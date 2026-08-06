@@ -684,8 +684,9 @@ fork: a flat, Emacs-style namespace, or first-class namespaced modules
 (Clojure/Racket-style per-file resolution with explicit imports/exports).
 
 **Decision.** **Flat, Emacs-style modules over the one shared global table.**
-- `*features*` (a global list) records what's loaded; `(provide 'name)` adds it,
-  `(require 'name)` returns early if present.
+- `*features*` (a global registry) records what's loaded; `(provide 'name)` adds it,
+  `(require 'name)` returns early if present. (A list here originally — ADR-216 made it a
+  set-shaped map, because the load-once test runs on every `require` and had to be O(1).)
 - `*load-path*` (a global list of dirs) is searched for `name.blsp`; the first hit
   is `load`ed (evaluated into the shared globals), then `require` checks the
   feature was actually provided.
@@ -14200,3 +14201,48 @@ still per-process** — ADR-175 identified the obstacle (call-site ids are dense
 indices baked into shared `Node::Call`s, so naive IC sharing pushes every process's IC
 vectors toward the root's size and loses more memory than it saves). That is the successor
 item; this ADR deliberately does not touch it.
+
+## ADR-216 — `*features*` is a set-shaped map: the load-once check must be O(1)
+
+**Status:** implemented (2026-08-06), unconditional (no switch — a list-shaped `*features*`
+has no advantage to A/B against).
+
+**Context.** `provide` recorded a loaded feature by consing its name onto a *list*, and
+`require-one` answered "already loaded?" with `(member? key *features*)` — a linear scan.
+That is invisible for the ~40 modules a normal project loads, and quadratic for a large
+one: every `require` scans every feature loaded so far, and `provide`'s `:cons-new` scans
+it a second time to stay idempotent.
+
+Measured by generating N synthetic modules of ~1000 lines each and loading them
+(2026-08-06 devlog):
+
+| modules | load (list) | of which `member?` |
+|---------|-------------|--------------------|
+| 1 000   | 7.0 s       | 0.17 s             |
+| 4 000   | 45.9 s      | 17.4 s             |
+| 10 000  | 217 s       | ~137 s             |
+
+The marginal cost per 1000 modules climbed 6.7 s → 37.9 s across a single 10 000-module
+load. Two controls pin it on the *module count* rather than on code volume: the same 10M
+total lines in 1000 files of 10 000 lines each loads in 70 s and is perfectly linear, and
+replacing the check with a hash index drops the 10 000-module load to 80 s, also linear.
+A direct probe of the scan is flat at ~190 ns per element scanned, to 20 000 elements.
+
+**Decision.** `*features*` is a **map from feature name to `true`** — a set in the shape
+Brood already has an atomic registry op for. `provide` uses `:assoc-new [key] true`
+instead of `:cons-new`, and both membership tests become `contains?`.
+
+**Consequences.**
+- `(keys *features*)` is how you get the names as a sequence; `crates/lisp/src/introspect.rs`
+  (`loadable_modules`) evaluates `(keys *features*)` rather than the global directly.
+- Idempotence stops being something `provide` has to *enforce* and becomes structural: a
+  map cannot hold a duplicate key. The test that guarded it now guards the key *spelling*
+  (a `provide` storing the symbol instead of its name would add a second entry).
+- The KI-22 atomicity story is unchanged — the read-modify-write still happens inside the
+  kernel's `registry_lock` via `%registry-update!`, which is what stops a concurrent
+  `provide` from dropping a feature. Only the op and the container shape changed.
+- `RegistryOp::ConsNew` loses its only in-tree caller. It is kept: it is the sole atomic
+  update for a list-valued registry global, and removing it would leave that gap.
+- This does **not** make 100 000 modules loadable. It removes the quadratic term; the
+  remaining wall is memory — ~0.8 MB of RSS per 1000-line module, measured 24.4 GB at
+  30 000 modules — which is a separate piece of work (see the devlog entry).

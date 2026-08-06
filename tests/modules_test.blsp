@@ -25,11 +25,13 @@
     (assert= (parent-dir "/foo") "/")
     (assert= (parent-dir "rel") ".")))
 
-;; Concurrent `provide` must not lose a feature (KI-22's class). `provide` does
-;; `(def *features* (cons key *features*))` — a read-modify-write of one shared global, so
-;; two processes providing at once each read the old list and each write their own successor,
-;; dropping one. This was a real intermittent suite failure: "provide records a feature
-;; idempotently" saw its own feature missing from `*features*` on the very next line.
+;; Concurrent `provide` must not lose a feature (KI-22's class). `provide` is a
+;; read-modify-write of one shared global (`(def *features* (assoc *features* key true))`
+;; in effect), so two processes providing at once each read the old map and each write
+;; their own successor, dropping one — unless the whole sequence runs inside the kernel's
+;; registry lock, which is why it goes through `%registry-update!`. This was a real
+;; intermittent suite failure: "provide records a feature idempotently" saw its own
+;; feature missing from `*features*` on the very next line.
 (defn mt-conc-feature (i) (str "mt-conc-feature-" i))
 
 (describe "modules: concurrent provide (KI-22 class)"
@@ -37,7 +39,7 @@
   (test "no feature is lost when many processes provide at once"
     (let (n 120)
       (concurrently n (fn (i) (provide (symbol (mt-conc-feature i)))))
-      (assert= (count (remove (fn (i) (member? (mt-conc-feature i) *features*)) (range n))) 0))))
+      (assert= (count (remove (fn (i) (contains? *features* (mt-conc-feature i))) (range n))) 0))))
 
 ;; :serial — these mutate the shared *features* global, so run them one-at-a-time.
 (describe "modules: member? / provide / require"
@@ -45,14 +47,32 @@
   (test "member?" (is (member? 2 (list 1 2 3))) (refute (member? 9 (list 1 2 3))))
   (test "provide records a feature idempotently"
     (provide 'demo-feature)
-    (is (member? "demo-feature" *features*))
+    (is (contains? *features* "demo-feature"))
     (provide 'demo-feature)
-    (assert= (count (filter (fn (x) (= x "demo-feature")) *features*)) 1))
+    ;; idempotent: still exactly one entry after a second provide. A map makes a
+    ;; duplicate structurally impossible, so this now guards the *key spelling* —
+    ;; a `provide` that stored the symbol rather than its name would add a second.
+    (assert= (count (filter (fn (k) (= k "demo-feature")) (keys *features*))) 1))
   (test "require returns the list of feature names and is idempotent"
     (assert= (require 'test) (list "test"))
     ; variadic now: a list of names
     (assert= (require 'test 'docs) (list "test" "docs")))
   (test "require of a missing module raises" (assert-error (require 'no-such-module-xyz)))
+
+  ;; ADR-216: the load-once check must be O(1) in the number of loaded features, not a
+  ;; linear scan. As a list it was O(N) per require, so loading N modules was O(N²) —
+  ;; 137 s of a 217 s 10 000-module load was this one lookup. Guarded by SHAPE, not by
+  ;; timing (a wall-clock assert would be flaky under a loaded CI box): `*features*` must
+  ;; be a map, and a miss must not depend on how many features are already present.
+  (test "the load-once check is a map lookup, not a list scan"
+    (is (map? *features*))
+    (provide 'adr216-probe)
+    (is (contains? *features* "adr216-probe"))
+    (refute (contains? *features* "adr216-absent"))
+    ;; adding many features must not change the answer for an absent one
+    (map (fn (i) (provide (symbol (str "adr216-bulk-" i)))) (range 200))
+    (refute (contains? *features* "adr216-absent"))
+    (is (contains? *features* "adr216-bulk-199")))
 
   ;; The partial-load race: `defmodule` used to provide its feature at the TOP of the
   ;; file, so a require racing another process's load returned while the module was
