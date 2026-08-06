@@ -14343,7 +14343,28 @@ eliminates read and expand at best, a measured floor of ~13 s. It cannot approac
 because the 70% is materialising code into the heap, which a text cache re-does every start.
 
 **Decision.** Snapshot the *bindings* a source load produces into a binary artifact and
-restore them structurally. The encoding reuses the **distribution wire format** over
+restore them structurally — **sectioned by module, materialised on demand**.
+
+A whole-image restore costs seconds and hundreds of MB of resident code an entry point
+touching twenty modules will never call. So the image is grouped into one section per
+module, with the directory at the END of the file carrying absolute offsets: opening a
+151 MB image reads a few KB, and loading one module seeks straight to its bytes. `require`
+is the unit of materialisation — the same granularity BEAM loads `.beam` files at.
+
+The prelude gains a small seam for this: `*image-sections*` (feature → `[offset len]`) and
+`*image-path*`, consulted by `require-force` just before it falls back to the load-path. The
+prelude only knows how to *consult* a registry; building one is `std/tool/project.blsp`.
+
+A module's section key is derived, not tracked: a global `myproj/shapes/area` belongs to
+feature `myproj/shapes`, so the key is the name minus its last segment. Root-level names
+(the registries, defs from a file with no `defmodule`) go in the `""` section, which the
+loader always materialises, and declared sigs ride there too.
+
+**`*features*` must NOT be imaged.** Restoring a `*features*` that already lists every
+module makes `require-one` early-return, so nothing is ever materialised and the modules
+silently do not exist — the first thing sectioning broke. `require` re-provides each feature
+as it materialises it; a feature with no section (a std module pulled in during the build) is
+re-required from embedded source, which is idempotent and cheap. The encoding reuses the **distribution wire format** over
 `process::Message`, which already serialises closures as data (ADR-033) — so this adds no
 second implementation of code serialisation, and inherits a decision that turns out to
 matter: `wire::put_sym` writes symbol **names**, not the dense interner ids, so an image
@@ -14382,8 +14403,22 @@ startup — `def` rebinding, late binding, a running process observing a redefin
 (ADR-013) — is identical. `tests/startup_image_test.blsp` pins this directly: a process
 spawned *before* a `def` observes the new binding after an imaged start.
 
-**Measured**, 16 300 files of ~180 lines: cold (load + write image) **~24 s**, imaged start
-**4.3 s**, image 143 MB. Getting there took a phase trace (`BROOD_IMAGE_TRACE=1`) and two
+**Measured**, ~16 300 files of ~180 lines:
+
+| | wall | RSS |
+|--------------------------|--------|--------|
+| cold source load + write | ~32 s  | 2.3 GB |
+| eager whole-image restore| 4.3 s  | 1.9 GB |
+| **lazy, per-module**     | **1.30 s** | **219 MB** |
+| Elixir, same shape       | 2.26 s eager / 0.2 s lazy | 1.69 GB |
+
+Only **143 ms** of the 1.30 s is image work — 134 ms reading the section directory, 9 ms
+materialising the two modules the entry point touches. The rest is process start, prelude
+boot, and the fingerprint's ~16 000 `stat` calls. Memory is 8× better than Elixir's because
+only what runs is ever built.
+
+The eager path (`nest test` / `nest check` / the LSP, which genuinely need the whole project)
+is the same primitives driven over every section. Getting there took a phase trace (`BROOD_IMAGE_TRACE=1`) and two
 fixes, neither of which was in the codec everyone would have suspected:
 
 | | before | after |
@@ -14442,9 +14477,18 @@ declines to write one) whenever `BROOD_COVERAGE` is set. Found by `nest::coverag
 failing in the suite, not by reasoning about it beforehand — the class of interaction worth
 looking for is "who else depends on code having been *compiled here*".
 
-**One deliberate behaviour change.** `nest run` now loads the project's whole source tree,
-where it used to load only the entry module's transitive `require` closure — the same thing
-`nest test` and the LSP already did. The trade is that a big project starts from its image
-instead of re-evaluating source, and what gets loaded stops depending on which entry point
-you ran. The cost: a source file that previously only had to *parse* (because nothing
-required it) is now loaded by `nest run` too, and its errors surface there.
+**`nest run` stays lazy.** An intermediate version made it load the whole source tree, which
+was the price of being image-backed before sectioning existed. Sectioning removes that trade
+entirely: `nest run` installs the section directory, materialises nothing, and `require`
+pulls in exactly the modules the program reaches.
+
+**What still dominates `nest run` is not the image.** On a 16 300-file project it takes
+~127 s with the image hitting cleanly and no rebuild — that is the advisory pre-flight
+(`check-project-sources`) checking every source file. Pre-existing and unrelated to this
+ADR, but it now completely masks the startup win, so it is the next thing to attack for a
+fast `nest run` in practice.
+
+**Caveat: images are per-executable.** The fingerprint includes `build-id`, which embeds each
+executable's own mtime, so an image written by `nest` is not used by `brood` and vice versa.
+Safe (a binary change must invalidate an image) and harmless in practice, since
+`nest test`/`run`/`check` are one binary — but worth knowing before measuring.

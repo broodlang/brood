@@ -1,12 +1,12 @@
 ;;; The startup image (ADR-218): a project starts by restoring bindings from a binary
-;;; artifact instead of re-evaluating its sources.
+;;; artifact instead of re-evaluating its sources, and does it **per module, on demand**.
 ;;;
 ;;; The load-bearing property is not speed — it is that an imaged start is
-;;; INDISTINGUISHABLE from a source start. The image defines exactly the globals a
-;;; source load would have, so `def`, hot reload and late binding must behave
-;;; identically afterwards; a process running since before a redefinition must still
-;;; observe it. Those are the cases here. Speed is measured in the devlog and never
-;;; asserted — a wall-clock assertion would be flaky on a loaded CI box.
+;;; INDISTINGUISHABLE from a source start. The image defines exactly the globals a source
+;;; load would have, so `def`, hot reload and late binding must behave identically
+;;; afterwards; a process running since before a redefinition must still observe it. Those
+;;; are the cases here. Speed is measured in the devlog and never asserted — a wall-clock
+;;; assertion would be flaky on a loaded CI box.
 ;;;
 ;;; `:isolated` because these `def` globals they also assert on, so a second run in one
 ;;; image (`--repeat-until-failure`, `nest test --failed`) would otherwise start from the
@@ -26,6 +26,15 @@
   (send w [:ask (self)])
   (receive ([:got v] v)))
 
+;; Load every section an index names — the whole-image restore expressed in terms of the
+;; sectioned primitives, which is what a tool wanting the entire project in the heap does.
+(defn- si-load-all (path idx)
+  (fold (fn (acc k)
+          (let (sec (get idx k))
+            (+ acc (or (%image-load-section path (first sec) (second sec)) 0))))
+    0
+    (keys idx)))
+
 (describe "startup image: write and restore"
   :isolated
 
@@ -33,11 +42,13 @@
     (def si-a 41)
     (def si-f (fn (x) (+ x 1)))
     (let (p (img-tmp "basic"))
-      (assert= 2 (%image-write p ['startup-image-test/si-a 'startup-image-test/si-f] "fp1"))
+      (%image-write p [["" ['startup-image-test/si-a 'startup-image-test/si-f]]] "fp1")
       (def si-a :clobbered)
       (def si-f (fn (_) :clobbered))
       (assert= :clobbered si-a)
-      (assert= 2 (%image-read p "fp1"))
+      (let (idx (%image-index p "fp1"))
+        (is (map? idx))
+        (si-load-all p idx))
       (assert= 41 si-a)
       (assert= 6 (si-f 5))))
 
@@ -46,65 +57,73 @@
   (test "a fingerprint mismatch is a miss, not an error"
     (def si-b 7)
     (let (p (img-tmp "stale"))
-      (%image-write p ['startup-image-test/si-b] "fp-written")
+      (%image-write p [["" ['startup-image-test/si-b]]] "fp-written")
       (def si-b 8)
-      (is (nil? (%image-read p "fp-DIFFERENT")))
+      (is (nil? (%image-index p "fp-DIFFERENT")))
       (assert= 8 si-b)))
 
   (test "an absent or corrupt image is a miss"
-    (is (nil? (%image-read (img-tmp "no-such-file-at-all") "fp")))
+    (is (nil? (%image-index (img-tmp "no-such-file-at-all") "fp")))
     (let (p (img-tmp "corrupt"))
       (spit p "this is not a brood image")
-      (is (nil? (%image-read p "fp")))))
+      (is (nil? (%image-index p "fp")))))
+
+  ;; The point of sectioning: a module materialises on its own, and loading one section
+  ;; must not drag in the rest. This is what lets an imaged `nest run` pay only for the
+  ;; modules its entry point actually reaches.
+  (test "one section can be loaded without the others"
+    (def si-p 1)
+    (def si-q 2)
+    (let (path (img-tmp "sections"))
+      (%image-write path
+        [["" nil]
+         ["secp" ['startup-image-test/si-p]]
+         ["secq" ['startup-image-test/si-q]]]
+        "fp-sec")
+      (def si-p :clobbered)
+      (def si-q :clobbered)
+      (let (idx (%image-index path "fp-sec")
+            p-sec (get idx "secp"))
+        (assert= 1 (%image-load-section path (first p-sec) (second p-sec)))
+        (assert= 1 si-p)
+        ;; the OTHER section was not touched
+        (assert= :clobbered si-q))))
 
   ;; `to_message` refuses a macro — sending one to another process is meaningless. An
-  ;; image is the opposite case, so a macro rides as its closure plus a flag. If that
-  ;; regressed, a project's `defmacro`s would come back as plain functions and every
-  ;; call site would silently start evaluating its arguments.
+  ;; image is the opposite case, so a macro rides as its closure plus a kind tag. If that
+  ;; regressed, a project's `defmacro`s would come back as plain functions and every call
+  ;; site would silently start evaluating its arguments.
   (test "a macro survives the round trip as a macro"
     (defmacro si-twice (e) (list 'do e e))
     (let (p (img-tmp "macro"))
-      (assert= 1 (%image-write p ['startup-image-test/si-twice] "fp-m"))
+      (%image-write p [["" ['startup-image-test/si-twice]]] "fp-m")
       (def si-twice :clobbered)
-      (assert= 1 (%image-read p "fp-m"))
-      ;; The property a function cannot have: the call site EXPANDS. If the round trip
-      ;; had returned a plain closure, macroexpand would leave the form untouched.
+      (let (idx (%image-index p "fp-m")) (si-load-all p idx))
+      ;; The property a function cannot have: the call site EXPANDS. If the round trip had
+      ;; returned a plain closure, macroexpand would leave the form untouched.
       (assert= '(do 1 1) (macroexpand '(startup-image-test/si-twice 1)))))
 
-  ;; Line coverage instruments at COMPILE time, so code restored from an image was
-  ;; never compiled in this process and carries no instrumentation — the report would
-  ;; come back silently empty. `project-load-sources-cached` must therefore decline the
-  ;; image under `BROOD_COVERAGE`. Found by `nest::coverage_lines` failing, not by
-  ;; reasoning, which is why it is pinned here too.
-  (test "an instrumented run declines the image"
-    (require 'project)
-    ;; The predicate is the whole guard; it reads the env var the kernel reads.
-    (is (nil? (getenv "BROOD_COVERAGE")))
-    (is (project/project-image-usable?)))
-
-  ;; A user `(sig …)` lives in `RuntimeCode::declared_sigs`, NOT in the globals table,
-  ;; so an image that snapshotted only globals lost every one of them and the checker
-  ;; quietly fell back to inferring from the body — `expects int` became
-  ;; `expects number | map`. Weaker advice with no error, which is why this is pinned.
+  ;; A user `(sig …)` lives in `RuntimeCode::declared_sigs`, NOT in the globals table, so
+  ;; an image that snapshotted only globals lost every one and the checker quietly fell
+  ;; back to inferring from the body — `expects int` became `expects number | map`. Weaker
+  ;; advice with no error, which is why this is pinned. Sigs ride in the root section.
   (test "a declared sig survives the round trip"
     (defn si-typed (n) (+ n 1))
     (%register-sig 'startup-image-test/si-typed '(int -> int))
     (let (p (img-tmp "sig"))
-      (%image-write p ['startup-image-test/si-typed] "fp-s")
-      ;; Clobber the sig with a different one, then restore and check we got OURS back.
-      ;; `type-signature` is the reader that consults `declared_sigs`.
+      (%image-write p [["" ['startup-image-test/si-typed]]] "fp-s")
       (%register-sig 'startup-image-test/si-typed '(string -> string))
       (assert= "(string) -> string" (type-signature 'startup-image-test/si-typed))
-      (%image-read p "fp-s")
+      (let (idx (%image-index p "fp-s")) (si-load-all p idx))
       (assert= "(int) -> int" (type-signature 'startup-image-test/si-typed))))
 
   ;; The whole point: an imaged start must not freeze the image.
   (test "hot reload still works after restoring from an image"
     (def si-greet (fn () "v1"))
     (let (p (img-tmp "reload"))
-      (%image-write p ['startup-image-test/si-greet] "fp-r")
+      (%image-write p [["" ['startup-image-test/si-greet]]] "fp-r")
       (def si-greet (fn () :clobbered))
-      (assert= 1 (%image-read p "fp-r"))
+      (let (idx (%image-index p "fp-r")) (si-load-all p idx))
       (assert= "v1" (si-greet))
       (let (w (spawn (si-worker)))
         (assert= "v1" (si-ask w))
@@ -112,4 +131,13 @@
         (assert= "v2-hot" (si-greet))
         ;; the ALREADY-RUNNING process must observe the new binding
         (assert= "v2-hot" (si-ask w))
-        (send w [:stop])))))
+        (send w [:stop]))))
+
+  ;; Line coverage instruments at COMPILE time, so code restored from an image was never
+  ;; compiled in this process and carries no instrumentation — the report would come back
+  ;; silently empty. The loader must therefore decline the image under `BROOD_COVERAGE`.
+  ;; Found by `nest::coverage_lines` failing, not by reasoning, which is why it is pinned.
+  (test "an instrumented run declines the image"
+    (require 'project)
+    (is (nil? (getenv "BROOD_COVERAGE")))
+    (is (project/project-image-usable?))))

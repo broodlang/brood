@@ -17195,3 +17195,44 @@ value from LOCAL into RUNTIME, meaning a restore materialises every closure *twi
 reorders the successor items: build restored values directly in the RUNTIME region first,
 streaming decoder second. Worth recording because the pre-measurement plan had them the
 other way round.
+
+## 2026-08-06 — the image goes lazy: 16 300 modules start in 1.3 s and 219 MB
+
+The startup image now sections by module and materialises on demand, which is the change
+that makes a large project start in the time an *entry point* deserves rather than the time
+the *codebase* costs. See ADR-218; what follows is what building it taught.
+
+| 16 302 modules | wall | RSS |
+|--------------------------|--------|--------|
+| cold source load         | 32 s   | 2.3 GB |
+| eager whole-image restore| 4.3 s  | 1.9 GB |
+| **lazy, per-module**     | **1.30 s** | **219 MB** |
+| Elixir, same shape       | 2.26 s eager / 0.2 s lazy | 1.69 GB |
+
+**The design changed once the code was read, not before.** The obvious shape for laziness is
+to hook global lookup and materialise a binding on first reference. `Heap::global_lookup_cached`
+takes `&self`, and materialising needs `&mut` to allocate — so that would mean restructuring
+the hottest path in the runtime. The right seam for Brood is the one it already has:
+`require`. Module granularity is also exactly what BEAM does with `.beam` files, and it needs
+no kernel change beyond a registry the prelude consults before the load-path.
+
+**Imaging `*features*` silently broke lazy loading.** Restoring it told `require` every module
+was already loaded, so it early-returned, nothing materialised, and the modules simply did not
+exist — `unbound symbol` from a `(:use …)` that had worked moments earlier. It is now excluded,
+and `require` re-provides each feature as it materialises it. A good reminder that "restore all
+the state a load produced" and "let the loader do its job" are in tension: the load-once marker
+is the one piece of state an image must NOT restore.
+
+**Measuring `nest run` at scale was misleading twice.** First it read 124 s and looked like the
+lazy path was catastrophic; the image was in fact hitting cleanly with no rebuild, and the time
+is `nest run`'s advisory pre-flight checking all 16 301 source files — pre-existing, unrelated,
+and now the dominant cost of `nest run` on a big project. Second, a direct measurement with
+`brood` showed the image always missing: the fingerprint includes `build-id`, which embeds the
+executable's own mtime, so an image written by `nest` is never used by `brood`. Both cost real
+time to chase, and both are now recorded in the ADR.
+
+**Also confirmed a false alarm.** A full-suite run during this work failed `brood_suite_passes`
+with a green process dying on `division by zero` at 1163 s (2.2x its normal wall). Nothing else
+had changed, and 16 300-module image builds were running concurrently. A clean re-run on an idle
+box is 966/966 and 4458/4458. Same lesson as the `child_cleanup` scare earlier today: on this box
+a suite result taken under load is not evidence.
