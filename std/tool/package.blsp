@@ -356,37 +356,56 @@ land in a later slice."
   project/dep-git
   (dep-kind [d] :git)
   (dep-resolve [d root locked] (package-resolve-git root d locked))
+  ;; `d` is the already-resolved entry (a concrete `:ref`, plus `:resolved-version`
+  ;; if it came from a range); `other` is a fresh request (an exact `:ref`, or a
+  ;; `:version` range). Same repo required both ways; then the entry's pin must
+  ;; satisfy the new request — a range is checked against the pinned version, an
+  ;; exact ref must match the pinned ref (the greedy first-wins reconciliation).
   (dep-check-compatible [d other]
-    (when (not (and (= (get d :url) (get other :url)) (= (get d :ref) (get other :ref))))
+    (when (not (= (get d :url) (get other :url)))
       (package-conflict other
-        (str "required at both "
-          (get d :url)
-          " @ "
-          (get d :ref)
-          " and "
-          (get other :url)
-          " @ "
-          (get other :ref)))))
+        (str "required from two different git URLs (" (get d :url) " and " (get other :url) ")")))
+    (let (other-range (get other :version))
+      (if other-range
+        (let (pin (package-git-pin-version d))
+          (when (or (nil? pin) (not (version/version-satisfies? pin other-range)))
+            (package-conflict other
+              (str "pinned to " (get d :ref) ", which does not satisfy \"" other-range "\""))))
+        (when (not (= (get d :ref) (get other :ref)))
+          (package-conflict other
+            (str "required at both " (get d :ref) " and " (get other :ref) " (same repo)"))))))
+  ;; A ranged dep also records its resolved concrete `:version` in the lock, so a
+  ;; later run can range-check it without hitting the network (an exact-ref dep omits it).
   (dep-lock-vec [e]
     (apply vector
-      (list (get e :name)
-        :git
-        (get e :url)
-        :ref
-        (get e :ref)
-        :commit
-        (get e :commit)
-        :sha256
-        (get e :sha256)
-        :deps
-        (package-dep-names-vec (get e :deps)))))
+      (append (list (get e :name) :git (get e :url) :ref (get e :ref))
+        (if (get e :resolved-version) (list :version (get e :resolved-version)) nil)
+        (list :commit
+          (get e :commit)
+          :sha256
+          (get e :sha256)
+          :deps
+          (package-dep-names-vec (get e :deps))))))
+  ;; Manifest writeback (`nest add`): a ranged dep writes `:version <range>`, an
+  ;; exact one writes `:ref <ref>`.
   (dep-entry-node [d]
-    [:vector
-      (vector [:symbol (name (get d :name))]
-        [:keyword ":git"]
-        [:str (package-str-lit (get d :url))]
-        [:keyword ":ref"]
-        [:str (package-str-lit (get d :ref))])]))
+    (let (ranged (get d :version))
+      [:vector
+        (vector [:symbol (name (get d :name))]
+          [:keyword ":git"]
+          [:str (package-str-lit (get d :url))]
+          [:keyword (if ranged ":version" ":ref")]
+          [:str (package-str-lit (or ranged (get d :ref)))])])))
+
+;; The concrete version an already-resolved git entry is pinned at: its
+;; `:resolved-version` (a ranged dep), else its `:ref` read as a version when the
+;; tag is a plain `vX.Y.Z` (an exact pin to a version tag), else nil (an opaque
+;; ref — a branch or commit — that a range cannot be checked against).
+(defn- package-git-pin-version
+  (entry)
+  (or (get entry :resolved-version)
+    (let (v (package-git-tag-version (get entry :ref)))
+      (if (version/version-valid? v) v nil))))
 
 (impl Dependency
   project/dep-tarball
@@ -521,9 +540,77 @@ land in a later slice."
       (pr-str (list 'brood-pkg :git url :ref ref :commit commit :sha256 sha :fetched-at (now)))
       "\n")))
 
+;; --- git-tag semver ranges (ADR-209) ----------------------------------------
+;; A git dep may track a `:version` RANGE instead of pinning an exact `:ref`. The
+;; range is resolved GREEDILY to the newest published tag that satisfies it — one
+;; `ls-remote` (no per-candidate manifest fetch); the chosen tag then flows through
+;; the exact-ref clone path unchanged. `version/version-match?` gives plain-range
+;; excludes-prerelease for free, so a `1.4.0-rc.1` tag is skipped by `^1.2.0`.
+
+;; A tag's candidate version: strip one optional leading `v` (so `v1.2.0` and
+;; `1.2.0` both read as the version 1.2.0). Returns the string as-is otherwise.
+(defn- package-git-tag-version
+  (tag)
+  (if (and (> (string-length tag) 0) (= (substring tag 0 1) "v"))
+    (substring tag 1)
+    tag))
+
+;; PURE: from a remote's `tags` (names) pick the NEWEST that satisfies `range`,
+;; as `[tag version]` (the original tag name + its numeric version), or nil if
+;; none match. A tag whose stripped form isn't a valid MAJOR.MINOR.PATCH version
+;; (`latest`, `nightly`) is ignored. Offline-testable — the range-selection unit.
+(defn- package-select-git-version
+  (tags range)
+  (let (compiled (version/version-compile range)
+        candidates (fold (fn (acc tag)
+                           (let (v (package-git-tag-version tag))
+                             (if (and (version/version-valid? v)
+                                   (version/version-match? compiled v))
+                               (cons [tag v] acc)
+                               acc)))
+                     nil tags))
+    (if (empty? candidates)
+      nil
+      (fold (fn (best cand)
+              (if (> (version/version-compare (second cand) (second best)) 0) cand best))
+        (first candidates)
+        (rest candidates)))))
+
+;; Resolve a git dep to a concrete tag. An exact-`:ref` dep is returned unchanged.
+;; A ranged dep gets `:ref` (the chosen tag) + `:resolved-version` (its version)
+;; assoc'd on: reuse the lock's pinned tag when its resolved version still
+;; satisfies the range (network-free — keeps a plain `nest run` offline); else
+;; `%git-list-tags` and pick the newest match (or error, naming the range + tags).
+(defn- package-git-concrete-ref
+  (dep locked)
+  (let (range (get dep :version))
+    (if (nil? range)
+      dep
+      (let (url (get dep :url)
+            locked-version (and locked
+                             (= (plist-get locked :git) url)
+                             (plist-get locked :version)))
+        (if (and locked-version (version/version-satisfies? locked-version range))
+          (assoc dep :ref (plist-get locked :ref) :resolved-version locked-version)
+          (let (tags (or (offload %git-list-tags url) nil)
+                chosen (package-select-git-version tags range))
+            (if (nil? chosen)
+              (error "package: no git tag of "
+                (get dep :name)
+                " at "
+                url
+                " satisfies \""
+                range
+                "\" (tags: "
+                (if (empty? tags) "none" (join ", " tags))
+                ")")
+              (assoc dep :ref (first chosen) :resolved-version (second chosen)))))))))
+
 (defn- package-resolve-git
-  (root dep locked)
-  (let (nm (get dep :name)
+  (root raw-dep raw-locked)
+  (let (locked raw-locked
+        dep (package-git-concrete-ref raw-dep locked)
+        nm (get dep :name)
         url (get dep :url)
         ref (get dep :ref)
         target (package-git-target root nm)
@@ -1452,7 +1539,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
         false))))
 
 (defn add (nm & spec)
-  "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH`, `:git URL :ref REF`, or `:tarball URL :sha256 HEX` (strings). A :git/:tarball dep is fetched into _deps/ as part of the re-lock. Backs `nest add`."
+  "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH`, `:git URL :ref REF`, `:git URL :version RANGE` (newest matching tag, ADR-209), or `:tarball URL :sha256 HEX` (strings). A :git/:tarball dep is fetched into _deps/ as part of the re-lock. Backs `nest add`."
   ;; Checked BEFORE anything is written, so a bad name can't leave a half-edited
   ;; manifest behind.
   (when (not (package-valid-dep-name? nm))

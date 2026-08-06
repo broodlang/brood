@@ -2707,6 +2707,7 @@ pub(super) fn trace_context_set(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
 const OFFLOAD_ALLOWED: &[&str] = &[
     "%git-clone",
     "%git-resolve-ref",
+    "%git-list-tags",
     "%untar-gz",
     "%pbkdf2-sha256-bytes",
     "%digest",
