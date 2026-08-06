@@ -17,6 +17,25 @@ impl Heap {
         self.runtime.cur_code().closures.count()
     }
 
+    /// Tell the RUNTIME collector that a **bulk promote just happened and all of it is
+    /// live**, so it re-baselines instead of discovering that the expensive way.
+    ///
+    /// For a startup image (ADR-218) this is a fact, not a hint: every closure the restore
+    /// promoted is bound to a global, so a compaction immediately afterwards walks the whole
+    /// region and reclaims nothing. Measured on a 16 300-file project, that pointless
+    /// compaction was **4.0 s of an 8.3 s restore** — it fired at the first safepoint after
+    /// the restore, because the closure count had shot past a threshold set when the region
+    /// was still empty.
+    ///
+    /// Applies exactly the rule the safepoint applies after a real collection —
+    /// `max(floor, live * 2)` — so this skips only the *discovery*, never the policy.
+    /// Raising the threshold can only delay a compaction, and the collector is an
+    /// optimisation, so this cannot affect correctness.
+    pub fn rt_gc_rebaseline_all_live(&mut self) {
+        let count = self.runtime.cur_code().closures.count();
+        self.rt_gc_threshold = rt_gc_floor().max(count.saturating_mul(2));
+    }
+
     /// **RUNTIME-collector exploration (read-only, ADR-076 / `docs/runtime-collector-
     /// exploration.md`).** Count RUNTIME closures *reachable* from the live roots —
     /// the global bindings plus this process's operand stack — by marking the shared

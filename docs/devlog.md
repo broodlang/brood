@@ -17156,3 +17156,42 @@ depends on code having been **compiled in this process** rather than merely bein
 **Also corrected:** an earlier note in this session that `:source-paths` in a manifest was
 being ignored. That was a bad test manifest — the form takes `:name "x"`, not a positional
 symbol. No such bug; disregard.
+
+## 2026-08-06 — image follow-up: a lost sig, my own quadratic, and 4 s of pointless compaction
+
+Three fixes on top of ADR-218, two of them found only because the image was instrumented
+rather than reasoned about.
+
+**A correctness bug first: declared sigs were silently dropped.** A user `(sig f (int -> int))`
+lives in `RuntimeCode::declared_sigs`, not in the globals table, so an image that snapshots
+globals loses every one. The symptom is not an error — the checker falls back to inferring
+from the body, and `argument 1 expects int` quietly becomes `argument 1 expects number | map`.
+Weaker advice, no failure, on a path (`nest check`) whose entire job is advice. The image
+now carries a sig section. Caught by writing a project that exercises records, abilities,
+macros and a `sig` and diffing `nest check` cold-vs-imaged — records/abilities/macros were
+all fine, which is exactly why only a real comparison would have found the one that wasn't.
+
+**Then `BROOD_IMAGE_TRACE=1`, and the numbers did not land where expected.** Write 9.0 s:
+`to_message` 1.5 s, encode 0.4 s, file write 0.05 s — and **7 s outside every measured
+phase**. That was `project-image-names` diffing against `before` with `member?` on a LIST,
+~4000 × ~313 000 comparisons. The same quadratic ADR-216 had just removed from `*features*`,
+reintroduced by me three commits later in this ADR's own policy code. Write is now 2.7 s.
+The lesson is about the trace, not the bug: phase timers that do not sum to the total are
+the finding, and the habit of checking that sum is what caught it.
+
+**Restore 8.4 s, of which 4.0 s was a RUNTIME compaction that reclaims nothing.** Promoting
+309 706 closures pushes the region past a threshold set when it was empty, so the collector
+fires at the first safepoint after the restore and walks the entire region — every closure
+of which is bound to a global and therefore live. Pinned by bisecting the gap between "last
+`let` binding" and "first body expression" (4 s with nothing in between), then confirmed
+with `BROOD_RT_GC_FLOOR=20000000`: 8.3 s → 4.4 s. `image_read` now re-baselines the
+collector with the same `max(floor, live * 2)` rule it applies after a real collection —
+skipping the discovery, not the policy.
+
+**Where the remaining 4.3 s is**, per the trace: `%image-read` 4.2 s = read 45 ms + decode
+820 ms + `from_message` 1130 ms + `env_define` 1900 ms. So the intermediate `Message` tree
+is ~2 s and **not** the biggest item — `env_define` is, because it `promote`s each restored
+value from LOCAL into RUNTIME, meaning a restore materialises every closure *twice*. That
+reorders the successor items: build restored values directly in the RUNTIME region first,
+streaming decoder second. Worth recording because the pre-measurement plan had them the
+other way round.

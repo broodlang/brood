@@ -36,6 +36,16 @@ use crate::process::message::{from_message, to_message};
 /// written by an older binary, on top of whatever fingerprint the caller supplies.
 const MAGIC: &[u8] = b"brood-image-v1\n";
 
+/// `BROOD_IMAGE_TRACE=1` — report where image time goes, split by phase. Both sides run
+/// through an intermediate `process::Message` tree (`to_message` / `from_message`) before
+/// or after the byte codec, and the whole question for making this faster is how much of
+/// the cost is the tree versus the bytes. Cheap to keep: one cached bool.
+fn trace() -> bool {
+    use std::sync::OnceLock;
+    static T: OnceLock<bool> = OnceLock::new();
+    *T.get_or_init(|| std::env::var_os("BROOD_IMAGE_TRACE").is_some())
+}
+
 /// A string argument, or a type error naming `who`.
 fn need_str(heap: &Heap, v: Value, who: &str) -> Result<String, LispError> {
     match v {
@@ -99,6 +109,7 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let fingerprint = need_str(heap, arg(args, 2), "%image-write")?;
 
     let mut body: Vec<u8> = Vec::with_capacity(1 << 20);
+    let (mut ns_to_msg, mut ns_encode) = (0u64, 0u64);
     let mut count: u32 = 0;
     let mut entries: Vec<u8> = Vec::with_capacity(1 << 20);
     let global = heap.global();
@@ -115,6 +126,7 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             Value::Macro(id) => (Value::Fn(id), 1u8),
             other => (other, 0u8),
         };
+        let t0 = std::time::Instant::now();
         let msg = to_message(heap, v).map_err(|e| {
             LispError::type_err(format!(
                 "%image-write: cannot image global '{}': {}",
@@ -122,20 +134,52 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
                 e
             ))
         })?;
+        ns_to_msg += t0.elapsed().as_nanos() as u64;
+        let t1 = std::time::Instant::now();
         put_str(&mut entries, &value::symbol_name(sym));
         entries.push(is_macro);
         encode_msg(&mut entries, &msg)
             .map_err(|e| LispError::runtime(format!("%image-write: encode failed: {e}")))?;
+        ns_encode += t1.elapsed().as_nanos() as u64;
         count += 1;
+    }
+
+    // Declared sigs (ADR-218). These live in `RuntimeCode::declared_sigs`, NOT in the
+    // globals table, so imaging only globals loses every user `(sig …)` and the checker
+    // silently falls back to inferring from the body — weaker advice with no error, which
+    // is exactly the failure shape worth spending a file section on.
+    let mut sigs: Vec<u8> = Vec::new();
+    let mut sig_count: u32 = 0;
+    for (sym, tv) in heap.declared_sigs_snapshot() {
+        let Ok(msg) = to_message(heap, tv) else {
+            continue; // a type expression with no portable form: skip, never fail the image
+        };
+        put_str(&mut sigs, &value::symbol_name(sym));
+        encode_msg(&mut sigs, &msg)
+            .map_err(|e| LispError::runtime(format!("%image-write: sig encode failed: {e}")))?;
+        sig_count += 1;
     }
 
     body.extend_from_slice(MAGIC);
     put_str(&mut body, &fingerprint);
     put_u32(&mut body, count);
     body.extend_from_slice(&entries);
+    put_u32(&mut body, sig_count);
+    body.extend_from_slice(&sigs);
 
+    let t_io = std::time::Instant::now();
     std::fs::write(&path, &body)
         .map_err(|e| LispError::runtime(format!("%image-write: {path}: {e}")))?;
+    if trace() {
+        eprintln!(
+            "[image-write] {} bindings, {} MB — to_message {} ms, encode {} ms, write {} ms",
+            count,
+            body.len() / (1 << 20),
+            ns_to_msg / 1_000_000,
+            ns_encode / 1_000_000,
+            t_io.elapsed().as_millis()
+        );
+    }
     Ok(Value::int(count as i64))
 }
 
@@ -147,9 +191,12 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 pub(super) fn image_read(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = need_str(heap, arg(args, 0), "%image-read")?;
     let want = need_str(heap, arg(args, 1), "%image-read")?;
+    let t_all = std::time::Instant::now();
+    let t_io = std::time::Instant::now();
     let Ok(bytes) = std::fs::read(&path) else {
         return Ok(Value::Nil);
     };
+    let ns_io = t_io.elapsed().as_nanos() as u64;
     if !bytes.starts_with(MAGIC) {
         return Ok(Value::Nil);
     }
@@ -167,6 +214,8 @@ pub(super) fn image_read(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 
     let global = heap.global();
     let mut done: i64 = 0;
+    let (mut ns_decode, mut ns_from_msg) = (0u64, 0u64);
+    let (mut ns_intern, mut ns_define) = (0u64, 0u64);
     for _ in 0..count {
         let Some(name) = get_str(&mut r) else {
             return Ok(Value::Nil);
@@ -177,10 +226,14 @@ pub(super) fn image_read(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
         }
         let is_macro = r.get_ref()[p];
         r.set_position((p + 1) as u64);
+        let t0 = std::time::Instant::now();
         let Ok(msg) = decode_msg(&mut r) else {
             return Ok(Value::Nil);
         };
+        ns_decode += t0.elapsed().as_nanos() as u64;
+        let t1 = std::time::Instant::now();
         let v = from_message(heap, &msg);
+        ns_from_msg += t1.elapsed().as_nanos() as u64;
         let v = if is_macro == 1 {
             match v {
                 Value::Fn(id) => Value::Macro(id),
@@ -189,8 +242,42 @@ pub(super) fn image_read(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
         } else {
             v
         };
-        heap.env_define(global, value::intern(&name), v);
+        let t2 = std::time::Instant::now();
+        let sym = value::intern(&name);
+        ns_intern += t2.elapsed().as_nanos() as u64;
+        let t3 = std::time::Instant::now();
+        heap.env_define(global, sym, v);
+        ns_define += t3.elapsed().as_nanos() as u64;
         done += 1;
+    }
+    // The sig section. Absent in an older image: treat as "no sigs" rather than a miss,
+    // so a format that only gained a section stays readable.
+    if let Some(nsigs) = get_u32(&mut r) {
+        for _ in 0..nsigs {
+            let Some(name) = get_str(&mut r) else { break };
+            let Ok(msg) = decode_msg(&mut r) else { break };
+            let tv = from_message(heap, &msg);
+            heap.set_declared_sig(value::intern(&name), tv);
+        }
+    }
+    // Everything just promoted is bound to a global, so it is all live. Tell the RUNTIME
+    // collector that rather than let it find out by compacting the whole region at the next
+    // safepoint and reclaiming nothing — measured at 4.0 s of an 8.3 s restore.
+    heap.rt_gc_rebaseline_all_live();
+    if trace() {
+        eprintln!(
+            "[image-read] {} bindings — TOTAL {} ms = read {} ms + decode {} ms + from_message {} ms + intern {} ms + define {} ms + other {} ms",
+            done,
+            t_all.elapsed().as_millis(),
+            ns_io / 1_000_000,
+            ns_decode / 1_000_000,
+            ns_from_msg / 1_000_000,
+            ns_intern / 1_000_000,
+            ns_define / 1_000_000,
+            (t_all.elapsed().as_nanos() as u64)
+                .saturating_sub(ns_io + ns_decode + ns_from_msg + ns_intern + ns_define)
+                / 1_000_000
+        );
     }
     Ok(Value::int(done))
 }

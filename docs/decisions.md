@@ -14382,13 +14382,41 @@ startup — `def` rebinding, late binding, a running process observing a redefin
 (ADR-013) — is identical. `tests/startup_image_test.blsp` pins this directly: a process
 spawned *before* a `def` observes the new binding after an imaged start.
 
-**Measured**, 16 300 files of ~180 lines: cold (load + write image) **30.6 s**, imaged start
-**8.1 s**, image 144 MB. That is 3.8× and not yet Elixir's 2.26 s. An earlier spike
-measuring only `to_message`+`from_message` in memory said 2.2 s; the gap is the byte codec,
-which materialises a whole intermediate `Message` tree on decode before `from_message`
-walks it into heap values. Two passes with heavy allocation. **The successor item is a
-streaming decoder** that builds heap values directly from the byte stream, skipping the
-`Message` tree; that is where the remaining ~3× lives. Recorded rather than attempted here
+**Measured**, 16 300 files of ~180 lines: cold (load + write image) **~24 s**, imaged start
+**4.3 s**, image 143 MB. Getting there took a phase trace (`BROOD_IMAGE_TRACE=1`) and two
+fixes, neither of which was in the codec everyone would have suspected:
+
+| | before | after |
+|-----------------------|--------|-------|
+| image write           | 9.0 s  | 2.7 s |
+| imaged start          | 8.4 s  | 4.3 s |
+
+- **The write was quadratic, in this ADR's own Brood policy.** `project-image-names` diffed
+  against `before` with `member?` on a **list** — a linear scan run once per global,
+  ~4000 × ~313 000 comparisons, 7 s of the 9 s. Precisely the shape ADR-216 had removed
+  from `*features*` three commits earlier. It was invisible until the trace showed the time
+  landing *outside* every measured phase.
+- **The restore paid a RUNTIME compaction that reclaims nothing.** Promoting 309 706
+  closures shoots the region past a threshold set when it was empty, so the collector fires
+  at the first safepoint after the restore and walks the whole region — 4.0 s of 8.4 s, for
+  zero reclaimed, because every closure it scans is bound to a global. `image_read` now
+  calls `Heap::rt_gc_rebaseline_all_live`, applying the same `max(floor, live * 2)` rule
+  the collector applies after a real collection. It skips the *discovery*, never the
+  policy; raising a threshold can only delay a compaction, and the collector is an
+  optimisation, so correctness is untouched.
+
+Still not Elixir's 2.26 s. The phase trace now says where the
+remaining 4.3 s goes: `%image-read` is **4.2 s** = file read 45 ms + decode 820 ms +
+`from_message` 1130 ms + `env_define` 1900 ms + ~100 ms other, and the loader adds ~105 ms
+of source-tree walk and fingerprint.
+
+So the intermediate `Message` tree is real but is **not** the dominant cost — decode plus
+`from_message` is ~2 s of 4.3 s. The larger single item is `env_define` at 1.9 s, which
+`promote`s each restored value from LOCAL into the RUNTIME region: `from_message` builds
+LOCAL values and the define then deep-copies them, so an image restore materialises every
+closure **twice**. The successor items, in the order the measurement supports them: build
+restored values directly in the RUNTIME region (removes the second materialisation), then a
+streaming decoder that skips the `Message` tree. Recorded rather than attempted here
 because it wants its own change and its own gate. RSS also rises during restore (3.07 GB vs
 2.35 GB) for the same reason — bytes, tree and values are all live at once.
 
