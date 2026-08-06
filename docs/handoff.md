@@ -5,15 +5,17 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-05**, brood with ADR-213 (char→byte index), ADR-214 (form-start safepoints) and
+**As of 2026-08-06**, brood with ADR-213 (char→byte index), ADR-214 (form-start safepoints) and
 ADR-215 (AST-keyed shared compiled code) on
-top of the ADR-211/212 registry + package-signing work. Nothing half-finished. Rust
+top of the ADR-211/212 registry + package-signing work. Nothing half-finished — the 2026-08-06
+receive-matcher session ends with a **clean tree**: its findings are docs (§1 item 1, §4, §6) plus
+one new committed probe, and the code it wrote was measured, refuted and reverted. Rust
 suite **960/960** (nextest), in-language **4410/4410** — also green under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
-differential clean across 4 engine configs. **Five commits sit unpushed** (KI-29, KI-30, the
-short-vs-long measurement rule, and two rounds of `spawn-live` refutations) — nothing is
-half-finished, but `git push` has not been run. **Flake baseline** (2026-08-05): the in-language
+differential clean across 4 engine configs. The 2026-08-05 batch (KI-29, KI-30, the
+short-vs-long measurement rule, and two rounds of `spawn-live` refutations) **is pushed**;
+`main` and `origin/main` agree. **Flake baseline** (2026-08-05): the in-language
 suite is clean over 3 iterations × 3 seeds in one image, and `live_migration` is 16/16 under
 self-contention. **No open issues; one watch item, not in the runtime** — KI-28, a single
 unexplained `nodedown` flake seen once in a full run and not since (0/40 solo, 33/33 × 3 under
@@ -80,24 +82,69 @@ absolutes drift ~10% between invocations, so read the steps, not the levels.
 
 So the next candidates, in the order the numbers support them:
 
-1. **The receive machinery (+8.7 µs/unit) — the largest step, and it looks like a *caching*
-   problem rather than a tuning one. RECOMMENDED, and not yet investigated.** The evidence is
-   incidental and came from reading a JIT dump: during the ladder, ~20 `match-*` arms tier up —
-   `match-parse-clause`, `match-compile-clause`, `match-check-reachable`, `receive-prep`,
-   `receive-dispatch`, `receive-dedupe`, `receive-body-code`, `pattern-vars` and more. The
-   `receive` pattern matcher is **Brood code running per message**. That fits the timers:
-   `ns_match_run` ≈ 2.9 µs/unit and `ns_match_resolve` ≈ 0.7–1.1 µs/unit to match a *one-clause*
-   `[:go]` pattern, which is wildly disproportionate to the work the pattern describes.
+1. **The receive machinery (+8.7 µs/unit) — the largest step. Its "caching" premise was
+   measured and REFUTED 2026-08-06; what the measurement found instead is that the matcher
+   never reaches the native fast frame.** Still the recommended thread, and still the widest
+   reach of anything on this list — every message-passing row pays it (`latency`, `pingpong`,
+   `supervisor`), not just HOF loops — but the mechanism is not the one this item named.
 
-   If a receive's clauses are re-parsed/re-compiled per execution rather than once per site, this
-   is ADR-215's shape again — cache keyed on the receive site's clause AST — and ADR-215 is the
-   precedent that actually paid on this row (wall −12.5%, CPU −25%). **First measurement, before
-   any code:** count `match-compile-clause` executions against receive executions. If it is ~1
-   per receive, the cache is the fix; if it is ~1 per *site*, the cost is in `match_run` and this
-   becomes a matcher-representation question instead.
+   **The premise was wrong.** `receive` is a *macro*: `match-build-from` lowers the clause set
+   at macro-expansion time into a literal `(fn (msg) …)` whose body is a fully inlined
+   `vector?`/`vector-length`/`vector-ref`/`%eq` if-tree. Dump it —
+   `(println (macroexpand '(receive ([:go v] 1))))` — and there is no clause compiler left to
+   run. `match-compile-clause` executes **once per site, at load**, never per message; the ~20
+   `match-*`/`receive-*` arms seen tiering during the ladder are that expansion work, not
+   per-message work. So there is no ADR-215-shaped cache to add here. Compiles are already flat
+   (`BROOD_TRACE_COMPILE`: 169 vs 179 across rungs at N=2000), and `nopark` adds **no**
+   per-unit promotion over `send` (`BROOD_TRACE_PROMOTE`).
 
-   It also has the widest reach of anything on this list — every message-passing row pays it
-   (`latency`, `pingpong`, `supervisor`), not just HOF loops.
+   **What the cost actually is.** `hof_resolve` succeeds on **100%** of receives and
+   `hof_apply_step` is entered on 100% — but `hof_apply_native` declines every time, so every
+   matcher call pays the `vm_apply` → `vm_run_bc` trampoline. The matcher arm lowers to native,
+   then **deopts on every activation**; where `deopt_watch` is set, sixteen in a row make
+   `jit_deopt_feedback` mark it `BAILED` for the rest of the program
+   (`DEOPT_BAIL_CONSECUTIVE = 16`). Same failure shape as the float-global bug in `CLAUDE.md`.
+   It is *by design* as a self-heal — closure arms are deliberately exempt from the static
+   call-mediated profitability gate so deopt feedback can judge them at runtime — but here the
+   arm is being judged for something it should pass.
+
+   **WHICH patterns pay it, bisected 2026-08-06** (`scripts/fuzz/stress/recv_matcher.blsp`,
+   one long-lived process so tiering is not a variable; N=300k, perf-stats build):
+
+   | `PAT` | pattern | compares a literal? | ns/iter | `jit_deopt` | `jit_link_done` |
+   |---|---|---|---|---|---|
+   | `any` | `m` | no | 1266 | 0 | 281 043 |
+   | `bind` | `[a v]` | no | **1286** | 0 | 281 812 |
+   | `vec` | `[:go v]` | yes (keyword) | **1776** | 281 978 | **0** |
+   | `intlit` | `[1 v]` | yes (int) | 1763 | 281 467 | **0** |
+
+   **It is comparing a literal element that costs the native frame** — and `bind` is the honest
+   control, because it does the *same* vector work as `vec` (same `vector?`, same
+   `vector-length`, two `vector-ref`s) and merely binds the head instead of comparing it. So
+   the gap is **−28% of the whole receive loop**, not an artefact of work not done. (The
+   earlier catch-all comparison put `ns_match_run` at 534 vs 112 ns and `ns_receive` at 935 vs
+   485; treat those as the same story measured against a weaker control.)
+
+   That also rules out three things at once: it is **not** the matcher's calls (`bind` calls
+   `vector?` and `vector-length` and stays native), **not** the vector machinery, and **not**
+   keyword-specific (an int literal deopts identically). None of `BROOD_NO_LEAF_INLINE`,
+   `BROOD_NO_INLINE`, `BROOD_NO_PARTIAL_LEAF` or `BROOD_LINMAP=0` move it either — it is in the
+   base lowering. `BROOD_DEOPT_TRACE=1` names the deopting arm as the matcher `<closure>`
+   itself (`watch=false resume_ip=-1`).
+
+   **Reach: this is the entire tagged-tuple idiom** — `[:go v]`, `[:reply ^r v]`, every
+   supervisor and `gen` protocol message. Bind-only patterns are the rare case; essentially
+   every real `receive` is on the slow side of this line.
+
+   **The open question, and it is now a narrow one: which guard in the lowering of
+   `(if (%eq el <literal>) … nil)` branches to the deopt block?** Read the matcher's CLIF
+   (`BROOD_JIT_DUMP_IR=1`; the deopt block is the one returning `1`, and `block16`'s
+   unconditional jump into it is only the stack-guard prologue — ignore it). Worth knowing
+   before you start: `eq_dispatch` (`jit_lower/emit.rs`) looks *correct* on paper for both
+   operand shapes — int×int compares payloads, and either side Sym/Keyword compares interned
+   ids — so the guard is probably **not** `eq_dispatch`, and the `if`/branch structure around
+   it is the next place to look. Do NOT navigate by the deopt's `resume_ip`: it names the
+   nearest checkpoint, not the failing guard (§6).
 2. **The payload step (+9.3 µs/unit) — and the copy is NOT the cost.** `ns_msg_in` *fell* (216 →
    180 ns/unit) when the message grew from `[:go]` to a 16-element vector, so the deep copy this
    row was built to measure costs ~0.2 µs of a 31 µs row. Of the +12.5 µs the rung adds under
@@ -208,6 +255,37 @@ anyway (its copies are the parts, not the input). `scan-tokens` would need a two
 ## 4. Closed — do NOT re-attempt these
 
 Each was measured to a conclusion. Re-deriving them costs a session each.
+
+- **Three explanations for the receive matcher's deopt** — all measured and **killed
+  2026-08-06**, in the order they were tried. Each cost a build; re-deriving them costs the
+  session. The symptom under test throughout: the matcher arm deopts 16× and is marked
+  `BAILED`, so every receive pays the `vm_apply` trampoline (§1 item 1).
+
+  1. **"It is the non-tail calls (`vector?` / `vector-length`) — make them prims."** No. The
+     deopt's `resume_ip` sat immediately after a call, which reads as causal. It is not: the
+     `resume_ip` names the nearest *checkpoint*, and checkpoints sit after calls. Implemented
+     `PrimOp1::VectorLen` (IR + both VM exec paths + a Cranelift `inline_vec_len` mirroring
+     `inline_vec_ref`) — the chunk's `Call` duly became `Prim1`, and the deopt simply **moved
+     to the other call**. Removing that one too (the matcher generator emitting
+     `(%eq (type-of t) :vector)` instead of `(vector? t)`) left a **call-free** matcher that
+     deopts on **every** activation with no checkpoint at all (`resume_ip = -1`) and no longer
+     self-heals — measurably **worse** (1936 vs 1627 ns/iter, same build), because losing the
+     `BAILED` latch means paying a failed native entry per call forever. **Reverted; nothing
+     of it is in-tree.** If a later thread wants the `VectorLen` prim for its own sake, it is
+     ~120 lines and mirrors `inline_vec_ref` (`jit_lower/emit.rs`) exactly — but it must be
+     justified on its own measurement, because on this row it bought nothing.
+  2. **"The message vector is not LOCAL, so the inline vector ops deopt on the region check."**
+     No — `inline_vec_ref`/`inline_vec_len` do deopt on a non-LOCAL handle, but instrumenting
+     the deopt to print the operand's region gave **`region=0` (LOCAL) on every one** of 42 121
+     deopts.
+  3. **"The clauses are re-parsed/re-compiled per execution"** — the original §1 premise. No;
+     see §1. `receive` is a macro and the matcher is an inlined if-tree.
+
+  Two things worth keeping from that hunt. **`jit_link_done` is the counter that answers "did
+  the HOF fast frame engage?"** — 0 against ~N calls is the whole diagnosis, and no other
+  counter shows it (`jit_native` stays high because the *caller* is native). And
+  **`BROOD_NO_HOF_JIT=1` measuring flat is not evidence the native path is worthless** — here
+  it measured flat because the path was never taken at all.
 
 - **"Make a short-lived process reach native code"** — measured and **declined 2026-08-05**,
   before being built. The premise came from `spawn-live` gaining *nothing* from the JIT
@@ -471,6 +549,22 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
   plausible mechanism to "a fresh process is slow", so it became the item, and a ladder delta was
   read as confirming it. One measurement (a per-call warm-up curve) disproved it. Re-derive a
   thread's premise before implementing against it, and prefer a curve to a counter.
+- **A deopt's `resume_ip` names the nearest CHECKPOINT, not the failing guard.** Checkpoints sit
+  after calls, so a call-mediated arm's deopt always *looks* like it happened at the call — and
+  removing the call moves the reported site to the next call, which reads as confirmation. It
+  is not: with every call removed the arm still deopted, now with no checkpoint at all. To find
+  a guard, read the CLIF (`BROOD_JIT_DUMP_IR`) for the branch into the deopt block; the ip is a
+  hint about *where execution resumed*, never about what failed.
+- **An off-switch measuring flat can mean the path was never taken.** `BROOD_NO_HOF_JIT=1` moved
+  the receive micro 0.0% — which reads as "the native fast frame is worthless here" and is
+  wrong. `jit_link_done = 0` showed the frame had never engaged on a single call. Before
+  concluding a mechanism is worth nothing, check that it *ran*: for a mechanism with a success
+  counter, the counter beats the A/B.
+- **A probe that doesn't exercise the path reports confidently about nothing.** An A/B of two
+  closure shapes through `fold` was built to test the HOF-step deopt — but `fold` is *Brood*
+  (`fold--vec`), not a Rust HOF driver, so `hof_resolve` was never called and both arms'
+  tallies were other arms' work. The tell was there: the `resolve:OK`/`step:enter` counters read
+  **zero**. Check that your instrument fires before reading its output.
 - **A counter is not a timing.** IC misses ran at 58% of call sites, which was true and cost ~2 µs
   of a 33 µs row. A high miss *rate* is unavoidable on a process that makes five calls; only the
   `ns_*` timers and a per-call curve sized it.
@@ -527,6 +621,14 @@ All in `scripts/fuzz/stress/`, each with a usage header worth reading first.
   confound that made item 2 look like a 5.5 µs lever. Verify any rung's parking claim with
   `BROOD_L1_STATS=1`: the fast path fires only on a parked receiver, so it counts parks
   directly.
+- **`recv_matcher.blsp`** — what one `receive` costs, in a single long-lived process (so
+  tiering is not a variable, unlike the ladder). Four modes, and the pairing is the point:
+  `PAT=vec` (`[:go v]`) and `PAT=intlit` (`[1 v]`) compare a literal element and never reach
+  the native fast frame; `PAT=bind` (`[a v]`) and `PAT=any` (`m`) do not compare one and stay
+  native. **`bind` is the control to quote** — same vector work as `vec`, differing only in
+  the compare, so the −28% between them is a real gap rather than work not done.
+  `jit_link_done` — 0 vs ~N — is the counter that says which side of the fast frame you are
+  on; no other counter shows it (`jit_native` stays high because the *caller* is native).
 - **`hof_call.blsp`** — per-call cost of a HOF step function, global vs computed head. Its
   header carries the trap that makes this measurement easy to get 160× wrong: a callee of the
   form `(defn f (a b) (%prim a b))` is a passthrough that `resolve_prim` **inlines**, so such
