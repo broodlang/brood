@@ -1571,6 +1571,69 @@ pool untouched; add a single-threaded path behind cfg:
 everything behind `cfg(target_arch = "wasm32")`, so the native scheduler stays
 byte-for-byte unchanged.
 
+### Documentation generator — an ExDoc-equivalent for Brood
+
+> **Goal.** Pull documentation *from the language* — docstrings, arglists, type
+> signatures, source locations — and generate a browsable HTML doc site (API reference
+> + narrative guides + search + runnable examples), the way ExDoc does for Elixir. Host
+> it on hive per-package (the hexdocs.pm equivalent) and for the language itself (std +
+> prelude — the canonical reference).
+
+**What already exists (reuse, don't rebuild):**
+- `nest doc [MODULE] | --all` emits **Markdown** from docstrings by loading the module
+  and introspecting the live image (arglist + docstring + type-arrow + source location —
+  the same data `lookup` returns; `--all` covers every builtin + prelude global).
+- hive's `docbuild` builds **per-package** docs on publish by **parsing source forms
+  without evaluating them** (the security story for untrusted uploads — a public registry
+  must never run what it's handed), storing rendered module JSON in the `docs` table; the
+  web UI renders `/packages/:name/:version/docs`.
+- hive's `/docs` reference page already embeds the playground WASM so examples *run in the
+  browser* — a Brood upgrade over ExDoc the generator should inherit.
+
+**Design.**
+1. **A structured doc model** (`nest doc --json`), not just Markdown. Per module: the
+   moduledoc + a list of definitions `{name, arity, arglist, doc, type, source, privacy,
+   examples}`. Two extraction backends behind one schema — **loaded-image introspection**
+   (rich: macros expanded, types resolved; for trusted local/std docs) and
+   **parse-don't-eval** (hive's `docbuild` path; for untrusted registry uploads). The
+   HTML generator consumes the schema, indifferent to which backend produced it.
+2. **Guides (ExDoc "extras").** A `project.blsp` `:docs` key declaring narrative markdown
+   pages + ordering/groups, e.g.
+   `:docs {:guides ["guides/intro.md" "guides/processes.md"] :main "guides/intro.md"}`,
+   rendered as first-class pages alongside the API reference.
+3. **The HTML generator** (`nest doc --html [-o out]`) — a static, self-contained site: a
+   left sidebar (guides + modules), a page per module (moduledoc + each definition with
+   its signature/docstring/source link), client-side full-text **search**, **autolinking**
+   of `mod/fn` references in docstrings to their pages, and syntax-highlighted code. Reuse
+   the WASM interpreter so **code examples are runnable inline** (the `/docs` mechanism,
+   generalized).
+4. **Doctests.** Examples in docstrings written as `expr ;=> result` are extracted and run
+   by `nest test`, so docs can't drift from behaviour (Elixir doctest parity). One shared
+   example parser feeds both the runnable HTML blocks and the test runner.
+5. **Hosting on hive.** Extend `docbuild` from "module JSON → web UI" to rendering the full
+   ExDoc-like site per package/version, and publish the **language** reference (std +
+   prelude via `nest doc --all --json`) as the canonical site — the hexdocs.pm +
+   language-docs equivalent. The hand-written `/docs` guide becomes the first "extras"
+   guide of that site.
+
+**Milestones.**
+1. `nest doc --json` — the structured model from the loaded-image backend; unit-tested
+   against a fixture module.
+2. `nest doc --html` — the static site (sidebar, module pages, search) from the JSON.
+3. Guides/extras (`:docs` in project.blsp) + autolinking + runnable examples.
+4. Doctests: `;=>` extraction, run under `nest test`.
+5. hive: `docbuild` emits the full site; host the language reference at a stable URL.
+
+**Touch points.** `std/tool/` (the `nest doc` command + JSON/HTML emit), the runtime's
+doc-table / `lookup` introspection, hive's `docbuild` + `web/views/packages/docs`, and a
+shared HTML template (which can share the `/docs` page's styling + runnable-example JS). No
+new language features required — this is tooling over data the runtime already exposes.
+
+**Open questions.** Parse-don't-eval limits for untrusted packages (no macro-generated
+docs, no computed docstrings) vs. the rich loaded-image mode for std — the schema tolerates
+both, but the untrusted path is necessarily thinner; document the gap. Versioned URLs +
+"latest" redirects (the hexdocs shape) on hive.
+
 ### Tooling & errors
 
 - ✅ **LSP: type-directed record-field completion** — shipped 2026-07-30. Completing a
