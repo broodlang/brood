@@ -17046,3 +17046,61 @@ the pair slab**, indexed by slab index — no hashing, and no re-keying at all, 
 already walks every pair and holds the forwarding table. At the measured density (1.15M
 positions against 4.59M pairs, ~25%) memory is roughly a wash, so it is a speed change; it
 touches the three re-key sites in `gc.rs`. Prototype-and-measure, not a promised number.
+
+## 2026-08-06 — what it would take to start a 10×-moneyclub project: measured against Elixir
+
+Scale question with a concrete target: a project **10× the size of the largest app in
+`~/src/flt`** must start in reasonable time. Calibration from that tree (Elixir, excluding
+deps/livebook): the largest single app is **1630 files / 294k lines**; the whole 17-service
+suite is **7436 files / 1.37M lines**. So the target shape is ~16 300 files of ~180 lines.
+
+**Where Brood is today** (generated tree of that shape, idle box, best-of-3):
+
+| shape | files | load | RSS |
+|--------------------|--------|---------|---------|
+| moneyclub          | 1 630  | 1.80 s  | 298 MB  |
+| whole flt suite    | 7 436  | 8.69 s  | 1.03 GB |
+| **10× moneyclub**  | 16 300 | **18.5 s** | 1.92 GB |
+
+**Ballpark against Elixir**, same generated shape, same box:
+
+| | Brood | Elixir |
+|-------------------------------|--------|--------|
+| source → runnable, cold       | 18.5 s | 91 s (`mix compile`) |
+| start with everything loaded  | 18.5 s | **2.26 s** |
+| start lazily (nothing loaded) | 18.5 s | 0.2 s |
+| RSS, all loaded               | 1.92 GB | 1.69 GB |
+
+Two readings worth keeping. Brood's **from-source** path is ~5× faster than Elixir's
+compiler (1.1 ms/module against 5.6 ms) and its memory is already competitive. What Brood
+lacks is a **compiled-artifact tier**: Elixir pays 91 s once and 2.26 s per start, Brood
+pays 18.5 s every start — so Brood wins on total-cost-to-first-run and loses ~8× by the
+tenth start.
+
+*(Method note: a first pass measured BEAM at 170 s, which was `:code.ensure_loaded/1` per
+module doing a code-path search each time. The bulk parallel `:code.ensure_modules_loaded/1`
+is 2.26 s. And the first Brood moneyclub/suite numbers were taken while `make test` was
+running — 8.5 s / 27.5 s, both ~4× inflated. Neither figure should be quoted.)*
+
+**The obvious route is not good enough, and this is measured, not estimated.** Extending
+ADR-138's expanded-prelude boot cache to project code is the natural move, but the phase
+split on 180-line files is **read 9% · macroexpand 20% · eval+closure-build+promote 70%**
+(slurp 0.6%). A form-level text cache eliminates read and expand at best: 18.5 s → **~13 s
+floor**. It cannot approach 2.26 s, because the 70% is materialising code into the heap,
+which a text cache re-does on every start.
+
+**What would reach parity** is a real image — snapshot the RUNTIME code region + globals
+table + symbol interner as a binary artifact and restore it by bulk load instead of
+re-evaluation (the actual `.beam` analogue). The promising part is that RUNTIME handles are
+`(region, index)` into dense slabs (`PairId::runtime_gen(idx, gen)`), not raw pointers, so
+restoring the region as a unit from index 0 needs **no relocation pass** — normally the hard
+part of image loading, and apparently free here. At ~1.9 GB the disk read is ~1 s on this
+box, the right order for the target. The real work is at the edges: the symbol interner
+(snapshot or remap), closures' captured envs, and the invalidation key (build-id keying
+already exists from ADR-138).
+
+Not started — the next step is a spike that serialises and restores the region for the
+16 300-module image and times both, to prove the ~1–2 s assumption before committing to the
+design. Also noted: **lazy per-module loading** targets Elixir's 0.2 s rather than its
+2.26 s for far less work, since it means not loading what is never called; the open question
+there is module-level load-time side effects.
