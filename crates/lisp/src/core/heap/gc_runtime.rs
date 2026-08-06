@@ -302,7 +302,10 @@ impl Heap {
         // Bump the version so every process's version-stamped caches (global_ic, the
         // call/global ICs, the shared JIT caches) re-resolve to the migrated handles;
         // clear this process's own caches eagerly (they may hold old_gen handles).
+        // The code epoch moves too (ADR-217): migration REWRITES the handles compiled
+        // code baked in, so unlike a first-time `def` this must invalidate the JIT.
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
+        self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
         self.vm_cache.borrow_mut().clear();
         self.global_ic.borrow_mut().clear();
         self.vm_call_ics.borrow_mut().clear();
@@ -410,7 +413,10 @@ impl Heap {
         // after the store, so a consumer that sees the new version also sees the new slab).
         self.runtime.gen_version.fetch_add(1, Ordering::Release);
         // Invalidate the version-stamped caches (global_ic, call/global ICs, JIT)…
+        // — including the code epoch (ADR-217): the generation's slabs are gone, so any
+        // native code holding a handle into them must be re-tiered, not just re-resolved.
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
+        self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
         // …and the handle-keyed vm_cache (via free_epoch) across every process.
         self.runtime.free_epoch.fetch_add(1, Ordering::Relaxed);
         // Eagerly clear this process's caches (peers clear lazily on their next use).
@@ -1260,6 +1266,9 @@ impl Heap {
             // so the next read reloads instead of cloning the stale pre-compaction `Arc`.
             rt.gen_version.fetch_add(1, Ordering::Release);
             rt.version.fetch_add(1, Ordering::Relaxed);
+            // Compaction rewrites closure ids and moves code — a code-epoch bump, not
+            // merely an IC re-resolve (ADR-217).
+            rt.code_epoch.fetch_add(1, Ordering::Relaxed);
             // Drop the shared JIT-code cache: compaction rewrites closure ids, so its
             // `(id, argc)` keys no longer denote the same closures. The version bump
             // already makes every entry epoch-stale (never installed), but clearing

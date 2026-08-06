@@ -1496,6 +1496,29 @@ pub struct RuntimeCode {
     /// is sufficient — a global value is an immovable PRELUDE/RUNTIME handle, so
     /// there's no data it gates publication of; the counter only has to *change*.
     version: AtomicU64,
+    /// Monotonic **code** epoch — [`Heap::global_epoch`], the one the JIT guards on
+    /// (ADR-217). Bumped by everything `version` is bumped by *except a `def` that
+    /// binds a name for the FIRST time*, which cannot invalidate compiled code:
+    ///
+    /// - an inlined prim requires `resolve_prim`'s `env_get(global, head)?` to have
+    ///   succeeded, so its head was already bound at compile time;
+    /// - an entry-hoisted global that is unbound *deopts* rather than baking a value,
+    ///   and the hoist re-resolves on every activation anyway;
+    /// - `env_get` resolves a global by a single flat symbol lookup — namespace
+    ///   resolution happened before compilation — so a new binding of some *other*
+    ///   symbol can never redirect a symbol an arm already holds.
+    ///
+    /// Every dependency a compiled arm can have therefore already existed when it
+    /// compiled, and any change to one is a **rebind**, which does bump this.
+    ///
+    /// Split from `version` because the two have opposite cost profiles: re-resolving
+    /// a stale global IC is a hash hit, while a stale `compile_epoch` throws away
+    /// native code and re-tiers the arm. Sharing one counter meant a bulk load —
+    /// which is nothing but first-time `def`s — invalidated every JIT'd arm ~100
+    /// times per module: 12 distinct arms re-lowered 2294 times each over a
+    /// 4000-module load, and the JIT came out a net 43% *loss* against no JIT at all.
+    /// `version` keeps its exact old meaning for the inline caches.
+    code_epoch: AtomicU64,
     /// Where each global was *defined* — file + form position, recorded at load
     /// time before macroexpansion (ADR-031). Lives here, beside `globals`, so it
     /// is shared across a runtime's processes and updated by a redefinition, the
@@ -1770,6 +1793,7 @@ impl Default for RuntimeCode {
             // Likewise no private names until the prelude has been seeded.
             private: RwLock::new(std::collections::HashSet::new()),
             version: AtomicU64::new(0),
+            code_epoch: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
@@ -1890,6 +1914,7 @@ impl RuntimeCode {
             globals: RwLock::new(globals),
             registry_lock: Mutex::new(()),
             version: AtomicU64::new(0),
+            code_epoch: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
@@ -2046,6 +2071,13 @@ pub(crate) struct ColdHeap {
     pub(crate) form_pos: HashMap<u64, (crate::error::Pos, Option<Arc<str>>)>,
     /// The file currently being `load`ed, exposed via `(current-file)`.
     pub(crate) current_file: Option<String>,
+    /// `current_file` pre-shared as an `Arc<str>`, kept in step by
+    /// [`Heap::set_current_file`]. Every recorded form position stores the file it came
+    /// from, and `set_form_pos` used to build that with `Arc::from(&str)` — a fresh
+    /// allocation *and* a copy of the path, once per list form read. Loading 1000
+    /// thousand-line modules reads ~1.15M list forms, so that was ~1.15M allocations of
+    /// the same handful of strings. Cloning this instead is a refcount bump.
+    pub(crate) current_file_arc: Option<Arc<str>>,
     /// The namespace being compiled (`defmodule`).
     pub(crate) compile_ns: Option<Symbol>,
     /// Names the current namespace defines.
@@ -3536,13 +3568,12 @@ impl Heap {
     pub fn set_form_pos(&mut self, v: Value, pos: crate::error::Pos) {
         if let Some(id) = v.as_pair() {
             if id.region() == crate::core::value::LOCAL {
-                let file: Option<Arc<str>> = self
-                    .cold()
-                    .and_then(|c| c.current_file.as_deref())
-                    .map(Arc::from);
-                self.cold_mut()
-                    .form_pos
-                    .insert(form_pos_key(id), (pos, file));
+                // Clone the pre-shared `Arc` (a refcount bump), never `Arc::from(&str)` —
+                // that allocated and copied the path on every single form. See
+                // `ColdHeap::current_file_arc`.
+                let cold = self.cold_mut();
+                let file = cold.current_file_arc.clone();
+                cold.form_pos.insert(form_pos_key(id), (pos, file));
             }
         }
     }
@@ -3578,7 +3609,11 @@ impl Heap {
     /// Set the file currently being loaded, returning the previous value so the
     /// caller can restore it (loads nest).
     pub fn set_current_file(&mut self, file: Option<String>) -> Option<String> {
-        std::mem::replace(&mut self.cold_mut().current_file, file)
+        // Re-share the path once per `load`, not once per form — see `current_file_arc`.
+        let shared: Option<Arc<str>> = file.as_deref().map(Arc::from);
+        let cold = self.cold_mut();
+        cold.current_file_arc = shared;
+        std::mem::replace(&mut cold.current_file, file)
     }
 
     /// The file currently being loaded, exposed to Brood via `(current-file)`.
@@ -4972,7 +5007,7 @@ impl Heap {
     /// to the general call path the moment the operator is redefined. Mirrors the
     /// version `global_lookup_cached` already keys the symbol inline-cache on.
     pub fn global_epoch(&self) -> u64 {
-        self.runtime.version.load(Ordering::Relaxed)
+        self.runtime.code_epoch.load(Ordering::Relaxed)
     }
 
     /// Address of the global-epoch counter (`runtime.version`), so JIT'd code can read the
@@ -4990,7 +5025,7 @@ impl Heap {
     /// nothing on these targets and reinstate the FFI cost, so the plain load stays.
     #[cfg(feature = "jit")]
     pub(crate) fn global_epoch_ptr(&self) -> *const u64 {
-        &self.runtime.version as *const AtomicU64 as *const u64
+        &self.runtime.code_epoch as *const AtomicU64 as *const u64
     }
 
     /// Shared-JIT cache lookup (ADR-101, the spawn lever): the native code published
@@ -5294,9 +5329,16 @@ impl Heap {
             // the shared globals table (ADR-091 Stage 5 soundness). No-op until aging
             // has created a non-current generation to re-home out of.
             let shared = self.rehome_to_current(self.promote(val));
-            self.runtime.globals_write().insert(sym, shared);
+            let rebind = self.runtime.globals_write().insert(sym, shared).is_some();
             // Invalidate every process's global inline cache (late binding).
             self.runtime.version.fetch_add(1, Ordering::Relaxed);
+            // The JIT's code epoch moves only on a REBIND (ADR-217). Binding a name for
+            // the first time cannot invalidate compiled code — no arm can have baked in
+            // a binding that did not exist when it compiled (see `code_epoch`'s doc) —
+            // and bumping here made a bulk load re-tier every JIT'd arm per `def`.
+            if rebind {
+                self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
+            }
         } else if env.is_old() {
             // The frame was tenured (a minor collection promoted it while it was
             // still being bound — e.g. a collection during a `let` rhs eval). Mutate
@@ -5592,8 +5634,11 @@ impl Heap {
             "restore_globals out of order — globals snapshots must be restored LIFO"
         );
         *self.runtime.globals_write() = snapshot.saved;
-        // Wholesale table swap — invalidate every stamped global inline cache.
+        // Wholesale table swap — invalidate every stamped global inline cache. This one
+        // bumps the code epoch too (ADR-217): a restore can *replace or remove* bindings
+        // a compiled arm baked in, so it is a rebind in every sense that matters.
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
+        self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
         // Release the compaction suppression `snapshot_globals` took: the snapshot is no
         // longer outstanding, so a relocation can no longer strand it (KI-6).
         self.end_rt_collect_block();
