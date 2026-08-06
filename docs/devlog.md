@@ -16876,3 +16876,31 @@ from another process is observed across the heap boundary. gen 21/21, reload 2/2
 clean. Full `release_handler`/appup orchestration stays deferred (ROADMAP) — Brood's
 immutable-map data removes OTP's hardest case (nominal schema migration), leaving only
 loop-state drift, which this covers.
+
+## 2026-08-06 — REPL package-rooting: the interactive `%in-ns` + the checker to match
+
+Picking up the package-rooting follow-ups (ADR-070), a re-scope found the LSP-nav and REPL
+follow-ups had **already shipped** in `9ecad92b` (the memory note that flagged them open was
+stale — fixed). The one interactive gap that remained: at `nest repl` a bare project fn didn't
+resolve *cold*, because the REPL never entered the project's namespace.
+
+- **`nest repl` now starts in the project's `:main` namespace.** `cmd_repl` sets a plain global
+  `repl/*repl-start-ns*` to the main module (`crates/nest/src/main.rs`), and `repl-run` runs
+  `(%in-ns *repl-start-ns*)` **inside the spawned loop process** before the loop — a plain `def`
+  (not a `binding`) so it crosses the `spawn`, and the loop process holds the resulting
+  `compile_ns` across each interactive `eval-string` (which doesn't reset it). So a bare `go`
+  resolves to `myapp/main/go` at the prompt. A no-op for the plain `brood` REPL / outside a project.
+- **The advisory checker now mirrors eval's `compile_ns` rooting.** The first cut left a spurious
+  `unbound: go` warning: the eval resolved `go` (via `compile_ns`) but the checker looked it up
+  only at root. Fixed at the single chokepoint `deps::obs_global` — a bare name unbound at root
+  retries under `compile_ns/name`. **Sound by construction:** it only ever *finds* a binding eval
+  would also reach (eval roots identically), so it suppresses a false "unbound" and can never mask
+  a real one; a genuinely unbound name still warns (and eval still errors, rooted). Benefits any
+  `%in-ns` / interactive session, not just the REPL. 222 checker tests green (new:
+  `unbound_roots_a_bare_name_against_the_current_compile_ns`).
+
+**Not done, deferred (ADR-011):** full `nest release` bundle **dev/release parity** — rooting the
+bundle so two deps providing a same-named module can coexist in one released bundle. The bundler
+already *rejects* a duplicate name loudly (`bundle-reject-duplicate-names`), a safe interim; the
+codebase's own note (project.blsp:2113) defers the deeper rooting, and there is no in-tree consumer
+needing two same-named dep modules in a bundle. Left as the one open sliver of the follow-ups.

@@ -2892,6 +2892,41 @@ fn unbound_is_silent_for_prelude_names() {
 }
 
 #[test]
+fn unbound_roots_a_bare_name_against_the_current_compile_ns() {
+    // The checker mirrors eval's `compile_ns` rooting (ADR-070): after `%in-ns`, a bare
+    // name that resolves to `<ns>/name` is not flagged unbound. This is the REPL case —
+    // `nest repl` enters the project's `:main` namespace so a bare project fn resolves at
+    // the prompt without the advisory checker crying "unbound".
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(%in-ns 'ns1) (defn foo () 1)")
+        .expect("defines ns1/foo");
+    // `eval_str` resets `compile_ns` on return; re-establish it the way the REPL loop
+    // process holds it across interactive `eval-string`s (which don't reset).
+    interp
+        .heap
+        .set_compile_ns(Some(crate::core::value::intern("ns1")));
+
+    // A bare `foo` roots to the bound `ns1/foo` → no unbound warning.
+    let bound = reader::read_one(&mut interp.heap, "(foo)").expect("parse");
+    let w_bound = check_form(&interp.heap, bound);
+    assert!(
+        w_bound.iter().all(|m| !m.contains("unbound")),
+        "a bare `foo` should root to ns1/foo (bound) and not warn, got {w_bound:?}"
+    );
+
+    // A genuinely unbound bare name is still flagged (rooting only ever *finds*, never masks).
+    let unbound = reader::read_one(&mut interp.heap, "(nope-xyz)").expect("parse");
+    let w_unbound = check_form(&interp.heap, unbound);
+    assert!(
+        w_unbound
+            .iter()
+            .any(|m| m.contains("unbound") && m.contains("nope-xyz")),
+        "a genuinely unbound name must still be flagged, got {w_unbound:?}"
+    );
+}
+
+#[test]
 fn file_globals_make_later_forms_see_earlier_defs() {
     // `check_file` accumulates top-level def names. Without that,
     // `(my-fn 1)` in form 2 would be flagged unbound — `my-fn` isn't in

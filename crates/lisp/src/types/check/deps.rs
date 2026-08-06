@@ -43,7 +43,24 @@ pub(super) fn begin_record(heap: &Heap) {
 /// Record + read a global binding (`heap.env_get(global, sym)`).
 pub(super) fn obs_global(heap: &Heap, sym: Symbol) -> Option<Value> {
     heap.rec_check_dep_sym(sym);
-    heap.env_get(heap.global(), sym)
+    if let Some(v) = heap.env_get(heap.global(), sym) {
+        return Some(v);
+    }
+    // Mirror eval's `compile_ns` rooting: a BARE name unbound at root retries under the
+    // namespace currently being compiled into (`compile_ns/name`), so the checker
+    // resolves an interactive / in-`%in-ns` reference exactly as eval does — e.g. a bare
+    // project fn at the prompt after `nest repl` entered the project's `:main` namespace
+    // (ADR-070). Sound: this only ever FINDS a binding eval would also reach (eval roots
+    // the same way), so it suppresses a false "unbound" and can never mask a real one. A
+    // name that already carries a `/` is qualified — don't double-root it.
+    let ns = heap.compile_ns()?;
+    let name = value::symbol_name(sym);
+    if name.contains('/') {
+        return None;
+    }
+    let rooted = value::intern(&format!("{}/{}", value::symbol_name(ns), name));
+    heap.rec_check_dep_sym(rooted);
+    heap.env_get(heap.global(), rooted)
 }
 
 /// Record + read a global's declared `(sig …)` type-expression value.

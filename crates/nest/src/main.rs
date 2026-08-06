@@ -1467,13 +1467,25 @@ fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
 /// implementation both binaries bootstrap into via `(repl/repl-run)`.
 fn cmd_repl(interp: &mut Interp) {
     if in_project() {
+        // After loading the project's sources, tell the REPL to start in the project's
+        // `:main` module namespace so a BARE project fn (`go`) resolves at the prompt
+        // without qualifying it `myproj/main/go` — the interactive half of package
+        // rooting (ADR-070). `*repl-start-ns*` is a plain `def` (not a `binding`) so it
+        // reaches the spawned loop process, which roots + enters it through the ambient
+        // package context `project-setup` just established. Other project modules still
+        // need their `mod/fn` (or a `(defmodule …)`/`%in-ns` switch), exactly as in a file.
         run(
             interp,
-            "(require 'project) (project/load-config) \
+            "(require 'project) (require 'repl) (project/load-config) \
              (let (root (project/project-find-root (cwd))) \
-               (when root (project/project-setup root) (project/project-load-sources root)))",
+               (when root \
+                 (project/project-setup root) \
+                 (project/project-load-sources root) \
+                 (def repl/*repl-start-ns* (first *project-main*))))",
         );
-        eprintln!("nest repl — project sources loaded; Ctrl-D to exit");
+        eprintln!(
+            "nest repl — project sources loaded, in the project's main namespace; Ctrl-D to exit"
+        );
     } else {
         eprintln!("nest repl — no project.blsp here; plain REPL (`brood` would do the same)");
     }
