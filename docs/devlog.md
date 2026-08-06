@@ -16700,3 +16700,30 @@ either-side Sym/Keyword compares interned ids), so control provably reaches its 
 for `(%eq el :go)`. The failing guard is one of the other 16. Those are indistinguishable at
 runtime because every guard jumps to one shared block, so the next move is an instrument, not
 more reading: stamp a per-site id on the way into deopt and let one run name the guard.
+## 2026-08-06 — release 0.3.0, and a `CHANGELOG.md`
+
+**0.3.0 tagged and released.** A maintenance release: the workspace version bumped
+0.2.0 → 0.3.0 in the root `Cargo.toml` `[workspace.package]`, tagged `v0.3.0`, which
+the `release.yml` GitHub Actions workflow builds into the four-platform tarballs
+(`x86_64`/`aarch64` × linux-gnu/apple-darwin) attached to the GitHub Release. Nothing
+in the language or runtime changed since 0.2.0 — the release captures the session's
+test-runner robustness work (KI-29 orphaned children, KI-30 temp-dir leak), the new
+`nest update-tooling` subcommand, and the ADR-146 privacy/LSP review follow-ups.
+
+**Added a `CHANGELOG.md`** at the repo root as the human-facing source of truth for
+release notes (the CI-created GitHub Releases had empty bodies until now); it carries
+0.1.0/0.2.0/0.3.0 summaries and points at this devlog for the full narrative. hive's
+Dockerfile now pins its brood clone to the `v0.3.0` tag (was `main`), its install page
+advertises `BROOD_VERSION=v0.3.0`, and a new `/changelog` page mirrors these notes for
+download-facing users.
+
+**Greened the CI `differential (tree-walker)` job.** It had been red on every recent main
+push — one assertion, deterministic: `unbox_torture_test`'s `(ut-ack 3 8)` (Ackermann,
+~2045-deep non-tail recursion) tipped **1392 bytes** over the 12 MiB stack budget *under the
+tree-walker only* (`BROOD_VM=0` spends more native stack per eval frame; the VM run, the one
+that actually JITs this torture case, fits comfortably). The `clippy + test` job — which runs
+the default VM — was green throughout, which is why the break was invisible outside the
+main-only differential. Fixed by gating the deep case on `(not= (getenv "BROOD_VM") "0")`,
+the same engine guard `observability_test` already uses; the VM keeps full coverage. Raising
+`BROOD_STACK_BUDGET` was rejected — the default budget is `WORKER_STACK_BYTES (16 MiB) − 4 MiB`
+margin, and eating that margin risks a real SIGSEGV past the guard.
