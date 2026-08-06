@@ -1,0 +1,38 @@
+(defmodule zlib-test (:use test))
+(require 'zlib)
+
+(defn big (unit n)
+  "A string of `unit` repeated `n` times — compressible test data."
+  (apply str (map (fn (_) unit) (range 0 n))))
+
+(describe "gzip/gunzip"
+  (test "round-trips a string"
+    (assert= "hello" (utf8-bytes->string (zlib/gunzip (zlib/gzip "hello")))))
+  (test "round-trips a bytes value"
+    (let (b (string->utf8-bytes "the quick brown fox jumps over the lazy dog"))
+      (assert= b (zlib/gunzip (zlib/gzip b)))))
+  (test "compresses repetitive data smaller than the input"
+    (let (s (big "ababababab" 100))
+      (is (< (byte-length (zlib/gzip s)) (byte-length (string->utf8-bytes s))))))
+  (test "output carries the gzip magic bytes (0x1f 0x8b)"
+    (let (gz (zlib/gzip "x"))
+      (assert= 31 (byte-at gz 0))
+      (assert= 139 (byte-at gz 1))))
+  (test "gunzip raises on data that isn't gzip"
+    (is (= :raised
+          (try (do (zlib/gunzip (string->utf8-bytes "definitely not gzip")) :ok)
+            (catch e :raised))))))
+
+(describe "zlib compress/uncompress (RFC 1950)"
+  (test "round-trips"
+    (assert= "payload"
+      (utf8-bytes->string (zlib/uncompress (zlib/compress "payload")))))
+  (test "empty input round-trips"
+    (assert= "" (utf8-bytes->string (zlib/uncompress (zlib/compress ""))))))
+
+(describe "raw deflate zip/unzip (RFC 1951)"
+  (test "round-trips"
+    (assert= "payload" (utf8-bytes->string (zlib/unzip (zlib/zip "payload")))))
+  (test "raw deflate is smaller than gzip for the same data (no header/checksum)"
+    (let (s (big "compress me " 50))
+      (is (<= (byte-length (zlib/zip s)) (byte-length (zlib/gzip s)))))))
