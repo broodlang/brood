@@ -16631,3 +16631,54 @@ which still caught this session four times. The practical rule: a filed fix dire
 hypothesis with no measurement behind it, so re-derive the premise before implementing against it,
 and prefer reading the mechanism's own code and comments first (KI-30's convention was documented
 on the very function that implements it).
+
+## 2026-08-06 — the receive matcher never reaches the native fast frame
+
+Picked up handoff §1 item 1 — "the receive machinery (+8.7 µs/unit), and it looks like a
+*caching* problem" — and the first measurement killed the premise. `receive` is a **macro**:
+`match-build-from` lowers the clause set at expansion into a literal `(fn (msg) …)` whose body is
+an inlined `vector?`/`vector-length`/`vector-ref`/`%eq` if-tree. `macroexpand` shows it in one
+line. `match-compile-clause` therefore runs **once per site at load**, never per message, and the
+~20 `match-*`/`receive-*` arms seen tiering during the ladder are that expansion work. There is no
+ADR-215-shaped cache to add.
+
+What the cost actually is, from the new control pair `scripts/fuzz/stress/recv_matcher.blsp`
+(one long-lived process, so tiering is not a variable): `ns_receive` is **57%** of a receive-loop
+iteration and `ns_match_run` is **55% of that**. `hof_resolve` succeeds on 100% of receives and
+`hof_apply_step` is entered on 100% — but `hof_apply_native` **declines every time**, so each
+matcher call pays the `vm_apply` → `vm_run_bc` trampoline. The reason: the matcher arm lowers to
+native, deopts on 16 consecutive activations, and `jit_deopt_feedback` marks it `BAILED` for the
+rest of the program. A catch-all pattern, whose matcher makes no call, stays native instead —
+`jit_link_done` 993 489 vs **0**, `ns_match_run` 112 ns vs 534 — which sizes the *mechanism* but
+is an upper bound on the prize, since the catch-all also does less matching work.
+
+Three explanations for that deopt were then measured and killed (handoff §4), including one that
+was implemented before being disproved: `PrimOp1::VectorLen` (IR + both VM exec paths + a
+Cranelift `inline_vec_len`) plus a call-free matcher generator. The chunk's calls duly
+disappeared and the arm **still** deopted — now on every activation, with no checkpoint and no
+self-heal, i.e. measurably worse than the `BAILED` it replaced. All reverted; tree clean.
+
+**The trap that sold it, and it is a general one.** A deopt's `resume_ip` names the nearest
+*checkpoint*, and checkpoints sit after calls — so a call-mediated arm's deopt always looks like
+it happened *at* the call, and removing one call moves the reported site to the next one, which
+reads as confirmation. Two more from the same hunt are now in §6: an off-switch measuring flat
+(`BROOD_NO_HOF_JIT=1`, 0.0%) can mean the path was **never taken** rather than worthless — the
+success counter `jit_link_done` beats the A/B — and a probe built on `fold` never exercised the
+HOF path at all, because `fold` is Brood, not a Rust driver, and its instrument read zero.
+
+Continuing this thread means reading the arm's CLIF for the branch into the deopt block. That is
+the one thing the session did not get to, and it is the whole question.
+
+**Bisected the same day.** The matcher's deopt is caused by **comparing a literal pattern
+element**, and by nothing else. `scripts/fuzz/stress/recv_matcher.blsp` now carries the four-way
+control: `[a v]` and `m` stay native (`jit_deopt` 0, `jit_link_done` ~1 per receive), while
+`[:go v]` and `[1 v]` deopt ~1 per receive with `jit_link_done` **0**. `[a v]` is the honest
+control — it does the same `vector?`/`vector-length`/two-`vector-ref` work and merely binds the
+head instead of comparing it — so the gap is **1286 vs 1776 ns/iter, −28% of the receive loop**,
+not an artefact of work not done. That simultaneously rules out the calls, the vector machinery
+and anything keyword-specific (an int literal deopts identically), and none of the inliner
+switches move it, so it is in the base lowering. `BROOD_DEOPT_TRACE` names the arm as the matcher
+`<closure>`. Since the tagged tuple is the dominant idiom, essentially every real `receive` is on
+the slow side of this line. What is left is one narrow question — which guard in the lowering of
+`(if (%eq el <literal>) … nil)` branches to the deopt block — with the note that `eq_dispatch`
+reads correct on paper for both operand shapes, so it is probably not the culprit.
