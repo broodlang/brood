@@ -9,7 +9,7 @@
 //!     Adler-32 checksum.
 //!   - **raw deflate** (`%deflate`/`%inflate`) — RFC 1951, no header/checksum.
 //!
-//! The Erlang `:zlib`-shaped public names (`gzip`/`gunzip`, `compress`/`uncompress`,
+//! The public names (`gzip`/`gunzip`, `compress`/`uncompress`,
 //! `zip`/`unzip`) are Brood policy in `std/zlib.blsp` over these six prims.
 
 use std::io::{Read, Write};
