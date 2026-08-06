@@ -16631,3 +16631,20 @@ which still caught this session four times. The practical rule: a filed fix dire
 hypothesis with no measurement behind it, so re-derive the premise before implementing against it,
 and prefer reading the mechanism's own code and comments first (KI-30's convention was documented
 on the very function that implements it).
+
+## 2026-08-06 — release 0.3.0, and a `CHANGELOG.md`
+
+**0.3.0 tagged and released.** A maintenance release: the workspace version bumped
+0.2.0 → 0.3.0 in the root `Cargo.toml` `[workspace.package]`, tagged `v0.3.0`, which
+the `release.yml` GitHub Actions workflow builds into the four-platform tarballs
+(`x86_64`/`aarch64` × linux-gnu/apple-darwin) attached to the GitHub Release. Nothing
+in the language or runtime changed since 0.2.0 — the release captures the session's
+test-runner robustness work (KI-29 orphaned children, KI-30 temp-dir leak), the new
+`nest update-tooling` subcommand, and the ADR-146 privacy/LSP review follow-ups.
+
+**Added a `CHANGELOG.md`** at the repo root as the human-facing source of truth for
+release notes (the CI-created GitHub Releases had empty bodies until now); it carries
+0.1.0/0.2.0/0.3.0 summaries and points at this devlog for the full narrative. hive's
+Dockerfile now pins its brood clone to the `v0.3.0` tag (was `main`), its install page
+advertises `BROOD_VERSION=v0.3.0`, and a new `/changelog` page mirrors these notes for
+download-facing users.
