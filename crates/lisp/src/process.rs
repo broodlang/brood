@@ -41,7 +41,7 @@ mod links;
 mod mailbox;
 /// Diagnostic counters for the L1 local-send fast path (`BROOD_L1_STATS=1`).
 pub use mailbox::l1_stats;
-mod message;
+pub(crate) mod message;
 mod monitor;
 mod scheduler;
 /// The system monitor (kernel runtime events → one subscriber's mailbox).

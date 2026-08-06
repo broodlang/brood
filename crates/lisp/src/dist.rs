@@ -1447,7 +1447,7 @@ fn deliver_inbound(target: Target, msg: Message) {
 mod handshake;
 mod heartbeat;
 mod session;
-mod wire;
+pub(crate) mod wire;
 
 use heartbeat::ensure_heartbeat;
 use session::Session;

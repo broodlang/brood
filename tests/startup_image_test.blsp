@@ -1,0 +1,99 @@
+;;; The startup image (ADR-218): a project starts by restoring bindings from a binary
+;;; artifact instead of re-evaluating its sources.
+;;;
+;;; The load-bearing property is not speed — it is that an imaged start is
+;;; INDISTINGUISHABLE from a source start. The image defines exactly the globals a
+;;; source load would have, so `def`, hot reload and late binding must behave
+;;; identically afterwards; a process running since before a redefinition must still
+;;; observe it. Those are the cases here. Speed is measured in the devlog and never
+;;; asserted — a wall-clock assertion would be flaky on a loaded CI box.
+;;;
+;;; `:isolated` because these `def` globals they also assert on, so a second run in one
+;;; image (`--repeat-until-failure`, `nest test --failed`) would otherwise start from the
+;;; redefined state (KI-25).
+
+(defmodule startup-image-test (:use test))
+
+(defn- img-tmp (n) (path-join "/tmp" (str "brood-startup-image-" n ".bin")))
+
+;; A worker that re-reads the global on every request — the late-binding contract.
+(defn si-worker ()
+  (receive
+    ([:ask from] (do (send from [:got (si-greet)]) (si-worker)))
+    ([:stop] :ok)))
+
+(defn si-ask (w)
+  (send w [:ask (self)])
+  (receive ([:got v] v)))
+
+(describe "startup image: write and restore"
+  :isolated
+
+  (test "a written image restores the values it captured"
+    (def si-a 41)
+    (def si-f (fn (x) (+ x 1)))
+    (let (p (img-tmp "basic"))
+      (assert= 2 (%image-write p ['startup-image-test/si-a 'startup-image-test/si-f] "fp1"))
+      (def si-a :clobbered)
+      (def si-f (fn (_) :clobbered))
+      (assert= :clobbered si-a)
+      (assert= 2 (%image-read p "fp1"))
+      (assert= 41 si-a)
+      (assert= 6 (si-f 5))))
+
+  ;; A stale image must be a MISS, not an error and not a wrong restore — the caller's
+  ;; entire recovery strategy is "nil means load from source instead".
+  (test "a fingerprint mismatch is a miss, not an error"
+    (def si-b 7)
+    (let (p (img-tmp "stale"))
+      (%image-write p ['startup-image-test/si-b] "fp-written")
+      (def si-b 8)
+      (is (nil? (%image-read p "fp-DIFFERENT")))
+      (assert= 8 si-b)))
+
+  (test "an absent or corrupt image is a miss"
+    (is (nil? (%image-read (img-tmp "no-such-file-at-all") "fp")))
+    (let (p (img-tmp "corrupt"))
+      (spit p "this is not a brood image")
+      (is (nil? (%image-read p "fp")))))
+
+  ;; `to_message` refuses a macro — sending one to another process is meaningless. An
+  ;; image is the opposite case, so a macro rides as its closure plus a flag. If that
+  ;; regressed, a project's `defmacro`s would come back as plain functions and every
+  ;; call site would silently start evaluating its arguments.
+  (test "a macro survives the round trip as a macro"
+    (defmacro si-twice (e) (list 'do e e))
+    (let (p (img-tmp "macro"))
+      (assert= 1 (%image-write p ['startup-image-test/si-twice] "fp-m"))
+      (def si-twice :clobbered)
+      (assert= 1 (%image-read p "fp-m"))
+      ;; The property a function cannot have: the call site EXPANDS. If the round trip
+      ;; had returned a plain closure, macroexpand would leave the form untouched.
+      (assert= '(do 1 1) (macroexpand '(startup-image-test/si-twice 1)))))
+
+  ;; Line coverage instruments at COMPILE time, so code restored from an image was
+  ;; never compiled in this process and carries no instrumentation — the report would
+  ;; come back silently empty. `project-load-sources-cached` must therefore decline the
+  ;; image under `BROOD_COVERAGE`. Found by `nest::coverage_lines` failing, not by
+  ;; reasoning, which is why it is pinned here too.
+  (test "an instrumented run declines the image"
+    (require 'project)
+    ;; The predicate is the whole guard; it reads the env var the kernel reads.
+    (is (nil? (getenv "BROOD_COVERAGE")))
+    (is (project/project-image-usable?)))
+
+  ;; The whole point: an imaged start must not freeze the image.
+  (test "hot reload still works after restoring from an image"
+    (def si-greet (fn () "v1"))
+    (let (p (img-tmp "reload"))
+      (%image-write p ['startup-image-test/si-greet] "fp-r")
+      (def si-greet (fn () :clobbered))
+      (assert= 1 (%image-read p "fp-r"))
+      (assert= "v1" (si-greet))
+      (let (w (spawn (si-worker)))
+        (assert= "v1" (si-ask w))
+        (def si-greet (fn () "v2-hot"))
+        (assert= "v2-hot" (si-greet))
+        ;; the ALREADY-RUNNING process must observe the new binding
+        (assert= "v2-hot" (si-ask w))
+        (send w [:stop])))))

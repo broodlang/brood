@@ -22,6 +22,7 @@ mod os;
 mod pkg;
 mod selfhost_macros;
 mod sequences;
+mod startup_image;
 mod syntax_scan;
 mod system;
 #[cfg(not(target_arch = "wasm32"))]
@@ -44,6 +45,7 @@ use os::*;
 use pkg::*;
 use selfhost_macros::*;
 use sequences::*;
+use startup_image::*;
 use syntax_scan::*;
 use system::*;
 use terminal::*;
@@ -2181,6 +2183,25 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![kw, any, any], bytes_ty),
         hmac,
     );
+    // Startup-image prims (ADR-218) — encode/decode a set of global bindings to a
+    // binary artifact so a large project starts by rebuilding values instead of
+    // re-evaluating source. Mechanism only: the fingerprint is an opaque string this
+    // layer stores and compares, and every *policy* question — what to snapshot, what
+    // invalidates an image, who rebuilds it — is Brood in std/tool/project.blsp.
+    def(
+        heap,
+        "%image-write",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], any),
+        image_write,
+    );
+    def(
+        heap,
+        "%image-read",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        image_read,
+    );
     // Compression prims (the `flate2` crate) — a byte sequence in, `bytes` out, one
     // encode/decode pair per container format. The public names
     // (gzip/gunzip, compress/uncompress, zip/unzip) are Brood in std/zlib.blsp.
@@ -3367,6 +3388,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
     ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
+    ("%image-write", &["path", "names", "fingerprint"], "Write the global bindings named by `names` (a sequence of symbols) to the binary startup image at `path`, stamped with the opaque `fingerprint` string; returns how many were written. An unbound name is skipped; a value with no portable form (a builtin, a pid) raises rather than silently dropping a binding. Mechanism only (ADR-218) — the snapshot set and the staleness policy are Brood in std/tool/project.blsp."),
+    ("%image-read", &["path", "fingerprint"], "Restore the bindings from the startup image at `path`, but only if its stamp equals `fingerprint`; returns how many were defined, or nil when the image is absent, unreadable, of an older format, or stale. Nil is the rebuild-me signal — every failure is a cache miss, never an error, so a corrupt image degrades to loading from source (ADR-218)."),
     ("spit-bytes", &["path", "bytes"], "Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. The binary write-side counterpart to slurp-bytes (spit is UTF-8 string-only) — materialises a received image / archive / any binary asset to disk."),
     ("append-bytes", &["path", "bytes"], "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. The incremental counterpart to spit-bytes (which truncates) — lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory."),
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),

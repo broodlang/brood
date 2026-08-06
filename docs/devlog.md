@@ -17104,3 +17104,49 @@ Not started — the next step is a spike that serialises and restores the region
 design. Also noted: **lazy per-module loading** targets Elixir's 0.2 s rather than its
 2.26 s for far less work, since it means not loading what is never called; the open question
 there is module-level load-time side effects.
+
+## 2026-08-06 — the startup image ships (ADR-218): 30.6 s → 8.1 s on a 16 300-file project
+
+Built the compiled-artifact tier the previous entry identified as the only route to the
+start-time target. See ADR-218 for the design; what follows is what the work taught.
+
+**The spike was right about the mechanism and wrong about the number.** Before building
+anything, a zero-Rust spike measured the decisive question — how fast is a *structural*
+rebuild versus re-evaluating source — by exploiting the fact that a cross-process `send`
+already does exactly that (`to_message` in the sender, `from_message` in the receiver,
+closures as data per ADR-033). It said 2.155 s against 20.0 s from source, at the target
+scale, with a rebuilt closure verifiably callable in the receiver. The shipped thing
+measures **8.1 s**. The spike had left out the byte codec, which materialises a whole
+intermediate `Message` tree on decode before `from_message` walks it into heap values —
+two passes, heavy allocation. That is where the remaining ~3× lives, and a streaming
+decoder that builds heap values straight from the bytes is the successor item. Lesson
+worth keeping: a spike that reuses an in-memory path measures the *rebuild*, not the
+*load*, and the difference here was 4×.
+
+**Reusing the wire format paid twice.** No second code serialiser, and — unplanned — the
+interner problem evaporated: `wire::put_sym` writes symbol *names*, not the dense ids, so
+an image never depends on intern order. That was the risk flagged as "the hard part" when
+scoping this, and it was already solved by a decision made for distribution.
+
+**`to_message` refuses macros, for good reasons that do not apply here.** Sending a macro
+between processes is meaningless; imaging one is mandatory. Since `Value::Macro` and
+`Value::Fn` share a `ClosureId`, a macro rides as its closure plus a flag. Confined to a
+top-level binding — a macro nested in data still refuses, as for `send`.
+
+**What was verified, beyond the suite.** A scratch project exercising the real commands:
+`nest test` with no image builds one and passes; the second run hits it; `nest run` and
+`nest check` likewise; editing a source file invalidates; adding a file invalidates.
+`tests/startup_image_test.blsp` pins the property that actually matters — a process spawned
+*before* a redefinition still observes it after an imaged start — plus stale/absent/corrupt
+all being misses rather than errors, and a macro surviving as a macro. The staleness gate
+and the macro flag were both verified by sabotage.
+
+**The suite caught what reasoning did not.** `nest::coverage_lines` failed: line coverage
+instruments at *compile* time, so image-restored code carries no instrumentation and the
+report comes back empty — a silent wrong answer, not an error. The loader now declines the
+image under `BROOD_COVERAGE`. Generalisable question for anything image-like: who else
+depends on code having been **compiled in this process** rather than merely being present?
+
+**Also corrected:** an earlier note in this session that `:source-paths` in a manifest was
+being ignored. That was a bad test manifest — the form takes `:name "x"`, not a positional
+symbol. No such bug; disregard.

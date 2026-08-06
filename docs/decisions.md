@@ -14322,3 +14322,88 @@ missed dependency is a silent wrong answer, and it wants its own change with its
 tiered arm stays correct across runs of first-time `def`s, a rebind of its callee is still
 honoured *after* such a run, and the rebind stays in effect through more of them. Verified
 by sabotage — suppressing the rebind bump fails the second case.
+
+## ADR-218 — The startup image: a project starts by restoring bindings, not re-evaluating source
+
+**Status:** implemented (2026-08-06), on by default, no separate build step. `.brood/image.bin`
+per project; delete it (or the whole `.brood/`) to force a source load.
+
+**Context.** Loading a large project costs ~1.1 ms *per file* — the per-file constant
+dominates, not lines. Calibrated against `~/src/flt`, a project 10× the largest app there
+(16 300 files of ~180 lines) took **~20 s** to load and the requirement is that it start in
+reasonable time, close to or better than Elixir. Elixir on the same generated shape:
+`mix compile` 91 s once, then **2.26 s** to load all modules precompiled (0.2 s if it loads
+lazily, which is its default). So Brood's *from-source* path is ~5× faster than Elixir's
+compiler and its memory is competitive — what it lacked was a **compiled-artifact tier**.
+
+The phase split on realistic 180-line files is **read 9% · macroexpand 20% · eval +
+closure-build + promote 70%**. That rules out the obvious move: extending ADR-138's
+expanded-prelude boot cache (post-macroexpansion *forms* as text) to project code
+eliminates read and expand at best, a measured floor of ~13 s. It cannot approach 2 s
+because the 70% is materialising code into the heap, which a text cache re-does every start.
+
+**Decision.** Snapshot the *bindings* a source load produces into a binary artifact and
+restore them structurally. The encoding reuses the **distribution wire format** over
+`process::Message`, which already serialises closures as data (ADR-033) — so this adds no
+second implementation of code serialisation, and inherits a decision that turns out to
+matter: `wire::put_sym` writes symbol **names**, not the dense interner ids, so an image
+never depends on the order symbols happened to be interned in. The interner problem that
+would normally dominate an image format simply does not arise.
+
+Rust supplies only mechanism (ADR-006): `%image-write path names fingerprint` and
+`%image-read path fingerprint`. The fingerprint is an **opaque string** this layer stores
+and compares, so every policy question — what to snapshot, what invalidates an image, who
+rebuilds it — stays in Brood (`std/tool/project.blsp`).
+
+**Policy.** The image carries the globals a load *created* (the diff against `(global-names)`
+taken before the load) plus the registries a load *mutates* rather than creates —
+`*features*`, `*module-docs*`, `*impls*`, `*abilities*`, `*methods*`, `*record-ids*`.
+Restoring `*features*` is what stops a later `require` re-loading an imaged module from
+source. The staleness key is every source file's path + size + mtime plus the binary's
+build id; it is not hashed, because it is only ever compared for equality.
+
+`project-load-sources-cached` is the single entry point: image if current, otherwise load
+from source **and write one**. Every whole-project load routes through it, so `nest test`,
+`nest check`, `nest run`, the LSP and `nest mcp` all build the image on first use and none
+of them ever fails for want of a build step. Writing is best-effort — a read-only or full
+disk costs speed, never correctness — and every read failure (absent, stale, corrupt, older
+format) returns nil, which means "load from source", never an error.
+
+**Macros.** `to_message` refuses `Value::Macro`, correctly: sending one to another process
+is meaningless, since macros run at expansion time. An image is the opposite case, and a
+project's `defmacro`s must survive. `Value::Macro` and `Value::Fn` share a `ClosureId`, so
+a macro is encoded as its closure plus a flag and rebuilt as a macro. This is confined to a
+*top-level binding*; a macro buried inside a data structure still refuses, exactly as for
+`send`.
+
+**Hot reload is unaffected, and that is the load-bearing property.** The image defines
+exactly the globals a source load would have, via the same `env_define`. Everything after
+startup — `def` rebinding, late binding, a running process observing a redefinition
+(ADR-013) — is identical. `tests/startup_image_test.blsp` pins this directly: a process
+spawned *before* a `def` observes the new binding after an imaged start.
+
+**Measured**, 16 300 files of ~180 lines: cold (load + write image) **30.6 s**, imaged start
+**8.1 s**, image 144 MB. That is 3.8× and not yet Elixir's 2.26 s. An earlier spike
+measuring only `to_message`+`from_message` in memory said 2.2 s; the gap is the byte codec,
+which materialises a whole intermediate `Message` tree on decode before `from_message`
+walks it into heap values. Two passes with heavy allocation. **The successor item is a
+streaming decoder** that builds heap values directly from the byte stream, skipping the
+`Message` tree; that is where the remaining ~3× lives. Recorded rather than attempted here
+because it wants its own change and its own gate. RSS also rises during restore (3.07 GB vs
+2.35 GB) for the same reason — bytes, tree and values are all live at once.
+
+**Line coverage declines the image.** Coverage (ADR-148 tier 2) instruments at *compile*
+time — the compiler prefixes positioned nodes with a `RecordLine` opcode — so code restored
+from an image was never compiled in this process and carries no instrumentation. Left
+alone, `nest test --cover-lines` would report an empty result and look like a coverage
+collapse rather than a bug. `project-load-sources-cached` therefore declines the image (and
+declines to write one) whenever `BROOD_COVERAGE` is set. Found by `nest::coverage_lines`
+failing in the suite, not by reasoning about it beforehand — the class of interaction worth
+looking for is "who else depends on code having been *compiled here*".
+
+**One deliberate behaviour change.** `nest run` now loads the project's whole source tree,
+where it used to load only the entry module's transitive `require` closure — the same thing
+`nest test` and the LSP already did. The trade is that a big project starts from its image
+instead of re-evaluating source, and what gets loaded stops depending on which entry point
+you ran. The cost: a source file that previously only had to *parse* (because nothing
+required it) is now loaded by `nest run` too, and its errors surface there.
