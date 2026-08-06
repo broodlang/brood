@@ -424,6 +424,7 @@ dependencies = [
  "crossterm",
  "divan",
  "ed25519-dalek",
+ "flate2",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
