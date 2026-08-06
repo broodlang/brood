@@ -82,6 +82,22 @@
     (is (nil? (getenv "BROOD_COVERAGE")))
     (is (project/project-image-usable?)))
 
+  ;; A user `(sig …)` lives in `RuntimeCode::declared_sigs`, NOT in the globals table,
+  ;; so an image that snapshotted only globals lost every one of them and the checker
+  ;; quietly fell back to inferring from the body — `expects int` became
+  ;; `expects number | map`. Weaker advice with no error, which is why this is pinned.
+  (test "a declared sig survives the round trip"
+    (defn si-typed (n) (+ n 1))
+    (%register-sig 'startup-image-test/si-typed '(int -> int))
+    (let (p (img-tmp "sig"))
+      (%image-write p ['startup-image-test/si-typed] "fp-s")
+      ;; Clobber the sig with a different one, then restore and check we got OURS back.
+      ;; `type-signature` is the reader that consults `declared_sigs`.
+      (%register-sig 'startup-image-test/si-typed '(string -> string))
+      (assert= "(string) -> string" (type-signature 'startup-image-test/si-typed))
+      (%image-read p "fp-s")
+      (assert= "(int) -> int" (type-signature 'startup-image-test/si-typed))))
+
   ;; The whole point: an imaged start must not freeze the image.
   (test "hot reload still works after restoring from an image"
     (def si-greet (fn () "v1"))

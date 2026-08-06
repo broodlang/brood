@@ -588,8 +588,13 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; The globals an image must carry: everything the source load defined that the
 ;; prelude did not, plus the registries it mutated.
 (defn- project-image-names (before)
-  (append-two *project-image-registries*
-    (remove (fn (n) (member? n before)) (global-names))))
+  ;; `before` goes into a SET first. As a list, `member?` is a linear scan run once per
+  ;; global — ~4000 x ~313 000 on a big project, which measured 7 s of a 9 s image write
+  ;; and was invisible until the phase trace showed the time landing outside every
+  ;; measured phase. Exactly the shape ADR-216 removed from `*features*`.
+  (let (seen (fold (fn (m n) (assoc m n true)) {} before))
+    (append-two *project-image-registries*
+      (remove (fn (n) (contains? seen n)) (global-names)))))
 
 (defn project-write-image (root before)
   "Snapshot the bindings this project load produced into `root`'s image. `before` is
@@ -632,11 +637,19 @@ Reports the build on stderr when it actually builds, and says nothing on an imag
 hit — a cold load of a large project takes tens of seconds, and silence there is
 indistinguishable from a hang. stderr, not stdout, so `nest run`'s output stays the
 program's and the LSP's protocol channel stays clean."
-  (let (files (project-source-files root)
+  (let (t-a (now-ns)
+        files (project-source-files root)
+        t-b (now-ns)
         fp (project-fingerprint-of files)
+        t-c (now-ns)
         hit (cond
               (project-image-usable?) (%image-read (project-image-path root) fp)
-              else nil))
+              else nil)
+        t-d (now-ns)
+        _ (when (getenv "BROOD_IMAGE_TRACE")
+            (eprintln (str "[loader] collect " (quot (- t-b t-a) 1000000)
+                        " ms, fingerprint " (quot (- t-c t-b) 1000000)
+                        " ms, image-read " (quot (- t-d t-c) 1000000) " ms"))))
     (cond
       hit hit
       else
