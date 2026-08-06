@@ -4,6 +4,17 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.2 — 2026-08-06
+
+Adds in-process compression.
+
+- **`zlib` std module** — gzip / zlib / raw-deflate, shaped like Erlang's `:zlib`
+  (`gzip`/`gunzip`, `compress`/`uncompress`, `zip`/`unzip`) over six new `flate2`-backed
+  byte primitives (`%gzip`/`%gunzip`, `%zlib-compress`/`%zlib-uncompress`,
+  `%deflate`/`%inflate`). brood previously had no in-process compression (`%untar-gz`
+  shells out to `tar`); this enables HTTP `Content-Encoding: gzip` for dynamic responses,
+  tarball/stream compression, and more. The primitives are `%offload`-safe.
+
 ## v0.3.1 — 2026-08-06
 
 A packaging fix — no language or runtime changes since 0.3.0.
