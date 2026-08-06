@@ -12,8 +12,13 @@ in `std/project.blsp`; Rust supplies only that mechanism (ADR-006).
 Attribution uses a `(global-names)` delta around loading the module, so it can't
 document a module already loaded before the snapshot (the delta is empty). For
 that reason `project` is required lazily, inside `document-project`, rather than
-at the top — keeping it out of the snapshot when it is itself the doc target."
-  (:use project))
+at the top — keeping it out of the snapshot when it is itself the doc target.
+
+`(:use-internals project)` grants access to `project-file-feature` (the rooted
+module name of a source file), which `model-file` needs to attribute a project
+module's namespace-rooted globals (ADR-070) back to it."
+  (:use project)
+  (:use-internals project))
 
 ;; --- module source + leading docstring ---------------------------------------
 
@@ -167,6 +172,129 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
       "`nest doc <module>` for an opt-in module (`display`, `buffer`, `ansi`, …).\n\n"
       (docs-section-defs syms)
       (docs-section-vars syms))))
+
+;; --- structured doc model (`nest docs` — HTML site via `docsite`) ------------
+
+;; The bare (unqualified) name of a symbol: the last "/"-separated segment, e.g.
+;; `net/http/get` -> `get`. Bare-named operators like `/` have an empty last segment,
+;; so those keep their whole name.
+(defn- docs-bare
+  (sym)
+  (let (nm (name sym) segments (string-split nm "/"))
+    (if (= (last segments) "") nm (last segments))))
+
+;; One definition as a data record for the model: bare name (for anchors/headings),
+;; a bare-named signature, docstring, macro flag, type-arrow, and source location.
+;; type-signature/source-location are guarded — a name the checker can't type or the
+;; image can't locate yields nil rather than failing the whole build.
+(defn- docs-def-record
+  (sym v)
+  (let (bare (docs-bare sym))
+    {:name bare
+     :sig (pr-str (cons (symbol bare) (arglist v)))
+     :doc (doc v)
+     :macro (= (type-of v) :macro)
+     :type (try (type-signature sym) (catch _ nil))
+     :source (try (source-location sym) (catch _ nil))}))
+
+;; The public documentable definitions among `syms`, as records (in `syms` order).
+(defn- docs-def-records
+  (syms)
+  (apply vector
+    (map (fn (s) (docs-def-record s (eval s)))
+      (filter (fn (s) (and (docs-documentable? (eval s)) (not (docs-private? s)))) syms))))
+
+;; One module entry of the doc model: `{:module :doc :defs}`.
+(defn- docs-module-model (title mdoc syms) {:module title :doc mdoc :defs (docs-def-records syms)})
+
+;; A file's declared module name — the `(defmodule NAME …)` symbol — or nil if the file
+;; has no module header. Read from source (the form is discarded once loaded).
+(defn- docs-module-name
+  (src)
+  (let (form (try (read-first src) (catch _ nil)))
+    (when (and (pair? form) (= (first form) 'defmodule)) (name (nth form 1)))))
+
+;; Every global bound in module `modname`'s namespace (`modname/…`). Order-independent,
+;; so a module's own definitions are attributed to it no matter what loaded first — the
+;; robust alternative to a `(global-names)` delta, which mis-credits transitively-loaded
+;; dependencies to whichever file pulled them in.
+(defn- docs-namespace-syms
+  (modname)
+  (let (prefix (str modname "/")) (filter (fn (s) (starts-with? (name s) prefix)) (global-names))))
+
+(defn model-file (path)
+  "The doc-model module entry for the file at `path`: load it, then collect its module's
+  own public definitions (by namespace, not a load-order-sensitive delta), each a
+  `{:name :sig :doc :macro :type :source}` record. The globals a project module binds are
+  rooted under the project name (ADR-070) — e.g. `web/endpoint` -> `hive/web/endpoint/…` —
+  so the namespace is taken from `project-file-feature` (the rooted name) while the
+  module is *displayed* under its declared name. A file with no module header, or read
+  outside a project, falls back to the load delta."
+  (let (src (slurp path)
+        declared (docs-module-name src)
+        feature (try (project/project-file-feature path) (catch _ nil))
+        before (global-names))
+    (load path)
+    (if feature
+      (docs-module-model (or declared feature) (docs-leading-doc src) (docs-namespace-syms feature))
+      (docs-module-model (docs-basename path)
+        (docs-leading-doc src)
+        (docs-added before (global-names))))))
+
+(defn model-module (modname)
+  "The doc-model module entry for the module named `modname` (a symbol or string),
+  resolved baked-in or on `*load-path*`. Errors if it can't be found."
+  (let (key (name modname) src (docs-source key))
+    (when (nil? src) (error "docs: cannot find module '" key "'"))
+    (let (before (global-names))
+      (require modname)
+      (docs-module-model key (docs-leading-doc src) (docs-added before (global-names))))))
+
+(defn model-project ()
+  "The whole-project doc model — `{:name :version :modules […]}` — found from the cwd,
+  documenting every source file under it. Errors if not in a Brood project."
+  (require 'project)
+  (let (root (project/project-find-root (cwd)))
+    (when (nil? root) (error "docs: not in a Brood project (no project.blsp found from " (cwd) ")"))
+    (project-setup root)
+    (let (dirs (project/project-abs-paths root *project-source-paths*)
+          files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
+      {:name *project-name*
+       :version *project-version*
+       :modules (apply vector (map model-file files))})))
+
+;; The full builtin+prelude reference as a one-module model (for `nest docs --all`).
+(defn- model-all
+  ()
+  {:name "Brood"
+   :version (try (brood-version) (catch _ nil))
+   :modules [(docs-module-model "Global reference" nil (filter docs-public? (global-names)))]})
+
+(defn- write-site
+  (out-dir model title)
+  (require 'json)
+  (require 'docsite)
+  (when (not (dir? out-dir)) (make-dir out-dir))
+  (spit (path-join out-dir "index.html") (docsite/render model {:title title}))
+  (spit (path-join out-dir "model.json") (json/json-encode model))
+  (println (str "Wrote "
+             (path-join out-dir "index.html")
+             " and model.json ("
+             (count (get model :modules))
+             " modules)")))
+
+(defn generate-site (& args)
+  "Generate an HTML documentation site for the current project into `doc/` (or the
+  directory named by the first argument): a rendered `index.html` plus the structured
+  `model.json`. The policy behind `nest docs`."
+  (let (out-dir (if (empty? args) "doc" (first args)) model (model-project))
+    (write-site out-dir model (get model :name))))
+
+(defn generate-site-all (& args)
+  "Generate an HTML site for the whole builtin + prelude reference into `doc/` (or the
+  first-argument directory) — the language reference. Backs `nest docs --all`."
+  (let (out-dir (if (empty? args) "doc" (first args)))
+    (write-site out-dir (model-all) "Brood — reference")))
 
 (defn generate-docs (& args)
   "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`."

@@ -1025,6 +1025,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // {{var}} string templating: render a template string against a data map.
     // render, render-all.
     embedded_module!("template", "std/template.blsp"),
+    // The documentation-site renderer: a pure `model -> HTML string` for `nest docs`
+    // and hive's per-package doc builds (both feed it the same doc-model shape). CORE,
+    // not DEV, because a shipped app (hive) requires it at runtime to render docs.
+    embedded_module!("docsite", "std/docsite.blsp"),
     // Purely functional FIFO queue (two-list, amortised O(1)) and min-priority
     // queue (sorted-list, O(n) insert / O(1) pop).
     embedded_module!("queue", "std/queue.blsp"),
