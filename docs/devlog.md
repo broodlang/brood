@@ -16648,3 +16648,14 @@ release notes (the CI-created GitHub Releases had empty bodies until now); it ca
 Dockerfile now pins its brood clone to the `v0.3.0` tag (was `main`), its install page
 advertises `BROOD_VERSION=v0.3.0`, and a new `/changelog` page mirrors these notes for
 download-facing users.
+
+**Greened the CI `differential (tree-walker)` job.** It had been red on every recent main
+push — one assertion, deterministic: `unbox_torture_test`'s `(ut-ack 3 8)` (Ackermann,
+~2045-deep non-tail recursion) tipped **1392 bytes** over the 12 MiB stack budget *under the
+tree-walker only* (`BROOD_VM=0` spends more native stack per eval frame; the VM run, the one
+that actually JITs this torture case, fits comfortably). The `clippy + test` job — which runs
+the default VM — was green throughout, which is why the break was invisible outside the
+main-only differential. Fixed by gating the deep case on `(not= (getenv "BROOD_VM") "0")`,
+the same engine guard `observability_test` already uses; the VM keeps full coverage. Raising
+`BROOD_STACK_BUDGET` was rejected — the default budget is `WORKER_STACK_BYTES (16 MiB) − 4 MiB`
+margin, and eating that margin risks a real SIGSEGV past the guard.
