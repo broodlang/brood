@@ -16682,3 +16682,21 @@ switches move it, so it is in the base lowering. `BROOD_DEOPT_TRACE` names the a
 the slow side of this line. What is left is one narrow question — which guard in the lowering of
 `(if (%eq el <literal>) … nil)` branches to the deopt block — with the note that `eq_dispatch`
 reads correct on paper for both operand shapes, so it is probably not the culprit.
+
+**Narrowed once more before stopping.** The trigger is not the comparison but the **second
+conditional exit** it introduces. A literal in position 0 (`[:go v]`), a literal in position 1
+(`[v :go]`), an int literal instead of a keyword (`[1 v]`), and the same compare moved into a
+`:when` **guard** after the binds (`[a v] :when (%eq a :go)`) all deopt identically (~290k at
+N=300k, `jit_link_done` 0); `[a v]`, whose bind chain is straight-line, does not. So the
+comparison's operand type, its position, and pattern-vs-guard are all the same thing to the
+lowering — what matters is that the matcher gains another branch to `nil`. The chunk shows it:
+the deopting matchers end `… MakeVector Jump Const Jump Const`, two `nil` exits, against
+`bind`'s one.
+
+Reading the CLIF got as far as excluding the equality itself. The deopting arm has 18 edges into
+the shared deopt block against `bind`'s 15, and the extra three are exactly one more
+`eq_dispatch` — whose lowering is *correct* for both operand shapes (int×int compares payloads,
+either-side Sym/Keyword compares interned ids), so control provably reaches its non-deopt block
+for `(%eq el :go)`. The failing guard is one of the other 16. Those are indistinguishable at
+runtime because every guard jumps to one shared block, so the next move is an instrument, not
+more reading: stamp a per-site id on the way into deopt and let one run name the guard.
