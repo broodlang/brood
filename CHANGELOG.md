@@ -4,6 +4,16 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.1 — 2026-08-06
+
+A packaging fix — no language or runtime changes since 0.3.0.
+
+- **macOS Intel binary** — the `x86_64-apple-darwin` release is now cross-compiled on
+  the Apple-Silicon (`macos-14`) runner instead of the scarce/deprecated Intel
+  `macos-13` runner, so all four platforms (macOS arm64/Intel, Linux x86_64/aarch64)
+  build reliably. The Makefile gained a `TARGET` variable for cross-compiled release
+  builds (an empty `TARGET` keeps the prior host build byte-for-byte).
+
 ## v0.3.0 — 2026-08-06
 
 A maintenance release: test-runner robustness and tooling, no language or
