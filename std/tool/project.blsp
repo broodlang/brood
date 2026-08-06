@@ -514,8 +514,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (feat skip-all? before)
   (cond
     (nil? feat) true
-    skip-all? (not (member? feat *features*))
-    else (or (not (member? feat *features*)) (member? feat before))))
+    skip-all? (not (contains? *features* feat))
+    else (or (not (contains? *features* feat)) (contains? before feat))))
 
 ;; Load every source file under the project's source paths, so tests and other
 ;; code can use the project's definitions directly — no per-file `require`. Within

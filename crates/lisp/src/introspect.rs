@@ -416,7 +416,7 @@ pub fn module_file(interp: &mut Interp, feature: &str) -> Option<String> {
 }
 
 /// Module names the buffer could `require` / `:use`: every already-loaded feature
-/// (`*features*`) plus every top-level `<name>.blsp` on the live `*load-path*`.
+/// (the keys of `*features*`) plus every top-level `<name>.blsp` on the live `*load-path*`.
 /// Powers context-aware completion inside a `(require '…)` / `(:use …)` clause.
 /// Best-effort and de-duplicated (sorted): a nested `dir/mod` module appears only
 /// once it has been loaded (the path scan is one level deep, like a directory
@@ -424,8 +424,9 @@ pub fn module_file(interp: &mut Interp, feature: &str) -> Option<String> {
 pub fn loadable_modules(interp: &mut Interp) -> Vec<String> {
     let cp = interp.heap.checkpoint();
     let mut out = std::collections::BTreeSet::new();
-    // 1. Loaded features — strings, including nested `dir/mod` names.
-    if let Ok(v) = interp.eval_str("*features*") {
+    // 1. Loaded features — strings, including nested `dir/mod` names. `*features*`
+    // is a set-shaped map (name -> true), so take its keys (ADR-216).
+    if let Ok(v) = interp.eval_str("(keys *features*)") {
         if let Ok(items) = interp.heap.list_to_vec(v) {
             for it in items {
                 if let Value::Str(id) = it {

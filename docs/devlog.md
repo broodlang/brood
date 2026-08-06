@@ -16803,3 +16803,68 @@ been outstanding since the disk filled and two merges landed.
 **Gap this exposed in the arsenal:** no generator covers `std/version.blsp`, which is why a
 resolver bug of this shape survived to be found by hand. A `version` oracle generator — random
 version/constraint pairs against an independent reference — is the obvious addition.
+
+## 2026-08-06 — Module-load scaling: `*features*` was O(n²); where the other two walls are
+
+**Question asked.** Can we generate 100 000 source files of ~1000 lines each and load them
+in reasonable time? Answered by climbing the scale rather than jumping to it, which is what
+found three unrelated walls instead of one. Harness (outside the repo, throwaway):
+generator + three drivers — plain `require`, a phase-attributed one, and one with an O(1)
+feature index.
+
+**The ladder** (modules × 1000 lines, `require` path, release build):
+
+| modules | source | load  | RSS     |
+|---------|--------|-------|---------|
+| 100     | 1.9 MB | 0.70 s| 174 MB  |
+| 1 000   | 19.5 MB| 6.98 s| 945 MB  |
+| 10 000  | 197 MB | 217 s | 7.2 GB  |
+| 20 000  | 396 MB | 189 s¹| 14.1 GB |
+| 30 000  | 595 MB | 328 s¹| 24.4 GB |
+
+¹ with the O(1) index, i.e. what the tree does now.
+
+**Wall 1 — `*features*` (fixed, ADR-216).** Flat at ~7 ms/module through 1000, then the
+marginal cost climbs to 37.9 ms by module 10 000. Three controls: the same 10M total lines
+in 10× fewer files is 3× faster *and* linear (so the quadratic is per-module, not per-line
+or per-global); phase attribution puts 17.4 s of a 45.9 s 4000-module load in `member?`
+alone while `load` itself stays linear; and swapping in a hash index takes 10 000 modules
+from 217 s to 80 s, flat. Now a set-shaped map.
+
+**Wall 2 — the JIT re-lowers the same arms thousands of times under a `def`-heavy load.**
+`BROOD_JIT_DUMP_IR` over a 4000-module load: only **12 distinct arms ever lower**, but each
+lowers thousands of times — `member?` 2294×, `reverse-acc` 4251×, `list` 4029×. Bytecode
+compiles are fine (76 total), so it is the JIT tier specifically. `BROOD_NO_JIT=1` makes
+`member?` 7.7× faster (17.4 s → 2.26 s) and the whole load 1.6× faster. Invisible at 1000
+modules; the cliff is between 2000 and 2400. **Not root-caused.** The lead: `RuntimeCode`'s
+`version: AtomicU64` is bumped on every binding change and, per its own doc comment, "any
+`def` makes every stamped cache entry stale at once" — and a bulk load does ~100 `def`s per
+module. Worth chasing on its own; it should also affect hot reload.
+
+**Wall 3 — memory, ~45 bytes of RSS per source byte** (~0.8 MB per 1000-line module). This
+is the one that makes the original question a no on a 30 GB box: 100 000 modules needs
+~80 GB. It is real, not slack — `MIMALLOC_PURGE_DELAY=0` recovers 1.6%, and it is not
+per-function metadata either (10 big functions vs 100 small ones at equal line count costs
+the same or more).
+
+Instrumented breakdown at 1000 modules (933 MB RSS), from a throwaway worktree build:
+AST pairs 4.59M × 48 B = **220 MB** (`Value` is 24 B); the two source-position side tables
+(LOCAL `Heap::form_pos` + RUNTIME `RuntimeCode::positions`, 1.15M entries) = **169 MB**,
+measured by ablation, which also costs **24% of load time**; closure metadata 24 MB. ~55%
+remains unattributed to a named structure (slab capacity, interner, GC copy space, JIT) —
+that wants an allocation profiler before anyone promises a reduction target.
+
+**On "just compile it ahead of time, like BEAM."** Measured the phase split of a `load`:
+parse **11%**, macroexpand **11%**, eval + closure build + promote into RUNTIME **77%**
+(file I/O 0.2%). So an AOT format that only skips parsing and expansion caps out near 1.3×.
+The structural point is that `ClosureArm::body` is `Vec<Value>` — **the source AST is the
+permanent representation**, and VM bytecode is a lazily-built cache keyed off it, needed by
+the tree-walker, `macroexpand`, hot reload, `source-location` and the checker. In this test
+the generated functions are never *called*, so zero bytecode was compiled, and it still
+cost 900 MB: that is pure AST. Compiling ahead of time and *keeping* the AST makes memory
+worse. The version that would pay is the rest of the BEAM analogy — a compact IR as the
+source of truth (AST dropped or reconstructible) in a relocation-free **mmap-able** image,
+so loading is O(pages touched) instead of O(nodes) and code sits in evictable file-backed
+pages rather than anonymous heap. That is a real project, not a tweak; recorded here so the
+cheap-sounding version isn't attempted first. Lazy per-module loading (which BEAM also
+does) would sidestep the whole question for far less work.
