@@ -660,9 +660,23 @@ program's and the LSP's protocol channel stays clean."
               before (global-names)
               _ (apply project-load-sources (cons root opts))
               t-load (quot (- (now-ns) t0) 1000000)
+              ;; A project whose globals are not all portable — a `table` global is the
+              ;; documented mutable-state idiom, and a table is deliberately local to its
+              ;; runtime — simply cannot be imaged. That is correct (loading from source is
+              ;; always right), but swallowing it meant such a project silently loaded cold
+              ;; forever with no way to find out why. Say so, once, and carry on.
               wrote (cond
                       (project-image-usable?)
-                        (try (project-write-image root before) (catch e nil))
+                        (try
+                          (project-write-image root before)
+                          (catch e
+                            ;; No once-per-key guard needed: this is the cold path, which
+                            ;; already prints Building/Built exactly once per build.
+                            (do
+                              (eprintln (str "note: " name
+                                          " cannot use a startup image, so it loads from"
+                                          " source every time — " (get e :message)))
+                              nil)))
                       else nil)
               t-all (quot (- (now-ns) t0) 1000000))
           (eprintln (str "Built " name " in " (project-ms-str t-load)
