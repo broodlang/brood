@@ -1,6 +1,6 @@
 ;; std/zlib.blsp — gzip / zlib / raw-deflate compression. (require 'zlib)
 ;;
-;; Shaped like Erlang's `:zlib` module: three container formats, each an
+;; Three container formats, each an
 ;; encode/decode pair over a byte sequence.
 ;;
 ;;   | format      | encode              | decode                | notes                       |
@@ -14,7 +14,7 @@
 ;; (UTF-8 encoded first) or any byte sequence; output is always a `bytes` value.
 
 (defmodule zlib
-  "gzip / zlib / raw-deflate compression, Erlang `:zlib`-style.
+  "gzip / zlib / raw-deflate compression.
 
     (require 'zlib)
     (zlib/gunzip (zlib/gzip \"hello\"))   ;; => the bytes of \"hello\"
