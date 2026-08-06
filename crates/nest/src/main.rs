@@ -412,6 +412,19 @@ enum Cmd {
         all: bool,
     },
 
+    /// Generate a browsable HTML documentation site from docstrings — the whole
+    /// project, written to `doc/` by default (an `index.html` plus a `model.json`).
+    Docs {
+        /// Output directory for the generated site. Defaults to `doc`.
+        #[arg(short = 'o', long = "out")]
+        out: Option<String>,
+
+        /// Document the whole builtin + prelude reference (the language reference)
+        /// in a fresh image instead of the current project.
+        #[arg(long = "all")]
+        all: bool,
+    },
+
     /// Generate an editor syntax grammar from the language's own `(special-forms)`
     /// — one source of truth, no hand-maintained keyword lists (ADR-092). Prints to
     /// stdout; redirect to the editor's grammar file.
@@ -712,6 +725,12 @@ fn run_main(cli: Cli) {
                 );
             }
             cmd_doc(&mut interp, module.as_deref(), all)
+        }
+        Cmd::Docs { out, all } => {
+            if !all {
+                require_project("docs", Some("For the language reference: nest docs --all"));
+            }
+            cmd_docs(&mut interp, out.as_deref(), all)
         }
         Cmd::Grammar { target } => cmd_grammar(&mut interp, target),
         Cmd::Fetch => {
@@ -1442,6 +1461,22 @@ fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
         }
     };
     run(interp, &code);
+}
+
+/// `nest docs [--all] [-o DIR]` — generate an HTML documentation site (default `doc/`).
+/// Without `--all` documents the current project; with it, the whole builtin + prelude
+/// reference (the language reference) in a fresh image.
+fn cmd_docs(interp: &mut Interp, out: Option<&str>, all: bool) {
+    let entry = if all {
+        "docs/generate-site-all"
+    } else {
+        "docs/generate-site"
+    };
+    let call = match out {
+        Some(dir) => brood::introspect::call_form(entry, &[dir]),
+        None => format!("({entry})"),
+    };
+    run(interp, &format!("(require 'docs) {call}"));
 }
 
 /// `nest grammar [TARGET]` — emit an editor syntax grammar generated from the

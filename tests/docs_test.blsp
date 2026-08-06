@@ -47,3 +47,27 @@
   (test "an undocumented function gets a placeholder"
     (defn doc-bare (x) (* x x))
     (assert= (docs/docs-entry 'doc-bare doc-bare) "### `(doc-bare x)`\n\n_Undocumented._\n")))
+
+(describe "docs: structured model (nest docs)"
+  (test "docs-bare strips the module namespace to the last segment"
+    (assert= (docs/docs-bare 'net/http/get) "get")
+    (assert= (docs/docs-bare 'map) "map")
+    ; a bare operator name (empty last segment) keeps its whole name
+    (assert= (docs/docs-bare '/) "/"))
+  (test "a def record carries name, bare signature, docstring, and macro flag"
+    (defn model-sq (x) "Square x." (* x x))
+    (let (record (docs/docs-def-record 'model-sq model-sq))
+      (assert= (get record :name) "model-sq")
+      (assert= (get record :sig) "(model-sq x)")
+      (assert= (get record :doc) "Square x.")
+      (refute (get record :macro))))
+  (test "a module model has :module/:doc/:defs; only documentable fns/macros reach :defs"
+    (defn model-pub (x) x)
+    (def model-val 42)
+    ; the syms arrive qualified (as they do from `global-names`), so eval resolves them;
+    ; the plain value is not documentable and is dropped, the function is kept
+    (let (model (docs/docs-module-model "m" "Doc." '(docs-test/model-pub docs-test/model-val)))
+      (assert= (get model :module) "m")
+      (assert= (get model :doc) "Doc.")
+      (assert= (count (get model :defs)) 1)
+      (assert= (get (first (get model :defs)) :name) "model-pub"))))

@@ -1,0 +1,61 @@
+;; The documentation-site renderer (std/docsite.blsp): a pure `model -> HTML string`.
+;; Register-only — discovered and run by `nest test`.
+
+(defmodule docsite-test (:use test) (:use docsite))
+
+(def sample-model
+  {:name "demo"
+   :version "0.1.0"
+   :modules [{:module "my/mod"
+              :doc "A demo module.\n\nSecond paragraph with `code` in it."
+              :defs [{:name "foo"
+                      :sig "(foo x y)"
+                      :doc "Adds `x` and `y`."
+                      :macro false
+                      :type "(int, int -> int)"}
+                      {:name "bar" :sig "(bar z)" :doc nil :macro true :type nil}]}
+              {:module "my/empty" :doc nil :defs []}]})
+
+(describe "docsite: escaping"
+  (test "the HTML metacharacters are escaped (& first)"
+    (assert= (docsite/escape "a<b>&c") "a&lt;b&gt;&amp;c"))
+  (test "a non-string is coerced then escaped"
+    (assert= (docsite/escape 42) "42")))
+
+(describe "docsite: prose"
+  (test "blank lines split paragraphs"
+    (assert= (docsite/prose "one\n\ntwo") "<p>one</p><p>two</p>"))
+  (test "backtick pairs become inline code, escaped"
+    (assert= (docsite/prose "call `f<x>`") "<p>call <code>f&lt;x&gt;</code></p>"))
+  (test "nil and blank render to the empty string"
+    (assert= (docsite/prose nil) "")
+    (assert= (docsite/prose "   ") "")))
+
+(describe "docsite: anchors"
+  (test "module and def anchors slugify slashes"
+    (assert= (docsite/module-anchor "my/mod") "m-my-mod")
+    (assert= (docsite/def-anchor "my/mod" "foo") "d-my-mod-foo")))
+
+(describe "docsite: render (whole page)"
+  (test "a wrapped render is a self-contained document"
+    (let (html (docsite/render sample-model {}))
+      (is (includes? html "<!doctype html>"))
+      (is (includes? html "<title>demo</title>"))
+      (is (includes? html "<div class=\"docsite\">"))
+      ; the sidebar lists the module
+      (is (includes? html "class=\"nav-module-link\""))
+      ; a definition renders its signature, type, and a macro tag where due
+      (is (includes? html "(foo x y)"))
+      (is (includes? html "(int, int -&gt; int)"))
+      (is (includes? html "class=\"tag\">macro"))
+      ; an undocumented def and an empty module have their placeholders
+      (is (includes? html "Undocumented."))
+      (is (includes? html "No public definitions."))))
+  (test "an unwrapped render is a bare fragment (no doctype), still scoped"
+    (let (fragment (docsite/render sample-model {:wrap? false}))
+      (refute (includes? fragment "<!doctype html>"))
+      (is (includes? fragment "<div class=\"docsite\">"))))
+  (test "the fragment stylesheet is namespaced under .docsite"
+    (is (includes? (docsite/render-css) ".docsite .def{")))
+  (test "an explicit :title overrides the model name"
+    (is (includes? (docsite/render sample-model {:title "Custom"}) "<title>Custom</title>"))))
