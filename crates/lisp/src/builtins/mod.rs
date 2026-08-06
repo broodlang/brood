@@ -2184,8 +2184,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // Compression prims (the `flate2` crate) — a byte sequence in, `bytes` out, one
     // encode/decode pair per container format. The public names
     // (gzip/gunzip, compress/uncompress, zip/unzip) are Brood in std/zlib.blsp.
-    def(heap, "%gzip", Arity::exact(1), Sig::new(vec![any], bytes_ty), gzip);
-    def(heap, "%gunzip", Arity::exact(1), Sig::new(vec![any], bytes_ty), gunzip);
+    def(
+        heap,
+        "%gzip",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        gzip,
+    );
+    def(
+        heap,
+        "%gunzip",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        gunzip,
+    );
     def(
         heap,
         "%zlib-compress",
@@ -2200,8 +2212,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![any], bytes_ty),
         zlib_uncompress,
     );
-    def(heap, "%deflate", Arity::exact(1), Sig::new(vec![any], bytes_ty), deflate);
-    def(heap, "%inflate", Arity::exact(1), Sig::new(vec![any], bytes_ty), inflate);
+    def(
+        heap,
+        "%deflate",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        deflate,
+    );
+    def(
+        heap,
+        "%inflate",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        inflate,
+    );
     // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
     // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
     // layout / lock file / conflict policy are all Brood (std/tool/package.blsp).
