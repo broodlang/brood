@@ -302,7 +302,7 @@ shipped 2026-05-29 under ADR-042; the collector remains deferred.**
 
 ---
 
-## Stage 6 — Upgrade hook for long-lived processes
+## Stage 6 — Upgrade hook for long-lived processes → **shipped 2026-08-06**
 
 **Problem.** A running loop keeps old-shaped state across a code change (gap #4).
 
@@ -325,6 +325,19 @@ Brood where supervision already lives.
 
 **Done when.** A documented example loop survives a state-shape change across
 reload by migrating on `[:code-change]`. Suite green.
+
+**→ Shipped 2026-08-06.** `defprocess` gained an optional `(code-change old-state
+body…)` lifecycle clause (sibling of `init`/`terminate`) that runs on a
+`[:$code-change]` envelope, binding the current state and returning the migrated
+one; `(gen/code-change pid)` is the push trigger (a supervisor or `on-reload` hook
+calls it once per affected child), and a server with no clause drops the message
+as a safe no-op. The pull counterpart shipped too: `reload/*code-version*` (a plain
+global, bumped on each successful `reload-defs`) with a `(reload/code-version)`
+reader, so a loop can stash its start version and self-migrate when it differs.
+Covered by `tests/gen_test.blsp` "gen: code-change state migration" (inline +
+cross-process). Full `release_handler`/appup orchestration remains deferred (see the
+ROADMAP OTP-deferred item) — unneeded here because immutable-map data removes OTP's
+hardest upgrade case, nominal schema migration.
 
 ---
 

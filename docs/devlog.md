@@ -16850,3 +16850,29 @@ state after a reload) is Stage 6 in `live-editing.md`, already designed and user
 `ROADMAP.md` (OTP-deferred block) with the note that full `release_handler`/appup orchestration
 stays deferred because Brood's immutable-map data removes OTP's hardest upgrade case (nominal
 schema migration). "incarnations" is an agent-learning journal, not a version stamp.
+
+## 2026-08-06 — Stage 6: a userland `code_change` for `gen` servers
+
+Built the hot-upgrade state-migration hook teed up above (live-editing.md Stage 6). A
+long-lived `gen` server threads one immutable state value through its receive loop, so after
+a hot reload the new code met **old-shaped state** with no way to migrate — OTP's `code_change/3`
+gap. Fixed in Brood (no kernel surface, matching the ADR-039 supervision call):
+
+- **`defprocess` gained a `(code-change old-state body…)` lifecycle clause** (sibling of
+  `init`/`terminate`, `std/proc/gen.blsp`). It compiles to a `[:$code-change]` receive clause
+  that binds the current state and tail-recurses with the body's result — the migrated state.
+  Placed among the envelope clauses (before the catch-all), so a server without the clause
+  drops the message as a **safe no-op**.
+- **`(gen/code-change pid)`** is the push trigger (mirrors `stop` — sends `[:$code-change]`).
+  A supervisor or an `on-reload` hook calls it once per affected child.
+- **`reload/*code-version*`** is the pull counterpart: a plain global (deliberately not a
+  `defdyn` — a dynamic var is a per-process stack, the wrong shape for a runtime-wide count),
+  bumped on each successful `reload-defs`, read via `(reload/code-version)`. A loop can stash
+  its start version and self-migrate when it differs, no message needed.
+
+Verified: `tests/gen_test.blsp` "gen: code-change state migration" — an int state migrates to a
+versioned map on `(code-change pid)`, a clause-less server no-ops, and a migration triggered
+from another process is observed across the heap boundary. gen 21/21, reload 2/2, `nest check`
+clean. Full `release_handler`/appup orchestration stays deferred (ROADMAP) — Brood's
+immutable-map data removes OTP's hardest case (nominal schema migration), leaving only
+loop-state drift, which this covers.

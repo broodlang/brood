@@ -192,3 +192,44 @@
       (stop p)
       (is true))))
 ; reached here ⇒ the linked normal exit didn't kill us
+
+;; The `code-change` lifecycle clause (ADR-013, live-editing.md Stage 6): a long-lived
+;; server migrates its own loop state to a new shape on `(code-change pid)` — the
+;; hand-off that reshapes state after a hot reload has swapped the code behind it.
+(describe "gen: code-change state migration"
+  :isolated
+  ;; old state is a bare int; after a code-change it is a versioned map.
+  (defprocess migrating
+    (n)
+    (query :value n)
+    (query :shape (if (map? n) :map :int))
+    (code-change old {:count old :ver 2}))
+
+  (defprocess plain (n) (query :value n))
+
+  (test "code-change runs the migration clause, reshaping the loop state"
+    (let (c (spawn-server migrating 5))
+      (assert= (gen-call c :shape) :int)
+      (assert= (gen-call c :value) 5)
+      (code-change c)
+      ;; the next query observes the migrated state — same server, new shape
+      (assert= (gen-call c :shape) :map)
+      (assert= (gen-call c :value) {:count 5 :ver 2})
+      (stop c)))
+
+  (test "code-change on a server without the clause is a safe no-op"
+    (let (p (spawn-server plain 7))
+      (code-change p)
+      (assert= (gen-call p :value) 7) ; dropped by the catch-all; state unchanged
+      (stop p)))
+
+  ;; Cross-process: build the pre-migration state in one process, ship the server's
+  ;; pid to the test process, migrate, and read it back — proves the hand-off works
+  ;; across the per-process heap boundary, not just inline.
+  (test "a migration triggered from another process is observed here"
+    (let (me (self))
+      (spawn (send me (spawn-server migrating 3)))
+      (let (c (receive (p p)))
+        (code-change c)
+        (assert= (gen-call c :value) {:count 3 :ver 2})
+        (stop c)))))
