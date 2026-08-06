@@ -1034,6 +1034,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // MD5/SHA-1/SHA-256/SHA-384/SHA-512 + HMAC, all Brood over the two `%digest`
     // / `%hmac` prims (raw bytes); hex/string shaping via bytes->hex; hash-string is djb2.
     embedded_module!("hash", "std/hash.blsp"),
+    // gzip/zlib/raw-deflate compression, shaped like Erlang's :zlib module
+    // (gzip/gunzip, compress/uncompress, zip/unzip) over the six %gzip/%deflate prims.
+    embedded_module!("zlib", "std/zlib.blsp"),
     // LCS-based sequence diff: diff-seq, diff-lines, diff-summary, diff-patch,
     // diff-unified. O(m*n) time/space; suitable for small-to-medium sequences.
     embedded_module!("diff", "std/diff.blsp"),
@@ -2711,6 +2714,12 @@ const OFFLOAD_ALLOWED: &[&str] = &[
     "%pbkdf2-sha256-bytes",
     "%digest",
     "%hmac",
+    "%gzip",
+    "%gunzip",
+    "%zlib-compress",
+    "%zlib-uncompress",
+    "%deflate",
+    "%inflate",
     "slurp",
     "slurp-bytes",
     "spit",
