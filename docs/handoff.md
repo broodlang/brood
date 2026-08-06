@@ -136,7 +136,23 @@ So the next candidates, in the order the numbers support them:
    supervisor and `gen` protocol message. Bind-only patterns are the rare case; essentially
    every real `receive` is on the slow side of this line.
 
-   **Sharpened once more, and this is the current best statement of it: the matcher deopts
+   **GO/NO-GO, 2026-08-06 (read this before implementing anything here).** The deopt is real and
+   its guard is now known — `eq_dispatch`'s non-interned fallthrough in `jit_lower/emit.rs`;
+   routing it away from `f.deopt` takes the arm's deopts from ~282k to **0**, with the arm still
+   lowering. But **removing it is worth ~0–5%, inside the noise**: clean `--release`, N=300k,
+   three runs each, `vec` medians **1290 ns/iter baseline vs 1226 deopt-removed**, spreads
+   1230–1330 and 1203–1436. It also does **not** restore the native fast frame —
+   `jit_link_done` stays 0 — so the deopt is not why the matcher misses it. A general
+   non-deopting `=` fallback was therefore designed and **not built**. Two consequences: the
+   `vec`-vs-`bind` gap is **~17% on a clean build**, not the 28% first quoted (that came from a
+   perf-stats build, whose counters perturb, against `any` rather than `bind`); and part of even
+   that 17% is `bind` doing *different* work (binding the head and building a 3-element result
+   against comparing the head and building a 2-element one), not pure overhead. What survives is
+   the counter-verified structural fact — `vec`'s matcher takes `vm_apply` on ~100% of calls
+   while `bind`'s takes the fast frame — and an unexplained one: with deopts eliminated it
+   *still* does not link. That is the question to answer before any more work here.
+
+   **The deopt's shape, kept because it cost a session to establish: the matcher deopts
    iff it has a SECOND conditional exit.** `[a v]` compiles to one guard (the
    `vector?`+length test) followed by a straight-line bind chain, and is native. Everything
    that adds a further branch-to-`nil` inside that chain deopts, and all three variants
