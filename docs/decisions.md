@@ -14246,3 +14246,79 @@ instead of `:cons-new`, and both membership tests become `contains?`.
 - This does **not** make 100 000 modules loadable. It removes the quadratic term; the
   remaining wall is memory — ~0.8 MB of RSS per 1000-line module, measured 24.4 GB at
   30 000 modules — which is a separate piece of work (see the devlog entry).
+
+## ADR-217 — The JIT's code epoch moves on a rebind, not on every `def`
+
+**Status:** implemented (2026-08-06), unconditional. Successor item recorded at the end.
+
+**Context.** `jit_tier`'s hot-reload guard invalidates a compiled arm whenever the global
+epoch has moved since the arm compiled: the arm is reset to untried, its native code (and
+its inlined-upgrade native) dropped, and the next call re-validates and recompiles. That is
+correct and necessary — a JIT'd arm inlines its arithmetic operators as raw machine ops, so
+a `def` that rebinds one must not keep running the old code.
+
+The epoch it read was `RuntimeCode::version`, which is bumped by **every** binding change,
+including a `def` that binds a name for the first time. Defining globals therefore threw
+away native code that no `def` could possibly have invalidated. Found while loading 100 000
+generated modules (devlog 2026-08-06): a 4000-module load — ~100 first-time `def`s per
+module — re-lowered only **12 distinct arms**, but each of them thousands of times
+(`member?` 2294×, `reverse-acc` 4251×), for 45 269 lowerings in total. Bytecode compiles
+were 76, so the churn was the JIT tier alone.
+
+Isolated in a micro-benchmark (`thrash2`: a hot arm called rarely, 100 first-time `def`s
+between calls), best-of-5 pinned:
+
+| | JIT | no-JIT |
+|-----------------|--------|--------|
+| no defs         | 403 ms | 406 ms |
+| defs between calls | **656 ms** | 459 ms |
+
+With `def` churn the JIT was a **43% net loss against having no JIT at all**.
+
+**Decision.** Split the counter. `RuntimeCode::version` keeps its exact meaning and its only
+consumer that needs it — the per-process global inline caches, for which a first-time `def`
+*can* matter and re-resolving is only a hash hit. A new `RuntimeCode::code_epoch` is what
+`Heap::global_epoch` / `global_epoch_ptr` return, and it is bumped by everything `version`
+is bumped by **except a first-time binding**.
+
+**Why that is sound.** Every dependency a compiled arm can hold already existed when it
+compiled, so any later change to one is a rebind:
+
+- an inlined prim needs `resolve_prim`'s `env_get(global, head)?` to have succeeded, so its
+  head — and the inner head a pass-through chases — was bound at compile time;
+- an entry-hoisted global that is unbound **deopts** rather than baking a value, and the
+  hoist re-resolves on every activation regardless;
+- `env_get` resolves a global by one flat symbol lookup (namespace resolution happens before
+  compilation), so a new binding of some *other* symbol can never redirect a symbol an arm
+  already holds.
+
+The RUNTIME-region sites keep bumping both: generation free, live-globals migration and
+compaction **rewrite or drop the handles compiled code baked in**, which is a code-epoch
+event, not merely an IC re-resolve. So does `restore_globals`, which can replace or remove
+bindings wholesale.
+
+**Result.** The 4000-module load drops from 45 269 lowerings to 5049; `thrash`'s 732 → 9,
+identical to its no-def control; `thrash2` under def churn goes from a 43% loss to neutral
+(468 ms JIT vs 465 ms no-JIT).
+
+**Cost.** `spawn` measures **+2.0%** against a 0.92% base-vs-base noise floor (fixed
+baseline binary, best-of-15 pinned; the 11-row sweep's +5.5% did not reproduce solo). The
+plausible reading is that arms now stay valid, so a freshly spawned process actually
+installs shared native code instead of finding it epoch-stale — spawn pays a little to get
+code that is usable. Every other row is inside noise. Accepted against removing a 43%
+pathology.
+
+**What this does NOT fix, and the successor item.** It does not speed up the bulk module
+load: 10 000 modules went 69.2 s → 68.4 s, and the JIT is *still* an 8% loss there (68.4 s
+against 63.2 s with `BROOD_NO_JIT=1`). The residue is **registry rebinds** — `provide`
+rebinds `*features*` once per module, and a rebind legitimately bumps the code epoch under
+this ADR even though no arm inlines `*features*` as an operator. Closing that needs the
+precise version: track per-arm the symbols it actually baked in (the `head`s in its
+`Prim2*` instructions, plus every global its entry hoist resolves) and bump only when one
+of *those* is rebound. That is deliberately not attempted here — the failure mode of a
+missed dependency is a silent wrong answer, and it wants its own change with its own gate.
+
+**Validation.** `tests/jit_new_def_epoch_test.blsp` pins the direction that matters: a hot,
+tiered arm stays correct across runs of first-time `def`s, a rebind of its callee is still
+honoured *after* such a run, and the rebind stays in effect through more of them. Verified
+by sabotage — suppressing the rebind bump fails the second case.

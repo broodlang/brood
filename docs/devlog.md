@@ -16915,3 +16915,80 @@ so loading is O(pages touched) instead of O(nodes) and code sits in evictable fi
 pages rather than anonymous heap. That is a real project, not a tweak; recorded here so the
 cheap-sounding version isn't attempted first. Lazy per-module loading (which BEAM also
 does) would sidestep the whole question for far less work.
+
+## 2026-08-06 — the JIT re-tiered every arm on every `def` (ADR-217)
+
+Follow-on from the module-load scaling entry above, which recorded the JIT re-lowering
+storm as "not root-caused". It is now root-caused and fixed: `jit_tier`'s hot-reload guard
+compared the arm's `compile_epoch` against `RuntimeCode::version`, and *every* binding
+change bumps that counter — including a `def` binding a name for the first time, which
+cannot invalidate compiled code. See ADR-217 for the soundness argument and the numbers.
+
+Two things worth carrying forward from doing it.
+
+**The micro-benchmark had to match the right shape before the cost appeared.** The first
+repro — a hot arm called in a tight loop with `def`s interleaved — showed the lowering
+count explode (9 → 732) and the wall clock barely move (1453 → 1601 ms), because compiles
+are backgrounded and an arm called constantly re-tiers within `THRESHOLD` calls and spends
+most activations native anyway. The shape that actually hurts is a hot arm called **rarely
+relative to the def rate**, each call doing a lot of work: then every call is invalidated,
+re-validates, and runs its work on the VM. Rebuilt that way (`thrash2`) the JIT came out a
+43% net loss against no JIT — which is the number the fix should be judged on.
+
+**The 1.6× the earlier entry attributed to the thrash was entangled with ADR-216.** That
+measurement (`BROOD_NO_JIT=1` making a 4000-module load 1.6× faster) was taken while
+`*features*` was still a list, so the arm being thrashed was `member?` — running the O(n)
+scan interpreted on every module. ADR-216 removed the scan, so most of that 1.6× was
+already gone before this change landed. Correcting the record: fixing the thrash is worth
+**~1%** on the bulk load (69.2 s → 68.4 s at 10 000 modules), not 1.6×. Its value is in
+the general case — hot reload, a long-lived REPL image, `nest test --cover` (which rebinds
+every project function) — not in bulk loading.
+
+The bulk load is *still* an 8% JIT loss (68.4 s vs 63.2 s with the JIT off), because
+`provide` rebinds `*features*` once per module and a rebind legitimately bumps the code
+epoch. Closing that needs per-arm dependency tracking; ADR-217's last section says why that
+is a separate change rather than an extension of this one.
+
+## 2026-08-06 — source positions: an allocation bug, a GC re-key, and what's actually left
+
+Speed pass over the source-position side tables, prompted by re-framing the scaling work
+around *time* rather than memory (8 GB corresponds to ~10M lines — about 150× Brood's own
+`std/`+`tests/`, so memory never binds for a real project; load time does).
+
+An earlier ablation had measured "positions off" as 27% of load time. Dissecting it, most
+of that was not the tables at all:
+
+**`set_form_pos` allocated the filename on every form.** It built its `Option<Arc<str>>`
+with `Arc::from(&str)` — a fresh allocation *and* a copy of the path — once per LOCAL list
+form read. A 1000-module load reads ~1.15M forms, all from the same handful of paths.
+`ColdHeap` now caches the current file pre-shared as an `Arc<str>`, kept in step by
+`set_current_file`, and the recorder clones it (a refcount bump). That is a plain bug, and
+it is where essentially all of this round's memory win came from.
+
+**The minor-collect re-key rebuilt the whole map every collection.** `form_pos` is keyed by
+LOCAL pair index, and the re-key took the entire map and reinserted every entry — including
+tenured ones, whose keys are unchanged because old does not move in a minor. So it was
+O(all positions recorded so far) per collection instead of O(nursery). Now an in-place
+`retain` that reinserts only the young survivors whose slab index actually moved. Worth
+~2.8%.
+
+**Batching the RUNTIME carry did nothing and was reverted.** `set_position` takes the
+shared `positions` write lock per promoted cons cell, which looked like ~1.15M needless
+lock round-trips. Collecting a whole promoted list and taking the lock once measured 10.59
+→ 10.73 s — the lock is uncontended, and the batch `Vec` costs what it saves. Recorded here
+so it is not re-attempted.
+
+Net for the load, matched build profiles, best-of-5 (unpinned; the pinned figures agree at
+−14.8%/−8.3%, so this is not the background-compilation artifact): 1000 files of ~1000
+lines go **6.28 s → 5.45 s (−13%)** and **924 MB → 839 MB (−9%)**. Most of the *time* is
+ADR-217, in the same working tree; the position work contributed ~3% time and nearly all
+the memory.
+
+**What is left, and why it is structural.** After the allocation fix the residual position
+cost is ~18–20% of load and is inherent to recording one position per form in a hash map:
+~3.5M hash operations with 24-byte values per 1000 files. Optimising the map will not move
+it. The change that would is replacing the `HashMap` side table with an **array parallel to
+the pair slab**, indexed by slab index — no hashing, and no re-keying at all, since the GC
+already walks every pair and holds the forwarding table. At the measured density (1.15M
+positions against 4.59M pairs, ~25%) memory is roughly a wash, so it is a speed change; it
+touches the three re-key sites in `gc.rs`. Prototype-and-measure, not a promised number.

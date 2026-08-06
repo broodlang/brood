@@ -919,15 +919,25 @@ impl Heap {
         // in a minor).
         let new_age_bit: u64 = if tenure { 1 << 32 } else { 0 };
         if self.cold.is_some() {
-            let old_form_pos = std::mem::take(&mut self.cold_mut().form_pos);
-            for (key, pos) in old_form_pos {
+            // An OLD entry keeps its exact key — old doesn't move in a minor — so only the
+            // young survivors need re-keying. Taking the whole map and reinserting every
+            // entry re-hashed and re-allocated the tenured ones on *every* collection,
+            // which is O(all positions recorded so far) per minor rather than O(nursery).
+            // Retain in place, and reinsert only the entries whose slab index moved.
+            let mut moved: Vec<(u64, (crate::error::Pos, Option<Arc<str>>))> = Vec::new();
+            let cold = self.cold_mut();
+            cold.form_pos.retain(|&key, pos| {
                 if (key >> 32) & 1 == 1 {
-                    self.cold_mut().form_pos.insert(key, pos);
+                    true
                 } else if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
-                    self.cold_mut()
-                        .form_pos
-                        .insert((new_idx as u64) | new_age_bit, pos);
+                    moved.push(((new_idx as u64) | new_age_bit, pos.clone()));
+                    false
+                } else {
+                    false
                 }
+            });
+            for (k, p) in moved {
+                cold.form_pos.insert(k, p);
             }
         }
         // Install the relocated space. Tenure: `dest` is the grown old gen; the
