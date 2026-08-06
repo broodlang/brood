@@ -683,25 +683,32 @@ All in `scripts/fuzz/stress/`, each with a usage header worth reading first.
 
 ## 9. Where we stand against the field
 
-From the published run (`brood-benchmarks/results/`, **2026-08-05** — the first since the
-ADR-213/214/215 work):
+From the published run (`brood-benchmarks/results/`, **2026-08-06**, brood 0.3.0 at commit
+`61f3766f` — clean exit, no checksum mismatch, no compute-floor clamp):
 
-- **`latency`** (open-loop, ranked by p99) — Elixir 56 µs, **Brood 68 µs**, .NET 719, Python 469,
-  Node 470. 2nd of five, **6.9× ahead of third**, p50 14 µs against Elixir's 8. The tail moved
-  this run for a reason worth remembering: p99.9 658 → **461 µs** and max 6.0 → **1.6 ms** came
-  from ADR-215, i.e. from removing compilation off the *arrival* path. **An open-loop tail is
-  where one-off per-process setup shows up**; a throughput row amortises it away.
-- **`spawn-live`** — still the worst row, but it moved for the first time provably: 2.56 → **2.13
-  s**, 8.40 → **6.24 CPU·s**, 1.75 → **1.58 GB**. Now **2.9× slower and 1.75× heavier** than the
-  BEAM (was 3.4× / 1.9×). §1 has what's next.
-- **`supervisor`** — Brood 878 ms vs Elixir 449 ms, unchanged.
-- **Compute aggregate** — 2.9× the fastest, 3rd of seven, ahead of Elixir.
-- **Base RSS 22.4 MB** — 3rd-lightest of seven, and **up from 18.6 MB at the start of
-  2026-08-04**. ~2 MB arrived with the batch that merged upstream's package-signing crates; ~1 MB
-  is in the ADR-215 commit and is **not** the shared compiled-code cache (its off-switch accounts
-  for ~40 kB) and is **not diagnosed**. Published with that caveat stated. If you pick this up:
-  binary size is unchanged (37.479 → 37.481 MB), the boot cache is a 170 KB source file, and the
-  `startup` row measures a warm best-of-9 — so the usual suspects are already ruled out.
+- **`latency`** (open-loop, ranked by p99) — Elixir 56 µs, **Brood 75 µs**, Node 416, Python 506,
+  .NET 871. 2nd of five, still multiples ahead of third, p50 18 µs against Elixir's 8. It gave a
+  little back this run (p99 68 → 75, p99.9 461 → 488) on an **unchanged message path**, so that is
+  invocation drift on a percentile row, not a regression — but note the level is what the previous
+  runs bought, and the reason is worth keeping: p99.9 658 → 461 and max 6.0 → 1.6 ms came from
+  ADR-215 removing compilation from the *arrival* path. **An open-loop tail is where one-off
+  per-process setup shows up**; a throughput row amortises it away.
+- **`spawn-live`** — still the worst row, and it has now moved twice running: 2.13 → **1.93 s**
+  (−9%), 6.24 → **5.55 CPU·s** (−11%), RSS flat at **1.57 GB**. Now **2.8× slower and 1.75×
+  heavier** than the BEAM (~5.4 KB per live process against ~2.9 KB). This move is `fold--vec`
+  (A/B'd before the run); the one before was ADR-215. §1 has what's next.
+- **`supervisor`** — Brood 855 ms vs Elixir 271 ms, unchanged in substance.
+- **Compute aggregate** — 2.9× the fastest, 3rd of seven, ahead of Elixir. Unchanged.
+- **Base RSS 22.1 MB** — 3rd-lightest of seven, flat against the previous run's 22.4 and still
+  **up from 18.6 MB at the start of 2026-08-04**. ~2 MB arrived with the batch that merged
+  upstream's package-signing crates; ~1 MB is in the ADR-215 commit and is **not** the shared
+  compiled-code cache (its off-switch accounts for ~40 kB) and is **not diagnosed**. Published
+  with that caveat stated. If you pick this up: binary size is unchanged, the boot cache is a
+  170 KB source file, and the `startup` row measures a warm best-of-9 — the usual suspects are
+  already ruled out.
+- **The benchmark repo's FRONTIER lever 1 is now this repo's §1 item 1** — the receive machinery.
+  Its previous top lever (per-process inline caches) was moved to "measured and ruled out" in the
+  same pass, matching §4 here.
 
 **Publishing procedure** (from `brood-benchmarks/CLAUDE.md`, and it matters): install the **lean**
 build first — `make install INSTALL_FEATURES='$(RUN_FEATURES)'` — run `python3 bench/harness.py`
