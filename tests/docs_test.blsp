@@ -95,3 +95,13 @@
     (is (includes? (docs/markdown->html "a <b> c") "&lt;b&gt;")))
   (test "guide title humanises the filename"
     (assert= (docs/guide-title "guides/getting-started.md") "Getting started")))
+
+(describe "docs: Markdown edge cases (review fixes)"
+  (test "an unmatched [ is a literal, not a runaway recursion"
+    (assert= (docs/markdown->html "a [b c") "<p>a [b c</p>")
+    (assert= (docs/markdown->html "cost $[5 today") "<p>cost $[5 today</p>"))
+  (test "a link URL is attribute-escaped and javascript: is neutralised"
+    (is (includes? (docs/markdown->html "x [y](\" onx=1)") "&quot;"))
+    (is (includes? (docs/markdown->html "[a](javascript:alert(1))") "href=\"#\"")))
+  (test "an unclosed code fence at EOF is emitted, not dropped"
+    (is (includes? (docs/markdown->html "```\n(+ 1 2)") "<pre><code>(+ 1 2)</code></pre>"))))
