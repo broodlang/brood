@@ -17513,3 +17513,33 @@ looked like an ADR-213 regression. It is not — a debug build (unoptimised + pe
 checks) inflates the small-N fixed cost nonlinearly. Release: **4.0 (ASCII) / 3.5 (UTF-8)**,
 linear in both regimes exactly as its header claims. Do not read a scale ratio off a debug
 binary; the header's numbers are all release for this reason.
+
+## 2026-08-07 — the image build wipes a pre-build runtime rebinding (a wipe, not a leak) — contract, no fix
+
+Chasing a downstream symptom to its upstream root. bedit's run-breakpoints silently did
+nothing on a project's **first** run and worked on every run after — root-caused to this
+week's startup image (ADR-218). A tool that installs a `trace-fn` (ADR-184) and then triggers
+a **cold** run loses it: `project-load-sources-cached`'s cold path re-evaluates clean source to
+build the image, rebinding every project fn to its source definition and overwriting the trace
+installed moments earlier. A warm run hits the image, skips the reload, and the trace survives —
+hence first-run-only. Fixed bedit-side by reordering (build, then instrument, then run;
+`fix(apprun)`).
+
+**The question that decides whether Brood needs a fix: wipe, or leak?** A wipe (the live
+rebinding is lost) is a caller-ordering problem. A leak (the runtime patch is *snapshotted into
+the image* and restored on every future run) would be a real correctness bug in the loader.
+Reasoned it out — the image is written by exactly one site, `project-write-image`, called
+immediately after `project-load-sources`, with `before` captured pre-load — so a patch is
+always overwritten before the write, and the image is structurally clean. Then **verified it**
+rather than trusting the argument: build a project's image, patch a global at runtime, run
+again; the image restores `:orig`, not `:PATCHED`. Wipe confirmed, leak ruled out.
+
+**So no kernel fix — and the tempting one would be wrong.** Making the reload preserve
+already-loaded rebindings would turn the harmless wipe into a leak, baking a transient trace
+into every future run. The behaviour is correct: a startup image *must* be clean source. What
+was missing was the **contract** — build first, then instrument — now recorded in ADR-218
+(§"Runtime instrumentation must follow the build") beside the existing coverage-declines-the-
+image note (same class: "who depends on code having been evaluated/compiled *here*"), and as a
+pointer comment on `project-load-sources-cached` where a tool author looks. bedit is the only
+in-tree tool doing the load-then-instrument-then-run dance; every other image caller
+(`nest run`/`test`/`check`) runs its instrumentation, if any, after the build already.

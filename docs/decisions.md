@@ -14509,6 +14509,24 @@ declines to write one) whenever `BROOD_COVERAGE` is set. Found by `nest::coverag
 failing in the suite, not by reasoning about it beforehand — the class of interaction worth
 looking for is "who else depends on code having been *compiled here*".
 
+**Runtime instrumentation must follow the build, not precede it.** The same class,
+found downstream (bedit's out-of-image runner, 2026-08-07): a tool that installs a
+`trace-fn`/`break-fn` (ADR-184) — or otherwise rebinds a global — and *then* triggers a
+**cold** run loses the rebinding. `project-load-sources-cached`'s cold path re-evaluates
+clean source to build the image, which rebinds every project fn to its source definition,
+overwriting the instrumentation installed moments earlier. The symptom is order-of-magnitude
+subtle: it fails only on a project's **first** run (the cold one) and works on every run
+after, because a warm run hits the image and skips the reload. The contract is therefore
+**build the image, then instrument, then run** — which is also the *correct* order for a
+second reason: it keeps the instrumentation out of the image. The image is a snapshot taken
+immediately after the clean reload (`project-write-image`'s `before` is captured pre-load),
+so a runtime rebinding is **never** written into it — verified: patch a global after a build,
+run again, the image restores the clean value, not the patch. So this is a *wipe*, never a
+*leak*, and the fix is ordering, not a change to the loader. Making the reload preserve
+rebindings would be the wrong fix — it would turn the harmless wipe into a leak, baking a
+transient trace into every future run. bedit's `apprun` was reordered to build first
+(bedit `fix(apprun)`, 2026-08-07); no kernel change is warranted, only this contract.
+
 **`nest run` stays lazy.** An intermediate version made it load the whole source tree, which
 was the price of being image-backed before sectioning existed. Sectioning removes that trade
 entirely: `nest run` installs the section directory, materialises nothing, and `require`

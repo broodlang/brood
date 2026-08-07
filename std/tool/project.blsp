@@ -752,6 +752,13 @@ a 16 300-module project an entry touching twenty of them materialises twenty, no
     (not (project-image-usable?)) nil
     else (project-install-image root (project-image-fingerprint root))))
 
+;; CONTRACT for tools that instrument the live image (trace-fn/break-fn, ADR-184, or
+;; any global rebind): build FIRST, then instrument, then run. On a COLD run this fn
+;; re-evaluates clean source to build the image, which overwrites any rebinding done
+;; before it — so a trace installed first is silently wiped on a project's first run
+;; (and only the first: a warm run hits the image and skips the reload). The image
+;; itself is always clean (the snapshot is taken right after this reload), so this is a
+;; wipe, never a leak. See ADR-218 §"Runtime instrumentation must follow the build".
 (defn project-load-sources-cached (root & opts)
   "Load the project the fast way: from its startup image when that is current,
 otherwise from source — and in that case write the image, so the NEXT run is fast.
