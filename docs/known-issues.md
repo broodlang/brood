@@ -329,6 +329,14 @@ Still worth confirming with `pgrep -af 'brood /tmp/brood-'` before chasing anyth
 "A could not connect to a listening B"; a `connect` failure would then be a real runtime question
 rather than a harness one.
 
+**Dedicated hunt 2026-08-07: 0 failures in 260 runs, retries OFF.** With no stray `brood` nodes
+on the box (confirmed `pgrep -af 'brood /tmp/brood-'` clean), the whole dist file ran 60× under
+nextest (`--retries 0 --no-fail-fast`, the exact config that flaked) and the named test ran 200×
+alone — zero flakes, zero aborts. That is now the standing record: KI-28 **genuinely does not
+reproduce on demand**, so it stays a watch item rather than an open bug, with the B-stderr
+diagnostic armed. A recurrence after this date — on a box with the KI-29 leak fixed — is a real
+signal worth chasing; until then there is nothing under it to fix.
+
 ## KI-27 — node tests drew their port from the OS ephemeral range · **fixed 2026-08-05**
 
 **Symptom.** In a full `make test`, `cli::distribution reconnect_watcher_heals_a_fallen_link`
