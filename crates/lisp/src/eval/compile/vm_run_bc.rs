@@ -57,6 +57,12 @@ pub(crate) fn run_process_body(
 pub struct ProgramExit {
     slot: std::sync::Mutex<Option<Result<(), LispError>>>,
     cv: std::sync::Condvar,
+    /// The printed last-form value (wasm only). A `Value` can't cross the process-heap
+    /// boundary (it dies with the program's heap), so the driver renders it to a string
+    /// while the heap is alive; the playground reads it here. Native `run_program` discards
+    /// the value, so this stays unset there.
+    #[cfg(target_arch = "wasm32")]
+    result: std::sync::Mutex<Option<String>>,
 }
 
 impl ProgramExit {
@@ -64,6 +70,8 @@ impl ProgramExit {
         Arc::new(ProgramExit {
             slot: std::sync::Mutex::new(None),
             cv: std::sync::Condvar::new(),
+            #[cfg(target_arch = "wasm32")]
+            result: std::sync::Mutex::new(None),
         })
     }
 
@@ -75,13 +83,39 @@ impl ProgramExit {
         }
     }
 
-    /// Block the calling (root) thread until the program publishes its outcome.
+    /// Store the program's printed result (wasm; called by the driver at completion).
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_result(&self, s: Option<String>) {
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = s;
+    }
+
+    /// Take the program's printed result (wasm; the playground reads it after `wait`).
+    #[cfg(target_arch = "wasm32")]
+    pub fn take_result(&self) -> Option<String> {
+        self.result.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Block the calling (root) thread until the program publishes its outcome. On wasm
+    /// there are no worker threads, so instead of parking we drive the run queue on this
+    /// thread (`pump_until_quiescent`) — which runs the program and everything it spawns to
+    /// completion — then read the slot. If the pump goes quiescent without a publish the
+    /// program deadlocked in a top-level `receive` (no sender will ever wake it); return
+    /// `:normal` rather than hang forever, as there is no other thread to make progress.
     pub fn wait(&self) -> Result<(), LispError> {
-        let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
-        while g.is_none() {
-            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::process::pump_until_quiescent();
+            let g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+            return g.clone().unwrap_or(Ok(()));
         }
-        g.clone().expect("published above")
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+            while g.is_none() {
+                g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            }
+            g.clone().expect("published above")
+        }
     }
 }
 
@@ -104,6 +138,10 @@ pub struct ProgramState {
     /// bind before advancing. `None` for a non-`def` form (run whole).
     def_name: Option<Value>,
     exit: Arc<ProgramExit>,
+    /// The printed value of the most recently finished top-level form (wasm only) — the
+    /// program's result once the last form completes, rendered while its heap is alive.
+    #[cfg(target_arch = "wasm32")]
+    last_repr: Option<String>,
 }
 
 impl ProgramState {
@@ -124,6 +162,8 @@ impl ProgramState {
             started: false,
             def_name: None,
             exit,
+            #[cfg(target_arch = "wasm32")]
+            last_repr: None,
         }
     }
 }
@@ -244,6 +284,8 @@ pub(crate) fn run_program_body(
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    prog.exit.set_result(prog.last_repr.take());
     prog.exit.publish(Ok(()));
     Ok(VmOutcome::Done(Value::nil()))
 }
@@ -253,6 +295,12 @@ impl ProgramState {
     /// `name` to `v` now (reusing the full `def` semantics — naming, promote-to-shared,
     /// reload diagnostics); either way advance to the next form.
     fn finish_form(&mut self, heap: &mut Heap, v: Value) -> Result<(), LispError> {
+        // Render the form's value while its heap is alive (wasm). Overwritten each form, so
+        // after the last one it holds the program's result for the playground to print.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.last_repr = Some(crate::syntax::printer::print(heap, v));
+        }
         if let Some(name) = self.def_name.take() {
             bind_def(heap, name, v)?;
         }

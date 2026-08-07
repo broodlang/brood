@@ -70,6 +70,8 @@ pub(crate) use links::{
     deliver_remote_link_exit, drop_remote_link, handle_node_down as handle_link_node_down,
     record_remote_link,
 };
+#[cfg(target_arch = "wasm32")]
+pub(crate) use scheduler::pump_until_quiescent;
 pub use scheduler::{
     begin_capture, capture_append, current_pid, deadline_exceeded, exit, exit_count,
     free_drained_gen, gc_block_depth, in_green_process, live_pids, macro_block_active,

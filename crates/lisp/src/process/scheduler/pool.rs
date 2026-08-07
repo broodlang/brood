@@ -226,7 +226,9 @@ fn try_steal_any() -> Option<Box<Process>> {
 /// dirty-block). The drainer is counted live (`LIVE_EXECUTORS`) **before** the thread
 /// starts, so a racing second exhaustion check sees it and doesn't spawn a redundant one.
 pub(crate) fn spawn_overflow_drainer() {
-    if TEST_NO_WORKERS.load(Ordering::SeqCst) {
+    // No OS threads under the deterministic test driver or on wasm (the cooperative pump
+    // drives stranded work instead of an overflow thread — which would trap under wasm).
+    if TEST_NO_WORKERS.load(Ordering::SeqCst) || cfg!(target_arch = "wasm32") {
         return;
     }
     LIVE_EXECUTORS.fetch_add(1, Ordering::SeqCst);
@@ -307,6 +309,38 @@ pub fn test_drive_quanta(max: usize) -> usize {
     ran
 }
 
+/// The cooperative single-thread scheduler (wasm): with no OS workers, drive every queued
+/// process to quiescence on the **calling** thread. Sweep all worker queues, running each
+/// process a quantum via [`run_one`] (the real logic, so a `receive` park-captures and a
+/// `send` re-enqueues its receiver onto some queue), and repeat until a whole sweep runs
+/// nothing. A process that blocks forever in `receive` simply leaves the queues (parked on
+/// its mailbox) and the sweep ends. This is [`test_drive_quanta`] generalised to all
+/// workers and run to a fixpoint — the same "drive `run_one` off a non-worker thread"
+/// pattern the deterministic test driver proves out.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn pump_until_quiescent() {
+    loop {
+        let mut ran_any = false;
+        for wid in 0..WORKERS.len() {
+            loop {
+                // Bind the pop to a `let` so the queue guard drops before `run_one` — the
+                // running process's receive/preempt re-enqueue re-locks this same queue.
+                let next = crate::core::sync::lock(&WORKERS[wid].0).pop_front();
+                match next {
+                    Some(p) => {
+                        run_one(p);
+                        ran_any = true;
+                    }
+                    None => break,
+                }
+            }
+        }
+        if !ran_any {
+            break; // a full sweep ran nothing: every process is done or parked
+        }
+    }
+}
+
 /// Start the worker pool exactly once (on the first `spawn`).
 pub(crate) fn ensure_workers() {
     WORKERS_STARTED.call_once(|| {
@@ -317,7 +351,10 @@ pub(crate) fn ensure_workers() {
         ACTIVE_WORKERS.store(n, Ordering::SeqCst);
         // Test hook: skip starting OS workers so a test can drive quanta itself
         // (`test_drive_quanta`). Inert in normal builds — the flag is never set.
-        if TEST_NO_WORKERS.load(Ordering::SeqCst) {
+        // On wasm there are no OS threads at all: `spawn`/`send`/`receive` are driven
+        // cooperatively on the single thread by `pump_until_quiescent` (see there), so we
+        // start no workers and never reach `thread::spawn` (which traps under wasm).
+        if TEST_NO_WORKERS.load(Ordering::SeqCst) || cfg!(target_arch = "wasm32") {
             return;
         }
         // The pool's `n` fixed workers are all live executors from the moment they're

@@ -404,6 +404,18 @@ impl Interp {
         exit.wait()
     }
 
+    /// Run a top-level program as a green process and return its **printed** result (wasm).
+    /// `run_program` discards the value (a handle into the program's heap, which dies at
+    /// exit); this captures the last form's rendered form across that boundary so the
+    /// in-browser playground can display it. On wasm `exit.wait()` drives the cooperative
+    /// single-thread scheduler, so `spawn`/`send`/`receive` run with no OS threads.
+    #[cfg(target_arch = "wasm32")]
+    pub fn run_program_repr(&mut self, src: &str) -> Result<String, LispError> {
+        let exit = process::spawn_root_program(&self.heap, src, None)?;
+        exit.wait()?;
+        Ok(exit.take_result().unwrap_or_default())
+    }
+
     /// Read every form in `src`, evaluate each against the global environment,
     /// and return the value of the last.
     pub fn eval_str(&mut self, src: &str) -> Result<Value, LispError> {

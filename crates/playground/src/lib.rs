@@ -21,11 +21,20 @@ use wasm_bindgen::prelude::*;
 pub fn run(source: &str) -> String {
     let mut interp = Interp::new();
     brood::builtins::begin_stdout_capture();
-    let result = interp.eval_source(source);
+    // On wasm, run the snippet as a green process driven by the cooperative single-thread
+    // scheduler, so `spawn`/`send`/`receive` work; `run_program_repr` returns the printed
+    // last value across the process-heap boundary. Off wasm (the host workspace build),
+    // fall back to `eval_source` on this thread.
+    #[cfg(target_arch = "wasm32")]
+    let result = interp.run_program_repr(source);
+    #[cfg(not(target_arch = "wasm32"))]
+    let result = match interp.eval_source(source) {
+        Ok(value) => Ok(interp.print(value)),
+        Err(error) => Err(error),
+    };
     let captured = brood::builtins::take_captured_stdout().unwrap_or_default();
     match result {
-        Ok(value) => {
-            let printed = interp.print(value);
+        Ok(printed) => {
             if captured.is_empty() {
                 printed
             } else if printed.is_empty() {

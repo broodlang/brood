@@ -4,6 +4,18 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.5 — 2026-08-07
+
+- **Green processes run under WebAssembly.** `spawn`/`send`/`receive` used to trap in the
+  browser (the scheduler starts a pool of OS threads, which wasm can't). On `wasm32` there
+  are now no worker threads: the run queue is driven cooperatively on the single thread by a
+  `pump_until_quiescent` sweep, and the top-level program runs as a green process whose
+  result is rendered across the process-heap boundary (`run_program_repr`) so the playground
+  can show it. Everything is behind `cfg(target_arch = "wasm32")`, so the native scheduler is
+  byte-for-byte unchanged. (`now_nanos` moves to `web_time::Instant` — plain
+  `std::time::Instant::now()` panics on wasm.) The in-browser playground and the runnable doc
+  examples can now run concurrency snippets.
+
 ## v0.3.4 — 2026-08-07
 
 - **`doc-catalog`** — a new CORE module mapping every public builtin/prelude function to a
