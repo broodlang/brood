@@ -336,7 +336,13 @@ pub(crate) fn pump_until_quiescent() {
             }
         }
         if !ran_any {
-            break; // a full sweep ran nothing: every process is done or parked
+            // A full sweep ran nothing. If a receive-timeout is pending, fire the earliest
+            // (advance logical time) and keep going — a process waiting only on its `after`
+            // clause makes progress. Otherwise every process is done or blocked forever.
+            if crate::process::timer::fire_next_timer() {
+                continue;
+            }
+            break;
         }
     }
 }

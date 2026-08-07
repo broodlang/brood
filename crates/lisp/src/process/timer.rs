@@ -30,14 +30,17 @@ type TimerQueue = BinaryHeap<Reverse<(Instant, u64, u64)>>;
 /// its deadline so it can fire its `after` clause.
 static TIMERS: LazyLock<(Mutex<TimerQueue>, Condvar)> =
     LazyLock::new(|| (Mutex::new(BinaryHeap::new()), Condvar::new()));
+#[cfg(not(target_arch = "wasm32"))]
 static TIMER_STARTED: Once = Once::new();
 
 /// Arrange to wake green process `pid` at `deadline`. `gen` is the process's park
 /// generation (stamped by the caller in `wait_for_message`) — the timer fires the
 /// wakeup only while it's still current, giving lazy cancellation of superseded
 /// deadlines. Lazily starts the timer thread on first use (programs that never use a
-/// `receive` timeout never spawn it).
+/// `receive` timeout never spawn it). On wasm there is no timer thread — the cooperative
+/// scheduler pump fires due timers itself (`fire_next_timer`); we only record the deadline.
 pub(super) fn arm_timer(pid: u64, deadline: Instant, gen: u64) {
+    #[cfg(not(target_arch = "wasm32"))]
     TIMER_STARTED.call_once(|| {
         std::thread::spawn(timer_loop);
     });
@@ -46,7 +49,28 @@ pub(super) fn arm_timer(pid: u64, deadline: Instant, gen: u64) {
     cv.notify_one();
 }
 
+/// Fire the earliest pending receive-timeout, waking its parked process (wasm cooperative
+/// scheduler — there is no timer thread). Called by the pump when nothing else is runnable:
+/// the earliest deadline is then the only thing that can advance the program, so it fires in
+/// logical time (real delays aren't honored under wasm — fine for a playground). Messages
+/// still win over timeouts, since the pump drains all run queues before firing a timer. A
+/// superseded entry (its `gen` advanced) wakes nothing but is still removed. Returns whether
+/// an entry was fired.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn fire_next_timer() -> bool {
+    let (lock, _cv) = &*TIMERS;
+    let next = crate::core::sync::lock(lock).pop();
+    match next {
+        Some(Reverse((_deadline, pid, gen))) => {
+            super::mailbox::wake_for_timeout(pid, gen);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Sleep until the nearest deadline, then wake every process whose deadline passed.
+#[cfg(not(target_arch = "wasm32"))]
 fn timer_loop() {
     let (lock, cv) = &*TIMERS;
     let mut q = crate::core::sync::lock(lock);
