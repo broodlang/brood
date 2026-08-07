@@ -59,3 +59,10 @@
     (is (includes? (docsite/render-css) ".docsite .def{")))
   (test "an explicit :title overrides the model name"
     (is (includes? (docsite/render sample-model {:title "Custom"}) "<title>Custom</title>"))))
+
+(describe "docsite: guides"
+  (test "a guide renders as a section (raw HTML) with a sidebar link"
+    (let (html (docsite/render {:name "g" :guides [{:title "Intro" :html "<p>hi</p>"}] :modules []} {}))
+      (is (includes? html "id=\"g-Intro\""))
+      (is (includes? html "<p>hi</p>"))
+      (is (includes? html "href=\"#g-Intro\"")))))

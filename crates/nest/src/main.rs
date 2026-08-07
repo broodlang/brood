@@ -425,6 +425,11 @@ enum Cmd {
         all: bool,
     },
 
+    /// Check every `expr ;=> result` example in the project's docstrings still holds —
+    /// so a documented example can't silently drift from the code. Exits non-zero on a
+    /// mismatch.
+    Doctest,
+
     /// Generate an editor syntax grammar from the language's own `(special-forms)`
     /// — one source of truth, no hand-maintained keyword lists (ADR-092). Prints to
     /// stdout; redirect to the editor's grammar file.
@@ -731,6 +736,10 @@ fn run_main(cli: Cli) {
                 require_project("docs", Some("For the language reference: nest docs --all"));
             }
             cmd_docs(&mut interp, out.as_deref(), all)
+        }
+        Cmd::Doctest => {
+            require_project("doctest", None);
+            cmd_doctest(&mut interp)
         }
         Cmd::Grammar { target } => cmd_grammar(&mut interp, target),
         Cmd::Fetch => {
@@ -1477,6 +1486,17 @@ fn cmd_docs(interp: &mut Interp, out: Option<&str>, all: bool) {
         None => format!("({entry})"),
     };
     run(interp, &format!("(require 'docs) {call}"));
+}
+
+/// `nest doctest` — evaluate the project's `expr ;=> result` docstring examples and exit
+/// non-zero on any mismatch, so a CI run catches docs drifting from the code. `run-doctests`
+/// prints the per-example report and returns the failure count.
+fn cmd_doctest(interp: &mut Interp) {
+    match run_for_value(interp, "(require 'docs) (docs/run-doctests)") {
+        brood::core::value::Value::Int(0) => {}
+        brood::core::value::Value::Int(_) => std::process::exit(1),
+        _ => {}
+    }
 }
 
 /// `nest grammar [TARGET]` — emit an editor syntax grammar generated from the
