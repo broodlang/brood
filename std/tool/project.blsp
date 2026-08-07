@@ -611,8 +611,24 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; Not hashed: the fingerprint is only ever compared for equality, and hashing
   ;; would pull `hash` into the loader's dependencies for nothing. Even 16 000 files
   ;; make ~1.5 MB, which is noise beside the image itself.
+  ;;
+  ;; DEPENDENCY files count too, because their bindings are in the image (ADR-070/218): a
+  ;; dep lives outside `:source-paths` — in `_deps/`, or anywhere at all for a `:path` dep —
+  ;; so the source-tree walk alone cannot see one change, and an imaged start would go on
+  ;; serving the old code. They come from `*package-module-files*`, which `project-setup`
+  ;; populates before any fingerprint is taken, on the cold and warm paths alike.
   (str (build-id) "\n"
-    (join "\n" (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f))) files))))
+    (join "\n" (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f)))
+                 (append-two files (project-dep-module-files))))))
+
+;; The file behind every DEPENDENCY module, sorted for a stable fingerprint. A project roots
+;; its own modules under its `:name` too (ADR-070), so both live in `*package-module-files*`
+;; and the prefix is what separates them — the project's own files are already in the source
+;; walk, and listing them twice would only make the key longer.
+(defn- project-dep-module-files ()
+  (sort (map second
+          (remove (fn (kv) (not (project-image-dep-module? (first kv))))
+            (seq *package-module-files*)))))
 
 ;; `before` as a SET. As a list, `member?` is a linear scan run once per global — ~4000 x
 ;; ~313 000 on a big project, which measured 7 s of a 9 s image write and was invisible
@@ -644,19 +660,13 @@ manifest is read, naming the key, not later inside whoever consumes the map."
       (< (count parts) 2) nil
       else (join "/" (take (- (count parts) 1) parts)))))
 
-;; Whether section key `k` names a module of a DEPENDENCY rather than one of this project's
-;; own. Both are package-rooted (ADR-070) and both therefore appear in
-;; `*package-module-files*` — the project's own under its `:name` — so membership alone does
-;; not tell them apart; the prefix does.
-;;
-;; A dependency's modules are deliberately NOT imaged. The staleness key covers this
-;; project's `:source-paths` only — a dep lives in `_deps/`, or anywhere at all for a `:path`
-;; dep — so a changed dep cannot invalidate the image; and since `require` prefers an image
-;; section over the package branch, imaging one would go on serving the dep's old code until
-;; an unrelated edit here happened to rebuild it. Left out, deps load from source through the
-;; package branch exactly as before. Imaging them is worth doing, but it wants the
-;; fingerprint to cover their files first.
-(defn- project-image-dep-section? (k)
+;; Whether module key `k` belongs to a DEPENDENCY rather than to this project. A project
+;; roots its own modules under its `:name` (ADR-070) exactly as a dep's are rooted under
+;; theirs, so both appear in `*package-module-files*` and membership alone does not separate
+;; them — the prefix does. Used for the fingerprint (a dep's files are outside the source
+;; walk, so they must be stat'd from the registry) rather than to exclude anything: a dep's
+;; modules ARE imaged, which is why its files have to be in the staleness key.
+(defn- project-image-dep-module? (k)
   (and (contains? *package-module-files* k)
     (not (= (first (string-split k "/"))
            (if *project-name* (name *project-name*) nil)))))
@@ -684,8 +694,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
                (or (get grouped "") nil)))
     (cons ["" root]
       (map (fn (k) [k (get grouped k)])
-        (remove (fn (k) (or (= k "") (project-image-dep-section? k)))
-          (keys grouped))))))
+        (remove (fn (k) (= k "")) (keys grouped))))))
 
 (defn project-write-image (root before)
   "Snapshot the bindings this project load produced into `root`'s image, grouped into

@@ -124,6 +124,10 @@ the entry point reaches, not just the root section.
 **Guard:** `crates/nest/tests/startup_image.rs` — `a_second_run_loads_modules_from_the_image_not_from_source`
 (plus `an_edited_source_file_invalidates_the_image`, so the fix cannot be "serve a stale image").
 
+**Follow-up shipped the same day:** a dependency's modules are imaged too, with their files
+added to the staleness key (they live outside `:source-paths`, so nothing else could invalidate
+them) — see the ADR and `a_path_dependency_is_imaged_and_its_edits_invalidate`.
+
 **Re-measured 2026-08-07, and the two halves of ADR-218 fared very differently.** Same fixture
 (4 002 generated modules), same box, release binaries from `90099993` (pre-fix) and `34770be4`:
 

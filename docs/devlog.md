@@ -17543,3 +17543,26 @@ image note (same class: "who depends on code having been evaluated/compiled *her
 pointer comment on `project-load-sources-cached` where a tool author looks. bedit is the only
 in-tree tool doing the load-then-instrument-then-run dance; every other image caller
 (`nest run`/`test`/`check`) runs its instrumentation, if any, after the build already.
+
+## 2026-08-07 — dependencies get imaged too, once their files are in the staleness key
+
+The follow-up the image fix left open. Preferring the image over the package branch means a
+dependency's modules would be served from the image — correct only if an edit to that dep can
+invalidate it, and the staleness key covered this project's `:source-paths` alone. A dep lives
+in `_deps/`, or anywhere at all for a `:path` dep, so no edit of it was visible to the key.
+
+So the key stats dependency files as well. They come from `*package-module-files*`, which
+`project-setup` populates *before* any fingerprint is taken (via `ensure-deps`) — on the warm
+path as much as the cold one, which is what makes this possible at all: the warm path has to
+compute the same key without loading anything. Telling a dep's modules from the project's own is
+by **prefix**, not by registry membership, because a project roots its own modules under its
+`:name` and both therefore live in that registry — the same fact that caused KI-34's second
+defect.
+
+The alternative was leaving dep bindings out of the image, which is correct and gives up the
+image for exactly the code a project *doesn't* edit between runs. Measured on the fixture, the
+whole point: with deps imaged, a warm start materialises them instead of re-evaluating them.
+
+Guarded by `a_path_dependency_is_imaged_and_its_edits_invalidate` — both halves in one case,
+since "imaged" without "invalidated" is the dangerous state and it is only dangerous in
+combination. Sabotage-verified: drop dep files from the key and the case fails on the edit.
