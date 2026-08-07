@@ -17157,6 +17157,46 @@ depends on code having been **compiled in this process** rather than merely bein
 being ignored. That was a bad test manifest — the form takes `:name "x"`, not a positional
 symbol. No such bug; disregard.
 
+## 2026-08-06 (cont.) — KI-32: a selective `receive` corrupted a skipped local message to `nil`
+
+The green-tree flake battery caught the in-language suite's `stream-drop › drop more than
+available` timing out once at 600s — masked by a nextest retry, so the battery's own
+fail-count read 0. Chasing it turned into the deepest bug of the session, and it was not in
+the stream library.
+
+**Reproduction.** A `stream-drop`-over-`stream-from-list` pipeline hammered concurrently hung
+intermittently: ~20% at 200 pipelines, ~80% at 800, **100% under `BROOD_J=1`**. Single-worker
+being *worse* ruled out a multi-core data race and named it a cooperative-scheduling logic
+bug. Every runtime opt-out lever (`BROOD_NO_HANDOFF`, `…STEAL_WAKE`, `…SHARE_FN`, `…MSGTAG`,
+`…RECV_MARK`, `BROOD_NO_JIT`, `BROOD_VM=0`) left it unchanged.
+
+**The wedge.** A gdb thread dump of a hung single-worker run: the root process blocked in
+`receive` waiting for a reply, the one worker parked on its condvar with an **empty run
+queue** — nothing runnable, yet someone owed a reply. A watchdog that dumps every `:waiting`
+process with a backlog named it: **one** process parked over a single queued message whose
+decoded value was **`nil`**. Nothing in the stream protocol sends `nil` → message corruption.
+
+**The bug** (`scan_mailbox`, `crates/lisp/src/process/mailbox.rs`). An L1-fast-path message
+— the sender copies it straight into a *parked* receiver's heap, a `Payload::Local` whose
+value lives in a `msg_roots` slot — was read during the optimistic single-lock scan with
+`msg_root_take`, which **tombstones the slot for reuse**. On a non-match, `reinsert_candidate`
+put the same envelope (still holding that slot index) back in the queue; the next scan
+`msg_root_peek`-ed the now-empty slot → `nil`. A `[:next pid]` request sitting in a stream
+stage's mailbox while it waited on its upstream was corrupted to `nil`, never matched again,
+and the stage — and the whole pipeline — deadlocked. Intermittent because it needed L1
+delivery (receiver parked) *and* the message to be the optimistically-popped first
+non-matching candidate; engine-independent because the scan is shared; Wire messages immune.
+
+**The fix.** Peek, don't take, in the optimistic scan (a re-queued candidate keeps its slot
+intact); free the slot (`msg_root_take`) only on the **consume** path where the message
+leaves the queue. Also closes a latent slot leak on the non-optimistic match path.
+
+**Guard.** `tests/concurrency_test.blsp`, "selective receive: a skipped local message keeps
+its value": drive a receiver to `:waiting` via `process-info` so the send takes L1, skip a
+non-matching `[:data 42]`, then match it; a companion hammers it across 40 processes and
+checks the value round-trips. Sabotage-verified — pre-fix it hangs 5/5, post-fix 0/10, and
+the amplified repro goes 80%/100% → 0.
+
 ## 2026-08-06 — image follow-up: a lost sig, my own quadratic, and 4 s of pointless compaction
 
 Three fixes on top of ADR-218, two of them found only because the image was instrumented

@@ -1138,11 +1138,16 @@ fn scan_mailbox(
             if optimistic {
                 let m = st.queue.remove(*i).expect("bounds checked above");
                 drop(st);
-                // A Local payload is already in this heap — take it out of its traced
-                // slot. A Wire one is rebuilt as before.
+                // A Local payload is already in this heap — read it from its traced slot.
+                // A Wire one is rebuilt as before.
                 let v = match &m.msg {
                     Payload::Wire(w) => from_message(heap, w),
-                    Payload::Local { slot, .. } => heap.msg_root_take(*slot),
+                    // PEEK, not take: a candidate that fails to match is re-inserted into
+                    // the queue with this same slot index, so clearing (tombstoning) the
+                    // slot here would corrupt the re-queued message to `nil` — the slot is
+                    // reused by the next `msg_root_add`. The slot is freed on the match
+                    // path below, the one place the message is actually consumed.
+                    Payload::Local { slot, .. } => heap.msg_root_peek(*slot),
                 };
                 (Some(m), v)
             } else {
@@ -1188,36 +1193,35 @@ fn scan_mailbox(
             }
         };
         if !matches!(answer, Value::Nil) {
-            // Matched — remove exactly this message and hand the matcher's
-            // `[idx var…]` answer back. The clause BODY is not run here: the
-            // `receive` macro emits it at the call site and dispatches on `idx`
-            // there, so a loop that tail-calls back into `receive` stays O(1)
-            // native stack (running a body here would nest a `receive_match` per
-            // message → worker-stack overflow). An optimistically-popped match is
-            // already out of the queue — nothing left to do.
-            // A non-optimistic match removes the message now; grab it (dev-tools) so
-            // the receiver can adopt the sender's causal context (ADR-174 send-level).
-            #[cfg(feature = "dev-tools")]
-            let matched_trace = match &popped {
-                Some(env) => env.trace.clone(),
-                None => crate::core::sync::lock(&ctx.mailbox.state)
-                    .queue
-                    .remove(*i)
-                    .and_then(|e| e.trace),
+            // Matched — the message is consumed. An optimistically-popped candidate is
+            // already out of the queue (`popped`); a peeked one is removed now. Either
+            // way, free its msg_roots slot: a Local payload roots its value in that slot,
+            // and the scan only PEEKS it (so a non-match can leave it queued intact), so
+            // the consume path is the one place that tombstones it for reuse — without
+            // this the slot table would grow unboundedly. The clause BODY is not run here:
+            // the `receive` macro emits it at the call site and dispatches on `idx` there,
+            // so a loop that tail-calls back into `receive` stays O(1) native stack. The
+            // matcher's `[idx var…]` answer already roots any value the clause bound.
+            let consumed = match popped {
+                Some(env) => Some(env),
+                None => crate::core::sync::lock(&ctx.mailbox.state).queue.remove(*i),
             };
-            #[cfg(not(feature = "dev-tools"))]
-            if popped.is_none() {
-                crate::core::sync::lock(&ctx.mailbox.state).queue.remove(*i);
+            if let Some(env) = consumed.as_ref() {
+                if let Payload::Local { slot, .. } = &env.msg {
+                    heap.msg_root_take(*slot);
+                }
             }
-            // Adopt the message's context so this receive — and anything it then
-            // spawns or sends — runs in the sender's causal context.
+            // Adopt the message's causal context (ADR-174 send-level) so this receive —
+            // and anything it then spawns or sends — runs in the sender's causal context.
             #[cfg(feature = "dev-tools")]
-            if let Some(t) = matched_trace {
+            if let Some(t) = consumed.and_then(|e| e.trace) {
                 let v = from_message(heap, &t);
                 // Adopted from a message (`own = false`): used to handle this message,
                 // but not propagated onward by `spawn` — so it can't leak transitively.
                 heap.set_trace_context(Some(v), false);
             }
+            #[cfg(not(feature = "dev-tools"))]
+            let _ = consumed;
             return Ok(Some(answer));
         }
         if let Some(m) = popped {
