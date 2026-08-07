@@ -5,22 +5,44 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-07 (end of the startup-image session)**, brood at 0.3.6 with the ADR-218
-startup image *actually working* — see below, because for its first day it did not. Tree is
-**clean and pushed**; `main` and `origin/main` agree. Rust + in-language suite **970/970** via
-nextest (the in-language suite runs as one case), `nest check` clean cold and imaged, rustfmt
-clean. **`nest format --check` fails on 12 `.blsp` files** — pre-existing plus upstream's new
-`std/doc-catalog.blsp`, not CI-gated, and left alone deliberately: reformatting whole files is a
+**As of 2026-08-07 (evening — the hatch-review + verification session)**, brood past 0.3.8 with
+the ADR-218 startup image working *and* following require edges (KI-37). Tree is **clean and
+pushed**; `main` and `origin/main` agree at `afe4bcff`. **`nest format --check` fails on 12 `.blsp`
+files** — pre-existing, not CI-gated, left alone deliberately: reformatting whole files is a
 judgement call, not a drive-by.
 
-**No open bugs. Two watch items, both single unreproducible dist failures under load** — KI-28
-(`clean_peer_exit_fires_nodedown_promptly`, 2026-08-05) and KI-36
-(`reconnect_watcher_heals_a_fallen_link`, 2026-08-07: 0 failures in 25 idle runs, 0 in 10 under
-synthetic load, and a clean 970/970 re-run). Same shape, same suite, independent sightings; the
-entries cross-reference, so a **third** would be the point at which this is a pattern rather than
-two coincidences.
+**The tree is proven green, and by more than one pass** (a single pass is not evidence — see the
+green-tree rule in CLAUDE.md). On `afe4bcff`: `make test` **974/974**; `make test-both`
+**1948/1948** across both engines; the GC_STRESS + GC_VERIFY sweep over the seven concurrency
+binaries **37/37 with zero heap-verifier complaints**; and a fuzz differential of 6 generators ×
+150 programs × 4 engine configs — **1650 checks, 0 divergences, 0 crashes**.
 
-### What this session changed (five commits, all pushed)
+**One open issue (KI-38) and one watch item (KI-36).** KI-38 is the boot-wait cluster: three tests
+that wait for a freshly spawned *debug* `brood` to become ready fail *together* under peak suite
+load, roughly one full run in two. **KI-28 is no longer a separate watch item** — it recurred
+twice (2026-08-06, 2026-08-07) and turned out to be one of the three, so it is folded in. It is a
+harness bug, not a language/runtime one — every sighting is a boot wait, never an assertion about
+behaviour under test — but it reds a suite often enough that you will meet it, and it is
+**undiagnosed**: nobody has yet measured what a debug boot costs under peak parallelism. KI-36 is
+deliberately *not* merged into it (different test, different deadline analysis).
+
+### What this session changed (two commits, both pushed)
+
+**Require edges are part of the image** (KI-37) and **three gaps hatch surfaced** — a `table`
+global no longer forfeits the image for the whole project (imaged by value, format v4),
+`tcp-read-until`/`tcp-read-n` take `:timeout-ms`/`:max-bytes` so a hardened server can use them,
+and `nest format` walks a whitelist (`:format-paths`) instead of the whole root minus an ignore
+list (`c3c58843`). Plus a rustfmt fix the pre-push hook caught (`afe4bcff`).
+
+**A GC_STRESS false red was removed from `live_migration`.** Under `BROOD_GC_STRESS` the deep-
+receive migration test reds on a *liveness* assertion while the correctness assertion it exists
+for passes — collecting at every safepoint means nothing is ever stolen (measured: 400 bursts,
+122 s, zero migrations, every per-burst total correct). It now runs 5 bursts and skips the
+liveness check under stress only: the sweep goes 120 s + 1 TIMEOUT → **15 s, 37/37**. This matters
+because CLAUDE.md instructs you to run that sweep before trusting a green tree, so the trap was
+armed for the next person. See §6.
+
+### The previous session's changes (five commits, all pushed)
 
 **The startup image had never been read from** (KI-34, `34770be4`). ADR-218 shipped it on
 2026-08-06 and it was written on every cold start and then ignored: `nest run` restored the root
@@ -496,6 +518,38 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
 *trend* across bases, not one triple.
 
 ## 6. Traps — every one of these cost real time
+
+**Proving green**
+
+- **A red under `BROOD_GC_STRESS` is not automatically a bug — check *which* assertion fired.**
+  Collecting at every safepoint changes scheduling, not just speed, so a *liveness* assertion can
+  fail while the correctness assertion beside it passes. `live_migration`'s deep-receive test did
+  exactly that (400 bursts, 122 s, zero migrations, every total correct) and is now gated on the
+  env var. Worse, it took 122 s against nextest's 120 s cap, so the failure was reported as a
+  **TIMEOUT** — which tells you nothing about which assert fired. If a stress sweep times a test
+  out, run that test standalone with a raised cap before concluding anything.
+- **A flake hunt that deletes its logs on success cannot be believed.** A `nextest -E` filter that
+  matches nothing exits 0, so "0/25 failures" and "the filter was wrong" look identical. Keep the
+  per-iteration logs, or assert on `1 test run` per iteration. Confirm with `cargo nextest list -E`
+  that the filter selects what you think it does.
+- **Re-running a flaky test *idly* usually just repeats what the entry already records.** KI-36
+  already had "0 failures in 25 idle runs"; a second 25 added nothing, because neither reproduced
+  the condition of the sighting (a 4000-module image build beside the suite). Before spending the
+  runs, check that your load actually reaches the test's path — KI-36's own synthetic-load attempt
+  is the counterexample, at 1.6–1.9 s loaded against 2.58 s idle.
+
+**Running the suite at all**
+
+- **Do not run two debug `make test` runs at once on this box.** 30 GB, ~420 MB debug binaries,
+  ~650 MB per suite process, and `release_bundle` tests at **835 MB RSS each**. Two concurrent
+  suites on 2026-08-07 ended with the editor process dying on memory at ~20:56 and taking its own
+  suite with it (`TRY 1 TERM [808 s] brood_suite_passes` — children reaped with the parent). The
+  three kernel OOM kills earlier that day (26.5–26.8 GB, `brood`/`nest`) were a *different* cause,
+  the quadratic pre-flight since fixed in `03efa15a`.
+- **`brood`/`nest` panics land in `.brood_crash_dump` in the cwd, but a session crash does not.**
+  If work vanishes with the session, the recoverable trail is: the scratchpad under
+  `/tmp/claude-*/…/scratchpad/`, `~/.claude/history.jsonl`, and `journalctl -k | grep -i oom`
+  (absence there means it was *not* the kernel OOM killer). Write findings to a file as you go.
 
 **Measurement**
 

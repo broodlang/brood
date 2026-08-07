@@ -19,8 +19,9 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — **KI-28 is one of them, and has now recurred twice** | 🔴 **open** (2 sightings: 2026-08-06, 2026-08-07) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
-| KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07) |
+| KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07; +25 more idle passes) |
 | KI-35 | `*method-from*` was never imaged, so an imaged start stopped reporting cross-module `defmethod` conflicts | ✅ **fixed** 2026-08-07 |
 | KI-34 | the startup image was written on every cold start and **never read from** — two defects, either sufficient | ✅ **fixed** 2026-08-07 |
 | KI-33 | fully consuming a stream leaked its producer process — an exhausted stream parked in `stream-done-loop` forever instead of exiting | ✅ **fixed** 2026-08-07 |
@@ -56,9 +57,66 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open issues; two watch items (KI-28, KI-36 — both single, unreproducible dist failures seen under load).** No open bug in the language, runtime or toolchain
-itself. (KI-37 was open for a few hours on 2026-08-07 and is fixed.) Every KI above is fixed, incidentally fixed, or a non-reproducing transient — each kept as
-a record with its regression test, so a recurrence is recognizable.
+**One open issue (KI-38) and one watch item (KI-36).** KI-28 is **no longer a watch item — it has
+recurred twice and is folded into KI-38**, which is the larger pattern it turned out to be part
+of: three tests that wait for a freshly spawned debug `brood` to finish booting, failing together
+under peak suite load. No open bug in the *language or runtime* is implied by it — every sighting
+is a boot wait, never an assertion about behaviour under test — but it is an open harness bug, and
+a flake that reds a suite one run in two is not something to build on. (KI-37 was open for a few
+hours on 2026-08-07 and is fixed.)
+
+---
+
+## KI-38 — three boot-wait tests fail together under peak suite load · **open, 2 sightings**
+
+**This is what KI-28 turned out to be part of.** KI-28 was recorded as "a single unexplained
+`nodedown` flake" with a standing record of 0 failures in 260 runs, and said in terms: *"A
+recurrence after this date — on a box with the KI-29 leak fixed — is a real signal worth
+chasing."* It has now recurred twice, and both times it brought two siblings with it.
+
+**The three tests, and the one thing they have in common:**
+
+| test | wait helper | deadline | panic |
+|---|---|---|---|
+| `cli::distribution clean_peer_exit_fires_nodedown_promptly` (was KI-28) | `wait_until_listening` (`crates/cli/tests/support/mod.rs:193`) | 20 s | `server never started listening on port N` |
+| `cli::child_cleanup a_brood_child_dies_when_its_spawning_thread_exits_ki29` | `wait_until_up` (`crates/cli/tests/child_cleanup.rs:66`) | 30 s | `child never wrote its marker at …` |
+| `cli::child_cleanup the_drop_guard_kills_a_running_brood_child_ki29` | `wait_until_up` (same) | 30 s | `child never wrote its marker at …` |
+
+Every one is a **boot wait** — a helper waiting for a freshly spawned *debug* `brood` to become
+ready. None is an assertion about the behaviour the test exists to check. So the common factor is
+**not distribution**, which is how KI-28 was framed and why the pattern stayed invisible: two of
+the three are child-spawn tests that have nothing to do with nodes.
+
+**The sightings.** Both are full `make test` runs, and in both the three fail together in the same
+dense region of the schedule:
+
+- **2026-08-06 18:41** — all three failed: 34.675 s / 35.142 s / 35.145 s, at position 840/966.
+- **2026-08-07 21:20** — `…_ki29` failed at 35.521 s; `clean_peer_exit…` failed try 1 at 35.476 s
+  **and passed on retry in 0.827 s**; at 841/974. The immediately following run of the same suite
+  on the same commit was 974/974 green, and `make test-both` was 1948/1948 green.
+
+**KI-28's open question is answered.** That entry said a recurrence should separate *"B never bound
+its port"* from *"A could not connect to a listening B."* Both recurrences panic in
+`wait_until_listening`: **B never bound its port.** It is a startup failure — not a failed
+`connect`, and not the late-`[:nodedown]` shape the entry speculated about (that speculation was
+already withdrawn there for having nothing under it; this closes it properly).
+
+**What is NOT yet established, and must be before anything is "fixed":**
+
+- what a debug `brood` boot actually costs under peak `nextest` parallelism, against idle;
+- whether the 20 s / 30 s deadlines are simply too tight for a debug build on this box, or whether
+  boot occasionally *stalls hard* — the interesting case, and the only one that is a real bug;
+- whether the specific spike is the `release_bundle` tests, which run in the same region of the
+  schedule at **835 MB RSS each, two concurrently**.
+
+**The methodological trap, inherited from KI-36 and worth heeding.** KI-36 flagged its own
+synthetic-load reproduction as weak evidence and said why: the loaded runs took 1.6–1.9 s against
+2.58 s idle, i.e. *the load never reached the test's path*. Any attempt here must first demonstrate
+that the load inflates the tests' own durations, or a clean result means nothing at all.
+
+**Do not merge KI-36 into this.** Different test, and its 22.6 s was analysed against its own three
+deadlines (nodedown 15 s / pong 20 s / nodeup 45 s) and points at the nodedown branch. It may be
+the same family; nothing yet says it is, and a premature merge would bury one of the two.
 
 ---
 
@@ -167,6 +225,15 @@ sighting stands alone, exactly as KI-28's does.
 **Related:** KI-28 is the same shape in the same suite — a single unexplained dist failure that
 passed on retry and has never recurred. Two independent one-off failures in the dist tests, both
 under load, is worth correlating if a third appears; neither reproduces on demand today.
+
+**Update 2026-08-07 (evening): KI-28 recurred and became [KI-38](#ki-38); this one did not.** A
+further **25 consecutive idle passes** (retries off, one at a time, ~2.0 s each) plus four whole-
+suite passes on the same commit — but note that only *repeats* this entry's own "0 failures in 25
+idle runs" and therefore adds a third idle confirmation and nothing more. **It does not touch the
+condition that produced the sighting** (a 4000-module image build running beside the suite), which
+is exactly the weakness recorded above. This stays a watch item, deliberately **not** folded into
+KI-38: KI-38's three tests all fail in a *boot* wait, whereas this one's 22.6 s points at the
+nodedown branch, and merging on a resemblance would bury one of the two.
 
 ---
 
@@ -497,7 +564,16 @@ SIGKILLing the very shell doing the killing.
 **Check for a recurrence with** `pgrep -af 'brood /tmp/brood-'` — still the right instrument, since
 the class of bug is one that no test failure reports.
 
-## KI-28 — a single unexplained `nodedown` flake · **watching, seen once 2026-08-05**
+## KI-28 — a single unexplained `nodedown` flake · **superseded by [KI-38](#ki-38) 2026-08-07**
+
+> **Recurred twice (2026-08-06, 2026-08-07) and is now part of KI-38.** The recurrence this entry
+> asked for arrived, and it answered this entry's own question: both sightings panic in
+> `wait_until_listening` — **B never bound its port** — so this is a *boot* failure, and the
+> framing below ("a dist flake") is the wrong altitude. Both times it failed alongside two
+> `cli::child_cleanup` tests that are not dist tests at all. Read KI-38 first; everything below is
+> kept because its 0/260 hunt and its ruling-out of KI-27/KI-29 remain valid and are load-bearing
+> for KI-38.
+
 
 **Not a diagnosis — a record, so a second occurrence is recognised as the second.** In the full
 `make test` that verified the KI-27 fix, `cli::distribution clean_peer_exit_fires_nodedown_promptly`
