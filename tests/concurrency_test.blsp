@@ -330,3 +330,60 @@
     (send (self) :marker)
     (sleep 20)
     (assert= (receive (:marker :still-here) (after 0 :was-consumed)) :still-here)))
+
+;; ---- selective receive must not corrupt a skipped local message ---------------
+;;
+;; Regression (see devlog 2026-08-06). A message delivered by the L1 fast path (the
+;; sender copies it straight into a *parked* receiver's heap — a "Local" payload whose
+;; value lives in a `msg_roots` slot) that a selective `receive` scans, fails to match,
+;; and leaves queued must keep its value. The optimistic-pop scan `take`-ed (tombstoned)
+;; the message's slot to read it, then on a non-match re-inserted the envelope still
+;; pointing at that now-empty slot — so the next scan read it back as `nil`, and the
+;; message could never match again. A stream request/reply pipeline (`stream-drop` over
+;; `stream-from-list`) deadlocked intermittently: the receiver parked forever over a
+;; `[:next pid]` request that had been corrupted to `nil`.
+
+(defn- wait-parked (p)
+  ;; Spin until p is parked in a `receive`, so a send to it takes the L1 (Local) path —
+  ;; the path the bug lived on. Reduction preemption breaks the spin so p gets to run.
+  (if (= :waiting (get (process-info p) :status)) :ok (wait-parked p)))
+
+(describe "selective receive: a skipped local message keeps its value"
+  :isolated
+
+  (test "a non-matching local message, skipped then matched, still carries its value"
+    (let (main (self)
+          p (spawn (fn ()
+                     (send main [:ready (self)])
+                     ;; only :go matches here — the [:data _] main sends while we are
+                     ;; parked is scanned, skipped, and left queued (the corruption site).
+                     (receive (:go nil))
+                     ;; the skipped [:data v] must still be a real 42, not nil.
+                     (receive ([:data v] (send main [:got v]))))))
+      (receive ([:ready _] nil))
+      (wait-parked p)              ; guarantee p is parked → [:data 42] is a Local payload
+      (send p [:data 42])
+      (send p :go)
+      (assert= 42 (receive ([:got v] v)))))
+
+  ;; The same shape at volume, across processes — verifies the value round-trips, not
+  ;; just that nothing hangs. Each worker's own [:data i] is skipped by its :go receive,
+  ;; then matched; it reports whether the value survived intact.
+  (test "many skipped-then-matched local messages, across processes, none corrupted"
+    (let (main (self))
+      (defn- reg-worker (parent i)
+        (send parent [:ready (self)])
+        (receive (:go nil))
+        (receive ([:data v] (send parent [:done (= v i)]))))
+      (defn- drive (i n)
+        (when (< i n)
+          (let (p (spawn (reg-worker main i)))
+            (receive ([:ready _] nil))
+            (wait-parked p)
+            (send p [:data i])
+            (send p :go))
+          (drive (+ i 1) n)))
+      (defn- collect (got n ok)
+        (if (= got n) ok (collect (+ got 1) n (receive ([:done b] (if b ok false))))))
+      (drive 0 40)
+      (assert= true (collect 0 40 true)))))
