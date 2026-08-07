@@ -196,8 +196,97 @@ pub fn wait_until_listening(port: u16) {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("server never started listening on port {port}");
+            panic!(
+                "server never started listening on port {port}{}",
+                stall_report(&format!("wait_until_listening({port}) gave up after 20 s"))
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A snapshot of what the box and every live `brood`/`nest` was doing at the instant a boot
+/// wait gave up — see **KI-38**, and note this only ever runs on the failure path.
+///
+/// Why it exists. The three boot-wait tests (this helper, plus `wait_until_up` in
+/// `child_cleanup.rs`) fail at 20–30 s, while a debug `brood` boot was measured at **151 ms
+/// idle and 4066 ms worst case over ~14 600 samples taken during full suite runs, with
+/// nothing above 5 s**. A 20 s failure is therefore not the slow tail of a loaded box; it is
+/// a different mode. This prints the fields that separate the candidates, because a sighting
+/// that arrives roughly once in eleven suite runs is too expensive to waste:
+///
+/// - **state `D`** — uninterruptible sleep, i.e. parked in a blocked syscall. That is the
+///   stall shape, and `wchan` then names where.
+/// - **state `R`** — actually running, so it really was contention and the deadline is the
+///   question after all.
+/// - **no `brood` at all** — the child died rather than hung, which is a third thing again
+///   and would be visible nowhere else, since these helpers only ever report a timeout.
+///
+/// Modelled on what KI-28 did: it armed "print B's stderr on failure", and that is exactly
+/// what answered its open question when it recurred. Same move, one level down.
+#[cfg(target_os = "linux")]
+pub fn stall_report(what: &str) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    let _ = writeln!(s, "\n--- KI-38 stall report: {what} ---");
+    let _ = writeln!(
+        s,
+        "loadavg: {}",
+        std::fs::read_to_string("/proc/loadavg")
+            .unwrap_or_default()
+            .trim()
+    );
+    if let Ok(mi) = std::fs::read_to_string("/proc/meminfo") {
+        let grab = |k: &str| {
+            mi.lines()
+                .find(|l| l.starts_with(k))
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let _ = writeln!(s, "{} | {}", grab("MemAvailable"), grab("SwapFree"));
+    }
+    let _ = writeln!(s, "live brood/nest (pid state wchan cmd):");
+    let mut n = 0;
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for e in entries.flatten() {
+            let Some(pid) = e.file_name().to_str().and_then(|p| p.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) else {
+                continue;
+            };
+            let cmd = cmdline.replace('\0', " ");
+            if !(cmd.contains("/brood") || cmd.contains("/nest")) {
+                continue;
+            }
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            // Split after comm's ')': comm itself can contain spaces, so field indexing
+            // before it is unreliable — the same reason `alive()` in child_cleanup.rs does
+            // this. State is the first field after.
+            let rest = stat
+                .rsplit_once(')')
+                .map(|(_, r)| r)
+                .unwrap_or("")
+                .to_string();
+            let state = rest.split_whitespace().next().unwrap_or("?");
+            let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan"))
+                .unwrap_or_else(|_| "-".into());
+            let _ = writeln!(s, "  {pid} {state} {} {}", wchan.trim(), cmd.trim());
+            n += 1;
+            if n >= 40 {
+                let _ = writeln!(s, "  … truncated at 40");
+                break;
+            }
+        }
+    }
+    if n == 0 {
+        let _ = writeln!(s, "  (none — the child is gone, so this was not a stall)");
+    }
+    s
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn stall_report(_what: &str) -> String {
+    String::new()
 }

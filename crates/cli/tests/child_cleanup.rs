@@ -70,8 +70,11 @@ fn wait_until_up(marker: &std::path::Path) {
     while !marker.exists() {
         assert!(
             Instant::now() < deadline,
-            "child never wrote its marker at {}",
-            marker.display()
+            "child never wrote its marker at {}{}",
+            marker.display(),
+            // KI-38: this fires at 30 s against a boot measured at 151 ms idle / 4 s worst
+            // case under a full suite, so the report says which mode it was.
+            stall_report("wait_until_up gave up after 30 s")
         );
         std::thread::sleep(Duration::from_millis(50));
     }

@@ -546,6 +546,13 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
   suite with it (`TRY 1 TERM [808 s] brood_suite_passes` — children reaped with the parent). The
   three kernel OOM kills earlier that day (26.5–26.8 GB, `brood`/`nest`) were a *different* cause,
   the quadratic pre-flight since fixed in `03efa15a`.
+- **Any ad-hoc tool that spawns `brood` children leaks them when *it* is killed — that is KI-29,
+  and you will re-create it.** A sampler loop killed with `kill $PID` mid-iteration orphans the
+  child it had just spawned, and a `(park)` program never exits: seven orphans accumulated on
+  2026-08-07, one per time the loop was stopped, and were found only because an unrelated
+  diagnostic listed live `brood` processes. The test harness solves this with
+  `support::dies_with_parent` (`PR_SET_PDEATHSIG`); scratch tooling has nothing, so check
+  `pgrep -af '/tmp/brood-'` after any session that spawned children in a loop.
 - **`brood`/`nest` panics land in `.brood_crash_dump` in the cwd, but a session crash does not.**
   If work vanishes with the session, the recoverable trail is: the scratchpad under
   `/tmp/claude-*/…/scratchpad/`, `~/.claude/history.jsonl`, and `journalctl -k | grep -i oom`
