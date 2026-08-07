@@ -4,6 +4,19 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.6 — 2026-08-07
+
+- **`receive` timeouts run under WebAssembly.** `(receive … (after ms expr))` used the OS
+  timer thread, which wasm has none of. The cooperative pump now fires the earliest pending
+  deadline when nothing else is runnable (logical time — real delays aren't honoured, which
+  is fine for a playground); messages still win over a timeout, since the pump drains the run
+  queues first. Behind `cfg(target_arch = "wasm32")`; the native timer thread is unchanged.
+- **`doc-catalog` recategorisation.** Reflection predicates (`bound?`, `dynamic?`, `private?`,
+  `satisfies?`) → *Modules and reflection*; the ETS-style shared store (`table-*`) →
+  *Processes and concurrency* (it's a concurrency primitive, not an immutable map);
+  record/protocol multimethod seams (`num-add`, `ord-compare`, `to-str`, `to-seq`, `-conj`,
+  …) → *Modules and reflection*; tty tests (`stdin-tty?`, `stdout-tty?`) → *System*.
+
 ## v0.3.5 — 2026-08-07
 
 - **Green processes run under WebAssembly.** `spawn`/`send`/`receive` used to trap in the

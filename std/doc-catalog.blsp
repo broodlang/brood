@@ -39,7 +39,7 @@
    "->>" :control
    "->decimal" :convert
    "->float" :convert
-   "-conj" :collections
+   "-conj" :meta
    "/" :math
    "<" :math
    "<=" :math
@@ -91,7 +91,7 @@
    "bits->float" :convert
    "blank?" :predicates
    "bool?" :predicates
-   "bound?" :predicates
+   "bound?" :meta
    "brood-version" :meta
    "build-id" :meta
    "builtin-modules" :meta
@@ -142,7 +142,7 @@
    "comp" :functions
    "comp-compose" :functions
    "compare" :math
-   "compare-to" :math
+   "compare-to" :meta
    "complement" :functions
    "cond" :control
    "cond->" :control
@@ -229,7 +229,7 @@
    "drop" :collections
    "drop-last" :collections
    "drop-while" :collections
-   "dynamic?" :predicates
+   "dynamic?" :meta
    "empty?" :predicates
    "ends-with?" :predicates
    "enumerate" :collections
@@ -488,17 +488,17 @@
    "nth-bad-index" :collections
    "nth-list" :collections
    "nth-seq-or-fail" :collections
-   "num-add" :math
+   "num-add" :meta
    "num-div" :math
-   "num-mul" :math
-   "num-sub" :math
+   "num-mul" :meta
+   "num-sub" :meta
    "number->string" :strings
    "number?" :predicates
    "numerator" :math
    "odd?" :predicates
    "offload" :processes
    "or" :control
-   "ord-compare" :math
+   "ord-compare" :meta
    "pad-left" :strings
    "pad-right" :strings
    "pair?" :predicates
@@ -531,7 +531,7 @@
    "pr-str-bounded" :io
    "print" :io
    "println" :io
-   "private?" :predicates
+   "private?" :meta
    "proc-close" :system
    "proc-send" :system
    "proc-set-binary" :system
@@ -632,7 +632,7 @@
    "run-process" :system
    "runtime-collect" :meta
    "sample" :collections
-   "satisfies?" :predicates
+   "satisfies?" :meta
    "scan" :collections
    "scan-acc" :collections
    "scan-form-start" :meta
@@ -696,8 +696,8 @@
    "sqrt" :math
    "start-remote-spawn" :processes
    "starts-with?" :predicates
-   "stdin-tty?" :predicates
-   "stdout-tty?" :predicates
+   "stdin-tty?" :system
+   "stdout-tty?" :system
    "steal-count" :meta
    "str" :strings
    "string->codepoints" :strings
@@ -725,14 +725,14 @@
    "symbol->string" :strings
    "symbol?" :predicates
    "system-monitor" :meta
-   "table" :maps
+   "table" :processes
    "table-count" :maps
-   "table-delete" :maps
+   "table-delete" :processes
    "table-drop" :maps
-   "table-get" :maps
-   "table-has?" :predicates
+   "table-get" :processes
+   "table-has?" :processes
    "table-incr" :maps
-   "table-put" :maps
+   "table-put" :processes
    "table-snapshot" :maps
    "table?" :predicates
    "take" :collections
@@ -767,8 +767,8 @@
    "tls-request" :system
    "tls-self-signed" :system
    "to-fixed" :strings
-   "to-seq" :collections
-   "to-str" :strings
+   "to-seq" :meta
+   "to-str" :meta
    "transduce" :collections
    "trap-exit" :processes
    "tree-sitter-forget" :meta
