@@ -147,11 +147,17 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 //
 // What this does NOT fix, deliberately recorded because it looks like it should: the
 // buffer-command path (`sexp/forward` and friends) calls `(buffer-text buf)`, which is
-// `rope->string` — a FRESH string per motion, so the table can never hit there. Those
-// motions are O(n) in the stringify before any scanning happens; making them cheap needs
-// rope-native motion, which is a different piece of work. The shapes this does fix are
-// the ones that hold one text value across many queries: the sweep row, `nest check`-style
-// tooling, and an LSP/eldoc pass over an unchanged document.
+// `rope->string` — a FRESH string value per motion, so this table (and the char↔byte
+// index) can never hit there. The residual cost is that MISS, not the copy: measured
+// 2026-08-07, the `rope->string` copy is ~14% of a buffer-path motion, while the table
+// miss makes `scan-form-start-2` re-scan O(pos) from the top every keystroke — so a
+// buffer-path motion stays O(buffer) even though `narrow`'s forward window scan is now
+// native (`scan-form-end`) and the held-text path is flat. Making the buffer path flat
+// needs the cache to survive across motions — rope-native scanning, or a GC-safe
+// `rope->string` memo so an unchanged rope yields the same string value — a separate
+// piece of work. The shapes this DOES fix are the ones that hold one text value across
+// many queries: the sweep row, `nest check`-style tooling, and an LSP/eldoc pass over an
+// unchanged document.
 
 /// Bytes between safepoints. A 1 MB source gets ~256 of them (~5 KB of table), and a
 /// query's residual scan is bounded by one stride rather than by `pos`.
@@ -327,6 +333,101 @@ pub(super) fn scan_form_start_2(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     };
     let items = vec![Value::int(prev as i64), Value::int(best as i64)];
     Ok(heap.alloc_vector(items))
+}
+
+/// Forward from byte offset `start_byte` (whose char index is `start_ch`) in `s`,
+/// skipping string and `;`-comment content and tracking bracket depth. Returns the char
+/// offset just after `nforms` top-level (depth-returns-to-0) forms have completed, or the
+/// char length of `s` if it ends first. A depth-0 open bracket begins a form; the close
+/// that returns depth to 0 completes it. Every character this cares about (`"`, `\`, `;`,
+/// `\n`, the brackets) is ASCII, so the pass matches bytes and carries the char index
+/// alongside — the same technique as [`form_scan`].
+///
+/// This is the byte-native form of `tool/sexp`'s interpreted `sexp-scan`: same lexical
+/// rules as `scan-tokens`/`scan-form-start` (`"` opens a string in which `\` escapes the
+/// next char and which runs to the end if unterminated; `;` runs to end-of-line), but one
+/// native pass over the ~3-form window instead of an O(window) `char-at` loop in Brood,
+/// which was ~85% of every structural motion.
+fn scan_form_end_bytes(s: &str, start_byte: usize, start_ch: usize, nforms: i64) -> usize {
+    let b = s.as_bytes();
+    let len = b.len();
+    let mut byte = start_byte.min(len);
+    let mut ch = start_ch;
+    let mut depth: i64 = 0;
+    let mut left = nforms;
+    macro_rules! step {
+        () => {{
+            byte += utf8_width(b[byte]) as usize;
+            ch += 1;
+        }};
+    }
+    while byte < len {
+        if depth == 0 && left <= 0 {
+            break;
+        }
+        match b[byte] {
+            b'"' => {
+                step!(); // past the opening quote
+                while byte < len {
+                    match b[byte] {
+                        b'\\' => {
+                            step!();
+                            if byte < len {
+                                step!();
+                            }
+                        }
+                        b'"' => {
+                            step!();
+                            break;
+                        }
+                        _ => step!(),
+                    }
+                }
+            }
+            b';' => {
+                while byte < len && b[byte] != b'\n' {
+                    step!();
+                }
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                step!();
+            }
+            b')' | b']' | b'}' => {
+                depth = (depth - 1).max(0);
+                if depth == 0 {
+                    left -= 1;
+                }
+                step!();
+            }
+            _ => step!(),
+        }
+    }
+    ch
+}
+
+/// `(scan-form-end s from n-forms)` — the char offset just after `n-forms` top-level forms
+/// starting at char offset `from`, skipping strings/comments and tracking bracket depth, or
+/// `(string-length s)` if the text ends first. The forward window-end companion to
+/// `scan-form-start`: `tool/sexp`'s `narrow` uses the pair to bound structural motion to the
+/// neighbourhood of point (previous, enclosing, next form) in one native pass, where it used
+/// an interpreted `char-at` loop — the dominant cost of every keystroke-driven motion.
+pub(super) fn scan_form_end(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let from = expect_int(heap, "scan-form-end", arg(args, 1))?.max(0) as usize;
+    let nforms = expect_int(heap, "scan-form-end", arg(args, 2))?;
+    let h: &Heap = heap;
+    let v = arg(args, 0);
+    let s = expect_string_ref(h, "scan-form-end", v)?;
+    // `from` is a char index; convert to a byte offset in O(1)+bounded via the string's
+    // ADR-213 char↔byte index (a fresh `Vec<char>` walk would reintroduce the O(pos) cost
+    // this primitive exists to remove). A non-`Str` value can't reach here — the ref check
+    // already errored — but fall back to a linear conversion to keep the match total.
+    let start_byte = match v {
+        Value::Str(id) => h.str_char_to_byte(id, from),
+        _ => s.char_indices().nth(from).map_or(s.len(), |(b, _)| b),
+    };
+    let end = scan_form_end_bytes(&s, start_byte, from, nforms);
+    Ok(Value::int(end as i64))
 }
 
 pub(super) fn scan_form_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

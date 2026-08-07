@@ -92,42 +92,10 @@ fine for position queries, but don't feed the returned spans to `eval` unchecked
 ;; (`highlight/safe-restart` is the same idea) — found by the native `scan-form-start`:
 ;; the awareness needs a forward lexical pass from the top (a backward char-scan can't know
 ;; whether a `(` sits inside an unterminated string), and interpreted that pass made every
-;; structural query O(pos) at char-recursion cost.
-
-(defn- sexp-open? (c) (or (= c "(") (= c "[") (= c "{")))
-(defn- sexp-close? (c) (or (= c ")") (= c "]") (= c "}")))
-
-(defn- sexp-str-end
-  (text i n)
-  "Index just past the closing `\"` of a string whose first content char is at `i`
-(escapes via `\\` skipped), or `n` if it runs to the end."
-  (cond
-    (>= i n) n
-    (= (char-at text i) "\\") (sexp-str-end text (+ i 2) n)
-    (= (char-at text i) "\"") (inc i)
-    else (sexp-str-end text (inc i) n)))
-
-(defn- sexp-eol
-  (text i n)
-  "Index just past the next newline at or after `i`, or `n` — skips a `;` comment tail."
-  (cond (>= i n) n (= (char-at text i) "\n") (inc i) else (sexp-eol text (inc i) n)))
-
-(defn- sexp-scan
-  (text i n depth left)
-  "Forward from `i`, skipping strings/comments and tracking bracket `depth`; returns the
-offset once `left` top-level forms have completed (depth returns to 0 after an open) or
-`n`. Finds a window end that covers the enclosing form and the one after it."
-  (if (or (>= i n) (and (= depth 0) (<= left 0)))
-    i
-    (let (c (char-at text i))
-      (cond
-        (= c "\"") (sexp-scan text (sexp-str-end text (inc i) n) n depth left)
-        (= c ";") (sexp-scan text (sexp-eol text (inc i) n) n depth left)
-        (sexp-open? c) (sexp-scan text (inc i) n (inc depth) left)
-        (sexp-close? c)
-          (let (d (max 0 (dec depth)))
-            (sexp-scan text (inc i) n d (if (= d 0) (dec left) left)))
-        else (sexp-scan text (inc i) n depth left)))))
+;; structural query O(pos) at char-recursion cost. The window END — the forward scan over
+;; the ~3-form window, skipping strings/comments and tracking bracket depth — is likewise
+;; the native `scan-form-end`; it was an interpreted `char-at` loop and measured ~85% of
+;; every keystroke-driven motion.
 
 (defn narrow (text point)
   "`[base sub]` — `text` sliced to the top-level forms around `point` (the previous,
@@ -141,7 +109,10 @@ cost of ~three forms, not the whole buffer."
         ;; calls, and the second re-walked the prefix the first had already covered — the
         ;; dominant cost of every structural motion, paid twice (2026-08-04).
         [base start] (scan-form-start-2 text (min p (max 0 (dec n))))
-        end (sexp-scan text base n 0 3))
+        ;; The window END was an interpreted `sexp-scan` char-at loop over the ~3-form
+        ;; window — ~85% of every structural motion. `scan-form-end` is the same lexical
+        ;; scan (strings/comments skipped, bracket depth tracked) in one native byte pass.
+        end (scan-form-end text base 3))
     [base (substring text base end)]))
 
 ;; ---- pure navigation: (text point) -> point ---------------------------------

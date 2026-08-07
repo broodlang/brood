@@ -296,13 +296,14 @@
   (k acc)
   (if (= k 0) (cons utf8-src-lead acc) (sweep-src (- k 1) (cons sweep-src-line acc))))
 ;; A SEQUENCE of structural motions across one buffer — the editor's repeated
-;; `forward-sexp`, not one motion. Each motion calls `sexp/narrow`, which calls the native
-;; `scan-form-start` TWICE, and that is a forward lexical pass from offset 0 by design (a
-;; backward scan cannot know whether a bracket sits inside a string). So per motion is
-;; O(point) and the sequence is O(n^2). Confirmed 2026-08-04 on three rising points:
-;; ASCII 5.68x then 9.40x; with ONE non-ASCII char 8.84x then 12.30x. Not fixed — the
-;; asymptote needs cached lexer state or a bounded safe-restart, which the pure
-;; `(text point) -> point` API forecloses. See docs/handoff.md.
+;; `forward-sexp`, not one motion — over ONE held text value (the tooling/LSP shape; the
+;; editor's fresh-string-per-motion buffer path is a separate story, see the header).
+;; Each motion calls `sexp/narrow`: `scan-form-start-2` for the window START (a backward
+;; form-start scan, O(point) by design but resumed from a safepoint table cached on the
+;; string value, so linear over one held text — ADR-214) and `scan-form-end` for the
+;; window END (the forward ~3-form scan, one native byte pass since 2026-08-07; it was an
+;; interpreted `char-at` loop measuring ~85% of every motion). Linear; this row's job is
+;; to keep it that way. Measure the SEQUENCE — one motion looks fine at any buffer size.
 (defn sexp-motions (k)
   (let (text (join "" (sweep-src k nil)))
     (fold (fn (p _) (let (np (point-forward text p)) (if (or (nil? np) (= np p)) p np)))

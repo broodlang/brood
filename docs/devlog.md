@@ -17474,3 +17474,42 @@ absent from it was created by this load — so one map now serves both. Interlea
 +3.0% with every post sample above every pre sample (a real difference, small as it is) → +0.3%
 with the samples fully interleaved. Worth the extra run: at three samples the first result was
 already outside the drift pattern, which is what made it worth chasing rather than dismissing.
+
+## 2026-08-07 — `tool/sexp`'s forward window scan goes native (`scan-form-end`), the last interpreted loop in a keystroke motion
+
+ADR-214 made `sexp motions` linear by resuming the form-*start* scan from a cached safepoint
+table. That left the window *end* — `narrow`'s forward scan over the ~3-form neighbourhood of
+point — as an interpreted `sexp-scan`: a `char-at` recursion in Brood tracking bracket depth
+and skipping strings/comments. Measured **~85% of every structural motion** once the start
+scan was native. This session moves it to `scan-form-end`, one native byte pass with the same
+lexical rules as `scan-tokens`/`scan-form-start` (`"` opens a string in which `\` escapes and
+which runs to end-of-text unterminated; `;` runs to end-of-line; depth-0 open begins a form,
+the close returning depth to 0 completes it). `from` is a char index converted to a byte
+offset in O(1)-bounded via the ADR-213 char↔byte index, so the primitive never reintroduces
+the O(pos) `Vec<char>` walk it exists to remove; the scan matches ASCII bytes and carries the
+char index alongside, the `form_scan` technique. `narrow` now calls the pair
+(`scan-form-start-2` + `scan-form-end`) and the five interpreted helpers
+(`sexp-open?`/`sexp-close?`/`sexp-str-end`/`sexp-eol`/`sexp-scan`) are deleted.
+
+Not a new decision — the successor mechanism ADR-214 already named, so no ADR. The one seam it
+does *not* close is recorded on the primitive and in `syntax_scan.rs`: the editor's own
+`sexp/forward` path calls `(buffer-text buf)` = `rope->string`, a fresh string value per
+motion, so neither this scan's inputs nor the ADR-214 safepoint table can hit there. Measured,
+the `rope->string` copy is only ~14% of a buffer-path motion; the dominant residual is the
+*table miss* making `scan-form-start-2` re-scan O(pos) every keystroke. So the buffer path
+stays O(buffer) even with both scans native — closing it needs rope-native scanning or a
+GC-safe `rope->string` memo (an unchanged rope yielding the same string value), a separate
+piece of work. The shape this fixes is the tooling/LSP one: one held text value, many queries.
+
+**Verification.** `tests/sexp_test.blsp` gains a `describe` block, 6 cases pinning the lexical
+rules directly (top-level form counting, brackets inert inside strings and `;` comments, an
+escaped quote not closing early, an unterminated string running to end, char offsets correct
+through multi-byte text) — 36/36 green. Release sweep, `scan-form-end` in place: `sexp motions`
+ratio **4.24 (ASCII) / 4.23 (UTF-8)** at base 3200 — linear and encoding-independent, matching
+ADR-214's ~3.9. Absolutes 245 → 1040 ms vs 242 → 1024 ms across regimes.
+
+**Also cleared while here:** a debug-build sweep read `string inc-scan` at ratio 8.46, which
+looked like an ADR-213 regression. It is not — a debug build (unoptimised + per-deref epoch
+checks) inflates the small-N fixed cost nonlinearly. Release: **4.0 (ASCII) / 3.5 (UTF-8)**,
+linear in both regimes exactly as its header claims. Do not read a scale ratio off a debug
+binary; the header's numbers are all release for this reason.
