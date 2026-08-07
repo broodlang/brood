@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
 | KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07) |
 | KI-35 | `*method-from*` was never imaged, so an imaged start stopped reporting cross-module `defmethod` conflicts | ✅ **fixed** 2026-08-07 |
 | KI-34 | the startup image was written on every cold start and **never read from** — two defects, either sufficient | ✅ **fixed** 2026-08-07 |
@@ -56,8 +57,81 @@ ADRs / topic docs.
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
 **No open issues; two watch items (KI-28, KI-36 — both single, unreproducible dist failures seen under load).** No open bug in the language, runtime or toolchain
-itself. Every KI above is fixed, incidentally fixed, or a non-reproducing transient — each kept as
+itself. (KI-37 was open for a few hours on 2026-08-07 and is fixed.) Every KI above is fixed, incidentally fixed, or a non-reproducing transient — each kept as
 a record with its regression test, so a recurrence is recognizable.
+
+---
+
+## KI-37 — an imaged start never followed a module's require edges · **fixed 2026-08-07**
+
+**Found 2026-08-07** while scoping `nest run`'s cold pre-flight, and confirmed within the hour
+by an independent sighting on a real project: `hatch-demo` (24 files plus a `_deps/hatch`
+dependency) ran fine cold and died on the **second** run with
+`unbound symbol: hatch-demo/db/start`.
+
+**The defect.** Materialising an image section **defines** a module's bindings; it does not
+**evaluate** its source. So the `(defmodule shapes (:use geom))` header — whose expansion is
+what runs `(require 'geom)` — never runs. `require-force`'s image branch restored the section
+and `provide`d the feature, and stopped there. An imaged start therefore built a heap with
+holes and the program died at the first call across a missing edge. Third defect in the same
+loader seam after KI-34's two, and the same family as KI-35: the image carried a module's
+*bindings* and silently dropped a piece of its *behaviour*.
+
+**It looked like it worked, and here is why — the part worth keeping.** `nest run`'s advisory
+pre-flight `check-file`s each source file, and checking a file incidentally `require`s its
+header's deps. That propped up **exactly one level** of the graph, for free, invisibly. So:
+
+- a project whose entry `:use`s its modules directly worked, and every fixture in
+  `crates/nest/tests/startup_image.rs` was exactly that shape (`app (:use lib)`,
+  `app (:use shapes)`, `app (:use libdep/util)`) — five tests, all blind to it;
+- a two-level chain died on the second hop;
+- **the correctness of `nest run` depended on an advisory pass**, and `BROOD_NO_CHECK=1` did
+  not disable it (that flag suppresses warnings, not the checker's requires);
+- `nest test` / `nest check` / the LSP were never affected — they call
+  `project-materialize-all`, which requires every section, so every edge is satisfied trivially.
+
+Isolating it needed the pre-flight removed entirely. With it out, a warm `nest run` on
+`main → shapes → geom` fails at the **first** hop: `FEATURES: (demo/main)`,
+`unbound symbol: demo/shapes/area`.
+
+**Fix: record the edges during the load and replay them on materialisation.** A new root
+registry `*require-edges*` maps feature → the features its body required.
+`require-record-edge!` runs at the **top** of `require-one`, before its already-loaded
+short-circuit — the edge is a property of the requiring module, not of who won the race to
+load the target — and the image branch does
+`(fold (fn (_ d) (require-one d)) nil (get *require-edges* key))` after `provide`.
+
+Two details that cost a build each:
+
+1. **The parent is `(current-ns)`, not a dynamic var set by `require-force`.** The first
+   version bound `*require-parent*` around the load in `require-force`, which records edges
+   for std modules and **none at all for the project's own sources** — those are `load`ed
+   directly by the bulk loader, never through `require-force`. `current-ns` is the module
+   whose *file* is being loaded, is set for every top-level form in it, and reads **nil at
+   runtime**, so a runtime `require` is correctly not recorded as a load-time edge.
+   `*require-parent*` survives only as the fallback for a file with no `(defmodule …)`.
+2. **Recorded, not re-derived.** Re-parsing headers at materialisation time
+   (`%module-direct-requires`) would work and costs ~2 ms/file — ~34 s on a 16 300-module
+   project, which is the whole cost ADR-218 exists to remove. Recording is one CAS per
+   *distinct* edge (a `member?` read is the lock-free fast path for repeats), and being a
+   registry it rides into the always-materialised root section automatically via KI-35's
+   derived set — so no image-format version knows about it.
+
+A spurious edge costs one extra materialisation and nothing else; the error direction is
+one-sided on purpose.
+
+**Guard:** `crates/nest/tests/startup_image.rs::an_imaged_start_follows_transitive_require_edges`.
+**The chain is inside a dependency deliberately** — a dep's modules resolve outside
+`:source-paths`, so the pre-flight never checks them and cannot prop the test up the way it
+propped up the bug. **Verified by sabotage**: with the replay removed it fails with
+`unbound symbol: libdep/helper/triple` and the other five image tests still pass, which is
+the measurement of how blind they were.
+
+A companion, `an_imaged_start_terminates_on_a_require_cycle`, covers an imaged require cycle.
+**It is a behaviour test, not a gate on the `provide`/replay ordering** — reordering those two
+lines was tried and it still passed, because `require-one`'s `*features-loading*` marker is
+what actually breaks the cycle. Recorded so a later reader does not credit it with more than
+it does.
 
 ---
 

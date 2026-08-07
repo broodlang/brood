@@ -4,6 +4,38 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+Three gaps found by reviewing [hatch](https://github.com/broodlang/hatch), the
+Brood web framework, against 0.3.8 — each a feature that had not yet met its first
+real consumer:
+
+- **A `table` global no longer locks a project out of the startup image.**
+  `%image-write` refused any value with no portable form, and a table handle is
+  per-runtime, so one `(def *cache* (table))` forfeited the ADR-218 image for the
+  *whole* project — which then reloaded from source on every start. Since `table`
+  is the language's only sanctioned mutable structure (ADR-026/107), the blessed
+  way to hold shared state was also the way to lose imaged startup. A table is now
+  imaged **by value** (its snapshot) and rebuilt as a fresh table on restore, so
+  load-time contents survive. Confined to a top-level binding, as `Value::Macro`
+  already is; two globals aliasing one table raise, naming both. Image format
+  bumped to **v4** (a v3 reader would bind the global to the snapshot map).
+- **`tcp-read-until` / `tcp-read-n` take limits**, so a hardened server can use
+  them: `:timeout-ms` (an **idle** wait, reset per chunk) and `:max-bytes` (a cap
+  on the frame), both off by default. New tagged returns `[:timeout acc]` /
+  `[:too-large acc]` join `[:closed acc]`, so a caller can distinguish 408 from 413
+  from "peer hung up". `tcp-read-n` checks the cap against the *declared* length
+  before reading, so an absurd `Content-Length` is refused rather than buffered.
+  Without these the combinators could not replace a server's own read loop —
+  hatch declined to adopt them for exactly that reason.
+- **`nest format` only formats what the project owns.** It walked every `.blsp`
+  under the root minus an ignore list, which reached `_deps/<pkg>/**` — a fetched
+  dependency's source, which the author cannot edit and `nest fetch` regenerates.
+  It now walks a **whitelist**: `:source-paths` + `:test-paths` + a new
+  **`:format-paths`** manifest key, plus the root's own top-level `.blsp`. A tree
+  of authored-but-not-built Brood must now be declared (this repo lists `std`,
+  `examples`, `scripts`, `stress`, `breakage`).
+
 ## v0.3.8 — 2026-08-07
 
 Review fixes for the doc/wasm batch:

@@ -106,6 +106,12 @@ the `nest new` scaffolder."
 (def *project-format-plugins* nil)
 ; the manifest's :format-plugins vector ([dep-name …]) — deps whose own
 ; :format-headers this project pulls in (so a framework ships its macro shapes)
+(defdyn *project-format-paths* nil)
+; the manifest's :format-paths (a vector of directories) — EXTRA trees `nest format`
+; owns, beyond :source-paths and :test-paths. nil = just those two. `nest format` walks
+; a whitelist, so a directory holding .blsp the project authors but does not build from
+; (`std/`, `examples/`, `scripts/`) has to be named here to be formatted. Ambient so
+; `std/format.blsp` reads it without importing the manifest.
 (defdyn *project-format-width* nil)
 ; the manifest's :format-width (an integer column budget for `nest format`, e.g. 80);
 ; nil = use the formatter's built-in default. Ambient so `std/format.blsp` reads it
@@ -330,7 +336,7 @@ than being fetched into `_deps/<name>/`."
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'project-apply …)`) so α qualifies `project-apply`
   ;; to `project/project-apply` at this macro's definition (ADR-065 §7).
   `(project-apply (quote ~opts)))
@@ -345,7 +351,10 @@ than being fetched into `_deps/<name>/`."
   (key value)
   ;; `example` keeps the fix-it accurate per key — suggesting ["src"] for
   ;; :test-paths would be actively misleading.
-  (let (example (if (= key :test-paths) "[\"tests\"]" "[\"src\"]"))
+  (let (example (cond
+                  (= key :test-paths) "[\"tests\"]"
+                  (= key :format-paths) "[\"examples\"]"
+                  else "[\"src\"]"))
     (cond
       (or (vector? value) (pair? value))
         (if (fold (fn (ok p) (and ok (string? p))) true value)
@@ -415,9 +424,11 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (def *project-enhances* (project-parse-enhances (plist-get opts :enhances)))
   (let (src (plist-get opts :source-paths)
         tst (plist-get opts :test-paths)
+        fmt (plist-get opts :format-paths)
         m (plist-get opts :main))
     (when src (def *project-source-paths* (project-check-paths :source-paths src)))
     (when tst (def *project-test-paths* (project-check-paths :test-paths tst)))
+    (when fmt (def *project-format-paths* (project-check-paths :format-paths fmt)))
     (when m (def *project-main* (project-parse-main m))))
   (def *project-dependencies* (project-parse-deps (plist-get opts :dependencies)))
   ;; `:dev-dependencies` (ADR-172) — parsed exactly like `:dependencies`, each tagged
@@ -531,7 +542,15 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (fold (fn (_ dir)
             (fold (fn (_ f)
                     (when (project-should-load? (project-file-feature f) skip-all? before)
-                      (load f)))
+                      ;; Attribute this file's load-time requires to the ROOT section (KI-37).
+                      ;; A file WITH a `(defmodule …)` header sets `current-ns`, which wins and
+                      ;; keys its edges by its own module. A file WITHOUT one establishes no
+                      ;; namespace, so its defs are root-level globals that ride the
+                      ;; always-materialised `""` section — and its requires belong there too,
+                      ;; or an imaged start restores its functions and never loads what they
+                      ;; call. `project-install-image` replays the `""` edges.
+                      (binding (*require-parent* "")
+                        (load f))))
               nil
               (project-collect-sources dir)))
       nil
@@ -735,7 +754,13 @@ were loaded. Returns the entry count."
           (set-image-source! path (dissoc idx ""))
           (let (root-sec (get idx ""))
             (when root-sec
-              (%image-load-section path (first root-sec) (second root-sec))))
+              (%image-load-section path (first root-sec) (second root-sec))
+              ;; The root section carries the registries, so `*require-edges*` only exists
+              ;; after that load — and it is also where a headerless file's defs live, so its
+              ;; own load-time requires are recorded under `""` and have to be replayed here
+              ;; (KI-37). A module's edges are replayed by `require` when its section
+              ;; materialises; the root section has no `require` to hang them on.
+              (fold (fn (_ d) (require-one d)) nil (or (get *require-edges* "") nil))))
           (count idx)))))
 
 (defn project-materialize-all ()
@@ -2087,32 +2112,68 @@ and the pre-flight would 'check' the manifest and warn on it."
         p (require-find (str rel ".blsp") *load-path*))
     (when (and p (any? (fn (d) (starts-with? p d)) srcdirs)) p)))
 
-(defn check-project-run-closure ()
-  "Advisory pre-flight over the modules `nest run` actually loaded — the entry point's
-require-closure, read straight off `*features*`. Returns the warning count. A module the
-program never reaches is `nest check`/`nest test`'s business."
+;; The project source files reachable from module `entry`, and the module names the walk
+;; passed through. Walks OUTWARD from the entry through module headers, so it costs one
+;; `%module-direct-requires` parse per module *in the closure* — never one per file in the
+;; project, which is what `project-require-closures` costs and why the pre-flight cannot
+;; use it (parsing 16 300 headers to check eleven files measured 34 s of a 35 s run).
+;;
+;; A name that resolves outside `srcdirs` — a std module, a dependency, an unresolvable
+;; name — terminates the walk rather than failing it: its contents are its own project's
+;; business, and it cannot require one of ours back. It stays in the returned name set,
+;; because that set is the KI-17 reachability closure and a reference to it is legitimate.
+;;
+;; Why this is not `(keys *features*)`, which it replaced. On a WARM start the loaded
+;; features really are the entry's closure and reading them off is exact. On a COLD start
+;; `project-load-sources-cached` has just loaded every module to build the startup image,
+;; so `*features*` is the whole project — and the pre-flight silently checked all of it
+;; (~3.7 ms/file, uncached: ~50 s of an 85 s cold run on 16 302 modules). The closure has
+;; to be DERIVED from the requires graph, or the same command checks a different file set
+;; depending on whether an image happened to be fresh, which is a cache leaking into
+;; advisory output.
+(defn- project-entry-closure
+  (entry srcdirs)
+  (letrec (go (fn (frontier seen files)
+                (if (empty? frontier)
+                  ;; sorted, so a cold and a warm run print in the same order too
+                  [(sort (vec files)) (vec seen)]
+                  (let (m (name (first frontier)))
+                    (if (contains? seen m)
+                      (go (rest frontier) seen files)
+                      (let (seen2 (conj seen m)
+                            p (project-feature-file m srcdirs))
+                        (if (nil? p)
+                          (go (rest frontier) seen2 files)
+                          (let (info (try (%module-direct-requires p)
+                                       (catch e {:module nil :requires []})))
+                            (go (append (rest frontier) (or (map-get info :requires nil) []))
+                              seen2
+                              (conj files p))))))))))
+    (go [(name entry)] #{} #{})))
+
+(defn check-project-run-closure (entry)
+  "Advisory pre-flight over the entry point's require-closure — the modules the program is
+about to run actually reaches, walked from module `entry` through the require graph.
+Returns the warning count. A module the program never reaches is `nest check`/`nest test`'s
+business."
   (let (root (project-find-root (cwd)))
     (when (nil? root)
       (error "check-project-run-closure: not in a Brood project (no project.blsp found from "
         (cwd) ")"))
-    (let (srcdirs (project-abs-paths root *project-source-paths*)
-          feats (keys *features*)
-          want (into [] (keep (fn (f) (project-feature-file f srcdirs)) feats))
+    (let ([want reach] (project-entry-closure entry
+                         (project-abs-paths root *project-source-paths*))
           extracts (project-gather-extracts want)
           source-set (fold (fn (m p) (map-assoc m p true)) {} want)
-          ;; The closure is handed in, not derived. `project-check-files` builds the
-          ;; KI-17 reachability graph from EVERY file in the project — sound for
-          ;; `nest check FILE`, but it parses 16 300 headers to check eleven files, which
-          ;; measured 34 s of a 35 s `nest run`. Here every loaded feature is by
-          ;; definition reachable (it is loaded), so the loaded set IS the closure.
-          ;; …and because it is the SAME closure for every file, it crosses to each check
-          ;; worker once per chunk rather than once per file (`project-check-files-shared`).
-          ;; Pairing it per file made a cold run's pre-flight quadratic in project size — a
-          ;; `spawn` deep-copies its captured chunk, so the feature list was copied ~100
-          ;; times per chunk. Measured on 16 302 modules: 24 GB of a 26.5 GB peak.
+          ;; `reach` is one closure for the whole set rather than one per file: every file
+          ;; in it is reachable from the entry, so the entry's closure is a superset of each
+          ;; member's own — sound in the permissive direction, and it crosses to each check
+          ;; worker once per CHUNK instead of once per file (`project-check-files-shared`).
+          ;; Pairing a closure per file made this quadratic in project size — a `spawn`
+          ;; deep-copies its captured chunk, so the list was copied ~100 times per chunk.
+          ;; Measured on 16 302 modules: 24 GB of a 26.5 GB peak.
           )
       (project-check-duplicate-defs extracts source-set)
-      (project-check-files-shared want feats))))
+      (project-check-files-shared want reach))))
 
 ;; (run-project-tests & opts) — find the project from the cwd, set it up, load
 ;; every <name>_test.blsp under its test paths (which only REGISTER tests via the
@@ -2495,10 +2556,13 @@ as unchanged (only when some were)."
           ;; verdicts are deliberately not cached, so whole-project checking is ~60-120 s
           ;; on a 16 300-file project — against a 143 ms image-backed load, i.e. 99.9% of
           ;; `nest run` was the advisory check. A module the program never reaches is
-          ;; `nest check`/`nest test`'s business. Warnings go to stderr so they don't
-          ;; pollute the entry point's own stdout; after `require` so cross-module names
-          ;; see the heap's globals (see `check-project`).
-          (check-project-run-closure)
+          ;; `nest check`/`nest test`'s business. The closure is derived from `modname`'s
+          ;; requires graph rather than read off `*features*`, so a COLD run — which has
+          ;; just loaded every module to build the image — checks the same files a warm
+          ;; one does. Warnings go to stderr so they don't pollute the entry point's own
+          ;; stdout; after `require` so cross-module names see the heap's globals (see
+          ;; `check-project`).
+          (check-project-run-closure modname)
           (let (f (eval target))
             (unless (fn? f)
               (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))

@@ -4490,6 +4490,34 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 (def *image-sections* {})
 (def *image-path* nil)
 
+;; feature name -> [feature name …] : the modules each module required WHILE ITS BODY
+;; LOADED — its `(:use …)` clauses and any top-level `(require …)`.
+;;
+;; Why the loader has to carry this. Materialising an imaged section DEFINES a module's
+;; bindings; it does not EVALUATE its source, so the `(defmodule shapes (:use geom))` header
+;; that would require `geom` never runs. Restoring a section and providing the feature
+;; therefore produced a heap with holes — `demo/shapes/area` restored, `demo/geom/square`
+;; never loaded — and the program died on the first call across the missing edge. The edges
+;; are the one part of a module's *behaviour*, as opposed to its bindings, that the image has
+;; to reproduce.
+;;
+;; Recorded here rather than re-derived from module headers because it is FREE: `require-one`
+;; already sees every edge as it happens, so this costs one CAS per edge, against ~2 ms per
+;; file to re-parse headers at materialisation time (~34 s on a 16 300-module project, which
+;; is the whole cost ADR-218 exists to remove). Being a registry, it is imaged into the
+;; always-materialised root section automatically (KI-35's derived set), so no image-format
+;; version knows about it.
+;;
+;; A spurious edge — a runtime `require` that happens to run while some other module loads,
+;; and is attributed to it by dynamic scope — costs one extra materialisation and nothing
+;; else. The error direction is one-sided on purpose.
+(def *require-edges* {})
+
+;; The feature whose body is currently being evaluated, or nil. `require-one` attributes
+;; each edge to it. Dynamic (not a parameter) because the edge is discovered arbitrarily
+;; deep inside `load`ing the parent's source, with no call path to thread it down.
+(defdyn *require-parent* nil)
+
 ;; The root setter for the pair above, and it exists for the same reason `set-load-path!`
 ;; does: these globals live in the ROOT namespace, so a `(def *image-sections* …)` written
 ;; inside a module defines `mod/*image-sections*` and `require-force` — root code — goes on
@@ -4799,10 +4827,50 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
     (file-exists? (path-join (first dirs) filename)) (path-join (first dirs) filename)
     else (require-find filename (rest dirs))))
 
+;; Record `key` as an edge from the module currently loading (see `*require-edges*`).
+;; Called at the TOP of `require-one`, BEFORE its already-loaded short-circuit: the edge
+;; exists whether or not this particular require is the one that does the loading, and a
+;; module whose dep happened to be loaded first by some other path would otherwise lose its
+;; edge and later materialise from an image with a hole where that dep should be.
+;;
+;; The `member?` read is a lock-free fast path — every repeat of an edge (the common case,
+;; since a widely-used module is `:use`d from everywhere) skips the CAS entirely; only a
+;; genuinely new edge pays for the atomic update. `swap-registry!` rather than a plain `def`
+;; because loads run concurrently and a read-modify-write over a whole map silently loses
+;; ~40% of its updates under contention (KI-22).
+(defn- require-record-edge!
+  (key)
+  ;; `current-ns` first: it is the module whose FILE is being loaded, which is the accurate
+  ;; parent for every require in that file — the `(:use …)` clauses `defmodule` expands and
+  ;; any bare top-level `(require …)` alike. It is also the only one that works for the
+  ;; project's own sources, which the bulk loader `load`s directly rather than through
+  ;; `require-force`, so `*require-parent*` is nil for all of them. It reads nil at RUNTIME
+  ;; (only a load sets it), which is exactly the requires that are not load-time edges.
+  ;; `*require-parent*` is the fallback for a file with no `(defmodule …)` header, which
+  ;; establishes no namespace but is still `require`able by its filename.
+  (let (ns (current-ns)
+        parent (if ns (name ns) *require-parent*))
+    (when (and parent
+            (not (= parent key))
+            (not (member? key (or (get *require-edges* parent) nil))))
+      (swap-registry! *require-edges*
+        (fn (m)
+          (let (cur (or (get m parent) nil))
+            (if (member? key cur) m (assoc m parent (cons key cur)))))))))
+
 ;; The raw load of feature `key`: evaluate its embedded source (a baked-in std
 ;; module) or the first <key>.blsp found on *load-path*, then record it. No
 ;; loading-bookkeeping — callers manage *features-loading*. Errors if not found.
 (defn- require-force
+  (key)
+  ;; Everything this load requires is an edge OUT of `key` — `require-one` reads the
+  ;; binding to attribute it. It wraps the image branch too, which merely re-records edges
+  ;; that are already there (the `member?` fast path makes that free).
+  (binding (*require-parent* key)
+    (require-force-in key)))
+
+;; `require-force`'s body, split out only so the dynamic binding above wraps every branch.
+(defn- require-force-in
   (key)
   (let (src (%builtin-module key))
     (cond
@@ -4842,7 +4910,21 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       (contains? *image-sections* key)
         (let (sec (get *image-sections* key))
           (%image-load-section *image-path* (first sec) (second sec))
-          (provide key))
+          ;; `provide` BEFORE following the edges, mirroring the source path (`defmodule`
+          ;; expands to `defmodule-provide` and only then to its `(:use …)` requires). A
+          ;; require CYCLE terminates either way — `require-one`'s `*features-loading*`
+          ;; marker already returns immediately for this process's own in-flight load, and
+          ;; reordering these two lines was measured not to break the cycle case — so this
+          ;; is agreement with the source path, not a load-bearing ordering.
+          (provide key)
+          ;; Materialising defines this module's bindings but evaluates nothing, so the
+          ;; requires its header would have run have to be replayed from the edges the
+          ;; original load recorded. Without this an imaged start built a heap with holes
+          ;; and the program died on the first call across a missing edge — and it looked
+          ;; like it worked, because `nest run`'s advisory pre-flight incidentally requires
+          ;; each checked file's header deps, which propped up exactly one level.
+          (fold (fn (_ d) (require-one d)) nil (or (get *require-edges* key) nil))
+          key)
       ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
       ;; manager mapped to a file. Load it under `foo`'s package context so its
       ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
@@ -4895,6 +4977,9 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 Safe under concurrency: never returns while another process is mid-load of `mod` —
 it waits for that load to finish (a half-evaluated module is never observable)."
   (let (key (name mod))
+    ;; Before every early return below: the edge is a property of the requiring module,
+    ;; not of who won the race to load the target.
+    (require-record-edge! key)
     (cond
       (contains? *features* key) key
       ;; OUR OWN in-flight load of `key` requiring it back (a :use cycle): proceed —

@@ -950,17 +950,31 @@ retired the `comment-on-own-line?` distinction this used to need."
     else (cons block (cons "\n" acc))))
 
 ;; ---- driving the project ----------------------------------------------------
-;; `nest format` walks every .blsp under the project ROOT — wider than `nest
-;; test`, which scans only the configured source + test paths. The intent is
-;; "format every Brood file the project owns", including baked-in stdlib
-;; sources (e.g. `std/`) and the manifest itself. `nest format --check` runs
-;; the same walk but emits a diff summary and raises if anything was off.
+;; `nest format` formats the trees the project OWNS, named as a whitelist:
+;; `:source-paths` + `:test-paths` + any extra `:format-paths`, plus the root's
+;; own top-level .blsp (the manifest). `nest format --check` runs the same walk
+;; but emits a diff summary and raises if anything was off.
+;;
+;; A whitelist, not "everything under the root minus an ignore list". The root
+;; also holds Brood source the project does NOT own — `_deps/<pkg>/**.blsp` is a
+;; fetched dependency, which `nest fetch` regenerates and the author cannot edit,
+;; so reformatting it is churn the next fetch discards, and counting it makes
+;; "N files considered" a number about somebody else's code. An ignore list has
+;; to grow an entry for each such directory as it is invented (`target`,
+;; `node_modules`, `_deps`, the next one); naming what we own is closed by
+;; construction. The cost is that a tree of authored-but-not-built .blsp — this
+;; repo's own `std/`, an `examples/` — must be listed in `:format-paths` to be
+;; formatted.
 
-;; Directory names skipped during the walk. `target/` is Cargo's build output
-;; (never authored), and dot-dirs (`.git`, `.claude`, …) are external state.
+;; Directory names skipped WITHIN a whitelisted tree. `target/` is Cargo's build
+;; output and `node_modules/` npm's, neither authored; dot-dirs (`.git`,
+;; `.claude`, …) are external state. `_deps/` is here as depth (the whitelist
+;; already excludes it) for a nested-project layout that vendors one inside a
+;; source path.
 (defn- format-ignored-dir?
   (name)
   (or (= name "target")
+    (= name "_deps")
     (= name "node_modules")
     (and (> (string-length name) 0) (= (substring name 0 1) "."))))
 
@@ -988,11 +1002,45 @@ retired the `comment-on-own-line?` distinction this used to need."
       (list-dir dir))
     nil))
 
+;; The root's OWN .blsp files, non-recursively — `project.blsp` and any top-level
+;; script. Non-recursive on purpose: descending is exactly what the whitelist is
+;; there to prevent, and this keeps the manifest formatted without naming it.
+;; `project.lock.blsp` is skipped by the `.lock.blsp` rule below, as before.
+(defn- format-root-files
+  (root)
+  (if (dir? root)
+    (fold (fn (acc entry)
+            (let (p (path-join root entry))
+              (cond
+                (dir? p) acc
+                (ends-with? entry ".lock.blsp") acc
+                (ends-with? entry ".blsp") (cons p acc)
+                else acc)))
+      nil
+      (list-dir root))
+    nil))
+
+;; The directories this project owns: its source and test paths, plus whatever
+;; `:format-paths` adds. A path that does not exist contributes nothing.
+;; The path vars are `defdyn`, so they are ROOT names (ADR-151) — read bare, not
+;; as `project/…`, even though `project` is where they are declared.
+(defn- format-roots
+  (root)
+  (require 'project)
+  (append (project/project-abs-paths root *project-source-paths*)
+    (project/project-abs-paths root *project-test-paths*)
+    (project/project-abs-paths root (or *project-format-paths* (list)))))
+
 (defn- format-every-blsp
   (root)
-  ;; Every .blsp under the project root, in deterministic order. The manifest
-  ;; (`project.blsp` at the root) is included along with everything else.
-  (distinct (format-collect-blsp root)))
+  ;; Every .blsp the project owns, in deterministic order: the root's own files
+  ;; plus each whitelisted tree. `distinct` because the whitelists can overlap
+  ;; (`:format-paths ["."]`, or a test path nested inside a source path).
+  (distinct
+    (append (format-root-files root)
+      (fold (fn (acc dir) (append-two (format-collect-blsp dir) acc))
+        nil
+        (format-roots root)))))
 
 (defn- format-require-root
   ()

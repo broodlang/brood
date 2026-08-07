@@ -17686,3 +17686,141 @@ writing them down: a memory sweep run *while the suite was running* produced a 1
 for the N=500 row against 1.67 s for N=1000 (load contaminates everything), and a `make test`
 died with `ld terminated with signal 7` that was simply a **full disk** — `target/debug` had
 reached 81 GB.
+
+## 2026-08-07 — KI-37: an imaged start never followed a module's require edges
+
+Found while scoping `nest run`'s cold pre-flight (below), and confirmed within the hour by an
+independent sighting on a real project — `hatch-demo` ran fine cold and died on the **second**
+run with `unbound symbol: hatch-demo/db/start`.
+
+Materialising an image section **defines** a module's bindings; it does not **evaluate** its
+source, so the `(defmodule shapes (:use geom))` header whose expansion runs `(require 'geom)`
+never runs. The image branch restored the section, `provide`d the feature, and stopped — an
+imaged start built a heap with holes and died at the first call across a missing edge. Third
+defect in this one loader seam after KI-34's two, and the same family as KI-35: the image
+carried a module's *bindings* and silently dropped a piece of its *behaviour*.
+
+**Why five image tests were blind to it, which is the part worth keeping.** `nest run`'s
+advisory pre-flight `check-file`s each source file, and checking a file incidentally
+`require`s its header's deps — propping up **exactly one level** of the graph, for free and
+invisibly. Every fixture in `startup_image.rs` was exactly that shape (`app (:use lib)`,
+`app (:use shapes)`, `app (:use libdep/util)`). So a one-level project worked; a two-level
+chain died on the second hop; **the correctness of `nest run` depended on an advisory pass**;
+and `BROOD_NO_CHECK=1` did not disable it, because that flag suppresses warnings, not the
+checker's requires. `nest test`/`nest check`/the LSP were never affected — they call
+`project-materialize-all`, which requires every section. Isolating it needed the pre-flight
+removed outright: with it gone, a warm run on `main → shapes → geom` fails at the **first**
+hop.
+
+Fixed by recording the edges during the load — a `*require-edges*` registry written at the
+top of `require-one`, before its already-loaded short-circuit — and replaying them in the
+image branch. Two details each cost a build:
+
+- **The parent is `(current-ns)`.** The first version bound a dynamic `*require-parent*` in
+  `require-force`, which records edges for std modules and **none at all for the project's own
+  sources** — those are `load`ed directly by the bulk loader and never reach `require-force`.
+  `current-ns` is the module whose *file* is loading, is set for every top-level form in it,
+  and reads nil at runtime, so a runtime `require` is correctly not a load-time edge.
+- **Recorded, not re-derived.** Re-parsing headers at materialisation time works and costs
+  ~2 ms/file — ~34 s on a 16 300-module project, i.e. the whole cost ADR-218 exists to remove.
+  Recording is one CAS per *distinct* edge, and being a registry it rides into the
+  always-materialised root section via KI-35's derived set, so no image-format version knows
+  about it.
+
+The guard's chain lives inside a **dependency** deliberately: a dep's modules resolve outside
+`:source-paths`, so the pre-flight never checks them and cannot prop the test up the way it
+propped up the bug. Verified by sabotage — the replay removed fails the new test and the other
+five still pass, which measures how blind they were.
+
+One negative result recorded rather than dropped: the companion cycle test is a *behaviour*
+test, not a gate on the `provide`/replay ordering. Reordering those two lines was tried and it
+still passed, because `require-one`'s `*features-loading*` marker is what actually breaks a
+cycle.
+
+## 2026-08-07 — `nest run`'s cold pre-flight checks the entry closure, not everything loaded
+
+`check-project-run-closure`'s docstring said it checked "the entry point's require-closure,
+read straight off `*features*`". True on a **warm** start, where the loaded features *are* the
+closure. False on a **cold** one: `project-load-sources-cached` has just loaded every module to
+build the startup image, so `*features*` is the whole project and the pre-flight checked all of
+it — ~3.7 ms/file, uncached, ~50 s of an 85 s cold run on 16 302 modules.
+
+The user-visible half is worse than the cost: the same command checked a **different file set**
+depending on whether an image happened to be fresh, so a cache leaked into advisory output.
+
+`project-entry-closure` now walks outward from the entry through module headers — one
+`%module-direct-requires` per module *in the closure*, never one per file in the project (which
+is the 34 s that made `project-require-closures` unusable here). A name resolving outside
+`:source-paths` (std, a dependency, unresolvable) terminates the walk but stays in the returned
+reachability set, since a reference to it is legitimate. The set is sorted, so cold and warm
+print in the same order too.
+
+Verified against a baseline binary built from `9625ff25` on a four-module fixture where the
+entry reaches three: baseline cold printed both warnings (including the unreachable module's)
+and baseline warm printed none; the new build prints exactly the reachable module's warning on
+cold, warm and warm-again alike, and `nest check` still reports both. That is the intended
+division of labour — "a module the program never reaches is `nest check`/`nest test`'s
+business" — now actually implemented.
+
+**Behaviour change, taken deliberately:** a cold run no longer warns about unreachable modules.
+It was deferred as a drive-by on 2026-08-07 morning for exactly that reason and taken here as a
+decision.
+
+## 2026-08-07 — three gaps hatch found: table globals vs the image, unbounded framed reads, `nest format`'s scope
+
+Reviewing [hatch](../../hatch) against 0.3.8 to adopt what had shipped since its last update
+surfaced three things that were ours, not hatch's. All three are the dogfooding loop working as
+intended — each is a case where the feature was built without its first real consumer in hand.
+
+**1. A `table` global locked a project out of the startup image (ADR-218).** `%image-write`
+raised on any value with no portable form, and a `Value::Table` is a per-runtime registry
+handle, so it has none. The consequence was out of all proportion to the cause: one
+`(def *cache* (table))` anywhere in a project forfeited the image for the **whole project**,
+which then reloaded from source on every start. Hatch hit it with `web/static`'s two caches
+(the fingerprint manifest and ETags) — and a table is not an exotic choice there, it is *the*
+sanctioned mutable structure (ADR-026/107), so the blessed way to hold shared state was also
+the way to lose imaged startup. Reproduced on a bare `nest new` plus one table global, which
+is what confirmed it was upstream.
+
+A table is now imaged **by value**: the write side stores its snapshot under a new
+`KIND_TABLE`, and restore builds a fresh table and refills it. That reproduces the program as
+it stood after loading — load-time contents survive, an empty table comes back empty — and
+fresh identity costs nothing because the restored runtime has no other handle to the old
+store. Confined to a *top-level binding*, exactly as `Value::Macro` already is; a table nested
+inside a structure still refuses. Two globals **aliasing** one table raise, naming both: that
+one really would change the program (a write through one would stop being visible through the
+other), and it is rare enough not to justify a cross-section identity map, since sections
+restore lazily and independently. Format version bumped to v4 — required, not cosmetic, since
+a v3 reader would bind the global to the snapshot *map* and fail on the first `table-put`.
+
+**2. `tcp-read-until` / `tcp-read-n` could not be used by a hardened server.** The framed-read
+combinators shipped 2026-07-25 for exactly the HTTP/WS workload hatch has, and hatch declined
+to adopt them: neither took a read timeout or a size cap, so switching would have dropped its
+408 (idle client) and 413 (oversize head) handling — the slow-loris hardening in hatch's
+`docs/robustness.md`. The in-file comment already noted "there is no size cap here … also
+remotely triggerable by a peer that drip-feeds and never sends the delimiter", so the gap was
+known; what was missing was the consumer proving it mattered.
+
+Both now take an options map, off by default so no existing caller changes: `:timeout-ms` is
+an **idle** wait (reset per chunk, bounding a peer that goes silent) and `:max-bytes` caps the
+frame (bounding a peer that keeps talking but never delimits). Two bounds because neither
+substitutes for the other — a drip-feeder defeats a timeout, and a cap alone lets a silent
+hold run forever. Idle rather than a total deadline because a large legitimate body is slow
+for honest reasons; what marks an attack is silence. New tagged returns `[:timeout acc]` /
+`[:too-large acc]` sit alongside `[:closed acc]` so a caller can tell 408 from 413 from "peer
+hung up". `tcp-read-n` checks the cap against the *declared* `n` before reading anything, so a
+`Content-Length: 4000000000` is refused rather than buffered.
+
+**3. `nest format` walked directories the project does not own.** It formatted every `.blsp`
+under the root minus an ignore list, which reached `_deps/<pkg>/**` — a fetched dependency's
+source, which `nest fetch` regenerates and the author cannot edit. It reformatted one of
+hatch's on first run, and "68 files considered" was counting somebody else's code.
+
+Switched to a **whitelist**: `:source-paths` + `:test-paths` + a new `:format-paths`, plus the
+root's own top-level `.blsp`. An ignore list needs a new entry for each such directory as it
+is invented (`target`, `node_modules`, `_deps`, the next one); naming what we own is closed by
+construction. The cost is that a tree of authored-but-not-built Brood has to be declared — and
+this repo is the example: `std/`, `examples/`, `scripts/`, `stress/`, `breakage/` are all
+outside `:source-paths`, so `project.blsp` now lists them under `:format-paths` or they would
+have silently stopped being formatted. Verified coverage is unchanged by count (353 files here
+before and after) and that hatch drops exactly its six `_deps` files (68 → 62).

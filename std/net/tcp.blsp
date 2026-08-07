@@ -34,7 +34,10 @@ client]` messages in the owning process's mailbox — consume them with `receive
 This module adds the `socket?` predicate, `tcp-drain` (read to EOF), and the
 framed-read combinators `tcp-read-until` (read to a delimiter — an HTTP head, a
 line) and `tcp-read-n` (read a length-prefixed body/frame), which return the frame
-plus any surplus already read past it. Policy is Brood; only the syscalls are Rust.")
+plus any surplus already read past it. Both take an options map bounding an
+untrusted peer — `:timeout-ms` (idle) and `:max-bytes` — so a server can answer 408
+/ 413 instead of holding a process open or accumulating without limit. Policy is
+Brood; only the syscalls are Rust.")
 
 (defn socket? (x) "True if `x` is a TCP socket." (%eq (type-of x) :socket))
 
@@ -75,9 +78,39 @@ plus any surplus already read past it. Policy is Brood; only the syscalls are Ru
 ;; (`tcp-set-binary`) is recommended so byte lengths and delimiters are exact.
 ;; Must be called by the socket's owning process (they `receive` its messages).
 
-(defn tcp-read-until (sock sep)
-  "Receive `[:tcp sock data]` chunks until the byte sequence `sep` (a string or `bytes`) first appears in the stream. Return `[head rest]`: `head` is the bytes up to AND INCLUDING `sep`, `rest` is any bytes already received past it (both `bytes`). Return `[:closed acc]` if the socket closes before `sep` appears (`acc` = all bytes received). For a delimited frame — an HTTP request head (`sep` = \"\\r\\n\\r\\n\"), a line (\"\\n\"), a protocol record — which is bounded; a length-prefixed *body* uses `tcp-read-n` (which never scans). Must be called by the socket's owning process."
-  (tcp-read-until-loop sock (bytes-concat sep) nil 0 #b""))
+;; ---- limits: why both, and why idle rather than total --------------------
+;; A server reading an attacker-controlled stream needs two different bounds, and
+;; neither substitutes for the other:
+;;
+;;   :timeout-ms  how long to wait for the NEXT chunk (idle, reset per chunk).
+;;                Bounds a peer that connects and then says nothing — the classic
+;;                slow-loris hold, which costs the server a process and an fd for
+;;                as long as it lasts. Idle rather than a total deadline because a
+;;                large legitimate body is slow for honest reasons; what marks an
+;;                attack is silence, not duration.
+;;   :max-bytes   how many bytes the frame may reach. Bounds a peer that DOES keep
+;;                talking — drip-feeding a byte just inside the idle timeout, or
+;;                streaming an unbounded head that never contains the delimiter.
+;;                Without it `tcp-read-until` accumulates until the process OOMs.
+;;
+;; Both are opt-in and default off: a client reading a reply it asked for wants
+;; neither, and adding them silently would change existing callers' behaviour.
+;; Limits produce their own tagged returns (`[:timeout acc]` / `[:too-large acc]`),
+;; alongside `[:closed acc]`, so a caller can answer 408 vs 413 vs "peer hung up"
+;; — the distinction an HTTP server has to make.
+
+;; `{:timeout-ms n :max-bytes n}` → `[ms maxb]`, either nil when unset. One place
+;; that reads the map, so both combinators accept exactly the same options.
+(defn- tcp-read-limits
+  (opts)
+  [(get opts :timeout-ms) (get opts :max-bytes)])
+
+(defn tcp-read-until (sock sep &optional (opts {}))
+  "Receive `[:tcp sock data]` chunks until the byte sequence `sep` (a string or `bytes`) first appears in the stream. Return `[head rest]`: `head` is the bytes up to AND INCLUDING `sep`, `rest` is any bytes already received past it (both `bytes`). Return `[:closed acc]` if the socket closes before `sep` appears (`acc` = all bytes received). For a delimited frame — an HTTP request head (`sep` = \"\\r\\n\\r\\n\"), a line (\"\\n\"), a protocol record — which is bounded; a length-prefixed *body* uses `tcp-read-n` (which never scans).
+
+  `opts` bounds an untrusted peer, both off by default: `:timeout-ms` is the IDLE wait for the next chunk (reset per chunk), returning `[:timeout acc]` — a peer that connects and goes silent; `:max-bytes` caps the frame INCLUDING `sep`, returning `[:too-large acc]` — a peer that drip-feeds or never sends the delimiter. An HTTP head reader wants both (408 and 413 respectively). Must be called by the socket's owning process."
+  (let ([ms maxb] (tcp-read-limits opts))
+    (tcp-read-until-loop sock (bytes-concat sep) nil 0 #b"" ms maxb)))
 
 ;; `acc` is the chunks in reverse, `have` their running byte total, and `tail` the
 ;; last (|sep|-1) bytes accumulated — the only earlier bytes a delimiter straddling
@@ -94,25 +127,50 @@ plus any surplus already read past it. Policy is Brood; only the syscalls are Ru
 ;; `byte-length`, not `count`, throughout: these are byte counts, and `count` reaches
 ;; bytes only at the bottom of a five-deep type-predicate `cond` (514ns vs 36ns) — a
 ;; per-chunk cost in a loop this shape.
+;; Only the `receive` SHAPE differs between the bounded and unbounded cases — `after`
+;; needs a real millisecond count, so there is no way to write "no timeout" as an
+;; `after` clause. The two receives therefore differ in that one clause and hand every
+;; chunk to the same `tcp-read-until-step`, so the delimiter arithmetic (the subtle
+;; part) exists once. The unbounded path pays one `if` per chunk and is otherwise the
+;; loop it always was.
 (defn- tcp-read-until-loop
-  (sock sep acc have tail)
-  (receive
-    ([:tcp ^sock d]
-      (let (probe (bytes-concat tail d)
-            i (bytes-index-of probe sep))
-        (if (>= i 0)
-          ;; probe byte 0 sits at absolute (have - |tail|); a match must
-          ;; include a byte of `d` (|tail| < |sep|), so it is never one
-          ;; we already reported past.
-          (let (buf (bytes-concat (reverse (cons d acc)))
-                cut (+ (- have (byte-length tail)) i (byte-length sep)))
-            [(subbytes buf 0 cut) (subbytes buf cut (byte-length buf))])
+  (sock sep acc have tail ms maxb)
+  (if ms
+    (receive
+      ([:tcp ^sock d] (tcp-read-until-step sock sep acc have tail ms maxb d))
+      ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])
+      (after ms [:timeout (bytes-concat (reverse acc))]))
+    (receive
+      ([:tcp ^sock d] (tcp-read-until-step sock sep acc have tail ms maxb d))
+      ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))]))))
+
+(defn- tcp-read-until-step
+  (sock sep acc have tail ms maxb d)
+  (let (probe (bytes-concat tail d)
+        i (bytes-index-of probe sep))
+    (if (>= i 0)
+      ;; probe byte 0 sits at absolute (have - |tail|); a match must
+      ;; include a byte of `d` (|tail| < |sep|), so it is never one
+      ;; we already reported past.
+      (let (cut (+ (- have (byte-length tail)) i (byte-length sep)))
+        ;; The cap is checked against the COMPLETED frame, so a head that lands
+        ;; exactly on `:max-bytes` is delivered rather than rejected off-by-one.
+        (if (and maxb (> cut maxb))
+          [:too-large (bytes-concat (reverse (cons d acc)))]
+          (let (buf (bytes-concat (reverse (cons d acc))))
+            [(subbytes buf 0 cut) (subbytes buf cut (byte-length buf))])))
+      (let (have (+ have (byte-length d)))
+        ;; No delimiter yet: stop as soon as what we hold already exceeds the cap,
+        ;; rather than waiting for a delimiter that may never come.
+        (if (and maxb (> have maxb))
+          [:too-large (bytes-concat (reverse (cons d acc)))]
           (tcp-read-until-loop sock
             sep
             (cons d acc)
-            (+ have (byte-length d))
-            (tcp-straddle probe (byte-length sep))))))
-    ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])))
+            have
+            (tcp-straddle probe (byte-length sep))
+            ms
+            maxb))))))
 
 ;; The last (|sep|-1) bytes of `probe` — everything a delimiter spanning the next
 ;; chunk boundary could need, and nothing more.
@@ -122,15 +180,30 @@ plus any surplus already read past it. Policy is Brood; only the syscalls are Ru
         k (max 0 (- sep-len 1)))
     (if (<= n k) probe (subbytes probe (- n k) n))))
 
-(defn tcp-read-n (sock n)
-  "Receive `[:tcp sock data]` chunks until at least `n` bytes have arrived; return `[data rest]` where `data` is exactly the first `n` bytes and `rest` any surplus already received (both `bytes`). Return `[:closed acc]` if the socket closes with fewer than `n` bytes (`acc` = what arrived). For a length-prefixed body — a Content-Length payload, one chunk of a chunked transfer, a WebSocket frame payload. O(total): the running byte count means no rescanning and a single `bytes-concat` at the end. Assumes binary mode (chunk byte lengths). Must be called by the socket's owning process."
-  (tcp-read-n-loop sock n 0 nil))
+(defn tcp-read-n (sock n &optional (opts {}))
+  "Receive `[:tcp sock data]` chunks until at least `n` bytes have arrived; return `[data rest]` where `data` is exactly the first `n` bytes and `rest` any surplus already received (both `bytes`). Return `[:closed acc]` if the socket closes with fewer than `n` bytes (`acc` = what arrived). For a length-prefixed body — a Content-Length payload, one chunk of a chunked transfer, a WebSocket frame payload. O(total): the running byte count means no rescanning and a single `bytes-concat` at the end. Assumes binary mode (chunk byte lengths).
+
+  `opts` takes the same limits as `tcp-read-until`, both off by default: `:timeout-ms`, the IDLE wait for the next chunk, returning `[:timeout acc]`; and `:max-bytes`, returning `[:too-large #b\"\"]` **before reading anything** when the declared `n` exceeds it — a `Content-Length: 4000000000` is refused rather than read. Must be called by the socket's owning process."
+  (let ([ms maxb] (tcp-read-limits opts))
+    (if (and maxb (> n maxb))
+      ;; The length is DECLARED, so the cap is a pre-read decision: there is no
+      ;; reason to buffer a body we have already resolved to reject (that is the
+      ;; whole amplification the cap exists to stop). Nothing has been consumed.
+      [:too-large #b""]
+      (tcp-read-n-loop sock n 0 nil ms))))
 
 (defn- tcp-read-n-loop
-  (sock n have acc)
+  (sock n have acc ms)
   (if (>= have n)
     (let (buf (bytes-concat (reverse acc)))
       [(subbytes buf 0 n) (subbytes buf n (count buf))])
-    (receive
-      ([:tcp ^sock d] (tcp-read-n-loop sock n (+ have (count d)) (cons d acc)))
-      ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))]))))
+    ;; As in `tcp-read-until-loop`: `after` needs a concrete ms, so the timeout and
+    ;; no-timeout cases are two receives over the same body.
+    (if ms
+      (receive
+        ([:tcp ^sock d] (tcp-read-n-loop sock n (+ have (count d)) (cons d acc) ms))
+        ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])
+        (after ms [:timeout (bytes-concat (reverse acc))]))
+      (receive
+        ([:tcp ^sock d] (tcp-read-n-loop sock n (+ have (count d)) (cons d acc) ms))
+        ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])))))
