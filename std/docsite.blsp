@@ -137,6 +137,7 @@
     (let (v (get model :version)) (if v (str " <span class=\"ver\">" (escape v) "</span>") ""))
     "</div>"
     "<input id=\"docsite-filter\" type=\"search\" placeholder=\"Filter…\" autocomplete=\"off\" spellcheck=\"false\">"
+    (apply str (map sidebar-guide (or (get model :guides) [])))
     (apply str (map sidebar-module (get model :modules)))
     "</nav>"))
 
@@ -152,15 +153,36 @@
       (if v (str "<span class=\"badge\">" (escape v) "</span>") "")
       "</header>")))
 
+;; ---- guides (narrative pages) -----------------------------------------------
+
+(defn- guide-anchor (title) (str "g-" (slug title)))
+
+;; A guide's body is already HTML (Markdown-rendered by the caller), so emit it raw inside
+;; a `.module`-styled section — it shares the page's spacing and heading treatment.
+(defn- guide-html
+  (guide)
+  (str "<section class=\"module guide\" id=\"" (guide-anchor (get guide :title)) "\">"
+    "<h2>" (escape (get guide :title)) "</h2>"
+    "<div class=\"guide-body\">" (get guide :html) "</div>"
+    "</section>"))
+
+(defn- sidebar-guide
+  (guide)
+  (str "<div class=\"nav-module\"><a class=\"nav-module-link\" href=\"#"
+    (guide-anchor (get guide :title)) "\">" (escape (get guide :title)) "</a></div>"))
+
 (defn- content-html
   (model)
-  (str (sidebar-html model)
-    "<main class=\"content\">"
-    (header-html model)
-    (if (empty? (get model :modules))
-      "<p class=\"empty\">No documented modules.</p>"
-      (apply str (map module-html (get model :modules))))
-    "</main>"))
+  (let (guides (or (get model :guides) []) modules (get model :modules))
+    (str (sidebar-html model)
+      "<main class=\"content\">"
+      (header-html model)
+      (apply str (map guide-html guides))
+      (cond
+        (not (empty? modules)) (apply str (map module-html modules))
+        (empty? guides) "<p class=\"empty\">No documented modules.</p>"
+        else "")
+      "</main>")))
 
 ;; The base reset for a standalone page (`:wrap? true`) only — it restyles `body`, so it
 ;; is NOT emitted into an embedding host (hive), whose own body styling must win.
@@ -200,7 +222,15 @@
     ".docsite .type{color:#7b8794;font-size:.85rem;margin-top:.15rem}"
     ".docsite .doc{margin-top:.4rem;color:#3e4c59}.docsite .doc p{margin:.4rem 0}.docsite .undoc{color:#9aa5b1;font-style:italic;margin:.4rem 0 0}"
     ".docsite .doc code,.docsite .moduledoc code{background:#f0f4f8;border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
-    ".docsite .empty{color:#9aa5b1}"))
+    ".docsite .empty{color:#9aa5b1}"
+    ".docsite .guide-body{color:#3e4c59}"
+    ".docsite .guide-body h1{font-size:1.5rem;margin:1rem 0 .5rem;color:#1f2933}"
+    ".docsite .guide-body h2{font-size:1.2rem;border:0;margin:1rem 0 .4rem;color:#1f2933}"
+    ".docsite .guide-body h3{font-size:1.05rem;margin:.8rem 0 .3rem;color:#1f2933}"
+    ".docsite .guide-body p{margin:.5rem 0}.docsite .guide-body ul{margin:.5rem 0;padding-left:1.4rem}"
+    ".docsite .guide-body pre{background:#f0f4f8;border-radius:.4rem;padding:.6rem .8rem;overflow-x:auto}"
+    ".docsite .guide-body code{background:#f0f4f8;border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
+    ".docsite .guide-body pre code{background:none;padding:0}"))
 
 ;; The OS-dark palette for a STANDALONE page only (`:wrap? true`) — that page owns its
 ;; whole background, so it may follow `prefers-color-scheme`. It is NOT part of

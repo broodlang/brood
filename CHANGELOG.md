@@ -4,6 +4,18 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.7 — 2026-08-07
+
+- **`nest doctest`** — a new subcommand that evaluates every `expr ;=> result` example in
+  the project's docstrings and checks it still holds, so a documented example can't silently
+  drift from the code. Prints a line per example and exits non-zero on any mismatch (CI-
+  ready). Scoped to the project's own globals; `;=>` never appears in a builtin/prelude
+  docstring, so nothing else is picked up.
+- **Guides in `nest docs`.** A `guides/*.md` file becomes a narrative page in the generated
+  site, alongside the API reference (in the sidebar and rendered from a small Markdown subset
+  — ATX headings, fenced code, `- ` lists, paragraphs, inline `code`/links). The
+  guide-vs-reference split ExDoc has, from plain Markdown files, no manifest wiring.
+
 ## v0.3.6 — 2026-08-07
 
 - **`receive` timeouts run under WebAssembly.** `(receive … (after ms expr))` used the OS

@@ -71,3 +71,27 @@
       (assert= (get model :doc) "Doc.")
       (assert= (count (get model :defs)) 1)
       (assert= (get (first (get model :defs)) :name) "model-pub"))))
+
+(describe "docs: doctests (nest doctest)"
+  (test "a `expr ;=> expected` line parses into [expr expected]"
+    (assert= (docs/doctest-of-line "(+ 1 2) ;=> 3") ["(+ 1 2)" "3"])
+    (assert= (docs/doctest-of-line "just prose") nil)
+    (assert= (docs/doctest-of-line "  (f x) ;=> :ok  ") ["(f x)" ":ok"]))
+  (test "multiple examples are extracted in order"
+    (assert= (docs/doctests-in "Doc.\n(a) ;=> 1\n(b) ;=> 2") (list ["(a)" "1"] ["(b)" "2"])))
+  (test "run-one-doctest evaluates and compares"
+    (assert= (docs/run-one-doctest "(+ 2 2)" "4") [:ok])
+    (assert= (first (docs/run-one-doctest "(+ 2 2)" "5")) :fail)
+    (assert= (first (docs/run-one-doctest "(this-is-unbound)" "5")) :error)))
+
+(describe "docs: guides (Markdown → HTML)"
+  (test "headings, inline code, links, lists, and fenced code render"
+    (assert= (docs/markdown->html "# Hi") "<h1>Hi</h1>")
+    (is (includes? (docs/markdown->html "a `b` c") "<code>b</code>"))
+    (is (includes? (docs/markdown->html "see [x](/y)") "<a href=\"/y\">x</a>"))
+    (is (includes? (docs/markdown->html "- one\n- two") "<li>one</li>"))
+    (is (includes? (docs/markdown->html "```\n(+ 1 2)\n```") "<pre><code>(+ 1 2)</code></pre>"))
+    ; HTML in prose is escaped
+    (is (includes? (docs/markdown->html "a <b> c") "&lt;b&gt;")))
+  (test "guide title humanises the filename"
+    (assert= (docs/guide-title "guides/getting-started.md") "Getting started")))

@@ -261,6 +261,7 @@ module's namespace-rooted globals (ADR-070) back to it."
           files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
       {:name *project-name*
        :version *project-version*
+       :guides (collect-guides root)
        :modules (apply vector (map model-file files))})))
 
 ;; The full builtin+prelude reference (for `nest docs --all`), grouped by function
@@ -314,6 +315,167 @@ module's namespace-rooted globals (ADR-070) back to it."
   first-argument directory) — the language reference. Backs `nest docs --all`."
   (let (out-dir (if (empty? args) "doc" (first args)))
     (write-site out-dir (model-all) "Brood — reference")))
+
+;; --- guides (narrative Markdown pages) ---------------------------------------
+;; A `guides/*.md` file becomes a narrative page in the generated site, alongside the API
+;; reference. A small Markdown subset: ATX headings, fenced code, `- ` lists, blank-line
+;; paragraphs, and inline `code`/[text](url) links — enough for a getting-started guide.
+
+(defn- md-escape (s) (-> (str s) (replace "&" "&amp;") (replace "<" "&lt;") (replace ">" "&gt;")))
+
+;; A non-code text run: turn `[text](url)` into a link, HTML-escape everything else.
+(defn- md-links
+  (text)
+  (let (open-bracket (index-of text "["))
+    (if (or (not (number? open-bracket)) (< open-bracket 0))
+      (md-escape text)
+      (let (close-bracket (index-of text "]"))
+        (if (and (number? close-bracket) (> close-bracket open-bracket)
+              (= (substring text (+ close-bracket 1) (min (+ close-bracket 2) (string-length text))) "("))
+          (let (rest (substring text (+ close-bracket 2) (string-length text)) close-paren (index-of rest ")"))
+            (if (and (number? close-paren) (>= close-paren 0))
+              (str (md-escape (substring text 0 open-bracket))
+                "<a href=\"" (md-escape (substring rest 0 close-paren)) "\">"
+                (md-escape (substring text (+ open-bracket 1) close-bracket)) "</a>"
+                (md-links (substring rest (+ close-paren 1) (string-length rest))))
+              (md-escape text)))
+          (str (md-escape (substring text 0 (+ close-bracket 1)))
+            (md-links (substring text (+ close-bracket 1) (string-length text)))))))))
+
+;; Inline Markdown for one text run: `code` spans (backtick pairs) plus links via `md-links`.
+(defn- md-inline
+  (text)
+  (let (parts (string-split text "`"))
+    (apply str
+      (map (fn (pair)
+             (let ([i seg] pair)
+               (if (odd? i) (str "<code>" (md-escape seg) "</code>") (md-links seg))))
+        (zip (range (count parts)) parts)))))
+
+;; Emit a buffered paragraph or list when a block ends; a no-op for other modes.
+(defn- md-flush
+  (state)
+  (let (mode (get state :mode) buf (get state :buf) out (get state :out))
+    (cond
+      (= mode :para) (assoc state :out (str out "<p>" (md-inline (join " " (reverse buf))) "</p>") :mode :none :buf nil)
+      (= mode :list)
+        (assoc state
+          :out (str out "<ul>" (apply str (map (fn (l) (str "<li>" (md-inline l) "</li>")) (reverse buf))) "</ul>")
+          :mode :none :buf nil)
+      else state)))
+
+(defn- md-line
+  (state line)
+  (let (mode (get state :mode) t (trim line) end (string-length (trim line)))
+    (cond
+      (starts-with? t "```")
+        (if (= mode :code)
+          (assoc state :mode :none :buf nil
+            :out (str (get state :out) "<pre><code>" (md-escape (join "\n" (reverse (get state :buf)))) "</code></pre>"))
+          (assoc (md-flush state) :mode :code :buf nil))
+      (= mode :code) (assoc state :buf (cons line (get state :buf)))
+      (starts-with? t "### ") (let (s (md-flush state)) (assoc s :out (str (get s :out) "<h3>" (md-inline (substring t 4 end)) "</h3>")))
+      (starts-with? t "## ") (let (s (md-flush state)) (assoc s :out (str (get s :out) "<h2>" (md-inline (substring t 3 end)) "</h2>")))
+      (starts-with? t "# ") (let (s (md-flush state)) (assoc s :out (str (get s :out) "<h1>" (md-inline (substring t 2 end)) "</h1>")))
+      (or (starts-with? t "- ") (starts-with? t "* "))
+        (let (s (if (= mode :list) state (md-flush state))) (assoc s :mode :list :buf (cons (substring t 2 end) (get s :buf))))
+      (= t "") (md-flush state)
+      else (let (s (if (= mode :para) state (md-flush state))) (assoc s :mode :para :buf (cons line (get s :buf)))))))
+
+(defn markdown->html (md)
+  "Render a Markdown string to HTML — a small subset (ATX headings, fenced ``` code, `- `
+  lists, blank-line paragraphs, inline `code`/links). Everything is HTML-escaped; not a
+  full CommonMark parser. Used for doc guides."
+  (get (md-flush (fold md-line {:out "" :mode :none :buf nil} (string-split md "\n"))) :out))
+
+;; A guide's display title from its filename: `getting-started.md` -> `Getting started`.
+(defn- guide-title
+  (path)
+  (let (file (last (string-split path "/"))
+        stem (if (ends-with? file ".md") (substring file 0 (- (string-length file) 3)) file))
+    (capitalize (replace stem "-" " "))))
+
+;; Every `guides/*.md` under the project root, rendered — `[{:title :html}]`, sorted by
+;; filename. Empty when there is no `guides/` directory.
+(defn- collect-guides
+  (root)
+  (let (dir (path-join root "guides"))
+    (if (not (dir? dir))
+      []
+      (apply vector
+        (map (fn (path) {:title (guide-title path) :html (markdown->html (slurp path))})
+          (sort (filter (fn (p) (ends-with? p ".md")) (map (fn (f) (path-join dir f)) (list-dir dir)))))))))
+
+;; --- doctests (`nest doctest`) -----------------------------------------------
+;; A doctest is a docstring line of the form `<expr> ;=> <expected>` (the expression
+;; alone before the marker, on its own line). `nest doctest` evaluates each and checks it
+;; equals `<expected>`, so a documented example can't silently drift from behaviour.
+
+;; Parse one line into `[expr-str expected-str]`, or nil if it holds no `;=>` example.
+(defn- doctest-of-line
+  (line)
+  (let (i (index-of line ";=>"))
+    (when (and (number? i) (> i 0))
+      (let (expr (trim (substring line 0 i))
+            expected (trim (substring line (+ i 3) (string-length line))))
+        (when (and (not (= expr "")) (not (= expected ""))) [expr expected])))))
+
+;; Every `expr ;=> expected` example in a docstring, in source order.
+(defn- doctests-in
+  (docstring)
+  (filter (fn (x) (not (nil? x))) (map doctest-of-line (string-split docstring "\n"))))
+
+;; Evaluate one example: `[:ok]`, `[:fail actual expected]`, or `[:error message]`.
+(defn- run-one-doctest
+  (expr-str expected-str)
+  (try
+    (let (actual (eval (read-first expr-str)) expected (eval (read-first expected-str)))
+      (if (= actual expected) [:ok] [:fail actual expected]))
+    (catch e [:error (error-message e)])))
+
+;; Collect every example from the *project's own* documented globals (those namespaced
+;; under `prefix`, e.g. `myproj/`), evaluated. Scoping to the project keeps the tooling's
+;; own docstrings (this module's `;=>` examples, in prose) and the builtins out.
+(defn- collect-doctests
+  (prefix)
+  (fold (fn (acc sym)
+          (if (not (starts-with? (name sym) prefix))
+            acc
+            (let (v (try (eval sym) (catch _ nil))
+                  d (when v (try (doc v) (catch _ nil))))
+              (if (and (string? d) (includes? d ";=>"))
+                (append acc
+                  (map (fn (ex) [sym (nth ex 0) (nth ex 1) (run-one-doctest (nth ex 0) (nth ex 1))])
+                    (doctests-in d)))
+                acc))))
+    nil (global-names)))
+
+(defn- doctest-report
+  (results)
+  (let (fails (filter (fn (r) (not (= (first (nth r 3)) :ok))) results))
+    (doseq (r results)
+      (let ([sym expr expected outcome] r)
+        (match outcome
+          ([:ok] (println (str "  ok   " (name sym) ": " expr " ;=> " expected)))
+          ([:fail actual _]
+            (println (str "  FAIL " (name sym) ": " expr " ;=> " expected " — got " (pr-str actual))))
+          ([:error msg] (println (str "  ERR  " (name sym) ": " expr " — " msg))))))
+    (println (str (count results) " doctests, " (- (count results) (count fails)) " passed, "
+      (count fails) " failed"))
+    (count fails)))
+
+(defn run-doctests ()
+  "Evaluate every `expr ;=> result` example in the current project's docstrings and check
+  it equals `result`, so documentation examples can't drift from behaviour. Loads the
+  project's sources, prints a line per example, and returns the failure count (0 = all
+  passed). The policy behind `nest doctest`."
+  (require 'project)
+  (let (root (project/project-find-root (cwd)))
+    (when (nil? root)
+      (error "doctest: not in a Brood project (no project.blsp found from " (cwd) ")"))
+    (project-setup root)
+    (project/project-load-sources-cached root)
+    (doctest-report (collect-doctests (str *project-name* "/")))))
 
 (defn generate-docs (& args)
   "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`."
