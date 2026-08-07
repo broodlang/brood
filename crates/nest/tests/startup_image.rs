@@ -262,3 +262,172 @@ fn an_imaged_start_keeps_what_loading_registered() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Materialising a section DEFINES a module's bindings; it does not EVALUATE its source,
+/// so the `(defmodule b (:use c))` header that would `require` its own dependencies never
+/// runs. An imaged start therefore built a heap with holes and died on the first call
+/// across a missing edge (KI-37) — `require` has to replay the edges the original load
+/// recorded (`*require-edges*`).
+///
+/// **The chain is inside a DEPENDENCY on purpose, and that is what makes this test worth
+/// having.** `nest run`'s advisory pre-flight `check-file`s each source file, and checking a
+/// file incidentally `require`s its header's deps — so a chain in the project's *own* source
+/// would be materialised by the checker whether or not the loader follows edges, and the
+/// test would pass with the mechanism reverted. `project-feature-file` resolves a dep's
+/// modules outside `:source-paths`, so they are never checked and nothing but the edge map
+/// can pull `libdep/helper` in.
+///
+/// Verified by sabotage: with the `*require-edges*` replay removed, the warm run dies with
+/// `unbound symbol: libdep/helper/triple`.
+#[test]
+fn an_imaged_start_follows_transitive_require_edges() {
+    let dep = scratch("edge-lib");
+    let dir = scratch("edge-app");
+    write(&dep, "project.blsp", "(project :name libdep)\n");
+    // Two levels *inside* the dependency: app reaches `util` directly, and only `util`'s own
+    // header reaches `helper`. Nothing the entry point names mentions `helper` at all.
+    write(
+        &dep,
+        "src/helper.blsp",
+        "(defmodule helper)\n\
+         (println \"SOURCE-LOAD: libdep/helper\")\n\
+         (defn triple (x) (* 3 x))\n",
+    );
+    write(
+        &dep,
+        "src/util.blsp",
+        "(defmodule util (:use libdep/helper))\n\
+         (println \"SOURCE-LOAD: libdep/util\")\n\
+         (defn double-tripled (x) (* 2 (triple x)))\n",
+    );
+    write(
+        &dir,
+        "project.blsp",
+        &format!(
+            "(project\n  :name edgedemo\n  :main app\n  :dependencies [[libdep :path \"../{}\"]])\n",
+            dep.file_name().unwrap().to_string_lossy()
+        ),
+    );
+    write(
+        &dir,
+        "src/app.blsp",
+        "(defmodule app (:use libdep/util))\n\
+         (defn main () (println (str \"ANSWER: \" (double-tripled 7))))\n",
+    );
+
+    let cold = nest_run(&dir);
+    assert!(cold.contains("ANSWER: 42"), "cold:\n{cold}");
+    assert!(cold.contains("SOURCE-LOAD: libdep/helper"), "cold:\n{cold}");
+
+    // The load that matters: `app` is required, which materialises `libdep/util`, which must
+    // in turn pull `libdep/helper` — a module no evaluated form in this run ever names.
+    let warm = nest_run(&dir);
+    assert!(
+        warm.contains("ANSWER: 42"),
+        "an imaged start did not follow the transitive require edge:\n{warm}"
+    );
+    assert!(
+        !warm.contains("SOURCE-LOAD"),
+        "precondition: the warm run should be imaged, not a source load:\n{warm}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dep);
+}
+
+/// The same hole as `an_imaged_start_follows_transitive_require_edges`, one section over.
+/// A file with **no `(defmodule …)` header** establishes no namespace, so its defs are
+/// root-level globals that ride the always-materialised `""` section — restored without
+/// anything ever `require`ing that file, and so without its own top-level `(require …)`
+/// ever running. Its edges are recorded under `""` and replayed by `project-install-image`.
+#[test]
+fn an_imaged_start_follows_a_headerless_files_require_edges() {
+    let dir = scratch("edge-root");
+    write(
+        &dir,
+        "project.blsp",
+        "(project\n  :name rootdemo\n  :main app)\n",
+    );
+    write(
+        &dir,
+        "src/geom.blsp",
+        "(defmodule geom)\n\
+         (println \"SOURCE-LOAD: geom\")\n\
+         (defn square (x) (* x x))\n",
+    );
+    // No `defmodule`: `helpers` defines a ROOT global and requires `geom` at top level.
+    write(
+        &dir,
+        "src/helpers.blsp",
+        "(require 'rootdemo/geom)\n\
+         (defn helper-area (x) (geom/square x))\n",
+    );
+    write(
+        &dir,
+        "src/app.blsp",
+        "(defmodule app)\n\
+         (defn main () (println (str \"ANSWER: \" (helper-area 7))))\n",
+    );
+
+    let cold = nest_run(&dir);
+    assert!(cold.contains("ANSWER: 49"), "cold:\n{cold}");
+
+    let warm = nest_run(&dir);
+    assert!(
+        warm.contains("ANSWER: 49"),
+        "an imaged start restored a headerless file's defs without loading what they call:\n{warm}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A require CYCLE must still terminate now that materialising a section replays the
+/// module's require edges — a mutually-recursive pair is the shape that spins if the
+/// replay ever stops going through `require-one`'s load-once bookkeeping.
+///
+/// **Stated honestly: this is a behaviour test, not a gate on the `provide`/replay
+/// ordering.** Reordering those two lines was tried and this test still passed, because
+/// `require-one`'s `*features-loading*` marker returns immediately for this process's own
+/// in-flight load and is what actually breaks the cycle. It earns its place by covering an
+/// imaged cycle at all, which nothing else here does — but do not read a pass as evidence
+/// about the ordering.
+#[test]
+fn an_imaged_start_terminates_on_a_require_cycle() {
+    let dir = scratch("edge-cycle");
+    write(
+        &dir,
+        "project.blsp",
+        "(project\n  :name cyc\n  :main app)\n",
+    );
+    // `:use-internals … :only` is the cycle-safe import form — a refer-all into a
+    // still-loading module is an error, which is a different failure from the one under test.
+    write(
+        &dir,
+        "src/a.blsp",
+        "(defmodule a (:use-internals cyc/b :only [bee]))\n\
+         (defn ay () (str \"a\" (bee)))\n",
+    );
+    write(
+        &dir,
+        "src/b.blsp",
+        "(defmodule b)\n\
+         (require 'cyc/a)\n\
+         (defn bee () \"b\")\n",
+    );
+    write(
+        &dir,
+        "src/app.blsp",
+        "(defmodule app (:use cyc/a))\n\
+         (defn main () (println (str \"ANSWER: \" (ay))))\n",
+    );
+
+    let cold = nest_run(&dir);
+    assert!(cold.contains("ANSWER: ab"), "cold:\n{cold}");
+    let warm = nest_run(&dir);
+    assert!(
+        warm.contains("ANSWER: ab"),
+        "an imaged start mishandled a require cycle:\n{warm}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

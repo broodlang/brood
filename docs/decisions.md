@@ -14584,11 +14584,56 @@ Two things made that work, and neither is obvious:
   that was still 34 s of a 35 s run. Every loaded feature is reachable by definition, so
   the loaded set *is* the closure.
 
-**Consequence worth knowing:** a cold `nest run` loads everything, so its pre-flight warns
+~~**Consequence worth knowing:** a cold `nest run` loads everything, so its pre-flight warns
 about everything; a warm one warns only about the closure. Both are "warnings for the code
-you loaded", but the sets differ. `nest check` and `nest test` remain whole-project.
+you loaded", but the sets differ.~~ **Superseded 2026-08-07** — that divergence was a cache
+leaking into advisory output (the same command checking a different file set depending on
+whether an image happened to be fresh) and cost ~50 s of an 85 s cold run on 16 302 modules.
+`check-project-run-closure` now takes the entry module and **derives** the closure by walking
+outward through module headers — one `%module-direct-requires` per module *in the closure*,
+which is what keeps it off the 34 s whole-project path described just above. Cold and warm now
+check the same files, in the same order. `nest check` and `nest test` remain whole-project, so
+a module the program never reaches is still linted, just not by `nest run`.
+
+**A module's require EDGES are part of the image, not just its bindings (KI-37, 2026-08-07).**
+Materialising a section *defines* a module's bindings; it does not *evaluate* its source, so
+the `(defmodule b (:use c))` header whose expansion runs `(require 'c)` never runs. Restoring
+a section and providing the feature therefore built a heap with holes, and the program died at
+the first call across a missing edge. The loader records each edge as it happens — a
+`*require-edges*` registry written at the top of `require-one`, keyed by `(current-ns)`, the
+module whose file is loading — and the image branch replays them after `provide`. Recorded
+rather than re-derived from headers at materialisation time, because that re-derivation is the
+same ~2 ms/file that this ADR exists to avoid; and being a registry it rides into the
+always-materialised root section automatically (KI-35's derived set), so the image format is
+unchanged. See KI-37 for why five end-to-end tests were blind to this for a day.
 
 **Caveat: images are per-executable.** The fingerprint includes `build-id`, which embeds each
 executable's own mtime, so an image written by `nest` is not used by `brood` and vice versa.
 Safe (a binary change must invalidate an image) and harmless in practice, since
 `nest test`/`run`/`check` are one binary — but worth knowing before measuring.
+
+**A `table` global is imaged by VALUE, not refused (2026-08-07, format v4).** The write side
+raised on any value with no portable form, and a `Value::Table` is a per-runtime registry
+handle (ADR-107), so it has none. The blast radius was the problem: one `(def *cache* (table))`
+anywhere forfeited the image for the *whole project*, which then reloaded from source every
+start. Since a table is the language's only sanctioned mutable structure (ADR-026), that made
+the blessed way to hold shared state also the way to lose imaged startup — found in hatch,
+whose `web/static` caches a fingerprint manifest and ETags in two tables, and reproduced on a
+bare `nest new` plus one table global.
+
+A table now rides as its **snapshot**, and restore builds a fresh table and refills it. This
+keeps the ADR's actual contract — an imaged start is indistinguishable from a source start —
+because it reproduces the program *as it stood after loading*: load-time contents survive, and
+a table empty at load comes back empty. Fresh identity is not a semantic loss, since the
+restored runtime holds no other handle to the old store (the registry is per-runtime and the
+old one does not exist in this process). Two things stay refused, both because they *would*
+change the program: a table nested inside a data structure (rebuilding it there would silently
+split an identity the program can observe — the same line `Value::Macro` draws), and two
+globals **aliasing** one table, which raises naming both rather than handing back two stores.
+A cross-section identity map would fix the alias case but is not worth it: sections restore
+lazily and independently, so the map would have to live for the runtime's lifetime to serve a
+pattern nobody writes.
+
+The format version bump is required, not cosmetic — a v3 reader meeting a `KIND_TABLE` entry
+would fall through its default arm and bind the global to the snapshot *map*, so the failure
+would surface later, at the first `table-put`, far from the cause.

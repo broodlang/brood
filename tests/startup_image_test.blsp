@@ -185,3 +185,64 @@
       (def si-body :clobbered)
       (let (idx (%image-index p "fp-body")) (si-load-all p idx))
       (is (= #b"\x00payload" (si-body))))))
+
+;; A `table` global used to make `%image-write` raise, which forfeited the image for the
+;; WHOLE project — so any app holding shared state the blessed way (ADR-026/107: a table
+;; is the language's only mutable structure) silently lost imaged startup. Reproduced on
+;; hatch, whose `web/static` caches a fingerprint manifest and ETags in two tables.
+;;
+;; A table handle is per-runtime and cannot be carried, so the image stores the table's
+;; CONTENTS and rebuilds a fresh table on restore. What has to hold: the global is bound
+;; to a live, writable table, and whatever load-time code put in it is still there.
+(describe "startup image: table globals"
+  :isolated
+
+  (test "a table global restores as a live, writable table"
+    (def si-tab (table))
+    (let (p (img-tmp "table"))
+      (%image-write p [["" ['startup-image-test/si-tab]]] "fp-table")
+      (def si-tab :clobbered)
+      (let (idx (%image-index p "fp-table")) (si-load-all p idx))
+      (assert= :table (type-of si-tab))
+      ;; writable, not a frozen snapshot masquerading as one
+      (table-put si-tab :k 7)
+      (assert= 7 (table-get si-tab :k))))
+
+  (test "a table's load-time CONTENTS survive the round-trip"
+    (def si-tab2 (table))
+    (table-put si-tab2 :a 1)
+    (table-put si-tab2 "b" [2 3])
+    (let (p (img-tmp "table2"))
+      (%image-write p [["" ['startup-image-test/si-tab2]]] "fp-table2")
+      (def si-tab2 :clobbered)
+      (let (idx (%image-index p "fp-table2")) (si-load-all p idx))
+      (assert= 1 (table-get si-tab2 :a))
+      (assert= [2 3] (table-get si-tab2 "b"))
+      (assert= 2 (table-count si-tab2))))
+
+  (test "the restored table is a FRESH store — writing it does not touch the original"
+    (def si-tab3 (table))
+    (table-put si-tab3 :n 1)
+    (let (original si-tab3
+          p (img-tmp "table3"))
+      (%image-write p [["" ['startup-image-test/si-tab3]]] "fp-table3")
+      (def si-tab3 :clobbered)
+      (let (idx (%image-index p "fp-table3")) (si-load-all p idx))
+      (table-put si-tab3 :n 99)
+      ;; the pre-image handle still reads its own store
+      (assert= 1 (table-get original :n))
+      (assert= 99 (table-get si-tab3 :n))))
+
+  (test "two globals aliasing ONE table are refused, not silently split"
+    (def si-alias-a (table))
+    (def si-alias-b si-alias-a)
+    (let (p (img-tmp "table-alias")
+          r (try
+              (do
+                (%image-write p
+                  [["" ['startup-image-test/si-alias-a 'startup-image-test/si-alias-b]]]
+                  "fp-alias")
+                :no-raise)
+              (catch e (error-message e))))
+      (is (not (= r :no-raise)))
+      (is (includes? r "same table")))))

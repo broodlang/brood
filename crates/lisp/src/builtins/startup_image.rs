@@ -47,12 +47,20 @@ use crate::process::message::{from_message, to_message, to_message_image};
 
 /// `brood-image` + a format version. Bumping the version invalidates every image written by
 /// an older binary, on top of whatever fingerprint the caller supplies.
-const MAGIC: &[u8] = b"brood-image-v3\n";
+///
+/// v4 adds `KIND_TABLE`. The bump is required, not cosmetic: a v3 reader meeting a
+/// `KIND_TABLE` entry would fall through its `_ =>` arm and bind the global to the
+/// snapshot *map* instead of a table, so every `table-put` against it would then fail
+/// on a type error far from the cause.
+const MAGIC: &[u8] = b"brood-image-v4\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
 const KIND_MACRO: u8 = 1;
 const KIND_SIG: u8 = 2;
+/// A global bound to a `Value::Table` — stored as the table's *contents* (its snapshot
+/// map) and rebuilt into a fresh table on restore. See `encode_section`.
+const KIND_TABLE: u8 = 3;
 
 /// `BROOD_IMAGE_TRACE=1` — report where image time goes, split by phase. Both sides run
 /// through an intermediate `process::Message` tree before or after the byte codec, and the
@@ -128,6 +136,7 @@ fn encode_section(
     with_sigs: bool,
     ns_to_msg: &mut u64,
     ns_encode: &mut u64,
+    tables_seen: &mut std::collections::HashMap<u64, String>,
 ) -> Result<(Vec<u8>, u32), LispError> {
     let mut out: Vec<u8> = Vec::new();
     let mut entries: Vec<u8> = Vec::new();
@@ -143,8 +152,40 @@ fn encode_section(
         let Some(v) = heap.env_get(global, sym) else {
             continue;
         };
+        // A `Value::Table` is a handle into a per-runtime registry, so it has no portable
+        // form and `to_message` refuses it — which used to forfeit the WHOLE image for the
+        // project. That is the wrong trade: `table` is the language's only sanctioned
+        // mutable structure (ADR-026/107), so `(def *cache* (table))` is the blessed way to
+        // hold shared state, and any project doing it lost image startup entirely.
+        //
+        // Image the table by VALUE — its snapshot map — and rebuild a fresh table from
+        // those pairs on restore. That reproduces "the program as it stood after loading":
+        // whatever load-time code put in the table is still there, and a table that was
+        // empty at load comes back empty. Identity is necessarily fresh, which costs
+        // nothing, because a restored runtime has no other handle to the old store — the
+        // registry is per-runtime and the old one does not exist in this process.
+        //
+        // Confined to a TOP-LEVEL binding, exactly as `Value::Macro` is: a table buried
+        // inside a data structure still refuses, because rebuilding it there would silently
+        // split an identity the program can observe.
         let (v, kind) = match v {
             Value::Macro(id) => (Value::Fn(id), KIND_MACRO),
+            Value::Table(tid) => {
+                // Two globals bound to the SAME table alias one store, and restoring them
+                // independently would hand the program two — a real semantic change, where
+                // a write through one stopped being visible through the other. Rare enough
+                // not to be worth a cross-section identity map (sections restore lazily and
+                // independently), so refuse it loudly and let the caller load from source.
+                if let Some(first) = tables_seen.get(&tid) {
+                    return Err(LispError::type_err(format!(
+                        "%image-write: cannot image global '{}': it is the same table as \
+                         '{first}', and the image would restore them as two separate tables",
+                        value::symbol_name(sym)
+                    )));
+                }
+                tables_seen.insert(tid, value::symbol_name(sym).to_string());
+                (crate::core::table::snapshot(heap, tid)?, KIND_TABLE)
+            }
             other => (other, KIND_GLOBAL),
         };
         let t0 = std::time::Instant::now();
@@ -211,6 +252,9 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 
     let mut dir: Vec<(String, u64, u32)> = Vec::new();
     let mut total: u32 = 0;
+    // Table handles seen anywhere in this write, so an aliased pair is caught across
+    // sections and not just within one (see `encode_section`).
+    let mut tables_seen: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
     for sv in sections {
         let pair = seq_items(heap, sv)?;
         if pair.len() != 2 {
@@ -221,7 +265,14 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         let name = need_str(heap, pair[0], "%image-write")?;
         let syms = seq_items(heap, pair[1])?;
         let with_sigs = name.is_empty();
-        let (bytes, n) = encode_section(heap, &syms, with_sigs, &mut ns_to_msg, &mut ns_encode)?;
+        let (bytes, n) = encode_section(
+            heap,
+            &syms,
+            with_sigs,
+            &mut ns_to_msg,
+            &mut ns_encode,
+            &mut tables_seen,
+        )?;
         dir.push((name, body.len() as u64, bytes.len() as u32));
         body.extend_from_slice(&bytes);
         total += n;
@@ -387,6 +438,19 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
                     other => other,
                 };
                 heap.env_define(global, sym, m);
+            }
+            // Rebuild the table the write side snapshotted: a fresh store in THIS
+            // runtime's registry, refilled from the imaged pairs, so the global is bound
+            // to a live table with the contents loading produced. `table::put` deep-clones
+            // in, exactly as a `table-put` from Brood would.
+            KIND_TABLE => {
+                let tid = crate::core::table::create();
+                if let value::ValueRef::Map(mid) = v.unpack() {
+                    for (k, val) in heap.map_entries(mid) {
+                        crate::core::table::put(heap, tid, k, val)?;
+                    }
+                }
+                heap.env_define(global, sym, Value::Table(tid));
             }
             _ => heap.env_define(global, sym, v),
         }
