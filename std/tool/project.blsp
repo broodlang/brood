@@ -614,21 +614,24 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (str (build-id) "\n"
     (join "\n" (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f))) files))))
 
+;; `before` as a SET. As a list, `member?` is a linear scan run once per global — ~4000 x
+;; ~313 000 on a big project, which measured 7 s of a 9 s image write and was invisible
+;; until the phase trace showed the time landing outside every measured phase. Exactly the
+;; shape ADR-216 removed from `*features*`. Built once and passed to both users below: a
+;; second set of the same size costs ~3% of the cold path, measured.
+(defn- project-image-seen (before)
+  (fold (fn (m n) (assoc m n true)) {} before))
+
 ;; The globals the load CREATED: everything bound now that was not bound before it ran.
-(defn- project-image-fresh-names (before)
-  ;; `before` goes into a SET first. As a list, `member?` is a linear scan run once per
-  ;; global — ~4000 x ~313 000 on a big project, which measured 7 s of a 9 s image write
-  ;; and was invisible until the phase trace showed the time landing outside every
-  ;; measured phase. Exactly the shape ADR-216 removed from `*features*`.
-  (let (seen (fold (fn (m n) (assoc m n true)) {} before))
-    (remove (fn (n) (contains? seen n)) (global-names))))
+(defn- project-image-fresh-names (seen)
+  (remove (fn (n) (contains? seen n)) (global-names)))
 
 ;; The registries the load MUTATED — derived from the funnel, minus the exclusions above,
-;; minus anything already in `fresh-set` (a registry the project itself defines was created
-;; by the load, so it is a fresh global and sections with its own module; naming it twice
-;; would write its entry twice).
-(defn- project-image-registry-names (fresh-set)
-  (remove (fn (n) (or (contains? fresh-set n)
+;; minus any the project itself DEFINES. That last test is `seen` read the other way round:
+;; a registry absent from `before` was created by this load, so it is already a fresh global
+;; that sections with its own module, and naming it here too would write its entry twice.
+(defn- project-image-registry-names (seen)
+  (remove (fn (n) (or (not (contains? seen n))
                     (member? n *project-image-registry-exclusions*)))
     (%registry-names)))
 
@@ -670,14 +673,14 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; the section would never be materialised and the registry silently lost, which is the whole
 ;; class this is guarding against.
 (defn- project-image-sections (before)
-  (let (fresh (project-image-fresh-names before)
-        fresh-set (fold (fn (m n) (assoc m n true)) {} fresh)
+  (let (seen (project-image-seen before)
+        fresh (project-image-fresh-names seen)
         grouped (fold (fn (m n)
                         (let (k (or (project-image-section-of n) ""))
                           (assoc m k (cons n (or (get m k) nil)))))
                   {}
                   fresh)
-        root (append-two (project-image-registry-names fresh-set)
+        root (append-two (project-image-registry-names seen)
                (or (get grouped "") nil)))
     (cons ["" root]
       (map (fn (k) [k (get grouped k)])

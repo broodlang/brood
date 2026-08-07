@@ -17443,3 +17443,34 @@ which is the same fact that caused the bug.
 
 Rust + in-language suite 966/966 green (the in-language suite runs as one nextest case);
 `nest check` clean cold and imaged.
+
+**Re-measured, and the fix's value is entirely in the eager path.** Same generated fixture
+(4 002 modules), same box, release binaries from `90099993` and `34770be4`, interleaved:
+
+| row | pre-fix | post-fix |
+|---|---|---|
+| lazy `nest run` (entry reaches 2 of N) | 0.37 s / 112 MB | 0.36 s / 102 MB |
+| eager materialise-all | 8.55 s / 674 MB | **1.34 s / 453 MB** |
+| ⤷ materialise time alone | 7 012 ms | **959 ms** |
+| cold source load + write (medians of 3) | 14.06 s | 14.10 s |
+
+The lazy row does not move, and that is the explanation for how this shipped: an entry point
+reaching two of N modules pays about the same to source-load two files as to materialise two
+sections, so ADR-218's 1.30 s headline was a real number measuring the wrong mechanism. (Re-run
+at 16 302 modules it reads 1.57 s / 243 MB against its 1.30 s / 219 MB, on a denser fixture whose
+cold path costs 97 s / 26 GB against that fixture's 32 s / 2.3 GB — the lazy row is dominated by
+the section-directory read and ~16 000 `stat`s, not by how much code the project holds, which is
+why the two agree despite the cold paths differing 3×.) What was actually broken is the eager
+path — `nest test`, `nest check`, the LSP — re-evaluating every module on every start.
+
+**The instrument lied in both arms:** the eager path reported "materialised 4002 of 4003
+sections" pre-fix too, because that counts sections *walked*, not sections served from the image.
+Only the wall clock and a top-level `println` in a module distinguished them.
+
+**And the measurement caught a 3% cold-path cost in my own change.** The sections rewrite built a
+SECOND set of every fresh global (~84 000 entries) just to keep a registry the project defines
+from being named twice. That test is the `before` set read the other way round — a registry
+absent from it was created by this load — so one map now serves both. Interleaved medians of 3:
++3.0% with every post sample above every pre sample (a real difference, small as it is) → +0.3%
+with the samples fully interleaved. Worth the extra run: at three samples the first result was
+already outside the drift pattern, which is what made it worth chasing rather than dismissing.
