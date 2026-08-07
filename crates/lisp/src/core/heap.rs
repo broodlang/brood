@@ -5605,6 +5605,22 @@ impl Heap {
             .insert(sym, shared);
     }
 
+    /// Every `(sig …)` declared so far, as `(qualified-name, type-expression)`.
+    ///
+    /// Exists for the startup image (ADR-218): declared sigs live here rather than in the
+    /// globals table, so an image that snapshots only globals silently loses them, and the
+    /// checker quietly falls back to inferring from the body — `expects int` becomes
+    /// `expects number | map`. Weaker advice, no error, which is the worst shape of bug.
+    pub fn declared_sigs_snapshot(&self) -> Vec<(Symbol, Value)> {
+        self.runtime
+            .declared_sigs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect()
+    }
+
     /// The raw type-expression `Value` a `(sig …)` declared for the qualified global
     /// `sym`, or `None`. The checker (`sig_of`) parses it to a signature and gives it
     /// precedence over primitive/curated/inferred sigs. See [`Heap::set_declared_sig`].

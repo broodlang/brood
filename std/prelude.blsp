@@ -4482,6 +4482,14 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 (def *load-path* (list "."))
 ; directories searched for <name>.blsp
 
+;; Features that a startup image can supply instead of a source file (ADR-218):
+;; feature name -> [offset len] into `*image-path*`. Empty unless a tool installs one;
+;; `require` consults it just before falling back to the load-path, so an imaged module
+;; is materialised on first require rather than at startup. Policy — which image, when it
+;; is stale, what goes in it — lives in `std/tool/project.blsp`.
+(def *image-sections* {})
+(def *image-path* nil)
+
 ;; `*load-path*` lives in the ROOT namespace, so only root code can rebind it: a
 ;; `(def *load-path* …)` written inside a module defines `mod/*load-path*` (ambient
 ;; is a declaration now, not an earmuff spelling — see `defdyn`). These two setters
@@ -4807,6 +4815,16 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       (contains? *package-module-files* key)
         (require-force-package key
           (get *package-module-files* key))
+      ;; A feature can come from a startup IMAGE instead of a source file (ADR-218): its
+      ;; bindings are materialised from a byte range rather than evaluated. This is the
+      ;; seam that makes an imaged project load LAZILY — `require` stays the unit of
+      ;; materialisation, so a program pays only for the modules it actually reaches.
+      ;; The registry is empty unless a tool populated it; the prelude only knows how to
+      ;; consult it, never how to build one (that is `std/tool/project.blsp`).
+      (contains? *image-sections* key)
+        (let (sec (get *image-sections* key))
+          (%image-load-section *image-path* (first sec) (second sec))
+          (provide key))
       else
         (let (path (require-find (str key ".blsp") *load-path*))
           (if path

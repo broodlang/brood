@@ -2197,10 +2197,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "%image-read",
+        "%image-index",
         Arity::exact(2),
         Sig::new(vec![any, any], any),
-        image_read,
+        image_index,
+    );
+    def(
+        heap,
+        "%image-load-section",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], any),
+        image_load_section,
     );
     // Compression prims (the `flate2` crate) — a byte sequence in, `bytes` out, one
     // encode/decode pair per container format. The public names
@@ -3388,8 +3395,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
     ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
-    ("%image-write", &["path", "names", "fingerprint"], "Write the global bindings named by `names` (a sequence of symbols) to the binary startup image at `path`, stamped with the opaque `fingerprint` string; returns how many were written. An unbound name is skipped; a value with no portable form (a builtin, a pid) raises rather than silently dropping a binding. Mechanism only (ADR-218) — the snapshot set and the staleness policy are Brood in std/tool/project.blsp."),
-    ("%image-read", &["path", "fingerprint"], "Restore the bindings from the startup image at `path`, but only if its stamp equals `fingerprint`; returns how many were defined, or nil when the image is absent, unreadable, of an older format, or stale. Nil is the rebuild-me signal — every failure is a cache miss, never an error, so a corrupt image degrades to loading from source (ADR-218)."),
+    ("%image-write", &["path", "sections", "fingerprint"], "Write a sectioned startup image to `path`, stamped with the opaque `fingerprint` string; returns the number of entries written. `sections` is a sequence of [name syms] pairs — `name` is the section key (a module's feature name, or `\"\"` for the always-materialised root), `syms` the global names it holds; declared sigs are added to the root section automatically. An unbound name is skipped; a value with no portable form (a builtin, a pid, a table) raises rather than silently dropping a binding. Mechanism only (ADR-218) — the grouping and the staleness policy are Brood in std/tool/project.blsp."),
+    ("%image-index", &["path", "fingerprint"], "Open the sectioned startup image at `path` if its stamp equals `fingerprint`, returning its section directory as a map {name -> [offset len]} — `\"\"` is the always-materialised root section, every other key a module's feature name. nil for any miss (absent, unreadable, older format, stale), which is the rebuild-me signal. Reads the header and directory only, never the payload (ADR-218)."),
+    ("%image-load-section", &["path", "offset", "len"], "Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. Returns how many entries were defined, or nil if the bytes could not be read or decoded. Seeks straight to the section, so loading one module never reads the rest of the image (ADR-218)."),
     ("spit-bytes", &["path", "bytes"], "Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. The binary write-side counterpart to slurp-bytes (spit is UTF-8 string-only) — materialises a received image / archive / any binary asset to disk."),
     ("append-bytes", &["path", "bytes"], "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. The incremental counterpart to spit-bytes (which truncates) — lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory."),
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),

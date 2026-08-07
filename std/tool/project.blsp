@@ -555,8 +555,14 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; the prelude, so the "names that appeared" diff below cannot see them, yet the image
 ;; is wrong without them — restoring `*features*` in particular is what stops a
 ;; `require` re-loading an imaged module from source.
+;; Deliberately NOT `*features*`. With a sectioned image (ADR-218) `require` is what
+;; materialises a module, so restoring a `*features*` that already lists every module makes
+;; `require-one` early-return and nothing is ever loaded — the modules silently do not
+;; exist. `require` re-provides each feature as it materialises it. A feature with no
+;; section (a std module pulled in during the build) is simply re-required from the embedded
+;; source, which is idempotent and cheap.
 (def *project-image-registries*
-  ['*features* '*module-docs* '*impls* '*abilities* '*methods* '*record-ids*])
+  ['*module-docs* '*impls* '*abilities* '*methods* '*record-ids*])
 
 (defn project-image-path (root)
   "Where `root`'s startup image lives."
@@ -588,23 +594,74 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; The globals an image must carry: everything the source load defined that the
 ;; prelude did not, plus the registries it mutated.
 (defn- project-image-names (before)
-  (append-two *project-image-registries*
-    (remove (fn (n) (member? n before)) (global-names))))
+  ;; `before` goes into a SET first. As a list, `member?` is a linear scan run once per
+  ;; global — ~4000 x ~313 000 on a big project, which measured 7 s of a 9 s image write
+  ;; and was invisible until the phase trace showed the time landing outside every
+  ;; measured phase. Exactly the shape ADR-216 removed from `*features*`.
+  (let (seen (fold (fn (m n) (assoc m n true)) {} before))
+    (append-two *project-image-registries*
+      (remove (fn (n) (contains? seen n)) (global-names)))))
+
+;; The module a global belongs to: its name minus the last segment, which IS the feature
+;; name `require` uses (a global `myproj/shapes/area` comes from feature `myproj/shapes`).
+;; nil for a root-level name — a registry, or a def from a file with no `defmodule`.
+(defn- project-image-section-of (n)
+  (let (parts (string-split (name n) "/"))
+    (cond
+      (< (count parts) 2) nil
+      else (join "/" (take (- (count parts) 1) parts)))))
+
+;; Group the image's globals into per-module sections, so `require` can materialise one
+;; module at a time (ADR-218). Root-level names go in the `""` section, which the loader
+;; always materialises; declared sigs are added to it by `%image-write`.
+(defn- project-image-sections (before)
+  (let (grouped (fold (fn (m n)
+                        (let (k (or (project-image-section-of n) ""))
+                          (assoc m k (cons n (or (get m k) nil)))))
+                  {}
+                  (project-image-names before)))
+    ;; `""` must exist even when every global is module-qualified — it carries the sigs.
+    (map (fn (k) [k (or (get grouped k) nil)])
+      (cond
+        (contains? grouped "") (keys grouped)
+        else (cons "" (keys grouped))))))
 
 (defn project-write-image (root before)
-  "Snapshot the bindings this project load produced into `root`'s image. `before` is
-the `(global-names)` list captured *before* the sources were loaded. Returns the count."
+  "Snapshot the bindings this project load produced into `root`'s image, grouped into
+per-module sections. `before` is the `(global-names)` list captured *before* the sources
+were loaded. Returns the entry count."
   (let (dir (parent-dir (project-image-path root)))
     (when (not (dir? dir)) (make-dir dir))
     (%image-write (project-image-path root)
-      (project-image-names before)
+      (project-image-sections before)
       (project-image-fingerprint root))))
 
-(defn project-read-image (root)
-  "Restore `root`'s startup image if it exists and matches the current sources.
-Returns the number of bindings restored, or nil for a miss (absent, stale, corrupt) —
-in which case the caller loads from source and should then write a fresh image."
-  (%image-read (project-image-path root) (project-image-fingerprint root)))
+;; Install `root`'s image as a source of features, if it is current. Materialises the root
+;; section (registries + declared sigs — small, and needed before anything else) and hands
+;; `require` the directory for everything else, so each module materialises on first use.
+;; Returns the section count, or nil for a miss (absent, stale, corrupt).
+(defn project-install-image (root fp)
+  (let (path (project-image-path root)
+        idx (%image-index path fp))
+    (cond
+      (nil? idx) nil
+      else
+        (do
+          (set-load-path! *load-path*)      ; no-op; keeps this a statement position
+          (def *image-path* path)
+          (def *image-sections* (dissoc idx ""))
+          (let (root-sec (get idx ""))
+            (when root-sec
+              (%image-load-section path (first root-sec) (second root-sec))))
+          (count idx)))))
+
+(defn project-materialize-all ()
+  "Materialise every module the installed image holds — for tools that genuinely need the
+whole project in the heap (`nest test`, `nest check`, the LSP). `nest run` deliberately does
+NOT call this: it requires its entry point and lets the rest stay on disk."
+  (let (ks (keys *image-sections*))
+    (fold (fn (_ k) (require-one k)) nil ks)
+    (count ks)))
 
 ;; Whether an image may be used at all this run. Line coverage (ADR-148 tier 2)
 ;; instruments at COMPILE time — the compiler prefixes positioned nodes with a
@@ -621,6 +678,17 @@ in which case the caller loads from source and should then write a fresh image."
     (str ms "ms")
     (str (quot ms 1000) "." (quot (mod ms 1000) 100) "s")))
 
+(defn project-setup-lazy-image (root)
+  "Install `root`'s startup image WITHOUT materialising its modules, so `require` pulls each
+one in on first use (ADR-218). Returns the section count, or nil when there is no current
+image — in which case the caller must fall back to a source load.
+
+This is what makes `nest run` pay only for the modules its entry point actually reaches: on
+a 16 300-module project an entry touching twenty of them materialises twenty, not 16 300."
+  (cond
+    (not (project-image-usable?)) nil
+    else (project-install-image root (project-image-fingerprint root))))
+
 (defn project-load-sources-cached (root & opts)
   "Load the project the fast way: from its startup image when that is current,
 otherwise from source — and in that case write the image, so the NEXT run is fast.
@@ -632,11 +700,25 @@ Reports the build on stderr when it actually builds, and says nothing on an imag
 hit — a cold load of a large project takes tens of seconds, and silence there is
 indistinguishable from a hang. stderr, not stdout, so `nest run`'s output stays the
 program's and the LSP's protocol channel stays clean."
-  (let (files (project-source-files root)
+  (let (t-a (now-ns)
+        files (project-source-files root)
+        t-b (now-ns)
         fp (project-fingerprint-of files)
+        t-c (now-ns)
         hit (cond
-              (project-image-usable?) (%image-read (project-image-path root) fp)
-              else nil))
+              (project-image-usable?)
+                (let (n (project-install-image root fp))
+                  (cond
+                    (nil? n) nil
+                    ;; Everything, because this entry point is for the tools that need the
+                    ;; whole project. `nest run` uses `project-setup-lazy-image` instead.
+                    else (do (project-materialize-all) n)))
+              else nil)
+        t-d (now-ns)
+        _ (when (getenv "BROOD_IMAGE_TRACE")
+            (eprintln (str "[loader] collect " (quot (- t-b t-a) 1000000)
+                        " ms, fingerprint " (quot (- t-c t-b) 1000000)
+                        " ms, image-read " (quot (- t-d t-c) 1000000) " ms"))))
     (cond
       hit hit
       else
@@ -647,9 +729,23 @@ program's and the LSP's protocol channel stays clean."
               before (global-names)
               _ (apply project-load-sources (cons root opts))
               t-load (quot (- (now-ns) t0) 1000000)
+              ;; A project whose globals are not all portable — a `table` global is the
+              ;; documented mutable-state idiom, and a table is deliberately local to its
+              ;; runtime — simply cannot be imaged. That is correct (loading from source is
+              ;; always right), but swallowing it meant such a project silently loaded cold
+              ;; forever with no way to find out why. Say so, once, and carry on.
               wrote (cond
                       (project-image-usable?)
-                        (try (project-write-image root before) (catch e nil))
+                        (try
+                          (project-write-image root before)
+                          (catch e
+                            ;; No once-per-key guard needed: this is the cold path, which
+                            ;; already prints Building/Built exactly once per build.
+                            (do
+                              (eprintln (str "note: " name
+                                          " cannot use a startup image, so it loads from"
+                                          " source every time — " (get e :message)))
+                              nil)))
                       else nil)
               t-all (quot (- (now-ns) t0) 1000000))
           (eprintln (str "Built " name " in " (project-ms-str t-load)
@@ -2151,14 +2247,14 @@ as unchanged (only when some were)."
           ;; entry (no `(defmodule …)`, so not a registered module) is left unrooted.
           modname (%root-module-name (first entry))
           fname (second entry))
-      ;; Image-backed start (ADR-218). Note this makes `nest run` load the project's
-      ;; WHOLE source tree, where it used to load only the entry module's transitive
-      ;; `require` closure — the same thing `nest test` and the LSP already do. That is
-      ;; the deliberate trade: a big project starts from its image in ~2 s instead of
-      ;; re-evaluating ~20 s of source, and what gets loaded stops depending on which
-      ;; entry point you happened to run. A source file that only parsed because nothing
-      ;; required it will now be loaded (and its errors surfaced) by `nest run` too.
-      (project-load-sources-cached root)
+      ;; Image-backed and LAZY (ADR-218). Install the image's section directory but
+      ;; materialise nothing, then `require` the entry point: `require` pulls in exactly
+      ;; the modules the program reaches, one section at a time, and the rest of the
+      ;; project stays on disk. An entry point touching twenty of 16 300 modules
+      ;; materialises twenty. With no current image, fall through to the ordinary source
+      ;; load — which builds one, so the next run is fast.
+      (when (nil? (project-setup-lazy-image root))
+        (project-load-sources-cached root))
       (require modname)
       ;; A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
       ;; module file with no `defmodule` header defines it bare. Prefer the

@@ -17196,3 +17196,83 @@ its value": drive a receiver to `:waiting` via `process-info` so the send takes 
 non-matching `[:data 42]`, then match it; a companion hammers it across 40 processes and
 checks the value round-trips. Sabotage-verified — pre-fix it hangs 5/5, post-fix 0/10, and
 the amplified repro goes 80%/100% → 0.
+
+## 2026-08-06 — image follow-up: a lost sig, my own quadratic, and 4 s of pointless compaction
+
+Three fixes on top of ADR-218, two of them found only because the image was instrumented
+rather than reasoned about.
+
+**A correctness bug first: declared sigs were silently dropped.** A user `(sig f (int -> int))`
+lives in `RuntimeCode::declared_sigs`, not in the globals table, so an image that snapshots
+globals loses every one. The symptom is not an error — the checker falls back to inferring
+from the body, and `argument 1 expects int` quietly becomes `argument 1 expects number | map`.
+Weaker advice, no failure, on a path (`nest check`) whose entire job is advice. The image
+now carries a sig section. Caught by writing a project that exercises records, abilities,
+macros and a `sig` and diffing `nest check` cold-vs-imaged — records/abilities/macros were
+all fine, which is exactly why only a real comparison would have found the one that wasn't.
+
+**Then `BROOD_IMAGE_TRACE=1`, and the numbers did not land where expected.** Write 9.0 s:
+`to_message` 1.5 s, encode 0.4 s, file write 0.05 s — and **7 s outside every measured
+phase**. That was `project-image-names` diffing against `before` with `member?` on a LIST,
+~4000 × ~313 000 comparisons. The same quadratic ADR-216 had just removed from `*features*`,
+reintroduced by me three commits later in this ADR's own policy code. Write is now 2.7 s.
+The lesson is about the trace, not the bug: phase timers that do not sum to the total are
+the finding, and the habit of checking that sum is what caught it.
+
+**Restore 8.4 s, of which 4.0 s was a RUNTIME compaction that reclaims nothing.** Promoting
+309 706 closures pushes the region past a threshold set when it was empty, so the collector
+fires at the first safepoint after the restore and walks the entire region — every closure
+of which is bound to a global and therefore live. Pinned by bisecting the gap between "last
+`let` binding" and "first body expression" (4 s with nothing in between), then confirmed
+with `BROOD_RT_GC_FLOOR=20000000`: 8.3 s → 4.4 s. `image_read` now re-baselines the
+collector with the same `max(floor, live * 2)` rule it applies after a real collection —
+skipping the discovery, not the policy.
+
+**Where the remaining 4.3 s is**, per the trace: `%image-read` 4.2 s = read 45 ms + decode
+820 ms + `from_message` 1130 ms + `env_define` 1900 ms. So the intermediate `Message` tree
+is ~2 s and **not** the biggest item — `env_define` is, because it `promote`s each restored
+value from LOCAL into RUNTIME, meaning a restore materialises every closure *twice*. That
+reorders the successor items: build restored values directly in the RUNTIME region first,
+streaming decoder second. Worth recording because the pre-measurement plan had them the
+other way round.
+
+## 2026-08-06 — the image goes lazy: 16 300 modules start in 1.3 s and 219 MB
+
+The startup image now sections by module and materialises on demand, which is the change
+that makes a large project start in the time an *entry point* deserves rather than the time
+the *codebase* costs. See ADR-218; what follows is what building it taught.
+
+| 16 302 modules | wall | RSS |
+|--------------------------|--------|--------|
+| cold source load         | 32 s   | 2.3 GB |
+| eager whole-image restore| 4.3 s  | 1.9 GB |
+| **lazy, per-module**     | **1.30 s** | **219 MB** |
+| Elixir, same shape       | 2.26 s eager / 0.2 s lazy | 1.69 GB |
+
+**The design changed once the code was read, not before.** The obvious shape for laziness is
+to hook global lookup and materialise a binding on first reference. `Heap::global_lookup_cached`
+takes `&self`, and materialising needs `&mut` to allocate — so that would mean restructuring
+the hottest path in the runtime. The right seam for Brood is the one it already has:
+`require`. Module granularity is also exactly what BEAM does with `.beam` files, and it needs
+no kernel change beyond a registry the prelude consults before the load-path.
+
+**Imaging `*features*` silently broke lazy loading.** Restoring it told `require` every module
+was already loaded, so it early-returned, nothing materialised, and the modules simply did not
+exist — `unbound symbol` from a `(:use …)` that had worked moments earlier. It is now excluded,
+and `require` re-provides each feature as it materialises it. A good reminder that "restore all
+the state a load produced" and "let the loader do its job" are in tension: the load-once marker
+is the one piece of state an image must NOT restore.
+
+**Measuring `nest run` at scale was misleading twice.** First it read 124 s and looked like the
+lazy path was catastrophic; the image was in fact hitting cleanly with no rebuild, and the time
+is `nest run`'s advisory pre-flight checking all 16 301 source files — pre-existing, unrelated,
+and now the dominant cost of `nest run` on a big project. Second, a direct measurement with
+`brood` showed the image always missing: the fingerprint includes `build-id`, which embeds the
+executable's own mtime, so an image written by `nest` is never used by `brood`. Both cost real
+time to chase, and both are now recorded in the ADR.
+
+**Also confirmed a false alarm.** A full-suite run during this work failed `brood_suite_passes`
+with a green process dying on `division by zero` at 1163 s (2.2x its normal wall). Nothing else
+had changed, and 16 300-module image builds were running concurrently. A clean re-run on an idle
+box is 966/966 and 4458/4458. Same lesson as the `child_cleanup` scare earlier today: on this box
+a suite result taken under load is not evidence.
