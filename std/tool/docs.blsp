@@ -119,10 +119,20 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; Markdown for the module loaded from `path`: snapshot the globals, load the
 ;; file, and attribute every newly-bound name to it.
 (defn document-file (path)
-  "The Markdown documentation for the module in the file at `path`: load it and document every global it newly binds (each with its arglist and docstring)."
-  (let (src (slurp path) before (global-names))
+  "The Markdown documentation for the module in the file at `path`: load it and document
+  the definitions in its own namespace. Attribution is by namespace (`project-file-feature`,
+  ADR-070 rooting), like `model-file` — a `(global-names)` delta mis-credits a module already
+  bound (transitively loaded, or materialised from a startup image, ADR-218) and modules the
+  file's own load pulls in. Files with no module header, or read outside a project, fall back
+  to the delta."
+  (let (src (slurp path)
+        declared (docs-module-name src)
+        feature (try (project/project-file-feature path) (catch _ nil))
+        before (global-names))
     (load path)
-    (docs-render (docs-basename path) (docs-leading-doc src) (docs-added before (global-names)))))
+    (if feature
+      (docs-render (or declared (docs-basename path)) (docs-leading-doc src) (docs-namespace-syms feature))
+      (docs-render (docs-basename path) (docs-leading-doc src) (docs-added before (global-names))))))
 
 ;; Markdown for a module named `modname` (symbol or string): resolve its source
 ;; (baked-in or on *load-path*), snapshot the globals, `require` it, and document
@@ -323,24 +333,36 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 (defn- md-escape (s) (-> (str s) (replace "&" "&amp;") (replace "<" "&lt;") (replace ">" "&gt;")))
 
+;; Escape a URL for an `href="…"` attribute (adds `"` to `md-escape`) and neutralise a
+;; `javascript:` link, so a guide's Markdown can't break out of the attribute or inject
+;; script into the generated site.
+(defn- md-attr
+  (url)
+  (if (starts-with? (trim url) "javascript:") "#" (replace (md-escape url) "\"" "&quot;")))
+
 ;; A non-code text run: turn `[text](url)` into a link, HTML-escape everything else.
 (defn- md-links
   (text)
-  (let (open-bracket (index-of text "["))
-    (if (or (not (number? open-bracket)) (< open-bracket 0))
-      (md-escape text)
-      (let (close-bracket (index-of text "]"))
-        (if (and (number? close-bracket) (> close-bracket open-bracket)
-              (= (substring text (+ close-bracket 1) (min (+ close-bracket 2) (string-length text))) "("))
-          (let (rest (substring text (+ close-bracket 2) (string-length text)) close-paren (index-of rest ")"))
-            (if (and (number? close-paren) (>= close-paren 0))
-              (str (md-escape (substring text 0 open-bracket))
-                "<a href=\"" (md-escape (substring rest 0 close-paren)) "\">"
-                (md-escape (substring text (+ open-bracket 1) close-bracket)) "</a>"
-                (md-links (substring rest (+ close-paren 1) (string-length rest))))
-              (md-escape text)))
-          (str (md-escape (substring text 0 (+ close-bracket 1)))
-            (md-links (substring text (+ close-bracket 1) (string-length text)))))))))
+  (let (open-bracket (index-of text "[")
+        close-bracket (index-of text "]"))
+    (cond
+      ;; no `[`, or a `]` before any `[` with no closing `]` after — no link, escape all.
+      ;; (`index-of` returns -1 when absent, so both bounds are guarded — missing the `]`
+      ;; guard recursed on the same text and stack-overflowed.)
+      (or (not (number? open-bracket)) (< open-bracket 0)) (md-escape text)
+      (or (not (number? close-bracket)) (< close-bracket open-bracket)) (md-escape text)
+      ;; `[text](url)` — a real link
+      (= (substring text (+ close-bracket 1) (min (+ close-bracket 2) (string-length text))) "(")
+        (let (rest (substring text (+ close-bracket 2) (string-length text)) close-paren (index-of rest ")"))
+          (if (and (number? close-paren) (>= close-paren 0))
+            (str (md-escape (substring text 0 open-bracket))
+              "<a href=\"" (md-attr (substring rest 0 close-paren)) "\">"
+              (md-escape (substring text (+ open-bracket 1) close-bracket)) "</a>"
+              (md-links (substring rest (+ close-paren 1) (string-length rest))))
+            (md-escape text)))
+      ;; a `[…]` that isn't a link — emit it literally, continue past the `]`
+      else (str (md-escape (substring text 0 (+ close-bracket 1)))
+             (md-links (substring text (+ close-bracket 1) (string-length text)))))))
 
 ;; Inline Markdown for one text run: `code` spans (backtick pairs) plus links via `md-links`.
 (defn- md-inline
@@ -362,6 +384,9 @@ module's namespace-rooted globals (ADR-070) back to it."
         (assoc state
           :out (str out "<ul>" (apply str (map (fn (l) (str "<li>" (md-inline l) "</li>")) (reverse buf))) "</ul>")
           :mode :none :buf nil)
+      ;; an unclosed ``` fence at end-of-input: emit what was buffered rather than drop it
+      (= mode :code)
+        (assoc state :out (str out "<pre><code>" (md-escape (join "\n" (reverse buf))) "</code></pre>") :mode :none :buf nil)
       else state)))
 
 (defn- md-line

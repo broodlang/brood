@@ -870,12 +870,12 @@ fn receive_match_timed(
                 let mut st = crate::core::sync::lock(&ctx.mailbox.state);
                 Some(
                     *st.recv_deadline
-                        .get_or_insert_with(|| Instant::now() + Duration::from_millis(ms as u64)),
+                        .get_or_insert_with(|| super::timer::sched_now() + Duration::from_millis(ms as u64)),
                 )
             } else {
                 // Coroutine/root: the `receive_match` loop holds the deadline across its
                 // waits (it never exits between scans), so compute it once here.
-                Some(Instant::now() + Duration::from_millis(ms as u64))
+                Some(super::timer::sched_now() + Duration::from_millis(ms as u64))
             }
         }
         _ => {
@@ -931,7 +931,7 @@ fn receive_match_timed(
             Ok(None) => {
                 // Scanned every queued message with no match.
                 if let Some(d) = deadline {
-                    if Instant::now() >= d {
+                    if super::timer::sched_now() >= d {
                         // The receive completed via timeout — answer `nil` (the macro's
                         // `after` branch tests for it) and clear the persisted
                         // capture-mode deadline.

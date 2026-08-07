@@ -56,12 +56,50 @@ pub(super) fn arm_timer(pid: u64, deadline: Instant, gen: u64) {
 /// still win over timeouts, since the pump drains all run queues before firing a timer. A
 /// superseded entry (its `gen` advanced) wakes nothing but is still removed. Returns whether
 /// an entry was fired.
+// The scheduler's clock for receive deadlines. On native this is the real monotonic
+// clock. On wasm there is no timer thread, so real time never advances *while a snippet
+// runs* — `fire_next_timer` advances this LOGICAL clock to the fired deadline instead, so a
+// woken receive sees its deadline as reached and takes its `after` clause at once (rather
+// than re-checking `Instant::now()`, finding almost no real time passed, and re-parking —
+// which spun the pump at 100% CPU for the full real delay, freezing the tab).
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn sched_now() -> Instant {
+    Instant::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static LOGICAL_NOW: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn sched_now() -> Instant {
+    LOGICAL_NOW.with(|c| {
+        let now = c.get().unwrap_or_else(Instant::now);
+        c.set(Some(now));
+        now
+    })
+}
+
+/// Fire the earliest pending receive-timeout, waking its parked process (wasm cooperative
+/// scheduler — there is no timer thread). Called by the pump when nothing else is runnable:
+/// the earliest deadline is then the only thing that can advance the program, so it fires in
+/// logical time — advance the logical clock to that deadline so the woken receive's gate
+/// (`sched_now() >= deadline`) is satisfied and the timeout resolves immediately (no real
+/// wait, no busy-spin). Messages still win, since the pump drains all run queues before this
+/// runs. A superseded entry (its `gen` advanced) wakes nothing but is still removed. Returns
+/// whether an entry was fired.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn fire_next_timer() -> bool {
     let (lock, _cv) = &*TIMERS;
     let next = crate::core::sync::lock(lock).pop();
     match next {
-        Some(Reverse((_deadline, pid, gen))) => {
+        Some(Reverse((deadline, pid, gen))) => {
+            LOGICAL_NOW.with(|c| {
+                if c.get().is_none_or(|now| deadline > now) {
+                    c.set(Some(deadline));
+                }
+            });
             super::mailbox::wake_for_timeout(pid, gen);
             true
         }

@@ -4,6 +4,23 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.8 — 2026-08-07
+
+Review fixes for the doc/wasm batch:
+
+- **wasm `receive` timeouts no longer busy-spin.** `(after ms …)` woke the process but the
+  gate re-checked the *real* clock (almost no time passed) and re-parked, so the pump spun at
+  100% CPU for the whole real delay — freezing the browser tab. A `cfg(wasm32)` **logical
+  clock** (`timer::sched_now`) now advances to the fired deadline, so the receive resolves at
+  once (a 1 s timeout returns immediately). Native uses the real clock, unchanged.
+- **`markdown->html` no longer runs away on an unmatched `[`** (`index-of` returns -1, not
+  nil — the missing guard recursed on the same text and stack-overflowed). An unclosed ```
+  fence at end-of-input is now emitted rather than dropped, and a guide link's URL is
+  attribute-escaped with `javascript:` neutralised.
+- **`nest doc` (Markdown) uses namespace attribution** (`project-file-feature`), like `nest
+  docs`, instead of a `global-names` load-delta — which mis-credited a module already bound
+  (transitively loaded, or materialised from an ADR-218 startup image).
+
 ## v0.3.7 — 2026-08-07
 
 - **`nest doctest`** — a new subcommand that evaluates every `expr ;=> result` example in
