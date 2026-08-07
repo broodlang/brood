@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07) |
 | KI-35 | `*method-from*` was never imaged, so an imaged start stopped reporting cross-module `defmethod` conflicts | ✅ **fixed** 2026-08-07 |
 | KI-34 | the startup image was written on every cold start and **never read from** — two defects, either sufficient | ✅ **fixed** 2026-08-07 |
 | KI-33 | fully consuming a stream leaked its producer process — an exhausted stream parked in `stream-done-loop` forever instead of exiting | ✅ **fixed** 2026-08-07 |
@@ -54,9 +55,44 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open issues; one watch item (KI-28).** No open bug in the language, runtime or toolchain
+**No open issues; two watch items (KI-28, KI-36 — both single, unreproducible dist failures seen under load).** No open bug in the language, runtime or toolchain
 itself. Every KI above is fixed, incidentally fixed, or a non-reproducing transient — each kept as
 a record with its regression test, so a recurrence is recognizable.
+
+---
+
+## KI-36 — a single `reconnect_watcher_heals_a_fallen_link` failure · **watching, seen once 2026-08-07**
+
+**Seen once**, in the full `make test` that gated the dependency-imaging change: `TRY 1 FAIL
+[22.567s]`, passed on nextest's retry, suite otherwise 970/970. The box was **not idle** — a
+4000-module image build (≈2.9 GB RSS) was running beside the suite, which is the same condition
+the 2026-08-06 devlog records as producing a false `division by zero` failure in
+`brood_suite_passes`.
+
+**Not reproduced: 0 failures in 25 idle runs** (retries off, one at a time) and **0 in 10 runs
+under synthetic load** (six CPU burners plus repeated cold image builds). That second number is
+weak evidence, and worth saying so: those runs took 1.6–1.9 s each against 2.58 s idle, i.e. the
+load never actually reached the test's path.
+
+**What the 22.6 s says.** The test has three liveness deadlines — nodedown 15 s, pong 20 s,
+nodeup 45 s. A 22.6 s failure can only be the **nodedown** one (15 s plus node startup), not the
+nodeup deadline, which would have taken at least 45 s. That branch is A failing to observe
+`[:nodedown]` after B1 exits *cleanly*, where the socket EOF should fire it immediately and the
+heartbeat path (`DOWN_AFTER` 6 s, 2 s ticks) is only the backstop — so 15 s is roughly 2× the
+worst case, and exceeding it means a real stall, not a marginal deadline.
+
+**Diagnostic to arm next time:** the failing run's stdout was lost because the suite output was
+piped through a `grep` for summary lines. The test prints exactly which branch fired
+(`TIMEOUT-no-nodedown` / `NODEDOWN-OK` / `NOCONNECTION-OK` / …) precisely so this question is
+answerable after the fact — capture the full nextest output on any suite run that is expected to
+be evidence.
+
+**A clean re-run is green:** 970/970 with no flaky row, on an idle box, same commit. So the
+sighting stands alone, exactly as KI-28's does.
+
+**Related:** KI-28 is the same shape in the same suite — a single unexplained dist failure that
+passed on retry and has never recurred. Two independent one-off failures in the dist tests, both
+under load, is worth correlating if a third appears; neither reproduces on demand today.
 
 ---
 

@@ -17566,3 +17566,11 @@ whole point: with deps imaged, a warm start materialises them instead of re-eval
 Guarded by `a_path_dependency_is_imaged_and_its_edits_invalidate` — both halves in one case,
 since "imaged" without "invalidated" is the dangerous state and it is only dangerous in
 combination. Sabotage-verified: drop dep files from the key and the case fails on the edit.
+
+**Housekeeping trap, confirmed the hard way:** a `make test` in this session died with
+`collect2: fatal error: ld terminated with signal 7 [Bus error]` and a page of LLVM backtrace —
+which is the *full disk* already written down in `handoff.md`, not a toolchain or code fault.
+`/` was at 100% with 1.6 GB free: `target/debug` had grown to **81 GB** (15 GB of it
+`incremental`) plus 12 GB of `target/release`, and an A/B worktree build added 1.3 GB on top.
+`cargo clean` recovered **107 GB** (99% → 53%), after which the suite is 970/970 clean with no
+flaky row. Check `df` before reading a linker crash as anything else.
