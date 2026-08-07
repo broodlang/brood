@@ -43,11 +43,11 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use super::*;
 use crate::core::value::{self, Value};
 use crate::dist::wire::{decode_msg, encode_msg};
-use crate::process::message::{from_message, to_message};
+use crate::process::message::{from_message, to_message, to_message_image};
 
 /// `brood-image` + a format version. Bumping the version invalidates every image written by
 /// an older binary, on top of whatever fingerprint the caller supplies.
-const MAGIC: &[u8] = b"brood-image-v2\n";
+const MAGIC: &[u8] = b"brood-image-v3\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -148,23 +148,29 @@ fn encode_section(
             other => (other, KIND_GLOBAL),
         };
         let t0 = std::time::Instant::now();
-        // A value with no portable form (a builtin, a pid, a table) raises: silently
-        // dropping a binding would make the image a *different program* from the source,
-        // which is far worse than failing loudly. The caller reports it and loads from
-        // source instead.
-        let msg = to_message(heap, v).map_err(|e| {
+        // A value with no portable form (a pid, a table, an open socket) raises: silently
+        // dropping a binding would make the image a *different program* from the source, which
+        // is far worse than failing loudly. The caller reports it and loads from source
+        // instead. A *builtin* is the exception — `to_message_image` carries it by name (the
+        // image restores bindings in the same, binary-keyed runtime), so a global holding a
+        // primitive (e.g. `std/editor/ui`'s `*term-display*`, a map of `term-*` prims) no
+        // longer forfeits the whole image.
+        let msg = to_message_image(heap, v).map_err(|e| {
             LispError::type_err(format!(
-                "%image-write: cannot image global '{}': {}",
-                value::symbol_name(sym),
-                e
+                "%image-write: cannot image global '{}': {e}",
+                value::symbol_name(sym)
             ))
         })?;
         *ns_to_msg += t0.elapsed().as_nanos() as u64;
         let t1 = std::time::Instant::now();
         entries.push(kind);
         put_str(&mut entries, &value::symbol_name(sym));
-        encode_msg(&mut entries, &msg)
-            .map_err(|e| LispError::runtime(format!("%image-write: encode failed: {e}")))?;
+        encode_msg(&mut entries, &msg).map_err(|e| {
+            LispError::runtime(format!(
+                "%image-write: cannot image global '{}': {e}",
+                value::symbol_name(sym)
+            ))
+        })?;
         *ns_encode += t1.elapsed().as_nanos() as u64;
         count += 1;
     }

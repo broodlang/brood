@@ -55,10 +55,11 @@ pub enum Message {
     /// `Str` because separate runtimes have independent blob lifetimes.
     StrShared(Arc<SharedBlob>),
     /// **Raw bytes** sent by handle. Always
-    /// Arc-backed, so it crosses by reference (a refcount bump, no byte copy). Within
-    /// one runtime only; the dist wire encoder **rejects** it (independent blob
-    /// lifetimes; the bytes aren't UTF-8). A same-runtime receiver reconstructs it
-    /// with `alloc_bytes`. Never decoded as UTF-8 text.
+    /// Arc-backed, so within one runtime it crosses by reference (a refcount bump, no byte
+    /// copy). A same-runtime receiver reconstructs it with `alloc_bytes`. Across the wire (a
+    /// cross-node send, or the startup image) it is copied inline as a length-prefixed raw
+    /// blob — immutable data, so the receiver allocates its own `SharedBlob` with no shared
+    /// identity. Never decoded as UTF-8 text.
     Bytes(Arc<SharedBlob>),
     Sym(Symbol),
     Keyword(Symbol),
@@ -126,6 +127,15 @@ pub enum Message {
     /// *local* variables are copied (see [`ClosureMsg::captured`]). This is what
     /// makes `(spawn …)` shippable to another node — see `docs/decisions.md`.
     Closure(Box<ClosureMsg>),
+    /// A builtin (`Value::Native`) carried by the **name** it is bound to, not by its Rust
+    /// function pointer (which has no portable form). Produced ONLY by the startup-image
+    /// writer ([`to_message_image`]): the image restores global bindings in the same runtime,
+    /// where a builtin is a stable, registered primitive, so it travels by name and
+    /// [`from_message`] re-resolves it. A cross-process / cross-node *message* still refuses a
+    /// builtin — the image is binary-keyed (build-id in its fingerprint), so the name is
+    /// guaranteed to resolve to the same primitive on read; a plain message has no such
+    /// guarantee. The wire codec encodes it like any other by-name symbol.
+    Native(Symbol),
 }
 
 /// The wire form of a [`Closure`]: everything but the global env, which is
@@ -189,6 +199,37 @@ pub fn to_message_to_runtime(
     dest_runtime: Option<u64>,
 ) -> Result<Message, LispError> {
     to_message_rec(heap, v, &mut Vec::new(), 0, dest_runtime)
+}
+
+thread_local! {
+    /// Set only while the startup-image writer serialises a global: it flips a builtin from
+    /// "refused" to [`Message::Native`]. A plain `send` never sets it, so message and wire
+    /// semantics are unchanged. See [`to_message_image`].
+    static IMAGE_NATIVE_BY_NAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Reverts [`IMAGE_NATIVE_BY_NAME`] on drop, so an early `?`-return or a panic can't leave it
+/// stuck on for the next `to_message` on this thread.
+struct ImageNativeMode;
+impl ImageNativeMode {
+    fn enter() -> Self {
+        IMAGE_NATIVE_BY_NAME.with(|f| f.set(true));
+        ImageNativeMode
+    }
+}
+impl Drop for ImageNativeMode {
+    fn drop(&mut self) {
+        IMAGE_NATIVE_BY_NAME.with(|f| f.set(false));
+    }
+}
+
+/// [`to_message`] for the **startup image** only: a builtin is serialised by name
+/// ([`Message::Native`]) instead of being refused, because the image restores bindings in the
+/// same runtime where the primitive is registered under that name (and is binary-keyed, so it
+/// re-resolves). Everything else behaves exactly as `to_message`.
+pub fn to_message_image(heap: &Heap, v: Value) -> Result<Message, LispError> {
+    let _mode = ImageNativeMode::enter();
+    to_message_rec(heap, v, &mut Vec::new(), 0, None)
 }
 
 /// `BROOD_NO_SHARE_FN_MSG=1` reverts a serialised same-runtime send to deep-copying the
@@ -396,13 +437,19 @@ fn to_message_rec(
             )?))
         }
         Value::Macro(_) => return Err(LispError::type_err("cannot send a macro in a message")),
-        Value::Native(_) => {
-            // A builtin is a Rust function pointer with no portable form — and on
-            // another node the receiver has its own copy anyway. Reference it by
-            // the symbol it's bound to instead of capturing its value.
-            return Err(LispError::type_err(
-                "cannot send a builtin in a message; reference it by name (code is shared)",
-            ));
+        Value::Native(id) => {
+            // A builtin is a Rust function pointer with no portable form — and on another node
+            // the receiver has its own copy anyway. In a MESSAGE it is refused (the sender must
+            // reference it by name). But the STARTUP IMAGE carries it by the name it is bound
+            // to: the image restores bindings in the same runtime and is binary-keyed, so the
+            // name re-resolves to the same primitive on read. See `Message::Native`.
+            if IMAGE_NATIVE_BY_NAME.with(|f| f.get()) {
+                Message::Native(crate::core::value::intern(&heap.native(id).name))
+            } else {
+                return Err(LispError::type_err(
+                    "cannot send a builtin in a message; reference it by name (code is shared)",
+                ));
+            }
         }
         Value::Rope(_) => {
             // A rope is process-local: it lives in exactly one process's heap
@@ -612,6 +659,16 @@ fn from_message_timed(heap: &mut Heap, m: &Message) -> Value {
         Message::Float(f) => Value::float(*f),
         Message::Sym(s) => Value::symbol(*s),
         Message::Keyword(s) => Value::keyword(*s),
+        Message::Native(s) => {
+            // Re-resolve the builtin by the name it was imaged under. The image is binary-keyed
+            // (build-id in its fingerprint), so the same primitive is registered under this name
+            // on read. Defensive fallback to nil if a stale image ever slipped through — a
+            // missing binding, never a wrong one. Only the image produces this variant.
+            match heap.env_get(heap.global(), *s) {
+                Some(v @ Value::Native(_)) => v,
+                _ => Value::nil(),
+            }
+        }
         Message::Str(s) => heap.alloc_string(s),
         Message::StrShared(blob) => heap.alloc_string_from_shared(Arc::clone(blob)),
         Message::Bytes(blob) => heap.alloc_bytes(Arc::clone(blob)),

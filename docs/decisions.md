@@ -14532,6 +14532,35 @@ rebindings would be the wrong fix — it would turn the harmless wipe into a lea
 transient trace into every future run. bedit's `apprun` was reordered to build first
 (bedit `fix(apprun)`, 2026-08-07); no kernel change is warranted, only this contract.
 
+**A builtin and a byte literal are imageable; a table is not — and a std module's section is
+never imaged at all.** Found imaging bedit (2026-08-07): one global with no portable form
+forfeits the *whole* image (a partial image would be a different program), and bedit had three
+in a row — each hidden behind the last. The fixes, in the order they surfaced:
+
+- *A builtin travels by name.* `std/editor/ui`'s `*term-display*` is a map of `term-*`
+  primitives, and a builtin is a Rust function pointer with no data form — so a *message*
+  refuses it ("reference it by name"). But the image restores bindings in the **same** runtime,
+  and the fingerprint already carries `(build-id)`, so the writing binary *is* the reading
+  binary: a builtin can travel as `Message::Native(name)` and re-resolve to the same primitive
+  on load. Confined to the image (a thread-local the writer sets), so cross-process/node message
+  semantics are unchanged — a plain `send` still refuses a builtin.
+- *Bytes copy inline.* A `#b"…"` literal in a function body (bedit's `web-handle-input`) is
+  immutable data; the wire codec had refused it "for now" only because it isn't UTF-8. It now
+  rides `M_BYTES` (length-prefixed raw bytes), which also lets bytes cross a node link.
+- *A std module's section is dropped from the write.* `regex/regex-states-cache` is a **table**
+  — Brood's one mutable structure, genuinely un-imageable (runtime state, not source). But it is
+  a *std* module's global, and a std module is always served from its baked-in source, so its
+  image section would never be materialised anyway (the same fact the registry-names funnel
+  guards). `project-image-sections` now keeps only sections in `*package-module-files*` — the
+  project's own modules and its deps — so a std module's runtime-local values never reach the
+  writer. A genuinely un-imageable value in the *project's own* code would still (correctly)
+  decline the image, now with the offending global named in the note.
+
+Net: bedit went from "loads from source every run" to an imaged start (cold 335 ms → warm
+~200 ms). The image `MAGIC` is bumped `v2`→`v3` for the new `M_NATIVE`/`M_BYTES` tags, and
+`(build-id)` in the fingerprint means a rebuilt binary rebuilds the image — so a builtin's name
+can never resolve to a *different* primitive than the one that was imaged.
+
 **`nest run` stays lazy.** An intermediate version made it load the whole source tree, which
 was the price of being image-backed before sectioning existed. Sectioning removes that trade
 entirely: `nest run` installs the section directory, materialises nothing, and `require`
