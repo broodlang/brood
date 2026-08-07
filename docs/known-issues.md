@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-32 | a selective `receive` corrupted a skipped **local** (L1-delivered) message to `nil` — a stream request/reply pipeline deadlocked intermittently | ✅ **fixed** 2026-08-06 |
 | KI-31 | a foreign-ecosystem version range compiled to its FIRST term — `">=1.0.0 <2.0.0"` became `>=1.0.0` | ✅ **fixed** 2026-08-06 |
 | KI-30 | seven `temp-dir` prefixes were never purged — 4484 dirs / 168 MB of `/tmp` litter | ✅ **fixed** 2026-08-05 |
 | KI-29 | node/observe tests orphan `brood` children — one found alive **9 days** later, ~15% CPU each | ✅ **fixed** 2026-08-05 |
@@ -53,6 +54,48 @@ ADRs / topic docs.
 **No open issues; one watch item (KI-28).** No open bug in the language, runtime or toolchain
 itself. Every KI above is fixed, incidentally fixed, or a non-reproducing transient — each kept as
 a record with its regression test, so a recurrence is recognizable.
+
+---
+
+## KI-32 — a selective `receive` corrupted a skipped local message to `nil` · **fixed 2026-08-06**
+
+**Found by the green-tree flake battery, 2026-08-06** — the in-language suite's
+`stream-drop › drop more than available` timed out at 600s once (masked by a nextest
+retry, so the battery's own fail-count read 0). Not a stream bug: an amplified repro
+(`stream-drop` pipelines hammered concurrently) reproduced an intermittent **hang** —
+~20% at 200 pipelines, ~80% at 800, and **100% single-worker** (`BROOD_J=1`), which ruled
+out a multi-core data race and pointed at a cooperative-scheduling logic bug. A gdb
+snapshot of the wedge showed the root process blocked in `receive` while the worker slept
+with an empty run queue; a watchdog dump named the culprit: one process parked over a
+single queued message whose value had become **`nil`**.
+
+The bug was in the selective-receive scan (`scan_mailbox`, `process/mailbox.rs`). A message
+delivered by the **L1 fast path** — the sender copies it straight into a *parked* receiver's
+heap, a `Payload::Local` whose value lives in a `msg_roots` slot — was read during the
+optimistic single-lock scan with **`msg_root_take`**, which *tombstones the slot for reuse*.
+On a **non-match**, the same envelope (still holding that slot index) was re-inserted into
+the queue via `reinsert_candidate`; the next scan `msg_root_peek`-ed the now-empty slot and
+read **`nil`** (or, worse, a later message that reused the slot). A `[:next pid]` request
+sitting in a stream stage's mailbox while it waited for its upstream reply was thus corrupted
+to `nil` and could never match again — the stage parked forever, and the whole pull-stream
+pipeline deadlocked. Intermittent because it needed the message to arrive via L1 (receiver
+parked) *and* be the optimistically-popped first candidate of a non-matching scan; worse
+single-threaded because that interleaving is more likely; engine-independent because the
+mailbox scan is shared by the VM and the tree-walker; unhelped by every scheduler/message
+opt-out lever because none of them touch the take/reinsert.
+
+**Fixed** by **peeking, not taking**, in the optimistic scan (so a re-queued candidate keeps
+its slot intact) and freeing the slot (`msg_root_take`) only on the **consume** path, where
+the message actually leaves the queue. This also closes a latent slot leak on the
+non-optimistic match path, which peeked but never freed. Wire-format messages were always
+immune (their value lives in the envelope, not a slot).
+
+Regression test: `tests/concurrency_test.blsp`, "selective receive: a skipped local message
+keeps its value" — a receiver is driven to `:waiting` (via `process-info`) so the send takes
+the L1 path, then a non-matching `[:data 42]` is skipped and later matched; a companion
+hammers the shape across 40 processes and checks the value round-trips. **Verified by
+sabotage** — on the pre-fix binary the test hangs 5/5 (600s → timeout); on the fix it passes
+0/10, and the amplified repro drops from 80%/100% hang to 0.
 
 ---
 
