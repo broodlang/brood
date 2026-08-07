@@ -616,6 +616,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         registry_cas,
     );
 
+    // Which globals the two above have actually written (ADR-218): the derived answer to
+    // "what does loading MUTATE rather than create?", which the startup image needs and the
+    // `(global-names)` diff cannot see. Naming them by hand went stale twice, silently.
+    def(
+        heap,
+        "%registry-names",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        registry_names,
+    );
+
     // set (the `#{…}` kernel type; the `set` library is Brood over these)
     def(
         heap,
@@ -3396,6 +3407,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
     ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
     ("%image-write", &["path", "sections", "fingerprint"], "Write a sectioned startup image to `path`, stamped with the opaque `fingerprint` string; returns the number of entries written. `sections` is a sequence of [name syms] pairs — `name` is the section key (a module's feature name, or `\"\"` for the always-materialised root), `syms` the global names it holds; declared sigs are added to the root section automatically. An unbound name is skipped; a value with no portable form (a builtin, a pid, a table) raises rather than silently dropping a binding. Mechanism only (ADR-218) — the grouping and the staleness policy are Brood in std/tool/project.blsp."),
+    ("%registry-names", &[], "Every global a registry update (%registry-update! / %registry-cas!) has written in this runtime, sorted by spelling. The derived answer to \"which globals does LOADING mutate rather than create?\" — the ones a startup image has to carry deliberately, because the (global-names) diff it is built from cannot see them (ADR-218). Naming them by hand went stale three times, silently; std/tool/project.blsp filters this instead."),
     ("%image-index", &["path", "fingerprint"], "Open the sectioned startup image at `path` if its stamp equals `fingerprint`, returning its section directory as a map {name -> [offset len]} — `\"\"` is the always-materialised root section, every other key a module's feature name. nil for any miss (absent, unreadable, older format, stale), which is the rebuild-me signal. Reads the header and directory only, never the payload (ADR-218)."),
     ("%image-load-section", &["path", "offset", "len"], "Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. Returns how many entries were defined, or nil if the bytes could not be read or decoded. Seeks straight to the section, so loading one module never reads the rest of the image (ADR-218)."),
     ("spit-bytes", &["path", "bytes"], "Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. The binary write-side counterpart to slurp-bytes (spit is UTF-8 string-only) — materialises a received image / archive / any binary asset to disk."),

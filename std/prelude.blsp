@@ -4490,6 +4490,21 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 (def *image-sections* {})
 (def *image-path* nil)
 
+;; The root setter for the pair above, and it exists for the same reason `set-load-path!`
+;; does: these globals live in the ROOT namespace, so a `(def *image-sections* …)` written
+;; inside a module defines `mod/*image-sections*` and `require-force` — root code — goes on
+;; reading the empty root one. That is not hypothetical: the installer in
+;; `std/tool/project.blsp` did exactly that, so every imaged start restored the root section
+;; and then loaded every module from source anyway. Nothing failed; the image was simply
+;; never consulted. Install through here instead.
+(defn set-image-source! (path sections)
+  "Install `path`'s section directory `sections` (feature name → `[offset len]`) as a source
+of features, so `require` materialises an imaged module instead of loading its source.
+Returns the directory. Pass `{}` to stop consulting an image."
+  (def *image-path* path)
+  (def *image-sections* sections)
+  *image-sections*)
+
 ;; `*load-path*` lives in the ROOT namespace, so only root code can rebind it: a
 ;; `(def *load-path* …)` written inside a module defines `mod/*load-path*` (ambient
 ;; is a declaration now, not an earmuff spelling — see `defdyn`). These two setters
@@ -4809,22 +4824,31 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
           (%load-module-source src (%builtin-module-file key))
           (%set-package-context (first prev) (second prev)))
         (provide key))
-      ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
-      ;; manager mapped to a file. Load it under `foo`'s package context so its
-      ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
-      (contains? *package-module-files* key)
-        (require-force-package key
-          (get *package-module-files* key))
       ;; A feature can come from a startup IMAGE instead of a source file (ADR-218): its
       ;; bindings are materialised from a byte range rather than evaluated. This is the
       ;; seam that makes an imaged project load LAZILY — `require` stays the unit of
       ;; materialisation, so a program pays only for the modules it actually reaches.
       ;; The registry is empty unless a tool populated it; the prelude only knows how to
       ;; consult it, never how to build one (that is `std/tool/project.blsp`).
+      ;;
+      ;; BEFORE the package branch, and that ordering is load-bearing: a project roots its
+      ;; OWN modules too (ADR-070), so `*package-module-files*` holds `myproj/shapes` as
+      ;; surely as it holds a dependency's `foo/b`. Consulted after it, the image branch was
+      ;; unreachable for every module of every named project — the image was written on each
+      ;; cold start and then never read from. Preferring it is also the right precedence on
+      ;; its own terms: an image is only ever installed after its fingerprint matched the
+      ;; sources the package branch would otherwise re-evaluate, and a module with no section
+      ;; still falls through to that branch.
       (contains? *image-sections* key)
         (let (sec (get *image-sections* key))
           (%image-load-section *image-path* (first sec) (second sec))
           (provide key))
+      ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
+      ;; manager mapped to a file. Load it under `foo`'s package context so its
+      ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
+      (contains? *package-module-files* key)
+        (require-force-package key
+          (get *package-module-files* key))
       else
         (let (path (require-find (str key ".blsp") *load-path*))
           (if path

@@ -809,6 +809,14 @@ pub(super) fn registry_cas(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
     )))
 }
 
+/// `(%registry-names)` — the symbols of every global a registry update has written in this
+/// runtime, as a list. See [`Heap::registry_names`]: it is what lets `std/tool/project.blsp`
+/// derive the startup image's registry set instead of naming it (ADR-218).
+pub(super) fn registry_names(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let names: Vec<Value> = heap.registry_names().into_iter().map(Value::Sym).collect();
+    Ok(heap.list(names))
+}
+
 /// `(map-get m k [default])` — the value `k` maps to, or `default` (nil if
 /// omitted) when absent.
 pub(super) fn map_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

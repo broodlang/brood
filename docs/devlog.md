@@ -17370,3 +17370,76 @@ Units trap worth recording: `now` and `file-mtime` both report **milliseconds**,
 first cut of the prune compared against a seconds-based cutoff — which would have pruned
 nothing, silently, forever. Caught by testing with a deliberately backdated directory rather
 than trusting the code to be obviously right.
+
+## 2026-08-07 — the startup image was never read from, and nothing failed
+
+Went looking for the maintenance hazard the last session wrote down (the hand-maintained
+registry list) and found the mechanism it protects had been dead since it shipped. **A
+project's image was written on every cold start and never consulted**: `nest run` restored
+the root section, then loaded every module from source anyway. No error, no wrong answer, no
+slow-down worth noticing on a small project — only the entire ADR-218 benefit, absent.
+
+**Two independent defects, either one sufficient.**
+
+1. **The installer wrote the wrong global.** `project-install-image` ran
+   `(def *image-sections* …)` from inside module `project`, which binds
+   `project/*image-sections*`, while `require-force` — root code — kept reading the empty
+   root one. The prelude states this exact rule four lines above the global's own `def`
+   ("a `(def *load-path* …)` written inside a module defines `mod/*load-path*`") and ships
+   `set-load-path!` as the root setter for precisely this reason. There is now a
+   `set-image-source!` beside it, and the installer goes through it.
+2. **`require-force` checked the branches in the wrong order.** The image branch sat *after*
+   the ADR-070 package-module branch — and a project roots its OWN modules, so
+   `*package-module-files*` holds `demo/shapes` as surely as it holds a dependency's
+   `foo/b`. The package branch matched first for every module of every named project, which
+   made the image branch unreachable. The image is only ever installed after its fingerprint
+   matched the sources that branch would re-evaluate, so preferring it is also the right
+   precedence on its own terms; a module with no section still falls through.
+
+Verified by what a second run *loads*, which is the only thing that shows it: a `println` at
+a module's top level is evaluated by a source load and absent from an imaged one. Before:
+the marker printed on every run. After: cold prints it, warm doesn't, and
+`BROOD_IMAGE_TRACE=1` shows three sections materialising (root, entry, the one module the
+entry reaches) instead of one. Same answers both ways.
+
+**Why no test caught it.** `startup_image_test.blsp` and `image_test.blsp` both exercise the
+`%image-*` primitives directly — they pass a section list in and read it back, so they never
+route through `require`. The defect lived entirely in the seam between the primitives and the
+loader. `crates/nest/tests/startup_image.rs` covers that seam now: run a project twice, assert
+the second run does not evaluate a source file, plus staleness (an edit must invalidate) and
+registry survival.
+
+**The registry list is derived now, not named.** That list had gone stale three times, always
+silently: `declared_sigs`, then seven ability/multimethod registries, then `*method-from*`
+(found this session — cross-module `defmethod` conflicts stop being reported without it). An
+inclusion list fails in the silent direction by construction, because nothing about adding a
+registry reminds you the list exists. `%registry-update!`/`%registry-cas!` are the only ways a
+registry is written, so the kernel records the names they write (one `HashSet` insert under a
+lock already held) and `(%registry-names)` reports them. What is left in Brood is an
+*exclusion* list — `*features*` (imaging it makes `require-one` early-return and nothing
+materialises), `*features-loading*`, `*deprecation-seen*`, and the two package-module maps —
+where forgetting an entry costs a redundant load rather than a wrong answer.
+
+**Worth keeping:** the sabotage check that "confirmed" the registry fix was measuring nothing.
+Excluding `*method-from*` deliberately and re-running left it intact, which read as "the fix
+does not matter" — when the real explanation was that the image was not being read at all. A
+fix verified against a mechanism that never runs verifies nothing; the tell was that both arms
+of the A/B were identical, which no working mechanism produces.
+
+**Sabotage-verified**, since a green test proves nothing until it is run with the mechanism
+off: put the package branch back in front of the image branch → the "second run loads from the
+image" case fails; install with `def` from inside the module again → same case fails; exclude
+`*method-from*` from the derived set → the registry case fails. All three restored after.
+
+**One consequence, closed deliberately.** Preferring the image over the package branch would
+also serve a *dependency* from the image — and the staleness key covers this project's
+`:source-paths` only, so an edited `:path` dep could never invalidate it. Dep modules are
+therefore left out of the image and keep loading from source, exactly as today. Imaging them is
+worth doing and wants the fingerprint to cover their files first; `*package-module-files*` is
+populated by `project-setup` before any fingerprint is taken, so the list is there for it.
+Discriminating a dep from the project's own modules is by prefix, not by registry membership:
+a project roots its own modules under its `:name`, so both live in `*package-module-files*` —
+which is the same fact that caused the bug.
+
+Rust + in-language suite 966/966 green (the in-language suite runs as one nextest case);
+`nest check` clean cold and imaged.

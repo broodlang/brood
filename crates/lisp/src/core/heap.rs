@@ -1462,7 +1462,16 @@ pub struct RuntimeCode {
     /// from `self`. Nothing acquires this while holding the `globals` lock, so there is no
     /// ordering hazard. Registration is a load-time/hot-reload event, so the contention is
     /// nil and holding it briefly on the worker thread is free.
-    registry_lock: Mutex<()>,
+    ///
+    /// It guards a *value*, not `()`: the set of globals a registry update has actually
+    /// written, which [`Heap::registry_names`] reports. A registry is precisely a global that
+    /// loading MUTATES rather than creates, so the `(global-names)` diff a startup image is
+    /// built from cannot see it — and a registry left out of the image is lost with no error
+    /// (ADR-218). Naming them by hand went stale three times; this set is derived from the writes
+    /// themselves, so a registry added later is carried without anyone remembering to.
+    /// Recorded on the write path only, under the lock already held, so it costs one
+    /// `HashSet` insert per registration and nothing at all per lookup.
+    registry_lock: Mutex<HashSet<Symbol>>,
     /// **Reserved** names — everything the language itself ships, which a user `def`
     /// may not rebind (ADR-166). Seeded with every symbol bound at runtime-seed time
     /// (the prelude's 443 definitions plus every Rust builtin), and extended with each
@@ -1787,7 +1796,7 @@ impl Default for RuntimeCode {
             gen_inflight: [AtomicUsize::new(0), AtomicUsize::new(0)],
             gen_version: AtomicU64::new(0),
             globals: RwLock::new(SymbolMap::default()),
-            registry_lock: Mutex::new(()),
+            registry_lock: Mutex::new(HashSet::new()),
             // A default (un-seeded) runtime reserves nothing — the prelude hasn't run.
             sealed: RwLock::new(std::collections::HashSet::new()),
             // Likewise no private names until the prelude has been seeded.
@@ -1912,7 +1921,7 @@ impl RuntimeCode {
             // bindings themselves are.
             private: RwLock::new(prelude_private.iter().copied().collect()),
             globals: RwLock::new(globals),
-            registry_lock: Mutex::new(()),
+            registry_lock: Mutex::new(HashSet::new()),
             version: AtomicU64::new(0),
             code_epoch: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
@@ -5158,7 +5167,7 @@ impl Heap {
         // propagate: a panicking registrar leaves the registry structurally sound (values
         // are immutable), and wedging every later registration would be worse.
         let rt = self.runtime.clone();
-        let _guard = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // `def` binds at `env_root(env)`, which is NOT always `EnvId::GLOBAL`: during prelude
         // load the root is a bootstrap env whose bindings later seed the shared runtime. A
@@ -5240,6 +5249,9 @@ impl Heap {
         // Reuse `env_define`'s global path: it promotes into the shared RUNTIME region and
         // bumps the version that invalidates every process's global inline cache.
         self.env_define(root, sym, next);
+        // Only on the write path: a declined op leaves the registry untouched, and a name
+        // that was never written has nothing for an image to carry.
+        guard.insert(sym);
         true
     }
 
@@ -5262,7 +5274,7 @@ impl Heap {
     /// — and harmless: the retry would recompute the same answer.
     pub fn registry_cas(&mut self, env: EnvId, sym: Symbol, old: Value, new: Value) -> bool {
         let rt = self.runtime.clone();
-        let _guard = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
         // Read through the chain and write at the root, exactly as `def` does (see
         // `registry_update`: the root is NOT always `EnvId::GLOBAL` during prelude load).
         // Matching `def` is what makes a `defdyn` registry safe to convert — an active
@@ -5273,7 +5285,35 @@ impl Heap {
             return false;
         }
         self.env_define(root, sym, new);
+        guard.insert(sym);
         true
+    }
+
+    /// Every global a registry update has written in this runtime — the derived answer to
+    /// "which globals does *loading* mutate rather than create?".
+    ///
+    /// A startup image is built from the `(global-names)` diff across a load (ADR-218), which
+    /// by construction cannot see a global that already existed and was only updated. Those
+    /// were named by hand and the list went stale three times, silently: `declared_sigs`
+    /// weakened the checker, seven ability/multimethod registries governed dispatch with no
+    /// error when lost, and `*method-from*` stopped cross-module `defmethod` conflicts being
+    /// reported. Both funnels record here instead, so the set is a consequence of the writes
+    /// rather than of anyone's memory. Which of them an image should *carry* stays policy, in
+    /// `std/tool/project.blsp`.
+    ///
+    /// Sorted by spelling, like `(global-names)` — a set iterates in hash order, and a
+    /// caller diffing two runs or asserting on the set wants neither that nor interner order.
+    pub fn registry_names(&self) -> Vec<Symbol> {
+        let mut names: Vec<Symbol> = self
+            .runtime
+            .registry_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        names.sort_by_cached_key(|&s| crate::core::value::symbol_name(s));
+        names
     }
 
     /// Structural `member?` over a proper list — the `:cons-new` presence test, kept inside
