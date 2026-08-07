@@ -868,10 +868,9 @@ fn receive_match_timed(
                 // the receive was first entered (and actually fires), instead of being
                 // reset to `now + ms` on each wake. Cleared at every non-suspend exit.
                 let mut st = crate::core::sync::lock(&ctx.mailbox.state);
-                Some(
-                    *st.recv_deadline
-                        .get_or_insert_with(|| super::timer::sched_now() + Duration::from_millis(ms as u64)),
-                )
+                Some(*st.recv_deadline.get_or_insert_with(|| {
+                    super::timer::sched_now() + Duration::from_millis(ms as u64)
+                }))
             } else {
                 // Coroutine/root: the `receive_match` loop holds the deadline across its
                 // waits (it never exits between scans), so compute it once here.
