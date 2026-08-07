@@ -1254,6 +1254,7 @@ resolve in the advisory checker. Returns the project root."
   (op chunk)
   (cond
     (= op :check) (project-check-chunk chunk)
+    (= op :check-shared) (project-check-chunk-shared chunk)
     (= op :scan-entries) (project-scan-entries-chunk chunk)
     (= op :check-deps) (project-check-deps-chunk chunk)
     else (error "project-pfold-run: unknown op " op)))
@@ -1318,6 +1319,25 @@ resolve in the advisory checker. Returns the project root."
 ;; only in this (driver) process, so they may be closures — only `op` crosses to a
 ;; worker, and it is data. A small file set runs in-process (no spawn, stable
 ;; order); a large one is sliced into `cores * *check-oversample*` chunks.
+;; `project-pfold-files` where every file shares one payload (`shared`), which is prepended
+;; to each chunk instead of being paired with each file — so a worker's captured body carries
+;; it once, not once per file. The op sees `(shared file …)`.
+(defn- project-pfold-files-shared
+  (files shared op combine on-death init)
+  (let (n (count files))
+    (if (< n *check-min-parallel*)
+      (combine init (project-pfold-run op (cons shared files)))
+      (let (cores (project-pool-size)
+            nchunks (min n (* cores *check-oversample*))
+            csize (quot (+ n nchunks -1) nchunks)
+            chunks (map (fn (c) (cons shared c)) (project-chunk-list csize files nil)))
+        (project-pfold-groups (project-chunk-list cores chunks nil)
+          op
+          combine
+          on-death
+          init
+          (self))))))
+
 (defn- project-pfold-files
   (files op combine on-death init)
   (let (n (count files))
@@ -1383,12 +1403,42 @@ resolve in the advisory checker. Returns the project root."
             (fold project-tally-warning k (check-file f cl))))
     0 chunk))
 
+;; The same pass for the case where every file shares ONE reachability set, which is what
+;; `check-project-run-closure` has: the loaded features are the closure, identically for all
+;; of them. The chunk is `(closure file …)` rather than a list of `[file closure]` pairs, so
+;; the set crosses to the worker ONCE instead of once per file.
+;;
+;; That is not a micro-optimisation. A chunk is captured by the spawned worker's body, and a
+;; `spawn` DEEP-COPIES what it captures — so pairing each file with the same 16 302-element
+;; list meant copying that list ~100 times per chunk. Measured on a cold `nest run` over
+;; 16 302 modules: the pre-flight cost 24 GB of the run's 26.5 GB peak, and its memory grew
+;; ~4x per doubling of the project (quadratic), while the check itself is ~3.7 ms/file.
+(defn- project-check-chunk-shared
+  (chunk)
+  (let (cl (first chunk))
+    (fold (fn (k f) (fold project-tally-warning k (check-file f cl)))
+      0
+      (rest chunk))))
+
 ;; The from-scratch parallel path: fan `check-file` (print-in-worker) across the
 ;; pool. Used when the cache is off, absent, or the project is over the file cap.
 (defn- project-check-files-fresh
   (files closures)
   (project-pfold-files (project-with-closures files closures)
     :check
+    (fn (n c) (+ n c))
+    (fn (n chunk reason)
+      (eprintln (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason)))
+      (+ n 1))
+    0))
+
+;; `project-check-files-fresh` for one shared reachability set (see
+;; `project-check-chunk-shared`). Same files, same warnings — only the amount copied to each
+;; worker changes, from one closure per FILE to one per CHUNK.
+(defn- project-check-files-shared
+  (files closure)
+  (project-pfold-files-shared files closure
+    :check-shared
     (fn (n c) (+ n c))
     (fn (n chunk reason)
       (eprintln (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason)))
@@ -2055,9 +2105,14 @@ program never reaches is `nest check`/`nest test`'s business."
           ;; `nest check FILE`, but it parses 16 300 headers to check eleven files, which
           ;; measured 34 s of a 35 s `nest run`. Here every loaded feature is by
           ;; definition reachable (it is loaded), so the loaded set IS the closure.
-          closures (fold (fn (m p) (map-assoc m p feats)) {} want))
+          ;; …and because it is the SAME closure for every file, it crosses to each check
+          ;; worker once per chunk rather than once per file (`project-check-files-shared`).
+          ;; Pairing it per file made a cold run's pre-flight quadratic in project size — a
+          ;; `spawn` deep-copies its captured chunk, so the feature list was copied ~100
+          ;; times per chunk. Measured on 16 302 modules: 24 GB of a 26.5 GB peak.
+          )
       (project-check-duplicate-defs extracts source-set)
-      (project-check-files-fresh want closures))))
+      (project-check-files-shared want feats))))
 
 ;; (run-project-tests & opts) — find the project from the cwd, set it up, load
 ;; every <name>_test.blsp under its test paths (which only REGISTER tests via the

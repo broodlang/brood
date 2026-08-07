@@ -17612,3 +17612,77 @@ binary rebuilds the image, so a builtin name can never resolve to a *different* 
 space left on device`, not a code fault — the same hazard `handoff.md` records. This session's
 repeated release+debug rebuilds had regrown `target/debug` to 243 GB; `rm -rf target/debug`
 reclaimed it (100% → 59%). Check `df` before reading a linker/LLVM crash as anything else.
+
+## 2026-08-07 — `nest run`'s cold pre-flight was quadratic: 26.5 GB → ~2 GB
+
+Chasing "the cold path costs ~1.6 MB of peak RSS per module" ended somewhere else entirely,
+and the first finding is that the premise was wrong.
+
+**The loader is linear.** A clean sweep (idle box, warm-up run discarded) over 500 → 8 000
+modules puts the cold load at a flat **~128–140 KB and ~1.6 ms per module**, with the image
+growing exactly linearly (5 → 73 MB). At 16 302 modules `brood` loading the whole project and
+writing its image costs **30.2 s / 2.6 GB**, which is ADR-218's original 32 s / 2.3 GB row.
+There is no memory defect in the runtime. The 26 GB figure that started this came from a
+`nest run`, and attributing it to the loader was the mistake.
+
+**What `nest run` adds, isolated one step at a time** (16 302 modules):
+
+| | wall | peak RSS |
+|---|---|---|
+| load + write image | 28.9 s | 2.6 GB |
+| + require the entry point | 27.8 s | 2.8 GB |
+| + advisory pre-flight | **78.5 s** | **26.5 GB** |
+
+So the pre-flight was ~50 s and ~24 GB of it. Requiring the entry costs nothing.
+
+**Why, and it is not the checking itself.** `check-project-run-closure` reads the closure off
+`*features*` — sound, and cheap on a warm start where only the entry's modules are
+materialised. On a **cold** start every module has just been loaded to build the image, so the
+closure is the whole project: 16 302 files each handed the same 16 302-element feature list as
+its KI-17 reachability set. The check is fanned across the green-process pool, and **a `spawn`
+deep-copies its captured chunk** — so that one list crossed the heap boundary once per *file*,
+roughly a hundred times per chunk. Copies = files × closure, i.e. quadratic in project size,
+which is exactly what the scaling showed: peak memory 911 MB → 2.6 GB → 8.4 GB for N = 2 000 →
+4 000 → 8 000, about 3.2× per doubling.
+
+**The fix ships the shared set once per chunk** (`project-pfold-files-shared` +
+`:check-shared`), leaving what is checked and what it warns about untouched:
+
+| N | before | after |
+|---|---|---|
+| 4 000 | 16.1 s / 2.6 GB | 14.0 s / **1.3 GB** |
+| 8 000 | 36.6 s / 8.4 GB | 28.9 s / **2.1 GB** |
+
+Per-doubling memory growth goes 3.2× → 1.6×: the quadratic is gone, and what remains is the
+inherent ~3.7 ms/file of checking.
+
+**On the row that started it** — a cold `nest run` over 16 302 modules, interleaved A/B, two
+samples a side on an idle box:
+
+| | pre-fix | post-fix |
+|---|---|---|
+| wall | 81.6 / 83.5 s | 88.0 / 84.1 s |
+| peak RSS | 26.76 / 26.76 GB | **5.22 / 5.15 GB** |
+
+**5.2× less memory for about +4% time**, and the time cost is real rather than noise — the
+samples do not overlap (post-fix min 84.1 s against pre-fix max 83.5 s), the same ~+4% the
+isolate showed. Worth it at this size: it is the difference between needing a 32 GB box and
+fitting in 8 GB. Reported rather than buried, since a 5× memory win is easy to quote without
+its cost.
+
+**A measurement trap inside the measurement.** A single post-fix `nest run` first read
+**139.6 s**, which looked like a 61% regression and did not match the 4 000/8 000 rows (both
+got *faster*). It was an artefact of the box state — that run followed a full suite. The
+like-for-like isolate said +4.4%, and the interleaved A/B above settled it at +4%. Two lone
+samples taken hours apart are not an A/B, even when both are "clean".
+
+**Equivalence was verified directly rather than argued**: a project with three deliberate
+warnings (a declared-sig violation across a module boundary, one inside the declaring module,
+and an unbound symbol), run through the old per-file path and the new shared path in the same
+session — identical output, byte for byte.
+
+**Two traps this session walked into**, both already written down here, which is the point of
+writing them down: a memory sweep run *while the suite was running* produced a 12.8 s reading
+for the N=500 row against 1.67 s for N=1000 (load contaminates everything), and a `make test`
+died with `ld terminated with signal 7` that was simply a **full disk** — `target/debug` had
+reached 81 GB.
