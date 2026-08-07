@@ -561,8 +561,24 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; exist. `require` re-provides each feature as it materialises it. A feature with no
 ;; section (a std module pulled in during the build) is simply re-required from the embedded
 ;; source, which is idempotent and cheap.
+;; MAINTENANCE HAZARD: this list is hand-maintained, and a registry missing from it is
+;; lost on an imaged start with no error — the failure mode is a wrong answer, not a
+;; crash. `declared_sigs` was exactly that (the checker silently weakened from
+;; `expects int` to `expects number | map`), and an audit then found seven ability and
+;; multimethod registries also missing. Everything reachable behaviourally survives today
+;; because the CHECKER derives its facts from source extracts rather than these; they
+;; matter for runtime dispatch. The robust successor is to diff the globals table against
+;; a pre-load snapshot instead of naming registries, which cannot go stale — deliberately
+;; not done here because it also captures anything a project rebinds at load time (an
+;; output port, say) and that wants its own thinking.
 (def *project-image-registries*
-  ['*module-docs* '*impls* '*abilities* '*methods* '*record-ids*])
+  ['*module-docs*
+   ;; abilities + records (ADR-168/172)
+   '*impls* '*abilities* '*methods* '*record-ids*
+   '*ability-owner* '*impl-from* '*op-ability* '*ability-derives* '*sealed*
+   '*ability-requires*
+   ;; multimethods
+   '*multi-algebra*])
 
 (defn project-image-path (root)
   "Where `root`'s startup image lives."
@@ -1683,6 +1699,37 @@ resolve in the advisory checker. Returns the project root."
 ;; The cache directory for `root` (created if absent), or nil if no cache base is
 ;; available: `$XDG_CACHE_HOME` (or `~/.cache`) `/brood/check/<sha256 of root>`.
 ;; Never inside the project tree (mirrors the image-cache convention).
+;; Drop check-cache directories nothing has touched for a week.
+;;
+;; The cache is keyed by a hash of the project ROOT, so every ephemeral project leaves a
+;; directory behind for good — a test fixture in /tmp, a scratch build, a checkout that
+;; moved. Measured on one dev machine: 6458 directories and 83 MB accumulated over twelve
+;; days, none of them ever reachable again. The boot cache has always pruned by age
+;; (`boot_cache_prune` in lib.rs); this is the same policy for its sibling.
+;;
+;; Once per run, not per file: `*project-cache-pruned*` latches. Never prunes the directory
+;; in use. Best-effort throughout — a cache is an optimisation, so a prune that cannot read
+;; the directory or delete an entry simply leaves it (and a concurrent `nest` deleting the
+;; same entry is a no-op, since `delete-dir` treats NotFound as success).
+;; Milliseconds: both `now` and `file-mtime` report ms since the epoch.
+(def *project-cache-max-age-ms* (* 7 24 3600 1000))
+(def *project-cache-pruned* false)
+
+(defn- project-cache-prune (base keep)
+  (when (not *project-cache-pruned*)
+    (def *project-cache-pruned* true)
+    (try
+      (let (cutoff (- (now) *project-cache-max-age-ms*))
+        (fold (fn (_ entry)
+                (let (p (path-join base entry))
+                  (when (and (not (= p keep))
+                          (dir? p)
+                          (< (or (file-mtime p) 0) cutoff))
+                    (try (delete-dir p) (catch _ nil)))))
+          nil
+          (list-dir base)))
+      (catch _ nil))))
+
 (defn- project-cache-dir
   (root)
   (require 'hash)
@@ -1693,8 +1740,10 @@ resolve in the advisory checker. Returns the project root."
                (and home (not (= home ""))) (path-join home ".cache")
                else nil))
     (when base
-      (let (dir (path-join (path-join (path-join base "brood") "check") (hash/sha256 root)))
+      (let (checks (path-join (path-join base "brood") "check")
+            dir (path-join checks (hash/sha256 root)))
         (make-dir dir)
+        (project-cache-prune checks dir)
         dir))))
 
 ;; `name` selects which on-disk manifest under the project's cache dir — Phase 1's

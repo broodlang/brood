@@ -17314,3 +17314,37 @@ output before believing it.
 Also fixed: the feature→file mapping resolved the std `project` module to `./project.blsp`
 — the manifest — so the pre-flight "checked" the manifest and warned on it. Paths are now
 constrained to the project's own source dirs.
+
+## 2026-08-07 — image audit: seven missing registries, and a cache that never pruned
+
+Went looking for more of the class of bug that had already bitten once — runtime state a
+source load produces that the image does not carry (`declared_sigs` was the first).
+
+**What survives, and why it survives.** Module privacy (`defn-`, ADR-146) and sealed-ability
+impl checking are both identical cold and imaged, and the reason is worth knowing: the
+CHECKER derives those from source extracts, not from runtime registries. So the registries
+only matter for runtime dispatch, which narrows the blast radius. Records, abilities, macros
+and sigs all round-trip; `source-location` is nil on both paths, so not an image regression.
+
+**Seven registries were missing from the image list**: `*ability-owner*`, `*impl-from*`,
+`*op-ability*`, `*ability-derives*`, `*sealed*`, `*ability-requires*`, `*multi-algebra*`.
+Nothing reachable behaviourally broke — which is exactly why they are dangerous, since they
+govern impl precedence, super-abilities, derives and multimethod algebra, and losing them
+is a wrong answer with no error. Now captured, with the hazard written down: that list is
+hand-maintained and anything absent is lost silently. The robust successor is to diff the
+globals table against a pre-load snapshot instead of naming registries; deliberately not
+done here, because it would also capture whatever a project rebinds at load time (an output
+port, say) and that wants its own thinking.
+
+**The check cache never pruned.** `~/.cache/brood/check` is keyed by a hash of the project
+ROOT, so every ephemeral project leaves a directory behind for good — a test fixture in
+/tmp, a scratch build, a checkout that moved. Measured on this machine: **6458 directories,
+83 MB, accumulated over twelve days**, none of them ever reachable again. The boot cache has
+always pruned by age (`boot_cache_prune`); its sibling never did. Now the same policy: once
+per run, seven days, never the directory in use, best-effort throughout. First real run
+after the change: 6458 → 4897 directories, 83 → 69 MB.
+
+Units trap worth recording: `now` and `file-mtime` both report **milliseconds**, and the
+first cut of the prune compared against a seconds-based cutoff — which would have pruned
+nothing, silently, forever. Caught by testing with a deliberately backdated directory rather
+than trusting the code to be obviously right.
