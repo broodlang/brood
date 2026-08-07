@@ -173,7 +173,10 @@
 ;; The component styles — every selector scoped under `.docsite`, so the fragment can be
 ;; embedded in any host page (hive's daisyUI theme) without a class collision (`.badge`,
 ;; `.sidebar`, … are all namespaced). Two columns: a sticky sidebar + scrolling content,
-;; monospace signatures, a light/dark palette following the viewer's OS theme.
+;; monospace signatures. LIGHT palette only: an embedding host controls the theme (hive
+;; forces `data-theme="light"`), so the fragment must NOT flip to dark on the viewer's OS
+;; — doing so painted dark-mode light-gray text onto the host's white page. The standalone
+;; page opts into OS dark separately via `component-dark-css`.
 (defn- component-css
   ()
   (str ".docsite code,.docsite .sig,.docsite .type{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}"
@@ -197,7 +200,14 @@
     ".docsite .type{color:#7b8794;font-size:.85rem;margin-top:.15rem}"
     ".docsite .doc{margin-top:.4rem;color:#3e4c59}.docsite .doc p{margin:.4rem 0}.docsite .undoc{color:#9aa5b1;font-style:italic;margin:.4rem 0 0}"
     ".docsite .doc code,.docsite .moduledoc code{background:#f0f4f8;border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
-    ".docsite .empty{color:#9aa5b1}" "@media (prefers-color-scheme:dark){"
+    ".docsite .empty{color:#9aa5b1}"))
+
+;; The OS-dark palette for a STANDALONE page only (`:wrap? true`) — that page owns its
+;; whole background, so it may follow `prefers-color-scheme`. It is NOT part of
+;; `render-css` (a host embeds the fragment and dictates the theme itself).
+(defn- component-dark-css
+  ()
+  (str "@media (prefers-color-scheme:dark){"
     ".docsite .sidebar{background:#12161c;border-color:#2b3138}.docsite #docsite-filter{background:#1a1f26;border-color:#3e4c59}"
     ".docsite .content .sig{color:#e4e7eb}.docsite .def{border-color:#2b3138}.docsite .tag{background:#2b3138;color:#9aa5b1}"
     ".docsite .page-head,.docsite .module h2{border-color:#2b3138}.docsite .doc code,.docsite .moduledoc code{background:#2b3138}"
@@ -239,6 +249,7 @@
         "<style>"
         (page-reset-css)
         (component-css)
+        (component-dark-css)
         "</style></head><body>"
         fragment
         (filter-script)

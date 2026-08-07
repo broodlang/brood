@@ -409,7 +409,7 @@ checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 
 [[package]]
 name = "brood"
-version = "0.3.0"
+version = "0.3.3"
 dependencies = [
  "arboard",
  "arc-swap",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "brood-lsp"
-version = "0.3.0"
+version = "0.3.3"
 dependencies = [
  "brood",
  "lsp-server",
@@ -668,7 +668,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cli"
-version = "0.3.0"
+version = "0.3.3"
 dependencies = [
  "brood",
  "clap",
@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "nest"
-version = "0.3.0"
+version = "0.3.3"
 dependencies = [
  "brood",
  "clap",
