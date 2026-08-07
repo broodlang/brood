@@ -4,6 +4,20 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.3 — 2026-08-07
+
+- **`nest docs`** — a new subcommand that generates a browsable HTML documentation
+  site from a project's docstrings (`doc/index.html` + `doc/model.json`); `nest docs
+  --all` documents the whole builtin + prelude reference (the language reference).
+- **`docsite`** — a new CORE module: a pure `model -> HTML` renderer (sidebar,
+  per-module sections, signatures/types/docstrings, a client-side filter) shared by
+  `nest docs` and any app that hosts docs (the styles are scoped under `.docsite` so a
+  `:wrap? false` fragment embeds in a host page; the host dictates light/dark, only the
+  standalone page follows the OS).
+- Per-module attribution in the doc model is by namespace (via `project-file-feature`,
+  accounting for ADR-070 project-name rooting), not a load-order-sensitive
+  `global-names` delta.
+
 ## v0.3.0 — 2026-08-06
 
 A maintenance release: test-runner robustness and tooling, no language or

@@ -261,3 +261,37 @@
               data (stream/stream-fold str "" s))
           (tcp-close ls)
           (assert= data "hello world"))))))
+
+;; ---- no producer-process leak on exhaustion (KI-33) ---------------------------
+;;
+;; Regression: an exhausted stream used to keep its producer parked in stream-done-loop
+;; forever (answering :stream-done idempotently), so fully consuming a stream leaked one
+;; or more processes — at volume, an unbounded memory leak. Every exhausted-source shape
+;; must now exit. We count only processes still parented to THIS test process and parked,
+;; so the parallel suite's own processes don't perturb the measurement (verified: the
+;; counter reports 5 for 5 deliberately-parked children).
+
+(defn- stream-test-my-id () (get (process-info (self)) :id))
+
+(defn- stream-test-parked-children (me)
+  (count (filter (fn (p) (and (= me (get (process-info p) :parent))
+                              (= :waiting (get (process-info p) :status))))
+                 (list-processes))))
+
+(describe "streams do not leak producer processes"
+  :isolated
+
+  (test "fully consuming exhausted streams of every shape leaves no parked producers"
+    (let (me (stream-test-my-id))
+      (defn- stream-test-consume-batch (k)
+        (when (> k 0)
+          ;; each of these ends in an exhausted-producer state that used to leak:
+          (stream/stream-to-vector (stream/stream-drop 10 (stream/stream-from-list [1 2]))) ; drop past end
+          (stream/stream-to-list (stream/stream-empty))                                     ; empty
+          (stream/stream-to-vector (stream/stream-map inc (stream/stream-singleton 7)))     ; singleton
+          (stream/stream-to-vector (stream/stream-chunk 3 (stream/stream-from-list [1 2]))) ; partial chunk
+          (stream-test-consume-batch (- k 1))))
+      (stream-test-consume-batch 150)
+      (sleep 80)
+      ;; after the fix: ~0. before it, each batch leaked ~4 producers → ~600 parked.
+      (is (< (stream-test-parked-children me) 25)))))
