@@ -14479,12 +14479,17 @@ LOCAL values and the define then deep-copies them, so an image restore materiali
 closure **twice**. The successor items, in the order the measurement supports them: build
 restored values directly in the RUNTIME region (removes the second materialisation), then a
 streaming decoder that skips the `Message` tree. Recorded rather than attempted here
-because it wants its own change and its own gate. A third successor joins them (2026-08-07):
-**a dependency's modules are not imaged**, because the staleness key covers this project's
-`:source-paths` only, so an edited `:path` dep could not invalidate the image — they load from
-source through the package branch. Imaging them needs the fingerprint to cover their files
-first; `*package-module-files*` is populated by `project-setup`, before any fingerprint is
-taken, so the file list is available on both paths. RSS also rises during restore (3.07 GB vs
+because it wants its own change and its own gate.
+
+**Dependencies are imaged too, and their files are in the staleness key** (2026-08-07). A dep
+lives outside `:source-paths` — in `_deps/`, or anywhere at all for a `:path` dep — so the
+source-tree walk cannot see one change, and an imaged start would go on serving its old code.
+The fingerprint therefore also stats every file in `*package-module-files*` whose prefix is not
+this project's own `:name` (a project roots its own modules the same way, so membership alone
+does not separate them). That registry is populated by `project-setup`, before any fingerprint
+is taken, on the cold and warm paths alike. Without this the dep's bindings would have to be
+left out of the image entirely, which is the safe-but-slow alternative: correct, and it gives up
+the image for exactly the dependency code a project does not edit between runs. RSS also rises during restore (3.07 GB vs
 2.35 GB) for the same reason — bytes, tree and values are all live at once.
 
 **Build output.** A cold load of a large project takes tens of seconds, and silence
