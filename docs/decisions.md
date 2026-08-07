@@ -14482,11 +14482,27 @@ was the price of being image-backed before sectioning existed. Sectioning remove
 entirely: `nest run` installs the section directory, materialises nothing, and `require`
 pulls in exactly the modules the program reaches.
 
-**What still dominates `nest run` is not the image.** On a 16 300-file project it takes
-~127 s with the image hitting cleanly and no rebuild — that is the advisory pre-flight
-(`check-project-sources`) checking every source file. Pre-existing and unrelated to this
-ADR, but it now completely masks the startup win, so it is the next thing to attack for a
-fast `nest run` in practice.
+**The pre-flight is scoped to the require-closure.** With the image hitting cleanly,
+`nest run` on a 16 300-file project still took ~127 s — 99.9% of it the advisory check, at
+~3.7 ms per file with verdicts deliberately uncached (a change in one file can shift
+another's verdict, so they are re-derived every run). A run only executes its entry point's
+closure, so that is what is now checked: **127 s → 1.2 s**, RSS 4.2 GB → 213 MB.
+
+Two things made that work, and neither is obvious:
+
+- **The closure is not recomputed — `*features*` already is it.** `run-project` has just
+  `require`d the entry point, so the loaded project features are exactly the modules about
+  to run. Deriving each file from its feature name (the path `require-find` already walks)
+  keeps this O(closure).
+- **The closure has to be handed to `project-check-files`, not derived by it.** That
+  function builds the KI-17 reachability graph from *every* file in the project — sound for
+  `nest check FILE`, but it parses 16 300 headers to check eleven files, and on its own
+  that was still 34 s of a 35 s run. Every loaded feature is reachable by definition, so
+  the loaded set *is* the closure.
+
+**Consequence worth knowing:** a cold `nest run` loads everything, so its pre-flight warns
+about everything; a warm one warns only about the closure. Both are "warnings for the code
+you loaded", but the sets differ. `nest check` and `nest test` remain whole-project.
 
 **Caveat: images are per-executable.** The fingerprint includes `build-id`, which embeds each
 executable's own mtime, so an image written by `nest` is not used by `brood` and vice versa.
