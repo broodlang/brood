@@ -17314,3 +17314,25 @@ output before believing it.
 Also fixed: the feature→file mapping resolved the std `project` module to `./project.blsp`
 — the manifest — so the pre-flight "checked" the manifest and warned on it. Paths are now
 constrained to the project's own source dirs.
+
+## 2026-08-07 — KI-33: fully consuming a stream leaked its producer process
+
+Found while chasing KI-32. A `std/stream.blsp` stream is a process, and an *exhausted* one
+answered `:stream-done` idempotently by looping in `stream-done-loop` — so once a stream was
+fully consumed, its producer parked there **forever** instead of exiting. `stream-empty`,
+`stream-singleton`, `stream-drop` past its end, `stream-chunk`'s partial last chunk, and
+`stream-lines`' final flush all ended in that loop; every other source and every transformer
+already exited on exhaustion. So some pipelines self-cleaned and some leaked a process per
+stream — invisible for a one-shot, an unbounded leak for a long-lived producer of streams
+(it showed up as `memory limit exceeded` under a stream-hammering repro).
+
+**Fix:** `stream-done-loop` (and `stream-err-loop`) now answer once and exit, like every other
+loop. Safe because a well-behaved consumer stops at the first `:done` — the idempotence was
+never relied on — and no transformer re-polls a done upstream (each forwards `:done` and
+exits), so a fully-consumed multi-stage pipeline now tears itself down completely with no
+`stream-close` needed from the terminal consumers.
+
+**Guard:** `tests/stream_test.blsp`, "streams do not leak producer processes" — consume 150
+batches of the four leaking shapes and assert nothing is left parked under this process
+(counted via `process-info` `:parent`/`:status`, the counter cross-checked to report 5 for 5
+deliberately-parked children). Sabotage-verified: restoring the recursion fails it 3/3.
