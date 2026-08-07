@@ -132,6 +132,78 @@ fn an_edited_source_file_invalidates_the_image() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A dependency's modules are imaged like the project's own (ADR-070/218) — and because they
+/// live outside `:source-paths` (`_deps/`, or anywhere at all for a `:path` dep), their files
+/// have to be in the staleness key or an imaged start would serve the dep's old code forever.
+/// Both halves are asserted here: served from the image, and invalidated by an edit.
+///
+/// The two are one test on purpose — "imaged" without "invalidated" is the dangerous state,
+/// and it is only dangerous in combination.
+#[test]
+fn a_path_dependency_is_imaged_and_its_edits_invalidate() {
+    let dep = scratch("dep-lib");
+    let dir = scratch("dep-app");
+    write(&dep, "project.blsp", "(project :name libdep)\n");
+    write(
+        &dep,
+        "src/util.blsp",
+        "(defmodule util)\n\
+         (println \"SOURCE-LOAD: libdep/util\")\n\
+         (defn double (x) (* 2 x))\n",
+    );
+    // `:path` is resolved against the project root, so it has to be relative — both scratch
+    // dirs are siblings under the temp dir.
+    write(
+        &dir,
+        "project.blsp",
+        &format!(
+            "(project\n  :name depdemo\n  :main app\n  :dependencies [[libdep :path \"../{}\"]])\n",
+            dep.file_name().unwrap().to_string_lossy()
+        ),
+    );
+    write(
+        &dir,
+        "src/app.blsp",
+        "(defmodule app (:use libdep/util))\n\
+         (defn main () (println (str \"ANSWER: \" (double 21))))\n",
+    );
+
+    let cold = nest_run(&dir);
+    assert!(cold.contains("SOURCE-LOAD: libdep/util"), "cold:\n{cold}");
+    assert!(cold.contains("ANSWER: 42"), "cold:\n{cold}");
+
+    let warm = nest_run(&dir);
+    assert!(warm.contains("ANSWER: 42"), "warm:\n{warm}");
+    assert!(
+        !warm.contains("SOURCE-LOAD: libdep/util"),
+        "the dependency was re-evaluated instead of materialised from the image:\n{warm}"
+    );
+
+    // Editing the DEP — outside this project's source paths entirely — must invalidate.
+    write(
+        &dep,
+        "src/util.blsp",
+        "(defmodule util)\n\
+         (println \"SOURCE-LOAD: libdep/util\")\n\
+         (defn double (x) (* 3 x))\n",
+    );
+    let edited = nest_run(&dir);
+    assert!(
+        edited.contains("ANSWER: 63"),
+        "an imaged start ran the dependency's pre-edit code:\n{edited}"
+    );
+    // …and the rebuilt image serves the NEW dep code, rather than rebuilding every run.
+    let after = nest_run(&dir);
+    assert!(after.contains("ANSWER: 63"), "after:\n{after}");
+    assert!(
+        !after.contains("SOURCE-LOAD: libdep/util"),
+        "the dependency stopped being imaged after its edit:\n{after}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dep);
+}
+
 /// Loading MUTATES registries (`*impls*`, `*methods*`, `*method-from*`, `*module-docs*`, …)
 /// rather than creating them, so the `(global-names)` diff an image is built from cannot
 /// see them and each has to be carried deliberately. They were named by hand and the list
