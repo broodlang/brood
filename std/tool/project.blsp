@@ -694,7 +694,18 @@ manifest is read, naming the key, not later inside whoever consumes the map."
                (or (get grouped "") nil)))
     (cons ["" root]
       (map (fn (k) [k (get grouped k)])
-        (remove (fn (k) (= k "")) (keys grouped))))))
+        (remove (fn (k)
+                  ;; A non-root section is materialised from the image only for the project's
+                  ;; own modules and its dependencies — both live in `*package-module-files*`
+                  ;; (a project roots its own modules under its `:name` too, ADR-070). A
+                  ;; std/embedded module (regex, editor/ui, …) always loads from its baked-in
+                  ;; source, so its section would never be read back — writing it is dead
+                  ;; weight, and it is exactly where a runtime-only value like
+                  ;; `regex/regex-states-cache` (a mutable cache table) makes the whole image
+                  ;; write fail. Skip it. (Its bare globals still ride the always-materialised
+                  ;; root section; a builtin there images by name.)
+                  (or (= k "") (not (contains? *package-module-files* k))))
+          (keys grouped))))))
 
 (defn project-write-image (root before)
   "Snapshot the bindings this project load produced into `root`'s image, grouped into

@@ -141,3 +141,47 @@
     (require 'project)
     (is (nil? (getenv "BROOD_COVERAGE")))
     (is (project/project-image-usable?))))
+
+;; Values a cross-process MESSAGE cannot carry — a builtin (a Rust primitive with no data
+;; form) and a raw-bytes literal — can still be IMAGED, because the image restores bindings in
+;; the same, binary-keyed runtime: a builtin travels by the name it is bound to and re-resolves
+;; on read, and bytes copy inline. Without this a single such global forfeits the whole image
+;; (found via bedit: `std/editor/ui`'s `*term-display*` is a map of `term-*` prims, and a
+;; `#b"…"` literal sits in a function body). Guarded here at the primitive level.
+(describe "startup image: builtins by name, bytes inline"
+  :isolated
+
+  (test "a global bound to a builtin restores as the callable primitive"
+    (def si-prim string-length) ; :native — no portable data form
+    (let (p (img-tmp "prim"))
+      (%image-write p [["" ['startup-image-test/si-prim]]] "fp-prim")
+      (def si-prim :clobbered)
+      (let (idx (%image-index p "fp-prim")) (si-load-all p idx))
+      (assert= 4 (si-prim "abcd")))) ; re-resolved to the real primitive, by name
+
+  (test "a map of builtins round-trips (the *term-display* display-map shape)"
+    (def si-display {:len string-length :up upper})
+    (let (p (img-tmp "display"))
+      (%image-write p [["" ['startup-image-test/si-display]]] "fp-display")
+      (def si-display :clobbered)
+      (let (idx (%image-index p "fp-display")) (si-load-all p idx))
+      (assert= 4 ((get si-display :len) "abcd"))
+      (assert= "OK" ((get si-display :up) "ok"))))
+
+  (test "a bytes value round-trips inline"
+    (def si-bytes #b"hi\x00\xffthere")
+    (let (original si-bytes
+          p (img-tmp "bytes"))
+      (%image-write p [["" ['startup-image-test/si-bytes]]] "fp-bytes")
+      (def si-bytes :clobbered)
+      (let (idx (%image-index p "fp-bytes")) (si-load-all p idx))
+      (is (bytes? si-bytes))
+      (is (= original si-bytes))))
+
+  (test "a closure whose body holds a bytes literal round-trips (web-handle-input shape)"
+    (def si-body (fn () #b"\x00payload"))
+    (let (p (img-tmp "body"))
+      (%image-write p [["" ['startup-image-test/si-body]]] "fp-body")
+      (def si-body :clobbered)
+      (let (idx (%image-index p "fp-body")) (si-load-all p idx))
+      (is (= #b"\x00payload" (si-body))))))

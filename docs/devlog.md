@@ -17574,3 +17574,41 @@ which is the *full disk* already written down in `handoff.md`, not a toolchain o
 `incremental`) plus 12 GB of `target/release`, and an A/B worktree build added 1.3 GB on top.
 `cargo clean` recovered **107 GB** (99% → 53%), after which the suite is 970/970 clean with no
 flaky row. Check `df` before reading a linker crash as anything else.
+
+## 2026-08-07 — a builtin and a byte literal can be imaged; a std module's cache table is not imaged at all
+
+bedit could not use the startup image — it printed "loads from source every time" and forfeited
+the ADR-218 speedup entirely. One global with no portable form kills the *whole* image (a
+partial image would be a different program), and bedit had three, each hidden behind the last.
+Improving the writer's error to name the global, then a skip-and-list diagnostic, turned the
+whack-a-mole into a finite list.
+
+**Three fixes, in the order they surfaced.**
+1. **A builtin travels by name.** `std/editor/ui`'s `*term-display*` is a map of `term-*`
+   primitives; a builtin is a Rust function pointer, refused by `to_message` ("reference it by
+   name"). But the image restores bindings in the *same* runtime and the fingerprint already
+   carries `(build-id)`, so the writing binary is the reading binary — a builtin can ride as
+   `Message::Native(name)` and re-resolve to the same primitive on load. Confined to the image
+   via a thread-local the writer sets, so message/wire semantics are unchanged (a plain `send`
+   still refuses a builtin — locked by a test).
+2. **Bytes copy inline.** A `#b"…"` literal in a function body (`web-handle-input`) is immutable
+   data; the wire codec had refused it "for now" only because it isn't UTF-8. Now `M_BYTES`
+   (length-prefixed raw bytes), which also lets bytes cross a node link.
+3. **A std module's section is dropped from the write.** `regex/regex-states-cache` is a
+   **table** — genuinely un-imageable (mutable runtime state) — but it belongs to a *std*
+   module, served from baked-in source, whose image section is never materialised anyway.
+   `project-image-sections` now keeps only sections in `*package-module-files*` (the project's
+   own modules + deps), so a std module's runtime-local values never reach the writer. A
+   genuinely un-imageable value in the *project's own* code still declines the image, now with
+   the global named.
+
+bedit now boots imaged: cold 335 ms → warm ~200 ms. `MAGIC` bumped `v2`→`v3` for the two new
+tags. Guarded by four `startup_image_test.blsp` round-trips (builtin, map-of-builtins, bytes,
+a closure whose body holds a byte literal) and a `wire_tests.rs` `M_NATIVE`/`M_BYTES` codec
+round-trip. The whole thing is safe because `(build-id)` in the fingerprint means a rebuilt
+binary rebuilds the image, so a builtin name can never resolve to a *different* primitive.
+
+**Trap, again: the full disk.** `make test` (a debug build) died with `rustc-LLVM ERROR: No
+space left on device`, not a code fault — the same hazard `handoff.md` records. This session's
+repeated release+debug rebuilds had regrown `target/debug` to 243 GB; `rm -rf target/debug`
+reclaimed it (100% → 59%). Check `df` before reading a linker/LLVM crash as anything else.

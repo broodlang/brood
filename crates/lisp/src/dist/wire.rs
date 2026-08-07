@@ -16,6 +16,7 @@
 
 use std::io::{self, Cursor, Read, Write};
 
+use crate::core::blob::SharedBlob;
 use crate::core::value::{self, Symbol};
 use crate::process::Message;
 
@@ -427,6 +428,15 @@ const M_SET: u8 = 16;
 /// An exact rational, sent as its `num/den` string (mirrors [`M_DECIMAL`] /
 /// [`Message::Ratio`]) — portable across nodes.
 const M_RATIO: u8 = 17;
+/// A builtin referenced by name ([`Message::Native`]) — the name travels like any other
+/// symbol, and the reader re-resolves it to that runtime's primitive. Only the startup image
+/// produces this; a plain message refuses a builtin before it reaches the wire.
+const M_NATIVE: u8 = 18;
+/// A raw-bytes value ([`Message::Bytes`]), length-prefixed and copied inline. Immutable data,
+/// so it crosses by value (the receiver re-`SharedBlob::new`s its own copy — no shared Arc
+/// identity, which is why blob lifetimes don't matter here). Carries the startup image's byte
+/// literals (`#b"…"`), and a cross-node byte send.
+const M_BYTES: u8 = 19;
 
 pub(crate) fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     match m {
@@ -478,6 +488,10 @@ pub(crate) fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
         }
         Message::Keyword(s) => {
             w.push(M_KEYWORD);
+            put_sym(w, *s);
+        }
+        Message::Native(s) => {
+            w.push(M_NATIVE);
             put_sym(w, *s);
         }
         Message::List(items, pos) => {
@@ -563,13 +577,13 @@ pub(crate) fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
                 "cannot send a shared closure handle across nodes; it is local to its runtime",
             ));
         }
-        Message::Bytes(_) => {
-            // A raw-bytes `Arc<SharedBlob>` is runtime-local and not
-            // UTF-8, so it can't ride the `M_STR` path. Refuse across nodes for now.
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "cannot send a bytes value across nodes; it is local to its runtime",
-            ));
+        Message::Bytes(blob) => {
+            // Immutable bytes, copied inline (a length-prefixed raw blob — it isn't UTF-8, so
+            // it can't ride the `M_STR` path). The receiver allocates its own `SharedBlob`, so
+            // there is no shared-Arc lifetime to worry about across the boundary. Carries the
+            // startup image's `#b"…"` literals and a genuine cross-node byte send alike.
+            w.push(M_BYTES);
+            put_bytes(w, blob.as_bytes());
         }
     }
     Ok(())
@@ -643,6 +657,8 @@ fn decode_msg_at(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Message> {
         M_STR => Message::Str(get_str(r)?),
         M_SYM => Message::Sym(get_sym(r)?),
         M_KEYWORD => Message::Keyword(get_sym(r)?),
+        M_NATIVE => Message::Native(get_sym(r)?),
+        M_BYTES => Message::Bytes(SharedBlob::new(&get_bytes(r)?)),
         M_LIST => {
             let n = get_u32(r)? as usize;
             let mut items = Vec::with_capacity(prealloc(r, n));
@@ -755,6 +771,12 @@ fn put_u32(w: &mut Vec<u8>, n: u32) {
 fn put_str(w: &mut Vec<u8>, s: &str) {
     put_u32(w, s.len() as u32);
     w.extend_from_slice(s.as_bytes());
+}
+
+/// Length-prefixed raw bytes (mirror of [`put_str`] without the UTF-8 assumption).
+fn put_bytes(w: &mut Vec<u8>, b: &[u8]) {
+    put_u32(w, b.len() as u32);
+    w.extend_from_slice(b);
 }
 
 /// A symbol is encoded **by name** — separate runtimes have independent
@@ -900,6 +922,21 @@ fn get_str(r: &mut Cursor<Vec<u8>>) -> io::Result<String> {
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf)?;
     String::from_utf8(buf).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad utf8"))
+}
+
+/// Read length-prefixed raw bytes (mirror of [`get_str`] without the UTF-8 check). Bounds the
+/// claimed length against the frame first, so a small frame can't force a huge allocation.
+fn get_bytes(r: &mut Cursor<Vec<u8>>) -> io::Result<Vec<u8>> {
+    let n = get_u32(r)? as usize;
+    if n > remaining(r) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bytes length exceeds frame",
+        ));
+    }
+    let mut buf = vec![0u8; n];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 /// Read a fixed-size byte array from the frame. Used by the handshake for the

@@ -129,6 +129,39 @@ fn send_with_rich_message_roundtrips() {
 }
 
 #[test]
+fn bytes_and_native_roundtrip_through_the_wire() {
+    // The two variants ADR-218's startup image added: raw bytes copy inline (non-UTF-8
+    // tolerant, unlike the M_STR path), and a builtin travels by the NAME it is bound to
+    // (re-interned on decode; the receiver re-resolves it to its own primitive). Exercised
+    // here at the wire codec, which the image reuses.
+    let msg = Message::Vector(vec![
+        Message::Bytes(SharedBlob::new(&[0u8, 1, 0xff, b'h', b'i'])),
+        Message::Native(value::intern("string-length")),
+    ]);
+    let f = Frame::Send {
+        target: Target::Name(value::intern("echo")),
+        msg,
+    };
+    match read_full(&f) {
+        Frame::Send { msg, .. } => match msg {
+            Message::Vector(items) => {
+                match &items[0] {
+                    Message::Bytes(b) => {
+                        assert_eq!(b.as_bytes().to_vec(), vec![0u8, 1, 0xff, b'h', b'i'])
+                    }
+                    _ => panic!("bytes did not survive the wire"),
+                }
+                assert!(
+                    matches!(&items[1], Message::Native(s) if value::symbol_name(*s) == "string-length")
+                );
+            }
+            _ => panic!("wrong message"),
+        },
+        _ => panic!("wrong frame"),
+    }
+}
+
+#[test]
 fn pid_id_survives_above_u32() {
     // The local id is u64 end-to-end (the scheduler counter is u64); a value
     // past u32::MAX must round-trip, not truncate.
