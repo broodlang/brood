@@ -263,12 +263,31 @@ module's namespace-rooted globals (ADR-070) back to it."
        :version *project-version*
        :modules (apply vector (map model-file files))})))
 
-;; The full builtin+prelude reference as a one-module model (for `nest docs --all`).
+;; The full builtin+prelude reference (for `nest docs --all`), grouped by function
+;; category via the shared `doc-catalog` — Math, Strings, Filesystem, Processes, … — so
+;; the CLI reference and hive's hosted `/reference` present the language identically. A
+;; name the catalogue doesn't know falls into the `:other` group.
 (defn- model-all
   ()
-  {:name "Brood"
-   :version (try (brood-version) (catch _ nil))
-   :modules [(docs-module-model "Global reference" nil (filter docs-public? (global-names)))]})
+  (require 'doc-catalog)
+  ;; The language surface is the builtins and prelude — NOT the tooling modules
+  ;; (`docs`/`project`/…) loaded to run this command. Those are namespaced (`docs/foo`);
+  ;; exclude any name whose `/` has a non-empty prefix. A bare operator like `/` (its `/`
+  ;; is at position 0) stays in. (Source-location can't tell them apart: an image-restored
+  ;; module binding has no def-site, ADR-218.)
+  (let (namespaced? (fn (nm) (let (i (index-of nm "/")) (and i (> i 0))))
+        language? (fn (s) (and (docs-public? s) (not (namespaced? (name s)))))
+        syms (filter language? (global-names))
+        category-of (fn (s) (doc-catalog/category-of (docs-bare s))))
+    {:name "Brood"
+     :version (try (brood-version) (catch _ nil))
+     :modules (apply vector
+                (filter (fn (group) (not (empty? (get group :defs))))
+                  (map (fn (pair)
+                         (let ([key title] pair)
+                           (docs-module-model title nil
+                             (filter (fn (s) (= (category-of s) key)) syms))))
+                    doc-catalog/*category-order*)))}))
 
 (defn- write-site
   (out-dir model title)

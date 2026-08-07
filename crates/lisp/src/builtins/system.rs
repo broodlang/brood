@@ -1029,6 +1029,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // and hive's per-package doc builds (both feed it the same doc-model shape). CORE,
     // not DEV, because a shipped app (hive) requires it at runtime to render docs.
     embedded_module!("docsite", "std/docsite.blsp"),
+    // The function catalogue: bare builtin/prelude name -> functional category, plus the
+    // category order/titles. CORE so both `nest docs --all` and a shipped app (hive's
+    // /reference) present the categorised language reference from one source.
+    embedded_module!("doc-catalog", "std/doc-catalog.blsp"),
     // Purely functional FIFO queue (two-list, amortised O(1)) and min-priority
     // queue (sorted-list, O(n) insert / O(1) pop).
     embedded_module!("queue", "std/queue.blsp"),

@@ -4,6 +4,14 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.4 — 2026-08-07
+
+- **`doc-catalog`** — a new CORE module mapping every public builtin/prelude function to a
+  functional category (Math, Strings, Filesystem, Processes, …) plus the category order and
+  titles. `nest docs --all` now emits the reference **grouped by category** instead of one
+  flat list, and a shipped app (hive's `/reference`) requires the same module — so the CLI
+  and hosted language reference are categorised identically from one source.
+
 ## v0.3.3 — 2026-08-07
 
 - **`nest docs`** — a new subcommand that generates a browsable HTML documentation
