@@ -19,6 +19,8 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-35 | `*method-from*` was never imaged, so an imaged start stopped reporting cross-module `defmethod` conflicts | ✅ **fixed** 2026-08-07 |
+| KI-34 | the startup image was written on every cold start and **never read from** — two defects, either sufficient | ✅ **fixed** 2026-08-07 |
 | KI-33 | fully consuming a stream leaked its producer process — an exhausted stream parked in `stream-done-loop` forever instead of exiting | ✅ **fixed** 2026-08-07 |
 | KI-32 | a selective `receive` corrupted a skipped **local** (L1-delivered) message to `nil` — a stream request/reply pipeline deadlocked intermittently | ✅ **fixed** 2026-08-06 |
 | KI-31 | a foreign-ecosystem version range compiled to its FIRST term — `">=1.0.0 <2.0.0"` became `>=1.0.0` | ✅ **fixed** 2026-08-06 |
@@ -55,6 +57,77 @@ ADRs / topic docs.
 **No open issues; one watch item (KI-28).** No open bug in the language, runtime or toolchain
 itself. Every KI above is fixed, incidentally fixed, or a non-reproducing transient — each kept as
 a record with its regression test, so a recurrence is recognizable.
+
+---
+
+## KI-35 — `*method-from*` was never imaged · **fixed 2026-08-07**
+
+**Filed separately from KI-34 on purpose**, for the reason KI-30 was filed separately from
+KI-29: found while fixing another issue, and a bug recorded as an aside inside a fixed one is
+invisible. This is also the *third* recurrence of one shape — a registry missing from the
+startup image's hand-maintained list — after `declared_sigs` and the seven ability/multimethod
+registries of 2026-08-07 morning.
+
+**The defect.** `register-method` records `[multimethod key] → registering ns` in
+`*method-from*` and warns when a *different* module re-registers the same key
+("redefined from … by … (last wins)"). The image never carried that registry, so an imaged
+start began with it empty: `has-prev` is false for every key, and the conflict warning stops
+being emitted. Nothing crashes and dispatch still works — the last registration simply wins,
+silently, which is exactly the class this list keeps producing.
+
+**The fix is the mechanism, not the entry.** The set is derived now rather than named —
+`%registry-update!`/`%registry-cas!` are the only ways a registry is written, so the kernel
+records the names they write and `(%registry-names)` reports them (see KI-34 and ADR-218).
+A registry added later is carried without anyone remembering to. What remains in
+`std/tool/project.blsp` is an *exclusion* list, where a forgotten entry costs a redundant load
+rather than a wrong answer.
+
+**Guard:** `crates/nest/tests/startup_image.rs::an_imaged_start_keeps_what_loading_registered`
+runs a project twice and asserts multimethod dispatch, ability dispatch, record identity,
+method provenance and module docs all survive the imaged start.
+
+---
+
+## KI-34 — the startup image was written every cold start and never read from · **fixed 2026-08-07**
+
+**Found 2026-08-07** while auditing KI-35's neighbourhood. ADR-218's per-module lazy
+materialisation had not worked since it shipped (118f745a): `nest run` on a project restored
+the image's root section and then **loaded every module from source anyway**. There is no error
+and no wrong answer — the observable behaviour of an imaged start was identical to a cold one,
+because it *was* a cold one. Only the benefit was missing.
+
+**Two independent defects, either one sufficient to disable it.**
+
+1. **The installer wrote a module-qualified global.** `project-install-image` ran
+   `(def *image-sections* …)` from inside module `project`, binding
+   `project/*image-sections*`, while `require-force` — root code — read the empty root global.
+   The prelude documents this exact rule four lines above the global's own `def`, and ships
+   `set-load-path!` as the root setter for the same reason; `set-image-source!` is now its
+   sibling and the installer goes through it.
+2. **`require-force` tested the branches in the wrong order.** The image branch sat after the
+   ADR-070 package-module branch, and a project roots its OWN modules — so
+   `*package-module-files*` holds `demo/shapes` exactly as it holds a dependency's `foo/b`, and
+   the package branch matched first for every module of every named project. The image branch
+   now comes first: an image is only installed after its fingerprint matched the sources that
+   branch would re-evaluate, and a module with no section still falls through to it.
+
+**Why the existing tests missed it.** `startup_image_test.blsp` and `image_test.blsp` drive the
+`%image-*` primitives directly — they hand in a section list and read it back, never routing
+through `require`. The defect lived entirely in the seam between the primitives and the loader,
+which no unit of either side can see.
+
+**How to tell it is working** (the only reliable signal): a `println` at a module's top level is
+evaluated by a source load and absent from an imaged one. A second run of an unchanged project
+must not print it, and `BROOD_IMAGE_TRACE=1` should show one `[image-section]` line per module
+the entry point reaches, not just the root section.
+
+**Guard:** `crates/nest/tests/startup_image.rs` — `a_second_run_loads_modules_from_the_image_not_from_source`
+(plus `an_edited_source_file_invalidates_the_image`, so the fix cannot be "serve a stale image").
+
+**Not re-measured here:** ADR-218's headline lazy row (16 302 modules, 1.30 s) was measured on
+the same commit that shipped defect 1, so that number cannot be reproduced from the committed
+code. The mechanism is verified working on a small project; re-running the large-project
+measurement is left as its own task.
 
 ---
 

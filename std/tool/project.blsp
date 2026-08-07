@@ -551,34 +551,41 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 
 (def *project-image-file* ".brood/image.bin")
 
-;; Registry globals that LOADING mutates rather than creates. They already exist after
-;; the prelude, so the "names that appeared" diff below cannot see them, yet the image
-;; is wrong without them — restoring `*features*` in particular is what stops a
-;; `require` re-loading an imaged module from source.
-;; Deliberately NOT `*features*`. With a sectioned image (ADR-218) `require` is what
-;; materialises a module, so restoring a `*features*` that already lists every module makes
-;; `require-one` early-return and nothing is ever loaded — the modules silently do not
-;; exist. `require` re-provides each feature as it materialises it. A feature with no
-;; section (a std module pulled in during the build) is simply re-required from the embedded
-;; source, which is idempotent and cheap.
-;; MAINTENANCE HAZARD: this list is hand-maintained, and a registry missing from it is
-;; lost on an imaged start with no error — the failure mode is a wrong answer, not a
-;; crash. `declared_sigs` was exactly that (the checker silently weakened from
-;; `expects int` to `expects number | map`), and an audit then found seven ability and
-;; multimethod registries also missing. Everything reachable behaviourally survives today
-;; because the CHECKER derives its facts from source extracts rather than these; they
-;; matter for runtime dispatch. The robust successor is to diff the globals table against
-;; a pre-load snapshot instead of naming registries, which cannot go stale — deliberately
-;; not done here because it also captures anything a project rebinds at load time (an
-;; output port, say) and that wants its own thinking.
-(def *project-image-registries*
-  ['*module-docs*
-   ;; abilities + records (ADR-168/172)
-   '*impls* '*abilities* '*methods* '*record-ids*
-   '*ability-owner* '*impl-from* '*op-ability* '*ability-derives* '*sealed*
-   '*ability-requires*
-   ;; multimethods
-   '*multi-algebra*])
+;; A registry global is one that LOADING mutates rather than creates — `*impls*`,
+;; `*methods*`, `*module-docs*`, … They already exist after the prelude, so the "names that
+;; appeared" diff below cannot see them, and an image without them is silently wrong.
+;;
+;; They used to be NAMED here, and that list went stale three times with no error to show for
+;; it:
+;; `declared_sigs` first (the checker quietly weakened from `expects int` to
+;; `expects number | map`), then an audit found seven ability/multimethod registries missing,
+;; and `*method-from*` after that (cross-module `defmethod` conflicts stopped being
+;; reported). A hand-maintained inclusion list fails in the silent direction every time,
+;; because nothing about adding a registry reminds you it exists.
+;;
+;; So the set is DERIVED: `%registry-update!` / `%registry-cas!` are the only ways a registry
+;; is written, and the kernel records the names they write (`%registry-names`). A registry
+;; added later is carried without anyone remembering to, and what is left below is an
+;; EXCLUSION list — where forgetting an entry costs speed or a redundant load, never a wrong
+;; answer.
+(def *project-image-registry-exclusions*
+  ;; `*features*` — with a sectioned image (ADR-218) `require` is what materialises a
+  ;; module, so restoring a `*features*` that already lists every module makes `require-one`
+  ;; early-return: nothing is ever loaded and the modules silently do not exist. `require`
+  ;; re-provides each feature as it materialises it, and a feature with no section (a std
+  ;; module pulled in during the build) is re-required from the embedded source, which is
+  ;; idempotent and cheap.
+  ['*features*
+    ;; In-flight loads, keyed to the loader's pid — empty by the time an image is written,
+    ;; and a pid is meaningless in the next process anyway.
+    '*features-loading*
+    ;; A once-per-run "already warned about this" filter. An imaged start does no loading,
+    ;; so it has nothing to suppress; carrying the filter would only silence a later warning.
+    '*deprecation-seen*
+    ;; ADR-070's dependency-module maps. The image already carries a dep's bindings, and
+    ;; restoring these would only send `require` down the source-load branch for modules the
+    ;; image can serve directly.
+    '*package-module-files* '*package-modules-of*])
 
 (defn project-image-path (root)
   "Where `root`'s startup image lives."
@@ -607,16 +614,23 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (str (build-id) "\n"
     (join "\n" (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f))) files))))
 
-;; The globals an image must carry: everything the source load defined that the
-;; prelude did not, plus the registries it mutated.
-(defn- project-image-names (before)
+;; The globals the load CREATED: everything bound now that was not bound before it ran.
+(defn- project-image-fresh-names (before)
   ;; `before` goes into a SET first. As a list, `member?` is a linear scan run once per
   ;; global — ~4000 x ~313 000 on a big project, which measured 7 s of a 9 s image write
   ;; and was invisible until the phase trace showed the time landing outside every
   ;; measured phase. Exactly the shape ADR-216 removed from `*features*`.
   (let (seen (fold (fn (m n) (assoc m n true)) {} before))
-    (append-two *project-image-registries*
-      (remove (fn (n) (contains? seen n)) (global-names)))))
+    (remove (fn (n) (contains? seen n)) (global-names))))
+
+;; The registries the load MUTATED — derived from the funnel, minus the exclusions above,
+;; minus anything already in `fresh-set` (a registry the project itself defines was created
+;; by the load, so it is a fresh global and sections with its own module; naming it twice
+;; would write its entry twice).
+(defn- project-image-registry-names (fresh-set)
+  (remove (fn (n) (or (contains? fresh-set n)
+                    (member? n *project-image-registry-exclusions*)))
+    (%registry-names)))
 
 ;; The module a global belongs to: its name minus the last segment, which IS the feature
 ;; name `require` uses (a global `myproj/shapes/area` comes from feature `myproj/shapes`).
@@ -627,20 +641,48 @@ manifest is read, naming the key, not later inside whoever consumes the map."
       (< (count parts) 2) nil
       else (join "/" (take (- (count parts) 1) parts)))))
 
+;; Whether section key `k` names a module of a DEPENDENCY rather than one of this project's
+;; own. Both are package-rooted (ADR-070) and both therefore appear in
+;; `*package-module-files*` — the project's own under its `:name` — so membership alone does
+;; not tell them apart; the prefix does.
+;;
+;; A dependency's modules are deliberately NOT imaged. The staleness key covers this
+;; project's `:source-paths` only — a dep lives in `_deps/`, or anywhere at all for a `:path`
+;; dep — so a changed dep cannot invalidate the image; and since `require` prefers an image
+;; section over the package branch, imaging one would go on serving the dep's old code until
+;; an unrelated edit here happened to rebuild it. Left out, deps load from source through the
+;; package branch exactly as before. Imaging them is worth doing, but it wants the
+;; fingerprint to cover their files first.
+(defn- project-image-dep-section? (k)
+  (and (contains? *package-module-files* k)
+    (not (= (first (string-split k "/"))
+           (if *project-name* (name *project-name*) nil)))))
+
 ;; Group the image's globals into per-module sections, so `require` can materialise one
-;; module at a time (ADR-218). Root-level names go in the `""` section, which the loader
-;; always materialises; declared sigs are added to it by `%image-write`.
+;; module at a time (ADR-218). The `""` section is the one the loader always materialises,
+;; and it carries the registries, the root-level defs (a file with no `defmodule`) and — added
+;; by `%image-write` — the declared sigs. It is built even when every other name is
+;; module-qualified.
+;;
+;; Registries go to `""` by NAME, not by spelling: a module-qualified one (a std module's
+;; registry that this load happened to write) would otherwise be grouped into that module's
+;; section, and a std feature is served from its embedded source rather than the image — so
+;; the section would never be materialised and the registry silently lost, which is the whole
+;; class this is guarding against.
 (defn- project-image-sections (before)
-  (let (grouped (fold (fn (m n)
+  (let (fresh (project-image-fresh-names before)
+        fresh-set (fold (fn (m n) (assoc m n true)) {} fresh)
+        grouped (fold (fn (m n)
                         (let (k (or (project-image-section-of n) ""))
                           (assoc m k (cons n (or (get m k) nil)))))
                   {}
-                  (project-image-names before)))
-    ;; `""` must exist even when every global is module-qualified — it carries the sigs.
-    (map (fn (k) [k (or (get grouped k) nil)])
-      (cond
-        (contains? grouped "") (keys grouped)
-        else (cons "" (keys grouped))))))
+                  fresh)
+        root (append-two (project-image-registry-names fresh-set)
+               (or (get grouped "") nil)))
+    (cons ["" root]
+      (map (fn (k) [k (get grouped k)])
+        (remove (fn (k) (or (= k "") (project-image-dep-section? k)))
+          (keys grouped))))))
 
 (defn project-write-image (root before)
   "Snapshot the bindings this project load produced into `root`'s image, grouped into
@@ -663,9 +705,11 @@ were loaded. Returns the entry count."
       (nil? idx) nil
       else
         (do
-          (set-load-path! *load-path*)      ; no-op; keeps this a statement position
-          (def *image-path* path)
-          (def *image-sections* (dissoc idx ""))
+          ;; Through the prelude's setter, not `def`: this is module code, and a `def` here
+          ;; would bind `project/*image-sections*` while `require-force` kept reading the
+          ;; empty root one — which is how an imaged start came to restore the root section
+          ;; and then load every module from source anyway.
+          (set-image-source! path (dissoc idx ""))
           (let (root-sec (get idx ""))
             (when root-sec
               (%image-load-section path (first root-sec) (second root-sec))))

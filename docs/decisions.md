@@ -14352,8 +14352,23 @@ module, with the directory at the END of the file carrying absolute offsets: ope
 is the unit of materialisation — the same granularity BEAM loads `.beam` files at.
 
 The prelude gains a small seam for this: `*image-sections*` (feature → `[offset len]`) and
-`*image-path*`, consulted by `require-force` just before it falls back to the load-path. The
-prelude only knows how to *consult* a registry; building one is `std/tool/project.blsp`.
+`*image-path*`, consulted by `require-force`, plus the root setter `set-image-source!` that
+installs them. The prelude only knows how to *consult* a registry; building one is
+`std/tool/project.blsp`.
+
+Two details of that seam are load-bearing, and both were wrong for a day without anything
+failing (KI-34 — the image was written every cold start and never read from):
+
+- **Install through the setter, never `def`.** These globals live in the ROOT namespace, so a
+  `(def *image-sections* …)` written inside module `project` binds `project/*image-sections*`
+  while `require-force`, root code, goes on reading the empty root one. `set-image-source!` is
+  the root code that binds them, exactly as `set-load-path!` is for `*load-path*`.
+- **The image branch precedes the package branch.** A project roots its OWN modules (ADR-070),
+  so `*package-module-files*` holds `myproj/shapes` as surely as a dependency's `foo/b`;
+  consulted after it, the image branch is unreachable for every module of every named project.
+  Preferring the image is also right on its own terms — it is only installed once its
+  fingerprint matched the sources that branch would otherwise re-evaluate — and a module with
+  no section still falls through.
 
 A module's section key is derived, not tracked: a global `myproj/shapes/area` belongs to
 feature `myproj/shapes`, so the key is the name minus its last segment. Root-level names
@@ -14377,11 +14392,23 @@ and compares, so every policy question — what to snapshot, what invalidates an
 rebuilds it — stays in Brood (`std/tool/project.blsp`).
 
 **Policy.** The image carries the globals a load *created* (the diff against `(global-names)`
-taken before the load) plus the registries a load *mutates* rather than creates —
-`*features*`, `*module-docs*`, `*impls*`, `*abilities*`, `*methods*`, `*record-ids*`.
-Restoring `*features*` is what stops a later `require` re-loading an imaged module from
-source. The staleness key is every source file's path + size + mtime plus the binary's
-build id; it is not hashed, because it is only ever compared for equality.
+taken before the load) plus the registries a load *mutates* rather than creates. The staleness
+key is every source file's path + size + mtime plus the binary's build id; it is not hashed,
+because it is only ever compared for equality.
+
+Those registries were **named by hand**, and that list went stale three times, each time
+silently — `declared_sigs` (the checker quietly weakened from `expects int` to
+`expects number | map`), then seven ability/multimethod registries governing dispatch, then
+`*method-from*` (cross-module `defmethod` conflicts stopped being reported). An inclusion list
+fails in the silent direction by construction: nothing about adding a registry reminds you the
+list exists. So the set is **derived** (2026-08-07). `%registry-update!` / `%registry-cas!` are
+the only ways a registry is written; the kernel records the names they write and
+`(%registry-names)` reports them, so a registry added later is carried without anyone
+remembering to. What remains in `std/tool/project.blsp` is an *exclusion* list —
+`*features*`, `*features-loading*`, `*deprecation-seen*`, and ADR-070's two package-module
+maps — where forgetting an entry costs a redundant load, never a wrong answer. `*features*` in
+particular must **not** be imaged (see above): restoring it makes `require-one` early-return and
+nothing is ever materialised.
 
 `project-load-sources-cached` is the single entry point: image if current, otherwise load
 from source **and write one**. Every whole-project load routes through it, so `nest test`,
@@ -14452,7 +14479,12 @@ LOCAL values and the define then deep-copies them, so an image restore materiali
 closure **twice**. The successor items, in the order the measurement supports them: build
 restored values directly in the RUNTIME region (removes the second materialisation), then a
 streaming decoder that skips the `Message` tree. Recorded rather than attempted here
-because it wants its own change and its own gate. RSS also rises during restore (3.07 GB vs
+because it wants its own change and its own gate. A third successor joins them (2026-08-07):
+**a dependency's modules are not imaged**, because the staleness key covers this project's
+`:source-paths` only, so an edited `:path` dep could not invalidate the image — they load from
+source through the package branch. Imaging them needs the fingerprint to cover their files
+first; `*package-module-files*` is populated by `project-setup`, before any fingerprint is
+taken, so the file list is available on both paths. RSS also rises during restore (3.07 GB vs
 2.35 GB) for the same reason — bytes, tree and values are all live at once.
 
 **Build output.** A cold load of a large project takes tens of seconds, and silence
