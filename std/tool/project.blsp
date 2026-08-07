@@ -1887,6 +1887,55 @@ resolve in the advisory checker. Returns the project root."
       (project-check-duplicate-defs extracts source-set)
       (project-check-files srcs root))))
 
+;; `nest run`'s pre-flight, scaled to what is actually about to run.
+;;
+;; Checking is ~3.7 ms per file and verdicts are deliberately NOT cached (only the parse
+;; is — a change in one file can shift another's verdict, so verdicts are re-derived every
+;; run). Over a 16 300-file project that is 60-120 s, against a 143 ms image-backed load:
+;; the advisory check was 99.9% of `nest run`.
+;;
+;; The closure is not recomputed — `*features*` already IS it. The caller has just
+;; `require`d the entry point, so the project features now loaded are exactly the modules
+;; about to run. Deriving the file from the feature name (the same path `require-find`
+;; walks) keeps this O(closure); building a module graph would mean parsing every file in
+;; the project, which is the cost being avoided. Nothing here re-loads: `nest run` has
+;; already materialised its closure, and `project-ensure-loaded` would drag in the whole
+;; project and undo the laziness.
+(defn- project-feature-file (feat srcdirs)
+  "The source file a loaded project feature came from, or nil if it is not one of this
+project's own sources. The `srcdirs` guard matters: a feature like `project` (the std
+tooling module) otherwise resolves to the manifest `./project.blsp` sitting in the cwd,
+and the pre-flight would 'check' the manifest and warn on it."
+  (let (n (name feat)
+        prefix (cond (nil? *project-name*) nil else (str *project-name* "/"))
+        rel (cond
+              (and prefix (starts-with? n prefix)) (substring n (string-length prefix))
+              else n)
+        p (require-find (str rel ".blsp") *load-path*))
+    (when (and p (any? (fn (d) (starts-with? p d)) srcdirs)) p)))
+
+(defn check-project-run-closure ()
+  "Advisory pre-flight over the modules `nest run` actually loaded — the entry point's
+require-closure, read straight off `*features*`. Returns the warning count. A module the
+program never reaches is `nest check`/`nest test`'s business."
+  (let (root (project-find-root (cwd)))
+    (when (nil? root)
+      (error "check-project-run-closure: not in a Brood project (no project.blsp found from "
+        (cwd) ")"))
+    (let (srcdirs (project-abs-paths root *project-source-paths*)
+          feats (keys *features*)
+          want (into [] (keep (fn (f) (project-feature-file f srcdirs)) feats))
+          extracts (project-gather-extracts want)
+          source-set (fold (fn (m p) (map-assoc m p true)) {} want)
+          ;; The closure is handed in, not derived. `project-check-files` builds the
+          ;; KI-17 reachability graph from EVERY file in the project — sound for
+          ;; `nest check FILE`, but it parses 16 300 headers to check eleven files, which
+          ;; measured 34 s of a 35 s `nest run`. Here every loaded feature is by
+          ;; definition reachable (it is loaded), so the loaded set IS the closure.
+          closures (fold (fn (m p) (map-assoc m p feats)) {} want))
+      (project-check-duplicate-defs extracts source-set)
+      (project-check-files-fresh want closures))))
+
 ;; (run-project-tests & opts) — find the project from the cwd, set it up, load
 ;; every <name>_test.blsp under its test paths (which only REGISTER tests via the
 ;; test framework), then run the whole suite once. opts pass through to run-tests
@@ -2263,12 +2312,15 @@ as unchanged (only when some were)."
         (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
           (when (nil? target)
             (error "run-project: entry fn '" fname "' is not defined (module '" modname "')"))
-          ;; Advisory pre-flight: warnings go to stderr so they don't pollute the
-          ;; entry point's own stdout. After `require` so cross-module names see
-          ;; the heap's globals (see `check-project`). Sources only — `tests/` is
-          ;; out of scope for `nest run`, and its files reference test-framework
-          ;; macros that `(require 'test)` introduces (which we don't run here).
-          (check-project-sources)
+          ;; Advisory pre-flight over the entry point's REQUIRE-CLOSURE, not the whole
+          ;; tree: warnings for the code about to execute. Checking is ~3.7 ms/file and
+          ;; verdicts are deliberately not cached, so whole-project checking is ~60-120 s
+          ;; on a 16 300-file project — against a 143 ms image-backed load, i.e. 99.9% of
+          ;; `nest run` was the advisory check. A module the program never reaches is
+          ;; `nest check`/`nest test`'s business. Warnings go to stderr so they don't
+          ;; pollute the entry point's own stdout; after `require` so cross-module names
+          ;; see the heap's globals (see `check-project`).
+          (check-project-run-closure)
           (let (f (eval target))
             (unless (fn? f)
               (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))

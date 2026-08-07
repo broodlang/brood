@@ -17236,3 +17236,41 @@ with a green process dying on `division by zero` at 1163 s (2.2x its normal wall
 had changed, and 16 300-module image builds were running concurrently. A clean re-run on an idle
 box is 966/966 and 4458/4458. Same lesson as the `child_cleanup` scare earlier today: on this box
 a suite result taken under load is not evidence.
+
+## 2026-08-07 — `nest run` on 16 300 files: 127 s → 1.2 s
+
+With the sectioned image landing the load in 143 ms, `nest run` still took ~127 s on the
+16 300-file project. All of it was the advisory pre-flight. Checking is ~3.7 ms/file and
+verdicts are deliberately not cached (only the parse is — a change in one file can shift
+another's verdict), so a whole-project check is 60-120 s no matter how warm anything is.
+
+A run only executes its entry point's require-closure, so that is what it now checks.
+**127 s → 1.2 s, RSS 4.2 GB → 213 MB.**
+
+Two non-obvious steps, and the first fix was wrong:
+
+**Attempt 1 barely helped (127 s → ~101 s), for two reasons.** It called
+`project-ensure-loaded`, which materialises every section and undoes the laziness; and it
+rebuilt the module graph by parsing all 16 301 headers to find the closure. Both are
+O(project) — precisely what was being avoided.
+
+**The closure did not need computing at all: `*features*` already is it.** `run-project` has
+just `require`d the entry point, so the loaded project features *are* the modules about to
+run. Mapping each back to a file by name (the path `require-find` already walks) is
+O(closure), no parse, no graph.
+
+**Even then it was still 34 s, inside `project-check-files`.** That builds the KI-17
+reachability graph from every file in the project regardless of how few files it was asked
+to check — correct for `nest check FILE`, disastrous here. Handing the closure in (every
+loaded feature is reachable by definition) removed the last 34 s.
+
+**A 1.13 s result that was actually a crash.** After the closure fix the run "finished" in
+1.13 s, which looked like the win — but grepping for the program's own output showed it was
+absent: `some?` does not exist in Brood, so the pre-flight raised and `nest run` exited 0
+having run nothing. The real number after fixing it is 1.2 s *with* `sum: 24` printed. Worth
+recording as a habit: when a number improves by 100x, check the program still produced its
+output before believing it.
+
+Also fixed: the feature→file mapping resolved the std `project` module to `./project.blsp`
+— the manifest — so the pre-flight "checked" the manifest and warned on it. Paths are now
+constrained to the project's own source dirs.
