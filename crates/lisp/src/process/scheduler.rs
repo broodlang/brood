@@ -66,6 +66,8 @@ pub use lifecycle::{exit, spawn, spawn_linked, spawn_root_program};
 // scheduling state stays in the root (reached via `use super::*`). Re-export the
 // public/`process`-facing surface so `scheduler::…`/`process::…` paths are unchanged.
 mod pool;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use pool::pump_until_quiescent;
 use pool::spawn_overflow_drainer;
 pub(crate) use pool::{enqueue, ensure_workers, wake_enqueue};
 pub use pool::{set_test_no_workers, test_drive_quanta};
@@ -673,7 +675,10 @@ thread_local! {
 /// Monotonic nanoseconds since the first call — a cheap `u64` clock for `queued_at`, so a
 /// `Process` carries a plain integer rather than an `Instant`.
 fn now_nanos() -> u64 {
-    static EPOCH: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+    // `web_time::Instant` (std on native, `performance.now()` on wasm) — plain
+    // `std::time::Instant::now()` panics under wasm, which the cooperative scheduler hits
+    // on the very first `enqueue` (`queued_at`).
+    static EPOCH: LazyLock<web_time::Instant> = LazyLock::new(web_time::Instant::now);
     EPOCH.elapsed().as_nanos() as u64
 }
 
