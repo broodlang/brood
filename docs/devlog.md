@@ -17824,3 +17824,66 @@ this repo is the example: `std/`, `examples/`, `scripts/`, `stress/`, `breakage/
 outside `:source-paths`, so `project.blsp` now lists them under `:format-paths` or they would
 have silently stopped being formatted. Verified coverage is unchanged by count (353 files here
 before and after) and that hatch drops exactly its six `_deps` files (68 → 62).
+
+## 2026-08-07 (evening) — proving c3c58843 green after a crash, and what the proof turned up
+
+`c3c58843` was committed deliberately as "commit now, fix forward" while the suite was still
+running, and the run that would have confirmed it died with the session that started it (the
+editor process hit its own heap ceiling at ~20:56; no kernel OOM, but the box had been swapping
+and two debug `make test` runs were live at once). The suite it had launched shows the death from
+the outside: `TRY 1 TERM [808.025s] brood::suite brood_suite_passes`, children reaped with the
+parent, everything else passing. Nothing was lost — the parallel session's `git add -A` had swept
+in the dead session's edits, verified byte-identical against its `project.blsp.final` snapshot.
+
+Pushing then failed on the pre-push rustfmt hook, on a hunk in `mailbox.rs` that the dead session
+had *found* (it was sitting in its scratchpad `fmt.txt`) and never applied. Pure formatting,
+pre-existing, committed as `afe4bcff`.
+
+**The verification, six steps, strictly sequential** (two concurrent debug suites being what
+starved the box in the first place):
+
+| step | result |
+|---|---|
+| `make test` ×1 | 973 passed, **1 failed**, 1 flaky — 617.8 s |
+| `make test` ×2 | **974/974** — 515.9 s |
+| `make test-both` | **1948/1948**, both engines (ADR-076 gate) |
+| KI-36 ×25 | 0 failures |
+| GC_STRESS + GC_VERIFY, 7 concurrency binaries | 36 passed, 1 timeout → **37/37 after a fix** |
+| fuzz: 6 generators × 150 programs × 4 engine configs | 1650 checks, **0 divergences, 0 crashes, 0 oracle failures** |
+
+Zero heap-verifier complaints anywhere in the stress sweep — no stale handle, no poison, no epoch
+violation. So the commit itself is sound. The two things the run turned up were both older than it.
+
+**1. KI-28 recurred twice and was the wrong shape all along — now [KI-38](known-issues.md).** The
+round-1 failure was not a regression: the identical cluster hit on 2026-08-06 18:41, a day before
+the commit. Three tests fail *together* — `clean_peer_exit_fires_nodedown_promptly` (KI-28) plus
+two `cli::child_cleanup` tests — and all three are **boot waits** on a freshly spawned debug
+`brood`, at 20 s and 30 s deadlines. KI-28 had been filed as a dist flake with a 0/260 standing
+record and an explicit "a recurrence after this date is a real signal"; the recurrence arrived and
+answered its own open question, since both sightings panic in `wait_until_listening` — *B never
+bound its port*, a startup failure rather than the late-nodedown shape it had guessed at. Two of
+the three tests are not dist tests at all, which is why the pattern stayed invisible while the
+entry was framed around distribution. What it is *not* yet: diagnosed. Nobody has measured what a
+debug boot costs under peak parallelism, and "the deadline is too tight" and "boot occasionally
+stalls hard" are still both live.
+
+**2. `deep_receive_continuations_resume_correctly_across_workers` reds under GC_STRESS for a
+reason that is not a bug** — and CLAUDE.md tells you to run exactly that sweep before trusting a
+green tree, so the trap is armed for the next person. Collecting at every safepoint makes a burst
+~1000× slower and means no process is ever stolen: measured 400 bursts, 122 s, **zero migrations,
+and the per-burst correctness total right every single time**. The test's two assertions come
+apart under stress — the liveness one fails, the one that actually guards the capture machinery
+(and caught the ADR-210 deopt-resume bug) passes. Worse, at 122 s nextest reports it as a 120 s
+TIMEOUT, which hides *which* assertion fired. Under `BROOD_GC_STRESS` the test now runs 5 bursts
+instead of 400 and skips the liveness assert, keeping the correctness guard: **3.1 s and green**,
+where the sweep as a whole goes 120 s/1 timeout → **15 s/37 passed**. Normal runs are untouched
+(1.6 s, liveness still asserted).
+
+One negative result worth recording, because it nearly became a false green: STEP 4's KI-36 loop
+reported 0/25 in 46 s, which is ~1.8 s an iteration, and a nextest `-E` filter that matches nothing
+also exits 0. The harness had *deleted* its per-iteration logs on success — exactly backwards for a
+flake hunt, since it destroys the only evidence the runs happened. Re-checked with `nextest list`
+(the filter selects exactly one test) and three retained re-runs at `1 test run: 1 passed`, 2.01 s.
+The result stands; the method did not deserve to be believed as written. And the loop only repeats
+what KI-36 already records ("0 failures in 25 idle runs") — it never reproduces the 4000-module
+image build that produced the sighting, so it is a third idle confirmation and nothing more.

@@ -84,9 +84,23 @@ fn deep_receive_continuations_resume_correctly_across_workers() {
     // real-TCP suites: this test's other assertion catches *intermittent* corruption, and a
     // retry would let exactly that class pass on the second attempt and be written off as
     // FLAKY. A failure here has to stay meaningful.
-    const BURSTS: usize = 400;
+    // Under `BROOD_GC_STRESS=1` the two assertions come apart, so the liveness one is
+    // dropped and the correctness one kept. Collecting at *every* safepoint slows a burst by
+    // ~1000×, and no process is ever stolen — measured 2026-08-07: 400 bursts, 122 s, zero
+    // migrations, and the per-burst total correct every single time. So under stress this
+    // test reds on a scheduler precondition while the machinery it exists to guard is
+    // provably fine. That matters because CLAUDE.md tells you to sweep the concurrency
+    // binaries with GC_STRESS + GC_VERIFY before trusting a green tree: left alone, that
+    // sweep hands you a red that is not a bug (and, at 122 s, one that nextest reports as a
+    // 120 s TIMEOUT rather than an assertion, hiding which assert even fired).
+    //
+    // The correctness guard is the part worth having under stress — it is what caught the
+    // ADR-210 deopt-resume bug — so it still runs, just over few enough bursts to fit the
+    // cap. Migration liveness is covered by every non-stress run of this same test.
+    let gc_stress = std::env::var_os("BROOD_GC_STRESS").is_some();
+    let bursts: usize = if gc_stress { 5 } else { 400 };
     let mut migrated = false;
-    for _ in 0..BURSTS {
+    for _ in 0..bursts {
         let v = interp
             .eval_str(&format!("(burst {})", k))
             .expect("burst errored");
@@ -102,11 +116,12 @@ fn deep_receive_continuations_resume_correctly_across_workers() {
         }
     }
     assert!(
-        migrated,
+        migrated || gc_stress,
         "no live migration observed across {} bursts of {} deep-receive processes — \
          capture-mode processes never resumed on a different worker. If this is the only \
          failure and the machine was loaded, suspect scheduler starvation rather than the \
          capture machinery: the per-burst correctness assertion above passed every time.",
-        BURSTS, k
+        bursts,
+        k
     );
 }
