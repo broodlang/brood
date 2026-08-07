@@ -3201,6 +3201,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string, int], Ty::vector_of(int)),
         scan_form_start_2,
     );
+    def(
+        heap,
+        "scan-form-end",
+        Arity::exact(3),
+        Sig::new(vec![string, int, int], int),
+        scan_form_end,
+    );
 }
 
 /// Docstrings + parameter names for the public primitives, so `(doc 'name)`,
@@ -3378,6 +3385,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("scan-tokens", &["s"], "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens)."),
     ("scan-form-start-2", &["s", "pos"], "[prev start] — the greatest column-0 form-start offset <= pos AND the one before it, from a SINGLE forward pass. What tool/sexp narrowing actually wants: computing the pair as two scan-form-start calls runs the O(pos) lexical pass twice over the same prefix. prev is 0 when there is no earlier form start, matching what the second call returned there."),
     ("scan-form-start", &["s", "pos"], "The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer."),
+    ("scan-form-end", &["s", "from", "n-forms"], "The char offset just after n-forms top-level forms starting at char offset from, skipping strings/comments and tracking bracket depth, or (string-length s) if the text ends first. The forward window-end companion to scan-form-start: tool/sexp narrowing uses the pair to bound structural motion to the neighbourhood of point in ONE native pass, replacing an interpreted char-at loop that was the dominant cost of every keystroke-driven motion."),
     ("span-runs", &["text", "base", "spans", "ranges"], "Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. With optional overlay ranges ([lo hi face], may overlap/be unordered) each char's face is its span face with every covering range face merged on top (later wins). Adjacent equal-face runs coalesce. The highlight span->runs tiler (fontify-runs), in Rust. Faces are opaque maps."),
     ("clipboard-get", &[], "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature)."),
     ("clipboard-set!", &["s"], "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."),

@@ -275,8 +275,20 @@ The options, in the order I would try them:
   motions between edits — worth checking against how the downstream editor actually drives it
   before building anything in the kernel.
 
-Measure `(buffer-text buf)` first: if the stringify dominates a single motion at realistic
-buffer sizes, that number decides which of the two above is worth the work.
+Measured 2026-08-07, and it settles which option: the stringify does **not** dominate. The
+`rope->string` copy is ~14% of a buffer-path motion; the dominant residual is the *table miss*
+— a fresh string value per motion means `scan-form-start-2` re-scans O(pos) from the top every
+keystroke, so the motion stays O(buffer) even though the window END is now native
+(`scan-form-end`, below) and the held-text path is flat. So "let the caller hold the string"
+does not help while `buffer-text` mints a new value each call: the fix has to make the *cache*
+survive across motions — rope-native scanning, or a GC-safe `rope->string` memo (an unchanged
+rope yielding the *same* string value, so both the ADR-213 index and the ADR-214 safepoint
+table hit). The rope-native scan is the more direct of the two.
+
+(The window END of `narrow` — the forward ~3-form scan — was itself an interpreted `char-at`
+loop measuring ~85% of every motion; it is now the native `scan-form-end` (devlog 2026-08-07).
+That closed the last interpreted loop on the *tooling* shape but changes nothing for the editor
+path above, exactly because that path is dominated by the table miss, not the scan.)
 
 ## 3. Then: the `expect_string` copy seam, by body cost
 
