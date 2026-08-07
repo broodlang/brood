@@ -65,8 +65,15 @@ Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error.
 
 (defn- stream-done-loop
   ()
+  ;; An exhausted stream answers :stream-done ONCE, then exits — like every other source
+  ;; loop (stream-list-loop, stream-fn-loop) and every transformer, all of which return on
+  ;; exhaustion. Recursing here (answering :done idempotently) kept the process parked
+  ;; forever after its stream was fully consumed: a per-stream process leak that grew
+  ;; memory at volume. A well-behaved consumer stops at the first :done, so the idempotence
+  ;; was never relied on (and a transformer forwards :done then exits, never re-polling its
+  ;; upstream), so exiting here is safe. See KI-33 / devlog 2026-08-07.
   (receive
-    ([:next r] (send r :stream-done) (stream-done-loop))
+    ([:next r] (send r :stream-done))
     (:stream-close nil)))
 
 (defn stream-from-list (xs)
@@ -274,8 +281,11 @@ Call immediately after accept or connect, before any data has been read."
 
 (defn- stream-err-loop
   (m)
+  ;; Like stream-done-loop: report the error once, then exit rather than parking forever.
+  ;; A consumer that sees [:stream-err …] stops (stream-fold/-to-list raise), and a
+  ;; transformer forwards the error and exits — nothing re-polls, so exiting is safe.
   (receive
-    ([:next r] (send r [:stream-err m]) (stream-err-loop m))
+    ([:next r] (send r [:stream-err m]))
     (:stream-close nil)))
 
 (defn stream-chunk (n s)

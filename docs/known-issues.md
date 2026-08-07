@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-33 | fully consuming a stream leaked its producer process — an exhausted stream parked in `stream-done-loop` forever instead of exiting | ✅ **fixed** 2026-08-07 |
 | KI-32 | a selective `receive` corrupted a skipped **local** (L1-delivered) message to `nil` — a stream request/reply pipeline deadlocked intermittently | ✅ **fixed** 2026-08-06 |
 | KI-31 | a foreign-ecosystem version range compiled to its FIRST term — `">=1.0.0 <2.0.0"` became `>=1.0.0` | ✅ **fixed** 2026-08-06 |
 | KI-30 | seven `temp-dir` prefixes were never purged — 4484 dirs / 168 MB of `/tmp` litter | ✅ **fixed** 2026-08-05 |
@@ -54,6 +55,33 @@ ADRs / topic docs.
 **No open issues; one watch item (KI-28).** No open bug in the language, runtime or toolchain
 itself. Every KI above is fixed, incidentally fixed, or a non-reproducing transient — each kept as
 a record with its regression test, so a recurrence is recognizable.
+
+---
+
+## KI-33 — fully consuming a stream leaked its producer process · **fixed 2026-08-07**
+
+**Found while fixing KI-32, 2026-08-07.** A `std/stream.blsp` stream is a process; an
+exhausted one used to answer `:stream-done` *idempotently* by looping in `stream-done-loop`
+— so once a stream was fully consumed, its producer process stayed **parked forever** instead
+of exiting. `stream-empty`, `stream-singleton`, `stream-drop` (when it drops past the end),
+`stream-chunk` (partial last chunk) and `stream-lines` (final buffer flush) all ended there.
+Every *other* source (`stream-list-loop`, `stream-fn-loop`) and every transformer already
+exited on exhaustion, so this was an inconsistency: some pipelines self-cleaned, some leaked
+one (or more) processes per stream. Harmless for a one-shot, but a long-lived program that
+builds many streams leaked processes without bound — surfaced as `memory limit exceeded`
+under a stream-hammering repro.
+
+**Fixed** by making `stream-done-loop` (and `stream-err-loop`) answer once and then **exit**,
+matching every other loop. Safe because a well-behaved consumer stops at the first `:done`
+(the idempotence was never relied on) and no transformer re-polls a done upstream — each
+forwards `:done`/`:stream-err` and exits. Terminal consumers therefore need no `stream-close`
+call, and a fully-consumed multi-stage pipeline tears itself down completely.
+
+Regression test: `tests/stream_test.blsp`, "streams do not leak producer processes" — consumes
+150 batches of the four leaking shapes and asserts no producers remain parked under this
+process (a `process-info :parent`/`:status` count, cross-checked to report 5 for 5
+deliberately-parked children). **Verified by sabotage** — restoring the recursion fails the
+test 3/3.
 
 ---
 
