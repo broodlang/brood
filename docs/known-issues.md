@@ -101,13 +101,60 @@ its port"* from *"A could not connect to a listening B."* Both recurrences panic
 `connect`, and not the late-`[:nodedown]` shape the entry speculated about (that speculation was
 already withdrawn there for having nothing under it; this closes it properly).
 
-**What is NOT yet established, and must be before anything is "fixed":**
+### Measured 2026-08-07: it is a stall, not a slow boot
 
-- what a debug `brood` boot actually costs under peak `nextest` parallelism, against idle;
-- whether the 20 s / 30 s deadlines are simply too tight for a debug build on this box, or whether
-  boot occasionally *stalls hard* — the interesting case, and the only one that is a real bug;
+The first question below is now answered. `scripts`-free tooling lives in the session scratchpad
+(`bootsample.py`): it spawns a debug `brood` running the *same* child program as
+`child_cleanup.rs` and polls for the marker at the same 50 ms interval as `wait_until_up`.
+
+| | n | p50 | p99 | p99.9 | max |
+|---|---|---|---|---|---|
+| idle | 289 | 151 ms | 151 ms | 151 ms | 151 ms |
+| during a full `make test` | 4915 | 151 ms | 555 ms | 810 ms | **4066 ms** |
+
+Across ~14 600 loaded samples spanning four full suite runs: **2 boots ≥ 1 s, zero ≥ 5 s.**
+
+**The load genuinely reached the path** — p99 moved 151 → 555 ms and the max 151 → 4066 ms — so
+this is not KI-36's failure mode of measuring an unloaded path and reporting it as loaded. That
+check is the reason the numbers are worth anything.
+
+So a 20–30 s timeout is **not** the slow tail of a loaded box: it would have to be ~5× worse than
+the worst of 4915 samples taken while the suite was running. The failure is a different mode —
+boot occasionally **stalling** — which is a real bug rather than a deadline-tuning question. That
+is an inference, not yet a demonstration: see the limits below.
+
+**Reproduction attempt: 6 consecutive full suite rounds, all green** (`hunt.sh`, sampler armed
+each round, stopping on first reproduction). Counting everything run on this tree on 2026-08-07:
+**11 suite runs, 1 with the cluster** — so the rate is ~1 in 11, and the "1 in 2" suggested by the
+first two runs was small-sample noise.
+
+**Limits on the measurement, stated because they bound the claim:**
+1. Every sampled run was **green**. This establishes the normal-case ceiling, not the failing case.
+2. The sampler waits on a **marker file**, matching `wait_until_up`. It does **not** cover KI-28's
+   leg, where `wait_until_listening` waits for a **TCP bind** — node startup and port binding are
+   extra work beyond runtime boot and are unmeasured.
+
+### Diagnostic armed for the next sighting
+
+`support::stall_report` now prints, on the failure path of both helpers: loadavg, MemAvailable /
+SwapFree, and every live `brood`/`nest` with its **process state char** and **wchan**. That
+separates the three candidates a bare timeout cannot:
+
+- **`D`** (uninterruptible sleep) — parked in a blocked syscall: the stall shape, with `wchan`
+  naming where.
+- **`R`** — genuinely running, so it was contention after all and the deadline is the question.
+- **no `brood` at all** — the child died rather than hung, a third thing entirely.
+
+This is the same move KI-28 made (it armed "print B's stderr on failure", which is precisely what
+answered its question when it recurred), one level down. At ~1 sighting per 11 suite runs, a
+sighting is too expensive to waste.
+
+**Still not established:**
+
 - whether the specific spike is the `release_bundle` tests, which run in the same region of the
-  schedule at **835 MB RSS each, two concurrently**.
+  schedule at **835 MB RSS each, two concurrently**;
+- what the child is actually blocked on when it stalls — which is what the armed report exists to
+  answer, and which needs the next sighting.
 
 **The methodological trap, inherited from KI-36 and worth heeding.** KI-36 flagged its own
 synthetic-load reproduction as weak evidence and said why: the loaded runs took 1.6–1.9 s against
