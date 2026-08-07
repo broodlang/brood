@@ -1,0 +1,252 @@
+(defmodule docsite
+  "Render a documentation model to a browsable HTML site — the shared renderer behind
+  `nest docs` and hive's per-package doc builds. Pure `model -> HTML string`: it takes
+  data and returns markup, so a trusted local build (introspection) and an untrusted
+  registry build (parse-don't-eval) can feed it the same shape and get the same site.
+
+  The model is a map:
+
+      {:name    \"my-project\"        ; project / package name
+       :version \"0.1.0\"             ; optional
+       :modules [{:module \"my/mod\"  ; module (namespace) name
+                  :doc    \"…\"        ; moduledoc, or nil
+                  :defs   [{:name  \"foo\"          ; bare definition name (for anchors)
+                            :sig   \"(foo x y)\"     ; rendered signature
+                            :doc   \"…\"             ; docstring, or nil
+                            :macro false           ; true for defmacro
+                            :type  \"(int -> int)\"  ; type-arrow, or nil
+                            :source [\"f.blsp\" 3 1]}]}]}  ; [file line col], or nil
+
+  Every field except `:module`/`:sig` may be nil; the renderer degrades gracefully, so
+  a thin parse-only model (no `:type`/`:source`) renders fine. `render` returns a
+  self-contained HTML string: with `:wrap? true` (the default) a whole `<html>` page
+  with inlined CSS + a client-side filter; with `:wrap? false` just the content
+  fragment (sidebar + main), for embedding in a host layout (e.g. hive's themed page).
+
+  Docstrings are treated as light Markdown — blank-line paragraphs and inline `code`
+  spans — and every value is HTML-escaped, so a docstring can never inject markup.")
+
+;; ---- escaping + inline prose ------------------------------------------------
+
+(defn escape (raw)
+  "HTML-escape `&`, `<`, `>` in `raw` (coerced to a string). `&` must go first."
+  (-> (str raw) (replace "&" "&amp;") (replace "<" "&lt;") (replace ">" "&gt;")))
+
+(defn- inline
+  ;; One paragraph as HTML: split on backticks, wrap the odd (inside-a-pair) segments
+  ;; in <code>, escape every segment. An unbalanced backtick just leaves a stray token.
+  (para)
+  (let (parts (string-split para "`"))
+    (apply str
+      (map (fn (pair)
+             (let ([index segment] pair)
+               (if (odd? index)
+                 (str "<code>" (escape segment) "</code>")
+                 (escape segment))))
+        (zip (range (count parts)) parts)))))
+
+(defn prose (text)
+  "Render a docstring as safe HTML: blank-line-separated `<p>` paragraphs with inline
+  `code` spans. Empty/nil text renders to the empty string."
+  (if (or (nil? text) (= (trim (str text)) ""))
+    ""
+    (apply str
+      (map (fn (para) (str "<p>" (inline para) "</p>"))
+        (filter (fn (para) (not (= (trim para) "")))
+          (string-split (str text) "\n\n"))))))
+
+;; ---- anchors ----------------------------------------------------------------
+
+(defn- slug (raw) (replace (replace (str raw) "/" "-") " " "-"))
+(defn module-anchor (module-name) (str "m-" (slug module-name)))
+(defn def-anchor (module-name definition-name)
+  (str "d-" (slug module-name) "-" (slug definition-name)))
+
+;; ---- one definition ---------------------------------------------------------
+
+(defn- definition-html
+  (module-name definition)
+  (let (macro? (get definition :macro)
+        type-arrow (get definition :type)
+        docstring (get definition :doc))
+    (str "<div class=\"def\" id=\""
+      (def-anchor module-name (get definition :name))
+      "\">"
+      "<div class=\"def-head\">"
+      "<code class=\"sig\">"
+      (escape (get definition :sig))
+      "</code>"
+      (if macro? " <span class=\"tag\">macro</span>" "")
+      "</div>"
+      (if type-arrow (str "<div class=\"type\">" (escape type-arrow) "</div>") "")
+      (if docstring
+        (str "<div class=\"doc\">" (prose docstring) "</div>")
+        "<p class=\"undoc\">Undocumented.</p>")
+      "</div>")))
+
+;; ---- one module -------------------------------------------------------------
+
+(defn- module-html
+  (module)
+  (let (module-name (get module :module)
+        defs (get module :defs))
+    (str "<section class=\"module\" id=\""
+      (module-anchor module-name)
+      "\">"
+      "<h2>"
+      (escape module-name)
+      "</h2>"
+      (let (moduledoc (get module :doc))
+        (if moduledoc (str "<div class=\"moduledoc\">" (prose moduledoc) "</div>") ""))
+      (if (empty? defs)
+        "<p class=\"empty\">No public definitions.</p>"
+        (str "<div class=\"defs\">"
+          (apply str (map (fn (d) (definition-html module-name d)) defs))
+          "</div>"))
+      "</section>")))
+
+;; ---- sidebar navigation -----------------------------------------------------
+
+(defn- sidebar-def
+  (module-name definition)
+  (str "<li><a href=\"#"
+    (def-anchor module-name (get definition :name))
+    "\">"
+    (escape (get definition :name))
+    "</a></li>"))
+
+(defn- sidebar-module
+  (module)
+  (let (module-name (get module :module))
+    (str "<div class=\"nav-module\">"
+      "<a class=\"nav-module-link\" href=\"#"
+      (module-anchor module-name)
+      "\">"
+      (escape module-name)
+      "</a>"
+      "<ul class=\"nav-defs\">"
+      (apply str (map (fn (d) (sidebar-def module-name d)) (get module :defs)))
+      "</ul>"
+      "</div>")))
+
+(defn- sidebar-html
+  (model)
+  (str "<nav class=\"sidebar\">"
+    "<div class=\"brand\">"
+    (escape (or (get model :name) "Documentation"))
+    (let (v (get model :version)) (if v (str " <span class=\"ver\">" (escape v) "</span>") ""))
+    "</div>"
+    "<input id=\"docsite-filter\" type=\"search\" placeholder=\"Filter…\" autocomplete=\"off\" spellcheck=\"false\">"
+    (apply str (map sidebar-module (get model :modules)))
+    "</nav>"))
+
+;; ---- page assembly ----------------------------------------------------------
+
+(defn- header-html
+  (model)
+  (let (v (get model :version))
+    (str "<header class=\"page-head\">"
+      "<h1>"
+      (escape (or (get model :name) "Documentation"))
+      "</h1>"
+      (if v (str "<span class=\"badge\">" (escape v) "</span>") "")
+      "</header>")))
+
+(defn- content-html
+  (model)
+  (str (sidebar-html model)
+    "<main class=\"content\">"
+    (header-html model)
+    (if (empty? (get model :modules))
+      "<p class=\"empty\">No documented modules.</p>"
+      (apply str (map module-html (get model :modules))))
+    "</main>"))
+
+;; The base reset for a standalone page (`:wrap? true`) only — it restyles `body`, so it
+;; is NOT emitted into an embedding host (hive), whose own body styling must win.
+(defn- page-reset-css
+  ()
+  (str "*{box-sizing:border-box}"
+    "body{margin:0;font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;color:#1f2933;background:#fff}"
+    "@media (prefers-color-scheme:dark){body{color:#cbd2d9;background:#1a1f26}}"))
+
+;; The component styles — every selector scoped under `.docsite`, so the fragment can be
+;; embedded in any host page (hive's daisyUI theme) without a class collision (`.badge`,
+;; `.sidebar`, … are all namespaced). Two columns: a sticky sidebar + scrolling content,
+;; monospace signatures, a light/dark palette following the viewer's OS theme.
+(defn- component-css
+  ()
+  (str ".docsite code,.docsite .sig,.docsite .type{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}"
+    ".docsite a{color:#2563eb;text-decoration:none}.docsite a:hover{text-decoration:underline}"
+    ".docsite .layout{display:flex;align-items:flex-start}"
+    ".docsite .sidebar{width:16rem;flex:0 0 16rem;position:sticky;top:0;height:100vh;overflow-y:auto;"
+    "padding:1rem;border-right:1px solid #e4e7eb;background:#f8fafc}"
+    ".docsite .brand{font-weight:700;margin-bottom:.5rem}.docsite .ver{color:#7b8794;font-weight:400}"
+    ".docsite #docsite-filter{width:100%;padding:.35rem .5rem;margin-bottom:.75rem;border:1px solid #cbd2d9;border-radius:.375rem;background:#fff;color:inherit}"
+    ".docsite .nav-module{margin-bottom:.4rem}.docsite .nav-module-link{font-weight:600}"
+    ".docsite .nav-defs{list-style:none;margin:.15rem 0 .5rem;padding-left:.75rem}"
+    ".docsite .nav-defs li{margin:.05rem 0}.docsite .nav-defs a{color:#52606d;font-size:.86rem}"
+    ".docsite .content{flex:1 1 auto;min-width:0;max-width:52rem;padding:1.5rem 2rem}"
+    ".docsite .page-head{display:flex;align-items:baseline;gap:.75rem;border-bottom:1px solid #e4e7eb;padding-bottom:.75rem;margin-bottom:1.5rem}"
+    ".docsite .page-head h1{margin:0;font-size:1.6rem}"
+    ".docsite .badge{background:#2563eb;color:#fff;border-radius:.375rem;padding:.1rem .5rem;font-size:.8rem}"
+    ".docsite .module{margin-bottom:2.5rem}.docsite .module h2{font-size:1.3rem;color:#2563eb;border-bottom:1px solid #eef1f4;padding-bottom:.3rem}"
+    ".docsite .moduledoc{color:#3e4c59;margin-bottom:1rem}"
+    ".docsite .def{border:1px solid #e4e7eb;border-radius:.5rem;padding:.75rem 1rem;margin:.6rem 0;scroll-margin-top:1rem}"
+    ".docsite .sig{font-weight:600;color:#1f2933}.docsite .tag{background:#e4e7eb;color:#52606d;border-radius:.25rem;padding:0 .35rem;font-size:.72rem;vertical-align:middle}"
+    ".docsite .type{color:#7b8794;font-size:.85rem;margin-top:.15rem}"
+    ".docsite .doc{margin-top:.4rem;color:#3e4c59}.docsite .doc p{margin:.4rem 0}.docsite .undoc{color:#9aa5b1;font-style:italic;margin:.4rem 0 0}"
+    ".docsite .doc code,.docsite .moduledoc code{background:#f0f4f8;border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
+    ".docsite .empty{color:#9aa5b1}" "@media (prefers-color-scheme:dark){"
+    ".docsite .sidebar{background:#12161c;border-color:#2b3138}.docsite #docsite-filter{background:#1a1f26;border-color:#3e4c59}"
+    ".docsite .content .sig{color:#e4e7eb}.docsite .def{border-color:#2b3138}.docsite .tag{background:#2b3138;color:#9aa5b1}"
+    ".docsite .page-head,.docsite .module h2{border-color:#2b3138}.docsite .doc code,.docsite .moduledoc code{background:#2b3138}"
+    ".docsite a{color:#63b3ed}.docsite .nav-defs a{color:#9aa5b1}.docsite .moduledoc,.docsite .doc{color:#b0b8c1}}"))
+
+;; A dependency-free filter: hide any definition, module, and sidebar entry whose text
+;; doesn't contain the query. Empty query restores everything.
+(defn- filter-script
+  ()
+  (str "<script>(function(){"
+    "var q=document.getElementById('docsite-filter');if(!q)return;"
+    "function norm(s){return s.toLowerCase()}" "q.addEventListener('input',function(){"
+    "var t=norm(q.value.trim());" "document.querySelectorAll('.module').forEach(function(m){"
+    "var any=false;" "m.querySelectorAll('.def').forEach(function(d){"
+    "var hit=!t||norm(d.textContent).indexOf(t)>=0;d.style.display=hit?'':'none';if(hit)any=true;});"
+    "m.style.display=(!t||any||norm(m.querySelector('h2').textContent).indexOf(t)>=0)?'':'none';});"
+    "document.querySelectorAll('.nav-module').forEach(function(n){" "var any=false;"
+    "n.querySelectorAll('.nav-defs li').forEach(function(li){"
+    "var hit=!t||norm(li.textContent).indexOf(t)>=0;li.style.display=hit?'':'none';if(hit)any=true;});"
+    "n.style.display=(!t||any||norm(n.querySelector('.nav-module-link').textContent).indexOf(t)>=0)?'':'none';});"
+    "});})();</script>"))
+
+(defn render (model opts)
+  "Render `model` to an HTML string. `opts` is a map:
+
+  - `:wrap?` (default true) — emit a whole self-contained `<html>` page (inlined CSS +
+    filter script). When false, emit only the `<div class=\"layout\">…</div>` content
+    fragment, for embedding inside a host page (the CSS/script are the caller's job).
+  - `:title` — the `<title>`/page heading; defaults to the model's `:name`."
+  (let (fragment (str "<div class=\"docsite\"><div class=\"layout\">"
+                   (content-html model)
+                   "</div></div>"))
+    (if (get opts :wrap? true)
+      (str "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>"
+        (escape (or (get opts :title) (get model :name) "Documentation"))
+        "</title>"
+        "<style>"
+        (page-reset-css)
+        (component-css)
+        "</style></head><body>"
+        fragment
+        (filter-script)
+        "</body></html>")
+      fragment)))
+
+(defn render-css ()
+  "The `.docsite`-scoped component stylesheet a `:wrap? false` fragment needs, for a host
+  that inlines it once. Every rule is namespaced under `.docsite`, so it never touches the
+  host's own styles; the host supplies its page chrome, this styles the doc content."
+  (component-css))
