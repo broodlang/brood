@@ -5,43 +5,64 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-06**, brood with ADR-213 (char→byte index), ADR-214 (form-start safepoints) and
-ADR-215 (AST-keyed shared compiled code) on
-top of the ADR-211/212 registry + package-signing work. Nothing half-finished — the 2026-08-06
-receive-matcher session ends with a **clean tree**: its findings are docs (§1 item 1, §4, §6) plus
-one new committed probe, and the code it wrote was measured, refuted and reverted. Rust
-suite **960/960** (nextest), in-language **4410/4410** — also green under
-`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
-clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
-differential clean across 4 engine configs. The 2026-08-05 batch (KI-29, KI-30, the
-short-vs-long measurement rule, and two rounds of `spawn-live` refutations) **is pushed**;
-`main` and `origin/main` agree. **Flake baseline** (2026-08-05): the in-language
-suite is clean over 3 iterations × 3 seeds in one image, and `live_migration` is 16/16 under
-self-contention. **No open issues; one watch item, not in the runtime** — KI-28, a single
-unexplained `nodedown` flake seen once in a full run and not since (0/40 solo, 33/33 × 3 under
-nextest, absent from the next 956/956 run); its diagnostic is armed, so a recurrence will explain
-itself — and now that KI-29 is fixed, a recurrence can no longer be blamed on a stray node.
-**KI-30 was fixed 2026-08-05**: seven `temp-dir` prefixes were never passed to `purge-stale-temp`,
-which had left 4484 of 4622 `/tmp` directories (168 MB) across months of green runs. The mechanism
-already existed and was documented — only seven lines were missing — and my filed fix direction (a
-`with-temp-dir` helper) was the wrong shape. `tests/temp_purge_coverage_test.blsp` now scans each
-file's source and fails on an unpurged prefix; the suite is flat at 128 directories over three
-consecutive runs.
-**KI-29 was fixed 2026-08-05**: the node/observe tests orphaned `brood` children (one found alive 9
-days later, ~35% of a core across three strays) because a *killed* test binary runs no destructors.
-`spawn_brood` now returns a `BroodChild` guard carrying two independent nets — `Drop` for a panicking
-test, `PR_SET_PDEATHSIG(SIGKILL)` for a SIGKILLed binary — each verified by sabotage. Its filed
-fix direction (a process group) was measured to be the *wrong* lever and not taken; see its entry.
-KI-27 was fixed 2026-08-05: the three node-test harnesses
-picked their ports out of the kernel's *ephemeral* range (32768–60999), so an unrelated process's
-client socket could take the port a test node was about to bind. They now share
-`crates/cli/tests/support/mod.rs` and allocate from a pid-sliced band below the ephemeral floor.
-KI-25 (five suites failing when
-re-run inside one image, which blocked `--repeat-until-failure` across the suite) was fixed
-2026-08-04: four suites marked `:isolated` for the `%isolate` rollback, and `pid_identity_test`
-now takes the one-shot `node-start` only when `(node-name)` is `:nonode`. The whole suite
-re-runs clean in one image (4390/4390 twice), so `--repeat-until-failure` is usable for flake
-hunting again.
+**As of 2026-08-07 (end of the startup-image session)**, brood at 0.3.6 with the ADR-218
+startup image *actually working* — see below, because for its first day it did not. Tree is
+**clean and pushed**; `main` and `origin/main` agree. Rust + in-language suite **970/970** via
+nextest (the in-language suite runs as one case), `nest check` clean cold and imaged, rustfmt
+clean. **`nest format --check` fails on 12 `.blsp` files** — pre-existing plus upstream's new
+`std/doc-catalog.blsp`, not CI-gated, and left alone deliberately: reformatting whole files is a
+judgement call, not a drive-by.
+
+**No open bugs. Two watch items, both single unreproducible dist failures under load** — KI-28
+(`clean_peer_exit_fires_nodedown_promptly`, 2026-08-05) and KI-36
+(`reconnect_watcher_heals_a_fallen_link`, 2026-08-07: 0 failures in 25 idle runs, 0 in 10 under
+synthetic load, and a clean 970/970 re-run). Same shape, same suite, independent sightings; the
+entries cross-reference, so a **third** would be the point at which this is a pattern rather than
+two coincidences.
+
+### What this session changed (five commits, all pushed)
+
+**The startup image had never been read from** (KI-34, `34770be4`). ADR-218 shipped it on
+2026-08-06 and it was written on every cold start and then ignored: `nest run` restored the root
+section and loaded every module from source anyway. Nothing failed — an imaged start behaved
+exactly like a cold one, because it *was* one. Two independent defects, either sufficient:
+`project-install-image` ran `(def *image-sections* …)` inside module `project` (binding
+`project/*image-sections*` while `require-force`, root code, read the empty root one), and
+`require-force` tested the ADR-070 package branch *before* the image branch — which always
+matches, because a project roots its own modules too. Both fixed; `set-image-source!` is the root
+setter, and the image branch now comes first.
+
+**The registry set is derived, not named** (KI-35, same commit). The list of "globals loading
+mutates rather than creates" had gone stale three times, always silently — `declared_sigs`, then
+seven ability/multimethod registries, then `*method-from*`. `%registry-update!`/`%registry-cas!`
+are the only ways a registry is written, so the kernel records those names and `%registry-names`
+reports them; what remains in Brood is an *exclusion* list, where forgetting an entry costs a
+redundant load rather than a wrong answer.
+
+**Dependencies are imaged too** (`94170dfc`), with their files added to the staleness key — they
+live outside `:source-paths`, so nothing else could invalidate them.
+
+**`nest run`'s cold pre-flight was quadratic** (`03efa15a`): 26.8 GB → **5.2 GB** on 16 302
+modules, for ~+4% time. `check-project-run-closure` handed every file the same whole-project
+reachability list, and a `spawn` deep-copies its captured chunk — so copies scaled as
+files × closure. Shipping it once per chunk fixes it. See §9.
+
+### Measurement state — read before re-deriving anything
+
+- **The loader is linear**: ~130 KB and ~1.6 ms per module, flat 500 → 8 000, image size exactly
+  linear; 16 302 modules load and image in **30 s / 2.6 GB**. There is *no* per-module memory
+  defect — an earlier "~1.6 MB/module" reading was a `nest run` figure wrongly attributed to the
+  loader. Reproduce with `scripts/bench/gen-project.py` + `scripts/bench/image-scale.sh`.
+- **ADR-218's headline lazy row reproduces but measured the wrong mechanism.** An entry point
+  reaching two of N modules pays about the same to source-load two files as to materialise two
+  sections, so 1.30 s looked right while the image was dead. The row that was genuinely broken is
+  the **eager** one (`nest test` / `nest check` / LSP): **8.55 s → 1.34 s**, materialise time
+  7 012 → 959 ms.
+- **An instrument that reads healthy either way is worse than none.** The eager path reported
+  "materialised 4002 of 4003 sections" in *both* arms — it counts sections walked, not sections
+  served. What distinguishes them is a top-level `println` in a module (absent on an imaged
+  start) and `BROOD_IMAGE_TRACE=1`, which prints one `[image-section]` line per module actually
+  materialised.
 
 ---
 
@@ -665,7 +686,18 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
 
 ## 8. Tools
 
-All in `scripts/fuzz/stress/`, each with a usage header worth reading first.
+Startup / project-scale measurement lives in **`scripts/bench/`** (added 2026-08-07, because the
+last session's ladder was left uncommitted and its figures could not be re-derived):
+
+- **`gen-project.py N DIR`** — a synthetic project of N modules × ~180 lines, with an entry point
+  that reaches exactly TWO of them (the case the lazy image exists for). The 10x-moneyclub shape
+  is `16300`.
+- **`image-scale.sh [sizes…]`** — per N: cold load alone, cold load + image write, image size, so
+  the write is attributable. Waits for an idle box, discards a warm-up run, and its header lists
+  the four traps that each produced a wrong number here first (load contamination, cold boot
+  cache, `nest` vs `brood` build-ids, and `nest run` not being the loader).
+
+Everything else is in `scripts/fuzz/stress/`, each with a usage header worth reading first.
 
 - **`scale_sweep.blsp`** — a `std/` op at N and 4N, ratio printed (linear ~4×, quadratic ~16×).
   **`UTF8=1` re-runs every row in the multi-byte regime.** Its header records which rows are
@@ -751,3 +783,39 @@ The harness fails itself on a checksum mismatch or a compute-floor clamp, so a c
 something. One trap of its own: `pgrep -f "bench/harness.py"` is useless as a wait condition —
 stale waiter loops from earlier sessions match that pattern (and match themselves). Wait on the
 PID.
+
+## 10. `nest run`'s cold pre-flight — fixed, and what is left in it
+
+`check-project-run-closure` reads its closure off `*features*`. On a **warm** start that is the
+handful of modules the entry materialised, and it is cheap. On a **cold** start every module has
+just been loaded to build the image, so the closure is the whole project — and each file was
+handed that whole list as its KI-17 reachability set. The check fans across the green-process
+pool, and **a `spawn` deep-copies what its body captures**, so the list crossed the heap boundary
+once per *file* (~100× per chunk): copies = files × closure, quadratic in project size.
+
+Fixed 2026-08-07 by `project-pfold-files-shared` + the `:check-shared` op, which prepend the
+shared set to each chunk instead of pairing it with each file. Same files, same warnings —
+verified by running the old per-file path and the new one in the same session against a project
+with three deliberate warnings and diffing the output (identical). Measured, interleaved, idle:
+
+| N | before | after |
+|---|---|---|
+| 4 000 | 16.1 s / 2.6 GB | 14.0 s / 1.3 GB |
+| 8 000 | 36.6 s / 8.4 GB | 28.9 s / 2.1 GB |
+| 16 302 (cold `nest run`) | 81.6–83.5 s / 26.76 GB | 84.1–88.0 s / 5.2 GB |
+
+Per-doubling memory growth 3.2× → 1.6×. The ~+4% time cost is real (the samples do not overlap),
+and worth it at the size where it matters.
+
+**What remains, if this row is ever revisited:** the checking itself is ~3.7 ms/file and verdicts
+are deliberately not cached, so a cold `nest run` on a 16 000-file project still spends ~50 s
+checking code the entry point may never reach. The honest fix is to scope the pre-flight to the
+entry's *require closure* computed from module headers rather than to `*features*` — which is
+what the docstring already claims it does. That is a behaviour change (fewer files checked ⇒
+fewer advisory warnings on a cold run), so it wants a deliberate decision rather than a
+drive-by; it was not taken here for that reason.
+
+**A trap from that measurement.** A single post-fix `nest run` read 139.6 s, which looked like a
+61% regression and contradicted the 4 000/8 000 rows (both got faster). It was the box state —
+that run followed a full suite. Two lone samples taken hours apart are not an A/B, even when both
+look clean. The interleaved four-sample run settled it at +4%.
