@@ -124,10 +124,25 @@ the entry point reaches, not just the root section.
 **Guard:** `crates/nest/tests/startup_image.rs` — `a_second_run_loads_modules_from_the_image_not_from_source`
 (plus `an_edited_source_file_invalidates_the_image`, so the fix cannot be "serve a stale image").
 
-**Not re-measured here:** ADR-218's headline lazy row (16 302 modules, 1.30 s) was measured on
-the same commit that shipped defect 1, so that number cannot be reproduced from the committed
-code. The mechanism is verified working on a small project; re-running the large-project
-measurement is left as its own task.
+**Re-measured 2026-08-07, and the two halves of ADR-218 fared very differently.** Same fixture
+(4 002 generated modules), same box, release binaries from `90099993` (pre-fix) and `34770be4`:
+
+| row | pre-fix | post-fix | |
+|---|---|---|---|
+| lazy `nest run` (entry reaches 2 of N) | 0.37 s / 112 MB | 0.36 s / 102 MB | unchanged |
+| eager materialise-all | 8.55 s / 674 MB | **1.34 s / 453 MB** | **6.4×**, −33% RSS |
+| ⤷ materialise time alone | 7 012 ms | **959 ms** | **7.3×** |
+
+So the **lazy row was never broken in a way a stopwatch could see**: an entry point reaching two
+modules pays about the same to source-load two files as to materialise two sections, which is why
+ADR-218's 1.30 s was a real number measuring the wrong mechanism (a 16 302-module re-run of that
+row lands at 1.57 s / 243 MB against its 1.30 s / 219 MB, on a denser fixture). The row that was
+genuinely broken is the **eager** one — `project-materialize-all` → `require-one` → the source
+branch — so `nest test`, `nest check` and the LSP re-evaluated the whole project on every start.
+
+**A trap worth keeping:** the eager path *reported* "materialised 4002 of 4003 sections" in both
+arms. The count is sections walked, not sections served from the image, so the instrument looked
+healthy throughout. Only the wall clock and a top-level `println` in a module told the truth.
 
 ---
 
