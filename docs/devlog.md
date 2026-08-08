@@ -17903,3 +17903,20 @@ speed/ratio midpoint a per-request compressor wants — exactly the split a sing
 can't serve. It now passes level 9; the default stays 6 for the dynamic `web/compress` middleware.
 Tests: `tests/zlib_test.blsp` (round-trip at 9, level-0 larger than level-9, applies to
 compress/zip, out-of-range raises).
+
+## 2026-08-08 — brotli compression (`Content-Encoding: br`)
+
+Added a fourth compression format alongside gzip/zlib/deflate: brotli (RFC 7932), the modern
+`Content-Encoding: br` a browser prefers over gzip and which beats it on text at a comparable
+cost. Two prims, `%brotli`/`%unbrotli` (the `brotli` crate, pure-Rust), wrapped in
+`std/zlib.blsp` as `brotli`/`unbrotli`. The encoder takes an optional quality `0..=11` (0 =
+fastest, 11 = best), default **5** — a balanced point suited to per-request compression, where
+brotli's own default of 11 is too slow; a static asset built once passes 11. Out-of-range is a
+clean error. Decode errors on non-brotli input.
+
+The decoder rides the same `decode` Read-adapter helper the flate2 formats use; the encoder uses
+`brotli::CompressorWriter` (flush + `into_inner`) with lgwin 22. `brotli-decompressor` was already
+in the tree transitively; the direct `brotli` dep pins the compressor for the builtin. The
+consumer is hatch's `web/compress`, which now negotiates `br` ahead of `gzip`. Tests:
+`tests/zlib_test.blsp` (round-trip, quality-11 ≤ quality-0, brotli ≤ gzip on text, out-of-range
+raises).

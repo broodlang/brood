@@ -184,6 +184,9 @@ getrandom = "0.4"
 # gzip/zlib/raw-deflate compression (the `zlib` builtins, Erlang's :zlib shape).
 # Already in the tree transitively; a direct dep pins it for the compress builtins.
 flate2 = "1"
+# Brotli compression (the `%brotli`/`%unbrotli` builtins) — the `Content-Encoding: br`
+# wire format, which beats gzip on text at a comparable cost. Pure-Rust, no_std-friendly.
+brotli = "8"
 # Node-link channel encryption (ADR-089): a Noise-style session that gives the
 # steady-state node link confidentiality + per-frame integrity, closing ADR-081's
 # cleartext/injection gap. `x25519-dalek` does the ephemeral ECDH (forward secrecy);
