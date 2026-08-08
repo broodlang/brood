@@ -36,3 +36,23 @@
   (test "raw deflate is smaller than gzip for the same data (no header/checksum)"
     (let (s (big "compress me " 50))
       (is (<= (byte-length (zlib/zip s)) (byte-length (zlib/gzip s)))))))
+
+(describe "compression level (optional arg, 0-9)"
+  (test "level 9 round-trips like the default"
+    (assert= "hello world"
+      (utf8-bytes->string (zlib/gunzip (zlib/gzip "hello world" 9)))))
+  (test "level 0 (store) round-trips and is larger than level 9"
+    (let (s (big "the quick brown fox " 80))
+      (assert= s (utf8-bytes->string (zlib/gunzip (zlib/gzip s 0))))
+      (is (> (byte-length (zlib/gzip s 0)) (byte-length (zlib/gzip s 9))))))
+  (test "level 9 is no larger than the default for repetitive data"
+    (let (s (big "ababababab " 100))
+      (is (<= (byte-length (zlib/gzip s 9)) (byte-length (zlib/gzip s))))))
+  (test "level applies to zlib/compress and zlib/zip too"
+    (let (s (big "payload " 60))
+      (assert= s (utf8-bytes->string (zlib/uncompress (zlib/compress s 9))))
+      (assert= s (utf8-bytes->string (zlib/unzip (zlib/zip s 9))))
+      (is (> (byte-length (zlib/zip s 0)) (byte-length (zlib/zip s 9))))))
+  (test "an out-of-range level raises"
+    (is (= :raised (try (do (zlib/gzip "x" 10) :ok) (catch e :raised))))
+    (is (= :raised (try (do (zlib/gzip "x" -1) :ok) (catch e :raised))))))

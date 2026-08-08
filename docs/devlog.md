@@ -17887,3 +17887,19 @@ flake hunt, since it destroys the only evidence the runs happened. Re-checked wi
 The result stands; the method did not deserve to be believed as written. And the loop only repeats
 what KI-36 already records ("0 failures in 25 idle runs") — it never reproduces the 4000-module
 image build that produced the sighting, so it is a third idle confirmation and nothing more.
+
+## 2026-08-08 — an optional compression level for the zlib encoders
+
+`%gzip`/`%zlib-compress`/`%deflate` took a byte sequence and always compressed at flate2's
+default (level 6). The three now accept an optional second argument, a level `0..=9` (0 = store,
+9 = best), plumbed through `std/zlib.blsp`'s `gzip`/`compress`/`zip` wrappers (`&optional level`).
+Arity moved `exact(1)` → `range(1, 2)` with `Sig::with_rest(vec![any], int, bytes_ty)`; an
+out-of-range level is a clean runtime error, not a silent clamp. Decoders are unchanged (a stream
+carries its own level). Additive — every existing one-arg call is unaffected.
+
+The consumer that asked for it: hatch's static-asset precompression (`web/assets/precompress`)
+writes a `.gz` sibling served many times but built once, so it wants the best ratio, not the
+speed/ratio midpoint a per-request compressor wants — exactly the split a single fixed level
+can't serve. It now passes level 9; the default stays 6 for the dynamic `web/compress` middleware.
+Tests: `tests/zlib_test.blsp` (round-trip at 9, level-0 larger than level-9, applies to
+compress/zip, out-of-range raises).

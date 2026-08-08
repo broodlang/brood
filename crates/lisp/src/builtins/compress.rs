@@ -23,7 +23,25 @@ use crate::core::value::{EnvId, Value};
 use crate::error::{LispError, LispResult};
 
 use super::io::{bytes_to_value, collect_bytes};
-use super::numeric::arg;
+use super::numeric::{arg, expect_int};
+
+/// The compression level for an encoder prim's optional 2nd arg: absent → the
+/// library default (6), else an integer clamped to the valid `0..=9` (0 = store,
+/// 9 = best). An out-of-range level is a clean runtime error, not a silent clamp.
+fn level_arg(name: &str, args: &[Value], heap: &Heap) -> Result<Compression, LispError> {
+    match arg(args, 1) {
+        Value::Nil => Ok(Compression::default()),
+        v => {
+            let n = expect_int(heap, name, v)?;
+            if !(0..=9).contains(&n) {
+                return Err(LispError::runtime(format!(
+                    "{name}: compression level must be 0-9 (got {n})"
+                )));
+            }
+            Ok(Compression::new(n as u32))
+        }
+    }
+}
 
 /// Feed `data` through a write-adapter encoder `enc` and return the compressed bytes.
 fn encode<W: Write + FinishBytes>(
@@ -65,14 +83,12 @@ impl FinishBytes for DeflateEncoder<Vec<u8>> {
     }
 }
 
-/// `(%gzip bytes)` — gzip-compress a byte sequence, returned as `bytes`.
+/// `(%gzip bytes [level])` — gzip-compress a byte sequence at optional `level`
+/// (0-9, default 6), returned as `bytes`.
 pub(super) fn gzip(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let level = level_arg("%gzip", args, heap)?;
     let data = collect_bytes("%gzip", arg(args, 0), heap)?;
-    let out = encode(
-        "%gzip",
-        GzEncoder::new(Vec::new(), Compression::default()),
-        &data,
-    )?;
+    let out = encode("%gzip", GzEncoder::new(Vec::new(), level), &data)?;
     Ok(bytes_to_value(&out, heap))
 }
 
@@ -83,14 +99,12 @@ pub(super) fn gunzip(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(bytes_to_value(&out, heap))
 }
 
-/// `(%zlib-compress bytes)` — zlib-compress (RFC 1950), returned as `bytes`.
+/// `(%zlib-compress bytes [level])` — zlib-compress (RFC 1950) at optional
+/// `level` (0-9, default 6), returned as `bytes`.
 pub(super) fn zlib_compress(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let level = level_arg("%zlib-compress", args, heap)?;
     let data = collect_bytes("%zlib-compress", arg(args, 0), heap)?;
-    let out = encode(
-        "%zlib-compress",
-        ZlibEncoder::new(Vec::new(), Compression::default()),
-        &data,
-    )?;
+    let out = encode("%zlib-compress", ZlibEncoder::new(Vec::new(), level), &data)?;
     Ok(bytes_to_value(&out, heap))
 }
 
@@ -101,14 +115,12 @@ pub(super) fn zlib_uncompress(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     Ok(bytes_to_value(&out, heap))
 }
 
-/// `(%deflate bytes)` — raw DEFLATE (RFC 1951, no header/checksum), as `bytes`.
+/// `(%deflate bytes [level])` — raw DEFLATE (RFC 1951, no header/checksum) at
+/// optional `level` (0-9, default 6), as `bytes`.
 pub(super) fn deflate(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let level = level_arg("%deflate", args, heap)?;
     let data = collect_bytes("%deflate", arg(args, 0), heap)?;
-    let out = encode(
-        "%deflate",
-        DeflateEncoder::new(Vec::new(), Compression::default()),
-        &data,
-    )?;
+    let out = encode("%deflate", DeflateEncoder::new(Vec::new(), level), &data)?;
     Ok(bytes_to_value(&out, heap))
 }
 
