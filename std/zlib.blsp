@@ -12,6 +12,11 @@
 ;; All six are Brood over the `%gzip`/`%gunzip`/`%zlib-compress`/`%zlib-uncompress`/
 ;; `%deflate`/`%inflate` prims (the `flate2` crate). Input is *iodata* — a string
 ;; (UTF-8 encoded first) or any byte sequence; output is always a `bytes` value.
+;;
+;; The three encoders take an optional compression `level`, 0-9 (0 = store, 9 = best;
+;; default 6). Reach for 9 when the compressed form is written once and served many
+;; times (a precompressed static asset); the default trades a little ratio for speed,
+;; which is what per-request compression wants.
 
 (defmodule zlib
   "gzip / zlib / raw-deflate compression.
@@ -29,10 +34,11 @@
 
 ;; ---- gzip (RFC 1952) — the HTTP `Content-Encoding: gzip` format ----
 
-(defn gzip (data)
+(defn gzip (data &optional level)
   "gzip-compress `data` (a string or byte sequence), returned as `bytes`. This is the
-  `Content-Encoding: gzip` wire format. Inverse: `gunzip`."
-  (%gzip (as-bytes data)))
+  `Content-Encoding: gzip` wire format. Optional `level` is 0-9 (0 = store, 9 = best; default
+  6). Inverse: `gunzip`."
+  (if (nil? level) (%gzip (as-bytes data)) (%gzip (as-bytes data) level)))
 
 (defn gunzip (data)
   "Decompress gzip `bytes` back to a `bytes` value. Raises on data that isn't valid gzip."
@@ -40,9 +46,10 @@
 
 ;; ---- zlib (RFC 1950) — 2-byte header + Adler-32 checksum ----
 
-(defn compress (data)
-  "zlib-compress `data` (a string or byte sequence), returned as `bytes`. Inverse: `uncompress`."
-  (%zlib-compress (as-bytes data)))
+(defn compress (data &optional level)
+  "zlib-compress `data` (a string or byte sequence), returned as `bytes`. Optional `level` is
+  0-9 (default 6). Inverse: `uncompress`."
+  (if (nil? level) (%zlib-compress (as-bytes data)) (%zlib-compress (as-bytes data) level)))
 
 (defn uncompress (data)
   "Decompress zlib `bytes` to a `bytes` value. Raises on invalid data."
@@ -50,10 +57,10 @@
 
 ;; ---- raw deflate (RFC 1951) — no header or checksum ----
 
-(defn zip (data)
+(defn zip (data &optional level)
   "Raw-DEFLATE-compress `data` (a string or byte sequence), returned as `bytes` — no
-  gzip/zlib header or checksum. Inverse: `unzip`."
-  (%deflate (as-bytes data)))
+  gzip/zlib header or checksum. Optional `level` is 0-9 (default 6). Inverse: `unzip`."
+  (if (nil? level) (%deflate (as-bytes data)) (%deflate (as-bytes data) level)))
 
 (defn unzip (data)
   "Decompress raw-DEFLATE `bytes` to a `bytes` value. Raises on invalid data."
