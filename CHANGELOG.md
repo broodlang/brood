@@ -4,11 +4,24 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.3.9 — 2026-08-08
 
-Three gaps found by reviewing [hatch](https://github.com/broodlang/hatch), the
-Brood web framework, against 0.3.8 — each a feature that had not yet met its first
-real consumer:
+New compression capabilities, both surfaced by [hatch](https://github.com/broodlang/hatch)
+adopting brood's compression for HTTP responses:
+
+- **An optional compression level for the zlib encoders.** `zlib/gzip` / `zlib/compress` /
+  `zlib/zip` (and the `%gzip` / `%zlib-compress` / `%deflate` prims) now take a level `0..=9`
+  (0 = store, 9 = best; default 6, unchanged). Reach for 9 when a compressed form is written
+  once and served many times (a precompressed static asset); the default suits per-request
+  work. An out-of-range level is a clean error, not a silent clamp; decoders are unchanged.
+- **Brotli compression (`Content-Encoding: br`).** A fourth format beside gzip/zlib/deflate:
+  `zlib/brotli` / `zlib/unbrotli` (the `%brotli` / `%unbrotli` prims, over the pure-Rust
+  `brotli` crate). The encoder takes an optional quality `0..=11` (default 5 — a balanced point
+  for per-request work; a static asset built once passes 11). Brotli beats gzip on text and is
+  the coding a modern browser prefers.
+
+Three gaps found by reviewing hatch, the Brood web framework, against 0.3.8 — each a feature
+that had not yet met its first real consumer:
 
 - **A `table` global no longer locks a project out of the startup image.**
   `%image-write` refused any value with no portable form, and a table handle is
