@@ -7,6 +7,12 @@
 # sibling case down with it. It also gives a true per-CASE timeout (below), which
 # plain `cargo test`/libtest cannot.
 
+# KI-38 — warm the expanded-prelude boot cache before the fan-out. Root-level
+# because nextest still gates setup scripts (0.9.137); it gates only that
+# feature, and a nextest too old to know the key fails loudly at parse time
+# rather than silently skipping the warm-up. See `[scripts.setup...]` at the end.
+experimental = ["setup-scripts"]
+
 [profile.default]
 # Per-test-case hard cap. nextest prints a "slow" warning every `period`, and after
 # `terminate-after` periods it kills the test (SIGTERM, then SIGKILL on its own grace
@@ -95,3 +101,28 @@ slow-timeout = { period = "60s", terminate-after = 20 }
 # fails both attempts and stays red, and a pass-on-retry is reported as FLAKY so it
 # cannot be silently absorbed.
 retries = 1
+
+# --- KI-38: warm the boot cache once, before ~50 binaries fan out ---
+#
+# The expanded-prelude cache is keyed on `build_id` = version + git sha + the
+# running executable's OWN mtime, so a rebuild colds it for every binary at
+# once, and the first suite run after a build is a fully cold one. A cold boot
+# costs ~1.23 s against ~0.11 s warm — almost entirely macro-expanding the
+# prelude (`BROOD_BOOT_TRACE=1`: expand=1.10s of a 1.227s source boot).
+#
+# The suite spawns `brood`/`nest` children by the dozen in one dense window, and
+# they all share ONE cache file (keyed on the child binary, not the caller).
+# Cold, the first child does not finish writing it until ~1.2 s in, so every
+# child starting inside that window misses too. Cold cost x herd size is linear
+# and crosses `wait_until_listening`'s 20 s deadline at ~70 concurrent boots,
+# which is how three boot-wait tests came to fail together (KI-38 — reproduced
+# on demand at `-j 64` with the cache cleared).
+#
+# ~2.4 s here, once, so the herd hits a warm cache. The script exits 0 on every
+# failure path: warming is an optimisation and must never redden a run.
+[scripts.setup.warm-boot-cache]
+command = 'scripts/warm-boot-cache.sh'
+
+[[profile.default.scripts]]
+filter = 'all()'
+setup = 'warm-boot-cache'

@@ -17,14 +17,55 @@ green-tree rule in CLAUDE.md). On `afe4bcff`: `make test` **974/974**; `make tes
 binaries **37/37 with zero heap-verifier complaints**; and a fuzz differential of 6 generators ×
 150 programs × 4 engine configs — **1650 checks, 0 divergences, 0 crashes**.
 
-**One open issue (KI-38) and one watch item (KI-36).** KI-38 is the boot-wait cluster: three tests
-that wait for a freshly spawned *debug* `brood` to become ready fail *together* under peak suite
-load, roughly one full run in two. **KI-28 is no longer a separate watch item** — it recurred
-twice (2026-08-06, 2026-08-07) and turned out to be one of the three, so it is folded in. It is a
-harness bug, not a language/runtime one — every sighting is a boot wait, never an assertion about
-behaviour under test — but it reds a suite often enough that you will meet it, and it is
-**undiagnosed**: nobody has yet measured what a debug boot costs under peak parallelism. KI-36 is
-deliberately *not* merged into it (different test, different deadline analysis).
+**KI-38 is diagnosed, reproduced and FIXED (2026-08-08); KI-36 remains the one watch item.**
+KI-38 was the boot-wait cluster: three tests that wait for a freshly spawned *debug* `brood` to
+become ready, failing *together* under peak suite load. **KI-28 is not a separate watch item** —
+it recurred twice and is one of the three, so it is folded in.
+
+**The mechanism.** `build_id_string()` embeds `binary_stamp()`, the running executable's own mtime,
+so the expanded-prelude boot cache is invalidated by **every rebuild**, for `brood`, `nest` and all
+~50 test binaries at once. A **cold** boot costs **1227–1361 ms against 107–114 ms warm** — ~11x,
+and `BROOD_BOOT_TRACE` shows it is entirely macro-expansion (`expand=1.10s` of a 1.227 s source
+boot). Every boot sample the entry previously rested on (151 ms idle, 4066 ms worst) was taken on
+an already-built tree and was therefore **warm**; the cold path had never been sampled, which is
+why the deadline was being compared against the wrong distribution and the failure read as a
+stall. Cold cost times the concurrent herd is linear and crosses the 20 s deadline at ~70
+concurrent boots, the 30 s one at ~105 — the observed 34.7–35.5 s failures sit at ~120.
+
+**Reproduced deterministically** (the first time this flake fired on demand), then used as the
+regression test for the fix:
+
+```
+rm -f ~/.cache/brood/prelude-expanded-*.blsp
+cargo nextest run --no-fail-fast --features brood/treesit-grammars -j 64
+```
+
+**The fix**: `scripts/warm-boot-cache.sh`, wired as a **nextest setup script** (so a bare
+`cargo nextest run` gets it too, not just `make test`). One boot of each spawned binary, ~2.4 s,
+before ~50 binaries fan out. Same command, same `-j 64`, same cleared cache:
+
+| test (deadline) | before | after |
+|---|---|---|
+| `clean_peer_exit` (20 s) | **FAIL 20.119 s** | **2.599 s** |
+| `drop_guard` (30 s) | 28.363 s | **1.926 s** |
+| `pdeath` (30 s) | 26.697 s | **1.991 s** |
+
+Note `-j 64` on 12 cores independently breaks `gc spawned_process_reclaims_too` and times out a
+jit case — over-subscription damage, not a regression, and both pass at the default `-j`. Even so
+the run improved from *1 failed, 3 timed out, 1 flaky* to *1 failed, 1 timed out, no flaky*.
+
+Two things the fix deliberately does **not** do, both recorded in `docs/known-issues.md`: it does
+not warm the ~50 test binaries' own in-process boots (each has its own mtime-keyed file, so they
+cannot be warmed without running them — the suite does that anyway); and it does not re-key the
+cache on prelude *content* to let all binaries share one file, because the mtime is what catches
+an uncommitted change to the expander, which is exactly the development loop this repo lives in.
+
+**`stall_report` is still blind and should be fixed before it is trusted.** It reads
+`/proc/<pid>/stat` — the **main thread only** — and a `brood` runtime parks its root thread on a
+futex while worker threads work, so in the reproduction every process printed `S futex_do_wait`
+and the `D`/`R`/dead discrimination it exists for collapsed. Its `cmd.contains("/brood")` filter
+also matches everything under the repo path `…/broodlang/brood/`. It needs per-thread state
+(`/proc/<pid>/task/*/stat`) or utime/stime deltas. **This is the one loose end left on KI-38.**
 
 ### What this session changed (two commits, both pushed)
 
@@ -494,6 +535,7 @@ mechanism with a switch, the switch on ONE binary is the attribution (§6).
 
 | Change | Off-switch | Worth |
 |---|---|---|
+| Boot cache warmed once before the suite fans out (KI-38) | `BROOD_NO_WARM_BOOT_CACHE=1` (nextest cannot skip a setup script — `--config 'profile.default.scripts=[]'` does **not** work) | the three boot-wait tests at `-j 64` cold: **FAIL 20.1 s → 2.6 s**, and 4.1/3.7/4.7 s → 0.4/0.5/1.2 s at the default `-j`; costs ~2.4 s once |
 | Compiled code keyed by the closure's AST, shared per runtime (ADR-215) | `BROOD_NO_SHARED_ARMS=1` | `spawn-live` wall −12.5%, CPU −25%, RSS −14%; bytecode compiles 100 154 → 163 per 100k processes |
 | Form-start safepoint table on the string value (ADR-214) | — (a cache that changes no answer; gated by equality with the pre-table scan at every position) | `sexp motions` 7.97× → 3.88×, 3.0× at 12800 forms |
 | Sparse char→byte index on the string slot (ADR-213) | — (a cache that changes no result; its gate is that its answers equal the walk's) | multi-byte char indexing **96×** on a micro (60.2 s → 0.62 s); `inc-scan` 16.85× → linear; `sexp motions` 9.80× → 5.42×; ASCII flat |
@@ -537,6 +579,15 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
   the condition of the sighting (a 4000-module image build beside the suite). Before spending the
   runs, check that your load actually reaches the test's path — KI-36's own synthetic-load attempt
   is the counterexample, at 1.6–1.9 s loaded against 2.58 s idle.
+
+**A boot measurement taken on an already-built tree is a WARM measurement.** The
+expanded-prelude cache is keyed on each binary's own mtime, so it is cold exactly once per
+binary per rebuild — and a cold boot is **~11x** a warm one (1.23 s vs 0.11 s, essentially all
+macro-expansion; `BROOD_BOOT_TRACE=1` prints which path a boot took and where the time went).
+KI-38 sat undiagnosed for two sessions because 4915 boot samples were taken beside and after
+suite runs, i.e. entirely on the warm path, and the deadline was then judged against that
+distribution. If you are timing a boot, state which path you measured, and use
+`XDG_CACHE_HOME` to isolate a cold one (`scripts/ki38/bootcost.sh` does exactly this).
 
 **Running the suite at all**
 
@@ -757,6 +808,23 @@ last session's ladder was left uncommitted and its figures could not be re-deriv
   the write is attributable. Waits for an idle box, discards a warm-up run, and its header lists
   the four traps that each produced a wrong number here first (load contamination, cold boot
   cache, `nest` vs `brood` build-ids, and `nest run` not being the loader).
+
+Flake-hunt tooling for the boot-cache family lives in **`scripts/ki38/`** (committed for the same
+reason as `scripts/bench/` — the previous session's equivalent sat in a scratchpad and its figures
+could not be re-derived). All of it reads `/proc` only and spawns no `brood`, so it cannot
+re-create the KI-29 orphan leak an earlier sampler did:
+
+- **`bootcost.sh [N]`** — what a cold expanded-prelude boot costs, alone and as a herd of N,
+  against the warm path, isolated via `XDG_CACHE_HOME` so the real `~/.cache/brood` is untouched.
+  This is the tool that separates the two boot paths; use it before quoting any boot number.
+- **`doseresponse.py`** — sweeps herd size against a shared cold cache and reports the worst boot
+  per herd: the number the 20 s / 30 s deadlines actually race. Aborts the sweep on memory
+  pressure rather than risking the box.
+- **`sysmon.py OUT.csv`** / **`analyze.py OUT.csv`** — a 1 Hz timeline beside a suite run and its
+  summary (loadavg, MemAvailable/SwapFree/Shmem, major-fault and swap deltas, live `brood` count
+  and how many are in `D`, and which test binary is running so the timeline names the schedule
+  region). `analyze.py` is worth running on **green** rounds too: that is how the memory
+  hypothesis for KI-38 was refuted, before any sighting.
 
 Everything else is in `scripts/fuzz/stress/`, each with a usage header worth reading first.
 
