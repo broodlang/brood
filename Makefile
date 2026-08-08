@@ -111,6 +111,10 @@ test: ## Run Rust tests + the in-language suite via cargo-nextest (each test cas
 	# so the suite opts into `treesit-grammars` to exercise the ruby/elixir tests.
 	# The .blsp grammar tests also self-skip when absent, so a bare `cargo nextest`
 	# (no grammars) stays green too.
+	# The `SETUP warm-boot-cache` line comes from a nextest setup script that boots
+	# `brood`/`nest` once (~2.4s) before the fan-out, so the spawned children don't
+	# each pay the cold prelude expansion — KI-38. `BROOD_NO_WARM_BOOT_CACHE=1`
+	# turns it off; see .config/nextest.toml.
 	cargo nextest run --no-fail-fast --features brood/treesit-grammars
 	cargo test --doc   # nextest doesn't run doctests; none today, kept so future ones still run
 

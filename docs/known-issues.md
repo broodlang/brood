@@ -19,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | 🟡 **diagnosed + reproduced 2026-08-08**, fix not yet chosen |
+| KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | ✅ fixed 2026-08-08 (warm the cache before the fan-out) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
 | KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07; +25 more idle passes) |
 | KI-35 | `*method-from*` was never imaged, so an imaged start stopped reporting cross-module `defmethod` conflicts | ✅ **fixed** 2026-08-07 |
@@ -57,20 +57,20 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**One diagnosed issue (KI-38) and one watch item (KI-36).** KI-28 is **no longer a watch item — it
-has recurred twice and is folded into KI-38**, which is the larger pattern it turned out to be
-part of: three tests that wait for a freshly spawned debug `brood` to finish booting, failing
-together under peak suite load. **Diagnosed and reproduced deterministically on 2026-08-08**: the
-expanded-prelude boot cache is keyed on each binary's own mtime, so a rebuild colds it for every
-binary at once, a cold boot costs ~11x a warm one (all macro-expansion), and that cost times the
-concurrent herd walks straight through the helpers' 20 s / 30 s deadlines. No open bug in the
-*language or runtime* is implied — every sighting is a boot wait, never an assertion about
-behaviour under test — but it is a harness bug with a known mechanism and no fix chosen yet.
-(KI-37 was open for a few hours on 2026-08-07 and is fixed.)
+**No open issue; one watch item (KI-36).** KI-28 is **no longer a watch item — it recurred twice
+and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
+that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
+load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
+boot cache is keyed on each binary's own mtime, so a rebuild colds it for every binary at once, a
+cold boot costs ~11x a warm one (all macro-expansion), and that cost times the concurrent herd
+walked straight through the helpers' 20 s / 30 s deadlines. Warming the cache once before the
+fan-out takes the three tests from a 20.1 s failure to 1.9–2.6 s. No bug in the *language or
+runtime* was implied at any point — every sighting was a boot wait, never an assertion about
+behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
 
-## KI-38 — three boot-wait tests fail together under peak suite load · **diagnosed + reproduced 2026-08-08**
+## KI-38 — three boot-wait tests fail together under peak suite load · **fixed 2026-08-08**
 
 **This is what KI-28 turned out to be part of.** KI-28 was recorded as "a single unexplained
 `nodedown` flake" with a standing record of 0 failures in 260 runs, and said in terms: *"A
@@ -178,6 +178,67 @@ The stall report fired and reads: **`loadavg: 62.00`, `MemAvailable: 24865760 kB
 `-j 64` on 12 cores also broke `brood::gc spawned_process_reclaims_too` and timed out 3 cases.
 **That is over-subscription damage at loadavg 80, not a regression** — the same commit is
 974/974 green at the default `-j`, twice over (see below).
+
+### Fixed 2026-08-08 — warm the cache once, before the fan-out
+
+`scripts/warm-boot-cache.sh`, wired as a **nextest setup script** so it covers a bare
+`cargo nextest run` and not just `make test`:
+
+```toml
+experimental = ["setup-scripts"]      # root-level; nextest 0.9.137 still gates this
+
+[scripts.setup.warm-boot-cache]
+command = 'scripts/warm-boot-cache.sh'
+
+[[profile.default.scripts]]
+filter = 'all()'
+setup = 'warm-boot-cache'
+```
+
+It boots each spawned binary **once** (~2.4 s total) so the herd hits a warm cache. Two
+details worth keeping: `brood` and `nest` carry **separate** cache files (different mtimes,
+different keys), and `nest --version` does **not** boot the prelude while `nest complete --`
+does — so warming `nest` needs the latter. Every failure path in the script exits 0: warming
+is an optimisation and must never redden a run.
+
+**The herd-miss is directly demonstrable**, which is the whole reason one boot up front is
+worth ~2.4 s. Twelve children launched simultaneously against a *cold* shared cache — every one
+misses, because none has finished writing it — then twelve more against the same cache once warm:
+
+```
+cold, 12 at once:  3.71 3.72 4.14 4.21 4.23 4.35 4.39 4.54 4.58 4.60 4.86 4.86   (seconds)
+warm, 12 at once:  0.24 0.24 0.25 0.25 0.29 0.32 0.33 0.34 0.35 0.35 0.36 0.37
+```
+
+13–15x, and note the cold spread is *tight*: they are not queueing behind one another, they are
+each doing the full 1.1 s expansion in parallel and contending for cores while they do it.
+
+**Verified against the reproduction**, same command, same `-j 64`, same cleared cache:
+
+| test (deadline) | before | after |
+|---|---|---|
+| `clean_peer_exit` (20 s) | **FAIL 20.119 s** | **2.599 s** |
+| `drop_guard` (30 s) | 28.363 s | **1.926 s** |
+| `pdeath` (30 s) | 26.697 s | **1.991 s** |
+
+10–14x faster, and from 94% of the deadline consumed to 13%. The whole `-j 64` run also
+improved from *1 failed, 3 timed out, 1 flaky* to *1 failed, 1 timed out, no flaky* — the two
+that remain are the over-subscription damage described above (`gc spawned_process_reclaims_too`
+failed in the pre-fix `-j 64` run too), not a regression; both pass at the default `-j`.
+
+**What this does not cover, stated so nobody assumes otherwise.** Each of the ~50 test binaries
+also boots the prelude **in-process**, and each has its own cache file keyed on its own mtime —
+so they cannot be warmed without running them, which is what the suite is doing anyway. Those
+boots still pay ~1.2 s once each after a rebuild, and they still contribute to the herd. What
+the fix removes is the *repeated* cost: the dozens of spawned children that were each paying
+the expansion because they all started before any of them had written the cache. That is the
+part that scaled with the herd, and it is the part the deadline was racing.
+
+**A cheaper fix was considered and rejected**: key the cache on the prelude's content rather
+than the binary's mtime, so all ~50 binaries could share one file. The mtime is there precisely
+because an uncommitted Rust change to the *expander* changes the expansion without changing the
+prelude text or the git sha — content-keying would serve a stale cache during exactly the
+development loop this repo lives in. Not worth the correctness risk to save ~50 boots.
 
 ### What the sighting rate means
 
