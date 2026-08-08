@@ -56,3 +56,30 @@
   (test "an out-of-range level raises"
     (is (= :raised (try (do (zlib/gzip "x" 10) :ok) (catch e :raised))))
     (is (= :raised (try (do (zlib/gzip "x" -1) :ok) (catch e :raised))))))
+
+(describe "brotli / unbrotli (RFC 7932, Content-Encoding: br)"
+  (test "round-trips a string"
+    (assert= "hello brotli"
+      (utf8-bytes->string (zlib/unbrotli (zlib/brotli "hello brotli")))))
+  (test "round-trips a bytes value"
+    (let (b (string->utf8-bytes "the quick brown fox jumps over the lazy dog"))
+      (assert= b (zlib/unbrotli (zlib/brotli b)))))
+  (test "compresses repetitive data smaller than the input"
+    (let (s (big "ababababab " 100))
+      (is (< (byte-length (zlib/brotli s)) (byte-length (string->utf8-bytes s))))))
+  (test "quality 11 is no larger than quality 0 for repetitive data"
+    (let (s (big "the quick brown fox " 80))
+      (assert= s (utf8-bytes->string (zlib/unbrotli (zlib/brotli s 11))))
+      (is (<= (byte-length (zlib/brotli s 11)) (byte-length (zlib/brotli s 0))))))
+  (test "beats gzip on repetitive text"
+    (let (s (big "compress this text " 200))
+      (is (<= (byte-length (zlib/brotli s 11)) (byte-length (zlib/gzip s 9))))))
+  (test "empty input round-trips"
+    (assert= "" (utf8-bytes->string (zlib/unbrotli (zlib/brotli "")))))
+  (test "unbrotli raises on data that isn't brotli"
+    (is (= :raised
+          (try (do (zlib/unbrotli (string->utf8-bytes "definitely not brotli xyz")) :ok)
+            (catch e :raised)))))
+  (test "an out-of-range quality raises"
+    (is (= :raised (try (do (zlib/brotli "x" 12) :ok) (catch e :raised))))
+    (is (= :raised (try (do (zlib/brotli "x" -1) :ok) (catch e :raised))))))

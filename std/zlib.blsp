@@ -1,6 +1,6 @@
-;; std/zlib.blsp — gzip / zlib / raw-deflate compression. (require 'zlib)
+;; std/zlib.blsp — gzip / zlib / raw-deflate / brotli compression. (require 'zlib)
 ;;
-;; Three container formats, each an
+;; Four container formats, each an
 ;; encode/decode pair over a byte sequence.
 ;;
 ;;   | format      | encode              | decode                | notes                       |
@@ -8,10 +8,11 @@
 ;;   | gzip        | `zlib/gzip`         | `zlib/gunzip`         | RFC 1952, `Content-Encoding`|
 ;;   | zlib        | `zlib/compress`     | `zlib/uncompress`     | RFC 1950, header + Adler-32 |
 ;;   | raw deflate | `zlib/zip`          | `zlib/unzip`          | RFC 1951, no header         |
+;;   | brotli      | `zlib/brotli`       | `zlib/unbrotli`       | RFC 7932, `Content-Encoding: br`|
 ;;
-;; All six are Brood over the `%gzip`/`%gunzip`/`%zlib-compress`/`%zlib-uncompress`/
-;; `%deflate`/`%inflate` prims (the `flate2` crate). Input is *iodata* — a string
-;; (UTF-8 encoded first) or any byte sequence; output is always a `bytes` value.
+;; The gzip/zlib/deflate encoders are Brood over the `flate2` prims; brotli is Brood over the
+;; `%brotli`/`%unbrotli` prims (the `brotli` crate). Input is *iodata* — a string (UTF-8 encoded
+;; first) or any byte sequence; output is always a `bytes` value.
 ;;
 ;; The three encoders take an optional compression `level`, 0-9 (0 = store, 9 = best;
 ;; default 6). Reach for 9 when the compressed form is written once and served many
@@ -65,3 +66,15 @@
 (defn unzip (data)
   "Decompress raw-DEFLATE `bytes` to a `bytes` value. Raises on invalid data."
   (%inflate data))
+
+;; ---- brotli (RFC 7932) — the HTTP `Content-Encoding: br` format ----
+
+(defn brotli (data &optional quality)
+  "Brotli-compress `data` (a string or byte sequence), returned as `bytes`. This is the
+  `Content-Encoding: br` wire format, which beats gzip on text. Optional `quality` is 0-11
+  (0 = fastest, 11 = best; default 5). Inverse: `unbrotli`."
+  (if (nil? quality) (%brotli (as-bytes data)) (%brotli (as-bytes data) quality)))
+
+(defn unbrotli (data)
+  "Decompress brotli `bytes` back to a `bytes` value. Raises on data that isn't valid brotli."
+  (%unbrotli data))

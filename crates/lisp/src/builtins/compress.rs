@@ -130,3 +130,46 @@ pub(super) fn inflate(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let out = decode("%inflate", DeflateDecoder::new(&data[..]))?;
     Ok(bytes_to_value(&out, heap))
 }
+
+/// The brotli quality for the encoder's optional 2nd arg: absent → 5 (a balanced
+/// default suited to per-request compression), else an integer clamped to the valid
+/// `0..=11` (0 = fastest, 11 = best). Out of range is a clean runtime error.
+fn brotli_quality(name: &str, args: &[Value], heap: &Heap) -> Result<u32, LispError> {
+    match arg(args, 1) {
+        Value::Nil => Ok(5),
+        v => {
+            let n = expect_int(heap, name, v)?;
+            if !(0..=11).contains(&n) {
+                return Err(LispError::runtime(format!(
+                    "{name}: brotli quality must be 0-11 (got {n})"
+                )));
+            }
+            Ok(n as u32)
+        }
+    }
+}
+
+/// `(%brotli bytes [quality])` — brotli-compress a byte sequence (the
+/// `Content-Encoding: br` wire format) at optional `quality` (0-11, default 5),
+/// returned as `bytes`.
+pub(super) fn brotli(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let quality = brotli_quality("%brotli", args, heap)?;
+    let data = collect_bytes("%brotli", arg(args, 0), heap)?;
+    // lgwin 22 is brotli's common default window (RFC 7932 allows 10..=24).
+    let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, quality, 22);
+    writer
+        .write_all(&data)
+        .map_err(|e| LispError::runtime(format!("%brotli: {e}")))?;
+    writer
+        .flush()
+        .map_err(|e| LispError::runtime(format!("%brotli: {e}")))?;
+    let out = writer.into_inner();
+    Ok(bytes_to_value(&out, heap))
+}
+
+/// `(%unbrotli bytes)` — decompress brotli data, returned as `bytes`.
+pub(super) fn unbrotli(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let data = collect_bytes("%unbrotli", arg(args, 0), heap)?;
+    let out = decode("%unbrotli", brotli::Decompressor::new(&data[..], 4096))?;
+    Ok(bytes_to_value(&out, heap))
+}
