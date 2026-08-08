@@ -19,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — **KI-28 is one of them, and has now recurred twice** | 🔴 **open** (2 sightings: 2026-08-06, 2026-08-07) |
+| KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | ✅ fixed 2026-08-08 (warm the cache before the fan-out) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
 | KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07; +25 more idle passes) |
 | KI-35 | `*method-from*` was never imaged, so an imaged start stopped reporting cross-module `defmethod` conflicts | ✅ **fixed** 2026-08-07 |
@@ -57,17 +57,20 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**One open issue (KI-38) and one watch item (KI-36).** KI-28 is **no longer a watch item — it has
-recurred twice and is folded into KI-38**, which is the larger pattern it turned out to be part
-of: three tests that wait for a freshly spawned debug `brood` to finish booting, failing together
-under peak suite load. No open bug in the *language or runtime* is implied by it — every sighting
-is a boot wait, never an assertion about behaviour under test — but it is an open harness bug, and
-a flake that reds a suite one run in two is not something to build on. (KI-37 was open for a few
-hours on 2026-08-07 and is fixed.)
+**No open issue; one watch item (KI-36).** KI-28 is **no longer a watch item — it recurred twice
+and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
+that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
+load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
+boot cache is keyed on each binary's own mtime, so a rebuild colds it for every binary at once, a
+cold boot costs ~11x a warm one (all macro-expansion), and that cost times the concurrent herd
+walked straight through the helpers' 20 s / 30 s deadlines. Warming the cache once before the
+fan-out takes the three tests from a 20.1 s failure to 1.9–2.6 s. No bug in the *language or
+runtime* was implied at any point — every sighting was a boot wait, never an assertion about
+behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
 
-## KI-38 — three boot-wait tests fail together under peak suite load · **open, 2 sightings**
+## KI-38 — three boot-wait tests fail together under peak suite load · **fixed 2026-08-08**
 
 **This is what KI-28 turned out to be part of.** KI-28 was recorded as "a single unexplained
 `nodedown` flake" with a standing record of 0 failures in 260 runs, and said in terms: *"A
@@ -101,65 +104,166 @@ its port"* from *"A could not connect to a listening B."* Both recurrences panic
 `connect`, and not the late-`[:nodedown]` shape the entry speculated about (that speculation was
 already withdrawn there for having nothing under it; this closes it properly).
 
-### Measured 2026-08-07: it is a stall, not a slow boot
+### Diagnosed 2026-08-08: a COLD expanded-prelude boot cache, times the herd
 
-The first question below is now answered. `scripts`-free tooling lives in the session scratchpad
-(`bootsample.py`): it spawns a debug `brood` running the *same* child program as
-`child_cleanup.rs` and polls for the marker at the same 50 ms interval as `wait_until_up`.
+**The mechanism is contention after all — but on work nobody had measured, so the earlier
+"it is a stall, not a slow boot" conclusion was drawn from a distribution that excluded it.**
 
-| | n | p50 | p99 | p99.9 | max |
-|---|---|---|---|---|---|
-| idle | 289 | 151 ms | 151 ms | 151 ms | 151 ms |
-| during a full `make test` | 4915 | 151 ms | 555 ms | 810 ms | **4066 ms** |
+`build_id_string()` = version + git sha + `binary_stamp()`, **the running executable's own
+mtime**. The expanded-prelude boot cache (`~/.cache/brood/prelude-expanded-<hash>.blsp`) is
+therefore invalidated by **every rebuild**, for `brood`, `nest` and all ~50 test binaries at
+once. The first suite run after a build is a fully **cold** one — and that is the run you do
+after committing, i.e. the one you are watching when you see the flake.
 
-Across ~14 600 loaded samples spanning four full suite runs: **2 boots ≥ 1 s, zero ≥ 5 s.**
+**A cold boot costs ~11x a warm one, and it is all macro-expansion** (`bootcost.sh`, isolated
+via `XDG_CACHE_HOME`, idle box):
 
-**The load genuinely reached the path** — p99 moved 151 → 555 ms and the max 151 → 4066 ms — so
-this is not KI-36's failure mode of measuring an unloaded path and reporting it as loaded. That
-check is the reason the numbers are worth anything.
+| | single boot | 16 concurrent |
+|---|---|---|
+| cold | 1227–1361 ms | max **4313 ms** |
+| warm | 107–114 ms | max 359 ms |
 
-So a 20–30 s timeout is **not** the slow tail of a loaded box: it would have to be ~5× worse than
-the worst of 4915 samples taken while the suite was running. The failure is a different mode —
-boot occasionally **stalling** — which is a real bug rather than a deadline-tuning question. That
-is an inference, not yet a demonstration: see the limits below.
+`BROOD_BOOT_TRACE=1` names it: cold is `expand=1.102851931s` of `total=1.227s (source boot,
+cache written)`; warm is `cache hit — total=93.9ms`.
 
-**Reproduction attempt: 6 consecutive full suite rounds, all green** (`hunt.sh`, sampler armed
-each round, stopping on first reproduction). Counting everything run on this tree on 2026-08-07:
-**11 suite runs, 1 with the cluster** — so the rate is ~1 in 11, and the "1 in 2" suggested by the
-first two runs was small-sample noise.
+**Every boot sample the previous entry rested on was warm.** The 151 ms idle / 4066 ms worst
+figures came from a sampler run alongside and after suite runs on an already-built tree. The
+cold path was never sampled, so "a 20–30 s timeout would have to be ~5x worse than the worst of
+4915 samples" compared the deadline against the wrong distribution.
 
-**Limits on the measurement, stated because they bound the claim:**
-1. Every sampled run was **green**. This establishes the normal-case ceiling, not the failing case.
-2. The sampler waits on a **marker file**, matching `wait_until_up`. It does **not** cover KI-28's
-   leg, where `wait_until_listening` waits for a **TCP bind** — node startup and port binding are
-   extra work beyond runtime boot and are unmeasured.
+**Dose-response, and it is linear** (`doseresponse.py`, N cold boots sharing one cold cache,
+12 cores):
 
-### Diagnostic armed for the next sighting
+| herd | 8 | 16 | 24 | 32 | 48 | 64 | 96 | 128 |
+|---|---|---|---|---|---|---|---|---|
+| cold, worst boot | 2.3 s | 4.2 s | 6.4 s | 8.8 s | 13.7 s | **18.4 s** | **27.3 s** | **36.5 s** |
+| warm, worst boot | — | 0.32 s | — | 0.64 s | — | 1.30 s | — | — |
 
-`support::stall_report` now prints, on the failure path of both helpers: loadavg, MemAvailable /
-SwapFree, and every live `brood`/`nest` with its **process state char** and **wchan**. That
-separates the three candidates a bare timeout cannot:
+The 20 s deadline is crossed at a herd of ~70, the 30 s one at ~105 — and the observed failures
+(34.7 / 35.1 / 35.1 / 35.5 s) sit where the curve puts ~120. Memory is **not** involved anywhere
+on this curve: 24.7 GB still available at n=128, no sustained D state.
 
-- **`D`** (uninterruptible sleep) — parked in a blocked syscall: the stall shape, with `wchan`
-  naming where.
-- **`R`** — genuinely running, so it was contention after all and the deadline is the question.
-- **no `brood` at all** — the child died rather than hung, a third thing entirely.
+**Confirmed in situ, on the tests themselves.** Each row is a full suite run; the cold rows had
+`~/.cache/brood/prelude-expanded-*.blsp` removed first, which is exactly the post-rebuild state:
 
-This is the same move KI-28 made (it armed "print B's stderr on failure", which is precisely what
-answered its question when it recurred), one level down. At ~1 sighting per 11 suite runs, a
-sighting is too expensive to waste.
+| condition | `clean_peer_exit` (20 s) | `drop_guard` (30 s) | `pdeath` (30 s) |
+|---|---|---|---|
+| idle, standalone, warm | 0.492 s | 0.156 s | 0.206 s |
+| suite `-j12`, warm | 1.110 s | 0.524 s | 0.414 s |
+| suite `-j12`, **cold** | 4.714 s | 4.135 s | 3.723 s |
+| suite `-j32`, **cold** | 7.123 s | 11.038 s | 11.484 s |
+| suite `-j64`, **cold** | **FAIL 20.119 s** | 28.363 s | 26.697 s |
 
-**Still not established:**
+This also satisfies KI-36's methodological trap in the direction it demands: the load demonstrably
+inflates the tests' own durations (0.5 s → 4.7 s → 7.1 s → past the deadline) before anything is
+concluded from it.
 
-- whether the specific spike is the `release_bundle` tests, which run in the same region of the
-  schedule at **835 MB RSS each, two concurrently**;
-- what the child is actually blocked on when it stalls — which is what the armed report exists to
-  answer, and which needs the next sighting.
+### Reproduced deterministically 2026-08-08 — the first reproduction
 
-**The methodological trap, inherited from KI-36 and worth heeding.** KI-36 flagged its own
-synthetic-load reproduction as weak evidence and said why: the loaded runs took 1.6–1.9 s against
-2.58 s idle, i.e. *the load never reached the test's path*. Any attempt here must first demonstrate
-that the load inflates the tests' own durations, or a clean result means nothing at all.
+```
+rm -f ~/.cache/brood/prelude-expanded-*.blsp
+cargo nextest run --no-fail-fast --features brood/treesit-grammars -j 64
+```
+
+`cli::distribution clean_peer_exit_fires_nodedown_promptly` — **TRY 1 FAIL [20.119s]**, panicking
+in `wait_until_listening` at `support/mod.rs:199`, then **FLAKY 2/2, passing on retry in 2.850 s**.
+That retry is itself confirmation: by then the herd had written the cache, so the retry booted
+**warm**. The 2026-08-07 sighting has the identical signature (failed try 1, passed on retry in
+0.827 s). The other two tests came in at 26.7 s and 28.4 s — the same regime, saved only by their
+larger 30 s budget.
+
+The stall report fired and reads: **`loadavg: 62.00`, `MemAvailable: 24865760 kB`, `SwapFree:
+282200 kB`** — 24 GB free, swap untouched. CPU contention, not a stall, not memory, not I/O.
+
+`-j 64` on 12 cores also broke `brood::gc spawned_process_reclaims_too` and timed out 3 cases.
+**That is over-subscription damage at loadavg 80, not a regression** — the same commit is
+974/974 green at the default `-j`, twice over (see below).
+
+### Fixed 2026-08-08 — warm the cache once, before the fan-out
+
+`scripts/warm-boot-cache.sh`, wired as a **nextest setup script** so it covers a bare
+`cargo nextest run` and not just `make test`:
+
+```toml
+experimental = ["setup-scripts"]      # root-level; nextest 0.9.137 still gates this
+
+[scripts.setup.warm-boot-cache]
+command = 'scripts/warm-boot-cache.sh'
+
+[[profile.default.scripts]]
+filter = 'all()'
+setup = 'warm-boot-cache'
+```
+
+It boots each spawned binary **once** (~2.4 s total) so the herd hits a warm cache. Two
+details worth keeping: `brood` and `nest` carry **separate** cache files (different mtimes,
+different keys), and `nest --version` does **not** boot the prelude while `nest complete --`
+does — so warming `nest` needs the latter. Every failure path in the script exits 0: warming
+is an optimisation and must never redden a run.
+
+**The herd-miss is directly demonstrable**, which is the whole reason one boot up front is
+worth ~2.4 s. Twelve children launched simultaneously against a *cold* shared cache — every one
+misses, because none has finished writing it — then twelve more against the same cache once warm:
+
+```
+cold, 12 at once:  3.71 3.72 4.14 4.21 4.23 4.35 4.39 4.54 4.58 4.60 4.86 4.86   (seconds)
+warm, 12 at once:  0.24 0.24 0.25 0.25 0.29 0.32 0.33 0.34 0.35 0.35 0.36 0.37
+```
+
+13–15x, and note the cold spread is *tight*: they are not queueing behind one another, they are
+each doing the full 1.1 s expansion in parallel and contending for cores while they do it.
+
+**Verified against the reproduction**, same command, same `-j 64`, same cleared cache:
+
+| test (deadline) | before | after |
+|---|---|---|
+| `clean_peer_exit` (20 s) | **FAIL 20.119 s** | **2.599 s** |
+| `drop_guard` (30 s) | 28.363 s | **1.926 s** |
+| `pdeath` (30 s) | 26.697 s | **1.991 s** |
+
+10–14x faster, and from 94% of the deadline consumed to 13%. The whole `-j 64` run also
+improved from *1 failed, 3 timed out, 1 flaky* to *1 failed, 1 timed out, no flaky* — the two
+that remain are the over-subscription damage described above (`gc spawned_process_reclaims_too`
+failed in the pre-fix `-j 64` run too), not a regression; both pass at the default `-j`.
+
+**What this does not cover, stated so nobody assumes otherwise.** Each of the ~50 test binaries
+also boots the prelude **in-process**, and each has its own cache file keyed on its own mtime —
+so they cannot be warmed without running them, which is what the suite is doing anyway. Those
+boots still pay ~1.2 s once each after a rebuild, and they still contribute to the herd. What
+the fix removes is the *repeated* cost: the dozens of spawned children that were each paying
+the expansion because they all started before any of them had written the cache. That is the
+part that scaled with the herd, and it is the part the deadline was racing.
+
+**A cheaper fix was considered and rejected**: key the cache on the prelude's content rather
+than the binary's mtime, so all ~50 binaries could share one file. The mtime is there precisely
+because an uncommitted Rust change to the *expander* changes the expansion without changing the
+prelude text or the git sha — content-keying would serve a stale cache during exactly the
+development loop this repo lives in. Not worth the correctness risk to save ~50 boots.
+
+### What the sighting rate means
+
+~1 in 11 is what this mechanism predicts with nothing exotic added: **one cold suite run per
+rebuild**, every other run in the session warm. It also explains why the cluster is *only* these
+three tests. Many tests spawn a `brood` child, but these are the only ones that wait for a booted
+child **against a deadline**; everywhere else a slow boot is absorbed as a slightly slower test.
+
+A single default-`-j` suite run peaks at **27–29 concurrent `brood`** (measured, 1 Hz), which the
+curve puts at ~8 s — short of the deadline. So a real sighting needs the herd roughly 2–4x that,
+from load *beside* the suite. The handoff records exactly such a condition 24 minutes before the
+2026-08-07 sighting: two debug suites running at once, which ended with the editor process dying
+on memory at 20:56.
+
+### `stall_report` is blind in the way that matters — fix before trusting it
+
+The armed diagnostic could not have distinguished the candidates it was built for. It reads
+`/proc/<pid>/stat`, i.e. **the main thread only**, and a `brood` runtime parks its root thread on
+a futex while worker threads do the work. So in the reproduction every process — including the
+children burning CPU — printed `S futex_do_wait`, and `D` / `R` / dead all present identically.
+Its filter is also over-broad: `cmd.contains("/brood")` matches every binary under the repo path
+`…/broodlang/brood/`, so the report is mostly test binaries and the invoking shell.
+
+To be useful it must read `/proc/<pid>/task/*/stat` (per-thread state) or sample utime/stime
+deltas. Until then, a bare `S` from it means nothing.
 
 **Do not merge KI-36 into this.** Different test, and its 22.6 s was analysed against its own three
 deadlines (nodedown 15 s / pong 20 s / nodeup 45 s) and points at the nodedown branch. It may be
