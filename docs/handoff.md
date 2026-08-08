@@ -17,14 +17,39 @@ green-tree rule in CLAUDE.md). On `afe4bcff`: `make test` **974/974**; `make tes
 binaries **37/37 with zero heap-verifier complaints**; and a fuzz differential of 6 generators ×
 150 programs × 4 engine configs — **1650 checks, 0 divergences, 0 crashes**.
 
-**One open issue (KI-38) and one watch item (KI-36).** KI-38 is the boot-wait cluster: three tests
-that wait for a freshly spawned *debug* `brood` to become ready fail *together* under peak suite
-load, roughly one full run in two. **KI-28 is no longer a separate watch item** — it recurred
-twice (2026-08-06, 2026-08-07) and turned out to be one of the three, so it is folded in. It is a
-harness bug, not a language/runtime one — every sighting is a boot wait, never an assertion about
-behaviour under test — but it reds a suite often enough that you will meet it, and it is
-**undiagnosed**: nobody has yet measured what a debug boot costs under peak parallelism. KI-36 is
-deliberately *not* merged into it (different test, different deadline analysis).
+**KI-38 is diagnosed and reproduced (2026-08-08); KI-36 remains the one watch item.** KI-38 is the
+boot-wait cluster: three tests that wait for a freshly spawned *debug* `brood` to become ready fail
+*together* under peak suite load. **KI-28 is not a separate watch item** — it recurred twice and is
+one of the three, so it is folded in.
+
+**The mechanism.** `build_id_string()` embeds `binary_stamp()`, the running executable's own mtime,
+so the expanded-prelude boot cache is invalidated by **every rebuild**, for `brood`, `nest` and all
+~50 test binaries at once. A **cold** boot costs **1227–1361 ms against 107–114 ms warm** — ~11x,
+and `BROOD_BOOT_TRACE` shows it is entirely macro-expansion (`expand=1.10s` of a 1.227 s source
+boot). Every boot sample the entry previously rested on (151 ms idle, 4066 ms worst) was taken on
+an already-built tree and was therefore **warm**; the cold path had never been sampled, which is
+why the deadline was being compared against the wrong distribution and the failure was read as a
+stall. Cold-boot cost times the concurrent herd is linear and crosses the 20 s deadline at ~70
+concurrent boots and the 30 s one at ~105 — the observed 34.7–35.5 s failures sit at ~120.
+
+**Reproduced deterministically**, the first time this flake has been made to fire on demand:
+`rm -f ~/.cache/brood/prelude-expanded-*.blsp && cargo nextest run --no-fail-fast --features
+brood/treesit-grammars -j 64` → `clean_peer_exit_fires_nodedown_promptly` TRY 1 FAIL [20.119s],
+FLAKY 2/2 passing on retry in 2.850 s (warm by then — the same signature as the 2026-08-07
+sighting's 0.827 s retry). Note `-j 64` on 12 cores also breaks `gc spawned_process_reclaims_too`
+and times out 3 cases: over-subscription damage, not a regression.
+
+**No fix is chosen yet, and that is the next decision.** The obvious candidate is to warm the cache
+once before the herd (a nextest setup script, or a single boot in `make test`) so ~50 binaries do
+not each pay the 1.10 s expansion simultaneously; raising the deadlines would only hide it. See
+`docs/known-issues.md` KI-38 for the full curve and the in-situ table.
+
+**`stall_report` must be fixed before it is trusted.** It reads `/proc/<pid>/stat` — the **main
+thread only** — and a `brood` runtime parks its root thread on a futex while worker threads work,
+so in the reproduction every process printed `S futex_do_wait` and the `D`/`R`/dead discrimination
+it exists for collapsed. Its `cmd.contains("/brood")` filter also matches everything under the repo
+path `…/broodlang/brood/`. It needs per-thread state (`/proc/<pid>/task/*/stat`) or utime/stime
+deltas.
 
 ### What this session changed (two commits, both pushed)
 
