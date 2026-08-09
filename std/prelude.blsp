@@ -138,12 +138,18 @@
       ;; 18.2 µs of the row's 33.9 µs per unit, against 2.2 µs for the same sum written
       ;; as an indexed loop. Indexing is O(1) on a vector, so this is the same walk
       ;; without the intermediate list.
+      ;; ...and a vector folds in a NATIVE counted loop (`%vector-reduce`), the
+      ;; counterpart of the `%range-reduce` branch above. The Brood-level `fold-vec` this
+      ;; replaced still paid an `apply` per element, and a reducer like `+` is a thin
+      ;; passthrough wrapper whose redirect was re-resolved on every one of them.
+      ;; `%vector-reduce` resolves it once, via the same `reduce_prim_op` that already
+      ;; makes `(fold + 0 (range n))` fast — the vector path simply never consulted it.
+      ;; On the `spawn-live` shape (each unit folds a 16-cell payload with `(fold + 0 p)`)
+      ;; the fold step was 13.6 µs/unit against 8.8 µs for `(fold %add 0 p)`; that whole
+      ;; gap was the redirect. A/B on the published row: 9.96 → 8.04 CPU·s.
       (if (%eq (type-of coll) :vector)
-        (fold-vec f acc coll 0 (vector-length coll))
+        (%vector-reduce f acc coll)
         (fold-loop f acc (seq coll))))))
-(defn- fold-vec
-  (f acc v i n)
-  (if (%eq i n) acc (fold-vec f (f acc (vector-ref v i)) v (%add i 1) n)))
 (defn- fold-loop
   (f acc coll)
   (if (empty? coll) acc (fold-loop f (f acc (first coll)) (rest coll))))

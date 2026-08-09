@@ -102,6 +102,29 @@ mod imp {
         jit_apply_fast,
         /// JIT fast-path deopt (outcome 1/2/None): fell back to vm_apply with fresh_argv.
         jit_fast_deopt,
+        // ---- why `hof_apply_native` DECLINED to link -----------------------
+        // `jit_link_done` says whether the HOF fast frame engaged; when it reads 0
+        // against N calls, these say which guard turned it away. Added while chasing
+        // KI-38's neighbour — the receive matcher, which resolves and is entered on
+        // 100% of receives yet never links (handoff §1 item 1). Every decline path in
+        // `hof_apply_native` bumps exactly one of these, so they sum to the declines.
+        /// Declined: the arm has no installed native code yet (never tiered).
+        hof_decline_nocode,
+        /// Declined: the arm is `BAILED` — deopt feedback latched it off for the run.
+        hof_decline_bailed,
+        /// Declined: compilation is queued but not finished.
+        hof_decline_queued,
+        /// Declined: at/over the native-recursion depth cap, or out of stack headroom.
+        hof_decline_depth,
+        /// Declined: the arm's `compile_epoch` is stale (a `def` recompiled mid-loop).
+        hof_decline_epoch,
+        /// The HOF fast frame RAN and deopted (outcome 1). Counted separately from
+        /// `jit_deopt`, which only sees `jit_tier`'s outcome-1 and is therefore blind to
+        /// every deopt taken on this path — the receive matcher's deopts landed in that
+        /// blind spot and read as `jit_deopt 0`. Sixteen consecutive of these latch the
+        /// arm `BAILED` (`DEOPT_BAIL_CONSECUTIVE`), after which `hof_decline_bailed`
+        /// takes over for the rest of the run.
+        hof_native_deopt,
         /// JIT fast-path outcome 4 (staged tail): dispatched the staged call.
         jit_fast_tail4,
         // ---- TIMING counters (nanoseconds), armed by `perf_time!` ----------

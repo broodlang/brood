@@ -2209,6 +2209,16 @@ fn hof_apply_native(
     let argc = args.len();
     let code = arm.jit_code.load(Acquire);
     if code.is_null() || code == crate::jit::BAILED || code == crate::jit::QUEUED {
+        // Which of the three, under `perf-stats`: `jit_link_done` reading 0 against N calls
+        // says the fast frame never engaged but not why, and the three have entirely
+        // different fixes (never got hot / deopt-latched off / still compiling).
+        if code == crate::jit::BAILED {
+            crate::perf_bump!(hof_decline_bailed);
+        } else if code == crate::jit::QUEUED {
+            crate::perf_bump!(hof_decline_queued);
+        } else {
+            crate::perf_bump!(hof_decline_nocode);
+        }
         return None;
     }
     // Over the native-recursion cap → don't link (would overflow the native stack); let the VM
@@ -2216,8 +2226,12 @@ fn hof_apply_native(
     // `argc` arm; re-check the epoch here since a `def` can recompile mid-fold.)
     if heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT
         || !crate::eval::compile::jit_runtime::jit_native_headroom_ok(heap.jit_native_depth)
-        || arm.compile_epoch.load(Acquire) != heap.global_epoch()
     {
+        crate::perf_bump!(hof_decline_depth);
+        return None;
+    }
+    if arm.compile_epoch.load(Acquire) != heap.global_epoch() {
+        crate::perf_bump!(hof_decline_epoch);
         return None;
     }
     let nslots = arm.active_nslots();
@@ -2265,6 +2279,9 @@ fn hof_apply_native(
     heap.jit_dbg_fn = saved_fn;
     // Deopt feedback (see `jit_deopt_feedback`): the HOF step arm is the canonical
     // watched shape (nqueens' reduce closure).
+    if outcome == 1 {
+        crate::perf_bump!(hof_native_deopt);
+    }
     if arm.deopt_watch {
         use std::sync::atomic::Ordering::Relaxed;
         if outcome == 1 {
