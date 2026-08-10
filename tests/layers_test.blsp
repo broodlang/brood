@@ -148,6 +148,22 @@
     (assert= (layers-for-type :t-rt) (list 'layers-test/layer-a 'layers-test/layer-b))
     (is (empty? (layers-for-type :t-missing))))
 
+  (test "REGRESSION: the registries survive a module RE-LOAD (defonce, not def)"
+    ;; A registered type/file-rule must not be wiped when this module re-runs its own
+    ;; registry defs — the case an IMAGED start hits (ADR-218): the image restores the
+    ;; registries' values in the root section, then a project module's `(:use
+    ;; editor/layers)` re-loads this std file from its EMBEDDED source. A plain `(def
+    ;; *type-layers* {})` there dropped every deferred module's type; `defonce` keeps it.
+    (register-type-layers :t-reload (list 'layers-test/layer-a))
+    (register-file-type ".reload-ext" :t-reload-ext)
+    (is (not (empty? (layers-for-type :t-reload))))
+    ;; Re-run editor/layers's ACTUAL embedded source — exactly what `require-force-in`
+    ;; does for an imaged `(:use editor/layers)`. With `def` this reset the registries to
+    ;; empty; the assertions below fail unless the defs are `defonce`.
+    (%load-module-source (%builtin-module "editor/layers") (%builtin-module-file "editor/layers"))
+    (is (not (empty? (layers-for-type :t-reload)))) ; the type survived the reload
+    (assert= (buffer-type-for {:file "x.reload-ext"}) :t-reload-ext)) ; and the file rule
+
   (test "buffer-type-for matches a filename suffix"
     (register-file-type ".foo" :t-foo)
     (assert= (buffer-type-for {:file "x.foo"}) :t-foo))

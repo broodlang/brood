@@ -296,11 +296,27 @@ splice it back in front of the remainder."
 ;; (defonce *registry* {}). Plain behaviour stays `defn`/`def`. To force re-init,
 ;; restart or re-`def` explicitly. (`bound?` returns false on an unbound symbol,
 ;; so this is safe on first definition — docs/live-editing.md Stage 1.)
+
+;; The name a module-level `def` of `sym` actually BINDS — `sym` prefixed with the
+;; loading module's namespace. `defonce`'s bound? check must name the same binding the
+;; `def` writes, and inside a module `(def *x* v)` writes `mod/*x*` while a bare quoted
+;; `'*x*` is data the resolver never rewrites (it would read at root, never see the
+;; binding, and re-def every reload — the bug this fixes). Computed at LOAD time, where
+;; `current-ns` is the module being loaded; a bare/root context (no current-ns) or an
+;; already-qualified name passes through, matching `def`.
+(defn defonce-qualified-name (sym)
+  (let (ns (current-ns))
+    (if (or (nil? ns) (includes? (str sym) "/"))
+      sym
+      (symbol (str (name ns) "/" (str sym))))))
+
 (defmacro defonce (name val)
   "Bind `name` to `val` only if it isn't already bound, so the value survives
 hot-reload (cf. Emacs `defvar`). Once bound, re-evaluating is a no-op; restart
-or re-`def` to force re-init."
-  `(unless (bound? '~name) (def ~name ~val)))
+or re-`def` to force re-init. Works for a module-level name: the bound? check is
+resolved against the LOADING module's namespace (`defonce-qualified-name`), the same
+binding `def` writes — a bare `(bound? '~name)` would read at root and miss it."
+  `(unless (bound? (defonce-qualified-name '~name)) (def ~name ~val)))
 
 ;; `(comment …)` — the dev-scratch block every Lisp has. Its body is read (so it
 ;; must still be balanced sexps) but never evaluated, which is the point: a

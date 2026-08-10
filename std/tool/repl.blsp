@@ -176,7 +176,7 @@ highlights. Used to colour a printed result on an interactive TTY."
 ;; `:names` is the command plus any aliases, `:handler` takes the trimmed argument
 ;; string, `:usage`/`:summary` render the `,help` table (a `:hidden` entry is dispatched
 ;; but not listed). The debugger uses this seam to add `,resume`/`,step` under `pry`.
-(def *repl-commands* (list))
+(defonce *repl-commands* (list))
 
 (defn- repl-meta-parts
   (line)

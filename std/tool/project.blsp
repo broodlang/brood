@@ -662,12 +662,20 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (remove (fn (n) (contains? seen n)) (global-names)))
 
 ;; The registries the load MUTATED — derived from the funnel, minus the exclusions above,
-;; minus any the project itself DEFINES. That last test is `seen` read the other way round:
-;; a registry absent from `before` was created by this load, so it is already a fresh global
-;; that sections with its own module, and naming it here too would write its entry twice.
+;; minus any that ride their OWN materialised section (writing them here too would double
+;; the entry). A registry the load created sections with its own module — but ONLY a
+;; project/dep module's section is ever materialised from the image. A registry in a STD
+;; module (`editor/layers/*type-layers*`, served from embedded source — its section is never
+;; read back, see `project-image-sections`) or a root-level one has no section to ride, so it
+;; MUST stay in root even though the load created it. Excluding it — as a bare `seen` test
+;; did — dropped it from the image entirely: a deferred module's buffer type vanished on an
+;; imaged start (register-type-layers runs at that module's load, which materialising skips).
 (defn- project-image-registry-names (seen)
-  (remove (fn (n) (or (not (contains? seen n))
-                    (member? n *project-image-registry-exclusions*)))
+  (remove (fn (n)
+            (or (member? n *project-image-registry-exclusions*)
+              (and (not (contains? seen n))
+                (let (mod (project-image-section-of n))
+                  (and mod (contains? *package-module-files* mod))))))
     (%registry-names)))
 
 ;; The module a global belongs to: its name minus the last segment, which IS the feature
