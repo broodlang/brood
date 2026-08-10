@@ -60,12 +60,16 @@ cannot be warmed without running them — the suite does that anyway); and it do
 cache on prelude *content* to let all binaries share one file, because the mtime is what catches
 an uncommitted change to the expander, which is exactly the development loop this repo lives in.
 
-**`stall_report` is still blind and should be fixed before it is trusted.** It reads
-`/proc/<pid>/stat` — the **main thread only** — and a `brood` runtime parks its root thread on a
-futex while worker threads work, so in the reproduction every process printed `S futex_do_wait`
-and the `D`/`R`/dead discrimination it exists for collapsed. Its `cmd.contains("/brood")` filter
-also matches everything under the repo path `…/broodlang/brood/`. It needs per-thread state
-(`/proc/<pid>/task/*/stat`) or utime/stime deltas. **This is the one loose end left on KI-38.**
+**`stall_report` was blind and is now FIXED (2026-08-10) — KI-38 has no loose ends left.** It
+read `/proc/<pid>/stat`, the **main thread only**, and a `brood` runtime parks its root thread on
+a futex while workers run, so in the reproduction every process printed `S futex_do_wait` and the
+`D`/`R`/dead discrimination it exists for collapsed; its `cmd.contains("/brood")` filter also
+matched everything under the repo path. It now reads per-thread state from
+`/proc/<pid>/task/*/stat`, prints each thread's state char plus the first non-`S` thread's
+`wchan` and the process's total CPU ms, and matches argv[0]'s file name. Verified by sabotage
+(marker write removed so the wait really times out): two processes listed instead of ~40 lines of
+harness, and the child reads as booted-then-parked (15 threads all `S`, CPU flat) — see
+`docs/known-issues.md` KI-38.
 
 ### What this session changed (two commits, both pushed)
 
