@@ -121,34 +121,31 @@
 ;; rather than O(n) per step.
 (defn fold (f acc coll)
   "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no intermediate lists."
-  (if (range? coll)
-    (%range-reduce f acc coll)
-    (if (seqview? coll)
-      ;; Fuse: `(xform f)` is the wrapped reducer; fold it over the source (a
-      ;; range → counted loop, a list → fold-loop, a nested view → fuses again).
-      ;; Raw kernel ops (`if`/`let`/`vector-ref`) only — `fold` is defined before
-      ;; `cond`/`second`.
-      (let (parts (%seqview-parts coll))
-        (fold ((vector-ref parts 1) f) acc (vector-ref parts 0)))
-      ;; A VECTOR folds by index. The generic path walks with `first`/`rest`, and
-      ;; `(rest v)` on a vector *materialises a list of the tail* — so folding a
-      ;; 16-element vector allocated 15 cons cells and paid ~48 one-arg primitive
-      ;; dispatches (`empty?`/`first`/`rest` per element) to add 16 numbers.
-      ;; Measured on `spawn-live`, where each of 300k units folds a 16-cell payload:
-      ;; 18.2 µs of the row's 33.9 µs per unit, against 2.2 µs for the same sum written
-      ;; as an indexed loop. Indexing is O(1) on a vector, so this is the same walk
-      ;; without the intermediate list.
-      ;; ...and a vector folds in a NATIVE counted loop (`%vector-reduce`), the
-      ;; counterpart of the `%range-reduce` branch above. The Brood-level `fold-vec` this
-      ;; replaced still paid an `apply` per element, and a reducer like `+` is a thin
-      ;; passthrough wrapper whose redirect was re-resolved on every one of them.
-      ;; `%vector-reduce` resolves it once, via the same `reduce_prim_op` that already
-      ;; makes `(fold + 0 (range n))` fast — the vector path simply never consulted it.
-      ;; On the `spawn-live` shape (each unit folds a 16-cell payload with `(fold + 0 p)`)
-      ;; the fold step was 13.6 µs/unit against 8.8 µs for `(fold %add 0 p)`; that whole
-      ;; gap was the redirect. A/B on the published row: 9.96 → 8.04 CPU·s.
-      (if (%eq (type-of coll) :vector)
-        (%vector-reduce f acc coll)
+  ;; DISPATCH ORDER IS LOAD-BEARING. A vector is tested first, with the one-call
+  ;; `vector?` predicate rather than `type-of` + `%eq` from the bottom of the chain.
+  ;; The branches are disjoint (`type-of` is `:vector` for a vector and `:pair` for a
+  ;; range, a seq-view AND a list), so no value changes branch — this is pure ordering.
+  ;;
+  ;; Measured 2026-08-10, 300k small folds of a 16-cell container, containers hoisted
+  ;; out of the loop so only dispatch + reduce is timed (median of 3):
+  ;;
+  ;;     vector 533 -> 410 ns   range 230 -> 183 ns   list 3595 -> 3248 ns
+  ;;
+  ;; Note the range row IMPROVES even though a range now pays an extra `vector?` first:
+  ;; flattening the chain is worth more than the check costs. That is why this is not
+  ;; the trade it looks like — nothing regresses. On the spawn-live shape (each unit
+  ;; folds a 16-cell payload in a cold process) the rung went 28.3 -> 27.1 us/unit.
+  (if (vector? coll)
+    (%vector-reduce f acc coll)
+    (if (range? coll)
+      (%range-reduce f acc coll)
+      (if (seqview? coll)
+        ;; Fuse: `(xform f)` is the wrapped reducer; fold it over the source (a
+        ;; range → counted loop, a list → fold-loop, a nested view → fuses again).
+        ;; Raw kernel ops (`if`/`let`/`vector-ref`) only — `fold` is defined before
+        ;; `cond`/`second`.
+        (let (parts (%seqview-parts coll))
+          (fold ((vector-ref parts 1) f) acc (vector-ref parts 0)))
         (fold-loop f acc (seq coll))))))
 (defn- fold-loop
   (f acc coll)
