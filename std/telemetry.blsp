@@ -35,7 +35,7 @@ process you own.")
 
 ;; The shared handler table: event → list of {:id … :fn …}. A `def`-rebound global so
 ;; it survives a listener restart and is visible across processes (ADR-013).
-(def *telemetry-handlers* {})
+(defonce *telemetry-handlers* {})
 
 ;; ---- table helpers (pure) ---------------------------------------------------
 
@@ -183,7 +183,7 @@ handler logic in a process you own, off even the listener. Returns `id`."
 ;; runtime presence-checking (`*telemetry-validate*`), and raw `emit` still works for
 ;; undeclared events.
 
-(def *telemetry-events* {})
+(defonce *telemetry-events* {})
 
 (defn- telemetry-spec-name
   (spec)

@@ -30,10 +30,11 @@
 (defmodule editor/formbuf
   "Form buffers: generated text with editable regions. Region algebra —
 `delimited-regions` (a region per delimited block), `skeleton` (everything
-outside the regions), `region-at`, `region-index`, `splice` (re-render the
-generated text, keeping region contents by index) — plus `guard-veto` /
-`guard-clamp`, the two `:post-key` policies that keep the generated part intact.
-`(require 'editor/formbuf)`.")
+outside the regions), `protected-spans` (those same outside ranges, for
+`buffer/set-read-only-spans` to freeze at the edit primitive), `region-at`,
+`region-index`, `splice` (re-render the generated text, keeping region contents
+by index) — plus `guard-veto` / `guard-clamp`, the two `:post-key` policies that
+keep the generated part intact. `(require 'editor/formbuf)`.")
 
 ;; ---- region providers ---------------------------------------------------------
 
@@ -112,6 +113,23 @@ typed inside the regions, so it is stable while they work."
             regions)
         [pos parts] r)
     (apply str (reverse (cons (substring text pos (string-length text)) parts)))))
+
+(defn protected-spans (text regions)
+  "The COMPLEMENT of `regions` over `text` — the `[lo hi)` ranges *outside* every editable
+region, in document order. The dual of `skeleton`: `skeleton` returns the generated text,
+this returns its ranges, which is exactly what `buffer/set-read-only-spans` freezes so the
+edit primitives refuse a keystroke that would damage the generated part — enforcement at
+the mutator instead of a skeleton comparison run after each key (which every edit path has
+to remember to run). An empty region contributes no gap on either side beyond its neighbours'."
+  (let (len (string-length text)
+        r (fold (fn (acc region)
+                  (let ([pos spans] acc
+                        s (get region :start))
+                    [(get region :end) (if (< pos s) (cons [pos s] spans) spans)]))
+            [0 '()]
+            regions)
+        [pos spans] r)
+    (reverse (if (< pos len) (cons [pos len] spans) spans))))
 
 (defn splice (new-text old-text regions-fn)
   "`new-text` (a freshly generated form) with `old-text`'s region CONTENTS carried

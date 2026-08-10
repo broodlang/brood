@@ -14637,3 +14637,82 @@ pattern nobody writes.
 The format version bump is required, not cosmetic — a v3 reader meeting a `KIND_TABLE` entry
 would fall through its default arm and bind the global to the snapshot *map*, so the failure
 would surface later, at the first `table-put`, far from the cause.
+
+**A STD-module registry the load created must still ride the root section (2026-08-08).** A
+deferred module's buffer type vanished on an imaged start: an editor that opened a tutorial
+(`register-type-layers` runs at `tutor`'s load, which materialising a section deliberately
+skips) had no `:tutor` layers, so nothing dispatched. Two independent gaps, both now closed.
+
+*Gap 1 — the registry was dropped from the image.* `project-image-registry-names` picked the
+registries to write into the always-materialised root section as "those the load MUTATED,
+minus those the load CREATED" — the reasoning being that a created registry is a fresh global
+that already sections with its own module. True for a PROJECT module (its section is
+materialised), false for a STD module: `editor/layers/*type-layers*` is created the first time
+a project `(:use editor/layers)`s, but editor/layers is served from embedded source, so its
+section is never written — the registry sectioned into a hole and was lost. The fix narrows the
+exclusion: a created registry is dropped from root only when its module is in
+`*package-module-files*` (a materialised project/dep section to ride); a std-module or
+root-level registry stays in root. This is the general form of the guard the sections comment
+already described for the *mutated* case.
+
+*Gap 2 — the reload wiped it back out.* `*features*` is excluded from the image, so on an
+imaged start the first `(:use editor/layers)` RE-LOADS the std file from embedded source, and a
+plain `(def *type-layers* {})` there clobbered the value the root section had just restored. The
+registry defs are now `defonce`, so the reload leaves the restored/accumulated registry intact —
+and `defonce` itself had to be fixed to make that sound. It expanded to `(bound? '*type-layers*)`,
+but a bare quoted symbol is not rewritten to the module namespace, so the check read at ROOT
+(always unbound) and re-`def`d every reload — `defonce` was silently a plain `def` for every
+module-level var, contrary to its whole contract. It now resolves the name against the loading
+module (`defonce-qualified-name`, the same binding `def` writes). Root restore then survives the
+embedded reload, and the deferred module's types are there when it finally loads.
+
+## ADR-219 — Partial read-only: a form buffer freezes spans at the edit primitive, not with a post-key guard
+
+**Status:** implemented (2026-08-08). `std/editor/buffer` gains `:read-only-spans`; `std/editor/formbuf` gains `protected-spans`.
+
+**Context.** A *form buffer* (`std/editor/formbuf` — a shell prompt, a commit-message help
+block, the tutorial's fixed prose around editable code boxes) is mostly generated text the
+user must not change, with a few editable spans. Until now the generated part was protected
+*reactively*: `guard-veto`, a `:post-key` layer facet, let a keystroke edit the buffer, then
+compared the text outside the regions against a stashed skeleton and returned the pre-key
+model if it had changed. That protection is only as good as the dispatch paths that remember
+to run it. bedit shipped three edit paths — fresh key-press, mouse, and held-key repeat — and
+the repeat path (a timer re-issuing the key) never ran the guard, so *holding* backspace to
+clear a tutorial box sailed past the box start and ate the border and the prose. A reactive
+after-the-fact comparison is structurally the wrong shape: every current and future edit path
+is a place to forget it.
+
+The buffer already had the right shape for the opposite grain — **whole-buffer** read-only,
+enforced at one choke point (`buffer-barf-if-read-only`) that *every* mutator runs first, "so
+the read-only contract lives in the model, no consumer has to remember to check." It was just
+all-or-nothing.
+
+**Decision.** Make read-only **partial** and enforce it at the same choke point. A buffer
+carries `:read-only-spans`, a list of `[lo hi)` protected ranges (plain data — a form buffer
+serialises across collab/hosting like any other value). Every mutator (`insert`,
+`delete-char`, `delete-backward-char`, `delete-region`, and `replace-region` by composition)
+computes the range it will touch and refuses if it hits a span: an insert is refused only when
+its point is *strictly interior* to a span (at an edge it belongs to the neighbouring editable
+text); a delete is refused when its range *overlaps* one. Because every edit path — key, mouse,
+held-repeat, keyboard macro, a programmatic edit — funnels through these primitives, protection
+holds by construction; there is no path to forget.
+
+The spans travel with edits under **inward gravity** (`buffer-adjust-spans`): a span's left
+edge shifts when text is inserted at-or-before it (`lo >= p`), its right edge only when the
+insert is strictly before it (`hi > p`), so text typed at a span's edge lands *outside* the
+span, in the editable text; a delete confined to editable text (the only kind that isn't
+refused) slides the spans past it. So once set, the spans stay correct across edits with no
+recomputation — a form re-stamps them only when it regenerates its text. Undo/redo snapshot
+and restore `:read-only-spans` exactly as they do `:markers`, so the spans revert in lockstep
+with the text they guard.
+
+`formbuf/protected-spans` is the dual of `skeleton`: same ranges outside the editable regions,
+returned as `[lo hi)` pairs rather than concatenated text, so a form computes them once from
+its region list and stamps them with `buffer/set-read-only-spans`. `position-read-only?`
+answers per character, for the editor to explain a refused edit or keep a caret out of
+generated text.
+
+**Consequence.** `guard-veto`/`guard-clamp` remain for the `:clamp` use (a shell whose
+scrollback is navigable but whose typing belongs at the prompt — a point policy, not an edit
+refusal), but the tutorial's prose no longer needs a `:post-key` skeleton comparison: the
+buffer refuses the damaging edit itself, on every path.

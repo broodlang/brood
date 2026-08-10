@@ -69,6 +69,27 @@
   (test "no regions: the skeleton is the whole text"
     (assert= (skeleton "abc" ()) "abc")))
 
+(describe "protected-spans (the ranges the buffer freezes)"
+  (test "it is the complement of the regions — its text is exactly the skeleton"
+    (let (rs (boxes boxed)
+          spans (protected-spans boxed rs)
+          joined (apply str (map (fn (s) (let ([lo hi] s) (substring boxed lo hi))) spans)))
+      (assert= joined (skeleton boxed rs))))
+
+  (test "every editable region sits in a GAP between spans, never inside one"
+    (let (rs (boxes boxed)
+          spans (protected-spans boxed rs)
+          inside? (fn (p) (find (fn (s) (let ([lo hi] s) (and (>= p lo) (< p hi)))) spans)))
+      ;; a region's interior char is writable; the delimiter char just before it is frozen
+      (is (nil? (inside? (:start (first rs)))))
+      (is (not (nil? (inside? (dec (:start (first rs))))))))) ; the >>>/<<< newline
+
+  (test "no regions: the whole text is one protected span"
+    (assert= (protected-spans "abc" ()) (list [0 3])))
+
+  (test "no text: no spans"
+    (assert= (protected-spans "" ()) ())))
+
 (describe "splice (re-render, keep what the user typed)"
   (test "the new generated text keeps the old region contents, by index"
     (let (old "<<< a\nMINE-1\n>>>\n<<< b\nMINE-2\n>>>"
