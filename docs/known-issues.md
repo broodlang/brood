@@ -253,17 +253,30 @@ from load *beside* the suite. The handoff records exactly such a condition 24 mi
 2026-08-07 sighting: two debug suites running at once, which ended with the editor process dying
 on memory at 20:56.
 
-### `stall_report` is blind in the way that matters — fix before trusting it
+### `stall_report` was blind in the way that mattered — FIXED 2026-08-10
 
-The armed diagnostic could not have distinguished the candidates it was built for. It reads
-`/proc/<pid>/stat`, i.e. **the main thread only**, and a `brood` runtime parks its root thread on
-a futex while worker threads do the work. So in the reproduction every process — including the
-children burning CPU — printed `S futex_do_wait`, and `D` / `R` / dead all present identically.
-Its filter is also over-broad: `cmd.contains("/brood")` matches every binary under the repo path
-`…/broodlang/brood/`, so the report is mostly test binaries and the invoking shell.
+The armed diagnostic could not have distinguished the candidates it was built for. It read
+`/proc/<pid>/stat`, i.e. **the main thread only**, and a `brood` runtime parks its root thread
+on a futex while worker threads do the work. So in the reproduction every process — including
+the children burning CPU — printed `S futex_do_wait`, and `D` / `R` / dead all presented
+identically. Its filter was over-broad too: `cmd.contains("/brood")` matches every binary under
+the repo path `…/broodlang/brood/`, so the report was mostly test binaries and the invoking
+shell.
 
-To be useful it must read `/proc/<pid>/task/*/stat` (per-thread state) or sample utime/stime
-deltas. Until then, a bare `S` from it means nothing.
+**Fixed:** it now reads **per-thread** state from `/proc/<pid>/task/*/stat` and prints every
+thread's state char, the `wchan` of the first non-`S` thread, and the process's total CPU ms;
+and it matches on argv[0]'s **file name** (`brood`/`nest`) rather than a substring of the path.
+Verified by sabotage — the child's marker write removed so the wait really times out:
+
+```
+live brood/nest (pid states-by-thread cpu-ms wchan cmd):
+  3469426 [S,S,S,S,S,S,S,S,S,S,S,S,S,S,S] cpu=1380ms S:futex_do_wait  …/brood …/park.blsp
+```
+
+Two processes listed instead of ~40 lines of harness, and the child reads as *booted then
+parked idle* (15 threads all `S`, CPU flat). A stall now shows a `D` thread with its `wchan`,
+and contention shows an `R` thread with CPU rising between two samples — the discrimination
+the report existed for.
 
 **Do not merge KI-36 into this.** Different test, and its 22.6 s was analysed against its own three
 deadlines (nodedown 15 s / pong 20 s / nodeup 45 s) and points at the nodedown branch. It may be

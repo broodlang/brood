@@ -215,12 +215,19 @@ pub fn wait_until_listening(port: u16) {
 /// a different mode. This prints the fields that separate the candidates, because a sighting
 /// that arrives roughly once in eleven suite runs is too expensive to waste:
 ///
-/// - **state `D`** — uninterruptible sleep, i.e. parked in a blocked syscall. That is the
-///   stall shape, and `wchan` then names where.
-/// - **state `R`** — actually running, so it really was contention and the deadline is the
-///   question after all.
+/// - **any thread `D`** — uninterruptible sleep, i.e. parked in a blocked syscall. That is
+///   the stall shape, and the reported `wchan` then names where.
+/// - **any thread `R`** — actually running, so it really was contention and the deadline is
+///   the question after all. `cpu=` corroborates: sample twice and a contended child's
+///   number moves.
 /// - **no `brood` at all** — the child died rather than hung, which is a third thing again
 ///   and would be visible nowhere else, since these helpers only ever report a timeout.
+///
+/// **Read states PER THREAD, not per process (fixed 2026-08-10).** The first version read
+/// `/proc/<pid>/stat`, which is the main thread only, and a `brood` runtime parks its root
+/// thread on a futex while workers run — so in the KI-38 reproduction every process printed
+/// `S futex_do_wait`, children burning CPU included, and all three cases above were
+/// indistinguishable. The report was worse than useless: it looked like an answer.
 ///
 /// Modelled on what KI-28 did: it armed "print B's stderr on failure", and that is exactly
 /// what answered its open question when it recurred. Same move, one level down.
@@ -246,7 +253,10 @@ pub fn stall_report(what: &str) -> String {
         };
         let _ = writeln!(s, "{} | {}", grab("MemAvailable"), grab("SwapFree"));
     }
-    let _ = writeln!(s, "live brood/nest (pid state wchan cmd):");
+    let _ = writeln!(
+        s,
+        "live brood/nest (pid states-by-thread cpu-ms wchan cmd):"
+    );
     let mut n = 0;
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for e in entries.flatten() {
@@ -257,22 +267,16 @@ pub fn stall_report(what: &str) -> String {
                 continue;
             };
             let cmd = cmdline.replace('\0', " ");
-            if !(cmd.contains("/brood") || cmd.contains("/nest")) {
+            if !is_brood_process(&cmd) {
                 continue;
             }
-            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-            // Split after comm's ')': comm itself can contain spaces, so field indexing
-            // before it is unreliable — the same reason `alive()` in child_cleanup.rs does
-            // this. State is the first field after.
-            let rest = stat
-                .rsplit_once(')')
-                .map(|(_, r)| r)
-                .unwrap_or("")
-                .to_string();
-            let state = rest.split_whitespace().next().unwrap_or("?");
-            let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan"))
-                .unwrap_or_else(|_| "-".into());
-            let _ = writeln!(s, "  {pid} {state} {} {}", wchan.trim(), cmd.trim());
+            let (states, busiest) = thread_states(pid);
+            let cpu_ms = process_cpu_ms(pid);
+            let _ = writeln!(
+                s,
+                "  {pid} [{states}] cpu={cpu_ms}ms {busiest} {}",
+                cmd.trim()
+            );
             n += 1;
             if n >= 40 {
                 let _ = writeln!(s, "  … truncated at 40");
@@ -284,6 +288,96 @@ pub fn stall_report(what: &str) -> String {
         let _ = writeln!(s, "  (none — the child is gone, so this was not a stall)");
     }
     s
+}
+
+/// Is this cmdline an actual `brood`/`nest` BINARY, rather than anything that merely has
+/// those letters in its path?
+///
+/// The first version tested `cmd.contains("/brood")`, which matches every test binary,
+/// every `cargo` invocation and the invoking shell — because they all live under
+/// `…/broodlang/brood/`. In the KI-38 reproduction the report was ~40 lines of test
+/// harness with the two children that mattered buried inside it. Match on the executable
+/// (argv[0]'s file name) instead.
+#[cfg(target_os = "linux")]
+fn is_brood_process(cmd: &str) -> bool {
+    let exe = cmd.split_whitespace().next().unwrap_or("");
+    let base = exe.rsplit('/').next().unwrap_or("");
+    matches!(base, "brood" | "nest")
+}
+
+/// Every thread's state char, plus the `wchan` of the most interesting one.
+///
+/// **This is the fix that makes the report mean anything.** It used to read
+/// `/proc/<pid>/stat`, which is the MAIN thread only — and a `brood` runtime parks its
+/// root thread on a futex while worker threads do the work. So in the KI-38 reproduction
+/// every process printed `S futex_do_wait`, including children burning CPU, and the three
+/// candidates the report exists to separate (`D` blocked in a syscall / `R` running /
+/// gone) were indistinguishable. Per-thread state distinguishes them: a runtime with any
+/// `R` thread is running, one with a `D` thread is blocked in a syscall, and all-`S` with
+/// flat CPU is genuinely idle.
+///
+/// Returns e.g. `("R,S,S,S", "run:-")` — the state chars in thread order, and
+/// `state:wchan` for the first non-`S` thread (the one worth looking at), or the main
+/// thread's when every thread is sleeping.
+#[cfg(target_os = "linux")]
+fn thread_states(pid: u32) -> (String, String) {
+    let state_of = |stat: &str| -> String {
+        // Split after comm's ')': comm can contain spaces, so field indexing before it is
+        // unreliable — the same reason `alive()` in child_cleanup.rs does this.
+        stat.rsplit_once(')')
+            .and_then(|(_, r)| r.split_whitespace().next())
+            .unwrap_or("?")
+            .to_string()
+    };
+    let mut states = Vec::new();
+    let mut interesting: Option<String> = None;
+    if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+        let mut tids: Vec<u32> = tasks
+            .flatten()
+            .filter_map(|t| t.file_name().to_str().and_then(|s| s.parse().ok()))
+            .collect();
+        tids.sort_unstable(); // main thread (tid == pid) first, then stable order
+        for tid in tids {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/stat")) else {
+                continue;
+            };
+            let st = state_of(&stat);
+            if st != "S" && interesting.is_none() {
+                let wchan = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/wchan"))
+                    .unwrap_or_else(|_| "-".into());
+                interesting = Some(format!("{st}:{}", wchan.trim()));
+            }
+            states.push(st);
+        }
+    }
+    if states.is_empty() {
+        return ("?".into(), "-".into());
+    }
+    let fallback = || {
+        let wchan =
+            std::fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap_or_else(|_| "-".into());
+        format!("S:{}", wchan.trim())
+    };
+    (states.join(","), interesting.unwrap_or_else(fallback))
+}
+
+/// Total CPU (utime + stime) this process has burned, in ms. A stalled child and a
+/// contended one both look asleep in a single sample; CPU time separates them — sample the
+/// report twice and a contended child's number moves while a stalled one's does not.
+#[cfg(target_os = "linux")]
+fn process_cpu_ms(pid: u32) -> u64 {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return 0;
+    };
+    let Some((_, rest)) = stat.rsplit_once(')') else {
+        return 0;
+    };
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    // After comm, fields are 1-indexed from `state`: utime is 12, stime 13 (procfs(5)
+    // numbers them 14/15 counting pid and comm).
+    let tick = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let hz = 100; // USER_HZ is 100 on every Linux target we run on
+    (tick(11) + tick(12)) * 1000 / hz
 }
 
 #[cfg(not(target_os = "linux"))]
