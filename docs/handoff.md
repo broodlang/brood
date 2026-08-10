@@ -146,6 +146,18 @@ directly (`fold--vec`). Per unit: allocations **27.7 → 15.0**, one-arg dispatc
 the shape **32.7 → 28.6 µs** CPU, the published row **11.44 → 10.40 CPU·s** (−9%). And ADR-215
 fixed per-process recompilation (compiles 100 154 → 163 per 100k processes).
 
+**Then, 2026-08-09: `%vector-reduce` — the vector fold moved into a native counted loop, −19%
+CPU on the row.** `fold-vec` had dropped the list materialisation but still paid a Brood-level
+`apply` per element, and — the part that dominated — a reducer like `+` is a thin **passthrough
+wrapper** whose redirect was re-resolved on every element. `reduce_prim_op` already resolves that
+wrapper once, which is why `(fold + 0 (range n))` is fast, but **nothing on the vector path ever
+consulted it**: it was wired only into the two range paths. `%vector-reduce` is the vector
+counterpart of `%range-reduce` (tight i64 loop → resolved-once HOF arm → general apply), and the
+prelude's vector branch now calls it. A/B on `bench/brood/spawn-live.blsp` at `BENCH_N=300000`,
+alternating on an idle box, identical checksums: **9.96 → 8.04 CPU·s (−19.3%)**, wall 2.00 → 1.90.
+RSS went 1.60 → 1.63 GB, a ~2% rise that is at the edge of run-to-run noise but is the one number
+that moved the wrong way — worth a look if the RSS gap to the BEAM is ever the target.
+
 **Where the row now stands.** The ladder is now committed as
 `scripts/fuzz/stress/spawn_live_ladder.blsp` (it was `sl_one.blsp`, uncommitted, so these
 figures could not be re-derived). Run **one rung per process** and read CPU, not wall:
@@ -220,6 +232,30 @@ So the next candidates, in the order the numbers support them:
    supervisor and `gen` protocol message. Bind-only patterns are the rare case; essentially
    every real `receive` is on the slow side of this line.
 
+   **CORRECTION 2026-08-09 — it does NOT deopt per activation; it deopts 16 times, then is
+   latched off for the run.** The counters said `jit_deopt 281 978` and this item read that as
+   "deopts on every activation". It is not: `jit_deopt` counts `jit_tier`'s outcome-1 only and
+   is **blind to every deopt taken on the HOF fast frame**, which is the path the matcher uses.
+   With a counter added on that path (`hof_native_deopt`) the real shape at N=300k is
+   **`jit_link_done` 16 · `hof_native_deopt` 16 · `hof_decline_bailed` 283 961**: the arm links,
+   deopts 16 consecutive times, `jit_deopt_feedback` latches it `BAILED`, and every one of the
+   remaining ~284k calls is then *declined before it runs* — no native attempt, no deopt.
+
+   So the recurring puzzle in this item — "with deopts eliminated it still does not link" — has
+   a mundane answer: `BAILED` is sticky for the process, so removing the deopt *source* does not
+   un-bail an arm that already bailed. And the per-call cost being paid is `vm_apply`, not a
+   deopt round trip.
+
+   New counters for this, all `perf-stats` only and free otherwise: `hof_decline_nocode` /
+   `_bailed` / `_queued` / `_depth` / `_epoch` say **why** `hof_apply_native` declined (they sum
+   to the declines), and `hof_native_deopt` counts the frame's own deopts. `jit_link_done`
+   reading 0 against N calls now names its own cause in one run instead of needing a bisect.
+
+   **Read `hof_decline_*` before theorising about the 18 CLIF edges.** The instrument this item
+   proposed (stamp a per-site id into the deopt block) answers a *different* question — which
+   guard fails — and is only worth building if the 16 deopts turn out to matter, which at 16
+   occurrences they almost certainly do not. The cost is the 284k declines.
+
    **GO/NO-GO, 2026-08-06 (read this before implementing anything here).** The deopt is real and
    its guard is now known — `eq_dispatch`'s non-interned fallthrough in `jit_lower/emit.rs`;
    routing it away from `f.deopt` takes the arm's deopts from ~282k to **0**, with the arm still
@@ -271,7 +307,29 @@ So the next candidates, in the order the numbers support them:
    guard site its own identifiable exit — e.g. have `jit_lower` stamp a per-site id into a
    heap field on the way out — and the counter names the guard in one run. Do NOT navigate by
    the deopt's `resume_ip`: it names the nearest checkpoint, not the failing guard (§6).
-2. **The payload step (+9.3 µs/unit) — and the copy is NOT the cost.** `ns_msg_in` *fell* (216 →
+2. **The payload step — the copy is NOT the cost, and neither is what this item used to
+   blame. RE-MEASURED 2026-08-09; two of its claims were wrong.**
+
+   **(a) "Hand-rolling the sum as an indexed loop recovers ~10.7 µs" is FALSE in this regime.**
+   Measured on the spawn-live shape itself (100k fresh processes, 16-cell payload, one variant
+   per process), µs/unit CPU: `nopayload` 21.0 · `nofold` 20.4 · `fold %add` 29.2 ·
+   `fold +` 34.0 · **hand indexed loop 64.1**. The hand loop is **2× worse**, not 10.7 µs
+   better — a Brood-level loop in a *cold, short-lived* process is interpreted, where the
+   native `fold` builtin is not. The old figure came from warm, long-lived-process
+   measurements (`fold +` 163 ns/elem ⇒ ~2.6 µs for 16 cells, which could never have
+   accounted for a 9–13 µs step in the first place — the arithmetic did not close, and that
+   was the tell).
+
+   **(b) The dominant cost was the passthrough reducer, and it is now fixed.** `fold +` vs
+   `fold %add` was **4.8 µs/unit** — pure wrapper redirect, re-resolved per element, on a row
+   whose total is ~34 µs. `%vector-reduce` (see the top of this section) closed it: the gap is
+   now 1.6 µs and the whole rung went 33.2 → 28.9 µs/unit. **`nofold` ≈ `nopayload` confirms
+   the 16-cell copy costs ~0**, which the old `ns_msg_in` reading already said.
+
+   What remains of the step after the fix is ~8.8 µs/unit of genuine per-element callback work,
+   and *that* is what the speculative-inline lever below would attack. Original text follows.
+
+   **The payload step (+9.3 µs/unit) — and the copy is NOT the cost.** `ns_msg_in` *fell* (216 →
    180 ns/unit) when the message grew from `[:go]` to a 16-element vector, so the deep copy this
    row was built to measure costs ~0.2 µs of a 31 µs row. Of the +12.5 µs the rung adds under
    perf-stats, only ~1.3 µs (10%) lands in any runtime timer; the rest is Brood-level `fold`
@@ -891,6 +949,12 @@ From the published run (`brood-benchmarks/results/`, **2026-08-06**, brood 0.3.0
   (−9%), 6.24 → **5.55 CPU·s** (−11%), RSS flat at **1.57 GB**. Now **2.8× slower and 1.75×
   heavier** than the BEAM (~5.4 KB per live process against ~2.9 KB). This move is `fold--vec`
   (A/B'd before the run); the one before was ADR-215. §1 has what's next.
+  **Not yet republished: `%vector-reduce` (2026-08-09) A/B's at −19.3% CPU on this row**
+  (9.96 → 8.04 CPU·s on a plain `--release` build, alternating runs, identical checksums; wall
+  2.00 → 1.90, RSS 1.60 → 1.63 GB). Do not quote that as a published figure — the published
+  numbers come from the **lean** build via the procedure below, and the absolutes differ
+  accordingly (this box reads 9.96 CPU·s where the published run reads 5.55). It needs a proper
+  harness run to land; if it holds, the BEAM gap goes ~2.8× → ~2.3×.
 - **`supervisor`** — Brood 855 ms vs Elixir 271 ms, unchanged in substance.
 - **Compute aggregate** — 2.9× the fastest, 3rd of seven, ahead of Elixir. Unchanged.
 - **Base RSS 22.1 MB** — 3rd-lightest of seven, flat against the previous run's 22.4 and still
