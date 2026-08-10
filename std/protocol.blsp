@@ -16,7 +16,7 @@
 ; ---- the behaviour/interface registry (read by the checker + LSP) ------------
 
 ; interface-name → its declared op specs, as DATA
-(def *protocols* {})
+(defonce *protocols* {})
 
 (defn register-protocol (pname specs)
   "Record interface `pname`'s declared op specs (raw forms) for the checker / LSP."

@@ -453,12 +453,15 @@ strictly before `before`, or nil if there is none. The backward counterpart of
 (defn- buffer-snapshot
   (buf)
   "The restorable edit state of `buf` — `{:rope :point :mark}` (no history), plus `:markers`
-when the buffer has any. Markers are snapshot-restored like `point`/`mark` (not re-derived),
-so undo/redo return them to their recorded positions instead of stranding them at the
-post-edit spot. A marker-less buffer omits the key, staying identical to before markers."
+and `:read-only-spans` when the buffer has any. Both are snapshot-restored like `point`/`mark`
+(not re-derived), so undo/redo return them to their recorded positions instead of stranding
+them at the post-edit spot — protected spans revert in lockstep with the text they guard. A
+buffer with neither omits the key, staying identical to before those facilities."
   (let (base {:rope (get buf :rope) :point (get buf :point) :mark (get buf :mark)}
-        m (get buf :markers))
-    (if m (assoc base :markers m) base)))
+        m (get buf :markers)
+        s (get buf :read-only-spans)
+        base (if m (assoc base :markers m) base))
+    (if s (assoc base :read-only-spans s) base)))
 
 (defn amalgamate-undo (buf)
   "Make the **next** editing op amalgamate into the current undo group rather than start
@@ -495,14 +498,19 @@ bound — editing ops on the result record nothing, so undo stays a no-op. Like 
 
 (defn- buffer-restore
   (buf snap)
-  "Restore the `{:rope :point :mark}` (and `:markers`) of `snap` into `buf`, keeping `buf`'s
-history. Markers are restored to the snapshot's recorded positions; a snapshot with no
-markers drops the key so a marker-less state stays marker-less."
+  "Restore the `{:rope :point :mark}` (and `:markers`, `:read-only-spans`) of `snap` into
+`buf`, keeping `buf`'s history. Markers and protected spans are restored to the snapshot's
+recorded positions; a snapshot without them drops the key so that state stays as it was."
   (let (b (assoc buf :rope (get snap :rope) :point (get snap :point) :mark (get snap :mark))
-        m (get snap :markers))
+        m (get snap :markers)
+        b (cond
+            m (assoc b :markers m)
+            (get b :markers) (dissoc b :markers)
+            else b)
+        s (get snap :read-only-spans))
     (cond
-      m (assoc b :markers m)
-      (get b :markers) (dissoc b :markers)
+      s (assoc b :read-only-spans s)
+      (get b :read-only-spans) (dissoc b :read-only-spans)
       else b)))
 
 (defn undo-start (buf)
@@ -714,12 +722,121 @@ flipping this on (construction never checks the flag), the way a generated repor
 or `special-mode` buffer does."
   (assoc buf :read-only (if flag true false)))
 
+;; The signal every read-only refusal raises: a structured error tagged `:kind :read-only`
+;; (the canonical error-map shape — `error-message` still returns the `:message`, so a plain
+;; `(catch e (error-message e))` reads unchanged). A consumer that wants to turn a refusal
+;; into a graceful no-op matches `(= (:kind e) :read-only)` rather than the message text, so
+;; the wording can change without breaking the handler.
+(defn- buffer-read-only-error
+  (message)
+  (throw {:kind :read-only :message message}))
+
 (defn- buffer-barf-if-read-only
   (buf)
   "Throw if `buf` is read-only — the guard every text mutator runs first, so the
 read-only contract lives in the model (no consumer has to remember to check). Returns
 `buf` unchanged when writable, for use as a guard expression."
-  (if (read-only? buf) (error "buffer is read-only") buf))
+  (if (read-only? buf) (buffer-read-only-error "buffer is read-only") buf))
+
+;; ---- partial read-only: protected spans -------------------------------------
+;; Whole-buffer `read-only?` is all-or-nothing. A FORM buffer wants the opposite grain:
+;; most of the text is generated and untouchable, a few spans are the user's to edit — a
+;; shell prompt whose input line is yours; a commit-message buffer whose `#` help block
+;; must survive; a tutorial whose prose explains and whose code boxes you may break.
+;; `:read-only-spans` holds the protected ranges as `[lo hi)` half-open pairs (plain data,
+;; so a form buffer rides collab/hosting like any other buffer value).
+;;
+;; Enforced at the SAME choke point as the whole-buffer flag — every mutator asks before it
+;; touches the rope — so protection holds on every edit path by CONSTRUCTION (key, mouse,
+;; held-key repeat, keyboard macro, a programmatic edit), never a reactive after-the-fact
+;; comparison a caller can forget to run.
+;;
+;; The spans travel with edits (INWARD gravity, `buffer-adjust-spans`): text inserted at a
+;; span's edge lands OUTSIDE it, in the neighbouring editable text (a span's left edge shifts
+;; when `lo >= p`, its right edge only when `hi > p`), and a delete confined to editable text
+;; slides the spans past it. So once set the spans stay correct across edits with no
+;; recomputation, and a form re-stamps them only when it regenerates its text.
+
+(defn read-only-spans (buf)
+  "The protected `[lo hi)` spans of `buf`, clamped to its length and with empties dropped
+(`()` if none). Chars inside a span can be neither inserted-into nor deleted; everything
+else edits normally even while these are set. Orthogonal to the whole-buffer `read-only?`
+flag, which still refuses the buffer entire."
+  (let (len (buffer-length buf))
+    (keep (fn (s)
+            (let ([lo hi] s
+                  l (buffer-clamp 0 len lo)
+                  h (buffer-clamp 0 len hi))
+              (when (< l h) [l h])))
+      (or (get buf :read-only-spans) '()))))
+
+(defn set-read-only-spans (buf spans)
+  "Mark `spans` (a list of `[lo hi)` pairs) read-only in `buf`, replacing any prior set;
+`()` clears them. Stored as given and normalised on read (`read-only-spans`). Build the text
+first, then stamp — like `set-read-only`, construction never checks the spans."
+  (assoc buf :read-only-spans (into [] spans)))
+
+(defn- span-covers?
+  (spans pos)
+  ;; is the CHAR at `pos` inside a protected span
+  (find (fn (s) (let ([lo hi] s) (and (>= pos lo) (< pos hi)))) spans))
+
+(defn position-read-only? (buf pos)
+  "True when the char at `pos` falls inside a protected span (or the whole buffer is
+read-only) — what the editor asks to explain a refused edit, or to keep a caret out of
+generated text."
+  (or (read-only? buf) (not (nil? (span-covers? (read-only-spans buf) pos)))))
+
+(defn- span-blocks-insert?
+  (spans len p)
+  ;; Inserting at `p` drops new (unprotected) text between the chars at `p-1` and `p`. Refuse
+  ;; it only when `p` is STRICTLY interior to a single span (both neighbours are the same
+  ;; protected run), or against a BUFFER END whose adjacent char is protected (nothing editable
+  ;; to grow into there). NOT refused at the junction of two *different* spans — that is a
+  ;; zero-width editable region (an emptied box), and typing must be able to refill it — nor at
+  ;; an ordinary protected/editable boundary, where the insert joins the editable side.
+  (or (find (fn (s) (let ([lo hi] s) (and (< lo p) (< p hi)))) spans)
+    (and (= p 0) (span-covers? spans 0))
+    (and (= p len) (span-covers? spans (dec len)))))
+
+(defn- span-blocks-delete?
+  (spans lo hi)
+  ;; a delete of `[lo hi)` is refused when it overlaps any protected span at all
+  (find (fn (s) (let ([slo shi] s) (and (< slo hi) (> shi lo)))) spans))
+
+(defn- buffer-barf-if-protected-insert
+  (buf p)
+  (if (span-blocks-insert? (read-only-spans buf) (buffer-length buf) p)
+    (buffer-read-only-error "text is read-only")
+    buf))
+
+(defn- buffer-barf-if-protected-delete
+  (buf lo hi)
+  (if (span-blocks-delete? (read-only-spans buf) lo hi)
+    (buffer-read-only-error "text is read-only")
+    buf))
+
+(defn- buffer-adjust-spans
+  (buf kind a b)
+  "Return `buf` with its protected spans shifted for an edit — `:insert` (a=pos, b=len) or
+`:delete` (a=lo, b=hi) — or `buf` unchanged when it has no spans. Inward gravity on insert;
+a delete never overlaps a span (the mutators refuse that first), so every endpoint is either
+at/before the cut or slides left by its width."
+  (let (spans (get buf :read-only-spans))
+    (if (nil? spans)
+      buf
+      (assoc buf
+        :read-only-spans
+        (if (= kind :insert)
+          (map (fn (s)
+                 (let ([lo hi] s)
+                   [(if (>= lo a) (+ lo b) lo) (if (> hi a) (+ hi b) hi)]))
+            spans)
+          (let (d (- b a))
+            (map (fn (s)
+                   (let ([lo hi] s)
+                     [(if (>= lo b) (- lo d) lo) (if (>= hi b) (- hi d) hi)]))
+              spans)))))))
 
 ;; ---- markers: edit-surviving positions --------------------------------------
 ;; A marker is a named char position the editing ops keep in sync as text is inserted or
@@ -762,11 +879,16 @@ insertion point shift with the text. Throws if `buf` is read-only."
   (if (= (string-length s) 0)
     buf
     (let (p (get buf :point)
+          _ (buffer-barf-if-protected-insert buf p)
           buf (buffer-push-undo buf))
-      (buffer-adjust-markers (assoc buf
-                               :rope (rope-insert (get buf :rope) p s)
-                               :point (+ p (string-length s))
-                               :mark nil)
+      (buffer-adjust-spans
+        (buffer-adjust-markers (assoc buf
+                                 :rope (rope-insert (get buf :rope) p s)
+                                 :point (+ p (string-length s))
+                                 :mark nil)
+          :insert
+          p
+          (string-length s))
         :insert
         p
         (string-length s)))))
@@ -779,8 +901,11 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
         end (buffer-clamp p (buffer-length buf) (+ p n)))
     (if (= p end)
       buf
-      (let (buf (buffer-push-undo buf))
-        (buffer-adjust-markers (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)
+      (let (_ (buffer-barf-if-protected-delete buf p end)
+            buf (buffer-push-undo buf))
+        (buffer-adjust-spans
+          (buffer-adjust-markers (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)
+            :delete p end)
           :delete p end)))))
 
 (defn delete-backward-char (buf &optional (n 1))
@@ -791,11 +916,14 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
         start (buffer-clamp 0 p (- p n)))
     (if (= p start)
       buf
-      (let (buf (buffer-push-undo buf))
-        (buffer-adjust-markers (assoc buf
-                                 :rope (rope-delete (get buf :rope) start p)
-                                 :point start
-                                 :mark nil)
+      (let (_ (buffer-barf-if-protected-delete buf start p)
+            buf (buffer-push-undo buf))
+        (buffer-adjust-spans
+          (buffer-adjust-markers (assoc buf
+                                   :rope (rope-delete (get buf :rope) start p)
+                                   :point start
+                                   :mark nil)
+            :delete start p)
           :delete start p)))))
 
 (defn delete-region (buf)
@@ -810,11 +938,14 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
       (let ([lo hi] b)
         (if (= lo hi)
           (assoc buf :mark nil)
-          (let (buf (buffer-push-undo buf))
-            (buffer-adjust-markers (assoc buf
-                                     :rope (rope-delete (get buf :rope) lo hi)
-                                     :point lo
-                                     :mark nil)
+          (let (_ (buffer-barf-if-protected-delete buf lo hi)
+                buf (buffer-push-undo buf))
+            (buffer-adjust-spans
+              (buffer-adjust-markers (assoc buf
+                                       :rope (rope-delete (get buf :rope) lo hi)
+                                       :point lo
+                                       :mark nil)
+                :delete lo hi)
               :delete lo hi)))))))
 
 (defn replace-region (buf start end s)
