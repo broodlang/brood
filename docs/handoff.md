@@ -158,6 +158,36 @@ alternating on an idle box, identical checksums: **9.96 → 8.04 CPU·s (−19.3
 RSS went 1.60 → 1.63 GB, a ~2% rise that is at the edge of run-to-run noise but is the one number
 that moved the wrong way — worth a look if the RSS gap to the BEAM is ever the target.
 
+**Then, 2026-08-10: `fold`'s own dispatch chain was costing more than the fold.** With the
+native reduce in, the payload rung was decomposed by isolating one thing at a time on the
+spawn-live shape (100k fresh processes, 16-cell payload, median of 3, µs/unit CPU):
+
+| variant | µs | what it adds |
+|---|---|---|
+| `noop` (no fold) | 20.2 | — |
+| `(%vector-reduce %add 0 p)` | 22.5 | **+2.3** the native reduce itself |
+| `(%vector-reduce + 0 p)` | 23.9 | +1.4 resolving `+` through its passthrough arm |
+| `(fold %add 0 p)` | 27.9 | **+5.4** `fold`'s dispatch chain |
+| `(fold + 0 p)` | 28.3 | +4.4 |
+
+So the arithmetic is nanoseconds and the *dispatch* was microseconds. A vector was tested
+**last** (`range?` → `seqview?` → `type-of` + `%eq`, four native calls in a cold process)
+while a range was tested first. Testing a vector first with the one-call `vector?` predicate
+is pure reordering — the branches are disjoint, since `type-of` is `:vector` for a vector and
+`:pair` for a range, a seq-view *and* a list — and **nothing regresses**: 300k small folds,
+containers hoisted, median of 3, **vector 533 → 410 ns, range 230 → 183, list 3595 → 3248**.
+The range row improves even though a range now pays an extra `vector?` first, so flattening
+the chain is worth more than the check costs. A/B on the published row: **8.30 → 7.92 CPU·s
+(−4.6%)**, and **9.96 → 7.92 (−20.5%) cumulative** with `%vector-reduce`.
+
+**The next lever on this rung, with its size already measured: make `fold` itself native.**
+After the reorder, `(fold + 0 p)` is 27.1 µs against `(%vector-reduce + 0 p)` at 23.9 — so
+**~3.2 µs/unit is the cold call into the Brood-level `fold` wrapper itself**, not its
+predicates (now one) and not the reduce (2.3). That is the largest single remaining piece of
+the payload step. It is a real change, not a reorder: `fold` must keep map-as-pairs, the
+seq-view fusion (which calls a Brood transducer back), and the exact error/promotion
+behaviour. Size it against that ~3.2 µs before starting.
+
 **Where the row now stands.** The ladder is now committed as
 `scripts/fuzz/stress/spawn_live_ladder.blsp` (it was `sl_one.blsp`, uncommitted, so these
 figures could not be re-derived). Run **one rung per process** and read CPU, not wall:
@@ -231,6 +261,22 @@ So the next candidates, in the order the numbers support them:
    **Reach: this is the entire tagged-tuple idiom** — `[:go v]`, `[:reply ^r v]`, every
    supervisor and `gen` protocol message. Bind-only patterns are the rare case; essentially
    every real `receive` is on the slow side of this line.
+
+   **MEASURED 2026-08-10 AND DECLINED FOR THIS ROW — fixing the matcher is worth ~0 on
+   `spawn-live`.** Before building anything here, the counterfactual was run directly: the
+   ladder's unit with three receive patterns doing identical work, interleaved, 3 rounds,
+   µs/unit CPU — `[:go p]` (bails) **28.0**, `[t p] :when (%eq t :go)` (also bails) **27.8**,
+   `[_t p]` (stays native) **27.5**. That is ~0.5 µs/unit, ~1.8%, with overlapping spreads.
+   The guard row is the control that makes it readable: it bails like the tag row, so the
+   small gap is the native frame and not the skipped comparison.
+
+   This matters more than the `recv_matcher` figures suggested, because the arm is shared
+   process-wide (ADR-215) — 16 deopts anywhere bail it for all 100k units — and it *still*
+   buys nothing. So the receive step (+8.2 µs/unit) is real but its cost is **not** the
+   native frame; it is the rest of `receive` (mailbox scan, delivery, message copy). **Do not
+   spend a session on the deopt for this row's sake.** It may still be worth something on a
+   long-lived message-passing row (`latency`, `pingpong`, `supervisor`) — that is untested,
+   and is the only remaining reason to look at it.
 
    **CORRECTION 2026-08-09 — it does NOT deopt per activation; it deopts 16 times, then is
    latched off for the run.** The counters said `jit_deopt 281 978` and this item read that as
@@ -949,12 +995,14 @@ From the published run (`brood-benchmarks/results/`, **2026-08-06**, brood 0.3.0
   (−9%), 6.24 → **5.55 CPU·s** (−11%), RSS flat at **1.57 GB**. Now **2.8× slower and 1.75×
   heavier** than the BEAM (~5.4 KB per live process against ~2.9 KB). This move is `fold--vec`
   (A/B'd before the run); the one before was ADR-215. §1 has what's next.
-  **Not yet republished: `%vector-reduce` (2026-08-09) A/B's at −19.3% CPU on this row**
-  (9.96 → 8.04 CPU·s on a plain `--release` build, alternating runs, identical checksums; wall
-  2.00 → 1.90, RSS 1.60 → 1.63 GB). Do not quote that as a published figure — the published
-  numbers come from the **lean** build via the procedure below, and the absolutes differ
-  accordingly (this box reads 9.96 CPU·s where the published run reads 5.55). It needs a proper
-  harness run to land; if it holds, the BEAM gap goes ~2.8× → ~2.3×.
+  **Not yet republished: two changes A/B at −20.5% CPU on this row, cumulatively.**
+  `%vector-reduce` (2026-08-09) 9.96 → 8.04 CPU·s, then `fold`'s vector-first dispatch
+  (2026-08-10) 8.30 → 7.92, all on a plain `--release` build with alternating runs and
+  identical checksums (36300000); wall 2.00 → 1.90, RSS flat at ~1.62 GB. Do not quote these
+  as published figures — the published numbers come from the **lean** build via the procedure
+  below, and the absolutes differ accordingly (this box reads 9.96 CPU·s where the published
+  run reads 5.55). Both need a harness run to land; if the ratio holds, the BEAM gap goes
+  ~2.8× → ~2.2×.
 - **`supervisor`** — Brood 855 ms vs Elixir 271 ms, unchanged in substance.
 - **Compute aggregate** — 2.9× the fastest, 3rd of seven, ahead of Elixir. Unchanged.
 - **Base RSS 22.1 MB** — 3rd-lightest of seven, flat against the previous run's 22.4 and still
