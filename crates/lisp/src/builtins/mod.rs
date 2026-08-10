@@ -422,6 +422,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![callable, any, list_ty], any),
         range_reduce,
     );
+    // The vector counterpart of `%range-reduce`, behind the prelude `fold`'s vector
+    // branch. Same reason: fold the container in a native loop instead of paying a
+    // per-element `apply` — and, on this path specifically, resolve a passthrough
+    // reducer like `+` once rather than per element.
+    def(
+        heap,
+        "%vector-reduce",
+        Arity::exact(3),
+        Sig::new(vec![callable, any, any], any),
+        vector_reduce,
+    );
     // Lazy seq-view (ADR: lazy seq-view) — the fused result of `map`/`filter`/
     // `keep`/`remove`. `%seqview` constructs it from `[source xform]`;
     // `%seqview-parts` returns that pair as a 2-vector for the prelude `fold`
