@@ -288,17 +288,28 @@ returns `[ctx' pending']`. The bridge from layers to keymap — compose, then st
 ;; `:file` / `:type` / `:layers` keys on a plain map — `std/buffer` need not be
 ;; loaded, and a buffer-less context can carry a `:type` too.
 
+;; These three are REGISTRIES: a module `register-`s into them at load and they must
+;; accumulate across the module's life, so each is `defonce`, not `def` — re-loading THIS
+;; module must not wipe registrations already made. Two ways this file re-runs after
+;; registrations exist, both of which a plain `def` silently reset: a hot reload, and — the
+;; one that bit a real app — an IMAGED start (ADR-218). The image restores these registries'
+;; VALUES in the always-materialised root section, but editor/layers is a STD module served
+;; from its own EMBEDDED source, so a project module's `(:use editor/layers)` re-runs this
+;; file; a `(def *type-layers* {})` here would clobber the restored value — dropping the
+;; layer types of every DEFERRED module (loaded on demand, so absent from the image's eager
+;; set: a tutorial, a test runner). `defonce` leaves the restored/accumulated registry intact.
+
 ;; type → its layer refs, in precedence order (head = highest; activated base-first).
-(def *type-layers* {})
+(defonce *type-layers* {})
 ;; ordered filename→type rules, newest-first (first match wins). Each is
 ;; `{:match <suffix-string | (fn (filename) -> bool)> :type <type>}`.
-(def *auto-type-by-file* ())
+(defonce *auto-type-by-file* ())
 
 ;; Always-on **system layers** — included (at lowest precedence) on every buffer by
 ;; `init-buffer-layers`, regardless of type. The home for global behaviour (a
 ;; baseline keymap, etc.) that isn't a "mode". Mark such a layer `:system true` so a
 ;; UI can keep it out of the mode display (e.g. show the major mode, not "global").
-(def *system-layers* ())
+(defonce *system-layers* ())
 
 (defn register-system-layer (ref)
   "Register `ref` as an always-on system layer (appended at lowest precedence to

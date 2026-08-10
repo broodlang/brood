@@ -182,7 +182,7 @@ are just a Brood predicate, so no recompile and no cost on the false path. (A ma
 ;; YOUR functions. The wrapper is variadic, so every arity of a multi-clause fn goes
 ;; through it; its `arglist` reads `(& args)` while traced.
 
-(def *traced-fns* {}) ; sym -> the original fn value (`untrace-fn` restores it)
+(defonce *traced-fns* {}) ; sym -> the original fn value (`untrace-fn` restores it)
 (defn- debug-original
   (sym)
   ;; The pre-instrumentation fn for `sym`: the registry entry when already traced
