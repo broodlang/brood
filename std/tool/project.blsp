@@ -912,6 +912,46 @@ the file is missing or declares none."
         {}))
     {}))
 
+(defn- manifest-enhances
+  (manifest-path)
+  "The `:enhances` map declared in the manifest at `manifest-path` — `{app-symbol ->
+constraint-string}`, or {} if the file is missing or declares none. The sibling of
+`project-manifest-format-headers`, feeding the plugin-discovery query below."
+  (if (file-exists? manifest-path)
+    (let (form (read-first (slurp manifest-path)))
+      (if (and (pair? form) (= (first form) 'project))
+        (or (plist-get (rest form) :enhances) {})
+        {}))
+    {}))
+
+(defn installed-enhancers
+  (root app app-version)
+  "The names of packages installed under `root/_deps` that declare they enhance the
+application `app` with a constraint satisfied by `app-version` — the RUNTIME sibling of the
+registry's `?enhances=` query (`nest search --enhances` matches published packages; this
+matches INSTALLED ones). Reads each dep's `project.blsp` `:enhances`; requires nothing and
+fetches nothing, so a plugin host (an editor, a daemon) can call it at startup to find the
+packages that plug into it, then load them however it likes.
+
+`app`/`app-version` are the host's own name and version: a package whose `:enhances` names
+`app` but demands a newer host than `app-version` is excluded, via the same
+`version-satisfies-all?` the resolver and `nest search` use. Naming `app` is what gates — an
+empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not count. An
+absent `_deps` (nothing installed) is []."
+  (require 'version)
+  (let (deps-dir (path-join root "_deps")
+        app-symbol (symbol app)
+        host {app-symbol app-version})
+    (if (not (file-exists? deps-dir))
+      []
+      (vec (filter
+             (fn (dep-name)
+               (let (enhances (manifest-enhances
+                                (path-join (path-join deps-dir dep-name) "project.blsp")))
+                 (and (get enhances app-symbol)
+                   (version/version-satisfies-all? host enhances))))
+             (list-dir deps-dir))))))
+
 (defn- project-plugin-format-headers
   (root plugin-name)
   "The `:format-headers` a `:format-plugins` entry contributes — read from that
