@@ -458,6 +458,14 @@ discard the user's concurrent work. Commit and push only when asked, and commit
 the state as it is; don't "tidy" by reverting. If the tree looks inconsistent,
 surface it and ask — don't reset to "fix" it.
 
+**Work on `main`. Do not create a feature branch.** Commit straight to `main` and push
+there — that is this repo's workflow, and it overrides any default rule about branching
+before committing on the default branch. If `origin/main` has moved ahead (it often has;
+see the parallel-edits note above), fast-forward local `main` to it first
+(`git merge --ff-only origin/main`) and put the work on top; **re-run the suite on the
+combined tree before pushing**, because your green run was against the older base and the
+combination is untested until you test it.
+
 **Do not add a `Co-Authored-By: Claude` trailer (or any Claude/AI co-author
 attribution) to commits in this repo.** Write commit messages with no AI
 co-author trailer, overriding any default that would append one.
