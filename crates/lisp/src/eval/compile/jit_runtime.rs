@@ -2,6 +2,13 @@
 //! JIT tiering runtime glue (extracted from mod.rs).
 use super::*;
 
+// Everything this module asks of a backend goes through the contract, never through a concrete
+// one: `lower_arm`/`lower_inlined_arm` from the two places below (`jit_compile_now` and the
+// `JIT_COMPILER` thread — the whole production codegen surface), plus the three tiering
+// advisories, which are associated fns precisely so consulting them per activation costs no
+// `GLOBAL_JIT` lock. See `crate::jit::backend`.
+use crate::jit::{ActiveBackend, JitBackend};
+
 /// The background JIT compiler (ADR-101 1b). A single dedicated OS thread, lazily spawned,
 /// is the **only** place arms are lowered: it owns the sole mutable access to the JIT
 /// module via [`GLOBAL_JIT`](crate::jit::GLOBAL_JIT), so that lock is otherwise
@@ -137,7 +144,7 @@ pub(crate) fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) 
                 && !ptr.is_null()
                 && ptr != crate::jit::BAILED
                 && ptr != crate::jit::QUEUED
-                && !jit_lower::arm_i64_too_deep(arm)
+                && ActiveBackend::may_adopt_shared_code(arm)
             {
                 arm.compile_epoch.store(epoch, Release);
                 arm.jit_code.store(ptr, Release);
@@ -159,7 +166,7 @@ pub(crate) fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) 
         return; // the background thread finished it while we waited for the lock
     }
     let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        jit_lower_arm(&mut jit, arm, &slot_tags)
+        jit.lower_arm(arm, &slot_tags)
     }));
     drop(jit); // install the pointer outside the module lock
     match lowered {
@@ -263,9 +270,9 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                 let t0 = web_time::Instant::now();
                 let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if inlined {
-                        jit_lower_inlined_arm(&mut jit, arm, slot_tags)
+                        jit.lower_inlined_arm(arm, slot_tags)
                     } else {
-                        jit_lower_arm(&mut jit, arm, slot_tags)
+                        jit.lower_arm(arm, slot_tags)
                     }
                 }));
                 #[cfg(feature = "perf-stats")]
@@ -1693,7 +1700,7 @@ pub(crate) fn jit_tier(
     // either way — the background dequeue skips any resolved slot, and if it races a
     // concurrent store of this copy's own pointer, both pointers are valid code for
     // the same epoch (each kept alive by its compiler's keepalive push).
-    if (code.is_null() || code == crate::jit::QUEUED) && !jit_lower::arm_i64_too_deep(arm) {
+    if (code.is_null() || code == crate::jit::QUEUED) && ActiveBackend::may_adopt_shared_code(arm) {
         if let Some(key) = arm.share_key {
             if let Some((ptr, epoch)) = heap.jit_shared_lookup(key) {
                 if epoch == heap.global_epoch()
@@ -1808,7 +1815,7 @@ pub(crate) fn jit_tier(
     // registers — the boxed depth-2 inlined upgrade would only swap in inferior code.
     if arm.inline_name.is_some()
         && !arm.inline_installed.load(Acquire)
-        && !jit_lower::arm_i64_eligible(arm)
+        && !ActiveBackend::declines_inline_upgrade(arm)
     {
         let ic = arm.inline_code.load(Acquire);
         if ic.is_null() {
@@ -1934,7 +1941,7 @@ pub(crate) fn jit_tier(
     // VM. Without this a deep non-tail recursion would deopt-and-re-tier per level (~100× thrash).
     if outcome == 5 {
         if let Some(sym) = arm.dbg_name {
-            jit_lower::i64_mark_too_deep(sym);
+            ActiveBackend::note_depth_bail(sym);
         }
         arm.jit_code.store(std::ptr::null_mut(), Release);
         arm.jit_calls.store(THRESHOLD, Release);

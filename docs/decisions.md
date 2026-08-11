@@ -14716,3 +14716,127 @@ generated text.
 scrollback is navigable but whose typing belongs at the prompt — a point policy, not an edit
 refusal), but the tutorial's prose no longer needs a `:post-key` skeleton comparison: the
 buffer refuses the damaging edit itself, on every path.
+
+## ADR-220 — The JIT backend is a contract, and the decisions about lowering live above it
+
+**Status:** implemented (2026-08-11), unconditional, no behaviour change. Plan and the wider
+five-item session roadmap in [`backend-seams.md`](backend-seams.md).
+
+**Context.** "Can we swap the JIT?" had a better answer than expected and a worse one than it
+looked. Better: Cranelift is named in **7 backend files / 128 references**, all under
+`eval/compile/jit_lower*` plus the module owner in `jit/mod.rs`; `eval/compile/ir.rs` is
+Cranelift-free; and the production invocation surface is **two places** in `jit_runtime.rs`
+(three calls — the background one chooses between the plain and inlined lowering).
+The IR was already the seam. Worse: what a backend must satisfy existed only as prose spread
+across `docs/jit-tier2.md` and `docs/jit-optimizing-tier.md`, enforced by nothing but tests
+passing — and the decisions about *whether* an arm should be lowered sat interleaved with
+Cranelift builder calls inside `jit_lower.rs`.
+
+That second half is the real hazard of a swap. Re-implementing codegen is mechanical. Re-deriving
+the *decisions* means re-paying for each measurement session behind them: the call-mediated
+profitability gate exists because lowering the boxed-call shape regressed `nbody` 15–20%;
+`inst_allocates_hot` is narrower than `inst_may_allocate` because including the table ops cost
+`sieve` 6%; `jit_spill_reserve` is liveness-driven because a hardcoded `1` made a two-call
+recursion bail. None of that is legible from the code that benefits from it.
+
+**Decision.** Two moves, neither touching generated code.
+
+1. **A contract.** `trait JitBackend` (`jit/backend.rs`) with the two lowering entry points, and
+   six obligations documented on it: the input (`CompiledArm` + slot tags), the output ABI
+   (`extern "C" fn(*mut Heap, i64) -> i64`, result boxed into `roots[base]`), the outcome codes,
+   the `brood_rt_*` table as the *only* heap/GC interface, roots-only value discipline (no `Value`
+   in a register across a safepoint), and the epoch guard + `jit_code` sentinels. `jit/mod.rs`
+   splits into `mod` (registry + sentinels), `rt` (the callback table — backend-independent),
+   `backend` (the contract), `cranelift` (`CraneliftBackend`, the module owner + the impl).
+2. **The decisions above it,** in `eval/compile/jit_plan.rs`, in two tiers: frame layout
+   (`jit_spill_reserve`, `jit_ckpt_depth`, `non_tail_call_count`, `chunk_in_jit_subset`) **ungated**,
+   and a `jit_plan::codegen` module gated once on `feature = "jit"` for everything a code generator
+   consults. The profitability gate becomes `plan_general_lowering() -> Result<(), BailReason>`.
+
+**Why this costs nothing at runtime — by construction, not by measurement.** A backend's entire
+output is a `*const u8`; everything after that crosses the obligation-2/3 ABI, which no trait
+participates in. `lower_arm` runs once per arm, on the background compiler thread, behind a
+`Mutex`. `ActiveBackend` is a `#[cfg]`-selected concrete type, so calls are static and
+monomorphic. There is no execution path on which the seam could be measurable, which is why this
+ADR makes no timing claim — a benchmark here would be measuring noise.
+
+**Why the two tiers, and not one ungated module.** The first `--no-default-features` build
+answered this: six decisions have no caller without a backend. But `jit_spill_reserve` and
+`jit_ckpt_depth` describe *frame layout*, which the VM applies whether or not a JIT exists — and
+they had been paying for that ambiguity. Each was defined **twice** (real version inside jit-gated
+`jit_lower`, zero/`None` stub in `compile/mod.rs`), and `jit_lower` *also* carried
+`#[cfg(not(feature = "jit"))]` copies that could never compile at all, since the module they sit
+in only exists when the feature is on. Four definitions, two unreachable; one each now.
+
+**Amended the same day — the trait was not yet the whole surface.** A review found
+`jit_runtime.rs`, the backend-*independent* tiering glue, reaching around `JitBackend` **four
+times** into `jit_lower/i64.rs` (the Cranelift backend's unboxed-scalar submodule) to ask whether
+an arm was on the register worker — calls a second backend would have found meaningless. Three
+**tiering advisories** now carry those questions: `may_adopt_shared_code` (may this arm adopt a
+peer process's published code?), `declines_inline_upgrade` (is your small native already better
+than the boxed depth-2 upgrade?), and `note_depth_bail` (outcome 5 — you ran out of native stack).
+
+They are **associated functions, not methods**, because tiering consults the first two per
+activation and `&self` would mean taking the `GLOBAL_JIT` lock on that path — a lock that is
+uncontended only because the background compiler is its sole taker. The price is that
+`JitBackend` is no longer object-safe; that is recorded on the trait, with the instruction to
+split the advisories into a static-only trait rather than make them methods if runtime backend
+selection is ever wanted. Each has a default, so a backend with no special strategies implements
+none of them.
+
+This also corrected a **factual error in obligation 3**: it listed outcomes 0–4 and omitted **5**,
+the depth bail — the very outcome `note_depth_bail` services. A backend written against the
+contract as first published would not have known to return it.
+
+Guarded by `tiering_advisories_route_to_the_predicate_they_name`. It exists because the two
+Cranelift predicates are easy to confuse — `arm_i64_too_deep` (has this fn been demoted?) versus
+`arm_i64_eligible` (does it take the worker?) — and **either swap compiles and passes every other
+test in the tree**: the shared-code path would quietly stop adopting peers' code, or a demoted
+function would keep taking an inline upgrade it must not have. Only the pair of assertions
+separates them, and both directions were verified by sabotage.
+
+**What was deliberately not built.** No `LoweringPlan` struct — the plan doc predicted one and the
+code disproved it. `jit_lower_arm` makes exactly two choices before delegating, and the *order*
+between them is load-bearing, so a value bundling both would invite the failure below. No
+`name()` on the trait, no capability query, no second backend. Per ADR-011 an additive feature
+costs nothing to defer, and here a shape with no reader would actively mislead.
+
+**The failure this surfaced, which no existing gate could see.** The first version of the hoist
+consulted the profitability gate *before* trying the unboxed-scalar register path. The gate's
+predicate — a named `defn`, ≥1 non-tail call, no inline vector op, no self-tail loop — describes
+`fib`/`pfib` precisely, i.e. the arms that path wins biggest on. They would have stopped lowering
+and fallen back to the VM: **correct**, so the JIT≡VM differential stays 40/40 and `make test`
+stays 974/974. Only a benchmark would have moved.
+
+And it would not have been caught by inspection either, because `jit_lower/i64.rs` emitted **no
+`[jit-ir]` line at all** — the scalar-register path was invisible to the one tool CLAUDE.md points
+at for "did this arm ever lower?", where absence is the documented signal. Both are fixed: the
+scalar path reports (`scalar-register: i64|f64`), the dump-flag read is shared, and the ordering
+carries a comment in both `jit_lower_arm` and `plan_general_lowering` saying what breaks if it is
+swapped.
+
+**Consequence: a new gate.** `scripts/jit-lower-witness.sh` runs 13 benchmark rows under
+`BROOD_JIT_DUMP_IR=1` and prints the sorted set of arm fingerprints — `(name, ckpt/strategy,
+opcode sequence)`. The *count* is unusable: installation is asynchronous, so a marginal arm may or
+may not land before the program exits (±2 measured on a 78-lowering sweep). The *set* is
+deterministic — byte-identical across three passes before any change. Any restructuring of the JIT
+should diff it, because it is the only gate that observes an arm quietly ceasing to lower.
+
+**Validation.** Per increment: `cargo test --features jit --test jit` **40/40**, and 40/40 again
+under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; `make test` **974/974** for item 1 and again for
+item 2; `make test-both`; `cargo check --workspace --no-default-features`; clippy `-D warnings`
+over all targets and all features; rustfmt. The witness: **empty diff** for item 1, and **0
+removed / 2 added** for item 2, the additions being `fib` and `pfib` becoming visible for the
+first time. `BROOD_JIT_BAIL_TRACE=1` corroborated the gate's own comment on its first run,
+naming `nbody`'s `advance` plus the prelude macro-expansion arms (`match-count-sym`,
+`match-compile`, `append`, `cond`) that the comment cites as the reason named `defn`s keep the
+gate verbatim.
+
+**Verified after the fact, because "no behaviour change" is the load-bearing claim.** Every
+hoisted function body was compared against the pre-move original: **9 of 11 byte-identical, and
+the remaining two identical modulo rustfmt reflow** (the extra indent from `mod codegen`
+rewrapped one match arm across lines). Every collapsed engine call site was read against its
+original — `run_on_active_engine` is exactly the `if`/`else` it replaced, and the two sites that
+legitimately differ kept their own dispatch. The `BROOD_VM` truthiness table was re-verified
+behaviourally rather than by reading: `0`/`false`/`off`/`no`/empty select the tree-walker,
+everything else and unset select the bytecode VM, observed through whether any arm tiers at all.

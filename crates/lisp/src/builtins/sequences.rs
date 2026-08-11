@@ -364,7 +364,12 @@ pub(super) fn range_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
         v => return Err(LispError::wrong_type(heap, "%range-reduce", "range", v)),
     };
     // Route the per-element callback through the VM when it's the active engine.
-    let use_vm = crate::eval::compile::vm_enabled();
+    // Exhaustive on purpose: a third `Engine` must decide how its callbacks route rather than
+    // collapsing to `false` and silently tree-walking every element.
+    let use_vm = match crate::eval::compile::active_engine() {
+        crate::eval::compile::Engine::Bytecode => true,
+        crate::eval::compile::Engine::TreeWalker => false,
+    };
     // Primitive-reducer fast path: when `f` is `+`/`*` (directly, or via the
     // prelude wrapper's passthrough arm), fold with the inlined scalar op and
     // never call back into `apply` per element.
@@ -433,7 +438,12 @@ pub(super) fn vector_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
         v => return Err(LispError::wrong_type(heap, "%vector-reduce", "vector", v)),
     };
     let n = heap.vector(vid).len();
-    let use_vm = crate::eval::compile::vm_enabled();
+    // Exhaustive on purpose: a third `Engine` must decide how its callbacks route rather than
+    // collapsing to `false` and silently tree-walking every element.
+    let use_vm = match crate::eval::compile::active_engine() {
+        crate::eval::compile::Engine::Bytecode => true,
+        crate::eval::compile::Engine::TreeWalker => false,
+    };
     // Primitive-reducer fast path: `+`/`*` directly, or through the prelude wrapper's
     // passthrough arm. This is the resolution the vector path never did.
     let prim = crate::eval::compile::reduce_prim_op(heap, f);

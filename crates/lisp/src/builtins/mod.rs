@@ -1702,6 +1702,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         );
         def(
             heap,
+            "vm-stats-reset",
+            Arity::exact(0),
+            Sig::nullary(map_ty),
+            vm_stats_reset,
+        );
+        def(
+            heap,
             "gc-collect",
             Arity::exact(0),
             Sig::nullary(map_ty),
@@ -3396,6 +3403,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("mem-limit", &[], "Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT."),
     ("mem-soft-limit", &[], "Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint."),
     ("gc-stats", &[], "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the timing tier) for the caller's own LOCAL heap; :runtime-closures and :runtime-threshold for the *shared* RUNTIME code region (its promoted-closure count + next auto-compact trigger — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (runtime-collect) for the RUNTIME live/reclaimable split."),
+    ("vm-stats-reset", &[], "Zero the VM work-attribution counters, returning :enabled (false without --features perf-stats). The counters are process-global and cumulative FROM PROCESS START, so a snapshot after a short program also counts the runtime's own boot — which is macro-expansion-heavy and defers to the tree-walker (measured: the same program read an 84% defer rate cold-cache and 0.8% warm). Zero first when measuring a region; `(perf/measure thunk)` packages that."),
     ("vm-stats", &[], "A snapshot map of VM work-attribution counters (the perf-stats feature). :enabled is false unless the binary was built with --features perf-stats; when true, process-global cumulative totals: :vm-apply (closure activations), :tail-call/:self-tail (trampoline iterations), :tw-defer (tree-walker fallbacks), :call-ic-hit/:call-ic-miss, :global-ic-hit/:global-ic-miss, :prim2-inline/:prim2-fallback, :prim1-inline/:prim1-fallback, :env-get/:env-hops (lookups + chain frames walked), :alloc (LOCAL allocations). Tells you whether the VM is dispatch-, env-, or alloc-bound. A counting tool, not a timing one — read times from the benches (docs/benchmarking.md)."),
     ("gc-collect", &[], "Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded."),
     ("hibernate", &[], "Tell the runtime this process is about to idle for a long time: collect, shrink its heap slabs and root vectors, and drop its inline caches and compiled-body cache. Returns the bytes of slab capacity released. Erlang's erlang:hibernate/3 (minus the continuation argument — Brood processes resume from their receive). Use it in a process that will wait a long while (a pooled connection, an idle session actor) — it trades a one-off cache rebuild on the next call for a substantially smaller idle footprint. Do NOT use it in a request loop: dropping the caches per park costs message-heavy code 12-26%, which is exactly why this is an explicit call and not automatic."),
@@ -3730,7 +3738,12 @@ mod primitive_docs_tests {
             .filter(|n| {
                 !matches!(
                     *n,
-                    "gc-collect" | "gc-stats" | "gc-trace" | "runtime-collect" | "vm-stats"
+                    "gc-collect"
+                        | "gc-stats"
+                        | "gc-trace"
+                        | "runtime-collect"
+                        | "vm-stats"
+                        | "vm-stats-reset"
                 )
             })
             .collect();

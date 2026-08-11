@@ -35,34 +35,73 @@ use crate::core::value::{
 };
 use crate::error::{LispError, LispResult, Pos};
 
-thread_local! {
-    /// Per-thread engine override for the differential test harness (and any tool
-    /// that wants to pin the engine): `Some(true)` forces the VM, `Some(false)` the
-    /// tree-walker, `None` defers to the cached `BROOD_VM`/default choice. Checked
-    /// before the cache so it wins; only a top-level form consults it, so the cost
-    /// is negligible. See [`set_forced_engine`].
-    static FORCED_ENGINE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+/// Which engine executes a form.
+///
+/// Both live in every binary, which is what makes the differential harnesses possible —
+/// `make test-both`, `tests/differential.rs`, `tests/gabriel_engines.rs` and the `eval`
+/// benches all run the *same* process through each. That harness, not this enum, is the real
+/// asset: adding an engine is cheap here because there is already a conformance suite to hold
+/// a new one to (`docs/backend-seams.md` §4).
+///
+/// **What this enum does not abstract.** `eval/compile/ir.rs` — `Node`, `Inst`, `Chunk`,
+/// `CompiledArm` — is shared by both engines, by the JIT, *and* by the deopt/journal protocol.
+/// So a third engine means replacing `exec_chunk.rs` + `vm_run_bc.rs` (~2 kLOC) while keeping
+/// that IR: a register VM, threaded code, or computed-goto dispatch all fit; a different IR
+/// does not. Adding one is a variant here, a `run` implementation, and inclusion in the
+/// differential — the selector was never what coupled an engine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Engine {
+    /// The tree-walking evaluator (`eval::eval`). Retained as the differential reference and
+    /// the `BROOD_VM=0` escape hatch; ~10× slower, and a top-level `receive` blocks its
+    /// worker (`vm_run_bc`'s carve-out). A debug engine, not a production path.
+    TreeWalker,
+    /// The closure-compiling bytecode VM (ADR-076 Stage 3) — the default, and the engine the
+    /// JIT tiers *within*.
+    Bytecode,
 }
 
-/// Force (or clear) the execution engine for the current thread, overriding
-/// `BROOD_VM` and the build default — lets one process run a form through *both*
-/// engines (the differential harness, `crates/lisp/tests/differential.rs`).
-/// `Some(true)` = VM, `Some(false)` = tree-walker, `None` = default.
-pub fn set_forced_engine(choice: Option<bool>) {
+impl Engine {
+    /// Every engine, in the order harnesses should present them: the default first, the
+    /// reference last. `crates/lisp/benches/eval.rs` builds its engine × size grid from this, so
+    /// a new variant gets benchmark rows without touching each `#[divan::bench]`.
+    pub const ALL: &'static [Engine] = &[Engine::Bytecode, Engine::TreeWalker];
+
+    /// Short label for benchmark rows and traces. Stable: `scripts/bench_ratio.py` reads these
+    /// out of divan's arg column, and `docs/benchmarking.md` quotes them.
+    pub const fn short(self) -> &'static str {
+        match self {
+            Engine::Bytecode => "Vm",
+            Engine::TreeWalker => "Tw",
+        }
+    }
+}
+
+thread_local! {
+    /// Per-thread engine override for the differential harnesses (and any tool that wants to
+    /// pin the engine); `None` defers to the cached `BROOD_VM`/default choice. Checked before
+    /// the cache so it wins; only a top-level form consults it, so the cost is negligible.
+    /// See [`set_forced_engine`].
+    static FORCED_ENGINE: std::cell::Cell<Option<Engine>> = const { std::cell::Cell::new(None) };
+}
+
+/// Force (or clear) the execution engine for the current thread, overriding `BROOD_VM` and the
+/// build default — this is what lets one process run a form through *every* engine
+/// (`crates/lisp/tests/differential.rs`). `None` restores the default.
+pub fn set_forced_engine(choice: Option<Engine>) {
     FORCED_ENGINE.with(|c| c.set(choice));
 }
 
-/// Is the compiling VM enabled? A per-thread [`set_forced_engine`] override wins;
-/// otherwise **the VM is the default engine** (ADR-076 Stage 3 cutover): every build
-/// runs it unless `BROOD_VM` is set to a falsy value (`0`/`false`/`off`/`no`/empty),
-/// which forces the tree-walker — the one-env-var escape hatch retained for at least
-/// one release. Any other `BROOD_VM` value (or none) selects the VM. The env/default
-/// choice is read once and cached; it can't change mid-run, but the override can.
-pub fn vm_enabled() -> bool {
+/// The engine this thread runs top-level forms on. A per-thread [`set_forced_engine`] override
+/// wins; otherwise **[`Engine::Bytecode`] is the default** (ADR-076 Stage 3 cutover): every
+/// build runs it unless `BROOD_VM` is set to a falsy value (`0`/`false`/`off`/`no`/empty),
+/// which selects [`Engine::TreeWalker`] — the one-env-var escape hatch retained for at least
+/// one release. Any other `BROOD_VM` value (or none) selects the VM. The env/default choice is
+/// read once and cached; it can't change mid-run, but the override can.
+pub fn active_engine() -> Engine {
     if let Some(forced) = FORCED_ENGINE.with(|c| c.get()) {
         return forced;
     }
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
     fn truthy(v: &str) -> bool {
         !matches!(
             v.trim().to_ascii_lowercase().as_str(),
@@ -70,9 +109,28 @@ pub fn vm_enabled() -> bool {
         )
     }
     *ON.get_or_init(|| match std::env::var("BROOD_VM") {
-        Ok(v) => truthy(&v), // explicit override (BROOD_VM=0 → tree-walker)
-        Err(_) => true,      // VM is the default engine
+        // An explicit `BROOD_VM=0` selects the tree-walker.
+        Ok(v) if !truthy(&v) => Engine::TreeWalker,
+        _ => Engine::Bytecode,
     })
+}
+
+/// Run one already-macro-expanded **top-level** form on the active engine.
+///
+/// The engine choice for a top-level form lives here and nowhere else. Three call sites
+/// (`eval`/`load` in `builtins/system.rs`, `Interp::eval_str` in `lib.rs`) had this exact
+/// `if`/`else` inline, so a third [`Engine`] would have meant finding all of them; now it means
+/// adding an arm to one `match`. The two sites that legitimately differ keep their own dispatch:
+/// `eval/mod.rs`'s top-level `def` (its VM branch tags the error with the RHS's position) and
+/// `vm_run_bc`'s tree-walker carve-out (an inverse check that hands the *whole* form over).
+///
+/// `compile::run` itself falls back to the tree-walker per form for anything outside the VM's
+/// vocabulary, so [`Engine::Bytecode`] is never a restriction on what can be evaluated.
+pub(crate) fn run_on_active_engine(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
+    match active_engine() {
+        Engine::Bytecode => run(heap, form, env),
+        Engine::TreeWalker => crate::eval::eval(heap, form, env),
+    }
 }
 
 /// "This `Node::Call` has no call-site inline cache" — the callee isn't a free
@@ -2496,7 +2554,7 @@ pub(crate) enum VmOutcome {
 }
 
 /// Compile-then-run a resolved top-level `form` — the VM entry the form loops use
-/// when `vm_enabled()`. A form built from the core vocabulary runs on the VM (an
+/// under [`Engine::Bytecode`]. A form built from the core vocabulary runs on the VM (an
 /// empty lexical scope: no locals at top level); anything else defers to the
 /// tree-walker. `env` is the process's global/root env.
 pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
@@ -2633,32 +2691,29 @@ pub fn apply_value(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId) 
 /// `isolate`); NOT for the `apply` builtin itself — that needs the TW's inline
 /// `apply`-unfolding trampoline for O(1)-stack `(apply f …)`-driven tail recursion.
 pub fn apply_engine(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId) -> LispResult {
-    if vm_enabled() {
-        apply_value(heap, callee, args, genv)
-    } else {
-        crate::eval::apply(heap, callee, args, genv)
+    match active_engine() {
+        Engine::Bytecode => apply_value(heap, callee, args, genv),
+        Engine::TreeWalker => crate::eval::apply(heap, callee, args, genv),
     }
 }
+
+// The backend-independent lowering decisions. **Not** gated on `feature = "jit"`: the frame
+// layout two of them describe (`jit_spill_reserve`, `jit_ckpt_depth`) is what the VM sizes
+// frames by, JIT or no JIT, and the rest is analysis any consumer may want to read without a
+// backend present. This is why the `#[cfg(not(feature = "jit"))]` stubs that used to live here
+// are gone rather than moved — there is one definition now, and it always compiles.
+mod jit_plan;
+use jit_plan::{jit_ckpt_depth, jit_spill_reserve};
 
 #[cfg(feature = "jit")]
 mod jit_lower;
 #[cfg(feature = "jit")]
-use jit_lower::jit_ckpt_depth;
+pub(crate) use jit_lower::{jit_lower_arm, jit_lower_inlined_arm};
+// Reached by `jit::cranelift`'s `JitBackend` tiering advisories, which is the only way the
+// tiering glue is allowed to ask "have I demoted this fn off the register worker?" — it used to
+// call straight into the Cranelift backend's i64 submodule (ADR-220's one remaining hole).
 #[cfg(feature = "jit")]
-pub(crate) use jit_lower::{jit_lower_arm, jit_lower_inlined_arm, jit_spill_reserve};
-// When JIT is disabled, provide zero stubs so callers don't need cfg guards.
-#[cfg(not(feature = "jit"))]
-fn jit_spill_reserve(_code: &[Inst]) -> usize {
-    0
-}
-#[cfg(not(feature = "jit"))]
-fn jit_ckpt_depth(
-    _code: &[Inst],
-    _self_name: Option<Symbol>,
-    _self_arity: Option<usize>,
-) -> Option<usize> {
-    None
-}
+pub(crate) use jit_lower::{arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep};
 
 #[test]
 fn test_inst_size() {

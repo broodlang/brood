@@ -5,24 +5,85 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-10 (the spawn-live + publish session)**, brood 0.3.9. Tree is **clean and
-pushed**; `main` and `origin/main` agree at `853afe6f`. **`nest format --check` fails on 12
-`.blsp` files** — pre-existing, not CI-gated, left alone deliberately: reformatting whole files
-is a judgement call, not a drive-by.
+**As of 2026-08-11 (the backend-seam session)**, brood 0.3.9. The working tree has **all five
+items of `docs/backend-seams.md` applied and UNCOMMITTED** — see "What this session changed"
+below. Last commit is `c0a845a5`. **`nest format --check` fails on 12 `.blsp`
+files** — pre-existing, not CI-gated, left alone deliberately: reformatting whole files is a
+judgement call, not a drive-by.
 
-**The tree is green, on repeated passes** (a single pass is not evidence — see the green-tree
-rule in CLAUDE.md). Across this session's commits: `make test` **974/974** (four separate
-runs), both engines **974/974 + 974/974 = 1948/1948**, and the in-language suite **4517/4517**
-on seven consecutive runs. The `%vector-reduce` work was additionally exercised under
-`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` with allocating reducers — byte-identical results, no
-verifier complaints — because it passes *heap* values as callback arguments where the range
-path only ever passed ints. The GC_STRESS sweep over the seven concurrency binaries and the
-fuzz differential were last run on `afe4bcff` (37/37, and 1650 checks / 0 divergences); they
-have **not** been re-run since, and should be before the next release.
+**Green as of this session's work:** `make test` **974/974**, run separately after item 1, item 2,
+item 3, and items 4–5; `make test-both` **974 + 974 = 1948/1948**; `cargo test --features jit
+--test jit` **40/40** and 40/40 again under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, per item;
+`cargo check --workspace --no-default-features`; clippy `-D warnings` all-targets/all-features;
+rustfmt; `tests/perf_test.blsp` 16/16 on both a counter-armed and an ordinary build. Plus the new
+lowering witness (below), byte-identical.
 
-**What this session changed.** Two `fold` optimisations — `%vector-reduce` (a native counted
-loop for vector folds, which also resolves a passthrough reducer like `+` once instead of per
-element) and testing a vector first in `fold`'s dispatch — worth **−16% CPU on the published
+⚠️ **`nest check` exits 1 at HEAD — pre-existing, and the CI "zero warnings" gate should be red
+on main.** Three advisory warnings: `std/tool/docs.blsp` non-tail recursion (×2) and
+`std/tool/repl.blsp` `%in-ns` nil. CLAUDE.md documents that batch `nest check` exits nonzero on
+*any* warning. Verified against a clean `HEAD` worktree — identical 3 warnings, identical exit 1
+— so this session neither caused nor fixed it. Left alone deliberately (restructuring those two
+functions vs adding a justified opt-out is a judgement call), but it should not stay unnoticed:
+either fix them or the gate is decoration.
+
+**Not re-run this session, and still owed before the next release:** the GC_STRESS sweep over
+the seven concurrency binaries and the fuzz differential, last run on `afe4bcff` (37/37, and
+1650 checks / 0 divergences).
+
+**Previous session (2026-08-10, spawn-live + publish):** `make test` 974/974 four times, both
+engines 1948/1948, in-language suite 4517/4517 on seven consecutive runs.
+
+**What this session changed — and what is left to do with it.** Items **1–2** of
+[`backend-seams.md`](backend-seams.md), recorded as **ADR-220**: a `JitBackend` contract
+(`jit/{mod,backend,rt,cranelift}.rs`) and the backend-independent lowering decisions hoisted into
+`eval/compile/jit_plan.rs`. No generated code changed. **Uncommitted** — the natural split is two
+commits, item 1 then item 2, each with its own gate run already done.
+
+Three things a next session should know before touching this:
+
+1. **`scripts/jit-lower-witness.sh` is the new gate for any JIT restructuring.** It prints the
+   sorted *set* of arm fingerprints from 13 rows under `BROOD_JIT_DUMP_IR=1`. Diff it before and
+   after. The *count* is unusable (installation is async: ±2 on a 78-lowering sweep); the set is
+   deterministic. It is the only gate that observes an arm quietly ceasing to lower — every other
+   gate checks the answer, and the VM's answer is correct too.
+2. **The scalar-register path now reports** (`scalar-register: i64|f64`). It previously emitted no
+   `[jit-ir]` line at all, so `fib`/`pfib` read as never-lowered in the check CLAUDE.md points at,
+   where absence is the documented signal.
+3. **Ordering trap, live in the code with comments on both sides:** `jit_lower_arm` must try the
+   scalar path **before** `jit_plan::codegen::plan_general_lowering`. The gate's predicate
+   describes `fib`/`pfib` exactly, so consulting it first silently drops them to the VM — correct,
+   therefore invisible to `tests/jit.rs` and `make test`. This nearly landed this session.
+
+Items **3–5** also landed. What a next session most needs from them:
+
+- **`make perf-brood` then `(require 'perf) (perf/summary)`** is now the answer to "where does
+  the time go". Use **`(perf/measure thunk)`** for anything narrower than a whole process — the
+  counters are cumulative from process start and boot is expansion-heavy, so the same program
+  read an **84% defer rate cold-cache and 0.8% warm**.
+- **Two things `perf/report` will not tell you, on purpose.** It never concludes `:alloc-bound`
+  (once an arm goes native its iterations stop being counted while its allocations do not — a
+  200k-iteration loop measured `:alloc` 200017 against `:vm-apply` 197), and it refuses to judge
+  a rate resting on under 1000 samples. Both were wrong labels first, then guards.
+- **`brood --debug-flags`** lists the perf-triage flags from the binary.
+- **`make ab --floor`** reports each row's own base-vs-base noise floor and a verdict against it.
+  A *stored* baseline was deliberately not built — absolute ms don't compare across runs or
+  machines, so a committed number would be a false reference. Still an open question.
+- `Engine::ALL` / `Engine::short()` are the seam for a third engine: add a variant and it gets
+  bench rows plus the differential and Gabriel corpus with no harness edits. Note the honest
+  limit, recorded on the enum: `Engine` is **not** a trait, so a third engine means answering the
+  ~7 questions the compiler flags, not implementing an interface.
+- **The `JitBackend` surface is the trait and nothing else, as of the review.** It had four
+  bypasses — `jit_runtime.rs` calling into the Cranelift backend's unboxed-scalar submodule — now
+  three **tiering advisories** (`may_adopt_shared_code`, `declines_inline_upgrade`,
+  `note_depth_bail`). They are *associated functions* on purpose: tiering consults them per
+  activation and `&self` would take the `GLOBAL_JIT` lock there. That makes the trait
+  non-object-safe, which is deliberate and documented. If you add a backend, those three plus the
+  six obligations are the whole contract — and obligation 3 includes outcome **5** (the depth
+  bail), which the first version of the contract omitted.
+
+**Previous session's work (2026-08-10).** Two `fold` optimisations — `%vector-reduce` (a native
+counted loop for vector folds, which also resolves a passthrough reducer like `+` once instead of
+per element) and testing a vector first in `fold`'s dispatch — worth **−16% CPU on the published
 `spawn-live` row**, taking the BEAM gap 2.8× → **2.5×**. `stall_report` fixed to read per-thread
 state, closing KI-38's last loose end. The suite was republished (2026-08-10 run), the
 positioning chart rebuilt to aggregate all 27 comparable rows instead of 11, and a per-row trend

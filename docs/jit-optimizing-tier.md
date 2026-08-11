@@ -17,8 +17,8 @@ is the same shape. The protocol is shared by every Brood→Brood call, so cuttin
 ### What a single non-tail call costs today (the `Inst::Call` lowering, `compile/jit_lower.rs`)
 
 1. **Stage operands** `[callee?, arg0..argc-1]` onto `roots` — **one `brood_rt_push` FFI call per
-   operand** (`compile/jit_lower.rs`; the callback is `jit/mod.rs:410`, a `push_root`).
-2. **`brood_rt_call_slow`** (FFI, `jit/mod.rs:477`) → **`jit_dispatch_call`** (`compile/mod.rs`):
+   operand** (`compile/jit_lower.rs`; the callback is `brood_rt_push` in `jit/rt.rs`).
+2. **`brood_rt_call_slow`** (FFI, `jit/rt.rs`) → **`jit_dispatch_call`** (`compile/mod.rs`):
    the IC probe (`vm_call_ic_fast_link`), `truncate_roots` + `extend_roots_to_nil` to lay out the
    callee frame, env save/restore, `jit_native_depth` bump, `transmute` + call the callee's native
    `fn(*mut Heap, base)`, then outcome handling (0=ok/3=err/1,2,4=deopt-preempt-tail).
@@ -275,7 +275,7 @@ the target is `jit_dispatch_call` + `brood_rt_call_slow` dropping out of the pro
   `jit_dispatch_call` (`mod.rs`, the dispatch to replace/inline), `vm_call_ic_fast_link` /
   `vm_call_ic_probe` (the IC, `core/heap.rs`), `jit_tier`, `chunk_in_jit_subset`, `CompiledArm`
   (`share_key`, `jit_code`, `compile_epoch`).
-- `crates/lisp/src/jit/mod.rs` — `brood_rt_push`/`brood_rt_call_slow`/`brood_rt_roots_base` (the FFI
+- `crates/lisp/src/jit/rt.rs` — `brood_rt_push`/`brood_rt_call_slow`/`brood_rt_roots_base` (the FFI
   callbacks Phase 0/1 remove from the hot path), `Jit::new` (symbol registration).
 - `crates/lisp/src/core/heap.rs` — `RuntimeCode::jit_code_cache` (shared callee code ptrs),
   `global_epoch` (= `runtime.version`, the free deopt guard), `roots` layout (frame setup).

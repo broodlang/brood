@@ -30,7 +30,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 
 - [**Active work**](#active-work--dated-findings--backlogs) — dated findings & backlogs (the
   large, time-ordered section; skim by the `###` sub-headers below)
-  - [Runtime-feature parity](#runtime-feature-parity-program--beam--net--node-2026-07-22) ·
+  - [Backend seams](#backend-seams--swappable-jit--engine--perf-legibility-2026-08-11) ·
+    [Runtime-feature parity](#runtime-feature-parity-program--beam--net--node-2026-07-22) ·
     [Robustness gaps vs BEAM/.NET](#robustness-gaps-vs-beam--net-2026-07-18-runtime-survey) ·
     [Elixir-parity perf gaps](#elixir-parity-performance-gaps-2026-07-12-refreshed-2026-07-18) ·
     [Stability backlog](#stability-backlog-2026-07-10) ·
@@ -54,6 +55,105 @@ protocol on abilities** (read half done), **std-library breadth** (no markdown/W
 and **observability**. See "What's next — by area".
 
 ## Active work — dated findings & backlogs
+
+### Backend seams — swappable JIT / engine + perf legibility (2026-08-11)
+
+**Status: all five items landed (2026-08-11; items 1–2 are ADR-220).** Full plan and the
+plan-vs-reality corrections:
+[`docs/backend-seams.md`](docs/backend-seams.md). Structural session, deliberately
+chosen over a compute lever because the cheap end of the compute frontier is mined out (see
+[VM & JIT](#vm--jit)'s at-rest status) while every remaining lever is a multi-session redesign —
+and because the biggest of them (the X-register call convention) is a rewrite of exactly the
+call protocol this work makes explicit.
+
+Starting position, all in-code facts: Cranelift is confined to **7 backend files / 128
+references** (~6.4 kLOC under `eval/compile/jit_lower*` plus the module owner in `jit/mod.rs`);
+`ir.rs` is Cranelift-free, so **the IR is already the seam**; the production invocation surface
+is **two places** in `jit_runtime.rs` (three calls — the background one picks between the plain
+and inlined lowering). What is missing is not decoupling but a
+*compile-checked contract* — the six obligations a backend must satisfy exist only as prose
+across `jit-tier2.md` / `jit-optimizing-tier.md`.
+
+- ✅ **1. `trait JitBackend` + `CraneliftBackend`** — **done 2026-08-11** (ADR-220). `jit/mod.rs`
+  split into `mod`/`backend`/`rt`/`cranelift`: the `brood_rt_*` table (backend-independent ABI)
+  apart from the Cranelift module owner, with six obligations documented on the trait.
+  `ActiveBackend` is a `#[cfg]`-selected type alias, so dispatch stays static. Perf-neutral by
+  construction, not by measurement: the backend's whole output is a `*const u8` and `lower_arm`
+  runs once per arm on the background compiler thread behind a `Mutex`, so no execution path
+  touches it. Dropped as speculative (ADR-011): a `name()` with no caller.
+  - ✅ **Amended after review:** the trait was not the whole surface — `jit_runtime.rs` reached
+    around it **four times** into the Cranelift backend's unboxed-scalar submodule. Now three
+    **tiering advisories** (`may_adopt_shared_code`, `declines_inline_upgrade`,
+    `note_depth_bail`), deliberately *associated functions* so consulting them per activation
+    costs no `GLOBAL_JIT` lock (the price: the trait is no longer object-safe, recorded on it).
+    Also fixed a real error in obligation 3, which omitted outcome **5** (the depth bail) — the
+    outcome one of the advisories exists to service. Guarded by a sabotage-verified test, because
+    the two Cranelift predicates it delegates to are easy to swap and either swap passes every
+    other test in the tree. The lowering stays
+  under `eval/compile/jit_lower*` — it reads `compile`'s private IR — which is now documented
+  rather than incidental.
+- ✅ **2. Hoist the decisions into `eval/compile/jit_plan.rs`** — **done 2026-08-11** (ADR-220);
+  the valuable half. The cut was contiguous (`jit_lower.rs` 98–662), itself evidence the code was
+  already logically layered. **Two tiers**: frame layout (`jit_spill_reserve`, `jit_ckpt_depth`,
+  `non_tail_call_count`, `chunk_in_jit_subset`) ungated, because the VM sizes frames with or
+  without a backend; a `jit_plan::codegen` module gated once for everything a code generator
+  consults. **Four definitions became two** — the two frame-layout helpers were each defined
+  twice, and `jit_lower` also carried `#[cfg(not(feature = "jit"))]` copies that could never
+  compile. The profitability gate is now `plan_general_lowering() -> Result<(), BailReason>` with
+  `BROOD_JIT_BAIL_TRACE=1` naming refusals. **No `LoweringPlan` struct**: the plan predicted one
+  and the code disproved it — the entry point makes two choices and the order between them is
+  load-bearing, so bundling them would invite the bug below.
+  - ⚠️ **The trap this surfaced, and the blind spot behind it.** The first version consulted the
+    gate *before* the unboxed-scalar path, whose predicate describes `fib`/`pfib` exactly. They
+    would have silently stopped lowering — still correct on the VM, so the differential stayed
+    40/40 and `make test` 974/974; **only a benchmark would have moved**. Nor was it visible by
+    inspection: `jit_lower/i64.rs` emitted **no `[jit-ir]` line at all**, so the scalar path was
+    invisible to the tool CLAUDE.md points at for "did this arm ever lower?", where absence is the
+    documented signal. Both fixed (the path reports `scalar-register: i64|f64`), and
+    **`scripts/jit-lower-witness.sh`** is the new gate: the sorted *set* of arm fingerprints, not
+    the count (installation is async — ±2 on a 78-lowering sweep — while the set is deterministic).
+    Item 1 diffed empty; item 2 was 0 removed / 2 added, the additions being `fib` and `pfib`
+    becoming visible for the first time.
+- ✅ **3. `enum Engine`** — **done 2026-08-11.** `bool` → `TreeWalker`/`Bytecode`;
+  `vm_enabled()` → `active_engine()`. The generalization that matters is **`Engine::ALL`** +
+  **`Engine::short()`**: `benches/eval.rs` had its own local `Eng { Vm, Tw }` and
+  `tests/{differential,gabriel_engines}.rs` each hardcoded the pair — all three now iterate
+  `Engine::ALL`, so a new engine gets bench rows and inherits the differential + the Gabriel
+  corpus untouched, and `bench_ratio.py` (a two-engine regex by construction) reports every
+  engine as its own column. Seven `vm_enabled()` sites became one `run_on_active_engine` (three
+  were byte-identical) plus exhaustive `match`es where they genuinely differ — so a third engine
+  cannot silently collapse to "not the VM" and tree-walk. Honest limit documented on the enum:
+  `ir.rs` is shared by both engines, the JIT *and* the deopt/journal protocol, so "swap the VM"
+  means replacing `exec_chunk.rs` + `vm_run_bc.rs` (~2 kLOC) while keeping that IR.
+  - 📌 Corrected a wrong claim in `docs/benchmarking.md` en route: it said `(Vm, N)`/`(Tw, N)`
+    appear as *neighbouring* rows. Divan sorts rows by label, so they never did; the property
+    that makes the ratio load-robust is *one process*, and `bench_ratio.py` pairs by
+    `(bench, size)` regardless of print order.
+- ✅ **4. One-command perf triage** — **done 2026-08-11.** `make perf-brood` (counter-armed
+  build, `release-brood`'s flags + `perf-stats`, so they cannot drift from what it is compared
+  against); **`std/tool/perf.blsp`** — `(perf/report)` / `(perf/summary)` carrying
+  `docs/benchmarking.md` §2's dispatch-/env-/alloc-bound rules, where a ratio is **nil, not
+  zero**, without samples and a non-perf-stats binary yields `:no-data` with a hint rather than
+  a claim; and **`brood --debug-flags`** (`crates/lisp/src/debug_flags.rs`), the `BROOD_*`
+  catalogue grouped for triage, with a test asserting every catalogued name still exists in the
+  source so a rename cannot leave a line telling you to set something the runtime ignores.
+- ✅ **5. Perf verdict against a measured noise floor** — **done 2026-08-11**, with one part
+  deliberately not built. `scripts/ab-bench.sh --json <path>` emits machine-readable rows;
+  `--floor` measures each row's own base-vs-base spread and the `verdict` column calls a
+  regression only when the delta clears `max(5%, 2 × floor)` — CLAUDE.md's own prescription,
+  which exists because a +5.3% "confirmed" regression was a baseline that had wandered ~10%
+  across a day (the same change read +0.9% against a +0.5% floor).
+  - ⛔ **The committed baseline keyed by release tag was NOT built, on purpose.** Absolute ms
+    drift 10–20% between runs here and do not compare across machines at all, so a stored
+    number would be a false reference inviting exactly the comparison this repo already knows
+    is invalid. Left as an open question rather than shipped misleading. Still not a blocking
+    CI gate: per-row drift would make a hard threshold a flake generator.
+
+Gate for 1–2 is the **full JIT gate every increment** despite both being behaviour-preserving
+(moving-GC codegen: "it only moved code" is the claim that needs checking, not asserting), plus
+an identical `BROOD_JIT_DUMP_IR` compile count before/after — the sharpest witness that the
+decisions moved without changing. Non-goals: no second backend, no third engine, no change to
+generated code or to any of the hoisted decisions.
 
 ### Syntax review — ✅ COMPLETE (2026-07-26)
 
@@ -1377,6 +1477,13 @@ Runtime housekeeping (both items landed):
 > and JIT Stage 4 (no-go — gated off in production, below). The VM+JIT is in good
 > shape; further compute-perf work is high-effort/capped-payoff. Reopen only for a
 > concrete need (e.g. closure-arm inlining if a real workload demands it).
+>
+> **The structural work this at-rest state argues for is IN PROGRESS (2026-08-11)** — see
+> [Backend seams](#backend-seams--swappable-jit--engine--perf-legibility-2026-08-11) and
+> [`docs/backend-seams.md`](docs/backend-seams.md). It changes no generated code: it makes the
+> backend contract compile-checked and hoists the bail/profitability decisions above it, so the
+> one remaining redesign-class lever (the X-register call convention) has an interface to be
+> checked against.
 
 - ✅ **The `let`-self-ref `send` divergence no longer reproduces** (verified
   2026-07-19): a `let`-bound self-recursive closure sent to a pid is rejected with
