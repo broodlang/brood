@@ -669,3 +669,18 @@
     (assert= *project-kind* :app)
     (project :name "a-lib")
     (assert= *project-kind* :library)))
+
+;; enhancers-in — the general discovery over ANY package dir (not just _deps): the runtime
+;; host's user-package dir uses it directly.
+(describe "enhancers-in — plugins under an arbitrary dir"
+  (test "finds satisfied bedit enhancers directly under a dir (no _deps layer)"
+    (let (dir (temp-dir "brood-enhancer-"))
+      (make-dir (path-join dir "good"))
+      (spit (path-join (path-join dir "good") "project.blsp")
+        "(project :name \"good\" :version \"1.0.0\" :enhances {bedit \">= 0.1\"})")
+      (make-dir (path-join dir "plain"))
+      (spit (path-join (path-join dir "plain") "project.blsp")
+        "(project :name \"plain\" :version \"1.0.0\")")
+      (assert= (enhancers-in dir "bedit" "0.1.0") ["good"])))
+  (test "[] for a dir that doesn't exist"
+    (assert= (enhancers-in "/no/such/pkgdir" "bedit" "1.0.0") [])))
