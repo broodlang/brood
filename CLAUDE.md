@@ -136,7 +136,7 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                  - exec_chunk.rs — the bytecode interpreter inner loop
                  - vm_run_bc.rs — the outer VM trampoline (tail-call loop, frame save/restore)
                  - inline.rs — Node→Node optimizer passes (linmap rewrite, self/leaf inlining)
-                 - jit_plan.rs — backend-INDEPENDENT lowering decisions (ADR-220): frame
+                 - jit_plan.rs — backend-INDEPENDENT lowering decisions (ADR-221): frame
                    layout (jit_spill_reserve/jit_ckpt_depth, ungated — the VM sizes frames
                    with or without a JIT) + a `codegen` submodule, gated once, for the
                    subset rule, the profitability gate (plan_general_lowering/BailReason),

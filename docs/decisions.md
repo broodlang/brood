@@ -14717,7 +14717,52 @@ scrollback is navigable but whose typing belongs at the prompt — a point polic
 refusal), but the tutorial's prose no longer needs a `:post-key` skeleton comparison: the
 buffer refuses the damaging edit itself, on every path.
 
-## ADR-220 — The JIT backend is a contract, and the decisions about lowering live above it
+## ADR-220 — Standard-library module names are reserved package names
+
+**Status:** accepted **and implemented**, 2026-08-11. Extends ADR-070 (package-rooted
+namespaces) and ADR-166 (reserved *function* names).
+
+**Context.** Package-rooted namespaces (ADR-070) auto-root every dependency's and the root
+project's modules under a package prefix — dep `foo`'s `(defmodule b)` becomes `foo/b`. The
+standard library is the one thing that loads with *no* package context, so its modules keep
+short, bare names (`json`, `set`, `text`, `net/tcp`, `proc/gen`). That is the intended Elixir
+shape — the stdlib owns the premium short names, like `Enum`/`String` — but Elixir enforces it
+only by *convention* (nothing stops a library defining `Enum`; it silently collides). Two gaps
+remained here: (1) a dependency or project *named after a stdlib group prefix* reproduces a
+baked-in namespace exactly — a package called `net` provides `net/tcp`, the same symbols as the
+stdlib module (a genuine clobber); and (2) even a non-colliding stdlib name (a package `json`
+providing `json/parser`) squats the stdlib's prefix and confuses readers.
+
+**Decision.** A package — a dependency **or** the root project — **may not take a name the
+standard library owns**. The reserved set is the first path segment of every module baked into
+the binary (`(builtin-modules)`): `net`/`proc` (which own `net/…`,`proc/…`), plus the flat
+modules `json`, `set`, `text`, `test`, and the rest. One predicate, `reserved-package-name?`
+(std/prelude.blsp, derived from `(builtin-modules)` so it can never drift from what is actually
+baked in), backs **three enforcement layers**:
+
+1. **`nest new`** (scaffold) — refuses a reserved project name up front.
+2. **`nest publish`** — refuses to publish a project whose `:name` is reserved (the registry
+   gate; the authoritative "you can't publish a package named `Enum`").
+3. **Load time** (`require-force-package`, the package-load path) — refuses a rooted module
+   whose package prefix is reserved, *before* the file is opened. This is the deepest net: it
+   catches a `:path`/`:git` dependency that never went through the registry, and a resolution
+   guard (`package-guard-reserved-names`) additionally fails such a dep fast at
+   `nest fetch`/`add`.
+
+**Rationale.** This makes the stdlib-name reservation **mechanically enforced**, not merely
+conventional — stronger than Elixir. Because everything but the stdlib auto-roots (ADR-070), a
+bare top-level module name now belongs to the standard library *by construction*, and the
+three layers guarantee nothing else can quietly take one. Deriving the reserved set from
+`(builtin-modules)` means adding or removing a std module updates the reservation automatically.
+
+**Consequences.** No language-surface change and no call-site change. A dependency author who
+picked a stdlib name must rename (surfaced loudly at add/publish/load, with the owned namespace
+named). The reservation is *name-level* (the whole prefix), broader than the exact-collision it
+strictly needs to prevent — a deliberate ADR-011 choice: a simple, explainable rule ("a package
+can't be named after a stdlib module") beats a narrow one that still permits confusing names.
+Relaxing a reservation later (freeing a name) is safe; *adding* one is the breaking direction —
+the same asymmetry ADR-166 records for function names.
+## ADR-221 — The JIT backend is a contract, and the decisions about lowering live above it
 
 **Status:** implemented (2026-08-11), unconditional, no behaviour change. Plan and the wider
 five-item session roadmap in [`backend-seams.md`](backend-seams.md).

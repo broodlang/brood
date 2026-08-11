@@ -6,7 +6,7 @@
 > a claim wrong, and the corrections are the most useful part of the file.
 >
 > Nothing here changes generated code or runtime behaviour: it changes *where the decisions
-> live* and *how legible the machine is*. Items 1–2 are recorded as **ADR-220**; the narrative
+> live* and *how legible the machine is*. Items 1–2 are recorded as **ADR-221**; the narrative
 > and the gate results are in `docs/devlog.md`.
 
 ## 0. Why structure and not compute, today

@@ -58,7 +58,7 @@ and **observability**. See "What's next — by area".
 
 ### Backend seams — swappable JIT / engine + perf legibility (2026-08-11)
 
-**Status: all five items landed (2026-08-11; items 1–2 are ADR-220).** Full plan and the
+**Status: all five items landed (2026-08-11; items 1–2 are ADR-221).** Full plan and the
 plan-vs-reality corrections:
 [`docs/backend-seams.md`](docs/backend-seams.md). Structural session, deliberately
 chosen over a compute lever because the cheap end of the compute frontier is mined out (see
@@ -74,7 +74,7 @@ and inlined lowering). What is missing is not decoupling but a
 *compile-checked contract* — the six obligations a backend must satisfy exist only as prose
 across `jit-tier2.md` / `jit-optimizing-tier.md`.
 
-- ✅ **1. `trait JitBackend` + `CraneliftBackend`** — **done 2026-08-11** (ADR-220). `jit/mod.rs`
+- ✅ **1. `trait JitBackend` + `CraneliftBackend`** — **done 2026-08-11** (ADR-221). `jit/mod.rs`
   split into `mod`/`backend`/`rt`/`cranelift`: the `brood_rt_*` table (backend-independent ABI)
   apart from the Cranelift module owner, with six obligations documented on the trait.
   `ActiveBackend` is a `#[cfg]`-selected type alias, so dispatch stays static. Perf-neutral by
@@ -92,7 +92,7 @@ across `jit-tier2.md` / `jit-optimizing-tier.md`.
     other test in the tree. The lowering stays
   under `eval/compile/jit_lower*` — it reads `compile`'s private IR — which is now documented
   rather than incidental.
-- ✅ **2. Hoist the decisions into `eval/compile/jit_plan.rs`** — **done 2026-08-11** (ADR-220);
+- ✅ **2. Hoist the decisions into `eval/compile/jit_plan.rs`** — **done 2026-08-11** (ADR-221);
   the valuable half. The cut was contiguous (`jit_lower.rs` 98–662), itself evidence the code was
   already logically layered. **Two tiers**: frame layout (`jit_spill_reserve`, `jit_ckpt_depth`,
   `non_tail_call_count`, `chunk_in_jit_subset`) ungated, because the VM sizes frames with or

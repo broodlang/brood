@@ -1202,9 +1202,29 @@ sha256 pin still holds."
           seen
           (package-provided-modules dir))))))
 
-;; The guard the verbs share: reject any cross-provider module-name collision.
+;; A dependency may not be NAMED after a standard-library module (ADR-070/166): its
+;; name becomes a load-time package prefix, so a dep called `net` would provide `net/tcp`
+;; — the baked-in module — and even a stdlib name that would not collide (`json`, `set`)
+;; is a trap. Reject at resolution so a `:path`/`:git`/registry dep fails fast at
+;; `nest fetch`/`add`, not only when its module is first `require`d (`reserved-package-name?`
+;; is the same predicate the load-time and publish guards use).
+(defn- package-guard-reserved-names
+  (entries)
+  (fold (fn (_ e)
+          (when (reserved-package-name? (get e :name))
+            (error "package: dependency '"
+              (name (get e :name))
+              "' is named after a standard-library module — the stdlib owns the '"
+              (name (get e :name))
+              "' namespace, so this dependency cannot be used until its author renames it")))
+    nil
+    entries))
+
+;; The guard the verbs share: reject a dep named after the stdlib, then any
+;; cross-provider module-name collision.
 (defn- package-guard-collisions
   (root entries)
+  (package-guard-reserved-names entries)
   (package-check-namespace-collisions (package-collision-sources root entries)))
 
 ;; --- the lock file -----------------------------------------------------------
@@ -1875,6 +1895,12 @@ published is refused. Backs `nest publish`."
                           (let (base (registry-base-for index)
                                 token (registry-token))
                             (when (nil? *project-name*) (error "package: project has no :name"))
+                            (when (reserved-package-name? *project-name*)
+                              (error "package: cannot publish — the project name '"
+                                *project-name*
+                                "' is reserved by the standard library (it owns the '"
+                                *project-name*
+                                "' module namespace); rename the project"))
                             (when (nil? *project-version*)
                               (error "package: nothing to publish — the project has no :version"))
                             (when (or (nil? token) (= token ""))

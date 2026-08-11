@@ -4957,6 +4957,24 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
             (error "require: cannot find module '" key "'"))))
     key))
 
+;; A package (dependency or root project) may not take a name the standard library
+;; already owns. Its name becomes a load-time package prefix (ADR-070), so a package
+;; called `net` would provide `net/tcp` — exactly the baked-in module — and even where
+;; the rooted names would not collide, a package sharing a stdlib name (`json`, `set`,
+;; `test`) is a trap. The reserved set is the first path segment of every module baked
+;; into this binary (`(builtin-modules)`). Enforced in THREE layers: at `nest new`
+;; (scaffold) and `nest publish` (package.blsp), and here at LOAD time so a `:path`/`:git`
+;; dependency that never went through the registry is refused all the same (ADR-166 kin).
+(defn reserved-package-name?
+  (nm)
+  "True if package name `nm` (a symbol or string) is reserved by the standard library —
+its first segment names a module baked into this binary, so a package taking it would
+root its own modules onto stdlib namespaces. Backs the `nest new` / `nest publish` /
+load-time (`require`) guards."
+  (let (seg (first (string-split (name nm) "/"))
+        owned (distinct (map (fn (m) (first (string-split m "/"))) (builtin-modules))))
+    (includes? owned seg)))
+
 ;; Load a dependency module file `path` under package `key`'s context (ADR-070): set
 ;; the active prefix + intra-package module set so the file's `%in-ns`/`(:use …)`
 ;; root, load it, then RESTORE the enclosing context on both the normal and error
@@ -4964,15 +4982,22 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 ;; prefix is the rooted key's first segment (package local names are single-segment).
 (defn- require-force-package
   (key path)
-  (let (prefix (symbol (first (string-split key "/")))
-        modules (get *package-modules-of* (name prefix))
-        prev (%set-package-context prefix modules))
-    (try
-      (do (load path) (provide key))
-      (catch e
-        (do (%set-package-context (first prev) (second prev)) (throw e))))
-    (%set-package-context (first prev) (second prev))
-    key))
+  (let (prefix (symbol (first (string-split key "/"))))
+    ;; Refuse a package whose name the standard library owns, BEFORE touching the
+    ;; ambient context — a `:path`/`:git`/registry dep (or a root project) named after
+    ;; a baked-in module would silently root its modules onto stdlib namespaces.
+    (when (reserved-package-name? prefix)
+      (error "require: package '" (name prefix) "' is reserved by the standard library "
+        "(it owns the '" (name prefix) "' module namespace) — a package cannot take this "
+        "name; rename the package"))
+    (let (modules (get *package-modules-of* (name prefix))
+          prev (%set-package-context prefix modules))
+      (try
+        (do (load path) (provide key))
+        (catch e
+          (do (%set-package-context (first prev) (second prev)) (throw e))))
+      (%set-package-context (first prev) (second prev))
+      key)))
 
 ;; Wait (5ms ticks, ~`n` of them) for another process's in-flight load of `key`;
 ;; if it never completes — the loader died or its load threw, leaving a stale

@@ -328,6 +328,36 @@ direction*), deferred until the editor's multi-author plugin ecosystem makes it
 pay. It's a loader-level change that won't churn package source, so deferring it
 is nearly free.
 
+### Reserved names — you can't name a package after the stdlib (ADR-220)
+
+The standard library owns its short module names — `json`, `set`, `text`, `test`,
+and the group prefixes `net` (which owns `net/tcp`, `net/http`, …) and `proc`
+(`proc/gen`, `proc/supervisor`, …). A package — a dependency **or** your own
+project — **may not take one of these names**. Its name becomes a load-time package
+prefix, so a package called `net` would provide `net/tcp` — exactly the baked-in
+module — and even a non-colliding stdlib name (`json` providing `json/parser`)
+squats the stdlib's prefix. This is the Elixir "you can't name your app `Enum`"
+rule, but enforced mechanically rather than by convention.
+
+The reserved set is derived from `(builtin-modules)` (so it tracks whatever is baked
+into your `brood`), and three layers enforce it:
+
+- `nest new` refuses a reserved project name.
+- `nest publish` refuses to publish a project whose `:name` is reserved.
+- `require` refuses a rooted module under a reserved prefix at **load time** — so a
+  `:path`/`:git` dependency that never went through the registry is caught too, and
+  `nest fetch`/`add` fails such a dep fast at resolution:
+
+```
+$ nest fetch
+error: package: dependency 'net' is named after a standard-library module — the
+  stdlib owns the 'net' namespace, so this dependency cannot be used until its
+  author renames it
+```
+
+The fix is to rename the package. `(reserved-package-name? 'name)` answers the check
+directly.
+
 ## `*load-path*` integration
 
 `project-setup` (in `std/tool/project.blsp`) gains an `(ensure-deps)` step that:

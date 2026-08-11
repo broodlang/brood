@@ -17921,13 +17921,37 @@ consumer is hatch's `web/compress`, which now negotiates `br` ahead of `gzip`. T
 `tests/zlib_test.blsp` (round-trip, quality-11 ≤ quality-0, brotli ≤ gzip on text, out-of-range
 raises).
 
+## 2026-08-11 — standard-library module names are reserved package names (ADR-220)
+
+Closed the one gap in the ADR-070 namespace model: the stdlib was the sole un-rooted island
+(its modules keep bare names — `json`, `set`, `net/tcp`), but nothing stopped a dependency or
+project from *taking* one of those names. A dep named `net` provides `net/tcp` — exactly the
+baked-in symbols (a clobber); a dep named `json` squats the `json/…` prefix (confusing). This is
+the Elixir "you can't name your app `Enum`" rule, but enforced mechanically rather than by
+convention.
+
+One predicate, `reserved-package-name?` in `std/prelude.blsp`, derived from `(builtin-modules)`
+(so it tracks whatever is actually baked in — its reserved set is the first path segment of every
+std module: `net`, `proc`, `json`, `set`, `text`, `test`, …). Three enforcement layers share it:
+`nest new` (scaffold refuses the name), `nest publish` (registry gate), and — the layer the user
+asked for so a `:path`/`:git` dep that never touched the registry is still caught — **load time**
+in `require-force-package`, which refuses a rooted module under a reserved prefix before opening
+the file. A resolution-time guard (`package-guard-reserved-names`, folded into the existing
+`package-guard-collisions`) additionally fails such a dep fast at `nest fetch`/`add`.
+`require-force-package` was restructured into nested `let`s so the check runs *before*
+`%set-package-context`, needing no restore on the reject path.
+
+Tests: `tests/namespace_test.blsp` — the predicate (true for `json`/`set`/`net`/`proc`, false for
+ordinary names) and the load-time refusal (a module registered under `set/…` is refused with a
+"reserved" error; an ordinary `greeter/…` prefix passes the guard and fails only to find its
+file). Full suite green (974 passed); `nest check` clean.
 ## 2026-08-11 — the backend seam: a `JitBackend` contract, and the decisions hoisted above it
 
 Structural session, chosen over a compute lever deliberately: the cheap end of the compute
 frontier is mined out (ROADMAP §VM & JIT, at rest since 2026-07-24) and every remaining item is a
 multi-session redesign, while the swappability work was unusually cheap *right now* because the
 layering already almost held. Plan and full rationale in
-[`docs/backend-seams.md`](backend-seams.md); ADR-220 records the seam.
+[`docs/backend-seams.md`](backend-seams.md); ADR-221 records the seam.
 
 **Starting position, measured rather than assumed.** Cranelift is named in 7 backend files /
 128 references; `eval/compile/ir.rs` is Cranelift-free, so the IR was already the seam; the
@@ -17998,7 +18022,7 @@ the no-default-features build is what turned six dead-code warnings into the mod
 
 ## 2026-08-11 (continued) — the engine selector, and three ways a perf report lies
 
-Items 3–5 of [`backend-seams.md`](backend-seams.md), same session as ADR-220's items 1–2.
+Items 3–5 of [`backend-seams.md`](backend-seams.md), same session as ADR-221's items 1–2.
 
 **Item 3 — `enum Engine`.** `bool` → `TreeWalker`/`Bytecode`; `vm_enabled()` →
 `active_engine()`. The part that actually generalizes anything is **`Engine::ALL`** +
@@ -18075,7 +18099,7 @@ functions or add a justified opt-out), but it should not stay unnoticed.
 
 ## 2026-08-11 (review) — the backend contract was not the whole surface
 
-A post-implementation review of the day's work found ADR-220's trait leaking, and the fix is an
+A post-implementation review of the day's work found ADR-221's trait leaking, and the fix is an
 amendment to that ADR rather than a new decision.
 
 **The hole.** `jit_runtime.rs` — the backend-*independent* tiering glue — reached around

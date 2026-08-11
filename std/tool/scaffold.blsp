@@ -918,6 +918,12 @@ test discovery, lints, release, config)."
       (error "new: invalid project name '" nm "' (no '/' or spaces, and not empty)"))
     (when (and in-place (= actual-name ""))
       (error "new: cwd has no basename — cannot derive a project name"))
+    (when (reserved-package-name? actual-name)
+      (error "new: project name '"
+        actual-name
+        "' is reserved by the standard library (it owns the '"
+        actual-name
+        "' module namespace); choose another name"))
     (let (src-dir (path-join nm "src")
           tests-dir (path-join nm "tests")
           docs-dir (path-join nm "docs")
