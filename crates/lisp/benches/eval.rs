@@ -15,38 +15,51 @@
 //! ~7.3 ms on the VM vs ~13 ms on the tree-walker. Don't read a single number as
 //! "the" eval cost without noting which engine row it's on.
 
-use brood::eval::compile::set_forced_engine;
+use brood::eval::compile::{set_forced_engine, Engine};
 use brood::{syntax::reader, Interp};
 
 fn main() {
     divan::main();
 }
 
-/// Which execution engine a benchmark row is pinned to. `Debug` is what divan
-/// prints in the arg column (`Vm` / `Tw`). Since ADR-100 Stage 5 the VM *is* the
-/// bytecode stepping engine (the `Node`-walking executor was retired); `Tw` is the
-/// tree-walker fallback.
-#[derive(Clone, Copy, Debug)]
-enum Eng {
-    Vm,
-    Tw,
+/// A benchmark row's engine, wrapped only to control how divan labels it: `Debug`
+/// prints `Engine::short()` (`Vm` / `Tw`) rather than the variant name, because
+/// `scripts/bench_ratio.py` reads those labels out of the arg column and
+/// `docs/benchmarking.md` quotes them. The engine *identity* is the library's
+/// `Engine` — this file no longer keeps its own list of engines.
+#[derive(Clone, Copy)]
+struct Eng(Engine);
+
+impl std::fmt::Debug for Eng {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.short())
+    }
 }
 
 /// A fresh interpreter with the given engine forced on this thread for the
 /// measured region. `set_forced_engine` takes precedence over the `BROOD_VM`
-/// env default (`compile::vm_enabled`), and divan runs this input setup on the
+/// env default (`compile::active_engine`), and divan runs this input setup on the
 /// same worker thread as the benched closure, so the pin holds through the eval.
 fn interp_on(eng: Eng) -> Interp {
-    set_forced_engine(Some(matches!(eng, Eng::Vm)));
+    set_forced_engine(Some(eng.0));
     Interp::new()
 }
 
-/// `[(Vm, n), (Tw, n)]` for every `n` — the engine × size grid each eval
-/// benchmark iterates, so the two engines sit on adjacent rows per size.
+/// `[(Vm, n), (Tw, n), …]` for every `n` — the engine × size grid each eval
+/// benchmark iterates. Built from `Engine::ALL`, so adding an engine gives every
+/// bench a row for it without editing a single `#[divan::bench]`.
+///
+/// What makes the ratio load-robust is that every engine is measured **in the same
+/// process** (`docs/benchmarking.md` §1 — under load they slow down together), not the
+/// order of this list: divan sorts rows by their printed label, so it controls the
+/// output order regardless of what this emits. `scripts/bench_ratio.py` pairs rows by
+/// `(bench, size)`, so print order does not matter to it either.
 macro_rules! engine_grid {
-    ($($n:expr),+ $(,)?) => {
-        [ $( (Eng::Vm, $n), (Eng::Tw, $n) ),+ ]
-    };
+    ($($n:expr),+ $(,)?) => {{
+        let mut rows = Vec::new();
+        $( for &e in Engine::ALL { rows.push((Eng(e), $n)); } )+
+        rows
+    }};
 }
 
 /// Standing up a fresh interpreter. The prelude is built once per process; this
@@ -101,7 +114,7 @@ fn defseq_map(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 fn reduce_range(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     // `(reduce <named-fn> 0 (range n))` — drives the `%range-reduce` native,
     // which calls the reducer back per element through `apply_value` when
-    // `vm_enabled` (commit `4af9d2a`). A named `defn` reducer is RUNTIME-region
+    // `active_engine` (commit `4af9d2a`). A named `defn` reducer is RUNTIME-region
     // and VM-compiles, so the Vm row shows a clear speedup over the Tw row
     // (~65–67% faster measured at the time of routing).
     let src = format!("(defn rf (a x) (+ a (* x 2))) (reduce rf 0 (range {n}))");

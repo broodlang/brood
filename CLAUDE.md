@@ -136,9 +136,16 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                  - exec_chunk.rs — the bytecode interpreter inner loop
                  - vm_run_bc.rs — the outer VM trampoline (tail-call loop, frame save/restore)
                  - inline.rs — Node→Node optimizer passes (linmap rewrite, self/leaf inlining)
+                 - jit_plan.rs — backend-INDEPENDENT lowering decisions (ADR-220): frame
+                   layout (jit_spill_reserve/jit_ckpt_depth, ungated — the VM sizes frames
+                   with or without a JIT) + a `codegen` submodule, gated once, for the
+                   subset rule, the profitability gate (plan_general_lowering/BailReason),
+                   LICM analysis and the alloc predicates
                  - jit_runtime.rs — JIT tiering glue (feature = "jit")
-                 - jit_lower.rs — jit_lower_arm / jit_lower_arm_inner: Cranelift JIT lowering
-                   (feature = "jit")
+                 - jit_lower.rs — jit_lower_arm / jit_lower_arm_inner: the Cranelift
+                   lowering, i.e. `jit::JitBackend`'s implementation (feature = "jit").
+                   Lives under `compile/` rather than `jit/` because it reads compile's
+                   private IR; it decides nothing — see jit_plan.rs
                macros.rs (quasiquote, macroexpand, the compile pass + pattern lowering)
   types/       mod.rs (Ty/GradualTy set-theoretic lattice), check.rs + check/
                (advisory checker)
@@ -166,7 +173,14 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   treesit.rs   tree-sitter integration for the editor highlighter (std/editor/treesit.blsp)
   bundle.rs    single-binary app bundling (ADR-038); gui.rs the GUI frontend (ADR-046);
                gui_gpu.rs the experimental OpenGL backend; audio.rs `audio-beep`
-  coverage.rs  line-coverage instrumentation (ADR-148); perf.rs/profile.rs VM counters
+  jit/         the JIT's ABI + backend registry (feature = "jit", ADR-101/220):
+               backend.rs (the `JitBackend` contract — six obligations a backend must
+               satisfy), rt.rs (the `brood_rt_*` callback table, the ONLY heap/GC interface
+               native code has — backend-independent), cranelift.rs (`CraneliftBackend`:
+               the Cranelift `JITModule` owner + the impl), mod.rs (sentinels +
+               `ActiveBackend`). The lowering itself is `eval/compile/jit_lower*`
+  coverage.rs  line-coverage instrumentation (ADR-148); perf.rs/profile.rs VM counters;
+               debug_flags.rs the `BROOD_*` catalogue behind `brood --debug-flags`
   error.rs     LispError / LispResult / source Pos
   lib.rs       the `Interp` entry point; bundles std/prelude.blsp
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
@@ -178,6 +192,8 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          prelude.blsp + ~30 bare-core modules (io, file, set, regex,
                          json, format, task, log, version, resolver, crypto, hash, csv,
                          datetime, encoding, url, uuid, template, stream, …); the
+                         perf-triage module `std/tool/perf.blsp` (`perf/report`,
+                         `perf/summary`, `perf/measure` — DEV); the
                          editor/display framework `std/editor/*` (buffer, display, ui,
                          keymap, face, highlight, lineedit, pane, layers, ansi, serve);
                          the process framework `std/proc/*` (`gen`, `supervisor`,
@@ -228,8 +244,24 @@ cargo run -p nest -- new foo      # scaffold a new project
 make ab BASE=<ref>                # A/B the working tree vs a git ref on the benchmark rows
 ```
 
+**Reading where the time goes: `make perf-brood`, then `(perf/summary)`.** The counters are a
+cargo feature, so an ordinary (or installed) binary cannot attribute at all — `make perf-brood`
+is that build, with `release-brood`'s exact flags plus `perf-stats` so it cannot drift from what
+you compare it against. `(require 'perf)` then gives `(perf/report)` (a map), `(perf/summary)`
+(printed), and **`(perf/measure thunk)`** — use the last one for anything narrower than a whole
+process: the counters are cumulative from process start, and boot is expansion-heavy, so the
+same program read an **84% tree-walker defer rate on a cold boot cache and 0.8% on a warm one**.
+`(vm-stats-reset)` is the primitive underneath. Two things `perf/report` deliberately will not
+tell you: it never concludes `:alloc-bound` (once an arm goes native its iterations stop being
+counted while its allocations do not — a 200k-iteration loop measured `:alloc` 200017 against
+`:vm-apply` 197), and it refuses to judge any rate resting on under 1000 samples (0 hits of 12
+IC probes is not a 0% hit rate). See `docs/backend-seams.md` §5.
+
 **Measuring a perf change: use `make ab`** (`scripts/ab-bench.sh`), don't hand-roll
-it. It builds the baseline ref in a throwaway worktree and the working tree
+it. Add **`--floor`** when a row moves by only a few percent: it runs the baseline twice and
+reports that row's own base-vs-base spread, and the `verdict` column then calls a regression
+only when the delta clears `max(5%, 2 x floor)` — the discipline described further down, applied
+automatically. **`--json <path>`** writes the sweep as machine-readable rows. It builds the baseline ref in a throwaway worktree and the working tree
 through the *same* `make release-brood` target, so profile and features cannot
 drift between the two sides; then it warms each binary's build-id-keyed boot
 cache, pins with `taskset`, and reports best-of-N per row against
@@ -344,8 +376,10 @@ contention races).
 | `BROOD_RT_GC_FLOOR=<count>` | Threshold floor (RUNTIME closures) for reclaiming the shared code region — single-process compaction when uniquely owned, else the unconditional 2-generation collector (ADR-091; default 4096). The shared-region counterpart of `BROOD_GC_FLOOR`. |
 | `BROOD_TRACE_COMPILE=1` | Name every closure the VM **bytecode-compiles**, with its cache key and body region (`[compile] id_region=… key=Body(…) body=…`). The question it answers: is a compiled body being *reused*? A key repeated once per process means the shared cache is missing — which is exactly how ADR-215 was found (100 154 compiles for 100 000 spawned processes, 8.1 µs each). Works in release; compiles are rare once sharing works, so the check is free. |
 | `BROOD_NO_SHARED_ARMS=1` | **Opt-OUT** of runtime-shared compiled code (ADR-175 + ADR-215): every process compiles its own copy of every closure it calls, as before. The A/B lever and the bisect switch for a suspected stale-shared-arm fault; `spawn-live` costs 25% more CPU and 14% more RSS with it set. |
+| `brood --debug-flags` | Not a flag — **the list of them.** Prints the performance-triage subset of this table (grouped: attribution / JIT / optimizer opt-outs / GC / scheduler / engine), from `crates/lisp/src/debug_flags.rs`, with a dependency's flags marked `[not brood's]`. Exists because this table is the only place the flags were documented and it does not ship in the binary. A test asserts every catalogued name still exists in the source, so a rename cannot leave a line telling you to set something the runtime ignores. |
 | `BROOD_PERF_STATS=1` | Dump the VM work-attribution counters (`(vm-stats)`) to stderr after a file/`--test` run — closure activations, IC hit/miss, prim inline/fallback, env-chain hops, allocs, defers — **plus the `ns_*` TIMING accumulators** (`perf_time!`: spawn, deliver, message copy in/out, receive, matcher resolve, teardown, and one scheduler quantum, which nests the rest). **Needs `--features perf-stats`** (else prints a hint; both compile to nothing by default). The counts answer "how much work"; the `ns_*` shares answer "**where**" — read shares of `ns_quantum`, not a sum, and confirm any winner with a counter-free A/B, since the atomics perturb timing. See `docs/benchmarking.md`. |
-| `BROOD_JIT_DUMP_IR=1` | Dump each fully-lowered JIT arm's **bytecode opcode fingerprint + Cranelift CLIF** to stderr (`[jit-ir]` lines), for diagnosing a JIT miscompile — read the IR, diff against the intended semantics. **Needs `--features jit`**; only fires for arms that lower (a bailed arm never reaches the dump). Run a *targeted* program to limit which arms compile. |
+| `BROOD_JIT_DUMP_IR=1` | Dump each fully-lowered JIT arm's **bytecode opcode fingerprint + Cranelift CLIF** to stderr (`[jit-ir]` lines), for diagnosing a JIT miscompile — read the IR, diff against the intended semantics. **Needs `--features jit`**; only fires for arms that lower (a bailed arm never reaches the dump — pair with `BROOD_JIT_BAIL_TRACE` for the refusals). Run a *targeted* program to limit which arms compile. Since 2026-08-11 the **scalar-register worker reports too** (`scalar-register: i64\|f64` in place of `ckpt_slot:`, no CLIF — its IR is built and finalized in one pass): it previously emitted nothing, so `fib`/`pfib` — the arms it wins biggest on — read as never-lowered here, and an arm that stopped taking that path was invisible to every gate but a benchmark. |
+| `BROOD_JIT_BAIL_TRACE=1` | Name each arm the **profitability gate refuses** (`[jit-bail] arm=<name> reason=call-mediated-boxed`, `jit_plan::plan_general_lowering`). The complement of `BROOD_JIT_DUMP_IR`: that tool shows what lowered, so a refusal was only ever visible as *absence* — indistinguishable from an arm that was never hot or never tried. Reach for it when a row is slower than expected and you want to know whether the hot arm was rejected on purpose. **Needs `--features jit`**; one cached `var_os` when off. |
 | `BROOD_NO_INLINE=1` | **Opt-OUT** of the JIT recursive self-inliner (Phase B, `docs/jit-optimizing-tier.md` §6b) — now **default ON** via two-stage tiering (devlog 2026-06-17: dual-body + per-engine frame sizing + a deferred lower-priority inlined upgrade, so the VM keeps the small body and short-lived workloads stay on the small native — fib ~1.7×, spawn/bintree/nqueens flat). Set it to fall back to the small-native-only baseline (the A/B lever). **Needs `--features jit`**; `BROOD_INLINE_DBG=1` traces which arms qualify to inline. |
 | `BROOD_NO_PARTIAL_LEAF=1` | **Opt-OUT** of **partial** leaf splicing (ADR-210) — default ON since 2026-08-03. A derivation may keep a **residual non-tail call** beside the spliced leaves, because the leaf-spliced layout now carries its own deopt checkpoint and a deopt resumes in the *spliced* chunk (`ir::LeafInline::resume`). Before this, one un-spliceable callee blocked inlining of every small callee beside it — `mandelbrot`'s `->float` next to the recursive `esc`. Set it to revert to all-or-nothing splicing: the A/B lever, the bisect lever, and the stopgap if a duplicated effect is ever suspected — which is why it has a switch at all, since that failure mode is a silently *repeated* effect, not a crash. Guarded by `tests/jit_effect_once_test.blsp` cases 5–6 (verified by sabotage: no journal → the loop case counts 50 179 of 50 000). **Needs `--features jit`**. |
 | `BROOD_NO_LEAF_INLINE=1` | **Opt-OUT** of the JIT leaf-callee inliner (Phase 2, `docs/jit-optimizing-tier.md`) — **default ON since 2026-07-19** (boot/`require`/`nest check`/suite/benchmark rows measured flat; scalar-helper loops ~30%, type-predicate dispatch a further ~8% on top of the `type-of` prim). Set it to disable the splice (the A/B / bisect lever, the leaf sibling of `BROOD_NO_INLINE`). **Needs `--features jit`**; `BROOD_INLINE_DBG=1` traces leaf derivations too. |

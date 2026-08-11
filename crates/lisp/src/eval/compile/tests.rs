@@ -394,7 +394,7 @@ fn jit_lowers_and_runs_a_straight_line_int_arm() {
         leaf: None,
     };
 
-    let mut jit = crate::jit::Jit::new();
+    let mut jit = crate::jit::CraneliftBackend::new();
     let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("straight-line int arm should JIT");
     let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
@@ -479,7 +479,7 @@ fn jit_lowers_and_runs_an_if_with_comparison() {
         leaf: None,
     };
 
-    let mut jit = crate::jit::Jit::new();
+    let mut jit = crate::jit::CraneliftBackend::new();
     let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("if/cmp arm should JIT");
     let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
@@ -574,7 +574,7 @@ fn jit_lowers_and_runs_a_self_recursive_int_loop() {
         leaf: None,
     };
 
-    let mut jit = crate::jit::Jit::new();
+    let mut jit = crate::jit::CraneliftBackend::new();
     let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("self-recursive int loop should JIT");
     let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
@@ -713,7 +713,7 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         #[cfg(feature = "jit")]
         leaf: None,
     };
-    let mut jit = crate::jit::Jit::new();
+    let mut jit = crate::jit::CraneliftBackend::new();
     assert!(
         jit_lower_arm(&mut jit, &arm, &[]).is_some(),
         "an arm ending in a computed-callee tail call (past the body-weight gate) must lower"
@@ -950,7 +950,7 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         #[cfg(feature = "jit")]
         leaf: None,
     };
-    let mut jit = crate::jit::Jit::new();
+    let mut jit = crate::jit::CraneliftBackend::new();
 
     // (a) sumto with the REAL fused shape: `(< i 1)`/`(- i 1)` → Prim2SlotInt,
     // `(+ acc i)` → Prim2SlotSlot. i = slot0, acc = slot1.
@@ -1598,4 +1598,104 @@ fn ki26_shape_check_admits_everything_the_flag_form_did() {
             }
         }
     }
+}
+
+/// The three `JitBackend` tiering advisories must route to the predicate they name.
+///
+/// This is the guard for ADR-220's one remaining hole: `jit_runtime.rs` used to call straight
+/// into the Cranelift backend's unboxed-scalar submodule, and routing those calls through the
+/// trait means a delegation could now be wired to the *wrong* one of two similar predicates —
+/// `arm_i64_too_deep` (has this fn been demoted?) versus `arm_i64_eligible` (does it take the
+/// register worker?). Either swap compiles and passes every other test in the tree: the shared
+/// -code path would just quietly stop adopting peers' code, or a demoted function would keep
+/// taking an inline upgrade it must not have. Only the *pair* of assertions separates them.
+#[cfg(feature = "jit")]
+#[test]
+fn tiering_advisories_route_to_the_predicate_they_name() {
+    use crate::jit::{ActiveBackend, JitBackend};
+
+    // A name of its own: `note_depth_bail` writes a process-global, monotonic set, so a shared
+    // name would leak into (or from) another test in this binary.
+    let name = value::intern("advisory-probe-fn-adr220");
+    let chunk = Chunk {
+        code: vec![
+            Inst::Local(0),
+            Inst::Const(ConstVal::new(Value::int(1))),
+            Inst::Prim2 {
+                op: PrimOp::Add,
+                map: [0, 1],
+                head: value::intern("+"),
+                guard: AtomicU64::new(0),
+                pos: None,
+            },
+        ],
+    };
+    let arm = CompiledArm {
+        nrequired: 1,
+        noptional: 0,
+        optional_defaults: Box::new([]),
+        rest_slot: None,
+        nslots: 1,
+        nsites: 0,
+        ngsites: 0,
+        uid: super::ir::next_arm_uid(),
+        site_pos: Box::new([]),
+        body: Node::Const(ConstVal::new(Value::nil())),
+        chunk: Some(chunk),
+        has_runtime_handles: false,
+        jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+        jit_calls: std::sync::atomic::AtomicU32::new(0),
+        deopt_watch: false,
+        jit_deopts: std::sync::atomic::AtomicU32::new(0),
+        float_globals: std::sync::OnceLock::new(),
+        self_global_ok: std::sync::atomic::AtomicBool::new(false),
+        ckpt_slot: u32::MAX,
+        compile_epoch: std::sync::atomic::AtomicU64::new(0),
+        share_key: None,
+        shared_published: std::sync::atomic::AtomicBool::new(false),
+        fn_name: None,
+        src_file: None,
+        capture_names: Box::new([]),
+        #[cfg(feature = "jit")]
+        inline_name: None,
+        dbg_name: Some(name),
+        #[cfg(feature = "jit")]
+        inline_stride: 0,
+        #[cfg(feature = "jit")]
+        inline_nslots: 0,
+        #[cfg(feature = "jit")]
+        inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+        #[cfg(feature = "jit")]
+        inline_queued: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "jit")]
+        inline_installed: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "jit")]
+        leaf: None,
+    };
+
+    // Nothing demoted yet, so a peer's published code is adoptable...
+    assert!(
+        ActiveBackend::may_adopt_shared_code(&arm),
+        "a fresh arm must be free to adopt shared code"
+    );
+    // ...and this arm is straight-line, not recursive, so it never takes the register worker and
+    // the inline upgrade is never declined for it.
+    assert!(
+        !ActiveBackend::declines_inline_upgrade(&arm),
+        "a non-recursive arm is not scalar-register eligible, so nothing to decline"
+    );
+
+    // Outcome 5: the worker ran out of native stack. Adoption must stop — otherwise the next
+    // activation reinstalls the very wrapper the demotion exists to escape.
+    ActiveBackend::note_depth_bail(name);
+    assert!(
+        !ActiveBackend::may_adopt_shared_code(&arm),
+        "after a depth bail this fn must not adopt shared (possibly register-worker) code"
+    );
+    // And the *other* advisory must be unmoved by it — wiring it to the depth-bail set instead
+    // of to eligibility is exactly the mistake this test exists to catch.
+    assert!(
+        !ActiveBackend::declines_inline_upgrade(&arm),
+        "declines_inline_upgrade keys on scalar eligibility, not on the depth-bail set"
+    );
 }

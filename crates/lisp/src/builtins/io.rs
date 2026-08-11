@@ -354,6 +354,24 @@ pub(super) fn vm_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.map_from_pairs(pairs))
 }
 
+/// `(vm-stats-reset)` — zero the work-attribution counters, returning `:enabled`.
+///
+/// The counters are **process-global and cumulative from process start**, so a snapshot
+/// taken after a short program includes the runtime's own boot work — and boot is
+/// macro-expansion-heavy, which defers to the tree-walker. Measured: the same
+/// list-building program read an 84% defer rate on a cold boot cache and 0.8% on a warm
+/// one, purely from whether expansion ran. Anything measuring a *region* rather than a
+/// whole process must zero first; `(perf/measure thunk)` in `std/tool/perf.blsp` is that,
+/// packaged.
+///
+/// A no-op returning `:enabled false` without `--features perf-stats`, like `(vm-stats)`.
+#[cfg(feature = "dev-tools")]
+pub(super) fn vm_stats_reset(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    crate::perf::reset();
+    let enabled = crate::perf::snapshot().is_some();
+    Ok(heap.map_from_pairs(vec![(value::kw("enabled"), Value::boolean(enabled))]))
+}
+
 /// `(runtime-collect)` — compact the shared RUNTIME code region now (reclaim
 /// superseded hot-reload versions), returning `{:before :after :reclaimed :ran}`.
 /// `:ran` is false (and nothing changes) when the runtime is shared with another

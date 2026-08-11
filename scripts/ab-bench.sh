@@ -16,6 +16,8 @@
 #   scripts/ab-bench.sh -a /path/to/other-brood   # A/B a binary you already built
 #   scripts/ab-bench.sh --all                  # every row (slow)
 #   scripts/ab-bench.sh --list                 # show available rows
+#   scripts/ab-bench.sh --floor fib nbody      # + each row's own noise floor + a verdict
+#   scripts/ab-bench.sh --json /tmp/ab.json    # + machine-readable rows
 #
 # Env: BROOD_BENCH_DIR (default ../brood-benchmarks), AB_PIN_CPU (default 2).
 #
@@ -45,6 +47,19 @@
 # few percent of thermal/cache drift on a row (2026-07-27: persistent-map read
 # +3.7% in a sweep and 82 vs 81 ms when measured directly). If a row moves by
 # only a few percent and you care, re-run that row alone before believing it.
+#
+# `--floor` is that caveat made measurable: it runs the BASELINE binary twice per row and
+# reports the base-vs-base spread, so a delta is read against that row's own noise rather
+# than against a fixed 5%. It exists because a +5.3% "confirmed" regression (2026-07-29)
+# was a baseline that had wandered ~10% across the day — the same change measured +0.9%
+# against a +0.5% floor, i.e. neutral. A `verdict` column reports regressed/improved/noise
+# on that basis. Costs one extra timed pass per row, hence opt-in.
+#
+# What this script deliberately does NOT do is compare against a *stored* baseline of
+# absolute times. Absolute ms drift 10-20% between runs on this box and do not compare
+# across machines at all (see the note above and docs/benchmarking.md §1), so a committed
+# number would be a false reference. The comparison has to be against a binary built here,
+# now, from the same target — which is what the worktree build exists for.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -79,6 +94,8 @@ while [ $# -gt 0 ]; do
     -n|--reps)    reps="${2:?-n needs a count}"; shift 2 ;;
     -a|--against) prebuilt_base="${2:?-a needs a path to a brood binary}"; shift 2 ;;
     --allow-same) allow_same=1; shift ;;
+    --json)       json_out="${2:?--json needs a path}"; shift 2 ;;
+    --floor)      measure_floor=1; shift ;;
     --all)        rows=(ALL); shift ;;
     --list)       ls "$bench_dir/bench/brood/" | sed 's/\.blsp$//' | tr '\n' ' '; echo; exit 0 ;;
     -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
@@ -116,6 +133,16 @@ rows=("${kept[@]}")
 # A row that blocks forever would otherwise be timed rather than failed, so bound each
 # run. Generous: the slowest row (`ring`) is ~0.8s and a cold JIT adds to the first.
 timeout_s="${AB_TIMEOUT:-120}"
+
+# `--json <path>`: also write the sweep as JSON, so a tool (or an LLM) reads rows instead of
+# re-parsing the human table. `--floor`: measure each row's own NOISE FLOOR by running the
+# baseline binary TWICE and taking the base-vs-base spread — the method CLAUDE.md prescribes
+# after a +5.3% "confirmed regression" turned out to be a baseline that had wandered ~10%
+# across the day. Without a floor, a delta is a number with no scale; with one, the verdict
+# below only calls a regression when the delta clears a couple of multiples of it. Opt-in
+# because it costs one extra timed pass per row.
+json_out="${json_out:-}"
+measure_floor="${measure_floor:-0}"
 
 # ---- build side A (baseline) ----------------------------------------------
 if [ -n "$prebuilt_base" ]; then
@@ -181,10 +208,16 @@ best_of() { # $1 binary  $2 program  $3 cpu spec -> best wall ms
 
 printf 'ab-bench: base=%s  new=working tree  reps=best-of-%s  pin=cpu%s\n\n' \
   "$base_desc" "$reps" "$pin_cpu" >&2
-printf '%-16s %9s %9s %9s\n' row base new delta
-printf '%-16s %9s %9s %9s\n' ---------------- --------- --------- ---------
+if [ "$measure_floor" -eq 1 ]; then
+  printf '%-16s %9s %9s %9s %9s %-10s\n' row base new delta floor verdict
+  printf '%-16s %9s %9s %9s %9s %-10s\n' ---------------- --------- --------- --------- --------- ----------
+else
+  printf '%-16s %9s %9s %9s\n' row base new delta
+  printf '%-16s %9s %9s %9s\n' ---------------- --------- --------- ---------
+fi
 
 regressed=0
+json_rows=()
 for r in "${rows[@]}"; do
   prog="$bench_dir/bench/brood/$r.blsp"
   case "$parallel_rows" in *" $r "*) cpus="$all_cpus" ;; *) cpus="$pin_cpu" ;; esac
@@ -196,13 +229,45 @@ for r in "${rows[@]}"; do
   timeout "$timeout_s" taskset -c "$cpus" "$new_bin"  "$prog" >/dev/null 2>&1 \
     || die "row '$r' did not finish within ${timeout_s}s on the working tree" 
   b=$(best_of "$base_bin" "$prog" "$cpus")
+  # The floor pass runs the SAME binary again, between the two sides, so it samples the
+  # same thermal/cache window the comparison does.
+  if [ "$measure_floor" -eq 1 ]; then
+    b2=$(best_of "$base_bin" "$prog" "$cpus")
+    floor=$(awk -v a="$b" -v c="$b2" 'BEGIN{ if (a==0) print 0; else { d=(c-a)*100.0/a; if (d<0) d=-d; printf "%.1f", d } }')
+  else
+    floor=""
+  fi
   n=$(best_of "$new_bin"  "$prog" "$cpus")
-  d=$(awk -v a="$b" -v c="$n" 'BEGIN{ if (a==0) print "n/a"; else printf "%+.1f%%", (c-a)*100.0/a }')
-  case "$d" in
-    +[5-9].*%|+[1-9][0-9]*.*%) regressed=1 ;;
-  esac
-  printf '%-16s %7sms %7sms %9s\n' "$r" "$b" "$n" "$d"
+  d_num=$(awk -v a="$b" -v c="$n" 'BEGIN{ if (a==0) print "nan"; else printf "%.1f", (c-a)*100.0/a }')
+  d=$(awk -v x="$d_num" 'BEGIN{ if (x=="nan") print "n/a"; else printf "%+.1f%%", x }')
+  # Verdict: a regression must clear 5% AND — when a floor was measured — twice that row's
+  # own noise. "Don't report a regression whose size is within a couple of multiples of the
+  # floor you haven't measured" (CLAUDE.md).
+  verdict=$(awk -v x="$d_num" -v f="${floor:--1}" 'BEGIN{
+    if (x=="nan") { print "unknown"; exit }
+    lim = 5.0; if (f >= 0 && 2*f > lim) lim = 2*f;
+    if (x >= lim) print "regressed"; else if (x <= -lim) print "improved"; else print "noise";
+  }')
+  [ "$verdict" = "regressed" ] && regressed=1
+  if [ -n "$floor" ]; then
+    printf '%-16s %7sms %7sms %9s %8s%% %-10s\n' "$r" "$b" "$n" "$d" "$floor" "$verdict"
+  else
+    printf '%-16s %7sms %7sms %9s\n' "$r" "$b" "$n" "$d"
+  fi
+  json_rows+=("$(printf '{"row":"%s","base_ms":%s,"new_ms":%s,"delta_pct":%s,"floor_pct":%s,"verdict":"%s"}' \
+    "$r" "$b" "$n" "${d_num/nan/null}" "${floor:-null}" "$verdict")")
 done
+
+if [ -n "$json_out" ]; then
+  { printf '{"base":"%s","reps":%s,"pinned_cpu":"%s","rows":[' "$base_desc" "$reps" "$pin_cpu"
+    for i in "${!json_rows[@]}"; do
+      [ "$i" -gt 0 ] && printf ','
+      printf '%s' "${json_rows[$i]}"
+    done
+    printf ']}\n'
+  } > "$json_out"
+  echo "ab-bench: wrote $json_out" >&2
+fi
 
 echo
 if [ "$regressed" -eq 1 ]; then

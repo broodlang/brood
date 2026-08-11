@@ -35,9 +35,11 @@ pub enum PrimOp {
     // in-bounds case runs inline, and every other shape — non-vector, non-int, or
     // out-of-range — defers to the native `vector-ref` so its bounds error and
     // type errors stay bit-identical. This is the per-element cost of `matmul` and
-    // (through the prelude `nth`) any indexed vector walk. Kept out of the JIT
-    // subset for now (no cranelift lowering yet), so a JIT arm containing it
-    // pre-bails rather than mis-lowering.
+    // (through the prelude `nth`) any indexed vector walk. The JIT lowers it now
+    // (`jit_plan::chunk_in_jit_subset` admits it, and an inline vector read is one of
+    // the two unboxing signals `plan_general_lowering` looks for — it is what rules
+    // `bintree`/`matmul` into the general lowering); the note here previously said the
+    // opposite, from when it was still subset-excluded.
     VectorRef,
     // `max`/`min` (perf): replaces the prelude's variadic fold-over-closure with a
     // single native + JIT-inlined `select` instruction. Eliminates ~2 heap allocs

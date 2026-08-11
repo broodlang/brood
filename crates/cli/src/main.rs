@@ -58,6 +58,12 @@ struct Cli {
     #[arg(long)]
     check: bool,
 
+    /// List the `BROOD_*` diagnostic environment flags used for performance
+    /// triage and A/B, grouped, with one line each. The runtime has ~75 of them
+    /// and knowing which to reach for was only documented outside the binary.
+    #[arg(long)]
+    debug_flags: bool,
+
     /// Cap concurrent spawned processes (0 = unlimited). Useful for bounding
     /// a concurrent test run; see `std/tool/test.blsp`.
     #[arg(
@@ -97,6 +103,12 @@ fn main() {
 }
 
 fn run(cli: Cli) {
+    // Answered before anything else: it is a question about the binary, not a run, so it
+    // must not depend on limits, an Interp, or a file argument being present.
+    if cli.debug_flags {
+        brood::debug_flags::print_catalogue();
+        return;
+    }
     if let Some(n) = cli.max_parallel {
         brood::process::set_max_parallel(n);
     }

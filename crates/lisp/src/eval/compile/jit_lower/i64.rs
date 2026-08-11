@@ -23,6 +23,14 @@ impl Scalar {
             Scalar::Float => cranelift_codegen::ir::types::F64,
         }
     }
+    /// Name for the `BROOD_JIT_DUMP_IR` line, so a reader can tell an `i64` worker from an
+    /// `f64` one without reading the CLIF.
+    fn name(self) -> &'static str {
+        match self {
+            Scalar::Int => "i64",
+            Scalar::Float => "f64",
+        }
+    }
     fn tag(self) -> u8 {
         match self {
             Scalar::Int => crate::core::value::jit_layout::TAG_INT,
@@ -609,7 +617,10 @@ fn lower_i64_cond(
 /// `*ovf`, calls the worker, and either deopts (outcome 1 → VM recomputes with BigInt) if the
 /// sentinel is set, or boxes the `i64` result into `roots[base]` and returns 0 (Done).
 #[cfg(feature = "jit")]
-pub(super) fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*const u8> {
+pub(super) fn jit_lower_i64_arm(
+    jit: &mut crate::jit::CraneliftBackend,
+    arm: &CompiledArm,
+) -> Option<*const u8> {
     use crate::core::value::jit_layout::PAYLOAD_OFFSET;
     use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, InstBuilder, MemFlagsData};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -941,5 +952,33 @@ pub(super) fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) ->
     }
 
     m.finalize_definitions().ok()?;
+    // Report this lowering under `BROOD_JIT_DUMP_IR` like the general path does. It did not,
+    // which made the scalar-register path — `fib`/`pfib`, the JIT's biggest wins — invisible to
+    // the one tool CLAUDE.md points at for "did this arm ever lower?", where absence is the
+    // documented signal. So an arm could stop lowering here with every gate still green: the
+    // JIT differential only proves the *answer* is right, and the VM's answer is right too.
+    // (Exactly the trap `plan_general_lowering`'s ordering note describes.) The `insts:` shape
+    // matches the general dump so one grep covers both; there is no CLIF here because the
+    // worker's IR is built and finalized in one pass rather than kept for a dump.
+    if jit_dump_ir_enabled() {
+        let insts = arm
+            .chunk
+            .as_ref()
+            .map(|c| {
+                c.code
+                    .iter()
+                    .map(inst_opcode_name)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_else(|| "<no chunk>".to_string());
+        eprintln!(
+            "[jit-ir] ===== arm: {} ({}) scalar-register: {} insts: {} =====",
+            arm.chunk.as_ref().map_or(0, |c| c.code.len()),
+            crate::core::value::symbol_name_ref(self_sym),
+            kind.name(),
+            insts
+        );
+    }
     Some(m.get_finalized_function(wrap_id))
 }

@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
-"""Parse `cargo bench --bench eval` (engine-grid) output on stdin and print the
-load-robust VM ÷ tree-walker ratio per workload.
+"""Parse `cargo bench --bench eval` (engine-grid) output on stdin and print each
+engine's load-robust ratio against the reference engine, per workload.
 
-The eval benches pin each row to an engine via `set_forced_engine`, so every
-size N appears as adjacent `(Vm, N)` and `(Tw, N)` rows in the *same* process.
-We pair them and report VM/TW — the metric that survives the machine load that
-wrecks absolute times (see docs/benchmarking.md). Ratio < 1 ⇒ the VM wins.
+The eval benches pin each row to an engine via `set_forced_engine`, so every size N
+appears as *adjacent* rows — `(Vm, N)`, `(Tw, N)`, … — in the same process. Adjacency is
+the point: under load they slow down together, so the ratio holds where the absolute
+times wander (see docs/benchmarking.md §1). Ratio < 1 ⇒ that engine beats the reference.
+
+Engine-agnostic: labels come from `Engine::short()` in
+`crates/lisp/src/eval/compile/mod.rs` and the grid is built from `Engine::ALL`, so a third
+engine shows up here as an extra column without touching this script. `Tw` (the
+tree-walker) is the reference because it is the stable in-process baseline the methodology
+rests on — it is not the engine under test.
 """
 import sys
 import re
 
 TIME = re.compile(r"([\d.]+)\s*(ns|µs|us|ms|s)\b")
-LEAF = re.compile(r"\((Vm|Tw),\s*(\d+)\)")
+# Any engine label the bench emits, not a fixed pair.
+LEAF = re.compile(r"\(([A-Za-z][A-Za-z0-9_]*),\s*(\d+)\)")
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 UNIT = {"ns": 1.0, "µs": 1e3, "us": 1e3, "ms": 1e6, "s": 1e9}
+
+REFERENCE = "Tw"
 
 
 def strip_tree(s: str) -> str:
@@ -44,31 +53,59 @@ def main() -> int:
         if NAME.match(label) and label != "eval" and not TIME.search(s):
             cur = label
 
+    # Every non-reference engine seen anywhere, in first-seen order.
+    engines: list = []
+    for bench in data:
+        for n in data[bench]:
+            for eng in data[bench][n]:
+                if eng != REFERENCE and eng not in engines:
+                    engines.append(eng)
+
     rows = []
     for bench in data:
         for n in sorted(data[bench]):
             e = data[bench][n]
-            if "Vm" in e and "Tw" in e:
-                (vm_s, vm_ns), (tw_s, tw_ns) = e["Vm"], e["Tw"]
-                ratio = vm_ns / tw_ns if tw_ns else float("nan")
-                rows.append((bench, n, tw_s, vm_s, ratio))
+            if REFERENCE not in e:
+                continue
+            ref_s, ref_ns = e[REFERENCE]
+            cells = []
+            for eng in engines:
+                if eng in e:
+                    got_s, got_ns = e[eng]
+                    cells.append((got_s, got_ns / ref_ns if ref_ns else float("nan")))
+                else:
+                    cells.append(("-", None))
+            if any(c[1] is not None for c in cells):
+                rows.append((bench, n, ref_s, cells))
 
     if not rows:
-        print("bench-ratio: no paired (Vm, N)/(Tw, N) rows found in input.", file=sys.stderr)
+        print(
+            f"bench-ratio: no ({REFERENCE}, N) reference rows found in input.",
+            file=sys.stderr,
+        )
         print("  (run on `cargo bench --bench eval` engine-grid output)", file=sys.stderr)
         return 1
 
-    hdr = f"{'bench':<24}{'size':>11}{'tree-walker':>14}{'VM':>14}{'VM/TW':>9}"
+    hdr = f"{'bench':<24}{'size':>11}{'tree-walker':>14}"
+    for eng in engines:
+        hdr += f"{eng:>14}{eng + '/' + REFERENCE:>9}"
     print(hdr)
     print("-" * len(hdr))
-    for bench, n, tw_s, vm_s, ratio in rows:
-        if ratio < 0.98:
-            mark = f"  {(1 - ratio) * 100:.0f}% faster"
-        elif ratio > 1.02:
-            mark = f"  {(ratio - 1) * 100:.0f}% slower"
-        else:
-            mark = "  ~parity"
-        print(f"{bench:<24}{n:>11}{tw_s:>14}{vm_s:>14}{ratio:>9.2f}{mark}")
+    for bench, n, ref_s, cells in rows:
+        line = f"{bench:<24}{n:>11}{ref_s:>14}"
+        notes = []
+        for eng, (got_s, ratio) in zip(engines, cells):
+            if ratio is None:
+                line += f"{got_s:>14}{'-':>9}"
+                continue
+            line += f"{got_s:>14}{ratio:>9.2f}"
+            if ratio < 0.98:
+                notes.append(f"{eng} {(1 - ratio) * 100:.0f}% faster")
+            elif ratio > 1.02:
+                notes.append(f"{eng} {(ratio - 1) * 100:.0f}% slower")
+            else:
+                notes.append(f"{eng} ~parity")
+        print(line + ("  " + ", ".join(notes) if notes else ""))
     return 0
 
 

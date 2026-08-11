@@ -90,7 +90,7 @@ define install_binaries
 endef
 
 .DEFAULT_GOAL := help
-.PHONY: help build release test test-both breakagetests ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
+.PHONY: help build release perf-brood test test-both breakagetests ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -225,6 +225,30 @@ release-brood: ## Build ONLY the `brood` binary into $(RELEASE_DIR) — the perf
 	# package is `cli` (the binary), NOT `-p brood` (the lib) — `-p brood` does not
 	# relink $(RELEASE_DIR)/brood and silently benchmarks a stale binary.
 	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(RUN_FEATURES) $(CARGO_TARGET)
+
+perf-brood: ## Build a counter-armed `brood` into $(RELEASE_DIR) — the attribution build ((perf/report), BROOD_PERF_STATS, BROOD_DEOPT_TRACE)
+	# The VM work-attribution counters are a cargo feature (`perf.rs`), so a normal
+	# binary — including an installed one — cannot answer "where does the time go".
+	# This is that binary, and the reason it is a target rather than a documented
+	# command line: the flags have to match `release-brood`'s exactly except for the
+	# added feature, or you are comparing two different builds.
+	#
+	# Then: `BROOD_PERF_STATS=1 $(RELEASE_DIR)/brood prog.blsp` dumps the counters at
+	# exit, or `(perf/report)` / `(perf/summary)` reads them in-image with the
+	# docs/benchmarking.md §2 interpretation applied. `BROOD_DEOPT_TRACE=1` also needs
+	# this build.
+	#
+	# NOT for timing. The counters are atomics on the hot path, so this binary is the
+	# wrong one to measure *times* with — that is `make ab` / `scripts/bench-ratio.sh`
+	# on a counter-free build. Keeping the two apart is what docs/benchmarking.md is
+	# about; it was written after conflating them cost an afternoon.
+	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli \
+		$(INSTALL_FEATURES) --features brood/perf-stats $(CARGO_TARGET)
+	@echo "counter-armed brood: $(RELEASE_DIR)/brood"
+	@echo "  NOTE this OVERWRITES the same path \`make release-brood\`/\`make ab\` use —"
+	@echo "  re-run \`make release-brood\` before timing anything, or you will time the counters."
+	@echo "  BROOD_PERF_STATS=1 $(RELEASE_DIR)/brood prog.blsp   # dump counters at exit"
+	@echo "  (require 'perf) (perf/summary)                       # in-image triage"
 
 release: release-brood ## Build optimized `brood`, `nest` and `brood-lsp` into $(RELEASE_DIR) (gitignored; does NOT install — ./configure --with-gui first for the window)
 	# Build the configured (./configure) binaries into the local, gitignored

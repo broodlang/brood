@@ -12,7 +12,7 @@
 
 use std::sync::LazyLock;
 
-use brood::eval::compile::set_forced_engine;
+use brood::eval::compile::{set_forced_engine, Engine};
 use brood::Interp;
 
 static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
@@ -24,11 +24,10 @@ static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
 
 /// Evaluate `src` in a fresh interpreter pinned to one engine. `Ok(printed)` or
 /// `Err(message)` — the message alone (engine-independent), not the position, which
-/// is asserted separately in `basic.rs`. `vm = true` is the bytecode VM (the sole VM
-/// executor since ADR-100 Stage 5); `vm = false` is the tree-walker (the reference).
-fn eval_on(src: &str, vm: bool) -> Result<String, String> {
+/// is asserted separately in `basic.rs`.
+fn eval_on(src: &str, engine: Engine) -> Result<String, String> {
     LazyLock::force(&MEM_GUARD);
-    set_forced_engine(Some(vm));
+    set_forced_engine(Some(engine));
     let mut interp = Interp::new();
     let out = match interp.eval_str(src) {
         Ok(v) => Ok(interp.print(v)),
@@ -39,13 +38,23 @@ fn eval_on(src: &str, vm: bool) -> Result<String, String> {
 }
 
 /// Assert the bytecode VM agrees with the reference tree-walker on `src`.
+/// Every engine must agree with the reference. Iterates [`Engine::ALL`] rather than naming a
+/// pair, so a third engine is held to this the moment it exists — the differential is the
+/// asset that makes an engine swappable at all (`docs/backend-seams.md` §4).
 fn agree(src: &str) {
-    let tw = eval_on(src, false);
-    let vm = eval_on(src, true);
-    assert_eq!(
-        tw, vm,
-        "engine divergence on:\n  {src}\n  tree-walker: {tw:?}\n  bytecode VM: {vm:?}"
-    );
+    const REFERENCE: Engine = Engine::TreeWalker;
+    let expected = eval_on(src, REFERENCE);
+    for &engine in Engine::ALL {
+        if engine == REFERENCE {
+            continue;
+        }
+        let got = eval_on(src, engine);
+        assert_eq!(
+            expected, got,
+            "engine divergence on:\n  {src}\n  {REFERENCE:?} (reference): {expected:?}\n  \
+             {engine:?}: {got:?}"
+        );
+    }
 }
 
 /// The corpus — each entry is a self-contained program. Grouped by feature so a
@@ -229,7 +238,7 @@ fn vm_defers_unexpanded_forward_referenced_macro() {
     assert_eq!(
         eval_on(
             "(defn uf (n) (fwm n)) (defmacro fwm (x) `(* ~x 3)) (uf 7)",
-            true
+            Engine::Bytecode
         ),
         Ok("21".to_string()),
     );
@@ -238,18 +247,18 @@ fn vm_defers_unexpanded_forward_referenced_macro() {
     assert_eq!(
         eval_on(
             "(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)",
-            true
+            Engine::Bytecode
         ),
         eval_on(
             "(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)",
-            false
+            Engine::TreeWalker
         ),
     );
     // a macro defined *before* still VM-compiles (we didn't over-defer).
     assert_eq!(
         eval_on(
             "(defmacro em (x) `(+ ~x 1)) (defn ue (n) (em n)) (ue 41)",
-            true
+            Engine::Bytecode
         ),
         Ok("42".to_string()),
     );

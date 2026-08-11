@@ -2602,6 +2602,22 @@ iolist in memory.
   pause, and the most recent one (µs). `:debug-build` is `true` when the binary
   carries debug assertions (i.e. *not* a performance build); `process-info`
   carries the per-process `:collections` count too.
+- `(vm-stats)` returns the VM **work-attribution** counters — `:vm-apply`,
+  `:tail-call`/`:self-tail`, `:tw-defer` (tree-walker fallbacks),
+  `:call-ic-hit`/`:call-ic-miss`, `:global-ic-*`, `:prim1-*`/`:prim2-*`,
+  `:env-get`/`:env-hops`, `:alloc`, `:jit-native`/`:jit-deopt` — answering *where the
+  work goes*, i.e. whether the VM is dispatch-, env-, or alloc-bound. `:enabled` is
+  `false` (and every other key absent) unless the binary was built with
+  `--features perf-stats`, which `make perf-brood` does; the counters compile to
+  nothing otherwise, so an ordinary build cannot attribute. `(vm-stats-reset)` zeroes
+  them: they are process-global and cumulative **from process start**, so a snapshot
+  after a short program also counts the runtime's own boot — which is
+  macro-expansion-heavy and defers to the tree-walker, enough to swing a defer rate
+  from 0.8% to 84% purely on whether the boot cache was warm. A **counting** tool, not
+  a timing one (the atomics perturb timing; read times from the counter-free benches).
+  Policy lives in Brood: `(require 'perf)` gives `(perf/report)`, `(perf/summary)` and
+  `(perf/measure thunk)` — the last resets first, so it reports on that region rather
+  than on the process. See `docs/benchmarking.md` and `docs/backend-seams.md` §5.
 - `(sched-stats)` returns the scheduler's cumulative counters —
   `{:spawned :exited :preempts :steals :migrations :workers :peak-threads}` —
   `:spawned − :exited` is the live-process figure, `:preempts` counts

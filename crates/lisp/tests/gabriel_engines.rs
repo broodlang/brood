@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use brood::eval::compile::set_forced_engine;
+use brood::eval::compile::{set_forced_engine, Engine};
 use brood::Interp;
 
 static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
@@ -53,11 +53,10 @@ fn driver(module: &str, input: &str, expr: &str) -> String {
     )
 }
 
-/// Evaluate in a fresh interpreter pinned to one engine. `true` = the bytecode VM,
-/// `false` = the reference tree-walker.
-fn eval_on(src: &str, vm: bool) -> Result<String, String> {
+/// Evaluate in a fresh interpreter pinned to one engine.
+fn eval_on(src: &str, engine: Engine) -> Result<String, String> {
     LazyLock::force(&MEM_GUARD);
-    set_forced_engine(Some(vm));
+    set_forced_engine(Some(engine));
     let mut interp = Interp::new();
     let out = match interp.eval_str(src) {
         Ok(v) => Ok(interp.print(v)),
@@ -67,14 +66,15 @@ fn eval_on(src: &str, vm: bool) -> Result<String, String> {
     out
 }
 
-/// Assert both engines run `module`'s program and agree with upstream.
+/// Assert **every** engine runs `module`'s program and agrees with upstream. Iterates
+/// [`Engine::ALL`], so a new engine inherits the whole Gabriel corpus as conformance coverage.
 fn agrees_with_upstream(module: &str, input: &str, expr: &str) {
     let src = driver(module, input, expr);
-    for (label, vm) in [("tree-walker", false), ("bytecode VM", true)] {
+    for &engine in Engine::ALL {
         assert_eq!(
-            eval_on(&src, vm),
+            eval_on(&src, engine),
             Ok("true".to_string()),
-            "{module}: did not match upstream's expected output on the {label}",
+            "{module}: did not match upstream's expected output on {engine:?}",
         );
     }
 }

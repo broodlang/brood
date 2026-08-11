@@ -21,13 +21,20 @@ is not hypothetical: it cost an afternoon — a VM change first looked like a
 flat-to-regression across separately-loaded runs, then a same-but-noisy bench read
 as a big win, before a load-robust measurement settled it.
 
-The load-robust signal is the **VM ÷ tree-walker ratio measured as adjacent rows
-in one `divan` process**. Both engines live in every binary; the `eval` benches
-pin each row to an engine (`set_forced_engine`, the `engine_grid!` macro), so
-size `N` appears as neighbouring `(Vm, N)` and `(Tw, N)` rows. Under load both
-slow down *together*, so their ratio holds where the absolutes wander. The
-tree-walker is a stable in-process reference — you don't even need a baseline
-binary.
+The load-robust signal is the **VM ÷ tree-walker ratio measured within one `divan`
+process**. Both engines live in every binary; the `eval` benches pin each row to an
+engine (`set_forced_engine`, the `engine_grid!` macro), so size `N` is measured as a
+`(Vm, N)` row and a `(Tw, N)` row in the same run. Under load both slow down
+*together*, so their ratio holds where the absolutes wander. The tree-walker is a
+stable in-process reference — you don't even need a baseline binary. (Divan sorts
+rows by label when printing, so `(Vm, N)` and `(Tw, N)` are not necessarily printed
+next to each other; `scripts/bench_ratio.py` pairs them by `(bench, size)`. What
+matters is one process, not one screen line.)
+
+The grid is built from `Engine::ALL` and the labels come from `Engine::short()`
+(`eval/compile/mod.rs`), so a third engine gets rows in every eval bench and a column
+in `bench_ratio.py` without either being edited. `Tw` stays the reference — it is the
+stable baseline the method rests on, not an engine under test.
 
 ```bash
 scripts/bench-ratio.sh                 # the whole eval grid, VM/TW per workload
