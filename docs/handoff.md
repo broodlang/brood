@@ -34,7 +34,7 @@ the seven concurrency binaries and the fuzz differential, last run on `afe4bcff`
 engines 1948/1948, in-language suite 4517/4517 on seven consecutive runs.
 
 **What this session changed — and what is left to do with it.** Items **1–2** of
-[`backend-seams.md`](backend-seams.md), recorded as **ADR-220**: a `JitBackend` contract
+[`backend-seams.md`](backend-seams.md), recorded as **ADR-221**: a `JitBackend` contract
 (`jit/{mod,backend,rt,cranelift}.rs`) and the backend-independent lowering decisions hoisted into
 `eval/compile/jit_plan.rs`. No generated code changed. **Uncommitted** — the natural split is two
 commits, item 1 then item 2, each with its own gate run already done.

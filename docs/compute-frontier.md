@@ -43,7 +43,7 @@
 > rows). **The stale framing was wrong and is now fixed:** the ROADMAP said these "run
 > interpreted (~39×/187× behind Elixir)". They do **not** — both are cleanly JIT'd (`jit_deopt=0`),
 > and the real gap is ~9.5×. `Cons` and small `MakeVector` are admitted to the JIT subset
-> (`chunk_in_jit_subset`, `jit_plan.rs` — it moved out of `jit_lower.rs` in ADR-220), so
+> (`chunk_in_jit_subset`, `jit_plan.rs` — it moved out of `jit_lower.rs` in ADR-221), so
 > structure-building arms lower and win.
 >
 > **Verified current numbers** (fresh `--bin brood` build; `make`-installed harness N):

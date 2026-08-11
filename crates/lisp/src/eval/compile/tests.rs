@@ -1602,7 +1602,7 @@ fn ki26_shape_check_admits_everything_the_flag_form_did() {
 
 /// The three `JitBackend` tiering advisories must route to the predicate they name.
 ///
-/// This is the guard for ADR-220's one remaining hole: `jit_runtime.rs` used to call straight
+/// This is the guard for ADR-221's one remaining hole: `jit_runtime.rs` used to call straight
 /// into the Cranelift backend's unboxed-scalar submodule, and routing those calls through the
 /// trait means a delegation could now be wired to the *wrong* one of two similar predicates —
 /// `arm_i64_too_deep` (has this fn been demoted?) versus `arm_i64_eligible` (does it take the

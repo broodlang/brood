@@ -2711,7 +2711,7 @@ mod jit_lower;
 pub(crate) use jit_lower::{jit_lower_arm, jit_lower_inlined_arm};
 // Reached by `jit::cranelift`'s `JitBackend` tiering advisories, which is the only way the
 // tiering glue is allowed to ask "have I demoted this fn off the register worker?" — it used to
-// call straight into the Cranelift backend's i64 submodule (ADR-220's one remaining hole).
+// call straight into the Cranelift backend's i64 submodule (ADR-221's one remaining hole).
 #[cfg(feature = "jit")]
 pub(crate) use jit_lower::{arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep};
 
