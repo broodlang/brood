@@ -1017,6 +1017,73 @@ TOFU-pinned signing key, nil for an unsigned package)."
                 (now)))
       "\n")))
 
+;; ---- runtime package install (the user-package model, Emacs `elpa`) ---------
+;; `add`/`fetch` above install into a project's `_deps` by editing the manifest + lock. These
+;; install a SINGLE package into an arbitrary directory at RUNTIME — no manifest, no lock — so
+;; a running app (an editor) can let a user add/remove plugins live. The sha256 verify is
+;; identical to the resolver's: the registry is never trusted for the bytes.
+
+(defn registry-latest-version
+  (nm)
+  "The newest published version string of package `nm` (a symbol or string) at the configured
+registry, or nil if it is unpublished. Backs an app's 'is there an update?' check."
+  (require 'version)
+  (let (base (registry-base-for nil)
+        versions (registry-list-versions base (if (symbol? nm) nm (symbol nm))))
+    (if (or (nil? versions) (empty? versions))
+      nil
+      (fold (fn (best v) (if (or (nil? best) (version/version-newer? v best)) v best))
+        nil versions))))
+
+(defn registry-enhancers
+  (app)
+  "The packages published to the configured registry that ENHANCE application `app` — a list of
+`{:name :latest_version :description :kind :enhances}` maps, or nil on a request failure. The
+runtime side of `nest search --enhances`: an app lists its own installable plugins."
+  (let (base (registry-base-for nil))
+    (match (registry-get-json (registry-search-url base "" app))
+      ([:ok data] (or (get data :packages) nil))
+      ([:error _status _message] nil))))
+
+(defn registry-install
+  (nm dest-dir)
+  "Download, sha-VERIFY, and extract the newest release of package `nm` into `dest-dir/<nm>/`
+at runtime — the user-package install path, independent of any project `_deps`/manifest. Returns
+`{:name :version :path :checksum}`. Errors on an unknown package, a download failure, or a
+checksum mismatch (the same integrity guarantee `nest add` gives — the registry is never trusted
+for the bytes). Advisory signature/TOFU checking is a lock-file concern and is skipped here; the
+sha256 pin still holds."
+  (require 'net/http)
+  (let (base (registry-base-for nil)
+        name-sym (if (symbol? nm) nm (symbol nm))
+        name-str (if (symbol? nm) (name nm) nm)
+        version (registry-latest-version name-sym))
+    (when (nil? version)
+      (error "package: " name-str " is not published on " base
+        " (run `nest search " name-str "` to see what is)"))
+    (match (registry-get-json (registry-release-url base name-sym version))
+      ([:error 404 _message] (error "package: no release " name-str " " version))
+      ([:error _status message] (error "package: " message))
+      ([:ok meta]
+        (let (checksum (get meta :checksum)
+              source-url (get meta :source_url)
+              external (and source-url (not (= source-url "")))
+              bytes (if external
+                      (package-fetch-bytes source-url)
+                      (registry-download-hosted base name-sym version))
+              got (hash/sha256-bytes bytes))
+          (when (not (= got checksum))
+            (error "package: " name-str " " version " sha256 mismatch — declared " checksum
+              ", got " got " (tampered or corrupted — not installed)"))
+          (let (target (path-join dest-dir name-str)
+                archive (path-join dest-dir (str name-str ".tar.gz")))
+            (when (dir? target) (%rm-rf target))
+            (make-dir dest-dir)
+            (spit-bytes archive bytes)
+            (offload %untar-gz archive target (if external 1 0))
+            (delete-file archive)
+            {:name name-str :version version :path target :checksum checksum}))))))
+
 ;; Two resolutions of the same name must agree on their source. Different kinds can
 ;; never agree (checked here, since it is the one rule that is *about* the pair rather
 ;; than about either kind); same-kind agreement is the `dep-check-compatible` op, so each

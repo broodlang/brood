@@ -944,33 +944,37 @@ constraint-string}`, or {} if the file is missing or declares none. The sibling 
         {}))
     {}))
 
-(defn installed-enhancers
-  (root app app-version)
-  "The names of packages installed under `root/_deps` that declare they enhance the
-application `app` with a constraint satisfied by `app-version` — the RUNTIME sibling of the
-registry's `?enhances=` query (`nest search --enhances` matches published packages; this
-matches INSTALLED ones). Reads each dep's `project.blsp` `:enhances`; requires nothing and
-fetches nothing, so a plugin host (an editor, a daemon) can call it at startup to find the
-packages that plug into it, then load them however it likes.
+(defn enhancers-in
+  (dir app app-version)
+  "The names of packages directly under `dir` (each at `dir/<name>/project.blsp`) that declare
+they enhance the application `app` with a constraint satisfied by `app-version`. The general
+form of `installed-enhancers`, over ANY package directory — a project's `_deps`, or an app's
+own user-package dir (the Emacs `elpa` model), so a running host can discover plugins wherever
+it keeps them. Requires nothing, fetches nothing. An absent `dir` is [].
 
 `app`/`app-version` are the host's own name and version: a package whose `:enhances` names
 `app` but demands a newer host than `app-version` is excluded, via the same
 `version-satisfies-all?` the resolver and `nest search` use. Naming `app` is what gates — an
-empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not count. An
-absent `_deps` (nothing installed) is []."
+empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not count."
   (require 'version)
-  (let (deps-dir (path-join root "_deps")
-        app-symbol (symbol app)
+  (let (app-symbol (symbol app)
         host {app-symbol app-version})
-    (if (not (file-exists? deps-dir))
+    (if (not (file-exists? dir))
       []
       (vec (filter
              (fn (dep-name)
                (let (enhances (manifest-enhances
-                                (path-join (path-join deps-dir dep-name) "project.blsp")))
+                                (path-join (path-join dir dep-name) "project.blsp")))
                  (and (get enhances app-symbol)
                    (version/version-satisfies-all? host enhances))))
-             (list-dir deps-dir))))))
+             (list-dir dir))))))
+
+(defn installed-enhancers
+  (root app app-version)
+  "The names of packages installed under `root/_deps` that enhance `app` at a satisfied
+`app-version` — `enhancers-in` over a project's dependency dir. The runtime sibling of the
+registry's `?enhances=` query (`nest search --enhances`)."
+  (enhancers-in (path-join root "_deps") app app-version))
 
 (defn- project-plugin-format-headers
   (root plugin-name)
