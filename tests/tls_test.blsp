@@ -49,8 +49,16 @@
                      ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
                  (send me [:ready (tcp-local-port ls) (first ck)])
                  (let (c (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
-                   (tcp-controlling-process c (self))
+                   ;; Binary mode BEFORE handing over control, not after. `tcp-controlling-process`
+                   ;; starts messages flowing to this process, so a request already in flight can
+                   ;; be delivered in the window before `tcp-set-binary` lands — as a *string*,
+                   ;; and `bytes->list` below then kills this process, leaving the client to drain
+                   ;; nothing (`resp` = ""). A fast box wins that race; a 2-core one loses it about
+                   ;; 1 run in 3 (measured 2026-08-11 under `taskset -c 0,1`), which is what made
+                   ;; this test redden CI while passing locally. Configuring the socket before
+                   ;; anyone is receiving from it closes the window entirely.
                    (tcp-set-binary c true)
+                   (tcp-controlling-process c (self))
                    (let (got (receive ([:tcp ^c d] d) (after *test-wait-ms* :timeout)))
                      (tcp-send c (pr-str (into [] (bytes->list got))))
                      (tcp-close c))))))
