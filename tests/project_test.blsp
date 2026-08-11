@@ -19,6 +19,7 @@
 ;; 2784 directories between them; `temp_purge_coverage_test.blsp` now fails if one is
 ;; dropped again.
 (purge-stale-temp "brood-dup-")
+(purge-stale-temp "brood-enhancer-")
 (purge-stale-temp "brood-feat-")
 (purge-stale-temp "brood-fmt-plugin-")
 (purge-stale-temp "brood-manifest-")
@@ -612,3 +613,38 @@
     (binding (*project-brood* 42)
       (is (includes? (try (project/project-check-brood-version) (catch e (error-message e)))
             "must be a version-constraint string")))))
+
+;; installed-enhancers — the runtime sibling of `nest search --enhances`: which INSTALLED
+;; packages (under `_deps/`) declare they enhance this host, satisfied by its version. A
+;; plugin host (bedit) calls it at startup. Fixtures write hand-authored dep manifests.
+(defn with-enhancer-deps (layout)
+  "A temp project root with a `_deps/` of manifests — `layout` maps dep-name → the
+`:enhances …` clause text (\"\" for a plain dep). Returns the root."
+  (let (root (temp-dir "brood-enhancer-"))
+    (doseq (kv (map-pairs layout))
+      (let ([dep-name enhances] kv
+            dir (path-join (path-join root "_deps") dep-name))
+        (make-dir dir)
+        (spit (path-join dir "project.blsp")
+          (str "(project :name \"" dep-name "\" :version \"1.0.0\" " enhances ")"))))
+    root))
+
+(describe "installed-enhancers — installed packages that enhance a host"
+  (test "keeps only satisfied enhancers of the named app"
+    (let (root (with-enhancer-deps {'good ":enhances {bedit \">= 0.1\"}"
+                                    'plain ""
+                                    'other ":enhances {waggle \">= 0.1\"}"
+                                    'toonew ":enhances {bedit \">= 9.0\"}"}))
+      (assert= (installed-enhancers root "bedit" "0.1.0") ["good"])))
+
+  (test "the host version gates the constraint"
+    (let (root (with-enhancer-deps {'p ":enhances {bedit \">= 0.5\"}"}))
+      (assert= (installed-enhancers root "bedit" "0.2.0") [])
+      (assert= (installed-enhancers root "bedit" "0.6.0") ["p"])))
+
+  (test "naming the app is required — an empty :enhances is not a vacuous match"
+    (let (root (with-enhancer-deps {'lib ""}))
+      (assert= (installed-enhancers root "bedit" "1.0.0") [])))
+
+  (test "[] when there is no _deps at all"
+    (assert= (installed-enhancers (temp-dir "brood-enhancer-") "bedit" "1.0.0") [])))
