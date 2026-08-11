@@ -1055,6 +1055,29 @@
             (assert= (vector-ref row 0) 'greeter)
             (assert= (vector-ref row 1) :path)
             (assert= (vector-ref row 2) "../greeter"))))))
+  ;; The lock is a CANONICAL artifact: resolution order isn't stable across runs, so the
+  ;; serialized content must not depend on it — otherwise every `nest fetch` rewrites the
+  ;; committed file with the same deps in a new order (the churn this sort fixes).
+  (test "the lock content is canonical — same deps, any order, one serialization"
+    (let (parent (pkg-fixture-root)
+          a-dir (path-join parent "alpha")
+          b-dir (path-join parent "beta")
+          app-dir (path-join parent "app"))
+      (pkg-write-project a-dir "alpha" "alpha" "(defn a () 1)" "")
+      (pkg-write-project b-dir "beta" "beta" "(defn b () 2)" "")
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)"
+        " :dependencies [[alpha :path \"../alpha\"] [beta :path \"../beta\"]]")
+      (let (entries (resolve-deps app-dir
+                      (list (dep-path 'alpha "../alpha") (dep-path 'beta "../beta"))
+                      nil))
+        ;; the SAME entries in the opposite order serialize identically
+        (assert= (package/package-lockfile-content entries)
+          (package/package-lockfile-content (reverse entries)))
+        ;; …and the canonical order is by name (alpha before beta)
+        (write-lockfile app-dir (reverse entries))
+        (let (locked (read-lockfile app-dir))
+          (assert= (vector-ref (vector-ref locked 0) 0) 'alpha)
+          (assert= (vector-ref (vector-ref locked 1) 0) 'beta)))))
   (test "read-lockfile is nil when there is no lock file"
     (assert= (read-lockfile (pkg-fixture-root)) nil)))
 
