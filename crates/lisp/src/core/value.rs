@@ -166,6 +166,20 @@ pub fn is_dynamic(sym: Symbol) -> bool {
         .contains(&sym)
 }
 
+/// The spelling of every symbol currently marked dynamic, sorted (a deterministic image).
+///
+/// The startup image needs these: an imaged start restores a `defdyn` global's *value* but
+/// skips the module load that ran the `defdyn`, so the mark is missing and `binding` would
+/// reject the var (`docs/language.md` Dynamic variables). The image writes this list and
+/// re-`mark_dynamic`s each on restore — the dynamic-var counterpart of the registry/`defonce`
+/// imaged-start fixes.
+pub fn dynamic_names() -> Vec<String> {
+    let set = DYNAMICS.read().unwrap_or_else(|e| e.into_inner());
+    let mut names: Vec<String> = set.iter().map(|&s| symbol_name(s)).collect();
+    names.sort();
+    names
+}
+
 // ----- handles into the Heap -----
 
 /// A handle is a packed `u64`: the two top bits tag the heap **region**, the

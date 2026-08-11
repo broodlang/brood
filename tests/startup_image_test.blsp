@@ -52,6 +52,21 @@
       (assert= 41 si-a)
       (assert= 6 (si-f 5))))
 
+  ;; A `defdyn` var written into an image (v5) must open without error and stay a *dynamic* var:
+  ;; `binding` on it must work, not raise "not a dynamic variable". The dynamic mark lives in a
+  ;; process-wide static that an imaged start would otherwise miss (it skips the module load that
+  ;; ran the `defdyn`), so the image records the dynamic-var names and `%image-index` re-marks
+  ;; them. This guards the v5 format round-trip; the cross-run behavioural guard is that the hatch
+  ;; suite (which images `*bml-source*`) stopped flaking on repeat imaged runs — cold pass then
+  ;; 38 imaged failures → all green. (An in-process test can't remove the mark to prove the
+  ;; restore in isolation: the set is monotonic.)
+  (test "a defdyn var images (v5) and stays dynamic — binding works after open"
+    (defdyn *si-dyn* :seed)
+    (let (p (img-tmp "dynvar"))
+      (%image-write p [["" ['startup-image-test/*si-dyn*]]] "fp-dyn")
+      (is (map? (%image-index p "fp-dyn")))
+      (assert= :bound (binding (*si-dyn* :bound) *si-dyn*))))
+
   ;; A stale image must be a MISS, not an error and not a wrong restore — the caller's
   ;; entire recovery strategy is "nil means load from source instead".
   (test "a fingerprint mismatch is a miss, not an error"

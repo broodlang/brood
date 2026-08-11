@@ -52,7 +52,13 @@ use crate::process::message::{from_message, to_message, to_message_image};
 /// `KIND_TABLE` entry would fall through its `_ =>` arm and bind the global to the
 /// snapshot *map* instead of a table, so every `table-put` against it would then fail
 /// on a type error far from the cause.
-const MAGIC: &[u8] = b"brood-image-v4\n";
+///
+/// v5 records the `defdyn` dynamic-var marks (after the directory, in the region
+/// `%image-index` reads whole) and re-establishes them on open — an imaged start restores a
+/// dynamic global's value but skips the module load that ran the `defdyn`, so without this the
+/// mark is missing and `binding` rejects the var. A v4 image has no such list, so a v5 reader
+/// must reject it (else it would read the footer as the dynamic-name count); the bump does that.
+const MAGIC: &[u8] = b"brood-image-v5\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -288,6 +294,15 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         put_u64(&mut body, *off);
         put_u32(&mut body, *len);
     }
+    // The `defdyn` marks (which globals are dynamic vars). They live *after* the directory but
+    // still before the footer, so they sit inside the `[dir_off, footer)` span `%image-index`
+    // reads whole — the image restores them when opened, no payload read. Written last (at
+    // image-build time the whole runtime is loaded, so `DYNAMICS` is complete).
+    let dyn_names = value::dynamic_names();
+    put_u32(&mut body, dyn_names.len() as u32);
+    for name in &dyn_names {
+        put_str(&mut body, name);
+    }
     put_u64(&mut body, dir_off);
 
     let t_io = std::time::Instant::now();
@@ -381,6 +396,19 @@ pub(super) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         let k = heap.alloc_string(&name);
         let v = heap.alloc_vector(vec![Value::int(off as i64), Value::int(len as i64)]);
         pairs.push((k, v));
+    }
+    // Re-establish the `defdyn` dynamic-var marks recorded after the directory (v5): an imaged
+    // start restores a dynamic global's value but skips the module load that ran the `defdyn`,
+    // so `binding` on it would fail. Marking is idempotent + monotonic, so a spurious entry is
+    // harmless (and a stale image is fingerprint-rejected before we get here). Done in the same
+    // `%image-index` pass every install runs, so the marks are back before any section loads.
+    if let Some(dyn_count) = get_u32(&mut dr) {
+        for _ in 0..dyn_count {
+            match get_str(&mut dr) {
+                Some(name) => value::mark_dynamic(value::intern(&name)),
+                None => break,
+            }
+        }
     }
     Ok(heap.map_from_pairs(pairs))
 }
