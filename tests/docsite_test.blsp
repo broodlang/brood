@@ -29,7 +29,17 @@
     (assert= (docsite/prose "call `f<x>`") "<p>call <code>f&lt;x&gt;</code></p>"))
   (test "nil and blank render to the empty string"
     (assert= (docsite/prose nil) "")
-    (assert= (docsite/prose "   ") "")))
+    (assert= (docsite/prose "   ") ""))
+  ; an indented code example renders as a <pre> with its newlines PRESERVED (not collapsed into
+  ; one run-on <p>) and dedented — the fix for the scrambled module docstrings.
+  (test "an indented code block becomes a dedented <pre>, line breaks kept"
+    (assert= (docsite/prose "prose here\n\n    (a 1)\n    (b 2)")
+      "<p>prose here</p><pre class=\"doc-example\"><code>(a 1)\n(b 2)</code></pre>"))
+  (test "code-block content is HTML-escaped, backticks left literal"
+    (assert= (docsite/prose "    (f `x` <y>)")
+      "<pre class=\"doc-example\"><code>(f `x` &lt;y&gt;)</code></pre>"))
+  (test "a non-indented block stays a <p> with inline code"
+    (assert= (docsite/prose "call `f`") "<p>call <code>f</code></p>")))
 
 (describe "docsite: anchors"
   (test "module and def anchors slugify slashes"

@@ -45,14 +45,44 @@
                  (escape segment))))
         (zip (range (count parts)) parts)))))
 
+(defn- leading-space-count
+  (line i)
+  "The number of leading space/tab characters in `line`, scanning from `i`."
+  (if (and (< i (string-length line))
+        (let (c (substring line i (+ i 1))) (or (= c " ") (= c "\t"))))
+    (leading-space-count line (+ i 1))
+    i))
+
+(defn- code-block?
+  (block)
+  "True if `block` is an indented code example — its first non-blank line starts with
+  whitespace. Such a block's newlines are significant (each example on its own line), so it must
+  render as `<pre>` rather than a `<p>` whose newlines HTML would collapse into one run-on line."
+  (let (lines (filter (fn (l) (not (= (trim l) ""))) (string-split block "\n")))
+    (and (not (empty? lines)) (> (leading-space-count (first lines) 0) 0))))
+
+(defn- dedent
+  (block)
+  "Strip the common leading indentation from every line of `block`, so an indented docstring
+  code example renders flush-left in its `<pre>` rather than doubly indented."
+  (let (lines (string-split block "\n")
+        non-blank (filter (fn (l) (not (= (trim l) ""))) lines)
+        n (if (empty? non-blank) 0 (apply min (map (fn (l) (leading-space-count l 0)) non-blank))))
+    (join "\n"
+      (map (fn (l) (if (>= (string-length l) n) (substring l n (string-length l)) l)) lines))))
+
 (defn prose (text)
-  "Render a docstring as safe HTML: blank-line-separated `<p>` paragraphs with inline
-  `code` spans. Empty/nil text renders to the empty string."
+  "Render a docstring as safe HTML: blank-line-separated blocks become `<p>` paragraphs (with
+  inline `code` spans), except an indented block, which becomes a `<pre>` code example with its
+  line breaks preserved. Every value is HTML-escaped. Empty/nil text renders to the empty string."
   (if (or (nil? text) (= (trim (str text)) ""))
     ""
     (apply str
-      (map (fn (para) (str "<p>" (inline para) "</p>"))
-        (filter (fn (para) (not (= (trim para) "")))
+      (map (fn (block)
+             (if (code-block? block)
+               (str "<pre class=\"doc-example\"><code>" (escape (dedent block)) "</code></pre>")
+               (str "<p>" (inline block) "</p>")))
+        (filter (fn (block) (not (= (trim block) "")))
           (string-split (str text) "\n\n"))))))
 
 ;; ---- anchors ----------------------------------------------------------------
@@ -222,6 +252,8 @@
     ".docsite .type{color:#7b8794;font-size:.85rem;margin-top:.15rem}"
     ".docsite .doc{margin-top:.4rem;color:#3e4c59}.docsite .doc p{margin:.4rem 0}.docsite .undoc{color:#9aa5b1;font-style:italic;margin:.4rem 0 0}"
     ".docsite .doc code,.docsite .moduledoc code{background:#f0f4f8;border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
+    ".docsite .doc-example{background:#f0f4f8;border-radius:.375rem;padding:.6rem .8rem;margin:.5rem 0;overflow-x:auto;font-size:.85rem;line-height:1.45}"
+    ".docsite .doc-example code{background:none;padding:0;white-space:pre}"
     ".docsite .empty{color:#9aa5b1}"
     ".docsite .guide-body{color:#3e4c59}"
     ".docsite .guide-body h1{font-size:1.5rem;margin:1rem 0 .5rem;color:#1f2933}"
