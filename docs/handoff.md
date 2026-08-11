@@ -5,17 +5,29 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-07 (evening — the hatch-review + verification session)**, brood past 0.3.8 with
-the ADR-218 startup image working *and* following require edges (KI-37). Tree is **clean and
-pushed**; `main` and `origin/main` agree at `afe4bcff`. **`nest format --check` fails on 12 `.blsp`
-files** — pre-existing, not CI-gated, left alone deliberately: reformatting whole files is a
-judgement call, not a drive-by.
+**As of 2026-08-10 (the spawn-live + publish session)**, brood 0.3.9. Tree is **clean and
+pushed**; `main` and `origin/main` agree at `853afe6f`. **`nest format --check` fails on 12
+`.blsp` files** — pre-existing, not CI-gated, left alone deliberately: reformatting whole files
+is a judgement call, not a drive-by.
 
-**The tree is proven green, and by more than one pass** (a single pass is not evidence — see the
-green-tree rule in CLAUDE.md). On `afe4bcff`: `make test` **974/974**; `make test-both`
-**1948/1948** across both engines; the GC_STRESS + GC_VERIFY sweep over the seven concurrency
-binaries **37/37 with zero heap-verifier complaints**; and a fuzz differential of 6 generators ×
-150 programs × 4 engine configs — **1650 checks, 0 divergences, 0 crashes**.
+**The tree is green, on repeated passes** (a single pass is not evidence — see the green-tree
+rule in CLAUDE.md). Across this session's commits: `make test` **974/974** (four separate
+runs), both engines **974/974 + 974/974 = 1948/1948**, and the in-language suite **4517/4517**
+on seven consecutive runs. The `%vector-reduce` work was additionally exercised under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` with allocating reducers — byte-identical results, no
+verifier complaints — because it passes *heap* values as callback arguments where the range
+path only ever passed ints. The GC_STRESS sweep over the seven concurrency binaries and the
+fuzz differential were last run on `afe4bcff` (37/37, and 1650 checks / 0 divergences); they
+have **not** been re-run since, and should be before the next release.
+
+**What this session changed.** Two `fold` optimisations — `%vector-reduce` (a native counted
+loop for vector folds, which also resolves a passthrough reducer like `+` once instead of per
+element) and testing a vector first in `fold`'s dispatch — worth **−16% CPU on the published
+`spawn-live` row**, taking the BEAM gap 2.8× → **2.5×**. `stall_report` fixed to read per-thread
+state, closing KI-38's last loose end. The suite was republished (2026-08-10 run), the
+positioning chart rebuilt to aggregate all 27 comparable rows instead of 11, and a per-row trend
+chart added. The base-RSS "regression" carried for three runs was chased and **retired** — it is
+noise on a metric that swings ~19 MB with boot-cache state.
 
 **KI-38 is diagnosed, reproduced and FIXED (2026-08-08); KI-36 remains the one watch item.**
 KI-38 was the boot-wait cluster: three tests that wait for a freshly spawned *debug* `brood` to
@@ -71,7 +83,7 @@ matched everything under the repo path. It now reads per-thread state from
 harness, and the child reads as booted-then-parked (15 threads all `S`, CPU flat) — see
 `docs/known-issues.md` KI-38.
 
-### What this session changed (two commits, both pushed)
+### 2026-08-07's changes (two commits) — the session before the KI-38 work
 
 **Require edges are part of the image** (KI-37) and **three gaps hatch surfaced** — a `table`
 global no longer forfeits the image for the whole project (imaged by value, format v4),
@@ -87,7 +99,7 @@ liveness check under stress only: the sweep goes 120 s + 1 TIMEOUT → **15 s, 3
 because CLAUDE.md instructs you to run that sweep before trusting a green tree, so the trap was
 armed for the next person. See §6.
 
-### The previous session's changes (five commits, all pushed)
+### 2026-08-06's changes (five commits)
 
 **The startup image had never been read from** (KI-34, `34770be4`). ADR-218 shipped it on
 2026-08-06 and it was written on every cold start and then ignored: `nest run` restored the root
@@ -135,13 +147,14 @@ files × closure. Shipping it once per chunk fixes it. See §9.
 
 ## 1. START HERE — `spawn-live`: measure the candidate before you build it
 
-**This section has now named the wrong lever three sessions running, and each time the mechanism
+**This section has now named the wrong lever four sessions running, and each time the mechanism
 it named was the one *nearest the symptom* rather than the one carrying the cost.** Per-process
-inline caches, then park/resume, then an identity-keyed IC, then "reach native code" — four
-candidates, four refutations, each disposed of by one measurement that cost far less than the
-implementation would have. §4 has them all. **So: before implementing anything below, measure
-that its premise still holds.** Everything here is an argument, not a fact, until re-measured;
-the facts are the ladder table and §4.
+inline caches, then park/resume, then an identity-keyed IC, then "reach native code", and now
+**the receive machinery itself** — five candidates, five refutations, each disposed of by one
+measurement that cost far less than the implementation would have. §4 has the first four; the
+fifth is item 1 below, retired 2026-08-10 at ~1.8% of the row. **So: before implementing
+anything below, measure that its premise still holds.** Everything here is an argument, not a
+fact, until re-measured; the facts are the ladder table and §4.
 
 **What has actually been fixed on this row.** `fold` coerced with `seq` and walked with
 `first`/`rest`, and `(rest v)` on a vector *materialises a list of the tail* — 15 cons cells and
@@ -196,25 +209,48 @@ behaviour. Size it against that ~3.2 µs before starting.
 `scripts/fuzz/stress/spawn_live_ladder.blsp` (it was `sl_one.blsp`, uncommitted, so these
 figures could not be re-derived). Run **one rung per process** and read CPU, not wall:
 
-| rung | µs/unit (CPU, N=100k) | adds |
-|---|---|---|
-| `spawn` — spawn + exit | 6.9 | — |
-| `send` — + an unread message | 7.1 | +0.2 |
-| `nopark` — + a `receive` that never suspends | 15.8 | **+8.7** |
-| `park-batched` — + every unit suspends (100 coexist) | 17.6 | +1.8 |
-| `park` — + all N coexist | 22.2 | **+4.6** |
-| `payload` — + the 16-cell copy and fold | 31.5 | **+9.3** |
+| rung | µs/unit (2026-08-06) | µs/unit (2026-08-10) | adds, now |
+|---|---|---|---|
+| `spawn` — spawn + exit | 6.9 | 7.8 | — |
+| `send` — + an unread message | 7.1 | 7.3 | ~0 |
+| `nopark` — + a `receive` that never suspends | 15.8 | 15.5 | **+8.2** |
+| `park-batched` — + every unit suspends (100 coexist) | 17.6 | 14.0 | — |
+| `park` — + all N coexist | 22.2 | 21.6 | **+7.6** vs batched |
+| `payload` — + the 16-cell copy and fold | 31.5 | 28.9 | **+7.3** |
 
-The three big steps are the **receive machinery** (+8.7), the **payload copy and fold**
+The `payload` rung fell 33.2 → 28.9 on 2026-08-10 (`%vector-reduce` + the dispatch reorder);
+the rest is invocation drift, ~10% between runs, so read the steps and not the levels.
+
+The three big steps are the **receive machinery** (+8.2, but see item 1 — its addressable
+part measured ~0), **coexistence** (+7.6) and the **payload copy and fold**
 (+9.3), and **coexistence** (+4.6). Suspending is not one of them (item 4 below). The
 earlier version of this table read 8.6 / 12.2 / 17.7 / 28.6 for the comparable rungs;
 absolutes drift ~10% between invocations, so read the steps, not the levels.
 
-So the next candidates, in the order the numbers support them:
+**Where to actually start, as of 2026-08-10.** Items 1 and 2 below have both been measured
+since they were written, and the order has changed:
 
-1. **The receive machinery (+8.7 µs/unit) — the largest step. Its "caching" premise was
-   measured and REFUTED 2026-08-06; what the measurement found instead is that the matcher
-   never reaches the native fast frame.** Still the recommended thread, and still the widest
+- **Item 1 (receive) is retired for this row** — ~1.8%, inside the noise.
+- **Item 2 (payload) is largely banked** — `%vector-reduce` and the dispatch reorder took the
+  rung 33.2 → 28.9 µs/unit and the published row −16% CPU. What is left of it is ~2.9 µs for
+  the cold call into `fold`, i.e. nativising `fold` (~11% of the row, real regression surface —
+  `seq` is not a Rust builtin, so two of its four paths re-enter Brood).
+- **The unmeasured candidate that may beat both**: a bare Brood-level call in a freshly spawned
+  process costs **~0.85 µs** (measured by inserting trivial forwarders — 23.7 → 24.3 → 25.4
+  µs/unit for zero, one and two extra calls). Every prelude call in this row pays that, not
+  just `fold`'s. Making a first-call-in-a-process cheap would pay out far more broadly than
+  nativising one function. Nobody has looked at where that 0.85 µs goes.
+- **Item 3 (coexistence, +7.6 µs/unit)** is the other big step and is untouched by all four
+  wins — the ~5.5 KB live-process floor, which the published row's flat ~1.6 GB RSS reflects.
+
+The original list follows, corrected in place:
+
+1. **The receive machinery (+8.2 µs/unit) — RETIRED FOR THIS ROW 2026-08-10, worth ~1.8%.
+   Do not start here; read the correction below before anything else in this item.** The step
+   is real and the matcher really does miss the native fast frame, but making it native was
+   measured directly on this row and buys almost nothing. Its "caching" premise was separately
+   REFUTED 2026-08-06. Kept in full because the mechanism is worth knowing and may matter on a
+   long-lived message row. Historically it was described as the widest
    reach of anything on this list — every message-passing row pays it (`latency`, `pingpong`,
    `supervisor`), not just HOF loops — but the mechanism is not the one this item named.
 
@@ -643,6 +679,7 @@ mechanism with a switch, the switch on ONE binary is the attribution (§6).
 
 | Change | Off-switch | Worth |
 |---|---|---|
+| Vector `fold` in a native counted loop + vector-first dispatch (2026-08-10) | — (no flag; bisect `std/prelude.blsp`'s `fold` and `%vector-reduce` in `builtins/sequences.rs`) | published `spawn-live` **5.55 → 4.66 CPU·s (−16%)**; small folds 533 → 410 ns (vector), 230 → 183 (range), 3595 → 3248 (list) |
 | Boot cache warmed once before the suite fans out (KI-38) | `BROOD_NO_WARM_BOOT_CACHE=1` (nextest cannot skip a setup script — `--config 'profile.default.scripts=[]'` does **not** work) | the three boot-wait tests at `-j 64` cold: **FAIL 20.1 s → 2.6 s**, and 4.1/3.7/4.7 s → 0.4/0.5/1.2 s at the default `-j`; costs ~2.4 s once |
 | Compiled code keyed by the closure's AST, shared per runtime (ADR-215) | `BROOD_NO_SHARED_ARMS=1` | `spawn-live` wall −12.5%, CPU −25%, RSS −14%; bytecode compiles 100 154 → 163 per 100k processes |
 | Form-start safepoint table on the string value (ADR-214) | — (a cache that changes no answer; gated by equality with the pre-table scan at every position) | `sexp motions` 7.97× → 3.88×, 3.0× at 12800 forms |
@@ -985,40 +1022,42 @@ Everything else is in `scripts/fuzz/stress/`, each with a usage header worth rea
 
 ## 9. Where we stand against the field
 
-From the published run (`brood-benchmarks/results/`, **2026-08-06**, brood 0.3.0 at commit
-`61f3766f` — clean exit, no checksum mismatch, no compute-floor clamp):
+From the published run (`brood-benchmarks/results/`, **2026-08-10**, brood 0.3.9 at commit
+`853afe6f` — clean exit, no checksum mismatch, no compute-floor clamp):
 
-- **`latency`** (open-loop, ranked by p99) — Elixir 56 µs, **Brood 75 µs**, Node 416, Python 506,
-  .NET 871. 2nd of five, still multiples ahead of third, p50 18 µs against Elixir's 8. It gave a
-  little back this run (p99 68 → 75, p99.9 461 → 488) on an **unchanged message path**, so that is
-  invocation drift on a percentile row, not a regression — but note the level is what the previous
+- **`spawn-live`** — still the worst row, and it has now moved **four runs running**:
+  1.93 → **1.75 s** (−8%), 5.55 → **4.66 CPU·s** (−16%), RSS 1.57 → **1.60 GB**. Now **2.5×
+  slower and 1.8× heavier** than the BEAM (~5.5 KB per live process against ~3.1 KB), from
+  2.8×/1.75×. This run's move is `%vector-reduce` plus `fold`'s vector-first dispatch, both
+  A/B'd against a fixed baseline *before* the harness (9.96 → 8.04 then 8.30 → 7.92 CPU·s,
+  −20.5% together, against −16% observed). The RSS rise was predicted by the same A/B. §1
+  has what is next; note the receive-machinery lever is now **retired**, measured at ~1.8%.
+- **`latency`** (open-loop, ranked by p99) — Elixir 58 µs, **Brood 73 µs**, Python 467, Node
+  472, .NET 839. 2nd of five, p50 16 µs against Elixir's 8, p99.9 492 µs. Essentially flat
+  against the previous run's 75/488 on an unchanged message path. The level is what earlier
   runs bought, and the reason is worth keeping: p99.9 658 → 461 and max 6.0 → 1.6 ms came from
   ADR-215 removing compilation from the *arrival* path. **An open-loop tail is where one-off
   per-process setup shows up**; a throughput row amortises it away.
-- **`spawn-live`** — still the worst row, and it has now moved twice running: 2.13 → **1.93 s**
-  (−9%), 6.24 → **5.55 CPU·s** (−11%), RSS flat at **1.57 GB**. Now **2.8× slower and 1.75×
-  heavier** than the BEAM (~5.4 KB per live process against ~2.9 KB). This move is `fold--vec`
-  (A/B'd before the run); the one before was ADR-215. §1 has what's next.
-  **Not yet republished: two changes A/B at −20.5% CPU on this row, cumulatively.**
-  `%vector-reduce` (2026-08-09) 9.96 → 8.04 CPU·s, then `fold`'s vector-first dispatch
-  (2026-08-10) 8.30 → 7.92, all on a plain `--release` build with alternating runs and
-  identical checksums (36300000); wall 2.00 → 1.90, RSS flat at ~1.62 GB. Do not quote these
-  as published figures — the published numbers come from the **lean** build via the procedure
-  below, and the absolutes differ accordingly (this box reads 9.96 CPU·s where the published
-  run reads 5.55). Both need a harness run to land; if the ratio holds, the BEAM gap goes
-  ~2.8× → ~2.2×.
-- **`supervisor`** — Brood 855 ms vs Elixir 271 ms, unchanged in substance.
-- **Compute aggregate** — 2.9× the fastest, 3rd of seven, ahead of Elixir. Unchanged.
-- **Base RSS 22.1 MB** — 3rd-lightest of seven, flat against the previous run's 22.4 and still
-  **up from 18.6 MB at the start of 2026-08-04**. ~2 MB arrived with the batch that merged
-  upstream's package-signing crates; ~1 MB is in the ADR-215 commit and is **not** the shared
-  compiled-code cache (its off-switch accounts for ~40 kB) and is **not diagnosed**. Published
-  with that caveat stated. If you pick this up: binary size is unchanged, the boot cache is a
-  170 KB source file, and the `startup` row measures a warm best-of-9 — the usual suspects are
-  already ruled out.
-- **The benchmark repo's FRONTIER lever 1 is now this repo's §1 item 1** — the receive machinery.
-  Its previous top lever (per-process inline caches) was moved to "measured and ruled out" in the
-  same pass, matching §4 here.
+- **`supervisor`** — Brood 847 ms vs Elixir 254 ms, unchanged in substance.
+- **Overall speed** — **2.3× the leader (4th of seven)** over all 27 rows every port
+  implements, geomean of per-row ratios, normalised so the leader reads 1×. This replaced an
+  aggregate over 11 rows summed by wall time on 2026-08-10; the wider set is *not* harsher on
+  Brood in absolute terms (2.3× against 2.8× on the eleven compute rows), but it drops Brood
+  3rd → 4th because Elixir gains more when the concurrency rows count. The narrower
+  single-threaded compute aggregate is unchanged at **2.8× the fastest**.
+- **Base RSS 23.2 MB** — 3rd-lightest of seven. **Chased 2026-08-10 and there is no regression
+  to chase.** Three lean builds, identical flags, warm: `4f49a38f` (pre-brotli) 21.5 MB,
+  `877ccec5` (brotli) 21.3, `853afe6f` 21.8 — **+0.3 MB across the window**. Brotli added
+  **1.2 MB of binary and zero RSS**, because code that never runs at boot is never paged in.
+  And the metric is **bimodal**: a cold expanded-prelude boot costs **~42 MB** against ~22 MB
+  warm, an 18.9 MB swing that is what the published history's 12.8–27.9 MB spread actually
+  tracks. Treat a sub-2 MB movement as drift unless a controlled build says otherwise. The
+  older 18.6 → 22.4 step predates this and stays attributed to the crypto deps + ADR-215.
+- **A per-row trend chart exists now** (`bench/trend.py` → `results/trend.svg`): Brood's rows
+  across every published run, from git history of `results.json`. `spawn-live` is **−67%**
+  across seven runs (5362 → 1771 ms) — progress that is invisible on the positioning map,
+  because one row inside a 27-row geomean barely shifts it. Use it to see whether an
+  optimisation landed; use the map for where the runtime stands.
 
 **Publishing procedure** (from `brood-benchmarks/CLAUDE.md`, and it matters): install the **lean**
 build first — `make install INSTALL_FEATURES='$(RUN_FEATURES)'` — run `python3 bench/harness.py`
