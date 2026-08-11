@@ -648,3 +648,24 @@
 
   (test "[] when there is no _deps at all"
     (assert= (installed-enhancers (temp-dir "brood-enhancer-") "bedit" "1.0.0") [])))
+
+;; :kind — optional package classification (app vs library, default library), validated at
+;; manifest load so a typo can't reach a publish.
+;; `:isolated` — the last test runs `(project …)`, which clobbers the ambient `*project-*`
+;; globals; roll them back so a later test doesn't inherit *project-kind* :app.
+(describe "project: :kind parsing"
+  :isolated
+  (test "absent defaults to :library"
+    (assert= (project/project-parse-kind nil) :library))
+  (test ":app and :library pass through"
+    (assert= (project/project-parse-kind :app) :app)
+    (assert= (project/project-parse-kind :library) :library))
+  (test "an unknown kind is a clear manifest error"
+    (let (msg (try (project/project-parse-kind :widget) (catch e (error-message e))))
+      (is (includes? msg ":kind must be :app or :library"))
+      (is (includes? msg ":widget"))))
+  (test "a manifest sets *project-kind*, and omitting it leaves the default"
+    (project :name "an-app" :kind :app)
+    (assert= *project-kind* :app)
+    (project :name "a-lib")
+    (assert= *project-kind* :library)))

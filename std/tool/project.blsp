@@ -82,6 +82,11 @@ the `nest new` scaffolder."
 ;; index and filter on the key (`nest search --enhances bedit`) without learning
 ;; either. Absent = an ordinary library.
 (defdyn *project-enhances* {})
+;; `:kind` — whether this package is an APPLICATION (`:app`, something you run) or a generic
+;; LIBRARY (`:library`, the default — the reusable packages everything else depends on). The
+;; hive lists them differently. Optional; absent = `:library`. Orthogonal to `:enhances`,
+;; which marks a plugin (a library that plugs into an app) regardless of kind.
+(defdyn *project-kind* :library)
 (defdyn *project-source-paths* (list "src"))
 ; conventional default
 (defdyn *project-test-paths* (list "tests"))
@@ -336,7 +341,7 @@ than being fetched into `_deps/<name>/`."
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'project-apply …)`) so α qualifies `project-apply`
   ;; to `project/project-apply` at this macro's definition (ADR-065 §7).
   `(project-apply (quote ~opts)))
@@ -380,6 +385,20 @@ than being fetched into `_deps/<name>/`."
           " "
           example))))
 
+(defn- project-parse-kind
+  (value)
+  "`:kind` as `:app` or `:library` (the default when absent — it is optional). Any other
+value is a manifest error, caught here at load so a typo can't reach a publish. Orthogonal
+to `:enhances`: a plugin is an ordinary `:library` that also declares what it enhances."
+  (cond
+    (nil? value) :library
+    (= value :app) :app
+    (= value :library) :library
+    else (error "project: "
+           ":kind must be :app or :library, got "
+           (pr-str value)
+           " — write :kind :app for an application, or omit it (the default is :library)")))
+
 (defn- project-parse-enhances
   (value)
   "`:enhances` as a `{name-symbol -> constraint-string}` map. Absent is `{}` (an
@@ -422,6 +441,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (def *project-repository* (plist-get opts :repository))
   (def *project-brood* (plist-get opts :brood))
   (def *project-enhances* (project-parse-enhances (plist-get opts :enhances)))
+  (def *project-kind* (project-parse-kind (plist-get opts :kind)))
   (let (src (plist-get opts :source-paths)
         tst (plist-get opts :test-paths)
         fmt (plist-get opts :format-paths)

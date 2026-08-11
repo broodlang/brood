@@ -1605,11 +1605,13 @@ TOFU-pinned signing key, nil for an unsigned package)."
 
 (defn- registry-search-line
   (p)
-  "One search hit: `name  version  — description`."
+  "One search hit: `name  version  [app]  — description`. The `[app]` tag shows only for
+applications; libraries (the default kind) carry none, so the common case stays uncluttered."
   (let (desc (get p :description))
     (str (get p :name)
       "  "
       (let (v (get p :latest_version)) (if (or (nil? v) (= v "")) "?" v))
+      (if (= (get p :kind) "app") "  [app]" "")
       (if (and desc (not (= desc ""))) (str "  — " desc) ""))))
 
 (defn- registry-search-url
@@ -1777,6 +1779,9 @@ the bytes live (ADR-211); pass nil for a hosted publish. When the release is sig
               ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it
               ;; and can filter on its names, without knowing what any of them are
               :enhances (registry-publishable-enhances)
+              ;; the package's kind — "app" or "library" (the default) — so the registry can
+              ;; list applications apart from the libraries everything depends on
+              :kind (name *project-kind*)
               :checksum checksum}
         with-source (if (and source-url (not (= source-url "")))
                       (assoc meta :source_url source-url)
