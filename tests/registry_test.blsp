@@ -43,15 +43,32 @@
   ;; The mechanism itself, with its own control — so a regression cannot hide behind a
   ;; test that would pass even with the bug.
   (test "swap-registry! loses no updates where a plain def rebind does"
-    (reg-fan *reg-writers* (fn (i) (def *reg-plain* (assoc *reg-plain* i i))))
+    ;; The control: read the global, YIELD, then write it back — the read-modify-write
+    ;; shape the registry mechanisms exist to fix. The `sleep` is load-bearing and is why
+    ;; this reads as it does: the assertion below needs the control to ACTUALLY lose
+    ;; updates, and without a yield that depends on the read and write windows happening
+    ;; to overlap. They do on a many-core box; they do NOT on a 2-core runner, where 200
+    ;; spawned writers serialise enough that every update survives, `count` equals
+    ;; `*reg-writers*`, and the assertion fails — reddening the whole 4600-case wrapper on
+    ;; CI while passing locally (diagnosed 2026-08-11 by pinning a local run to 2 cores
+    ;; with `taskset`; it failed on both nextest attempts there and passes on 12).
+    ;; With the yield every writer has read before any write lands, so updates are lost by
+    ;; construction at any core count — a stronger demonstration of the same bug, and a
+    ;; deterministic one.
+    (reg-fan *reg-writers*
+      (fn (i)
+        (let (old *reg-plain*)
+          (sleep 5)
+          (def *reg-plain* (assoc old i i)))))
+    ;; The mechanism, deliberately left un-yielded: its CAS retry recomputes from whatever
+    ;; won, so it must lose nothing under ordinary contention.
     (reg-fan *reg-writers*
       (fn (i)
         (swap-registry! registry-test/*reg-swapped*
           (fn (m) (assoc m i i)))))
     (assert= *reg-writers* (count *reg-swapped*))
-    ;; The control must actually lose some, or this test proves nothing. It is wildly
-    ;; racy by construction (measured ~30% surviving at 200 writers), so assert only
-    ;; that it lost *something* — the exact count is timing.
+    ;; Now a hard bound rather than a hopeful one: with every writer working from a stale
+    ;; read, at most a handful of the 200 registrations can survive.
     (is (< (count *reg-plain*) *reg-writers*)))
 
   (test "the transform runs against the value that won, not a stale copy"
