@@ -1,0 +1,120 @@
+(defmodule perf-test (:use test))
+(require 'perf)
+
+;; These run on whatever binary the suite was built with — usually WITHOUT
+;; `--features perf-stats`, so `(vm-stats)` reports `:enabled false`. That is the case worth
+;; pinning hardest: the failure mode this module exists to avoid is reporting zeros as if they
+;; were measurements. Every assertion below therefore holds on both kinds of build, and the
+;; ones that depend on real counters are written as implications rather than fixed values.
+
+(describe "perf/report shape"
+  (test "always answers with the documented keys"
+    (let (r (perf/report))
+      (is (contains? r :enabled?))
+      (is (contains? r :verdict))
+      (is (contains? r :why))
+      (is (contains? r :ratios))
+      (is (contains? r :vm))
+      (is (contains? r :gc))
+      (is (contains? r :debug-build?))))
+
+  (test "without counters it reports :no-data and a hint, never a verdict"
+    (let (r (perf/report))
+      (if (get r :enabled?)
+        ;; A counter-armed build: no hint needed, and the verdict must be a real label.
+        (do (is (nil? (get r :hint)))
+            (is (includes? [:dispatch-bound :env-bound :balanced :no-data]
+                           (get r :verdict))))
+        ;; The ordinary build: a claim here would be a claim about zeros.
+        (do (assert= :no-data (get r :verdict))
+            (is (not (nil? (get r :hint))))
+            (is (includes? (get r :hint) "perf-brood"))))))
+
+  (test "the gc snapshot comes through with its collection count"
+    (let (r (perf/report))
+      (is (>= (get (get r :gc) :collections) 0)))))
+
+(describe "perf/ratios"
+  (test "a rate is nil rather than 0 when it has no samples"
+    ;; The distinction the whole report rests on: `nil` = no data, `0` = measured zero. An
+    ;; empty counter map has no samples for anything, so every rate must be nil — if `share`
+    ;; ever returned 0 here, a fresh process would look like a perfect 0% defer rate.
+    (let (rs (perf/ratios {} {}))
+      (is (nil? (get rs :defer-rate)))
+      (is (nil? (get rs :call-ic-hit-rate)))
+      (is (nil? (get rs :env-hops-per-get)))))
+
+  (test "counts are counts, and absent counters read as zero"
+    (let (rs (perf/ratios {} {}))
+      (assert= 0 (get rs :allocations))
+      (assert= 0 (get rs :gc-collections))
+      (assert= 0 (get rs :native-runs))
+      (assert= 0 (get rs :native-deopts))))
+
+  (test "allocation is NOT normalised by activations"
+    ;; Guards the finding that motivated the shape: a JIT'd loop counts every allocation but
+    ;; almost no activations, so any per-activation figure reads in the thousands and says
+    ;; nothing (measured: :alloc 200017 against :vm-apply 197). If a future change
+    ;; reintroduces such a key, this fails.
+    (let (rs (perf/ratios {:alloc 200017 :vm-apply 197} {}))
+      (is (not (contains? rs :allocs-per-apply)))
+      (is (not (contains? rs :allocs-per-activation)))
+      (assert= 200017 (get rs :allocations))))
+
+  (test "reports how many samples each rate rests on"
+    (let (rs (perf/ratios {:vm-apply 40 :tw-defer 10 :call-ic-hit 3 :call-ic-miss 1 :env-get 7} {}))
+      (let (n (get rs :samples))
+        (assert= 50 (get n :activations))
+        (assert= 4 (get n :ic-probes))
+        (assert= 7 (get n :env-gets))))))
+
+(describe "perf/verdict"
+  (test "refuses to judge a rate drawn from too few samples"
+    ;; A 0% IC hit rate over 3 probes is what a natively-running hot loop leaves behind. It
+    ;; labelled such a loop :dispatch-bound before the sample floor existed.
+    (let (rs (perf/ratios {:vm-apply 195 :call-ic-hit 0 :call-ic-miss 12 :env-get 110 :env-hops 110} {}))
+      (assert= :no-data (first (perf/verdict rs)))))
+
+  (test "calls a high defer rate dispatch-bound once there are enough samples"
+    (let (rs (perf/ratios {:vm-apply 2000 :tw-defer 8000 :env-get 5000 :env-hops 5000} {}))
+      (assert= :dispatch-bound (first (perf/verdict rs)))))
+
+  (test "calls a deep env chain env-bound"
+    (let (rs (perf/ratios {:vm-apply 10000 :env-get 5000 :env-hops 40000
+                           :call-ic-hit 5000 :call-ic-miss 0}
+                          {}))
+      (assert= :env-bound (first (perf/verdict rs)))))
+
+  (test "calls a poor inline-cache hit rate dispatch-bound"
+    (let (rs (perf/ratios {:vm-apply 10000 :env-get 5000 :env-hops 5000
+                           :call-ic-hit 3000 :call-ic-miss 7000}
+                          {}))
+      (assert= :dispatch-bound (first (perf/verdict rs)))))
+
+  (test "calls a healthy profile balanced"
+    (let (rs (perf/ratios {:vm-apply 10000 :env-get 5000 :env-hops 5000
+                           :call-ic-hit 9900 :call-ic-miss 100}
+                          {}))
+      (assert= :balanced (first (perf/verdict rs)))))
+
+  (test "never claims :alloc-bound — these counters cannot establish it"
+    ;; Deliberately absent (see perf/verdict's docstring): the only denominator available
+    ;; stops counting once the hot path goes native, while allocations do not.
+    (let (rs (perf/ratios {:vm-apply 10000 :alloc 99999999 :env-get 5000 :env-hops 5000
+                           :call-ic-hit 9900 :call-ic-miss 100}
+                          {}))
+      (assert= :balanced (first (perf/verdict rs)))))
+
+  (test "the why-line is prose, and carries the numbers behind the label"
+    (let (rs (perf/ratios {:vm-apply 2000 :tw-defer 8000 :env-get 5000 :env-hops 5000} {}))
+      (is (includes? (first (rest (perf/verdict rs))) "%")))))
+
+(describe "perf/measure"
+  (test "returns the thunk's value alongside a report for that region"
+    (let (r (perf/measure (fn () (+ 1 2))))
+      (assert= 3 (get r :value))
+      (is (contains? (get r :report) :verdict))))
+
+  (test "zeroing the counters is safe on a build without them"
+    ;; `(vm-stats-reset)` is a no-op returning :enabled false there; `measure` must not care.
+    (is (contains? (vm-stats-reset) :enabled))))

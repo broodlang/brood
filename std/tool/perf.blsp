@@ -1,0 +1,193 @@
+(defmodule perf
+  "One-call performance triage: `(perf/report)` answers *where the time goes*.
+
+The counters and the GC snapshot were always available — `(vm-stats)` and `(gc-stats)`
+— but reading them meant knowing which of ~75 `BROOD_*` flags to set, which cargo
+feature to build, and the interpretation rules in `docs/benchmarking.md` §2. This
+module carries the interpretation so it does not have to be recalled.
+
+- `(perf/report)` — a map: the two snapshots, the derived ratios, and a `:verdict`.
+- `(perf/summary)` — the same, printed for a human.
+
+**This is a counting tool, not a timing one.** The counters are atomics on the hot
+path, so they perturb timing; read *counts* here and *times* from the counter-free
+benches (`scripts/bench-ratio.sh`). Conflating the two wastes afternoons — see
+`docs/benchmarking.md`, which exists because it did.
+
+Counters need a `--features perf-stats` build; `make perf-brood` produces one. Without
+it `:enabled?` is false and `:hint` says so, rather than reporting zeros as if they
+were measurements.")
+
+;; Fewest samples a rate must rest on before `verdict` will judge it. Coarse and
+;; uncalibrated — the point is only that a rate from single digits is noise, not that 1000 is
+;; the right line. Below it the rate is still *reported*; it just does not drive a label.
+(def min-samples 1000)
+
+;; ---- derived ratios ---------------------------------------------------------
+;; Each returns nil rather than a number when its denominator is zero, so "no data"
+;; is distinguishable from "measured zero" — the distinction the whole report rests on.
+
+(defn- pct (x)
+  "`x` as a percentage rounded to one decimal — for prose only. The map keeps full
+  precision, because a consumer may want it and rounding is a display choice."
+  (format "%.1f%%" (* 100.0 x)))
+
+(defn- dp2 (x)
+  "`x` rounded to 2 decimals, or nil unchanged — for prose only."
+  (if (nil? x) nil (/ (->float (round (* 100.0 x))) 100.0)))
+
+(defn- share (part whole)
+  "`part / whole` as a float, or nil when `whole` is zero (no samples)."
+  (if (or (nil? part) (nil? whole) (= whole 0))
+    nil
+    (/ (->float part) (->float whole))))
+
+(defn- at (m k)
+  "`(get m k)`, defaulting a missing counter to 0 — an absent key means the build
+  does not track it, which for a ratio is the same as never having happened."
+  (or (get m k) 0))
+
+(defn ratios (vm gc)
+  "Derived figures, split by what the counters can actually support.
+
+**Meaningful ratios** — all three live inside the *interpreted* domain, so numerator and
+denominator are counted by the same machinery: `:defer-rate` (share of activations that fell
+back to the tree-walker — the deopt surface), `:call-ic-hit-rate`, `:env-hops-per-get` (chain
+depth; deep chains are a lexical-addressing target).
+
+**Counts, not ratios** — `:allocations`, `:gc-collections`, `:native-runs`, `:native-deopts`. Allocation is
+deliberately *not* normalised by activations, because it cannot be: once an arm tiers to
+native its iterations stop being counted while its allocations keep being counted (through
+`brood_rt_cons`). Measured on a 200k-iteration list-building loop that went native:
+`:alloc` 200017 against `:vm-apply` 197 — a ratio of 1025 that says nothing about the
+program. `:native-runs` (tiered arms that ran to completion natively) is in the map so a reader can
+see whether that is the situation, and `:native-deopts` beside it because a high deopt count
+against a low run count is the separate `compiles but keeps falling off native` signal."
+  (let (applies (at vm :vm-apply)
+        defers (at vm :tw-defer)
+        activations (+ applies defers)
+        ic-hit (at vm :call-ic-hit)
+        ic-miss (at vm :call-ic-miss))
+    {:defer-rate (share defers activations)
+     :call-ic-hit-rate (share ic-hit (+ ic-hit ic-miss))
+     :env-hops-per-get (share (at vm :env-hops) (at vm :env-get))
+     :allocations (at vm :alloc)
+     :gc-collections (at gc :collections)
+     :native-runs (at vm :jit-native)
+     :native-deopts (at vm :jit-deopt)
+     ;; How many samples each rate above rests on. `verdict` refuses to judge a rate drawn
+     ;; from too few, because a rate is not a signal at small n: a region whose hot loop runs
+     ;; natively leaves only a handful of IC probes behind, and 0 hits out of 3 is a 0% hit
+     ;; rate that means nothing. Measured — that exact shape labelled a JIT'd list-building
+     ;; loop `:dispatch-bound` before this guard existed.
+     :samples {:activations activations
+               :ic-probes (+ ic-hit ic-miss)
+               :env-gets (at vm :env-get)}}))
+
+;; ---- the verdict ------------------------------------------------------------
+
+(defn verdict (rs)
+  "`[verdict why]` for a `ratios` map: which bottleneck the counters support, and the numbers
+behind the call.
+
+Verdicts: `:dispatch-bound` (a bytecode VM / JIT removes this), `:env-bound` (a
+lexical-addressing or capture-flattening target), `:balanced`, or `:no-data`.
+
+**`:alloc-bound` is deliberately absent**, though `docs/benchmarking.md` §2 names it as one of
+the three. These counters cannot establish it: the only available denominator stops counting
+once the hot path goes native, while allocations do not (see `ratios`). Guessing anyway would
+label every JIT'd tail loop alloc-bound. To answer that question, read `:allocations` and
+`:gc-collections` against a *second run* of the same workload — or sweep `BROOD_GC_FLOOR`,
+which is what actually distinguishes GC-frequency-bound from allocation-volume-bound.
+
+**The thresholds below are first-cut heuristics, not calibrated cutoffs.** Every number they
+read is in the report beside them, so a reader can disagree with the label without having to
+re-derive the inputs."
+  (let (n (get rs :samples)
+        enough? (fn (k) (>= (get n k) min-samples))
+        defer (if (enough? :activations) (get rs :defer-rate) nil)
+        ic (if (enough? :ic-probes) (get rs :call-ic-hit-rate) nil)
+        hops (if (enough? :env-gets) (get rs :env-hops-per-get) nil))
+    (cond
+      (and (nil? defer) (nil? hops) (nil? ic))
+      [:no-data (fmt "fewer than {min-samples} samples on every rate — too little interpreted work to judge (activations {(get n :activations)}, IC probes {(get n :ic-probes)}, env gets {(get n :env-gets)}). A region whose hot path runs natively looks like this.")]
+      (and defer (> defer 0.05))
+      [:dispatch-bound (fmt "{(pct defer)} of activations deferred to the tree-walker")]
+      (and hops (> hops 3.0))
+      [:env-bound (fmt "{(dp2 hops)} env-chain frames walked per lookup")]
+      (and ic (< ic 0.9))
+      [:dispatch-bound (fmt "call-site inline cache hit rate {(pct ic)}")]
+      :else [:balanced (fmt "no interpreted counter dominates ({(get rs :allocations)} allocations, {(get rs :gc-collections)} collections, {(get rs :native-runs)} native runs / {(get rs :native-deopts)} deopts — judge allocation separately)")])))
+
+;; ---- the report ------------------------------------------------------------
+
+(defn report ()
+  "Triage the current process's counters in one call: `{:enabled? :verdict :why
+:ratios :vm :gc :debug-build?}`.
+
+`:enabled?` false means this binary has no counters compiled in (`:hint` says how to
+get one) — the snapshots are still returned, but every counter reads zero and the
+verdict is `:no-data`, never a claim.
+
+`:debug-build?` true means the timings in `:gc` are from a debug binary and are not
+representative; the *counts* still are."
+  (let (vm (vm-stats)
+        gc (gc-stats)
+        on? (= (get vm :enabled) true)
+        rs (ratios vm gc)
+        v (verdict rs))
+    {:enabled? on?
+     :verdict (if on? (first v) :no-data)
+     :why (if on?
+            (first (rest v))
+            "counters not compiled in — build with `make perf-brood`, then set BROOD_PERF_STATS=1")
+     ;; The exact command, not a paraphrase — `make perf-brood` matches `release-brood`'s
+     ;; flags, which a hand-rolled `cargo build` would not.
+     :hint (if on? nil "make perf-brood   # then: BROOD_PERF_STATS=1 target/release-fast/brood prog.blsp")
+     :ratios rs
+     :vm vm
+     :gc gc
+     :debug-build? (= (get gc :debug-build) true)}))
+
+(defn measure (thunk)
+  "Zero the counters, run `thunk`, and report on **just that region**: `{:value :report}`.
+
+Reach for this rather than a bare `(perf/report)` whenever you care about a specific piece
+of work. The counters are process-global and cumulative from process start, so a plain
+report on a short program also counts the runtime's own boot — and boot is
+macro-expansion-heavy, which defers to the tree-walker. Measured: the same list-building
+program read an **84% defer rate on a cold boot cache and 0.8% on a warm one**, purely from
+whether expansion had to run. That is a property of the boot, not of the program, and
+without a reset it is indistinguishable from one.
+
+Two limits on `just that region`. The counters are still **process-global**, so a concurrent
+process's work lands in them too — measure one workload at a time, or accept that the numbers
+are the whole runtime's. And the **GC figures are not resettable**: there is no counterpart to
+`(vm-stats-reset)` for `(gc-stats)`, so `:gc-collections` stays cumulative from process start
+even inside a `measure`. Read it as a ceiling on the region, not a count of it."
+  (vm-stats-reset)
+  (let (v (thunk))
+    {:value v :report (report)}))
+
+(defn- line (label value)
+  (println (fmt "  {label}  {value}")))
+
+(defn summary ()
+  "Print `(perf/report)` for a human, then return it.
+
+The shape a terminal reader wants: the verdict first, the numbers that produced it
+next, then the raw snapshots' headline counters. Returns the map so it is still usable
+from a script."
+  (let (r (report))
+    (println (fmt "perf: {(get r :verdict)} — {(get r :why)}"))
+    (when (get r :debug-build?)
+      (println "  (debug build — treat the GC pause times as meaningless; counts are fine)"))
+    (let (rs (get r :ratios))
+      (line "defer rate       " (dp2 (get rs :defer-rate)))
+      (line "call-IC hit rate " (dp2 (get rs :call-ic-hit-rate)))
+      (line "env hops per get " (dp2 (get rs :env-hops-per-get)))
+      (line "allocations      " (get rs :allocations))
+      (line "gc collections   " (get rs :gc-collections))
+      (line "native runs      " (get rs :native-runs))
+      (line "native deopts    " (get rs :native-deopts)))
+    r))

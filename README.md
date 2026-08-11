@@ -439,6 +439,9 @@ docs/          architecture, language reference, roadmap, decisions, dev log
 - [ROADMAP.md](ROADMAP.md) — milestones and status
 - [docs/benchmarking.md](docs/benchmarking.md) — how performance is measured;
   archived runs in [docs/benchmarks/](docs/benchmarks/)
+- [docs/backend-seams.md](docs/backend-seams.md) — how swappable the JIT and the
+  execution engine actually are, what the backend contract is, and how to read
+  performance (`make perf-brood`, `(perf/report)`, `brood --debug-flags`)
 - [broodlang/brood-benchmarks](https://github.com/broodlang/brood-benchmarks) — the
   cross-language benchmark suite and its published results
 - [docs/protocol-dispatch-design.md](docs/protocol-dispatch-design.md) — how the

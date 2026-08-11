@@ -55,6 +55,7 @@ pub mod builtins;
 pub mod bundle; // single-binary app release: append-to-binary bundling (ADR-038)
 pub mod cli_support; // tiny mechanism the `brood` and `nest` binaries share
 pub mod coverage; // line-coverage recording, off unless BROOD_COVERAGE is set (ADR-148)
+pub mod debug_flags; // the BROOD_* diagnostic-flag catalogue (`brood --debug-flags`)
 pub mod dist; // distributed nodes: connect two runtimes over TCP, route messages
 pub mod error; // errors + source positions (cross-cutting)
 pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
@@ -497,11 +498,7 @@ impl Interp {
                     if let Some(pos) = pos {
                         heap.note_definition(f, pos);
                     }
-                    if eval::compile::vm_enabled() {
-                        eval::compile::run(heap, f, root)
-                    } else {
-                        eval::eval(heap, f, root)
-                    }
+                    eval::compile::run_on_active_engine(heap, f, root)
                 })
                 .map_err(|e| match pos {
                     Some(p) => e.or_pos(p),

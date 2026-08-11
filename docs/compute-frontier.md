@@ -43,7 +43,8 @@
 > rows). **The stale framing was wrong and is now fixed:** the ROADMAP said these "run
 > interpreted (~39×/187× behind Elixir)". They do **not** — both are cleanly JIT'd (`jit_deopt=0`),
 > and the real gap is ~9.5×. `Cons` and small `MakeVector` are admitted to the JIT subset
-> (`chunk_in_jit_subset`, `jit_lower.rs`), so structure-building arms lower and win.
+> (`chunk_in_jit_subset`, `jit_plan.rs` — it moved out of `jit_lower.rs` in ADR-220), so
+> structure-building arms lower and win.
 >
 > **Verified current numbers** (fresh `--bin brood` build; `make`-installed harness N):
 >
@@ -215,7 +216,7 @@
 > **Work queue (5 items, see §3e–§3i for details):**
 >
 > 1. ~~**car/cdr inline in JIT** (§3e)~~ **SHIPPED 2026-06-20** — nqueens 163→**137 ms** (−16%).
->    3-file change: `heap.rs` exposes `local_pair_nursery_base`/`local_pair_old_base`; `jit/mod.rs`
+>    3-file change: `heap.rs` exposes `local_pair_nursery_base`/`local_pair_old_base`; `jit/rt.rs`
 >    exports them via `builder.symbol()` (critical: without this the JIT linker can't resolve the
 >    symbols even though they're `#[no_mangle]`); `compile/jit_lower.rs` hoists both pointers at arm entry
 >    (`pair_bases: Option<(nursery, old)>`) when the arm has First/Rest AND no Cons, then emits
@@ -314,7 +315,7 @@ Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_I
   See §6 for why this is sound.
 - Entry points: `eval/compile/` — `let vector_ref =` (the JIT helper in `jit_lower.rs`, currently
   emits the call), `chunk_in_jit_subset`/`resolve_prim` (`nth` → `PrimOp::VectorRef`),
-  `jit/mod.rs::brood_rt_vector_ref` (the runtime helper); `core/heap.rs` `vector()` + the
+  `jit/rt.rs::brood_rt_vector_ref` (the runtime helper); `core/heap.rs` `vector()` + the
   `CodeSlabs.vectors` boxcar (the storage to flatten).
 
 ### 3b. `bintree` (~?×) — **car/cdr FFI per tree step (§3e is the lever)**
@@ -410,7 +411,7 @@ inline; fall back to FFI.
 
 **Proposed approach.**
 1. Add `brood_rt_pair_bases(heap, out_nursery: *mut *const u8, out_old: *mut *const u8)` to
-   `jit/mod.rs` — writes the nursery `pairs.as_ptr()` and old-gen `pairs.as_ptr()` as raw
+   `jit/rt.rs` — writes the nursery `pairs.as_ptr()` and old-gen `pairs.as_ptr()` as raw
    byte pointers. Call once at JIT function entry (like `brood_rt_roots_base`).
 2. In `jit_lower_arm`'s `Inst::Prim1 { First | Rest }` arm: after the existing `TAG_PAIR`
    tag-check, extract `region = (w1 >> 62) & 3` and `age = (w1 >> 61) & 1` and `idx = w1 &
@@ -428,7 +429,7 @@ inline; fall back to FFI.
 `first`/`rest`: ~20–30 ns → ~2–3 ns (3 loads + arithmetic). bintree: ~127ms → ~90ms;
 nqueens: ~163ms → ~120ms. `sort`'s `hash--acc` walk gains proportionally.
 
-**Entry points:** `jit/mod.rs` (add `brood_rt_pair_bases`), `eval/compile/jit_lower.rs`
+**Entry points:** `jit/rt.rs` (add `brood_rt_pair_bases`), `eval/compile/jit_lower.rs`
 `jit_lower_arm` (the `Inst::Prim1` arm), `jit_lower_arm` function entry (add the
 one-shot `brood_rt_pair_bases` call + store base SSA values for later use by First/Rest arms).
 

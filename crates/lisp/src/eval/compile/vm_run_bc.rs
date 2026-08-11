@@ -248,7 +248,7 @@ pub(crate) fn run_program_body(
             // the tree-walker — `def` is its special form, and a top-level
             // `receive` blocks the worker (the documented tree-walker behavior;
             // it's a debug engine, not the production path).
-            if !vm_enabled() {
+            if active_engine() == Engine::TreeWalker {
                 prog.def_name = None;
                 return Ok(VmOutcome::Done(crate::eval::eval(heap, expanded, root)?));
             }

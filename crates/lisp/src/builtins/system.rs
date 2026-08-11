@@ -41,11 +41,7 @@ pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
     let compiled = crate::eval::macros::compile(heap, arg(args, 0), root);
     heap.set_ns_assume_own(prev_assume);
     let form = compiled?;
-    if crate::eval::compile::vm_enabled() {
-        crate::eval::compile::run(heap, form, root)
-    } else {
-        crate::eval::eval(heap, form, root)
-    }
+    crate::eval::compile::run_on_active_engine(heap, form, root)
 }
 
 pub(super) fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -764,13 +760,9 @@ pub(super) fn eval_string_inner(
         // Same as `eval_builtin`/the file loader: compile then run on the VM when enabled
         // (deferred.md #9), tree-walker under `BROOD_VM=0`. `compile::run` falls back to the
         // tree-walker per-form, so a form outside the VM's vocabulary still evaluates.
-        match crate::eval::macros::compile(heap, form, root).and_then(|f| {
-            if crate::eval::compile::vm_enabled() {
-                crate::eval::compile::run(heap, f, root)
-            } else {
-                crate::eval::eval(heap, f, root)
-            }
-        }) {
+        match crate::eval::macros::compile(heap, form, root)
+            .and_then(|f| crate::eval::compile::run_on_active_engine(heap, f, root))
+        {
             Ok(v) => result = Ok(v),
             Err(e) => {
                 result = Err(e);
@@ -1212,6 +1204,11 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
     // catalogue the `nest mcp` dispatcher reads (ADR-036, docs/mcp.md, step 3).
     embedded_module!("mcp", "std/tool/mcp.blsp"),
+    // One-call performance triage: `(perf/report)`/`(perf/summary)` read `(vm-stats)` +
+    // `(gc-stats)` and apply `docs/benchmarking.md` §2's interpretation rules, so "is this
+    // dispatch-, env-, or alloc-bound?" does not depend on recalling them. DEV: it serves
+    // *developing* a program, and a shipped app has no use for it.
+    embedded_module!("perf", "std/tool/perf.blsp"),
     // The read-eval-print loop itself, written in Brood (`(require 'repl)`):
     // policy over the `read-line`/`eval-string`/`pr-str` primitives. The Rust
     // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`. A shipped
