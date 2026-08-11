@@ -343,26 +343,40 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; A non-code text run: turn `[text](url)` into a link, HTML-escape everything else.
 (defn- md-links
   (text)
+  (apply str (reverse (md-links-acc text '()))))
+
+;; The scanning worker: **tail**-recursive, carrying the emitted chunks newest-first (so the
+;; caller reverses once) rather than nesting `str` around the recursive call. Two reasons it is
+;; shaped this way and not as the obvious `(str … (md-links rest))`: that form recurses once per
+;; link in non-tail position, which the checker flags for stack headroom; and each level built a
+;; fresh concatenation of everything after it, which is quadratic in the number of links. A list
+;; of chunks plus one `apply str` is linear. Behaviour is unchanged — `tests/docs_test.blsp`
+;; characterised every branch against the previous implementation before this was written.
+(defn- md-links-acc
+  (text chunks)
   (let (open-bracket (index-of text "[")
         close-bracket (index-of text "]"))
     (cond
       ;; no `[`, or a `]` before any `[` with no closing `]` after — no link, escape all.
       ;; (`index-of` returns -1 when absent, so both bounds are guarded — missing the `]`
       ;; guard recursed on the same text and stack-overflowed.)
-      (or (not (number? open-bracket)) (< open-bracket 0)) (md-escape text)
-      (or (not (number? close-bracket)) (< close-bracket open-bracket)) (md-escape text)
+      (or (not (number? open-bracket)) (< open-bracket 0)) (cons (md-escape text) chunks)
+      (or (not (number? close-bracket)) (< close-bracket open-bracket)) (cons (md-escape text) chunks)
       ;; `[text](url)` — a real link
       (= (substring text (+ close-bracket 1) (min (+ close-bracket 2) (string-length text))) "(")
         (let (rest (substring text (+ close-bracket 2) (string-length text)) close-paren (index-of rest ")"))
           (if (and (number? close-paren) (>= close-paren 0))
-            (str (md-escape (substring text 0 open-bracket))
-              "<a href=\"" (md-attr (substring rest 0 close-paren)) "\">"
-              (md-escape (substring text (+ open-bracket 1) close-bracket)) "</a>"
-              (md-links (substring rest (+ close-paren 1) (string-length rest))))
-            (md-escape text)))
+            (md-links-acc (substring rest (+ close-paren 1) (string-length rest))
+              (cons "</a>"
+                (cons (md-escape (substring text (+ open-bracket 1) close-bracket))
+                  (cons "\">"
+                    (cons (md-attr (substring rest 0 close-paren))
+                      (cons "<a href=\""
+                        (cons (md-escape (substring text 0 open-bracket)) chunks)))))))
+            (cons (md-escape text) chunks)))
       ;; a `[…]` that isn't a link — emit it literally, continue past the `]`
-      else (str (md-escape (substring text 0 (+ close-bracket 1)))
-             (md-links (substring text (+ close-bracket 1) (string-length text)))))))
+      else (md-links-acc (substring text (+ close-bracket 1) (string-length text))
+             (cons (md-escape (substring text 0 (+ close-bracket 1))) chunks)))))
 
 ;; Inline Markdown for one text run: `code` spans (backtick pairs) plus links via `md-links`.
 (defn- md-inline

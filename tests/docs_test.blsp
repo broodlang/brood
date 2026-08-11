@@ -105,3 +105,48 @@
     (is (includes? (docs/markdown->html "[a](javascript:alert(1))") "href=\"#\"")))
   (test "an unclosed code fence at EOF is emitted, not dropped"
     (is (includes? (docs/markdown->html "```\n(+ 1 2)") "<pre><code>(+ 1 2)</code></pre>"))))
+
+;; `md-links` — inline link rendering. Characterisation tests written BEFORE making the
+;; function tail-recursive: it had no coverage at all, and it is fiddly index arithmetic over
+;; strings, so the rewrite needed something to hold it to. Every case below passed against the
+;; original non-tail implementation first.
+(describe "docs: md-links"
+  (test "text with no bracket is escaped and returned"
+    (assert= "plain &lt;b&gt;" (docs/md-links "plain <b>")))
+
+  (test "a real [text](url) link becomes an anchor"
+    (assert= "<a href=\"u\">a</a>" (docs/md-links "[a](u)")))
+
+  (test "text around a link is preserved and escaped"
+    (assert= "x <a href=\"u\">a</a> y" (docs/md-links "x [a](u) y")))
+
+  (test "two links in one run both render"
+    (assert= "<a href=\"u\">a</a><a href=\"v\">b</a>"
+      (docs/md-links "[a](u)[b](v)")))
+
+  (test "a bracket run that is not a link is emitted literally, and scanning continues"
+    (assert= "[a] then <a href=\"u\">b</a>" (docs/md-links "[a] then [b](u)")))
+
+  (test "an unclosed ] escapes the whole run"
+    (assert= "[a(u)" (docs/md-links "[a(u)")))
+
+  (test "an unclosed ) escapes the whole run"
+    (assert= "[a](u" (docs/md-links "[a](u")))
+
+  (test "link text and url are escaped"
+    (assert= "<a href=\"u&amp;v\">&lt;t&gt;</a>" (docs/md-links "[<t>](u&v)")))
+
+  (test "a javascript: url is neutralised"
+    ;; The trailing `)` is real, not a bug in the test: `index-of ")"` finds the INNER paren,
+    ;; so the url is `javascript:alert(1` and the outer `)` falls through as literal text.
+    ;; Nested parens in a url truncate it — pinned here because the security property that
+    ;; matters (a `javascript:` url becomes `#`) holds regardless.
+    (assert= "<a href=\"#\">x</a>)" (docs/md-links "[x](javascript:alert(1))")))
+
+  (test "a long run of links all render"
+    ;; 2000 links. Recursion depth here is one frame per link, so this is also the shape the
+    ;; checker's non-tail-recursion warning is about — though 2000 does NOT overflow, so the
+    ;; warning is about headroom, not an observed failure. `string-split` on N separators
+    ;; yields N+1 pieces.
+    (let (src (apply str (map (fn (_) "[a](u)") (range 0 2000))))
+      (assert= 2001 (count (string-split (docs/md-links src) "<a href="))))))

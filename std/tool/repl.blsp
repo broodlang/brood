@@ -912,7 +912,15 @@ by the outermost invocation only."
     ;; package context that roots the module name. A no-op when `*repl-start-ns*` is nil
     ;; (the plain `brood` REPL, or `nest repl` outside a project).
     (repl-await (spawn (binding (*repl-prompt* prompt *repl-cont-prompt* cont-prompt)
-                         (when *repl-start-ns* (%in-ns *repl-start-ns*))
+                         ;; Guard on `symbol?`, not on truthiness. `*repl-start-ns*` is a
+                         ;; redefinable global, so it types as `dynamic()`; `(when *x* …)` only
+                         ;; rules out nil/false, which is not enough for the checker to conclude
+                         ;; `%in-ns` gets a symbol — it warned on both the direct read and on a
+                         ;; plain `let` binding of it. A type predicate is what occurrence typing
+                         ;; narrows on, and it is the better guard anyway: a non-symbol value
+                         ;; here (someone `def`s it to a string) now skips rather than erroring.
+                         (let (start-ns *repl-start-ns*)
+                           (when (symbol? start-ns) (%in-ns start-ns)))
                          (repl-loop interactive history))))
     (when (and owner (= *repl-sigint-owner* token))
       (%restore-interrupt-handler)

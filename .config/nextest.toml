@@ -87,9 +87,29 @@ retries = 1
 # budget rather than sit one slow scheduling quantum away from a false red. The inner
 # `*test-timeout-ms*` (600s here, set in tests/suite.rs) remains the guard that actually
 # catches a hung case; this is only the outer wall-clock backstop.
+# Raised 1200s → 2700s on 2026-08-11, and the "check for a slow case first" instruction above
+# was followed, not skipped. The culprit is not a case, it is the ENGINE: the CI
+# `differential (tree-walker)` job runs this same wrapper under `BROOD_VM=0`, and the
+# tree-walker is ~10× slower than the VM by design. Measured on one box, same commit:
+# **562s under the VM, 954s under the tree-walker** — i.e. the tree-walker was inside a 1200s
+# budget by 20% on fast hardware and had no chance on a runner the config elsewhere describes as
+# sharing 2 cores with the workspace build.
+#
+# The arithmetic confirms it. `retries = 1` below means a killed wrapper is attempted twice, so
+# 2 × 1200s + ~5 min of checkout/build/setup ≈ **45 min** — and the failing CI job ran
+# **45m20s** (08:50:50 → 09:36:10 on 9f06c6c9), exiting 100. That job had been red on four
+# consecutive commits with no common code change between them, which is the signature of a
+# budget, not a regression. The VM job's Test step passed on every one of those runs.
+#
+# So this is a wall-clock budget that only ever fitted one of the two engines. 2700s gives the
+# tree-walker ~2.8× headroom over its measured 954s. The cost of the raise is that a genuinely
+# hung suite now takes 45 min to be killed instead of 20 — acceptable because, as the note above
+# says, the guard that actually catches a hung *case* is the inner `*test-timeout-ms*`
+# (tests/suite.rs), and this outer cap is only the backstop. If it needs raising again, check the
+# engine ratio first: a tree-walker figure much past ~10× the VM's is a real finding.
 [[profile.default.overrides]]
 filter = 'binary(suite)'
-slow-timeout = { period = "60s", terminate-after = 20 }
+slow-timeout = { period = "60s", terminate-after = 45 }
 # One retry, for the same reason `distribution`/`serve_attach` get one — and with a
 # sharper edge here. The in-language suite CONTAINS timing-sensitive cases that talk
 # to a local node (`tests/remote_spawn_test.blsp` does a `remote-spawn` round trip),
