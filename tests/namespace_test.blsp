@@ -304,3 +304,37 @@ is what a `:use` would actually import, not what the source looks like."
         ;; and they are DIFFERENT operations, not duplicates: treesit's take a `lang`
         (assert= 3 (count (arglist editor/treesit/point-forward)))
         (assert= 2 (count (arglist sexp/point-forward)))))))
+
+;; A package (dependency or root project) may not take a name the standard library
+;; owns: its name becomes a load-time package prefix (ADR-070), so a package called
+;; `net` would provide `net/tcp` — exactly the baked-in module. `reserved-package-name?`
+;; (prelude) is the single predicate the `nest new`, `nest publish`, and load-time
+;; (`require`) guards share. Here we exercise the predicate and the deepest layer:
+;; `require`'s refusal of a module rooted under a reserved prefix — the layer that
+;; catches a `:path`/`:git` dependency that never touched the registry.
+(describe "namespaces: standard-library names are reserved (ADR-070/166)"
+  :isolated
+
+  (test "reserved-package-name? is true for a baked-in module (flat and group prefixes)"
+    (is (reserved-package-name? 'json))
+    (is (reserved-package-name? "set"))
+    (is (reserved-package-name? 'net))     ; owns net/tcp, net/http, …
+    (is (reserved-package-name? 'proc)))   ; owns proc/gen, proc/supervisor, …
+
+  (test "reserved-package-name? is false for an ordinary package name"
+    (is (not (reserved-package-name? 'myapp)))
+    (is (not (reserved-package-name? "greeter"))))
+
+  (test "requiring a package rooted under a reserved name is refused at load time"
+    ;; Register a rooted module file so `require` reaches the package-load path; the
+    ;; reserved-name guard fires BEFORE the file is opened, so a bogus path is fine.
+    (%registry-update! '*package-module-files* :assoc ["set/thing"] "/nonexistent/thing.blsp")
+    (let (msg (try (do (require 'set/thing) :no-error)
+                (catch e (error-message e))))
+      (is (includes? (str msg) "reserved"))))
+
+  (test "an ordinary package name passes the reserved-name guard (fails only to find its file)"
+    (%registry-update! '*package-module-files* :assoc ["greeter/thing"] "/nonexistent/thing.blsp")
+    (let (msg (try (do (require 'greeter/thing) :no-error)
+                (catch e (error-message e))))
+      (is (not (includes? (str msg) "reserved"))))))

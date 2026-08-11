@@ -17920,3 +17920,28 @@ in the tree transitively; the direct `brotli` dep pins the compressor for the bu
 consumer is hatch's `web/compress`, which now negotiates `br` ahead of `gzip`. Tests:
 `tests/zlib_test.blsp` (round-trip, quality-11 ≤ quality-0, brotli ≤ gzip on text, out-of-range
 raises).
+
+## 2026-08-11 — standard-library module names are reserved package names (ADR-220)
+
+Closed the one gap in the ADR-070 namespace model: the stdlib was the sole un-rooted island
+(its modules keep bare names — `json`, `set`, `net/tcp`), but nothing stopped a dependency or
+project from *taking* one of those names. A dep named `net` provides `net/tcp` — exactly the
+baked-in symbols (a clobber); a dep named `json` squats the `json/…` prefix (confusing). This is
+the Elixir "you can't name your app `Enum`" rule, but enforced mechanically rather than by
+convention.
+
+One predicate, `reserved-package-name?` in `std/prelude.blsp`, derived from `(builtin-modules)`
+(so it tracks whatever is actually baked in — its reserved set is the first path segment of every
+std module: `net`, `proc`, `json`, `set`, `text`, `test`, …). Three enforcement layers share it:
+`nest new` (scaffold refuses the name), `nest publish` (registry gate), and — the layer the user
+asked for so a `:path`/`:git` dep that never touched the registry is still caught — **load time**
+in `require-force-package`, which refuses a rooted module under a reserved prefix before opening
+the file. A resolution-time guard (`package-guard-reserved-names`, folded into the existing
+`package-guard-collisions`) additionally fails such a dep fast at `nest fetch`/`add`.
+`require-force-package` was restructured into nested `let`s so the check runs *before*
+`%set-package-context`, needing no restore on the reject path.
+
+Tests: `tests/namespace_test.blsp` — the predicate (true for `json`/`set`/`net`/`proc`, false for
+ordinary names) and the load-time refusal (a module registered under `set/…` is refused with a
+"reserved" error; an ordinary `greeter/…` prefix passes the guard and fails only to find its
+file). Full suite green (974 passed); `nest check` clean.
