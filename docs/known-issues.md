@@ -30,7 +30,7 @@ ADRs / topic docs.
 | KI-31 | a foreign-ecosystem version range compiled to its FIRST term — `">=1.0.0 <2.0.0"` became `>=1.0.0` | ✅ **fixed** 2026-08-06 |
 | KI-30 | seven `temp-dir` prefixes were never purged — 4484 dirs / 168 MB of `/tmp` litter | ✅ **fixed** 2026-08-05 |
 | KI-29 | node/observe tests orphan `brood` children — one found alive **9 days** later, ~15% CPU each | ✅ **fixed** 2026-08-05 |
-| KI-28 | `clean_peer_exit_fires_nodedown_promptly` failed once, then passed on retry; output not captured | ⚠️ **watching** (seen once 2026-08-05) |
+| KI-28 | `clean_peer_exit_fires_nodedown_promptly` failed once, then passed on retry; output not captured | ☑️ **superseded by KI-38** — recurred twice, both in `wait_until_listening` (a *boot* failure), and KI-38's fix is verified holding (2026-08-12) |
 | KI-27 | node tests drew their port from the OS **ephemeral** range, so an unrelated process could take it | ✅ **fixed** 2026-08-05 |
 | KI-25 | five JIT/VM suites cannot be re-run in one image (`--repeat-until-failure` fails on iteration 2) | ✅ **fixed** 2026-08-04 |
 | KI-24 | `eval`'d code cannot forward-reference a name a later `eval` defines (regression, 97d63eda) | ✅ **fixed** 2026-08-01 |
@@ -430,6 +430,26 @@ be evidence.
 
 **A clean re-run is green:** 970/970 with no flaky row, on an idle box, same commit. So the
 sighting stands alone, exactly as KI-28's does.
+
+**Update 2026-08-12 — the condition this entry called untested has now been tested: 0/14.** The
+weakness recorded above was that the load hunts never reached the test's path (synthetic CPU
+burners; runs came out *faster* than idle). So the real thing was reproduced instead: a
+`gen-project.py 4000` fixture, its `.brood` image deleted every iteration, loaded in a loop by
+the prebuilt `nest` — measured at **186% CPU and 352 MB RSS** with a load average of ~3 while the
+test ran. **14 runs, retries off, one at a time: 0 failures.** Idle baseline the same day: 0/10.
+
+That does not explain the sighting, but it does retire the "we never tried the real condition"
+caveat: the 4000-module image build beside the suite is now a *tested* negative, not an untested
+suspicion.
+
+⚠️ **Method trap, recorded because it produced a convincing false positive first.** The first
+attempt drove the load with `cargo run -q -p nest …` against the same workspace. That takes the
+**cargo build lock** on the target dir the foreground `cargo nextest run` needs, so every
+foreground run failed on lock contention — and a `grep -E "FAIL|failed"` matched *cargo's* error
+text. It read as **12/14 → then 12/12 failures**, i.e. a reproduction, and it was nothing of the
+kind: with the load stopped the same test passed in 1.3 s. Drive background load with a
+**prebuilt binary**, never through cargo, and assert on the test harness's own summary line rather
+than on any line containing "fail".
 
 **Related:** KI-28 is the same shape in the same suite — a single unexplained dist failure that
 passed on retry and has never recurred. Two independent one-off failures in the dist tests, both
