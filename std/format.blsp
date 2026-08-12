@@ -1036,11 +1036,10 @@ retired the `comment-on-own-line?` distinction this used to need."
   ;; Every .blsp the project owns, in deterministic order: the root's own files
   ;; plus each whitelisted tree. `distinct` because the whitelists can overlap
   ;; (`:format-paths ["."]`, or a test path nested inside a source path).
-  (distinct
-    (append (format-root-files root)
-      (fold (fn (acc dir) (append-two (format-collect-blsp dir) acc))
-        nil
-        (format-roots root)))))
+  (distinct (append (format-root-files root)
+              (fold (fn (acc dir) (append-two (format-collect-blsp dir) acc))
+                nil
+                (format-roots root)))))
 
 (defn- format-require-root
   ()

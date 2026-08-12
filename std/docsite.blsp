@@ -191,15 +191,24 @@
 ;; a `.module`-styled section — it shares the page's spacing and heading treatment.
 (defn- guide-html
   (guide)
-  (str "<section class=\"module guide\" id=\"" (guide-anchor (get guide :title)) "\">"
-    "<h2>" (escape (get guide :title)) "</h2>"
-    "<div class=\"guide-body\">" (get guide :html) "</div>"
+  (str "<section class=\"module guide\" id=\""
+    (guide-anchor (get guide :title))
+    "\">"
+    "<h2>"
+    (escape (get guide :title))
+    "</h2>"
+    "<div class=\"guide-body\">"
+    (get guide :html)
+    "</div>"
     "</section>"))
 
 (defn- sidebar-guide
   (guide)
   (str "<div class=\"nav-module\"><a class=\"nav-module-link\" href=\"#"
-    (guide-anchor (get guide :title)) "\">" (escape (get guide :title)) "</a></div>"))
+    (guide-anchor (get guide :title))
+    "\">"
+    (escape (get guide :title))
+    "</a></div>"))
 
 (defn- content-html
   (model)
@@ -254,8 +263,7 @@
     ".docsite .doc code,.docsite .moduledoc code{background:#f0f4f8;border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
     ".docsite .doc-example{background:#f0f4f8;border-radius:.375rem;padding:.6rem .8rem;margin:.5rem 0;overflow-x:auto;font-size:.85rem;line-height:1.45}"
     ".docsite .doc-example code{background:none;padding:0;white-space:pre}"
-    ".docsite .empty{color:#9aa5b1}"
-    ".docsite .guide-body{color:#3e4c59}"
+    ".docsite .empty{color:#9aa5b1}" ".docsite .guide-body{color:#3e4c59}"
     ".docsite .guide-body h1{font-size:1.5rem;margin:1rem 0 .5rem;color:#1f2933}"
     ".docsite .guide-body h2{font-size:1.2rem;border:0;margin:1rem 0 .4rem;color:#1f2933}"
     ".docsite .guide-body h3{font-size:1.05rem;margin:.8rem 0 .3rem;color:#1f2933}"

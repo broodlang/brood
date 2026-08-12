@@ -920,9 +920,7 @@ test discovery, lints, release, config)."
       (error "new: cwd has no basename — cannot derive a project name"))
     (when (reserved-package-name? actual-name)
       (error "new: project name '"
-        actual-name
-        "' is reserved by the standard library (it owns the '"
-        actual-name
+        actual-name "' is reserved by the standard library (it owns the '" actual-name
         "' module namespace); choose another name"))
     (let (src-dir (path-join nm "src")
           tests-dir (path-join nm "tests")
@@ -975,7 +973,7 @@ test discovery, lints, release, config)."
   ;; without a project — but guard directly too, so a bare `(scaffold/update-tooling)`
   ;; at the REPL errors clearly instead of writing into the cwd.
   (let (root (or (project-find-root (cwd))
-                 (error "update-tooling: no project.blsp in the current directory or any parent"))
+               (error "update-tooling: no project.blsp in the current directory or any parent"))
         docs-dir (path-join root "docs")
         skill-dir (path-join root ".claude/skills/writing-brood"))
     (make-dir docs-dir)

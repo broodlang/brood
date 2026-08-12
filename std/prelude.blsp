@@ -4965,8 +4965,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 ;; into this binary (`(builtin-modules)`). Enforced in THREE layers: at `nest new`
 ;; (scaffold) and `nest publish` (package.blsp), and here at LOAD time so a `:path`/`:git`
 ;; dependency that never went through the registry is refused all the same (ADR-166 kin).
-(defn reserved-package-name?
-  (nm)
+(defn reserved-package-name? (nm)
   "True if package name `nm` (a symbol or string) is reserved by the standard library —
 its first segment names a module baked into this binary, so a package taking it would
 root its own modules onto stdlib namespaces. Backs the `nest new` / `nest publish` /
@@ -4987,8 +4986,12 @@ load-time (`require`) guards."
     ;; ambient context — a `:path`/`:git`/registry dep (or a root project) named after
     ;; a baked-in module would silently root its modules onto stdlib namespaces.
     (when (reserved-package-name? prefix)
-      (error "require: package '" (name prefix) "' is reserved by the standard library "
-        "(it owns the '" (name prefix) "' module namespace) — a package cannot take this "
+      (error "require: package '"
+        (name prefix)
+        "' is reserved by the standard library "
+        "(it owns the '"
+        (name prefix)
+        "' module namespace) — a package cannot take this "
         "name; rename the package"))
     (let (modules (get *package-modules-of* (name prefix))
           prev (%set-package-context prefix modules))
