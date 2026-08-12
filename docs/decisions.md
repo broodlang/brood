@@ -14980,3 +14980,44 @@ pool must stay a *backend* concern (ADR-091 measured that the indirection AOT ne
 nothing, so putting it in the shared lowering would slow tier 2), epoch admission wants ADR-217's
 deferred per-arm symbol tracking, and an unprofiled AOT build is sound-but-deopt-prone because
 speculation is guarded.
+
+---
+
+## ADR-223 — A unified module/symbol index, deferred to M2 plugin pressure
+
+**Status:** proposed, **not built** — a recorded future direction. Design in
+[module-index.md](module-index.md); this entry records only the decision to *defer* and the
+trigger to build. Sits on the ADR-070 trajectory (package-rooting), one step further.
+
+**Context.** "Where/what is X" is answered by several ad-hoc half-indexes — the `module foo →
+foo.blsp` filename bijection, `*package-module-files*`, baked `%builtin-module` keys, `*features*`
+/ `*require-edges*`, the startup image manifest, the ADR-129 check cache, `*record-ids*`, and the
+LSP's on-demand scans. Each is partial and locally maintained, which risks drift between what the
+editor thinks a name means and what the runtime does (the consistency `namespaces.md` §4 exists to
+protect), makes symbol-level location require a scan or load, and — via the filename bijection —
+forecloses multiple modules per file. A single auto-built index (symbol → site, module → file,
+feature → provider, ability → impls) would consolidate all of it, following the Elixir
+"artifact-*is*-the-index" precedent Brood already half-implements for std and deps.
+
+**Decision.** **Record the design and defer the build.** The advantages are real (O(1) symbol
+find, collision/reserved checks as index queries, `BROOD_MONO` by default, cheap whole-program
+queries, module↔file decoupling incl. multi-module files) but they are shaped like *faster /
+more unified*, which ADR-011 says to defer until a concrete need justifies the cost. The concrete
+need is **M2+ plugin pressure** — many modules from many authors, an editor that navigates by
+symbol — the same trigger §8 of `namespaces.md` names for package-rooting. The namespace bug hunt
+(devlog 2026-08-12) found the current machinery *robust*, so nothing is forcing it now, and the
+root project is small enough that the filename convention is not a bottleneck.
+
+**The one invariant any future build rests on.** The index is a *cache of live truth, never the
+truth*: auto-refreshed, mtime-invalidated, with every consumer falling back to live scanning when
+it is absent or stale (the LSP already needs that for unsaved buffers). The flat interned symbol
+table stays the runtime truth and ADR-065 resolution *semantics do not change* — the index
+accelerates lookup, never meaning. In a hot-reload system a stale index that misdirects is worse
+than none, which is the whole risk and why it must never be authoritative.
+
+**Scope when built (from the design doc).** Flat multiple-modules-per-file (the Elixir model),
+*not* lexical submodules — an index solves *addressing*, not *scoping*, and even the precedent
+treats module nesting as name-sugar, not scope. Build the index first and prove it against live
+truth before changing the one-module-per-file rule; until then the honest interim for a second
+`defmodule` in one file is a **loud load error**, not silent misqualification (devlog 2026-08-12
+fixed the pre-module case of that silent miscompile).
