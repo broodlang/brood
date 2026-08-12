@@ -44,33 +44,34 @@
         (assert= (tcp-drain s) (bytes 0 255 128 65)))))
   (test "an iolist request (with a bytes leaf) reaches the server byte-faithfully"
     (let (me (self))
-      (spawn (do
-               (let (ck (tls-self-signed "localhost")
-                     ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
-                 (send me [:ready (tcp-local-port ls) (first ck)])
-                 (let (c (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
-                   ;; Binary mode BEFORE handing over control, not after. `tcp-controlling-process`
-                   ;; starts messages flowing to this process, so a request already in flight can
-                   ;; be delivered in the window before `tcp-set-binary` lands — as a *string*,
-                   ;; and `bytes->list` below then kills this process, leaving the client to drain
-                   ;; nothing (`resp` = ""). A fast box wins that race; a 2-core one loses it about
-                   ;; 1 run in 3 (measured 2026-08-11 under `taskset -c 0,1`), which is what made
-                   ;; this test redden CI while passing locally. Configuring the socket before
-                   ;; anyone is receiving from it closes the window entirely.
-                   ;;
-                   ;; This is the codebase's established convention, not a new idea: the HTTP
-                   ;; server does the same thing for the same reason, and its comment names the
-                   ;; prior occurrence — "setting binary after the handoff left a window where a
-                   ;; first chunk was decoded as lossy text (the old http binary-body flake)"
-                   ;; (`std/net/http.blsp`). A sweep of every `tcp-controlling-process` /
-                   ;; `tcp-set-binary` pair found this file as the only remaining outlier;
-                   ;; `tests/tcp_test.blsp`'s ~17 pairs are safe because there the client sends
-                   ;; only AFTER the server has configured the socket, so nothing is in flight.
-                   (tcp-set-binary c true)
-                   (tcp-controlling-process c (self))
-                   (let (got (receive ([:tcp ^c d] d) (after *test-wait-ms* :timeout)))
-                     (tcp-send c (pr-str (into [] (bytes->list got))))
-                     (tcp-close c))))))
+      (spawn
+        (do
+          (let (ck (tls-self-signed "localhost")
+                ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
+            (send me [:ready (tcp-local-port ls) (first ck)])
+            (let (c (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
+              ;; Binary mode BEFORE handing over control, not after. `tcp-controlling-process`
+              ;; starts messages flowing to this process, so a request already in flight can
+              ;; be delivered in the window before `tcp-set-binary` lands — as a *string*,
+              ;; and `bytes->list` below then kills this process, leaving the client to drain
+              ;; nothing (`resp` = ""). A fast box wins that race; a 2-core one loses it about
+              ;; 1 run in 3 (measured 2026-08-11 under `taskset -c 0,1`), which is what made
+              ;; this test redden CI while passing locally. Configuring the socket before
+              ;; anyone is receiving from it closes the window entirely.
+              ;;
+              ;; This is the codebase's established convention, not a new idea: the HTTP
+              ;; server does the same thing for the same reason, and its comment names the
+              ;; prior occurrence — "setting binary after the handoff left a window where a
+              ;; first chunk was decoded as lossy text (the old http binary-body flake)"
+              ;; (`std/net/http.blsp`). A sweep of every `tcp-controlling-process` /
+              ;; `tcp-set-binary` pair found this file as the only remaining outlier;
+              ;; `tests/tcp_test.blsp`'s ~17 pairs are safe because there the client sends
+              ;; only AFTER the server has configured the socket, so nothing is in flight.
+              (tcp-set-binary c true)
+              (tcp-controlling-process c (self))
+              (let (got (receive ([:tcp ^c d] d) (after *test-wait-ms* :timeout)))
+                (tcp-send c (pr-str (into [] (bytes->list got))))
+                (tcp-close c))))))
       (let (port-cert (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout))
             s (tls-request "localhost"
                 (first port-cert)

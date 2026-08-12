@@ -131,7 +131,9 @@ module's namespace-rooted globals (ADR-070) back to it."
         before (global-names))
     (load path)
     (if feature
-      (docs-render (or declared (docs-basename path)) (docs-leading-doc src) (docs-namespace-syms feature))
+      (docs-render (or declared (docs-basename path))
+        (docs-leading-doc src)
+        (docs-namespace-syms feature))
       (docs-render (docs-basename path) (docs-leading-doc src) (docs-added before (global-names))))))
 
 ;; Markdown for a module named `modname` (symbol or string): resolve its source
@@ -296,7 +298,8 @@ module's namespace-rooted globals (ADR-070) back to it."
                 (filter (fn (group) (not (empty? (get group :defs))))
                   (map (fn (pair)
                          (let ([key title] pair)
-                           (docs-module-model title nil
+                           (docs-module-model title
+                             nil
                              (filter (fn (s) (= (category-of s) key)) syms))))
                     doc-catalog/*category-order*)))}))
 
@@ -361,10 +364,12 @@ module's namespace-rooted globals (ADR-070) back to it."
       ;; (`index-of` returns -1 when absent, so both bounds are guarded — missing the `]`
       ;; guard recursed on the same text and stack-overflowed.)
       (or (not (number? open-bracket)) (< open-bracket 0)) (cons (md-escape text) chunks)
-      (or (not (number? close-bracket)) (< close-bracket open-bracket)) (cons (md-escape text) chunks)
+      (or (not (number? close-bracket)) (< close-bracket open-bracket))
+        (cons (md-escape text) chunks)
       ;; `[text](url)` — a real link
       (= (substring text (+ close-bracket 1) (min (+ close-bracket 2) (string-length text))) "(")
-        (let (rest (substring text (+ close-bracket 2) (string-length text)) close-paren (index-of rest ")"))
+        (let (rest (substring text (+ close-bracket 2) (string-length text))
+              close-paren (index-of rest ")"))
           (if (and (number? close-paren) (>= close-paren 0))
             (md-links-acc (substring rest (+ close-paren 1) (string-length rest))
               (cons "</a>"
@@ -375,8 +380,9 @@ module's namespace-rooted globals (ADR-070) back to it."
                         (cons (md-escape (substring text 0 open-bracket)) chunks)))))))
             (cons (md-escape text) chunks)))
       ;; a `[…]` that isn't a link — emit it literally, continue past the `]`
-      else (md-links-acc (substring text (+ close-bracket 1) (string-length text))
-             (cons (md-escape (substring text 0 (+ close-bracket 1))) chunks)))))
+      else
+        (md-links-acc (substring text (+ close-bracket 1) (string-length text))
+          (cons (md-escape (substring text 0 (+ close-bracket 1))) chunks)))))
 
 ;; Inline Markdown for one text run: `code` spans (backtick pairs) plus links via `md-links`.
 (defn- md-inline
@@ -393,14 +399,26 @@ module's namespace-rooted globals (ADR-070) back to it."
   (state)
   (let (mode (get state :mode) buf (get state :buf) out (get state :out))
     (cond
-      (= mode :para) (assoc state :out (str out "<p>" (md-inline (join " " (reverse buf))) "</p>") :mode :none :buf nil)
+      (= mode :para)
+        (assoc state
+          :out (str out "<p>" (md-inline (join " " (reverse buf))) "</p>")
+          :mode :none
+          :buf nil)
       (= mode :list)
         (assoc state
-          :out (str out "<ul>" (apply str (map (fn (l) (str "<li>" (md-inline l) "</li>")) (reverse buf))) "</ul>")
-          :mode :none :buf nil)
+          :out
+            (str out
+              "<ul>"
+              (apply str (map (fn (l) (str "<li>" (md-inline l) "</li>")) (reverse buf)))
+              "</ul>")
+          :mode :none
+          :buf nil)
       ;; an unclosed ``` fence at end-of-input: emit what was buffered rather than drop it
       (= mode :code)
-        (assoc state :out (str out "<pre><code>" (md-escape (join "\n" (reverse buf))) "</code></pre>") :mode :none :buf nil)
+        (assoc state
+          :out (str out "<pre><code>" (md-escape (join "\n" (reverse buf))) "</code></pre>")
+          :mode :none
+          :buf nil)
       else state)))
 
 (defn- md-line
@@ -409,17 +427,32 @@ module's namespace-rooted globals (ADR-070) back to it."
     (cond
       (starts-with? t "```")
         (if (= mode :code)
-          (assoc state :mode :none :buf nil
-            :out (str (get state :out) "<pre><code>" (md-escape (join "\n" (reverse (get state :buf)))) "</code></pre>"))
+          (assoc state
+            :mode :none
+            :buf nil
+            :out
+              (str (get state :out)
+                "<pre><code>"
+                (md-escape (join "\n" (reverse (get state :buf))))
+                "</code></pre>"))
           (assoc (md-flush state) :mode :code :buf nil))
       (= mode :code) (assoc state :buf (cons line (get state :buf)))
-      (starts-with? t "### ") (let (s (md-flush state)) (assoc s :out (str (get s :out) "<h3>" (md-inline (substring t 4 end)) "</h3>")))
-      (starts-with? t "## ") (let (s (md-flush state)) (assoc s :out (str (get s :out) "<h2>" (md-inline (substring t 3 end)) "</h2>")))
-      (starts-with? t "# ") (let (s (md-flush state)) (assoc s :out (str (get s :out) "<h1>" (md-inline (substring t 2 end)) "</h1>")))
+      (starts-with? t "### ")
+        (let (s (md-flush state))
+          (assoc s :out (str (get s :out) "<h3>" (md-inline (substring t 4 end)) "</h3>")))
+      (starts-with? t "## ")
+        (let (s (md-flush state))
+          (assoc s :out (str (get s :out) "<h2>" (md-inline (substring t 3 end)) "</h2>")))
+      (starts-with? t "# ")
+        (let (s (md-flush state))
+          (assoc s :out (str (get s :out) "<h1>" (md-inline (substring t 2 end)) "</h1>")))
       (or (starts-with? t "- ") (starts-with? t "* "))
-        (let (s (if (= mode :list) state (md-flush state))) (assoc s :mode :list :buf (cons (substring t 2 end) (get s :buf))))
+        (let (s (if (= mode :list) state (md-flush state)))
+          (assoc s :mode :list :buf (cons (substring t 2 end) (get s :buf))))
       (= t "") (md-flush state)
-      else (let (s (if (= mode :para) state (md-flush state))) (assoc s :mode :para :buf (cons line (get s :buf)))))))
+      else
+        (let (s (if (= mode :para) state (md-flush state)))
+          (assoc s :mode :para :buf (cons line (get s :buf)))))))
 
 (defn markdown->html (md)
   "Render a Markdown string to HTML — a small subset (ATX headings, fenced ``` code, `- `
@@ -443,7 +476,8 @@ module's namespace-rooted globals (ADR-070) back to it."
       []
       (apply vector
         (map (fn (path) {:title (guide-title path) :html (markdown->html (slurp path))})
-          (sort (filter (fn (p) (ends-with? p ".md")) (map (fn (f) (path-join dir f)) (list-dir dir)))))))))
+          (sort (filter (fn (p) (ends-with? p ".md"))
+                  (map (fn (f) (path-join dir f)) (list-dir dir)))))))))
 
 ;; --- doctests (`nest doctest`) -----------------------------------------------
 ;; A doctest is a docstring line of the form `<expr> ;=> <expected>` (the expression
@@ -487,7 +521,8 @@ module's namespace-rooted globals (ADR-070) back to it."
                   (map (fn (ex) [sym (nth ex 0) (nth ex 1) (run-one-doctest (nth ex 0) (nth ex 1))])
                     (doctests-in d)))
                 acc))))
-    nil (global-names)))
+    nil
+    (global-names)))
 
 (defn- doctest-report
   (results)
@@ -496,11 +531,21 @@ module's namespace-rooted globals (ADR-070) back to it."
       (let ([sym expr expected outcome] r)
         (match outcome
           ([:ok] (println (str "  ok   " (name sym) ": " expr " ;=> " expected)))
-          ([:fail actual _]
-            (println (str "  FAIL " (name sym) ": " expr " ;=> " expected " — got " (pr-str actual))))
+          ([:fail actual _] (println (str "  FAIL "
+                                       (name sym)
+                                       ": "
+                                       expr
+                                       " ;=> "
+                                       expected
+                                       " — got "
+                                       (pr-str actual))))
           ([:error msg] (println (str "  ERR  " (name sym) ": " expr " — " msg))))))
-    (println (str (count results) " doctests, " (- (count results) (count fails)) " passed, "
-      (count fails) " failed"))
+    (println (str (count results)
+               " doctests, "
+               (- (count results) (count fails))
+               " passed, "
+               (count fails)
+               " failed"))
     (count fails)))
 
 (defn run-doctests ()

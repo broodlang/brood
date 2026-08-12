@@ -22,13 +22,15 @@
     (let (r (perf/report))
       (if (get r :enabled?)
         ;; A counter-armed build: no hint needed, and the verdict must be a real label.
-        (do (is (nil? (get r :hint)))
-            (is (includes? [:dispatch-bound :env-bound :balanced :no-data]
-                           (get r :verdict))))
+        (do
+          (is (nil? (get r :hint)))
+          (is (includes? [:dispatch-bound :env-bound :balanced :no-data]
+                (get r :verdict))))
         ;; The ordinary build: a claim here would be a claim about zeros.
-        (do (assert= :no-data (get r :verdict))
-            (is (not (nil? (get r :hint))))
-            (is (includes? (get r :hint) "perf-brood"))))))
+        (do
+          (assert= :no-data (get r :verdict))
+          (is (not (nil? (get r :hint))))
+          (is (includes? (get r :hint) "perf-brood"))))))
 
   (test "the gc snapshot comes through with its collection count"
     (let (r (perf/report))
@@ -72,7 +74,8 @@
   (test "refuses to judge a rate drawn from too few samples"
     ;; A 0% IC hit rate over 3 probes is what a natively-running hot loop leaves behind. It
     ;; labelled such a loop :dispatch-bound before the sample floor existed.
-    (let (rs (perf/ratios {:vm-apply 195 :call-ic-hit 0 :call-ic-miss 12 :env-get 110 :env-hops 110} {}))
+    (let (rs (perf/ratios {:vm-apply 195 :call-ic-hit 0 :call-ic-miss 12 :env-get 110 :env-hops 110}
+               {}))
       (assert= :no-data (first (perf/verdict rs)))))
 
   (test "calls a high defer rate dispatch-bound once there are enough samples"
@@ -80,29 +83,42 @@
       (assert= :dispatch-bound (first (perf/verdict rs)))))
 
   (test "calls a deep env chain env-bound"
-    (let (rs (perf/ratios {:vm-apply 10000 :env-get 5000 :env-hops 40000
-                           :call-ic-hit 5000 :call-ic-miss 0}
-                          {}))
+    (let (rs (perf/ratios {:vm-apply 10000
+                           :env-get 5000
+                           :env-hops 40000
+                           :call-ic-hit 5000
+                           :call-ic-miss 0}
+               {}))
       (assert= :env-bound (first (perf/verdict rs)))))
 
   (test "calls a poor inline-cache hit rate dispatch-bound"
-    (let (rs (perf/ratios {:vm-apply 10000 :env-get 5000 :env-hops 5000
-                           :call-ic-hit 3000 :call-ic-miss 7000}
-                          {}))
+    (let (rs (perf/ratios {:vm-apply 10000
+                           :env-get 5000
+                           :env-hops 5000
+                           :call-ic-hit 3000
+                           :call-ic-miss 7000}
+               {}))
       (assert= :dispatch-bound (first (perf/verdict rs)))))
 
   (test "calls a healthy profile balanced"
-    (let (rs (perf/ratios {:vm-apply 10000 :env-get 5000 :env-hops 5000
-                           :call-ic-hit 9900 :call-ic-miss 100}
-                          {}))
+    (let (rs (perf/ratios {:vm-apply 10000
+                           :env-get 5000
+                           :env-hops 5000
+                           :call-ic-hit 9900
+                           :call-ic-miss 100}
+               {}))
       (assert= :balanced (first (perf/verdict rs)))))
 
   (test "never claims :alloc-bound — these counters cannot establish it"
     ;; Deliberately absent (see perf/verdict's docstring): the only denominator available
     ;; stops counting once the hot path goes native, while allocations do not.
-    (let (rs (perf/ratios {:vm-apply 10000 :alloc 99999999 :env-get 5000 :env-hops 5000
-                           :call-ic-hit 9900 :call-ic-miss 100}
-                          {}))
+    (let (rs (perf/ratios {:vm-apply 10000
+                           :alloc 99999999
+                           :env-get 5000
+                           :env-hops 5000
+                           :call-ic-hit 9900
+                           :call-ic-miss 100}
+               {}))
       (assert= :balanced (first (perf/verdict rs)))))
 
   (test "the why-line is prose, and carries the numbers behind the label"
