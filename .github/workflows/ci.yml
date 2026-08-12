@@ -130,7 +130,26 @@ jobs:
 
       # No --all-features here: this job only needs the default surface (the
       # engine under test), so it skips the gui/audio system-dep install above.
+      #
+      # Output is tee'd so the step below can upload it. Reading a run's LOG needs admin on
+      # the repository (`/actions/runs/:id/logs` → 403 otherwise), which means a failure here
+      # is undiagnosable to anyone without it — and this job fails in ways that do not
+      # reproduce locally, so "read the log" is exactly what one needs to do. An artifact is
+      # downloadable with plain read access (`gh run download`), so the failing case travels
+      # out of CI regardless of permissions. `pipefail` keeps the tee from masking the exit
+      # code.
       - name: Test (nextest, BROOD_VM=0)
         env:
           BROOD_VM: 0
-        run: cargo nextest run --no-fail-fast
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --no-fail-fast 2>&1 | tee tree-walker-nextest.log
+
+      - name: Upload the tree-walker log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tree-walker-nextest-log
+          path: tree-walker-nextest.log
+          retention-days: 14
