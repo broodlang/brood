@@ -18163,3 +18163,17 @@ heads. Two new `namespace_test.blsp` cases pin it. `defmodule_form_name` was fac
 `file_ns` and reused for the scan boundary. *Left as an unsupported edge:* two `(defmodule …)` in
 one file still cross-pollute known-names (the design is one module per file); a bare cross-module
 reference there misqualifies, as before.
+
+### A unified module/symbol index, recorded as a deferred direction (ADR-223)
+
+The pre-module bug started a design thread: the one-module-per-file rule is load-bearing (the
+`module → foo.blsp` filename bijection is what `require`, package-rooting, and the LSP nav all lean
+on), and lifting it cleanly wants an *index* — the Elixir "compiler emits one name-keyed artifact
+per module, the artifact directory *is* the index" model, which Brood already half-implements for
+std (`%builtin-module`) and deps (`*package-module-files*`). Rather than build speculative
+infrastructure (ADR-011: the current machinery is robust, scale isn't there, no concrete driver),
+the design is **recorded and deferred**: [module-index.md](module-index.md) (full design — schema,
+the six half-indexes it consolidates, the *cache-of-live-truth-never-the-truth* invariant, the
+consumer-by-consumer migration, flat-multi-module-not-lexical-nesting scope) + [ADR-223](decisions.md)
+(the decision to defer + the M2-plugin-pressure trigger) + a cross-link from `namespaces.md` §8.
+Nothing about resolution *semantics* changes; the index would accelerate lookup, never meaning.
