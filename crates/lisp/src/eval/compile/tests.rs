@@ -1065,6 +1065,14 @@ fn jit_lowers_fused_prims_map_and_overflow() {
 #[cfg(feature = "jit")]
 #[test]
 fn jit_tier_compiles_a_hot_arm_then_runs_native() {
+    // These exercise native tiering directly, so they need ceiling 2 — say so rather than rely
+    // on the default. Before ADR-222 they did not have to: `jit_tier` read its own
+    // `BROOD_NO_JIT` and knew nothing about the engine selector, so under `BROOD_VM=0` the
+    // selector said tree-walker while this test still got native code. That incoherence is
+    // exactly what the ceiling removes — and removing it is what made these two fail in the
+    // tree-walker half of `make test-both` until they were pinned.
+    set_forced_ceiling(Some(Tier::Native));
+
     let prim2 = |op: PrimOp, head: &str| Inst::Prim2 {
         op,
         map: [0, 1],
@@ -1227,6 +1235,14 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
 #[cfg(feature = "jit")]
 #[test]
 fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
+    // These exercise native tiering directly, so they need ceiling 2 — say so rather than rely
+    // on the default. Before ADR-222 they did not have to: `jit_tier` read its own
+    // `BROOD_NO_JIT` and knew nothing about the engine selector, so under `BROOD_VM=0` the
+    // selector said tree-walker while this test still got native code. That incoherence is
+    // exactly what the ceiling removes — and removing it is what made these two fail in the
+    // tree-walker half of `make test-both` until they were pinned.
+    set_forced_ceiling(Some(Tier::Native));
+
     let prim2 = |op: PrimOp, head: &str| Inst::Prim2 {
         op,
         map: [0, 1],

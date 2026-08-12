@@ -678,17 +678,11 @@ pub(crate) fn build_inlined_body(
     Some((spliced, next_block))
 }
 
-/// Runtime JIT off-switch. **Default OFF** (the JIT runs). `BROOD_NO_JIT=1` makes
-/// [`jit_tier`] never compile or run native code — every arm interprets on the VM,
-/// which is the correct reference engine. Today disabling the JIT otherwise needs a
-/// no-`jit`-feature *build*; this is the runtime A/B lever that lets a suspected
-/// JIT-only miscompile (e.g. a use-after-GC in a render arm) be ruled in/out and
-/// worked around without a rebuild. Cached once, like the other JIT levers.
-#[cfg(feature = "jit")]
-pub(crate) fn no_jit_enabled() -> bool {
-    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| std::env::var_os("BROOD_NO_JIT").is_some())
-}
+// The runtime JIT off-switch used to live here as its own `BROOD_NO_JIT` read. It is now a
+// **tier ceiling** below `Tier::Native` (ADR-222) — `tier_ceiling()` in `compile/mod.rs` reads
+// `BROOD_TIER`, with `BROOD_NO_JIT` kept as an alias for ceiling 1. Deleted rather than left
+// delegating, so there is one source of truth for how high the ladder may go instead of two
+// unrelated env reads in two modules.
 
 /// Debug bisect: `BROOD_NO_JIT_COMPUTED=1` bails (runs on the VM) any arm whose chunk
 /// contains a **computed-head** non-tail call `(f …)` — the shape fold--loop / assoc--pairs

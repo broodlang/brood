@@ -31,10 +31,16 @@ rows by label when printing, so `(Vm, N)` and `(Tw, N)` are not necessarily prin
 next to each other; `scripts/bench_ratio.py` pairs them by `(bench, size)`. What
 matters is one process, not one screen line.)
 
-The grid is built from `Engine::ALL` and the labels come from `Engine::short()`
-(`eval/compile/mod.rs`), so a third engine gets rows in every eval bench and a column
-in `bench_ratio.py` without either being edited. `Tw` stays the reference — it is the
-stable baseline the method rests on, not an engine under test.
+The grid is built from `Tier::ALL` and the labels come from `Tier::short()`
+(`eval/compile/mod.rs`), so a new tier gets rows in every eval bench and a column in
+`bench_ratio.py` without either being edited. `Tw` stays the reference — it is the stable
+baseline the method rests on, not a tier under test.
+
+Since ADR-222 there are **three** rows per size, not two: `Jit` (ceiling 2), `Vm` (ceiling 1 —
+the VM with native tiering off) and `Tw` (ceiling 0). The middle one is the addition, and it is
+the useful one for JIT work: `Jit`÷`Vm` per row is exactly the JIT-vs-no-JIT ratio the frontier
+docs quote (`fib` 54×, `collatz` 40×, and `nbody`'s 3.2× is what exposed a silently bailing arm),
+which previously had to be produced by hand with `BROOD_NO_JIT`.
 
 ```bash
 scripts/bench-ratio.sh                 # the whole eval grid, VM/TW per workload

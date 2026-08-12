@@ -498,7 +498,7 @@ impl Interp {
                     if let Some(pos) = pos {
                         heap.note_definition(f, pos);
                     }
-                    eval::compile::run_on_active_engine(heap, f, root)
+                    eval::compile::run_top_form(heap, f, root)
                 })
                 .map_err(|e| match pos {
                     Some(p) => e.or_pos(p),

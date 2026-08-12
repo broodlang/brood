@@ -118,7 +118,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_NO_JIT",
         JIT,
-        "runtime JIT off-switch (no rebuild) — rules a JIT-only miscompile in or out",
+        "alias for BROOD_TIER=1 — no native tiering, interpret on the VM; rules a JIT-only miscompile in or out",
     ),
     f(
         "BROOD_NO_JIT_COMPUTED",
@@ -243,9 +243,14 @@ pub const FLAGS: &[DebugFlag] = &[
     ),
     // ---- engine ----
     f(
+        "BROOD_TIER",
+        ENGINE,
+        "the tier ceiling: 0 tree-walk, 1 bytecode VM, 2 native (ADR-222). Measured 57.4s/3.2s/0.12s",
+    ),
+    f(
         "BROOD_VM",
         ENGINE,
-        "`=0` runs the tree-walker instead of the bytecode VM (~10x slower; the differential reference)",
+        "alias for BROOD_TIER=0 — `=0` runs the tree-walker (~10x slower; the differential reference)",
     ),
     f(
         "BROOD_NO_BOOT_CACHE",

@@ -7,7 +7,7 @@
 //! run by `nest test` still JIT-compiles (`BROOD_JIT_DUMP_IR=1` lists its arms) and shows
 //! no tree-walker slowdown, because the env var gates how a *top-level form* is run while
 //! the framework invokes each test as an already-compiled closure. So the env var cannot
-//! give these programs tree-walker coverage; only `set_forced_engine` can, which is why
+//! give these programs tree-walker coverage; only `set_forced_ceiling` can, which is why
 //! this file is Rust and lives beside `differential.rs`.
 //!
 //! What it buys over `differential.rs`: that file's corpus is single expressions probing
@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use brood::eval::compile::{set_forced_engine, Engine};
+use brood::eval::compile::{set_forced_ceiling, Tier};
 use brood::Interp;
 
 static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
@@ -54,27 +54,29 @@ fn driver(module: &str, input: &str, expr: &str) -> String {
 }
 
 /// Evaluate in a fresh interpreter pinned to one engine.
-fn eval_on(src: &str, engine: Engine) -> Result<String, String> {
+fn eval_on(src: &str, ceiling: Tier) -> Result<String, String> {
     LazyLock::force(&MEM_GUARD);
-    set_forced_engine(Some(engine));
+    set_forced_ceiling(Some(ceiling));
     let mut interp = Interp::new();
     let out = match interp.eval_str(src) {
         Ok(v) => Ok(interp.print(v)),
         Err(e) => Err(e.message.clone()),
     };
-    set_forced_engine(None);
+    set_forced_ceiling(None);
     out
 }
 
-/// Assert **every** engine runs `module`'s program and agrees with upstream. Iterates
-/// [`Engine::ALL`], so a new engine inherits the whole Gabriel corpus as conformance coverage.
+/// Assert the program agrees with upstream at **every** ceiling. Iterates [`Tier::ALL`], so a new
+/// tier inherits the whole Gabriel corpus as conformance coverage. Affordable here in a way it is
+/// not in `differential.rs`: this corpus is already sized for what tier 0 can carry in a debug
+/// build, so the tier-1 and tier-2 passes are the cheap ones.
 fn agrees_with_upstream(module: &str, input: &str, expr: &str) {
     let src = driver(module, input, expr);
-    for &engine in Engine::ALL {
+    for &ceiling in Tier::ALL {
         assert_eq!(
-            eval_on(&src, engine),
+            eval_on(&src, ceiling),
             Ok("true".to_string()),
-            "{module}: did not match upstream's expected output on {engine:?}",
+            "{module}: did not match upstream's expected output at ceiling {ceiling:?}",
         );
     }
 }
