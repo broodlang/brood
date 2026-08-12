@@ -69,11 +69,22 @@ clipboard = ["dep:arboard"]
 # This is a *counting* tool, not a timing one — the increments perturb timing, so
 # read counts here and times from the (counter-free) benches. See docs/benchmarking.md.
 perf-stats = []
-# JIT tier-1 (ADR-101), opt-in and off every default/release/bundle build. Stage 0 is
-# plumbing only: the `extern "C"` runtime-callback table (src/jit/) the JIT'd code calls,
-# plus (later increments) the Cranelift module and the platform trampolines. The heavy
-# Cranelift backend (cranelift-jit/-module/-codegen) is pulled in only here; default/
-# release/bundle builds link none of it. Stage 0: callback table + JITModule skeleton.
+# JIT tier-1 (ADR-101) — **a default feature**, so an ordinary `cargo build`, `cargo test`,
+# rust-analyzer and every binary get it; `--no-default-features` (what `make install`/
+# `nest release` build from) re-adds it explicitly unless `./configure --without-jit`.
+# It is tier 2 of the execution ladder (ADR-222): `BROOD_TIER=1` (or its `BROOD_NO_JIT`
+# alias) turns native tiering off at RUN time without a rebuild.
+#
+# The heavy Cranelift backend (cranelift-jit/-module/-codegen/-frontend) is pulled in only
+# by this feature. What it enables, by module: `src/jit/` — `backend.rs` (the `JitBackend`
+# contract, ADR-221), `rt.rs` (the `extern "C"` runtime-callback table the emitted code
+# calls), `cranelift.rs` (the module owner + impl) — plus the lowering under
+# `src/eval/compile/jit_lower*` and the gated half of `jit_plan.rs`.
+#
+# (This comment used to read "opt-in and off every default/release/bundle build" and
+# describe a "Stage 0: callback table + JITModule skeleton". Both were left over from
+# ADR-101's first increment: the feature became default long ago and the JIT has emitted
+# real code since Stage 1.)
 jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "dep:cranelift-frontend"]
 # tree-sitter parsing for *foreign* languages — the `tree-sitter-parse` builtin
 # (ADR: multi-language modes / ROADMAP §C). `treesit` is the *generic mechanism*

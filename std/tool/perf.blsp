@@ -27,22 +27,26 @@ were measurements.")
 ;; Each returns nil rather than a number when its denominator is zero, so "no data"
 ;; is distinguishable from "measured zero" — the distinction the whole report rests on.
 
-(defn- pct (x)
+(defn- pct
+  (x)
   "`x` as a percentage rounded to one decimal — for prose only. The map keeps full
   precision, because a consumer may want it and rounding is a display choice."
   (format "%.1f%%" (* 100.0 x)))
 
-(defn- dp2 (x)
+(defn- dp2
+  (x)
   "`x` rounded to 2 decimals, or nil unchanged — for prose only."
   (if (nil? x) nil (/ (->float (round (* 100.0 x))) 100.0)))
 
-(defn- share (part whole)
+(defn- share
+  (part whole)
   "`part / whole` as a float, or nil when `whole` is zero (no samples)."
   (if (or (nil? part) (nil? whole) (= whole 0))
     nil
     (/ (->float part) (->float whole))))
 
-(defn- at (m k)
+(defn- at
+  (m k)
   "`(get m k)`, defaulting a missing counter to 0 — an absent key means the build
   does not track it, which for a ratio is the same as never having happened."
   (or (get m k) 0))
@@ -110,14 +114,15 @@ re-derive the inputs."
         hops (if (enough? :env-gets) (get rs :env-hops-per-get) nil))
     (cond
       (and (nil? defer) (nil? hops) (nil? ic))
-      [:no-data (fmt "fewer than {min-samples} samples on every rate — too little interpreted work to judge (activations {(get n :activations)}, IC probes {(get n :ic-probes)}, env gets {(get n :env-gets)}). A region whose hot path runs natively looks like this.")]
+        [:no-data
+          (fmt "fewer than {min-samples} samples on every rate — too little interpreted work to judge (activations {(get n :activations)}, IC probes {(get n :ic-probes)}, env gets {(get n :env-gets)}). A region whose hot path runs natively looks like this.")]
       (and defer (> defer 0.05))
-      [:dispatch-bound (fmt "{(pct defer)} of activations deferred to the tree-walker")]
-      (and hops (> hops 3.0))
-      [:env-bound (fmt "{(dp2 hops)} env-chain frames walked per lookup")]
-      (and ic (< ic 0.9))
-      [:dispatch-bound (fmt "call-site inline cache hit rate {(pct ic)}")]
-      :else [:balanced (fmt "no interpreted counter dominates ({(get rs :allocations)} allocations, {(get rs :gc-collections)} collections, {(get rs :native-runs)} native runs / {(get rs :native-deopts)} deopts — judge allocation separately)")])))
+        [:dispatch-bound (fmt "{(pct defer)} of activations deferred to the tree-walker")]
+      (and hops (> hops 3.0)) [:env-bound (fmt "{(dp2 hops)} env-chain frames walked per lookup")]
+      (and ic (< ic 0.9)) [:dispatch-bound (fmt "call-site inline cache hit rate {(pct ic)}")]
+      :else
+        [:balanced
+          (fmt "no interpreted counter dominates ({(get rs :allocations)} allocations, {(get rs :gc-collections)} collections, {(get rs :native-runs)} native runs / {(get rs :native-deopts)} deopts — judge allocation separately)")])))
 
 ;; ---- the report ------------------------------------------------------------
 
@@ -143,7 +148,9 @@ representative; the *counts* still are."
             "counters not compiled in — build with `make perf-brood`, then set BROOD_PERF_STATS=1")
      ;; The exact command, not a paraphrase — `make perf-brood` matches `release-brood`'s
      ;; flags, which a hand-rolled `cargo build` would not.
-     :hint (if on? nil "make perf-brood   # then: BROOD_PERF_STATS=1 target/release-fast/brood prog.blsp")
+     :hint (if on?
+             nil
+             "make perf-brood   # then: BROOD_PERF_STATS=1 target/release-fast/brood prog.blsp")
      :ratios rs
      :vm vm
      :gc gc
@@ -169,7 +176,8 @@ even inside a `measure`. Read it as a ceiling on the region, not a count of it."
   (let (v (thunk))
     {:value v :report (report)}))
 
-(defn- line (label value)
+(defn- line
+  (label value)
   (println (fmt "  {label}  {value}")))
 
 (defn summary ()
