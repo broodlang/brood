@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-39 | the CI `differential (tree-walker)` job fails intermittently (~3 of 8 observed runs) with nextest exit 100, and does not reproduce locally in any configuration tried | ⚠️ **watching** — the failing case is now captured as a CI artifact (2026-08-12) |
 | KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | ✅ fixed 2026-08-08 (warm the cache before the fan-out) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
 | KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07; +25 more idle passes) |
@@ -69,6 +70,50 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-39 — the tree-walker CI job fails intermittently, and the log was unreadable
+
+**Status:** ⚠️ watching (2026-08-12). Not reproduced locally. The diagnostic gap is closed:
+the failing case is now uploaded as a CI artifact, so the next occurrence is readable.
+
+**What.** The `differential (tree-walker)` job (`cargo nextest run --no-fail-fast` with
+`BROOD_VM=0`) fails with **exit 100** — nextest's "tests failed" — on some runs and passes on
+others, with no relevant change between them. Observed on `main`:
+
+| commit | tree-walker | note |
+|---|---|---|
+| `aeac1ae0` | ✅ | |
+| `14b1db40` | ❌ | two test fixes (registry, tls) |
+| `79e7e555` | ❌ | ADR-222, the tier ladder |
+| `d7508f8c` | ✅ | **workflow file only — identical test code to `79e7e555`** |
+
+That last row is what makes it a flake rather than a regression: same tests, opposite result.
+Two consecutive failures had made a deterministic cause look likely; it was not.
+
+**What has been ruled out.** The suite passes locally at every configuration tried:
+`make test-both` 977/977 + 977/977; `BROOD_VM=0 cargo nextest run` 977/977 on 12 cores;
+the same under `taskset -c 0,1` 977/977. The two test files changed in `14b1db40` were each
+hammered 15× at ceiling 0 (`BROOD_TIER=0`) with **0 failures**. It is not the 1200s→2700s
+wall-clock budget either: the failing jobs ran ~30 min end to end, well inside it.
+
+**One caveat on the local attempts, worth not repeating.** `taskset -c 0,1` limits *affinity*
+but not what nextest sees — it still detected 12 CPUs and started 12 test threads onto 2 cores,
+which is **more** oversubscribed than the runner, not equivalent. GitHub's `ubuntu-latest` has 4
+CPUs and nextest defaults its thread count to that, so the faithful local shape is
+`taskset -c 0-3 … -j 4` together.
+
+**What was done instead of guessing.** Reading a run's log needs **admin** on the repository
+(`/actions/runs/:id/logs` → 403; `rerun-failed-jobs` → 401), so a failure here was
+undiagnosable to anyone without those rights — the wrong property for the only gate that catches
+tree-walker-only divergence. The step now tees its output and uploads it on failure
+(`actions/upload-artifact`, 14-day retention); artifacts download with plain read access via
+`gh run download`. Nothing is uploaded on a green run.
+
+**Next step when it recurs.** `gh run download <run-id>` → `tree-walker-nextest.log` names the
+failing case. Until then this is a watch item, not a blocker: the VM job and rustfmt have been
+green throughout, and the tree-walker gate exists to catch engine divergence, which
+`tests/differential.rs` and `tests/gabriel_engines.rs` also cover per-expression inside the
+normal run.
 
 ## KI-38 — three boot-wait tests fail together under peak suite load · **fixed 2026-08-08**
 
