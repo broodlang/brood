@@ -83,7 +83,6 @@
       ;; a region's interior char is writable; the delimiter char just before it is frozen
       (is (nil? (inside? (:start (first rs)))))
       (is (not (nil? (inside? (dec (:start (first rs))))))))) ; the >>>/<<< newline
-
   (test "no regions: the whole text is one protected span"
     (assert= (protected-spans "abc" ()) (list [0 3])))
 

@@ -6,30 +6,27 @@
   changes; a name absent from the catalog categorises as :other.")
 
 (def *category-order*
-  [
-   [:math "Math and numbers"]
-   [:strings "Strings and text"]
-   [:collections "Sequences and collections"]
-   [:maps "Maps and records"]
-   [:sets "Sets"]
-   [:bytes "Bytes and binary"]
-   [:predicates "Predicates"]
-   [:convert "Types and conversion"]
-   [:control "Control flow and macros"]
-   [:patterns "Pattern matching"]
-   [:functions "Functions and combinators"]
-   [:io "Input and output"]
-   [:filesystem "Filesystem"]
-   [:processes "Processes and concurrency"]
-   [:errors "Errors"]
-   [:meta "Modules and reflection"]
-   [:system "System and environment"]
-   [:other "Other"]
-   ])
+  [[:math "Math and numbers"]
+    [:strings "Strings and text"]
+    [:collections "Sequences and collections"]
+    [:maps "Maps and records"]
+    [:sets "Sets"]
+    [:bytes "Bytes and binary"]
+    [:predicates "Predicates"]
+    [:convert "Types and conversion"]
+    [:control "Control flow and macros"]
+    [:patterns "Pattern matching"]
+    [:functions "Functions and combinators"]
+    [:io "Input and output"]
+    [:filesystem "Filesystem"]
+    [:processes "Processes and concurrency"]
+    [:errors "Errors"]
+    [:meta "Modules and reflection"]
+    [:system "System and environment"]
+    [:other "Other"]])
 
 (def *catalog*
-  {
-   "*" :math
+  {"*" :math
    "*err*" :io
    "*out*" :io
    "*show*" :meta
@@ -820,8 +817,7 @@
    "zip-acc" :collections
    "zip-with" :collections
    "zip-with-acc" :collections
-   "zipmap" :maps
-   })
+   "zipmap" :maps})
 
 (defn category-of (function-name)
   "The category keyword for a bare function name, or :other if uncatalogued."

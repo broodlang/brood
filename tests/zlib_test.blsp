@@ -20,7 +20,8 @@
       (assert= 139 (byte-at gz 1))))
   (test "gunzip raises on data that isn't gzip"
     (is (= :raised
-          (try (do (zlib/gunzip (string->utf8-bytes "definitely not gzip")) :ok)
+          (try
+            (do (zlib/gunzip (string->utf8-bytes "definitely not gzip")) :ok)
             (catch e :raised))))))
 
 (describe "zlib compress/uncompress (RFC 1950)"
@@ -78,7 +79,8 @@
     (assert= "" (utf8-bytes->string (zlib/unbrotli (zlib/brotli "")))))
   (test "unbrotli raises on data that isn't brotli"
     (is (= :raised
-          (try (do (zlib/unbrotli (string->utf8-bytes "definitely not brotli xyz")) :ok)
+          (try
+            (do (zlib/unbrotli (string->utf8-bytes "definitely not brotli xyz")) :ok)
             (catch e :raised)))))
   (test "an out-of-range quality raises"
     (is (= :raised (try (do (zlib/brotli "x" 12) :ok) (catch e :raised))))

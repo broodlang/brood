@@ -116,7 +116,7 @@
     ;; only for `defn-`/`def-`.
     (%load-string "(defmodule priv-flip) (defn- x () 1)")
     (is (private? 'priv-flip/x))
-    (%load-string "(defmodule priv-flip) (defn x () 2)")   ; redefine PUBLIC
+    (%load-string "(defmodule priv-flip) (defn x () 2)") ; redefine PUBLIC
     (refute (private? 'priv-flip/x))
-    (%load-string "(defmodule priv-flip) (defn- x () 3)")  ; redefine PRIVATE
+    (%load-string "(defmodule priv-flip) (defn- x () 3)") ; redefine PRIVATE
     (is (private? 'priv-flip/x))))

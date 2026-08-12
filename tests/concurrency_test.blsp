@@ -343,7 +343,8 @@
 ;; `stream-from-list`) deadlocked intermittently: the receiver parked forever over a
 ;; `[:next pid]` request that had been corrupted to `nil`.
 
-(defn- wait-parked (p)
+(defn- wait-parked
+  (p)
   ;; Spin until p is parked in a `receive`, so a send to it takes the L1 (Local) path —
   ;; the path the bug lived on. Reduction preemption breaks the spin so p gets to run.
   (if (= :waiting (get (process-info p) :status)) :ok (wait-parked p)))
@@ -353,15 +354,16 @@
 
   (test "a non-matching local message, skipped then matched, still carries its value"
     (let (main (self)
-          p (spawn (fn ()
-                     (send main [:ready (self)])
-                     ;; only :go matches here — the [:data _] main sends while we are
-                     ;; parked is scanned, skipped, and left queued (the corruption site).
-                     (receive (:go nil))
-                     ;; the skipped [:data v] must still be a real 42, not nil.
-                     (receive ([:data v] (send main [:got v]))))))
+          p (spawn
+              (fn ()
+                (send main [:ready (self)])
+                ;; only :go matches here — the [:data _] main sends while we are
+                ;; parked is scanned, skipped, and left queued (the corruption site).
+                (receive (:go nil))
+                ;; the skipped [:data v] must still be a real 42, not nil.
+                (receive ([:data v] (send main [:got v]))))))
       (receive ([:ready _] nil))
-      (wait-parked p)              ; guarantee p is parked → [:data 42] is a Local payload
+      (wait-parked p) ; guarantee p is parked → [:data 42] is a Local payload
       (send p [:data 42])
       (send p :go)
       (assert= 42 (receive ([:got v] v)))))
@@ -371,11 +373,13 @@
   ;; then matched; it reports whether the value survived intact.
   (test "many skipped-then-matched local messages, across processes, none corrupted"
     (let (main (self))
-      (defn- reg-worker (parent i)
+      (defn- reg-worker
+        (parent i)
         (send parent [:ready (self)])
         (receive (:go nil))
         (receive ([:data v] (send parent [:done (= v i)]))))
-      (defn- drive (i n)
+      (defn- drive
+        (i n)
         (when (< i n)
           (let (p (spawn (reg-worker main i)))
             (receive ([:ready _] nil))
@@ -383,7 +387,8 @@
             (send p [:data i])
             (send p :go))
           (drive (+ i 1) n)))
-      (defn- collect (got n ok)
+      (defn- collect
+        (got n ok)
         (if (= got n) ok (collect (+ got 1) n (receive ([:done b] (if b ok false))))))
       (drive 0 40)
       (assert= true (collect 0 40 true)))))

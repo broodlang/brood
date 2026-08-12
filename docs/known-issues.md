@@ -19,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-39 | the CI `differential (tree-walker)` job fails intermittently (~3 of 8 observed runs) with nextest exit 100, and does not reproduce locally in any configuration tried | ⚠️ **watching** — the failing case is now captured as a CI artifact (2026-08-12) |
+| KI-39 | the CI `differential (tree-walker)` job fails intermittently (3 of 11 observed runs) with nextest exit 100; not reproduced in six local configurations, and the cold-boot-herd hypothesis is measured dead | ⚠️ **watching** — green on the 3 runs since the failing case became a CI artifact (2026-08-12) |
 | KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | ✅ fixed 2026-08-08 (warm the cache before the fan-out) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
 | KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07; +25 more idle passes) |
@@ -108,6 +108,37 @@ undiagnosable to anyone without those rights — the wrong property for the only
 tree-walker-only divergence. The step now tees its output and uploads it on failure
 (`actions/upload-artifact`, 14-day retention); artifacts download with plain read access via
 `gh run download`. Nothing is uploaded on a green run.
+
+**Update 2026-08-12 — a mechanism hypothesis raised and killed by measurement.** The best theory
+was a **cold-boot herd the KI-38 fix does not cover**: `scripts/warm-boot-cache.sh` warms `brood`
+and `nest` but explicitly not the ~50 test binaries (each is keyed on its own mtime), so on CI —
+where every commit rebuilds and colds every key — each test binary pays a cold prelude expansion,
+and if that expansion ran on the *tree-walker* it would cost ~10× and reproduce KI-38's herd in
+the one job that flakes.
+
+**It does not.** Measured, same binary, trivial program:
+
+| | cold | warm |
+|---|---|---|
+| default (ceiling 2) | 1213 ms | 98 ms |
+| `BROOD_VM=0` | **1274 ms** | 98 ms |
+
+Prelude macro-expansion does not go through the selected engine — `BROOD_BOOT_TRACE` shows
+`expand=1.20s` either way, and the cache key (`build_id_string`: version + git sha + executable
+mtime) is engine-independent, which is *why* one cache file serves both. So the tree-walker job is
+no more exposed to cold-boot cost than the VM job, and this line of attack is closed. Recorded so
+it is not re-derived.
+
+**What the retry policy narrows it to.** Only three filters carry `retries = 1` (`binary(suite)`,
+`binary(distribution)`, `binary(serve_attach) | binary(observe_attach)`); everything else gets no
+retry. The failing runs showed exit 100 with **no `FLAKY` row**, so the failing case is either one
+of those three failing *both* attempts — which would make it reproducible-within-a-run rather than
+a coin flip — or any un-retried test failing once. That is a genuine narrowing, and it argues
+against "marginal timing" for the retried binaries.
+
+**Not reproduced in six local configurations:** `make test-both`; `BROOD_VM=0` alone on 12 cores;
+`taskset -c 0,1` with 12 nextest threads; `taskset -c 0-3` with `-j 4` (the faithful runner shape);
+plus the two changed test files hammered 15× each at ceiling 0. All 977/977 or 0 failures.
 
 **Next step when it recurs.** `gh run download <run-id>` → `tree-walker-nextest.log` names the
 failing case. Until then this is a watch item, not a blocker: the VM job and rustfmt have been

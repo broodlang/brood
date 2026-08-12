@@ -1065,7 +1065,8 @@
           app-dir (path-join parent "app"))
       (pkg-write-project a-dir "alpha" "alpha" "(defn a () 1)" "")
       (pkg-write-project b-dir "beta" "beta" "(defn b () 2)" "")
-      (pkg-write-project app-dir "app" "main" "(defn main () 1)"
+      (pkg-write-project app-dir
+        "app" "main" "(defn main () 1)"
         " :dependencies [[alpha :path \"../alpha\"] [beta :path \"../beta\"]]")
       (let (entries (resolve-deps app-dir
                       (list (dep-path 'alpha "../alpha") (dep-path 'beta "../beta"))
