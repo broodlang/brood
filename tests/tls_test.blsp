@@ -57,6 +57,15 @@
                    ;; 1 run in 3 (measured 2026-08-11 under `taskset -c 0,1`), which is what made
                    ;; this test redden CI while passing locally. Configuring the socket before
                    ;; anyone is receiving from it closes the window entirely.
+                   ;;
+                   ;; This is the codebase's established convention, not a new idea: the HTTP
+                   ;; server does the same thing for the same reason, and its comment names the
+                   ;; prior occurrence — "setting binary after the handoff left a window where a
+                   ;; first chunk was decoded as lossy text (the old http binary-body flake)"
+                   ;; (`std/net/http.blsp`). A sweep of every `tcp-controlling-process` /
+                   ;; `tcp-set-binary` pair found this file as the only remaining outlier;
+                   ;; `tests/tcp_test.blsp`'s ~17 pairs are safe because there the client sends
+                   ;; only AFTER the server has configured the socket, so nothing is in flight.
                    (tcp-set-binary c true)
                    (tcp-controlling-process c (self))
                    (let (got (receive ([:tcp ^c d] d) (after *test-wait-ms* :timeout)))
