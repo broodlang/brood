@@ -107,15 +107,24 @@ which is what actually distinguishes GC-frequency-bound from allocation-volume-b
 **The thresholds below are first-cut heuristics, not calibrated cutoffs.** Every number they
 read is in the report beside them, so a reader can disagree with the label without having to
 re-derive the inputs."
-  (let (n (get rs :samples)
-        enough? (fn (k) (>= (get n k) min-samples))
+  (let (n (or (get rs :samples) {})
+        ;; `(or … {})` and `(or … 0)`: this is a public function documented as taking a `ratios`
+        ;; map, and a caller who hands it something else should get a verdict rather than
+        ;; `<=: expected number, got nil` raised three frames down.
+        enough? (fn (k) (>= (or (get n k) 0) min-samples))
         defer (if (enough? :activations) (get rs :defer-rate) nil)
         ic (if (enough? :ic-probes) (get rs :call-ic-hit-rate) nil)
         hops (if (enough? :env-gets) (get rs :env-hops-per-get) nil))
     (cond
       (and (nil? defer) (nil? hops) (nil? ic))
         [:no-data
-          (fmt "fewer than {min-samples} samples on every rate — too little interpreted work to judge (activations {(get n :activations)}, IC probes {(get n :ic-probes)}, env gets {(get n :env-gets)}). A region whose hot path runs natively looks like this.")]
+          ;; Report the counts; do NOT assert *why* nothing is judgeable. A rate is nil either
+          ;; because it rests on too few samples or because it has none at all (a zero
+          ;; denominator), and this branch cannot tell which. The earlier wording claimed
+          ;; "fewer than N samples on every rate" — a guess, and a wrong one for
+          ;; `{:samples {:activations 5000 …}}` with absent rates, where it reported a sample
+          ;; shortage that had not happened. Guessing a cause is what this module exists not to do.
+          (fmt "no rate is judgeable at min-samples={min-samples} (activations {(or (get n :activations) 0)}, IC probes {(or (get n :ic-probes) 0)}, env gets {(or (get n :env-gets) 0)}) — either too few samples or none at all. A region whose hot path runs natively looks like this.")]
       (and defer (> defer 0.05))
         [:dispatch-bound (fmt "{(pct defer)} of activations deferred to the tree-walker")]
       (and hops (> hops 3.0)) [:env-bound (fmt "{(dp2 hops)} env-chain frames walked per lookup")]

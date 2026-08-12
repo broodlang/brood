@@ -1715,3 +1715,54 @@ fn tiering_advisories_route_to_the_predicate_they_name() {
         "declines_inline_upgrade keys on scalar eligibility, not on the depth-bail set"
     );
 }
+
+/// The tier ladder's ORDER is load-bearing and derived, so nothing else guards it.
+///
+/// Every consumer compares (`tier_ceiling() >= Tier::Bytecode`, `< Tier::Native`), and those
+/// comparisons come from `#[derive(PartialOrd, Ord)]`, i.e. from the order the variants are
+/// *declared* in. Reorder the declaration and every comparison silently inverts: a ceiling of
+/// `TreeWalk` would start admitting native code and `BROOD_TIER=0` would stop meaning anything.
+/// Nothing would fail to compile.
+///
+/// The invitation to do exactly that is right there in the same `impl`: `Tier::ALL` is written
+/// highest-first (`[Native, Bytecode, TreeWalk]`, the order harnesses should present), which reads
+/// as though the enum is "backwards" and wants tidying to match. It does not.
+#[test]
+fn tier_order_is_treewalk_lowest_and_native_highest() {
+    use super::Tier;
+    assert!(
+        Tier::TreeWalk < Tier::Bytecode,
+        "tier 0 must be below tier 1"
+    );
+    assert!(Tier::Bytecode < Tier::Native, "tier 1 must be below tier 2");
+    assert!(
+        Tier::TreeWalk < Tier::Native,
+        "and the ladder must be transitive"
+    );
+
+    // The comparisons the call sites actually make, spelled out so a reordering fails HERE with
+    // a message rather than as a mystery in the scheduler or the JIT.
+    assert!(
+        Tier::Native >= Tier::Bytecode && Tier::Bytecode >= Tier::Bytecode,
+        "ceilings 2 and 1 must both admit the bytecode VM (`run_top_form`, `apply_engine`)"
+    );
+    assert!(
+        !(Tier::TreeWalk >= Tier::Bytecode),
+        "ceiling 0 must NOT admit the bytecode VM"
+    );
+    assert!(
+        Tier::TreeWalk < Tier::Native && Tier::Bytecode < Tier::Native,
+        "ceilings 0 and 1 must both refuse native tiering (`jit_tier`)"
+    );
+
+    // `ALL` is a presentation order, deliberately the reverse of the ladder. Assert both facts
+    // so neither can be "fixed" into the other.
+    assert_eq!(
+        Tier::ALL,
+        &[Tier::Native, Tier::Bytecode, Tier::TreeWalk],
+        "ALL is highest-first for harness presentation; the enum stays lowest-first for Ord"
+    );
+    let mut sorted = Tier::ALL.to_vec();
+    sorted.sort();
+    assert_eq!(sorted, vec![Tier::TreeWalk, Tier::Bytecode, Tier::Native]);
+}

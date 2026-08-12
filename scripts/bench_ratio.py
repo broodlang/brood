@@ -13,8 +13,9 @@ engine shows up here as an extra column without touching this script. `Tw` (the
 tree-walker) is the reference because it is the stable in-process baseline the methodology
 rests on — it is not the engine under test.
 """
-import sys
+import math
 import re
+import sys
 
 TIME = re.compile(r"([\d.]+)\s*(ns|µs|us|ms|s)\b")
 # Any engine label the bench emits, not a fixed pair.
@@ -75,9 +76,19 @@ def main() -> int:
                     cells.append((got_s, got_ns / ref_ns if ref_ns else float("nan")))
                 else:
                     cells.append(("-", None))
-            if any(c[1] is not None for c in cells):
-                rows.append((bench, n, ref_s, cells))
+            # Emit the row whenever the REFERENCE was measured, even if a subject engine has
+            # no row for this size — that prints as "-" rather than vanishing. The previous
+            # behaviour (inherited from the two-engine version, which required both engines
+            # present) dropped such a size silently, so an interrupted or partially-failed
+            # bench run read as though that size had never been measured.
+            rows.append((bench, n, ref_s, cells))
 
+    if not engines:
+        print(
+            f"bench-ratio: only ({REFERENCE}, N) rows in input — nothing to compare against.",
+            file=sys.stderr,
+        )
+        return 1
     if not rows:
         print(
             f"bench-ratio: no ({REFERENCE}, N) reference rows found in input.",
@@ -97,6 +108,14 @@ def main() -> int:
         for eng, (got_s, ratio) in zip(engines, cells):
             if ratio is None:
                 line += f"{got_s:>14}{'-':>9}"
+                continue
+            # A non-finite ratio means the reference timed as 0 — too fast to resolve at this
+            # script's millisecond-ish granularity, not "the same speed". Saying "~parity"
+            # there (which the comparisons below would, since every comparison against nan is
+            # False) reports equality that was never measured.
+            if not math.isfinite(ratio):
+                line += f"{got_s:>14}{'n/a':>9}"
+                notes.append(f"{eng} unresolved (reference measured 0)")
                 continue
             line += f"{got_s:>14}{ratio:>9.2f}"
             if ratio < 0.98:
