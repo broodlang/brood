@@ -15,20 +15,20 @@
 //! ~7.3 ms on the VM vs ~13 ms on the tree-walker. Don't read a single number as
 //! "the" eval cost without noting which engine row it's on.
 
-use brood::eval::compile::{set_forced_engine, Engine};
+use brood::eval::compile::{set_forced_ceiling, Tier};
 use brood::{syntax::reader, Interp};
 
 fn main() {
     divan::main();
 }
 
-/// A benchmark row's engine, wrapped only to control how divan labels it: `Debug`
-/// prints `Engine::short()` (`Vm` / `Tw`) rather than the variant name, because
+/// A benchmark row's tier ceiling, wrapped only to control how divan labels it: `Debug` prints
+/// `Tier::short()` (`Jit` / `Vm` / `Tw`) rather than the variant name, because
 /// `scripts/bench_ratio.py` reads those labels out of the arg column and
-/// `docs/benchmarking.md` quotes them. The engine *identity* is the library's
-/// `Engine` — this file no longer keeps its own list of engines.
+/// `docs/benchmarking.md` quotes them. The identity is the library's `Tier` — this file keeps no
+/// list of its own.
 #[derive(Clone, Copy)]
-struct Eng(Engine);
+struct Eng(Tier);
 
 impl std::fmt::Debug for Eng {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,17 +37,21 @@ impl std::fmt::Debug for Eng {
 }
 
 /// A fresh interpreter with the given engine forced on this thread for the
-/// measured region. `set_forced_engine` takes precedence over the `BROOD_VM`
-/// env default (`compile::active_engine`), and divan runs this input setup on the
-/// same worker thread as the benched closure, so the pin holds through the eval.
+/// measured region. `set_forced_ceiling` takes precedence over the env default
+/// (`compile::tier_ceiling`), and divan runs this input setup on the same worker thread as the
+/// benched closure, so the pin holds through the eval.
 fn interp_on(eng: Eng) -> Interp {
-    set_forced_engine(Some(eng.0));
+    set_forced_ceiling(Some(eng.0));
     Interp::new()
 }
 
-/// `[(Vm, n), (Tw, n), …]` for every `n` — the engine × size grid each eval
-/// benchmark iterates. Built from `Engine::ALL`, so adding an engine gives every
-/// bench a row for it without editing a single `#[divan::bench]`.
+/// `[(Jit, n), (Vm, n), (Tw, n)]` for every `n` — the tier × size grid each eval benchmark
+/// iterates. Built from `Tier::ALL`, so a new tier gives every bench a row without editing a
+/// single `#[divan::bench]`.
+///
+/// The tier-1 row is new with ADR-222 and earns its place: JIT-vs-no-JIT per row is a
+/// measurement the frontier docs quote (`fib` 54×, `collatz` 40×, and `nbody`'s 3.2× is what
+/// exposed a silent bail) and it previously had to be produced by hand with `BROOD_NO_JIT`.
 ///
 /// What makes the ratio load-robust is that every engine is measured **in the same
 /// process** (`docs/benchmarking.md` §1 — under load they slow down together), not the
@@ -57,7 +61,7 @@ fn interp_on(eng: Eng) -> Interp {
 macro_rules! engine_grid {
     ($($n:expr),+ $(,)?) => {{
         let mut rows = Vec::new();
-        $( for &e in Engine::ALL { rows.push((Eng(e), $n)); } )+
+        $( for &t in Tier::ALL { rows.push((Eng(t), $n)); } )+
         rows
     }};
 }
@@ -114,7 +118,7 @@ fn defseq_map(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 fn reduce_range(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     // `(reduce <named-fn> 0 (range n))` — drives the `%range-reduce` native,
     // which calls the reducer back per element through `apply_value` when
-    // `active_engine` (commit `4af9d2a`). A named `defn` reducer is RUNTIME-region
+    // `tier_ceiling` (commit `4af9d2a`). A named `defn` reducer is RUNTIME-region
     // and VM-compiles, so the Vm row shows a clear speedup over the Tw row
     // (~65–67% faster measured at the time of routing).
     let src = format!("(defn rf (a x) (+ a (* x 2))) (reduce rf 0 (range {n}))");

@@ -35,89 +35,141 @@ use crate::core::value::{
 };
 use crate::error::{LispError, LispResult, Pos};
 
-/// Which engine executes a form.
+/// How far up the execution **tier ladder** a form may go (ADR-222).
 ///
-/// Both live in every binary, which is what makes the differential harnesses possible —
-/// `make test-both`, `tests/differential.rs`, `tests/gabriel_engines.rs` and the `eval`
-/// benches all run the *same* process through each. That harness, not this enum, is the real
-/// asset: adding an engine is cheap here because there is already a conformance suite to hold
-/// a new one to (`docs/backend-seams.md` §4).
+/// Brood does not choose between engines; it runs a ladder, and each tier falls back to the one
+/// below when it declines:
 ///
-/// **What this enum does not abstract.** `eval/compile/ir.rs` — `Node`, `Inst`, `Chunk`,
-/// `CompiledArm` — is shared by both engines, by the JIT, *and* by the deopt/journal protocol.
-/// So a third engine means replacing `exec_chunk.rs` + `vm_run_bc.rs` (~2 kLOC) while keeping
-/// that IR: a register VM, threaded code, or computed-goto dispatch all fit; a different IR
-/// does not. Adding one is a variant here, a `run` implementation, and inclusion in the
-/// differential — the selector was never what coupled an engine.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Engine {
-    /// The tree-walking evaluator (`eval::eval`). Retained as the differential reference and
-    /// the `BROOD_VM=0` escape hatch; ~10× slower, and a top-level `receive` blocks its
-    /// worker (`vm_run_bc`'s carve-out). A debug engine, not a production path.
-    TreeWalker,
-    /// The closure-compiling bytecode VM (ADR-076 Stage 3) — the default, and the engine the
-    /// JIT tiers *within*.
+/// ```text
+/// Native    ──deopt (outcome 1)──▶  Bytecode  ──defer──▶  TreeWalk
+/// ```
+///
+/// Both falls are real and load-bearing, not error paths: `jit_deopt` is documented as "a tiered
+/// arm deopted back to the VM mid-run", and `tw_defer` as "calls that fell back to the
+/// tree-walker" — `compile::run` "falls back to the tree-walker per form for anything outside the
+/// VM's vocabulary". [`Tier::TreeWalk`] is *total*: it accepts every form, which is what makes a
+/// ceiling meaningful at all.
+///
+/// **This type is a ceiling, not a selection.** The runtime always uses the highest tier that
+/// applies; the ceiling only says how high it may reach. That is why the ordering is derived and
+/// why call sites compare (`>= Tier::Bytecode`) rather than matching every variant: a new tier
+/// slots into the ladder instead of forcing a decision at each site. Contrast the `JitBackend`
+/// trait, where alternatives genuinely are alternatives.
+///
+/// **A ceiling bounds capability, too.** Tier 0 has no reified frame stack, so a top-level
+/// `receive` blocks its worker (`vm_run_bc`'s carve-out) and it is not preemptible the same way;
+/// only tier 1 and above tier to native. Under the old two-engine framing those read as
+/// inconsistencies between peers. As tiers they are simply what you give up by lowering the
+/// ceiling.
+///
+/// **What the ladder does not abstract.** `eval/compile/ir.rs` — `Node`, `Inst`, `Chunk`,
+/// `CompiledArm` — is shared by every tier *and* the deopt/journal protocol. So replacing tier 1
+/// means rewriting `exec_chunk.rs` + `vm_run_bc.rs` (~2 kLOC) while keeping that IR: a register
+/// VM, threaded code, or computed-goto dispatch all fit; a different IR does not.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Tier {
+    /// **Tier 0** — tree-walk the `Node` (`eval::eval`). The bottom of the ladder, the deopt
+    /// floor, and the differential reference. Total by construction: whatever a higher tier
+    /// declines lands here, so it must accept everything. ~10× slower than tier 1.
+    TreeWalk,
+    /// **Tier 1** — the closure-compiling bytecode VM (ADR-076 Stage 3). Defers a form outside
+    /// its vocabulary to tier 0; the default floor for real work.
     Bytecode,
+    /// **Tier 2** — native code from a [`crate::jit::JitBackend`] (ADR-101/221), *earned* by
+    /// tiering at run time. Deopts to tier 1 on a guard miss. The default ceiling.
+    ///
+    /// AOT would be this tier **admitted at load** rather than earned — which is the whole of
+    /// the difference, and the reason the ladder framing is worth having before AOT exists.
+    Native,
 }
 
-impl Engine {
-    /// Every engine, in the order harnesses should present them: the default first, the
-    /// reference last. `crates/lisp/benches/eval.rs` builds its engine × size grid from this, so
-    /// a new variant gets benchmark rows without touching each `#[divan::bench]`.
-    pub const ALL: &'static [Engine] = &[Engine::Bytecode, Engine::TreeWalker];
+impl Tier {
+    /// Every tier, highest first. Used by `crates/lisp/benches/eval.rs` to build its tier × size
+    /// grid, so a new tier gets benchmark rows without touching each `#[divan::bench]` — and the
+    /// tier-1 row is itself useful, since JIT-vs-no-JIT per row is a standing measurement the
+    /// frontier docs quote (`fib` 54×, `collatz` 40×) and previously had to be produced by hand.
+    ///
+    /// **Deliberately not the differential set.** `tests/differential.rs` compares an explicit
+    /// pair; iterating this there would add a third full suite run to every `make test-both` and
+    /// to CI, for coverage `tests/jit.rs` already provides. See that file's `DIFFERENTIAL_TIERS`.
+    pub const ALL: &'static [Tier] = &[Tier::Native, Tier::Bytecode, Tier::TreeWalk];
 
-    /// Short label for benchmark rows and traces. Stable: `scripts/bench_ratio.py` reads these
-    /// out of divan's arg column, and `docs/benchmarking.md` quotes them.
+    /// Short label for benchmark rows and traces. `Vm`/`Tw` are unchanged from the two-engine
+    /// era on purpose: `scripts/bench_ratio.py` reads them out of divan's arg column and
+    /// `docs/benchmarking.md` quotes them.
     pub const fn short(self) -> &'static str {
         match self {
-            Engine::Bytecode => "Vm",
-            Engine::TreeWalker => "Tw",
+            Tier::Native => "Jit",
+            Tier::Bytecode => "Vm",
+            Tier::TreeWalk => "Tw",
         }
     }
 }
 
 thread_local! {
-    /// Per-thread engine override for the differential harnesses (and any tool that wants to
-    /// pin the engine); `None` defers to the cached `BROOD_VM`/default choice. Checked before
-    /// the cache so it wins; only a top-level form consults it, so the cost is negligible.
-    /// See [`set_forced_engine`].
-    static FORCED_ENGINE: std::cell::Cell<Option<Engine>> = const { std::cell::Cell::new(None) };
+    /// Per-thread ceiling override for the differential harnesses (and any tool that wants to pin
+    /// a tier); `None` defers to the cached env/default choice. Checked before the cache so it
+    /// wins; only a top-level form consults it, so the cost is negligible.
+    /// See [`set_forced_ceiling`].
+    static FORCED_CEILING: std::cell::Cell<Option<Tier>> = const { std::cell::Cell::new(None) };
 }
 
-/// Force (or clear) the execution engine for the current thread, overriding `BROOD_VM` and the
-/// build default — this is what lets one process run a form through *every* engine
+/// Force (or clear) the tier ceiling for the current thread, overriding the env and the build
+/// default — this is what lets one process run a form at several ceilings
 /// (`crates/lisp/tests/differential.rs`). `None` restores the default.
-pub fn set_forced_engine(choice: Option<Engine>) {
-    FORCED_ENGINE.with(|c| c.set(choice));
+pub fn set_forced_ceiling(choice: Option<Tier>) {
+    FORCED_CEILING.with(|c| c.set(choice));
 }
 
-/// The engine this thread runs top-level forms on. A per-thread [`set_forced_engine`] override
-/// wins; otherwise **[`Engine::Bytecode`] is the default** (ADR-076 Stage 3 cutover): every
-/// build runs it unless `BROOD_VM` is set to a falsy value (`0`/`false`/`off`/`no`/empty),
-/// which selects [`Engine::TreeWalker`] — the one-env-var escape hatch retained for at least
-/// one release. Any other `BROOD_VM` value (or none) selects the VM. The env/default choice is
-/// read once and cached; it can't change mid-run, but the override can.
-pub fn active_engine() -> Engine {
-    if let Some(forced) = FORCED_ENGINE.with(|c| c.get()) {
+/// How high this thread may climb the ladder. A per-thread [`set_forced_ceiling`] override wins;
+/// otherwise the default is [`Tier::Native`] — every build tiers to native unless told not to.
+///
+/// One knob, `BROOD_TIER=0|1|2`, with the two flags it replaces kept as **aliases** because they
+/// are in muscle memory and quoted across the docs:
+///
+/// | set | ceiling |
+/// |---|---|
+/// | `BROOD_TIER=0` \| `BROOD_VM` falsy (`0`/`false`/`off`/`no`/empty) | [`Tier::TreeWalk`] |
+/// | `BROOD_TIER=1` \| `BROOD_NO_JIT` set | [`Tier::Bytecode`] |
+/// | `BROOD_TIER=2`, or nothing | [`Tier::Native`] |
+///
+/// `BROOD_TIER` wins if both are set. Before ADR-222 these were two unrelated checks in two
+/// modules — this one and `jit_tier`'s own `BROOD_NO_JIT` read — which is why "the engine" and
+/// "the JIT switch" looked like different kinds of thing. The env/default choice is read once and
+/// cached; it cannot change mid-run, but the override can.
+pub fn tier_ceiling() -> Tier {
+    if let Some(forced) = FORCED_CEILING.with(|c| c.get()) {
         return forced;
     }
-    static ON: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+    static ON: std::sync::OnceLock<Tier> = std::sync::OnceLock::new();
     fn truthy(v: &str) -> bool {
         !matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "" | "0" | "false" | "off" | "no"
         )
     }
-    *ON.get_or_init(|| match std::env::var("BROOD_VM") {
-        // An explicit `BROOD_VM=0` selects the tree-walker.
-        Ok(v) if !truthy(&v) => Engine::TreeWalker,
-        _ => Engine::Bytecode,
+    *ON.get_or_init(|| {
+        match std::env::var("BROOD_TIER").as_deref().map(str::trim) {
+            Ok("0") => return Tier::TreeWalk,
+            Ok("1") => return Tier::Bytecode,
+            Ok("2") => return Tier::Native,
+            // Anything else (unset, or a value we do not recognise) falls through to the
+            // aliases rather than guessing — a typo must not silently lower the ceiling.
+            _ => {}
+        }
+        if std::env::var("BROOD_VM").is_ok_and(|v| !truthy(&v)) {
+            return Tier::TreeWalk;
+        }
+        if std::env::var_os("BROOD_NO_JIT").is_some() {
+            return Tier::Bytecode;
+        }
+        Tier::Native
     })
 }
 
-/// Run one already-macro-expanded **top-level** form on the active engine.
+/// Run one already-macro-expanded **top-level** form as high up the ladder as the ceiling allows.
 ///
-/// The engine choice for a top-level form lives here and nowhere else. Three call sites
+/// The tier choice for a top-level form lives here and nowhere else. Three call sites
 /// (`eval`/`load` in `builtins/system.rs`, `Interp::eval_str` in `lib.rs`) had this exact
 /// `if`/`else` inline, so a third [`Engine`] would have meant finding all of them; now it means
 /// adding an arm to one `match`. The two sites that legitimately differ keep their own dispatch:
@@ -125,11 +177,16 @@ pub fn active_engine() -> Engine {
 /// `vm_run_bc`'s tree-walker carve-out (an inverse check that hands the *whole* form over).
 ///
 /// `compile::run` itself falls back to the tree-walker per form for anything outside the VM's
-/// vocabulary, so [`Engine::Bytecode`] is never a restriction on what can be evaluated.
-pub(crate) fn run_on_active_engine(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
-    match active_engine() {
-        Engine::Bytecode => run(heap, form, env),
-        Engine::TreeWalker => crate::eval::eval(heap, form, env),
+/// vocabulary, so a ceiling of [`Tier::Bytecode`] or above never restricts what can be
+/// evaluated — it only decides how fast.
+pub(crate) fn run_top_form(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
+    // A comparison, not a match: the ceiling says how high the ladder may go, and tier 1 is
+    // where a top-level form enters it (tier 2 is reached from inside, by tiering). A new tier
+    // above Bytecode needs no change here — which is the ladder's point.
+    if tier_ceiling() >= Tier::Bytecode {
+        run(heap, form, env)
+    } else {
+        crate::eval::eval(heap, form, env)
     }
 }
 
@@ -2554,7 +2611,8 @@ pub(crate) enum VmOutcome {
 }
 
 /// Compile-then-run a resolved top-level `form` — the VM entry the form loops use
-/// under [`Engine::Bytecode`]. A form built from the core vocabulary runs on the VM (an
+/// at a ceiling of [`Tier::Bytecode`] or above. A form built from the core vocabulary runs on
+/// the VM (an
 /// empty lexical scope: no locals at top level); anything else defers to the
 /// tree-walker. `env` is the process's global/root env.
 pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
@@ -2691,9 +2749,10 @@ pub fn apply_value(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId) 
 /// `isolate`); NOT for the `apply` builtin itself — that needs the TW's inline
 /// `apply`-unfolding trampoline for O(1)-stack `(apply f …)`-driven tail recursion.
 pub fn apply_engine(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId) -> LispResult {
-    match active_engine() {
-        Engine::Bytecode => apply_value(heap, callee, args, genv),
-        Engine::TreeWalker => crate::eval::apply(heap, callee, args, genv),
+    if tier_ceiling() >= Tier::Bytecode {
+        apply_value(heap, callee, args, genv)
+    } else {
+        crate::eval::apply(heap, callee, args, genv)
     }
 }
 

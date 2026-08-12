@@ -14885,3 +14885,98 @@ original — `run_on_active_engine` is exactly the `if`/`else` it replaced, and 
 legitimately differ kept their own dispatch. The `BROOD_VM` truthiness table was re-verified
 behaviourally rather than by reading: `0`/`false`/`off`/`no`/empty select the tree-walker,
 everything else and unset select the bytecode VM, observed through whether any arm tiers at all.
+
+## ADR-222 — Execution is a tier ladder with a ceiling, not a choice of engine
+
+**Status:** implemented (2026-08-12), unconditional. `BROOD_VM=0` and `BROOD_NO_JIT=1` keep
+working as aliases. Successor work (AOT, the `jit`→`native` renames) noted at the end.
+
+**Context.** Brood presented its execution machinery as two engines and a separate JIT switch:
+`BROOD_VM=0` selected the tree-walker in `compile/mod.rs`, `BROOD_NO_JIT=1` disabled native
+tiering in `jit_runtime.rs`, and the two were unrelated env reads in unrelated modules. ADR-076
+called the VM "the default engine" and the tree-walker "the escape hatch"; ADR-221 modelled the
+engine choice as an `enum Engine { TreeWalker, Bytecode }` and every consumer matched on it.
+
+That framing does not describe what the code does. The tree-walker is not a peer of the VM — it
+is the **floor** of a ladder, and it fills three roles that are all tier-0 roles:
+
+1. the per-form fallback for anything outside the VM's vocabulary (`compile::run` "falls back to
+   the tree-walker per form", and `perf.rs` counts it as `tw_defer`, "the deopt surface");
+2. the bottom of the deopt path — `perf.rs`'s `jit_deopt` is "a tiered arm deopted back to the
+   VM mid-run", and the VM in turn defers;
+3. the differential reference, precisely because it accepts everything.
+
+And it is still used *inside* tier 1: `exec_value` is "the surviving `Node` path", reached from
+`push_frame`'s `&optional` defaults and top-level `run`.
+
+**Decision.** Replace `Engine` with an **ordered** `Tier { TreeWalk, Bytecode, Native }` and the
+selector with `tier_ceiling()`. A ceiling says how high a form may climb; the runtime always uses
+the highest tier that applies. One knob, `BROOD_TIER=0|1|2`, subsumes both flags, which are kept
+as documented aliases (`BROOD_VM` falsy → 0, `BROOD_NO_JIT` → 1) because they are in muscle
+memory and quoted across the docs. `BROOD_TIER` wins when both are set; an unrecognised value
+falls through to the aliases rather than guessing, so a typo cannot silently lower the ceiling.
+
+**Why an ordering rather than a set.** Call sites become comparisons — `tier_ceiling() >=
+Tier::Bytecode` — instead of exhaustive matches. That is the opposite of the advice in ADR-221,
+and deliberately so: there, backends genuinely *are* alternatives, and an exhaustive match is
+what forces each site to decide. Here they are not alternatives, and a new tier should slot into
+the ladder without touching seven call sites. The distinction is whether a fallback exists.
+
+**The invariant this rests on.** *Anything a higher tier declines falls to a lower one, and tier
+0 accepts everything.* Both halves are load-bearing. Without the first, a ceiling could strand a
+form with no tier willing to run it; without the second, there would be no floor. A future tier
+that could refuse *without* a fallback would break the model, which is the thing to check before
+adding one.
+
+**A ceiling bounds capability, and that is now honest rather than anomalous.** Tier 0 has no
+reified frame stack, so a top-level `receive` blocks its worker (`vm_run_bc`'s carve-out) and it
+is not preemptible the same way; only tier 1 and above tier to native. Under the two-engine
+framing those read as inconsistencies between peers that ought to be interchangeable. As tiers
+they are simply what lowering the ceiling costs you.
+
+**Result — the ladder is measurable, not just describable.** Same binary, same program
+(`collatz`, `BENCH_N=300000`), ceiling varied:
+
+| ceiling | wall | vs the tier below |
+|---|---|---|
+| 2 `Native` | **0.12 s** | 27× |
+| 1 `Bytecode` | **3.24 s** | 18× |
+| 0 `TreeWalk` | **57.37 s** | — |
+
+Verified behaviourally alongside it: ceilings 2 and 1 differ in whether any arm lowers (7 arms vs
+0 under `BROOD_JIT_DUMP_IR`), both aliases still select their old tier, `BROOD_TIER` overrides an
+alias, and `BROOD_TIER=9` falls through to the aliases instead of defaulting.
+
+**What this deletes.** `inline.rs`'s `no_jit_enabled()` — its own cached `BROOD_NO_JIT` read — is
+gone rather than left delegating, so there is one source of truth for how high the ladder may go
+instead of two env reads in two modules.
+
+**Two consequences taken deliberately, not by iteration.**
+
+- **`tests/differential.rs` compares an explicit pair, not `Tier::ALL`.** Iterating every tier
+  would add a third full suite pass to every `make test-both` and to CI, for coverage that
+  already exists — `tests/jit.rs` *is* the tier-2≡tier-1 differential. The pair is named
+  `DIFFERENTIAL_TIERS` with that reasoning attached, so the next tier is added there consciously.
+- **`benches/eval.rs` and `tests/gabriel_engines.rs` do iterate `Tier::ALL`.** In the benches the
+  new tier-1 row earns its place: JIT-vs-no-JIT per row is a number the frontier docs quote
+  (`fib` 54×, `collatz` 40×, and `nbody`'s 3.2× is what exposed a silent bail) and it previously
+  had to be produced by hand with `BROOD_NO_JIT`. In the Gabriel corpus the extra passes are the
+  cheap ones — that corpus is already sized for what tier 0 can carry in a debug build.
+
+**A clarity win that fell out.** `tests/jit.rs` pinned `Engine::Bytecode` while *meaning* "with
+the JIT" — it relied on native tiering being on by default. It now pins `Tier::Native`, which
+says what it needs.
+
+**What this does not do.** It does not make tier 1 replaceable: `ir.rs` (`Node`/`Inst`/`Chunk`/
+`CompiledArm`) is shared by every tier *and* the deopt/journal protocol, so swapping the bytecode
+VM still means rewriting `exec_chunk.rs` + `vm_run_bc.rs` (~2 kLOC) against that IR. And it does
+not rename `jit/`→`native/`, `jit_plan`→`plan` or `JitBackend`→`CodeGenerator`, which the ladder
+makes overdue — deferred to keep this change reviewable.
+
+**Where AOT lands, which is the point of doing this first.** AOT is **tier 2 admitted at load**
+rather than earned at run time. That is the entire difference, and under the peer framing it had
+nowhere to sit. Its blockers are unchanged and recorded in `backend-seams.md` §6: the constant
+pool must stay a *backend* concern (ADR-091 measured that the indirection AOT needs buys the JIT
+nothing, so putting it in the shared lowering would slow tier 2), epoch admission wants ADR-217's
+deferred per-arm symbol tracking, and an unprofiled AOT build is sound-but-deopt-prone because
+speculation is guarded.

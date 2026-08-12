@@ -495,13 +495,14 @@ fn eval_tail_loop(
                             // on the tree-walker — `def` is a special form, so the
                             // whole form (RHS included) was deferring. Mirrors
                             // `Interp::eval_str`'s per-form dispatch.
-                            // Not `run_on_active_engine`: the VM branch tags the error
-                            // with the RHS's own position, and the tree-walker branch uses
-                            // `eval_at` (already inside this evaluator).
-                            let v = match compile::active_engine() {
-                                compile::Engine::Bytecode => compile::run(heap, args[1], env)
-                                    .map_err(|e| e.or_form_pos(heap, args[1]))?,
-                                compile::Engine::TreeWalker => eval_at(heap, args[1], env)?,
+                            // Not `run_top_form`: the tier-1 branch tags the error
+                            // with the RHS's own position, and the tier-0 branch uses `eval_at`
+                            // (already inside this evaluator).
+                            let v = if compile::tier_ceiling() >= compile::Tier::Bytecode {
+                                compile::run(heap, args[1], env)
+                                    .map_err(|e| e.or_form_pos(heap, args[1]))?
+                            } else {
+                                eval_at(heap, args[1], env)?
                             };
                             Ok((v, heap.read_root_env(env_r)))
                         })?;

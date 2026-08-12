@@ -41,7 +41,7 @@ pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
     let compiled = crate::eval::macros::compile(heap, arg(args, 0), root);
     heap.set_ns_assume_own(prev_assume);
     let form = compiled?;
-    crate::eval::compile::run_on_active_engine(heap, form, root)
+    crate::eval::compile::run_top_form(heap, form, root)
 }
 
 pub(super) fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -761,7 +761,7 @@ pub(super) fn eval_string_inner(
         // (deferred.md #9), tree-walker under `BROOD_VM=0`. `compile::run` falls back to the
         // tree-walker per-form, so a form outside the VM's vocabulary still evaluates.
         match crate::eval::macros::compile(heap, form, root)
-            .and_then(|f| crate::eval::compile::run_on_active_engine(heap, f, root))
+            .and_then(|f| crate::eval::compile::run_top_form(heap, f, root))
         {
             Ok(v) => result = Ok(v),
             Err(e) => {

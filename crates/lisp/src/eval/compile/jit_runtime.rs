@@ -1658,11 +1658,13 @@ pub(crate) fn jit_tier(
     if heap.jit_force_vm {
         return None;
     }
-    // Runtime JIT off-switch (BROOD_NO_JIT): never compile or run native — interpret
-    // on the (correct) VM. Returns before the hotness count + the background-compile
-    // enqueue CAS, so no arm is ever handed to the compiler and no native pointer is
-    // installed, so the fast-link / dispatch paths have nothing to call either.
-    if no_jit_enabled() {
+    // Tier ceiling below Native (ADR-222; `BROOD_TIER=1`, or its `BROOD_NO_JIT` alias): never
+    // compile or run native — interpret on the (correct) tier 1. Returns before the hotness
+    // count + the background-compile enqueue CAS, so no arm is ever handed to the compiler and
+    // no native pointer is installed, so the fast-link / dispatch paths have nothing to call
+    // either. This used to be its own `BROOD_NO_JIT` read here, unrelated to the engine
+    // selector — one ceiling now answers both.
+    if tier_ceiling() < Tier::Native {
         return None;
     }
     if no_jit_computed() {

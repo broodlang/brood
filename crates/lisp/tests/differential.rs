@@ -5,14 +5,14 @@
 //! the VM never diverges from the reference tree-walker semantics — the safety net
 //! under which VM coverage can be widened (variadic arms, etc.).
 //!
-//! The engine is pinned per-eval via `compile::set_forced_engine`, which overrides
+//! The ceiling is pinned per-eval via `compile::set_forced_ceiling`, which overrides
 //! the `BROOD_VM` env / build default (so this test is independent of how the suite
 //! is being run). A *fresh* interpreter per (expr, engine) keeps side effects
 //! (`def`, `print`, `spawn`) from leaking across the two runs.
 
 use std::sync::LazyLock;
 
-use brood::eval::compile::{set_forced_engine, Engine};
+use brood::eval::compile::{set_forced_ceiling, Tier};
 use brood::Interp;
 
 static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
@@ -25,34 +25,42 @@ static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
 /// Evaluate `src` in a fresh interpreter pinned to one engine. `Ok(printed)` or
 /// `Err(message)` — the message alone (engine-independent), not the position, which
 /// is asserted separately in `basic.rs`.
-fn eval_on(src: &str, engine: Engine) -> Result<String, String> {
+fn eval_on(src: &str, ceiling: Tier) -> Result<String, String> {
     LazyLock::force(&MEM_GUARD);
-    set_forced_engine(Some(engine));
+    set_forced_ceiling(Some(ceiling));
     let mut interp = Interp::new();
     let out = match interp.eval_str(src) {
         Ok(v) => Ok(interp.print(v)),
         Err(e) => Err(e.message.clone()),
     };
-    set_forced_engine(None);
+    set_forced_ceiling(None);
     out
 }
 
 /// Assert the bytecode VM agrees with the reference tree-walker on `src`.
-/// Every engine must agree with the reference. Iterates [`Engine::ALL`] rather than naming a
-/// pair, so a third engine is held to this the moment it exists — the differential is the
-/// asset that makes an engine swappable at all (`docs/backend-seams.md` §4).
+/// The ceilings this differential compares, and **not** [`Tier::ALL`] (ADR-222).
+///
+/// Iterating every tier would add a third full pass — a whole suite at ceiling 1 — to every
+/// `make test-both` and to CI, for coverage that already exists: `tests/jit.rs` is the
+/// tier-2≡tier-1 differential, warming each program past the tiering threshold and asserting
+/// bit-identical results. What is *not* covered elsewhere is tier 0 against the default, which is
+/// what this pair is. If a tier ever lands whose correctness is not covered by a dedicated
+/// harness, add it here and accept the wall-clock cost deliberately rather than by iteration.
+const DIFFERENTIAL_TIERS: &[Tier] = &[Tier::TreeWalk, Tier::Native];
+
+/// Every compared ceiling must agree with the reference (tier 0 — the floor, and total).
 fn agree(src: &str) {
-    const REFERENCE: Engine = Engine::TreeWalker;
+    const REFERENCE: Tier = Tier::TreeWalk;
     let expected = eval_on(src, REFERENCE);
-    for &engine in Engine::ALL {
-        if engine == REFERENCE {
+    for &ceiling in DIFFERENTIAL_TIERS {
+        if ceiling == REFERENCE {
             continue;
         }
-        let got = eval_on(src, engine);
+        let got = eval_on(src, ceiling);
         assert_eq!(
             expected, got,
-            "engine divergence on:\n  {src}\n  {REFERENCE:?} (reference): {expected:?}\n  \
-             {engine:?}: {got:?}"
+            "tier divergence on:\n  {src}\n  {REFERENCE:?} (reference): {expected:?}\n  \
+             {ceiling:?}: {got:?}"
         );
     }
 }
@@ -238,7 +246,7 @@ fn vm_defers_unexpanded_forward_referenced_macro() {
     assert_eq!(
         eval_on(
             "(defn uf (n) (fwm n)) (defmacro fwm (x) `(* ~x 3)) (uf 7)",
-            Engine::Bytecode
+            Tier::Native
         ),
         Ok("21".to_string()),
     );
@@ -247,18 +255,18 @@ fn vm_defers_unexpanded_forward_referenced_macro() {
     assert_eq!(
         eval_on(
             "(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)",
-            Engine::Bytecode
+            Tier::Native
         ),
         eval_on(
             "(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)",
-            Engine::TreeWalker
+            Tier::TreeWalk
         ),
     );
     // a macro defined *before* still VM-compiles (we didn't over-defer).
     assert_eq!(
         eval_on(
             "(defmacro em (x) `(+ ~x 1)) (defn ue (n) (em n)) (ue 41)",
-            Engine::Bytecode
+            Tier::Native
         ),
         Ok("42".to_string()),
     );
