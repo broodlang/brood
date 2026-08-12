@@ -965,18 +965,18 @@ pub fn file_opens_ns(heap: &Heap, forms: &[Value]) -> bool {
 /// `None`. One per file, so the first such form wins. Used by the advisory checker
 /// to resolve qualified references without evaluating the header.
 pub fn file_ns(heap: &Heap, forms: &[Value]) -> Option<Symbol> {
-    for &f in forms {
-        if let Ok(items) = heap.list_to_vec(f) {
-            if let Some(ValueRef::Sym(h)) = items.first().map(|v| v.unpack()) {
-                if value::symbol_is(h, kw::DEFMODULE) {
-                    if let Some(ValueRef::Sym(name)) = items.get(1).map(|v| v.unpack()) {
-                        return Some(name);
-                    }
-                }
-            }
+    forms.iter().find_map(|&f| defmodule_form_name(heap, f))
+}
+
+/// If `form` is a top-level `(defmodule NAME …)`, its `NAME`; else `None`.
+fn defmodule_form_name(heap: &Heap, form: Value) -> Option<Symbol> {
+    let items = heap.list_to_vec(form).ok()?;
+    match (items.first()?.unpack(), items.get(1).map(|v| v.unpack())) {
+        (ValueRef::Sym(h), Some(ValueRef::Sym(name))) if value::symbol_is(h, kw::DEFMODULE) => {
+            Some(name)
         }
+        _ => None,
     }
-    None
 }
 
 /// Pre-scan UNEXPANDED top-level forms for the bare names a file will define
@@ -986,7 +986,19 @@ pub fn file_ns(heap: &Heap, forms: &[Value]) -> Option<Symbol> {
 pub fn scan_def_names(heap: &Heap, forms: &[Value]) -> HashSet<Symbol> {
     let mut names = HashSet::new();
     let mut ambient = HashSet::new();
-    for &form in forms {
+    // A name `def`ined BEFORE the module's `(defmodule …)` opens is a ROOT def, not a
+    // member of this namespace (`compile_ns` is still `None` when it runs), so a bare
+    // reference to it from inside the module must fall through to root. If it entered
+    // the known-names set here, the resolver would misqualify that reference to
+    // `ns/name` and it would go unbound. Start the scan at the first `defmodule` — the
+    // one `file_ns` picks — so pre-module forms (typically a leading `(require …)`)
+    // don't pollute the set. Normal files open with `defmodule`, so this scans them
+    // whole; only a stray pre-module `def` is now correctly left at root.
+    let start = forms
+        .iter()
+        .position(|&f| defmodule_form_name(heap, f).is_some())
+        .unwrap_or(0);
+    for &form in &forms[start..] {
         scan_def_form(heap, form, &mut names, &mut ambient);
     }
     // A name the file declares ambient with `defdyn` is never namespaced, so it must

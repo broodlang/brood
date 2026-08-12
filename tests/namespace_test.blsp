@@ -229,6 +229,25 @@
     (%load-string "(defmodule nsroot2) (defn half (x) (/ x 2))")
     (assert= (nsroot2/half 10) 5)))
 
+;;; A `def` that runs BEFORE the file's `(defmodule …)` opens is a ROOT def (the
+;;; namespace isn't set yet), so a bare reference to it from inside the module must
+;;; fall through to root. The forward-reference pre-scan used to collect def heads
+;;; from the WHOLE file — including pre-module ones — which made the module reference
+;;; misqualify to `mod/name` and fail with a confusing "unbound `mod/name`" even
+;;; though the name was plainly defined. The scan now starts at the first `defmodule`.
+(describe "namespaces: a pre-module def stays at root"
+  :isolated
+  (test "a bare reference to a def written before defmodule resolves to root"
+    (%load-string (str "(def pre-cfg 7)"
+                    " (defmodule nspre) (defn read-it () pre-cfg)"))
+    (is (bound? 'pre-cfg))          ; defined at root, not nspre/pre-cfg
+    (is (not (bound? 'nspre/pre-cfg)))
+    (assert= (nspre/read-it) 7))
+  (test "a pre-module def the module also calls as a function resolves to root"
+    (%load-string (str "(defn pre-helper () :root)"
+                    " (defmodule nspre2) (defn use-it () (pre-helper))"))
+    (assert= (nspre2/use-it) :root)))
+
 ;; ---- std's own cross-module name overlaps, enumerated ------------------------
 ;; Namespacing means two modules MAY export the same short name; `(:use A) (:use B)` then
 ;; raises E0099 and the consumer resolves it (`:only`/`:exclude`, or `require` + qualified

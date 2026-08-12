@@ -18144,3 +18144,22 @@ original (**9 of 11 byte-identical**, the other two identical modulo rustfmt ref
 collapsed engine call site read against its original; and the `BROOD_VM` truthiness table
 re-checked *behaviourally* — `0`/`false`/`off`/`no`/empty select the tree-walker, everything else
 and unset select the bytecode VM, observed through whether any arm tiers at all.
+
+## 2026-08-12 — the forward-ref pre-scan was not module-boundary-aware
+
+Bug hunt across the namespace resolver (ADR-065). The resolution/privacy/collision/reserved-name
+machinery held up under a wide probe — `match` `:when` guards, `for`/`if-let`/`catch`/destructuring
+binders (over-qualifying a binder is the *silent* miscompile direction), aliased private refs,
+private refs under `` `~unquote `` vs plain-quasiquote-data, and hierarchical-module privacy all
+resolved correctly. One real defect: **`scan_def_names` scanned the whole file**, so a `def`
+written *before* the file's `(defmodule …)` opened — a ROOT def, since `compile_ns` is still `None`
+when it runs — entered the module's known-names set. A bare reference to that name from inside the
+module then misqualified to `mod/name` and failed with a confusing `unbound symbol: mod/name`
+even though the name was plainly defined at root. The scan now starts at the first `defmodule`
+(the one `file_ns` already picks), so pre-module forms don't pollute the set; normal files (which
+open with `defmodule`) are scanned whole and unchanged. Provably regression-free for existing code:
+the only forms real std files place before `defmodule` are `(require …)`, which contribute no def
+heads. Two new `namespace_test.blsp` cases pin it. `defmodule_form_name` was factored out of
+`file_ns` and reused for the scan boundary. *Left as an unsupported edge:* two `(defmodule …)` in
+one file still cross-pollute known-names (the design is one module per file); a bare cross-module
+reference there misqualifies, as before.
