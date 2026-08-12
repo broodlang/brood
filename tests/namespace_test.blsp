@@ -240,7 +240,7 @@
   (test "a bare reference to a def written before defmodule resolves to root"
     (%load-string (str "(def pre-cfg 7)"
                     " (defmodule nspre) (defn read-it () pre-cfg)"))
-    (is (bound? 'pre-cfg))          ; defined at root, not nspre/pre-cfg
+    (is (bound? 'pre-cfg)) ; defined at root, not nspre/pre-cfg
     (is (not (bound? 'nspre/pre-cfg)))
     (assert= (nspre/read-it) 7))
   (test "a pre-module def the module also calls as a function resolves to root"
