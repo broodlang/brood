@@ -369,6 +369,15 @@ analysis in ADR-070's *Future direction*.
 > nav and multi-dep-collision bundling for rooted projects. Full status in ADR-070's
 > *Update (2026-08-02)*.
 
+> **Further direction — a unified module/symbol index (ADR-223, deferred).** One step
+> further along this trajectory: replace the several ad-hoc half-indexes (the `module →
+> file` filename bijection, `*package-module-files*`, baked-module keys, the LSP's scans,
+> …) with a single auto-built index (symbol → site, module → file, feature → provider,
+> ability → impls). It makes symbol-level "where is X" O(1), turns collision/reserved
+> checks into index queries, and would unlock *flat* multiple-modules-per-file (not lexical
+> nesting). Gated on the same **M2 plugin pressure** as package-rooting; recorded as a
+> future direction in [module-index.md](module-index.md), **not built**.
+
 ## 9. Auto-require
 
 Your `(observer/observe …)` → auto-load idea has precedent: Emacs `autoload` (a
