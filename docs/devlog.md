@@ -18247,3 +18247,26 @@ admin (403) and a rerun needs write (401). Validating that parser against a real
 caught a bug in it — the first regex expected `file:line:` and silently missed
 `registry_test.blsp:55:9`, i.e. it would have annotated *half* the failures, which is worse than
 none because an incomplete list gets trusted.
+
+## 2026-08-13 — `nest check` (and `brood`) no longer SIGABRT on a broken pipe
+
+**Bug:** `nest check … | head` (or a quit pager, or a scrolled-away TUI) aborted the process with
+`failed printing to stderr: Broken pipe (os error 32)` and wrote a `.brood_crash_dump` — normal
+Unix pipe teardown masquerading as a hard crash. Rust installs `SIG_IGN` for SIGPIPE, so a closed
+reader surfaces as an `EPIPE` *write error*, and the `eprintln!`/`println!` macros **panic** on it;
+that panic then fired the crash-dump hook. Every `Broken pipe` entry in `.brood_crash_dump` bottomed
+out here. It was **half-fixed already**: `builtins::io::write_stdout` had been hardened (devlog
+note in its doc comment), but the stderr paths and the CLI's own print sites had not.
+
+**Fix (output plumbing only, 3 files):** `cli_support::report_error` builds its message once and
+writes it through a broken-pipe-safe `write_stderr` (exposed as `pub` alongside a `write_stdout`
+twin — on `EPIPE` exit quietly like the default SIGPIPE disposition, drop any other write error);
+`builtins/io.rs` grows a `write_stderr` mirroring `write_stdout` and routes `eprint`/`%write-err`
+through it; and `crates/cli/src/main.rs`'s streaming warning sink (`check_one_file` — the exact
+crashing frame) uses the safe writers for both sinks. Reproduced the abort (exit 134 + fresh dump),
+confirmed gone for `nest check`, `brood <file>`, and `brood --check` (exit 0, no dump), normal full
+output byte-for-byte unchanged; `make test` green (980/980).
+
+**Deliberately not** a global SIGPIPE→`SIG_DFL` reset (the other common CLI fix): std's dist/net
+sockets rely on `SIG_IGN`+`EPIPE` to survive a peer disconnecting mid-write, so a global reset
+could kill a running node.
