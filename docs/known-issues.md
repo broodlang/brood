@@ -287,6 +287,13 @@ call it *found*, the annotations added in `2312d4a1` name the failing case the m
 now the only live path, since the local avenue is closed. **Do not repeat the local hunt:**
 15 runs at ~16.5 min is ~4 hours, and this entry is the record that it returned nothing.
 
+**Update 2026-08-13.** The specific CI-faithful shape this entry recommends — `taskset -c 0-3
+… --test-threads 4`, the one earlier runs (12-core, `-c 0,1`) had *not* actually used — was
+looped **3× clean** (981/981 each, ~15 min/run), plus a `make test-both` tree-walker pass the
+same day. So the faithful shape is now on record as *also* returning nothing; the four failing
+CI observations remain unreproduced locally in any shape tried. Still a watch item, not a
+blocker — the CI-artifact path stays the only live avenue.
+
 **Next step when it recurs.** `gh run download <run-id>` → `tree-walker-nextest.log` names the
 failing case. Until then this is a watch item, not a blocker: the VM job and rustfmt have been
 green throughout, and the tree-walker gate exists to catch engine divergence, which
