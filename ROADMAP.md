@@ -811,6 +811,42 @@ mechanism/policy split: kernel primitive, Brood policy.
   reports why the tree fell (`[:error {… :trace}]` end to end), BEAM
   semantics; the sticky-latch guarantee keys on hardness. **[kernel]**
 
+### Findings from hatch (2026-08-13)
+
+Two items from hatch's attempt to actually adopt the framed-read combinators, plus a
+startup-image bug the same session's test runs surfaced.
+
+- ✅ **`tcp-read-until` / `tcp-read-n` needed a THIRD bound: `:deadline-ms`.**
+  `:timeout-ms`/`:max-bytes` (added 2026-08-07, on hatch's last report) still were not
+  enough to adopt them. `:timeout-ms` is an *idle* wait, reset per chunk — deliberately,
+  and right for a body. But a peer that drip-feeds one byte per (idle − 1)ms re-arms it
+  forever, and `:max-bytes` bounds only the SIZE that drip reaches, never the TIME: a
+  worker can be held for `max-bytes × idle` — hours — inside both bounds. hatch's HTTP
+  head reader had hand-rolled exactly this defense (`(min idle (- deadline (now)))`
+  recomputed per receive, in all four of its read loops), so adopting the combinators
+  would have *regressed* its slow-loris hardening. It is not expressible from the
+  outside: the idle timer resets *inside* the call, and splitting the read across
+  several calls would miss a delimiter straddling the boundary between them (each call
+  scans only its own accumulator). **Fixed:** both combinators take `:deadline-ms`, a
+  total wall-clock budget resolved to an absolute epoch-ms at the call and never reset;
+  the per-chunk wait is now `(min idle remaining)`. It shares the `[:timeout acc]` return
+  with the idle timeout — both mean "did not arrive in time", one 408. Off by default.
+  Tests: `tests/tcp_test.blsp` › *framed-read limits — :deadline-ms*, including a real
+  dripper that defeats a 250ms idle timeout and is cut off at 301ms by a 300ms deadline.
+- ⬜ **A `defdyn` global loses its dynamic-variable registration when restored from the
+  ADR-218 startup image.** Same class as the `table`-global finding below (an image
+  round-trip losing a property of a global that is not part of its value), and it makes a
+  correct program fail on its *third* run. Symptom in hatch: `nest test` on a pristine
+  checkout is green twice, then fails 38 tests on every run after, all in `web/bml`, with
+  `binding: *bml-source* is not a dynamic variable (declare it with defdyn)` (E0099) —
+  the global is restored, but `binding` no longer accepts it. **Reproduction** (hatch at
+  `1ca8418`, verified in a throwaway `git worktree` to rule out local state):
+  `rm -f .brood/image.bin`, then `nest test` ×4 → green, green, red, red. The image is
+  written on the first run and never rewritten (unchanged mtime), so the trigger is the
+  *restore* path, not a rebuild; deleting the image restores green. Fix shape: carry the
+  dynamic-variable flag through the image, or re-register on restore. Note it is
+  invisible to CI that starts from a clean checkout, which is how it went unnoticed.
+
 ### Findings from hatch (2026-07-11)
 
 Three runtime/language items surfaced while eliminating a whole *class* of O(n²)
