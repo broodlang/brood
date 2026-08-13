@@ -1368,8 +1368,10 @@ Runtime housekeeping (both items landed):
   - ⬜ **Doctests** — runnable `>>>`-style examples in docstrings, executed by
     `nest test`; reuses `std/tool/test.blsp` + doc infra. Fits "docs as
     implemented." Bigger (docstring example parser + a discovery pass).
-  - ⬜ **`reduce-while`** (≈ `Enum.reduce_while`) — early-terminating fold via
-    `[:cont acc]` / `[:halt acc]`. Pure prelude fn over existing primitives.
+  - ✅ **`reduce-while`** (≈ `Enum.reduce_while`) — early-terminating fold via
+    `[:cont acc]` / `[:halt acc]` (2026-08-13). Pure prelude fn over `seq`/`match`
+    (`std/prelude.blsp`, `reduce-while-loop` accumulator); tests incl. cross-process
+    in `tests/prelude_enum_test.blsp`.
   - ⬜ **Function-head guards** — `:when` guards on `defn`/`fn` *clause heads*
     (work in `match` today, not in arity/pattern clause heads — verified: the
     guard is currently ignored). The one genuine *core* gap; touches the

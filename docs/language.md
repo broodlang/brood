@@ -2251,10 +2251,14 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 `member?`  `any?`  `every?`  `find`  `index-of`  `index-where`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
 `distinct`  `dedupe`  `group-by`  `flatten`  `interpose`  `interleave`
-`repeat`  `repeatedly`
+`repeat`  `repeatedly`  `reduce-while`
 
 - `first`/`rest` of `nil` are `nil`. `nth` takes an optional default:
   `(nth coll i default)`.
+- **`reduce-while`** is the early-terminating fold: `(reduce-while f init coll)`
+  where `(f acc x)` returns `[:cont acc']` to continue or `[:halt acc']` to stop,
+  returning the last accumulator. `(reduce-while (fn (a x) (if (> a 100) [:halt a]
+  [:cont (+ a x)])) 0 (range 1000))` → `105`. An all-`:cont` reducer is just `fold`.
 - **One sequence view, every collection.** `first`/`rest`/`last`/`count`/`empty?`/
   `map`/`filter`/`fold`/`reduce`/`into`/`vec`/`seq` accept a list, vector, `bytes`,
   **set** (as its elements) or **map** (as its `[k v]` pairs) — so
