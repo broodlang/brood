@@ -285,8 +285,15 @@ fn vm_run_bc_captures_and_resumes_a_suspend() {
     // WITHOUT unwinding (the operand stack — the pushed callee — survives on the
     // heap for the resume).
     let roots_before = heap.roots_len();
-    let outcome = vm_run_bc(&mut heap, arm.clone(), &[native], EnvId::GLOBAL, None, true)
-        .expect("first run errored");
+    let outcome = vm_run_bc(
+        &mut heap,
+        ArmHandle::new(arm.clone()),
+        &[native],
+        EnvId::GLOBAL,
+        None,
+        true,
+    )
+    .expect("first run errored");
     let suspended = match outcome {
         VmOutcome::Suspended(s) => s,
         _ => panic!("expected a captured suspend"),
@@ -299,7 +306,7 @@ fn vm_run_bc_captures_and_resumes_a_suspend() {
     // Resume: replay from the rewound `%receive` call; the native now returns 42.
     let resumed = vm_run_bc(
         &mut heap,
-        arm,
+        ArmHandle::new(arm),
         &[native],
         EnvId::GLOBAL,
         Some(suspended),
@@ -1337,7 +1344,7 @@ fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
     crate::process::yield_now();
     let outcome = vm_run_bc(
         &mut interp.heap,
-        arm,
+        ArmHandle::new(arm),
         &[Value::int(5), Value::int(0)],
         EnvId::GLOBAL,
         None,
@@ -1436,7 +1443,7 @@ fn jit_speedup_vs_vm() {
     let run = |h: &mut Heap, arm: &Arc<CompiledArm>| -> i64 {
         match vm_run_bc(
             h,
-            arm.clone(),
+            ArmHandle::new(arm.clone()),
             &[Value::int(n), Value::int(0)],
             EnvId::GLOBAL,
             None,
@@ -1765,4 +1772,54 @@ fn tier_order_is_treewalk_lowest_and_native_highest() {
     let mut sorted = Tier::ALL.to_vec();
     sorted.sort();
     assert_eq!(sorted, vec![Tier::TreeWalk, Tier::Bytecode, Tier::Native]);
+}
+
+/// KI-40 guard: cloning the per-call [`ArmHandle`] must NOT touch the shared
+/// [`CompiledArm`]'s refcount.
+///
+/// This is the invariant the whole fix rests on, and nothing else in the tree observes
+/// it. ADR-175 Phase B publishes a compiled arm to `Runtime::shared_closures`, so every
+/// green process's inline cache points at ONE allocation; the VM then clones that handle
+/// up to three times per call (the IC probe, the `BcFrame`, `live_arm_push`). If those
+/// clones land on the *shared* `Arc`, N worker threads RMW one cache line per call and
+/// `pfib` runs 3.2x slower — while still computing the right answer, so `make test`, the
+/// differential and the lowering witness all stay green and **only a benchmark moves**
+/// (the same blind spot ADR-221 hit). Hence an assertion on the refcount itself.
+#[test]
+fn arm_handle_clone_does_not_touch_the_shared_arm_refcount() {
+    // Reuse the existing arm builder rather than a second 30-field literal that would
+    // drift out of step with `CompiledArm`.
+    let shared: Arc<CompiledArm> = Arc::new(ki26_arm(1, 0));
+
+    // One process installs the arm into its IC: exactly one shared-refcount bump, ever.
+    let handle = ArmHandle::new(shared.clone());
+    let shared_after_install = Arc::strong_count(&shared);
+    assert_eq!(
+        shared_after_install, 2,
+        "installing a handle should take exactly one reference to the shared arm"
+    );
+
+    // Now simulate the hot path: many per-call clones of the handle.
+    let clones: Vec<Arc<ArmHandle>> = (0..1000).map(|_| handle.clone()).collect();
+
+    assert_eq!(
+        Arc::strong_count(&shared),
+        shared_after_install,
+        "per-call handle clones must not touch the SHARED arm's refcount — that \
+         contended cache line is KI-40; this is the assertion that catches a revert \
+         to cloning `Arc<CompiledArm>` on the call path"
+    );
+    assert_eq!(
+        Arc::strong_count(&handle),
+        1001,
+        "the clones should land on the process-local handle instead"
+    );
+
+    // ...and that the handle still resolves to the same arm it wraps.
+    assert!(std::ptr::eq(
+        Arc::as_ptr(handle.arc()),
+        Arc::as_ptr(&shared)
+    ));
+    drop(clones);
+    assert_eq!(Arc::strong_count(&handle), 1);
 }

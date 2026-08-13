@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-40 | concurrent green processes running the **same** shared compiled arm on the VM contended on that arm's single `Arc<CompiledArm>` refcount — one cache line, N cores — costing **3.2×** wall on a 100-way fan-out and leaving the cores stalled at 769% instead of 1150% | ✅ **fixed 2026-08-13** (ADR-224 — a process-local `ArmHandle` interposed on the call path; `pfib` 54.4 s → 17.1 s) |
 | KI-39 | the CI `differential (tree-walker)` job failed intermittently (3 of 11 runs) with nextest exit 100; **0/15** in the faithful local shape, cold-boot-herd hypothesis measured dead, and whether it is still present is genuinely unknown (4 green runs is 28% likely either way) | ⚠️ **watching** — local avenue closed; failing cases now self-report as CI annotations (2026-08-13) |
 | KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | ✅ fixed 2026-08-08 (warm the cache before the fan-out) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
@@ -68,6 +69,121 @@ walked straight through the helpers' 20 s / 30 s deadlines. Warming the cache on
 fan-out takes the three tests from a 20.1 s failure to 1.9–2.6 s. No bug in the *language or
 runtime* was implied at any point — every sighting was a boot wait, never an assertion about
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
+
+---
+
+## KI-40 — shared compiled arms serialise concurrent VM execution: one refcount, N cores
+
+**Status:** ✅ **fixed 2026-08-13** (ADR-224). A process-local
+[`ArmHandle`](../crates/lisp/src/eval/compile/ir.rs) is interposed between the inline cache
+and the runtime-shared arm, so the per-call clone lands on an allocation only one process
+touches. **`pfib` (100 × `fib(32)`, tier 1) 54.4 s → 17.1 s (3.19×)**, per-task CPU 6408 →
+2006 ms, and now at **parity with `BROOD_NO_SHARED_ARMS=1`** (16.8 s) — the contention is gone
+rather than reduced. Single-threaded rows unchanged (8-row A/B, every row inside its own noise
+floor); `spawn-live` pays **+1.8%** for the handle allocation, a measured and accepted trade
+(ADR-224). Guarded by `arm_handle_clone_does_not_touch_the_shared_arm_refcount`, sabotage-verified.
+The diagnosis that follows is kept because the *shape* of it is the reusable part.
+
+`BROOD_NO_SHARED_ARMS=1` was the diagnostic lever throughout and was never a shippable
+workaround (sharing exists for the `spawn-live` 4.5 GB footprint and ~25% spawn CPU).
+
+**What.** When several green processes run the *same* VM-compiled arm at once, per-task CPU
+inflates far beyond what the same parallelism costs anywhere else. On `pfib` (100 × `fib(32)`,
+`BROOD_TIER=1`, 6-core/12-thread i5-11500H):
+
+| | wall | CPU% | CPU per task |
+|---|---|---|---|
+| default | 52.7 s | 1179% | 6213 ms |
+| `BROOD_NO_SHARED_ARMS=1` | **17.6 s** | 1172% | **2058 ms** |
+
+Serial `fib(32)` on the VM is 790 ms, and 12 *independent OS processes* each running it inflate
+to 1998 ms (2.5×) — pure SMT + all-core clock drop. So 2058 ms **is** the machine's floor, and
+everything above it was contention. The CPU figure is the tell: at 12 tasks the default runs at
+**769%** against 1148% with sharing off — the cores are stalled, not busy.
+
+**This is not tier-1-only.** At the default ceiling, an arm that simply does not lower keeps
+paying it: 24 × `fib(30)` under `BROOD_NO_I64=1 BROOD_NO_INLINE=1` runs 3110 ms, and 1540 ms
+with sharing off — **2.0×**. Any concurrent workload whose hot arms stay on the VM is exposed,
+which is the normal case for non-numeric server code (a Hatch request handler, not `fib`).
+
+**The 2×2 that isolates it.** 24 concurrent processes, `fib(32)`, tier 1, ms of CPU per task:
+
+| | sharing **on** | sharing **off** |
+|---|---|---|
+| **same** arm | **3881 (4.9×)** | 1925 (2.4×) |
+| **distinct** arms (24 separately-defined `fib_i`) | 1992 (2.5×) | 2046 (2.6×) |
+
+Only one cell is slow. Three independent cells land on the 2.4–2.6× machine control, so the
+cost needs *both* a shared arm object *and* multiple threads touching it. That rules out
+sharing's bookkeeping (distinct arms + sharing on is fast), concurrency as such (every cell is
+24-way), and resident-process count (12 vs 24 resident measure the same, 4381 vs 4201).
+`BROOD_GC_FLOOR=2000000` makes it **worse** (3044 vs 2345 ms/task), so it is not GC frequency —
+the same negative result `compute-frontier.md` records for `bintree`/`nqueens`.
+
+**Mechanism.** `Heap::vm_call_ic_probe` (`core/heap/vm_cache.rs:507`) returns the cached arm as
+`a.clone()` — an `Arc<CompiledArm>` refcount increment, matched by a decrement when the caller
+drops it — and that is the **IC-hit** path, i.e. the hot one, taken on every VM closure call.
+The IC table is per-process, but ADR-175 Phase B publishes the arm itself to `shared_closures`,
+so every process's IC entry points at *one* allocation. N workers then RMW one cache line per
+call. With sharing off each process compiles privately, the refcount is core-local, and the
+traffic disappears.
+
+**There is a second contended clone, and it is the one real code hits.** `vm_apply`
+(`mod.rs:2700`) also does `live_arm_push(arm.clone())` per activation — but *only* when
+`arm.has_runtime_handles`, so `fib`'s pure arithmetic body skips it and the benchmark above
+measures the IC clone alone. An arm carrying a `ConstVal::Handle` or a `MakeClosure` — i.e.
+anything that touches a string, a keyword or a lambda, which is most real code — pays both.
+Same recursion shape with a string constant in the body, 24-way, tier 1: 2278 ms/task shared
+against 991 ms unshared, a **2.30×** sharing penalty against **2.02×** for pure `fib`. Worse,
+but not by much, so the IC clone remains the dominant site and `live_arm_push` is a second one
+to fix, not the headline. (That the variant is handle-bearing is inferred from the constant, not
+read from `has_runtime_handles` — there is no flag that reports it.)
+
+Note `gc_runtime.rs:683` already documents the shape from the GC side: recursion "occupies one
+entry per *active frame* — a 100 000-deep parse holds 100 000 entries that are all the same
+`Arc`", and that walk was already given a distinct-arm dedup for the same reason.
+
+The cache line itself was **not** measured — `perf_event_paranoid=4` here, the same limit
+`compute-frontier.md` records — so the mechanism is an inference from the 2×2 plus the code,
+not a hardware-counter proof. What the 2×2 does establish without counters is the shape: the
+cost needs one shared object and many threads, and scales with threads, not with objects.
+
+The tree already names the cost and already fixed it for the other engine:
+`vm_call_ic_fast_link` (`vm_cache.rs:518`) returns only `Copy` data and documents itself as
+avoiding *"the one real atomic-RMW the hot recursive call (`fib` &c.) otherwise pays per call
+(~30M times)"*. That path is `#[cfg(feature = "jit")]` and serves native-to-native links only,
+which is exactly why tier 2 is immune and the VM is not.
+
+**How it was fixed (ADR-224), and why not the other way.** The route below — making shared
+arms immortal so the call path could borrow — was **not** taken: it is sound for a sealed
+PRELUDE arm but not for a RUNTIME one, which `shared_closures_clear` and the free-epoch stamp
+exist to invalidate. Interposing a per-process `Arc<ArmHandle>` instead needs no immortality
+argument, because it holds the shared `Arc` for at least as long as a direct clone would —
+liveness is strictly *stronger* than before, and `runtime_collect` still reaches the same arms
+via `ArmHandle::arc()`. All three per-call clone sites move to the handle at once. Cost: one
+extra allocation per (process, call site) at IC-fill time, and one pointer hop on arm reads,
+which measured inside the noise floor on every single-threaded row.
+
+**Why it was not a *small* fix.** The self-tail path only pointer-compares the arm
+(`std::ptr::eq(compiled.as_ref(), arm)` in `exec_chunk.rs`), so *that* clone is pure waste and
+could go today — but `fib` recurses **non-tail**, and the general call path hands the arm onward
+as an owned `Arc`. Removing the traffic there means the callee chain can borrow instead, which
+needs the arm to be immortal — sound for a sealed PRELUDE arm, not obviously sound for a
+RUNTIME-region one, which `shared_closures_clear` and the free-epoch stamp exist to invalidate.
+The shape is an `ArmRef` that is either `Owned(Arc<…>)` or `Immortal(&'static CompiledArm)`,
+touching the ~42 `Arc<CompiledArm>` sites across 11 files. `live_vm_arms` wants the same
+treatment as a second step — a stack of raw pointers beside a small distinct-owner table, which
+is close to what its GC walk already reconstructs per collection with `seen_arms`. Both must
+clear the GC-stress and
+hot-reload gates, not just the differential — the VM's answer stays correct either way, so
+**only a benchmark moves**, the same blind spot ADR-221 hit.
+
+**Repro.** `BENCH_N=32 TASKS=100 BROOD_TIER=1 brood pfib_k.blsp`, with and without
+`BROOD_NO_SHARED_ARMS=1`, where `pfib_k.blsp` is `bench/brood/pfib.blsp` with the task count
+read from `TASKS`. Compare CPU% between the two, not just wall. Measure with
+`/usr/bin/time -f "%e %P"` — **not** `timeout(1)`, which rounds wall up to a 100 ms grid and
+silently flattens every sub-second row (the published harness uses Python's
+`subprocess(timeout=)` and is unaffected).
 
 ---
 

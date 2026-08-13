@@ -202,6 +202,9 @@ pub use ir::{
 // pub(super) items from ir: explicitly imported so `use ir::*` (pub-only) doesn't miss them.
 // pub items re-exported above; these are pub(super) items needed internally:
 use ir::{next_arm_uid, ArmSpec, ChunkExit, Step};
+// The process-local arm handle (KI-40) — named by `Heap`'s IC entry and live-arm stack,
+// so it is re-exported at the crate-visible `compile::` path rather than kept private.
+pub use ir::ArmHandle;
 // NodePtr is pub in ir, but not re-exported from mod.rs — import privately:
 use ir::NodePtr;
 
@@ -2221,7 +2224,7 @@ fn hof_fast_enabled() -> bool {
 /// so a late-rebind falls back) + its compiled arm (GC-stable `Arc`, off the heap graph).
 pub(crate) struct HofArm {
     id: ClosureId,
-    arm: Arc<CompiledArm>,
+    arm: Arc<ArmHandle>,
     /// The step arm's IC block ([`Heap::vm_arm_block`]), resolved once here so the
     /// per-element native fast-frame installs it without a registry lookup. Only the native
     /// (jit) fast path reads it, so a `--no-default-features` build carries neither the
@@ -2254,7 +2257,7 @@ pub(crate) fn hof_resolve(heap: &Heap, f: Value, argc: usize) -> Option<HofArm> 
     let bases = heap.vm_arm_block(&arm);
     Some(HofArm {
         id,
-        arm,
+        arm: ArmHandle::new(arm),
         #[cfg(feature = "jit")]
         bases,
     })
@@ -2286,7 +2289,7 @@ pub(crate) fn hof_apply_step(
     // shape) or deopts.
     #[cfg(feature = "jit")]
     if hof_native_enabled() {
-        if let Some(r) = hof_apply_native(heap, &hof.arm, args, cenv, hof.bases) {
+        if let Some(r) = hof_apply_native(heap, hof.arm.arc(), args, cenv, hof.bases) {
             return Some(r);
         }
     }
@@ -2462,7 +2465,12 @@ fn hof_apply_native(
                 argv2.push(heap.root_at(base + k));
             }
             heap.truncate_roots(base);
-            Some(vm_apply(heap, arm.clone(), &argv2, cenv_live))
+            Some(vm_apply(
+                heap,
+                ArmHandle::new(arm.clone()),
+                &argv2,
+                cenv_live,
+            ))
         }
     }
 }
@@ -2554,7 +2562,7 @@ const MAX_BC_FRAMES: usize = 1 << 20;
 /// unwind them when it captures (a collection while parked relocates the *values* at
 /// those positions in place, keeping the indices good — ADR-100 §8).
 pub(crate) struct BcFrame {
-    arm: Arc<CompiledArm>,
+    arm: Arc<ArmHandle>,
     ip: usize,
     base: usize,
     env: EnvRoot,
@@ -2698,7 +2706,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 leaf: None,
             });
             let arm_slot = if arm.has_runtime_handles {
-                heap.live_arm_push(arm.clone())
+                heap.live_arm_push(ArmHandle::new(arm.clone()))
             } else {
                 usize::MAX
             };

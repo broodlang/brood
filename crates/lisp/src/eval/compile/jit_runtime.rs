@@ -786,9 +786,8 @@ pub(crate) fn jit_run_fast_link(
                 .or_else(|| {
                     let genv = heap.read_root_env(heap.jit_call_env);
                     match heap.env_get(genv, head) {
-                        Some(Value::Fn(id)) => {
-                            super::compiled_arm_for(heap, id, argc).map(|a| (a, callee_env))
-                        }
+                        Some(Value::Fn(id)) => super::compiled_arm_for(heap, id, argc)
+                            .map(|a| (ArmHandle::new(a), callee_env)),
                         _ => None,
                     }
                 });
@@ -806,7 +805,9 @@ pub(crate) fn jit_run_fast_link(
                 // resumed and takes the legacy re-run instead. It must be **flag-free** —
                 // see [`jit_frame_shape_matches`] (KI-26).
                 if outcome == 1 && jit_frame_shape_matches(&arm, nslots) {
-                    if let Some((resume, rip, depth)) = jit_ckpt_resume(heap, &arm, base, nslots) {
+                    if let Some((resume, rip, depth)) =
+                        jit_ckpt_resume(heap, arm.arc(), base, nslots)
+                    {
                         return match jit_native_reenter(heap, native_depth, |h| {
                             vm_resume_deopt(h, resume, base, cenv, rip, depth)
                         }) {
@@ -1024,7 +1025,7 @@ pub(crate) fn jit_dispatch_call(
                 };
             }};
         }
-        let resolved: Option<(Arc<CompiledArm>, EnvId, (u32, u32))> = if elided {
+        let resolved: Option<(Arc<ArmHandle>, EnvId, (u32, u32))> = if elided {
             match heap.vm_call_ic_probe(site, head, argc as u32, epoch) {
                 Some((_, Some(t))) => Some(t),
                 // IC hit on a NATIVE callee (arm-less entry, filled below on first
@@ -1048,25 +1049,27 @@ pub(crate) fn jit_dispatch_call(
                     // and only while cold) and fill the IC.
                     let cenv = heap.read_root_env(heap.jit_call_env);
                     match heap.env_get(cenv, head).map(|v| v.unpack()) {
-                        Some(ValueRef::Fn(id)) => compiled_arm_for(heap, id, argc).map(|a| {
-                            let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
-                            let cb = heap.vm_arm_block(&a);
-                            if !value::is_dynamic(head) {
-                                heap.vm_call_ic_put(
-                                    site,
-                                    crate::core::heap::CallIcEntry {
-                                        sym: head,
-                                        argc: argc as u32,
-                                        epoch,
-                                        callee: Value::func(id),
-                                        arm: Some((a.clone(), env)),
-                                        // Overwritten inside `vm_call_ic_put`.
-                                        callee_bases: (0, 0),
-                                    },
-                                );
-                            }
-                            (a, env, cb)
-                        }),
+                        Some(ValueRef::Fn(id)) => compiled_arm_for(heap, id, argc)
+                            .map(ArmHandle::new)
+                            .map(|a| {
+                                let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                                let cb = heap.vm_arm_block(&a);
+                                if !value::is_dynamic(head) {
+                                    heap.vm_call_ic_put(
+                                        site,
+                                        crate::core::heap::CallIcEntry {
+                                            sym: head,
+                                            argc: argc as u32,
+                                            epoch,
+                                            callee: Value::func(id),
+                                            arm: Some((a.clone(), env)),
+                                            // Overwritten inside `vm_call_ic_put`.
+                                            callee_bases: (0, 0),
+                                        },
+                                    );
+                                }
+                                (a, env, cb)
+                            }),
                         // A builtin callee: fill an arm-less IC entry (so the next call
                         // takes the direct path above) and call it now. Dynamic heads are
                         // never cached (they can shadow per call) but still call direct.
@@ -1104,11 +1107,13 @@ pub(crate) fn jit_dispatch_call(
                 }
             }
         } else if let ValueRef::Fn(id) = heap.root_at(stage_base).unpack() {
-            compiled_arm_for(heap, id, argc).map(|a| {
-                let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
-                let cb = heap.vm_arm_block(&a);
-                (a, env, cb)
-            })
+            compiled_arm_for(heap, id, argc)
+                .map(ArmHandle::new)
+                .map(|a| {
+                    let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                    let cb = heap.vm_arm_block(&a);
+                    (a, env, cb)
+                })
         } else {
             None
         };
@@ -1255,7 +1260,7 @@ pub(crate) fn jit_dispatch_call(
                         // checkpoint, frame intact — never re-running side effects.
                         if outcome == 1 {
                             if let Some((resume, rip, depth)) =
-                                jit_ckpt_resume(heap, &arm, base, frame_nslots)
+                                jit_ckpt_resume(heap, arm.arc(), base, frame_nslots)
                             {
                                 return match vm_resume_deopt(
                                     heap, resume, base, callee_env, rip, depth,
@@ -1581,6 +1586,9 @@ pub(crate) fn vm_resume_deopt(
     rip: usize,
     depth: usize,
 ) -> LispResult {
+    // Deopt is a cold path, so wrapping the shared arm in its process-local handle
+    // (KI-40) here costs one allocation per deopt, not per call.
+    let arm = ArmHandle::new(arm);
     let cb = base + arm.ckpt_slot as usize + 1;
     for k in 0..depth {
         let v = heap.root_at(cb + k);
