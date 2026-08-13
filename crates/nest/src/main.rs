@@ -43,7 +43,8 @@ mod release;
 #[derive(Parser, Debug)]
 #[command(
     name = "nest",
-    version,
+    // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
+    version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
     propagate_version = true,
     subcommand_required = true,

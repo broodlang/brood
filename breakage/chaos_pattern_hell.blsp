@@ -78,7 +78,7 @@
 
 (defn find-magic (m)
   (match (get m target-key)
-    (~target-val "found the magic value!")
+    (^target-val "found the magic value!")
     (other (str "got: " (pr-str other)))))
 
 (println (find-magic {:magic 42}))
@@ -90,7 +90,7 @@
 (def expected-pair [1 2])
 (defn pin-nested (v)
   (match v
-    ([~expected-pair x] (str "outer with pair, x=" x))
+    ([^expected-pair x] (str "outer with pair, x=" x))
     (_ "no match")))
 
 (println "pin-nested [[1 2] 3]:" (pin-nested [[1 2] 3]))
@@ -150,7 +150,7 @@
   (match v
     (0 "zero")
     (1 "one")
-    (~huge-int "the huge int!")
+    (^huge-int "the huge int!")
     (x :when (> x 0) (str "positive: " (type-of x)))
     (_ "other")))
 

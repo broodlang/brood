@@ -66,7 +66,7 @@
     ;; Now monitor the (likely dead) pid
     (let (ref (monitor dead)
           msg (receive
-                ([:down ~ref _ reason] reason)
+                ([:down ^ref _ reason] reason)
                 (after 2000 :timeout)))
       (println "P18: down reason:" msg)
       (println "P18-correct (noproc or normal):"
@@ -123,7 +123,7 @@
     (let (ref (monitor victim))
       (exit victim :kill)
       (let (r (receive
-                ([:down ~ref _ reason] reason)
+                ([:down ^ref _ reason] reason)
                 (after 2000 :timeout)))
         (println "P21: victim died with reason:" r)
         (println "P21-correct (killed):" (= :killed r)))))

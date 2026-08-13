@@ -52,6 +52,12 @@ Before starting new work:
   looped, `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` on the concurrency-heavy tests, and a
   fuzz-differential pass (`scripts/fuzz/run.sh`). The flake-hunt tooling is below and in
   `docs/handoff.md`.
+- **Gate performance at the tier your change runs on.** `make ab` measures the default
+  ceiling, where a hot arm is native and the interpreter's call path never executes — so a cost
+  added to `exec_chunk`/`dispatch`/`vm_run_bc` reads as *flat* there. KI-40 was a 3.19x
+  regression that `make ab` reported as +1.3%. Use **`make ab-vm`** (ceiling 1) as well for
+  anything on the VM's call path, and remember `make doctor` first: a stale binary fails by
+  agreeing with the baseline.
 - **A regression is stop-the-world.** If new work turns a green row red or a green test
   flaky, fixing that takes priority over finishing the feature — don't commit forward.
 

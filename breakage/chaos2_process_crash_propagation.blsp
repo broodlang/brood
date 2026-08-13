@@ -78,7 +78,7 @@
     (let (ref (monitor victim))
       (send victim :go)
       (let (r (receive
-                ([:down ~ref _ reason] reason)
+                ([:down ^ref _ reason] reason)
                 (after 5000 :timeout)))
         (println "P64: reason == big-reason:" (= big-reason r))
         (println "P64-correct:" (= big-reason r))))))
@@ -159,7 +159,7 @@
       ;; Monitor to detect the crash without linking
       (let (ref (monitor child))
         (let (r (receive
-                  ([:down ~ref _ reason] reason)
+                  ([:down ^ref _ reason] reason)
                   (after 3000 :timeout)))
           (println "P67: inner crash reason:" r)
           ;; Outer process is still alive

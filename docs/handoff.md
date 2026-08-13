@@ -5,10 +5,41 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**As of 2026-08-13 (the VM-contention session, concluded)**, brood 0.3.9. That session's own
+summary is below under "the contention session"; the backend-seam entry it replaced follows it.
+
 **As of 2026-08-13 (the backend-seam session, concluded)**, brood 0.3.9. Everything is
 **committed and pushed**; `main` and `origin/main` agree. `nest format --check` is **clean across
 all 356 files** — the pre-existing backlog (12 files when this entry was first written, 23 by the
 time it was cleared) is gone, including nine embedded `std/` modules, verified with both engines.
+
+### The contention session (2026-08-13, latest)
+
+**What landed:** **ADR-224** — a shared compiled arm is now reached through a process-local
+`ArmHandle`, fixing **KI-40**: the VM's call path was cloning one shared `Arc<CompiledArm>`
+three times per call, so concurrent green processes running the same arm serialised on a single
+refcount cache line. `pfib` at ceiling 1 goes **54.4 s → 17.1 s (3.19×)** and now matches
+`BROOD_NO_SHARED_ARMS`; `spawn-live` pays a measured, accepted **+1.8%**. Plus **KI-42** (the
+breakage suite had rotted to 9 of 23 red — 7 fixed, 2 skipped by name) and a tooling pass:
+`make doctor`, `make ab-vm`, `--version` with the build sha, `ab-bench --tier`, `spawn-live`
+un-pinned in `parallel_rows`, and the witness's stale-binary trap closed.
+
+**Three things a next session should know:**
+
+1. **`make ab` cannot see a VM-path regression.** It measures the default ceiling, where a hot
+   arm is native and the interpreter's call path never runs — it reported KI-40's 3.19× as
+   **+1.3%**. Use `make ab-vm` (ceiling 1) for anything touching
+   `exec_chunk`/`dispatch`/`vm_run_bc`, and `make doctor` first.
+2. **The two skipped breakage files are judgement calls, not neglect** (KI-42):
+   `chaos2_tcp_stress` creates its listener in the parent and accepts in a child, so fixing it
+   changes what it measures; `chaos_map_volcano` trips the 1 GiB soft limit by design. Clear
+   `BREAKAGE_SKIP` to see them.
+3. **This class of bug is invisible to every correctness gate**, because the VM's answer stays
+   right — only a benchmark moves. That is why the fix carries a refcount assertion
+   (`arm_handle_clone_does_not_touch_the_shared_arm_refcount`, sabotage-verified) rather than
+   relying on the suite.
+
+### The backend-seam session (2026-08-13, previous)
 
 **What landed:** ADR-221 (the `JitBackend` contract + the decisions hoisted into `jit_plan`),
 ADR-222 (execution is a tier ladder with a ceiling — `BROOD_TIER` subsuming `BROOD_VM` and
@@ -38,9 +69,9 @@ should be red on main.** Three advisory warnings: `std/tool/docs.blsp` non-tail 
 functions vs adding a justified opt-out is a judgement call), but it should not stay unnoticed:
 either fix them or the gate is decoration.
 
-**Not re-run this session, and still owed before the next release:** the GC_STRESS sweep over
-the seven concurrency binaries and the fuzz differential, last run on `afe4bcff` (37/37, and
-1650 checks / 0 divergences).
+**Both previously-owed gates were run on 2026-08-13 and are green:** the GC_STRESS sweep over
+the seven concurrency binaries is **37/37** (matching `afe4bcff`) and the fuzz differential
+passed. Also run this session, and not usually: `make breakagetests`, `make tsan`, `make loom`.
 
 **Previous session (2026-08-10, spawn-live + publish):** `make test` 974/974 four times, both
 engines 1948/1948, in-language suite 4517/4517 on seven consecutive runs.

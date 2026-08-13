@@ -98,7 +98,12 @@
       (assert= 6 (run 20000 0))
       ; exact
       (assert= 4 (d 6))
-      (assert= 4.8 (d 5)))))
+      ; A remainder yields an exact :ratio, NOT a float — the warmed arm must deopt to the
+      ; same value the interpreter produces. This asserted `4.8` until 2026-08-13, which
+      ; brood's exactness-sensitive `=` has never accepted for `24/5`; the test predates
+      ; exact rationals and had been failing on every build since. It went unnoticed because
+      ; `make breakagetests` is deliberately outside `make test` and CI, so nothing ran it.
+      (assert= 24/5 (d 5)))))
 (describe "jit breakage: division edge cases raise cleanly"
   (test "warmed rem then divide-by-zero raises, never traps"
     (letrec (r (fn (a b) (rem a b))
