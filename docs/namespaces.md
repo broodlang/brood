@@ -128,7 +128,12 @@ over the existing flat table** — the core never grows a namespace axis:
   `current_file` slot and `dynamics` stack. File/module loaders (`load`,
   `%load-string`, `eval_source`) reset it to root per file and restore the
   caller's after; the interactive `eval-string` path leaves it **sticky** so a
-  REPL `(defmodule foo)` persists across entries. One `defmodule` per file.
+  REPL `(defmodule foo)` persists across entries. A file may open **more than one**
+  `(defmodule …)` (ADR-223 Phase 1): each opens a *region* running to the next
+  `defmodule` or EOF, and a bare reference qualifies against the module it is inside
+  (the per-region forward-ref pre-scan, `%in-ns` activating each region). Co-located
+  modules do not see each other's bare names — they qualify or `:use`. A single-module
+  file is the common case and behaves exactly as before.
 - Inside it, `(defn observe …)` defines the full symbol **`observer/observe`** in
   the one shared global table.
 - A **resolver pass** maps reference-position symbols at expand time:

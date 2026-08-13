@@ -18177,3 +18177,31 @@ the six half-indexes it consolidates, the *cache-of-live-truth-never-the-truth* 
 consumer-by-consumer migration, flat-multi-module-not-lexical-nesting scope) + [ADR-223](decisions.md)
 (the decision to defer + the M2-plugin-pressure trigger) + a cross-link from `namespaces.md` §8.
 Nothing about resolution *semantics* changes; the index would accelerate lookup, never meaning.
+
+## 2026-08-12 — multiple modules per file: the region model (ADR-223 Phase 1)
+
+Built the definition-side half of ADR-223, which closes the "unsupported edge" the entry above
+left open: a file may now declare more than one `(defmodule …)`. A file is a sequence of
+`defmodule`-*regions* — each `(defmodule M …)` opens a region running to the next `defmodule` or
+EOF — and a bare reference qualifies against the module it is *inside*, so co-located modules do
+not see each other's bare names (they qualify or `:use`). This *removed an assumption* rather than
+adding a mechanism: `compile_ns` already varied within a load via `%in-ns`; only the forward-ref
+pre-scan assumed it varied at most once. The work: `scan_def_names` became **per-module**
+`scan_regions` (partition forms by `defmodule` boundary; `defdyn`-ambient names still subtracted
+file-wide, so knob-read/declare/set order stays irrelevant) feeding a new
+`Heap::ns_known_by_module` map; the active `ns_known_names` now *starts empty* and each `%in-ns`
+calls `Heap::activate_ns_region` to switch it to the module being opened (sound because resolution
+is a no-op at root, so no form resolves before its region activates); the checker — which does not
+`eval` `%in-ns` — mirrors the switch at each `defmodule` in its pass-1 walk, and
+`collect_required_modules` now treats every co-located module as trivially required so an intra-file
+qualified sibling reference does not read as an unrequired-module use. `file_ns` grew a
+`file_modules` sibling; `defmodule_form_name` is now `pub(crate)`. A single-module file has exactly
+one region equal to the old whole-file scan, so existing files are unaffected — and this *subsumes*
+the pre-module pre-scan fix above (forms before the first `defmodule` are simply the root region).
+Two new `scan_regions` Rust unit tests plus a six-case `namespace_test.blsp` block (`:isolated`)
+pin it: two same-named `val` defs qualifying to their own module, bare-ref-resolves-to-enclosing,
+explicit cross-module qualified reach, bare-cross-module isolation (unbound), later-region forward
+ref, and a co-located value round-tripping through a spawned worker. Full `namespace_test.blsp`
+green (47 tests). Phase 2 (the AOT index — `require`-ing a co-located module by an arbitrary name
+across files) stays deferred to M2 plugin pressure; until then a co-located module is reachable
+once its file is loaded, not independently by name.

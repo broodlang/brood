@@ -2089,8 +2089,16 @@ pub(crate) struct ColdHeap {
     pub(crate) current_file_arc: Option<Arc<str>>,
     /// The namespace being compiled (`defmodule`).
     pub(crate) compile_ns: Option<Symbol>,
-    /// Names the current namespace defines.
+    /// Names the current namespace defines — the *active* forward-ref set, which
+    /// [`Heap::activate_ns_region`] switches to the module `%in-ns` opens.
     pub(crate) ns_known_names: HashSet<Symbol>,
+    /// Forward-ref pre-scan **per module region** (ADR-223): a file may declare more
+    /// than one `(defmodule …)`, and each opens a region whose bare def-heads live under
+    /// its module key here. `%in-ns` activates the current region's set into
+    /// `ns_known_names`, so a bare reference qualifies only against the module it is
+    /// actually inside — the mechanism that lets several modules share one file. Empty on
+    /// the sticky REPL path (no whole-file pre-scan), where `ns_assume_own` covers instead.
+    pub(crate) ns_known_by_module: HashMap<Symbol, HashSet<Symbol>>,
     /// Compiling a form that has **no** whole-file pre-scan behind it (a runtime
     /// `eval`), so `ns_known_names` cannot answer "will this namespace define it?".
     pub(crate) ns_assume_own: bool,
@@ -3762,6 +3770,31 @@ impl Heap {
     /// Is `sym` (a bare name) known to be defined in the current namespace's file?
     pub fn ns_knows_name(&self, sym: Symbol) -> bool {
         self.cold().is_some_and(|c| c.ns_known_names.contains(&sym))
+    }
+
+    /// Install the per-module forward-ref pre-scan (ADR-223), returning the prior map so
+    /// the caller can restore it (loads nest). Keyed by the **bare** module name each
+    /// `(defmodule …)` declares — what `%in-ns` receives before rooting.
+    pub fn set_ns_known_by_module(
+        &mut self,
+        map: HashMap<Symbol, HashSet<Symbol>>,
+    ) -> HashMap<Symbol, HashSet<Symbol>> {
+        std::mem::replace(&mut self.cold_mut().ns_known_by_module, map)
+    }
+
+    /// Make module `bare`'s region the active forward-ref set: each `%in-ns` switches
+    /// `ns_known_names` to the module it opens, so a bare forward reference qualifies only
+    /// against the CURRENT module's defs — the region model that lets several modules
+    /// share one file (ADR-223). A no-op when no region is recorded for `bare` (the sticky
+    /// REPL path, which has no whole-file pre-scan and relies on `ns_assume_own` instead),
+    /// so it never clobbers that path's set.
+    pub fn activate_ns_region(&mut self, bare: Symbol) {
+        let names = self
+            .cold()
+            .and_then(|c| c.ns_known_by_module.get(&bare).cloned());
+        if let Some(names) = names {
+            self.cold_mut().ns_known_names = names;
+        }
     }
 
     /// Compile the next form(s) as a namespace's **own** code with no whole-file
