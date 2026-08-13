@@ -1110,12 +1110,20 @@ sha256 pin still holds."
 ;; can't prevent it structurally yet, so we DETECT it at resolution time and error
 ;; loudly, naming both providers; the fix is to rename one.
 
-;; The (defmodule X) name a source file claims (a symbol), or nil if it declares
-;; none. That name — not the filename — is the global-table namespace that clobbers.
-(defn- package-module-name-of
+;; Every (defmodule X) name a source file declares, in source order (symbols) — the
+;; global-table namespaces it claims, which is what clobbers on collision, NOT the
+;; filename. A file may open more than one module (ADR-223); each is registered so a
+;; co-located secondary module is `require`able across files by its own name. A parse
+;; error yields `()` — the file is treated as declaring nothing and the load surfaces
+;; the real error, matching `project-file-feature`'s tolerance.
+(defn- package-module-names-of
   (file)
-  (let (form (read-first (slurp file)))
-    (if (and (pair? form) (= (first form) 'defmodule)) (second form) nil)))
+  (try
+    (map second
+      (filter (fn (form)
+                (and (pair? form) (= (first form) 'defmodule) (symbol? (second form))))
+        (read-all (slurp file))))
+    (catch _ nil)))
 
 ;; Every `.blsp` file at or under `dir`, recursively (full paths). A hierarchical
 ;; module `(defmodule gui/window)` lives at `gui/window.blsp` in a SUBdirectory
@@ -1133,27 +1141,32 @@ sha256 pin still holds."
                else nil)))
       (list-dir dir))))
 
-;; The module names a source dir provides: the (defmodule …) name of each
-;; `.blsp` file in it, recursively (so nested `gui/window` is included).
+;; Every module name a source dir provides: each `(defmodule …)` of each `.blsp`
+;; file in it, recursively (so nested `gui/window` and co-located secondary modules
+;; are both included). Feeds collision detection (ADR-070), so it must see every
+;; declared module, not just each file's first.
 (defn- package-provided-modules
   (src-dir)
   (if (not (dir? src-dir))
     nil
-    (filter (fn (m) (not (nil? m)))
-      (map package-module-name-of (package-blsp-files src-dir)))))
+    (apply append
+      (map package-module-names-of (package-blsp-files src-dir)))))
 
-;; `[module-symbol file-path]` for each `.blsp` file the dir provides (recursively) —
-;; `provided-modules` paired with the file each module lives in. Package-rooting
+;; `[module-symbol file-path]` for each MODULE the dir provides (recursively) —
+;; every `(defmodule …)` paired with the file it lives in. Package-rooting
 ;; (ADR-070) needs the FILE, not just the name: a dep module `foo/b` maps to that
-;; dep's `b.blsp`, and `require-force` loads it from there under `foo`'s context.
+;; dep's `b.blsp`, and `require-force` loads it from there under `foo`'s context. A
+;; file declaring more than one module contributes one pair per module (ADR-223), so
+;; a co-located secondary module is registered and thus `require`able across files.
 ;; PUBLIC (no `--`): the project loader (`project-root-project-rooting`) also scans
 ;; its own source dirs with it to root the root project's modules, a legitimate
 ;; cross-module use.
 (defn package-module-files (src-dir)
   (if (not (dir? src-dir))
     nil
-    (filter (fn (pair) (not (nil? (first pair))))
-      (map (fn (file) (list (package-module-name-of file) file))
+    (apply append
+      (map (fn (file)
+             (map (fn (m) (list m file)) (package-module-names-of file)))
         (package-blsp-files src-dir)))))
 
 ;; The [label src-dir] providers to check for a *module-name* collision. Since deps

@@ -15,6 +15,18 @@
 > → `Heap::ns_known_by_module`; `%in-ns` activates a region), so §6-in-scope and §7-step-5
 > below are *partly done* and the §7 "loud load error" interim no longer applies. What remains
 > deferred here is the index proper (module ↔ file decoupling, require-by-name).
+>
+> **Update (2026-08-13): cross-file require-by-name shipped for named projects (ADR-223 Phase 2
+> MVP), still without the persisted index.** §7-step-5's payoff — reaching a co-located
+> secondary module across files by its own name — reduced for the root project to one scan
+> generalization (`package/package-module-files` now records every `(defmodule …)`, not just
+> the first), which feeds the existing ADR-070 rooting registry (`*package-module-files*`) that
+> `require` already consults. So the *addressing* the index was meant to provide is, for the
+> in-project named case, already covered by the rooting registry. What the persisted index still
+> adds on top: module↔file decoupling beyond rooting, cross-*author* O(1) symbol location, LSP
+> routing, and folding the collision/reserved/duplicate checks into index queries — all still
+> deferred to M2 plugin pressure. Nameless projects and bare `brood file.blsp` runs are also
+> still filename-bijection-only.
 
 This is the design backing for a single, authoritative **index** that answers
 "where/what is X" for the whole image — module → file, symbol → definition site,

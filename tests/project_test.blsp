@@ -10,6 +10,7 @@
 (defmodule project-test
   (:use-internals project)
   (:use-internals scaffold)
+  (:use-internals package :only [package-guard-collisions])
   (:use test)
   (:use project))
 
@@ -18,6 +19,7 @@
 ;; /tmp forever and nothing fails. Four were missing until 2026-08-05 (KI-30) and had left
 ;; 2784 directories between them; `temp_purge_coverage_test.blsp` now fails if one is
 ;; dropped again.
+(purge-stale-temp "brood-coloc-")
 (purge-stale-temp "brood-dup-")
 (purge-stale-temp "brood-enhancer-")
 (purge-stale-temp "brood-feat-")
@@ -684,3 +686,103 @@
       (assert= (enhancers-in dir "bedit" "0.1.0") ["good"])))
   (test "[] for a dir that doesn't exist"
     (assert= (enhancers-in "/no/such/pkgdir" "bedit" "1.0.0") [])))
+
+;; ── ADR-223 Phase 2: cross-file require-by-name for a co-located module ──────────
+;; Phase 1 let a file declare more than one `(defmodule …)`; Phase 2 makes a co-located
+;; SECONDARY module reachable across files by its own name. The whole mechanism is one
+;; generalization — the file→module scan (`package/package-module-files`) now emits EVERY
+;; declared module, so `project-setup` registers `pkg/secondary → file` and the existing
+;; `*package-module-files*` require branch loads it. Named (ADR-070 rooted) projects only.
+;; These blocks mutate the process-global registries, so they run `:isolated` and each uses
+;; a unique project/module name to avoid cross-test registry contamination.
+
+;; Receive `n` messages then return (tail-recursive → O(1) stack in a test's green process).
+(defn- coloc-await-n
+  (n)
+  (when (> n 0) (receive) (coloc-await-n (dec n))))
+
+(describe "namespaces: cross-file require-by-name for a co-located module (ADR-223 Phase 2)"
+  :isolated
+
+  (test "the file→module scan surfaces EVERY declared module, not just the first"
+    (let (dir (temp-dir "brood-coloc-"))
+      (make-dir dir)
+      (spit (path-join dir "shapes.blsp")
+        "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
+      (let (pairs (package/package-module-files dir)
+            names (sort (map (fn (p) (name (first p))) pairs)))
+        (assert= names (list "shapes" "shapes-internal"))
+        ;; every declared module maps back to the one file that declares it
+        (is (every? (fn (p) (ends-with? (second p) "shapes.blsp")) pairs)))))
+
+  (test "project-setup registers a co-located secondary module, rooted"
+    (let (root (temp-dir "brood-coloc-"))
+      (make-dir root)
+      (make-dir (path-join root "src"))
+      (spit (path-join root "project.blsp") "(project :name \"pkga\" :source-paths [\"src\"])")
+      (spit (path-join (path-join root "src") "shapes.blsp")
+        "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
+      (project/project-setup root)
+      (is (contains? *package-module-files* "pkga/shapes-internal"))
+      (is (includes? (get *package-modules-of* "pkga") 'shapes-internal))))
+
+  (test "a secondary module resolves by name before its file is otherwise loaded"
+    ;; the ordering case the feature exists for: require the secondary with no prior
+    ;; require of the primary — the registry entry is what makes it resolvable.
+    (let (root (temp-dir "brood-coloc-"))
+      (make-dir root)
+      (make-dir (path-join root "src"))
+      (spit (path-join root "project.blsp") "(project :name \"pkgb\" :source-paths [\"src\"])")
+      (spit (path-join (path-join root "src") "shapes.blsp")
+        "(defmodule shapes) (defn area () 7) (defmodule shapes-internal) (defn secret () 42)")
+      (project/project-setup root)
+      (require 'pkgb/shapes-internal)
+      (assert= (pkgb/shapes-internal/secret) 42)
+      ;; loading the file co-provided the sibling region
+      (assert= (pkgb/shapes/area) 7)))
+
+  (test "a consumer file (:use)s a co-located secondary across files"
+    (let (root (temp-dir "brood-coloc-"))
+      (make-dir root)
+      (make-dir (path-join root "src"))
+      (spit (path-join root "project.blsp") "(project :name \"pkgc\" :source-paths [\"src\"])")
+      (let (src (path-join root "src"))
+        (spit (path-join src "shapes.blsp")
+          "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
+        (spit (path-join src "consumer.blsp")
+          "(defmodule consumer (:use shapes-internal)) (defn call-secret () (secret))")
+        (project/project-setup root)
+        (project/project-load-sources root)
+        (assert= (pkgc/consumer/call-secret) 42))))
+
+  (test "two files declaring the same module name collide loudly (secondary included)"
+    ;; the generalized `package-provided-modules` now surfaces secondaries, so the
+    ;; ADR-070 detect-and-reject guard catches a duplicate declared in a second module.
+    (let (root (temp-dir "brood-coloc-"))
+      (make-dir root)
+      (make-dir (path-join root "src"))
+      (spit (path-join root "project.blsp") "(project :name \"pkgd\" :source-paths [\"src\"])")
+      (let (src (path-join root "src"))
+        (spit (path-join src "a.blsp") "(defmodule aye) (defmodule dup)")
+        (spit (path-join src "b.blsp") "(defmodule bee) (defmodule dup)")
+        (project/project-setup root)
+        (let (msg (try
+                    (do (package/package-guard-collisions root nil) :no-error)
+                    (catch e (error-message e))))
+          (is (includes? (str msg) "dup"))))))
+
+  (test "concurrent require of a co-located secondary loads its file exactly once"
+    (let (root (temp-dir "brood-coloc-"))
+      (make-dir root)
+      (make-dir (path-join root "src"))
+      (spit (path-join root "project.blsp") "(project :name \"pkge\" :source-paths [\"src\"])")
+      (spit (path-join (path-join root "src") "twomod.blsp")
+        (str "(defmodule twomod) (defn area () 1)"
+          " (defmodule twomod-internal)" " (def *loads* (inc *loads*)) (defn secret () 42)"))
+      (def pkge/twomod-internal/*loads* 0)
+      (project/project-setup root)
+      (let (me (self) n 8)
+        (map (fn (_) (spawn (fn () (do (require 'pkge/twomod-internal) (send me :done)))))
+          (range n))
+        (coloc-await-n n))
+      (assert= pkge/twomod-internal/*loads* 1))))

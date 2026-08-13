@@ -671,9 +671,12 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; walk, and listing them twice would only make the key longer.
 (defn- project-dep-module-files
   ()
-  (sort (map second
-          (remove (fn (kv) (not (project-image-dep-module? (first kv))))
-            (seq *package-module-files*)))))
+  ;; `distinct`: a dep file declaring more than one module (ADR-223) now has one
+  ;; `*package-module-files*` entry per module, all pointing at the same path — the
+  ;; fingerprint wants each file once, not once per module it declares.
+  (sort (distinct (map second
+                    (remove (fn (kv) (not (project-image-dep-module? (first kv))))
+                      (seq *package-module-files*))))))
 
 ;; `before` as a SET. As a list, `member?` is a linear scan run once per global — ~4000 x
 ;; ~313 000 on a big project, which measured 7 s of a 9 s image write and was invisible

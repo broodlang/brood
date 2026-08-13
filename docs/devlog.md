@@ -18206,6 +18206,48 @@ green (47 tests). Phase 2 (the AOT index — `require`-ing a co-located module b
 across files) stays deferred to M2 plugin pressure; until then a co-located module is reachable
 once its file is loaded, not independently by name.
 
+## 2026-08-13 — ADR-223 Phase 2 (MVP): cross-file require-by-name for a co-located module
+
+Made a co-located *secondary* module reachable from another file by its own name — the piece
+Phase 1 deliberately left out. The design agent's finding shrank this from the "unified index"
+framing to **one generalization plus a consolidation**: the file→module scan
+(`package/package-module-files`, `std/tool/package.blsp`) recorded only each file's *first*
+`(defmodule …)` via a `read-first` helper; it now records **every** declared module. That
+single change flows unchanged through the existing rooting call sites
+(`project-root-project-rooting` for the root project, `package-register-rooting` for deps),
+which already register `pkg/mod → file` into `*package-module-files*` — so a co-located
+secondary gets `pkg/secondary → file` for free, and `require-force-in`'s existing
+`*package-module-files*` branch loads it through `require-force-package`. **No prelude change,
+no new require branch, no new Rust builtin.** The key scheme cannot drift because
+`(:use secondary)` expands to `(require (%root-module-name 'secondary))` and `%root-module-name`
+roots iff `secondary` is in the active package's module set — which the generalized scan is now
+what puts there; registration key and lookup key are the same rule over the same set.
+
+Done as a **consolidation, not an addition** (the request was explicitly to clean up, not just
+add): the singular `package-module-name-of` was deleted once `package-module-files` and
+`package-provided-modules` moved to the new plural `package-module-names-of`, and their
+redundant `filter … nil?` guards went with it — so the tree has *fewer* file scanners than
+before the feature. `package-provided-modules` was generalized in lockstep so the ADR-070
+collision guard still rejects two files declaring the same module name (now including a
+secondary). `project-dep-module-files` gained a `distinct` (a two-module dep file otherwise
+double-counts in the image fingerprint). Observed but deliberately **not touched** (out of the
+feature's blast radius, subtly different, and a green tree not to disturb mid-feature): the same
+"first defmodule of a file" logic is reimplemented in `project-file-feature` (rooted, for
+load-dedup) and twice inline in `std/tool/docs.blsp` — a worthwhile *separate* consolidation
+with its own tests.
+
+**Scope:** named (ADR-070 rooted) projects only. A nameless project skips rooting and a bare
+`brood file.blsp` run does no project setup; supporting either needs a new bare-key registry
+*and* a new require branch — deferred as not worth the surface for the marginal case. The
+checker needs nothing: `nest check`'s whole-project pre-flight loads every source file. The
+persisted AOT index (module↔file decoupling, LSP routing, folding the checks into an index)
+remains deferred to M2. Six new `:isolated` cases in `tests/project_test.blsp` pin it (the scan
+surfaces both modules; the secondary registers rooted; the ordering case — require the secondary
+before its file loads; a consumer `(:use)`s it across files; two files declaring one name still
+collide; concurrent require loads the file exactly once). This is the substrate for the
+requested co-located **test-module** feature — a `foo-test` module beside `foo`, run by
+`nest test`, stripped in the AOT/bundle step (next).
+
 ## 2026-08-13 — closing out: the whole-tree format, and KI-39's local avenue exhausted
 
 **`nest format` across the tree — 356 files considered, 23 rewritten, `--check` now clean.** This
