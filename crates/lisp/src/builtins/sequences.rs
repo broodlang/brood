@@ -911,7 +911,14 @@ pub(super) fn registry_update(args: &[Value], env: EnvId, heap: &mut Heap) -> Li
 pub(super) fn registry_member(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let sym = match arg(args, 0) {
         Value::Sym(s) => s,
-        v => return Err(LispError::wrong_type(heap, "%registry-member?", "symbol", v)),
+        v => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%registry-member?",
+                "symbol",
+                v,
+            ))
+        }
     };
     Ok(Value::boolean(heap.registry_member(sym, arg(args, 1))))
 }

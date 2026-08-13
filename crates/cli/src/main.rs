@@ -35,7 +35,8 @@ use std::path::Path;
 #[derive(Parser, Debug)]
 #[command(
     name = "brood",
-    version,
+    // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
+    version = brood::cli_support::VERSION_LINE,
     about = "The Brood language — language half of the brood/nest split (ADR-028).",
     long_about = "Run Brood code as a single file or a REPL, plus one-shot \
 type-check and test runs. For projects (scaffolding, project-wide tests, \

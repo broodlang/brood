@@ -4,6 +4,13 @@
 ;;; The model: tcp-listen and tcp-connect both deliver to the calling process's
 ;;; mailbox. tcp-controlling-process transfers ownership of an accepted socket.
 ;;;
+;;; THEREFORE the listener must be created INSIDE the process that accepts on it. Every
+;;; phase below used to call `tcp-listen` in the parent and `receive` the `[:tcp-accept …]`
+;;; in a spawned server, so the accept was delivered to the PARENT's mailbox and the server
+;;; timed out — P36 read `ok=0 bad=50` and P37-P40 all read `:timeout`. The whole file was
+;;; dead that way, and nothing ran it (KI-42). Each server now opens its own listener and
+;;; hands the port back to the parent, which waits for it before connecting.
+;;;
 ;;; Targets:
 ;;;   P36 — multi-client echo server: 50 concurrent clients, each sends/receives
 ;;;   P37 — rapid connect-disconnect: 200 connections opened and closed without data
@@ -17,12 +24,10 @@
 (println "=== P36: 50-client concurrent echo ===")
 
 (let (me (self)
-      n-clients 50
-      ls (tcp-listen "127.0.0.1" 0)
-      port (tcp-local-port ls))
+      n-clients 50)
 
-  ;; Server process: accepts and echoes for each client
-  (defn echo-server-loop (remaining)
+  ;; Server process: owns the listener, accepts and echoes for each client
+  (defn echo-server-loop (ls remaining)
     (if (= remaining 0)
       (tcp-close ls)
       (let (client (receive ([:tcp-accept _ cs] cs) (after 10000 :timeout)))
@@ -33,14 +38,18 @@
             (let (data (receive ([:tcp _ d] d) (after 5000 :timeout)))
               (when data (tcp-send client data))
               (tcp-close client)
-              (echo-server-loop (- remaining 1))))))))
+              (echo-server-loop ls (- remaining 1))))))))
 
-  (spawn (echo-server-loop n-clients))
+  (spawn (let (ls (tcp-listen "127.0.0.1" 0))
+           (send me [:p36-port (tcp-local-port ls)])
+           (echo-server-loop ls n-clients)))
+
+  (def p36-port (receive ([:p36-port p] p) (after 5000 :timeout)))
 
   ;; Spawn n-clients clients, each sends a unique message and waits for echo
   (dotimes (i n-clients)
     (spawn (let (msg (str "client-" i "-hello")
-                 c (tcp-connect "127.0.0.1" port))
+                 c (tcp-connect "127.0.0.1" p36-port))
              (tcp-send c msg)
              (let (echo (receive ([:tcp _ d] d) (after 5000 :timeout)))
                (tcp-close c)
@@ -60,25 +69,27 @@
 (println "=== P37: 200 rapid connect-disconnect ===")
 
 (let (me (self)
-      n 200
-      ls (tcp-listen "127.0.0.1" 0)
-      port (tcp-local-port ls))
+      n 200)
 
-  ;; Server: accept and immediately close
-  (spawn (defn quick-close-loop (remaining)
-           (if (= remaining 0)
-             (do (tcp-close ls) (send me :server-done))
-             (let (client (receive ([:tcp-accept _ cs] cs) (after 10000 :timeout)))
-               (if (= :timeout client)
-                 (send me :server-timeout)
-                 (do
-                   (tcp-close client)
-                   (quick-close-loop (- remaining 1)))))))
-    (quick-close-loop n))
+  ;; Server: owns the listener; accept and immediately close
+  (spawn (let (ls (tcp-listen "127.0.0.1" 0))
+           (send me [:p37-port (tcp-local-port ls)])
+           (defn quick-close-loop (remaining)
+             (if (= remaining 0)
+               (do (tcp-close ls) (send me :server-done))
+               (let (client (receive ([:tcp-accept _ cs] cs) (after 10000 :timeout)))
+                 (if (= :timeout client)
+                   (send me :server-timeout)
+                   (do
+                     (tcp-close client)
+                     (quick-close-loop (- remaining 1)))))))
+           (quick-close-loop n)))
+
+  (def p37-port (receive ([:p37-port p] p) (after 5000 :timeout)))
 
   ;; Clients: connect and immediately close
   (dotimes (_ n)
-    (let (c (tcp-connect "127.0.0.1" port))
+    (let (c (tcp-connect "127.0.0.1" p37-port))
       ;; Connection may be closed by server before we even close our side
       (tcp-close c)))
 
@@ -89,57 +100,64 @@
 ;;; ---- P38: binary mode (raw bytes 0x00–0xFF) ----
 (println "=== P38: binary mode round-trip ===")
 
-(let (me (self)
-      ls (tcp-listen "127.0.0.1" 0)
-      port (tcp-local-port ls))
+(let (me (self))
 
-  ;; Build a string with all byte values 0–255 (Latin-1 codepoints)
-  (def binary-payload
-    (apply str (map (fn (i) (int->char i)) (range 256))))
+  ;; All 256 byte values, as `bytes`. This used to build a STRING of codepoints 0–255 and
+  ;; send that: a string goes over the wire UTF-8-encoded, so codepoints 128–255 became two
+  ;; bytes each and 256 "bytes" arrived as 384 (visible as \xc2\x80… in the echo). The phase
+  ;; claims to round-trip raw bytes 0x00–0xFF, so it has to send `bytes` to do that.
+  (def binary-payload (apply bytes (range 256)))
 
-  ;; Server: accept, switch to binary mode, receive and echo
-  (spawn (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
-           (if (= :timeout client)
-             (tcp-close ls)
-             (do
-               (tcp-controlling-process client (self))
-               (tcp-set-binary client true)
-               (let (data (receive ([:tcp _ d] d) (after 5000 :timeout)))
-                 (when (not (= :timeout data)) (tcp-send client data))
-                 (tcp-close client)
-                 (tcp-close ls))))))
+  ;; Server: owns the listener; accept, switch to binary mode, receive and echo
+  (spawn (let (ls (tcp-listen "127.0.0.1" 0))
+           (send me [:p38-port (tcp-local-port ls)])
+           (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
+             (if (= :timeout client)
+               (tcp-close ls)
+               (do
+                 (tcp-controlling-process client (self))
+                 (tcp-set-binary client true)
+                 (let (data (receive ([:tcp _ d] d) (after 5000 :timeout)))
+                   (when (not (= :timeout data)) (tcp-send client data))
+                   (tcp-close client)
+                   (tcp-close ls)))))))
+
+  (def p38-port (receive ([:p38-port p] p) (after 5000 :timeout)))
 
   ;; Client: connect, binary mode, send all bytes, receive them back
-  (let (c (tcp-connect "127.0.0.1" port))
+  (let (c (tcp-connect "127.0.0.1" p38-port))
     (tcp-set-binary c true)
     (tcp-send c binary-payload)
     (let (echo (receive ([:tcp _ d] d) (after 5000 :timeout)))
       (tcp-close c)
-      (println "P38: payload length:" (string-length binary-payload))
-      (println "P38: echo length:" (if (= :timeout echo) :timeout (string-length echo)))
+      ;; A binary-mode socket delivers `bytes`, so both sides are compared as bytes.
+      (println "P38: payload length:" (count binary-payload))
+      (println "P38: echo length:" (if (= :timeout echo) :timeout (count echo)))
       (println "P38-correct:" (= binary-payload echo)))))
 
 ;;; ---- P39: half-close: client closes, server reads EOF then sends ----
 (println "=== P39: half-close (client closes write side) ===")
 ;; Note: TCP half-close (shutdown(SHUT_WR)) is not directly exposed.
 ;; We simulate by closing the client and verifying the server gets :tcp-closed.
-(let (me (self)
-      ls (tcp-listen "127.0.0.1" 0)
-      port (tcp-local-port ls))
+(let (me (self))
 
   (spawn
-    (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
-      (tcp-controlling-process client (self))
-      ;; Wait for client data OR close
-      (let (event (receive
-                    ([:tcp _ d] [:data d])
-                    ([:tcp-closed _] :closed)
-                    (after 5000 :timeout)))
-        (send me [:p39-server-saw event])
-        (tcp-close client)
-        (tcp-close ls))))
+    (let (ls (tcp-listen "127.0.0.1" 0))
+      (send me [:p39-port (tcp-local-port ls)])
+      (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process client (self))
+        ;; Wait for client data OR close
+        (let (event (receive
+                      ([:tcp _ d] [:data d])
+                      ([:tcp-closed _] :closed)
+                      (after 5000 :timeout)))
+          (send me [:p39-server-saw event])
+          (tcp-close client)
+          (tcp-close ls)))))
 
-  (let (c (tcp-connect "127.0.0.1" port))
+  (def p39-port (receive ([:p39-port p] p) (after 5000 :timeout)))
+
+  (let (c (tcp-connect "127.0.0.1" p39-port))
     (tcp-send c "hello-before-close")
     (tcp-close c))
 
@@ -152,27 +170,29 @@
 (println "=== P40: 512KB payload integrity ===")
 
 (let (me (self)
-      ls (tcp-listen "127.0.0.1" 0)
-      port (tcp-local-port ls)
       big (string-repeat "BROOD" (quot 524288 5)))
   ; ~512KB
 
-  ;; Server: receive all chunks, concatenate, report length
-  (spawn (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
-           (tcp-controlling-process client (self))
-           (defn drain-tcp (sock acc)
-             (let (event (receive
-                           ([:tcp _ d] [:data d])
-                           ([:tcp-closed _] :done)
-                           (after 10000 :timeout)))
-               (if (= :done event)
-                 (send me [:p40-received acc])
-                 (drain-tcp sock (str acc (second event))))))
-           (drain-tcp client "")
-           (tcp-close client)
-           (tcp-close ls)))
+  ;; Server: owns the listener; receive all chunks, concatenate, report length
+  (spawn (let (ls (tcp-listen "127.0.0.1" 0))
+           (send me [:p40-port (tcp-local-port ls)])
+           (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
+             (tcp-controlling-process client (self))
+             (defn drain-tcp (sock acc)
+               (let (event (receive
+                             ([:tcp _ d] [:data d])
+                             ([:tcp-closed _] :done)
+                             (after 10000 :timeout)))
+                 (if (= :done event)
+                   (send me [:p40-received acc])
+                   (drain-tcp sock (str acc (second event))))))
+             (drain-tcp client "")
+             (tcp-close client)
+             (tcp-close ls))))
 
-  (let (c (tcp-connect "127.0.0.1" port))
+  (def p40-port (receive ([:p40-port p] p) (after 5000 :timeout)))
+
+  (let (c (tcp-connect "127.0.0.1" p40-port))
     (tcp-send c big)
     (tcp-close c)
     (let (r (receive ([:p40-received s] s) (after 15000 :timeout)))

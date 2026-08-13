@@ -192,3 +192,52 @@ jobs:
           name: tree-walker-nextest-log
           path: tree-walker-nextest.log
           retention-days: 14
+
+  # The `breakage/` suite: deliberately abusive programs that try to make the JIT diverge
+  # from the VM, overflow the eval stack, corrupt the heap or deadlock the scheduler. It is
+  # NOT part of `make test` on purpose (slow, and abusive by design) — but that meant
+  # *nothing ever ran it*, and a broken assertion sat green-adjacent for two months:
+  # `jit_breakage_test.blsp` asserted `(assert= 4.8 (/ 24 5))`, which brood's
+  # exactness-sensitive `=` has never accepted since exact rationals landed. It failed on
+  # every build and no one saw it, because there was no runner (found 2026-08-13).
+  #
+  # Same guard as the tree-walker job: main pushes and manual dispatch, not every PR. Move it
+  # to a `schedule:` if it starts costing more than it catches.
+  breakage:
+    name: breakage suite (JIT + GC tripwire armed)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `make breakagetests` builds `--release` with `-C debug-assertions=on`, so the
+      # per-deref GC tripwire and heap verifier stay armed: a use-after-GC aborts at the bad
+      # deref instead of surfacing as a distant SIGSEGV. Default features only (the JIT is
+      # one), so no gui/audio system deps are needed.
+      - name: Run the breakage suite
+        shell: bash
+        run: make breakagetests 2>&1 | tee breakage.log
+
+      - name: Annotate the failing files (on failure)
+        if: failure()
+        shell: bash
+        run: |
+          if [ ! -f breakage.log ]; then
+            echo "::error::breakage: no log — the step failed before running"
+            exit 0
+          fi
+          grep -hoE '^>>> (FAIL|CRASH) \(.*' breakage.log | sort -u | head -25 \
+            | while IFS= read -r line; do echo "::error::breakage: $line"; done
+          grep -hoE '^breakage/[A-Za-z0-9_./-]+\.blsp:[0-9]+(:[0-9]+)?: test failed: .*' breakage.log \
+            | sort -u | head -25 \
+            | while IFS= read -r line; do echo "::error::breakage: $line"; done
+
+      - name: Upload the breakage log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: breakage-log
+          path: breakage.log
+          retention-days: 14
