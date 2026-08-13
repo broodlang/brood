@@ -1392,6 +1392,16 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
        ~@(map (fn (form) (thread-first-step v form)) forms)
        ~v)))
 
+;; `tap`/`then` — the single-function pipe helpers (Elixir's `Kernel.tap`/`then`).
+;; `doto` splices *forms* (`->`-style); these take a *function value*, so they compose
+;; with `->` where a plain function or a one-off closure is what you have in hand.
+(defn tap (x f)
+  "Call `(f x)` for its side effects and return `x` unchanged — a pass-through probe for a `->` pipeline: `(-> v (tap log) (process))` logs `v` and keeps threading it. Elixir's `Kernel.tap`."
+  (do (f x) x))
+(defn then (x f)
+  "Return `(f x)` — apply `f` to `x`. Lets a `->` pipeline step call an arbitrary function on the threaded value, not only splice it as a first argument: `(-> v (then (fn (n) (g n other))))`. Elixir's `Kernel.then`."
+  (f x))
+
 ;; ---- binding-conditionals: bind, test the *source* value, branch -------------
 ;; `if-let`/`when-let` evaluate the binding expression once, branch on its
 ;; truthiness, and bind the target (a symbol or destructuring pattern) to it in

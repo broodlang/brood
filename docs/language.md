@@ -1070,6 +1070,12 @@ The **conditional / short-circuit threading** macros build on those, plus `doto`
 `some->>`/`cond->>` are the thread-*last* variants; `run!` applies a function to
 each item for effect (`(run! println xs)`, the function form of `doseq`).
 
+`tap` and `then` are the single-**function** pipe helpers (Elixir's `Kernel.tap`/`then`),
+where `doto`/`->` splice *forms*: `(tap x f)` calls `(f x)` for its side effects and returns
+`x` unchanged (a probe — `(-> v (tap log) (process))`); `(then x f)` returns `(f x)`, letting a
+`->` step call an arbitrary function on the threaded value instead of splicing it as a first
+argument (`(-> v (then (fn (n) (g n other))))`).
+
 **Binding-conditionals** bind, test the *source* value, then branch (the target may
 destructure):
 
