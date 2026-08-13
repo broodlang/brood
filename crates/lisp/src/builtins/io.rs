@@ -147,12 +147,29 @@ pub(super) fn write_stdout(s: &str) {
     }
 }
 
+/// Write `s` to real stderr the way `write_stdout` writes stdout: a **broken
+/// pipe** (the downstream consumer closed — `nest check … | head`) is not a
+/// program error. The `eprint!` macro would panic on it with a Rust backtrace +
+/// crash dump (every observed `failed printing to stderr: Broken pipe` crash
+/// bottoms out in a bare `eprint!`/`eprintln!`), so instead we restore the
+/// terminal and exit quietly, exactly as the default SIGPIPE disposition would.
+/// Any other write/flush failure is best-effort-dropped.
+pub(super) fn write_stderr(s: &str) {
+    use std::io::Write;
+    let mut err = std::io::stderr();
+    if let Err(e) = err.write_all(s.as_bytes()).and_then(|_| err.flush()) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            restore_terminal_on_exit();
+            std::process::exit(0);
+        }
+        // Other errors: nothing useful to do from a print primitive; drop it.
+    }
+}
+
 pub(super) fn eprint(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let args = realize_seqviews(heap, env, args)?;
     let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
-    eprint!("{}", parts.join(" "));
-    use std::io::Write;
-    std::io::stderr().flush().ok();
+    write_stderr(&parts.join(" "));
     Ok(Value::nil())
 }
 
@@ -182,10 +199,8 @@ pub(super) fn write_out(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// `(%write-err s)` — write the ready string `s` to real stderr (never captured,
 /// matching `eprint`). The default value of the `*err*` port.
 pub(super) fn write_err(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use std::io::Write;
     let s = expect_string(heap, "%write-err", arg(args, 0))?;
-    eprint!("{}", s);
-    std::io::stderr().flush().ok();
+    write_stderr(&s);
     Ok(Value::nil())
 }
 
