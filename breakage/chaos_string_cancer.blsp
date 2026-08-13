@@ -24,10 +24,10 @@
 
 (println "--- searching ---")
 ;; The string is all 'a' and 'b' alternating, so "ba" always exists at odd positions
-(println "contains? 'ab':" (string-contains? leviathan "ab"))
-(println "contains? 'ba':" (string-contains? leviathan "ba"))
+(println "contains? 'ab':" (includes? leviathan "ab"))
+(println "contains? 'ba':" (includes? leviathan "ba"))
 ;; A pattern that can't exist: three consecutive 'a's
-(println "contains? 'aaa':" (string-contains? leviathan "aaa"))
+(println "contains? 'aaa':" (includes? leviathan "aaa"))
 ;; index-of near the end — should walk the whole string
 (def needle (str (substring leviathan (- (string-length leviathan) 10) (string-length leviathan))))
 (println "index-of last-10-chars:" (index-of leviathan needle))
