@@ -1372,10 +1372,13 @@ Runtime housekeeping (both items landed):
     `[:cont acc]` / `[:halt acc]` (2026-08-13). Pure prelude fn over `seq`/`match`
     (`std/prelude.blsp`, `reduce-while-loop` accumulator); tests incl. cross-process
     in `tests/prelude_enum_test.blsp`.
-  - ⬜ **Function-head guards** — `:when` guards on `defn`/`fn` *clause heads*
-    (work in `match` today, not in arity/pattern clause heads — verified: the
-    guard is currently ignored). The one genuine *core* gap; touches the
-    evaluator / arity dispatch, so weigh against "keep the core small."
+  - ✅ **Function-head guards** — `:when` guards on `defn`/`fn` *clause heads*
+    (2026-08-13, ADR-226). Met "keep the core small" by **reuse, not new
+    machinery**: a `:when`-bearing clause simply routes the whole fn through the
+    existing `match*` engine (which already evaluates guards for pattern clauses),
+    so guard eval / fall-through / hygiene / TCO all come for free. Only a fn that
+    uses a guard pays match-dispatch; `:when` + `&optional`/`&` in one clause is a
+    loud error (one mechanism per fn). `eval/macros.rs` `clause_has_when_guard`.
   - ⬜ **`tap` / `then`** (Kernel) — single-fn pipe helpers. Marginal: `->`
     already covers `then`, and `doto` covers multi-form `tap`. Ship only if the
     exact spelling is wanted.

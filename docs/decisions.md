@@ -15202,3 +15202,52 @@ deps (`:dev-dependencies`, excluded from the bundle, ADR-172), and env-specific 
 `defdyn`/`BROOD_*`). Consolidating them behind a build-env knob is exactly the "unify/add-a-knob"
 shape ADR-011 defers until M2+ app-config pressure forces it. **Scope:** named (ADR-070 rooted)
 projects, matching ADR-223 Phase 2. `nest new` keeps the `tests/` layout; co-located is opt-in.
+
+## ADR-226 — Function-head guards: `:when` on defn/fn clause heads, via the match engine
+
+**Status:** implemented 2026-08-13.
+
+**Decision.** A `defn`/`fn` **clause head** may carry a `:when` guard —
+`((n) :when (< n 0) :negative)` — with the same meaning it has in `match`: the clause
+applies only when its guard is truthy, else dispatch falls through to the next clause.
+This closes the one place the guard grammar did not reach (it already worked in `match`,
+refutable `let`, and *pattern* clauses; an *arity-only* clause silently ignored it).
+
+**Why by routing to `match*`, not by extending arity dispatch.** Brood already has two
+clause-dispatch paths (`eval/macros.rs::lower_fn`): an *arity-only* fn (every clause's
+params are plain symbols) compiles to native `ClosureArm`s dispatched by argument count
+(cheap, direct bind); any *pattern* clause lowers the whole fn to the Brood `match*`
+engine, **which already evaluates `:when` guards** (fn clauses *are* match* clauses, passed
+verbatim). The native path binds by count and has no place to run a guard. So rather than
+add a second guard mechanism to the evaluator — more core, two code paths to keep correct —
+a guard-bearing fn now simply takes the existing `match*` path: `clause_has_when_guard`
+makes a `:when` clause no longer count as "arity-only" in `lower_fn` and `fn_needs_lowering`.
+Zero new evaluator machinery; the guard, fall-through, hygiene, name-resolution, and **proper
+tail calls** all come from `match*` unchanged (verified: `count-down 200000` through a guarded
+clause does not overflow). This is the "keep the core small" bar (ADR-011) met by reuse.
+
+**Cost is opt-in.** Only a fn that *uses* a guard pays the `match*` dispatch (pattern-match
+the argument tuple) instead of native arity dispatch; a guard-free arity fn is unchanged.
+
+**Scope / the one rejected combination.** `:when` together with `&optional`/`&` in the same
+clause is a **loud error**, not silent: routing through `match*` matches the head as a
+pattern, where an arity marker would become a literal symbol — the same "the two axes don't
+combine" rule already enforced for pattern clauses. A guarded *variadic* clause is expressed
+with a `match` on the rest argument in the body. A guard also belongs on a **clause head**
+(the double-paren form `((n) :when …)`); the bare single-clause param form `(fn (n) :when …)`
+leaves `:when` in the body as before (no clause to guard). Both are consistent with treating
+the clause, not the parameter list, as the unit a guard attaches to.
+
+**A guard is any expression — unrestricted, deliberately (not Erlang's whitelist).** Because
+the guard is evaluated by the ordinary evaluator (it is just the `match*` clause's guard
+position), it may call **user-defined functions**, closures, `let`, higher-order fns —
+anything that yields a truthy/falsy value — not a fixed set of guard-safe BIFs. This is a
+direct consequence of the "reuse `match*`, add no core" decision: `match` guards already
+worked this way, and there is no separate guard evaluator to restrict. Erlang/Elixir restrict
+guards because the BEAM needs them side-effect-free, cheap, and provably terminating; Brood
+enforces none of those properties for *any* expression, so a guard is not special and a
+whitelist would only add core (a guard-safety checker) for no invariant it protects. Two
+consequences follow and are documented in `docs/language.md`: a guard **may** have side
+effects / be expensive / not terminate (discipline, not the compiler, keeps it pure), and a
+guard that **throws propagates** the error rather than silently failing the clause (Erlang
+falls through; Brood does not) — write `:when (try … (catch _ false))` for fall-through-on-error.

@@ -2386,6 +2386,20 @@ pub(crate) fn is_arity_clause(heap: &Heap, f: Value) -> bool {
     }
 }
 
+/// Does this clause carry a `:when` guard — is the form right after its
+/// parameter-list head the `:when` keyword (`(params :when guard body…)`)?
+/// A guarded clause must dispatch through `match*` (which evaluates the guard);
+/// the native arity path binds by argument count and cannot, so it would silently
+/// ignore the guard. See [`lower_fn`] (ADR-226).
+pub(crate) fn clause_has_when_guard(heap: &Heap, clause: Value) -> bool {
+    heap.list_to_vec(clause)
+        .ok()
+        .and_then(|parts| parts.get(1).copied())
+        .is_some_and(
+            |v| matches!(v.unpack(), ValueRef::Keyword(s) if value::symbol_name_ref(s) == "when"),
+        )
+}
+
 /// Cheap predicate: does this `fn`/`lambda` form need pattern lowering — i.e. is
 /// it multi-clause, or single-clause with a pattern in a required parameter?
 /// Mirrors [`lower_fn`]'s dispatch. Used by the evaluator as a fallback for `fn`
@@ -2410,8 +2424,10 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
     if forms.iter().all(|&f| is_clause(heap, f)) {
         // Multi-clause. Arity-only clauses dispatch natively (`make_closure`
         // builds `ClosureArm`s), so they DON'T need `match*` lowering; only a
-        // clause carrying a literal/destructuring pattern does.
-        return !forms.iter().all(|&f| is_arity_clause(heap, f));
+        // clause carrying a literal/destructuring pattern — or a `:when` guard,
+        // which the native path ignores (ADR-226) — does.
+        return !forms.iter().all(|&f| is_arity_clause(heap, f))
+            || forms.iter().any(|&f| clause_has_when_guard(heap, f));
     }
     // single-clause: a pattern in a required slot (before &optional / & rest)?
     let params = match form_items(heap, forms[0]) {
@@ -2451,17 +2467,22 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>, LispError
         if !clauses.is_empty() && clauses.iter().all(|&f| is_clause(heap, f)) {
             // This IS a multi-clause fn — never fall through to the single-clause
             // path below (which would misread the first clause as a param list).
-            if clauses.iter().all(|&f| is_arity_clause(heap, f)) {
-                // Arity-only: dispatches natively (the evaluator's `make_closure`
-                // builds one `ClosureArm` per clause, bound by argument count — no
-                // rest-list, no `match*`). Leave it un-lowered.
+            if clauses.iter().all(|&f| is_arity_clause(heap, f))
+                && !clauses.iter().any(|&f| clause_has_when_guard(heap, f))
+            {
+                // Arity-only AND guard-free: dispatches natively (the evaluator's
+                // `make_closure` builds one `ClosureArm` per clause, bound by argument
+                // count — no rest-list, no `match*`). Leave it un-lowered. A `:when`
+                // guard forces the `match*` path below, which evaluates it (ADR-226).
                 return Ok(None);
             }
-            // At least one literal/destructuring *pattern* clause → lower the whole
-            // dispatch to the `match*` engine. An `&optional`/`&` marker in ANY head
-            // is now an error rather than a literal-symbol pattern: the clause would
-            // silently stop being variadic, and `(f 1 2)` would fail with a
-            // match-error listing `(x &optional (y 5))` as a *pattern*.
+            // At least one literal/destructuring *pattern* clause, or a `:when`
+            // *guard* clause (ADR-226) → lower the whole dispatch to the `match*`
+            // engine. An `&optional`/`&` marker in ANY head is now an error rather
+            // than a literal-symbol pattern: the clause would silently stop being
+            // variadic, and `(f 1 2)` would fail with a match-error listing
+            // `(x &optional (y 5))` as a *pattern*.
+            let guarded = clauses.iter().any(|&c| clause_has_when_guard(heap, c));
             for &clause in clauses {
                 let head = match clause.unpack() {
                     ValueRef::Pair(p) => heap.car(p),
@@ -2469,17 +2490,18 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>, LispError
                 };
                 if head_has_amp_marker(heap, head) {
                     let shown = crate::syntax::printer::print(heap, head);
+                    let dispatch = if guarded { "guard" } else { "pattern" };
                     return Err(LispError::runtime(format!(
                         "fn: `&optional`/`&` in the clause {shown} of a \
-                         pattern-dispatched fn"
+                         {dispatch}-dispatched fn"
                     ))
                     .with_hint(
-                        "the two multi-clause axes don't combine: `&optional`/`&` control \
-                         ARITY, patterns control SHAPE. Because another clause here \
-                         dispatches on a pattern, this head is matched as a pattern and the \
-                         marker would be a literal symbol. Use one mechanism per fn — arity \
-                         clauses `((x) …) ((x y) …)`, or pattern clauses plus a `match` on \
-                         the optional argument in the body.",
+                        "these axes don't combine: `&optional`/`&` control ARITY, while \
+                         patterns and `:when` guards route the fn through the match engine, \
+                         where a head is a pattern and the marker would be a literal symbol. \
+                         Use one mechanism per fn — arity clauses `((x) …) ((x y) …)`, or \
+                         pattern/guard clauses plus a `match` on the optional argument in the \
+                         body.",
                     ));
                 }
             }

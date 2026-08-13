@@ -1307,6 +1307,32 @@ match total:
       (_                           (throw e)))))
 ```
 
+**Function-head guards.** The same `:when` guard works on a `fn`/`defn` **clause
+head** (ADR-226) — the clause applies only when its guard is truthy, else dispatch
+falls through to the next clause:
+
+```clojure
+(defn classify
+  ((n) :when (< n 0) :negative)
+  ((n) :when (= n 0) :zero)
+  ((n) :positive))
+```
+
+The guard sees every parameter the clause binds. A guarded fn dispatches through the
+match engine (so tail calls are still TCO-safe, and a single guarded clause whose guard
+fails raises `[:match-error …]` like any unmatched `match`). The guard belongs on a
+**clause head** — the double-paren form `((n) :when …)`, not the bare `(fn (n) :when …)`
+parameter form. `:when` does **not** combine with `&optional`/`&` in one clause (a loud
+error — one dispatch mechanism per fn); express a guarded variadic with a `match` on the
+rest argument in the body.
+
+A guard is **any expression** — unlike Erlang/Elixir, Brood does not restrict it to a
+whitelist of guard-safe operators: it may call your own functions, closures, `let`, or any
+computation that yields a truthy value. Two consequences: a guard **can** have side effects,
+be slow, or not terminate (discipline keeps it pure, not the compiler); and a guard that
+**throws propagates** the error rather than silently falling through to the next clause. For
+Erlang-style "on error, try the next clause," guard the guard: `:when (try (test x) (catch _ false))`.
+
 ### `case` — literal dispatch
 
 `case` dispatches on a **value** against literal tests, written as flat
