@@ -409,3 +409,49 @@ is what a `:use` would actually import, not what the source looks like."
                 (do (require 'greeter/thing) :no-error)
                 (catch e (error-message e))))
       (is (not (includes? (str msg) "reserved"))))))
+
+;; ── require by name for a CO-LOCATED module, nameless project / bare run (ADR-223) ──────
+;; A module declared beside another in one file (region model, ADR-223 Phase 1) whose name is
+;; not the file's is invisible to the `<name>.blsp` filename probe. A named project registers
+;; it (rooted) in `*package-module-files*`; a nameless project or a bare `brood file.blsp` run
+;; has no such registry, so `require` scans `*load-path*` for the declaring file. `:isolated`
+;; so each test's `set-load-path!` mutation stays on its private globals copy.
+(describe "require: co-located module by name (nameless project / bare run, ADR-223)"
+  :isolated
+  (test "a module in a file whose name it does not share is require-able by name"
+    (let (dir (temp-path "brood-coloc-req-"))
+      (make-dir dir)
+      (spit (path-join dir "combined.blsp")
+        "(defmodule combined-primary)\n(defn cbase () :base)\n(defmodule combined-extra)\n(defn cextra () :extra)\n")
+      (set-load-path! (cons dir *load-path*))
+      (require 'combined-extra)
+      (assert= :extra (combined-extra/cextra))))
+  (test "requiring one co-located module loads its file's siblings too"
+    (let (dir (temp-path "brood-coloc-sib-"))
+      (make-dir dir)
+      (spit (path-join dir "pair.blsp")
+        "(defmodule pair-a)\n(defn pa () 1)\n(defmodule pair-b)\n(defn pb () 2)\n")
+      (set-load-path! (cons dir *load-path*))
+      (require 'pair-b)
+      (assert= 3 (+ (pair-a/pa) (pair-b/pb)))))
+  (test "two files declaring the same co-located module error loudly"
+    (let (dir (temp-path "brood-coloc-dup-"))
+      (make-dir dir)
+      (spit (path-join dir "x.blsp") "(defmodule x-primary)\n(defmodule shared-dup)\n")
+      (spit (path-join dir "y.blsp") "(defmodule y-primary)\n(defmodule shared-dup)\n")
+      (set-load-path! (cons dir *load-path*))
+      (is (try
+            (do (require 'shared-dup) false)
+            (catch e (includes? (str (error-message e)) "more than one"))))))
+  (test "across processes: a co-located module's produced value round-trips through send"
+    (let (dir (temp-path "brood-coloc-proc-"))
+      (make-dir dir)
+      (spit (path-join dir "vals.blsp")
+        "(defmodule vals-primary)\n(defmodule vals-extra)\n(defn payload (n) {:n n :sq (* n n)})\n")
+      (set-load-path! (cons dir *load-path*))
+      (require 'vals-extra)
+      (let (me (self))
+        (map (fn (k) (let (v (vals-extra/payload k)) (spawn (fn () (send me (get v :sq))))))
+          (range 5))
+        (let (results (fold (fn (acc _) (cons (receive) acc)) nil (range 5)))
+          (assert= [0 1 4 9 16] (into [] (sort results))))))))

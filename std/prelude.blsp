@@ -4859,6 +4859,49 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
     (file-exists? (path-join (first dirs) filename)) (path-join (first dirs) filename)
     else (require-find filename (rest dirs))))
 
+;; The co-located-module fallback (ADR-223). A module whose name is not its file's —
+;; declared beside another `(defmodule …)` in one file — is invisible to the `<name>.blsp`
+;; filename probe. A NAMED project registers every declared module in `*package-module-files*`
+;; (rooted), so `require` finds it there; a NAMELESS project or a bare `brood file.blsp` run
+;; has no such registry, so `require` instead scans `*load-path*` for the file that declares
+;; the name. Reached only AFTER the filename probe misses, so the common path is untouched.
+(defn- require-file-declares?
+  (path key-name)
+  ;; True if `path` has a top-level `(defmodule key-name …)`. Read-only; a parse error is
+  ;; false (the file's real error surfaces when something actually loads it).
+  (any? (fn (form)
+          (and (pair? form)
+            (= (first form) 'defmodule)
+            (not (empty? (rest form)))
+            (= (name (first (rest form))) key-name)))
+    (try (read-all (slurp path)) (catch _ nil))))
+(defn- require-colocated-files
+  (key-name dirs)
+  ;; Every `.blsp` on `dirs` (searched top-level, not recursively) that declares `key-name`.
+  (fold (fn (acc dir)
+          (fold (fn (a entry)
+                  (if (and (ends-with? entry ".blsp")
+                        (require-file-declares? (path-join dir entry) key-name))
+                    (cons (path-join dir entry) a)
+                    a))
+            acc
+            (or (try (list-dir dir) (catch _ nil)) nil)))
+    nil dirs))
+(defn- require-find-colocated
+  (key)
+  ;; The single file declaring co-located module `key`, or nil if none. Errors if two files
+  ;; declare it — the nameless/bare analogue of a named project's duplicate-module rejection.
+  (let (key-name (name key)
+        matches (distinct (require-colocated-files key-name *load-path*)))
+    (cond
+      (empty? matches) nil
+      (empty? (rest matches)) (first matches)
+      else
+        (error "require: module '"
+          key-name
+          "' is declared in more than one file: "
+          (pr-str matches)))))
+
 ;; Record `key` as an edge from the module currently loading (see `*require-edges*`).
 ;; Called at the TOP of `require-one`, BEFORE its already-loaded short-circuit: the edge
 ;; exists whether or not this particular require is the one that does the loading, and a
@@ -4964,10 +5007,15 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
         (require-force-package key
           (get *package-module-files* key))
       else
-        (let (path (require-find (str key ".blsp") *load-path*))
-          (if path
-            (do (load path) (provide key))
-            (error "require: cannot find module '" key "'"))))
+      ;; Filename probe first (the fast, overwhelmingly common path: module `foo` in
+      ;; `foo.blsp`). On a miss, fall back to the co-located scan (ADR-223) — a module
+      ;; declared beside others in a file whose name it does not share, in a nameless
+      ;; project or a bare run. Only the miss pays for the scan.
+      (let (path (or (require-find (str key ".blsp") *load-path*)
+                   (require-find-colocated key)))
+        (if path
+          (do (load path) (provide key))
+          (error "require: cannot find module '" key "'"))))
     key))
 
 ;; A package (dependency or root project) may not take a name the standard library

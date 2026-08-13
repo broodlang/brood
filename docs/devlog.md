@@ -18395,3 +18395,20 @@ cadence (a combinator we lacked, written in the language). Tests in
 `tests/prelude_enum_test.blsp` (8 cases incl. halt/all-cont-is-fold/empty/map-pairs/find-first/
 bad-return, plus an `:isolated` cross-process case proving the reduced value round-trips through
 `send`). `docs/language.md` + `ROADMAP.md` updated.
+
+## 2026-08-13 — require-by-name for a co-located module in a nameless project / bare run (ADR-223 Phase 2b)
+
+Lifted the named-project scoping on ADR-223 Phase 2. A module declared beside another in one
+file (region model), whose name is not its file's, was reachable by name only in a *named*
+project (whose rooting scan fills `*package-module-files*`). A nameless project or a bare
+`brood file.blsp` run fell through to the `<name>.blsp` filename probe and errored. Fixed with
+**one fallback** in `require-force-in`'s existing `else` branch (`std/prelude.blsp`): on a probe
+miss, scan `*load-path*` for the `.blsp` declaring `(defmodule <name> …)` and load it
+(`require-find-colocated` → `require-colocated-files` → `require-file-declares?`, a read-only
+`read-all` parse). Fires only after the probe misses — the common path is untouched; two files
+declaring one name error loudly. No new registry and no reordering of the resolved branches (the
+original scoping had anticipated needing both), and one code path covers both cases since it
+reads `*load-path*` (source dirs for a nameless project, the script dir for a bare run) rather
+than project state. Verified end-to-end (nameless project via `nest run`, bare run, ambiguity
+error, filename-match regression); in-suite tests in `tests/namespace_test.blsp` (`:isolated`, incl.
+a cross-process case). `docs/decisions.md` (ADR-223 Phase 2b) + `docs/module-index.md` updated.
