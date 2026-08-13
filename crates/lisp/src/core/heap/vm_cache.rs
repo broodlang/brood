@@ -49,8 +49,10 @@ pub struct CallIcEntry {
     pub epoch: u64,
     pub callee: Value,
     /// The VM fast path: the callee's compiled arm for `argc` + its captured env,
-    /// when the callee resolved to a non-passthrough VM-eligible closure.
-    pub arm: Option<(Arc<crate::eval::compile::CompiledArm>, EnvId)>,
+    /// when the callee resolved to a non-passthrough VM-eligible closure. Held as a
+    /// process-local [`ArmHandle`](crate::eval::compile::ArmHandle) so the per-call
+    /// probe clone is never contended when the arm is runtime-shared (KI-40).
+    pub arm: Option<(Arc<crate::eval::compile::ArmHandle>, EnvId)>,
     /// The callee arm's IC block in **this process** (resolved once at install via
     /// [`Heap::vm_arm_block`]), so entering the callee on an IC hit sets the cursors
     /// without a registry lookup on the hot path. Meaningless when `arm` is `None`.
@@ -495,7 +497,7 @@ impl Heap {
         epoch: u64,
     ) -> Option<(
         Value,
-        Option<(Arc<crate::eval::compile::CompiledArm>, EnvId, (u32, u32))>,
+        Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))>,
     )> {
         let t = self.vm_call_ics.borrow();
         let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
@@ -731,7 +733,7 @@ impl Heap {
     /// Push a live compiled arm onto the execution-stack registry; returns its depth
     /// (the index to [`live_arm_truncate`](Self::live_arm_truncate) back to on return).
     /// See [`live_vm_arms`](Self::live_vm_arms).
-    pub fn live_arm_push(&mut self, arm: Arc<crate::eval::compile::CompiledArm>) -> usize {
+    pub fn live_arm_push(&mut self, arm: Arc<crate::eval::compile::ArmHandle>) -> usize {
         let i = self.live_vm_arms.len();
         self.live_vm_arms.push(arm);
         i
@@ -739,7 +741,7 @@ impl Heap {
 
     /// Replace the arm at depth `i` — a tail call into a different arm reuses the slot
     /// rather than growing the stack (the trampoline never recurses).
-    pub fn live_arm_set(&mut self, i: usize, arm: Arc<crate::eval::compile::CompiledArm>) {
+    pub fn live_arm_set(&mut self, i: usize, arm: Arc<crate::eval::compile::ArmHandle>) {
         self.live_vm_arms[i] = arm;
     }
 

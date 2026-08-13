@@ -694,7 +694,7 @@ impl Heap {
         // no longer needs.)
         let mut seen_arms: HashSet<*const crate::eval::compile::CompiledArm> = HashSet::new();
         for arm in self.live_vm_arms.iter() {
-            if !seen_arms.insert(Arc::as_ptr(arm)) {
+            if !seen_arms.insert(Arc::as_ptr(arm.arc())) {
                 continue;
             }
             crate::eval::compile::rewrite_arm_handles(arm, &mut |v| {

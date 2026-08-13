@@ -801,6 +801,51 @@ impl CompiledClosure {
     }
 }
 
+/// A **process-local handle** to a (possibly runtime-shared) [`CompiledArm`] — the
+/// thing the VM's call path clones, so that the clone is never contended (KI-40).
+///
+/// ADR-175 Phase B publishes a compiled arm to `Runtime::shared_closures`, so every
+/// green process running that closure holds an `Arc` into **one** allocation. The VM's
+/// non-tail call path then clones that `Arc` up to three times per call — the IC probe
+/// ([`Heap::vm_call_ic_probe`]), the `BcFrame` the driver pushes, and (for a
+/// handle-bearing arm) `live_arm_push` — so N worker threads RMW one refcount cache
+/// line per call. Measured cost: `pfib` 52.7 s against 17.6 s with sharing off, with the
+/// cores stalled at 769% instead of 1148%.
+///
+/// The fix is to interpose an `Arc` that only **one** process ever clones. `ArmHandle`
+/// is created once per (process, call site) when an inline cache is filled and owns the
+/// shared `Arc`; the per-call traffic then lands on the handle's own refcount, which is
+/// core-local, while the arm itself — the ~18 KB the sharing exists to deduplicate —
+/// stays shared. Liveness is strictly stronger than cloning the inner `Arc` directly
+/// (the handle keeps it alive for at least as long), so this needs no immortality
+/// argument and changes no GC invariant: `runtime_collect` still reaches the same arms
+/// through [`Self::arc`].
+pub struct ArmHandle {
+    inner: Arc<CompiledArm>,
+}
+
+impl ArmHandle {
+    #[inline]
+    pub fn new(inner: Arc<CompiledArm>) -> Arc<Self> {
+        Arc::new(Self { inner })
+    }
+
+    /// The shared `Arc`, for the paths that genuinely need to own or publish it (the
+    /// JIT's work queue and keepalive, `runtime_collect`'s handle rewrite).
+    #[inline]
+    pub fn arc(&self) -> &Arc<CompiledArm> {
+        &self.inner
+    }
+}
+
+impl std::ops::Deref for ArmHandle {
+    type Target = CompiledArm;
+    #[inline]
+    fn deref(&self) -> &CompiledArm {
+        &self.inner
+    }
+}
+
 /// The result of `dispatch` (and the value-position `exec_call`/`exec_value` path):
 /// a finished value, or a *tail call* the caller continues. `Tail` carries a resolved
 /// VM arm un-run, so a tail call reuses a frame (in [`vm_run_bc`]) or is forced (in
@@ -809,7 +854,7 @@ impl CompiledClosure {
 pub(crate) enum Step {
     Done(Value),
     Tail {
-        compiled: Arc<CompiledArm>,
+        compiled: Arc<ArmHandle>,
         args: SmallVec<[Value; 4]>,
         /// The tail callee's own captured env — switched to so the next arm resolves
         /// its free vars in *its* scope (Stage 2c: a tail call can cross into a
@@ -832,14 +877,14 @@ pub(crate) enum Step {
 pub(crate) enum ChunkExit {
     Done(Value),
     Tail {
-        arm: Arc<CompiledArm>,
+        arm: Arc<ArmHandle>,
         args: SmallVec<[Value; 4]>,
         genv: EnvId,
         /// Callee IC block (see [`Step::Tail::bases`]).
         bases: (u32, u32),
     },
     Call {
-        arm: Arc<CompiledArm>,
+        arm: Arc<ArmHandle>,
         args: SmallVec<[Value; 4]>,
         genv: EnvId,
         /// Callee IC block (see [`Step::Tail::bases`]).

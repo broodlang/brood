@@ -15066,6 +15066,68 @@ truth before changing the one-module-per-file rule; until then the honest interi
 `defmodule` in one file is a **loud load error**, not silent misqualification (devlog 2026-08-12
 fixed the pre-module case of that silent miscompile).
 
+## ADR-224 — A shared compiled arm is reached through a process-local handle
+
+**Status:** implemented (2026-08-13). Fixes [KI-40](known-issues.md). Sits directly on
+ADR-175 Phase B (the shared compiled-closure cache), whose memory win it preserves while
+removing the throughput cost that came with it.
+
+**The problem.** ADR-175 Phase B publishes a compiled arm to `Runtime::shared_closures`, so
+every green process running that closure holds an `Arc` into **one** allocation — deliberately,
+because the alternative was ~18 KB per distinct callee per process (the `spawn-live` 4.5 GB
+cause). The VM's non-tail call path then clones that `Arc` up to **three times per call**: the
+inline-cache probe (`Heap::vm_call_ic_probe`), the `BcFrame` the driver pushes, and — for an arm
+with `has_runtime_handles` — `live_arm_push`. Each clone is an atomic RMW, so N worker threads
+running the same arm serialise on one refcount cache line. Measured on `pfib` (100 × `fib(32)`,
+`BROOD_TIER=1`, 6-core/12-thread): **54.4 s**, with the cores stalled at **769%** rather than
+saturated. Twelve *independent OS processes* running the same work inflate only 2.5× (SMT +
+all-core clock), so that was the floor and everything above it was contention.
+
+**The decision.** Interpose `ArmHandle` — a process-local `Arc` that owns the shared `Arc` —
+between the inline cache and the arm. It is created once per (process, call site) when an IC is
+filled; every per-call clone thereafter lands on the handle's own refcount, which only one
+process ever touches, while the arm itself stays shared. `Deref<Target = CompiledArm>` keeps
+every read site unchanged; `ArmHandle::arc()` serves the few paths that genuinely need the
+shared `Arc` (the JIT work queue and keepalive, `runtime_collect`'s handle rewrite).
+
+**Result:** `pfib` 54.4 s → **17.1 s** (3.19×), per-task CPU 6408 → 2006 ms, CPU 1175%, and at
+parity with `BROOD_NO_SHARED_ARMS=1` (16.8 s) — the contention is *gone*, not reduced. A
+handle-bearing arm (the shape most real code has, and which pays the `live_arm_push` clone too)
+goes 5.2 s → 2.2 s. At the **default** ceiling an arm that merely fails to lower was paying the
+same tax: 3.64 s → 1.56 s. Single-threaded rows are unchanged — an 8-row `make ab` against
+`a9d65d1b` put every row inside its own noise floor.
+
+**The cost, measured and accepted.** The handle is one small allocation per (process, call
+site) at IC-fill time, which is *per-process* work — precisely the kind ADR-175 Phase B exists
+to avoid. So the row that pays for it is `spawn-live`, whose 300 000 short-lived processes each
+fill their inline caches fresh: **+1.8%** (3791 → 3860 ms, reproduced twice at best-of-21 with a
+baseline stable to 1 ms). That is under the 5% gate `ab-bench` reports on, but it is real and
+mechanistic, not noise, and is recorded here rather than rounded away. Judged a good trade:
+~2% on one spawn-heavy row against 2.3–3.2× on every concurrent VM workload, including the
+default tier whenever a hot arm does not lower. `spawn`/`ring`/`pingpong` moved within noise.
+Interning one handle per (process, arm) instead of per call site would cut the *duplication*
+across sites but not this cost, which is inherently per-process; removing it entirely would mean
+sharing the handle across processes, which is the contention being fixed.
+
+**The rejected alternative, and why.** The obvious fix is to stop cloning and let the callee
+chain *borrow* the arm, which requires the arm to be immortal. That is sound for a sealed
+PRELUDE arm and **not** sound for a RUNTIME-region one, which `shared_closures_clear` and the
+free-epoch stamp exist precisely to invalidate; it also wanted an `Owned | Immortal` enum across
+~42 `Arc<CompiledArm>` sites in 11 files. The handle needs no immortality argument at all: it
+holds the shared `Arc` for at least as long as a direct clone would, so liveness is strictly
+*stronger* than before and no GC invariant moves. It costs one small allocation per (process,
+call site) and one pointer hop, both of which measured inside the noise.
+
+**Why this needed its own assertion.** A regression here keeps computing the right answer, so
+`make test`, `make test-both`, the JIT differential and the lowering witness all stay green and
+**only a benchmark moves** — the same blind spot ADR-221 recorded. Hence
+`arm_handle_clone_does_not_touch_the_shared_arm_refcount`, which asserts on the shared
+refcount itself and is sabotage-verified (wrapping per call instead of per install reads
+1002 against 2). Gates: `make test` 980/980, `make test-both` 980+980, `cargo test --features
+jit --test jit` 40/40 and 40/40 again under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, the two
+compaction guards, `cargo check --workspace --no-default-features`, clippy `-D warnings`,
+`tests/perf_test.blsp` 16/16, and the lowering witness byte-identical (94 fingerprints).
+
 ## ADR-225 — Co-located tests: discovered by form, stripped from the ship
 
 **Status:** implemented 2026-08-13. Builds directly on ADR-223 (multiple modules per file) and
