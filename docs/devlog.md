@@ -18412,3 +18412,22 @@ reads `*load-path*` (source dirs for a nameless project, the script dir for a ba
 than project state. Verified end-to-end (nameless project via `nest run`, bare run, ambiguity
 error, filename-match regression); in-suite tests in `tests/namespace_test.blsp` (`:isolated`, incl.
 a cross-process case). `docs/decisions.md` (ADR-223 Phase 2b) + `docs/module-index.md` updated.
+
+## 2026-08-13 — Function-head guards: `:when` on defn/fn clause heads (ADR-226)
+
+A `defn`/`fn` clause head may now carry a `:when` guard — `((n) :when (< n 0) :negative)` —
+with `match`'s semantics (clause applies iff the guard is truthy, else fall through). It
+already worked in `match`, refutable `let`, and *pattern* clauses; an *arity-only* clause
+silently ignored it (the native argument-count dispatch has no place to run a guard).
+
+Met "keep the core small" by **reuse, not new machinery**. `eval/macros.rs` already has two
+paths: arity-only fns compile to native `ClosureArm`s; any pattern clause lowers the whole fn
+to the `match*` engine, which *already* evaluates `:when` (fn clauses are match* clauses,
+passed verbatim). So a new `clause_has_when_guard` makes a `:when` clause no longer count as
+"arity-only" in `lower_fn`/`fn_needs_lowering`, routing the fn through `match*` — guard eval,
+fall-through, hygiene, name resolution, and **TCO** all come for free (verified: a guarded
+`count-down 200000` does not overflow). Cost is opt-in (only a guarded fn pays match-dispatch).
+`:when` + `&optional`/`&` in one clause is a loud "guard-dispatched fn" error (one mechanism
+per fn). Tests in `tests/pattern_matching_test.blsp` (8 cases incl. mixed arities, precondition,
+TCO, macro-hygiene via the existing paths, and an `:isolated` cross-process case); `nest check`
+clean on guarded fns. `docs/language.md` + `ROADMAP.md` + ADR-226 in `docs/decisions.md`.

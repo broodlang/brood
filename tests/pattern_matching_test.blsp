@@ -215,6 +215,61 @@
     (assert= (match [:n 0] ([:n v] :when (> v 0) :pos) ([:n v] :nonpos)) :nonpos)))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
+;; FUNCTION-HEAD GUARDS — :when on fn/defn clause heads (ADR-226). A guarded clause
+;; routes the whole fn through the same match engine the pattern clauses use, so the
+;; guard is evaluated (the native arity path bound by argument count could not).
+;; ─────────────────────────────────────────────────────────────────────────────
+(defn fhg-sign ((n) :when (< n 0) :neg)
+  ((n) :when (> n 0) :pos)
+  ((n) :zero))
+
+(describe "function-head guards (:when on fn/defn clause heads)"
+  (test "a guard gates an arity clause, falling through to a later clause"
+    (let (classify (fn ((n) :when (< n 0) :negative)
+                     ((n) :when (= n 0) :zero)
+                     ((n) :positive)))
+      (assert= :negative (classify -5))
+      (assert= :zero (classify 0))
+      (assert= :positive (classify 7))))
+  (test "a guard sees every param of a multi-arg clause"
+    (let (cmp (fn ((a b) :when (> a b) :gt) ((a b) :when (< a b) :lt) ((a b) :eq)))
+      (assert= :gt (cmp 3 1))
+      (assert= :lt (cmp 1 3))
+      (assert= :eq (cmp 2 2))))
+  (test "guards combine with mixed arities"
+    (let (area (fn ((r) :when (> r 0) (* 3 r r))
+                 ((w h) :when (and (> w 0) (> h 0)) (* w h))
+                 ((r) :bad)))
+      (assert= 12 (area 2))
+      (assert= 12 (area 3 4))
+      (assert= :bad (area -1))))
+  (test "a single guarded clause is a precondition — a failed guard raises"
+    (let (only-pos (fn ((n) :when (> n 0) n)))
+      (assert= 5 (only-pos 5))
+      (is (try (do (only-pos -1) false) (catch _ true)))))
+  (test "guarded clauses preserve tail calls (deep recursion stays O(1) stack)"
+    (let (count-down (fn ((n acc) :when (= n 0) acc)
+                       ((n acc) (count-down (- n 1) (+ acc 1)))))
+      (assert= 50000 (count-down 50000 0))))
+  (test "defn clause heads take guards too"
+    (assert= :neg (fhg-sign -2))
+    (assert= :pos (fhg-sign 5))
+    (assert= :zero (fhg-sign 0)))
+  (test ":when combined with &optional/& in one fn is rejected"
+    (is (try
+          (do (eval '(fn ((r) :when (> r 0) r) ((& xs) :bad))) false)
+          (catch e (includes? (str (error-message e)) "guard-dispatched")))))
+  (test "across processes: a guarded fn dispatches correctly in spawned workers"
+    (let (me (self)
+          sign (fn ((n) :when (< n 0) :neg) ((n) :when (> n 0) :pos) ((n) :zero))
+          _ (map (fn (k) (spawn (fn () (send me [k (sign k)])))) (list -2 0 2))
+          results (fold (fn (acc _) (cons (receive) acc)) nil (range 3))
+          table (fold (fn (mp pair) (assoc mp (first pair) (second pair))) {} results))
+      (assert= :neg (get table -2))
+      (assert= :pos (get table 2))
+      (assert= :zero (get table 0)))))
+
+;; ─────────────────────────────────────────────────────────────────────────────
 ;; CLAUSE ORDERING, BODIES, AND match AS AN EXPRESSION
 ;; ─────────────────────────────────────────────────────────────────────────────
 (describe "clauses and bodies"
