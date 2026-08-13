@@ -5288,6 +5288,21 @@ impl Heap {
         true
     }
 
+    /// Does registry global `sym` (a map) contain `key`, read from the SHARED globals table
+    /// **bypassing the per-process inline cache**? `env_get`/`global_lookup_cached` gate their
+    /// cache on `runtime.version`, loaded `Relaxed`, so a concurrent registrar's just-committed
+    /// entry can be momentarily invisible to another process's cached read. That is fine for a
+    /// hot lookup, but WRONG for `require`'s load-once guard: a requirer whose `*features*` read
+    /// missed a racing loader's `provide` would reload an already-loaded module (the co-located
+    /// secondary double-load, ADR-225). A direct `globals_read` synchronises with the writer's
+    /// `globals_write`, so it never observes a stale "absent".
+    pub fn registry_member(&self, sym: Symbol, key: Value) -> bool {
+        match self.runtime.globals_read().get(&sym).map(|v| v.unpack()) {
+            Some(ValueRef::Map(id)) => self.map_get(id, key).is_some(),
+            _ => false,
+        }
+    }
+
     /// `(%registry-cas! 'sym old new)` — compare-and-swap a registry global under the same
     /// lock as [`Self::registry_update`]. Rebinds `sym` to `new` and returns true **only if**
     /// its current value still equals `old`; otherwise leaves it alone and returns false, so

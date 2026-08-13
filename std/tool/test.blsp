@@ -249,8 +249,20 @@ docs/testing.md for the full guide.")
         (fold (fn (_ t) (add-unit! :parallel group (list t))) nil rest)
         (add-unit! mode group rest)))))
 
+;; Does a describe body carry any tests — a direct `(test …)`/`(deftest …)` or a
+;; nested `(describe …)` group (whose own tests count)? Checked SYNTACTICALLY at
+;; expansion so a group of only nested describes is not mistaken for empty (the
+;; runtime `*collected*` sees only direct tests, ADR-225). An empty describe is a
+;; mistake — a heading with nothing under it — so `describe` warns when this is false.
+(defn- describe-body-has-tests?
+  (body)
+  (any? (fn (form)
+          (and (pair? form)
+            (member? (first form) (list 'test 'deftest 'describe))))
+    body))
+
 (defmacro describe (group & forms)
-  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on."
+  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. Warns (advisory) if the group contains no tests."
   (if (keyword? group)
     (error "describe: group name must be a string, not keyword "
       (pr-str group)
@@ -269,6 +281,9 @@ docs/testing.md for the full guide.")
          ; the (test ...) forms collect themselves
          (def *collecting* false)
          (emit-describe! ~mode ~group (reverse *collected*) ~tags ~skip)
+         ;; Advisory: a describe with no tests is a heading over nothing (ADR-225).
+         ~(unless (describe-body-has-tests? body)
+            (list 'eprintln (str "warning: describe " (pr-str group) " has no tests")))
          nil))))
 
 ;; (test "name" [:isolated] body...) — register one test. Each top-level body form

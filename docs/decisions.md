@@ -15065,3 +15065,52 @@ treats module nesting as name-sugar, not scope. Build the index first and prove 
 truth before changing the one-module-per-file rule; until then the honest interim for a second
 `defmodule` in one file is a **loud load error**, not silent misqualification (devlog 2026-08-12
 fixed the pre-module case of that silent miscompile).
+
+## ADR-225 — Co-located tests: discovered by form, stripped from the ship
+
+**Status:** implemented 2026-08-13. Builds directly on ADR-223 (multiple modules per file) and
+its Phase 2 (cross-file require-by-name).
+
+**Decision.** A `deftest`/`describe` may live **beside the code it exercises** — inline in a
+production module, or in a co-located `-test` module, in **any** file — not only in a
+`tests/**/*_test.blsp` file. The unit of "test-ness" is the **form, not the file or the module
+name**: `nest test` discovers and runs every `deftest`/`describe` wherever it appears, and the
+release/AOT step **strips** those forms so tests never ship. This is the Rust `#[cfg(test)] mod
+tests` model, expressed without a build-configuration concept.
+
+**Why by form, not by filename or a "test module" marker.** The runtime already registers tests
+per-module at load (`describe`/`test` cons onto `*units*`), so discovery is naturally
+form-driven; keying on a `_test.blsp` filename or a `-test` module name would be a second,
+weaker index over the same truth (the ADR-223 anti-pattern). A module is *not* classified as a
+test module — the presence of `deftest`/`describe` marks only *those forms*. A module that is
+nothing but tests simply strips to empty; the `-test` name stays a **convention**, not a
+mechanism.
+
+**Mechanism (all Brood, no kernel change).**
+- *Discovery* — `run-project-tests` adds every source file carrying a top-level `deftest`/
+  `describe` (`project-file-has-tests?` → `project-colocated-test-files`, `std/tool/project.blsp`)
+  to the `tests/` corpus; they load and run through the existing suite path.
+- *Stripping* — `strip-test-forms` (source→source) excises each top-level `deftest`/`describe`
+  by its half-open char span from the positioned CST (`sexp/top-level-forms`), keeping every
+  other byte verbatim. Applied in `bundle-collect` (the `nest release` ship boundary). Deferred:
+  stripping the dev startup image / `nest run` — the forms only *register* there (they never
+  *run* without `run-tests`), so the sole cost is `(:use test)` loading the framework in dev,
+  which is harmless; revisit if it matters.
+- *Empty-describe warning* — `describe` warns (advisory, via `*err*`) when its body carries no
+  `test`/`deftest`/nested-`describe` — checked syntactically at expansion so a group of only
+  nested describes is not falsely flagged.
+
+**Private testing is by placement, not policy (ADR-146).** An inline test in `(defmodule foo …)`
+runs in `foo`'s scope and can reach its `defn-` privates directly; a separate `(defmodule
+foo-test (:use foo) …)` imports only the public API and cannot. The module boundary *is* the
+access rule — no flag, no enforcement — exactly as Rust's in-module vs external-crate tests. A
+same-file `-test` module that `(:use)`s an earlier same-file module hits an intra-file require
+cycle (the module is mid-load until its file finishes); use `:only`/qualified names, or write the
+test inline. This is an ADR-223 loader property, orthogonal to this ADR.
+
+**No `Mix.env`.** Elixir's `:dev`/`:test`/`:prod` bundles three concerns Brood already handles
+separately and more simply: keeping test code out of the ship (this ADR's strip), dev/test-only
+deps (`:dev-dependencies`, excluded from the bundle, ADR-172), and env-specific config (runtime
+`defdyn`/`BROOD_*`). Consolidating them behind a build-env knob is exactly the "unify/add-a-knob"
+shape ADR-011 defers until M2+ app-config pressure forces it. **Scope:** named (ADR-070 rooted)
+projects, matching ADR-223 Phase 2. `nest new` keeps the `tests/` layout; co-located is opt-in.

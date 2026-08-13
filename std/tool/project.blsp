@@ -508,6 +508,30 @@ manifest is read, naming the key, not later inside whoever consumes the map."
       (list-dir dir))
     nil))
 
+;; A source file that carries co-located tests (ADR-225): it has a top-level
+;; `deftest` or `describe` form. Detection is by FORM — not filename, not module
+;; name — so a test written beside the code it exercises is found wherever it
+;; lives. Read-only parse; a parse error yields false (the file's real error
+;; surfaces when the suite loads it, as with any test file).
+(defn- project-file-has-tests?
+  (path)
+  (any? (fn (form)
+          (and (pair? form)
+            (let (head (first form))
+              (or (= head 'describe) (= head 'deftest)))))
+    (try (read-all (slurp path)) (catch _ nil))))
+
+;; Project source files carrying co-located tests (ADR-225), added to the `nest
+;; test` corpus so a `deftest`/`describe` written beside the code runs without a
+;; `tests/` file. Scans the source paths only; `tests/` files come from
+;; `project-collect-tests`.
+(defn- project-colocated-test-files
+  (root)
+  (filter project-file-has-tests?
+    (fold (fn (acc d) (append acc (project-collect-sources d)))
+      nil
+      (project-abs-paths root *project-source-paths*))))
+
 ;; The feature a source file provides — the name of its top-level `(defmodule NAME …)`
 ;; as a string, or nil when it declares none. Parses the file read-only (never
 ;; evaluates it), so the loader can tell whether a file is already loaded (its module
@@ -2444,7 +2468,11 @@ as unchanged (only when some were)."
     (test/reset-units!)
     ; drop any stale registrations from a prior run (long-lived image / hot reload)
     (let (dirs (project-abs-paths root *project-test-paths*)
-          files-all (fold (fn (acc d) (append acc (project-collect-tests d))) nil dirs)
+          ;; The corpus is `tests/**/*_test.blsp` PLUS any source file carrying co-located
+          ;; `deftest`/`describe` forms (ADR-225) — a test found by its forms, wherever it
+          ;; lives, not by a `_test.blsp` filename under `tests/`.
+          files-all (append (fold (fn (acc d) (append acc (project-collect-tests d))) nil dirs)
+                      (project-colocated-test-files root))
           ;; `--stale` drops any test file whose transitive deps are unchanged since it
           ;; last ran; the record is refreshed after the run (below). Whole-project only.
           files (if (test/opt? :stale opts)
@@ -2686,6 +2714,50 @@ as unchanged (only when some were)."
 ;; `require 'net/sse` looks up. So a bundle keyed this way resolves through the same
 ;; `%builtin-module` path as the baked-in std (whose table is likewise keyed by full
 ;; name, e.g. `editor/buffer`) — with no load-path on disk.
+;; ── Co-located test stripping (ADR-225) ─────────────────────────────────────
+;; Tests live beside the code as top-level `deftest`/`describe` forms and run under
+;; `nest test`, but must never SHIP. `strip-test-forms` excises them from a source
+;; string for the release bundle: it finds each top-level test form via the
+;; positioned CST (`sexp/top-level-forms`) and drops its half-open char span,
+;; keeping every other byte verbatim. A file that is only tests strips to empty.
+
+;; A positioned top-level CST node whose head symbol is `deftest`/`describe`.
+(defn- test-form-node?
+  (node source)
+  (and (= (get node :kind) :list)
+    (let (head (first (sexp/forms-of node)))
+      (and (not (nil? head))
+        (= (get head :kind) :symbol)
+        (let (name (substring source (get head :start) (get head :end)))
+          (or (= name "describe") (= name "deftest")))))))
+
+;; `source` with each half-open [start end) span in `spans` (ascending,
+;; non-overlapping) removed — the kept gaps concatenated.
+(defn- string-drop-spans
+  (source spans)
+  (let (n (string-length source))
+    (letrec (go (fn (pos spans acc)
+                  (if (empty? spans)
+                    (str acc (substring source pos n))
+                    (let ([s e] (first spans))
+                      (go e (rest spans) (str acc (substring source pos s)))))))
+      (go 0 spans ""))))
+
+;; A source string with its co-located `deftest`/`describe` forms excised (ADR-225).
+;; Unchanged when it carries none, so a test-free file pays only one parse.
+(defn- strip-test-forms
+  (source)
+  (require 'sexp)
+  (let (spans (fold (fn (acc n)
+                      (if (test-form-node? n source)
+                        (cons [(get n :start) (get n :end)] acc)
+                        acc))
+                nil
+                (sexp/top-level-forms source)))
+    (if (empty? spans)
+      source
+      (string-drop-spans source (reverse spans)))))
+
 (defn- project-bundle-name
   (dir path)
   (let (prefix (if (ends-with? dir "/") dir (str dir "/"))
@@ -2724,8 +2796,14 @@ std. Errors if `root` is nil (not in a project)."
       ;; (relative to that dir) keeps any namespace — `src/main.blsp` → `main`,
       ;; `src/net/sse.blsp` → `net/sse`. Dir order (project dirs first)
       ;; is preserved, so a project module still wins a name clash with a dep.
+      ;; Strip each file's co-located `deftest`/`describe` forms (ADR-225) as it is
+      ;; slurped: tests run under `nest test` but never ship. A file that is only tests
+      ;; strips to empty source (still embedded under its name — harmless, `require`s nothing).
       (let (pairs (fold (fn (acc d)
-                          (fold (fn (a f) (cons (list (project-bundle-name d f) (slurp f)) a))
+                          (fold (fn (a f)
+                                  (cons (list (project-bundle-name d f)
+                                          (strip-test-forms (slurp f)))
+                                    a))
                             acc
                             (project-collect-sources d)))
                     nil all-dirs))

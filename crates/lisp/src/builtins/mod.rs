@@ -627,6 +627,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         registry_cas,
     );
 
+    // Cache-bypassing membership test for a registry map (ADR-225): `require`'s load-once
+    // guard must never miss a racing loader's `provide` (which the per-process inline cache
+    // can momentarily hide) and reload the module. Reads the shared globals table directly.
+    def(
+        heap,
+        "%registry-member?",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        registry_member,
+    );
+
     // Which globals the two above have actually written (ADR-218): the derived answer to
     // "what does loading MUTATE rather than create?", which the startup image needs and the
     // `(global-names)` diff cannot see. Naming them by hand went stale twice, silently.

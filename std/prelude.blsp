@@ -5049,12 +5049,21 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; marked, or every later require of it stalls the full `require-await` window
       ;; (~5s of 5ms ticks) before taking the load over.
       (do
-        (try
-          (require-force key)
-          (catch e
-            (do
-              (%registry-update! '*features-loading* :dissoc [key] nil)
-              (throw e))))
+        ;; We won the load claim — but the `(contains? *features* key)` guard at the top read
+        ;; the per-process global inline cache, which can momentarily MISS a racing loader's
+        ;; `provide` (its version bump is not yet visible to our `Relaxed` cache read). We only
+        ;; reach here AFTER that loader released the marker, i.e. after it finished providing —
+        ;; so re-check `*features*` against the SHARED table (`%registry-member?` bypasses the
+        ;; cache) and skip the load if it is already there. Without this, a claimant whose
+        ;; guard read was stale reloads an already-loaded module — the co-located-secondary
+        ;; double-load (ADR-225). The marker is released either way.
+        (unless (%registry-member? '*features* key)
+          (try
+            (require-force key)
+            (catch e
+              (do
+                (%registry-update! '*features-loading* :dissoc [key] nil)
+                (throw e)))))
         (%registry-update! '*features-loading* :dissoc [key] nil)
         key))))
 
