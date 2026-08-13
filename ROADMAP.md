@@ -813,8 +813,8 @@ mechanism/policy split: kernel primitive, Brood policy.
 
 ### Findings from hatch (2026-08-13)
 
-Two items from hatch's attempt to actually adopt the framed-read combinators, plus a
-startup-image bug the same session's test runs surfaced.
+One item from hatch's attempt to actually adopt the framed-read combinators, plus one
+already-fixed-but-unreleased startup-image bug the same session's test runs re-surfaced.
 
 - ✅ **`tcp-read-until` / `tcp-read-n` needed a THIRD bound: `:deadline-ms`.**
   `:timeout-ms`/`:max-bytes` (added 2026-08-07, on hatch's last report) still were not
@@ -833,19 +833,16 @@ startup-image bug the same session's test runs surfaced.
   with the idle timeout — both mean "did not arrive in time", one 408. Off by default.
   Tests: `tests/tcp_test.blsp` › *framed-read limits — :deadline-ms*, including a real
   dripper that defeats a 250ms idle timeout and is cut off at 301ms by a 300ms deadline.
-- ⬜ **A `defdyn` global loses its dynamic-variable registration when restored from the
-  ADR-218 startup image.** Same class as the `table`-global finding below (an image
-  round-trip losing a property of a global that is not part of its value), and it makes a
-  correct program fail on its *third* run. Symptom in hatch: `nest test` on a pristine
-  checkout is green twice, then fails 38 tests on every run after, all in `web/bml`, with
-  `binding: *bml-source* is not a dynamic variable (declare it with defdyn)` (E0099) —
-  the global is restored, but `binding` no longer accepts it. **Reproduction** (hatch at
-  `1ca8418`, verified in a throwaway `git worktree` to rule out local state):
-  `rm -f .brood/image.bin`, then `nest test` ×4 → green, green, red, red. The image is
-  written on the first run and never rewritten (unchanged mtime), so the trigger is the
-  *restore* path, not a rebuild; deleting the image restores green. Fix shape: carry the
-  dynamic-variable flag through the image, or re-register on restore. Note it is
-  invisible to CI that starts from a clean checkout, which is how it went unnoticed.
+- ✅ **A `defdyn` global loses its dynamic-variable registration when restored from the
+  ADR-218 startup image** — already **fixed in `83151776`** (2026-08-11, image format v5:
+  the dynamic-var names are recorded in the image and re-marked on open). Re-derived
+  independently from the hatch side on 2026-08-13 and noted here only because the fix is
+  **unreleased** — the last tag is v0.3.9 (2026-08-08), which predates it, so anyone on an
+  installed 0.3.9 toolchain still hits it. Symptom, for searchability: `nest test` on a
+  pristine hatch checkout is green twice, then fails 38 `web/bml` tests on every run after,
+  with `binding: *bml-source* is not a dynamic variable (declare it with defdyn)` (E0099).
+  Workaround until the next release reaches a machine: `rm -f .brood/image.bin`. **Cutting
+  a release is the whole remaining action** — nothing to fix.
 
 ### Findings from hatch (2026-07-11)
 
