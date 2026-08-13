@@ -15097,17 +15097,29 @@ goes 5.2 s → 2.2 s. At the **default** ceiling an arm that merely fails to low
 same tax: 3.64 s → 1.56 s. Single-threaded rows are unchanged — an 8-row `make ab` against
 `a9d65d1b` put every row inside its own noise floor.
 
-**The cost, measured and accepted.** The handle is one small allocation per (process, call
-site) at IC-fill time, which is *per-process* work — precisely the kind ADR-175 Phase B exists
-to avoid. So the row that pays for it is `spawn-live`, whose 300 000 short-lived processes each
-fill their inline caches fresh: **+1.8%** (3791 → 3860 ms, reproduced twice at best-of-21 with a
-baseline stable to 1 ms). That is under the 5% gate `ab-bench` reports on, but it is real and
-mechanistic, not noise, and is recorded here rather than rounded away. Judged a good trade:
-~2% on one spawn-heavy row against 2.3–3.2× on every concurrent VM workload, including the
-default tier whenever a hot arm does not lower. `spawn`/`ring`/`pingpong` moved within noise.
-Interning one handle per (process, arm) instead of per call site would cut the *duplication*
-across sites but not this cost, which is inherently per-process; removing it entirely would mean
-sharing the handle across processes, which is the contention being fixed.
+**The cost, measured and accepted.** The handle is a small allocation on paths that reach an
+arm — at IC-fill time where there is a cache, and *per call* on the two paths without one
+(`dispatch`'s VM-eligible-closure branch and the JIT's non-elided resolve). So the row that pays
+is `spawn-live`, whose 300 000 short-lived processes each run their thunk once and therefore take
+exactly those paths: **+1.1%** (1861 → 1881 ms, best-of-15 against a 0.6% floor), with `spawn`
+at +3.4% against a 1.7% floor. Both are under the 5% gate `ab-bench` reports on, and are
+recorded here rather than rounded away. Judged a good trade against 2.3–3.2× on every concurrent
+VM workload, including at the default tier whenever a hot arm does not lower.
+`ring`/`pingpong`/`fib`/`pfib` moved within noise.
+
+**A correction to this paragraph, worth keeping because it is a measurement lesson.** It first
+recorded **+1.8%** (3791 → 3860 ms). Those numbers were taken while `ab-bench.sh` still pinned
+`spawn-live` to a single CPU — the row was missing from `parallel_rows`, so the benchmark whose
+entire point is holding 300 000 live processes was being measured on one core. After that harness
+bug was fixed the same comparison reads +1.1% off a 2× faster baseline. The regression was
+always real; its size was measured in the wrong configuration.
+
+**Rejected: interning the handle per (process, arm).** The obvious way to remove the per-call
+allocation is a process-local `uid → Arc<ArmHandle>` cache, so the steady state is a refcount
+bump on an existing handle. Implemented and measured: `spawn-live` **+0.9% against a 0.2%
+floor** — i.e. nothing. Trading an allocation for a hash lookup is a wash, and the cache brings a
+new invalidation obligation (it holds arms alive, so it has to be cleared with `vm_cache` on a
+free-epoch change). Reverted rather than carried (ADR-011).
 
 **The rejected alternative, and why.** The obvious fix is to stop cloning and let the callee
 chain *borrow* the arm, which requires the arm to be immortal. That is sound for a sealed

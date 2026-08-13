@@ -150,8 +150,9 @@ and the runtime-shared arm, so the per-call clone lands on an allocation only on
 touches. **`pfib` (100 × `fib(32)`, tier 1) 54.4 s → 17.1 s (3.19×)**, per-task CPU 6408 →
 2006 ms, and now at **parity with `BROOD_NO_SHARED_ARMS=1`** (16.8 s) — the contention is gone
 rather than reduced. Single-threaded rows unchanged (8-row A/B, every row inside its own noise
-floor); `spawn-live` pays **+1.8%** for the handle allocation, a measured and accepted trade
-(ADR-224). Guarded by `arm_handle_clone_does_not_touch_the_shared_arm_refcount`, sabotage-verified.
+floor); `spawn-live` pays **+1.1%** for the handle allocation, a measured and accepted trade
+(ADR-224 — which also records why an earlier +1.8% reading was measured in the wrong
+configuration, and why interning the handle was tried and rejected). Guarded by `arm_handle_clone_does_not_touch_the_shared_arm_refcount`, sabotage-verified.
 The diagnosis that follows is kept because the *shape* of it is the reusable part.
 
 `BROOD_NO_SHARED_ARMS=1` was the diagnostic lever throughout and was never a shippable
