@@ -19,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-39 | the CI `differential (tree-walker)` job fails intermittently (3 of 11 observed runs) with nextest exit 100; not reproduced in six local configurations, and the cold-boot-herd hypothesis is measured dead | ⚠️ **watching** — green on the 3 runs since the failing case became a CI artifact (2026-08-12) |
+| KI-39 | the CI `differential (tree-walker)` job failed intermittently (3 of 11 runs) with nextest exit 100; **0/15** in the faithful local shape, cold-boot-herd hypothesis measured dead, and whether it is still present is genuinely unknown (4 green runs is 28% likely either way) | ⚠️ **watching** — local avenue closed; failing cases now self-report as CI annotations (2026-08-13) |
 | KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | ✅ fixed 2026-08-08 (warm the cache before the fan-out) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
 | KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07; +25 more idle passes) |
@@ -139,6 +139,36 @@ against "marginal timing" for the retried binaries.
 **Not reproduced in six local configurations:** `make test-both`; `BROOD_VM=0` alone on 12 cores;
 `taskset -c 0,1` with 12 nextest threads; `taskset -c 0-3` with `-j 4` (the faithful runner shape);
 plus the two changed test files hammered 15× each at ceiling 0. All 977/977 or 0 failures.
+
+**Update 2026-08-13 — the local hunt is exhausted: 0 failures in 15 runs, and that is where it
+stops.** Fifteen runs of the *single* most faithful shape (`BROOD_VM=0`, `taskset -c 0-3` **and**
+`-j 4` together, prelude cache colded each iteration as a fresh CI commit does): **978/978 every
+time**, wall time 978-1015 s, a 3.7% spread with no outlier and no extra slow-test warning.
+
+Chosen deliberately over "one run each of several configurations", which is what the earlier
+attempt did and why its negative result was weak (see the correction above). Fifteen clean runs
+put the miss probability at **0.8%** — so on this machine, in this shape, the flake is not there
+to find. That is a statement about the machine, not about the code.
+
+**Do we know the bug is still present? No — and four green CI runs do not say otherwise.** At the
+observed 27% rate, four consecutive greens have a **28%** probability: exactly what you would see
+anyway if nothing had changed. "Fixed" and "still there" are both unfalsified. Three live
+possibilities:
+
+1. **Still present, and we have been lucky** — ~28% likely on its own.
+2. **Fixed in passing.** Weak: the last failure (`79e7e555`) came *after* the registry and tls
+   fixes landed in `14b1db40`, so those are not the explanation, and nothing else in that window
+   plausibly touched it.
+3. **Runner-dependent** — a property of which machine in GitHub's fleet the job lands on, which
+   would explain 15 identical local passes and 4 CI passes against 3 earlier failures.
+
+Most weight on 1 and 3.
+
+**What would settle it, either way.** To call it *gone* wants roughly **10 consecutive green CI
+runs** (0.73^10 = 4%); there are 4 so far, and they accumulate for free with ordinary pushes. To
+call it *found*, the annotations added in `2312d4a1` name the failing case the moment it fires —
+now the only live path, since the local avenue is closed. **Do not repeat the local hunt:**
+15 runs at ~16.5 min is ~4 hours, and this entry is the record that it returned nothing.
 
 **Next step when it recurs.** `gh run download <run-id>` → `tree-walker-nextest.log` names the
 failing case. Until then this is a watch item, not a blocker: the VM job and rustfmt have been
