@@ -90,7 +90,7 @@ define install_binaries
 endef
 
 .DEFAULT_GOAL := help
-.PHONY: help build release perf-brood test test-both breakagetests ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
+.PHONY: help build release perf-brood test test-light test-both breakagetests ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -117,6 +117,33 @@ test: ## Run Rust tests + the in-language suite via cargo-nextest (each test cas
 	# turns it off; see .config/nextest.toml.
 	cargo nextest run --no-fail-fast --features brood/treesit-grammars
 	cargo test --doc   # nextest doesn't run doctests; none today, kept so future ones still run
+
+# Concurrency cap for `test-light` — override on the command line, e.g. `make test-light LIGHT_JOBS=4`.
+LIGHT_JOBS ?= 8  # concurrent test PROCESSES (nextest -j) and cargo build jobs
+
+test-light: ## Like `make test` but capped + de-prioritized so it won't saturate the machine (override LIGHT_JOBS)
+	# Same suite as `make test`, tuned to stay off your back on a busy desktop —
+	# the default `make test` runs the compile AND the ~50-binary fan-out at full
+	# core count, which oversubscribes a many-core box (load > nproc) and stalls
+	# interactive work. This caps each layer instead:
+	#   nice -n19        — lowest CPU priority, so interactive work always preempts it
+	#                      (this is what actually keeps the desktop responsive)
+	#   CARGO_BUILD_JOBS — caps the compile/link spike
+	#   -j N             — caps how many test PROCESSES nextest runs at once (default: all cores)
+	# Trade-off is less parallelism *stress*, not less coverage: every case still runs in its
+	# own process — fewer cores just run concurrently. Keep the full-fat `make test` for the
+	# "prove green under load" runs the docs call for (concurrency/scheduler/GC/JIT changes).
+	#
+	# NB: deliberately does NOT set BROOD_J (the runtime's scheduler-pool cap). BROOD_J is a
+	# real knob for squeezing the in-language suite (`brood_suite_passes`), but it FLOORS the
+	# worker pool, so it forces extra workers onto the tests that pin themselves to exactly one
+	# (`cpu_bound_process_does_not_starve_peers_on_one_worker`) and reddens them — see
+	# `worker_count` in crates/lisp/src/process/scheduler.rs. Set it by hand for an ad-hoc run
+	# if you know you're not touching those, but it can't be a default here.
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo ">>> cargo-nextest not found — run 'make ensure-nextest' (or install from https://nexte.st)"; exit 1; }
+	nice -n 19 env CARGO_BUILD_JOBS=$(LIGHT_JOBS) \
+		cargo nextest run --no-fail-fast --features brood/treesit-grammars -j $(LIGHT_JOBS)
+	nice -n 19 cargo test --doc
 
 test-both: ## Run the whole suite through BOTH engines (tree-walker + VM) — the differential gate (ADR-076)
 	# The VM is the default engine; this also exercises the tree-walker escape hatch
