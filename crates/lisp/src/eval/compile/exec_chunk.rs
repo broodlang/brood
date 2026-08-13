@@ -26,7 +26,7 @@ pub(crate) fn tag_pos(e: LispError, pos: Option<Pos>) -> LispError {
 /// frame (TCO). A single pass to the next call/return is bounded by the chunk length.
 pub(crate) fn exec_chunk(
     heap: &mut Heap,
-    arm_arc: &Arc<CompiledArm>,
+    arm_arc: &Arc<ArmHandle>,
     ip: &mut usize,
     base: usize,
     genv: EnvRoot,
@@ -42,7 +42,7 @@ pub(crate) fn exec_chunk(
     // (`nslots`/`nrequired` on every SelfCall), and going through the Arc each time
     // cost the most interpreter-bound row (json) ~10%. `arm_arc` itself is only for
     // the spinning-loop sync compile, which needs the Arc for the keepalive.
-    let arm: &CompiledArm = arm_arc.as_ref();
+    let arm: &CompiledArm = arm_arc;
     let chunk = arm.chunk.as_ref().expect("exec_chunk: arm has no chunk");
     // Global epoch as of entering this frame — the hot-reload guard for `Inst::SelfCall`
     // (see there). A `def` bumps the epoch, so an unchanged value means no rebinding can
@@ -438,7 +438,7 @@ pub(crate) fn exec_chunk(
                 for k in 0..argc {
                     argv.push(heap.root_at(n - argc + k));
                 }
-                let mut fast: Option<(Arc<CompiledArm>, EnvId, (u32, u32))> = None;
+                let mut fast: Option<(Arc<ArmHandle>, EnvId, (u32, u32))> = None;
                 // KI-19: a *staged* head was resolved before the args (it sits below them),
                 // so the callee is that value — not a fresh resolution, which would observe
                 // a `def` an argument performed. The call-site IC is still consulted for the
@@ -478,7 +478,7 @@ pub(crate) fn exec_chunk(
                                     let cenv =
                                         heap.closure(id).env.unwrap_or_else(|| heap.global());
                                     let block = heap.vm_arm_block(&arm);
-                                    (arm, cenv, block)
+                                    (ArmHandle::new(arm), cenv, block)
                                 })
                             }
                             _ => None,
@@ -515,7 +515,7 @@ pub(crate) fn exec_chunk(
                                     compiled_arm_for(heap, id, argc).map(|arm| {
                                         let cenv =
                                             heap.closure(id).env.unwrap_or_else(|| heap.global());
-                                        (arm, cenv)
+                                        (ArmHandle::new(arm), cenv)
                                     })
                                 }
                                 _ => None,
@@ -570,7 +570,7 @@ pub(crate) fn exec_chunk(
                 // so the outer loop can collect (and can't have stale off-heap SmallVec).
                 if *tail {
                     if let Some((ref compiled, cenv, _)) = fast {
-                        if std::ptr::eq(compiled.as_ref(), arm)
+                        if std::ptr::eq(Arc::as_ptr(compiled.arc()), arm)
                             && arm.noptional == 0
                             && arm.rest_slot.is_none()
                             && cur_env == cenv

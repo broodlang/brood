@@ -2634,6 +2634,7 @@ mod resolve_tests {
         .expect("parse");
         let regions = scan_regions(&interp.heap, &forms);
         assert_eq!(region(&regions, "a"), vec!["x"]); // `pre` is root, not a's
+
         // scan_def_names is the union of regions — also excludes the pre-module def.
         let flat = scan_def_names(&interp.heap, &forms);
         assert!(flat.contains(&value::intern("x")));
