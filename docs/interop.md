@@ -13,7 +13,14 @@
 > Still ahead (the rest of this note): the package-manager `:native`
 > manifest/lock/build-on-fetch integration (the delivery vehicle — recommended
 > next), WASI capability grants, guest `resource` handles, and the blob
-> **zero-copy** read-mapping optimization (over slice 2's copy). This is the
+> **zero-copy** read-mapping optimization (over slice 2's copy).
+> **Reconsidered 2026-08-13 and kept deferred (ADR-011):** no in-tree package
+> ships `:native` code yet — the concrete consumer that would justify the
+> delivery vehicle — and the component build toolchain (`wasm32-wasip2` target,
+> `cargo-component`, `wasm-tools`) is not installed on the dev box, so the primary
+> `:wasm-build`-from-source path cannot even be exercised green here. Build it when
+> a package actually needs to ship native code; the design below is shovel-ready.
+> This is the
 > long-term answer to "how does a Brood package use code from another
 > ecosystem (or ship a perf-critical native kernel) without forking the Rust
 > kernel?" The short answer: **a package may ship a WebAssembly component;
