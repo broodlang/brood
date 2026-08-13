@@ -264,8 +264,8 @@ fn check_one_file(interp: &mut Interp, path: &str, src: &str, sink: CheckSink) -
             None => format!("{}: warning: {}", path, msg),
         };
         match sink {
-            CheckSink::Stdout => println!("{}", line),
-            CheckSink::Stderr => eprintln!("{}", line),
+            CheckSink::Stdout => brood::cli_support::write_stdout(&format!("{line}\n")),
+            CheckSink::Stderr => brood::cli_support::write_stderr(&format!("{line}\n")),
         }
     }
     warned

@@ -155,6 +155,7 @@ fn use_color() -> bool {
 pub fn report_error(e: &LispError) {
     let color = use_color();
     let located = e.located();
+    let mut out = String::new();
     if color {
         // Colorize just the `<kind> error:` label within the located line; the
         // `FILE:LINE:COL:` prefix and the message keep their plain text. The label
@@ -165,22 +166,24 @@ pub fn report_error(e: &LispError) {
             Some(idx) => {
                 let (prefix, rest) = located.split_at(idx);
                 let message = &rest[label.len()..];
-                eprintln!("{prefix}{C_ERR}{label}{C_RESET}{C_BOLD}{message}{C_RESET}");
+                out.push_str(&format!(
+                    "{prefix}{C_ERR}{label}{C_RESET}{C_BOLD}{message}{C_RESET}\n"
+                ));
             }
-            None => eprintln!("{located}"),
+            None => out.push_str(&format!("{located}\n")),
         }
     } else {
-        eprintln!("{located}");
+        out.push_str(&format!("{located}\n"));
     }
     if let (Some(file), Some(pos)) = (&e.file, e.pos) {
         if let Ok(src) = std::fs::read_to_string(file) {
             if let Some(line) = src.lines().nth(pos.line.saturating_sub(1) as usize) {
-                eprintln!("    {}", line);
+                out.push_str(&format!("    {line}\n"));
                 let pad = " ".repeat(pos.col.saturating_sub(1) as usize);
                 if color {
-                    eprintln!("    {pad}{C_ERR}^{C_RESET}");
+                    out.push_str(&format!("    {pad}{C_ERR}^{C_RESET}\n"));
                 } else {
-                    eprintln!("    {pad}^");
+                    out.push_str(&format!("    {pad}^\n"));
                 }
             }
         }
@@ -190,9 +193,9 @@ pub fn report_error(e: &LispError) {
     // most often reads it. Structured consumers (MCP / LSP) get it via `to_value_map`.
     if let Some(hint) = &e.hint {
         if color {
-            eprintln!("    {C_HINT}hint:{C_RESET} {hint}");
+            out.push_str(&format!("    {C_HINT}hint:{C_RESET} {hint}\n"));
         } else {
-            eprintln!("    hint: {hint}");
+            out.push_str(&format!("    hint: {hint}\n"));
         }
     }
     // The call trace (innermost frame first): `at <fn> (<file>:<line>:<col>)`,
@@ -214,9 +217,9 @@ pub fn report_error(e: &LispError) {
             (None, None) => String::new(),
         };
         if color {
-            eprintln!("    {C_DIM}at {name}{loc}{C_RESET}");
+            out.push_str(&format!("    {C_DIM}at {name}{loc}{C_RESET}\n"));
         } else {
-            eprintln!("    at {name}{loc}");
+            out.push_str(&format!("    at {name}{loc}\n"));
         }
     }
     let footer = format!(
@@ -225,9 +228,37 @@ pub fn report_error(e: &LispError) {
         env!("BROOD_GIT_SHA")
     );
     if color {
-        eprintln!("{C_DIM}{footer}{C_RESET}");
+        out.push_str(&format!("{C_DIM}{footer}{C_RESET}\n"));
     } else {
-        eprintln!("{footer}");
+        out.push_str(&format!("{footer}\n"));
+    }
+    write_stderr(&out);
+}
+
+/// Write `s` to real stderr without panicking on a **broken pipe** — the
+/// downstream reader closed early (`nest check … | head`, a pager quit, a
+/// scrolled-away TUI). The `eprintln!`/`eprint!` macros panic on `EPIPE`
+/// ("failed printing to stderr: Broken pipe"), which then fires the crash-dump
+/// hook and aborts the process — a spurious "crash" for what is normal Unix
+/// pipe teardown. Mirror `builtins::io::write_stderr`: on a broken pipe exit
+/// quietly (as the default SIGPIPE disposition would); drop any other write
+/// error, since an error reporter has nowhere better to send it. Both binaries
+/// use these for CLI output that a `| head`/pager can truncate.
+pub fn write_stderr(s: &str) {
+    write_stream(&mut std::io::stderr(), s);
+}
+
+/// The stdout twin of [`write_stderr`] — same broken-pipe discipline for the
+/// streamed lines the CLI sends to stdout (e.g. `brood --check`'s stdout sink).
+pub fn write_stdout(s: &str) {
+    write_stream(&mut std::io::stdout(), s);
+}
+
+fn write_stream(w: &mut impl std::io::Write, s: &str) {
+    if let Err(e) = w.write_all(s.as_bytes()).and_then(|_| w.flush()) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
     }
 }
 
