@@ -31,7 +31,8 @@ pub(crate) fn run_process_body(
         // Err and never suspends. Either way: no coroutine.
         None => match body.unpack() {
             ValueRef::Fn(id) if compiled_arm_for(heap, id, 0).is_some() => {
-                let arm = compiled_arm_for(heap, id, 0).expect("just checked is_some");
+                let arm =
+                    ArmHandle::new(compiled_arm_for(heap, id, 0).expect("just checked is_some"));
                 let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
                 vm_run_bc(heap, arm, &[], cenv, None, true)
             }
@@ -336,7 +337,7 @@ impl ProgramState {
 
 pub(crate) fn vm_run_bc(
     heap: &mut Heap,
-    arm0: Arc<CompiledArm>,
+    arm0: Arc<ArmHandle>,
     args0: &[Value],
     genv0: EnvId,
     resume: Option<Suspended>,
@@ -627,7 +628,7 @@ pub(crate) fn vm_run_bc(
                             && cur_arm.jit_code.load(std::sync::atomic::Ordering::Acquire)
                                 == crate::jit::QUEUED
                         {
-                            jit_compile_now(heap, &cur_arm, cur_base);
+                            jit_compile_now(heap, cur_arm.arc(), cur_base);
                         }
                         // Per-engine frame sizing (two-stage tiering, devlog 2026-06-17): the VM
                         // built the frame to the ORIGINAL `nslots` (small). ONLY when this arm's
@@ -658,7 +659,7 @@ pub(crate) fn vm_run_bc(
                         // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
                         // assumes roots return to exactly here.
                         let pre_roots = heap.roots_len();
-                        let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
+                        let jit_outcome = jit_tier(cur_arm.arc(), heap, cur_base, cur_env);
                         // The deopt-resume decision, taken ONCE and taken HERE, before the
                         // frame is resized below. Reading the journal twice — once to decide
                         // the resize, once to resume — is wrong two ways: the second read
@@ -673,7 +674,7 @@ pub(crate) fn vm_run_bc(
                         let resume = if matches!(jit_outcome, Some(1) | Some(2))
                             && heap.roots_len() >= cur_base + frame_nslots
                         {
-                            jit_ckpt_resume(heap, &cur_arm, cur_base, frame_nslots)
+                            jit_ckpt_resume(heap, cur_arm.arc(), cur_base, frame_nslots)
                         } else {
                             None
                         };
@@ -798,7 +799,7 @@ pub(crate) fn vm_run_bc(
                                     // small native that is `cur_arm` itself, for a
                                     // leaf-spliced native the derivation's resume arm, whose
                                     // chunk and frame layout are the spliced ones.
-                                    cur_arm = ra;
+                                    cur_arm = ArmHandle::new(ra);
                                 }
                                 exec_chunk(
                                     heap,

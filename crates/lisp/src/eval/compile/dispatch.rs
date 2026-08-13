@@ -39,7 +39,7 @@ pub(crate) fn exec_call(
     // local-capturing closure's captured frames could shadow the symbol,
     // and they differ per closure *instance* while the site is shared.
     let probe_epoch = heap.global_epoch();
-    let mut fast: Option<(Arc<CompiledArm>, EnvId, (u32, u32))> = None;
+    let mut fast: Option<(Arc<ArmHandle>, EnvId, (u32, u32))> = None;
     let cv: Value;
     'resolve: {
         if site != NO_SITE {
@@ -78,7 +78,7 @@ pub(crate) fn exec_call(
                                 compiled_arm_for(heap, id, args.len()).map(|arm| {
                                     let cenv =
                                         heap.closure(id).env.unwrap_or_else(|| heap.global());
-                                    (arm, cenv)
+                                    (ArmHandle::new(arm), cenv)
                                 })
                             }
                             _ => None,
@@ -297,7 +297,7 @@ pub(crate) fn dispatch(
     if let ValueRef::Fn(id) = cur_callee.unpack() {
         // Resolve the arm cloning only the `Arc<CompiledArm>` (not the enclosing
         // `CompiledClosure`) — one fewer Arc clone per call on the hot path.
-        if let Some(arm) = compiled_arm_for(heap, id, cur_argv.len()) {
+        if let Some(arm) = compiled_arm_for(heap, id, cur_argv.len()).map(ArmHandle::new) {
             // Run the callee in *its own* captured env (Stage 2c): a
             // global-capturing closure (`env == None`) resolves to the process
             // global as before, while a local-capturing one resolves its free
@@ -342,7 +342,7 @@ pub(crate) fn dispatch(
                         heap.truncate_env_roots(env_base);
                         return Err(e);
                     }
-                    let jit_outcome = jit_tier(&arm, heap, base, env_root);
+                    let jit_outcome = jit_tier(arm.arc(), heap, base, env_root);
                     heap.set_ic_bases(saved_bases);
                     match jit_outcome {
                         Some(0) => {
@@ -441,7 +441,7 @@ pub(crate) fn dispatch(
                             // resume arm is always `arm` itself here.
                             if matches!(jit_outcome, Some(1)) {
                                 if let Some((resume, rip, depth)) =
-                                    jit_ckpt_resume(heap, &arm, base, arm.nslots)
+                                    jit_ckpt_resume(heap, arm.arc(), base, arm.nslots)
                                 {
                                     heap.truncate_env_roots(env_base);
                                     return Ok(Step::Done(vm_resume_deopt(
@@ -597,7 +597,7 @@ pub(crate) fn push_frame(
 /// `force` (a tail `Step`). The tree-walker (`BROOD_VM=0`) is the remaining fallback.
 pub(crate) fn vm_apply(
     heap: &mut Heap,
-    compiled0: Arc<CompiledArm>,
+    compiled0: Arc<ArmHandle>,
     args: &[Value],
     genv0: EnvId,
 ) -> LispResult {
