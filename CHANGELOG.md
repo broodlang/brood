@@ -4,6 +4,20 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.11 — 2026-08-13
+
+**`:seed` on `tcp-read-until`** — bytes the caller already holds, treated as if they had just
+arrived as the first chunk. A protocol reading frame after frame off one stream ends each read
+holding the surplus that arrived past the frame it wanted, so the next read starts with bytes
+in hand — and those may contain the delimiter, or its first half. Without `:seed` a caller must
+either rescan them itself (re-implementing the loop these combinators exist to replace) or lose
+a delimiter straddling the boundary between what it holds and what arrives next. The seed is
+fed through the same step an arriving chunk takes, so that boundary is handled by exactly the
+arithmetic that handles every other one; a seed already containing a whole frame returns without
+touching the socket. It counts toward `:max-bytes`. From hatch again: its HTTP worker re-enters
+the head read with the leftover of a pipelined request, which is precisely this case, and it was
+the last thing keeping that read on a hand-rolled loop.
+
 ## v0.3.10 — 2026-08-13
 
 **Namespaces: more than one module per file (ADR-223).** A file is now a sequence of
