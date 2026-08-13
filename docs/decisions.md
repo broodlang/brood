@@ -14986,8 +14986,10 @@ speculation is guarded.
 ## ADR-223 — Multiple modules per file (region model); the unified index deferred to M2
 
 **Status:** **Phase 1 (definition-side) implemented (2026-08-12)** — a file may declare more
-than one `(defmodule …)`. **Phase 2 (MVP): cross-file require-by-name for a co-located module
-implemented (2026-08-13)** for named (ADR-070 rooted) projects. The **persisted AOT index**
+than one `(defmodule …)`. **Phase 2: cross-file require-by-name for a co-located module
+implemented (2026-08-13)** — first for named (ADR-070 rooted) projects via the rooting registry,
+then (**Phase 2b**, same day) for **nameless projects and bare `brood file.blsp` runs** via a
+`*load-path*`-scan fallback in `require` (see Phase 2b below). The **persisted AOT index**
 (module↔file decoupling, LSP routing, folding the checks into an index) stays deferred to M2
 plugin pressure. Design in [module-index.md](module-index.md). Sits on the ADR-070 trajectory
 (package-rooting), one step further. The user's request for co-located test modules — which
@@ -15026,12 +15028,24 @@ there), so they cannot drift. No prelude change, no new `require` branch, no new
 The change is a **consolidation** — the singular first-`defmodule` reader was deleted and its
 callers now share one all-modules scanner, so there are *fewer* file scanners than before.
 Collision detection was generalized in lockstep (`package-provided-modules`) so two files
-declaring the same module name still reject loudly. **Scoped to named projects** (a nameless
-project skips rooting entirely, and a bare `brood file.blsp` run does no project setup — both
-would need a new bare-key registry *and* a new require branch, deferred as not worth the
-surface). The checker needs no change: `nest check`'s whole-project pre-flight already loads
-every source file. This is the substrate the co-located **test-module** feature builds on (a
-`foo-test` module beside `foo`, stripped in the AOT/bundle step).
+declaring the same module name still reject loudly. The checker needs no change: `nest check`'s
+whole-project pre-flight already loads every source file. This is the substrate the co-located
+**test-module** feature builds on (a `foo-test` module beside `foo`, stripped in the AOT/bundle
+step).
+
+**Phase 2b — the nameless-project / bare-run case, without a new registry (2026-08-13).** The
+MVP above was scoped to *named* projects, because only they run the rooting scan that fills
+`*package-module-files*`; a nameless project skips rooting and a bare `brood file.blsp` run does
+no project setup, so a co-located secondary fell through to the `<name>.blsp` filename probe and
+errored. Lifted **without** the "new bare-key registry + new require branch" the original scoping
+anticipated: `require-force-in`'s existing `else` (filename-probe) branch gained **one fallback**
+— on a probe miss, scan `*load-path*` for the `.blsp` declaring `(defmodule <name> …)` and load
+it (`require-find-colocated`/`require-colocated-files`/`require-file-declares?`, `std/prelude.blsp`).
+It fires only *after* the probe misses, so the common path is untouched; two files declaring one
+name error loudly (the nameless analogue of the named-project duplicate rejection); and both a
+nameless project (its source dirs are on `*load-path*`) and a bare run (the script dir is) are
+covered by the same code, since the scan reads `*load-path*` rather than any project state. No
+new registry, no reordering of the resolved branches. Tests in `tests/namespace_test.blsp`.
 
 **Context.** "Where/what is X" is answered by several ad-hoc half-indexes — the `module foo →
 foo.blsp` filename bijection, `*package-module-files*`, baked `%builtin-module` keys, `*features*`

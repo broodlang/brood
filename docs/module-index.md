@@ -25,8 +25,13 @@
 > in-project named case, already covered by the rooting registry. What the persisted index still
 > adds on top: module↔file decoupling beyond rooting, cross-*author* O(1) symbol location, LSP
 > routing, and folding the collision/reserved/duplicate checks into index queries — all still
-> deferred to M2 plugin pressure. Nameless projects and bare `brood file.blsp` runs are also
-> still filename-bijection-only.
+> deferred to M2 plugin pressure.
+>
+> **Update (2026-08-13, Phase 2b): nameless projects and bare `brood file.blsp` runs now reach a
+> co-located module by name too** — not via a registry but via a `*load-path*`-scan fallback in
+> `require` (only on a filename-probe miss). So require-by-name for a co-located module is
+> complete across named/nameless/bare; what remains deferred here is still the *persisted index*
+> (cross-author O(1) symbol location, LSP routing, checks-as-queries).
 
 This is the design backing for a single, authoritative **index** that answers
 "where/what is X" for the whole image — module → file, symbol → definition site,
