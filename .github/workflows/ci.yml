@@ -138,13 +138,52 @@ jobs:
       # downloadable with plain read access (`gh run download`), so the failing case travels
       # out of CI regardless of permissions. `pipefail` keeps the tee from masking the exit
       # code.
+      # `--failure-output immediate-final` repeats every failure in one block at the end, which
+      # is what makes the parse below a parse rather than a guess.
       - name: Test (nextest, BROOD_VM=0)
+        id: tw
         env:
           BROOD_VM: 0
         shell: bash
         run: |
           set -o pipefail
-          cargo nextest run --no-fail-fast 2>&1 | tee tree-walker-nextest.log
+          cargo nextest run --no-fail-fast --failure-output immediate-final 2>&1 \
+            | tee tree-walker-nextest.log
+
+      # Name the failing cases as workflow ERROR commands, which GitHub turns into check-run
+      # ANNOTATIONS. This exists because of a permissions asymmetry that cost real time on
+      # KI-39: a run's *log* needs admin on the repository (`/actions/runs/:id/logs` → 403,
+      # `rerun-failed-jobs` → 401), but annotations are readable with plain read access
+      # (`gh api repos/:o/:r/check-runs/:id/annotations`). Before this, the only annotation a
+      # failure produced was the runner's own "Process completed with exit code 100" — which
+      # says a test failed and nothing about which, so a job that does not reproduce locally
+      # was undiagnosable without admin. The artifact below covers the same gap; this is the
+      # cheaper half, since it needs no download and shows on the run page.
+      #
+      # nextest marks failures as `        FAIL [   1.234s] binary case_name`, and a suite
+      # wrapper prints its own inner failures as `    tests/foo_test.blsp:12: test failed: …`.
+      # Emit both, deduplicated, capped so a mass failure cannot bury the summary.
+      - name: Annotate the failing cases (on failure)
+        if: failure() && steps.tw.outcome == 'failure'
+        shell: bash
+        run: |
+          if [ ! -f tree-walker-nextest.log ]; then
+            echo "::error::tree-walker: no nextest log — the step failed before running tests"
+            exit 0
+          fi
+          grep -hoE '^[[:space:]]*(TRY [0-9]+ )?FAIL \[[^]]*\] .*' tree-walker-nextest.log \
+            | sed 's/^[[:space:]]*//' | sort -u | head -25 \
+            | while IFS= read -r line; do echo "::error::tree-walker nextest: $line"; done
+          # `(:[0-9]+)?` for the column: the harness reports some failures as `file:line:col:`
+          # and others as `file:line:`. Tested against a real two-failure log — without the
+          # optional column this missed `registry_test.blsp:55:9` and annotated only half the
+          # failures, which is worse than annotating none.
+          grep -hoE 'tests/[A-Za-z0-9_./-]+\.blsp:[0-9]+(:[0-9]+)?: test failed: .*' tree-walker-nextest.log \
+            | sort -u | head -25 \
+            | while IFS= read -r line; do echo "::error::tree-walker in-language: $line"; done
+          # A summary line regardless, so the annotation set is never empty on a failure.
+          grep -hoE 'Summary \[[^]]*\].*' tree-walker-nextest.log | tail -1 \
+            | while IFS= read -r line; do echo "::error::tree-walker $line"; done
 
       - name: Upload the tree-walker log (on failure)
         if: failure()

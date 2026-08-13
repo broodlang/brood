@@ -5,21 +5,33 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-11 (the backend-seam session)**, brood 0.3.9. The working tree has **all five
-items of `docs/backend-seams.md` applied and UNCOMMITTED** — see "What this session changed"
-below. Last commit is `c0a845a5`. **`nest format --check` fails on 12 `.blsp`
-files** — pre-existing, not CI-gated, left alone deliberately: reformatting whole files is a
-judgement call, not a drive-by.
+**As of 2026-08-13 (the backend-seam session, concluded)**, brood 0.3.9. Everything is
+**committed and pushed**; `main` and `origin/main` agree. `nest format --check` is **clean across
+all 356 files** — the pre-existing backlog (12 files when this entry was first written, 23 by the
+time it was cleared) is gone, including nine embedded `std/` modules, verified with both engines.
 
-**Green as of this session's work:** `make test` **974/974**, run separately after item 1, item 2,
-item 3, and items 4–5; `make test-both` **974 + 974 = 1948/1948**; `cargo test --features jit
---test jit` **40/40** and 40/40 again under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, per item;
-`cargo check --workspace --no-default-features`; clippy `-D warnings` all-targets/all-features;
-rustfmt; `tests/perf_test.blsp` 16/16 on both a counter-armed and an ordinary build. Plus the new
-lowering witness (below), byte-identical.
+**What landed:** ADR-221 (the `JitBackend` contract + the decisions hoisted into `jit_plan`),
+ADR-222 (execution is a tier ladder with a ceiling — `BROOD_TIER` subsuming `BROOD_VM` and
+`BROOD_NO_JIT`), the perf-triage tooling (`make perf-brood`, `std/tool/perf.blsp`,
+`brood --debug-flags`, `(vm-stats-reset)`), `ab-bench --json`/`--floor`, and four CI fixes that
+took `main` from red to green. Full narrative in `docs/devlog.md`; the plan and its
+plan-vs-reality corrections in `docs/backend-seams.md`.
 
-⚠️ **`nest check` exits 1 at HEAD — pre-existing, and the CI "zero warnings" gate should be red
-on main.** Three advisory warnings: `std/tool/docs.blsp` non-tail recursion (×2) and
+**Green at the end:** `make test` **978/978** and `make test-both` **978 + 978 = 1956/1956** on
+the final merged tree; `cargo test --features jit --test jit` **40/40**, and 40/40 again under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, per increment; `cargo check --workspace
+--no-default-features`; clippy `-D warnings` all-targets/all-features; rustfmt; `nest check` 0
+warnings; `nest format --check` clean; `tests/perf_test.blsp` 16/16 on both a counter-armed and an
+ordinary build; the lowering witness byte-identical across the restructurings. **CI on `main` is
+green** (last four runs).
+
+✅ **`nest check` exited 1 at HEAD for three pre-existing advisory warnings — fixed** (the
+`docs/md-links` non-tail recursion became a tail-recursive accumulator with 10 characterisation
+tests written against the original first, and `repl.blsp`'s guard now uses `symbol?`, because the
+checker narrows on *type predicates* and not on truthiness). The historical note follows.
+
+⚠️ (historical) **`nest check` exits 1 at HEAD — pre-existing, and the CI "zero warnings" gate
+should be red on main.** Three advisory warnings: `std/tool/docs.blsp` non-tail recursion (×2) and
 `std/tool/repl.blsp` `%in-ns` nil. CLAUDE.md documents that batch `nest check` exits nonzero on
 *any* warning. Verified against a clean `HEAD` worktree — identical 3 warnings, identical exit 1
 — so this session neither caused nor fixed it. Left alone deliberately (restructuring those two

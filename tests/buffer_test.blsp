@@ -258,7 +258,6 @@
       (assert-error (insert (goto-char b 1) "X")) ; interior of a protected span: no
       (assert-error (delete-char (goto-char b 1))) ; delete a protected char: no
       (assert-error (delete-backward-char (goto-char b 2))))) ; backspace over one: no
-
   (test "backspacing the gap's first char over the protected edge is refused (the box-start case)"
     ;; point at the gap start (3): the char before (2) is generated — backspace must not eat it
     (assert-error (delete-backward-char (goto-char (form) 3)))
@@ -279,8 +278,9 @@
 
   (test "insert AT a span edge lands in the gap, not the protected text (inward gravity)"
     (let (b (form)
-          left (insert (goto-char b 3) "L")   ; at the gap's left edge
-          right (insert (goto-char b 7) "R"))  ; at the gap's right edge
+          left (insert (goto-char b 3) "L") ; at the gap's left edge
+          right (insert (goto-char b 7) "R"))
+      ; at the gap's right edge
       (assert= (buffer-text left) "012L3456789")
       (assert= (buffer-text right) "0123456R789")
       ;; the left protected span is untouched; the right one slid past the insert
@@ -293,9 +293,9 @@
     (let (b (insert (goto-char (form) 5) "XY"))
       (assert= (buffer-text b) "01234XY56789")
       (assert= (read-only-spans b) (list [0 3] [9 12])))) ; right span moved +2, left unchanged
-
   (test "a delete confined to the gap slides later spans left"
-    (let (b (delete-region (goto-char (set-mark (goto-char (form) 4)) 6))) ; delete [4 6)
+    (let (b (delete-region (goto-char (set-mark (goto-char (form) 4)) 6)))
+      ; delete [4 6)
       (assert= (buffer-text b) "01236789")
       (assert= (read-only-spans b) (list [0 3] [5 8]))))
 
@@ -315,7 +315,6 @@
   (test "the whole-buffer flag still wins over the gap"
     (let (b (set-read-only (form) true))
       (assert-error (insert (goto-char b 5) "X")))) ; even the editable gap is frozen
-
   (test "typing refills a gap emptied down to zero width (two spans touching, not one)"
     ;; delete the whole gap [3 7): the two protected spans now MEET at 3 — but that junction
     ;; is a zero-width editable region, not one span's interior, so an insert there is allowed
@@ -325,10 +324,8 @@
       (let (refilled (insert (goto-char empty 3) "NEW"))
         (assert= (buffer-text refilled) "012NEW789")
         (assert= (read-only-spans refilled) (list [0 3] [6 9]))))) ; NEW is editable between them
-
   (test "but the interior of a single span stays refused"
     (assert-error (insert (goto-char (form) 8) "X"))) ; strictly inside [7 10)
-
   (test "a refusal is a structured error tagged :kind :read-only (not just a message)"
     ;; so a caller degrades a refusal to a no-op by matching the kind, never the wording
     (let (e (try (do (insert (goto-char (form) 8) "X") nil) (catch e e)))
@@ -336,7 +333,6 @@
       (assert= (error-message e) "text is read-only"))
     (let (e (try (do (insert (set-read-only (make-buffer "hi") true) "x") nil) (catch e e)))
       (assert= (:kind e) :read-only)))) ; whole-buffer read-only carries the same kind
-
 (describe "buffer mark & region"
   (test "set-mark / region / clear-mark"
     (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4)))

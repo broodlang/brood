@@ -273,22 +273,25 @@
 
 (defn- stream-test-my-id () (get (process-info (self)) :id))
 
-(defn- stream-test-parked-children (me)
-  (count (filter (fn (p) (and (= me (get (process-info p) :parent))
-                              (= :waiting (get (process-info p) :status))))
-                 (list-processes))))
+(defn- stream-test-parked-children
+  (me)
+  (count (filter (fn (p)
+                   (and (= me (get (process-info p) :parent))
+                     (= :waiting (get (process-info p) :status))))
+           (list-processes))))
 
 (describe "streams do not leak producer processes"
   :isolated
 
   (test "fully consuming exhausted streams of every shape leaves no parked producers"
     (let (me (stream-test-my-id))
-      (defn- stream-test-consume-batch (k)
+      (defn- stream-test-consume-batch
+        (k)
         (when (> k 0)
           ;; each of these ends in an exhausted-producer state that used to leak:
           (stream/stream-to-vector (stream/stream-drop 10 (stream/stream-from-list [1 2]))) ; drop past end
-          (stream/stream-to-list (stream/stream-empty))                                     ; empty
-          (stream/stream-to-vector (stream/stream-map inc (stream/stream-singleton 7)))     ; singleton
+          (stream/stream-to-list (stream/stream-empty)) ; empty
+          (stream/stream-to-vector (stream/stream-map inc (stream/stream-singleton 7))) ; singleton
           (stream/stream-to-vector (stream/stream-chunk 3 (stream/stream-from-list [1 2]))) ; partial chunk
           (stream-test-consume-batch (- k 1))))
       (stream-test-consume-batch 150)

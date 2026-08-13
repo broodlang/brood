@@ -240,7 +240,7 @@
   (test "a bare reference to a def written before defmodule resolves to root"
     (%load-string (str "(def pre-cfg 7)"
                     " (defmodule nspre) (defn read-it () pre-cfg)"))
-    (is (bound? 'pre-cfg))          ; defined at root, not nspre/pre-cfg
+    (is (bound? 'pre-cfg)) ; defined at root, not nspre/pre-cfg
     (is (not (bound? 'nspre/pre-cfg)))
     (assert= (nspre/read-it) 7))
   (test "a pre-module def the module also calls as a function resolves to root"
@@ -270,8 +270,7 @@
   (test "a bare reference resolves against the module it is inside, not an earlier one"
     ;; `describe` in mm-sq calls its OWN `area`/`perimeter`, never mm-ci's `area`.
     (%load-string (str "(defmodule mm-ci) (defn area (r) (* 3 r r))"
-                    " (defmodule mm-sq) (defn area (s) (* s s))"
-                    " (defn perimeter (s) (* 4 s))"
+                    " (defmodule mm-sq) (defn area (s) (* s s))" " (defn perimeter (s) (* 4 s))"
                     " (defn describe (s) (list (area s) (perimeter s)))"))
     (is (= (mm-ci/area 2) 12))
     (is (= (mm-sq/area 3) 9))
@@ -389,9 +388,8 @@ is what a `:use` would actually import, not what the source looks like."
   (test "reserved-package-name? is true for a baked-in module (flat and group prefixes)"
     (is (reserved-package-name? 'json))
     (is (reserved-package-name? "set"))
-    (is (reserved-package-name? 'net))     ; owns net/tcp, net/http, …
-    (is (reserved-package-name? 'proc)))   ; owns proc/gen, proc/supervisor, …
-
+    (is (reserved-package-name? 'net)) ; owns net/tcp, net/http, …
+    (is (reserved-package-name? 'proc))) ; owns proc/gen, proc/supervisor, …
   (test "reserved-package-name? is false for an ordinary package name"
     (is (not (reserved-package-name? 'myapp)))
     (is (not (reserved-package-name? "greeter"))))
@@ -400,12 +398,14 @@ is what a `:use` would actually import, not what the source looks like."
     ;; Register a rooted module file so `require` reaches the package-load path; the
     ;; reserved-name guard fires BEFORE the file is opened, so a bogus path is fine.
     (%registry-update! '*package-module-files* :assoc ["set/thing"] "/nonexistent/thing.blsp")
-    (let (msg (try (do (require 'set/thing) :no-error)
+    (let (msg (try
+                (do (require 'set/thing) :no-error)
                 (catch e (error-message e))))
       (is (includes? (str msg) "reserved"))))
 
   (test "an ordinary package name passes the reserved-name guard (fails only to find its file)"
     (%registry-update! '*package-module-files* :assoc ["greeter/thing"] "/nonexistent/thing.blsp")
-    (let (msg (try (do (require 'greeter/thing) :no-error)
+    (let (msg (try
+                (do (require 'greeter/thing) :no-error)
                 (catch e (error-message e))))
       (is (not (includes? (str msg) "reserved"))))))
