@@ -133,7 +133,10 @@ over the existing flat table** — the core never grows a namespace axis:
   `defmodule` or EOF, and a bare reference qualifies against the module it is inside
   (the per-region forward-ref pre-scan, `%in-ns` activating each region). Co-located
   modules do not see each other's bare names — they qualify or `:use`. A single-module
-  file is the common case and behaves exactly as before.
+  file is the common case and behaves exactly as before. In a **named** (ADR-070 rooted)
+  project a co-located secondary module is also reachable *across* files by its own name
+  (`(:use secondary)` / `(require 'pkg/secondary)`) — the file→module scan registers every
+  declared module, not just the first (ADR-223 Phase 2 MVP).
 - Inside it, `(defn observe …)` defines the full symbol **`observer/observe`** in
   the one shared global table.
 - A **resolver pass** maps reference-position symbols at expand time:

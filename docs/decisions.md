@@ -14985,10 +14985,14 @@ speculation is guarded.
 
 ## ADR-223 — Multiple modules per file (region model); the unified index deferred to M2
 
-**Status:** **Phase 1 (definition-side) implemented (2026-08-12)** — a file may now declare
-more than one `(defmodule …)`; **Phase 2 (the AOT index, require-by-name across files) is
-deferred** to M2 plugin pressure. Design in [module-index.md](module-index.md). Sits on the
-ADR-070 trajectory (package-rooting), one step further.
+**Status:** **Phase 1 (definition-side) implemented (2026-08-12)** — a file may declare more
+than one `(defmodule …)`. **Phase 2 (MVP): cross-file require-by-name for a co-located module
+implemented (2026-08-13)** for named (ADR-070 rooted) projects. The **persisted AOT index**
+(module↔file decoupling, LSP routing, folding the checks into an index) stays deferred to M2
+plugin pressure. Design in [module-index.md](module-index.md). Sits on the ADR-070 trajectory
+(package-rooting), one step further. The user's request for co-located test modules — which
+need a co-located module reachable across files — is the concrete ADR-011 driver that lifted
+the Phase 2 deferral for the require-by-name slice.
 
 **Phase 1 — multiple modules per file (the region model).** A file is a sequence of
 `defmodule`-*regions*: each `(defmodule M …)` opens a region running to the next `defmodule`
@@ -15006,6 +15010,28 @@ pre-scan fix (devlog 2026-08-12): forms before the first `defmodule` are simply 
 region. The one thing Phase 1 does **not** give: `require`-ing a co-located module by a name
 that is not its file's — that needs the index (Phase 2). Until then a co-located module is
 reachable once its file is loaded, not independently by arbitrary name.
+
+**Phase 2 (MVP) — cross-file require-by-name, without the persisted index.** It turned out the
+addressing index is only needed to reach a co-located module *by an arbitrary name across
+files*, and for the root project that reduces to **one generalization**: the file→module scan
+(`package/package-module-files`, `std/tool/package.blsp`) recorded only each file's *first*
+`(defmodule …)`; it now records **every** declared module. Everything downstream is unchanged
+and already correct — `project-root-project-rooting` registers `pkg/secondary → file` into
+`*package-module-files*`, and `require-force-in`'s existing `*package-module-files*` branch
+loads it through `require-force-package` under the package context. The registration key and
+the lookup key are produced by the *same* ADR-070 rooting rule over the *same* module set
+(`(:use secondary)` expands to `(require (%root-module-name 'secondary))`; `%root-module-name`
+roots iff `secondary` is in the active package's set — which the generalized scan now puts
+there), so they cannot drift. No prelude change, no new `require` branch, no new Rust builtin.
+The change is a **consolidation** — the singular first-`defmodule` reader was deleted and its
+callers now share one all-modules scanner, so there are *fewer* file scanners than before.
+Collision detection was generalized in lockstep (`package-provided-modules`) so two files
+declaring the same module name still reject loudly. **Scoped to named projects** (a nameless
+project skips rooting entirely, and a bare `brood file.blsp` run does no project setup — both
+would need a new bare-key registry *and* a new require branch, deferred as not worth the
+surface). The checker needs no change: `nest check`'s whole-project pre-flight already loads
+every source file. This is the substrate the co-located **test-module** feature builds on (a
+`foo-test` module beside `foo`, stripped in the AOT/bundle step).
 
 **Context.** "Where/what is X" is answered by several ad-hoc half-indexes — the `module foo →
 foo.blsp` filename bijection, `*package-module-files*`, baked `%builtin-module` keys, `*features*`
