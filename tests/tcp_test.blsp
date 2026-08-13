@@ -407,3 +407,90 @@
           (tcp-close ls)
           (assert= (utf8-bytes->string (nth r 0)) "0123456789")
           (assert= (utf8-bytes->string (nth r 1)) "EXTRA"))))))
+
+;; The bound the other two leave open. A peer that drip-feeds — one byte, just inside
+;; the idle timeout, forever — defeats `:timeout-ms` (every chunk re-arms it) and is
+;; only SIZE-bounded by `:max-bytes`, so it can hold a worker for max-bytes × idle.
+;; `:deadline-ms` is a total budget measured once at the call, so a drip that never
+;; completes the frame is cut off on time. Found by hatch, whose HTTP head reader had
+;; hand-rolled exactly this and so could not adopt the combinators without it.
+(defn drip-bytes (sock n gap)
+  "Send `n` single bytes `gap` ms apart — a peer that is always talking and never
+  finishes its frame."
+  (when (> n 0)
+    (tcp-send sock "x")
+    (sleep gap)
+    (drip-bytes sock (- n 1) gap)))
+
+(describe "tcp: framed-read limits — :deadline-ms (total budget)"
+  :isolated
+  (test "a drip that keeps re-arming the idle timeout is still cut off by the deadline"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        ;; 40ms between bytes against a 250ms idle timeout: the idle timer is re-armed
+        ;; every time and can never fire. Only the 300ms total deadline ends this.
+        (spawn (drip-bytes c 100 40))
+        (let (started (now)
+              r (tcp-read-until s "\r\n\r\n" {:timeout-ms 250 :deadline-ms 300})
+              elapsed (- (now) started))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (first r) :timeout)
+          ;; it really was the deadline, not the idle timeout: we stopped near 300ms,
+          ;; well before the drip would have finished (100 × 40ms = 4s)
+          (assert= (< elapsed 1500) true)
+          ;; and bytes really were arriving throughout — the idle timer was being reset
+          (assert= (> (byte-length (nth r 1)) 1) true)))))
+  (test "a frame that arrives inside the deadline is delivered normally"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        (tcp-send c "GET / HTTP/1.1\r\n\r\nBODY")
+        (let (r (tcp-read-until s "\r\n\r\n" {:timeout-ms 2000 :deadline-ms 2000}))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (utf8-bytes->string (nth r 0)) "GET / HTTP/1.1\r\n\r\n")
+          (assert= (utf8-bytes->string (nth r 1)) "BODY")))))
+  (test "an already-expired deadline fires at once rather than waiting"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        ;; :deadline-ms 0 — the budget is gone before the first receive. The wait is
+        ;; floored at 1ms, so this must return immediately, not block on `after 0`.
+        (let (started (now)
+              r (tcp-read-until s "\r\n\r\n" {:deadline-ms 0})
+              elapsed (- (now) started))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (first r) :timeout)
+          (assert= (< elapsed 1000) true)))))
+  (test "tcp-read-n is bounded by the deadline too"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        ;; a declared 100-byte body that drips in and never completes in time
+        (spawn (drip-bytes c 100 40))
+        (let (started (now)
+              r (tcp-read-n s 100 {:timeout-ms 250 :deadline-ms 300})
+              elapsed (- (now) started))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (first r) :timeout)
+          (assert= (< elapsed 1500) true))))))

@@ -811,6 +811,39 @@ mechanism/policy split: kernel primitive, Brood policy.
   reports why the tree fell (`[:error {… :trace}]` end to end), BEAM
   semantics; the sticky-latch guarantee keys on hardness. **[kernel]**
 
+### Findings from hatch (2026-08-13)
+
+One item from hatch's attempt to actually adopt the framed-read combinators, plus one
+already-fixed-but-unreleased startup-image bug the same session's test runs re-surfaced.
+
+- ✅ **`tcp-read-until` / `tcp-read-n` needed a THIRD bound: `:deadline-ms`.**
+  `:timeout-ms`/`:max-bytes` (added 2026-08-07, on hatch's last report) still were not
+  enough to adopt them. `:timeout-ms` is an *idle* wait, reset per chunk — deliberately,
+  and right for a body. But a peer that drip-feeds one byte per (idle − 1)ms re-arms it
+  forever, and `:max-bytes` bounds only the SIZE that drip reaches, never the TIME: a
+  worker can be held for `max-bytes × idle` — hours — inside both bounds. hatch's HTTP
+  head reader had hand-rolled exactly this defense (`(min idle (- deadline (now)))`
+  recomputed per receive, in all four of its read loops), so adopting the combinators
+  would have *regressed* its slow-loris hardening. It is not expressible from the
+  outside: the idle timer resets *inside* the call, and splitting the read across
+  several calls would miss a delimiter straddling the boundary between them (each call
+  scans only its own accumulator). **Fixed:** both combinators take `:deadline-ms`, a
+  total wall-clock budget resolved to an absolute epoch-ms at the call and never reset;
+  the per-chunk wait is now `(min idle remaining)`. It shares the `[:timeout acc]` return
+  with the idle timeout — both mean "did not arrive in time", one 408. Off by default.
+  Tests: `tests/tcp_test.blsp` › *framed-read limits — :deadline-ms*, including a real
+  dripper that defeats a 250ms idle timeout and is cut off at 301ms by a 300ms deadline.
+- ✅ **A `defdyn` global loses its dynamic-variable registration when restored from the
+  ADR-218 startup image** — already **fixed in `83151776`** (2026-08-11, image format v5:
+  the dynamic-var names are recorded in the image and re-marked on open). Re-derived
+  independently from the hatch side on 2026-08-13 and noted here only because the fix is
+  **unreleased** — the last tag is v0.3.9 (2026-08-08), which predates it, so anyone on an
+  installed 0.3.9 toolchain still hits it. Symptom, for searchability: `nest test` on a
+  pristine hatch checkout is green twice, then fails 38 `web/bml` tests on every run after,
+  with `binding: *bml-source* is not a dynamic variable (declare it with defdyn)` (E0099).
+  Workaround until the next release reaches a machine: `rm -f .brood/image.bin`. **Cutting
+  a release is the whole remaining action** — nothing to fix.
+
 ### Findings from hatch (2026-07-11)
 
 Three runtime/language items surfaced while eliminating a whole *class* of O(n²)
