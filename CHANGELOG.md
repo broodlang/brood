@@ -4,6 +4,61 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.3.10 — 2026-08-13
+
+**Namespaces: more than one module per file (ADR-223).** A file is now a sequence of
+regions, each opened by a `defmodule`, so a small helper module no longer needs its own
+file. A co-located secondary module is reachable by name via `require`, including from a
+nameless project or a bare `brood run` of a single file.
+
+**Co-located tests (ADR-225).** `describe`/`test` forms can live beside the code they
+cover; they are discovered by form and stripped when the project ships, so a library
+carries its tests in-tree without carrying them to its consumers.
+
+**Execution is a tier ladder, not a choice of engine (ADR-222/ADR-224).** Evaluation
+climbs tiers up to a configurable ceiling rather than picking one engine, `enum Engine`
+and a `JitBackend` contract replace the ad-hoc seams, and a compiled match arm is reached
+through a process-local handle instead of being re-resolved. Plus two `fold` wins —
+folding a vector in a native counted loop, and testing vector first in the dispatch —
+worth −19% and −4.6% CPU respectively on the spawn-live benchmark.
+
+**`:deadline-ms` on the framed reads.** `tcp-read-until` / `tcp-read-n` take a third,
+optional bound: a **total** wall-clock budget for the frame, resolved once at the call and
+never reset, joining the idle `:timeout-ms` and the size cap `:max-bytes`. It closes the
+gap the other two leave open — a peer drip-feeding one byte per (idle − 1)ms re-arms the
+idle timeout forever, and `:max-bytes` bounds only the size that drip reaches, never the
+time, so a worker can be held for `max-bytes × idle`. Reported by
+[hatch](https://github.com/broodlang/hatch), whose HTTP head reader had hand-rolled
+exactly this defense in all four of its read loops and so could not adopt the combinators
+without it. The per-chunk wait becomes `(min idle remaining)`; an expired deadline returns
+the existing `[:timeout acc]`, since "did not arrive in time" is one 408 either way. Off
+by default, like the other two.
+
+**Packaging.** `:kind` classifies a package as an app or a library; `installed-enhancers`
+discovers `:enhances` packages at runtime, with a runtime install API behind it; a package
+may no longer be named after a standard-library module; and the lock file sorts
+deterministically instead of churning.
+
+Fixes worth calling out:
+
+- **`defdyn` marks survive an imaged start** (image format v5). An imaged start restored a
+  `defdyn` global's value but skipped the module load that ran the `defdyn`, so the
+  dynamic-var mark was missing and `binding` on it raised *"not a dynamic variable"*. The
+  dynamic-var names are now recorded in the image and re-marked on open. Surfaced by the
+  hatch suite (which images `*bml-source*`) going red on *repeat* imaged runs — a cold pass,
+  then 38 failures — which is a failure mode CI starting from a clean checkout never sees.
+  MAGIC bumped v4 → v5 so a v5 reader rejects a v4 image rather than misreading its footer.
+- **No SIGABRT on a broken pipe** in `nest check` / `brood` output (`… | head` no longer
+  aborts).
+- **Forward-ref names are scanned from the first `defmodule`**, not the whole file — the
+  region model's companion fix.
+- **A docsite code example indented in a docstring renders as a `<pre>`**, not a run-on
+  paragraph.
+- Editor: **partial read-only spans** (ADR-219), with a namespace-aware `defonce` and the
+  imaged-registry fix underneath it.
+
+Also: `reduce-while`, the early-terminating fold, joins the prelude.
+
 ## v0.3.9 — 2026-08-08
 
 New compression capabilities, both surfaced by [hatch](https://github.com/broodlang/hatch)
