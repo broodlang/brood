@@ -155,17 +155,19 @@ test-both: ## Run the whole suite through BOTH engines (tree-walker + VM) — th
 	@echo ">>> suite under the tree-walker (BROOD_VM=0 escape hatch)"
 	BROOD_VM=0 cargo nextest run --no-fail-fast
 
-# One breakage file is known-red for a reason that is NOT about the JIT/VM/memory it exists
-# to stress, and that needs a product decision rather than a mechanical fix (KI-42). It is
-# named here rather than deleted or silently tolerated, so the skip is visible on every run
-# and the other 22 files can actually gate. Clear this variable to see it fail.
-#   chaos_map_volcano — its 1M-entry map build needs more than 2 GiB and completes at 4 GiB,
-#     against the ~1 GiB default test ceiling. Raising the ceiling for one file is a policy
-#     call (CI runners), and shrinking the workload changes what "volcano" means. Worse, at
-#     exactly 2 GiB it does not raise the clean limit error — the ALLOCATOR aborts
-#     ("memory allocation of 981893 bytes failed"), which is a robustness question about
-#     limit enforcement rather than a test bug, and is why this is not just a number to bump.
-BREAKAGE_SKIP := breakage/chaos_map_volcano.blsp
+# Nothing is skipped: all 23 breakage files gate. Kept as a mechanism for the next file that
+# needs it — name a file here and the runner prints the skip on every run rather than hiding it.
+BREAKAGE_SKIP :=
+
+# Per-file memory allowance. The runners default a ~1 GiB soft ceiling (ADR-043) so an
+# adversarial test cannot take the machine down, but `chaos_map_volcano` legitimately needs
+# more: its 1M-entry map peaks at ~3.0 GB RSS and finishes in ~13 s. Note the ordering rule
+# from `core/alloc.rs` — the soft limit must sit BELOW the hard one, because soft is checked
+# at an eval safepoint and raises a clean catchable error, while hard is enforced inside
+# `alloc` and returns null, so Rust's OOM handler aborts the process. Setting them EQUAL
+# leaves the safepoint no headroom and turns a graceful failure into an abort; that is the
+# documented backstop working, not a bug (it briefly looked like one on 2026-08-13).
+BREAKAGE_ENV_map_volcano := BROOD_MEM_SOFT_LIMIT=4000000000 BROOD_MEM_LIMIT=6000000000
 
 breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwire armed) — try to break the JIT/VM/memory. NOT part of `make test`.
 	# These are deliberately abusive tests that live OUTSIDE tests/ (so neither
@@ -194,7 +196,12 @@ breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwi
 			continue ;; \
 		esac; \
 		echo ""; echo "===== $$f ====="; \
-		$$bin --test "$$f"; \
+		case "$$f" in \
+			breakage/chaos_map_volcano.blsp) pre="$(BREAKAGE_ENV_map_volcano)" ;; \
+			*) pre="" ;; \
+		esac; \
+		if [ -n "$$pre" ]; then echo ">>> (with $$pre)"; fi; \
+		env $$pre $$bin --test "$$f"; \
 		rc=$$?; \
 		if [ $$rc -ne 0 ]; then \
 			fail=1; \
