@@ -3005,6 +3005,19 @@ mailbox messages stay queued while waiting (selective receive)."
   "`coll` with its leading items for which `(pred x)` holds removed."
   (if (and (pair? coll) (pred (first coll))) (drop-while pred (rest coll)) coll))
 
+(defn reduce-while (f init coll)
+  "Left-fold `coll` with `f`, but let the reducer stop early: `(f acc x)` returns `[:cont acc']` to keep going or `[:halt acc']` to stop now. Returns the last accumulator either way. Like `fold`/`reduce`, except the step decides when to quit — the early-terminating fold (≈ `Enum.reduce_while`). Tail-recursive, so it is stack-safe."
+  (reduce-while-loop f init (seq coll)))
+(defn- reduce-while-loop
+  (f acc coll)
+  (if (empty? coll)
+    acc
+    (match (f acc (first coll))
+      ([:halt v] v)
+      ([:cont v] (reduce-while-loop f v (rest coll)))
+      (other (error "reduce-while: reducer must return [:cont acc] or [:halt acc], got: "
+               (pr-str other))))))
+
 ;; (any? pred coll) -> true if pred holds for any element; (every? pred coll) ->
 ;; true if it holds for all (vacuously true on the empty list). Booleans, by the
 ;; `?` convention — use `find` to recover the matching element itself.

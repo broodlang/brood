@@ -78,3 +78,34 @@
     (assert= 3 (max-by identity '(3 1 2))))
   (test "by negative"
     (assert= 1 (max-by (fn (n) (- n)) '(3 1 5 2)))))
+
+(describe "reduce-while"
+  (test "halts early when the reducer returns :halt"
+    (assert= 105 (reduce-while (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)])) 0 (range 1000))))
+  (test "all :cont behaves like fold"
+    (assert= 15 (reduce-while (fn (a x) [:cont (+ a x)]) 0 [1 2 3 4 5])))
+  (test "halts on the first element"
+    (assert= :seed (reduce-while (fn (a x) [:halt a]) :seed [1 2 3])))
+  (test "empty collection yields the init unchanged"
+    (assert= :init (reduce-while (fn (a x) [:cont x]) :init [])))
+  (test "finds the first element over a threshold"
+    (assert= 4 (reduce-while (fn (a x) (if (> x 3) [:halt x] [:cont a])) nil [1 2 3 4 5])))
+  (test "folds a map's [k v] pairs"
+    (assert= 6 (reduce-while (fn (a [k v]) [:cont (+ a v)]) 0 {:a 1 :b 2 :c 3})))
+  (test "errors on a return that is neither [:cont acc] nor [:halt acc]"
+    (is (try (do (reduce-while (fn (a x) 42) 0 [1]) false) (catch _ true))))
+  (test "across processes: the reduced value round-trips through send"
+    :isolated
+    (let (me (self)
+          n 6
+          expected (reduce-while (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)])) 0 (range 1000)))
+      (map (fn (_)
+             (spawn (fn ()
+                      (send me
+                        (reduce-while (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)]))
+                          0
+                          (range 1000))))))
+        (range n))
+      (let (results (fold (fn (acc _) (cons (receive) acc)) nil (range n)))
+        (assert= n (count results))
+        (is (every? (fn (r) (= r expected)) results))))))

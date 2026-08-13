@@ -18383,3 +18383,15 @@ on main pushes. Worth remembering how it was first mis-scoped: reading the suite
 **37/37** (matching `afe4bcff`), tsan and loom green, both compaction guards, the fuzz
 differential, `--no-default-features`, clippy, rustfmt, `perf_test.blsp` 16/16, and the lowering
 witness byte-identical at 94 fingerprints.
+
+## 2026-08-13 — `reduce-while`: the early-terminating fold (roadmap: Elixir-loved ergonomics)
+
+Added `reduce-while` — `(reduce-while f init coll)` where `(f acc x)` returns `[:cont acc']` to
+continue or `[:halt acc']` to stop, returning the last accumulator (≈ `Enum.reduce_while`). A
+pure prelude fn (`std/prelude.blsp`, next to `take-while`/`drop-while`) over `seq` + a
+tail-recursive `reduce-while-loop` accumulator and a `match` on the reducer's `[:cont|:halt v]`
+result; a return that is neither raises. No new special form, no kernel change — the dogfood
+cadence (a combinator we lacked, written in the language). Tests in
+`tests/prelude_enum_test.blsp` (8 cases incl. halt/all-cont-is-fold/empty/map-pairs/find-first/
+bad-return, plus an `:isolated` cross-process case proving the reduced value round-trips through
+`send`). `docs/language.md` + `ROADMAP.md` updated.
