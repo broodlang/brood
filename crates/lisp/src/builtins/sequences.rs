@@ -905,6 +905,17 @@ pub(super) fn registry_update(args: &[Value], env: EnvId, heap: &mut Heap) -> Li
     )))
 }
 
+/// `(%registry-member? name key)` — is registry global `name` a map containing `key`, read
+/// from the shared globals table bypassing the per-process inline cache (ADR-225)? For a
+/// load-once guard that must not miss a racing `provide`; see [`Heap::registry_member`].
+pub(super) fn registry_member(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let sym = match arg(args, 0) {
+        Value::Sym(s) => s,
+        v => return Err(LispError::wrong_type(heap, "%registry-member?", "symbol", v)),
+    };
+    Ok(Value::boolean(heap.registry_member(sym, arg(args, 1))))
+}
+
 /// `(%registry-cas! name old new)` — compare-and-swap a registry global (KI-23). Rebinds
 /// `name` to `new` and returns true only if its current value still equals `old`; returns
 /// false otherwise, leaving it untouched, so the caller can recompute and retry.

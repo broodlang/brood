@@ -442,6 +442,75 @@
         (project/project-load-sources root)
         (assert= skipfix/*skip-load-count* 2)))))
 
+;; ── Co-located tests (ADR-225) ──────────────────────────────────────────────
+;; A `deftest`/`describe` may live beside the code it exercises — inline in a
+;; production module, or in a co-located `-test` module, in ANY file. `nest test`
+;; discovers them by their FORMS (not a `_test.blsp` filename under `tests/`); the
+;; release bundle strips them so tests never ship. These pin detection, discovery,
+;; stripping, and the empty-describe warning.
+;; `:isolated` — these call `project-setup`/`bundle-collect`, which rebind SHARED
+;; project globals (`*package-module-files*`, `*project-source-paths*`, rooting). A
+;; private copy of the globals per test keeps that mutation from racing other project
+;; tests (notably the ADR-223 concurrent-require case) under the parallel runner.
+(describe "project: co-located tests (ADR-225)"
+  :isolated
+  (test "project-file-has-tests? is true iff a file carries deftest/describe"
+    (let (dir (temp-dir "brood-coloc-"))
+      (make-dir dir)
+      (let (with-tests (path-join dir "with.blsp")
+            no-tests (path-join dir "plain.blsp"))
+        (spit with-tests "(defmodule w (:use test))\n(defn g () 1)\n(deftest gt (assert= 1 (g)))\n")
+        (spit no-tests "(defmodule p)\n(defn h () 2)\n")
+        (is (project/project-file-has-tests? with-tests))
+        (is (not (project/project-file-has-tests? no-tests))))))
+  (test "project-colocated-test-files returns only source files carrying tests"
+    (let (root (temp-dir "brood-coloc-"))
+      (make-dir root)
+      (make-dir (path-join root "src"))
+      (let (src (path-join root "src"))
+        (spit (path-join root "project.blsp") "(project coloc)\n")
+        (spit (path-join src "lib.blsp")
+          "(defmodule lib (:use test))\n(defn g () 1)\n(deftest gt (assert= 1 (g)))\n")
+        (spit (path-join src "plain.blsp") "(defmodule plain)\n(defn h () 2)\n")
+        (project/project-setup root)
+        (let (files (project/project-colocated-test-files root))
+          (is (any? (fn (f) (includes? f "lib.blsp")) files))
+          (is (not (any? (fn (f) (includes? f "plain.blsp")) files)))))))
+  (test "strip-test-forms drops deftest/describe, keeps production defs"
+    (let (source (str "(defmodule m (:use test))\n"
+                   "(defn keep-me (x) x)\n" "(describe \"grp\" (test \"t\" (assert= 1 1)))\n"
+                   "(deftest solo (is true))\n" "(defn keep-too () 2)\n")
+          out (project/strip-test-forms source))
+      (is (includes? out "keep-me"))
+      (is (includes? out "keep-too"))
+      (is (not (includes? out "describe")))
+      (is (not (includes? out "deftest")))
+      (is (not (includes? out "assert=")))))
+  (test "bundle-collect strips co-located tests from the shipped source"
+    (let (root (temp-dir "brood-coloc-"))
+      (make-dir root)
+      (make-dir (path-join root "src"))
+      (let (src (path-join root "src"))
+        (spit (path-join root "project.blsp") "(project coloc)\n")
+        (spit (path-join src "lib.blsp")
+          (str "(defmodule lib (:use test))\n"
+            "(defn shipped () 1)\n" "(describe \"lib\" (test \"t\" (assert= 1 (shipped))))\n"))
+        (let (bundle (project/bundle-collect root))
+          (is (any? (fn (s) (and (string? s) (includes? s "defn shipped"))) bundle))
+          (is (not (any? (fn (s) (and (string? s) (includes? s "describe"))) bundle)))))))
+  (test "an empty describe warns; a describe with a test does not"
+    (is (includes? (with-err-str (describe "empty group")) "has no tests"))
+    (is (not (includes? (with-err-str (describe "full group" (test "t" (is true))))
+               "has no tests")))))
+
+;; NB: the concurrent-require *double-load* race this session fixed (ADR-225 — the kernel
+;; `registry_update` inline-cache read, `heap.rs`) is guarded by a dedicated STRESS repro,
+;; `breakage/chaos_concurrent_require_double_load.blsp` (run by `make breakagetests`, not
+;; here). It needs the near-simultaneous claim burst a mostly-idle worker pool gives; under
+;; the ~110-test shared suite the pool stays busy and the window never opens, so an in-suite
+;; version would pass even against the bug. The existing ADR-223 Phase 2 `describe` below
+;; still exercises the concurrent-secondary-require PATH in-suite (a gross-regression guard).
+
 ;; A malformed manifest used to be either cryptic or SILENT. `:source-paths "src"`
 ;; (an easy mistake, since one path is the common case) surfaced as
 ;; a bare `type error: first: …` raised from inside `map`, with
