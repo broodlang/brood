@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-42 | the `breakage/` suite had rotted to **9 of 23 files failing** and nobody knew, because it is outside `make test` and had no CI job — a pin-syntax change (`~ref`→`^ref`), a renamed `string-contains?`, an assertion predating exact rationals, and a TCP file whose every phase was dead | ✅ **8 fixed + CI job added 2026-08-13**; 1 remains skipped by name (`BREAKAGE_SKIP`) — see the allocator-abort question |
 | KI-41 | concurrent `require` of the same feature could **double-load** its file: a claimant whose `(contains? *features* key)` guard read the per-process global inline cache **missed** a racing loader's just-committed `provide` (the cache is version-gated on a `Relaxed` counter, no happens-before), won the released load-once claim, and reloaded the module. Surfaced as the ADR-225 co-located-secondary `nest test` flake (~1/77); reproduced on demand at 20 files × 40 requires | ✅ **fixed** 2026-08-13 — `require-one` re-checks `*features*` with a new cache-bypassing `%registry-member?` (reads the shared globals table directly) before loading; guard `breakage/chaos_concurrent_require_double_load.blsp` |
 | KI-40 | concurrent green processes running the **same** shared compiled arm on the VM contended on that arm's single `Arc<CompiledArm>` refcount — one cache line, N cores — costing **3.2×** wall on a 100-way fan-out and leaving the cores stalled at 769% instead of 1150% | ✅ **fixed 2026-08-13** (ADR-224 — a process-local `ArmHandle` interposed on the call path; `pfib` 54.4 s → 17.1 s) |
 | KI-39 | the CI `differential (tree-walker)` job failed intermittently (3 of 11 runs) with nextest exit 100; **0/15** in the faithful local shape, cold-boot-herd hypothesis measured dead, and whether it is still present is genuinely unknown (4 green runs is 28% likely either way) | ⚠️ **watching** — local avenue closed; failing cases now self-report as CI annotations (2026-08-13) |
@@ -70,6 +71,69 @@ walked straight through the helpers' 20 s / 30 s deadlines. Warming the cache on
 fan-out takes the three tests from a 20.1 s failure to 1.9–2.6 s. No bug in the *language or
 runtime* was implied at any point — every sighting was a boot wait, never an assertion about
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
+
+---
+
+## KI-42 — the breakage suite had rotted: 9 of 23 files red, unnoticed for months
+
+**Status:** ✅ 8 fixed 2026-08-13, and a CI job added so it cannot rot silently again. One
+file remains **skipped by name** in `BREAKAGE_SKIP` (Makefile) — visibly, printed on every run
+— because what to do about it is a policy question, and because it exposes a separate
+robustness question (below) rather than a test bug.
+
+**What.** `make breakagetests` is deliberately outside `make test` (slow, abusive by design).
+The consequence nobody had priced in is that **nothing ever ran it**, so it rotted. Found while
+gating ADR-224; all nine failures reproduce identically on the pre-change baseline, so none of
+them were the change under test. The causes were mundane and all in the *tests*, not the
+runtime — which is the point: an ungated test suite decays into noise, and then a real finding
+in it cannot be distinguished from the noise.
+
+| cause | files | fix |
+|---|---|---|
+| the pin pattern moved from `~ref` to `^ref`; these predate it | `chaos2_process_{crash_propagation,genserver,links,ring}`, `chaos_pattern_hell` | mechanical (9 pins), leaving quasiquote `~`/`~@` alone |
+| `string-contains?` was renamed | `chaos_string_cancer` | → `includes?` (strings = substring) |
+| `(assert= 4.8 (/ 24 5))` predates exact rationals | `jit_breakage_test` | → `(assert= 24/5 …)`; brood's `=` is exactness-sensitive, so this had failed on **every** build since |
+
+**`chaos2_tcp_stress` — every phase was dead, and it is now fixed.** The file's own header
+states the model: `tcp-listen` delivers `[:tcp-accept …]` to *the calling process's* mailbox. It
+then created the listener in the parent and accepted inside a spawned server in **all** of
+P36–P40, so every accept went to the wrong mailbox and timed out — `P36 ok=0 bad=50`, P37–P40
+all `:timeout`, with the timeout keyword then reaching `tcp-controlling-process` and surfacing
+as a type error that hid the cause. (An earlier draft of this entry described it as two
+unguarded call sites; it was the whole file.) Each server now opens its own listener and hands
+the port back to the parent, which waits for it before connecting. P36–P42 all pass.
+
+That fix also exposed a second stale assumption in **P38**, the phase that claims to round-trip
+raw bytes `0x00`–`0xFF`: it built a *string* of codepoints 0–255 and sent that, but a string
+goes over the wire **UTF-8-encoded**, so 256 "bytes" arrived as 384 (visible as `\xc2\x80…`).
+It now sends `(apply bytes (range 256))` and compares as bytes — which is what the phase always
+claimed to be testing.
+
+**The one still skipped, and the question it raises:**
+
+- **`chaos_map_volcano`** — its 1 000 000-entry map build needs **more than 2 GiB** and
+  completes at **4 GiB**, against the ~1 GiB default test ceiling. Raising the ceiling for one
+  file is a policy call (CI runners), and shrinking the workload changes what "volcano" means.
+  The reason it is not simply a number to bump: at exactly 2 GiB it does **not** raise the clean
+  catchable limit error — the **allocator aborts** (`memory allocation of 981893 bytes failed`,
+  with the backtrace suppressed to avoid recursion). A hard abort where a limit error is
+  expected is a robustness question about limit enforcement under fragmentation, not a test bug,
+  and it deserves its own look before the ceiling is touched.
+
+**Why it could rot at all, and what now stops it.** Three things hid it, and each is worth
+knowing separately:
+
+1. **No runner.** Now a `breakage` job in `.github/workflows/ci.yml`, guarded to main pushes
+   and `workflow_dispatch` exactly like the tree-walker differential, with failing files
+   emitted as annotations and the log uploaded as an artifact.
+2. **Truncated output.** The suite prints one `===== file =====` block per file and the
+   failures scroll; reading it through `tail` shows the *last* failure and reads as "one
+   failure". That is how this was first mis-scoped as a single broken assertion.
+3. **A file that dies still says little.** Most breakage files register no `deftest` at all —
+   their chaos runs at load and the exit code is the whole signal — so `--test` prints
+   `0 tests, 0 passed` whether the file did its job or died on line 3. The exit code is
+   correct and is what the runner checks; just do not read the per-file test counts as
+   coverage.
 
 ---
 

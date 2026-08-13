@@ -18312,3 +18312,74 @@ output byte-for-byte unchanged; `make test` green (980/980).
 **Deliberately not** a global SIGPIPE→`SIG_DFL` reset (the other common CLI fix): std's dist/net
 sockets rely on `SIG_IGN`+`EPIPE` to survive a peer disconnecting mid-write, so a global reset
 could kill a running node.
+
+## 2026-08-13 — the VM's call path was contending on one cache line (ADR-224), and the gates that should have caught it
+
+Started as "look at the VM vs JIT slowdown" and became three things: a real contention fix, an
+audit of the measurement tooling that had hidden it, and the discovery that the breakage suite
+had been red for months.
+
+**The fix (ADR-224, KI-40).** `pfib` (100 × `fib(32)`) at ceiling 1 ran **54.4 s with the cores
+stalled at 769%** — not saturated, stalled. Twelve independent OS processes running the same
+work inflate only 2.5× (SMT + all-core clock), so that was the floor and the rest was
+contention. A 2×2 isolated it: same-arm × sharing-on was the *only* slow cell (3881 ms/task
+against 1925/1992/2046 for the other three), so the cost needed both a shared arm object and
+several threads touching it. `BROOD_GC_FLOOR=2000000` made it *worse*, ruling out GC frequency.
+
+The mechanism is ADR-175 Phase B meeting the VM's call path: a shared arm lives in one
+allocation, and the path clones that `Arc` **three times per call** (the IC probe, the
+`BcFrame`, and `live_arm_push` for a handle-bearing arm), so N workers RMW one refcount cache
+line per call. `vm_call_ic_fast_link` already documents this exact cost — *"the one real
+atomic-RMW the hot recursive call (`fib` &c.) otherwise pays per call (~30M times)"* — and
+already avoids it, but it is `#[cfg(feature = "jit")]` and serves native-to-native links only.
+That is precisely why tier 2 is immune and the VM is not.
+
+`ArmHandle` is a process-local `Arc` owning the shared one, created once per (process, call
+site) at IC-fill. **54.4 s → 17.1 s (3.19×)**, at parity with `BROOD_NO_SHARED_ARMS` — the
+contention is gone, not reduced. The immortality route (`Owned | Immortal` across ~42 sites)
+was rejected: sound for a sealed PRELUDE arm, *not* for a RUNTIME one that
+`shared_closures_clear` invalidates. The handle needs no such argument — it holds the shared
+`Arc` at least as long as a direct clone would, so liveness is strictly stronger and no GC
+invariant moves. Cost: `spawn-live` **+1.8%**, reproduced twice at best-of-21, which is real and
+mechanistic (per-process work is exactly what ADR-175 exists to avoid) and recorded rather than
+rounded away — it is under `ab-bench`'s 5% gate.
+
+**Why no existing gate would have caught it.** The VM's answer is correct either way, so `make
+test`, `make test-both`, the JIT differential and the lowering witness all stay green and *only
+a benchmark moves* — the ADR-221 blind spot again. And the benchmark wouldn't have either:
+`make ab` measures the **default ceiling**, where a hot arm is native and the interpreter's call
+path never executes, so it reported the 3.19× regression as **+1.3%**. Hence
+`arm_handle_clone_does_not_touch_the_shared_arm_refcount` (asserts on the shared refcount,
+sabotage-verified at 1002 against 2) and **`make ab-vm`** (ceiling 1).
+
+**The tooling audit.** Four traps, each of which produced a *plausible* table rather than an
+obviously broken one, now written into `docs/benchmarking.md` §1:
+
+- `timeout(1)` rounds wall up to a **100 ms grid** (78 ms → 104, 103 → 204), so every
+  sub-second row reads as a multiple of 100 and every delta as `+0.0%`. `ab-bench.sh` already
+  knew this in a comment; nothing else did, and a hand-rolled sweep re-learned it.
+- The installed `brood` predated ADR-222, so `BROOD_TIER` was a **silent no-op** and the first
+  sweep read `1.0×` on all 23 rows — which reads as a finding about the tiers rather than a
+  mistake about the binary. `--version` now prints the build sha (`cli_support::VERSION_LINE`)
+  and **`make doctor`** diffs it against HEAD, along with strays, boot-cache state and litter.
+- `jit-lower-witness.sh` defaulted `BROOD` to `target/release/brood` while `make release-brood`
+  writes `target/release-fast/` — measuring a stale binary reproduces the baseline set, so the
+  diff comes back **empty** and the restructuring looks proven. Fixed, plus a staleness warning.
+- `ab-bench.sh`'s `parallel_rows` omitted **`spawn-live`** and `supervisor`, so the two rows
+  whose whole point is holding 300 000 / 20 000 live processes were being A/B'd pinned to one
+  CPU. Added; `--tier` added alongside.
+
+**KI-42 — the breakage suite had rotted to 9 of 23 files red**, all pre-existing (verified
+against a baseline build), none about the JIT/VM/memory it exists to stress: a pin-syntax change
+(`~ref` → `^ref`, 9 sites), a renamed `string-contains?`, and `(assert= 4.8 (/ 24 5))` predating
+exact rationals — that last one had failed on every build since 2026-06-10. Seven fixed; two
+skipped by name in `BREAKAGE_SKIP` because their fixes change what the tests measure. It rotted
+because it is outside `make test` and had **no runner at all**; there is now a `breakage` CI job
+on main pushes. Worth remembering how it was first mis-scoped: reading the suite output through
+`tail` shows the *last* failure and reads convincingly as "one broken assertion".
+
+**Gates:** `make test` 981/981, `make test-both` 980+980, jit 40/40 (and 40/40 under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`), the GC_STRESS sweep over the seven concurrency binaries
+**37/37** (matching `afe4bcff`), tsan and loom green, both compaction guards, the fuzz
+differential, `--no-default-features`, clippy, rustfmt, `perf_test.blsp` 16/16, and the lowering
+witness byte-identical at 94 fingerprints.

@@ -18,8 +18,10 @@
 #   scripts/ab-bench.sh --list                 # show available rows
 #   scripts/ab-bench.sh --floor fib nbody      # + each row's own noise floor + a verdict
 #   scripts/ab-bench.sh --json /tmp/ab.json    # + machine-readable rows
+#   scripts/ab-bench.sh --tier 1 pfib          # measure on the VM (see `ab_tier` below)
 #
-# Env: BROOD_BENCH_DIR (default ../brood-benchmarks), AB_PIN_CPU (default 2).
+# Env: BROOD_BENCH_DIR (default ../brood-benchmarks), AB_PIN_CPU (default 2),
+#      AB_TIER (default: the binary's own default ceiling).
 #
 # ---------------------------------------------------------------------------
 # The five footguns this encodes, each of which has cost a real session:
@@ -68,6 +70,12 @@ cd "$root"
 
 bench_dir="${BROOD_BENCH_DIR:-$root/../brood-benchmarks}"
 pin_cpu="${AB_PIN_CPU:-2}"
+# Execution-tier ceiling to measure at (ADR-222), or empty for the default. `--tier 1` is
+# how a VM-path regression becomes visible: at the default ceiling a hot arm lowers to
+# native and simply does not execute the interpreter, so a cost on the VM's call path reads
+# as flat here while being a 3x on any workload whose arms don't lower (KI-40 read +1.3% at
+# the default ceiling against 3.19x at ceiling 1).
+ab_tier="${AB_TIER:-}"
 base_ref="HEAD"
 reps=7
 prebuilt_base=""
@@ -76,7 +84,14 @@ rows=()
 
 # Rows that are supposed to use every core (the scheduler/process benchmarks);
 # everything else is pinned to one CPU so a co-scheduled thread can't skew it.
-parallel_rows=" pfib spawn pipeline ring pingpong "
+#
+# `spawn-live` and `supervisor` were MISSING here until 2026-08-13, so the two rows whose
+# whole point is holding 300 000 / 20 000 live processes were being A/B'd on a single CPU —
+# the scheduler behaviour they exist to measure cannot appear on one core, and a change that
+# only shows up across cores read as flat. Found while measuring KI-40, whose entire class
+# (per-call contention between worker threads) is invisible pinned. If you add a row that
+# spawns, add it here too.
+parallel_rows=" pfib spawn spawn-live supervisor pipeline ring pingpong "
 
 # Rows this script CANNOT run: they need scaffolding the benchmark harness provides and
 # this one deliberately does not. `http` needs a local server (`bench/harness.py` starts
@@ -96,6 +111,7 @@ while [ $# -gt 0 ]; do
     --allow-same) allow_same=1; shift ;;
     --json)       json_out="${2:?--json needs a path}"; shift 2 ;;
     --floor)      measure_floor=1; shift ;;
+    --tier)       ab_tier="$2"; shift 2 ;;
     --all)        rows=(ALL); shift ;;
     --list)       ls "$bench_dir/bench/brood/" | sed 's/\.blsp$//' | tr '\n' ' '; echo; exit 0 ;;
     -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
@@ -198,7 +214,7 @@ best_of() { # $1 binary  $2 program  $3 cpu spec -> best wall ms
     # 205 ms (measured 2026-07-28), so putting it inside the timed region silently
     # destroys fidelity — every row read the same value and every delta read +0.0%.
     # The hang guard lives on the warmup below, outside the measurement.
-    taskset -c "$3" "$1" "$2" >/dev/null 2>&1 || true
+    env ${ab_tier:+BROOD_TIER=$ab_tier} taskset -c "$3" "$1" "$2" >/dev/null 2>&1 || true
     t1=$(date +%s%N)
     ms=$(( (t1 - t0) / 1000000 ))
     [ "$ms" -lt "$best" ] && best=$ms
@@ -206,8 +222,8 @@ best_of() { # $1 binary  $2 program  $3 cpu spec -> best wall ms
   echo "$best"
 }
 
-printf 'ab-bench: base=%s  new=working tree  reps=best-of-%s  pin=cpu%s\n\n' \
-  "$base_desc" "$reps" "$pin_cpu" >&2
+printf 'ab-bench: base=%s  new=working tree  reps=best-of-%s  pin=cpu%s (concurrency rows: all cores)  tier=%s\n\n' \
+  "$base_desc" "$reps" "$pin_cpu" "${ab_tier:-default}" >&2
 if [ "$measure_floor" -eq 1 ]; then
   printf '%-16s %9s %9s %9s %9s %-10s\n' row base new delta floor verdict
   printf '%-16s %9s %9s %9s %9s %-10s\n' ---------------- --------- --------- --------- --------- ----------
@@ -224,9 +240,9 @@ for r in "${rows[@]}"; do
   # Footgun 4: discard one run per binary so the build-id-keyed boot cache is warm.
   # The warmup doubles as the hang guard: it is untimed, so `timeout` here costs
   # nothing, and a row that blocks forever fails loudly instead of pinning a core.
-  timeout "$timeout_s" taskset -c "$cpus" "$base_bin" "$prog" >/dev/null 2>&1 \
+  timeout "$timeout_s" env ${ab_tier:+BROOD_TIER=$ab_tier} taskset -c "$cpus" "$base_bin" "$prog" >/dev/null 2>&1 \
     || die "row '$r' did not finish within ${timeout_s}s on the baseline — needs harness scaffolding?"
-  timeout "$timeout_s" taskset -c "$cpus" "$new_bin"  "$prog" >/dev/null 2>&1 \
+  timeout "$timeout_s" env ${ab_tier:+BROOD_TIER=$ab_tier} taskset -c "$cpus" "$new_bin"  "$prog" >/dev/null 2>&1 \
     || die "row '$r' did not finish within ${timeout_s}s on the working tree" 
   b=$(best_of "$base_bin" "$prog" "$cpus")
   # The floor pass runs the SAME binary again, between the two sides, so it samples the

@@ -84,6 +84,43 @@ genuine before/after, which on this machine means **interleaving**: run baseline
 and candidate binaries in alternation (not back-to-back blocks) so they share the
 load window, many samples each.
 
+### Measuring a whole row by hand — the four ways it silently lies
+
+`scripts/ab-bench.sh` encodes these; a hand-rolled loop re-learns them the hard way, so
+they are written down here rather than only in that script's comments. All four were hit in
+one session (2026-08-13, the KI-40 hunt), and each produced a *plausible* table rather than
+an obviously broken one — which is what makes them expensive.
+
+1. **Never put `timeout(1)` inside the timed region.** GNU `timeout` rounds a run up to a
+   ~100 ms grid: a 78 ms row reads 104 ms, a 103 ms row reads 204 ms. Every sub-second row
+   then reads as a multiple of 100 ms and every delta reads `+0.0%` or a clean integer
+   ratio. Put the hang guard on an *untimed* warmup run instead. (The benchmark harness uses
+   Python's `subprocess(timeout=)`, which does not do this, so published numbers are safe.)
+2. **Subtract boot, or a fast row is all boot.** A warm `brood` boot is ~16 ms against a
+   ~1.2 s cold one (`BROOD_BOOT_TRACE=1` to see the split, KI-38 for why it swings). Measure
+   an empty program and subtract it, and discard one run per binary first so the
+   build-id-keyed prelude cache is warm — the cache key includes the executable's mtime, so
+   **every rebuild colds it**.
+3. **Check you are running the binary you think you are.** `make release-brood` writes to
+   `target/release-fast/`, `cargo build --release` to `target/release/`, and `make install`
+   to `$PREFIX/bin` — three paths, and a stale one fails silently by agreeing with the
+   baseline. `brood --version` prints the build sha for exactly this reason; compare it
+   against `git rev-parse --short HEAD`. An installed binary predating a flag simply
+   *ignores* that flag: a `BROOD_TIER` sweep against a pre-ADR-222 `brood` reports `1.0x`
+   on every row, which looks like a finding rather than a mistake.
+4. **A concurrency row must not be pinned, and a VM-path change must not be measured at the
+   default ceiling.** `taskset`-ing a scheduler row to one CPU removes the thing it
+   measures. And at the default tier a hot arm lowers to native, so the interpreter's call
+   path never executes: KI-40 — a 3.19x regression on the VM's call path — read **+1.3%** at
+   the default ceiling and only appeared under `--tier 1`. If a change touches
+   `exec_chunk`/`dispatch`/`vm_run_bc`, A/B it at `--tier 1` as well as the default, or the
+   result is a measurement of the JIT bypassing your change.
+
+```bash
+scripts/ab-bench.sh --tier 1 --floor pfib      # the VM's call path, with a noise floor
+scripts/ab-bench.sh --floor fib loop collatz   # the default ceiling, single-threaded rows
+```
+
 ## 2. Attribution — where the VM spends work
 
 Build with the `perf-stats` cargo feature to arm process-global work counters

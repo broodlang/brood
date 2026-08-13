@@ -31,7 +31,31 @@
 # Env: BROOD (binary under test), ROWS_DIR (brood-benchmarks rows).
 set -u
 
-BROOD=${BROOD:-target/release/brood}
+# `make release-brood` writes to target/release-fast (RELEASE_DIR), NOT target/release —
+# so the old default here pointed at whatever stale binary an earlier `cargo build --release`
+# happened to leave behind. That silently compares the wrong build: a witness run against a
+# stale binary reproduces the BASELINE set, so the diff comes back empty and the restructuring
+# looks proven. Cost a wasted before/after pair on 2026-08-13. Prefer release-fast, fall back
+# to release, and say which one is in use.
+BROOD=${BROOD:-}
+if [ -z "$BROOD" ]; then
+  for cand in target/release-fast/brood target/release/brood; do
+    [ -x "$cand" ] && { BROOD=$cand; break; }
+  done
+  BROOD=${BROOD:-target/release-fast/brood}
+fi
+if [ ! -x "$BROOD" ]; then
+  echo "jit-lower-witness: no binary at '$BROOD' — run \`make release-brood\` first" >&2
+  exit 1
+fi
+# Staleness guard: a witness that measures a binary older than the source it is supposed to
+# witness is worse than no witness, because the empty diff reads as a pass.
+newest_src=$(find crates -name '*.rs' -newer "$BROOD" -print -quit 2>/dev/null || true)
+if [ -n "$newest_src" ]; then
+  echo "jit-lower-witness: WARNING '$BROOD' is OLDER than $newest_src — rebuild (\`make release-brood\`)" >&2
+  echo "jit-lower-witness: measuring a stale binary reproduces the baseline set, so the diff would come back empty." >&2
+fi
+echo "jit-lower-witness: using $BROOD" >&2
 ROWS_DIR=${ROWS_DIR:-../brood-benchmarks/bench/brood}
 
 # row:BENCH_N — sized so every hot arm clears the tiering threshold and the background

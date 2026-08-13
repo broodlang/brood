@@ -10,6 +10,23 @@ use crate::error::LispError;
 use crate::Interp;
 use std::path::Path;
 
+/// The version line both binaries report from `--version`: `"<semver> (<git sha>)"`.
+///
+/// The sha matters more than the semver on a dev box, because **a stale binary fails by
+/// agreeing with you**. There are three `brood` binaries in a normal working tree —
+/// `target/release/`, `target/release-fast/` (what `make release-brood` writes) and
+/// `$PREFIX/bin` (what `make install` writes) — and nothing about a wrong one looks wrong: an
+/// A/B against it reads +0.0%, a lowering-witness diff comes back empty, and a binary that
+/// predates a flag *ignores* that flag rather than rejecting it. A `BROOD_TIER` sweep run
+/// against a pre-ADR-222 `brood` reported `1.0x` on all 23 rows, which reads as a finding
+/// about the tiers rather than a mistake about the binary (2026-08-13). `--version` printing
+/// only the semver could not tell those two builds apart; with the sha, `make doctor`
+/// diffs it against `git rev-parse --short HEAD` and says so.
+///
+/// `BROOD_GIT_SHA` is set by this crate's `build.rs`, so it is only in scope here — hence a
+/// const in the shared crate rather than `env!` at each binary's clap attribute.
+pub const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("BROOD_GIT_SHA"), ")");
+
 /// Format a Unix-epoch milliseconds value as a human-readable UTC timestamp
 /// (`YYYY-MM-DD HH:MM:SS UTC`) so a crash-dump entry tells you *when* the run
 /// was at a glance — `.brood_crash_dump` is append-only, so several runs pile up
