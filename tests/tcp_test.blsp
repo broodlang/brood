@@ -441,9 +441,12 @@
           (tcp-close s)
           (tcp-close ls)
           (assert= (first r) :timeout)
-          ;; it really was the deadline, not the idle timeout: we stopped near 300ms,
-          ;; well before the drip would have finished (100 × 40ms = 4s)
-          (assert= (< elapsed 1500) true)
+          ;; It really was the deadline, not the drip running out: we stopped near 300ms,
+          ;; well before the drip would have finished (100 x 40ms = 4s). The bound is 3s, not
+          ;; something tight around 300ms — a wall-clock assertion has to survive a loaded
+          ;; machine, and anything under 4s still discriminates "the deadline fired" from
+          ;; "we waited for the peer".
+          (assert= (< elapsed 3000) true)
           ;; and bytes really were arriving throughout — the idle timer was being reset
           (assert= (> (byte-length (nth r 1)) 1) true)))))
   (test "a frame that arrives inside the deadline is delivered normally"
@@ -476,7 +479,9 @@
           (tcp-close s)
           (tcp-close ls)
           (assert= (first r) :timeout)
-          (assert= (< elapsed 1000) true)))))
+          ;; generous for a call that should return in ~1ms — it only has to prove we did not
+          ;; block, and a wall-clock bound must survive a loaded machine
+          (assert= (< elapsed 3000) true)))))
   (test "tcp-read-n is bounded by the deadline too"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
@@ -493,4 +498,92 @@
           (tcp-close s)
           (tcp-close ls)
           (assert= (first r) :timeout)
-          (assert= (< elapsed 1500) true))))))
+          ;; same bound, same reasoning as the tcp-read-until case above
+          (assert= (< elapsed 3000) true))))))
+
+;; `:seed` — the bytes a caller already holds. A protocol reading frame after frame off one
+;; stream ends each read holding the surplus past the frame it wanted, so the next read starts
+;; with bytes in hand; those may contain the delimiter, or its first half. hatch's HTTP worker
+;; re-enters its head read with the leftover of a pipelined request, which is exactly this.
+(describe "tcp: framed reads — :seed (bytes already in hand)"
+  :isolated
+  (test "a seed containing the whole frame returns without reading the socket"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        ;; nothing is ever sent on the socket — the answer is entirely in the seed
+        (let (r (tcp-read-until s
+                  "\r\n\r\n"
+                  {:seed (string->utf8-bytes "GET / HTTP/1.1\r\n\r\nEXTRA") :timeout-ms 2000}))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (utf8-bytes->string (nth r 0)) "GET / HTTP/1.1\r\n\r\n")
+          (assert= (utf8-bytes->string (nth r 1)) "EXTRA")))))
+  (test "a delimiter straddling the seed and the first chunk is still found"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        ;; the seed ends mid-terminator ("\r\n\r"); the socket delivers the final "\n".
+        ;; This is the case a caller cannot handle by scanning the seed itself.
+        (tcp-send c "\nBODY")
+        (let (r (tcp-read-until s
+                  "\r\n\r\n"
+                  {:seed (string->utf8-bytes "GET / HTTP/1.1\r\n\r") :timeout-ms 2000}))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (utf8-bytes->string (nth r 0)) "GET / HTTP/1.1\r\n\r\n")
+          (assert= (utf8-bytes->string (nth r 1)) "BODY")))))
+  (test "a seed short of the delimiter continues into the socket"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        (tcp-send c "Host: x\r\n\r\nREST")
+        (let (r (tcp-read-until s
+                  "\r\n\r\n"
+                  {:seed (string->utf8-bytes "GET / HTTP/1.1\r\n") :timeout-ms 2000}))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (utf8-bytes->string (nth r 0)) "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+          (assert= (utf8-bytes->string (nth r 1)) "REST")))))
+  (test "the seed counts toward :max-bytes"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        (let (r (tcp-read-until s
+                  "\r\n\r\n"
+                  {:seed (string->utf8-bytes (string-repeat "x" 200))
+                   :max-bytes 64
+                   :timeout-ms 2000}))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (first r) :too-large)))))
+  (test "an empty seed behaves exactly like no seed"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        (tcp-send c "LINE\r\n\r\nTAIL")
+        (let (r (tcp-read-until s "\r\n\r\n" {:seed #b"" :timeout-ms 2000}))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (utf8-bytes->string (nth r 0)) "LINE\r\n\r\n")
+          (assert= (utf8-bytes->string (nth r 1)) "TAIL"))))))

@@ -130,6 +130,22 @@ are Rust.")
   (let (d (get opts :deadline-ms))
     [(get opts :timeout-ms) (get opts :max-bytes) (if d (+ (now) d) nil)]))
 
+;; ---- :seed — bytes the caller already holds -------------------------------
+;; A protocol that reads frame after frame off one stream ends each read holding the surplus
+;; that arrived past the frame it wanted. The NEXT frame therefore starts with bytes in hand,
+;; and those bytes may already contain the delimiter — or, worse, its first half. Without a
+;; way to hand them in, a caller must either scan them itself (re-implementing the loop these
+;; combinators exist to replace) or lose a delimiter straddling the boundary between what it
+;; holds and what arrives next.
+;;
+;; `:seed` is those bytes: the read behaves exactly as if they had just arrived as the first
+;; chunk. It is checked for the delimiter before any socket read, so a seed that already
+;; contains a whole frame returns without blocking at all.
+;;
+;; Added 2026-08-13, from hatch again: its HTTP worker re-enters the head read with the
+;; leftover of a pipelined request, which can be a partial head, so this was the last thing
+;; keeping it on a hand-rolled loop.
+
 ;; The `after` value for one receive: the idle timeout, the time left on the total
 ;; deadline, or the sooner of the two — nil when neither is set, which selects the
 ;; unbounded `receive` (there is no way to write "no timeout" as an `after` clause).
@@ -146,9 +162,18 @@ are Rust.")
 (defn tcp-read-until (sock sep &optional (opts {}))
   "Receive `[:tcp sock data]` chunks until the byte sequence `sep` (a string or `bytes`) first appears in the stream. Return `[head rest]`: `head` is the bytes up to AND INCLUDING `sep`, `rest` is any bytes already received past it (both `bytes`). Return `[:closed acc]` if the socket closes before `sep` appears (`acc` = all bytes received). For a delimited frame — an HTTP request head (`sep` = \"\\r\\n\\r\\n\"), a line (\"\\n\"), a protocol record — which is bounded; a length-prefixed *body* uses `tcp-read-n` (which never scans).
 
-  `opts` bounds an untrusted peer, all off by default: `:timeout-ms` is the IDLE wait for the next chunk (reset per chunk), returning `[:timeout acc]` — a peer that connects and goes silent; `:max-bytes` caps the frame INCLUDING `sep`, returning `[:too-large acc]` — a peer that drip-feeds or never sends the delimiter; `:deadline-ms` is a TOTAL budget for the whole frame, measured from the call and never reset, also returning `[:timeout acc]` — a peer that drips just fast enough to keep re-arming the idle timeout. An HTTP head reader wants all three (408, 413, 408). Must be called by the socket's owning process."
-  (let ([ms maxb end] (tcp-read-limits opts))
-    (tcp-read-until-loop sock (bytes-concat sep) nil 0 #b"" ms maxb end)))
+  `opts` bounds an untrusted peer, all off by default: `:timeout-ms` is the IDLE wait for the next chunk (reset per chunk), returning `[:timeout acc]` — a peer that connects and goes silent; `:max-bytes` caps the frame INCLUDING `sep`, returning `[:too-large acc]` — a peer that drip-feeds or never sends the delimiter; `:deadline-ms` is a TOTAL budget for the whole frame, measured from the call and never reset, also returning `[:timeout acc]` — a peer that drips just fast enough to keep re-arming the idle timeout. An HTTP head reader wants all three (408, 413, 408).
+
+  `:seed` is a `bytes` value the caller already holds — the surplus a previous framed read returned — treated as if it had just arrived as the first chunk. A protocol reading frame after frame off one stream needs it: without it, a delimiter sitting in (or straddling) those bytes is missed. A seed containing a whole frame returns without reading the socket at all. Must be called by the socket's owning process."
+  (let ([ms maxb end] (tcp-read-limits opts)
+        sepb (bytes-concat sep)
+        seed (get opts :seed))
+    (if (or (nil? seed) (= (byte-length seed) 0))
+      (tcp-read-until-loop sock sepb nil 0 #b"" ms maxb end)
+      ;; Feed the seed through the same step the loop runs on an arriving chunk, so a
+      ;; delimiter inside it — or straddling it and the next chunk — is found by exactly the
+      ;; arithmetic that handles every other boundary. One code path, no special case.
+      (tcp-read-until-step sock sepb nil 0 #b"" ms maxb end seed))))
 
 ;; `acc` is the chunks in reverse, `have` their running byte total, and `tail` the
 ;; last (|sep|-1) bytes accumulated — the only earlier bytes a delimiter straddling
