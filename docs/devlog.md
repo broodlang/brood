@@ -18205,3 +18205,45 @@ ref, and a co-located value round-tripping through a spawned worker. Full `names
 green (47 tests). Phase 2 (the AOT index — `require`-ing a co-located module by an arbitrary name
 across files) stays deferred to M2 plugin pressure; until then a co-located module is reachable
 once its file is loaded, not independently by name.
+
+## 2026-08-13 — closing out: the whole-tree format, and KI-39's local avenue exhausted
+
+**`nest format` across the tree — 356 files considered, 23 rewritten, `--check` now clean.** This
+was the backlog the handoff had recorded as deliberately untouched (12 files when that note was
+written, 23 by now). Nine are embedded `std/` modules, including `prelude.blsp` and `format.blsp`
+formatting its own source, so it was verified with **both engines** rather than one:
+`make test-both` 978/978 + 978/978. That the formatter is idempotent on itself (a second
+`--check` pass is clean) is the other thing worth having checked rather than assumed.
+
+A merge landed mid-push (`f025d56d`'s forward-ref fix, ADR-223), and its new cases in
+`tests/namespace_test.blsp` arrived unformatted into a file this branch had just reformatted —
+`format --check` went red *after* a conflict-free merge. Caught by re-running the check rather
+than reading "no conflicts" as "clean tree".
+
+**KI-39 — the local hunt is over, and it found nothing: 0 failures in 15 runs.** Fifteen runs of
+the *single* most faithful shape (`BROOD_VM=0`, `taskset -c 0-3` **and** `-j 4`, prelude cache
+colded each iteration), 978/978 each, 978–1015 s, a 3.7% spread with no outlier. Deliberately not
+"one run each of several configurations" — that is what the earlier attempt did, and against a
+27% flake six such runs have a **14.8%** chance of seeing nothing, so its negative result was much
+weaker than it read. Fifteen puts that at 0.8%.
+
+**The question worth recording is whether the bug is still there at all, and the answer is that we
+do not know.** Four green CI runs since the last failure do not indicate a fix: at 27%, four
+consecutive greens are **28% likely anyway**. "Fixed" and "still present" are both unfalsified.
+Fixed-in-passing is the weakest of the three readings — the last failure (`79e7e555`) came *after*
+the registry and tls fixes landed in `14b1db40` — leaving "still present, we were lucky" and
+"runner-dependent" as the live ones. Calling it gone wants ~10 consecutive green CI runs (4%),
+which accumulate for free.
+
+Also killed by measurement, so it is not re-derived: the cold-boot-herd hypothesis (that the
+~50 unwarmed test binaries pay a *tree-walked* prelude expansion and reproduce KI-38's herd in the
+one job that flakes). Cold boot is **1213 ms** at the default ceiling against **1274 ms** under
+`BROOD_VM=0` — expansion does not go through the selected engine, and the cache key is
+engine-independent, which is why one file serves both.
+
+What remains is instrumentation rather than a hunt: `2312d4a1` makes the failing cases self-report
+as **check-run annotations**, which are readable with plain repo access where a run's log needs
+admin (403) and a rerun needs write (401). Validating that parser against a real two-failure log
+caught a bug in it — the first regex expected `file:line:` and silently missed
+`registry_test.blsp:55:9`, i.e. it would have annotated *half* the failures, which is worse than
+none because an incomplete list gets trusted.

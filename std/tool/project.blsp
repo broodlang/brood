@@ -394,10 +394,11 @@ to `:enhances`: a plugin is an ordinary `:library` that also declares what it en
     (nil? value) :library
     (= value :app) :app
     (= value :library) :library
-    else (error "project: "
-           ":kind must be :app or :library, got "
-           (pr-str value)
-           " — write :kind :app for an application, or omit it (the default is :library)")))
+    else
+      (error "project: "
+        ":kind must be :app or :library, got "
+        (pr-str value)
+        " — write :kind :app for an application, or omit it (the default is :library)")))
 
 (defn- project-parse-enhances
   (value)
@@ -559,23 +560,24 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 (defn project-load-sources (root & opts)
   (let (skip-all? (member? :skip-loaded opts)
         before *features*)
-    (fold (fn (_ dir)
-            (fold (fn (_ f)
-                    (when (project-should-load? (project-file-feature f) skip-all? before)
-                      ;; Attribute this file's load-time requires to the ROOT section (KI-37).
-                      ;; A file WITH a `(defmodule …)` header sets `current-ns`, which wins and
-                      ;; keys its edges by its own module. A file WITHOUT one establishes no
-                      ;; namespace, so its defs are root-level globals that ride the
-                      ;; always-materialised `""` section — and its requires belong there too,
-                      ;; or an imaged start restores its functions and never loads what they
-                      ;; call. `project-install-image` replays the `""` edges.
-                      (binding (*require-parent* "")
-                        (load f))))
-              nil
-              (project-collect-sources dir)))
+    (fold
+      (fn (_ dir)
+        (fold
+          (fn (_ f)
+            (when (project-should-load? (project-file-feature f) skip-all? before)
+              ;; Attribute this file's load-time requires to the ROOT section (KI-37).
+              ;; A file WITH a `(defmodule …)` header sets `current-ns`, which wins and
+              ;; keys its edges by its own module. A file WITHOUT one establishes no
+              ;; namespace, so its defs are root-level globals that ride the
+              ;; always-materialised `""` section — and its requires belong there too,
+              ;; or an imaged start restores its functions and never loads what they
+              ;; call. `project-install-image` replays the `""` edges.
+              (binding (*require-parent* "")
+                (load f))))
+          nil
+          (project-collect-sources dir)))
       nil
       (project-abs-paths root *project-source-paths*))))
-
 
 ;; ═══ Startup image (ADR-218) ═══════════════════════════════════════════════
 ;; Loading a big project from source costs ~1.1 ms per FILE, almost all of it
@@ -646,7 +648,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 
 ;; Split from `project-image-fingerprint` so a caller that already has the file list
 ;; (the loader, which wants to report the count) does not walk and stat the tree twice.
-(defn- project-fingerprint-of (files)
+(defn- project-fingerprint-of
+  (files)
   ;; Not hashed: the fingerprint is only ever compared for equality, and hashing
   ;; would pull `hash` into the loader's dependencies for nothing. Even 16 000 files
   ;; make ~1.5 MB, which is noise beside the image itself.
@@ -656,15 +659,18 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; so the source-tree walk alone cannot see one change, and an imaged start would go on
   ;; serving the old code. They come from `*package-module-files*`, which `project-setup`
   ;; populates before any fingerprint is taken, on the cold and warm paths alike.
-  (str (build-id) "\n"
-    (join "\n" (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f)))
-                 (append-two files (project-dep-module-files))))))
+  (str (build-id)
+    "\n"
+    (join "\n"
+      (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f)))
+        (append-two files (project-dep-module-files))))))
 
 ;; The file behind every DEPENDENCY module, sorted for a stable fingerprint. A project roots
 ;; its own modules under its `:name` too (ADR-070), so both live in `*package-module-files*`
 ;; and the prefix is what separates them — the project's own files are already in the source
 ;; walk, and listing them twice would only make the key longer.
-(defn- project-dep-module-files ()
+(defn- project-dep-module-files
+  ()
   (sort (map second
           (remove (fn (kv) (not (project-image-dep-module? (first kv))))
             (seq *package-module-files*)))))
@@ -674,11 +680,13 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; until the phase trace showed the time landing outside every measured phase. Exactly the
 ;; shape ADR-216 removed from `*features*`. Built once and passed to both users below: a
 ;; second set of the same size costs ~3% of the cold path, measured.
-(defn- project-image-seen (before)
+(defn- project-image-seen
+  (before)
   (fold (fn (m n) (assoc m n true)) {} before))
 
 ;; The globals the load CREATED: everything bound now that was not bound before it ran.
-(defn- project-image-fresh-names (seen)
+(defn- project-image-fresh-names
+  (seen)
   (remove (fn (n) (contains? seen n)) (global-names)))
 
 ;; The registries the load MUTATED — derived from the funnel, minus the exclusions above,
@@ -690,7 +698,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; MUST stay in root even though the load created it. Excluding it — as a bare `seen` test
 ;; did — dropped it from the image entirely: a deferred module's buffer type vanished on an
 ;; imaged start (register-type-layers runs at that module's load, which materialising skips).
-(defn- project-image-registry-names (seen)
+(defn- project-image-registry-names
+  (seen)
   (remove (fn (n)
             (or (member? n *project-image-registry-exclusions*)
               (and (not (contains? seen n))
@@ -701,7 +710,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; The module a global belongs to: its name minus the last segment, which IS the feature
 ;; name `require` uses (a global `myproj/shapes/area` comes from feature `myproj/shapes`).
 ;; nil for a root-level name — a registry, or a def from a file with no `defmodule`.
-(defn- project-image-section-of (n)
+(defn- project-image-section-of
+  (n)
   (let (parts (string-split (name n) "/"))
     (cond
       (< (count parts) 2) nil
@@ -713,7 +723,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; them — the prefix does. Used for the fingerprint (a dep's files are outside the source
 ;; walk, so they must be stat'd from the registry) rather than to exclude anything: a dep's
 ;; modules ARE imaged, which is why its files have to be in the staleness key.
-(defn- project-image-dep-module? (k)
+(defn- project-image-dep-module?
+  (k)
   (and (contains? *package-module-files* k)
     (not (= (first (string-split k "/"))
            (if *project-name* (name *project-name*) nil)))))
@@ -729,7 +740,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; section, and a std feature is served from its embedded source rather than the image — so
 ;; the section would never be materialised and the registry silently lost, which is the whole
 ;; class this is guarding against.
-(defn- project-image-sections (before)
+(defn- project-image-sections
+  (before)
   (let (seen (project-image-seen before)
         fresh (project-image-fresh-names seen)
         grouped (fold (fn (m n)
@@ -741,17 +753,18 @@ manifest is read, naming the key, not later inside whoever consumes the map."
                (or (get grouped "") nil)))
     (cons ["" root]
       (map (fn (k) [k (get grouped k)])
-        (remove (fn (k)
-                  ;; A non-root section is materialised from the image only for the project's
-                  ;; own modules and its dependencies — both live in `*package-module-files*`
-                  ;; (a project roots its own modules under its `:name` too, ADR-070). A
-                  ;; std/embedded module (regex, editor/ui, …) always loads from its baked-in
-                  ;; source, so its section would never be read back — writing it is dead
-                  ;; weight, and it is exactly where a runtime-only value like
-                  ;; `regex/regex-states-cache` (a mutable cache table) makes the whole image
-                  ;; write fail. Skip it. (Its bare globals still ride the always-materialised
-                  ;; root section; a builtin there images by name.)
-                  (or (= k "") (not (contains? *package-module-files* k))))
+        (remove
+          (fn (k)
+            ;; A non-root section is materialised from the image only for the project's
+            ;; own modules and its dependencies — both live in `*package-module-files*`
+            ;; (a project roots its own modules under its `:name` too, ADR-070). A
+            ;; std/embedded module (regex, editor/ui, …) always loads from its baked-in
+            ;; source, so its section would never be read back — writing it is dead
+            ;; weight, and it is exactly where a runtime-only value like
+            ;; `regex/regex-states-cache` (a mutable cache table) makes the whole image
+            ;; write fail. Skip it. (Its bare globals still ride the always-materialised
+            ;; root section; a builtin there images by name.)
+            (or (= k "") (not (contains? *package-module-files* k))))
           (keys grouped))))))
 
 (defn project-write-image (root before)
@@ -809,7 +822,8 @@ NOT call this: it requires its entry point and lets the rest stay on disk."
   (nil? (getenv "BROOD_COVERAGE")))
 
 ;; Milliseconds as "12.3s" / "845ms" — build output should read at a glance.
-(defn- project-ms-str (ms)
+(defn- project-ms-str
+  (ms)
   (if (< ms 1000)
     (str ms "ms")
     (str (quot ms 1000) "." (quot (mod ms 1000) 100) "s")))
@@ -859,9 +873,13 @@ program's and the LSP's protocol channel stays clean."
               else nil)
         t-d (now-ns)
         _ (when (getenv "BROOD_IMAGE_TRACE")
-            (eprintln (str "[loader] collect " (quot (- t-b t-a) 1000000)
-                        " ms, fingerprint " (quot (- t-c t-b) 1000000)
-                        " ms, image-read " (quot (- t-d t-c) 1000000) " ms"))))
+            (eprintln (str "[loader] collect "
+                        (quot (- t-b t-a) 1000000)
+                        " ms, fingerprint "
+                        (quot (- t-c t-b) 1000000)
+                        " ms, image-read "
+                        (quot (- t-d t-c) 1000000)
+                        " ms"))))
     (cond
       hit hit
       else
@@ -885,16 +903,21 @@ program's and the LSP's protocol channel stays clean."
                             ;; No once-per-key guard needed: this is the cold path, which
                             ;; already prints Building/Built exactly once per build.
                             (do
-                              (eprintln (str "note: " name
+                              (eprintln (str "note: "
+                                          name
                                           " cannot use a startup image, so it loads from"
-                                          " source every time — " (get e :message)))
+                                          " source every time — "
+                                          (get e :message)))
                               nil)))
                       else nil)
               t-all (quot (- (now-ns) t0) 1000000))
-          (eprintln (str "Built " name " in " (project-ms-str t-load)
-                       (cond
-                         wrote (str " (+" (project-ms-str (- t-all t-load)) " image)")
-                         else "")))
+          (eprintln (str "Built "
+                      name
+                      " in "
+                      (project-ms-str t-load)
+                      (cond
+                        wrote (str " (+" (project-ms-str (- t-all t-load)) " image)")
+                        else "")))
           nil))))
 
 ;; Load the manifest (if present) and put the project's source dirs on *load-path*
@@ -944,8 +967,7 @@ constraint-string}`, or {} if the file is missing or declares none. The sibling 
         {}))
     {}))
 
-(defn enhancers-in
-  (dir app app-version)
+(defn enhancers-in (dir app app-version)
   "The names of packages directly under `dir` (each at `dir/<name>/project.blsp`) that declare
 they enhance the application `app` with a constraint satisfied by `app-version`. The general
 form of `installed-enhancers`, over ANY package directory — a project's `_deps`, or an app's
@@ -961,16 +983,14 @@ empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not 
         host {app-symbol app-version})
     (if (not (file-exists? dir))
       []
-      (vec (filter
-             (fn (dep-name)
-               (let (enhances (manifest-enhances
-                                (path-join (path-join dir dep-name) "project.blsp")))
-                 (and (get enhances app-symbol)
-                   (version/version-satisfies-all? host enhances))))
+      (vec (filter (fn (dep-name)
+                     (let (enhances (manifest-enhances (path-join (path-join dir dep-name)
+                                                         "project.blsp")))
+                       (and (get enhances app-symbol)
+                         (version/version-satisfies-all? host enhances))))
              (list-dir dir))))))
 
-(defn installed-enhancers
-  (root app app-version)
+(defn installed-enhancers (root app app-version)
   "The names of packages installed under `root/_deps` that enhance `app` at a satisfied
 `app-version` — `enhancers-in` over a project's dependency dir. The runtime sibling of the
 registry's `?enhances=` query (`nest search --enhances`)."
@@ -1534,7 +1554,8 @@ resolve in the advisory checker. Returns the project root."
 ;; worker changes, from one closure per FILE to one per CHUNK.
 (defn- project-check-files-shared
   (files closure)
-  (project-pfold-files-shared files closure
+  (project-pfold-files-shared files
+    closure
     :check-shared
     (fn (n c) (+ n c))
     (fn (n chunk reason)
@@ -1620,7 +1641,10 @@ resolve in the advisory checker. Returns the project root."
 ;; re-run its `defmacro`s and trip the hot-reload "macro redefined" warning.
 ;; Standalone callers (`nest check`, an interactive `(check-project)`) start from
 ;; an image with nothing loaded, so this still loads every source.
-(defn- project-ensure-loaded (root) (project-setup root) (project-load-sources-cached root :skip-loaded))
+(defn- project-ensure-loaded
+  (root)
+  (project-setup root)
+  (project-load-sources-cached root :skip-loaded))
 
 ;; Structured analogue of `check-project` — returns a flat list of
 ;; `{:file :line :col :message}` maps instead of printing GNU lines + a
@@ -1936,7 +1960,8 @@ resolve in the advisory checker. Returns the project root."
 (def *project-cache-max-age-ms* (* 7 24 3600 1000))
 (def *project-cache-pruned* false)
 
-(defn- project-cache-prune (base keep)
+(defn- project-cache-prune
+  (base keep)
   (when (not *project-cache-pruned*)
     (def *project-cache-pruned* true)
     (try
@@ -2171,7 +2196,8 @@ resolve in the advisory checker. Returns the project root."
 ;; the project, which is the cost being avoided. Nothing here re-loads: `nest run` has
 ;; already materialised its closure, and `project-ensure-loaded` would drag in the whole
 ;; project and undo the laziness.
-(defn- project-feature-file (feat srcdirs)
+(defn- project-feature-file
+  (feat srcdirs)
   "The source file a loaded project feature came from, or nil if it is not one of this
 project's own sources. The `srcdirs` guard matters: a feature like `project` (the std
 tooling module) otherwise resolves to the manifest `./project.blsp` sitting in the cwd,
@@ -2216,7 +2242,8 @@ and the pre-flight would 'check' the manifest and warn on it."
                             p (project-feature-file m srcdirs))
                         (if (nil? p)
                           (go (rest frontier) seen2 files)
-                          (let (info (try (%module-direct-requires p)
+                          (let (info (try
+                                       (%module-direct-requires p)
                                        (catch e {:module nil :requires []})))
                             (go (append (rest frontier) (or (map-get info :requires nil) []))
                               seen2
@@ -2231,7 +2258,8 @@ business."
   (let (root (project-find-root (cwd)))
     (when (nil? root)
       (error "check-project-run-closure: not in a Brood project (no project.blsp found from "
-        (cwd) ")"))
+        (cwd)
+        ")"))
     (let ([want reach] (project-entry-closure entry
                          (project-abs-paths root *project-source-paths*))
           extracts (project-gather-extracts want)

@@ -827,16 +827,16 @@ at/before the cut or slides left by its width."
       buf
       (assoc buf
         :read-only-spans
-        (if (= kind :insert)
-          (map (fn (s)
-                 (let ([lo hi] s)
-                   [(if (>= lo a) (+ lo b) lo) (if (> hi a) (+ hi b) hi)]))
-            spans)
-          (let (d (- b a))
+          (if (= kind :insert)
             (map (fn (s)
                    (let ([lo hi] s)
-                     [(if (>= lo b) (- lo d) lo) (if (>= hi b) (- hi d) hi)]))
-              spans)))))))
+                     [(if (>= lo a) (+ lo b) lo) (if (> hi a) (+ hi b) hi)]))
+              spans)
+            (let (d (- b a))
+              (map (fn (s)
+                     (let ([lo hi] s)
+                       [(if (>= lo b) (- lo d) lo) (if (>= hi b) (- hi d) hi)]))
+                spans)))))))
 
 ;; ---- markers: edit-surviving positions --------------------------------------
 ;; A marker is a named char position the editing ops keep in sync as text is inserted or
@@ -881,14 +881,13 @@ insertion point shift with the text. Throws if `buf` is read-only."
     (let (p (get buf :point)
           _ (buffer-barf-if-protected-insert buf p)
           buf (buffer-push-undo buf))
-      (buffer-adjust-spans
-        (buffer-adjust-markers (assoc buf
-                                 :rope (rope-insert (get buf :rope) p s)
-                                 :point (+ p (string-length s))
-                                 :mark nil)
-          :insert
-          p
-          (string-length s))
+      (buffer-adjust-spans (buffer-adjust-markers (assoc buf
+                                                    :rope (rope-insert (get buf :rope) p s)
+                                                    :point (+ p (string-length s))
+                                                    :mark nil)
+                             :insert
+                             p
+                             (string-length s))
         :insert
         p
         (string-length s)))))
@@ -903,9 +902,10 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
       buf
       (let (_ (buffer-barf-if-protected-delete buf p end)
             buf (buffer-push-undo buf))
-        (buffer-adjust-spans
-          (buffer-adjust-markers (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)
-            :delete p end)
+        (buffer-adjust-spans (buffer-adjust-markers (assoc buf
+                                                      :rope (rope-delete (get buf :rope) p end)
+                                                      :mark nil)
+                               :delete p end)
           :delete p end)))))
 
 (defn delete-backward-char (buf &optional (n 1))
@@ -918,12 +918,11 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
       buf
       (let (_ (buffer-barf-if-protected-delete buf start p)
             buf (buffer-push-undo buf))
-        (buffer-adjust-spans
-          (buffer-adjust-markers (assoc buf
-                                   :rope (rope-delete (get buf :rope) start p)
-                                   :point start
-                                   :mark nil)
-            :delete start p)
+        (buffer-adjust-spans (buffer-adjust-markers (assoc buf
+                                                      :rope (rope-delete (get buf :rope) start p)
+                                                      :point start
+                                                      :mark nil)
+                               :delete start p)
           :delete start p)))))
 
 (defn delete-region (buf)
@@ -940,12 +939,11 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
           (assoc buf :mark nil)
           (let (_ (buffer-barf-if-protected-delete buf lo hi)
                 buf (buffer-push-undo buf))
-            (buffer-adjust-spans
-              (buffer-adjust-markers (assoc buf
-                                       :rope (rope-delete (get buf :rope) lo hi)
-                                       :point lo
-                                       :mark nil)
-                :delete lo hi)
+            (buffer-adjust-spans (buffer-adjust-markers (assoc buf
+                                                          :rope (rope-delete (get buf :rope) lo hi)
+                                                          :point lo
+                                                          :mark nil)
+                                   :delete lo hi)
               :delete lo hi)))))))
 
 (defn replace-region (buf start end s)

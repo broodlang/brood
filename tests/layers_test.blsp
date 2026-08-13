@@ -163,7 +163,6 @@
     (%load-module-source (%builtin-module "editor/layers") (%builtin-module-file "editor/layers"))
     (is (not (empty? (layers-for-type :t-reload)))) ; the type survived the reload
     (assert= (buffer-type-for {:file "x.reload-ext"}) :t-reload-ext)) ; and the file rule
-
   (test "buffer-type-for matches a filename suffix"
     (register-file-type ".foo" :t-foo)
     (assert= (buffer-type-for {:file "x.foo"}) :t-foo))
