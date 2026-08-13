@@ -14983,11 +14983,29 @@ speculation is guarded.
 
 ---
 
-## ADR-223 — A unified module/symbol index, deferred to M2 plugin pressure
+## ADR-223 — Multiple modules per file (region model); the unified index deferred to M2
 
-**Status:** proposed, **not built** — a recorded future direction. Design in
-[module-index.md](module-index.md); this entry records only the decision to *defer* and the
-trigger to build. Sits on the ADR-070 trajectory (package-rooting), one step further.
+**Status:** **Phase 1 (definition-side) implemented (2026-08-12)** — a file may now declare
+more than one `(defmodule …)`; **Phase 2 (the AOT index, require-by-name across files) is
+deferred** to M2 plugin pressure. Design in [module-index.md](module-index.md). Sits on the
+ADR-070 trajectory (package-rooting), one step further.
+
+**Phase 1 — multiple modules per file (the region model).** A file is a sequence of
+`defmodule`-*regions*: each `(defmodule M …)` opens a region running to the next `defmodule`
+or EOF, and a bare reference qualifies against the module it is *inside*, so co-located
+modules do not see each other's bare names (they qualify or `:use`). This *removed an
+assumption* rather than adding a feature — `compile_ns` already varied within a load via
+`%in-ns`; only the forward-ref pre-scan assumed it varied at most once. The change: the
+pre-scan became **per-module** (`macros::scan_regions` → `Heap::ns_known_by_module`), `%in-ns`
+**activates** its module's region (`Heap::activate_ns_region`), and the checker — which does
+not `eval` `%in-ns` — mirrors the switch at each `defmodule` in its pass-1 walk. The runtime
+is unchanged (still flat interned symbols, one per qualified name); `file_ns` grew a
+`file_modules` sibling. A single-module file has exactly one region equal to the old
+whole-file scan, so nothing about existing files moves. This also *subsumes* the pre-module
+pre-scan fix (devlog 2026-08-12): forms before the first `defmodule` are simply the root
+region. The one thing Phase 1 does **not** give: `require`-ing a co-located module by a name
+that is not its file's — that needs the index (Phase 2). Until then a co-located module is
+reachable once its file is loaded, not independently by arbitrary name.
 
 **Context.** "Where/what is X" is answered by several ad-hoc half-indexes — the `module foo →
 foo.blsp` filename bijection, `*package-module-files*`, baked `%builtin-module` keys, `*features*`

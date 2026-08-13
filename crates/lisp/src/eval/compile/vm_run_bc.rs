@@ -208,12 +208,16 @@ pub(crate) fn run_program_body(
         let forms: Vec<Value> = (0..prog.count)
             .map(|i| heap.root_at(prog.root_base + i))
             .collect();
-        let known = if crate::eval::macros::file_opens_ns(heap, &forms) {
-            crate::eval::macros::scan_def_names(heap, &forms)
+        // Region model (ADR-223): install the per-module pre-scan; the active set starts
+        // empty and each `defmodule`'s `%in-ns` activates its region (no form resolves
+        // before its region opens, since resolution is a no-op at root).
+        let by_module = if crate::eval::macros::file_opens_ns(heap, &forms) {
+            crate::eval::macros::scan_regions(heap, &forms)
         } else {
-            std::collections::HashSet::new()
+            std::collections::HashMap::new()
         };
-        heap.set_ns_known_names(known);
+        heap.set_ns_known_names(std::collections::HashSet::new());
+        heap.set_ns_known_by_module(by_module);
         heap.set_imports(std::collections::HashMap::new());
     }
 

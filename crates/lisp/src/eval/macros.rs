@@ -675,6 +675,7 @@ pub struct NsLoadScope<'a> {
     heap: &'a mut Heap,
     compile_ns: Option<Symbol>,
     known: HashSet<Symbol>,
+    known_by_module: std::collections::HashMap<Symbol, HashSet<Symbol>>,
     imports: std::collections::HashMap<Symbol, Symbol>,
     assume_own: bool,
 }
@@ -686,19 +687,25 @@ impl<'a> NsLoadScope<'a> {
     /// **off** (a loaded file carries a real pre-scan; a nested load must not inherit an
     /// interactive `eval`'s assume-own fallback). The saved state is restored on drop.
     pub fn enter(heap: &'a mut Heap, forms: &[Value]) -> Self {
-        let known_new = if file_opens_ns(heap, forms) {
-            scan_def_names(heap, forms)
+        // The per-module forward-ref pre-scan (ADR-223). The *active* `ns_known_names`
+        // starts empty: `compile_ns` is `None` until a `defmodule`'s `%in-ns` runs, and
+        // resolution is a no-op at root, so no form is resolved before its region is
+        // activated — `%in-ns` then switches the active set to the module it opens.
+        let by_module = if file_opens_ns(heap, forms) {
+            scan_regions(heap, forms)
         } else {
-            HashSet::new()
+            std::collections::HashMap::new()
         };
         let compile_ns = heap.set_compile_ns(None);
-        let known = heap.set_ns_known_names(known_new);
+        let known = heap.set_ns_known_names(HashSet::new());
+        let known_by_module = heap.set_ns_known_by_module(by_module);
         let imports = heap.set_imports(std::collections::HashMap::new());
         let assume_own = heap.set_ns_assume_own(false);
         Self {
             heap,
             compile_ns,
             known,
+            known_by_module,
             imports,
             assume_own,
         }
@@ -716,6 +723,8 @@ impl Drop for NsLoadScope<'_> {
         self.heap.set_compile_ns(self.compile_ns);
         self.heap
             .set_ns_known_names(std::mem::take(&mut self.known));
+        self.heap
+            .set_ns_known_by_module(std::mem::take(&mut self.known_by_module));
         self.heap.set_imports(std::mem::take(&mut self.imports));
         self.heap.set_ns_assume_own(self.assume_own);
     }
@@ -968,8 +977,18 @@ pub fn file_ns(heap: &Heap, forms: &[Value]) -> Option<Symbol> {
     forms.iter().find_map(|&f| defmodule_form_name(heap, f))
 }
 
+/// Every module a file declares, in source order (ADR-223: a file may open more than one
+/// `(defmodule …)`). The bare names as written — `%in-ns` roots them. `file_ns` is the
+/// first of these; the checker/LSP/indexer iterate the whole list.
+pub fn file_modules(heap: &Heap, forms: &[Value]) -> Vec<Symbol> {
+    forms
+        .iter()
+        .filter_map(|&f| defmodule_form_name(heap, f))
+        .collect()
+}
+
 /// If `form` is a top-level `(defmodule NAME …)`, its `NAME`; else `None`.
-fn defmodule_form_name(heap: &Heap, form: Value) -> Option<Symbol> {
+pub(crate) fn defmodule_form_name(heap: &Heap, form: Value) -> Option<Symbol> {
     let items = heap.list_to_vec(form).ok()?;
     match (items.first()?.unpack(), items.get(1).map(|v| v.unpack())) {
         (ValueRef::Sym(h), Some(ValueRef::Sym(name))) if value::symbol_is(h, kw::DEFMODULE) => {
@@ -984,33 +1003,43 @@ fn defmodule_form_name(heap: &Heap, form: Value) -> Option<Symbol> {
 /// qualify a *forward* reference to a same-namespace name defined later in the
 /// file. Skips `quote`/`quasiquote` data.
 pub fn scan_def_names(heap: &Heap, forms: &[Value]) -> HashSet<Symbol> {
-    let mut names = HashSet::new();
-    let mut ambient = HashSet::new();
-    // A name `def`ined BEFORE the module's `(defmodule …)` opens is a ROOT def, not a
-    // member of this namespace (`compile_ns` is still `None` when it runs), so a bare
-    // reference to it from inside the module must fall through to root. If it entered
-    // the known-names set here, the resolver would misqualify that reference to
-    // `ns/name` and it would go unbound. Start the scan at the first `defmodule` — the
-    // one `file_ns` picks — so pre-module forms (typically a leading `(require …)`)
-    // don't pollute the set. Normal files open with `defmodule`, so this scans them
-    // whole; only a stray pre-module `def` is now correctly left at root.
-    let start = forms
-        .iter()
-        .position(|&f| defmodule_form_name(heap, f).is_some())
-        .unwrap_or(0);
-    for &form in &forms[start..] {
-        scan_def_form(heap, form, &mut names, &mut ambient);
+    scan_regions(heap, forms).into_values().flatten().collect()
+}
+
+/// Pre-scan UNEXPANDED top-level forms into **per-module regions** (ADR-223). Each
+/// top-level `(defmodule M …)` opens a region that runs to the next `defmodule` or EOF;
+/// the returned map gives, per module `M` (keyed by the **bare** name it was declared with
+/// — what `%in-ns` receives), the bare def-heads defined in `M`'s region. This is the
+/// region-aware core: with one module per file the sole entry equals the old whole-file
+/// set (which is why [`scan_def_names`] is just its union). Names `def`ined BEFORE the
+/// first `defmodule` are the **root region** — they `def` at root (`compile_ns` is still
+/// `None` there) and belong to no module, so they never enter any region's set and a bare
+/// reference to one correctly falls through to root instead of misqualifying to `M/name`.
+pub fn scan_regions(heap: &Heap, forms: &[Value]) -> HashMap<Symbol, HashSet<Symbol>> {
+    let mut by_module: HashMap<Symbol, HashSet<Symbol>> = HashMap::new();
+    // `defdyn`-declared names are ambient (never namespaced), so they must not be a known
+    // ns-local name in ANY region — even when a region also `def`s the knob. Collected
+    // file-wide and subtracted at the end, so declaration order is irrelevant (a module
+    // may read a knob near its top, declare it in the middle, and set it near the bottom).
+    let mut ambient: HashSet<Symbol> = HashSet::new();
+    let mut current: Option<Symbol> = None;
+    for &form in forms {
+        if let Some(m) = defmodule_form_name(heap, form) {
+            current = Some(m);
+            by_module.entry(m).or_default(); // an entry even if the region has no defs
+            continue; // the `defmodule` form itself declares no module-level names
+        }
+        if let Some(m) = current {
+            scan_def_form(heap, form, by_module.entry(m).or_default(), &mut ambient);
+        }
+        // else: a root-region form (before the first `defmodule`) — tracked by no module.
     }
-    // A name the file declares ambient with `defdyn` is never namespaced, so it must
-    // not be a known ns-local name — even if the file ALSO `def`s it somewhere
-    // (setting the knob, often inside a function body, which the recursive scan
-    // sees). Dropped after the walk so declaration order in the file is irrelevant:
-    // `std/tool/test.blsp` reads `*test-filter*` at the top, declares it in the
-    // middle, and `def`s it near the bottom.
-    for a in &ambient {
-        names.remove(a);
+    for names in by_module.values_mut() {
+        for a in &ambient {
+            names.remove(a);
+        }
     }
-    names
+    by_module
 }
 
 fn scan_def_form(
@@ -2568,6 +2597,47 @@ mod resolve_tests {
     #[test]
     fn definition_head_is_qualified() {
         assert_eq!(resolved(&[], "foo", "(def bar 1)"), "(def foo/bar 1)");
+    }
+
+    /// The bare def-heads scan_regions assigns to module `m`, sorted.
+    fn region(regions: &HashMap<Symbol, HashSet<Symbol>>, m: &str) -> Vec<String> {
+        let mut v: Vec<String> = regions
+            .get(&value::intern(m))
+            .map(|s| s.iter().map(|&n| value::symbol_name(n)).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn scan_regions_partitions_defs_by_module_boundary() {
+        // ADR-223: two modules in one file — each def head belongs to its own region.
+        let mut interp = Interp::new();
+        let forms = reader::read_all(
+            &mut interp.heap,
+            "(defmodule a) (defn x () 1) (defn y () 2) (defmodule b) (defn z () 3)",
+        )
+        .expect("parse");
+        let regions = scan_regions(&interp.heap, &forms);
+        assert_eq!(region(&regions, "a"), vec!["x", "y"]);
+        assert_eq!(region(&regions, "b"), vec!["z"]);
+    }
+
+    #[test]
+    fn scan_regions_excludes_pre_module_defs() {
+        // A def before the first defmodule is a ROOT def — in no module's region.
+        let mut interp = Interp::new();
+        let forms = reader::read_all(
+            &mut interp.heap,
+            "(defn pre () 0) (defmodule a) (defn x () 1)",
+        )
+        .expect("parse");
+        let regions = scan_regions(&interp.heap, &forms);
+        assert_eq!(region(&regions, "a"), vec!["x"]); // `pre` is root, not a's
+        // scan_def_names is the union of regions — also excludes the pre-module def.
+        let flat = scan_def_names(&interp.heap, &forms);
+        assert!(flat.contains(&value::intern("x")));
+        assert!(!flat.contains(&value::intern("pre")));
     }
 
     #[test]

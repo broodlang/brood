@@ -365,6 +365,14 @@ fn collect_required_modules(
     if let Some(ns) = file_ns {
         mods.insert(value::symbol_name(ns));
     }
+    // Every module the file itself declares (ADR-223: a file may open more than one
+    // `(defmodule …)`) is trivially "required" — an intra-file qualified reference to a
+    // co-located sibling module must not read as an unrequired-module use. `file_ns` above
+    // is only the first; add the rest (the caller roots every entry, so the bare names here
+    // gain their rooted form too).
+    for m in crate::eval::macros::file_modules(heap, forms) {
+        mods.insert(value::symbol_name(m));
+    }
     for &form in forms {
         collect_require_targets(heap, form, &mut mods);
     }
@@ -772,11 +780,22 @@ pub fn check_file_ext(
     // which then reads a module's reference to its own helper as a foreign private access.
     let file_ns = crate::eval::macros::file_ns(heap, forms).map(|ns| heap.root_module_name(ns));
     let prev_ns = heap.set_compile_ns(file_ns);
-    let prev_known = if file_ns.is_some() {
-        heap.set_ns_known_names(crate::eval::macros::scan_def_names(heap, forms))
+    // Region model (ADR-223): a file may declare more than one `(defmodule …)`. Install the
+    // per-module forward-ref pre-scan and start the active set on the FIRST module's region;
+    // the pass-1 loop below switches compile-ns + region at each subsequent `defmodule`
+    // (the checker doesn't `eval` `%in-ns`, so it must mirror that switch itself). A
+    // single-module file has one region equal to the old whole-file scan.
+    let regions = if file_ns.is_some() {
+        crate::eval::macros::scan_regions(heap, forms)
     } else {
-        heap.set_ns_known_names(std::collections::HashSet::new())
+        std::collections::HashMap::new()
     };
+    let first_known = crate::eval::macros::file_modules(heap, forms)
+        .first()
+        .and_then(|m| regions.get(m).cloned())
+        .unwrap_or_default();
+    let prev_known = heap.set_ns_known_names(first_known);
+    let prev_by_module = heap.set_ns_known_by_module(regions);
     // Imports start empty; a `(:use …)` in the header populates them during pass 1
     // (its `(require …)`/`%refer` is evaluated like any other header form).
     let prev_imports = heap.set_imports(std::collections::HashMap::new());
@@ -831,6 +850,14 @@ pub fn check_file_ext(
             // `%refer` scans, which made a whole-project check O(files²). A standalone
             // `(require …)` form (not a header) is still evaluated so its macros/globals resolve.
             if is_ns_header(heap, f) {
+                // Region model (ADR-223): a later `(defmodule …)` opens a new region — switch
+                // the checker's compile-ns + forward-ref set to it, exactly as `%in-ns` does
+                // at run time, so this module's defs/refs qualify to it and not the first.
+                if let Some(m) = crate::eval::macros::defmodule_form_name(heap, f) {
+                    let rooted = heap.root_module_name(m);
+                    heap.set_compile_ns(Some(rooted));
+                    heap.activate_ns_region(m);
+                }
                 setup_check_imports(heap, f);
             } else if is_require_form(heap, exp) {
                 let _ = crate::eval::eval(heap, exp, root);
@@ -1160,6 +1187,7 @@ pub fn check_file_ext(
     heap.truncate_roots(roots_base);
     heap.set_compile_ns(prev_ns);
     heap.set_ns_known_names(prev_known);
+    heap.set_ns_known_by_module(prev_by_module);
     heap.set_imports(prev_imports);
     if let Err(p) = panicked {
         let msg = if let Some(s) = p.downcast_ref::<&str>() {

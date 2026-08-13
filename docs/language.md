@@ -2689,8 +2689,11 @@ it into the live environment, replace definitions.
 ### Namespaces
 
 A file opens a **namespace** with `(defmodule foo "optional doc")` as its first
-form (one per file — `defmodule` *is* the namespace form; there is no separate
-`ns`). Inside it, every `def`/`defn`/`defmacro` defines the **qualified** name
+form (`defmodule` *is* the namespace form; there is no separate `ns`). A file may
+open **more than one** `(defmodule …)` — each opens a *region* running to the next
+`defmodule` or EOF, and a bare reference qualifies against the module it is inside,
+so co-located modules don't see each other's bare names (ADR-223); a single-module
+file is the common case. Inside it, every `def`/`defn`/`defmacro` defines the **qualified** name
 `foo/name`, and a bare reference resolves to `foo/name` when this namespace
 defines it (including a *forward* reference to something defined later in the
 file), otherwise it falls through to the **root** namespace — the prelude and any

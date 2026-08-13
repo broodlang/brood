@@ -727,18 +727,22 @@ pub(super) fn eval_string_inner(
     // When loading a module (`reset_ns`), bracket the namespace at root and
     // pre-scan its def heads for forward references; the plain `eval-string` (REPL,
     // inline) inherits the current namespace and does neither (ADR-065).
-    let (prev_ns, prev_known, prev_imports) = if reset_ns {
+    let (prev_ns, prev_known, prev_by_module, prev_imports) = if reset_ns {
         let pn = heap.set_compile_ns(None);
-        let known = if crate::eval::macros::file_opens_ns(heap, &forms) {
-            crate::eval::macros::scan_def_names(heap, &forms)
+        // Region model (ADR-223): per-module pre-scan; active set starts empty and each
+        // `defmodule`'s `%in-ns` activates its region (resolution is a no-op at root, so
+        // nothing resolves before its region opens).
+        let by_module = if crate::eval::macros::file_opens_ns(heap, &forms) {
+            crate::eval::macros::scan_regions(heap, &forms)
         } else {
-            std::collections::HashSet::new()
+            std::collections::HashMap::new()
         };
-        let pk = heap.set_ns_known_names(known);
+        let pk = heap.set_ns_known_names(std::collections::HashSet::new());
+        let pbm = heap.set_ns_known_by_module(by_module);
         let pi = heap.set_imports(std::collections::HashMap::new());
-        (Some(pn), Some(pk), Some(pi))
+        (Some(pn), Some(pk), Some(pbm), Some(pi))
     } else {
-        (None, None, None)
+        (None, None, None, None)
     };
     // No pre-scan on the inheriting path, so a reference to a name a LATER call will
     // define has no evidence to qualify against and would be left bare, missing the
@@ -777,6 +781,9 @@ pub(super) fn eval_string_inner(
     }
     if let Some(pk) = prev_known {
         heap.set_ns_known_names(pk);
+    }
+    if let Some(pbm) = prev_by_module {
+        heap.set_ns_known_by_module(pbm);
     }
     if let Some(pi) = prev_imports {
         heap.set_imports(pi);
@@ -2377,6 +2384,10 @@ pub(super) fn in_ns(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let sym = expect_symbol(heap, "%in-ns", arg(args, 0))?;
     let rooted = heap.root_module_name(sym);
     heap.set_compile_ns(Some(rooted));
+    // Region model (ADR-223): switch the active forward-ref set to the module this opens,
+    // so a file's later `defmodule` resolves its own bare names — not the earlier module's.
+    // Keyed by the bare declared name (pre-rooting), which is exactly `sym`.
+    heap.activate_ns_region(sym);
     Ok(Value::symbol(rooted))
 }
 

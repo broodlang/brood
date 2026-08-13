@@ -1,11 +1,20 @@
 # A unified module/symbol index — design
 
-> **Status:** proposed, **not built** — a recorded *future direction*, deferred under
-> ADR-011 (defer power features until a concrete need justifies them). The concrete
-> trigger is **M2+ plugin pressure** (many modules from many authors, an editor that
-> navigates by symbol), the same trigger `namespaces.md` §8 names for package-rooting.
-> This doc captures the design so it is shovel-ready when that pressure arrives; it does
-> **not** authorize building it now. Backing decision: [ADR-223](decisions.md).
+> **Status:** the **index itself is proposed, not built** — a recorded *future direction*,
+> deferred under ADR-011 (defer power features until a concrete need justifies them). The
+> concrete trigger is **M2+ plugin pressure** (many modules from many authors, an editor that
+> navigates by symbol), the same trigger `namespaces.md` §8 names for package-rooting. This
+> doc captures the design so it is shovel-ready when that pressure arrives; it does **not**
+> authorize building the index now. Backing decision: [ADR-223](decisions.md).
+>
+> **Update (2026-08-12): the per-region pre-scan and *intra-file* multiple-modules-per-file
+> shipped independently of the index (ADR-223 Phase 1).** It turned out the addressing index
+> is only needed to `require` a co-located module *by an arbitrary name across files* — within
+> one file every module loads together, so multi-module-per-file needs only the per-region
+> forward-ref pre-scan (§6), not the index. That pre-scan is now live (`macros::scan_regions`
+> → `Heap::ns_known_by_module`; `%in-ns` activates a region), so §6-in-scope and §7-step-5
+> below are *partly done* and the §7 "loud load error" interim no longer applies. What remains
+> deferred here is the index proper (module ↔ file decoupling, require-by-name).
 
 This is the design backing for a single, authoritative **index** that answers
 "where/what is X" for the whole image — module → file, symbol → definition site,
@@ -137,9 +146,12 @@ visibility). Kept separate deliberately:
 - **In scope (what the index enables):** *flat* multiple modules per file, each
   independently addressable by name — the Elixir model. Requires the resolver's
   forward-reference pre-scan to become **per-module-region** (partition a file's forms by
-  `defmodule` boundary; each module's known-names = the defs in its region) — the general
-  form of the boundary fix already landed for the pre-module case (`docs/devlog.md`
-  2026-08-12).
+  `defmodule` boundary; each module's known-names = the defs in its region). **This
+  pre-scan landed (ADR-223 Phase 1, 2026-08-12)** as `macros::scan_regions` →
+  `Heap::ns_known_by_module`, generalizing the pre-module boundary fix — so *intra-file*
+  multiple modules already work. What the *index* still adds on top is addressing a
+  co-located module **by an arbitrary name across files** (require-by-name); the pre-scan
+  alone does not decouple module from file.
 - **Out of scope (explicitly not doing):** **lexical submodules** where an inner module
   sees an outer's privates. That needs a `compile_ns` *stack* and a hierarchical privacy
   rule — real core cost for a capability the hierarchical-name model (`gui/window`,
@@ -156,13 +168,16 @@ mid-migration:
 2. **Route the LSP** resolution + completion + go-to-def through it (fallback intact).
 3. **Route `require`'s cold module → file** lookup through it (filename probe as fallback).
 4. **Fold in the checks** — collision/reserved/duplicate-def become index queries.
-5. **Only then**, if desired, allow multiple modules per file (needs the per-region pre-scan
-   from §6) and the module ↔ file decoupling.
+5. The module ↔ file decoupling — **require-by-name** for a co-located module whose name is
+   not its file's. (The per-region pre-scan from §6 and *intra-file* multiple-modules-per-file
+   already shipped ahead of the index in ADR-223 Phase 1; only cross-file addressing by
+   arbitrary name still waits on the index.)
 
-Ordering matters: build the index *first* and prove it against live truth; do **not** change
-the one-module-per-file rule before the index that would make it cheap exists. Until step 5,
-the honest interim for a second `defmodule` in one file is a **loud load error** (turning
-today's silent misqualification into a clear message), not silent support.
+Ordering matters for the remaining decoupling: build the index *first* and prove it against
+live truth; do **not** decouple module from file before the index that makes that lookup cheap
+exists. (Superseded for the intra-file case: a second `defmodule` in one file is now supported
+directly via the region model — no longer a load error — because within one file every module
+loads together and the per-region pre-scan resolves each bare reference against its own module.)
 
 ## 8. Why deferred, and the trigger to build
 

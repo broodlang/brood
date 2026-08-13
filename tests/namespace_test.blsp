@@ -248,6 +248,58 @@
                     " (defmodule nspre2) (defn use-it () (pre-helper))"))
     (assert= (nspre2/use-it) :root)))
 
+;;; Multiple modules per file (ADR-223). A file may open more than one `(defmodule …)`;
+;;; each opens a REGION that runs to the next `defmodule` or EOF. A bare reference
+;;; resolves against the module it is *inside* (its region's forward-ref set), so
+;;; co-located modules don't see each other's bare names — they qualify or `:use`. This
+;;; subsumes the pre-module case above: forms before the first `defmodule` are the root
+;;; region. `%in-ns` switches the active region at run time; the checker mirrors the
+;;; switch. The runtime is unchanged — still flat interned symbols, one per qualified name.
+(describe "namespaces: multiple modules per file (ADR-223)"
+  :isolated
+
+  (test "two modules in one file each qualify their own same-named def"
+    (%load-string (str "(defmodule mm-a) (defn val () :a)"
+                    " (defmodule mm-b) (defn val () :b)"))
+    (is (= (mm-a/val) :a))
+    (is (= (mm-b/val) :b))
+    (is (bound? 'mm-a/val))
+    (is (bound? 'mm-b/val))
+    (is (not (bound? 'val))))
+
+  (test "a bare reference resolves against the module it is inside, not an earlier one"
+    ;; `describe` in mm-sq calls its OWN `area`/`perimeter`, never mm-ci's `area`.
+    (%load-string (str "(defmodule mm-ci) (defn area (r) (* 3 r r))"
+                    " (defmodule mm-sq) (defn area (s) (* s s))"
+                    " (defn perimeter (s) (* 4 s))"
+                    " (defn describe (s) (list (area s) (perimeter s)))"))
+    (is (= (mm-ci/area 2) 12))
+    (is (= (mm-sq/area 3) 9))
+    (is (= (mm-sq/describe 3) (list 9 12))))
+
+  (test "a co-located module is reachable by an explicit qualified reference"
+    (%load-string (str "(defmodule mm-x) (defn base () 10)"
+                    " (defmodule mm-y) (defn use-x () (mm-x/base))"))
+    (is (= (mm-y/use-x) 10)))
+
+  (test "a bare cross-module reference is isolated (a sibling module isn't auto-visible)"
+    (%load-string (str "(defmodule mm-i1) (defn secret () 1)"
+                    " (defmodule mm-i2) (defn peek () (secret))"))
+    ;; `secret` is mm-i1's; a bare reference from mm-i2 is not mm-i2's own → unbound.
+    (is (= (try (mm-i2/peek) (catch e :unbound)) :unbound)))
+
+  (test "a forward reference within a later module's region resolves"
+    (%load-string (str "(defmodule mm-f1) (defn f () 1)"
+                    " (defmodule mm-f2) (defn front () (back)) (defn back () 99)"))
+    (is (= (mm-f2/front) 99)))
+
+  (test "a value built by a co-located module round-trips through a worker"
+    (%load-string (str "(defmodule mm-p1) (defn tag () 'mm-p1/tag)"
+                    " (defmodule mm-p2) (defn make () {:t (mm-p1/tag) :n 7})"))
+    (let (me (self) w (spawn (ns-echo me)))
+      (send w (mm-p2/make))
+      (is (= (receive) {:t 'mm-p1/tag :n 7})))))
+
 ;; ---- std's own cross-module name overlaps, enumerated ------------------------
 ;; Namespacing means two modules MAY export the same short name; `(:use A) (:use B)` then
 ;; raises E0099 and the consumer resolves it (`:only`/`:exclude`, or `require` + qualified
