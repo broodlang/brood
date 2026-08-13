@@ -468,7 +468,7 @@
       (make-dir root)
       (make-dir (path-join root "src"))
       (let (src (path-join root "src"))
-        (spit (path-join root "project.blsp") "(project coloc)\n")
+        (spit (path-join root "project.blsp") "(project :name \"coloc\" :source-paths [\"src\"])\n")
         (spit (path-join src "lib.blsp")
           "(defmodule lib (:use test))\n(defn g () 1)\n(deftest gt (assert= 1 (g)))\n")
         (spit (path-join src "plain.blsp") "(defmodule plain)\n(defn h () 2)\n")
@@ -491,7 +491,7 @@
       (make-dir root)
       (make-dir (path-join root "src"))
       (let (src (path-join root "src"))
-        (spit (path-join root "project.blsp") "(project coloc)\n")
+        (spit (path-join root "project.blsp") "(project :name \"coloc\" :source-paths [\"src\"])\n")
         (spit (path-join src "lib.blsp")
           (str "(defmodule lib (:use test))\n"
             "(defn shipped () 1)\n" "(describe \"lib\" (test \"t\" (assert= 1 (shipped))))\n"))
