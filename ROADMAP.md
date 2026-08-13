@@ -1412,9 +1412,10 @@ Runtime housekeeping (both items landed):
     so guard eval / fall-through / hygiene / TCO all come for free. Only a fn that
     uses a guard pays match-dispatch; `:when` + `&optional`/`&` in one clause is a
     loud error (one mechanism per fn). `eval/macros.rs` `clause_has_when_guard`.
-  - ⬜ **`tap` / `then`** (Kernel) — single-fn pipe helpers. Marginal: `->`
-    already covers `then`, and `doto` covers multi-form `tap`. Ship only if the
-    exact spelling is wanted.
+  - ✅ **`tap` / `then`** (Kernel) — single-fn pipe helpers (2026-08-13). Plain
+    prelude functions beside the `->`/`doto` family: `(tap x f)` runs `(f x)` for
+    effect and returns `x`; `(then x f)` returns `(f x)`. Elixir-parity spelling
+    for the "apply a function value in a pipeline" case (`doto`/`->` splice forms).
 - ✅ **Syntax finalisation pass (2026-07-25, ADR-149/150/151/152)** — closed the
   cases where the surface accepted a plausible-but-wrong spelling and
   **reinterpreted** it instead of rejecting it. Binding containers are lists (a

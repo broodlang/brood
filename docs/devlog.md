@@ -18431,3 +18431,14 @@ fall-through, hygiene, name resolution, and **TCO** all come for free (verified:
 per fn). Tests in `tests/pattern_matching_test.blsp` (8 cases incl. mixed arities, precondition,
 TCO, macro-hygiene via the existing paths, and an `:isolated` cross-process case); `nest check`
 clean on guarded fns. `docs/language.md` + `ROADMAP.md` + ADR-226 in `docs/decisions.md`.
+
+## 2026-08-13 — `tap` / `then`: the single-function pipe helpers (Elixir Kernel parity)
+
+Added `(tap x f)` — call `(f x)` for its side effects and return `x` unchanged (a pass-through
+probe in a `->` pipeline) — and `(then x f)` — return `(f x)`, so a `->` step can call an
+arbitrary function on the threaded value instead of splicing it as a first argument. Plain
+prelude functions beside the `->`/`doto` family (`std/prelude.blsp`); where `doto`/`->` splice
+*forms*, these take a *function value*. The roadmap had them marginal (`->`/`doto` cover the
+common cases); shipped for the exact Elixir spelling. Tests in `tests/ergonomics_test.blsp`
+(5 cases incl. pipeline composition and an `:isolated` cross-process case). `docs/language.md`
++ `ROADMAP.md` updated; no ADR (trivial additive prelude fns).
