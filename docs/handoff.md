@@ -5,20 +5,36 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-14 (the stdlib-namespacing session, concluded).** Everything is **committed and
-pushed**; `main` and `origin/main` agree; full suite green (4643/4643), `nest check` + `nest
-format --check` clean. Landed **ADR-227 stdlib namespacing** as three stages — `enum` (`4fb903ce`),
-`map` (`f9dff0be`), `math` (`4e862b0a`): derived helpers moved out of the flat prelude into
-`std/{enum,map,math}.blsp`, core protocol stays bare, consumers migrated with explicit `(:use …)`.
+**As of 2026-08-14 (the auto-derived-imports session, concluded).** Everything is **committed and
+pushed** (`a57cc573`); `main` and `origin/main` agree; full in-language suite green (single-process
+run, 470s, exit 0), the std-wide `nest check std/**/*.blsp tests/**/*.blsp` gate at zero warnings,
+workspace build + Rust tests green.
 
-➡ **TOP OPEN THREAD — build auto-derived stdlib imports.** The explicit `(:use enum/map/math)`
-migration is meant to be **replaced** by resolver-level derivation (a bare name that one curated
-stdlib module exports auto-refers it, lowest priority; ambiguity errors; local + explicit `:use`
-win). It's designed and de-risked but **not built** — the full plan, the resolver/checker seams
-(with file:line anchors), the build steps, and the gotchas are in
-**[`auto-derived-imports.md`](auto-derived-imports.md)**. Start there. It's a resolver + checker
-change (`eval/macros.rs` `resolve_sym` fallback + `types/check` mirror), scoped small because
-`scan_regions` already yields a module's exports from source without loading it.
+Landed the **auto-derived-imports follow-up** to ADR-227 — but as *qualified-reference
+auto-require*, **not** the bare-name "Design B" `auto-derived-imports.md` originally planned (a
+deliberate fork this session; you confirmed qualified-inference is the end state). A **qualified**
+reference `mod/name` infers `(require 'mod)` for *any* module, so no explicit `require` line is
+needed. **There is no bare-name magic** — a bare `sqrt` with neither a `math/` prefix nor `(:use
+math)` stays unbound; a file still `(:use math)` or writes `math/…`, and only the *require* is
+inferred away. New `crates/lisp/src/eval/derive.rs` + three hooks in `macros.rs` (eager qualified
+macro head, deferred qualified value ref, root-region scan for scripts/REPL); GC re-roots added in
+`macros.rs`/`check.rs` because `compile` can now collect. The checker's KI-17 unrequired-module
+lint is now obsolete — a qualified ref requires its own module — neutralized to a no-op in
+`walk.rs`. Plus **stage 4 (`json`)**: `std/json.blsp` drops its `json-` export prefix (now
+`json/parse`, `json/encode`), consumers + the JSON fuzz target updated. The ADR-227 namespacing
+program is now **complete** (stages 1–4 + the follow-up); `docs/{decisions,language,devlog,
+auto-derived-imports}.md` and `ROADMAP.md` are reconciled to the shipped design.
+
+**No open thread from this session.** The tree is green with no open bug — `known-issues.md` shows
+only the KI-36 / KI-39 *watch* items (unreproduced locally). Pick the next milestone item from
+`ROADMAP.md`.
+
+⚠ **Local-run discipline (hard constraint this session).** Bare `make test` / `make test-both`
+OOM-kills this box (28-way nextest fan-out); even a capped single-binary run tipped it over when
+free RAM was already low. Do **not** run any build/test here without checking `free -h` first and
+keeping it single-process/targeted — the full-suite verification above ran as one bounded
+`nextest -E 'binary(suite)'` process with a RAM alarm armed. See the `ram-pressure-background-suite`
+memory.
 
 **As of 2026-08-13 (the VM-contention session, concluded)**, brood 0.3.9. That session's own
 summary is below under "the contention session"; the backend-seam entry it replaced follows it.
