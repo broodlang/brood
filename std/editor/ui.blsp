@@ -29,7 +29,8 @@ pure `view` (model + cols/rows → a render frame) and an `update` (model + inpu
 cols/rows → model); set `:done` in the model to quit, and declare time-driven work
 as `:timers` (named timers, ADR-102) — or, legacy, `:tick-ms` for a single refresh
 beat. The observer and the editor are both `ui-run` clients — see
-`std/observer.blsp`.")
+`std/observer.blsp`."
+  (:use map))
 
 ;; ---- frontends (ADR-046: one render-op protocol, many frontends) ------------
 ;;

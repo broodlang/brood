@@ -1,0 +1,54 @@
+;; std/map.blsp — the map-transformation helper library (ADR-227).
+;; A namespace (ADR-065): its functions are `map/merge-with`, `map/update-vals`, … —
+;; consumers `(:use map)` to refer them bare, or call them qualified.
+;;
+;; The *core* map protocol stays bare in the prelude — `assoc`/`dissoc`/`get`/`keys`/
+;; `vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge` (and `zipmap`,
+;; which the record/ability machinery uses during bootstrap) are the universal map
+;; surface. This module is the derived transformation helpers layered on top.
+;;
+;; Note the module is named `map`; the bare `map` *function* (map/filter/reduce) is
+;; unaffected — a bare `map` still resolves to the function, and these helpers reach it
+;; the same way (there is no `map/map`).
+(defmodule map
+  "Map transformations — the derived helpers over the bare map protocol.
+
+The core ops (`assoc` `dissoc` `get` `keys` `vals` `contains?` `reduce-kv`
+`update` `get-in` `update-in` `merge`) stay bare in the prelude and need no import.
+This module adds: `merge-with` (combine on shared keys), `update-vals` / `update-keys`
+(map every value/key), and `select-keys` (project a subset). `(:use map)` for bare
+access, or call qualified (`map/update-vals`).")
+
+;; merge-with: on a shared key, combine with `(f existing new)` instead of replacing.
+;; Read-modify-write per key, so it folds immutable `assoc` (each returns a fresh map).
+(defn merge-with (f & maps)
+  "Like `merge`, but when two maps share a key the combined value is `(f value-so-far next-value)` rather than just the latter. `nil` maps are skipped."
+  (fold (fn (acc m)
+          (if (nil? m)
+            acc
+            (reduce-kv (fn (a k v) (assoc a k (if (contains? a k) (f (get a k) v) v))) acc m)))
+    {}
+    maps))
+
+(defn update-vals (m f)
+  "A map like `m` with `f` applied to every value."
+  (into {} (map (fn (p) [(first p) (f (second p))]) (map-pairs m))))
+(defn update-keys (m f)
+  "A map like `m` with `f` applied to every key (later keys win on a collision)."
+  (into {} (map (fn (p) [(f (first p)) (second p)]) (map-pairs m))))
+
+(defn select-keys (m ks)
+  "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped)."
+  ;; One `map-get` per key — which also yields the value — rather than
+  ;; `contains?` (its own probe) plus a separate `get`. A present key returns its
+  ;; stored value (used directly); only when that value happens to equal the
+  ;; first sentinel do we disambiguate present-vs-absent with a second sentinel,
+  ;; so a key stored with `nil`/`false` is still kept (contains?'s guarantee).
+  (into {}
+    (keep (fn (k)
+            (let (v (map-get m k :%select-miss-a))
+              (if (= v :%select-miss-a)
+                (let (v2 (map-get m k :%select-miss-b))
+                  (if (= v2 :%select-miss-b) nil [k v2]))
+                [k v])))
+      ks)))

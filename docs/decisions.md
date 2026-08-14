@@ -15254,7 +15254,7 @@ falls through; Brood does not) — write `:when (try … (catch _ false))` for f
 
 ## ADR-227 — Namespace the standard library: core stays bare, derived helpers move to modules
 
-**Status:** in progress (stage 1, `enum`, implemented 2026-08-13; `map`/`math`/… to follow).
+**Status:** in progress (stage 1 `enum` + stage 2 `map`, 2026-08-13/14; `math`/… to follow).
 
 **Context.** The stdlib is written in Brood, but the bulk lives in a flat, un-namespaced
 `std/prelude.blsp` (~6000 lines) where every function — from `map`/`filter`/`reduce` to niche
@@ -15292,6 +15292,14 @@ does not (stays bare), and the 6 int↔byte fns fold into `encoding` rather than
 files) or `(require 'enum)` + qualify for header-less scripts (`breakage/*`, a bench). The stale
 bare entries for the moved fns were removed from `std/doc-catalog.blsp` (module fns are documented
 via their module, as `set`/`json` already are). Full in-language suite green (4643/4643).
+
+**Stage 2 — `map` (done).** `std/map.blsp` (a `CORE_MODULE`) holds `merge-with`, `update-vals`,
+`update-keys`, `select-keys`; the core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/
+`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`/`zipmap`) stays bare. The module is
+named `map`; the bare `map` *function* is unaffected (a bare `map` resolves to the function, since
+there is no `map/map`, and the helpers themselves reach it the same way). Consumers: `enum`
+(`group-by` builds via `map/update-vals` — so `enum` now `(:use map)`), `editor/ui`,
+`editor/buffer`, `maps_test`. Full suite green (4643/4643).
 
 **Consequence — the reference.** Namespaced stdlib functions are not in the bare-surface catalog
 (`nest docs --all`); they are documented through their module, exactly as every other std module.

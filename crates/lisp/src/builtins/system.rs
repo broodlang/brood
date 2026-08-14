@@ -1057,6 +1057,11 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // index-where/dedupe. The core ops (map/filter/reduce/fold/take/drop/distinct/…)
     // stay bare in the prelude. `(:use enum)` for bare access, or call qualified.
     embedded_module!("enum", "std/enum.blsp"),
+    // Map-transformation helpers (ADR-227): merge-with / update-vals / update-keys /
+    // select-keys, layered over the bare map protocol (assoc/get/keys/vals/merge/…,
+    // which stay in the prelude). The module is named `map`; the bare `map` function
+    // is unaffected. `(:use map)` for bare access, or call qualified.
+    embedded_module!("map", "std/map.blsp"),
     // OS/process interface: env vars, argv, subprocess execution, OS type, halt.
     // Wraps the %env-all/%argv/%os-cmd/%os-type/%halt primitives with a clean API.
     embedded_module!("system", "std/system.blsp"),

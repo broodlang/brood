@@ -437,7 +437,6 @@
    "merge-runs" :collections
    "merge-sort" :collections
    "merge-sort-n" :collections
-   "merge-with" :maps
    "min" :math
    "mod" :math
    "module-doc" :meta
@@ -626,7 +625,6 @@
    "sched-stats" :meta
    "sealed-members" :meta
    "second" :collections
-   "select-keys" :maps
    "self" :processes
    "send" :processes
    "send-after" :processes
@@ -775,8 +773,6 @@
    "unregister-impl" :meta
    "update" :maps
    "update-in" :maps
-   "update-keys" :maps
-   "update-vals" :maps
    "upper" :strings
    "utf8-bytes->string" :bytes
    "vals" :maps
