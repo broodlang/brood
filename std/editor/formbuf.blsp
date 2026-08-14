@@ -35,7 +35,8 @@ outside the regions), `protected-spans` (those same outside ranges, for
 `region-index`, `splice` (re-render the generated text, keeping region contents
 by index) — plus `guard-veto` / `guard-clamp`, the two `:post-key` policies that
 keep the generated part intact. `(require 'editor/formbuf)`."
-  (:use enum))
+  (:use enum)
+  (:use math))
 
 ;; ---- region providers ---------------------------------------------------------
 

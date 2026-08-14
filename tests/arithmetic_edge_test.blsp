@@ -4,7 +4,9 @@
 ;; arithmetic) and malformed_test (zero-arg / div-by-zero errors). Every result
 ;; here is engine-independent — `make test` runs the suite through both the VM and
 ;; the tree-walker (ADR-076), and the differential gate guards cross-engine parity.
-(defmodule arithmetic-edge-test (:use test))
+(defmodule arithmetic-edge-test
+  (:use test)
+  (:use math))
 
 (def I64-MIN -9223372036854775808)
 (def I64-MAX 9223372036854775807)

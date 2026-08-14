@@ -5,7 +5,9 @@
 ;; language produces these floats by design (`1e400`, overflow), so the lossy
 ;; round-trip was reachable. Fix: the reader classifies `inf`/`-inf`/`nan` as the
 ;; matching float literals (reserved like `nil`/`true`/`false`).
-(defmodule float-roundtrip-test (:use test))
+(defmodule float-roundtrip-test
+  (:use test)
+  (:use math))
 
 (defn roundtrip (x) (read-string (pr-str x)))
 

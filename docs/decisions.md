@@ -15254,7 +15254,8 @@ falls through; Brood does not) — write `:when (try … (catch _ false))` for f
 
 ## ADR-227 — Namespace the standard library: core stays bare, derived helpers move to modules
 
-**Status:** in progress (stage 1 `enum` + stage 2 `map`, 2026-08-13/14; `math`/… to follow).
+**Status:** in progress (stages 1–3 `enum`/`map`/`math` done, 2026-08-13/14; a follow-up will
+replace the per-file `(:use …)` migrations with **auto-derived imports**, below).
 
 **Context.** The stdlib is written in Brood, but the bulk lives in a flat, un-namespaced
 `std/prelude.blsp` (~6000 lines) where every function — from `map`/`filter`/`reduce` to niche
@@ -15300,6 +15301,26 @@ named `map`; the bare `map` *function* is unaffected (a bare `map` resolves to t
 there is no `map/map`, and the helpers themselves reach it the same way). Consumers: `enum`
 (`group-by` builds via `map/update-vals` — so `enum` now `(:use map)`), `editor/ui`,
 `editor/buffer`, `maps_test`. Full suite green (4643/4643).
+
+**Stage 3 — `math` (done).** `std/math.blsp` (a `CORE_MODULE`) holds `sqrt`, `pow`, `ceil`,
+`round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates
+(`positive?`/`negative?`/`even?`/`odd?`) and the constants `pi`/`e`. Core arithmetic
+(operators, `quot`/`mod`/`rem`/`floor`/`min`/`max`, `zero?`/`nan?`/`infinite?`) stays bare.
+`quot` is pinned (used by `merge-sort`); `mod` stays bare and had its one `(abs b)` **inlined**
+so it needs nothing from the module (the boot-time prelude cannot require one). The `binding`
+macro's `(odd? …)` was likewise inlined. ~26 consumers migrated (`(:use math)`, or `:only`/qualify
+where a name clashed with another `:use` — e.g. `telemetry/sum` vs `math/sum`).
+
+**Migration lesson (why the follow-up).** The math move exposed how brittle *explicit* per-file
+imports are at this surface: a name like `even?`/`abs` is passed as a **higher-order argument**
+(`(filter even? xs)`, `(chunk-by even? xs)`, `(sort-by abs xs)`) far more than it is called in
+operator position, and a value-position use is just as much a reference that needs the import —
+so an operator-position-only migration scan silently missed five files, caught only by the suite.
+Combined with the `:use`-level name-clash errors, this argues the imports should be **derived from
+the code, not hand-written**. Planned follow-up: an unresolved bare name that a single curated
+stdlib module exports auto-refers that module, at the **lowest** resolution priority (local names
+and explicit `:use` win; genuine ambiguity stays an error). That removes every `(:use enum/map/
+math)` line added in stages 1–3 and the whole class of missed-import bugs.
 
 **Consequence — the reference.** Namespaced stdlib functions are not in the bare-surface catalog
 (`nest docs --all`); they are documented through their module, exactly as every other std module.

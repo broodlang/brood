@@ -26,7 +26,9 @@
 ;; diagnostic *classification* (FLAW / SERIOUS DEFECT / FAILURE) is dropped — a violated
 ;; identity here is simply a failure.
 
-(defmodule conformance-paranoia-test (:use test))
+(defmodule conformance-paranoia-test
+  (:use test)
+  (:use math))
 
 ;; Infinity and NaN have to be MADE, not computed. Brood deliberately **raises** on
 ;; division by zero (error E0040, with a hint) rather than returning IEEE 754's infinity,

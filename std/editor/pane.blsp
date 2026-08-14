@@ -27,7 +27,8 @@ by a `:ratio`, reserving one cell for a divider. `pane-layout` turns a tree + a
 rect into pane rects + divider rects; `pane-split`/`pane-delete`/`pane-other`
 restructure it; `divider-at` + `pane-ratio-for` + `pane-set-ratio` implement
 drag-to-resize over the kernel's `:drag` mouse events (ADR-077). Pure and
-content-agnostic — the editor supplies the payload and the keybindings.")
+content-agnostic — the editor supplies the payload and the keybindings."
+  (:use math))
 
 ;; Note on recursion: the helpers below walk the layout *tree*, so they recurse on
 ;; its DEPTH — the number of nested splits — not on any list length or leaf count.

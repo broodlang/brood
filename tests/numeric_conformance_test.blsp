@@ -4,7 +4,9 @@
 ;; *structural* `=` (no cross-type coercion) but coercing *ordering*. Every result
 ;; is engine-independent; `make test` runs the suite through both the VM and the
 ;; tree-walker (ADR-076).
-(defmodule numeric-conformance-test (:use test))
+(defmodule numeric-conformance-test
+  (:use test)
+  (:use math))
 
 (describe "arithmetic identities"
   (test "additive/multiplicative identity and inverse"

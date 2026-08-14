@@ -7,7 +7,9 @@
 ;;   (b) Raises a structured error — the runtime caught it safely.
 ;; "Silently crash" or "hang" are both failures.
 
-(defmodule chaos-test (:use test))
+(defmodule chaos-test
+  (:use test)
+  (:use math))
 
 (defn expand-error (form)
   (error-of (eval form)))

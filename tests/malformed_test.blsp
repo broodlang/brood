@@ -14,7 +14,9 @@
 ;;   read-string     — 1.2.3 a malformed-float error, #q as symbol, unknown escape stripped
 ;;   apply / map     — zero-arg and non-fn errors
 
-(defmodule malformed-test (:use test))
+(defmodule malformed-test
+  (:use test)
+  (:use math))
 
 (defn expand-error (form)
   "Return the error string when `form` raises via eval, or nil if it succeeds."

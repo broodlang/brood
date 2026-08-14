@@ -6,7 +6,10 @@
 ;; preserves comments, preserves blank-line intent between top-level forms,
 ;; collapses short forms onto a single line, and breaks long ones over multiple.
 
-(defmodule format-test (:use-internals format) (:use test) (:use format))
+(defmodule format-test
+  (:use-internals format)
+  (:use test)
+  (:use format))
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-fmt-safe-")

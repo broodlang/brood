@@ -24,7 +24,8 @@
   fragment (sidebar + main), for embedding in a host layout (e.g. hive's themed page).
 
   Docstrings are treated as light Markdown — blank-line paragraphs and inline `code`
-  spans — and every value is HTML-escaped, so a docstring can never inject markup.")
+  spans — and every value is HTML-escaped, so a docstring can never inject markup."
+  (:use math))
 
 ;; ---- escaping + inline prose ------------------------------------------------
 

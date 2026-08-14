@@ -1428,8 +1428,13 @@ Runtime housekeeping (both items landed):
   - ✅ **`map`-extras (stage 2, 2026-08-14)** — `merge-with`, `update-vals`, `update-keys`,
     `select-keys` → `std/map.blsp`. Core map protocol stays bare; the bare `map` *function*
     is unaffected by the module name. `enum/group-by` now `(:use map)`. Suite green.
-  - ⬜ **`math`** (`abs`, `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `sum`,
-    `product`, `even?`, `odd?`, `positive?`, `negative?`; core arithmetic stays bare).
+  - ✅ **`math` (stage 3, 2026-08-14)** — `sqrt`/`pow`/`ceil`/`round`/`round-to`/`clamp`/
+    `abs`/`sum`/`product`/`even?`/`odd?`/`positive?`/`negative?` + consts `pi`/`e` →
+    `std/math.blsp`. Core arithmetic stays bare (`quot`/`mod`/`rem`/`floor`/`min`/`max`);
+    `mod`/`binding` had their `abs`/`odd?` inlined. Suite green (4643/4643).
+  - ⬜ **Auto-derived imports** — replace the per-file `(:use enum/map/math)` with
+    resolver-level derivation (unresolved bare name → its unique stdlib module, lowest
+    priority; ambiguity errors). Removes the migration + the missed-import bug class (ADR-227).
 - ✅ **Syntax finalisation pass (2026-07-25, ADR-149/150/151/152)** — closed the
   cases where the surface accepted a plausible-but-wrong spelling and
   **reinterpreted** it instead of rejecting it. Binding containers are lists (a

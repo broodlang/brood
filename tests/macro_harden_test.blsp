@@ -10,7 +10,9 @@
 ;;   receive — (after …) in non-last position → named error
 ;;   describe — keyword group name → named error
 
-(defmodule macro-harden-test (:use test))
+(defmodule macro-harden-test
+  (:use test)
+  (:use math))
 
 ;; ── helpers ──────────────────────────────────────────────────────────────────
 

@@ -9,7 +9,11 @@
 
 ;; `:use-internals telemetry` grants the node-liveness tests access to the private
 ;; diff helpers (`telemetry-absent`) — the ADR-146 @testable seam.
-(defmodule telemetry-metrics-test (:use test) (:use telemetry) (:use-internals telemetry))
+(defmodule telemetry-metrics-test
+  (:use test)
+  (:use telemetry)
+  (:use-internals telemetry)
+  (:use math :only [abs]))
 
 (defn tmm-emit-n (event m n)
   "Emit `event` with measurements `m`, `n` times (tail-recursive)."

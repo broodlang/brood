@@ -3,7 +3,7 @@
 ;; value unchanged and only adds trace side-effects through `*spy-sink*`. Tests
 ;; rebind the sink to a collector (or a no-op) so nothing leaks to stderr and the
 ;; trace can be asserted as data.
-(defmodule spy-test (:use test))
+(defmodule spy-test (:use test) (:use math))
 
 ;; A no-op sink: prove transparency without any output.
 (defn silent (thunk) (binding (*spy-sink* (fn (entry) nil)) (thunk)))

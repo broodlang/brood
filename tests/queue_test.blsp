@@ -1,4 +1,4 @@
-(defmodule queue-test (:use test))
+(defmodule queue-test (:use test) (:use math))
 (require 'queue)
 
 (describe "FIFO queue"

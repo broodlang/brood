@@ -1,7 +1,7 @@
 ;; Tests for the ergonomic prelude additions: string interpolation (`fmt`),
 ;; binding-conditionals (`if-let`/`when-let`), conditional
 ;; and short-circuit threading (`cond->`/`some->`), `doto`, and `run!`.
-(defmodule ergonomics-test (:use test))
+(defmodule ergonomics-test (:use test) (:use math))
 
 (describe "fmt — string interpolation"
   (test "splices expression values between literal text"

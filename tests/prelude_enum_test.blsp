@@ -1,4 +1,4 @@
-(defmodule prelude-enum-test (:use test) (:use enum))
+(defmodule prelude-enum-test (:use test) (:use enum) (:use math))
 
 (describe "chunk-every"
   (test "even split"
