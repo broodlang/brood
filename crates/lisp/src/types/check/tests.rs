@@ -3895,11 +3895,12 @@ fn unknown_module_qualified_name_is_not_unbound() {
 }
 
 #[test]
-fn ki17_flags_a_qualified_reference_to_an_unrequired_module() {
-    // KI-17: a module bound in the loaded image, referenced qualified by a file that
-    // never `require`s/`:use`s it — resolving only by load-order luck. The whole-project
-    // driver passes each file its transitive require-closure; a reference outside that
-    // closure is flagged. Excluded → warn; included → silent (the require-what-you-name fix).
+fn ki17_qualified_reference_auto_requires_so_no_unrequired_warning() {
+    // KI-17 is OBSOLETE since the ADR-227 follow-up: a qualified reference `mod/name`
+    // now *infers* `(require 'mod)`, so "a reference to an unrequired module" can no
+    // longer occur — there is no unrequired module to reference. The lint is a permanent
+    // no-op, so a qualified reference draws NO "unrequired module" warning regardless of
+    // the reachability set (empty or populated), and NO "unbound" (the reference resolves).
     let mut interp = crate::Interp::new();
     interp
         .eval_str("(defmodule ki17mod \"m\")\n(defn foo (x) x)")
@@ -3907,21 +3908,18 @@ fn ki17_flags_a_qualified_reference_to_an_unrequired_module() {
     let forms = crate::syntax::reader::read_all(&mut interp.heap, "(defn go (x) (ki17mod/foo x))")
         .expect("parse");
 
-    // Empty reachability set → unreachable-from-this-file → warn.
+    // Empty reachability set — once the flag for KI-17, now silent.
     let warned = crate::types::check::check_file_ext(&mut interp.heap, &forms, &[]);
     assert!(
-        warned
-            .iter()
-            .any(|(_, m)| m.contains("unrequired module: ki17mod")),
-        "expected an unrequired-module warning, got {warned:?}"
+        warned.iter().all(|(_, m)| !m.contains("unrequired module")),
+        "KI-17 is obsolete — no unrequired-module warning is expected, got {warned:?}"
     );
-    // The plain unbound lint must NOT also fire (the reference resolves).
     assert!(
         warned.iter().all(|(_, m)| !m.contains("unbound symbol")),
-        "a bound-but-unrequired reference is not 'unbound': {warned:?}"
+        "the qualified reference resolves — it is not 'unbound': {warned:?}"
     );
 
-    // The module in the reachability set → silent.
+    // The module in the reachability set — also silent (unchanged).
     let ok =
         crate::types::check::check_file_ext(&mut interp.heap, &forms, &["ki17mod".to_string()]);
     assert!(

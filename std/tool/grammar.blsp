@@ -18,7 +18,7 @@
 drift across editors. `(tmlanguage)` emits a VS Code TextMate grammar (JSON text);
 `(emacs-special-forms)` emits the Emacs `brood-special-forms` defconst. The `nest
 grammar` subcommand prints them (redirect to the editor's grammar file). Pure Brood
-over `(special-forms)` + `json-encode`."
+over `(special-forms)` + `encode`."
   (:use json))
 
 ;; ---- the source of truth -----------------------------------------------------
@@ -98,7 +98,7 @@ part, from `special-keywords`). Returned as data so callers/tests can inspect it
 (defn tmlanguage ()
   "The VS Code TextMate grammar as JSON text (the `.tmLanguage.json` file body),
 generated from `(special-forms)`. Redirect `nest grammar` to the grammar file."
-  (json-encode (tmlanguage-grammar)))
+  (encode (tmlanguage-grammar)))
 
 ;; ---- tree-sitter highlight query ---------------------------------------------
 

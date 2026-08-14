@@ -749,7 +749,30 @@ pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
         enforce_private_refs(heap, form, &value::symbol_name(ns), None, 0)?;
     }
     let expanded = macroexpand_all(heap, form, env)?;
-    let resolved = resolve(heap, expanded);
+    // Inferred requires from qualified references (ADR-227 follow-up): arm recording so
+    // `resolve` notes each qualified reference's module, then require them — before eval,
+    // so `mod/name` is bound. At the root region (script/REPL) `resolve` is identity, so
+    // additionally scan the form for qualified references there. (A qualified macro/call
+    // head is already loaded eagerly during macroexpand.)
+    let resolved = {
+        let _recording = crate::eval::derive::RecordingScope::enter();
+        let resolved = resolve(heap, expanded);
+        if heap.compile_ns().is_none() {
+            crate::eval::derive::scan_root_refs(heap, resolved);
+        }
+        resolved
+    };
+    // `drain_pending` loads any inferred modules, which collects — so `resolved`
+    // (a LOCAL handle we still need for the quasiquote pass below) must be rooted
+    // across it, or it goes stale (use-after-GC). The nested loads push and truncate
+    // their own roots back to this base, so our slot stays valid throughout.
+    let roots_base = heap.roots_len();
+    let resolved_root = heap.root(resolved);
+    if let Err(error) = crate::eval::derive::drain_pending(heap, env) {
+        heap.truncate_roots(roots_base);
+        return Err(error);
+    }
+    let resolved = heap.read_root(resolved_root);
     // Final step: expand auto-gensym-FREE `quasiquote`s into builder code so the VM
     // can compile arms that use them (a raw `quasiquote` special form otherwise
     // defers the WHOLE arm to the tree-walker — the dominant cost of macro-heavy
@@ -759,7 +782,9 @@ pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // only the timing moves (once, at compile) for a template whose expansion is
     // deterministic. A `#`-autogensym template is LEFT for the runtime path (its
     // gensyms must be fresh per invocation, which a once-at-compile expansion freezes).
-    Ok(expand_static_quasiquotes(heap, resolved))
+    let out = expand_static_quasiquotes(heap, resolved);
+    heap.truncate_roots(roots_base);
+    Ok(out)
 }
 
 /// The import-table key under which `(:use-internals mod)` records its grant —
@@ -1207,8 +1232,15 @@ fn resolve_sym(
         // in the expand pass, bakes the rooted spelling into the compiled code — a std or
         // other-package name is left bare, and an already-rooted one is unchanged.
         if let Some(rooted) = heap.root_qualified_ref(s) {
+            // An intra-package qualified reference infers its (rooted) module's require.
+            crate::eval::derive::record_qualified(value::symbol_name_ref(rooted), ns_name);
             return rooted;
         }
+        // A qualified reference `mod/name` infers `(require 'mod)` — no explicit require
+        // needed (ADR-227 follow-up). Record it so `compile` loads the module before
+        // eval (for a value in argument position; a call head is loaded eagerly during
+        // macroexpand). Deferred because `resolve_sym` runs under GC/macro blocks.
+        crate::eval::derive::record_qualified(name, ns_name);
         return s; // already qualified, no alias
     }
     if is_ambient(s) {
@@ -1702,6 +1734,13 @@ pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value,
     if let ValueRef::Pair(p) = form.unpack() {
         let (head, tail) = heap.pair(p);
         if let ValueRef::Sym(s) = head.unpack() {
+            // A qualified call head into a not-yet-loaded module may be a macro that
+            // must expand at compile time (the compile-time require-for-macros rule) —
+            // infer the require from the qualified name so the module loads before this lookup.
+            // A no-op for a bare head or an already-loaded one (ADR-227 follow-up).
+            if macro_head_id(heap, env, s).is_none() {
+                crate::eval::derive::require_qualified_head(heap, env, s)?;
+            }
             if let Some(mid) = macro_head_id(heap, env, s) {
                 let args = heap.list_to_vec(tail)?;
                 // Run the expander through the ACTIVE ENGINE (VM when enabled), not the

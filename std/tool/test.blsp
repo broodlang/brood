@@ -1591,7 +1591,7 @@ the suite programmatically. Printed once, at the end, so parallel ordering is ir
   (require 'json)
   (let (total (count results)
         failed (count-failed results))
-    (println (json/json-encode {:total total
+    (println (json/encode {:total total
                                 :passed (- total failed)
                                 :failed failed
                                 :failed-assertions (count-failures results)

@@ -6,6 +6,7 @@
 //! pattern surfaces the evaluator runs, and the evaluator falls back to it.
 
 pub mod compile; // the compiling-VM execution engine (ADR-076) — gated by BROOD_VM
+pub mod derive; // auto-derived stdlib imports (ADR-227 follow-up)
 pub mod macros;
 
 use std::sync::LazyLock;

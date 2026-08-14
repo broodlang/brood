@@ -26,12 +26,12 @@
   "JSON ↔ Brood data, written entirely in Brood (pure; opt-in).
 
     (require 'json)
-    (json-parse \"{\\\"a\\\":[1,2],\\\"b\\\":true}\")  ; => {:a [1 2] :b true}
-    (json-encode {:a [1 2] :b nil})                ; => \"{\\\"a\\\":[1,2],\\\"b\\\":null}\"
+    (parse \"{\\\"a\\\":[1,2],\\\"b\\\":true}\")  ; => {:a [1 2] :b true}
+    (encode {:a [1 2] :b nil})                ; => \"{\\\"a\\\":[1,2],\\\"b\\\":null}\"
 
-`json-parse` maps a JSON object → a Brood map with **keyword** keys (`(get m :repo)`),
+`parse` maps a JSON object → a Brood map with **keyword** keys (`(get m :repo)`),
 array → vector, string → string, number → int/float, true/false → bool, null → nil;
-it errors on malformed input. `json-encode` is the inverse — it accepts keyword,
+it errors on malformed input. `encode` is the inverse — it accepts keyword,
 symbol, or string keys (all emitted as JSON string keys) and keyword/symbol values
 (emitted as their name) and lists (as arrays). Not optimised — a recursive-descent
 parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
@@ -67,7 +67,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 ;; returns `[value next-index]`. Whitespace is skipped between tokens. Tail
 ;; recursion + accumulators throughout; `error` on anything malformed.
 
-;; The parser indexes a vector of INTEGER CODE POINTS (built once in `json-parse`),
+;; The parser indexes a vector of INTEGER CODE POINTS (built once in `parse`),
 ;; not the raw string and not 1-char strings. `char-at` on a UTF-8 string is O(i),
 ;; so calling it at every position made parsing O(n^2); and 1-char-string tokens made
 ;; every comparison a string-equality through the slow dispatch path. Int codes make
@@ -342,7 +342,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       (= c -1) (error "json: unexpected end of input")
       else (json-number s i n))))
 
-(defn json-parse (s)
+(defn parse (s)
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →
 a vector, string → string, number → int/float, true/false → bool, null → nil. Errors
 on malformed input or trailing content. Pure."
@@ -359,7 +359,7 @@ on malformed input or trailing content. Pure."
         (if (< k n)
           (error "json: trailing content at index " k)
           v)))))
-(sig json-parse (string -> (or map vector string number bool nil)))
+(sig parse (string -> (or map vector string number bool nil)))
 
 ;; ---- encode -----------------------------------------------------------------
 
@@ -453,7 +453,7 @@ the named escapes + every C0 control) that would each find nothing."
 ;; "no rule for this identity", which is the question both call sites below ask.
 (defability JsonEncode
   "How a value converts to a JSON-encodable Brood value (nil / bool / number / string /
-  keyword / map / vector / list). The seam `json-encode` consults for a record with a
+  keyword / map / vector / list). The seam `encode` consults for a record with a
   custom wire shape, and for any kind JSON has no built-in rule for."
   (to-json [self] :-> any))
 
@@ -497,7 +497,7 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
             (type-of v)
             ") — give its type a JsonEncode impl to encode it")))))
 
-(defn json-encode (v)
+(defn encode (v)
   "Encode Brood value `v` as JSON text: nil → null, true/false → bool, a number → a
 number, a string → a quoted string, a keyword/symbol → a string of its name, a map →
 an object (keyword keys become string keys), a vector or list → an array. A `defrecord`
@@ -505,4 +505,4 @@ value encodes as its **fields** (its internal id never reaches the wire) unless 
 has a `JsonEncode` impl, which then decides the wire shape. Any other kind (a pid, a fn)
 errors unless it has a `JsonEncode` impl. Pure."
   (apply str (reverse (json-emit v nil))))
-(sig json-encode (any -> string))
+(sig encode (any -> string))

@@ -310,7 +310,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   (require 'docsite)
   (when (not (dir? out-dir)) (make-dir out-dir))
   (spit (path-join out-dir "index.html") (docsite/render model {:title title}))
-  (spit (path-join out-dir "model.json") (json/json-encode model))
+  (spit (path-join out-dir "model.json") (json/encode model))
   (println (str "Wrote "
              (path-join out-dir "index.html")
              " and model.json ("

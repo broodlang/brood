@@ -11,7 +11,7 @@
 ;; hand-written recursive-descent parser, not a wrapper over a Rust crate — so it is
 ;; the one with the most room to be wrong.
 ;;
-;; The two sides disagree only on key spelling: `json-parse` maps a JSON object to a
+;; The two sides disagree only on key spelling: `parse` maps a JSON object to a
 ;; Brood map with *keyword* keys (idiomatic Brood), while `csv-parse-maps` keys rows
 ;; by their header *strings*. `csv-stringify-keys` reconciles that, and nothing else
 ;; is normalised — the field values are compared exactly.
@@ -43,7 +43,7 @@
   (let (p (first (filter (fn (f) (= (csv-stem f) stem)) (csv-dir "json"))))
     (if (nil? p)
       (error "conformance-csv: no json expectation for " stem)
-      (into [] (map csv-stringify-keys (json/json-parse (slurp p)))))))
+      (into [] (map csv-stringify-keys (json/parse (slurp p)))))))
 
 (defn- csv-actual (path) (into [] (csv/csv-parse-maps (slurp path))))
 

@@ -33,7 +33,7 @@ the `nest mcp` tools of the same names.")
    "E0010" {:summary "Unbound symbol — a name that resolves to nothing."
             :causes "A typo; a missing `(require 'mod)` for a `mod/name`; a module-private name (`defn-`/`def-`) referenced from another module (ADR-146); using a `let`-bound name out of scope."
             :fix "Check the spelling with `(apropos \"part\")`. For `mod/x`, add `(require 'mod)`. For a private (check with `(private? 'mod/x)`), call it from its own module or add `(:use-internals mod)`."
-            :example "(require 'json) (json/json-parse \"{}\")"}
+            :example "(require 'json) (json/parse \"{}\")"}
    "E0020" {:summary "Arity mismatch — a function called with the wrong number of arguments."
             :causes "Too many or too few args; forgetting a required parameter; a variadic vs fixed confusion."
             :fix "Check the arglist with `(arglist 'the-fn)` (or the `lookup` MCP tool). `&optional` params may be omitted; `& rest` takes any number."

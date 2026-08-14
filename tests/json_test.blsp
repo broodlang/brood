@@ -7,31 +7,31 @@
 (defn- json-errs?
   (s)
   "True if parsing `s` raises (the malformed-input cases)."
-  (try (do (json-parse s) false) (catch e true)))
+  (try (do (parse s) false) (catch e true)))
 
-(describe "json-parse — scalars"
+(describe "parse — scalars"
   (test "integers and floats (incl. sign + exponent)"
-    (assert= (json-parse "42") 42)
-    (assert= (json-parse "-7") -7)
-    (assert= (json-parse "-2.5") -2.5)
-    (assert= (json-parse "1e3") 1000.0)
-    (assert= (json-parse "-2.5e3") -2500.0))
+    (assert= (parse "42") 42)
+    (assert= (parse "-7") -7)
+    (assert= (parse "-2.5") -2.5)
+    (assert= (parse "1e3") 1000.0)
+    (assert= (parse "-2.5e3") -2500.0))
   (test "the literals true / false / null"
-    (assert= (json-parse "true") true)
-    (assert= (json-parse "false") false)
-    (assert= (json-parse "null") nil))
+    (assert= (parse "true") true)
+    (assert= (parse "false") false)
+    (assert= (parse "null") nil))
   (test "leading + trailing whitespace is skipped"
-    (assert= (json-parse "   true  ") true)
-    (assert= (json-parse "\n\t [1] \n") [1])))
+    (assert= (parse "   true  ") true)
+    (assert= (parse "\n\t [1] \n") [1])))
 
-(describe "json-parse — strict number grammar (RFC 8259)"
+(describe "parse — strict number grammar (RFC 8259)"
   (test "valid numbers parse"
-    (assert= (json-parse "0") 0)
-    (assert= (json-parse "-0") 0)
-    (assert= (json-parse "0.5") 0.5)
-    (assert= (json-parse "123") 123)
-    (assert= (json-parse "1E+3") 1000.0)
-    (assert= (json-parse "1.5e-2") 0.015))
+    (assert= (parse "0") 0)
+    (assert= (parse "-0") 0)
+    (assert= (parse "0.5") 0.5)
+    (assert= (parse "123") 123)
+    (assert= (parse "1E+3") 1000.0)
+    (assert= (parse "1.5e-2") 0.015))
   (test "a leading + is rejected (string->number would accept it)"
     (is (json-errs? "+5"))
     (is (json-errs? "+.5")))
@@ -46,51 +46,51 @@
     (is (json-errs? "1e"))
     (is (json-errs? "1e+")))
   (test "strict rules hold inside arrays and objects"
-    (assert= (json-parse "[0, -1.5, 1e2]") [0 -1.5 100.0])
+    (assert= (parse "[0, -1.5, 1e2]") [0 -1.5 100.0])
     (is (json-errs? "[01]"))
     (is (json-errs? "{\"a\": +1}"))))
 
-(describe "json-parse — strings + escapes"
+(describe "parse — strings + escapes"
   (test "a plain string"
-    (assert= (json-parse "\"hello\"") "hello")
-    (assert= (json-parse "\"\"") ""))
+    (assert= (parse "\"hello\"") "hello")
+    (assert= (parse "\"\"") ""))
   ; \t
   (test "the named escapes"
     ; \"  -> "
-    (assert= (json-parse "\"a\\\"b\"") "a\"b")
+    (assert= (parse "\"a\\\"b\"") "a\"b")
     ; \\  -> \
-    (assert= (json-parse "\"a\\\\b\"") "a\\b")
+    (assert= (parse "\"a\\\\b\"") "a\\b")
     ; \/  -> /
-    (assert= (json-parse "\"a\\/b\"") "a/b")
+    (assert= (parse "\"a\\/b\"") "a/b")
     ; \n
-    (assert= (json-parse "\"a\\nb\"") "a\nb")
-    (assert= (json-parse "\"a\\tb\"") "a\tb"))
+    (assert= (parse "\"a\\nb\"") "a\nb")
+    (assert= (parse "\"a\\tb\"") "a\tb"))
   (test "\\b and \\f decode to single control chars (no codepoint primitive needed)"
-    (assert= (string-length (json-parse "\"\\b\"")) 1)
-    (assert= (string-length (json-parse "\"\\f\"")) 1))
+    (assert= (string-length (parse "\"\\b\"")) 1)
+    (assert= (string-length (parse "\"\\f\"")) 1))
   (test "\\uXXXX BMP escapes (via the reader's \\u{} mechanism)"
-    (assert= (json-parse "\"\\u0041\"") "A")
-    (assert= (json-parse "\"caf\\u00e9\"") "café"))
+    (assert= (parse "\"\\u0041\"") "A")
+    (assert= (parse "\"caf\\u00e9\"") "café"))
   (test "a surrogate pair combines into one astral code point"
-    (assert= (json-parse "\"\\ud83d\\ude00\"") "😀")
-    (assert= (string-length (json-parse "\"\\ud83d\\ude00\"")) 1)))
+    (assert= (parse "\"\\ud83d\\ude00\"") "😀")
+    (assert= (string-length (parse "\"\\ud83d\\ude00\"")) 1)))
 
-(describe "json-parse — arrays + objects"
+(describe "parse — arrays + objects"
   (test "arrays: empty, flat, mixed, nested"
-    (assert= (json-parse "[]") [])
-    (assert= (json-parse "[1,2,3]") [1 2 3])
-    (assert= (json-parse "[1, \"a\", true, null]") [1 "a" true nil])
-    (assert= (json-parse "[[1],[2,3]]") [[1] [2 3]]))
+    (assert= (parse "[]") [])
+    (assert= (parse "[1,2,3]") [1 2 3])
+    (assert= (parse "[1, \"a\", true, null]") [1 "a" true nil])
+    (assert= (parse "[[1],[2,3]]") [[1] [2 3]]))
   (test "objects: empty, flat (KEYWORD keys), nested"
-    (assert= (json-parse "{}") {})
-    (assert= (json-parse "{\"a\":1,\"b\":2}") {:a 1 :b 2})
-    (assert= (get (json-parse "{\"repo\":\"brood\"}") :repo) "brood")
-    (assert= (json-parse "{\"o\":{\"x\":[true]}}") {:o {:x [true]}}))
+    (assert= (parse "{}") {})
+    (assert= (parse "{\"a\":1,\"b\":2}") {:a 1 :b 2})
+    (assert= (get (parse "{\"repo\":\"brood\"}") :repo) "brood")
+    (assert= (parse "{\"o\":{\"x\":[true]}}") {:o {:x [true]}}))
   (test "whitespace between tokens is ignored"
-    (assert= (json-parse "{ \"a\" : [ 1 , 2 ] }") {:a [1 2]})))
+    (assert= (parse "{ \"a\" : [ 1 , 2 ] }") {:a [1 2]})))
 
 ; not a value
-(describe "json-parse — malformed input errors"
+(describe "parse — malformed input errors"
   (test "structural errors"
     ; empty
     (is (json-errs? ""))
@@ -109,50 +109,50 @@
     ; trailing content
     (is (json-errs? "1 2"))
     (is (json-errs? "nope"))))
-(describe "json-encode"
+(describe "encode"
   (test "scalars"
-    (assert= (json-encode nil) "null")
-    (assert= (json-encode true) "true")
-    (assert= (json-encode false) "false")
-    (assert= (json-encode 42) "42")
-    (assert= (json-encode -2.5) "-2.5"))
+    (assert= (encode nil) "null")
+    (assert= (encode true) "true")
+    (assert= (encode false) "false")
+    (assert= (encode 42) "42")
+    (assert= (encode -2.5) "-2.5"))
   (test "strings are quoted + escaped"
-    (assert= (json-encode "hi") "\"hi\"")
-    (assert= (json-encode "a\"b") "\"a\\\"b\"")
-    (assert= (json-encode "a\\b") "\"a\\\\b\"")
-    (assert= (json-encode "a\nb") "\"a\\nb\""))
+    (assert= (encode "hi") "\"hi\"")
+    (assert= (encode "a\"b") "\"a\\\"b\"")
+    (assert= (encode "a\\b") "\"a\\\\b\"")
+    (assert= (encode "a\nb") "\"a\\nb\""))
   (test "\\b and \\f control chars encode escaped (decode round-trip)"
-    (assert= (json-encode "a\u{8}b") "\"a\\bb\"")
-    (assert= (json-encode "a\u{c}b") "\"a\\fb\"")
-    (assert= (json-parse (json-encode "a\u{8}\u{c}b")) "a\u{8}\u{c}b"))
+    (assert= (encode "a\u{8}b") "\"a\\bb\"")
+    (assert= (encode "a\u{c}b") "\"a\\fb\"")
+    (assert= (parse (encode "a\u{8}\u{c}b")) "a\u{8}\u{c}b"))
   (test "other control chars (< U+0020) encode as \\u00XX"
-    (assert= (json-encode "a\u{1}b") "\"a\\u0001b\"")
-    (assert= (json-encode "\u{1f}") "\"\\u001f\"")
-    (assert= (json-encode "\u{0}") "\"\\u0000\"")
-    (assert= (json-parse (json-encode "a\u{0}\u{1b}\u{1f}b")) "a\u{0}\u{1b}\u{1f}b"))
+    (assert= (encode "a\u{1}b") "\"a\\u0001b\"")
+    (assert= (encode "\u{1f}") "\"\\u001f\"")
+    (assert= (encode "\u{0}") "\"\\u0000\"")
+    (assert= (parse (encode "a\u{0}\u{1b}\u{1f}b")) "a\u{0}\u{1b}\u{1f}b"))
   (test "keywords / symbols encode as their name string"
-    (assert= (json-encode :foo) "\"foo\"")
-    (assert= (json-encode 'bar) "\"bar\""))
+    (assert= (encode :foo) "\"foo\"")
+    (assert= (encode 'bar) "\"bar\""))
   (test "arrays and lists both encode as JSON arrays"
-    (assert= (json-encode [1 2 3]) "[1,2,3]")
-    (assert= (json-encode '(1 2 3)) "[1,2,3]")
-    (assert= (json-encode []) "[]"))
+    (assert= (encode [1 2 3]) "[1,2,3]")
+    (assert= (encode '(1 2 3)) "[1,2,3]")
+    (assert= (encode []) "[]"))
   ; keyword key → string key
   (test "a single-key object (order is deterministic for one key)"
-    (assert= (json-encode {"a" 1}) "{\"a\":1}")
-    (assert= (json-encode {:b [true nil]}) "{\"b\":[true,null]}"))
+    (assert= (encode {"a" 1}) "{\"a\":1}")
+    (assert= (encode {:b [true nil]}) "{\"b\":[true,null]}"))
   ;; A fn, not a pid: the JsonEncode block below deliberately impls `:pid` to show a
   ;; built-in kind being opened, so the "no rule for this kind" case is a fn here.
   (test "cannot encode a non-JSON value"
-    (is (try (do (json-encode (fn (x) x)) false) (catch e true)))))
+    (is (try (do (encode (fn (x) x)) false) (catch e true)))))
 
 (describe "json round-trips (parse ∘ encode = identity)"
   (test "values survive encode → parse (objects come back keyword-keyed)"
-    (assert= (json-parse (json-encode {:k [1 "two" true nil]})) {:k [1 "two" true nil]})
-    (assert= (json-parse (json-encode [1 [2 [3 []]]])) [1 [2 [3 []]]])
-    (assert= (json-parse (json-encode {:n -2.5 :s "a\"b\nc"})) {:n -2.5 :s "a\"b\nc"}))
+    (assert= (parse (encode {:k [1 "two" true nil]})) {:k [1 "two" true nil]})
+    (assert= (parse (encode [1 [2 [3 []]]])) [1 [2 [3 []]]])
+    (assert= (parse (encode {:n -2.5 :s "a\"b\nc"})) {:n -2.5 :s "a\"b\nc"}))
   (test "string keys encode fine and parse back as keywords (encode accepts either)"
-    (assert= (json-parse (json-encode {"repo" "brood" "stars" 3})) {:repo "brood" :stars 3})))
+    (assert= (parse (encode {"repo" "brood" "stars" 3})) {:repo "brood" :stars 3})))
 
 ;; ---- records + the JsonEncode ability ---------------------------------------
 ;; A record encodes as its FIELDS by default (its `:__id__` identity must never reach
@@ -168,28 +168,28 @@
 
 (describe "encoding records"
   (test "a record encodes as its fields, with the internal id omitted"
-    (assert= (json-parse (json-encode (point 1 2))) {:x 1 :y 2})
-    (is (not (includes? (json-encode (point 1 2)) "__id__"))))
+    (assert= (parse (encode (point 1 2))) {:x 1 :y 2})
+    (is (not (includes? (encode (point 1 2)) "__id__"))))
   (test "a nested record encodes as fields too"
-    (assert= (json-parse (json-encode (wrapped (point 3 4)))) {:inner {:x 3 :y 4}}))
+    (assert= (parse (encode (wrapped (point 3 4)))) {:inner {:x 3 :y 4}}))
   (test "a record in a map value or a vector element is encoded"
-    (assert= (json-parse (json-encode {:p (point 5 6)})) {:p {:x 5 :y 6}})
-    (assert= (json-parse (json-encode [(point 0 0)])) [{:x 0 :y 0}]))
+    (assert= (parse (encode {:p (point 5 6)})) {:p {:x 5 :y 6}})
+    (assert= (parse (encode [(point 0 0)])) [{:x 0 :y 0}]))
   (test "a plain map is unaffected — no id to strip"
-    (assert= (json-encode {:x 1}) "{\"x\":1}")))
+    (assert= (encode {:x 1}) "{\"x\":1}")))
 
 (describe "the JsonEncode ability"
   (test "a JsonEncode impl decides the wire shape instead of the fields"
-    (assert= (json-encode (usd 1050)) "\"$1050\"")
-    (assert= (json-parse (json-encode (usd 25))) "$25"))
+    (assert= (encode (usd 1050)) "\"$1050\"")
+    (assert= (parse (encode (usd 25))) "$25"))
   (test "the impl applies wherever the record appears"
-    (assert= (json-parse (json-encode {:m (usd 7)})) {:m "$7"})
-    (assert= (json-parse (json-encode [(usd 1) (usd 2)])) ["$1" "$2"]))
+    (assert= (parse (encode {:m (usd 7)})) {:m "$7"})
+    (assert= (parse (encode [(usd 1) (usd 2)])) ["$1" "$2"]))
   (test "an impl opens a kind that has no built-in JSON rule"
     ;; :pid is impl'd above — without it this raises
-    (is (string? (json-parse (json-encode (self))))))
+    (is (string? (parse (encode (self))))))
   (test "a kind with no impl still errors loudly"
-    (assert-error (json-encode (fn (x) x))))
+    (assert-error (encode (fn (x) x))))
   (test "no :default is registered — nil means 'no rule', not 'the fallback'"
     (is (nil? (impl-for '[JsonEncode to-json] :fn)))
     (is (not (nil? (impl-for '[JsonEncode to-json] :json-test/usd))))))
@@ -203,7 +203,7 @@
     (let (me (self)
           src "{\"id\":7,\"tags\":[\"a\",\"b\"],\"ok\":true}")
       (doseq (i (range 8))
-        (spawn (send me [:r (json-parse src)])))
+        (spawn (send me [:r (parse src)])))
       (let (results (map (fn (_) (receive ([:r m] m) (after *test-wait-ms* :timeout))) (range 8)))
         (is (every? (fn (m)
                       (and (= (get m :id) 7)
@@ -213,22 +213,22 @@
   (test "a value encoded in a worker parses back identically here"
     (let (me (self)
           v {:repo "brood" :runs [1 2 3]})
-      (spawn (send me [:enc (json-encode v)]))
+      (spawn (send me [:enc (encode v)]))
       (let (s (receive ([:enc s] s) (after *test-wait-ms* :timeout)))
-        (assert= (json-parse s) v))))
+        (assert= (parse s) v))))
   ;; `*impls*` is a global, so a spawned process sees the same registry; a record
   ;; deep-copies on `send` and keeps its `:__id__`, so it dispatches identically at
   ;; either end. Both directions are checked.
   (test "a record's JsonEncode impl applies in a spawned process too"
     (let (me (self))
-      (doseq (i (range 4)) (spawn (send me [:enc (json-encode (usd i))])))
+      (doseq (i (range 4)) (spawn (send me [:enc (encode (usd i))])))
       (let (results (map (fn (_) (receive ([:enc s] s) (after *test-wait-ms* :timeout)))
                       (range 4)))
-        (assert= (into [] (sort (map json-parse results))) ["$0" "$1" "$2" "$3"]))))
+        (assert= (into [] (sort (map parse results))) ["$0" "$1" "$2" "$3"]))))
   (test "a record built in a worker encodes via its impl after crossing heaps"
     (let (me (self))
       (spawn (send me [:rec (usd 99)]))
       (let (r (receive ([:rec r] r) (after *test-wait-ms* :timeout)))
         (is (record? r))
         (assert= (record-id r) :json-test/usd)
-        (assert= (json-encode r) "\"$99\"")))))
+        (assert= (encode r) "\"$99\"")))))

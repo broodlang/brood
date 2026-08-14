@@ -11,7 +11,7 @@
 ;;        surrogates, deep nesting). Reported, never failed.
 ;;
 ;; A file that is not valid UTF-8 cannot become a Brood string at all, so `slurp`
-;; raises before `json-parse` is reached. That counts as a rejection, which is the
+;; raises before `parse` is reached. That counts as a rejection, which is the
 ;; right verdict — several `n_` cases exist precisely to check that a parser does not
 ;; accept mis-encoded bytes.
 ;;
@@ -35,7 +35,7 @@
   (path)
   "`:ok` if `path` parses as JSON, `:rejected` if anything refuses it."
   (try
-    (do (json/json-parse (slurp path)) :ok)
+    (do (json/parse (slurp path)) :ok)
     (catch e :rejected)))
 
 (defn- js-kind (path) (substring (path-basename path) 0 1))
@@ -92,37 +92,37 @@
   [:conformance]
 
   (test "a bare scalar is a valid JSON text (RFC 8259 §2, not the 2006 grammar)"
-    (assert= (json/json-parse "123") 123)
-    (assert= (json/json-parse "\"s\"") "s")
-    (assert= (json/json-parse "true") true)
-    (assert= (json/json-parse "null") nil))
+    (assert= (json/parse "123") 123)
+    (assert= (json/parse "\"s\"") "s")
+    (assert= (json/parse "true") true)
+    (assert= (json/parse "null") nil))
 
   (test "trailing commas, comments and single quotes are rejected"
-    (assert-error (json/json-parse "[1,]"))
-    (assert-error (json/json-parse "{\"a\":1,}"))
-    (assert-error (json/json-parse "[1] // comment"))
-    (assert-error (json/json-parse "['a']")))
+    (assert-error (json/parse "[1,]"))
+    (assert-error (json/parse "{\"a\":1,}"))
+    (assert-error (json/parse "[1] // comment"))
+    (assert-error (json/parse "['a']")))
 
   (test "the number grammar rejects what looks numeric but isn't"
     ; leading zero
-    (assert-error (json/json-parse "01"))
+    (assert-error (json/parse "01"))
     ; trailing point
-    (assert-error (json/json-parse "1."))
+    (assert-error (json/parse "1."))
     ; leading point
-    (assert-error (json/json-parse ".1"))
+    (assert-error (json/parse ".1"))
     ; leading plus
-    (assert-error (json/json-parse "+1"))
+    (assert-error (json/parse "+1"))
     ; empty exponent
-    (assert-error (json/json-parse "1e"))
-    (assert-error (json/json-parse "Infinity"))
-    (assert-error (json/json-parse "NaN")))
+    (assert-error (json/parse "1e"))
+    (assert-error (json/parse "Infinity"))
+    (assert-error (json/parse "NaN")))
 
   (test "unescaped control characters are rejected inside a string"
-    (assert-error (json/json-parse "[\"a\nb\"]"))
-    (assert-error (json/json-parse "[\"a\tb\"]")))
+    (assert-error (json/parse "[\"a\nb\"]"))
+    (assert-error (json/parse "[\"a\tb\"]")))
 
   (test "escapes and astral surrogate pairs decode"
-    (assert= (json/json-parse "\"\\u0041\"") "A")
-    (assert= (json/json-parse "\"\\/\"") "/")
+    (assert= (json/parse "\"\\u0041\"") "A")
+    (assert= (json/parse "\"\\/\"") "/")
     ;; U+1D11E MUSICAL SYMBOL G CLEF, as the surrogate pair JSON must spell it with
-    (assert= (json/json-parse "\"\\uD834\\uDD1E\"") "\u{1D11E}")))
+    (assert= (json/parse "\"\\uD834\\uDD1E\"") "\u{1D11E}")))

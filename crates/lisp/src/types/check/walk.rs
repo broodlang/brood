@@ -409,23 +409,16 @@ fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
 /// job — the two are mutually exclusive), and the exact reference is *user-written*
 /// ([`Ctx::raw_qualified_has`] — never a macro-injected reference to a module the file
 /// doesn't mention). Each guard removes a false-positive class, keeping the lint sound.
-fn unrequired_module(heap: &Heap, ctx: &Ctx, s: Symbol) -> Option<String> {
-    let required = ctx.required_mods()?;
-    let nm = name_of(s);
-    let slash = nm.rfind('/')?;
-    let module = &nm[..slash];
-    if module.is_empty() {
-        return None; // a bare `/` (division), not a qualified reference
-    }
-    if required.contains(module) || !ctx.raw_qualified_has(&nm) {
-        return None;
-    }
-    // A local shadow, or a name the loaded image doesn't bind, is not this lint's
-    // concern (the latter is `is_unbound`'s).
-    if ctx.is_local(s) || !is_globally_bound(heap, s) {
-        return None;
-    }
-    Some(module.to_string())
+fn unrequired_module(_heap: &Heap, ctx: &Ctx, s: Symbol) -> Option<String> {
+    // OBSOLETE since the ADR-227 follow-up: a qualified reference `mod/name` now *infers*
+    // `(require 'mod)` — the reference itself loads the module (a qualified macro/call
+    // head during macroexpand, any other qualified reference before eval). So a
+    // "reference to an unrequired module" can no longer occur: there is no unrequired
+    // module to reference. The lint is a permanent no-op. Its reachability scaffolding
+    // (`required_mods` / `raw_qualified`) is retained for now — still touched here so it
+    // stays wired if ever repurposed — and can be pruned in a later cleanup.
+    let _ = (ctx.required_mods(), ctx.raw_qualified_has(&name_of(s)));
+    None
 }
 
 /// The KI-17 reachability diagnostic text for a reference to unrequired `module`.

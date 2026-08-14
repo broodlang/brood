@@ -1020,3 +1020,49 @@ descriptions*) were filtered out by eye. This — plus the `:use`-clash errors �
 replaces hand-written imports with **auto-derived** ones (an unresolved bare name that one curated
 stdlib module exports auto-refers it, lowest priority). Full suite green (4643/4643); `nest check` +
 `format --check` clean. ADR-227, `docs/language.md`, `ROADMAP.md`, doc-catalog updated.
+
+## 2026-08-14 — Auto-derived imports go live + stdlib namespacing stage 4: `json` (ADR-227 follow-up)
+
+The mechanism the earlier stages leaned toward now exists. A **qualified reference
+`mod/name` infers `(require 'mod)`** — you never write a `require` line just to satisfy
+a `mod/…` reference. New `crates/lisp/src/eval/derive.rs`, wired into the `compile` pass
+(`macros.rs`) via three hooks, each firing only on a `/` in a symbol:
+
+1. `require_qualified_head` — **eager**, from `macroexpand_1`: a qualified *macro* head
+   must load before the macro lookup (macros expand at compile time), so its module is
+   required immediately.
+2. `record_qualified` — **deferred**, from `resolve_sym`: records the module of a resolved
+   qualified reference (a value in argument position) on a thread-local; `drain_pending`
+   requires them after resolve, before eval.
+3. `scan_root_refs` — at the **root region** (a header-less script / the REPL, where
+   `resolve` is identity): scans the form so a top-level qualified value auto-requires
+   too. Gated so it never runs during prelude boot.
+
+**The design flipped from stage 3's plan.** Stage 3 anticipated bare-name magic (an
+unresolved bare `sqrt` auto-refers `math`). We didn't ship that: *there is no bare-name
+magic.* A bare `sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The
+rule is one line — *name where something comes from, and it loads on demand.* `(:use mod)`
+still refers a module's names bare and still needs no separate require.
+
+**GC safety.** `compile` can now collect at any depth (an inferred require loads a module),
+so every LOCAL handle held across it is rooted and re-read or it goes stale (use-after-GC):
+`resolved` in `macros.rs`, and two re-reads of the relocated form in `check.rs`'s
+`check_file_ext` (the error path and the header-check path).
+
+**Checker.** The KI-17 *"reference to an unrequired module"* lint (`unrequired_module`,
+`walk.rs`) is now **permanently obsolete** — a qualified reference can no longer reference
+an *unrequired* module, because the reference itself requires it. Neutralized to a no-op;
+its reachability scaffolding (`required_mods`/`raw_qualified`) is retained (still touched)
+for possible repurposing.
+
+**Stage 4 (`json`).** With the mechanism in place, `std/json.blsp`'s exports drop their
+now-redundant `json-` prefix — `json-parse`→`parse`, `json-encode`→`encode` (referenced
+qualified as `json/parse`, the prefix was doubled). Consumers updated with no new `require`
+lines needed anywhere: `std/net/sse.blsp`, `std/tool/{docs,explain,grammar,package,test}.blsp`,
+`tests/*_test.blsp`, and the JSON fuzz target. The stage-1/2/3 test consumers move to the
+qualified spellings too (`math/even?`, `enum/frequencies`, …) in `basic.rs` and the
+checker's `soundness_oracle`/`tests` fixtures.
+
+Verified: full in-language suite green (single-process run, 470s, exit 0); the std-wide
+zero-warnings gate `nest check std/**/*.blsp tests/**/*.blsp` clean; workspace build +
+Rust tests green. See `docs/auto-derived-imports.md`; ADR-227.
