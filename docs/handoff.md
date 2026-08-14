@@ -5,6 +5,21 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**As of 2026-08-14 (the stdlib-namespacing session, concluded).** Everything is **committed and
+pushed**; `main` and `origin/main` agree; full suite green (4643/4643), `nest check` + `nest
+format --check` clean. Landed **ADR-227 stdlib namespacing** as three stages — `enum` (`4fb903ce`),
+`map` (`f9dff0be`), `math` (`4e862b0a`): derived helpers moved out of the flat prelude into
+`std/{enum,map,math}.blsp`, core protocol stays bare, consumers migrated with explicit `(:use …)`.
+
+➡ **TOP OPEN THREAD — build auto-derived stdlib imports.** The explicit `(:use enum/map/math)`
+migration is meant to be **replaced** by resolver-level derivation (a bare name that one curated
+stdlib module exports auto-refers it, lowest priority; ambiguity errors; local + explicit `:use`
+win). It's designed and de-risked but **not built** — the full plan, the resolver/checker seams
+(with file:line anchors), the build steps, and the gotchas are in
+**[`auto-derived-imports.md`](auto-derived-imports.md)**. Start there. It's a resolver + checker
+change (`eval/macros.rs` `resolve_sym` fallback + `types/check` mirror), scoped small because
+`scan_regions` already yields a module's exports from source without loading it.
+
 **As of 2026-08-13 (the VM-contention session, concluded)**, brood 0.3.9. That session's own
 summary is below under "the contention session"; the backend-seam entry it replaced follows it.
 
