@@ -1066,3 +1066,101 @@ checker's `soundness_oracle`/`tests` fixtures.
 Verified: full in-language suite green (single-process run, 470s, exit 0); the std-wide
 zero-warnings gate `nest check std/**/*.blsp tests/**/*.blsp` clean; workspace build +
 Rust tests green. See `docs/auto-derived-imports.md`; ADR-227.
+
+## 2026-08-14 — The computed-head call pays no allocation: the arm handle is memoized (ADR-228)
+
+Perf session. Recovered the `pipeline` regression that the 2026-08-14 benchmark round had
+bisected to ADR-224 and priced as unavoidable, and took `nqueens` with it.
+
+**The tree was not green when this started — worth recording because of *where* the red was.**
+`make test` failed 6 cases at `26b04e36`: four in `crates/lisp/tests/basic.rs`, two in the
+checker's `types/check/soundness_oracle.rs`, all unbound-symbol errors for names ADR-227 had
+just moved (`even?`/`positive?`/`sum`/`abs` → `math/`, `frequencies` → `enum/`). Same class as
+ADR-227's own migration lesson (a reference in *value* position), with the twist that these live
+in **Rust** files that `eval_str` bare source — so the in-language suite reported green
+(4643/4643) while six Rust-side cases were red, because that suite structurally cannot see
+them. The lasting point: after a stdlib move, the migration scan has to cover
+`crates/**/*.rs` string literals, not just `.blsp`. **The fix that landed is `a57cc573`'s**
+(qualified names, no `require` — auto-derivation resolves them); the duplicate written here
+before that commit arrived was dropped in the merge. The rest of the gates were clean at that
+tree, both engines: `make test-both` 981 + 981, breakage 23/23,
+`nest check`/`format --check`/clippy.
+
+**The change (ADR-228).** `exec_chunk`'s call arm says a **computed head takes no inline
+cache** — so `dispatch`, `exec_chunk` and the JIT's non-elided resolve all reached
+`compiled_arm_for` *per call* and wrapped it in a fresh `ArmHandle`: one `Arc::new` **and** one
+clone of the shared `Arc<CompiledArm>` (an atomic RMW on KI-40's cross-process cache line) for
+every transducer step, callback and message handler. `compiled_arm_for` now returns the handle,
+memoized per `(closure, argc)` in the `vm_cache` entry it already consults.
+
+**Measured twice, against two bases, and the runs disagree — so the ADR records a range, not the
+flattering figure.** `pipeline` −9.1% vs `26b04e36` and **−5.6% vs `a57cc573`** (both best-of-15,
+default ceiling); at ceiling 1, −6.2% then −4.7%. `nqueens` at ceiling 1: −6.2% then −4.4%.
+`primes`: −4.3% then −5.7%. `pipeline` improves on every run and at both ceilings, so the
+direction is settled and ADR-224's +9.3% is substantially recovered, but the size is uncertain
+within ~5–9%. `nqueens` and `primes` each straddle the `max(5%, 2×floor)` gate depending on the
+run, so neither is claimed as certified. `pfib` ceiling-1 −1.9%, so ADR-224's 3.19× is untouched.
+The lesson to carry: two best-of-15 runs of the *same* comparison differed by ~3.5 points, and
+the `floor` column read 0.0% on several rows — at integer-millisecond output that means "below
+the resolution", not "no noise". Pinning a few-percent row wants a fixed baseline binary plus a
+base-vs-base control, which was not run here.
+
+**Two bugs the review caught, one race behind both.** "Put, then read the handle back out of
+the cache" is unsound as written: the read starts with `sync_free_epoch`, and a *peer* process
+can advance `free_epoch` at any instant (no stop-the-world), clearing the entry just inserted —
+so `compiled_arm_for` could report "no VM arm" for a closure that compiled fine, silently
+tree-walking a compiled body. The same race made `vm_run_bc`'s `is_some()` guard plus
+`.expect("just checked is_some")` a live **panic** vector on a process body. Both fixed (fall
+back to the arm in hand; resolve once).
+
+**`perf` works on this box again** (`kernel.perf_event_paranoid` 4 → 1), so the frontier's
+attribution is measured rather than inferred for the first time since 2026-07-03. `pipeline` at
+N=10M, self: `dispatch` 15.1%, `jit_dispatch_call` 8.1%, `push_frame` 6.3%, `passthrough_arm`
+5.3%, `Heap::closure` 5.0%, `vm_cache_arm_handle` 4.8%, `compiled_arm_for` 3.1%, `select_arm`
+2.0%, `vm_arm_block` 1.2%, plus ~8% of SmallVec argument staging — i.e. **~50% of the row is
+call plumbing**, and the pieces are individually fixable. Note `release-fast` sets `strip = true`,
+so a profiling build wants `CARGO_PROFILE_RELEASE_FAST_STRIP=false
+CARGO_PROFILE_RELEASE_FAST_DEBUG=line-tables-only make release-brood` (same codegen, symbols kept).
+
+**Next lever, now quantified rather than guessed:** give computed heads a one-way monomorphic
+inline cache keyed on closure identity, holding `(passthrough?, handle, cenv, bases)` together —
+`exec_chunk` already does exactly that identity check for *staged* heads. That collapses
+`passthrough_arm` + `select_arm` + `vm_arm_block` + the memo lookup + much of `Heap::closure`
+into one guarded slot read (~18% of the row), and reaches every callback/handler workload.
+
+**Two test-harness races fixed on the way through, because "known flake" is not a status
+(KI-43).** The merged tree's `make test` came back red twice over, and neither failure was in
+the change:
+
+- **`remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a fixed 5 s
+  sleep.** It failed *both* retries under load and passed standalone — the signature that
+  normally gets written off. Measured under saturating load (14 busy loops on 12 cores), the
+  case needs **5.9–9.2 s**: every sample above the deadline, so under load it was arithmetic,
+  not luck. Now waits for the observer's own attach report; **8/8 under that same load**, and
+  3.5 s instead of ~11 s idle because the unconditional sleep is gone. Two earlier sessions had
+  already bumped that constant (1500 → 5000 ms) — the same fix applied twice to the same wrong
+  idea. Confirmed in the live gate afterwards: it PASSed at **11.5 s**, i.e. the old code would
+  have failed that run too.
+- **`basic.rs`'s `named_spawn_respawns_after_death` had the identical shape, undetected** — a
+  fixed 50 ms sleep standing in for "the scheduler ran and deregister fired", then a positive
+  assertion. Polls now, 10 s backstop.
+- **`completion_never_fails_however_it_is_called` timed out at the 120 s default.** Not a
+  regression: 96 child-process spawns, **60.7 s solo at `a57cc573` vs 59.0 s here**, and a
+  previous session had already trimmed the matrix once. Given its own 300 s budget with the
+  measurements recorded; it then PASSed the gate at **147.8 s**, so the old cap would have
+  killed it again.
+
+Audited every other fixed sleep in the Rust harnesses: the rest are retry cadences, physical
+waits (`stale.rs`'s 1100 ms for mtime granularity), or gates on *negative* assertions where a
+short sleep costs sensitivity rather than correctness. The 59 `(sleep …)` sites in the
+in-language suite are covered by repetition rather than a blind rewrite — the campaign this
+session ran the real-TCP/boot-wait family 10× under load, the whole suite 6×, and the JIT tests
+3× under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+**Also found, not fixed (follow-up).** `gc_runtime.rs`'s compaction flush (step 3b, ~line 1224)
+walks `live_vm_arms` *without* the distinct-arm dedupe its sibling probe walk (~line 695) carries
+— and that walk's own comment explains why the dedupe exists: the registry is a per-frame stack,
+so a 100 000-deep recursion holds 100 000 entries that are all the same `Arc`. Not a correctness
+bug (`flush_rt_value` only forwards handles in the source generation, so repeats are no-ops), but
+a deep process being compacted pays O(frames × arm size) for O(distinct arms) of work — the
+KI-14 shape, in the walk that never got the fix. Same `seen_arms` set applies.
