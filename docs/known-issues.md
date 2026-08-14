@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-43 | `remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a **fixed 5 s sleep**, but the observer needs 5.9–9.2 s under load to boot + `require 'observer'` + connect — so the target died first, `connect` refused, stdout empty. Failed BOTH retries in a loaded `make test`, passed standalone: the signature that gets written off as noise | ✅ **fixed 2026-08-14** — waits for the observer's attach report instead of a stopwatch; **8/8 under saturating load**, and 3.5 s instead of ~11 s |
 | KI-42 | the `breakage/` suite had rotted to **9 of 23 files failing** and nobody knew, because it is outside `make test` and had no CI job — a pin-syntax change (`~ref`→`^ref`), a renamed `string-contains?`, an assertion predating exact rationals, and a TCP file whose every phase was dead | ✅ **fixed 2026-08-13** — all 23 files pass and gate, nothing skipped; CI job added so it cannot rot silently again |
 | KI-41 | concurrent `require` of the same feature could **double-load** its file: a claimant whose `(contains? *features* key)` guard read the per-process global inline cache **missed** a racing loader's just-committed `provide` (the cache is version-gated on a `Relaxed` counter, no happens-before), won the released load-once claim, and reloaded the module. Surfaced as the ADR-225 co-located-secondary `nest test` flake (~1/77); reproduced on demand at 20 files × 40 requires | ✅ **fixed** 2026-08-13 — `require-one` re-checks `*features*` with a new cache-bypassing `%registry-member?` (reads the shared globals table directly) before loading; guard `breakage/chaos_concurrent_require_double_load.blsp` |
 | KI-40 | concurrent green processes running the **same** shared compiled arm on the VM contended on that arm's single `Arc<CompiledArm>` refcount — one cache line, N cores — costing **3.2×** wall on a 100-way fan-out and leaving the cores stalled at 769% instead of 1150% | ✅ **fixed 2026-08-13** (ADR-224 — a process-local `ArmHandle` interposed on the call path; `pfib` 54.4 s → 17.1 s) |
@@ -61,7 +62,7 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open issue; one watch item (KI-36).** KI-28 is **no longer a watch item — it recurred twice
+**No open issue; one watch item (KI-36).** KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -71,6 +72,55 @@ walked straight through the helpers' 20 s / 30 s deadlines. Warming the cache on
 fan-out takes the three tests from a 20.1 s failure to 1.9–2.6 s. No bug in the *language or
 runtime* was implied at any point — every sighting was a boot wait, never an assertion about
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
+
+---
+
+## KI-43 — `remote_attach_reads_snapshot_then_sees_disconnect` killed the target on a stopwatch
+
+**Status:** ✅ **fixed 2026-08-14.** The test now waits for the observer's own attach report
+before killing the target, and passes **8/8 under saturating load** (14 busy loops on 12 cores)
+where the old form would have failed all eight. It also got *faster* — 3.5 s idle instead of
+~11 s, because a 5 s unconditional sleep is gone.
+
+**Not a flake, despite looking exactly like one.** It failed **both** tries in a full `make test`
+(the real-TCP group carries `retries = 1`) and passed in 10.8 s standalone, which is the classic
+signature people write off as load noise. The observer's failure was:
+
+```
+observer.blsp:4:1: connect: Connection refused (os error 111)
+    (def peer (connect "app@127.0.0.1:26720"))
+--- target stderr ---
+dist: incoming connection failed: failed to fill whole buffer
+```
+
+**The mechanism.** The test spawned the observer and then slept a **fixed 5000 ms** before
+killing the target. But the observer must boot a debug `brood`, `node-start`, `require 'observer'`
+(a large module) *and* connect inside that window. Measured under saturating load, the whole case
+needs **5.9–9.2 s** — every sample above the 5 s deadline. So the target was killed *before* the
+observer's `connect`, which is why the port refused and why stdout was **empty** (it never
+reached its first `println`). Under load this was not unlucky, it was arithmetic.
+
+**Two red herrings worth recording, because both cost time here.**
+- `dist: incoming connection failed: failed to fill whole buffer` is **not** a fault. It is
+  `wait_until_listening`'s readiness probe: that helper proves liveness with a bare
+  `TcpStream::connect` and drops it, and a *dist* listener accepts it, tries to read a
+  handshake, and gets EOF. Expected noise on every node test.
+- It does **not** kill the acceptor, which was the first hypothesis and was wrong:
+  `spawn_acceptor` (`dist.rs`) wraps each connection in its own thread plus
+  `catch_unwind`, logs the error and keeps looping. Verified before believing it.
+
+**The lesson, which generalises past this test.** Two earlier sessions had already bumped this
+constant (1500 → 5000 ms) — the same fix applied twice to the same wrong idea. A fixed sleep
+standing in for "the peer is ready" cannot be tuned right, because the quantity it approximates
+scales with machine load. Wait for the *event*: the marker read makes the wait proportional to
+the box, and it strengthens the assertion, since "attached before the kill" is what the case
+actually means and is now checked rather than assumed. The 60 s deadline that remains is a
+hang backstop, not a timing assumption.
+
+**Found in the same pass:** `completion_never_fails_however_it_is_called` timed out at the 120 s
+default for a related reason — it is 96 child-process spawns, measured at 59–61 s solo, so it had
+2× headroom against a load factor of ~2×. Given its own budget in `.config/nextest.toml`, with
+the measurements and the reason recorded there.
 
 ---
 

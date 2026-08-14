@@ -1485,16 +1485,28 @@ fn named_spawn_respawns_after_death() {
         .eval_str("(spawn :named-spawn-respawn-test nil)")
         .expect("first spawn ok");
     let p1_str = interp.print(p1);
-    // Wait for the scheduler to run + deregister to fire.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Wait for the scheduler to run + deregister to fire — by POLLING, not by sleeping a
+    // constant. The event is another thread's progress, so a fixed 50 ms is the KI-43 shape:
+    // it holds on an idle box and fails whenever the box is busier than the guess, which is
+    // precisely the condition a full `make test` creates. The deadline is a hang backstop.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let reaped = loop {
+        let where_ = interp
+            .eval_str("(whereis :named-spawn-respawn-test)")
+            .expect("whereis");
+        let printed = interp.print(where_);
+        if printed == "nil" {
+            break printed;
+        }
+        if std::time::Instant::now() >= deadline {
+            break printed;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
     // The name has been reaped — `whereis` returns nil.
-    let where_ = interp
-        .eval_str("(whereis :named-spawn-respawn-test)")
-        .expect("whereis");
     assert_eq!(
-        interp.print(where_),
-        "nil",
-        "name should be reaped after process death"
+        reaped, "nil",
+        "name should be reaped after process death (waited 10 s)"
     );
     // A second spawn under the same name creates a fresh process — different pid.
     let p2 = interp
