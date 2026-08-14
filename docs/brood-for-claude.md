@@ -401,7 +401,7 @@ edit the library. Beyond the core `Display` (`to-str`, what `println` shows) and
 
 | `impl` this | to get |
 |---|---|
-| `JsonEncode` — `(to-json x)`, from `json` | `json-encode` handles your type (a record's wire shape; a pid/fn/datetime at all). **No `:default`** — an unimpl'd kind still errors loudly. |
+| `JsonEncode` — `(to-json x)`, from `json` | `json/encode` handles your type (a record's wire shape; a pid/fn/datetime at all). **No `:default`** — an unimpl'd kind still errors loudly. |
 | `Port` — `(io-write p s)`, from `io` | your value is an output port (`with-out`, logger sinks). A bare 1-arg fn already is one. |
 | `LogBackend` — `(backend-emit b rec)`, from `log` | a backend that batches / emits JSON lines / samples. `backend-passes?` is the stock level+filter gate. |
 | `Response` — `(send-response r sock)`, from `net/http` | a response kind with its own wire behaviour, including who closes the socket. |
@@ -485,10 +485,10 @@ Prefer the higher-order combinators:
 ```lisp
 (reduce + 0 xs)
 (map sq xs)
-(filter even? xs)
+(filter math/even? xs)             ; even?/odd?/… live in the `math` module (ADR-227)
 (fold (fn (m k) (assoc m k (* k k))) {} (range 10))
 (map (partial + 10) xs)            ; partial / complement / constantly / comp all exist
-(filter (complement odd?) xs)
+(filter (complement math/odd?) xs)
 ```
 
 **One sequence view over every collection.** `count` `empty?` `first` `rest` `last`
@@ -544,9 +544,9 @@ intermediate collections (one pass, no throwaway lists). Thread them with `->>`:
 
 ```lisp
 ;; eager: builds two throwaway lists of ~1000 / ~500 elements
-(reduce + 0 (map sq (filter even? (range 1000))))
+(reduce + 0 (map sq (filter math/even? (range 1000))))
 ;; fused: one pass, no intermediate lists (≈3× faster on large inputs)
-(->> (range 1000) (lfilter even?) (lmap sq) (reduce + 0))
+(->> (range 1000) (lfilter math/even?) (lmap sq) (reduce + 0))
 ```
 
 `lmap`/`lfilter`/`lkeep`/`lremove` each return a lazy **seq-view** — a
@@ -574,14 +574,14 @@ The combinators above read well, but in a function called hundreds of times per
 frame their *intermediate allocations* dominate. Two rules for code on a hot
 path:
 
-- **`mapcat`-then-reduce builds a list only to walk it once.** `(frequencies
+- **`mapcat`-then-reduce builds a list only to walk it once.** `(enum/frequencies
   (mapcat f xs))` materialises the entire `(len-of-each × count)` list of items
-  before `frequencies` tallies it — thousands of throwaway cells per frame. Fuse
+  before `enum/frequencies` tallies it — thousands of throwaway cells per frame. Fuse
   the two into one `fold` so nothing intermediate is built:
 
   ```lisp
   ;; allocates the full neighbour list, then counts it
-  (frequencies (mapcat neighbours cells))
+  (enum/frequencies (mapcat neighbours cells))
   ;; fused: tally straight into the map, no intermediate list
   (fold (fn (counts cell)
           (fold (fn (c n) (assoc c n (inc (get c n 0)))) counts (neighbours cell)))
@@ -917,8 +917,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **list / seq**: `first` `rest` `cons` `list` `count` `empty?` `nth`
   `reverse` `map` `filter` `reduce` `fold` `append` (variadic, over
   lists *and* vectors, returning a list) `mapcat` `sort` `take`
-  `drop` `range` `zip` `partition` `frequencies` `enumerate` `repeat`
-  `repeatedly`
+  `drop` `range` `zip` `partition` `repeat` `repeatedly`. The derived
+  sequence helpers — `frequencies` `enumerate` `group-by` `chunk-by`
+  `chunk-every` `interpose` `interleave` `scan` `zip-with` `min-by` `max-by`
+  `reduce-while` `index-where` `dedupe` `distinct-by` — live in the **`enum`
+  module** (`enum/…`, or `(:use enum)`; a qualified `enum/frequencies`
+  auto-requires it) (ADR-227).
 - **iteration** (macros, for effect — there is no `while`/`for`-loop): `for`
   (list comprehension, with `:when`), `doseq` (destructuring/`:when`),
   `dotimes` `(i n)`, `dolist` `(x coll)`. All return `nil` except `for`.
@@ -944,7 +948,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `(count m)` / `(into [] m)` all walk the map as its `[k v]` pairs — no need
   for `(zip (keys m) (vals m))`. Iteration order (`keys`/`vals`/print/`seq`) is
   **hash-derived (ADR-040), NOT insertion order and NOT sorted** — don't rely on
-  it; `(sort (keys m))` for a defined order, or compare via `frequencies`.
+  it; `(sort (keys m))` for a defined order, or compare via `enum/frequencies`.
 - **set**: a **first-class kernel value** (`Value::Set`, ADR-060), written with a
   `#{1 2 3}` literal (evaluates its elements and dedups). It is its *own* kind:
   `(set? s)` is true, `(map? s)` is **false**, `(type-of s)` is `:set`, it prints
@@ -960,17 +964,21 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **types**: `type-of` plus the `?` predicates — `int?` `float?` `string?`
   `symbol?` `keyword?` `bool?` `nil?` `pair?` `vector?` `map?` `set?` `fn?` `ref?`
   `pid?`
-- **arithmetic**: variadic `+ - * /`; comparison variadic chains
-  `< > <= >= =`; `inc` `dec` `abs` `min` `max`; integer division `quot`
-  (truncating) / `rem` (truncated remainder) / `mod` (Euclidean);
-  `floor` `ceil` `round` `round-to` (round to N decimals, stays a number)
-  `pow` `sqrt`. Integer `+ - *` **error on overflow** (they don't wrap).
+- **arithmetic** (bare, core): variadic `+ - * /`; comparison variadic chains
+  `< > <= >= =`; `inc` `dec` `min` `max`; integer division `quot`
+  (truncating) / `rem` (truncated remainder) / `mod` (Euclidean); `floor`.
+  Integer `+ - *` **error on overflow** (they don't wrap).
   **`/` is exact** (ADR-196): `(/ 1 2)` → `1/2` (a **ratio**, not a float),
   `(/ 6 3)` → `2` (divides evenly → int). `1/2` is a literal; ratios do the full
   tower (ratio+decimal is exact, ratio+float contagion). Reach for `->float`
   (or `->decimal`) for an inexact result; `numerator`/`denominator` read the parts.
   Number types: `int` (bignum on overflow) · `float` · `decimal` (`1.50M`, exact
   base-10) · `ratio` (`1/2`, exact rational). `number?`/`ratio?`/`decimal?` test them.
+- **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-requires
+  it — ADR-227): `abs` `ceil` `round` `round-to` (round to N decimals, stays a number)
+  `pow` `sqrt` `clamp` `sum` `product`, the sign/parity predicates `positive?`
+  `negative?` `even?` `odd?`, and the constants `pi` `e`. **No bare-name magic** — a bare
+  `sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound.
 - **bitwise**: `bit-and` `bit-or` `bit-xor` `bit-not` `bit-shift-left`
   `bit-shift-right` (64-bit, arithmetic right shift; shift amount in `[0,64)`).
 - **randomness** (pure & seedable — there is *no* global RNG; thread the seed):
