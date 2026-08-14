@@ -23,7 +23,7 @@
         (count (filter (fn (k) (not (starts-with? k "def"))) (special-forms))))))
 
   (test "(tmlanguage) is valid JSON of the TextMate shape"
-    (let (g (json-parse (tmlanguage)))
+    (let (g (parse (tmlanguage)))
       (assert= (get g :scopeName) "source.brood")
       (assert= (get g :name) "Brood")
       (is (map? (get g :repository)))
@@ -31,7 +31,7 @@
       (is (vector? (get g :patterns)))))
 
   (test "the special-form rule carries the escaped keyword alternation"
-    (let (g (json-parse (tmlanguage))
+    (let (g (parse (tmlanguage))
           m (get (get (get g :repository) :special-form) :match))
       ;; regex metacharacters in keywords are escaped (`match*` → `match\*`)
       (is (includes? m "match\\*"))

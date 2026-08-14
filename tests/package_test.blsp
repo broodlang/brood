@@ -448,7 +448,7 @@
         (= path (str "/ext/" nm ".tar.gz"))
           (net/http/response 200 {"Content-Type" "application/gzip"} wrapped-bytes)
         (= path (str "/api/v1/packages/" nm "/releases/" version))
-          (net/http/ok (json/json-encode {:checksum checksum
+          (net/http/ok (json/encode {:checksum checksum
                                           :version version
                                           :source_url src
                                           :dependencies []}))
@@ -473,7 +473,7 @@
         (= path (str release-path "/tarball"))
           (net/http/response 200 {"Content-Type" "application/gzip"} bytes)
         (= path release-path)
-          (net/http/ok (json/json-encode {:checksum checksum
+          (net/http/ok (json/encode {:checksum checksum
                                           :version version
                                           :signature signature
                                           :pubkey pubkey
@@ -559,7 +559,7 @@
           ;; serve metadata whose source_url is the file:// URL, and a matching checksum
           base (mock-registry-start (fn (req)
                                       (if (= (get req :path) "/api/v1/packages/evil/releases/1.0.0")
-                                        (net/http/ok (json/json-encode {:checksum checksum
+                                        (net/http/ok (json/encode {:checksum checksum
                                                                         :version "1.0.0"
                                                                         :source_url file-url
                                                                         :dependencies []}))
@@ -626,7 +626,7 @@
                                               {"Content-Type" "application/gzip"}
                                               bytes)
                                           (= path rp)
-                                            (net/http/ok (json/json-encode {:checksum checksum
+                                            (net/http/ok (json/encode {:checksum checksum
                                                                             :version "1.0.0"
                                                                             :signature 123
                                                                             :pubkey 456

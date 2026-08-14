@@ -75,7 +75,7 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(first [])",
         // higher-order results (parametric — ADR-078)
         "(map inc [1 2 3])",
-        "(filter even? [1 2 3 4])",
+        "(filter math/even? [1 2 3 4])",
         "(reduce + 0 [1 2 3])",
         "(fold (fn (a x) (+ a x)) 0 [1 2 3])",
         "(map (fn (x) (+ x 1)) [1 2 3])",
@@ -123,7 +123,7 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         "(map inc [1 2 3])",
         "(map (fn (n) (+ n 1)) [1 2 3])",
         "(reduce + 0 [1 2 3])",
-        "(filter even? [1 2 3 4])",
+        "(filter math/even? [1 2 3 4])",
         "(first (map inc [1 2 3]))",
         "(match 5 (5 (+ 5 1)) (_ 0))",
         "(match [1 2] ([a b] (+ a b)) (_ 0))",

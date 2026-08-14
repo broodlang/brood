@@ -833,9 +833,12 @@ pub fn check_file_ext(
             // lints run.
             let exp = match crate::eval::macros::compile(heap, f, root) {
                 Ok(e) => e,
+                // Re-read the relocated form: `compile` now infers `(require …)` from
+                // qualified references (ADR-227 follow-up), and that module load can
+                // collect at any depth, so `f` captured above is stale on the error path.
                 Err(err) => {
                     out.push((err.pos, format!("does not compile: {}", err.message)));
-                    f
+                    heap.root_at(roots_base + j)
                 }
             };
             // Root the just-built expansion *before* possibly triggering a
@@ -843,6 +846,10 @@ pub fn check_file_ext(
             // here and the next iteration's macroexpand.
             heap.push_root(exp);
             expanded.push(exp);
+            // `compile` above can collect (it infers `(require …)` from qualified
+            // references, ADR-227 follow-up), relocating `f` — re-read the live handle
+            // from the root stack before the header checks that dereference it.
+            let f = heap.root_at(roots_base + j);
             // Make the file's imports + required modules resolvable for the rest of the walk.
             // For a `(defmodule … (:use …))` header, populate the import table DIRECTLY from its
             // clauses (`setup_check_imports`) instead of evaling the expanded header — the eval

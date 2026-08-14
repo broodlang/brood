@@ -123,8 +123,8 @@
 
 ;; ---- slice 2: the identity does not leak into serialization; clean field API ----
 (describe "record identity does not leak"
-  (test "json-encode omits the internal identity key, keeps the fields"
-    (let (s (json-encode (circle 7)))
+  (test "encode omits the internal identity key, keeps the fields"
+    (let (s (encode (circle 7)))
       (refute (includes? s "__id__"))
       (is (includes? s "\"r\":7"))))
   (test "record? / record-id / fields are the clean, id-free API"

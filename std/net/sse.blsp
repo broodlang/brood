@@ -38,7 +38,7 @@ framing for pushing events over `http`'s streaming seam.
 `sse-connect` spawns a reader **process** that opens the stream and delivers each
 event to `subscriber`'s mailbox as `[:sse {:event :data :id}]` (`[:sse-open status]`
 once connected, `[:sse-closed reason]` when the link ends); it returns that process's
-pid (kill it to disconnect). The `:data` is the raw payload — `json-parse` it
+pid (kill it to disconnect). The `:data` is the raw payload — `parse` it
 yourself. Pair with `with-events` (std/ui.blsp) to feed events into a `ui-run` loop.
 
 On the server side, `sse-headers` / `sse-frame` / `sse-send` turn payloads into wire

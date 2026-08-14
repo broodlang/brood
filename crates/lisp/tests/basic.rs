@@ -161,11 +161,11 @@ fn maps_structural_keys_and_equality() {
     // ADR-040 (CHAMP): iteration order is hash-driven, not insertion.
     // The key *set* survives assoc; assert via frequencies-as-map equality.
     assert_eq!(
-        run("(= (frequencies (keys (assoc {:a 1 :b 2} :a 9))) {:a 1 :b 1})"),
+        run("(= (enum/frequencies (keys (assoc {:a 1 :b 2} :a 9))) {:a 1 :b 1})"),
         "true"
     );
     assert_eq!(
-        run("(= (frequencies (keys (assoc {:a 1} :b 2))) {:a 1 :b 1})"),
+        run("(= (enum/frequencies (keys (assoc {:a 1} :b 2))) {:a 1 :b 1})"),
         "true"
     );
 }
@@ -196,7 +196,7 @@ fn maps_survive_arena_reset() {
 #[test]
 fn higher_order() {
     assert_eq!(run("(map inc (list 1 2 3))"), "(2 3 4)");
-    assert_eq!(run("(filter positive? (list -1 2 -3 4))"), "(2 4)");
+    assert_eq!(run("(filter math/positive? (list -1 2 -3 4))"), "(2 4)");
     assert_eq!(run("(reduce + 0 (list 1 2 3 4))"), "10");
     assert_eq!(run("(apply + (list 1 2 3))"), "6");
 }
@@ -204,9 +204,9 @@ fn higher_order() {
 #[test]
 fn prelude_helpers() {
     assert_eq!(run("(inc 41)"), "42");
-    assert_eq!(run("(sum (list 1 2 3 4))"), "10");
+    assert_eq!(run("(math/sum (list 1 2 3 4))"), "10");
     assert_eq!(run("(max 3 7)"), "7");
-    assert_eq!(run("(abs -9)"), "9");
+    assert_eq!(run("(math/abs -9)"), "9");
 }
 
 #[test]
@@ -1848,14 +1848,14 @@ fn letrec_self_recursion_accumulates() {
 #[test]
 fn defseq_ops_run_correctly() {
     assert_eq!(run("(map inc (range 5))"), "(1 2 3 4 5)");
-    assert_eq!(run("(filter even? (range 10))"), "(0 2 4 6 8)");
+    assert_eq!(run("(filter math/even? (range 10))"), "(0 2 4 6 8)");
     assert_eq!(
         run("(mapcat (fn (x) (list x x)) (range 3))"),
         "(0 0 1 1 2 2)"
     );
-    assert_eq!(run("(remove even? (range 6))"), "(1 3 5)");
+    assert_eq!(run("(remove math/even? (range 6))"), "(1 3 5)");
     assert_eq!(
-        run("(keep (fn (x) (if (even? x) (* x 10) nil)) (range 6))"),
+        run("(keep (fn (x) (if (math/even? x) (* x 10) nil)) (range 6))"),
         "(0 20 40)"
     );
 }

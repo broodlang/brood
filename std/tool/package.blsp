@@ -770,7 +770,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
   (resp)
   "The server's `:error` message from a JSON error body, or a generic HTTP line."
   (require 'net/http)
-  (let (parsed (try (json/json-parse (net/http/body-text resp)) (catch _ nil)))
+  (let (parsed (try (json/parse (net/http/body-text resp)) (catch _ nil)))
     (if (and (map? parsed) (get parsed :error))
       (get parsed :error)
       (str "HTTP " (get resp :status)))))
@@ -785,7 +785,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
         status (get resp :status))
     (cond
       (= status 0) [:error 0 (str "cannot reach the registry at " url ": " (get resp :error))]
-      (and (>= status 200) (< status 300)) [:ok (json/json-parse (net/http/body-text resp))]
+      (and (>= status 200) (< status 300)) [:ok (json/parse (net/http/body-text resp))]
       else [:error status (registry-error-text resp)])))
 
 ;; --- the resolver's registry provider (ADR-209) ---------------------------------
@@ -1892,7 +1892,7 @@ the bytes live (ADR-211); pass nil for a hosted publish. When the release is sig
         with-sig (if (and signature pubkey)
                    (assoc with-source :signature signature :pubkey pubkey)
                    with-source))
-    (encoding/base64-encode (json/json-encode with-sig))))
+    (encoding/base64-encode (json/encode with-sig))))
 
 (defn publish (& opts)
   "Publish the current project's release to the registry. Two shapes, chosen by `opts` (a
