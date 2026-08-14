@@ -41,7 +41,8 @@ recorded, so no state is ever lost) — see the undo section below.
 Because a buffer holds a rope, and ropes are **process-local**, a buffer cannot
 cross a process boundary. `spawn-buffer` makes a process that *owns* a buffer and
 serves edits/queries, replying only with derived views (strings, positions) —
-never the buffer itself. Drive it with `buffer-edit` / `buffer-query`.")
+never the buffer itself. Drive it with `buffer-edit` / `buffer-query`."
+  (:use map))
 
 ;; ---- helpers ----------------------------------------------------------------
 

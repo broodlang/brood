@@ -16,7 +16,9 @@ prelude and need no import. This module adds the higher-level helpers: grouping
 (`group-by` `frequencies` `chunk-by` `chunk-every`), dedup-by-key (`distinct-by`),
 running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 `interleave` `interpose`), extremum-by-key (`min-by` `max-by`), and indexing
-(`enumerate` `index-where`, `dedupe`).")
+(`enumerate` `index-where`, `dedupe`)."
+  ;; group-by builds its result with map/update-vals
+  (:use map))
 
 ;; reduce-while — the early-terminating fold (≈ Enum.reduce_while).
 (defn- reduce-while-loop

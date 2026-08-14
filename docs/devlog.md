@@ -980,3 +980,20 @@ documented via their module, as `set`/`json` already are). Full in-language suit
 `nest format --check` clean; a scaffolded editor project checks clean. ADR-227 records the
 principle + the boot-image constraint + the staging; `docs/language.md` + `ROADMAP.md` updated.
 Next stages: `map`-extras, `math`.
+
+## 2026-08-14 — Stdlib namespacing, stage 2: the `map` transformation-helper module (ADR-227)
+
+Second stage of the namespacing program (ADR-227). Moved the four derived map-transformation
+helpers — `merge-with`, `update-vals`, `update-keys`, `select-keys` — out of the flat prelude into
+a new `std/map.blsp` (`CORE_MODULES`). The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/
+`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`/`zipmap`) stays bare — `merge` and
+`zipmap` are called by the collection protocol / record machinery during bootstrap, and the rest
+are the universal map surface. The module is named `map`; the bare `map` *function* is unaffected
+(a bare `map` resolves to the function — there is no `map/map` — and the module's own helpers reach
+it the same way; verified by smoke test). Consumers migrated with `(:use map)`: `enum` (its
+`group-by` builds the result with `map/update-vals`, the one cross-module dep, which is why enum
+went first last commit), `editor/ui`, `editor/buffer`, `maps_test`. A repo-wide sweep (incl.
+`examples/`, `breakage/`, `benches/`, scaffold templates, `crates/`) found no other consumers.
+Removed the four now-stale bare entries from `std/doc-catalog.blsp`. Full in-language suite green
+(4643/4643); `nest format --check` clean (359 files). `docs/language.md` (map table + module
+table), ADR-227, `ROADMAP.md` updated. Next: `math`.

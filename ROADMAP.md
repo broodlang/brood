@@ -1425,7 +1425,9 @@ Runtime housekeeping (both items landed):
     `group-by`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`,
     `min-by`, `max-by`, `reduce-while`, `enumerate`, `index-where`) → `std/enum.blsp`,
     plus the new `enum/distinct-by`. `(:use enum)` or qualify. Suite green (4643/4643).
-  - ⬜ **`map`-extras** (`merge-with`, `update-vals`, `update-keys`, `select-keys`).
+  - ✅ **`map`-extras (stage 2, 2026-08-14)** — `merge-with`, `update-vals`, `update-keys`,
+    `select-keys` → `std/map.blsp`. Core map protocol stays bare; the bare `map` *function*
+    is unaffected by the module name. `enum/group-by` now `(:use map)`. Suite green.
   - ⬜ **`math`** (`abs`, `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `sum`,
     `product`, `even?`, `odd?`, `positive?`, `negative?`; core arithmetic stays bare).
 - ✅ **Syntax finalisation pass (2026-07-25, ADR-149/150/151/152)** — closed the

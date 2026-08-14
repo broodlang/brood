@@ -229,10 +229,10 @@ Maps are immutable — every operation returns a **fresh** map:
 | `(keys m)` / `(vals m)` | the keys / values, as a list, in the map's (hash-derived, unspecified) iteration order — sort if you need a defined order |
 | `(reduce-kv f init m)` | fold over the entries: `(f acc k v)` left to right → the final acc |
 | `(merge m1 m2 …)` | combine maps left to right; rightmost key wins (`nil` maps skipped) |
-| `(merge-with f m1 m2 …)` | like `merge`, but a shared key's value is `(f old new)` |
+| `(map/merge-with f m1 m2 …)` | like `merge`, but a shared key's value is `(f old new)` — the `map` module (ADR-227; `(:use map)` or qualify) |
 | `(update m k f args…)` | a new map with `k`'s value replaced by `(f current args…)` (`current` is `nil` if absent; also works on a **vector** by integer index, which must be in range) |
-| `(update-vals m f)` / `(update-keys m f)` | a new map with `f` applied to every value / key |
-| `(select-keys m ks)` | a new map of just the entries whose key is in `ks` |
+| `(map/update-vals m f)` / `(map/update-keys m f)` | a new map with `f` applied to every value / key — the `map` module |
+| `(map/select-keys m ks)` | a new map of just the entries whose key is in `ks` — the `map` module |
 | `(zipmap ks vs)` | a map pairing `ks` with `vs` positionally (stops at the shorter) |
 | `(get-in m path)` / `(get-in m path default)` | the value at a nested key `path`, or `default`/`nil` |
 | `(assoc-in m path v)` | a nested copy with `v` stored at `path` (intermediate maps created) |
@@ -2408,8 +2408,11 @@ ordinary function composition — because each stage wraps the *next* one's redu
 
 ### Maps
 `hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`
-`merge`  `merge-with`  `update`  `update-vals`  `update-keys`  `select-keys`
-`zipmap`  `get-in`  `assoc-in`  `dissoc-in`  `update-in`  `map?`
+`merge`  `update`  `zipmap`  `get-in`  `assoc-in`  `dissoc-in`  `update-in`  `map?`
+
+The transformation helpers `merge-with`, `update-vals`, `update-keys`, and
+`select-keys` live in the **`map` module** (ADR-227) — `(:use map)` for bare
+access, or call qualified (`map/update-vals`). The core protocol above stays bare.
 
 See the [Maps](#maps) section above. `{ }` is the literal form; the rest are
 immutable operations that return fresh maps. `count`/`empty?` work on maps too,
@@ -2931,6 +2934,7 @@ Run `nest doc <module>` for the full API of any module.
 | `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
 | `std/enum.blsp` | `'enum` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. The core ops (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stay bare in the prelude; `(:use enum)` for bare access or call qualified |
+| `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `merge-with`, `update-vals`, `update-keys`, `select-keys`. The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`/`zipmap`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
 | `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |
