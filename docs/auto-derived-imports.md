@@ -1,10 +1,48 @@
 # Auto-derived stdlib imports — design & build handoff
 
-**Status: designed, not built.** Read this cold to build the feature. The three stdlib
-namespacing stages it builds on are **done and pushed** (ADR-227): `enum` (`4fb903ce`),
-`map` (`f9dff0be`), `math` (`4e862b0a`), each with a green 4643/4643 suite. This document
-is the plan for the follow-up that makes those modules' names work **without any
-`(:use …)` line**.
+**Status: SHIPPED (`a57cc573`, 2026-08-14) — but as _qualified-reference auto-require_,
+which is NOT the bare-name "Design B" the rest of this document plans.** The mechanism
+below (defer the load past the GC/macro-blocked resolver, drain it in the compile driver)
+is what shipped; the *trigger* changed. Read "What actually shipped" next; everything from
+"The goal" onward is the **superseded original plan**, kept for the design reasoning.
+
+## What actually shipped (read this first)
+
+A **qualified** reference `mod/name` infers `(require 'mod)` — you never write a `require`
+line just to satisfy a `mod/…` reference, for **any** module (`enum`/`map`/`math`, `json`,
+`set`, your own project modules), not just a curated three. **There is no bare-name magic:**
+a bare `sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. `(:use mod)`
+still refers a module's names bare and needs no separate require either. The rule is one
+line: *name where something comes from, and it loads on demand.*
+
+Implementation: `crates/lisp/src/eval/derive.rs`, wired into `compile` (`macros.rs`) via
+three hooks, each firing only on a `/` in a symbol — `require_qualified_head` (eager, from
+`macroexpand_1`, so a qualified **macro** head loads before the macro lookup),
+`record_qualified` (deferred, from `resolve_sym`, drained by `drain_pending` before eval —
+a qualified **value** reference), and `scan_root_refs` (the root region: a header-less
+script / the REPL, where `resolve` is identity — so a top-level qualified value
+auto-requires too; gated so it never runs during prelude boot). Consequences of choosing
+this trigger over Design B:
+
+- **No curated index, no ambiguity, no collision guard.** The reference is already
+  unambiguous (`math/sqrt` names its module), so none of Design B's index/ambiguity/
+  no-collision machinery (settled decisions #1, #3, #4 below) is needed or built.
+- **It does NOT delete the `(:use …)` lines** (Design B's goal, #5 below) or make bare
+  names work. Stages 1–3's explicit imports stay; a file either `(:use math)` or writes
+  `math/…` qualified, and the *require* is what's inferred away, not the qualification.
+- **Root-region scripts DO auto-require** (`scan_root_refs`), resolving the "bare scripts"
+  gotcha below — but for *qualified* references, not bare ones.
+- **Works library-wide.** Because the trigger is a `/` and not a curated-name lookup, it
+  applies to `json/parse`, `csv/…`, project modules — the reason stage 4 (`json`) could
+  drop its `json-` export prefix and rely on `json/parse` self-loading.
+
+The checker's KI-17 *"reference to an unrequired module"* lint (`unrequired_module`,
+`walk.rs`) is now permanently obsolete — a qualified reference requires its own module —
+and is neutralized to a no-op (its `required_mods`/`raw_qualified` scaffolding retained).
+
+--------------------------------------------------------------------------------
+**Everything below is the ORIGINAL Design-B plan — superseded, kept for reasoning.**
+--------------------------------------------------------------------------------
 
 ## The goal
 

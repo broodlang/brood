@@ -1056,7 +1056,11 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **Importing a module**: inside `defmodule`, add a `(:use mod)` clause to refer
   `mod`'s public names **bare** (`(:use mod :only [a b])` for a subset). A
   plain top-level `(require 'mod)` only *loads* `mod` — its names stay
-  qualified (`mod/foo`). The header understands exactly `(:use …)`,
+  qualified (`mod/foo`) — and you **rarely need to write it**: a **qualified
+  reference `mod/name` auto-infers `(require 'mod)`** (ADR-227 follow-up), for any
+  module, so naming where something comes from loads it on demand. No bare-name
+  magic, though — a bare `sqrt` with no `math/` prefix and no `(:use math)` stays
+  unbound. The header understands exactly `(:use …)`,
   `(:use-internals …)` and `(:alias …)`; **anything else is an error** —
   `(:require …)` and a misspelled `(:use-internal …)` are rejected rather than
   silently ignored.
