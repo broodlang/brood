@@ -786,8 +786,9 @@ pub(crate) fn jit_run_fast_link(
                 .or_else(|| {
                     let genv = heap.read_root_env(heap.jit_call_env);
                     match heap.env_get(genv, head) {
-                        Some(Value::Fn(id)) => super::compiled_arm_for(heap, id, argc)
-                            .map(|a| (ArmHandle::new(a), callee_env)),
+                        Some(Value::Fn(id)) => {
+                            super::compiled_arm_for(heap, id, argc).map(|a| (a, callee_env))
+                        }
                         _ => None,
                     }
                 });
@@ -1049,9 +1050,8 @@ pub(crate) fn jit_dispatch_call(
                     // and only while cold) and fill the IC.
                     let cenv = heap.read_root_env(heap.jit_call_env);
                     match heap.env_get(cenv, head).map(|v| v.unpack()) {
-                        Some(ValueRef::Fn(id)) => compiled_arm_for(heap, id, argc)
-                            .map(ArmHandle::new)
-                            .map(|a| {
+                        Some(ValueRef::Fn(id)) => {
+                            compiled_arm_for(heap, id, argc).map(|a| {
                                 let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
                                 let cb = heap.vm_arm_block(&a);
                                 if !value::is_dynamic(head) {
@@ -1069,7 +1069,8 @@ pub(crate) fn jit_dispatch_call(
                                     );
                                 }
                                 (a, env, cb)
-                            }),
+                            })
+                        }
                         // A builtin callee: fill an arm-less IC entry (so the next call
                         // takes the direct path above) and call it now. Dynamic heads are
                         // never cached (they can shadow per call) but still call direct.
@@ -1107,13 +1108,13 @@ pub(crate) fn jit_dispatch_call(
                 }
             }
         } else if let ValueRef::Fn(id) = heap.root_at(stage_base).unpack() {
-            compiled_arm_for(heap, id, argc)
-                .map(ArmHandle::new)
-                .map(|a| {
-                    let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
-                    let cb = heap.vm_arm_block(&a);
-                    (a, env, cb)
-                })
+            // The non-elided (computed-head) resolve: no IC, so this runs per call — the
+            // handle it hands back is memoized, not freshly allocated.
+            compiled_arm_for(heap, id, argc).map(|a| {
+                let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                let cb = heap.vm_arm_block(&a);
+                (a, env, cb)
+            })
         } else {
             None
         };

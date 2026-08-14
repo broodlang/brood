@@ -1823,3 +1823,53 @@ fn arm_handle_clone_does_not_touch_the_shared_arm_refcount() {
     drop(clones);
     assert_eq!(Arc::strong_count(&handle), 1);
 }
+
+/// The sibling of the guard above: **resolving** an arm must not allocate a handle per call.
+///
+/// A computed head takes no inline cache (see the call arm in `exec_chunk`), so `dispatch`,
+/// `exec_chunk` and the JIT's non-elided resolve all reach `compiled_arm_for` on *every*
+/// call — per element of a transducer chain, per message handled, per callback invoked.
+/// While that returned a bare `Arc<CompiledArm>` for each caller to wrap, every such call
+/// paid an `Arc::new` **and** a clone of the shared arm's `Arc` — an atomic RMW on the one
+/// cross-process refcount cache line KI-40 is about. `compiled_arm_for` now hands back the
+/// handle memoized in the `vm_cache` entry instead.
+///
+/// This needs its own assertion for the same reason KI-40 did: the VM keeps computing the
+/// right answer either way, so `make test`, `make test-both` and the lowering witness all
+/// stay green and **only a benchmark moves** (`pipeline` +5.7%, bisected to `98e97308`).
+#[test]
+fn resolving_a_closure_arm_twice_reuses_one_memoized_handle() {
+    let mut interp = crate::Interp::new();
+    interp.eval_str("(def f (fn (x) (+ x 1)))").expect("define");
+    let f = interp.eval_str("f").expect("read f back");
+    let id = match f.unpack() {
+        ValueRef::Fn(id) => id,
+        _ => panic!("`f` should be a closure"),
+    };
+    let heap = &interp.heap;
+
+    let first = compiled_arm_for(heap, id, 1).expect("f/1 compiles");
+    let second = compiled_arm_for(heap, id, 1).expect("f/1 compiles");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "a second resolution must reuse the memoized handle, not allocate another one"
+    );
+
+    // The hot path: many resolutions, every result held so nothing can be recycled into
+    // the same address and fake a pass.
+    let shared_before = Arc::strong_count(first.arc());
+    let repeats: Vec<Arc<ArmHandle>> = (0..1000)
+        .map(|_| compiled_arm_for(heap, id, 1).expect("f/1 compiles"))
+        .collect();
+    assert!(
+        repeats.iter().all(|h| Arc::ptr_eq(h, &first)),
+        "every resolution of the same (closure, argc) should be the one memoized handle"
+    );
+    assert_eq!(
+        Arc::strong_count(first.arc()),
+        shared_before,
+        "resolving a computed-head callee must not touch the SHARED arm's refcount — that \
+         contended cache line is KI-40, and this is the assertion that catches a revert to \
+         deriving the handle per call"
+    );
+}

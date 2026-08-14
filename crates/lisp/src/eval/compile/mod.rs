@@ -2123,9 +2123,17 @@ fn probe_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compiled
     compile_closure(heap, id).and_then(|cc| cc.arm_for(argc).cloned())
 }
 
-fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<CompiledArm>> {
+/// The `argc` arm of closure `id`, as this process's [`ArmHandle`] — compiling and caching
+/// the closure on a miss.
+///
+/// Returns the **handle**, not the bare `Arc<CompiledArm>`, because every caller wants a
+/// handle (ADR-224) and a computed-head call site has no inline cache to keep one in. The
+/// handle is memoized per `(closure, argc)` in the `vm_cache` entry, so the steady state of a
+/// per-element closure call is a hash lookup plus a process-local `Arc` clone — no
+/// allocation, and no touch of the shared arm's refcount. See `Heap::vm_cache_arm_handle`.
+fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<ArmHandle>> {
     let key = cache_key(heap, id)?;
-    if let Some(hit) = heap.vm_cache_arm(key, argc) {
+    if let Some(hit) = heap.vm_cache_arm_handle(key, argc) {
         return hit;
     }
     // Shared-closure fast path (ADR-175): a closure another process already compiled is
@@ -2151,9 +2159,20 @@ fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compi
     let shareable = !crate::core::heap::Heap::shared_arms_disabled();
     if shareable {
         if let Some(cc) = heap.shared_closure_lookup(key.shared_bits()) {
-            let cc = Some(cc);
-            heap.vm_cache_put(key, cc.clone());
-            return cc.and_then(|cc| cc.arm_for(argc).cloned());
+            heap.vm_cache_put(key, Some(cc.clone()));
+            // Re-enter through the cache rather than deriving here, so this arity's handle
+            // is memoized for every call after this one — but do NOT trust the cache to
+            // still hold what we just put there: `vm_cache_arm_handle` begins with
+            // `sync_free_epoch`, and a *peer* process can advance `free_epoch` at any
+            // instant (`free_runtime_gen` runs from another worker's ordinary safepoint,
+            // no stop-the-world), which clears this cache. Falling through to the arm we
+            // already hold keeps that race a lost memo instead of a spurious "no VM arm",
+            // which would silently tree-walk a compiled body — or panic a caller that
+            // resolved twice.
+            return heap
+                .vm_cache_arm_handle(key, argc)
+                .flatten()
+                .or_else(|| cc.arm_for(argc).cloned().map(ArmHandle::new));
         }
     }
     // Read the free-epoch BEFORE compiling: if a generation is freed while we compile,
@@ -2168,7 +2187,13 @@ fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compi
             heap.shared_closure_publish(key.shared_bits(), fe, cc.clone());
         }
     }
-    compiled.and_then(|cc| cc.arm_for(argc).cloned())
+    // As above: take the handle back out of the cache so it is memoized, not re-derived —
+    // with the same fallback, for the same peer-`free_epoch` race.
+    heap.vm_cache_arm_handle(key, argc).flatten().or_else(|| {
+        compiled
+            .and_then(|cc| cc.arm_for(argc).cloned())
+            .map(ArmHandle::new)
+    })
 }
 
 /// Compile `f`'s body NOW, without calling it, and cache the result. Returns whether
@@ -2257,7 +2282,7 @@ pub(crate) fn hof_resolve(heap: &Heap, f: Value, argc: usize) -> Option<HofArm> 
     let bases = heap.vm_arm_block(&arm);
     Some(HofArm {
         id,
-        arm: ArmHandle::new(arm),
+        arm,
         #[cfg(feature = "jit")]
         bases,
     })

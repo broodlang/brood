@@ -78,7 +78,7 @@ pub(crate) fn exec_call(
                                 compiled_arm_for(heap, id, args.len()).map(|arm| {
                                     let cenv =
                                         heap.closure(id).env.unwrap_or_else(|| heap.global());
-                                    (ArmHandle::new(arm), cenv)
+                                    (arm, cenv)
                                 })
                             }
                             _ => None,
@@ -295,9 +295,11 @@ pub(crate) fn dispatch(
     // to the tree-walker via `eval::apply` (which is just `call_native` for a
     // native — cheap).
     if let ValueRef::Fn(id) = cur_callee.unpack() {
-        // Resolve the arm cloning only the `Arc<CompiledArm>` (not the enclosing
-        // `CompiledClosure`) — one fewer Arc clone per call on the hot path.
-        if let Some(arm) = compiled_arm_for(heap, id, cur_argv.len()).map(ArmHandle::new) {
+        // Resolve to the arm's memoized process-local handle (never the enclosing
+        // `CompiledClosure`, and never a fresh allocation) — this is the computed-head /
+        // no-IC path, so it runs per call: per element of a transducer chain, per message
+        // handled, per callback invoked.
+        if let Some(arm) = compiled_arm_for(heap, id, cur_argv.len()) {
             // Run the callee in *its own* captured env (Stage 2c): a
             // global-capturing closure (`env == None`) resolves to the process
             // global as before, while a local-capturing one resolves its free

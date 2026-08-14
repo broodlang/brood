@@ -114,12 +114,26 @@
 >   fast-link invalidation + shared inlined native) — green scheduling now ~93% of the machine ceiling.
 >
 > - **Next levers** (profiled; details in `todo.md`):
->   1. **Capturing-closure fast-link / lean HOF call** — `nqueens`/`pipeline` are per-element
->      closure-*dispatch* bound (NOT allocation — profiled). Pipeline's blocker CONFIRMED:
->      `eduction`'s transducer step closures capture → `vm_call_ic_fast_link` bails on
->      `!capture_names.is_empty()` → dispatch fallthrough. Fix = fill capture slots in the fast-frame
->      (index-copy from the flat env) + drop the bail. Ceiling ~1.4–1.5× on `pipeline`. **RISK: the
->      hottest JIT path — full gate+fuzz.** Increment-0 done, GO.
+>   1. ~~**Capturing-closure fast-link / lean HOF call**~~ — **KILLED for `pipeline` by profiling,
+>      2026-07-03. Do not re-attempt on this evidence.** The lever as written ("`eduction`'s
+>      transducer step closures capture → `vm_call_ic_fast_link` bails on
+>      `!capture_names.is_empty()` → dispatch fallthrough; drop the bail") named the wrong path.
+>      That bail is on the **elided free-global in-IR fast-link**, and `perf` measured that path at
+>      **0% of pipeline**: a transducer step is a **computed head** (a captured `rf`/`f`), so it
+>      never reaches the elided fast-link at all. The "Increment-0 confirmed GO" note was a
+>      *ceiling* measurement (how much the row could theoretically give), not a confirmation that
+>      the proposed mechanism was on the row's hot path — it was wrong about the mechanism.
+>      Separately, both JIT fast frames now **fill** capture slots from the captured env rather
+>      than refusing a capturing arm (`jit_runtime.rs`'s native→native link and `hof_apply_native`
+>      in `compile/mod.rs` — verified present 2026-08-14), so there is no bail left to drop.
+>      **What shipped instead** was `hof_apply_native` (jump the step arm's installed native
+>      directly, skipping `vm_apply`→`vm_run_bc`): **`nqueens` ~18%**, and **`pipeline` flat** —
+>      which is the datum that redirected this lever. Pure computed-head arm-caching was killed in
+>      the same pass (~1–6%: `vm_cache` is already FxHash-keyed, so the residue is the `arm_for`
+>      scan + an `Arc` clone, and `push_frame` does the same slot+capture work a fast frame would).
+>      **The open lever for `pipeline`** is therefore the **VM `dispatch` computed-head branch**
+>      (19.7% self at N=10M) + **`push_frame` (11.5%)** — give that path its own fast frame, as
+>      `jit_dispatch_call` already has. Riskier core-dispatch change; profile before building.
 >   2. **Unboxed arrays** (`matmul` — boxed 24-byte `Value` array reads; profile: `vector_ref` ~14%).
 >      The "monomorphic → unboxed" theme applied to *storage*.
 >   3. Interpreter/dispatch cost still bounds every un-JIT'd row.
