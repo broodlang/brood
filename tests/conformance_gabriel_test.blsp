@@ -33,6 +33,7 @@
 
 (defmodule conformance-gabriel-test
   (:use test)
+  (:use enum)
   (:use corpus)
   (:use gabriel/deriv)
   (:use gabriel/takl)

@@ -22,7 +22,8 @@ reconstructs a cross-process causal TREE, something `dbg` cannot do.
 Wire it up with `with-debugger`; trace with `spy` (its `*spy-sink*` is routed here),
 pause with `break`, and correlate with `span` (`span-spawn` is now just
 `(spawn (span …))` sugar). `debug-watch` gives a live terminal view."
-  (:use editor/ansi))
+  (:use editor/ansi)
+  (:use enum))
 
 ;; ---- ambient wiring: ONE propagating context (a durable per-process slot) ---
 ;; The debugger endpoint + current span live in `(%trace-context)` = {:debugger pid

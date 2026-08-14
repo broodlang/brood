@@ -7,7 +7,8 @@ Empty sequences raise unless documented otherwise.
   (stats/mean [1 2 3 4 5])      ;; => 3.0
   (stats/median [3 1 2])        ;; => 2
   (stats/stddev [2 4 4 4 5 5 7 9]) ;; => 2.0
-  (stats/percentile [1 2 3 4 5] 50) ;; => 3")
+  (stats/percentile [1 2 3 4 5] 50) ;; => 3"
+  (:use enum))
 
 ;; ---- basic moments -----------------------------------------------------------
 
@@ -89,8 +90,8 @@ For an even-length sequence, returns the mean of the two middle values."
   (- (stats-max xs) (stats-min xs)))
 
 ;; ---- frequency ---------------------------------------------------------------
-;; `mode` uses the prelude's `frequencies` (a general sequence op); no stats-local
-;; copy — it was a slower duplicate of the same function.
+;; `mode` uses the `enum` library's `frequencies` (a general sequence op, ADR-227);
+;; no stats-local copy — it was a slower duplicate of the same function.
 
 (defn mode (xs)
   "The most frequent value in `xs` (first occurrence wins on ties). Raises on empty."

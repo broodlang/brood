@@ -1,0 +1,171 @@
+;; std/enum.blsp — the sequence-helper library (ADR-227).
+;; A namespace (ADR-065): its functions are `enum/dedupe`, `enum/group-by`, … —
+;; consumers `(:use enum)` to refer them bare, or call them qualified.
+;;
+;; The *core* sequence protocol stays bare in the prelude — `map`/`filter`/`reduce`/
+;; `fold`/`seq`/`into`/`count`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`
+;; and friends are the universal collection surface (and several are load-bearing
+;; during the prelude's own bootstrap, so they cannot move). This module is the
+;; higher-level, derived helpers layered on top — the Elixir-`Enum`-flavour extras.
+(defmodule enum
+  "Sequence helpers — the derived enumeration API over the bare collection protocol.
+
+The core ops (`map` `filter` `reduce` `fold` `into` `count` `take` `drop`
+`distinct` `take-while` `drop-while` `partition` `zip` `sort` …) stay bare in the
+prelude and need no import. This module adds the higher-level helpers: grouping
+(`group-by` `frequencies` `chunk-by` `chunk-every`), dedup-by-key (`distinct-by`),
+running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
+`interleave` `interpose`), extremum-by-key (`min-by` `max-by`), and indexing
+(`enumerate` `index-where`, `dedupe`).")
+
+;; reduce-while — the early-terminating fold (≈ Enum.reduce_while).
+(defn- reduce-while-loop
+  (f acc coll)
+  (if (empty? coll)
+    acc
+    (match (f acc (first coll))
+      ([:halt v] v)
+      ([:cont v] (reduce-while-loop f v (rest coll)))
+      (other (error "reduce-while: reducer must return [:cont acc] or [:halt acc], got: "
+               (pr-str other))))))
+(defn reduce-while (f init coll)
+  "Left-fold `coll` with `f`, but let the reducer stop early: `(f acc x)` returns `[:cont acc']` to keep going or `[:halt acc']` to stop now. Returns the last accumulator either way. Like `fold`/`reduce`, except the step decides when to quit — the early-terminating fold (≈ `Enum.reduce_while`). Tail-recursive, so it is stack-safe."
+  (reduce-while-loop f init (seq coll)))
+
+(defn frequencies (coll)
+  "A map from each distinct element of `coll` to how many times it occurs."
+  ;; The map accumulator is always a map, so hit the 3-arg kernel ops
+  ;; (`map-assoc`/`map-get`) directly — variadic `assoc` would build a rest-list
+  ;; and `get` a `cond` dispatch on every one of the n elements.
+  (fold (fn (m x) (map-assoc m x (%add (map-get m x 0) 1))) {} coll))
+
+;; dedupe: collapse only *consecutive* runs of equal items (no "seen" set needed).
+(defn- dedupe-acc
+  (coll prev acc)
+  (cond
+    (empty? coll) acc
+    (= (first coll) prev) (dedupe-acc (rest coll) prev acc)
+    else (dedupe-acc (rest coll) (first coll) (cons (first coll) acc))))
+(defn dedupe (coll)
+  "The items of `coll` with *consecutive* runs of equal items collapsed to a single item."
+  (if (empty? coll)
+    nil
+    (reverse (dedupe-acc (rest coll) (first coll) (list (first coll))))))
+
+;; distinct-by: like the bare `distinct`, but dedup by a key function — keep the
+;; first item for each distinct `(f item)`. A map carried alongside the result is
+;; the "seen" set of keys (stores only `true`, so one `map-get` distinguishes it).
+(defn distinct-by (f coll)
+  "The items of `coll` with duplicates removed by key: keeps the first item for each distinct `(f item)`, order-preserving. `(distinct-by :id users)` keeps one user per id (≈ `Enum.uniq_by`)."
+  (reverse (nth (fold (fn (state x)
+                        (let (k (f x))
+                          (if (map-get (nth state 0) k false)
+                            state
+                            [(map-assoc (nth state 0) k true) (cons x (nth state 1))])))
+                  [{} nil]
+                  coll)
+             1)))
+
+(defn group-by (f coll)
+  "A map from each `(f x)` to the list of items of `coll` that produced it, each list in original order."
+  ;; Prepend per group (O(1)) then reverse every group's list once at the end.
+  ;; Direct kernel `map-assoc`/`map-get` — the accumulator is always a map.
+  (update-vals (fold (fn (m x) (let (k (f x)) (map-assoc m k (cons x (map-get m k nil))))) {} coll)
+    reverse))
+
+(defn- interpose-acc
+  (sep coll acc)
+  (if (empty? coll) acc (interpose-acc sep (rest coll) (cons (first coll) (cons sep acc)))))
+(defn interpose (sep coll)
+  "A list with `sep` inserted between adjacent items of `coll`."
+  (if (empty? coll) nil (reverse (interpose-acc sep (rest coll) (list (first coll))))))
+
+(defn- interleave-acc
+  (a b acc)
+  (if (or (empty? a) (empty? b))
+    (reverse acc)
+    (interleave-acc (rest a) (rest b) (cons (first b) (cons (first a) acc)))))
+(defn interleave (a b)
+  "A list alternating items from `a` and `b` — `(a0 b0 a1 b1 …)` — stopping at the shorter input."
+  (interleave-acc a b nil))
+
+;; (chunk-every n coll) — like partition but keeps the trailing partial chunk.
+(defn- chunk-every-acc
+  (n coll acc)
+  (if (empty? coll)
+    (reverse acc)
+    (chunk-every-acc n (drop n coll) (cons (into [] (take n coll)) acc))))
+(defn chunk-every (n coll)
+  "Split `coll` into consecutive `n`-item vectors; unlike `partition`, a
+trailing partial chunk is kept. `n` must be positive."
+  (chunk-every-acc n (seq coll) nil))
+
+;; (chunk-by f coll) — consecutive runs where (f x) returns the same value.
+(defn- chunk-by-acc
+  (f coll key curr acc)
+  (if (empty? coll)
+    (reverse (cons (into [] (reverse curr)) acc))
+    (let (x (first coll) k (f x))
+      (if (= k key)
+        (chunk-by-acc f (rest coll) key (cons x curr) acc)
+        (chunk-by-acc f (rest coll) k (list x) (cons (into [] (reverse curr)) acc))))))
+(defn chunk-by (f coll)
+  "Split `coll` into consecutive vectors where `(f x)` returns the same value.
+A new chunk starts each time the return value of `f` changes."
+  (let (s (seq coll))
+    (if (empty? s)
+      nil
+      (chunk-by-acc f (rest s) (f (first s)) (list (first s)) nil))))
+
+;; (scan f init coll) — running fold: returns a list of all intermediate values
+;; including the seed.
+(defn- scan-acc
+  (f acc coll result)
+  (if (empty? coll)
+    (reverse result)
+    (let (next (f acc (first coll)))
+      (scan-acc f next (rest coll) (cons next result)))))
+(defn scan (f init coll)
+  "Return a list of successively accumulated values of `(fold f init coll)`,
+starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`."
+  (scan-acc f init (seq coll) (list init)))
+
+;; (zip-with f a b) — map `f` over pairs, stopping at the shorter sequence.
+(defn- zip-with-acc
+  (f a b acc)
+  (if (or (empty? a) (empty? b))
+    (reverse acc)
+    (zip-with-acc f (rest a) (rest b) (cons (f (first a) (first b)) acc))))
+(defn zip-with (f a b)
+  "Map `f` over corresponding pairs from `a` and `b`, stopping at the shorter
+input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
+  (zip-with-acc f (seq a) (seq b) nil))
+
+;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
+(defn min-by (f coll)
+  "The item in `coll` for which `(f item)` is smallest; `nil` if `coll` is empty."
+  (fold (fn (best x) (if (< (f x) (f best)) x best)) (first coll) (rest coll)))
+(defn max-by (f coll)
+  "The item in `coll` for which `(f item)` is largest; `nil` if `coll` is empty."
+  (fold (fn (best x) (if (> (f x) (f best)) x best)) (first coll) (rest coll)))
+
+(defn- enumerate-acc
+  (i coll acc)
+  (if (empty? coll)
+    (reverse acc)
+    (enumerate-acc (inc i) (rest coll) (cons [i (first coll)] acc))))
+(defn enumerate (coll)
+  "Pair each item with its 0-based index: ([0 x₀] [1 x₁] …)."
+  (enumerate-acc 0 (seq coll) nil))
+
+(defn- index-where-from
+  (pred coll i)
+  (cond
+    (empty? coll) -1
+    (pred (first coll)) i
+    else (index-where-from pred (rest coll) (inc i))))
+(defn index-where (pred coll)
+  "The 0-based index of the first item of `coll` for which `(pred x)` holds, or
+-1 if none does. The predicate counterpart of `index-of` (which matches by
+equality); recover the item itself with `find`."
+  (index-where-from pred coll 0))

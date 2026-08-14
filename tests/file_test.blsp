@@ -3,7 +3,7 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(defmodule file-test (:use test) (:use file))
+(defmodule file-test (:use test) (:use file) (:use enum))
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-file-")

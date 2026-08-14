@@ -1,4 +1,4 @@
-(defmodule prelude-enum-test (:use test))
+(defmodule prelude-enum-test (:use test) (:use enum))
 
 (describe "chunk-every"
   (test "even split"
@@ -105,6 +105,30 @@
                         (reduce-while (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)]))
                           0
                           (range 1000))))))
+        (range n))
+      (let (results (fold (fn (acc _) (cons (receive) acc)) nil (range n)))
+        (assert= n (count results))
+        (is (every? (fn (r) (= r expected)) results))))))
+
+(describe "distinct-by"
+  (test "keeps the first item for each distinct key, order-preserving"
+    (assert= (list [1 :a] [2 :c]) (distinct-by (fn (p) (nth p 0)) [[1 :a] [1 :b] [2 :c] [1 :d]])))
+  (test "identity key behaves like distinct"
+    (assert= (list 1 2 3) (distinct-by (fn (x) x) [1 1 2 2 3 1])))
+  (test "keeps nil/false-valued keys distinctly"
+    (assert= (list nil false 0) (distinct-by (fn (x) x) [nil nil false false 0 0])))
+  (test "empty input"
+    (assert= nil (distinct-by (fn (x) x) [])))
+  (test "reachable qualified as enum/distinct-by"
+    (assert= (list 1 2) (enum/distinct-by (fn (x) (mod x 2)) [1 3 2 4])))
+  (test "across processes: the deduped value round-trips through send"
+    :isolated
+    (let (me (self)
+          n 6
+          input [[1 :a] [1 :b] [2 :c] [3 :d] [3 :e] [2 :f]]
+          expected (distinct-by (fn (p) (nth p 0)) input))
+      (map (fn (_)
+             (spawn (fn () (send me (distinct-by (fn (p) (nth p 0)) input)))))
         (range n))
       (let (results (fold (fn (acc _) (cons (receive) acc)) nil (range n)))
         (assert= n (count results))
