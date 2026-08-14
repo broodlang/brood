@@ -99,7 +99,8 @@
 (println "all strings?" (= (count (filter string? strs)) (count strs)))
 
 (println "--- type-of frequencies ---")
-(def type-freq (frequencies (map type-of soup)))
+(require 'enum)
+(def type-freq (enum/frequencies (map type-of soup)))
 (println "type frequencies:" (pr-str type-freq))
 
 (println "--- sort the soup (structural order) ---")

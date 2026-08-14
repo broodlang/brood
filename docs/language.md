@@ -2277,13 +2277,21 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 
 ### Lists & sequences
 `cons`  `first`  `rest`  `second`  `third`  `last`  `but-last`
-`list`  `vector`  `vec`  `conj`  `disj`  `into`  `seq`  `enumerate`
+`list`  `vector`  `vec`  `conj`  `disj`  `into`  `seq`
 `append`  `reverse`  `reverse-onto`  `nth`  `count`  `empty?`
 `range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
-`member?`  `any?`  `every?`  `find`  `index-of`  `index-where`  `zip`
+`member?`  `any?`  `every?`  `find`  `index-of`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
-`distinct`  `dedupe`  `group-by`  `flatten`  `interpose`  `interleave`
-`repeat`  `repeatedly`  `reduce-while`
+`distinct`  `flatten`  `repeat`  `repeatedly`
+
+> **The `enum` namespace (ADR-227).** The higher-level, *derived* sequence helpers
+> live in the `enum` module rather than the bare prelude: `dedupe`, `distinct-by`,
+> `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`,
+> `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`.
+> The *core* protocol above (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/
+> `take-while`/`partition`/`zip`/…) stays bare. Reach the helpers with `(:use enum)`
+> in your module header, or call them qualified (`enum/group-by`). The descriptions
+> below cover them all; the enum ones just need the import.
 
 - `first`/`rest` of `nil` are `nil`. `nth` takes an optional default:
   `(nth coll i default)`.
@@ -2922,10 +2930,11 @@ Run `nest doc <module>` for the full API of any module.
 | `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `file?`, `list-files`, `list-dirs`, `walk-files`, `path-extension`, `path-stem`. All Brood (ADR-006), no new Rust |
 | `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
+| `std/enum.blsp` | `'enum` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. The core ops (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stay bare in the prelude; `(:use enum)` for bare access or call qualified |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
 | `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |
-| `std/stats.blsp` | `'stats` | Descriptive statistics: `mean`, `median`, `variance`, `stddev`, `percentile`, `mode`, `frequencies`, `stats-min`, `stats-max` |
+| `std/stats.blsp` | `'stats` | Descriptive statistics: `mean`, `median`, `variance`, `stddev`, `percentile`, `mode`, `stats-min`, `stats-max` (`mode` uses `enum/frequencies` internally) |
 | `std/stream.blsp` | `'stream` | Process-based pull streams (lazy, I/O-friendly): sources (`stream-from-list`, `stream-range`, `stream-from-socket`), transformers (`stream-map`, `stream-filter`, `stream-chunk`, `stream-lines`), terminals (`stream-fold`, `stream-to-vector`, `stream-pipe`) |
 | `std/url.blsp` | `'url` | URL encoding/parsing: `percent-encode`, `percent-decode`, `query-encode`, `query-decode`, `parse-url`, `build-url` |
 | `std/csv.blsp` | `'csv` | CSV parse and emit: `csv-parse`, `csv-parse-maps`, `csv-emit`, `csv-emit-maps` |

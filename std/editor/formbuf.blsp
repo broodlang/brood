@@ -34,7 +34,8 @@ outside the regions), `protected-spans` (those same outside ranges, for
 `buffer/set-read-only-spans` to freeze at the edit primitive), `region-at`,
 `region-index`, `splice` (re-render the generated text, keeping region contents
 by index) — plus `guard-veto` / `guard-clamp`, the two `:post-key` policies that
-keep the generated part intact. `(require 'editor/formbuf)`.")
+keep the generated part intact. `(require 'editor/formbuf)`."
+  (:use enum))
 
 ;; ---- region providers ---------------------------------------------------------
 

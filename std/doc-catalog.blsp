@@ -124,9 +124,7 @@
    "check-file-deps" :meta
    "check-file-structured" :meta
    "check-string-structured" :meta
-   "chunk-by" :collections
    "chunk-by-acc" :collections
-   "chunk-every" :collections
    "chunk-every-acc" :collections
    "clamp" :math
    "clipboard-get" :system
@@ -166,7 +164,6 @@
    "decimal->float" :convert
    "decimal->string" :convert
    "decimal?" :predicates
-   "dedupe" :collections
    "dedupe-acc" :collections
    "def-" :control
    "defability" :meta
@@ -229,7 +226,6 @@
    "dynamic?" :meta
    "empty?" :predicates
    "ends-with?" :predicates
-   "enumerate" :collections
    "enumerate-acc" :collections
    "eprint" :io
    "eprintln" :io
@@ -274,7 +270,6 @@
    "format-loop" :strings
    "format-prec" :strings
    "format-spec" :strings
-   "frequencies" :collections
    "gc-collect" :meta
    "gc-stats" :meta
    "gc-trace" :meta
@@ -287,7 +282,6 @@
    "global-names" :meta
    "grapheme-at" :strings
    "grapheme-count" :strings
-   "group-by" :collections
    "gui-bg!" :system
    "gui-close" :system
    "gui-drag-move" :system
@@ -325,7 +319,6 @@
    "includes?" :predicates
    "index-of" :strings
    "index-of-seq-from" :strings
-   "index-where" :strings
    "index-where-from" :strings
    "infinite?" :predicates
    "inspect" :io
@@ -335,9 +328,7 @@
    "int->bytes-le" :bytes
    "int->char" :strings
    "int?" :predicates
-   "interleave" :collections
    "interleave-acc" :collections
-   "interpose" :collections
    "interpose-acc" :collections
    "into" :collections
    "iterate-times" :collections
@@ -436,7 +427,6 @@
    "match-vec-collect" :patterns
    "match-wildcard?" :predicates
    "max" :math
-   "max-by" :collections
    "mem-bytes" :meta
    "mem-limit" :meta
    "mem-peak" :meta
@@ -449,7 +439,6 @@
    "merge-sort-n" :collections
    "merge-with" :maps
    "min" :math
-   "min-by" :collections
    "mod" :math
    "module-doc" :meta
    "monitor" :processes
@@ -629,7 +618,6 @@
    "runtime-collect" :meta
    "sample" :collections
    "satisfies?" :meta
-   "scan" :collections
    "scan-acc" :collections
    "scan-form-start" :meta
    "scan-form-start-2" :meta
@@ -815,7 +803,6 @@
    "zero?" :predicates
    "zip" :collections
    "zip-acc" :collections
-   "zip-with" :collections
    "zip-with-acc" :collections
    "zipmap" :maps})
 

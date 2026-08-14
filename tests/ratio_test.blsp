@@ -7,7 +7,7 @@
 ;;; denominator reduces to 1 is demoted to an integer (`2/1` IS `2`), so the question
 ;;; "is a ratio `=` to an equal integer?" never arises — an integral ratio is an int.
 
-(defmodule ratio-test (:use test))
+(defmodule ratio-test (:use test) (:use enum))
 
 (describe "ratio: literals + reduction"
   (test "the 1/2 literal reads, prints, and round-trips"

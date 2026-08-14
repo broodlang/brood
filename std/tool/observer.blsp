@@ -63,7 +63,8 @@ attach). Drive the standalone app from the shell with `nest observe`."
   ;; the minibuffer reuses lineedit's pure editing core
   (:use editor/lineedit)
   ;; the reusable app framework — frontends + the `ui-run` loop
-  (:use editor/ui))
+  (:use editor/ui)
+  (:use enum))
 
 ; the parent→child forest ordering (shared with myedit's process list)
 (require 'proctree)

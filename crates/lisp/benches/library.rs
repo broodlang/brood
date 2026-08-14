@@ -113,11 +113,14 @@ mod maps {
     }
 
     /// `frequencies` over `0..n` bucketed into 7 keys — one `assoc` per element.
+    /// `frequencies` lives in the `enum` namespace (ADR-227), so require it first.
     #[divan::bench(args = [1_000, 10_000])]
     fn frequencies(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(count (frequencies (map (fn (x) (rem x 7)) (range {n}))))"),
+            format!(
+                "(do (require 'enum) (count (enum/frequencies (map (fn (x) (rem x 7)) (range {n})))))"
+            ),
         );
     }
 

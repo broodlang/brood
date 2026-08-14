@@ -15251,3 +15251,48 @@ consequences follow and are documented in `docs/language.md`: a guard **may** ha
 effects / be expensive / not terminate (discipline, not the compiler, keeps it pure), and a
 guard that **throws propagates** the error rather than silently failing the clause (Erlang
 falls through; Brood does not) — write `:when (try … (catch _ false))` for fall-through-on-error.
+
+## ADR-227 — Namespace the standard library: core stays bare, derived helpers move to modules
+
+**Status:** in progress (stage 1, `enum`, implemented 2026-08-13; `map`/`math`/… to follow).
+
+**Context.** The stdlib is written in Brood, but the bulk lives in a flat, un-namespaced
+`std/prelude.blsp` (~6000 lines) where every function — from `map`/`filter`/`reduce` to niche
+helpers like `dedupe`/`chunk-by` — is a bare global. The separate `std/*.blsp` modules (`set`,
+`json`, `csv`, …) already namespace via `defmodule` (ADR-065), but the prelude never did.
+
+**Decision — a principled split, run as a staged program.** *Core* collection-protocol ops,
+arithmetic, type predicates, combinators, and all language-runtime machinery **stay bare in the
+prelude**. *Derived, family-specific helpers* move into namespace modules (`enum/`, later
+`map/`-extras, `math/`, `float/`, …), keeping their current names (no Elixir-spelling renames,
+no bare re-export aliases — greenfield forbids aliases). Consumers gain bare access with
+`(:use <mod>)` or call qualified (`enum/group-by`). Each family is its own green commit; the
+end state is the whole stdlib namespaced, but a wholesale move is impossible in one step (below).
+
+**The hard constraint that shapes the split.** The prelude *is the boot image*: it is
+`include_str!`'d and evaluated form-by-form at startup, and `require` itself is defined near the
+*end* of the prelude. So **the prelude cannot `require` a module** — anything its own
+bootstrap / macro-expansion / `require` machinery calls must stay bare at root. This hard-splits
+the candidates into *pinned* (used during boot: `distinct`, `take-while`, `drop-while`,
+`partition`, `zip`, `split-at`, `merge`, `zipmap`, `quot`, `mod`) and *movable* (boot-independent).
+Conveniently the pinned set is also just the core sequence protocol — the ops that should stay
+bare anyway — so the boundary is principled, not incidental. The precedent is `path` (ADR: the
+bootstrap `path-*` subset stays bare; a richer `path/` module lives alongside in `CORE_MODULES`).
+
+**What a namespace must earn.** A cohesive API big enough that `:use`/qualifying pays for itself.
+`enum` (~15 helpers), `string`-extras, `map`-extras, `math` clear the bar; a 2-function `symbol/`
+does not (stays bare), and the 6 int↔byte fns fold into `encoding` rather than a new `bytes/`.
+
+**Stage 1 — `enum` (done).** `std/enum.blsp` (a `CORE_MODULE`) holds 14 moved helpers —
+`dedupe`, `frequencies`, `group-by`, `chunk-by`, `chunk-every`, `interpose`, `interleave`,
+`scan`, `zip-with`, `min-by`, `max-by`, `reduce-while`, `enumerate`, `index-where` — plus the new
+`distinct-by` (keyed uniq, ≈ `Enum.uniq_by`). The core protocol (`map`/`filter`/`reduce`/`fold`/
+`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stays bare. Consumers migrated with
+`(:use enum)` (`stats`, `debug`, `observer`, `formbuf`, the editor scaffold template, six test
+files) or `(require 'enum)` + qualify for header-less scripts (`breakage/*`, a bench). The stale
+bare entries for the moved fns were removed from `std/doc-catalog.blsp` (module fns are documented
+via their module, as `set`/`json` already are). Full in-language suite green (4643/4643).
+
+**Consequence — the reference.** Namespaced stdlib functions are not in the bare-surface catalog
+(`nest docs --all`); they are documented through their module, exactly as every other std module.
+Moving `enum`'s helpers there follows that existing convention rather than introducing a new one.

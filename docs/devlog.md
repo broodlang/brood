@@ -956,3 +956,27 @@ prelude functions beside the `->`/`doto` family (`std/prelude.blsp`); where `dot
 common cases); shipped for the exact Elixir spelling. Tests in `tests/ergonomics_test.blsp`
 (5 cases incl. pipeline composition and an `:isolated` cross-process case). `docs/language.md`
 + `ROADMAP.md` updated; no ADR (trivial additive prelude fns).
+
+## 2026-08-13 — Stdlib namespacing, stage 1: the `enum` sequence-helper module (ADR-227)
+
+Began the stdlib namespacing program: *core* stays bare in the prelude, *derived helpers* move
+into namespace modules. Stage 1 extracts 14 boot-independent sequence helpers (`dedupe`,
+`frequencies`, `group-by`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`,
+`zip-with`, `min-by`, `max-by`, `reduce-while`, `enumerate`, `index-where`) out of the flat
+`std/prelude.blsp` into a new `std/enum.blsp` (`CORE_MODULES`), and adds the new `enum/distinct-by`
+(keyed uniq). The core collection protocol (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/
+`take-while`/`partition`/`zip`) stays bare — several are load-bearing during the prelude's own
+bootstrap (it *is* the boot image and `require` is defined near its end, so it cannot require a
+module), which conveniently coincides with the ops that should stay bare anyway. Template: `path`.
+
+Consumers migrated with `(:use enum)` (`stats`, `tool/debug`, `tool/observer`, `editor/formbuf`,
+the `nest new` editor scaffold template, and six test files) or `(require 'enum)` + qualified calls
+for header-less scripts (`breakage/chaos_map_volcano`, `breakage/chaos_type_blender`, a `divan`
+bench). A `/code-review high` pass caught the four consumers outside `nest test`'s reach
+(`examples/`, `breakage/`, the scaffold template, `benches/`) — the class a full-suite green run
+misses — plus a stale `min-by`/`max-by` docstring ("errors on empty" → actually returns `nil`,
+corrected). Removed the 14 now-stale bare entries from `std/doc-catalog.blsp` (module fns are
+documented via their module, as `set`/`json` already are). Full in-language suite green (4643/4643);
+`nest format --check` clean; a scaffolded editor project checks clean. ADR-227 records the
+principle + the boot-image constraint + the staging; `docs/language.md` + `ROADMAP.md` updated.
+Next stages: `map`-extras, `math`.

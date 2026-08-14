@@ -1416,6 +1416,18 @@ Runtime housekeeping (both items landed):
     prelude functions beside the `->`/`doto` family: `(tap x f)` runs `(f x)` for
     effect and returns `x`; `(then x f)` returns `(f x)`. Elixir-parity spelling
     for the "apply a function value in a pipeline" case (`doto`/`->` splice forms).
+- 🟡 **Stdlib namespacing (ADR-227)** — split the flat prelude so *core* stays bare
+  and *derived helpers* move into namespace modules (`enum/`, `map/`-extras, `math/`,
+  …), keeping current names. Staged, one green commit per family; the prelude *is* the
+  boot image, so only boot-independent helpers move (the pinned core — `map`/`filter`/
+  `reduce`/`distinct`/`take-while`/`partition`/`zip` — stays bare, which is right anyway).
+  - ✅ **`enum` (stage 1, 2026-08-13)** — 14 sequence helpers (`dedupe`, `frequencies`,
+    `group-by`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`,
+    `min-by`, `max-by`, `reduce-while`, `enumerate`, `index-where`) → `std/enum.blsp`,
+    plus the new `enum/distinct-by`. `(:use enum)` or qualify. Suite green (4643/4643).
+  - ⬜ **`map`-extras** (`merge-with`, `update-vals`, `update-keys`, `select-keys`).
+  - ⬜ **`math`** (`abs`, `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `sum`,
+    `product`, `even?`, `odd?`, `positive?`, `negative?`; core arithmetic stays bare).
 - ✅ **Syntax finalisation pass (2026-07-25, ADR-149/150/151/152)** — closed the
   cases where the surface accepted a plausible-but-wrong spelling and
   **reinterpreted** it instead of rejecting it. Binding containers are lists (a

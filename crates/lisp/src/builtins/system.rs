@@ -1051,6 +1051,12 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // normalize, relative-to. Consolidates the prelude's path-* globals under
     // a single path/ namespace with additional operations.
     embedded_module!("path", "std/path.blsp"),
+    // Sequence helpers (ADR-227): the derived enumeration API layered over the bare
+    // collection protocol — group-by/frequencies/chunk-by/chunk-every, distinct-by,
+    // scan/reduce-while, zip-with/interleave/interpose, min-by/max-by, enumerate/
+    // index-where/dedupe. The core ops (map/filter/reduce/fold/take/drop/distinct/…)
+    // stay bare in the prelude. `(:use enum)` for bare access, or call qualified.
+    embedded_module!("enum", "std/enum.blsp"),
     // OS/process interface: env vars, argv, subprocess execution, OS type, halt.
     // Wraps the %env-all/%argv/%os-cmd/%os-type/%halt primitives with a clean API.
     embedded_module!("system", "std/system.blsp"),
