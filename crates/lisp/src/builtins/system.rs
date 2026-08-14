@@ -1062,6 +1062,11 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // which stay in the prelude). The module is named `map`; the bare `map` function
     // is unaffected. `(:use map)` for bare access, or call qualified.
     embedded_module!("map", "std/map.blsp"),
+    // The math library (ADR-227): sqrt / pow / ceil / round / round-to / clamp / abs /
+    // sum / product / positive? / negative? / even? / odd? + the constants pi/e —
+    // derived math over the bare arithmetic core (operators, quot/mod/rem stay in the
+    // prelude). `(:use math)` for bare access, or call qualified.
+    embedded_module!("math", "std/math.blsp"),
     // OS/process interface: env vars, argv, subprocess execution, OS type, halt.
     // Wraps the %env-all/%argv/%os-cmd/%os-type/%halt primitives with a clean API.
     embedded_module!("system", "std/system.blsp"),

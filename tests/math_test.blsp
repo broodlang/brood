@@ -4,7 +4,9 @@
 ;; ops on multiple cores; the final :isolated block adds explicit spawn/send/
 ;; fan-in coverage. Register-only — discovered and run by `nest test` / cargo test.
 
-(defmodule math-test (:use test))
+(defmodule math-test
+  (:use test)
+  (:use math))
 
 ;; sqrt delegates to `%f64-sqrt` (f64::sqrt) so it is IEEE-correct, not the Newton's
 ;; method it once was; the epsilon compare is kept where the algebra is what matters.

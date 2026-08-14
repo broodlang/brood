@@ -4,7 +4,7 @@
 ;; record is NOT `=` to a bare map with the same fields). `record?`/`record-id`/`fields`
 ;; are the clean, id-free view. A record is still a plain immutable map underneath:
 ;; `get`/`assoc`/`merge` work, plus one accessor per field.
-(defmodule record-test (:use test))
+(defmodule record-test (:use test) (:use math))
 
 (defrecord point (x y))
 ; typed fields

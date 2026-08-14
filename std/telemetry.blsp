@@ -31,7 +31,8 @@ emitting process; the only thing a buggy handler can take down is the listener (
 *throwing* handler is merely caught and detached). Start the listener once
 (`start-telemetry`) and supervise it; the handler table is a shared global that
 survives a restart. To run slow handler work off the listener too, `forward` to a
-process you own.")
+process you own."
+  (:use math))
 
 ;; The shared handler table: event → list of {:id … :fn …}. A `def`-rebound global so
 ;; it survives a listener restart and is visible across processes (ADR-013).

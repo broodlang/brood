@@ -4,7 +4,9 @@
 ;; Every case asserts Brood's DOCUMENTED semantics (docs/language.md); the
 ;; stress runner sweeps it across engines, so any tier divergence fails loudly.
 
-(defmodule core-semantics-stress-test (:use test))
+(defmodule core-semantics-stress-test
+  (:use test)
+  (:use math))
 
 (describe "numbers: i64 edges + bigint promotion"
   (test "overflow promotes to bigint, exactly"

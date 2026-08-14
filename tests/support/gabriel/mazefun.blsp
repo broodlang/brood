@@ -29,7 +29,8 @@
 (defmodule gabriel/mazefun
   "The Gabriel MAZEFUN benchmark (a purely functional maze generator) — a conformance
 port. The oracle is upstream's own expected output in
-`tests/corpus/gabriel/data/mazefun.input`.")
+`tests/corpus/gabriel/data/mazefun.input`."
+  (:use math))
 
 ;; ---- list and matrix helpers -------------------------------------------------
 

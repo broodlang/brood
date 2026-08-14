@@ -10,7 +10,9 @@
 ;; `is` / `refute` for boolean predicates. Each failure names the source
 ;; expression that failed, so the report is self-explanatory.
 
-(defmodule suite-test (:use test))
+(defmodule suite-test
+  (:use test)
+  (:use math))
 
 (describe "arithmetic"
   (test "addition" (assert= (+ 1 2 3) 6) (assert= (+ 1 (* 2 3)) 7))

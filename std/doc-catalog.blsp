@@ -49,7 +49,6 @@
    "ability-owner-ns" :meta
    "ability-qualify-op" :meta
    "ability-requires" :meta
-   "abs" :math
    "acos" :math
    "add-load-path!" :meta
    "and" :control
@@ -113,7 +112,6 @@
    "case" :control
    "case-check-test" :control
    "case-clauses" :control
-   "ceil" :math
    "chain?" :predicates
    "char->int" :strings
    "char-at" :strings
@@ -126,7 +124,6 @@
    "check-string-structured" :meta
    "chunk-by-acc" :collections
    "chunk-every-acc" :collections
-   "clamp" :math
    "clipboard-get" :system
    "clipboard-set!" :system
    "cmp-ge" :math
@@ -233,7 +230,6 @@
    "error-message" :errors
    "eval" :meta
    "eval-string" :meta
-   "even?" :predicates
    "every?" :predicates
    "exe-path" :system
    "exit" :processes
@@ -445,7 +441,6 @@
    "multi-resolve" :meta
    "name" :strings
    "nan?" :predicates
-   "negative?" :predicates
    "nil?" :predicates
    "no-impl" :meta
    "no-method" :meta
@@ -479,7 +474,6 @@
    "number->string" :strings
    "number?" :predicates
    "numerator" :math
-   "odd?" :predicates
    "offload" :processes
    "or" :control
    "ord-compare" :meta
@@ -499,8 +493,6 @@
    "pattern-vars" :patterns
    "peak-threads" :meta
    "pid?" :predicates
-   "positive?" :predicates
-   "pow" :math
    "pow-acc" :math
    "pow-inf?" :predicates
    "pow-reciprocal" :math
@@ -522,7 +514,6 @@
    "proc-spawn" :system
    "process-flag" :processes
    "process-info" :processes
-   "product" :math
    "profile-start" :meta
    "profile-stop" :meta
    "provide" :meta
@@ -610,8 +601,6 @@
    "rope-line-count" :strings
    "rope-slice" :strings
    "rope?" :predicates
-   "round" :math
-   "round-to" :math
    "run!" :control
    "run-process" :system
    "runtime-collect" :meta
@@ -675,7 +664,6 @@
    "spy-walk-if" :meta
    "spy-walk-let" :meta
    "spy-walk-seq" :meta
-   "sqrt" :math
    "start-remote-spawn" :processes
    "starts-with?" :predicates
    "stdin-tty?" :system
@@ -701,7 +689,6 @@
    "substring" :strings
    "substring-graphemes" :strings
    "subvec" :collections
-   "sum" :math
    "swap-registry!" :meta
    "symbol" :convert
    "symbol->string" :strings

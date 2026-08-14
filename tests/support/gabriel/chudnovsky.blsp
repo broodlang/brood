@@ -26,7 +26,8 @@
 (defmodule gabriel/chudnovsky
   "The CHUDNOVSKY benchmark (π to n digits by binary splitting over big integers) — a
 conformance port. The oracle is upstream's own expected output in
-`tests/corpus/gabriel/data/chudnovsky.input`.")
+`tests/corpus/gabriel/data/chudnovsky.input`."
+  (:use math))
 
 (def- chudnovsky-a 13591409)
 (def- chudnovsky-b 545140134)

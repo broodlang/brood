@@ -2179,8 +2179,13 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 > caller's point of view they're all just functions.
 
 ### Arithmetic
-`+`  `-`  `*`  `/`  `mod`  `rem`  `quot`  `inc`  `dec`
-`floor`  `ceil`  `round`  `round-to`  `sqrt`  `pow`  `abs`  `min`  `max`  `even?`  `odd?`
+`+`  `-`  `*`  `/`  `mod`  `rem`  `quot`  `inc`  `dec`  `floor`  `min`  `max`  `zero?`  `nan?`  `infinite?`
+
+> **The `math` namespace (ADR-227).** The derived math *library* lives in the `math`
+> module: `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`,
+> the sign/parity predicates (`positive?`, `negative?`, `even?`, `odd?`), and the
+> constants `pi`/`e`. Core arithmetic above (operators, `quot`/`mod`/`rem`, `floor`,
+> `min`/`max`) stays bare. Reach the library with `(:use math)` or qualify (`math/sqrt`).
 
 - Integer-only arguments give an integer result (`/` stays integer only when it
   divides evenly; otherwise it returns a float). Any float argument makes the
@@ -2917,8 +2922,9 @@ agent can explore the live image — see `docs/mcp.md`.
 actually lives — the `defn` macro, the arithmetic operators, comparisons,
 equality, the sequence library, and the `->`/`->>` threading macros, all defined
 in Brood on top of the Rust primitive kernel. It also adds `inc` `dec`
-`identity` `second` `third` `zero?` `positive?` `negative?` `abs` `max` `min`
-`even?` `odd?` `sum` `product`. It's ordinary Brood — every function in it is defined with `defn`, exactly as you'd
+`identity` `second` `third` `zero?` `max` `min` (the sign/parity predicates,
+`abs`, `sum`, `product` and the rest of the math library are in the `math`
+module — ADR-227). It's ordinary Brood — every function in it is defined with `defn`, exactly as you'd
 define your own — but the *names* are reserved: it can be read, studied and copied,
 not rebound (ADR-166).
 
@@ -2935,6 +2941,7 @@ Run `nest doc <module>` for the full API of any module.
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
 | `std/enum.blsp` | `'enum` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. The core ops (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stay bare in the prelude; `(:use enum)` for bare access or call qualified |
 | `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `merge-with`, `update-vals`, `update-keys`, `select-keys`. The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`/`zipmap`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
+| `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Core arithmetic (operators, `quot`/`mod`/`rem`/`floor`/`min`/`max`) stays bare in the prelude; `(:use math)` for bare access or call qualified |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
 | `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |

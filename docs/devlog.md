@@ -997,3 +997,26 @@ went first last commit), `editor/ui`, `editor/buffer`, `maps_test`. A repo-wide 
 Removed the four now-stale bare entries from `std/doc-catalog.blsp`. Full in-language suite green
 (4643/4643); `nest format --check` clean (359 files). `docs/language.md` (map table + module
 table), ADR-227, `ROADMAP.md` updated. Next: `math`.
+
+## 2026-08-14 — Stdlib namespacing, stage 3: the `math` library module (ADR-227)
+
+Third stage of the namespacing program (ADR-227). Moved the derived math *library* — `sqrt`,
+`pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates
+(`positive?`/`negative?`/`even?`/`odd?`) and the constants `pi`/`e` — out of the flat prelude into
+a new `std/math.blsp` (`CORE_MODULES`). Core arithmetic stays bare: the operators, `quot`/`mod`/
+`rem`/`floor`/`min`/`max`, and `zero?`/`nan?`/`infinite?`. Two bootstrap dependencies were inlined
+so the bare prelude needs nothing from the module (it *is* the boot image, cannot require one):
+`mod`'s `(abs b)` and the `binding` macro's `(odd? …)`. ~26 consumers migrated with `(:use math)`
+(and `:only [abs]` in `telemetry_metrics_test`, whose `sum` is `telemetry/sum` — a `:use`-level
+clash with `math/sum`).
+
+**The instructive bug.** The first migration pass scanned only *operator-position* calls
+(`(even? x)`) and missed the far more common *higher-order* uses (`(filter even? xs)`,
+`(chunk-by even? xs)`, `(sort-by abs xs)`) — a value-position reference needs the import just as
+much. Five files (`prelude_enum`, `queue`, `record`, `spy`, `stream`) slipped through and were
+caught only by the full suite (`even?` unbound). A comprehensive symbol-level + HOF scan then found
+them all; `min-by`/`max-by`-style false positives (`abs`/`sum` as *bindings* or in *strings*/*test
+descriptions*) were filtered out by eye. This — plus the `:use`-clash errors — is why the next step
+replaces hand-written imports with **auto-derived** ones (an unresolved bare name that one curated
+stdlib module exports auto-refers it, lowest priority). Full suite green (4643/4643); `nest check` +
+`format --check` clean. ADR-227, `docs/language.md`, `ROADMAP.md`, doc-catalog updated.

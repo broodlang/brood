@@ -11,6 +11,7 @@
 ;;;   - BigInt bitwise ops (if supported)
 
 ; 2^63 - 1
+(require 'math)
 (def i64-max 9223372036854775807)
 ; -2^63 (still an i64 in Brood)
 (def i64-min -9223372036854775808)
@@ -50,7 +51,7 @@
 (println "rem(-big, +3) sign <= 0:" (<= r2 0))
 (println "rem(+big, -3) sign >= 0:" (>= r3 0))
 (println "rem(-big, -3) sign <= 0:" (<= r4 0))
-(println "abs consistency:" (= (abs r1) (abs r2) (abs r3) (abs r4)))
+(println "abs consistency:" (= (math/abs r1) (math/abs r2) (math/abs r3) (math/abs r4)))
 
 ;;; ---- PROGRAM 11: BigInt → float precision ----
 (println "=== P11: BigInt -> float conversion ===")

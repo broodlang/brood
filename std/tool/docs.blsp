@@ -18,7 +18,8 @@ at the top — keeping it out of the snapshot when it is itself the doc target.
 module name of a source file), which `model-file` needs to attribute a project
 module's namespace-rooted globals (ADR-070) back to it."
   (:use project)
-  (:use-internals project))
+  (:use-internals project)
+  (:use math))
 
 ;; --- module source + leading docstring ---------------------------------------
 

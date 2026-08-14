@@ -16,7 +16,8 @@ benches (`scripts/bench-ratio.sh`). Conflating the two wastes afternoons — see
 
 Counters need a `--features perf-stats` build; `make perf-brood` produces one. Without
 it `:enabled?` is false and `:hint` says so, rather than reporting zeros as if they
-were measurements.")
+were measurements."
+  (:use math))
 
 ;; Fewest samples a rate must rest on before `verdict` will judge it. Coarse and
 ;; uncalibrated — the point is only that a rate from single digits is noise, not that 1000 is

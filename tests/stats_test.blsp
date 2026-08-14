@@ -1,6 +1,8 @@
 ;; Tests for std/stats.blsp — descriptive statistics.
 
-(defmodule stats-test (:use test))
+(defmodule stats-test
+  (:use test)
+  (:use math))
 (require 'stats)
 
 (defn st-approx= (a b) (< (abs (- a b)) 1e-9))

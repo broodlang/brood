@@ -28,7 +28,10 @@
 ;; *fractional* scale: dectest's ideal-exponent rules say `1.50 * 2.25` is `3.3750`,
 ;; not `3.375`, and Brood is held to that.
 
-(defmodule conformance-dectest-test (:use test) (:use corpus))
+(defmodule conformance-dectest-test
+  (:use test)
+  (:use corpus)
+  (:use math))
 
 (def- dt-ops-binary {"add" true "subtract" true "multiply" true "compare" true})
 (def- dt-ops-unary {"minus" true "plus" true "abs" true})
