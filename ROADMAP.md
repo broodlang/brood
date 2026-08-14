@@ -1416,7 +1416,7 @@ Runtime housekeeping (both items landed):
     prelude functions beside the `->`/`doto` family: `(tap x f)` runs `(f x)` for
     effect and returns `x`; `(then x f)` returns `(f x)`. Elixir-parity spelling
     for the "apply a function value in a pipeline" case (`doto`/`->` splice forms).
-- 🟡 **Stdlib namespacing (ADR-227)** — split the flat prelude so *core* stays bare
+- ✅ **Stdlib namespacing (ADR-227)** — split the flat prelude so *core* stays bare
   and *derived helpers* move into namespace modules (`enum/`, `map/`-extras, `math/`,
   …), keeping current names. Staged, one green commit per family; the prelude *is* the
   boot image, so only boot-independent helpers move (the pinned core — `map`/`filter`/
@@ -1432,9 +1432,15 @@ Runtime housekeeping (both items landed):
     `abs`/`sum`/`product`/`even?`/`odd?`/`positive?`/`negative?` + consts `pi`/`e` →
     `std/math.blsp`. Core arithmetic stays bare (`quot`/`mod`/`rem`/`floor`/`min`/`max`);
     `mod`/`binding` had their `abs`/`odd?` inlined. Suite green (4643/4643).
-  - ⬜ **Auto-derived imports** — replace the per-file `(:use enum/map/math)` with
-    resolver-level derivation (unresolved bare name → its unique stdlib module, lowest
-    priority; ambiguity errors). Removes the migration + the missed-import bug class (ADR-227).
+  - ✅ **`json` (stage 4, 2026-08-14, `a57cc573`)** — with auto-require in place, `std/json.blsp`
+    drops its redundant `json-` export prefix (`json-parse`→`parse`, `json-encode`→`encode`);
+    consumers and the JSON fuzz target move to the qualified `json/parse`. Suite green.
+  - ✅ **Auto-derived imports (2026-08-14, `a57cc573`)** — shipped as *qualified-reference
+    auto-require*, **not** the bare-name derivation first planned: a qualified `mod/name` infers
+    `(require 'mod)` for any module (macro heads eager, value refs deferred, root region scanned),
+    so no explicit `require` line is needed. Bare names still need `(:use …)` or qualification —
+    no bare-name magic. The KI-17 unrequired-module lint is now obsolete. See
+    `docs/auto-derived-imports.md`; `nest check` zero warnings, suite green.
 - ✅ **Syntax finalisation pass (2026-07-25, ADR-149/150/151/152)** — closed the
   cases where the surface accepted a plausible-but-wrong spelling and
   **reinterpreted** it instead of rejecting it. Binding containers are lists (a

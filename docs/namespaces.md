@@ -110,6 +110,13 @@ Racket-style sealing.
 > — so it degrades from a load-time "module-private" error to an ordinary **unbound
 > reference** at call time. More principled: you cannot assert privacy about code the
 > image has not loaded.
+>
+> **Largely superseded by the ADR-227 follow-up (2026-08-14, `a57cc573`):** a qualified
+> reference `mod/name` now **auto-requires** `mod` at compile time (`eval/derive.rs`), so a
+> reference into a *findable* never-loaded module now **loads** it — the name binds and
+> privacy can again be judged. Only a genuinely absent module (or a load cycle) still falls
+> through to the unbound reference above; the load is best-effort so an inferred require
+> never turns a reference into a compile error.
 
 ## 3. The substrate: expand-time resolution over the flat table
 

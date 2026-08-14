@@ -2772,7 +2772,12 @@ those. A bare reference resolves **current namespace → imports → root**, so 
 own-namespace definition shadows an import. `:use` auto-loads the module (it never
 *fetches* a package — declared deps only). A bare top-level `(require 'mod)` only
 *loads* `mod` — its names stay qualified (`mod/foo`); use a `(:use mod)` clause to
-refer them bare. The header understands exactly three clauses — `(:use …)`,
+refer them bare. In practice you rarely write `(require 'mod)` by hand: **a qualified
+reference `mod/name` auto-infers `(require 'mod)`** (ADR-227 follow-up) — naming where
+something comes from loads it on demand, for *any* module. This holds for a qualified
+macro head (loaded before it expands), a qualified value reference, and top-level
+references in a header-less script or the REPL. There is **no bare-name magic**: a bare
+`sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly three clauses — `(:use …)`,
 `(:use-internals …)`, and `(:alias …)`; **anything else is a hard error**. (It used
 to be silently ignored, so a misspelled `(:use-internal m)` or a Clojure-style
 `(:require m)` looked like it imported names or granted access and did nothing at

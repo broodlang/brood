@@ -15254,8 +15254,10 @@ falls through; Brood does not) — write `:when (try … (catch _ false))` for f
 
 ## ADR-227 — Namespace the standard library: core stays bare, derived helpers move to modules
 
-**Status:** in progress (stages 1–3 `enum`/`map`/`math` done, 2026-08-13/14; a follow-up will
-replace the per-file `(:use …)` migrations with **auto-derived imports**, below).
+**Status:** stages 1–4 done (`enum`/`map`/`math` 2026-08-13/14; `json` 2026-08-14, `a57cc573`).
+The auto-derived-imports follow-up **shipped** (`a57cc573`) but as *qualified-reference
+auto-require*, **not** the bare-name derivation planned below — see "Migration lesson / the
+follow-up as shipped".
 
 **Context.** The stdlib is written in Brood, but the bulk lives in a flat, un-namespaced
 `std/prelude.blsp` (~6000 lines) where every function — from `map`/`filter`/`reduce` to niche
@@ -15317,10 +15319,25 @@ imports are at this surface: a name like `even?`/`abs` is passed as a **higher-o
 operator position, and a value-position use is just as much a reference that needs the import —
 so an operator-position-only migration scan silently missed five files, caught only by the suite.
 Combined with the `:use`-level name-clash errors, this argues the imports should be **derived from
-the code, not hand-written**. Planned follow-up: an unresolved bare name that a single curated
-stdlib module exports auto-refers that module, at the **lowest** resolution priority (local names
-and explicit `:use` win; genuine ambiguity stays an error). That removes every `(:use enum/map/
-math)` line added in stages 1–3 and the whole class of missed-import bugs.
+the code, not hand-written**.
+
+**The follow-up as shipped (`a57cc573`) — differs from the original plan.** Rather than resolving a
+bare name, a **qualified** reference `mod/name` infers `(require 'mod)` — for *any* module, not a
+curated set — so no explicit `require` line is needed: a qualified macro head loads eagerly during
+macroexpand (macros expand at compile time), a qualified value reference is required after resolve
+and before eval, and the root region (header-less script / REPL) is scanned so top-level qualified
+references auto-require too. This does **not** delete the `(:use …)` lines or make bare names work:
+a file still `(:use math)` or writes `math/…`, and only the *require* is inferred away. The
+bare-name design (auto-refer an unresolved bare name from a single curated module, lowest priority,
+with an ambiguity error and a no-collision guard) was fully designed and **not shipped** —
+`docs/auto-derived-imports.md` records both. The checker's KI-17 *"reference to an unrequired
+module"* lint is now obsolete (a qualified reference requires its own module) and is a no-op.
+
+**Stage 4 — `json` (done, 2026-08-14 `a57cc573`).** With qualified-reference auto-require in place,
+`std/json.blsp`'s exports drop their now-redundant `json-` prefix — `json-parse`→`parse`,
+`json-encode`→`encode` (referenced qualified as `json/parse`, the prefix was doubled). Every
+consumer moves to the qualified spelling with no new `require` line: `std/net/sse.blsp`,
+`std/tool/{docs,explain,grammar,package,test}.blsp`, the `tests/*` suite, and the JSON fuzz target.
 
 **Consequence — the reference.** Namespaced stdlib functions are not in the bare-surface catalog
 (`nest docs --all`); they are documented through their module, exactly as every other std module.
