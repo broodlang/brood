@@ -15325,3 +15325,88 @@ math)` line added in stages 1–3 and the whole class of missed-import bugs.
 **Consequence — the reference.** Namespaced stdlib functions are not in the bare-surface catalog
 (`nest docs --all`); they are documented through their module, exactly as every other std module.
 Moving `enum`'s helpers there follows that existing convention rather than introducing a new one.
+
+## ADR-228 — The process-local arm handle is memoized in the body cache, not built per call
+
+**Status:** implemented (2026-08-14). Direct follow-up to [ADR-224](#adr-224), whose
+multi-core win it keeps while removing the single-threaded cost that came with it. Recovers
+the `pipeline` regression that A/B-bisected to ADR-224's commit.
+
+**The problem.** ADR-224 interposed an `ArmHandle` so per-call `Arc` traffic lands on a
+process-local refcount instead of the shared arm's (KI-40). It is created "once per (process,
+call site) at IC-fill" — which is true wherever there *is* an inline cache. But
+`exec_chunk`'s call arm states the exception outright: **"A computed head (`head = None`) is
+staged below the args and takes no IC."** So on the computed-head path — every transducer
+step, every HOF inner call, every callback, every message handler, every `(f x)` where `f` is
+a parameter — `dispatch`, `exec_chunk` and the JIT's non-elided resolve each reached
+`compiled_arm_for` *per call* and wrapped the result, paying **an `Arc::new` for the handle
+plus a clone of the shared `Arc<CompiledArm>`** — i.e. an atomic RMW on the very
+cross-process cache line KI-40 is about, once per element. `pipeline` (a closure per element)
+measured **+9.3%** end-to-end across 0.3.9 → 0.3.11, of which +5.7% bisected to ADR-224's
+commit against its own parent.
+
+**The decision.** `compiled_arm_for` returns the **handle**, memoized per `(closure, argc)`
+inside the `vm_cache` entry it already consults (`Heap::vm_cache_arm_handle`). The steady
+state of a computed-head call is then a hash lookup plus a clone of a process-local `Arc`:
+no allocation, no touch of the shared refcount, and no per-call `arm_for` scan (the negative
+— "this arity has no VM arm" — is memoized too). Every caller wanted a handle already, so
+the eight hot sites simply dropped their `ArmHandle::new`; the four that remain
+(deopt resume ×2, arm construction, the JIT's cold deopt) are one-off paths where an
+allocation is correct.
+
+**Why this is not the alternative ADR-224 rejected.** That ADR rejected "interning the handle
+per (process, arm)" on two grounds, and putting the memo *inside* the cache entry answers
+both. (1) It measured **+0.9% against a 0.2% floor on `spawn-live`** — but that row's 300 000
+processes call each arm about *once*, so no memo can amortise there; the rows that pay per
+*element* were never in the measurement. (2) It "brings a new invalidation obligation (it
+holds arms alive, so it has to be cleared with `vm_cache` on a free-epoch change)" — living
+in the entry, the obligation *is* `vm_cache`'s existing one: the same `clear()` drops it
+(`sync_free_epoch`, `deep_shrink`'s hibernate, `runtime_collect`'s post-compaction), a
+re-`put` replaces it, and it holds nothing alive the entry's `CompiledClosure` did not
+already hold. No side table, no second lifetime.
+
+**Result — measured TWICE, against two bases, and the two runs disagree by more than the
+write-up first implied. Both are recorded, because the spread is itself the finding.**
+
+| row | ceiling | vs `26b04e36` | vs `a57cc573` |
+|---|---|---|---|
+| `pipeline` | default (best-of-15) | **−9.1%** (1.8% floor) | **−5.6%** |
+| `pipeline` | 1 | −6.2% | −4.7% |
+| `nqueens` | 1 | −6.2% | −4.4% |
+| `nqueens` | default | −0.9% | −1.9% |
+| `primes` | default (best-of-15) | −4.3% (1.4% floor) | −5.7% (1.4% floor) |
+
+`pipeline` improves on every run and at both ceilings, so the *direction* is not in doubt and
+the ADR-224 regression (+9.3% end-to-end, +5.7% bisected) is substantially recovered — but the
+**size is uncertain within roughly 5–9%**, and quoting the −9.1% alone would have been
+flattering. `nqueens` and `primes` each *straddle* the `max(5%, 2×floor)` gate depending on the
+run (`nqueens` cleared it at −6.2% and missed at −4.4%; `primes` the reverse), so neither is
+claimed as a certified win: both move the right way, consistently, without clearing the bar
+twice. That is the honest state, and it is exactly what this repo's own measurement discipline
+predicts for a few-percent row — the reported `floor` column read 0.0% on several of these,
+which at integer-millisecond output means "below the resolution", not "no noise". A fixed
+baseline binary plus a base-vs-base control at higher N is what would pin the size; it was not
+run, so the size is left as a range rather than a number.
+
+Unchanged and load-bearing: `pfib` at ceiling 1 reads −1.9% against a 0.7% floor, so ADR-224's
+3.19× is intact — expected, since a `vm_cache` is per-process and no handle is ever shared
+across processes. `spawn-live` −1.6% (noise, right direction: ADR-224 charged it +1.1%).
+`sort`/`reduce`/`fib` flat.
+
+**Two bugs found in review, both from the same race, both worth keeping as a lesson.**
+The natural way to memoize is "`vm_cache_put`, then read the handle back out" — and that read
+begins with `sync_free_epoch`, which clears the whole cache when `runtime.free_epoch` has
+advanced. A **peer** process can advance it at any instant (`free_runtime_gen` runs from
+another worker's ordinary safepoint; peers clear lazily on next use). So the re-read can miss
+the entry just inserted, and `compiled_arm_for` would report "no VM arm" for a closure that
+compiled fine — silently tree-walking a compiled body. Both cold paths now fall back to the
+arm already in hand, making the race a lost memo rather than a wrong answer. The same race
+turned `vm_run_bc`'s `Fn(id) if compiled_arm_for(…).is_some()` + `.expect("just checked
+is_some")` into a live **panic** vector (two independent resolutions that can disagree, and a
+doubled cold compile); it now resolves once.
+
+**Why this needs its own assertion.** Same blind spot as ADR-224 and ADR-221: the VM keeps
+computing the right answer, so `make test`, `make test-both`, the differential and the
+lowering witness all stay green and **only a benchmark moves**. Hence
+`resolving_a_closure_arm_twice_reuses_one_memoized_handle`, which asserts handle identity
+across 1000 resolutions *and* that the shared arm's refcount does not move.

@@ -478,7 +478,7 @@ pub(crate) fn exec_chunk(
                                     let cenv =
                                         heap.closure(id).env.unwrap_or_else(|| heap.global());
                                     let block = heap.vm_arm_block(&arm);
-                                    (ArmHandle::new(arm), cenv, block)
+                                    (arm, cenv, block)
                                 })
                             }
                             _ => None,
@@ -515,7 +515,7 @@ pub(crate) fn exec_chunk(
                                     compiled_arm_for(heap, id, argc).map(|arm| {
                                         let cenv =
                                             heap.closure(id).env.unwrap_or_else(|| heap.global());
-                                        (ArmHandle::new(arm), cenv)
+                                        (arm, cenv)
                                     })
                                 }
                                 _ => None,

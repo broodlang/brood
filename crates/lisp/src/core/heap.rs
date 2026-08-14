@@ -2530,7 +2530,7 @@ pub struct Heap {
     /// entry is simply never looked up again. Empty unless `BROOD_VM` is on. `Arc`
     /// so the trampoline can hold the compiled body across a call without borrowing
     /// the cache.
-    vm_cache: RefCell<VmCacheMap<Option<Arc<crate::eval::compile::CompiledClosure>>>>,
+    vm_cache: RefCell<VmCacheMap<vm_cache::VmCacheEntry>>,
     /// The [`RuntimeCode::free_epoch`] this process last synced its [`Self::vm_cache`]
     /// to (ADR-091 Stage 4). When the shared free-epoch advances (a generation was
     /// freed and its slot may be reused with bit-identical handles), the `vm_cache`

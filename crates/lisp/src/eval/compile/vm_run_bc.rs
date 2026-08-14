@@ -30,15 +30,20 @@ pub(crate) fn run_process_body(
         // **block** the worker (the dirty-scheduler carve-out, §7.4); it returns Done/
         // Err and never suspends. Either way: no coroutine.
         None => match body.unpack() {
-            ValueRef::Fn(id) if compiled_arm_for(heap, id, 0).is_some() => {
-                let arm =
-                    ArmHandle::new(compiled_arm_for(heap, id, 0).expect("just checked is_some"));
-                let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
-                vm_run_bc(heap, arm, &[], cenv, None, true)
-            }
-            ValueRef::Fn(_) => {
-                crate::eval::apply(heap, body, &[], EnvId::GLOBAL).map(VmOutcome::Done)
-            }
+            // Resolve ONCE. This was a guard calling `compiled_arm_for` and a body
+            // re-calling it under an `expect` — two independent resolutions of the same
+            // closure, which ran the cold compile path twice and, worse, could disagree:
+            // a peer process advancing `free_epoch` between them clears this process's
+            // `vm_cache`, so `is_some()` then `expect` was a live panic vector on a
+            // process body that compiles perfectly well.
+            ValueRef::Fn(id) => match compiled_arm_for(heap, id, 0) {
+                Some(arm) => {
+                    let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                    vm_run_bc(heap, arm, &[], cenv, None, true)
+                }
+                // Not VM-eligible: the tree-walker runs it (see the comment above).
+                None => crate::eval::apply(heap, body, &[], EnvId::GLOBAL).map(VmOutcome::Done),
+            },
             _ => Err(LispError::type_err("process body must be a function")),
         },
     }
