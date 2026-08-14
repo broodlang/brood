@@ -449,9 +449,9 @@
           (net/http/response 200 {"Content-Type" "application/gzip"} wrapped-bytes)
         (= path (str "/api/v1/packages/" nm "/releases/" version))
           (net/http/ok (json/encode {:checksum checksum
-                                          :version version
-                                          :source_url src
-                                          :dependencies []}))
+                                     :version version
+                                     :source_url src
+                                     :dependencies []}))
         else (net/http/not-found)))))
 
 ;; Build a WRAPPED tarball — files under a single `nm/` dir, the `tar czf pkg/` / GitHub
@@ -474,10 +474,10 @@
           (net/http/response 200 {"Content-Type" "application/gzip"} bytes)
         (= path release-path)
           (net/http/ok (json/encode {:checksum checksum
-                                          :version version
-                                          :signature signature
-                                          :pubkey pubkey
-                                          :dependencies []}))
+                                     :version version
+                                     :signature signature
+                                     :pubkey pubkey
+                                     :dependencies []}))
         else (net/http/not-found)))))
 
 ;; A valid [signature-hex pubkey-hex] over the release's canonical payload (name, version,
@@ -560,9 +560,9 @@
           base (mock-registry-start (fn (req)
                                       (if (= (get req :path) "/api/v1/packages/evil/releases/1.0.0")
                                         (net/http/ok (json/encode {:checksum checksum
-                                                                        :version "1.0.0"
-                                                                        :source_url file-url
-                                                                        :dependencies []}))
+                                                                   :version "1.0.0"
+                                                                   :source_url file-url
+                                                                   :dependencies []}))
                                         (net/http/not-found)))))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (is (includes? (try
@@ -627,10 +627,10 @@
                                               bytes)
                                           (= path rp)
                                             (net/http/ok (json/encode {:checksum checksum
-                                                                            :version "1.0.0"
-                                                                            :signature 123
-                                                                            :pubkey 456
-                                                                            :dependencies []}))
+                                                                       :version "1.0.0"
+                                                                       :signature 123
+                                                                       :pubkey 456
+                                                                       :dependencies []}))
                                           else (net/http/not-found))))))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (let (e (package/package-resolve-registry app-dir (dep-registry 'weird "1.0.0") nil base))
