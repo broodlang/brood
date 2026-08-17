@@ -156,17 +156,15 @@
 ;; no `:section` renders exactly as before (no heading).
 (defn- modules-html
   (modules)
-  (get
-    (fold
-      (fn (acc m)
-        (let (sec (get m :section)
-              head (if (and sec (not (= sec (get acc :section))))
-                     (str "<h2 class=\"doc-section\">" (escape sec) "</h2>")
-                     ""))
-          {:section (or sec (get acc :section))
-           :html (str (get acc :html) head (module-html m))}))
-      {:section nil :html ""}
-      modules)
+  (get (fold (fn (acc m)
+               (let (sec (get m :section)
+                     head (if (and sec (not (= sec (get acc :section))))
+                            (str "<h2 class=\"doc-section\">" (escape sec) "</h2>")
+                            ""))
+                 {:section (or sec (get acc :section))
+                  :html (str (get acc :html) head (module-html m))}))
+         {:section nil :html ""}
+         modules)
     :html))
 
 ;; ---- sidebar navigation -----------------------------------------------------
@@ -197,17 +195,15 @@
 ;; introduces each group so the core/library split is visible in the nav too.
 (defn- sidebar-modules
   (modules)
-  (get
-    (fold
-      (fn (acc m)
-        (let (sec (get m :section)
-              head (if (and sec (not (= sec (get acc :section))))
-                     (str "<div class=\"nav-section\">" (escape sec) "</div>")
-                     ""))
-          {:section (or sec (get acc :section))
-           :html (str (get acc :html) head (sidebar-module m))}))
-      {:section nil :html ""}
-      modules)
+  (get (fold (fn (acc m)
+               (let (sec (get m :section)
+                     head (if (and sec (not (= sec (get acc :section))))
+                            (str "<div class=\"nav-section\">" (escape sec) "</div>")
+                            ""))
+                 {:section (or sec (get acc :section))
+                  :html (str (get acc :html) head (sidebar-module m))}))
+         {:section nil :html ""}
+         modules)
     :html))
 
 (defn- sidebar-html
