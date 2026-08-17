@@ -1097,7 +1097,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Structural (s-expression) navigation over the parse-source CST — reusable
     // Brood-code tooling (same tier as the formatter / LSP), not editor-specific.
     // (The text-mode/brood-mode *layers* built on it are editor policy and live in
-    // the editor app — examples/editor/src/ — not here.) Opt-in. (docs/layers.md)
+    // the downstream editor app — brood-edit — not here.) Opt-in. (docs/layers.md)
     embedded_module!("sexp", "std/tool/sexp.blsp"),
     // A small backtracking regular-expression engine, pure Brood (literals, ., * + ?,
     // ^ $, [...] sets, \d \w \s, |, groups; no ranges/captures yet). Opt-in.
