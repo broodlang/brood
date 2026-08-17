@@ -173,17 +173,17 @@ jobs:
           fi
           grep -hoE '^[[:space:]]*(TRY [0-9]+ )?FAIL \[[^]]*\] .*' tree-walker-nextest.log \
             | sed 's/^[[:space:]]*//' | sort -u | head -25 \
-            | while IFS= read -r line; do echo "::error::tree-walker nextest: $line"; done
+            | while IFS= read -r line; do echo "::error::tree-walker nextest: $line"; done || true
           # `(:[0-9]+)?` for the column: the harness reports some failures as `file:line:col:`
           # and others as `file:line:`. Tested against a real two-failure log — without the
           # optional column this missed `registry_test.blsp:55:9` and annotated only half the
           # failures, which is worse than annotating none.
           grep -hoE 'tests/[A-Za-z0-9_./-]+\.blsp:[0-9]+(:[0-9]+)?: test failed: .*' tree-walker-nextest.log \
             | sort -u | head -25 \
-            | while IFS= read -r line; do echo "::error::tree-walker in-language: $line"; done
+            | while IFS= read -r line; do echo "::error::tree-walker in-language: $line"; done || true
           # A summary line regardless, so the annotation set is never empty on a failure.
           grep -hoE 'Summary \[[^]]*\].*' tree-walker-nextest.log | tail -1 \
-            | while IFS= read -r line; do echo "::error::tree-walker $line"; done
+            | while IFS= read -r line; do echo "::error::tree-walker $line"; done || true
 
       - name: Upload the tree-walker log (on failure)
         if: failure()
@@ -228,7 +228,7 @@ jobs:
             exit 0
           fi
           grep -hoE '^  FAIL +.*' examples.log | sort -u | head -25 \
-            | while IFS= read -r line; do echo "::error::examples:$line"; done
+            | while IFS= read -r line; do echo "::error::examples:$line"; done || true
 
   # The `breakage/` suite: deliberately abusive programs that try to make the JIT diverge
   # from the VM, overflow the eval stack, corrupt the heap or deadlock the scheduler. It is
@@ -266,10 +266,10 @@ jobs:
             exit 0
           fi
           grep -hoE '^>>> (FAIL|CRASH) \(.*' breakage.log | sort -u | head -25 \
-            | while IFS= read -r line; do echo "::error::breakage: $line"; done
+            | while IFS= read -r line; do echo "::error::breakage: $line"; done || true
           grep -hoE '^breakage/[A-Za-z0-9_./-]+\.blsp:[0-9]+(:[0-9]+)?: test failed: .*' breakage.log \
             | sort -u | head -25 \
-            | while IFS= read -r line; do echo "::error::breakage: $line"; done
+            | while IFS= read -r line; do echo "::error::breakage: $line"; done || true
 
       - name: Upload the breakage log (on failure)
         if: failure()
