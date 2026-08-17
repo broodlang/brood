@@ -88,8 +88,10 @@ nothing outside the brood repo was migrated.**
 bare, twice, on its hot path, and is a header-less script — so since 2026-08-14 it died with
 `unbound symbol: sqrt`. A published `bench/harness.py` run would have failed on it. `json.blsp`
 was dead too, calling `json/json-parse`/`json/json-encode` after stage 4 dropped the `json-`
-export prefix. Both fixed (`(require 'math)` + `math/sqrt`; `json/parse`/`json/encode`), and
-both verified against the other ports' checksums (`nbody` −169063618 = node = python, `json`
+export prefix. Both fixed by referencing the module qualified — `math/sqrt`, `json/parse`/`json/encode` —
+which loads it by inference (ADR-229 removed the user-facing `require` a day later, and that
+removal broke `base64`/`json`/`regex` in the same repo for the same reason; fixed together), and
+all verified against the other ports' checksums (`nbody` −169063618 = node = python, `json`
 364568836 = node) rather than merely "it runs now".
 
 This is the **KI-42 pattern**: a suite that gates nothing rots silently. `brood-benchmarks` is a
