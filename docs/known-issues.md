@@ -302,6 +302,25 @@ knowing separately:
 
 ---
 
+## KI-41 — a concurrent `require` of the same feature could double-load its file
+
+**Status:** ✅ **fixed 2026-08-13.** Guard:
+`breakage/chaos_concurrent_require_double_load.blsp`.
+
+**What.** Two processes racing to load the same feature could both load it. The claimant's
+`(contains? *features* key)` guard read the **per-process global inline cache**, which is
+version-gated on a `Relaxed` counter with no happens-before, so it could miss a racing
+loader's just-committed `provide` — win the released load-once claim, and re-load the module.
+
+**How it surfaced.** As the ADR-225 co-located-secondary `nest test` flake, about 1 run in 77
+— then reproduced on demand at 20 files × 40 requires, which is what turned it from a
+sighting into a bug.
+
+**Fix.** `require-one` re-checks `*features*` through a new cache-bypassing
+`%registry-member?` (which reads the shared globals table directly) before loading.
+
+---
+
 ## KI-40 — shared compiled arms serialise concurrent VM execution: one refcount, N cores
 
 **Status:** ✅ **fixed 2026-08-13** (ADR-224). A process-local
