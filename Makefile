@@ -250,6 +250,16 @@ doctor: ## Report the things that make a measurement or a gate lie (build drift,
 	# row, a lowering-witness diff comes back empty). `--strict` exits 1 on any finding.
 	@./scripts/doctor.sh $(ARGS)
 
+ab-pin: ## A/B against a PINNED baseline binary that survives ab-clean: make ab-pin BASE=<ref> ROWS="pipeline nqueens" N=15
+	# `make ab` rebuilds its baseline in a throwaway worktree that `make ab-clean` removes, so
+	# two runs on different days measure against two different binaries — and a few-percent row
+	# cannot then be told from drift. ADR-228 hit exactly that: two best-of-15 runs of the same
+	# comparison read -9.1% and -5.6%, so the ADR records a range instead of a number.
+	#
+	# This keeps the baseline in target/ab-pinned/<sha>/brood (gitignored, NOT under target/ab/)
+	# and runs base-vs-base as the floor, which is the method CLAUDE.md prescribes.
+	N=$(or $(N),15) ./scripts/ab-pin.sh $(or $(BASE),HEAD) $(or $(ROWS),pipeline nqueens)
+
 ab-vm: ## A/B the VM's own call path (tier 1) — the regressions `make ab` structurally cannot see
 	# At the DEFAULT ceiling a hot arm lowers to native, so the interpreter's call path never
 	# executes and a cost added to it reads as flat. KI-40 was a 3.19x regression on that path

@@ -5,7 +5,8 @@
 # so nothing ever executed it — and it rotted three separate ways without anyone noticing:
 #
 #   * `examples/editor` has called `eval-command/eval-last-sexp` since 2026-05-31, two and a
-#     half months after that module moved to the sibling `brood-edit` project (KI-45).
+#     half months after that module moved to the sibling `brood-edit` project (KI-45 — the
+#     example was deleted rather than repaired, `brood-edit` being the real one).
 #   * ADR-227 moved `sqrt`/`frequencies` out of the prelude; `examples/life.blsp` needed a
 #     `(:use …)` and would have died on a bare name.
 #   * ADR-229 removed `require`; `examples/{webserver,hot-reload,editor}` all opened with a
@@ -96,7 +97,7 @@ for p in "$ROOT"/examples/*/project.blsp; do
   dir="$(dirname "$p")"; name="$(basename "$dir")"
   matches "$name" || continue
   case " $SKIP_PROJECTS " in *" $name "*)
-    echo "  skip    $name/ (known red — see docs/known-issues.md KI-45)"; continue ;;
+    echo "  skip    $name/ (named in SKIP_PROJECTS)"; continue ;;
   esac
   if [ ! -x "$NEST" ]; then
     echo "  skip    $name/ (no nest binary at $NEST)"; continue
