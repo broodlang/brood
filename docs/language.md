@@ -36,11 +36,11 @@ these are the ones to unlearn:
 | `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. A vector *inside* one is still destructuring: `(let ([x y] p) …)`. | A clean error with a hint (ADR-149). The vector spelling was once accepted as an alias; that is what turned every Clojure binding shape into a silent misread — `(let [[a 1] [b 2]] …)` destructured `[a 1]` against `[b 2]` and reported `unbound symbol: b`. |
 | `(let [[a 1] [b 2]] …)` / Scheme's `(let ((a 1)) …)` | Bindings are **flat**: `(let (a 1 b 2) …)`. | A clean error **with a hint** to flatten (was accepted-then-confusing). |
 | `^:kw` / `^{:doc "…"}` metadata | Brood has **no metadata**. `^` is the pattern **pin**: `^expr` matches the current value of `expr` (ADR-150). | `^:kw` reads as a pin of the keyword — a pattern where you meant an annotation. Docstrings go in the body (see [Docstrings](#docstrings)). |
-| `#{1 2 3}` set literal | A first-class set (`Value::Set`, ADR-060): `set?` true, prints `#{…}`, never `=` to a map. Evaluates its elements and dedups. | Reads as a kernel set; the `set` library (`(require 'set)`) adds `union`/`intersection`/… |
+| `#{1 2 3}` set literal | A first-class set (`Value::Set`, ADR-060): `set?` true, prints `#{…}`, never `=` to a map. Evaluates its elements and dedups. | Reads as a kernel set; the `set` library (`(:use set)`) adds `union`/`intersection`/… |
 | `#(+ 1 %)` anonymous-fn reader macro | Write it out: `(fn (x) (+ 1 x))`. | A parse error **with a hint** naming `(fn …)` (was "unbound symbol: #"). |
 | `#'foo` var-quote | Symbols are values — plain `'foo`. | A parse error **with a hint** naming `'foo`. |
 | `#_form` discard reader macro | No form-level discard — wrap the form in `(comment …)`, whose body is read but never evaluated, or comment it out with `;`. | A parse error **with a hint** naming `(comment …)` and `;` (was a stray `#_` symbol). |
-| `#"[0-9]+"` regex literal | Regexes are library values: `(require 'regex)` then `(regex/match? "pat" s)`. | A parse error **with a hint** naming `(require 'regex)` (was a stray `#`-symbol). |
+| `#"[0-9]+"` regex literal | Regexes are library values: a `(regex/match? "pat" s)` reference auto-loads the `regex` module. | A parse error **with a hint** naming `(regex/match? …)` (was a stray `#`-symbol). |
 | `\c` / `\newline` character literal | No character type — a character is a 1-char string `"c"` (or `(int->char 99)`). | A parse error **with a hint** naming the 1-char string (was `unbound symbol: \c`). |
 | `#\|…\|#` block comment (Scheme/CL) | No block comments — comment each line with `;`, or wrap forms in `(comment …)` (read but never evaluated). | A parse error **with a hint** (ADR-169; used to read as a bar-quoted symbol). Any other `#…` is likewise reserved — `#` is a dispatch character, and `#{…}` / `#b"…"` are its only forms. |
 | `0x1F`/`0b1010` radix, `1_000` separators, `1N` bigint | None of these — a digit-led token must be a number Brood has. `(string->number "1F" 16)` parses hex, `1000` needs no separator, plain `1` already widens to bignum. | A parse error **with a targeted hint** (ADR-169; these read as symbols before, surfacing as a far-away "unbound symbol"). Reserving the tokens keeps each future numeric syntax additive. |
@@ -666,7 +666,7 @@ The `Display` ability — Elixir's `String.Chars` for Brood (ADR-171/172) — is
 and always on**. Its op **`(to-str x)`** turns a value into its display string; the
 `:default` impl is the native `str`. The **screen printers** (`print` / `println` /
 `eprint` / `eprintln`) route a *record* through its `Display` impl out of the box — no
-`(require 'show)`, no activation step. Built-ins are unchanged and pay no dispatch cost.
+import, no activation step. Built-ins are unchanged and pay no dispatch cost.
 
 ```clojure
 (defmodule money)             ; no (:use ability), no (:use show) — both are core
@@ -684,7 +684,7 @@ dynamic var, so `(binding (*show* nil) …)` disables it for a scope. Default re
 printing keeps its `:__id__` — that is intended (records print unlike bare maps); the
 protocol is the per-record *override*, not a change to the default.
 
-#### `defbehaviour`: the module-as-implementor contract (`require 'protocol`)
+#### `defbehaviour`: the module-as-implementor contract (`:use protocol`)
 
 An ability dispatches on a **value**. When the unit that implements a contract is a
 *module* — a live view the router calls by name, say — there is no value to
@@ -834,7 +834,8 @@ and dedups, and `count`/`empty?`/`first`/`rest`/`vec`/`seq` treat it as its
 elements. The kernel supplies the literal, `set?`, and the O(log n) element ops
 (`%set`/`%set-add`/`%set-remove`/`%set-has?`/`%set-count`).
 
-The **`set` library** (`(require 'set)` / `(:use set)`, `std/set.blsp`) adds only
+The **`set` library** (`(:use set)`, or a qualified `set/union` that auto-loads,
+`std/set.blsp`) adds only
 what's specific to sets: the constructor from a collection (`(set coll)`, which
 dedups) and the algebra `union`/`intersection`/`difference`/`subset?`. Sets
 deep-copy across processes like any value (`send`/`spawn` round-trip them as sets,
@@ -1597,8 +1598,8 @@ expect. The point is that you can **redirect** it.
 
 `std/io.blsp` gives the port toolkit — constructors and the `with-out`/`with-err`
 scoping macros (thin wrappers over `binding`). Pull it in with `(:use io)` so the
-names read bare (a bare `(require 'io)` only *loads* it — you would then write
-`io/fn-port`):
+names read bare — otherwise a qualified `io/fn-port` reference auto-loads the
+module but leaves the names qualified:
 
 ```lisp
 (defmodule my-app (:use io))
@@ -1763,7 +1764,7 @@ match/pattern expansion are also exempt.
 
 **Unused `:use` imports** — a `(:use mod)` clause whose contributed public names
 are never referenced in the file. Only fires when the module contributed at least
-one name (so a failed `require` or an empty module is silent).
+one name (so a failed load or an empty module is silent).
 
 ```clojure
 (defmodule my/app (:use io) (:use json))
@@ -1896,7 +1897,7 @@ separate `await`/join. `(ref)` values are their own type (`ref?`, `:ref`),
 compared by identity, and may be sent in messages. (`call`/`reply` aren't in the
 prelude yet — see `examples/life.blsp`.)
 
-The opt-in **`task` module** (`(require 'task)`) packages the common "run this
+The opt-in **`task` module** (`(:use task)`) packages the common "run this
 thunk off my loop, with a timeout, cancellable" pattern over `spawn`/`receive`/
 `exit`: `(task thunk opts)` returns a handle and delivers a tagged `[:task-done
 handle v]` / `[:task-error handle msg]` / `[:task-timeout handle]` message to
@@ -1913,7 +1914,8 @@ gen_server-style framework — ~180 lines of Brood over `spawn`/`send`/`receive`
 `ref`/`monitor`, no kernel surface (ADR-099). A server carries one immutable
 state value through a tail-recursive `receive` loop; `defprocess` declares how it
 handles each kind of message. Pull it in with `(:use proc/gen)` so `defprocess`,
-`spawn-server` and `!` read bare (a bare `(require 'proc/gen)` only loads it):
+`spawn-server` and `!` read bare (otherwise a qualified `proc/gen/…` reference
+auto-loads it but leaves the names qualified):
 
 ```clojure
 (defmodule my-app (:use proc/gen))
@@ -2164,7 +2166,7 @@ heartbeat node-down detection, and mesh join have all shipped — full reference
 drops the message (Erlang's default). A process that must not lose messages opts
 in with `(process-flag :send-errors true)` — its sends then raise a catchable
 `E0060` noconnection error, so it can queue and resend. Pair it with
-**`net/reconnect`** (`(require 'net/reconnect)`): `(net/reconnect/watch spec)`
+**`net/reconnect`** (a `net/reconnect/…` reference auto-loads it): `(net/reconnect/watch spec)`
 keeps the link alive with exponential-backoff reconnects, and
 `(net/reconnect/subscribe spec)` delivers `[:nodedown name]` / `[:nodeup name]`
 to your mailbox — resend the queue on `[:nodeup …]`.
@@ -2667,7 +2669,7 @@ iolist in memory.
   macro-expansion-heavy and defers to the tree-walker, enough to swing a defer rate
   from 0.8% to 84% purely on whether the boot cache was warm. A **counting** tool, not
   a timing one (the atomics perturb timing; read times from the counter-free benches).
-  Policy lives in Brood: `(require 'perf)` gives `(perf/report)`, `(perf/summary)` and
+  Policy lives in Brood: `(:use perf)` gives `(perf/report)`, `(perf/summary)` and
   `(perf/measure thunk)` — the last resets first, so it reports on that region rather
   than on the process. See `docs/benchmarking.md` and `docs/backend-seams.md` §5.
 - `(sched-stats)` returns the scheduler's cumulative counters —
@@ -2714,13 +2716,15 @@ iolist in memory.
   suffixes accepted).
 
 ### Metaprogramming / self-hosting
-`eval`  `read-string`  `read-all`  `eval-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`
+`eval`  `read-string`  `read-all`  `eval-string`  `load`  `macroexpand`  `macroexpand-1`  `gensym`
 
-`(require 'name)` loads an embedded standard-library module (e.g. `(require 'test)`
-for the test framework) — works from any directory. It only *loads*: the module's
-names stay qualified (`test/describe`). To refer them **bare**, put a `(:use name)`
-clause in your `defmodule` header (see Namespaces) — that auto-loads too, so
-`(:use test)` subsumes `(require 'test)`.
+There is **no user-facing `require` form** — you load an embedded standard-library
+module by *referencing* it. A qualified reference `name/foo` auto-loads `name` on
+demand (its other names stay qualified, `test/describe`); to refer them **bare**,
+put a `(:use name)` clause in your `defmodule` header (see Namespaces), which loads
+the module and refers its names. (The kernel's internal loader is `require-one`,
+used by the `:use` machinery, the runtime bootstrap, and a few dynamic/cycle
+cases — not something you call directly.)
 
 ```clojure
 (eval (read-string "(+ 40 2)"))  ;=> 42
@@ -2770,11 +2774,11 @@ Import other namespaces' names with `(:use …)` clauses in the header. `(:use m
 refers all of `mod`'s public names bare; `(:use mod :only [a b])` refers just
 those. A bare reference resolves **current namespace → imports → root**, so an
 own-namespace definition shadows an import. `:use` auto-loads the module (it never
-*fetches* a package — declared deps only). A bare top-level `(require 'mod)` only
-*loads* `mod` — its names stay qualified (`mod/foo`); use a `(:use mod)` clause to
-refer them bare. In practice you rarely write `(require 'mod)` by hand: **a qualified
-reference `mod/name` auto-infers `(require 'mod)`** (ADR-227 follow-up) — naming where
-something comes from loads it on demand, for *any* module. This holds for a qualified
+*fetches* a package — declared deps only). There is **no `require` form** — you load
+a module by *referencing* it: a `(:use mod)` clause loads `mod` and refers its names
+bare, and otherwise **a qualified reference `mod/name` auto-infers the load**
+(ADR-227 follow-up) — naming where something comes from loads it on demand (its names
+stay qualified, `mod/foo`), for *any* module. This holds for a qualified
 macro head (loaded before it expands), a qualified value reference, and top-level
 references in a header-less script or the REPL. There is **no bare-name magic**: a bare
 `sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly three clauses — `(:use …)`,
@@ -2935,11 +2939,12 @@ not rebound (ADR-166).
 
 ## Standard library (opt-in modules)
 
-These modules are baked into the binary but **not** loaded at startup — use
-`(require 'name)` or `(:use name)` in a `defmodule` header to load one.
-Run `nest doc <module>` for the full API of any module.
+These modules are baked into the binary but **not** loaded at startup — there is
+**no `require` form**; reference a name qualified (`name/foo`, which auto-loads the
+module) or add a `(:use name)` clause in a `defmodule` header to load one and refer
+its names bare. Run `nest doc <module>` for the full API of any module.
 
-| Module | `require` name | What it provides |
+| Module | name | What it provides |
 |--------|---------------|-----------------|
 | `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `file?`, `list-files`, `list-dirs`, `walk-files`, `path-extension`, `path-stem`. All Brood (ADR-006), no new Rust |
 | `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
@@ -2968,27 +2973,29 @@ Run `nest doc <module>` for the full API of any module.
 | `std/protocol.blsp` | `'protocol` | Behaviour contracts — the *module*-satisfies-a-contract seam: `defbehaviour` declares the ops a module must define (no value dispatch), claimed with `(:implements Name)` in a module header; `protocol-ops` is the introspection hook the checker and LSP read. Value dispatch is `ability` — `defprotocol`/`defimpl` were retired (ADR-168) |
 | `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |
 
-The following modules are also opt-in and live under `std/net/` and `std/tool/`:
+The following modules are also opt-in and live under `std/net/` and `std/tool/`.
+Load each the same way — reference it qualified (`net/tcp/tcp-listen`, which
+auto-loads) or `(:use name)` for bare names:
 
 ```clojure
-(require 'net/tcp)    ; tcp-listen / tcp-connect / tcp-send / tcp-close … (thin wrapper over the net primitives)
-(require 'net/http)   ; http-get / http-post / http-request / serve / stream-response
-(require 'net/sse)    ; Server-Sent Events helpers
-(require 'test)       ; describe / test / assert= / is — the test framework
-(require 'format)     ; printf-style string formatting
-(require 'json)       ; json-encode / json-decode
-(require 'regex)      ; re-match / re-find / re-replace (thin wrapper over the regex engine)
-(require 'set)        ; set-specific algebra: set / union / intersection / difference / subset?
-                      ;   (conj/disj/get/into/contains? on a set are prelude — no import needed)
-(require 'fuzzy)      ; fuzzy string matching
-(require 'log)        ; structured logging
-(require 'task)       ; promise-style async tasks over processes
-(require 'eval-server) ; persistent image-isolated evaluator for a dedicated child
-                      ;   runtime: eval-server-run (stdin/stdout line loop) +
-                      ;   eval-capturing + the pure wire codec its clients share (ADR-198)
+net/tcp      ; tcp-listen / tcp-connect / tcp-send / tcp-close … (thin wrapper over the net primitives)
+net/http     ; http-get / http-post / http-request / serve / stream-response
+net/sse      ; Server-Sent Events helpers
+test         ; describe / test / assert= / is — the test framework
+format       ; printf-style string formatting
+json         ; json-encode / json-decode
+regex        ; re-match / re-find / re-replace (thin wrapper over the regex engine)
+set          ; set-specific algebra: set / union / intersection / difference / subset?
+             ;   (conj/disj/get/into/contains? on a set are prelude — no import needed)
+fuzzy        ; fuzzy string matching
+log          ; structured logging
+task         ; promise-style async tasks over processes
+eval-server  ; persistent image-isolated evaluator for a dedicated child
+             ;   runtime: eval-server-run (stdin/stdout line loop) +
+             ;   eval-capturing + the pure wire codec its clients share (ADR-198)
 ```
 
-### Telemetry (`require 'telemetry`)
+### Telemetry (`:use telemetry`)
 
 An Erlang-`:telemetry`-style instrumentation seam (ADR-106), written in Brood. Code
 **emits** a named event with a measurements map and a metadata map; **handlers**

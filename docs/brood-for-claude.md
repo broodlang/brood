@@ -387,7 +387,7 @@ Other things worth knowing:
 - `(satisfies? 'Shape x)` to branch instead of letting a missing op raise.
 - **Register at load time.** Top-level `impl` forms are safe; two *processes* calling
   `impl` concurrently can lose an update (it is a `def` under the hood).
-- `defbehaviour` (`(require 'protocol)`) is the *other* seam — a contract a **module**
+- `defbehaviour` (`(:use protocol)`) is the *other* seam — a contract a **module**
   satisfies by defining plain functions, claimed with `(:implements Name)` in the
   header. No value dispatch. Use it when the implementor is a namespace, not a value.
 - **`defprotocol`/`defimpl` no longer exist** (retired, ADR-168). If you were about to
@@ -737,8 +737,8 @@ kinds:
   Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
-(defmodule my-counter "…" (:use proc/gen))   ; (:use proc/gen), not (require 'proc/gen),
-                                          ; to write defprocess/cast/gen-call bare
+(defmodule my-counter "…" (:use proc/gen))   ; (:use proc/gen) to write
+                                          ; defprocess/cast/gen-call bare
 
 (defprocess counter (n)                 ; n is the state
   (cast  :inc       (+ n 1))            ; new state = n+1
@@ -922,7 +922,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `chunk-every` `interpose` `interleave` `scan` `zip-with` `min-by` `max-by`
   `reduce-while` `index-where` `dedupe` `distinct-by` — live in the **`enum`
   module** (`enum/…`, or `(:use enum)`; a qualified `enum/frequencies`
-  auto-requires it) (ADR-227).
+  auto-loads it) (ADR-227).
 - **iteration** (macros, for effect — there is no `while`/`for`-loop): `for`
   (list comprehension, with `:when`), `doseq` (destructuring/`:when`),
   `dotimes` `(i n)`, `dolist` `(x coll)`. All return `nil` except `for`.
@@ -957,8 +957,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   x)` add/remove, `(get s x)` returns the *element* (not an index) or nil, `(count
   s)`/`(first s)`/`map`/`fold`/`into`/`vec`/`seq` treat it as its elements, and
   `(into #{} coll)` pours-and-dedups. `#{[0 0] [1 2]}` is the natural live-cell model
-  (structural vector keys). The **`set` library** (`(:use set)` — `(require 'set)`
-  alone leaves names qualified, `set/union`) adds only the set-specific extras:
+  (structural vector keys). The **`set` library** (`(:use set)` for bare names, or a
+  qualified `set/union` which auto-loads) adds only the set-specific extras:
   `(set coll)` (build from a collection, dedups) and the algebra
   `union`/`intersection`/`difference`/`subset?`.
 - **types**: `type-of` plus the `?` predicates — `int?` `float?` `string?`
@@ -974,7 +974,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (or `->decimal`) for an inexact result; `numerator`/`denominator` read the parts.
   Number types: `int` (bignum on overflow) · `float` · `decimal` (`1.50M`, exact
   base-10) · `ratio` (`1/2`, exact rational). `number?`/`ratio?`/`decimal?` test them.
-- **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-requires
+- **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-loads
   it — ADR-227): `abs` `ceil` `round` `round-to` (round to N decimals, stays a number)
   `pow` `sqrt` `clamp` `sum` `product`, the sign/parity predicates `positive?`
   `negative?` `even?` `odd?`, and the constants `pi` `e`. **No bare-name magic** — a bare
@@ -1001,12 +1001,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `print`/`println` **space-join** their args (Python-style, via `%render`) —
   distinct from `str`, which concatenates. A **record** defines how it prints on screen
   (Elixir's `String.Chars`) via the core, always-on `Display` ability: just
-  `(impl Display my/rec (to-str [r] …))` and the screen printers honor it — no require,
+  `(impl Display my/rec (to-str [r] …))` and the screen printers honor it — no import,
   no activation step; built-ins unchanged (ADR-171/172).
   `print`/`println` **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the
-  full display protocol, `(:use editor/ansi)` in your `defmodule` header (a bare
-  `(require 'editor/ansi)` leaves them qualified, `editor/ansi/ansi-clear`) gives
+  full display protocol, `(:use editor/ansi)` in your `defmodule` header (or a
+  qualified `editor/ansi/ansi-clear`, which auto-loads) gives
   `(ansi-clear)`/`(ansi-home)`/
   `(ansi-cursor r c)`/`(ansi-hide-cursor)` — **zero-arg functions you call**, each
   *returning* an escape string. Call them: `(print (ansi-clear))`, **never**
@@ -1061,14 +1061,13 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   everything else: a plain `(def *width* 10)` in module `a` is `a/*width*`. So
   earmuffs are a naming convention, not a scoping rule (ADR-151) — declare the
   knob with `defdyn` if other modules must reach it.
-- **Importing a module**: inside `defmodule`, add a `(:use mod)` clause to refer
-  `mod`'s public names **bare** (`(:use mod :only [a b])` for a subset). A
-  plain top-level `(require 'mod)` only *loads* `mod` — its names stay
-  qualified (`mod/foo`) — and you **rarely need to write it**: a **qualified
-  reference `mod/name` auto-infers `(require 'mod)`** (ADR-227 follow-up), for any
-  module, so naming where something comes from loads it on demand. No bare-name
-  magic, though — a bare `sqrt` with no `math/` prefix and no `(:use math)` stays
-  unbound. The header understands exactly `(:use …)`,
+- **Importing a module**: there is **no `require` form** — you load a module by
+  *referencing* it. Inside `defmodule`, a `(:use mod)` clause both **loads** `mod`
+  and refers its public names **bare** (`(:use mod :only [a b])` for a subset).
+  Otherwise, a **qualified reference `mod/name` auto-infers the load**
+  (ADR-227 follow-up), for any module, so naming where something comes from loads
+  it on demand (`mod/foo`). No bare-name magic, though — a bare `sqrt` with no
+  `math/` prefix and no `(:use math)` stays unbound. The header understands exactly `(:use …)`,
   `(:use-internals …)` and `(:alias …)`; **anything else is an error** —
   `(:require …)` and a misspelled `(:use-internal …)` are rejected rather than
   silently ignored.
@@ -1112,8 +1111,8 @@ apps* above; needs a `--features gui` build).
 ```lisp
 ;; src/main.blsp
 ;; `(:use greeter)` brings `greeter`'s public names (here `greeting`) into scope
-;; bare; without it you'd call `(greeter/greeting)`. A plain `(require 'greeter)`
-;; only loads the file — it does not refer the names.
+;; bare; without it you'd call `(greeter/greeting)` (a qualified reference that
+;; auto-loads the module — there is no `require` form).
 (defmodule main "The project's entry-point module (nest run -> main/main)."
   (:use greeter))
 

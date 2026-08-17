@@ -15342,3 +15342,44 @@ consumer moves to the qualified spelling with no new `require` line: `std/net/ss
 **Consequence — the reference.** Namespaced stdlib functions are not in the bare-surface catalog
 (`nest docs --all`); they are documented through their module, exactly as every other std module.
 Moving `enum`'s helpers there follows that existing convention rather than introducing a new one.
+
+## ADR-228 — Remove the user-facing `require`; loading is inference + an internal `require-one`
+
+**Status:** accepted, shipped 2026-08-14 (`328b2941`). Follows ADR-227's auto-require.
+
+**Context.** Once a qualified reference `mod/name` auto-infers its load (ADR-227 follow-up) and
+`(:use mod)` both loads and refers, the explicit `(require 'mod)` line became redundant in normal
+code — it was thin sugar: `(defn require (& mods) (map require-one mods))`. Keeping a user-facing
+`require` that nobody needs to write is a tax on a language whose goal is a small surface.
+
+**Decision.** **Remove the user-facing `require` form.** A program loads a module *by referencing
+it* — a qualified `mod/name` (auto-require) or `(:use mod)`. There is no `require` to write. The
+loader itself stays: `require-one` (load-path search, cycle detection, feature tracking) remains,
+but as an **internal** mechanism, not a language form.
+
+**Why the loader stays in Brood (not a Rust `%require`).** The obvious "make it a kernel primitive"
+move — a `%require` alongside `%refer`/`%alias` — would move the loader's *policy* (load-path
+resolution, cycle handling) out of Brood into Rust, violating ADR-006 (policy in Brood, mechanism
+in Rust). So `require-one` stays a Brood function. It is not sprinkled everywhere: where a qualified
+reference already covers the load, the explicit call is **dropped** (inference), not renamed. It is
+called only by the irreducible cases: the `:use`/`:alias`/`:use-internals` expansion, the
+**project↔package mutual cycle** (inference would load a half-built module mid-cycle), dynamic loads
+by a *computed* name (`docs`/`project` folding over module lists), and a few pure effect-loads in
+the Rust bootstrap (`require-one 'test` — load the framework where no `test/` reference follows). Of
+the Rust `eval_str` bootstrap sites, 70 were dropped and 24 kept.
+
+**Scope of the change.** ~450 explicit call sites removed across `std/` + `tests/` + every `../*`
+sibling project. The `:use`/`:alias` expansion emits `(require-one …)`. The advisory checker
+(`is_require_form`, `require_target`, and `ensure_loaded`, which builds+evals a load form to read a
+`:use`d module's exports) and `guard_effects` recognise `require-one`. **Auto-require completeness
+fix:** the root-region scanner `scan_refs` now recurses into map/set literals — a qualified
+reference used only inside `{…}`/`#{…}` at the top of a header-less script now infers its load
+(previously masked by the explicit require). Guidance strings (reader/mailbox/debug-flags/builtins/
+`derive.rs`) reworded off `require`. Verified: full `cargo nextest` green, 981 tests.
+
+**Consequence — breaking for the published ecosystem.** `require` is gone from the *language*, so a
+published library that still calls it is incompatible with this runtime. Dependents (and the hive
+deploy, which fetches libraries from the registry) break until those libraries are **republished**
+require-less. The migration of a library's *source* is not enough; it must be re-published and
+re-fetched. This is the one real cost of the removal, accepted deliberately: pre-1.0, greenfield,
+better a small language now than a redundant form kept forever (ADR-011).
