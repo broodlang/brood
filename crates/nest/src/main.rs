@@ -1083,8 +1083,7 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
     // breakage the `.brood-skip-blsp-check` migration hatch was added for). Both
     // forms now return a warning count; non-zero → exit 1.
     let code = if files.is_empty() {
-        "(project/load-config) (require-one 'test) (project/check-project)"
-            .to_string()
+        "(project/load-config) (require-one 'test) (project/check-project)".to_string()
     } else {
         let list = files
             .iter()
@@ -1129,10 +1128,7 @@ fn cmd_format(interp: &mut Interp, check: bool, changed: bool) {
     } else {
         "(format/format-project)"
     };
-    let code = format!(
-        "(project/load-config) (require-one 'format) {}",
-        entry
-    );
+    let code = format!("(project/load-config) (require-one 'format) {}", entry);
     run(interp, &code);
 }
 
