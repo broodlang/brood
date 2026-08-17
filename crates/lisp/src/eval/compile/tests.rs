@@ -1873,3 +1873,48 @@ fn resolving_a_closure_arm_twice_reuses_one_memoized_handle() {
          deriving the handle per call"
     );
 }
+
+/// KI-44: the `sqrt` call-site inline survives its move out of the prelude (ADR-227). The head
+/// is now the qualified `math/sqrt`, a RUNTIME closure, so `resolve_prim1` identifies the
+/// canonical wrapper STRUCTURALLY rather than by the old sealed-PRELUDE identity. This guards
+/// both halves at once: the canonical wrapper still resolves to `PrimOp1::Sqrt` (so the ~1.8×
+/// `nbody` win is not silently lost the next time `std/math`'s `sqrt` is reworded), and a user's
+/// OWN `…/sqrt` — which the `/sqrt` name-gate also matches — does NOT inline unless it is
+/// genuinely the `%f64-sqrt` wrapper. The latter is the real miscompile guard: the x>0 shortcut
+/// returns `f64::sqrt(x)`, so inlining a `foo/sqrt` that computes something else would be wrong.
+/// (`math/sqrt` itself is a reserved name and cannot be rebound — E0030 — so it stays canonical.)
+#[test]
+fn sqrt_call_site_inline_recognizes_the_moved_math_wrapper() {
+    let mut interp = crate::Interp::new();
+    interp.eval_str("(require-one 'math)").expect("load std/math");
+    assert_eq!(
+        resolve_prim1(&interp.heap, value::intern("math/sqrt")),
+        Some(PrimOp1::Sqrt),
+        "the canonical math/sqrt wrapper must inline to PrimOp1::Sqrt — if this fails, \
+         std/math's sqrt was reworded out of the recognized shape and the inline (KI-44) is dead"
+    );
+    // A bare `sqrt` moved out of the prelude, so it is unbound and must not inline.
+    assert_eq!(resolve_prim1(&interp.heap, value::intern("sqrt")), None);
+    // A user's own `…/sqrt` that is NOT the `%f64-sqrt` wrapper must NOT inline — otherwise the
+    // x>0 shortcut would return `f64::sqrt(x)` where this function returns `n*n`.
+    interp
+        .eval_str("(defmodule usersq) (defn usersq/sqrt (n) (* n n))")
+        .expect("define a user usersq/sqrt");
+    // Guard against the None below passing for the wrong reason (an unbound name): it must be
+    // bound to a real closure, and *still* decline to inline.
+    assert!(
+        matches!(
+            interp
+                .eval_str("usersq/sqrt")
+                .expect("read usersq/sqrt back")
+                .unpack(),
+            ValueRef::Fn(_)
+        ),
+        "usersq/sqrt must be a bound closure"
+    );
+    assert_eq!(
+        resolve_prim1(&interp.heap, value::intern("usersq/sqrt")),
+        None,
+        "a user `usersq/sqrt` computing n*n must not inline as sqrt (it isn't the %f64-sqrt wrapper)"
+    );
+}

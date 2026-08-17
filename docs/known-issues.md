@@ -19,8 +19,8 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ⚠️ **OPEN** — needs a decision (delete the stale example / give it its own copy / drop the feature), not a patch |
-| KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site JIT inline** is dead: it requires a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ⚠️ correctness **fixed 2026-08-17** (both rows run, checksums match the other ports); the ~1.8× inline restoration is **OPEN** |
+| KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
+| KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
 | KI-43 | `remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a **fixed 5 s sleep**, but the observer needs 5.9–9.2 s under load to boot + `require 'observer'` + connect — so the target died first, `connect` refused, stdout empty. Failed BOTH retries in a loaded `make test`, passed standalone: the signature that gets written off as noise | ✅ **fixed 2026-08-14** — waits for the observer's attach report instead of a stopwatch; **8/8 under saturating load**, and 3.5 s instead of ~11 s |
 | KI-42 | the `breakage/` suite had rotted to **9 of 23 files failing** and nobody knew, because it is outside `make test` and had no CI job — a pin-syntax change (`~ref`→`^ref`), a renamed `string-contains?`, an assertion predating exact rationals, and a TCP file whose every phase was dead | ✅ **fixed 2026-08-13** — all 23 files pass and gate, nothing skipped; CI job added so it cannot rot silently again |
 | KI-41 | concurrent `require` of the same feature could **double-load** its file: a claimant whose `(contains? *features* key)` guard read the per-process global inline cache **missed** a racing loader's just-committed `provide` (the cache is version-gated on a `Relaxed` counter, no happens-before), won the released load-once claim, and reloaded the module. Surfaced as the ADR-225 co-located-secondary `nest test` flake (~1/77); reproduced on demand at 20 files × 40 requires | ✅ **fixed** 2026-08-13 — `require-one` re-checks `*features*` with a new cache-bypassing `%registry-member?` (reads the shared globals table directly) before loading; guard `breakage/chaos_concurrent_require_double_load.blsp` |
@@ -64,7 +64,7 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**Two open items — KI-45 (a stale example, needs a decision) and KI-44's performance half: the `sqrt` call-site JIT inline is dead, worth ~1.8x on `nbody` (its correctness half is fixed). One watch item (KI-36).** KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**No open items. One watch item (KI-36).** KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -79,8 +79,12 @@ behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed
 
 ## KI-45 — `examples/editor` references `eval-command`, which left the repo in May
 
-**Status:** ⚠️ **OPEN — needs a product decision, not a patch.** Found 2026-08-17 while
-finishing the ADR-229 migration.
+**Status:** ✅ **fixed 2026-08-17 — `examples/editor` deleted** (option (a) below). `brood-edit`
+is the real editor project, so the in-repo duplicate — which had referenced a module this repo
+lacks for two and a half months — was removed rather than kept limping. `make check-examples`
+no longer skips a known-red project (`SKIP_PROJECTS` is now empty), and the `layers.md` /
+`system.rs` pointers to `examples/editor/src/` were repointed at `brood-edit`. Original write-up
+kept below.
 
 `examples/editor/src/brood-mode.blsp` calls `eval-command/eval-last-sexp` for its `C-x C-e`
 binding, and `examples/editor/project.blsp` still advertises the example as built on
@@ -113,8 +117,10 @@ effect-load case.
 
 ## KI-44 — the `nbody` benchmark was dead, and the `sqrt` JIT call-site inline died with it
 
-**Status:** ⚠️ **correctness fixed 2026-08-17 (benchmark runs again, checksum verified);
-the ~1.8× performance half is OPEN** — see "what is left" below.
+**Status:** ✅ **fixed 2026-08-17.** Correctness fixed first (benchmark runs again, checksum
+verified); the ~1.8× performance half is **now fixed too** — the `sqrt` call-site inline was
+restored for the moved `math/sqrt`, keyed on a structural identity instead of the old
+sealed-PRELUDE one. See "the performance fix" below.
 
 **Two defects, one cause: ADR-227 moved `sqrt` out of the prelude into `std/math.blsp`, and
 nothing outside the brood repo was migrated.**
@@ -156,14 +162,22 @@ Measured (release, pinned):
 inner `%f64-sqrt` still inlines *inside* the wrapper's own body — what was lost is skipping the
 wrapper at the call site.
 
-**What is left (open).** Restore the call-site inline for the spelling that now exists. The
-work is not the name test — it is the *safety* argument: the PRELUDE-region check has to become
-something that still proves "this is the canonical `std/math` sqrt, not a redefinition", for a
-closure that now lives in RUNTIME where a rebind is possible. The existing epoch guard already
-re-validates on redefinition, so leaning on it is probably sufficient, and the deopt path (zero,
-negatives, NaN, bignum) must dispatch the *module* wrapper rather than the old prelude one.
-Deliberately not rushed in with the correctness fix. **Any `nbody` number published before this
-lands is ~1.8× off its pre-ADR-227 self, and should not be read as a runtime regression.**
+**The performance fix (2026-08-17).** The call-site inline was restored for `math/sqrt`, but the
+identity is now **structural, not name+region**. `region == RUNTIME` alone cannot distinguish the
+canonical wrapper from a user's own `foo/sqrt` (both are RUNTIME closures), and `math/sqrt` itself
+turns out to be a **reserved name** — `(def math/sqrt …)` is refused (E0030), so the *global*
+`math/sqrt` cannot be hot-reload-rebound at all. So `resolve_prim1` (`eval/compile/mod.rs`) now
+recognizes any `…/sqrt` (or bare `sqrt`) head bound to a closure whose single 1-param arm is
+*exactly* `(if (< n 0) _ (if (<= n 0) _ (%f64-sqrt n)))`, with `<`/`<=` the canonical PRELUDE
+comparisons and `%f64-sqrt` the native. That shape is what makes the x>0 shortcut sound (a positive
+argument provably returns `%f64-sqrt(n)`); every other argument still deopts to the live wrapper via
+the stored head. Three safety properties fall out: (1) a user's own `foo/sqrt` computing something
+else fails the match and never inlines — no miscompile; (2) `Inst::Prim1` re-runs `resolve_prim1` on
+every `global_epoch` change, so a rebind of `<`/`<=`/`%f64-sqrt` drops the inline; (3) any rewording
+of `std/math`'s `sqrt` simply stops inlining (degrades, never miscompiles) — guarded by the unit
+test `sqrt_call_site_inline_recognizes_the_moved_math_wrapper`, which also pins the no-inline case.
+Measured (release, pinned, 3M iterations): inline **321 ms** vs the wrapper-dispatch path **905 ms**,
+so the row's regression is recovered.
 
 **The generalisation worth keeping.** A kernel fast path keyed on a *bare stdlib name* is a
 hidden coupling to the stdlib's shape: moving the function is a source-compatible change that
