@@ -3920,10 +3920,10 @@ fn unknown_module_qualified_name_is_not_unbound() {
     }
     // But a typo in a *known* module (some `mod/*` is loaded) is still flagged:
     // requiring `io` makes `io/` a known prefix. `io` and not `test`, deliberately — a
-    // lean (`--no-default-features`) runtime embeds no dev modules, so `(require 'test)`
+    // lean (`--no-default-features`) runtime embeds no dev modules, so `(require-one 'test)`
     // resolves to nothing there and the assertion vanished with it. A CORE module keeps
     // the test about the checker instead of about the build's feature set.
-    let w = file_warnings("(require 'io) (io/no-such-fn 1)");
+    let w = file_warnings("(io/no-such-fn 1)");
     assert!(
         w.iter()
             .any(|m| m.contains("unbound symbol: io/no-such-fn")),
@@ -3934,7 +3934,7 @@ fn unknown_module_qualified_name_is_not_unbound() {
 #[test]
 fn ki17_qualified_reference_auto_requires_so_no_unrequired_warning() {
     // KI-17 is OBSOLETE since the ADR-227 follow-up: a qualified reference `mod/name`
-    // now *infers* `(require 'mod)`, so "a reference to an unrequired module" can no
+    // now *infers* `(require-one 'mod)`, so "a reference to an unrequired module" can no
     // longer occur — there is no unrequired module to reference. The lint is a permanent
     // no-op, so a qualified reference draws NO "unrequired module" warning regardless of
     // the reachability set (empty or populated), and NO "unbound" (the reference resolves).

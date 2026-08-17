@@ -755,7 +755,7 @@ fn run_main(cli: Cli) {
             require_project("update-tooling", None);
             run(
                 &mut interp,
-                "(require 'project) (project/load-config) (require 'scaffold) (scaffold/update-tooling)",
+                "(project/load-config) (scaffold/update-tooling)",
             );
         }
         Cmd::Tree => {
@@ -1029,7 +1029,7 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
         run_expecting_failure_signal(
             interp,
             &format!(
-                "(require 'project) (require 'test) (project/load-config) \
+                "(require-one 'test) (project/load-config) \
                  (project/run-project-tests {plist})"
             ),
             TEST_FAILURE_SIGNALS,
@@ -1039,11 +1039,11 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     // Single-file path: mirror brood --test, but pre-load project image when
     // we're inside a project so cross-module names resolve.
     let bootstrap = if in_project() {
-        "(require 'project) (project/load-config) (let (root (project/project-find-root (cwd))) \
+        "(project/load-config) (let (root (project/project-find-root (cwd))) \
             (when root (project/project-setup root) (project/project-load-sources root))) \
-            (require 'test)"
+            (require-one 'test)"
     } else {
-        "(require 'test)"
+        "(require-one 'test)"
     };
     let inside_project = in_project();
     run(interp, bootstrap);
@@ -1083,7 +1083,7 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
     // breakage the `.brood-skip-blsp-check` migration hatch was added for). Both
     // forms now return a warning count; non-zero → exit 1.
     let code = if files.is_empty() {
-        "(require 'project) (project/load-config) (require 'test) (project/check-project)"
+        "(project/load-config) (require-one 'test) (project/check-project)"
             .to_string()
     } else {
         let list = files
@@ -1091,7 +1091,7 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
             .map(|f| format!("\"{}\"", brood::introspect::escape_brood_string(f)))
             .collect::<Vec<_>>()
             .join(" ");
-        format!("(require 'project) (require 'test) (project/check-files (list {list}))")
+        format!("(require-one 'test) (project/check-files (list {list}))")
     };
     match run_for_value(interp, &code) {
         brood::core::value::Value::Int(0) => {}
@@ -1114,7 +1114,7 @@ fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
     let call = brood::introspect::call_form("scaffold/new-project", &args);
     run(
         interp,
-        &format!("(require 'project) (project/load-config) (require 'scaffold) {call}"),
+        &format!("(project/load-config) (require-one 'scaffold) {call}"),
     );
 }
 
@@ -1130,7 +1130,7 @@ fn cmd_format(interp: &mut Interp, check: bool, changed: bool) {
         "(format/format-project)"
     };
     let code = format!(
-        "(require 'project) (project/load-config) (require 'format) {}",
+        "(project/load-config) (require-one 'format) {}",
         entry
     );
     run(interp, &code);
@@ -1251,7 +1251,7 @@ fn cmd_run(
             })
             .collect::<Vec<_>>()
             .join(" ");
-        format!("(require 'reload) {}", calls)
+        format!("(require-one 'reload) {}", calls)
     };
 
     // With `--watch`, wrap the user's program in a supervised process and
@@ -1277,7 +1277,7 @@ fn cmd_run(
         // No FILE: run the project's :main via std/tool/project.blsp.
         None => format!("(project/run-project (list {}))", escaped_args),
         // FILE: run that file. Inside a project, set up the project so its
-        // `src/` is on `*load-path*` (the file can `(require 'foo)` other
+        // `src/` is on `*load-path*` (the file can `(require-one 'foo)` other
         // project modules), but *don't* eager-load every source — otherwise a
         // file under `src/` would run twice (once via the walker, once via the
         // explicit run). Outside a project, plain `brood <file>`.
@@ -1309,9 +1309,9 @@ fn cmd_run(
         (None, _) => String::new(),
     };
     let project_setup = if file.is_none() {
-        format!("(require 'project) (project/load-config) {}", main_override)
+        format!("(project/load-config) {}", main_override)
     } else if in_project() {
-        "(require 'project) (project/load-config) \
+        "(project/load-config) \
          (let (root (project/project-find-root (cwd))) \
            (when root (project/project-setup root))) "
             .to_string()
@@ -1412,7 +1412,7 @@ fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
 /// resolved without it. `fetch`/`tree`/`add`/`remove`/`update` were skipping it, so
 /// they used the hardcoded default index no matter what the user had configured —
 /// `nest add pkg :version 1.0.0` failed against a perfectly good local registry.
-const PACKAGE_BOOTSTRAP: &str = "(require 'project) (project/load-config) (require 'package)";
+const PACKAGE_BOOTSTRAP: &str = "(project/load-config) (require-one 'package)";
 
 /// `nest publish [BASE-URL] [--source-url URL]` — publish this project's release to
 /// the hosted registry over HTTP. Loads the user config first so a `:registry` override
@@ -1460,14 +1460,14 @@ fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>, enhances: O
 /// reference) and ignores MODULE.
 fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
     let code = if all {
-        "(require 'docs) (println (docs/document-all))".to_string()
+        "(println (docs/document-all))".to_string()
     } else {
         match module {
             Some(name) => format!(
-                "(require 'docs) {}",
+                "(require-one 'docs) {}",
                 brood::introspect::call_form("docs/generate-docs", &[name])
             ),
-            None => "(require 'docs) (docs/generate-docs)".to_string(),
+            None => "(docs/generate-docs)".to_string(),
         }
     };
     run(interp, &code);
@@ -1486,14 +1486,14 @@ fn cmd_docs(interp: &mut Interp, out: Option<&str>, all: bool) {
         Some(dir) => brood::introspect::call_form(entry, &[dir]),
         None => format!("({entry})"),
     };
-    run(interp, &format!("(require 'docs) {call}"));
+    run(interp, &format!("(require-one 'docs) {call}"));
 }
 
 /// `nest doctest` — evaluate the project's `expr ;=> result` docstring examples and exit
 /// non-zero on any mismatch, so a CI run catches docs drifting from the code. `run-doctests`
 /// prints the per-example report and returns the failure count.
 fn cmd_doctest(interp: &mut Interp) {
-    match run_for_value(interp, "(require 'docs) (docs/run-doctests)") {
+    match run_for_value(interp, "(docs/run-doctests)") {
         brood::core::value::Value::Int(0) => {}
         brood::core::value::Value::Int(_) => std::process::exit(1),
         _ => {}
@@ -1513,7 +1513,7 @@ fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
         GrammarTarget::Emacs => "(grammar/emacs-special-forms)",
         GrammarTarget::TreeSitter => "(grammar/tree-sitter-highlights)",
     };
-    run(interp, &format!("(require 'grammar) (println {call})"));
+    run(interp, &format!("(require-one 'grammar) (println {call})"));
 }
 
 /// `nest repl` — project-aware REPL. Inside a project, pre-load every source
@@ -1532,7 +1532,7 @@ fn cmd_repl(interp: &mut Interp) {
         // need their `mod/fn` (or a `(defmodule …)`/`%in-ns` switch), exactly as in a file.
         run(
             interp,
-            "(require 'project) (require 'repl) (project/load-config) \
+            "(project/load-config) \
              (let (root (project/project-find-root (cwd))) \
                (when root \
                  (project/project-setup root) \
@@ -1552,7 +1552,7 @@ fn cmd_repl(interp: &mut Interp) {
     // (restoring) before any error report + exit (`process::exit` skips Drop).
     let result = {
         let _guard = RawTermGuard;
-        interp.eval_str("(require 'repl) (repl/repl-run)")
+        interp.eval_str("(repl/repl-run)")
     };
     if let Err(e) = result {
         report_error(&e);
@@ -1566,7 +1566,6 @@ fn cmd_mcp(interp: &mut Interp) {
     // the LSP also uses (via `introspect::load_tooling_image`) — sources + the
     // test/format frameworks — so the two servers can't drift on its contents.
     let bootstrap = r#"
-        (require 'project)
         (project/load-config)
         (let (root (project/project-find-root (cwd)))
           (when (nil? root)
@@ -1604,11 +1603,11 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
                 None => vec![&spec],
             };
             format!(
-                "(require 'observer) {}",
+                "(require-one 'observer) {}",
                 brood::introspect::call_form("observer/observe-connect", &args)
             )
         }
-        None => "(require 'observer) (observer/observe-run)".to_string(),
+        None => "(observer/observe-run)".to_string(),
     };
     // The guard restores the terminal on a panic unwind; the inner scope drops it
     // (restoring) before any error is reported and we exit — `process::exit`
@@ -1641,7 +1640,7 @@ fn cmd_attach(interp: &mut Interp, spec: String, cookie: Option<String>) {
         None => vec![&spec],
     };
     let boot = format!(
-        "(require 'editor/serve) {}",
+        "(require-one 'editor/serve) {}",
         brood::introspect::call_form("editor/serve/attach", &args)
     );
     let result = {
@@ -1671,7 +1670,7 @@ fn cmd_release(
     //    reported + exit by `run_for_value`.
     let collected = run_for_value(
         interp,
-        "(require 'project) (let (root (project/project-find-root (cwd))) \
+        "(let (root (project/project-find-root (cwd))) \
          (project/bundle-collect root))",
     );
     let items = match interp.heap.seq_items(collected) {
@@ -1888,7 +1887,7 @@ fn value_kind(subcommand: &str, arg_name: &str) -> Option<&'static str> {
 fn print_dynamic_values(kind: &str, prefix: &str) {
     let mut interp = Interp::new();
     let code = format!(
-        "(require 'complete) {}",
+        "(require-one 'complete) {}",
         brood::introspect::call_form("complete/complete-print", &[kind, prefix])
     );
     let _ = interp.eval_str(&code);

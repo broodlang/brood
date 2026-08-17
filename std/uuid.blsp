@@ -6,7 +6,6 @@
 (defmodule uuid
   "UUID generation: v3 (MD5), v4 (random), v5 (SHA-1), v7 (time-ordered).
 
-    (require 'uuid)
     (uuid/uuid-v4)                          ;; random
     (uuid/uuid-v7)                          ;; time-ordered random (RFC 9562)
     (uuid/uuid-v5 uuid/ns-dns \"example.com\") ;; deterministic from a name
@@ -19,7 +18,6 @@ sort order. v3 and v5 are deterministic: same namespace + name → same UUID,
 always — useful for content-based IDs and idempotent generation.")
 
 ; v3/v5 hash names over namespace+name (hash/md5-bytes, hash/sha1-bytes)
-(require 'hash)
 ;; ---- hex helpers ------------------------------------------------------------
 
 (def- uuid-hex-digits "0123456789abcdef")

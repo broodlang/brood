@@ -6,8 +6,6 @@
 ;; Fixtures live under a unique /tmp dir per call (random-token), purged at load.
 
 (defmodule slurp-bytes-test (:use test))
-(require 'hash)
-(require 'encoding)
 
 (purge-stale-temp "brood-slurpb-")
 

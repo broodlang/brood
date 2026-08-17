@@ -22,7 +22,6 @@
 (defmodule zlib
   "gzip / zlib / raw-deflate compression.
 
-    (require 'zlib)
     (zlib/gunzip (zlib/gzip \"hello\"))   ;; => the bytes of \"hello\"
     (utf8-bytes->string (zlib/gunzip (zlib/gzip \"hello\")))  ;; => \"hello\"
 

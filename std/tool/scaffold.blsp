@@ -898,7 +898,6 @@ test discovery, lints, release, config)."
 ;; cosmetic pass must never break scaffolding.
 (defn- scaffold-format-generated!
   (paths)
-  (require 'format)
   (dolist (p paths)
     (when (ends-with? p ".blsp") (try (format/format-file p) (catch _ nil)))))
 

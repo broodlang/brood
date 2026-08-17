@@ -20,8 +20,10 @@
 > names, completion offers imported names bare, and **project references/rename are
 > namespace-sound** (only occurrences resolving to the *same* qualified global are
 > touched). **Package ns-collision policy decided** in [ADR-070](decisions.md):
-> flat names + detect-and-reject at dependency-resolution time (enforcement lands
-> with the package manager, ADR-037). **Ambient names** — the ones that stay bare/root,
+> flat names + detect-and-reject at dependency-resolution time. **Implemented
+> 2026-08-02 (ADR-070):** namespaces are now **package-rooted** — a dependency's modules
+> load under a `pkg/…` prefix — so cross-dependency collisions are structurally impossible
+> and detect-and-reject narrowed to a within-project check. **Ambient names** — the ones that stay bare/root,
 > never namespaced — are those *declared* with `defdyn` (ADR-151, superseding the
 > original earmuff-spelling rule), which keeps `defdyn` knobs reachable unqualified
 > from any ns. Prelude registries (`*load-path*`, `*features*`, `*module-docs*`) are
@@ -33,6 +35,15 @@
 > cross-file shadow detection (`project--duplicate-def-warnings` now groups by
 > resolved `ns/name`, so a short name reused across distinct namespaces no longer
 > false-flags). The per-file document outline stays bare by design.
+>
+> **Since 2026-05-30, later work extended this design** (patched into the sections below,
+> not this summary): **ADR-070** package-rooting (2026-08-02); **ADR-146** *enforced*
+> def-site privacy — `defn-`/`def-` replace the old `--`-in-name convention, and a
+> cross-namespace private reference is now a **hard load-time error**, not an advisory lint;
+> **ADR-223** multiple modules per file (the region model); and the **ADR-227** stdlib
+> namespacing + **qualified-reference auto-require** (a qualified `mod/name` auto-infers its
+> `(require 'mod)`). Where a section below still describes the pre-2026-05-30 model, the
+> per-section callouts are authoritative.
 
 This doc is the design backing for namespaces in Brood. It follows the spectrum
 ADR-019 laid out and commits to the *substrate* (how resolution works) while
@@ -166,13 +177,17 @@ one thing it deliberately can't do is *hard* sealing — which §2 says we don't
   re-prefixed (so `(def observer/observe …)` from outside works; matches Clojure).
 - A bare symbol resolves in order: **(1)** local lexical binding (unchanged —
   resolution only touches *free* references; the resolver tracks `let`/
-  `letrec`/`fn` binders and over-approximates `match*` pattern binders), **(2)**
-  an imported/`:only`'d name, **(3)** ns-qualified
-  (`observe` → `observer/observe`) if such a global **already exists** *or* the
-  name was **pre-scanned** as a def head this file will create (the forward-ref
-  pre-scan — without it a reference to a later definition would silently stay
-  bare), **(4)** root/prelude global, **(5)** left bare (an unbound-global
-  diagnostic, as today).
+  `letrec`/`fn` binders and over-approximates `match*` pattern binders), **(2)** an
+  **ambient** name (declared with `defdyn`, ADR-151), **(3) own-namespace** —
+  ns-qualified (`observe` → `observer/observe`) if such a global **already exists**
+  *or* the name was **pre-scanned** as a def head this file will create (the
+  forward-ref pre-scan) — **the own namespace resolves *before* imports, so a
+  same-named local def shadows a `(:use …)`d one**, **(4)** an imported/`:only`'d
+  name, **(5)** root/prelude global, **(6)** left bare (an unbound-global diagnostic).
+  A symbol that **already contains `/`** is handled ahead of all these (per the bullet
+  above: root-escape `/x`, an `(:alias)` prefix, ADR-070 package-rooting, and the
+  ADR-227 qualified-reference auto-require). (Code: `resolve_sym`,
+  `crates/lisp/src/eval/macros.rs` — the sketch above simplifies; this is the live order.)
 - **Quoted / data symbols are never rewritten** (§5).
 - **Safety invariant:** never rewrite a binder/param/pattern position. Over-
   qualifying a local is a *silent* miscompile; under-qualifying a free reference
@@ -358,8 +373,10 @@ loads and its dependents bind the wrong module). A provider's namespaces are rea
 from each source file's `(defmodule …)` name. (`std/tool/package.blsp`
 `package--check-namespace-collisions`; tested in `tests/package_test.blsp`.)
 
-The verbose escapes — a per-dep prefix, or an import-site alias `[parser :as p]` —
-stay deferred (ADR-011) until a real collision demands one. **Package-rooted
+The per-dep prefix escape shipped as **ADR-070 package-rooting**; the **import-site alias
+shipped too** — as a separate `(:alias mod :as p)` header clause (not the Clojure-style
+`[parser :as p]` inside `:use` sketched here), `crates/lisp/src/eval/macros.rs` rewriting the
+`p/…` prefix. (Only the *inline* `[… :as …]` spelling stayed deferred, ADR-011.) **Package-rooted
 namespaces** (the dep's local name as a load-time prefix, `foo/b/…`, making
 collisions *impossible*) is the recorded **future direction**, not a rejection — the
 detect-and-reject check is the interim. Crucially it's a *loader* change, not a
@@ -422,6 +439,13 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
 > live-image niche where autoload is idiomatic (Emacs) is served by the REPL's
 > unbound-name hint; a REPL-only autoload could be added there later, scoped away from
 > file loads and `nest check`, but is explicitly not the general mechanism.
+>
+> **Update (ADR-227 follow-up, 2026-08-14):** a **qualified** `mod/name` reference now DOES
+> auto-infer `(require 'mod)` (`crates/lisp/src/eval/derive.rs`) — a narrow, analyzable form
+> of reference-driven load: the module is *named at the reference*, so the dependency stays
+> explicit and statically visible, and it only ever loads code already on the load-path (never
+> fetches). Bare-name autoload — an *unqualified* `foo` conjuring its owning module — remains
+> rejected, exactly as argued above.
 
 ## 10. Migration gradient
 
@@ -429,10 +453,12 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
   `cons`). The ergonomic macros used bare everywhere — `describe` / `test` / `is`
   (`std/tool/test.blsp`), `cond`, `when`, … — stay root. Which std *macros* earn a
   root home vs. a prefix is a per-name call.
-- **`defmodule` evolves into `ns`.** It already takes name + optional docstring;
-  it grows `:use`/`:only`/`:export` and sets `*ns*`. `provide`/`require`/
-  `*load-path*`/`*features*` become the loader underneath auto-require — not
-  replaced.
+- **`defmodule` *is* the namespace form** (inc-3 dropped `ns`). It takes name +
+  optional docstring and understands exactly four header clauses — `(:use …)` (with
+  `:only`/`:exclude`), `(:use-internals …)`, `(:alias … :as …)`, and `(:implements …)` —
+  anything else is a hard error. (The migration-era `:export` clause was never built;
+  visibility is def-site privacy, `defn-`/`def-`, ADR-146.) `provide`/`require`/
+  `*load-path*`/`*features*` are the loader underneath — not replaced.
 - **std modules** get namespaced gradually; **package/user code** is namespaced
   from birth. Greenfield (CLAUDE.md): rename call sites freely, no compat shims.
 - **Side benefit:** the doc tool's "can't tell which module a def belongs to" gap
@@ -487,8 +513,13 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
 
 ## 12. Explicitly *not* doing
 
-- **No hard privacy / sealing.** Soft only (§2). Unexported names stay reachable
-  by full qualified name; the checker may *lint* `--` cross-ns use, never block it.
+- **No hard privacy / sealing at the *interner*.** A private name stays a plain
+  interned global, reachable via `(def mod/priv …)` for live hot-patching (§2). But
+  privacy **is enforced at compile time** (ADR-146, superseding the original
+  advisory-lint plan): a name is declared private at its def site (`defn-`/`def-`,
+  not the retired `--`-in-name convention), and a cross-namespace reference to it is
+  a **hard load-time error** unless granted by `(:use-internals mod)` — see the §2
+  callout. "Soft" means live-redefinable, not unenforced.
 - **No interner partition.** Symbols stay flat interned `u32` of the full string
   (§3 rejected alternative).
 - **No constraint solver / registry for ns names** beyond ADR-037's existing

@@ -8,7 +8,6 @@
 (defmodule diff
   "LCS-based diff: compute the shortest edit script between two sequences.
 
-    (require 'diff)
     (diff/diff-lines \"hello\\nworld\" \"hello\\nearth\")
     ;; => ([:keep \"hello\"] [:delete \"world\"] [:insert \"earth\"])
 

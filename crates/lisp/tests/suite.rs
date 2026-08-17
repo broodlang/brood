@@ -74,8 +74,8 @@ fn run_suite() {
     // SAFETY: as above — single-threaded, before any test file loads.
     unsafe { std::env::set_var("BROOD_JDR_OF", "4") };
     if let Err(e) = interp.eval_str(
-        "(require 'test) (def *test-timeout-ms* 600000) \
-         (require 'project) (project/run-project-tests)",
+        "(require-one 'test) (def *test-timeout-ms* 600000) \
+         (project/run-project-tests)",
     ) {
         panic!("Brood test suite failed: {}", e);
     }

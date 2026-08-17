@@ -43,7 +43,6 @@ navigable table of live processes (id, name, status, mailbox backlog, memory,
 monitors), built on the display seam (M3, ADR-046) over `process-info`. Renders to
 a GUI window (`(observe)`) or the terminal (`(observe-attach *term-display*)`).
 
-    (require 'observer)
     (observe)          ; open the observer in a native window (needs --features gui)
     (observe-run)      ; standalone terminal demo app (nest observe)
     (observe-attach)   ; observe THIS runtime in the terminal, inline
@@ -67,7 +66,6 @@ attach). Drive the standalone app from the shell with `nest observe`."
   (:use enum))
 
 ; the parent→child forest ordering (shared with myedit's process list)
-(require 'proctree)
 ;; ---- faces (named, via the shared `face` registry) --------------------------
 ;;
 ;; Every styled section names a face here instead of inlining `{:fg …}` at the
@@ -802,7 +800,6 @@ inspect itself: it spawns no demo processes, takes over the terminal, and return
 to the caller when the user quits (`q`/Esc/Ctrl-C). Same-runtime, so it sees every
 process in the shared registry.
 
-    (require 'observer)
     (observe-attach)                  ; modal terminal observer; returns on quit
     (observe-attach (gui-display))    ; or in a native window (what `(observe)` uses)
 
@@ -852,7 +849,6 @@ pass a **distinct `key`** for a SEPARATE window when you genuinely want a differ
 keys coexist, each unique. Needs a `--features gui` runtime (`./configure --with-gui
 && make install`); without it the spawned process dies when `gui-open` errors.
 
-    (require 'observer)
     (observe)         ; => pid; opens the self window
     (observe)         ; => the SAME pid; no second window
     (observe :audit)  ; => a different pid; an independent second window

@@ -25,7 +25,6 @@
 (defmodule json
   "JSON ↔ Brood data, written entirely in Brood (pure; opt-in).
 
-    (require 'json)
     (parse \"{\\\"a\\\":[1,2],\\\"b\\\":true}\")  ; => {:a [1 2] :b true}
     (encode {:a [1 2] :b nil})                ; => \"{\\\"a\\\":[1,2],\\\"b\\\":null}\"
 

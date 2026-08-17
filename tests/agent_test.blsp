@@ -1,5 +1,4 @@
 (defmodule agent-test (:use test))
-(require 'proc/agent)
 
 (describe "proc/agent/start + get"
   (test "initial state via get identity"

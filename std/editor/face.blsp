@@ -48,7 +48,6 @@ counterpart to `keymap`/`display`): style is named once and referenced everywher
 so restyling a section is a one-line redefinition rather than an edit at every call
 site.
 
-    (require 'face)
     (def-face :ui/header {:fg :white :bold true :reverse true})
     (def-face :note      {:inherit :ui/dim :italic true})
     (text 0 0 \"hi\" (face :ui/header))   ; resolve a face into a render op

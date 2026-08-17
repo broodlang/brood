@@ -1,7 +1,4 @@
 (defmodule hash-test (:use test))
-(require 'hash)
-(require 'encoding)
-(require 'crypto)
 
 (describe "sha256"
   (test "known digest for empty string"

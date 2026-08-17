@@ -1,7 +1,6 @@
 ;; Tests for std/url.blsp — URL encoding/decoding and parsing.
 
 (defmodule url-test (:use test))
-(require 'url)
 
 ;; ---- percent-encode ---------------------------------------------------------
 

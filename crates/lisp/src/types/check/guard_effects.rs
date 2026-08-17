@@ -55,7 +55,7 @@ const EFFECTFUL_IN_GUARD: &[&str] = &[
     "defmacro",
     "eval",
     "load",
-    "require",
+    "require-one",
 ];
 
 /// Entry: walk every top-level form for effectful `:when` guards.

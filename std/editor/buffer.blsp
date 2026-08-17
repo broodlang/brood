@@ -18,7 +18,6 @@
 ;; [0, length]; `mark` is a char index or nil. Lines are 0-based; a line's text
 ;; (`buffer-line-at`) includes its trailing newline, matching `rope-line`.
 
-(require 'diff) ; diff-lines — the change set a region undo filters
 (defmodule editor/buffer
   "An immutable text buffer for building editors, written in Brood over the rope
 primitives (ADR-045). A *buffer* is a **record** (so `buffer?` is an identity check, and
@@ -33,7 +32,6 @@ delimits the region. Each editing op records the pre-edit state on `:undo` (a st
 of `{:rope :point :mark}` snapshots); undo is an Emacs-style *tree* (undoing is itself
 recorded, so no state is ever lost) — see the undo section below.
 
-    (require 'buffer)
     (def b (-> (make-buffer \"hello world\")
                (goto-char 5) (insert \",\") end-of-line))
     (buffer-text b)            ; => \"hello, world\"

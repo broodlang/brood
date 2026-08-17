@@ -975,14 +975,14 @@ fn hints_name_only_features_that_exist() {
     assert!(s.contains("any?") && s.contains("nil?"), "{s}");
 }
 
-/// A bare name that exists only as `mod/name` — because `(require 'mod)` loaded
+/// A bare name that exists only as `mod/name` — because `(require-one 'mod)` loaded
 /// the module but didn't refer it — gets a `(:use mod)` fix-it hint. This is the
 /// most common post-ADR-065 mistake for code (and LLMs) written against the old
 /// flat-namespace model. `eval::unbound_namespace_hint`.
 #[test]
 fn unbound_bare_name_suggests_use_of_its_namespace() {
     let mut interp = Interp::new();
-    interp.eval_str("(require 'set)").unwrap(); // defines set/union, set/set, …
+    interp.eval_str("(require-one 'set)").unwrap(); // defines set/union, set/set, …
     let r = interp
         .eval_str("(try (union {} {}) (catch e (get e :hint)))")
         .unwrap();
@@ -1570,7 +1570,7 @@ fn gensym_is_unique_across_threads() {
 #[test]
 fn reset_units_prevents_reload_double_count() {
     let mut interp = Interp::new();
-    interp.eval_str("(require 'test)").expect("require test");
+    interp.eval_str("(require-one 'test)").expect("require test");
     // Simulate a test file loaded twice into one image: two registrations.
     interp
         .eval_str(

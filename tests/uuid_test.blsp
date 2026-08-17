@@ -1,5 +1,4 @@
 (defmodule uuid-test (:use-internals uuid) (:use test))
-(require 'uuid)
 
 (describe "uuid-v4"
   (test "produces a 36-character string"

@@ -42,7 +42,7 @@ fn write_sandbox_rejects_a_symlink_escape() {
     let mut interp = Interp::new();
     interp
         .eval_str(&format!(
-            "(require 'mcp) (def *project-root* {})",
+            "(require-one 'mcp) (def *project-root* {})",
             lit(&proj)
         ))
         .unwrap();

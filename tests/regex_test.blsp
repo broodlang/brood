@@ -2,7 +2,6 @@
 ;; run by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 
 (defmodule regex-test (:use test) (:use regex))
-(require 'regex)
 
 ; case-sensitive
 (describe "regex match? (search)"

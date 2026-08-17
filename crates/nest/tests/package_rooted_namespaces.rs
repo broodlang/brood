@@ -94,8 +94,6 @@ fn two_deps_with_the_same_module_name_coexist_rooted() {
     std::fs::write(
         app.join("src/main.blsp"),
         "(defmodule main)\n\
-         (require 'liba/parser)\n\
-         (require 'libb/parser)\n\
          (defn from-a (s) (liba/parser/parse s))\n\
          (defn from-b (s) (libb/parser/parse s))\n",
     )

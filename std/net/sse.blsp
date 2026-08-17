@@ -30,7 +30,6 @@
   "Server-Sent Events (`text/event-stream`) in Brood: a client, and server-side
 framing for pushing events over `http`'s streaming seam.
 
-    (require 'sse)
     (def conn (sse-connect \"http://127.0.0.1:7777/events\" (self)))
     (receive ([:sse ev] ev))     ; => {:event \"run_started\" :data \"{…}\" :id \"7\"}
     (exit conn :kill)            ; disconnect
@@ -47,7 +46,6 @@ data) …))` from an `http` handler to push events to a browser `EventSource`."
   (:use net/http))
 
 ; reuse http/parse-url + http/request-headers for the handshake
-(require 'net/http)
 ;; The reader consumes UNTRUSTED server output. A malicious endpoint that never
 ;; sends the head's blank line, or an event with no `\n\n` frame boundary, would
 ;; grow the reader's buffer without bound → OOM. Cap the buffered head/leftover at

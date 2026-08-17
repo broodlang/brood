@@ -17,7 +17,6 @@
 ;; for genuinely binary input, and it must return the bytes untouched.
 
 (defmodule conformance-utf8-test (:use test) (:use corpus))
-(require 'encoding)
 
 (defn- u8-bytes (hex) (encoding/hex-decode-bytes hex))
 
