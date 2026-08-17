@@ -177,7 +177,7 @@ The first real use of layers is editing modes — and it sets the tier line:
   foreign-language backend (tree-sitter, in the editor) can later produce the same
   shape and reuse these commands. This is *reusable Brood-code tooling* — same tier
   as the formatter / LSP — so it lives in std, not the editor.
-- **The modes live in the editor, not brood** (`examples/editor/src/`).
+- **The modes live in the editor, not brood** (the downstream `brood-edit` project).
   `text-mode` (the default — registered for `:fundamental`) and `brood-mode`
   (`.blsp` → `:brood`; reuses text-mode's motion + `sexp` nav + `eval-command`'s
   `C-x C-e`, stashing the result in `:message`) are *policy* — which keys do what,
@@ -186,7 +186,9 @@ The first real use of layers is editing modes — and it sets the tier line:
   **not baked into the `brood` binary.** Each mode is just a layer; the
   `:parser :brood` facet marks the structural backend (a `ruby`/`elixir` layer is
   the same shape with a tree-sitter `:parser`/`:grammar` facet — no new concept).
-  Tested by the editor's own `nest test` (`examples/editor/tests/`).
+  Tested by that editor project's own `nest test`. (An in-repo `examples/editor`
+  demonstrated this until 2026-08-17, when it was deleted as a stale duplicate of
+  `brood-edit` — KI-45.)
 
 ## Deferred (named, not precluded)
 

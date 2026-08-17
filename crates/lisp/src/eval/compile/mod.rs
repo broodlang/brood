@@ -880,14 +880,21 @@ pub fn prim_apply_int_step(op: PrimOp, a: i64, b: i64) -> Option<i64> {
 /// are bound directly to their natives. Read against the live global env, so a
 /// redefinition simply doesn't match.
 fn resolve_prim1(heap: &Heap, h: Symbol) -> Option<PrimOp1> {
-    // The canonical prelude `sqrt` (same discipline as `nth` in `resolve_prim`): only
-    // the untouched PRELUDE closure inlines — a user `(def sqrt …)` rebinds to a
-    // non-PRELUDE value, so the inline cleanly disables (and the epoch guard
-    // re-validates on any redefinition). The inline handles ONLY x > 0; zero,
-    // negatives (the wrapper's error), NaN, and bignums dispatch the real wrapper.
-    if value::symbol_is(h, "sqrt") {
+    // `sqrt` inlines to a single `f64::sqrt` for x > 0 (zero/negative/NaN/bignum deopt to the
+    // live wrapper via the stored head). ADR-227 moved `sqrt` out of the prelude into
+    // `std/math.blsp`, so the head is now the qualified `math/sqrt` bound to a RUNTIME closure —
+    // where the old "is it the sealed PRELUDE `sqrt`?" identity no longer holds and a hot-reload
+    // rebind is possible. So identify the canonical wrapper STRUCTURALLY instead: it must be the
+    // exact `(if (< n 0) _ (if (<= n 0) _ (%f64-sqrt n)))` shape over its single parameter, with
+    // `<`/`<=` the canonical PRELUDE comparisons and `%f64-sqrt` the native — which is precisely
+    // what makes the "x > 0 ⇒ %f64-sqrt(x)" shortcut sound. Name-independent (any `…/sqrt` head,
+    // or a bare `sqrt`), and rebind-safe for free: `Inst::Prim1` re-runs this on every
+    // `global_epoch` change, so a rebind of the wrapper, `<`, `<=`, or `%f64-sqrt` fails the
+    // check and cleanly falls back to a dispatch. It degrades to no-inline on ANY deviation from
+    // the shape (a reworded wrapper just stops inlining, guarded by a test) — never a miscompile.
+    if symbol_is_sqrt(h) {
         return match heap.env_get(heap.global(), h)?.unpack() {
-            ValueRef::Fn(id) if id.region() == crate::core::value::PRELUDE => Some(PrimOp1::Sqrt),
+            ValueRef::Fn(id) if is_canonical_sqrt_wrapper(heap, id) => Some(PrimOp1::Sqrt),
             _ => None,
         };
     }
@@ -895,6 +902,107 @@ fn resolve_prim1(heap: &Heap, h: Symbol) -> Option<PrimOp1> {
         ValueRef::Native(id) => PrimOp1::from_native_name(&heap.native(id).name),
         _ => None,
     }
+}
+
+/// A head whose name is `sqrt` or ends in `/sqrt` — the only heads for which the structural
+/// sqrt-wrapper probe below is worth running. Keeps the probe off every other 1-ary call.
+fn symbol_is_sqrt(h: Symbol) -> bool {
+    value::symbol_is(h, "sqrt") || value::symbol_name_ref(h).ends_with("/sqrt")
+}
+
+/// Destructure a call form `(head a b …)` into `(head-symbol, [a b …])`, or `None` if it is not
+/// a proper list headed by a symbol. Read-only over `&Heap`, for the structural sqrt probe.
+fn call_parts(heap: &Heap, form: Value) -> Option<(Symbol, SmallVec<[Value; 4]>)> {
+    let (head, mut rest) = match form.unpack() {
+        ValueRef::Pair(p) => heap.pair(p),
+        _ => return None,
+    };
+    let head_sym = match head.unpack() {
+        ValueRef::Sym(s) => s,
+        _ => return None,
+    };
+    let mut args: SmallVec<[Value; 4]> = SmallVec::new();
+    loop {
+        match rest.unpack() {
+            ValueRef::Nil => break,
+            ValueRef::Pair(p) => {
+                let (a, next) = heap.pair(p);
+                args.push(a);
+                rest = next;
+            }
+            _ => return None,
+        }
+    }
+    Some((head_sym, args))
+}
+
+/// True iff `form` is a guard call `(op p 0)` where `op` (`<` / `<=`) resolves to the canonical
+/// PRELUDE comparison closure — so a rebind of `<`/`<=` (which bumps `global_epoch`) fails it and
+/// the `Prim1` re-validation drops the inline. `p` is the wrapper's sole parameter symbol.
+fn is_zero_guard(heap: &Heap, form: Value, p: Symbol, op: &str) -> bool {
+    let Some((h, args)) = call_parts(heap, form) else {
+        return false;
+    };
+    if !value::symbol_is(h, op) || args.len() != 2 {
+        return false;
+    }
+    let canonical = matches!(
+        heap.env_get(heap.global(), h).map(|v| v.unpack()),
+        Some(ValueRef::Fn(id)) if id.region() == crate::core::value::PRELUDE
+    );
+    canonical
+        && matches!(args[0].unpack(), ValueRef::Sym(s) if s == p)
+        && matches!(args[1].unpack(), ValueRef::Int(0))
+}
+
+/// True iff `form` is `(%f64-sqrt p)` and `%f64-sqrt` resolves to the actual native — so a rebind
+/// of `%f64-sqrt` fails it and the inline drops. `p` is the wrapper's sole parameter symbol.
+fn is_f64_sqrt_call(heap: &Heap, form: Value, p: Symbol) -> bool {
+    let Some((h, args)) = call_parts(heap, form) else {
+        return false;
+    };
+    if !value::symbol_is(h, "%f64-sqrt") || args.len() != 1 {
+        return false;
+    }
+    let is_native = matches!(
+        heap.env_get(heap.global(), h).map(|v| v.unpack()),
+        Some(ValueRef::Native(id)) if heap.native(id).name == "%f64-sqrt"
+    );
+    is_native && matches!(args[0].unpack(), ValueRef::Sym(s) if s == p)
+}
+
+/// True iff closure `id` is the canonical `sqrt` wrapper: a single 1-parameter arm whose one body
+/// form is exactly `(if (< n 0) _ (if (<= n 0) _ (%f64-sqrt n)))` — the shape that guarantees a
+/// positive argument returns `%f64-sqrt(n)`, which is all the `PrimOp1::Sqrt` x>0 shortcut needs
+/// (every other argument deopts to the live wrapper via the stored head). Any other closure —
+/// including a hot-reload rebind of `math/sqrt` to something else — fails to match, so the inline
+/// never fires for a function that is not this exact sqrt.
+fn is_canonical_sqrt_wrapper(heap: &Heap, id: ClosureId) -> bool {
+    let closure = heap.closure(id);
+    let Some(arm) = closure.select_arm(1) else {
+        return false;
+    };
+    if !arm.optionals.is_empty() || arm.rest.is_some() || arm.params.len() != 1 || arm.body.len() != 1
+    {
+        return false;
+    }
+    let p = arm.params[0];
+    // Outer `(if (< p 0) <error> <inner-if>)`.
+    let Some((h_outer, outer)) = call_parts(heap, arm.body[0]) else {
+        return false;
+    };
+    if !value::symbol_is(h_outer, "if") || outer.len() != 3 || !is_zero_guard(heap, outer[0], p, "<")
+    {
+        return false;
+    }
+    // Inner `(if (<= p 0) <zero> (%f64-sqrt p))`.
+    let Some((h_inner, inner)) = call_parts(heap, outer[2]) else {
+        return false;
+    };
+    value::symbol_is(h_inner, "if")
+        && inner.len() == 3
+        && is_zero_guard(heap, inner[0], p, "<=")
+        && is_f64_sqrt_call(heap, inner[2], p)
 }
 
 /// Compile an already-expanded, already-resolved `form` against the lexical
