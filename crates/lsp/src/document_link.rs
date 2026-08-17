@@ -140,8 +140,6 @@ mod tests {
     fn does_not_link_a_use_clause_inside_quoted_data() {
         // A `(:use greeter)` written as data — inside `'(defmodule …)` — is not a
         // load, so it must produce no link, even though `greeter.blsp` exists.
-        assert!(
-            linked_names("quoted", "(def x '(defmodule app (:use greeter)))").is_empty()
-        );
+        assert!(linked_names("quoted", "(def x '(defmodule app (:use greeter)))").is_empty());
     }
 }

@@ -1,4 +1,4 @@
-;; std/tcp.blsp — TCP sockets, the Brood layer. (require 'tcp).
+;; std/tcp.blsp — TCP sockets, the Brood layer.
 ;;
 ;; Sockets follow the blocking-IO → mailbox model (ADR-059/060): the kernel reads
 ;; each socket on a non-worker thread and delivers events to the **owning process's

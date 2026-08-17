@@ -1,5 +1,5 @@
 ;; std/pane.blsp — Emacs-style tiled pane splits over the display seam.
-;; (require 'pane) — pure, content-agnostic.
+;; Pure and content-agnostic.
 ;;
 ;; A *pane layout* is an immutable **binary tree**: a leaf is one pane showing
 ;; an opaque PAYLOAD (the toolkit never inspects it — an editor stores e.g.

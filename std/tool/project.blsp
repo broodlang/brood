@@ -1,6 +1,6 @@
 ;; std/project.blsp — the project model + test runner (ADR-020), in Brood.
 ;;
-;;   (require 'project)       ; loaded on demand; baked into the binary
+;;   project/…                ; loaded on demand; baked into the binary
 ;;   (run-project-tests)      ; find project.blsp, discover tests, run them once
 ;;
 ;; This is the policy behind `nest test`. Convention over configuration: `src/`
@@ -16,10 +16,10 @@ Convention over configuration: `src/` holds source (added to *load-path*),
 `tests/` holds <name>_test.blsp cases; a `project.blsp` manifest declares
 identity and may override those paths. Also home to the user-config loader and
 the `nest new` scaffolder."
-  ;; NOT `(:use test)`: that would `(require 'test)` at *load* time, so a lean
+  ;; NOT `(:use test)`: that would load `test` at *load* time, so a lean
   ;; release runtime (which strips the test framework, ADR-038) couldn't even
   ;; load `project` to boot a bundle. The test runner needs test only when it
-  ;; actually runs — `run-project-tests` `(require 'test)`s and qualifies it.
+  ;; actually runs — `run-project-tests` loads `test` itself and qualifies it.
 )
 
 ;; --- the project, as set by the manifest -------------------------------------
@@ -154,7 +154,7 @@ the `nest new` scaffolder."
   (spec)
   (let (parts (string-split spec "/")
         ; reject blank module/fn halves so a typo like "" or "/start" errors
-        ; cleanly here, not as a malformed `(require '||)` downstream.
+        ; cleanly here, not as a malformed load downstream.
         ok? (fn (p) (not (blank? p))))
     (cond
       (and (= (count parts) 1) (ok? (first parts))) (list (symbol (first parts)) 'main)
@@ -1240,7 +1240,7 @@ resolve in the advisory checker. Returns the project root."
 ;; the moment that file moves — the KI-17 bug (docs/known-issues.md). `check-file`
 ;; flags such a reference, but only when told which modules the file may reach. That
 ;; set must be the *transitive* closure of the file's own requires (a file reaches
-;; `mod` if it, or a module it requires, recursively, `:use`s / `(require 'mod)`s it):
+;; `mod` if it, or a module it loads, recursively, `:use`s / references it):
 ;; e.g. a test that `(:use editor/treesit)` legitimately names `face/…` because
 ;; treesit itself requires `editor/face`. Only the whole-project driver sees every
 ;; header, so it builds the module→direct-deps graph (one native `%module-direct-requires`
@@ -2191,7 +2191,7 @@ resolve in the advisory checker. Returns the project root."
 
 ;; Sources-only variant for `run-project`'s auto pre-flight: skip `tests/`,
 ;; because test files depend on the test-framework macros (`describe`/`test`/
-;; `assert=`/`is`) loaded by `(require 'test)`, which `nest run` doesn't
+;; `assert=`/`is`) loaded with the `test` module, which `nest run` doesn't
 ;; do — so checking them there would emit spurious "unbound symbol" warnings.
 ;; `nest test` keeps using `check-project` (full coverage; `test` is loaded).
 (defn check-project-sources ()

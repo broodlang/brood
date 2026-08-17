@@ -39,7 +39,7 @@ are boundary-traced (`debug/trace-fn`) for the duration of the request — insta
 as soon as each name becomes a function, so a `defn` and its call in one request
 still trace — and the reply gains `:spy [{:kind :fn :args :value} …]` (bounded).
 `eval-capturing` is the reusable core: evaluate a source string and keep BOTH
-halves a REPL shows — the value and what it printed. `(require 'eval-server)`.")
+halves a REPL shows — the value and what it printed.")
 
 ;; The deadline applied when a request doesn't carry one. Module-scoped (plain
 ;; `def`, not `defdyn`): the server honours the per-request `:timeout-ms` first,
@@ -309,7 +309,7 @@ process died without answering."
 (defn eval-server-run ()
   "Run the eval server: print the `{:ready true}` banner, then answer one request
 per stdin line until EOF. This is the child's whole program — a client spawns
-`nest run <script>` where the script is `(require 'eval-server)`
+`nest run <script>` where the script references `eval-server/…`
 `(eval-server-run)`, and drives it over stdin/stdout."
   (println (evsrv-encode-reply {:ready true}))
   (eval-server-loop))

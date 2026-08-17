@@ -79,7 +79,7 @@
   ;; half-evaluated — the caller's very next `mod/fn` call hit unbound. Now a load in
   ;; flight is tracked in *features-loading*; a concurrent requirer WAITS for the
   ;; loader's end-of-file provide. Wide module (400 defs) to keep the window open.
-  (test "concurrent (require 'mod) from many processes never sees a half-loaded module"
+  (test "a concurrent load of the same module from many processes never sees it half-loaded"
     (let (path "/tmp/reqrace-mod.blsp"
           src (str "(defmodule reqrace-mod)\n"
                 (join "\n" (map (fn (i) (str "(def v" i " " i ")")) (range 400)))

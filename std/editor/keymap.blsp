@@ -1,4 +1,4 @@
-;; std/keymap.blsp — a rebindable key→command dispatcher. (require 'keymap).
+;; std/keymap.blsp — a rebindable key→command dispatcher.
 ;;
 ;; The shared input seam for interactive Brood UIs (the line editor, the process
 ;; observer, the coming text editor). A KEYMAP is a map `key → command`, where a

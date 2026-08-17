@@ -1,4 +1,4 @@
-;; std/ui.blsp — the reusable terminal/GUI app framework. (require 'ui).
+;; std/ui.blsp — the reusable terminal/GUI app framework.
 ;;
 ;; Extracted from the observer so a *new* project (the coming editor) builds on the
 ;; same seam instead of re-inventing it. Two pieces:
@@ -146,7 +146,7 @@ mailbox message (from an `sse-connect` whose subscriber is this process), else p
 terminal (where the raw `:poll` reads only the keyboard) and the GUI — `update` folds
 an `[:sse ev]` in like any other input. The other display ops pass through unchanged.
 A flood of events can starve the keyboard poll; fine for occasional pushes (a daemon's
-event feed). Requires `(require 'sse)` on the producing side."
+event feed). Needs the `sse` module on the producing side (loaded by referencing `sse/…`)."
   (assoc display
     :poll
       (fn (ms)

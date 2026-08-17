@@ -743,7 +743,7 @@ Brood pattern, `std/tool/explain.blsp`)."
 ;;   - `def mcp-tools` to a richer list (e.g. wrap the std catalogue:
 ;;     `(let (base mcp-tools) (defn mcp-tools () (append (base) (list ...))))`).
 ;; Runs **once**: this whole file body executes once per session (the dispatcher
-;; calls `(require 'mcp)` which `provide`s 'mcp early, so subsequent requires
+;; loads `mcp`, which `provide`s 'mcp early, so subsequent loads
 ;; are no-ops). Failures in the project mcp.blsp surface as load errors during
 ;; `nest mcp` startup, which is exactly when the agent's `.mcp.json` would
 ;; have wired it up — the right time for a hard error.

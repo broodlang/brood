@@ -1,4 +1,4 @@
-;; std/package.blsp — the package manager (ADR-037, docs/packages.md). (require 'package).
+;; std/package.blsp — the package manager (ADR-037, docs/packages.md).
 ;;
 ;; Third-party Brood deps: source pinned in the manifest's :dependencies, cached
 ;; per-project, locked for reproducibility. Policy is here; the kernel adds only
@@ -6,7 +6,7 @@
 ;;
 ;; Slice 1 (this file): `:path` deps end-to-end — resolve a sibling-directory dep,
 ;; hash its tree, write project.lock.blsp, and add its `src/` to *load-path* so
-;; `(require 'dep)` finds it. `:path` deps load IN PLACE (no _deps/ copy), so edits
+;; a `dep/…` reference finds it. `:path` deps load IN PLACE (no _deps/ copy), so edits
 ;; to a path-dep's tree are live. `:git` deps (the _deps/ cache + clone) land in
 ;; Slice 2 and error cleanly here.
 ;;

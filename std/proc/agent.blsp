@@ -1,4 +1,4 @@
-;; std/proc/agent.blsp — process-backed state cell. (require 'proc/agent)
+;; std/proc/agent.blsp — process-backed state cell.
 ;;
 ;; An agent is a single green process that holds one immutable value as state.
 ;; Callers send it messages to read or transform that value; the agent serialises

@@ -45,11 +45,13 @@ cd my-editor
 ```
 
 You get `project.blsp`, `src/`, and `tests/`. The framework modules are baked
-into the binary, so you reach them with `require` — no dependency wiring:
+into the binary, so you reach them by *naming* them — no dependency wiring and no load
+step (ADR-229): a qualified reference loads its module, and `(:use …)` refers it bare.
 
 ```clojure
-(require 'editor/buffer)    ; the buffer model
-(require 'editor/display)   ; the render-op protocol
+(editor/buffer/make "")            ; the buffer model — the reference loads it
+(editor/display/render-frame …)    ; the render-op protocol
+;; …or, in a module header: (defmodule my-editor (:use editor/buffer) (:use editor/display))
 ```
 
 The `term-*` primitives (`term-enter`, `term-leave`, `term-size`, `term-poll`,
@@ -324,8 +326,8 @@ Everything except the loop is pure, so test it like any other Brood code:
   editor changes — `nest attach` + `std/editor/serve.blsp` (ADR-090) are that
   frontend today.
 - **Drop in a process observer.** Your editor is a runtime full of processes
-  (buffers-as-processes, timers, jobs). `(require 'observe)` then bind a key/command
-  to `(observe-attach)` — it brings up the full-screen process viewer over *your
+  (buffers-as-processes, timers, jobs). bind a key/command to `(observer/observe-attach)`
+  — the qualified reference loads the module — it brings up the full-screen process viewer over *your
   editor's own* processes and returns control on `q`. (Since it `term-leave`s on
   quit, redraw your UI afterward.) The observer reads the same `process-info` /
   display seam this guide uses. To watch the editor **while it runs** (you can't show

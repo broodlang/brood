@@ -1,4 +1,4 @@
-;; std/lineedit.blsp — a raw-mode, emacs-style line editor in Brood. (require 'lineedit).
+;; std/lineedit.blsp — a raw-mode, emacs-style line editor in Brood.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - Policy, not mechanism (ADR-006/048): the editor is a Brood loop over the
