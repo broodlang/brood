@@ -28,7 +28,7 @@
 *layer* is a `def`'d map `{:name … :keymap … :hooks {event → (fn-syms)}}`, resolved
 by symbol at use (late-bound, so redefining it hot-swaps it everywhere).
 
-    (require 'keymap) (require 'layers)
+    (def app/quit (fn () :quit))
     (def app/base {:name 'base :keymap (keymap-bind {} [\"q\"] 'app/quit)})
     (def st (activate-layer {} 'app/base))
     (layer-dispatch st nil \"q\" (fn (s _) s))   ; => [st' pending']

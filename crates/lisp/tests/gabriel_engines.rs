@@ -46,7 +46,7 @@ fn driver(module: &str, input: &str, expr: &str) -> String {
     let input_path = root.join("tests/corpus/gabriel/data").join(input);
     format!(
         "(def *load-path* (cons {support:?} *load-path*)) \
-         (require '{module}) \
+         (require-one '{module}) \
          (let (f (read-all (slurp {input_path:?}))) {expr})",
         support = support.to_str().expect("utf-8 path"),
         input_path = input_path.to_str().expect("utf-8 path"),

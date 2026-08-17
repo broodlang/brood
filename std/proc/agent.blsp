@@ -7,7 +7,6 @@
 (defmodule proc/agent
   "A process-backed state cell: read or transform a value via message-passing.
 
-    (require 'proc/agent)
     (def a (proc/agent/start (fn () 0)))
     (proc/agent/update a inc)          ;; state becomes 1
     (proc/agent/get    a identity)     ;; => 1

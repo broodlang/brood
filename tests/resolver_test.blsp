@@ -11,7 +11,6 @@
 (defmodule resolver-test (:use test) (:use resolver))
 
 ;; the oracle (below) checks constraints directly, so it names `version` explicitly
-(require 'version)
 
 ;; ---- file-local helpers (defined once at load; survive :isolated rollback) ----
 ;; A provider from two literal tables: `versions` is {name -> [version ...]}; `deps` is

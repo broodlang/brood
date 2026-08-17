@@ -54,10 +54,10 @@
     ;; a `provide` that stored the symbol rather than its name would add a second.
     (assert= (count (filter (fn (k) (= k "demo-feature")) (keys *features*))) 1))
   (test "require returns the list of feature names and is idempotent"
-    (assert= (require 'test) (list "test"))
+    (assert= (require-one 'test) "test")
     ; variadic now: a list of names
-    (assert= (require 'test 'docs) (list "test" "docs")))
-  (test "require of a missing module raises" (assert-error (require 'no-such-module-xyz)))
+    (assert= (map require-one (list 'test 'docs)) (list "test" "docs")))
+  (test "require of a missing module raises" (assert-error (require-one 'no-such-module-xyz)))
 
   ;; ADR-216: the load-once check must be O(1) in the number of loaded features, not a
   ;; linear scan. As a list it was O(N) per require, so loading N modules was O(N²) —
@@ -92,7 +92,7 @@
         (spawn (send me
                  [:req-race
                    (try
-                     (do (require 'reqrace-mod) (reqrace-mod/ready))
+                     (do (require-one 'reqrace-mod) (reqrace-mod/ready))
                      (catch e [:err (error-message e)]))])))
       (let (results (map (fn (_) (receive ([:req-race r] r) (after *test-wait-ms* :timeout)))
                       (range 8)))
@@ -105,10 +105,10 @@
   ;; loading (the later mod/fn call dies unbound with no pointer to the real error),
   ;; while every other process stalls out the full await window per attempt.
   (test "a failed require clears its loading marker; the retry re-raises the real error"
-    (let (_ (try (require 'no-such-module-xyz) (catch e :expected)))
+    (let (_ (try (require-one 'no-such-module-xyz) (catch e :expected)))
       (refute (contains? *features-loading* "no-such-module-xyz"))
       ;; the retry must fail the SAME way — not fake success via a stale marker
-      (assert-error (require 'no-such-module-xyz))))
+      (assert-error (require-one 'no-such-module-xyz))))
 
   ;; The circular-require contract survives the fix: a module being loaded that
   ;; (directly or via :use) requires itself back must NOT deadlock or reload — the
@@ -116,11 +116,11 @@
   (test "a circular require inside one file's own load returns immediately"
     (let (path "/tmp/reqcirc-mod.blsp"
           ;; the module requires ITSELF mid-file — the degenerate cycle
-          src "(defmodule reqcirc-mod)\n(require 'reqcirc-mod)\n(defn ok () :yes)\n"
+          src "(defmodule reqcirc-mod)\n(require-one 'reqcirc-mod)\n(defn ok () :yes)\n"
           saved-path *load-path*)
       (spit path src)
       (set-load-path! (cons "/tmp" *load-path*))
-      (require 'reqcirc-mod)
+      (require-one 'reqcirc-mod)
       (set-load-path! saved-path)
       (delete-file path)
       (assert= (reqcirc-mod/ok) :yes))))
@@ -206,10 +206,10 @@
       (spit b2 "(defmodule cycb2 (:use cyca2 :only [a-one]))\n(defn b-one () (a-one))\n")
       (set-load-path! (cons dir *load-path*))
       (let (refer-all-err (try
-                            (do (require 'cyca) :no-error)
+                            (do (require-one 'cyca) :no-error)
                             (catch e (error-message e)))
             only-ok (try
-                      (do (require 'cyca2) (cycb2/b-one))
+                      (do (require-one 'cyca2) (cycb2/b-one))
                       (catch e [:err (error-message e)])))
         (set-load-path! saved)
         (doseq (p (list a1 b1 a2 b2)) (delete-file p))

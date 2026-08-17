@@ -8,7 +8,6 @@
 (defmodule queue
   "Purely functional FIFO queue and min-priority queue.
 
-    (require 'queue)
 
     ;; FIFO queue
     (let (q (-> (queue/queue-new)

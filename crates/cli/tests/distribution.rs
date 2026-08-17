@@ -789,7 +789,6 @@ fn ensure_link_reconnects_across_a_node_restart() {
     // a second time — `ensure-link` will reconnect under us).
     let client_src = format!(
         r#"
-(require 'net/reconnect)
 (node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (net/reconnect/watch "a@127.0.0.1:{port_a}" {{:min-ms 200 :max-ms 400}})
 ;; Wait for the watcher's initial connect (it is asynchronous, unlike the old
@@ -2032,7 +2031,6 @@ fn reconnect_watcher_heals_a_fallen_link() {
     // then narrate the down → noconnection-send → up → message-flows sequence.
     let watcher = format!(
         r#"
-(require 'net/reconnect)
 (node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (def spec "b@127.0.0.1:{port_b}")
 (net/reconnect/watch spec {{:min-ms 100 :max-ms 400}})

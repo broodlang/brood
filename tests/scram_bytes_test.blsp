@@ -8,9 +8,6 @@
 ;; (password "pencil", iteration count 4096), cross-checked with python hashlib.
 
 (defmodule scram-bytes-test (:use test))
-(require 'hash)
-(require 'crypto)
-(require 'encoding)
 
 ;; ---- the SCRAM client-key chain, in pure Brood over byte vectors ------------
 ;;

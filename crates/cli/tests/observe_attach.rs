@@ -28,7 +28,6 @@ fn remote_attach_reads_snapshot_then_sees_disconnect() {
     let target = format!(
         r#"
 (node-start :app "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(require 'observer)
 (observer/observe-serve)
 (spawn (receive (_ :done)))
 (spawn (receive ([:work _] :done)))
@@ -42,7 +41,6 @@ fn remote_attach_reads_snapshot_then_sees_disconnect() {
     let observer = format!(
         r#"
 (node-start :obs "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(require 'observer)
 (def peer (connect "app@127.0.0.1:{port_a}"))
 (monitor-node peer)
 (def snap (observer/observe-request peer))

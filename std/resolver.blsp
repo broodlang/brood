@@ -32,7 +32,6 @@ nil/\"\" = any); `provider` (see `make-provider`) answers what versions exist an
 release requires. Pure — no I/O; the registry provider that fetches for real lives in
 `std/tool/package`. `(require 'resolver)`.")
 
-(require 'version)
 
 ;; --- the provider: the resolver's only window onto the package universe ----------
 ;; Two closures. `versions-fn`: name → the list of version strings that exist for it.

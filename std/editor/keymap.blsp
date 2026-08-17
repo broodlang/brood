@@ -26,7 +26,6 @@ state)` — or a nested **keymap** (a prefix, for chords like `C-x C-e`). Bindin
 resolve by symbol at dispatch time, so rebinding a key or redefining its command
 hot-swaps behaviour.
 
-    (require 'keymap)
     (def *my-keys* {:up 'go-up :down 'go-down})
     (keymap-dispatch *my-keys* state key (fn (s _) s))   ; flat: unbound → no-op
 

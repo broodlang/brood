@@ -20,8 +20,6 @@
 ;; expose SHA-1/256/384/512 and MD5, not those, so their vectors have no target.
 
 (defmodule conformance-crypto-test (:use test) (:use corpus))
-(require 'hash)
-(require 'encoding)
 
 (defn- cy-file
   (name)

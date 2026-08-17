@@ -3,7 +3,7 @@
 ;; `type-of` kind, an identity-carrying record (`defrecord`) on its baked `module/name`
 ;; id. Subsumes value polymorphism (the `protocol` job) and drivers-as-values (part of
 ;; the `behaviour` job). Register-only — discovered and run by `nest test`.
-(defmodule ability-test (:use test) (:use json))
+(defmodule ability-test (:use test) (:use json) (:use project))
 
 ;; Records carry a nominal identity captured from THIS module (`ability-test`).
 (defrecord circle (r))
@@ -245,7 +245,6 @@
   ;; app tier (4): a module in the project's OWN package (*ns-package* → *project-name*), or
   ;; a root/REPL impl (from=nil, the user IS the app), outranks type/ability owners.
   (test "the project's own package (and root/REPL) is the top app tier"
-    (require 'project)
     (register-ability 'AppAb '((op [self])) 'artlib)
     (binding (*project-name* 'myproj
               *ns-package* (assoc *ns-package* 'appmod 'myproj))

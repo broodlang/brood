@@ -1,7 +1,6 @@
 ;; Tests for std/encoding.blsp — hex and base64.
 
 (defmodule encoding-test (:use test))
-(require 'encoding)
 
 ;; ---- char->int / int->char / utf8 primitives --------------------------------
 

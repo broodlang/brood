@@ -33,7 +33,6 @@ Per-language face tables + keymaps are policy in the editor. `(require
 'editor/treesit)`."
   (:use editor/face))
 
-(require 'editor/face)
 
 ;; ---- fontify ----------------------------------------------------------------
 

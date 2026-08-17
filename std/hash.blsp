@@ -14,7 +14,6 @@
 (defmodule hash
   "Hashing utilities: MD5, SHA-1, SHA-256, SHA-384, SHA-512, and HMAC variants.
 
-    (require 'hash)
     (hash/md5 \"hello\")
     ;; => \"5d41402abc4b2a76b9719d911017c592\"
 

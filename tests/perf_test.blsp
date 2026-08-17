@@ -1,5 +1,4 @@
 (defmodule perf-test (:use test))
-(require 'perf)
 
 ;; These run on whatever binary the suite was built with — usually WITHOUT
 ;; `--features perf-stats`, so `(vm-stats)` reports `:enabled false`. That is the case worth

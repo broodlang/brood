@@ -1,5 +1,4 @@
 (defmodule system-test (:use test))
-(require 'system)
 
 (describe "system/env"
   (test "PATH is set"

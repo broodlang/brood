@@ -10,10 +10,9 @@
 
 (defmodule buffer-test (:use test) (:use-internals editor/buffer))
 
-; the buffer-as-log-sink integration test drives a real logger
-(require 'log)
-; gen-call — to flush the logger's casts before asserting
-(require 'proc/gen)
+;; The buffer-as-log-sink integration test drives a real logger; `log` and
+;; `proc/gen` (for `gen-call`, to flush the logger's casts before asserting) are
+;; auto-required by the qualified `log/…` / `proc/gen/…` references below.
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-buf-")
 
