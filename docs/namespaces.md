@@ -397,9 +397,11 @@ analysis in ADR-070's *Future direction*.
 > `myeditor` is the global `myeditor/buffer`, and intra-project `(:use buffer)` stays
 > short. One mechanism serves both deps and the root project: an ambient package context
 > (`project-setup`) that roots `%in-ns` / `(:use)` / `(:alias)` / the `:main` entry / the
-> checker's import + require-reachability sites / hot-reload. Known follow-ups: LSP
-> nav and multi-dep-collision bundling for rooted projects. Full status in ADR-070's
-> *Update (2026-08-02)*.
+> checker's import + require-reachability sites / hot-reload. The two follow-ups —
+> LSP nav and multi-dep-collision bundling for rooted projects — have both since landed
+> (`nest release` embeds a dep's modules under their rooted key, so two deps sharing a
+> module name coexist in one bundle; 2026-08-17). Full status in ADR-070's *Update (2026-08-02)*
+> and its 2026-08-17 bundle-rooting update.
 
 > **Further direction — a unified module/symbol index (ADR-223, deferred).** One step
 > further along this trajectory: replace the several ad-hoc half-indexes (the `module →

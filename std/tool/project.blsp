@@ -2760,10 +2760,12 @@ as unchanged (only when some were)."
 (defn bundle-collect (root)
   "Collect a project's shippable source for `nest release`: a flat list of
 strings `(manifest-src name0 src0 name1 src1 …)` the `nest` side embeds in the
-binary (ADR-038). Includes resolved dependency sources; excludes `tests/`. Modules
-are keyed by their require-name — the path relative to the source dir, sans `.blsp`,
-so a namespaced module (`net/sse`) keeps its namespace and resolves like the baked-in
-std. Errors if `root` is nil (not in a project)."
+binary (ADR-038). Includes resolved dependency sources; excludes `tests/`. The
+root project's own modules are keyed by their require-name — the path relative to the
+source dir, sans `.blsp`, so a namespaced module (`net/sse`) keeps its namespace and
+resolves like the baked-in std. A DEPENDENCY's modules are keyed by their PACKAGE-ROOTED
+name (`foo/parser`), so two deps each providing a `parser` coexist in one flat bundle —
+dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not in a project)."
   (when (nil? root)
     (error "bundle-collect: not in a Brood project (no project.blsp found)"))
   ;; Load `package` explicitly (project↔package cycle, as in project-ensure-deps-on-path):
@@ -2781,35 +2783,56 @@ std. Errors if `root` is nil (not in a project)."
     ;; `:dev-dependencies` is test/dev-only, so it is deliberately excluded from the
     ;; shipped bundle. (This is the payoff of keeping dev-deps in their own slot.)
     (let (src-dirs (project-abs-paths root *project-source-paths*)
+          ;; `ensure-deps` resolves the deps AND, via `package-register-rooting`, writes each
+          ;; dep module's ROOTED name → path into `*package-module-files*` — the exact map the
+          ;; dep-embedding below reads. Returns the dep source dirs (used only to attribute
+          ;; those registry entries to a bundled dep).
           dep-dirs (if *project-dependencies*
                      (do (package/ensure-deps root *project-dependencies*))
-                     nil)
-          all-dirs (append src-dirs dep-dirs))
-      ;; Pair each file with the source dir it was found under, so its require-name
-      ;; (relative to that dir) keeps any namespace — `src/main.blsp` → `main`,
-      ;; `src/net/sse.blsp` → `net/sse`. Dir order (project dirs first)
-      ;; is preserved, so a project module still wins a name clash with a dep.
-      ;; Strip each file's co-located `deftest`/`describe` forms (ADR-225) as it is
-      ;; slurped: tests run under `nest test` but never ship. A file that is only tests
-      ;; strips to empty source (still embedded under its name — harmless, `require`s nothing).
-      (let (pairs (fold (fn (acc d)
-                          (fold (fn (a f)
-                                  (cons (list (project-bundle-name d f)
-                                          (strip-test-forms (slurp f)))
-                                    a))
-                            acc
-                            (project-collect-sources d)))
-                    nil all-dirs))
-        ;; Reject a module-name collision in the bundle. At DEV time package-rooting keeps
-        ;; two deps' same-named modules apart (`a/parser` vs `b/parser`, ADR-070), but a
-        ;; release bundle is UNROOTED — its embedded table is keyed by require-name — so two
-        ;; providers of one name would silently clobber (the last embedded wins). Since the
-        ;; rooting made `ensure-deps` stop rejecting cross-dep collisions, the bundle path
-        ;; guards it here instead. (Rooting the bundle itself, for full dev/release parity,
-        ;; is the deeper follow-up; this keeps the bundle SAFE meanwhile.)
+                     nil))
+      ;; The ROOT PROJECT's own modules are embedded by their UNROOTED require-name
+      ;; (`src/main.blsp` → `main`, `src/net/sse.blsp` → `net/sse`) — a single package cannot
+      ;; collide with itself, so the root project stays unrooted in the bundle exactly as it
+      ;; loads there (at ROOT context). Only DEPENDENCIES root. Strip each file's co-located
+      ;; `deftest`/`describe` forms (ADR-225) as it is slurped: tests run under `nest test`
+      ;; but never ship (a test-only file strips to empty source — harmless, `require`s nothing).
+      (let (project-pairs (fold (fn (acc d)
+                                  (fold (fn (a f)
+                                          (cons (list (project-bundle-name d f)
+                                                  (strip-test-forms (slurp f)))
+                                            a))
+                                    acc
+                                    (project-collect-sources d)))
+                            nil src-dirs)
+            ;; DEPENDENCY modules are embedded by their ROOTED name (`foo/parser`) so two deps
+            ;; each providing a `parser` coexist in one flat bundle — dev/release parity for
+            ;; package-rooting (ADR-070). The rooted-name → path entries are what `ensure-deps`
+            ;; just wrote into `*package-module-files*`; take those whose file lives under a
+            ;; bundled dep dir (so this is independent of any earlier `project-setup` that may
+            ;; also have registered the root project's own rooted modules there). `run-bundle`
+            ;; rebuilds the matching `*package-modules-of*` at boot and loads each under context.
+            dep-pairs (fold (fn (acc kv)
+                              (let (rooted-key (first kv) path (second kv))
+                                (if (bundle-dep-file? path dep-dirs)
+                                  (cons (list rooted-key (strip-test-forms (slurp path))) acc)
+                                  acc)))
+                        nil
+                        (seq *package-module-files*))
+            pairs (append project-pairs dep-pairs))
+        ;; With deps rooted, a same-named module in two deps no longer clashes. This guard now
+        ;; only catches a genuine bundle-key collision — two of your own source files declaring
+        ;; the same module, or a root-project module keyed identically to a dep's rooted name —
+        ;; a loud stop beats the silent last-embedded-wins clobber.
         (bundle-reject-duplicate-names (map first pairs))
         (cons manifest
           (fold (fn (acc p) (cons (first p) (cons (second p) acc))) nil pairs))))))
+
+;; True if `path` (an absolute .blsp file) lives under one of `dep-dirs` (the bundled
+;; dependency source dirs) — separates a dependency's rooted module from the root
+;; project's own when reading the `*package-module-files*` registry in `bundle-collect`.
+(defn- bundle-dep-file?
+  (path dep-dirs)
+  (any? (fn (d) (starts-with? path (if (ends-with? d "/") d (str d "/")))) dep-dirs))
 
 ;; Error on the first require-name two bundled files share (see `bundle-collect`);
 ;; returns nil when all are distinct (a guard, called for effect).
@@ -2825,6 +2848,32 @@ std. Errors if `root` is nil (not in a project)."
     nil names)
   nil)
 
+;; Reconstruct `*package-modules-of*` for a running release bundle (ADR-070 dev/release
+;; parity), so its embedded dependency modules — keyed `pkg/mod` — load under their package
+;; context. A dependency contributes every embedded module key prefixed by its `:name`; the
+;; short names (the part after `pkg/`) are that package's intra-package set — the same map
+;; `register-package-modules!` builds from disk deps at `project-setup`. Deps are known from
+;; the embedded manifest (`*project-dependencies*`, already applied); their paths are gone,
+;; but the bundle needs only the names. The root project's own modules stay unrooted (they
+;; are not registered here), so they load at ROOT, matching how `bundle-collect` embedded them.
+(defn- bundle-register-dep-rooting
+  ()
+  (let (dep-names (map (fn (d) (name (get d :name))) *project-dependencies*)
+        keys (%bundle-module-names))
+    (map (fn (pkg)
+           (let (marker (str pkg "/")
+                 shorts (fold (fn (acc key)
+                                (if (starts-with? key marker)
+                                  (cons (symbol (substring key
+                                                  (string-length marker)
+                                                  (string-length key)))
+                                    acc)
+                                  acc))
+                          nil keys))
+             (when shorts (register-package-modules! pkg shorts))))
+      dep-names)
+    nil))
+
 ;; (run-bundle args) — boot an embedded release bundle. The `brood` binary,
 ;; detecting its appended archive, calls this instead of starting a REPL. No
 ;; disk/cwd: every module comes from the embedded archive via `%builtin-module`
@@ -2837,6 +2886,12 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (default module `main`, fn `main`). Errors if the entry fn is missing/uncallable."
   (let (form (read-first (%bundle-manifest)))
     (when (and (pair? form) (= (first form) 'project)) (project-apply (rest form))))
+  ;; Rebuild the package-rooting context for the embedded DEPENDENCY modules (ADR-070
+  ;; dev/release parity): each is embedded under its rooted key `pkg/mod`, and must load
+  ;; under `pkg`'s context so its `(defmodule mod)` roots and its intra-package `(:use …)`
+  ;; targets root — exactly as `require-force-package` does from disk. Must run BEFORE the
+  ;; loads below (it is what makes `require-force`'s embedded branch pick the right context).
+  (bundle-register-dep-rooting)
   ;; Load every embedded module once. Order-independent: cross-module
   ;; `:use`/`require` resolve through the same embedded table, and require is
   ;; idempotent — so a `(:use foo)` in the first module pulls `foo` on demand.

@@ -69,6 +69,53 @@ fn bundled_brood_boots_embedded_main_with_cross_module_use() {
 }
 
 #[test]
+fn bundled_deps_with_same_module_name_coexist_rooted() {
+    // Dev/release parity for package-rooting (ADR-070): two dependencies each provide a
+    // `parser` module (and a `util` module). At dev time they are distinct globals
+    // `alpha/parser` / `beta/parser`; the bundle must keep them apart too. Each dep module
+    // is embedded under its ROOTED key, and `main` calls both — proving neither clobbered
+    // the other and that each `parser`'s intra-package `(:use util)` rooted to its OWN
+    // `util` (alpha→"A", beta→"B"), not the other dep's.
+    let (app, cwd) = write_app(
+        "same-name-deps",
+        "(project :name \"t\" :version \"0\" :dependencies [[alpha :path \"a\"] [beta :path \"b\"]])",
+        &[
+            (
+                "main",
+                "(defmodule main)\n(defn main () (println (str (alpha/parser/tag) \"|\" (beta/parser/tag))))",
+            ),
+            // `parser` in each dep uses its OWN `util` via a bare intra-package `(:use util)`,
+            // which must root to `alpha/util` / `beta/util` under each dep's package context.
+            (
+                "alpha/parser",
+                "(defmodule parser (:use util))\n(defn tag () (str \"alpha:\" (util-tag)))",
+            ),
+            ("alpha/util", "(defmodule util)\n(defn util-tag () \"A\")"),
+            (
+                "beta/parser",
+                "(defmodule parser (:use util))\n(defn tag () (str \"beta:\" (util-tag)))",
+            ),
+            ("beta/util", "(defmodule util)\n(defn util-tag () \"B\")"),
+        ],
+    );
+    let mut cmd = Command::new(&app);
+    cmd.current_dir(&cwd);
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run bundled app");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "alpha:A|beta:B"
+    );
+    let _ = std::fs::remove_dir_all(app.parent().unwrap());
+}
+
+#[test]
 fn bundled_app_receives_argv() {
     let (app, cwd) = write_app(
         "argv",

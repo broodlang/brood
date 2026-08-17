@@ -1286,6 +1286,39 @@
           (is (dir? (path-join (path-join app-dir "_deps") "salutation")))
           (is (file-exists? (path-join app-dir "project.lock.blsp"))))))))
 
+;; `nest release` bundle collection: a dependency's modules are embedded under their
+;; PACKAGE-ROOTED name (`alpha/parser`), so two deps each providing a `parser` coexist in
+;; one flat bundle — dev/release parity for package-rooting (ADR-070). Before this the
+;; bundle keyed every module by its bare require-name, so two `parser`s collided and
+;; `bundle-collect` errored. :isolated because it mutates *load-path* + the package
+;; registries and writes a lock file (ADR-017 rolls them back).
+(describe "package: bundle-collect roots dependency modules (dev/release parity)"
+  :isolated
+  (test "two deps providing a same-named module are embedded under distinct rooted keys"
+    (let (parent (pkg-fixture-root)
+          alpha-dir (path-join parent "alpha")
+          beta-dir (path-join parent "beta")
+          app-dir (path-join parent "app"))
+      ;; Each dep provides a `parser` module — the exact clash that used to be rejected.
+      (pkg-write-project alpha-dir "alpha" "parser" "(defn tag () \"A\")" "")
+      (pkg-write-project beta-dir "beta" "parser" "(defn tag () \"B\")" "")
+      ;; Declare `:source-paths` explicitly. `bundle-collect` reads the ambient
+      ;; `*project-source-paths*` (via `project-apply`, which only sets it when the manifest
+      ;; names it — unlike `project-setup`); a real `nest release` is a fresh process where
+      ;; it is the default `["src"]`, but this test shares an image with the rest of the
+      ;; suite, so pin it here rather than inherit whatever a prior test left behind.
+      (pkg-write-project app-dir
+        "app" "main" "(defn main () 1)"
+        " :source-paths [\"src\"] :dependencies [[alpha :path \"../alpha\"] [beta :path \"../beta\"]]")
+      ;; No error (two bare `parser`s would have tripped `bundle-reject-duplicate-names`),
+      ;; and both modules are present under their ROOTED keys — never the bare name.
+      (let (collected (project/bundle-collect app-dir))
+        (is (includes? collected "alpha/parser"))
+        (is (includes? collected "beta/parser"))
+        (refute (includes? collected "parser"))
+        ;; the root project's own module stays UNROOTED (only deps root)
+        (is (includes? collected "main"))))))
+
 ;; A dependency NAME is written verbatim (unquoted) into project.blsp, so it must
 ;; be a symbol that reads back as itself. Regression: `nest add "" :path ../x`
 ;; wrote `:dependencies [[ :path "../x"]]` — a manifest that no longer parsed —
