@@ -221,7 +221,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; (`math/sqrt`, `web/endpoint/handler`), not bare (a bare `sqrt` is unbound; you reference
 ;; the qualified name or `(:use)`). The prelude-category pseudo-modules the reference adds
 ;; leave it false (their names — `+`, `map` — are genuinely bare).
-(defn- docs-module-model (title mdoc syms)
+(defn- docs-module-model
+  (title mdoc syms)
   {:module title :doc mdoc :defs (docs-def-records syms) :qualified? true})
 
 ;; A file's declared module name — the `(defmodule NAME …)` symbol — or nil if the file
