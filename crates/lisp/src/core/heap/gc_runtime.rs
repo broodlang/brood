@@ -1221,8 +1221,22 @@ impl Heap {
         // sight. Clone the registry (cheap `Arc` bumps) to drop the `&self` borrow
         // before the `&old_code`/`&mut fwd` closure. This is what lets the safepoint
         // compact even while the VM is mid-call (no deferral, region stays bounded).
+        //
+        // **Visit each DISTINCT arm once** — the same reason the probe walk above dedupes,
+        // which this one had been missing. `live_vm_arms` is a per-frame stack, so a deep
+        // recursion holds one entry per *active frame* and they are all the same `Arc`: a
+        // 100 000-deep walk re-rewrote one arm 100 000 times, i.e. O(frames × arm size) for
+        // O(distinct arms) of work. It was never *wrong* — `flush_rt_value` only forwards a
+        // handle still resident in the source generation, so the 2nd..Nth visit is a no-op —
+        // which is exactly why it went unnoticed: a compaction landing on a deep process just
+        // took much longer than it needed to. That is the KI-14 shape, in the sibling walk
+        // that never got the fix.
         let live_arms = self.live_vm_arms.clone();
+        let mut seen_arms: HashSet<*const crate::eval::compile::CompiledArm> = HashSet::new();
         for arm in &live_arms {
+            if !seen_arms.insert(Arc::as_ptr(arm.arc())) {
+                continue;
+            }
             crate::eval::compile::rewrite_arm_handles(arm, &mut |v| {
                 flush_rt_value(&old_code, &new, &mut fwd, v)
             });
