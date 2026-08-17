@@ -277,7 +277,7 @@ check after the first invocation."
   "`check` — advisory type-check the project. Returns
 `{:diagnostics [{:file :line :col :message} ...]}` (one entry per warning,
 position omitted when the checker can't supply one — ADR-024). Backed by
-`(check-project-structured)` in `std/project.blsp` (step 1c-a). `(or … [])`
+`(check-project-structured)` in `std/tool/project.blsp` (step 1c-a). `(or … [])`
 so a clean project renders as `{:diagnostics []}` rather than `{:diagnostics
 null}` — agents shouldn't have to disambiguate \"no warnings\" from
 \"missing field\"."
@@ -581,7 +581,7 @@ stats by id) and `node` (runtime-wide stats) plus `watch-runtime` (the
 runtime-event STREAM — GC/spawn/exit/deopt over an interval, a trace not a
 snapshot) — which, with the now-enriched
 `processes`, give an agent the same live view the observer
-(`std/observer.blsp`) shows — the project-scoped editing pair `write`
+(`std/tool/observer.blsp`) shows — the project-scoped editing pair `write`
 (create/overwrite a file) and `edit` (exact-string replace), both sandboxed
 under `*project-root*` so an agent writes code *through* nest mcp rather than
 the raw filesystem, and the LLM-native pair `explain-error` (a stable error

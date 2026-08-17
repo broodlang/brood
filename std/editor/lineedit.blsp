@@ -1,9 +1,9 @@
-;; std/lineedit.blsp — a raw-mode, emacs-style line editor in Brood.
+;; std/editor/lineedit.blsp — a raw-mode, emacs-style line editor in Brood.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - Policy, not mechanism (ADR-006/048): the editor is a Brood loop over the
 ;;    thin inline `term-*` seam (`term-raw-enter`/`term-raw-leave`/`term-emit`/
-;;    `term-poll`/`term-size`) plus the pure `std/highlight.blsp`. The Rust side
+;;    `term-poll`/`term-size`) plus the pure `std/editor/highlight.blsp`. The Rust side
 ;;    only toggles raw mode and paints relative ops; everything an editor *does*
 ;;    — keymap, kill-ring, history, completion, layout — lives here, redefinable.
 ;;  - Pure core + thin IO (the `observe-frame` discipline): `lineedit-handle`
@@ -36,8 +36,8 @@ emacs/readline keys — C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, M-d, C-y, C-t, C
 C-d, C-l, arrows, Home/End, and ↑/↓ (or C-p/C-n) history; it returns
 `{:line <str|nil> :eof <bool> :cancel <bool>}`.
 
-Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
-`std/repl.blsp` calls it on a TTY in place of `read-line`."
+Built on `std/editor/highlight.blsp` (pure analysis) and the inline `term-*` seam.
+`std/tool/repl.blsp` calls it on a TTY in place of `read-line`."
   (:use editor/highlight)
   (:use editor/keymap))
 

@@ -1,10 +1,10 @@
-;; std/highlight.blsp — lexical syntax highlighting + bracket/call analysis.
+;; std/editor/highlight.blsp — lexical syntax highlighting + bracket/call analysis.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - Pure data → data, no IO and no kernel surface (the analogue of
 ;;    `observe-frame`): every function takes a source string and returns spans /
 ;;    chunks / positions. That makes the whole module unit-testable without a
-;;    terminal — `std/lineedit.blsp` is the only piece that touches `term-*`.
+;;    terminal — `std/editor/lineedit.blsp` is the only piece that touches `term-*`.
 ;;  - Lexical, not semantic: this is a tree-sitter-style *highlighter*, not the
 ;;    type checker. It classifies tokens by shape + head-position (the first
 ;;    symbol after a `(` is a call/special-form), not by resolving what a name
@@ -35,7 +35,7 @@ as pure functions over a source string (ADR-052):
   - `(enclosing-call full pos)` — `[callee arg-index]` for the call enclosing the cursor.
   - `(symbol-prefix-at full pos)` / `(common-prefix strs)` — completion helpers.
 
-Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable."
+Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently testable."
   (:use editor/face))
 ;; ---- faces: the :syntax/* theme seam ----------------------------------------
 ;; Syntax faces live in the shared face registry (`std/editor/face.blsp`) under
@@ -61,7 +61,7 @@ Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable."
 (def-face :syntax/error {:fg :red :bold true})
 ;; Resolved snapshots of the defaults, kept under the original `hl-face-*` names for
 ;; consumers that read a face directly rather than re-resolving each frame: the REPL
-;; line editor's bracket match/error (`std/lineedit.blsp`) and the highlighter's own
+;; line editor's bracket match/error (`std/editor/lineedit.blsp`) and the highlighter's own
 ;; tests. The live fontify path (`hl-spans`) instead calls `(face :syntax/…)` per
 ;; span, so an app's `face-set :syntax/…` restyles the editor on its next frame while
 ;; these snapshots (and so the default REPL look) stay put.

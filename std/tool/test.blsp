@@ -1,4 +1,4 @@
-;; std/test.blsp — a tiny test framework, written in Brood itself.
+;; std/tool/test.blsp — a tiny test framework, written in Brood itself.
 ;;
 ;;   (describe "math"
 ;;     (test "adds"       (assert= (+ 1 2) 3))

@@ -1,4 +1,4 @@
-;; std/display.blsp — the render-op protocol for the display seam.
+;; std/editor/display.blsp — the render-op protocol for the display seam.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - The display layer is a *protocol, not a library* (docs/architecture.md): a
