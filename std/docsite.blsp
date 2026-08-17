@@ -95,17 +95,30 @@
 
 ;; ---- one definition ---------------------------------------------------------
 
+;; Prefix a signature's leading name with `module/` so a namespaced module's defs read as
+;; their qualified CALL form — `(sqrt x)` → `(math/sqrt x)` — since that is how you invoke
+;; them (bare `sqrt` is unbound; you write `math/sqrt` or `(:use math)`). Applied only when
+;; the module is a real namespace (`:qualified?`), never to the prelude/category pseudo-modules.
+(defn- qualify-sig
+  (module-name sig)
+  (cond
+    (nil? sig) sig
+    (starts-with? sig "(") (str "(" module-name "/" (substring sig 1))
+    else (str module-name "/" sig)))
+
 (defn- definition-html
-  (module-name definition)
+  (module-name qualified? definition)
   (let (macro? (get definition :macro)
         type-arrow (get definition :type)
-        docstring (get definition :doc))
+        docstring (get definition :doc)
+        raw-sig (get definition :sig)
+        sig (if qualified? (qualify-sig module-name raw-sig) raw-sig))
     (str "<div class=\"def\" id=\""
       (def-anchor module-name (get definition :name))
       "\">"
       "<div class=\"def-head\">"
       "<code class=\"sig\">"
-      (escape (get definition :sig))
+      (escape sig)
       "</code>"
       (if macro? " <span class=\"tag\">macro</span>" "")
       "</div>"
@@ -120,6 +133,7 @@
 (defn- module-html
   (module)
   (let (module-name (get module :module)
+        qualified? (get module :qualified?)
         defs (get module :defs))
     (str "<section class=\"module\" id=\""
       (module-anchor module-name)
@@ -132,9 +146,28 @@
       (if (empty? defs)
         "<p class=\"empty\">No public definitions.</p>"
         (str "<div class=\"defs\">"
-          (apply str (map (fn (d) (definition-html module-name d)) defs))
+          (apply str (map (fn (d) (definition-html module-name qualified? d)) defs))
           "</div>"))
       "</section>")))
+
+;; Render the module sections, emitting a top-level `<h2 class="doc-section">` heading each
+;; time a module's `:section` changes — so the model groups (e.g. "Core language" then
+;; "Standard library") read as distinct bands, not one flat run of sections. A module with
+;; no `:section` renders exactly as before (no heading).
+(defn- modules-html
+  (modules)
+  (get
+    (fold
+      (fn (acc m)
+        (let (sec (get m :section)
+              head (if (and sec (not (= sec (get acc :section))))
+                     (str "<h2 class=\"doc-section\">" (escape sec) "</h2>")
+                     ""))
+          {:section (or sec (get acc :section))
+           :html (str (get acc :html) head (module-html m))}))
+      {:section nil :html ""}
+      modules)
+    :html))
 
 ;; ---- sidebar navigation -----------------------------------------------------
 
@@ -160,6 +193,23 @@
       "</ul>"
       "</div>")))
 
+;; Sidebar nav grouped by `:section`, mirroring `modules-html` — a `.nav-section` label
+;; introduces each group so the core/library split is visible in the nav too.
+(defn- sidebar-modules
+  (modules)
+  (get
+    (fold
+      (fn (acc m)
+        (let (sec (get m :section)
+              head (if (and sec (not (= sec (get acc :section))))
+                     (str "<div class=\"nav-section\">" (escape sec) "</div>")
+                     ""))
+          {:section (or sec (get acc :section))
+           :html (str (get acc :html) head (sidebar-module m))}))
+      {:section nil :html ""}
+      modules)
+    :html))
+
 (defn- sidebar-html
   (model)
   (str "<nav class=\"sidebar\">"
@@ -169,7 +219,7 @@
     "</div>"
     "<input id=\"docsite-filter\" type=\"search\" placeholder=\"Filter…\" autocomplete=\"off\" spellcheck=\"false\">"
     (apply str (map sidebar-guide (or (get model :guides) [])))
-    (apply str (map sidebar-module (get model :modules)))
+    (sidebar-modules (get model :modules))
     "</nav>"))
 
 ;; ---- page assembly ----------------------------------------------------------
@@ -219,7 +269,7 @@
       (header-html model)
       (apply str (map guide-html guides))
       (cond
-        (not (empty? modules)) (apply str (map module-html modules))
+        (not (empty? modules)) (modules-html modules)
         (empty? guides) "<p class=\"empty\">No documented modules.</p>"
         else "")
       "</main>")))
@@ -256,6 +306,8 @@
     ".docsite .page-head h1{margin:0;font-size:1.6rem}"
     ".docsite .badge{background:#2563eb;color:#fff;border-radius:.375rem;padding:.1rem .5rem;font-size:.8rem}"
     ".docsite .module{margin-bottom:2.5rem}.docsite .module h2{font-size:1.3rem;color:#2563eb;border-bottom:1px solid #eef1f4;padding-bottom:.3rem}"
+    ".docsite .doc-section{font-size:1.05rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#52606d;margin:3rem 0 1.4rem;padding-bottom:.45rem;border-bottom:2px solid #cbd2d9}.docsite .doc-section:first-child{margin-top:.5rem}"
+    ".docsite .nav-section{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#9aa5b1;margin:1.1rem 0 .45rem}"
     ".docsite .moduledoc{color:#3e4c59;margin-bottom:1rem}"
     ".docsite .def{border:1px solid #e4e7eb;border-radius:.5rem;padding:.75rem 1rem;margin:.6rem 0;scroll-margin-top:1rem}"
     ".docsite .sig{font-weight:600;color:#1f2933}.docsite .tag{background:#e4e7eb;color:#52606d;border-radius:.25rem;padding:0 .35rem;font-size:.72rem;vertical-align:middle}"
@@ -282,6 +334,7 @@
     ".docsite .sidebar{background:#12161c;border-color:#2b3138}.docsite #docsite-filter{background:#1a1f26;border-color:#3e4c59}"
     ".docsite .content .sig{color:#e4e7eb}.docsite .def{border-color:#2b3138}.docsite .tag{background:#2b3138;color:#9aa5b1}"
     ".docsite .page-head,.docsite .module h2{border-color:#2b3138}.docsite .doc code,.docsite .moduledoc code{background:#2b3138}"
+    ".docsite .doc-section{color:#9aa5b1;border-color:#3e4c59}"
     ".docsite a{color:#63b3ed}.docsite .nav-defs a{color:#9aa5b1}.docsite .moduledoc,.docsite .doc{color:#b0b8c1}}"))
 
 ;; A dependency-free filter: hide any definition, module, and sidebar entry whose text

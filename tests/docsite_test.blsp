@@ -77,3 +77,31 @@
       (is (includes? html "id=\"g-Intro\""))
       (is (includes? html "<p>hi</p>"))
       (is (includes? html "href=\"#g-Intro\"")))))
+
+(describe "docsite: namespaces + sections"
+  (test "a :qualified? module renders its defs as their qualified call form"
+    (let (html (docsite/render
+                 {:name "d" :modules [{:module "math" :qualified? true
+                                       :defs [{:name "sqrt" :sig "(sqrt x)"} {:name "pi" :sig "pi"}]}]}
+                 {:wrap? false}))
+      (is (includes? html "(math/sqrt x)"))
+      (is (includes? html "math/pi"))))
+  (test "a non-:qualified? (prelude-category) module keeps its defs bare"
+    (let (html (docsite/render
+                 {:name "d" :modules [{:module "Math and numbers" :qualified? false
+                                       :defs [{:name "+" :sig "(+ & xs)"}]}]}
+                 {:wrap? false}))
+      (is (includes? html "(+ &amp; xs)"))
+      (refute (includes? html "Math and numbers/+"))))
+  (test ":section renders one top-level doc-section heading per distinct section"
+    (let (html (docsite/render
+                 {:name "d" :modules [{:module "A" :section "Core" :defs [{:name "x" :sig "(x)"}]}
+                                      {:module "B" :section "Core" :defs [{:name "y" :sig "(y)"}]}
+                                      {:module "m" :section "Library" :qualified? true :defs [{:name "z" :sig "(z)"}]}]}
+                 {:wrap? false}))
+      (is (includes? html "class=\"doc-section\">Core"))
+      (is (includes? html "class=\"doc-section\">Library"))
+      (is (includes? html "class=\"nav-section\">Core"))))
+  (test "a module with no :section renders with no doc-section heading (backward compatible)"
+    (let (html (docsite/render {:name "d" :modules [{:module "plain" :defs [{:name "a" :sig "(a)"}]}]} {:wrap? false}))
+      (refute (includes? html "doc-section")))))
