@@ -1,6 +1,6 @@
 ;; examples/editor/src/text-mode.blsp — the default editing layer: plain-text
 ;; motion, no structure. An *editor* module (policy: keys + the default mode),
-;; loaded from the editor project's src/, not part of the language. (require 'text-mode).
+;; loaded from the editor project's src/, not part of the language.
 ;;
 ;; A `text-mode` LAYER (in the `layers` sense) for ordinary prose/text buffers: it
 ;; binds character / word / line motion over `std/buffer`, and nothing structural.
@@ -16,12 +16,8 @@
 (defmodule text-mode
   "The default text-editing layer: character/word/line motion over `std/buffer`,
 registered as the `:fundamental` type so a plain buffer gets it by default. Its
-motion commands `(buf key) -> buf` are shared with `brood-mode`. `(require
-'text-mode)`."
+motion commands `(buf key) -> buf` are shared with `brood-mode`."
   (:use editor/layers))
-
-(require 'editor/buffer)
-(require 'editor/layers)
 
 ;; ---- motion commands: (buf key) -> buf (key ignored) ------------------------
 (defn forward-char (b k) (editor/buffer/forward-char b))

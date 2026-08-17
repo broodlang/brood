@@ -1,4 +1,4 @@
-;; std/package.blsp — the package manager (ADR-037, docs/packages.md). (require 'package).
+;; std/tool/package.blsp — the package manager (ADR-037, docs/packages.md).
 ;;
 ;; Third-party Brood deps: source pinned in the manifest's :dependencies, cached
 ;; per-project, locked for reproducibility. Policy is here; the kernel adds only
@@ -6,11 +6,11 @@
 ;;
 ;; Slice 1 (this file): `:path` deps end-to-end — resolve a sibling-directory dep,
 ;; hash its tree, write project.lock.blsp, and add its `src/` to *load-path* so
-;; `(require 'dep)` finds it. `:path` deps load IN PLACE (no _deps/ copy), so edits
+;; a `dep/…` reference finds it. `:path` deps load IN PLACE (no _deps/ copy), so edits
 ;; to a path-dep's tree are live. `:git` deps (the _deps/ cache + clone) land in
 ;; Slice 2 and error cleanly here.
 ;;
-;; Manifest parsing (`project/project-parse-deps`) lives in std/project.blsp — the manifest
+;; Manifest parsing (`project/project-parse-deps`) lives in std/tool/project.blsp — the manifest
 ;; owner — and we reuse it both for the root manifest and for each dep's own.
 
 (defmodule package
@@ -301,7 +301,7 @@ land in a later slice."
 
 ;; --- the Dependency ability (ADR-172) ---------------------------------------
 ;; A dependency's KIND is its record identity (`project/dep-path` / `-git` / `-tarball`
-;; / `-registry`, defined by the manifest owner, std/project.blsp), and every per-kind
+;; / `-registry`, defined by the manifest owner, std/tool/project.blsp), and every per-kind
 ;; behaviour is an op of this one ability rather than a `(get dep :kind)` `cond` repeated
 ;; per behaviour. That was the actual bug risk here: adding a fifth kind meant finding
 ;; five scattered chains, and missing one failed late (a resolvable dep that couldn't be
@@ -736,7 +736,6 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 ;; `nest publish` builds a source tarball and POSTs it (Bearer-token authed);
 ;; releases are immutable, so the server refuses a re-publish. A base URL override
 ;; may be passed to the registry functions (tests point it at a loopback server).
-
 
 (defn- registry-trim
   (url)
@@ -1412,7 +1411,7 @@ sha256 pin still holds."
           dup (includes? seen nm)
           entry (get index nm))
       ;; a dep's tree label is its DISPLAY form (`impl Display` per kind, in
-      ;; std/project.blsp beside the records), so this and `(println dep)` can't drift
+      ;; std/tool/project.blsp beside the records), so this and `(println dep)` can't drift
       (println (str prefix "- " (to-str d) (if dup " (already shown)" "")))
       (when (and entry (not dup) (not (empty? (get entry :deps))))
         (package-print-tree (get entry :deps) index (str prefix "  ") (cons nm seen))))))

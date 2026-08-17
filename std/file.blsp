@@ -1,4 +1,4 @@
-;; std/file.blsp — the file & filesystem standard library. (require 'file).
+;; std/file.blsp — the file & filesystem standard library.
 ;;
 ;; A coherent Brood surface over the kernel's irreducible fs primitives — `slurp`,
 ;; `spit`, `file-exists?`, `dir?`, `list-dir`, `make-dir`, `file-mtime`, `cwd` —
@@ -10,7 +10,7 @@
 ;; atomic `spit-append` primitive — each write lands at end-of-file.)
 
 (defmodule file
-  "The file & filesystem library (`(require 'file)`): whole-file and line read/write
+  "The file & filesystem library: whole-file and line read/write
 (`slurp`/`spit`/`read-lines`/`write-lines`/`spit-append`), predicates
 (`file?`/`dir?`/`file-exists?`), directory listing (`list-files`/`list-dirs`/
 `walk-files`), and path helpers (`path-extension`/`path-stem`, complementing the

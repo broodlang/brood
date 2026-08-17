@@ -142,11 +142,6 @@
   (:use proc/gen :only [defprocess spawn-server gen-call])
   (:use editor/buffer)
   (:use sexp :only [point-forward]))
-(require 'template)
-(require 'format)
-(require 'ansi)
-(require 'stream)
-(require 'net/sse)
 
 (def n (let (e (getenv "N")) (if e (string->number e) 2000)))
 

@@ -30,8 +30,7 @@ picks one version per package across the transitive graph, or reports a derivati
 none fits. `roots` is a list of `[name constraint]` (constraint a `std/version` string, or
 nil/\"\" = any); `provider` (see `make-provider`) answers what versions exist and what each
 release requires. Pure — no I/O; the registry provider that fetches for real lives in
-`std/tool/package`. `(require 'resolver)`.")
-
+`std/tool/package`.")
 
 ;; --- the provider: the resolver's only window onto the package universe ----------
 ;; Two closures. `versions-fn`: name → the list of version strings that exist for it.

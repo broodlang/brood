@@ -1,4 +1,4 @@
-;; std/system.blsp — OS/process interface. (require 'system)
+;; std/system.blsp — OS/process interface.
 
 (defmodule system
   "OS and process utilities: environment, argv, subprocess execution, OS type.

@@ -1,5 +1,4 @@
 ;; std/io.blsp — output ports: the redirectable sink behind print/println.
-;; (require 'io).
 ;;
 ;; A *port* is any value with a **`Port` impl** — the ability whose one op, `io-write`,
 ;; is the single seam every output path goes through. Two shapes matter:
@@ -27,8 +26,8 @@
 ;; the same safe mechanism the logger's `process-backend` uses (std/log.blsp).
 
 (defmodule io
-  "Output ports — the redirectable sink the prelude's `print`/`println` write to
-(`(require 'io)`). A port is any value implementing the **`Port`** ability: a 1-arg fn
+  "Output ports — the redirectable sink the prelude's `print`/`println` write to.
+A port is any value implementing the **`Port`** ability: a 1-arg fn
 `(fn (s) …)` that consumes a ready string, or a port record. `*out*`/`*err*` (declared
 in the prelude) hold the current stdout/stderr ports.
 

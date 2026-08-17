@@ -99,7 +99,7 @@ vanishes. To see it:
 
 - **Monitor it.** `(monitor pid)` (or spawn with a link) so the parent
   `receive`s a `:down`/exit message with the reason instead of silence.
-- **Supervise it.** `(require 'proc/supervisor)` for restart strategies
+- **Supervise it.** `proc/supervisor/…` for restart strategies
   (`:one-for-one`/`:one-for-all`/`:rest-for-one`) when a process *should* recover.
 - **`processes`** (MCP) or `(list-processes)` shows who's still alive — a missing
   pid confirms it died.

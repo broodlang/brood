@@ -1,4 +1,4 @@
-;; std/log.blsp — an async, safe logger. (require 'log).
+;; std/log.blsp — an async, safe logger.
 ;;
 ;; Async + safe fall straight out of the process model (ADR-006):
 ;;  - A logger is one long-lived `proc/gen` process carrying {:level :backends}.
@@ -25,7 +25,7 @@
 
 ; ports + io-write
 (defmodule log
-  "An async, safe logger (`(require 'log)`). A `proc/gen` process holds a list of
+  "An async, safe logger. A `proc/gen` process holds a list of
 backends; each log call is a cast, so it never blocks the caller, and the single
 process serialises writes (no interleaving) and isolates a crashing backend.
 

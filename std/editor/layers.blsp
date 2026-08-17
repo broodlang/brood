@@ -1,5 +1,4 @@
 ;; std/layers.blsp — composable, runtime-reconfigurable behaviour layers.
-;; (require 'layers).
 ;;
 ;; The generic mechanism the editor's "modes" are built from — but NOT
 ;; editor-specific: any interactive Brood UI uses it, with or without buffers. A
@@ -23,7 +22,7 @@
 
 (defmodule editor/layers
   "Composable, runtime-reconfigurable behaviour layers for interactive UIs.
-`(require 'layers)`. A *context* (any state map — an app model or a buffer) holds
+A *context* (any state map — an app model or a buffer) holds
 `:layers`, an ordered list of layer references (head = highest precedence). A
 *layer* is a `def`'d map `{:name … :keymap … :hooks {event → (fn-syms)}}`, resolved
 by symbol at use (late-bound, so redefining it hot-swaps it everywhere).
@@ -55,7 +54,7 @@ core knows nothing about buffers."
 ;; keymap with `keymap-bind` (chords are vectors of >1 key):
 ;;
 ;;   (defmodule magit (:use layers) (:use keymap) (:use buffer))
-;;   (require 'layers) (require 'keymap)
+;;   ;; no load step: `layers/…` / `keymap/…` load on reference
 ;;
 ;;   (defn stage  (st key) …)            ; a command: (state key) -> state
 ;;   (defn commit (st key) …)

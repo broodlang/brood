@@ -1205,6 +1205,70 @@ Verified: **full `cargo nextest` run green — 981 tests pass** (the in-language
 plus every Rust test), no crash, capped at 4 threads. The sibling projects (`hive`, `hatch`,
 `pong`, `bedit`, `store-postgres`, …) were migrated in parallel and each `nest check`s clean.
 
+## 2026-08-17 — The stale-bare-name sweep: a curated sig masking the unbound lint, two dead benchmark rows, and one GC walk
+
+Follow-up session to ADR-228. Four queued items; this covers two of them plus two findings
+that were not on the list.
+
+**The checker's type tables had six stale entries, and one was a hole in the CI gate.** Swept
+mechanically rather than by eye — extracted all 101 keys from `sigs.rs`, `infer.rs` and
+`walk.rs` and tested each against `bound?` at root. An entry in `CURATED_SIGS` marks its name
+*known*, which **suppresses the unbound lint**, so a stale key makes `nest check` — the gate
+that exits nonzero on any warning — silent on code that dies at runtime. Proven by contrast:
+after ADR-227 moved `even?`/`odd?`/`abs` to `std/math.blsp`, a bare `(even? 4)` with no import
+drew *nothing*, while the uncurated siblings `sum`/`frequencies` correctly said "unbound
+symbol". Worse, **`length` had never existed at all** — added 2026-05-31 as if it were a `count`
+alias ("each vetted against std/prelude.blsp"; this one was not), so `(length x)` had been
+passing `nest check` for two and a half months. Fixes: `length` deleted; `even?`/`odd?`/`abs`
+re-keyed `math/…`, `index-where` `enum/…`; `infer.rs`'s `sqrt`/`abs`/`dedupe`/`interpose` and
+`walk.rs`'s `abs` re-keyed too (those are merely *dead* — they supply a type, they do not mark
+known-ness). Guard `a_curated_sig_does_not_mask_the_unbound_lint_for_a_moved_name`,
+sabotage-verified (restoring a bare key fails it with `Got: []`). Five existing tests asserted
+the old spellings; one of them, `(length :k)`, had been passing *accidentally* — "some warning
+mentioning length" is true of an unbound warning too, so it proved nothing.
+
+**Two published benchmark rows were dead for three days (KI-44).** `nbody` died with `unbound
+symbol: sqrt` and `json` with the dropped `json-` prefix: ADR-227's migration sweep covered
+`breakage/`, `examples/`, `stress/`, `std/` and `crates/` but could not see `brood-benchmarks`,
+a separate repo. A published harness run would have failed outright. Both fixed by qualifying the reference (which loads the module by
+inference) and verified against the other ports' checksums (`nbody` −169063618
+= node = python; `json` 364568836 = node), not merely "it runs now". The structural cause — that
+nothing runs those programs for *correctness*, only for timing, by hand, over tens of minutes —
+is fixed by `bench/smoke.py`: every row at the harness's own quick sizes, exit status only,
+about a minute, sabotage-verified — and it immediately paid for itself: ADR-229's `require`
+removal landed while this was in flight and broke `base64`, `json` and `regex` in that repo,
+which the check caught in one run. (First attempt used a flat `BENCH_N=50` and reported three
+false failures, because `BENCH_N` is an iteration count on some rows and a *problem size* on
+others — 50 means fib(50) on `pfib` and a 50×50 board on `nqueens`. It now imports the
+harness's `QUICK` table so the two cannot drift.)
+
+**Fixing `nbody` correctly then exposed a ~1.8× regression, left open deliberately.**
+`resolve_prim1` inlines `sqrt` to `PrimOp1::Sqrt` only for a **bare** head resolving to a
+**PRELUDE** closure, and post-move neither spelling qualifies — so every `sqrt` now pays a
+closure call plus the wrapper's two `cond` comparisons. Measured: 406→754 ms on a 3M-iteration
+loop (~115 ns/call) and **0.38–0.40 s → 0.66–0.74 s on the row**. The remaining work is the
+*safety* argument, not the name test: the PRELUDE-region check has to keep proving "this is the
+canonical `std/math` sqrt, not a redefinition" for a closure that now lives in RUNTIME. Recorded
+in KI-44 and flagged at the top of the benchmark repo's `nbody` entry, because **an `nbody`
+number measured before it lands is ~1.8× off its pre-ADR-227 self and is not a runtime
+regression.** The generalisation: a kernel fast path keyed on a bare stdlib name is a hidden
+coupling to the stdlib's shape — moving the function is source-compatible and silently deletes
+the optimisation. When a stdlib function moves, grep the kernel for its bare name.
+
+**GC: the compaction flush now visits each distinct arm once.** `live_vm_arms` is a per-frame
+stack, so a deep recursion holds one entry per active frame, all the same `Arc` — the flush
+re-rewrote one arm once per frame, O(frames × arm size) for O(distinct arms) of work, the KI-14
+shape in the sibling walk that never got the dedupe its twin carries. Never wrong
+(`flush_rt_value` only forwards source-generation handles, so repeats are no-ops), which is
+exactly why it hid.
+
+Gates: `make test` 983/983; `make test-both` 983+983 with **zero flaky**; `runtime_collector`
+and `jit` each under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; breakage 23/23; `nest check`; `nest
+format --check`; clippy `-D warnings`; fmt. A methodology note for the next session: two
+overlapping `make test-both` runs (my error) produced three fixed-deadline failures that a
+clean run did not reproduce — see the KI-43 addendum. Don't run two suites on one box and read
+the result as signal.
+
 ## 2026-08-17 — `nest release` bundle rooting: dev/release parity for package-rooted deps (ADR-070)
 
 Closed the last ADR-070 follow-up. A release bundle used to embed every module by its bare

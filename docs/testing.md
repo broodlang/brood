@@ -140,8 +140,9 @@ modifiers (`:serial`, `:isolated`, `:tags`) in any order.
 Output is **plain text when captured** (a pipe, `cargo test`, CI, or an LLM
 reading the run) and **coloured only when stdout is an interactive terminal**
 (via the `stdout-tty?` primitive) — so a captured run is never littered with ANSI
-escape codes. `tests/suite-failures.blsp` is a runnable demo of the failure
-rendering (`./bin/cli tests/suite-failures.blsp`).
+escape codes. `tests/suite_failures_test_ignore.blsp` is a runnable demo of the failure
+rendering (`./bin/cli tests/suite_failures_test_ignore.blsp`) — the `_ignore` suffix keeps
+the suite from discovering a file that is *meant* to fail.
 
 `(error-of body…)` is a helper, not an assertion: it evaluates `body` and yields
 the error it raised — a built-in error as its message string, a `(throw v)` as
@@ -443,8 +444,8 @@ high-water mark, bounded by the pool. `run-tests` raises if anything failed, so
 the process exits non-zero — which is how `cargo test` notices.
 
 See `tests/suite_test.blsp` (and the other `tests/*_test.blsp` files) for the real
-suite, and `tests/suite-failures.blsp` for a deliberately-failing file you can run
-by hand (`brood tests/suite-failures.blsp`) to see the failure report.
+suite, and `tests/suite_failures_test_ignore.blsp` for a deliberately-failing file you can run
+by hand (`brood tests/suite_failures_test_ignore.blsp`) to see the failure report.
 
 ## External conformance corpora
 

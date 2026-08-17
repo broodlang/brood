@@ -150,3 +150,29 @@
     ;; yields N+1 pieces.
     (let (src (apply str (map (fn (_) "[a](u)") (range 0 2000))))
       (assert= 2001 (count (string-split (docs/md-links src) "<a href="))))))
+
+;; ---------------------------------------------------------------------------
+;; The doc catalogue must not name things that do not exist.
+;;
+;; `std/doc-catalog.blsp` maps every public bare name to a category, and its own
+;; docstring says to "regenerate when the builtin/prelude surface changes" — a manual
+;; step, which is exactly what rotted. Found 2026-08-17: **13 stale entries**, including
+;; `require` (removed by ADR-229, so `nest docs --all` and hive's hosted /reference were
+;; still presenting it as a language function) and twelve private `-acc`/helper names
+;; (`dedupe-acc`, `pow-acc`, `index-where-from`, …) that moved into `enum`/`math` as
+;; module internals when ADR-227 namespaced them, but stayed listed as public API.
+;;
+;; Nothing detected it because a catalogue entry has no callers: `nest docs --all` simply
+;; prints whatever the map says, and an entry for a nonexistent name renders happily. So
+;; this asserts the invariant directly, and it is cheap (one `bound?` per entry).
+(describe "doc catalogue: every entry names something that exists"
+  (test "no catalogue entry is a name the runtime cannot resolve"
+    (let (forms (into #{} (map (fn (f) (if (pair? f) (first f) f)) (special-forms)))
+          missing (filter (fn (k)
+                            (let (s (string->symbol k))
+                              (not (or (bound? s) (contains? forms s)))))
+                    (keys doc-catalog/*catalog*)))
+      ;; Names, not just a count — a failure should say WHICH entry to remove.
+      (assert= (sort missing) (list))))
+  (test "the catalogue is not empty (a broken load would vacuously pass the check above)"
+    (is (> (count (keys doc-catalog/*catalog*)) 500))))

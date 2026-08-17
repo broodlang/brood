@@ -1,4 +1,4 @@
-;; std/docs.blsp — documentation extraction (`nest doc`), in Brood.
+;; std/tool/docs.blsp — documentation extraction (`nest doc`), in Brood.
 (defmodule docs
   "Generate Markdown documentation for a module by loading it and introspecting
 the definitions it adds to the global table.
@@ -7,7 +7,7 @@ the definitions it adds to the global table.
 `(generate-docs name)` documents a single module — a baked-in std module, or one
 found as <name>.blsp on `*load-path*`. This is policy built on the introspection
 primitives (`doc` / `arglist` / `global-names`), `slurp`, and the project model
-in `std/project.blsp`; Rust supplies only that mechanism (ADR-006).
+in `std/tool/project.blsp`; Rust supplies only that mechanism (ADR-006).
 
 Attribution uses a `(global-names)` delta around loading the module, so it can't
 document a module already loaded before the snapshot (the delta is empty). For
@@ -221,7 +221,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; (`math/sqrt`, `web/endpoint/handler`), not bare (a bare `sqrt` is unbound; you reference
 ;; the qualified name or `(:use)`). The prelude-category pseudo-modules the reference adds
 ;; leave it false (their names — `+`, `map` — are genuinely bare).
-(defn- docs-module-model (title mdoc syms)
+(defn- docs-module-model
+  (title mdoc syms)
   {:module title :doc mdoc :defs (docs-def-records syms) :qualified? true})
 
 ;; A file's declared module name — the `(defmodule NAME …)` symbol — or nil if the file

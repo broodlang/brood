@@ -1,4 +1,4 @@
-;; std/editor/dockerfile.blsp — lexical Dockerfile highlighting. (require 'editor/dockerfile).
+;; std/editor/dockerfile.blsp — lexical Dockerfile highlighting.
 ;;
 ;; The Dockerfile analogue of editor/markdown / editor/highlight: a pure data→data
 ;; tokenizer, no IO and no kernel surface. `(dockerfile-spans src)` returns

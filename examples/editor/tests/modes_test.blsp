@@ -4,11 +4,10 @@
 ;; the modes resolves them).
 
 (defmodule modes-test (:use test) (:use editor/buffer) (:use editor/layers))
-(require 'editor/buffer)
-(require 'editor/layers)
-(require 'brood-mode)
 ; from src/ (editor policy, not embedded)
-(require 'text-mode)
+;; Effect-load: text-mode registers itself as the `:fundamental` layer and is never
+;; referenced by name here, so inference cannot pull it in (ADR-229).
+(require-one 'text-mode)
 (describe "mode resolution & the default"
   (test "text-mode is the default for a plain buffer (:fundamental)"
     (assert= (buffer-type-for {}) :fundamental)

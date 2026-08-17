@@ -1,4 +1,4 @@
-;; std/net/reconnect.blsp — supervised node auto-reconnect. (require 'net/reconnect).
+;; std/net/reconnect.blsp — supervised node auto-reconnect.
 ;;
 ;; Heartbeats detect a dead node link (2 s ping / 6 s down) but nothing
 ;; reconnects: `send` to a disconnected node drops (or raises, with

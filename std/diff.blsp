@@ -1,4 +1,4 @@
-;; std/diff.blsp — LCS-based sequence diff. (require 'diff)
+;; std/diff.blsp — LCS-based sequence diff.
 ;;
 ;; Computes the shortest edit script (SES) between two sequences using a
 ;; classic O(m*n) dynamic-programming LCS table, then backtracks to produce

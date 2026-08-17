@@ -34,7 +34,6 @@ suggestions\", never to an error on the user's command line."
   ;; fails to load and every `complete-safely` net below is bypassed.
   (:use-internals project))
 
-
 ;; --- safety net ---------------------------------------------------------------
 ;; Run `thunk`, yielding nil on any failure. Wrapped around every filesystem or
 ;; parse operation below so a half-written manifest or an unreadable directory

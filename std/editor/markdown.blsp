@@ -1,4 +1,4 @@
-;; std/editor/markdown.blsp — lexical Markdown highlighting. (require 'editor/markdown).
+;; std/editor/markdown.blsp — lexical Markdown highlighting.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - The Markdown analogue of `editor/highlight.blsp`: pure data → data, no IO and

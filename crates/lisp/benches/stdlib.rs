@@ -329,7 +329,10 @@ mod csv {
             .map(|i| format!("{i},name_{i},{}", i * 100))
             .collect();
         let csv = format!("id,name,score\n{}", rows.join("\n"));
-        bench_prog(bencher, format!("(require-one 'csv) (def src {csv:?}) {body}"));
+        bench_prog(
+            bencher,
+            format!("(require-one 'csv) (def src {csv:?}) {body}"),
+        );
     }
 
     /// Parse a CSV string with `n` rows.

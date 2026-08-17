@@ -1,4 +1,4 @@
-;; std/net/http.blsp — a minimal HTTP/1.0 server, in Brood. (require 'net/http).
+;; std/net/http.blsp — a minimal HTTP/1.0 server, in Brood.
 ;;
 ;; Built entirely on the TCP socket library (ADR-062) and the file library: the
 ;; kernel adds nothing for plaintext HTTP. The shape:

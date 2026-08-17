@@ -82,7 +82,7 @@ Format suggestion:
 ## 2026-05-28 — Claude Opus 4.7 — concurrent Mandelbrot
 **Goal:** demo program exercising processes + fused pipelines + macros.
 **Blockers:** scheduler race; type-checker noise; formatter aggression.
-**Surprises:** `defprocess` is in hatch (require 'proc/hatch); apply exists.
+**Surprises:** `defprocess` is in hatch (reference `proc/hatch/…`, which loads it); apply exists.
 **What I'd tell next-me:** read std/prelude.blsp once; use -j 1 for
 fan-out demos; the type-checker warnings about hatch macros are noise.
 ```

@@ -1,4 +1,4 @@
-;; std/observer.blsp — an interactive process observer. (require 'observer).
+;; std/tool/observer.blsp — an interactive process observer.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - The first real app on the M3 display/input seam (ADR-046): an
@@ -235,7 +235,7 @@ on screen (roughly centred), clamped so the window never runs past the end."
 ;; ---- the eval minibuffer's rendering (colour shared with the REPL) -----------
 ;;
 ;; The minibuffer reuses the REPL line editor's *pure* analysis: `lineedit/lineedit-handle`
-;; for editing (incl. Tab completion via its keymap) and `std/highlight.blsp` for
+;; for editing (incl. Tab completion via its keymap) and `std/editor/highlight.blsp` for
 ;; colour. The only observer-specific bit is laying the highlight chunks out as
 ;; absolute `text` ops (the observer paints a full frame), where lineedit emits
 ;; relative `[:print …]` ops — both over the same `highlight-chunks`.
@@ -261,7 +261,7 @@ right from column `col`. Tail-recursive."
   "Render the eval minibuffer at frame `row` (width `cols`): the prompt, then the
 input text with the **same** live syntax highlighting + bracket matching the REPL
 line editor uses (`highlight-chunks` / `lineedit/lineedit-overrides` over
-`std/highlight.blsp`), then the cursor at point. Returns a list of render ops —
+`std/editor/highlight.blsp`), then the cursor at point. Returns a list of render ops —
 pure, so it shares the REPL's colouring rather than re-implementing it. (Tab
 completion already works via `lineedit/lineedit-handle`'s keymap in `observe-command-key`.)"
   (let (prompt (observe-fit (get edit :prompt) cols)
@@ -618,10 +618,10 @@ body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
             (observe-select st procs idx)))
       else state)))
 
-;; ---- display frontends + app loop now live in `ui` (std/ui.blsp) ------------
+;; ---- display frontends + app loop now live in `ui` (std/editor/ui.blsp) ------------
 ;; `*term-display*`, `(gui-display)`, `display-broadcast`, and the `ui-run` loop
 ;; were extracted into the reusable `ui` module so a new project (the editor) can
-;; build on the same seam. `(require 'ui)` above pulls them in; the observer is now
+;; build on the same seam. The `ui/…` references above pull them in; the observer is now
 ;; just a `ui-run` client — see `observe-view` / `observe-update` below.
 
 ;; ---- the eval minibuffer (a REPL inside the observer) ------------------------
@@ -671,7 +671,7 @@ the backend's `:kill` and reports the result; any other key cancels. Clears
       (assoc model :confirm nil :msg ((get backend :kill) c))
       (assoc model :confirm nil :msg "kill cancelled"))))
 
-;; The observer is a `ui-run` client (std/ui.blsp): a pure `view` (model + size →
+;; The observer is a `ui-run` client (std/editor/ui.blsp): a pure `view` (model + size →
 ;; frame) and an `update` (model + input + size → model). `ui-run` owns the loop —
 ;; enter, render, poll, fold, recurse, leave — so the observer holds no loop of its
 ;; own. The session model is `{:sel-id :sort :paused :last :link :mode :edit :msg

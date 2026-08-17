@@ -1,6 +1,6 @@
-;; std/project.blsp — the project model + test runner (ADR-020), in Brood.
+;; std/tool/project.blsp — the project model + test runner (ADR-020), in Brood.
 ;;
-;;   (require 'project)       ; loaded on demand; baked into the binary
+;;   project/…                ; loaded on demand; baked into the binary
 ;;   (run-project-tests)      ; find project.blsp, discover tests, run them once
 ;;
 ;; This is the policy behind `nest test`. Convention over configuration: `src/`
@@ -16,10 +16,10 @@ Convention over configuration: `src/` holds source (added to *load-path*),
 `tests/` holds <name>_test.blsp cases; a `project.blsp` manifest declares
 identity and may override those paths. Also home to the user-config loader and
 the `nest new` scaffolder."
-  ;; NOT `(:use test)`: that would `(require 'test)` at *load* time, so a lean
+  ;; NOT `(:use test)`: that would load `test` at *load* time, so a lean
   ;; release runtime (which strips the test framework, ADR-038) couldn't even
   ;; load `project` to boot a bundle. The test runner needs test only when it
-  ;; actually runs — `run-project-tests` `(require 'test)`s and qualifies it.
+  ;; actually runs — `run-project-tests` loads `test` itself and qualifies it.
 )
 
 ;; --- the project, as set by the manifest -------------------------------------
@@ -154,7 +154,7 @@ the `nest new` scaffolder."
   (spec)
   (let (parts (string-split spec "/")
         ; reject blank module/fn halves so a typo like "" or "/start" errors
-        ; cleanly here, not as a malformed `(require '||)` downstream.
+        ; cleanly here, not as a malformed load downstream.
         ok? (fn (p) (not (blank? p))))
     (cond
       (and (= (count parts) 1) (ok? (first parts))) (list (symbol (first parts)) 'main)
@@ -171,7 +171,7 @@ the `nest new` scaffolder."
 ;; Each :dependencies entry is a vector: `[name :git URL :ref REF]` or
 ;; `[name :path PATH]` — `name` is the local symbol `require` will see. Parsed
 ;; into one of the four **dep records** below for the package manager
-;; (std/package.blsp) to consume. The reserved opts :branch/:dir/:features
+;; (std/tool/package.blsp) to consume. The reserved opts :branch/:dir/:features
 ;; are recognised but rejected in v1, so the manifest shape stays forward-compatible.
 ;;
 ;; A dep's KIND is its record identity, not a `:kind` field: the package manager
@@ -179,7 +179,7 @@ the `nest new` scaffolder."
 ;; compatibility) through the `Dependency` ability it declares over these four types,
 ;; which is `:sealed` over exactly this set — so `nest check` flags a new kind that
 ;; forgets one of them. This module owns the *types* (it parses the manifest);
-;; std/package.blsp owns the *behaviour*. A resolved entry is one of these records with
+;; std/tool/package.blsp owns the *behaviour*. A resolved entry is one of these records with
 ;; the resolution fields (`:resolved-path`/`:sha256`/`:commit`/`:deps`) assoc'd on, so it
 ;; dispatches identically to the dep it came from.
 
@@ -1240,7 +1240,7 @@ resolve in the advisory checker. Returns the project root."
 ;; the moment that file moves — the KI-17 bug (docs/known-issues.md). `check-file`
 ;; flags such a reference, but only when told which modules the file may reach. That
 ;; set must be the *transitive* closure of the file's own requires (a file reaches
-;; `mod` if it, or a module it requires, recursively, `:use`s / `(require 'mod)`s it):
+;; `mod` if it, or a module it loads, recursively, `:use`s / references it):
 ;; e.g. a test that `(:use editor/treesit)` legitimately names `face/…` because
 ;; treesit itself requires `editor/face`. Only the whole-project driver sees every
 ;; header, so it builds the module→direct-deps graph (one native `%module-direct-requires`
@@ -1673,7 +1673,7 @@ resolve in the advisory checker. Returns the project root."
 
 ;; Structured analogue of `check-project` — returns a flat list of
 ;; `{:file :line :col :message}` maps instead of printing GNU lines + a
-;; count. Backs the `nest mcp` `check` tool (`std/mcp.blsp`, step 1c-a).
+;; count. Backs the `nest mcp` `check` tool (`std/tool/mcp.blsp`, step 1c-a).
 ;; Honors `BROOD_NO_CHECK=1` the same way `check-project` does: returns
 ;; an empty list under the flag.
 (defn check-project-structured ()
@@ -2191,7 +2191,7 @@ resolve in the advisory checker. Returns the project root."
 
 ;; Sources-only variant for `run-project`'s auto pre-flight: skip `tests/`,
 ;; because test files depend on the test-framework macros (`describe`/`test`/
-;; `assert=`/`is`) loaded by `(require 'test)`, which `nest run` doesn't
+;; `assert=`/`is`) loaded with the `test` module, which `nest run` doesn't
 ;; do — so checking them there would emit spurious "unbound symbol" warnings.
 ;; `nest test` keeps using `check-project` (full coverage; `test` is loaded).
 (defn check-project-sources ()
@@ -2796,15 +2796,14 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
       ;; loads there (at ROOT context). Only DEPENDENCIES root. Strip each file's co-located
       ;; `deftest`/`describe` forms (ADR-225) as it is slurped: tests run under `nest test`
       ;; but never ship (a test-only file strips to empty source — harmless, `require`s nothing).
-      (let (project-pairs
-              (fold (fn (acc d)
-                      (fold (fn (a f)
-                              (cons (list (project-bundle-name d f)
-                                      (strip-test-forms (slurp f)))
-                                a))
-                        acc
-                        (project-collect-sources d)))
-                nil src-dirs)
+      (let (project-pairs (fold (fn (acc d)
+                                  (fold (fn (a f)
+                                          (cons (list (project-bundle-name d f)
+                                                  (strip-test-forms (slurp f)))
+                                            a))
+                                    acc
+                                    (project-collect-sources d)))
+                            nil src-dirs)
             ;; DEPENDENCY modules are embedded by their ROOTED name (`foo/parser`) so two deps
             ;; each providing a `parser` coexist in one flat bundle — dev/release parity for
             ;; package-rooting (ADR-070). The rooted-name → path entries are what `ensure-deps`
@@ -2812,13 +2811,13 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
             ;; bundled dep dir (so this is independent of any earlier `project-setup` that may
             ;; also have registered the root project's own rooted modules there). `run-bundle`
             ;; rebuilds the matching `*package-modules-of*` at boot and loads each under context.
-            dep-pairs
-              (fold (fn (acc kv)
-                      (let (rooted-key (first kv) path (second kv))
-                        (if (bundle-dep-file? path dep-dirs)
-                          (cons (list rooted-key (strip-test-forms (slurp path))) acc)
-                          acc)))
-                nil (seq *package-module-files*))
+            dep-pairs (fold (fn (acc kv)
+                              (let (rooted-key (first kv) path (second kv))
+                                (if (bundle-dep-file? path dep-dirs)
+                                  (cons (list rooted-key (strip-test-forms (slurp path))) acc)
+                                  acc)))
+                        nil
+                        (seq *package-module-files*))
             pairs (append project-pairs dep-pairs))
         ;; With deps rooted, a same-named module in two deps no longer clashes. This guard now
         ;; only catches a genuine bundle-key collision — two of your own source files declaring
@@ -2865,7 +2864,8 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
            (let (marker (str pkg "/")
                  shorts (fold (fn (acc key)
                                 (if (starts-with? key marker)
-                                  (cons (symbol (substring key (string-length marker)
+                                  (cons (symbol (substring key
+                                                  (string-length marker)
                                                   (string-length key)))
                                     acc)
                                   acc))
