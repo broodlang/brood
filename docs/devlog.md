@@ -1332,3 +1332,50 @@ longer skips a known-red project (`SKIP_PROJECTS` is now empty), and the `docs/l
 
 `docs/known-issues.md` now shows **no open items** — only the KI-36 watch item (unreproducible on
 demand) remains.
+
+## 2026-08-17 (later) — the computed-head resolution memo: implemented, measured, reverted
+
+The frontier's lever 3, sized at ~18% of `pipeline` from that morning's profile: a **computed
+head takes no inline cache**, so `passthrough_arm` (5.3%), `select_arm` (2.0%), `vm_arm_block`
+(1.2%) and the arm-handle lookup (4.8%) are re-derived on every call — every transducer step,
+callback, message handler and `(f x)` where `f` is a parameter — and none of them can change
+between two calls to the same closure at the same arity.
+
+Built it the low-risk way: the memo rides in the existing `vm_cache` entry, so there is **no new
+table** (the per-process floor is the runtime frontier's lever 1) and **no new invalidation
+obligation** — verified first that every `arm_ic_blocks` clear is paired with a `vm_cache` clear
+in the same function, which is what makes caching `bases` sound, and that the one unpaired
+direction (`sync_free_epoch` clears only `vm_cache`) is the safe one. All five call sites
+rewired, including the JIT's non-elided resolve. Suite 4650/4650, 477 lib tests.
+
+**Reverted on measurement.** Against a pinned baseline (`make ab-pin`, added for exactly this):
+`nqueens` ceiling 1 **−4.3%/−4.9%**, `pipeline` ceiling 1 −1.6%, `sort` −1.3% — but `pipeline`
+at the **default** ceiling was **parity** interleaved at N=10M (3410/3420 base vs 3430/3420),
+and `spawn-live` peak RSS went **647→693 and 651→699 MB, +7.0%** (≈+135 MB at the published
+300k units), because the memo adds ~24 bytes per `(closure, argc)` per process. No gain where
+users run, ~5% on one row at ceiling 1, and a 7% memory regression on the row whose open work
+item is *reducing* the per-process floor. Bad trade; the patch stays out of tree.
+
+**Two findings worth more than the change would have been.**
+
+1. **The profile over-promised, because the derivations are cheaper than the memo that replaces
+   them.** A closure deref plus a `max_by_key` over a single-arm closure costs less than a
+   `HashMap` probe, so converting 13% of profiled self-time into one memo lookup bought ~0. A
+   share in a profile is an upper bound on what removing that code *could* pay, not a share you
+   can collect — the replacement has to be cheaper than what it replaces, and here it was not.
+2. **An intermediate version cost `reduce` +5.0%** because it resolved an arm even for thin
+   wrappers — i.e. it *compiled* every `+` just to memoize it — and that row is almost entirely
+   passthrough calls. Caught by measuring rather than by reading, which is the argument for
+   measuring each step rather than only the finished change.
+
+Also this session: `make ab-pin` / `scripts/ab-pin.sh` — a **pinned** baseline binary
+(`target/ab-pinned/<sha>/`, outside `target/ab/` so `make ab-clean` leaves it) plus a
+base-vs-base floor. `make ab` rebuilds its baseline in a throwaway worktree, so two runs on
+different days measure against two different binaries; ADR-228 hit exactly that and had to
+record a range (−9.1% and −5.6% for the same comparison) instead of a number. The reverted
+change above was measured with it, and one interleaved 10M-element run settled a question two
+`ab-bench` sweeps had left ambiguous.
+
+What the negative result implies for the frontier: the computed-head path's cost is the **call
+protocol itself** — frame setup and dispatch — not the resolution bookkeeping. That points back
+at call inlining and the interpreter's dispatch loop, and lever 3 is demoted accordingly.
