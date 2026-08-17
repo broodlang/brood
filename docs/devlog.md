@@ -1300,3 +1300,35 @@ Coverage: `crates/cli/tests/release_bundle.rs` gains `bundled_deps_with_same_mod
 `tests/package_test.blsp` gains a bundle-collect case asserting deps key rooted and the root
 module stays bare. Baselines re-run green: release_bundle 3/3, namespace 51/51, package 110/110,
 every in-language `tests/*_test.blsp` file with no failures.
+
+## 2026-08-17 — Close the last two open issues: the `sqrt` call-site inline (KI-44) and the stale `examples/editor` (KI-45)
+
+Two open items from the day's earlier sessions, both now green.
+
+**KI-44 — the `sqrt` call-site inline, restored via a structural identity.** ADR-227 moved `sqrt`
+out of the prelude into `std/math.blsp`, which killed the `resolve_prim1` inline: it required a
+*bare* `sqrt` head resolving to a sealed PRELUDE closure, and the head is now the qualified
+`math/sqrt` bound to a RUNTIME closure. `region == RUNTIME` alone cannot identify the canonical
+wrapper — a user's own `foo/sqrt` is a RUNTIME closure too — so the inline is now keyed on a
+STRUCTURAL match: any `…/sqrt` (or bare `sqrt`) head bound to a closure whose single 1-param arm is
+exactly `(if (< n 0) _ (if (<= n 0) _ (%f64-sqrt n)))`, with `<`/`<=` the canonical PRELUDE
+comparisons and `%f64-sqrt` the native. That shape is what makes the `PrimOp1::Sqrt` x>0 shortcut
+sound (a positive argument provably returns `%f64-sqrt(n)`; everything else deopts to the live
+wrapper via the stored head). Rebind-safe for free — `Inst::Prim1` re-runs `resolve_prim1` on every
+`global_epoch` change — and degrades to no-inline on any deviation, never a miscompile. Discovered
+along the way that `math/sqrt` is a *reserved* name (`(def math/sqrt …)` → E0030), so the global
+binding can't be hot-reload-rebound at all; the structural check still matters for user `…/sqrt`
+names, which the `/sqrt` name-gate also reaches. Measured (release, pinned, 3M-iter loop): inline
+**321 ms** vs wrapper-dispatch **905 ms**. Guarded by the whitebox unit test
+`sqrt_call_site_inline_recognizes_the_moved_math_wrapper` (canonical wrapper inlines; bare `sqrt`
+unbound; a user `usersq/sqrt` computing `n*n` does not inline).
+
+**KI-45 — deleted `examples/editor`.** It had referenced `eval-command/eval-last-sexp` since that
+module moved to the sibling `brood-edit` project on 2026-05-31, so 1 of its 5 tests failed. Chose
+option (a): brood-edit is the real editor project, so the in-repo duplicate was removed rather than
+kept limping (also removes 9 of the ADR-229 migration's edits). `scripts/check-examples.sh` no
+longer skips a known-red project (`SKIP_PROJECTS` is now empty), and the `docs/layers.md` /
+`builtins/system.rs` pointers to `examples/editor/src/` were repointed at brood-edit.
+
+`docs/known-issues.md` now shows **no open items** — only the KI-36 watch item (unreproducible on
+demand) remains.

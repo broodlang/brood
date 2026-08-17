@@ -36,8 +36,10 @@ NEST="${NEST:-$ROOT/target/release/nest}"
 RUN_SECS="${RUN_SECS:-8}"
 
 # Example PROJECTS whose suite is knowingly red — named here so the skip prints on every
-# run rather than hiding, exactly as `BREAKAGE_SKIP` does for the breakage suite.
-SKIP_PROJECTS="${SKIP_PROJECTS:-editor}"
+# run rather than hiding, exactly as `BREAKAGE_SKIP` does for the breakage suite. Empty
+# now that `examples/editor` (the one known-red project, KI-45) was deleted — brood-edit is
+# the real editor project, so the in-repo duplicate was removed rather than kept limping.
+SKIP_PROJECTS="${SKIP_PROJECTS:-}"
 
 [ -x "$BROOD" ] || { echo "no brood binary at $BROOD — run \`make release-brood\` first" >&2; exit 2; }
 
