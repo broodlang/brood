@@ -325,8 +325,8 @@ W2 and W3 both edit `core/heap.rs`. (W1 and W4 — the `builtins/` split — are
 - **Goal:** give the environment chain its own module.
 - **Do:** move `EnvFrame` and the chain ops (`new_env`, `env_get`, `env_define`,
   `env_set`, `env_root`, plus the `EnvId::GLOBAL` → `runtime.globals` routing) into
-  `crates/lisp/src/core/env.rs`. Frame *storage* stays in the heap slabs
-  (`local.envs`, `runtime.code.envs`); `core/env.rs` operates over the heap via
+  `crates/lisp/src/core/heap.rs` (the env-chain section). Frame *storage* stays in the heap slabs
+  (`local.envs`, `runtime.code.envs`); the env-chain code operates over the heap via
   accessors (add `pub(crate)` ones as needed). Declare `pub mod env;` in
   `core/mod.rs`; update call sites in `eval/mod.rs` and the builtins.
 - **Why:** `core/heap.rs` bundles ~6 concerns; the env chain was historically its own
@@ -347,7 +347,7 @@ W2 and W3 both edit `core/heap.rs`. (W1 and W4 — the `builtins/` split — are
 - **Risk:** low–medium. **Shares `core/heap.rs` with W2.**
 
 ### W4 — Split `builtins.rs` into `builtins/` by domain · ✅ done
-- **Was:** convert the single `crates/lisp/src/builtins.rs` into a directory,
+- **Was:** convert the single `crates/lisp/src/builtins/mod.rs` into a directory,
   one cohesive file per primitive domain, keeping the full `register` table in
   `mod.rs` so every primitive + arity stays visible in one place.
 - **Done:** the split exists on disk as `crates/lisp/src/builtins/` — `mod.rs`

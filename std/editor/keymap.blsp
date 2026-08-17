@@ -1,4 +1,4 @@
-;; std/keymap.blsp — a rebindable key→command dispatcher.
+;; std/editor/keymap.blsp — a rebindable key→command dispatcher.
 ;;
 ;; The shared input seam for interactive Brood UIs (the line editor, the process
 ;; observer, the coming text editor). A KEYMAP is a map `key → command`, where a
@@ -16,7 +16,7 @@
 ;; (unchanged — what lineedit/observer use); `keymap-step` is the chord-aware
 ;; superset that threads a "pending prefix" through the caller's loop.
 ;;
-;; This is the counterpart to the display seam: `std/display.blsp` is "render-ops
+;; This is the counterpart to the display seam: `std/editor/display.blsp` is "render-ops
 ;; out"; this is "key events in". Both are policy in Brood over a thin term-* seam.
 
 (defmodule editor/keymap
@@ -33,7 +33,7 @@ hot-swaps behaviour.
     (def *km* (keymap-bind {} [:ctrl-x :ctrl-e] 'eval-last-sexp))
     (keymap-step *km* pending state key fallback)        ; => [state' pending']
 
-Used by `std/lineedit.blsp` (self-insert fallback) and `std/observer.blsp` (no-op
+Used by `std/editor/lineedit.blsp` (self-insert fallback) and `std/tool/observer.blsp` (no-op
 fallback); the same pattern is how the editor's keymaps work.")
 
 (defn keymap-dispatch (keymap state key fallback)

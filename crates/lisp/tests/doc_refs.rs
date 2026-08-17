@@ -108,10 +108,7 @@ fn every_adr_reference_resolves_to_an_adr() {
     // Superseded ADRs keep their entries in the archive, and `decisions.md` links there.
     let known = defined(
         &root,
-        &[
-            "docs/decisions.md",
-            "docs/archive/decisions-superseded.md",
-        ],
+        &["docs/decisions.md", "docs/archive/decisions-superseded.md"],
         "ADR-",
     );
     assert!(

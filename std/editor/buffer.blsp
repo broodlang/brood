@@ -1,4 +1,4 @@
-;; std/buffer.blsp — the editor framework's buffer model.
+;; std/editor/buffer.blsp — the editor framework's buffer model.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - A BUFFER is an immutable value (a map) holding a rope plus cursor state.

@@ -212,7 +212,7 @@ test discovery, lints, release, config)."
     "    (let (c (spawn-server counter 0))\n" "      (! c :inc) (! c :inc) (! c [:add 10])\n"
     "      (assert= (gen-call c :value) 12))))\n"))
 
-;; `editor`: a tiny text editor on the `ui` framework (std/ui.blsp) — a `ui-run`
+;; `editor`: a tiny text editor on the `ui` framework (std/editor/ui.blsp) — a `ui-run`
 ;; client like the observer. The buffer is a list of line strings + a [row col]
 ;; cursor; every edit is a pure `(model -> model)` function (testable without a
 ;; terminal); `view`/`update` plug into `ui-run`, which owns the loop + teardown.

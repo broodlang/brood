@@ -140,7 +140,7 @@ behind a long-lived loop has changed since it started."
           (reload-loop path now on-reload)))))
 
 ;; Recursive .blsp collector. Returns a flat list of paths (relative to the
-;; original `dir` argument). Mirrors the walk in std/project.blsp; lives here
+;; original `dir` argument). Mirrors the walk in std/tool/project.blsp; lives here
 ;; too so std/reload stays prelude-only and require-able without project.
 (defn- reload-collect-blsp
   (dir)

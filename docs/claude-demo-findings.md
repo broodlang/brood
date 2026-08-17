@@ -61,7 +61,7 @@ I had to:
   `iterate-times`, `partition`, `frequencies`.
 - Read `std/hatch.blsp` to learn `defprocess`/`cast`/`call`/`!`/
   `gen-call`/`hatch`/`sleep` — none of these appear in the quick-ref.
-- Read `crates/lisp/src/builtins.rs` to discover `now` (no other doc
+- Read `crates/lisp/src/builtins/mod.rs` to discover `now` (no other doc
   mentions it).
 - Read `examples/life.blsp` to discover `defprocess` exists at all,
   and that ANSI escape codes are first-class (great feature!).

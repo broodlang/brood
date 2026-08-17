@@ -13,8 +13,9 @@ settled questions. Newest at the bottom.
 > and are not rewritten, so a few cite design/audit docs that have since been
 > deleted — `concurrency-v2.md`, `supervision.md`, `memory-review.md`,
 > `incremental-check.md`, `vm-perf-and-jit-runway.md`, `image-cache-plan.md`,
-> `feedback-retro-game-of-life.md` (most trimmed in `fdce540` once the features
-> they planned had shipped). Their content is superseded by the ADR that cites
+> `feedback-retro-game-of-life.md`, `value-repr.md`, `jit-tier2.md`,
+> `jit-stage1.md`, `frame-representation.md`, `runtime-collector-exploration.md`
+> (most trimmed in `fdce540` once the features they planned had shipped). Their content is superseded by the ADR that cites
 > them, the topic doc, or the source itself; recover the text from git if needed.
 
 ## Index
@@ -417,7 +418,7 @@ kernel) on the *ergonomics* side: small kernel, small surface.
 
 **Status:** accepted.
 
-**Decision.** Install a `#[global_allocator]` (`crates/lisp/src/alloc.rs`) that
+**Decision.** Install a `#[global_allocator]` (`crates/lisp/src/core/alloc.rs`) that
 wraps the system allocator and maintains two relaxed atomics — live bytes and a
 peak high-water mark — exposed to Brood as the `mem-bytes` / `mem-peak`
 primitives. It is declared in the `brood` library (not the CLI binary) so the
@@ -525,7 +526,7 @@ Brood.
 
 **Status:** accepted.
 
-**Context.** The test framework (`std/test.blsp`) is written in Brood and runs
+**Context.** The test framework (`std/tool/test.blsp`) is written in Brood and runs
 tests as processes. Under ADR-013 those processes **share** the global table, so
 the original design — workers tallying into shared mutable globals (`*passed*`,
 `*failed*`) — raced and miscounted (failures attributed to the wrong test, double
@@ -618,7 +619,7 @@ handles — cheap); `Heap::restore_globals()` puts a snapshot back. The `%isolat
 primitive wraps a thunk: snapshot → run → restore (even on error). The framework
 runs the `:isolated` phase **first** and calls each isolated test through
 `%isolate`, so every isolated test sees the clean post-load baseline and nothing
-it defines survives. Policy stays in Brood (`std/test.blsp`); Rust supplies only
+it defines survives. Policy stays in Brood (`std/tool/test.blsp`); Rust supplies only
 the snapshot/restore mechanism (ADR-006/008).
 
 **Why.** Proportionate (ADR-011): it delivers the property that matters — a test's
@@ -1202,7 +1203,7 @@ to rustc because rustc is not a library; our runtime *is* one, so embedding is
 simpler and keeps a single process for the eventual hot-reload/editor story.)
 `nest` stays a *thin Rust shell*: it evaluates bootstrap snippets
 (`(require 'project) (load-config) (run-project-tests)`) and the policy —
-templates, name checks, discovery — lives in `std/project.blsp` (ADR-006). The
+templates, name checks, discovery — lives in `std/tool/project.blsp` (ADR-006). The
 small `report_error`/`parse_args` helpers are duplicated across the two bins
 rather than coupled through a shared crate; they're tiny and stable.
 
@@ -1233,7 +1234,7 @@ has no namespace, so nothing records which definitions belong to which module.
   what it defined — read back through the existing `(doc f)`/`(arglist f)`. The
   module docstring is read from source (`slurp` + `read-string`), since a leading
   string is discarded on load. Output is Markdown to stdout. Policy lives in
-  `std/docs.blsp` (ADR-006); Rust adds only `slurp` (the read counterpart of
+  `std/tool/docs.blsp` (ADR-006); Rust adds only `slurp` (the read counterpart of
   `spit`) and sorts `(global-names)` for deterministic output.
 - Documenting one module **loads its code**. That's acceptable for a one-shot CLI
   (as `nest test` already loads files), and is explicitly *not* what the
@@ -1604,14 +1605,14 @@ file.blsp`. Concretely:
   get two `nest mcp` processes, each with its own image — no cross-session
   sharing.
 - **A shared introspection layer.** Pull the existing
-  `crates/lsp/src/introspect.rs` (`global_names` / `signature` /
+  `crates/lisp/src/introspect.rs` (`global_names` / `signature` /
   `arglist_tokens`) up to `crates/lisp/src/introspect.rs` and widen it with the
   operations both surfaces need (`source_location`, `macroexpand_to_string`,
   `check_project`, `run_tests`, `format_source`, `eval_in_session`). LSP and
   MCP each become genuinely thin shells over it, so hover and `lookup` cannot
   drift on what `map`'s signature is.
 - **The tool *surface* is declared in Brood**, not Rust (ADR-006). The Rust
-  side is a JSON-RPC dispatcher; `std/mcp.blsp` lists the tools (name, JSON
+  side is a JSON-RPC dispatcher; `std/tool/mcp.blsp` lists the tools (name, JSON
   schema, handler fn) and each handler is Brood. A project's own `mcp.blsp`
   can extend the catalogue — registering a project-specific verb is a `defn`,
   not a new Rust release. The initial set (ADR-011, ship the simple shape) is
@@ -1661,10 +1662,10 @@ file.blsp`. Concretely:
 - **Drift risk with the LSP** if the shared `brood::introspect` extraction is
   half-done — the LSP must move onto it as part of the same change, not after.
 
-**Consequences.** `crates/lsp/src/introspect.rs` moves to the lib crate as
+**Consequences.** `crates/lisp/src/introspect.rs` moves to the lib crate as
 `brood::introspect` and the LSP consumes it from there. `crates/nest/` grows
 an `mcp.rs` module (promote to a `crates/mcp/` lib only when something else
-needs to embed it — the move is mechanical). `std/mcp.blsp` is a new module
+needs to embed it — the move is mechanical). `std/tool/mcp.blsp` is a new module
 the dispatcher loads at startup. `nest new` templates gain a `.mcp.json`.
 The editor work later (M2/M3) inherits the same dispatcher — when the editor
 is itself a Brood image, `nest mcp` becomes a long-running thread inside it,
@@ -1734,7 +1735,7 @@ order from most to least committed:
   separate `cargo` crate, distributed via crates.io); the Brood side just
   `require`s a wrapper. The npm-style supply-chain attack surface stays
   closed by construction.
-- **Policy in Brood (`std/package.blsp`), mechanism in Rust.** The fetch
+- **Policy in Brood (`std/tool/package.blsp`), mechanism in Rust.** The fetch
   primitives are small: `%git-clone url dest ref` (shell out to `git`),
   `%sha256-file path`, `%http-get url` (for future tarball deps —
   primitive added now, used later). Manifest parsing, lock-file format,
@@ -1798,11 +1799,11 @@ order from most to least committed:
   treated as stable (the package's author already passed `nest check`).
   Override: `nest check --include-deps`.
 
-**Consequences.** `std/package.blsp` is a new module. `std/project.blsp`
+**Consequences.** `std/tool/package.blsp` is a new module. `std/tool/project.blsp`
 grows a `:dependencies` clause in its `(project …)` form and an
 `(ensure-deps)` step in `project-setup`. `nest`'s Rust shell gains
 `fetch`/`update`/`add`/`remove`/`tree` subcommands (each a one-liner that
-calls into `std/package.blsp`). The Rust kernel grows `%git-clone`,
+calls into `std/tool/package.blsp`). The Rust kernel grows `%git-clone`,
 `%sha256`, `%git-resolve-ref`, `%rm-rf` primitives (`%http-get` deferred with
 tarball deps — refinement 5 below). `.gitignore`
 templates from `nest new` get `_deps/` added. `nest mcp` gets a
@@ -1817,7 +1818,7 @@ build started, refining the original sketch (full rationale in
 1. **Hash primitive is `%sha256` over a *string*, not `%sha256-file` over a
    directory.** One irreducible primitive (hash a byte string → hex); the
    canonical tree walk + per-file `(%sha256 (slurp p))` + combine is Brood
-   (`std/package.blsp`), over the existing `list-dir`/`dir?`/`slurp`. Smaller
+   (`std/tool/package.blsp`), over the existing `list-dir`/`dir?`/`slurp`. Smaller
    kernel, more in-language (ADR-006), and the same primitive hashes the lock
    manifest. Replaces `%sha256-file` in the original kernel list.
 2. **`:path` deps load *in place*.** A path dep's `src/` goes straight onto
@@ -1927,7 +1928,7 @@ as designed, with two refinements from building it:
   so `require`/`:use` resolve an app's own modules (and bundled deps) transparently.
   Thin new primitives `%bundled?` / `%bundle-manifest` / `%bundle-module-names`
   expose the rest; boot policy is Brood (`project/run-bundle` + `bundle-collect`
-  in `std/project.blsp`), per ADR-006.
+  in `std/tool/project.blsp`), per ADR-006.
 - **Code-only + deps bundled.** v1 embeds `project.blsp` + `src/**/*.blsp` +
   resolved `_deps/` (so a `:path`/`:git`-dep app is self-contained); it does *not*
   virtualize the filesystem, so runtime asset reads (`(slurp "data.txt")`) still
@@ -2390,7 +2391,7 @@ safepoint-rooting machinery was the bulk of the multi-thread scheduler race
 — were never the problem and remain. The roadmap calls for supervisor trees;
 the question was *where* they live.
 
-**Decision.** Supervision is a require-able Brood module, `std/supervisor.blsp`
+**Decision.** Supervision is a require-able Brood module, `std/proc/supervisor.blsp`
 (`(require 'supervisor)`), built entirely on `spawn` / `monitor` / `receive`. A
 supervisor is an ordinary green process carrying immutable state through a
 receive loop (the `hatch.blsp` idiom); it `monitor`s each child and reacts to the
@@ -2526,12 +2527,12 @@ five `term-*` primitives over `crossterm` (`term-enter`, `term-leave`,
 lives behind the scheduler registry).
 
 - **Protocol meaning is policy (Brood); painting is mechanism (Rust).**
-  `std/display.blsp` defines the op vocabulary as pure constructors; `term-draw`
+  `std/editor/display.blsp` defines the op vocabulary as pure constructors; `term-draw`
   is a ~40-line interpreter of that vector. So the op set is redefinable Lisp data
   and a remote frontend re-implements the same ops elsewhere — exactly the seam
   architecture.md promised. This is the "drawing, I/O" Rust-primitive category the
   architecture already anticipated (ADR-006).
-- **Observer-as-proof, not editor-first.** `std/observer.blsp` + `nest observe` is
+- **Observer-as-proof, not editor-first.** `std/tool/observer.blsp` + `nest observe` is
   a tiny Erlang-observer-style process viewer — the *smallest real app* on the
   seam. It needs no rope/buffer, so it validates the render protocol + key loop
   end-to-end in isolation, before the editor rides on it. A node-stats panel +
@@ -2643,7 +2644,7 @@ multi-arity helps but doesn't fully solve).
 ## ADR-048 — Self-hosted REPL (the read-eval-print loop in Brood)
 
 **Status:** accepted (2026-05-29). Moves the REPL out of Rust (`crates/repl`) and
-into Brood (`std/repl.blsp`); the `rustyline` dependency leaves the tree with it.
+into Brood (`std/tool/repl.blsp`); the `rustyline` dependency leaves the tree with it.
 
 **Context.** The REPL was Rust from day one — a bootstrap (`crates/repl`, shared
 by `brood` and `nest repl`) doing `rustyline` line editing, multi-line balance
@@ -2669,7 +2670,7 @@ prerequisites had to land first, and now all have:
   (`{:kind :message [:line :col] …}`, ADR + `docs/llm-native.md` §4), so the loop
   can format errors without parsing strings.
 
-**Decision.** Write the loop in `std/repl.blsp` (opt-in module, `(require 'repl)`),
+**Decision.** Write the loop in `std/tool/repl.blsp` (opt-in module, `(require 'repl)`),
 add **one** irreducible Rust primitive, and shrink the binaries to a bootstrap.
 - **New primitive: `(read-line)`** — a blocking read of one line from stdin,
   returning the line (trailing newline stripped) or `nil` at EOF. Blocking stdin
@@ -2739,7 +2740,7 @@ code. Consumers match the **code**, not the message, to decide "needs more input
   throws at read time with **nothing evaluated** — the consumer can safely retry
   the whole growing buffer as more lines arrive, with no partial/double effects.
 
-`std/repl.blsp` uses this for line-at-a-time multi-line entry (`repl--incomplete?`).
+`std/tool/repl.blsp` uses this for line-at-a-time multi-line entry (`repl--incomplete?`).
 The same signal is what a future editor's eval-region / structured-editing layer
 will read; keeping it a reader-owned, code-tagged fact (not consumer-side
 delimiter counting) is what makes those reuses correct for free.
@@ -2876,13 +2877,13 @@ pid (a non-pid is a type error — same contract as `mailbox-size`):
 
 **References.** ADR-006 (mechanism in Rust, the map is policy-shaped data), ADR-046
 (the observer, first consumer), ADR-026 (the snapshot is an immutable value),
-`std/observer.blsp`, `docs/primitives.md` (the `process-info` entry).
+`std/tool/observer.blsp`, `docs/primitives.md` (the `process-info` entry).
 
 ## ADR-052 — Interactive REPL line editor in Brood (inline `term-*` seam)
 
 **Status:** accepted (2026-05-29). The syntax-highlighting, bracket-matching,
-signature-hinting, completing, emacs-keyed REPL editor — `std/lineedit.blsp` +
-`std/highlight.blsp` over a thin new inline `term-*` seam.
+signature-hinting, completing, emacs-keyed REPL editor — `std/editor/lineedit.blsp` +
+`std/editor/highlight.blsp` over a thin new inline `term-*` seam.
 
 **Context.** ADR-048 made the REPL a Brood loop over `read-line`, with line editing
 left to the terminal's cooked mode and an explicit note that richer editing was "now
@@ -2903,8 +2904,8 @@ hints, Tab completion, and the core emacs/readline keys + ↑/↓ history. The e
   flushed once, sharing `term-draw`'s `apply_face`). `key_to_value` also learns the
   ALT modifier (`:alt-f` …, for M-f/M-b) and `BackTab` (`:back-tab`). Everything an
   editor *does* — keymap, kill-ring, history, completion, layout, highlighting —
-  lives in Brood (`std/lineedit.blsp` + the pure `std/highlight.blsp`), redefinable.
-- **Lexical highlighting, written in Brood.** `std/highlight.blsp` is a pure
+  lives in Brood (`std/editor/lineedit.blsp` + the pure `std/editor/highlight.blsp`), redefinable.
+- **Lexical highlighting, written in Brood.** `std/editor/highlight.blsp` is a pure
   source→data lexer (the `observe-frame` discipline): it classifies tokens by shape +
   head-position (the first symbol after a `(` is a call / special form), not by
   resolving bindings — cheap, robust on incomplete input, and unit-testable without a
@@ -2975,9 +2976,9 @@ is ready, like `receive`) would make the block truly zero-cost — a nicety, not
   prompts/banner stay gated on `stdout-tty?`.
 - Follow-ups since shipped: `(special-forms)` de-drift (done — above); **persistent
   history** (`$BROOD_HISTORY`/`~/.brood_history`, loaded on start, saved capped per
-  submit — `std/repl.blsp`); and **reverse incremental search** (C-r, a `:search`
-  sub-mode in `std/lineedit.blsp`). The keymap was also generalised into a shared
-  `std/keymap.blsp` (`keymap-dispatch`), the input-side counterpart to the display
+  submit — `std/tool/repl.blsp`); and **reverse incremental search** (C-r, a `:search`
+  sub-mode in `std/editor/lineedit.blsp`). The keymap was also generalised into a shared
+  `std/editor/keymap.blsp` (`keymap-dispatch`), the input-side counterpart to the display
   seam, now used by both the editor and `observe`.
 - **Completion now *lists* when it can't extend** (2026-07-28). Tab shipped
   insert-or-common-prefix, which is silent on an ambiguous prefix: the user sees
@@ -3002,7 +3003,7 @@ INCOMPLETE_INPUT multi-line signal the single-line model relies on), ADR-046 (th
 full-screen `term-*` seam this adds an inline counterpart to), ADR-006 (mechanism in
 Rust, policy in Brood), ADR-025 (`arglist`/`global-names` introspection the hints +
 completion read; `semantic_tokens.rs` SPECIAL_FORMS the highlighter mirrors),
-`std/lineedit.blsp`, `std/highlight.blsp`, `std/repl.blsp`, `docs/primitives.md`.
+`std/editor/lineedit.blsp`, `std/editor/highlight.blsp`, `std/tool/repl.blsp`, `docs/primitives.md`.
 
 ## ADR-053 — Remote attach: observe a running runtime over the node link
 
@@ -3058,7 +3059,7 @@ re-doing the node wire codec for nothing.
 
 **References.** ADR-046 (the display seam / observer this extends), ADR-051
 (`process-info`, the send-able snapshot maps), ADR-034 (the node handshake/cookie),
-ADR-006 (mechanism in Rust, the agent + loop are Brood), `std/observer.blsp`,
+ADR-006 (mechanism in Rust, the agent + loop are Brood), `std/tool/observer.blsp`,
 `ROADMAP.md` M3.
 
 ## ADR-054 — Generational handles: a debug tripwire for use-after-GC
@@ -3230,7 +3231,7 @@ and a new render-op-protocol input shape, with zero change to the frame protocol
   `CursorMoved` fires per pixel, and since the observer refetches+redraws on every
   poll result, *emitting* motion would turn a mouse wiggle into a redraw storm.
   Release/drag are additive when a consumer (drag-select) needs them (ADR-011).
-- **The observer acts on two.** `std/observer.blsp` reacts to left-press (select the
+- **The observer acts on two.** `std/tool/observer.blsp` reacts to left-press (select the
   clicked process row) and the wheel (scroll the selection); a right/middle click,
   a click off the list, or any future action is a no-op. The mapping is **pure**
   (`observe--mouse-row->sel`, `observe--apply-mouse`) and unit-tested without a
@@ -3308,8 +3309,8 @@ rule that **a Brood author must never have to reason about GC**.
    a spawned-process body, both at depth 1), the manual flush is redundant. Gone:
    the `hibernate` builtin, the `ErrorKind::Hibernate` unwinding sentinel +
    `hibernate_args` carrier (shrinking `LispError` on the hot `Result` path), and
-   the scheduler's catch-and-flush loop. `std/test.blsp`'s runner and
-   `std/repl.blsp`'s loop became plain tail calls; the `gc.rs` / `blob_share_test`
+   the scheduler's catch-and-flush loop. `std/tool/test.blsp`'s runner and
+   `std/tool/repl.blsp`'s loop became plain tail calls; the `gc.rs` / `blob_share_test`
    cases that asserted hibernate semantics now drive Stage B directly.
    `Heap::flush` survives as a tested arena-flip helper.
 
@@ -3525,7 +3526,7 @@ interacts with the green scheduler.
 - **Thin kernel mechanism, policy in Brood (ADR-006).** Five primitives —
   `tcp-connect` / `tcp-listen` / `tcp-send` / `tcp-close` / `tcp-local-port` —
   wrap `std::net`. Framing, request/response draining, and protocols (HTTP next)
-  are Brood (`std/tcp.blsp`).
+  are Brood (`std/net/tcp.blsp`).
 - **Mailbox delivery, not polling (ADR-059).** An early non-blocking-poll design
   (Brood loops over a `tcp-recv` that returns would-block) was built and then
   **replaced**: it busy-polls and pins no worker only by luck. Instead a socket
@@ -3549,7 +3550,7 @@ interacts with the green scheduler.
 
 **Consequences / scope.**
 
-- No polling, no `tcp--yield`; `std/tcp.blsp` shrank to `socket?` + `tcp-drain`
+- No polling, no `tcp--yield`; `std/net/tcp.blsp` shrank to `socket?` + `tcp-drain`
   (collect a response until the peer closes). `tests/tcp_test.blsp` drives a full
   loopback echo in a single process via `receive` (so it passes without depending
   on cross-process spawn).
@@ -3564,7 +3565,7 @@ interacts with the green scheduler.
   TLS is a **one-shot `tls-request host port request`**: a non-worker thread
   connects, handshakes, writes the request, and streams the response back as the
   *same* `[:tcp id data]` / `[:tcp-closed id]` (and `[:tcp-error id msg]`)
-  messages — so `tcp-drain` and the HTTP parser are unchanged. `std/http.blsp`'s
+  messages — so `tcp-drain` and the HTTP parser are unchanged. `std/net/http.blsp`'s
   `http-get` picks `tls-request` for `https://`, `tcp-connect`+`tcp-send` for
   `http://`; verified against `https://api.github.com`. ⬜ Still deferred:
   *streaming/persistent* TLS sockets (needs a non-blocking rustls integration or
@@ -3946,7 +3947,7 @@ immaterial for supervision (a torn-down worker isn't monitored by anyone but its
 dead supervisor). A future "hard kill carrying an arbitrary reason" (a `hard` bit
 on the mailbox kill-state) would make it exact; deferred (ADR-011).
 
-**Supervisor rewrite.** `std/supervisor.blsp` switched from `monitor`/`[:down]`/
+**Supervisor rewrite.** `std/proc/supervisor.blsp` switched from `monitor`/`[:down]`/
 `:ref` to `trap-exit` + `link` + `[:EXIT]`/`:pid`. A child crash now arrives as
 `[:EXIT child reason]`; a supervisor's *own* death propagates to its children
 (workers die by propagation; a child **sub-supervisor** traps, recognises its
@@ -4171,7 +4172,7 @@ cached global handle is safe but a local one wouldn't be), ADR-023/024 +
 **Status:** accepted **and implemented**, 2026-05-30. Closes the one open policy
 question from ADR-065 (`namespaces.md` §8). The detect-and-reject check is wired
 into the package manager's resolution step (ADR-037 Slices 2–3 having landed) —
-`std/package.blsp` `package--check-namespace-collisions`, run from
+`std/tool/package.blsp` `package--check-namespace-collisions`, run from
 `fetch`/`add`/`ensure-deps`. **Package-rooted namespaces remain the eventual
 upgrade, deliberately deferred** (see *Future direction* below).
 
@@ -4372,7 +4373,7 @@ will want it). Cross-node: a WASM instance is local mutable state, so it doesn't
 travel in `send`/closure-ship — cross-node use is "talk to the owning process."
 
 **Consequences.** `project.blsp` gains a `:native` clause; `project.lock.blsp`
-gains a per-dep `:native` artifact hash + build provenance; `std/package.blsp`
+gains a per-dep `:native` artifact hash + build provenance; `std/tool/package.blsp`
 grows build orchestration + the WASM cache layout; a new `use-native` wrapper
 macro lands (likely `std/native.blsp`). The kernel embeds `wasmtime` and grows a
 small primitive set (`%wasm-instantiate`/`%wasm-call`/`%wasm-build` + resource-drop
@@ -4574,12 +4575,12 @@ removal), `crates/cli/tests/distribution.rs` (`dual_listen_serves_tcp_and_unix_a
 
 **Status.** Accepted, implemented 2026-05-30. Extends ADR-045 (the immutable,
 rope-backed buffer framework) and ADR-026 (immutability). See
-[`devlog.md`](devlog.md) (2026-05-30) and `std/buffer.blsp`.
+[`devlog.md`](devlog.md) (2026-05-30) and `std/editor/buffer.blsp`.
 
 **Context.** The editor app (`~/src/whk/myedit`) needs undo, and — with multiple
 buffers — undo must be **per-buffer** (Emacs keeps an undo list per buffer). The
 question was *where* it lives: in the editor app (a stack of buffers in the app's
-model) or in the buffer value itself (`std/buffer.blsp`). The prime directive
+model) or in the buffer value itself (`std/editor/buffer.blsp`). The prime directive
 (ADR-006) says general capabilities belong in the language toolkit; keybindings
 and the kill-ring/minibuffer UX are app policy and stay in the app.
 
@@ -4607,7 +4608,7 @@ it. The `spawn-buffer` actor ships text+point+mark and rebuilds, so history does
 cross a process boundary (process-local view state) — acceptable.
 
 **References.** ADR-045 (buffer framework), ADR-026 (immutability), ADR-006 (policy
-in Brood), ADR-011 (defer coalescing), `std/buffer.blsp`,
+in Brood), ADR-011 (defer coalescing), `std/editor/buffer.blsp`,
 `tests/buffer_test.blsp` (the `buffer undo / redo` block).
 
 ---
@@ -4785,7 +4786,7 @@ zoom via the per-window `gui-font!`, ADR-079), Ctrl+drag, etc. **This is a break
 change, not additive:** Brood vector patterns are *fixed-length* and forbid a `&`
 rest, so a consumer destructuring the old 5-vector (`[_ a b r c]`) silently stops
 matching. The fix is positional access (`(nth ev n)`) or a 6-binder pattern —
-`std/observer.blsp`'s `observe--apply-mouse` was migrated to `nth` (length-agnostic,
+`std/tool/observer.blsp`'s `observe--apply-mouse` was migrated to `nth` (length-agnostic,
 robust to any future element). Chose appending to the vector (over a `:ctrl-scroll`
 action keyword or reshaping the event to a map) for generality across all actions
 with the smallest shape change; the silent-break cost was accepted as the
@@ -4917,7 +4918,7 @@ status strip, or a per-pane / per-buffer font was inexpressible except by a
 hand-rolled "block font" magnified out of many cells (what the foobar Game-of-Life
 demo's status strip did by hand). Recorded as **GG-1** in
 [`known-issues.md`](known-issues.md); `gui-font!`'s `:height` only resizes the
-*whole window*, not an op. `std/pane.blsp` (ADR-077/078) already supplies the
+*whole window*, not an op. `std/editor/pane.blsp` (ADR-077/078) already supplies the
 pane layout + clip-rect mechanism, so the only missing piece for per-pane fonts was
 a per-op size.
 
@@ -4955,8 +4956,8 @@ metrics-query primitive and breaks the single grid.
 **References.** ADR-046 (the display-protocol seam + frame-as-data), ADR-011 (ship
 the simple form, defer power), ADR-006 (mechanism in Rust, policy in Brood — the
 pane/buffer font choice stays Brood). Lives in `crates/lisp/src/gui.rs` (`Face` +
-the renderer) and `crates/lisp/src/builtins.rs` (`gui_face` parsing); documented in
-`std/face.blsp`.
+the renderer) and `crates/lisp/src/builtins/mod.rs` (`gui_face` parsing); documented in
+`std/editor/face.blsp`.
 
 ## ADR-080 — Cursor zones: pointer-shape hints carried by the frame
 
@@ -4978,7 +4979,7 @@ GUI frontend stores the zones from each frame and, on `CursorMoved` (which it al
 tracks per-cell internally), sets the matching `CursorIcon` — or `Default` off every
 zone — calling `set_cursor` only when the shape *changes*. The **terminal frontend
 ignores it** (an unknown op, skipped), so one frame drives both. Constructor:
-`std/display.blsp`'s `(cursor-zone x y w h shape)`.
+`std/editor/display.blsp`'s `(cursor-zone x y w h shape)`.
 
 **Consequences.**
 - **Hover *and* drag for free, no new events, no flood.** The pointer sits on the
@@ -4988,14 +4989,14 @@ ignores it** (an unknown op, skipped), so one frame drives both. Constructor:
 - **Additive + frontend-neutral.** Existing apps/ops are untouched; the shape enum
   (`gui::CursorShape`) is mapped to winit's `CursorIcon` only inside the backend
   (`EwResize`/`NsResize`), so the shared `Op` stays dependency-free.
-- The editor's `view` emits one zone per `std/pane.blsp` divider (`:col`→
+- The editor's `view` emits one zone per `std/editor/pane.blsp` divider (`:col`→
   `:col-resize`, `:row`→`:row-resize`); resizing then has a real cursor affordance.
 
 **References.** ADR-046 (the render-op protocol this extends), ADR-077 (the drag this
 affords), ADR-056 (why bare motion isn't delivered — sidestepped by hit-testing zones
 in the frontend), ADR-079 (the sibling GUI-`Face` work this lands alongside). Lives in
 `crates/lisp/src/gui.rs` (`Op::CursorZone`, hit-test on `CursorMoved`) +
-`crates/lisp/src/builtins.rs` (`gui-draw` parsing) + `std/display.blsp`.
+`crates/lisp/src/builtins/mod.rs` (`gui-draw` parsing) + `std/editor/display.blsp`.
 
 ## ADR-083 — Output ports (`*out*`/`*err*`) and an async, safe logger
 
@@ -5043,7 +5044,7 @@ wrong shape) or a hand-rolled receive loop (duplicates `hatch`).
 cost on a cold path, broadly worth the capability). Dynamic bindings don't reach a
 `spawn`ed child, so `with-out` + `spawn` does not redirect the child — pass it a
 port explicitly. `nest new`'s default scaffold starts a logger and documents the
-buffer route. Lives in `crates/lisp/src/builtins.rs` (`%render`/`%write-out`/
+buffer route. Lives in `crates/lisp/src/builtins/mod.rs` (`%render`/`%write-out`/
 `%write-err`), `std/prelude.blsp` (`*out*`/`*err*` + the four print fns),
 `std/io.blsp`, and `std/log.blsp`; tested in `tests/io_test.blsp` +
 `tests/log_test.blsp`.
@@ -5412,7 +5413,7 @@ track a held input itself, rather than a producer-paced stream it can't keep up 
 kept scrolling for a beat *after* the key was up. The cause was the GUI key path
 (`gui.rs`): it relayed **every** `ElementState::Pressed` event — including the OS's
 auto-repeat — straight into the subscriber's mailbox, and the `ui-run` loop drains
-**one** message per render (`std/ui.blsp` `:poll` is a single `receive`). When the OS
+**one** message per render (`std/editor/ui.blsp` `:poll` is a single `receive`). When the OS
 repeat rate outruns the render rate (easy under a heavy fontify), the mailbox grows a
 backlog of `:ctrl-n`s; the release was *discarded* (only `Pressed` was handled), so on
 key-up nothing cancelled the backlog and it kept "playing." A producer-driven repeat
@@ -6075,7 +6076,7 @@ form means editing `SPECIAL_FORMS` once, then regenerating — no per-editor edi
 **References.** ADR-006 (policy in Brood), ADR-052 (`(special-forms)` shared with the
 LSP/REPL highlighter), the central `kw::` spelling module (devlog 2026-05-30). Lives in
 `std/tool/grammar.blsp`, `crates/nest/src/main.rs` (`nest grammar`),
-`crates/lisp/src/builtins.rs` (`SPECIAL_FORMS`) + `core/keywords.rs` (the new consts);
+`crates/lisp/src/builtins/mod.rs` (`SPECIAL_FORMS`) + `core/keywords.rs` (the new consts);
 consumed by `brood-vscode` and `brood-mode`.
 
 ## ADR-093 — Native char-class scanners + `scan-tokens`: lexing mechanism in Rust, faces in Brood
@@ -6146,7 +6147,7 @@ latest (`ui--coalesce-drag`) — render once per gesture step, not once per cell
 
 **References.** ADR-006 (mechanism in the kernel, policy in Brood), ADR-052
 (`highlight-spans` shape, `(special-forms)`), the editor's per-frame span cache. Lives in
-`crates/lisp/src/builtins.rs` (`string_span`/`string_span_until`/`scan_tokens`/`span_runs`),
+`crates/lisp/src/builtins/mod.rs` (`string_span`/`string_span_until`/`scan_tokens`/`span_runs`),
 `std/editor/highlight.blsp`, `std/editor/markdown.blsp`.
 
 ## ADR-094 — `overlay-route`: the modal-overlay dispatch fallthrough lives in `editor/ui`
@@ -6219,7 +6220,7 @@ toggleable; a non-clipboard build is unaffected. A right-click context menu (nex
 the same commands by mouse.
 
 **References.** ADR-046 (frontends), ADR-006 (mechanism in the kernel, policy in Brood).
-Lives in `crates/lisp/src/builtins.rs` (`clipboard` mod + the two builtins), `Cargo.toml`
+Lives in `crates/lisp/src/builtins/mod.rs` (`clipboard` mod + the two builtins), `Cargo.toml`
 (`clipboard` feature / `arboard`), `brood-edit`'s `commands.blsp` + `main.blsp`.
 
 ## ADR-096 — VM perf as the JIT runway: one road, not two
@@ -6301,7 +6302,7 @@ already trust) rather than a project. The cost: we deliberately leave the templa
 **References.** ADR-076 (the VM; its §2.4 names bytecode lowering as an internal change),
 ADR-069 (dispatch perf — the passthrough + IC groundwork), ADR-091 (RUNTIME compaction),
 ADR-026 (immutability), ADR-038 (bundle-size vs Cranelift). Lives in
-`crates/lisp/src/eval/compile.rs`; plan + analysis in `docs/vm-perf-and-jit-runway.md`.
+`crates/lisp/src/eval/compile/mod.rs`; plan + analysis in `docs/vm-perf-and-jit-runway.md`.
 
 ## ADR-097 — Batteries-included default install; split + rename the process framework
 
@@ -6328,7 +6329,7 @@ common consumer**: a gen_server-style server framework and OTP-style supervision
 **Decision.**
 1. **Everything ships bundled in the default install.** `net/tcp`, `net/http`,
    `net/sse`, `proc/gen`, and `proc/supervisor` are all in `CORE_MODULES`
-   (`crates/lisp/src/builtins.rs`). No internal framework `:path` packages;
+   (`crates/lisp/src/builtins/mod.rs`). No internal framework `:path` packages;
    consumers carry no `:source-paths` to sibling dirs.
 2. **Split `proc/hatch` into cohesive units.** `proc/gen` is the gen_server-style
    server loop (`defprocess` / `spawn-server` / `!` / `gen-call` / `stop`);
@@ -6544,7 +6545,7 @@ firing math is factored into pure functions (`ui--deadline`, `ui--timer-live?`,
 clock; a `:now-fn` model hook injects a scripted clock in tests (default `(now)`).
 Named timers are **opt-in by the `:timers` key**: a model without it keeps the
 exact legacy path (`nil` poll → bare `:tick` on the `:tick-ms` beat), so
-`std/observer.blsp` and any pre-timers app are untouched.
+`std/tool/observer.blsp` and any pre-timers app are untouched.
 
 Two subtleties the implementation pins down: (1) a `nil` poll only fires a timer
 when `(now)` confirms its deadline has actually arrived — `display--poll-any`
@@ -6858,7 +6859,7 @@ LSP-on-data concern.
 ## ADR-106 — Telemetry: handlers run in an isolated listener process (never the emitter)
 
 **Status:** accepted (2026-06-14). Implemented: `std/telemetry.blsp`
-(`require 'telemetry`), registered in `crates/lisp/src/builtins.rs`, tested by
+(`require 'telemetry`), registered in `crates/lisp/src/builtins/mod.rs`, tested by
 `tests/telemetry_test.blsp` (19 cases incl. the crash-isolation guarantee + a
 concurrent block). The kernel-event sources (ADR-137), the metric aggregators
 (counter/sum/gauge/summary/`sample-every` + the bucketed `distribution`/histogram with
@@ -6949,7 +6950,7 @@ schemas, and the remote tier.
 ## ADR-107 — `table`: an in-memory shared store (Brood's ETS) as a Rust-backed handle of deep clones
 
 **Status:** accepted (2026-06-14). Implemented: `Value::Table(u64)` + `Tag::Table`
-(`core/value.rs`), the store `crate::table` (`crates/lisp/src/table.rs`), the
+(`core/value.rs`), the store `crate::table` (`crates/lisp/src/core/table.rs`), the
 `table`/`table-put`/`table-get`/`table-has?`/`table-delete`/`table-incr`/
 `table-count`/`table-snapshot`/`table-drop` builtins + the `table?` prelude predicate,
 the `Message::Table` codec (cross-process, runtime-local), and
@@ -7074,7 +7075,7 @@ closures) — see the 2026-06-14 devlog entry.
 ## ADR-109 — `string-split` is a native builtin (not pure Brood)
 
 **Status:** accepted (2026-06-14). Implemented: `string_split` + its registration and
-arity/doc entry in `crates/lisp/src/builtins.rs` (beside `%str-index-of`); the former
+arity/doc entry in `crates/lisp/src/builtins/mod.rs` (beside `%str-index-of`); the former
 `string-split`/`string-split--acc` defns removed from `std/prelude.blsp`;
 `tests/strings_test.blsp` already covers the semantics.
 

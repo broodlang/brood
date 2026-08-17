@@ -1,5 +1,11 @@
 # Plan — the post-JIT single-threaded compute frontier
 
+> **Note on the background docs cited below.** `jit-tier2.md`, `jit-stage1.md`,
+> `value-repr.md` and `frame-representation.md` were trimmed in `fdce5400` once the work
+> they planned had shipped. Their conclusions are folded into this file, the ADR that
+> cites them, or the source; the full text is recoverable from git history
+> (`git show fdce5400^:docs/<name>.md`).
+
 > ## ✅ CLOSED (2026-07-27) — the KI-14 guard cost is recovered; the named suspect was wrong
 >
 > The regression this block was opened for (**`fib` 57 → 75 ms, `pfib` 165 → 218 ms**, bisected to
@@ -89,8 +95,13 @@
 > Better ROI lives elsewhere (JIT Stage-4 RUNTIME-compaction survival; closure-arm inlining) — see
 > `ROADMAP.md` VM & JIT. Reprioritize unless the narrower-repr invariant spend is explicitly wanted.
 >
-> `perf record` is unavailable here (`perf_event_paranoid=4`, no sudo assumed; flamegraph/valgrind/
-> heaptrack not installed), so the `BROOD_PERF_STATS` counters above are the profiling substrate.
+> `perf record` was unavailable when this block was written (`perf_event_paranoid=4`), so the
+> `BROOD_PERF_STATS` counters above were the substrate. **That changed on 2026-08-14:**
+> `kernel.perf_event_paranoid=1`, and `perf record` works — see the 2026-08-14 profile in the
+> `pipeline` entry of the benchmark repo's `FRONTIER.md`. Note `release-fast` sets `strip = true`,
+> so a profiling build needs `CARGO_PROFILE_RELEASE_FAST_STRIP=false
+> CARGO_PROFILE_RELEASE_FAST_DEBUG=line-tables-only make release-brood` (same codegen, symbols
+> kept). Kernel frames stay unresolved (restricted kallsyms); user space is what matters.
 
 > ## ⏯ RESUME HERE (2026-07-02) — unboxed-register JIT + HOF fast path shipped
 >

@@ -1,4 +1,4 @@
-;; std/project.blsp — the project model + test runner (ADR-020), in Brood.
+;; std/tool/project.blsp — the project model + test runner (ADR-020), in Brood.
 ;;
 ;;   project/…                ; loaded on demand; baked into the binary
 ;;   (run-project-tests)      ; find project.blsp, discover tests, run them once
@@ -171,7 +171,7 @@ the `nest new` scaffolder."
 ;; Each :dependencies entry is a vector: `[name :git URL :ref REF]` or
 ;; `[name :path PATH]` — `name` is the local symbol `require` will see. Parsed
 ;; into one of the four **dep records** below for the package manager
-;; (std/package.blsp) to consume. The reserved opts :branch/:dir/:features
+;; (std/tool/package.blsp) to consume. The reserved opts :branch/:dir/:features
 ;; are recognised but rejected in v1, so the manifest shape stays forward-compatible.
 ;;
 ;; A dep's KIND is its record identity, not a `:kind` field: the package manager
@@ -179,7 +179,7 @@ the `nest new` scaffolder."
 ;; compatibility) through the `Dependency` ability it declares over these four types,
 ;; which is `:sealed` over exactly this set — so `nest check` flags a new kind that
 ;; forgets one of them. This module owns the *types* (it parses the manifest);
-;; std/package.blsp owns the *behaviour*. A resolved entry is one of these records with
+;; std/tool/package.blsp owns the *behaviour*. A resolved entry is one of these records with
 ;; the resolution fields (`:resolved-path`/`:sha256`/`:commit`/`:deps`) assoc'd on, so it
 ;; dispatches identically to the dep it came from.
 
@@ -1673,7 +1673,7 @@ resolve in the advisory checker. Returns the project root."
 
 ;; Structured analogue of `check-project` — returns a flat list of
 ;; `{:file :line :col :message}` maps instead of printing GNU lines + a
-;; count. Backs the `nest mcp` `check` tool (`std/mcp.blsp`, step 1c-a).
+;; count. Backs the `nest mcp` `check` tool (`std/tool/mcp.blsp`, step 1c-a).
 ;; Honors `BROOD_NO_CHECK=1` the same way `check-project` does: returns
 ;; an empty list under the flag.
 (defn check-project-structured ()

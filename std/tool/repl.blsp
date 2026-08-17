@@ -1,4 +1,4 @@
-;; std/repl.blsp — the read-eval-print loop, written in Brood.
+;; std/tool/repl.blsp — the read-eval-print loop, written in Brood.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - The REPL is policy, not mechanism: it's a loop over `read-line` (the one
@@ -20,7 +20,7 @@
 ;;    `eval-string` reads *all* forms before evaluating any, an incomplete buffer
 ;;    throws at read time with nothing evaluated, so retrying the whole buffer as
 ;;    later lines arrive has no partial / double side effects.
-;;  - Line editing: on a TTY the loop reads through `std/lineedit.blsp` — a
+;;  - Line editing: on a TTY the loop reads through `std/editor/lineedit.blsp` — a
 ;;    raw-mode, emacs-style editor (syntax highlighting, bracket matching,
 ;;    signature hints, Tab completion, ↑/↓ history) written in Brood over the
 ;;    inline `term-*` seam (ADR-052) — exactly the "now a Brood function to add,
@@ -873,7 +873,7 @@ the loop spawns so its `def`s are in place for the first prompt."
 
 (defn repl-run ()
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and
-stdout are both a TTY it edits interactively (`std/lineedit.blsp`) with the banner +
+stdout are both a TTY it edits interactively (`std/editor/lineedit.blsp`) with the banner +
 prompts; redirected stdin keeps the plain `read-line` path (prompt echoed only when
 stdout is a TTY). The loop runs in a spawned process — so Stage B's automatic GC
 reclaims each command's transients at the safepoint — and this call blocks (parked

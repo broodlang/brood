@@ -1,4 +1,4 @@
-;; std/ui.blsp — the reusable terminal/GUI app framework.
+;; std/editor/ui.blsp — the reusable terminal/GUI app framework.
 ;;
 ;; Extracted from the observer so a *new* project (the coming editor) builds on the
 ;; same seam instead of re-inventing it. Two pieces:
@@ -15,7 +15,7 @@
 ;;    leave. `input` is the frontend's key/mouse value, or `:tick` on the poll
 ;;    timeout (the refresh beat).
 ;;
-;; Both the observer (`std/observer.blsp`) and the editor are just `ui-run` clients:
+;; Both the observer (`std/tool/observer.blsp`) and the editor are just `ui-run` clients:
 ;; they supply a `view` (model+size → frame, built with `display.blsp` ops) and an
 ;; `update` (model+input+size → model, dispatching via `keymap.blsp`, prompting via
 ;; `lineedit.blsp`, colouring via `highlight.blsp`). That is the dogfooding proof —
@@ -29,7 +29,7 @@ pure `view` (model + cols/rows → a render frame) and an `update` (model + inpu
 cols/rows → model); set `:done` in the model to quit, and declare time-driven work
 as `:timers` (named timers, ADR-102) — or, legacy, `:tick-ms` for a single refresh
 beat. The observer and the editor are both `ui-run` clients — see
-`std/observer.blsp`."
+`std/tool/observer.blsp`."
   (:use map))
 
 ;; ---- frontends (ADR-046: one render-op protocol, many frontends) ------------
