@@ -31,11 +31,21 @@
       (assert= (quot -9 3) -3)
       (assert= (rem -9 3) 0)
       true))
-  (test "/ is exact on exact division, float otherwise"
+  ;; `/` on two integers is EXACT — an int when it divides evenly, otherwise a RATIO.
+  ;; It only produces a float when an operand is already a float. This test asserted
+  ;; `(/ 7 2)` = 3.5 and so had been failing on every `make stress` run since exact
+  ;; rationals landed — the identical stale assertion KI-42 found in `breakage/`
+  ;; (`(assert= 4.8 (/ 24 5))`), in the other suite that no CI job runs.
+  (test "/ is exact for integer operands (int or ratio); float only if an operand is float"
     (do
       (assert= (/ 6 2) 3)
-      (assert= (/ 7 2) 3.5)
-      (assert= (/ -7 2) -3.5)
+      (assert= (/ 7 2) 7/2)
+      (assert= (/ -7 2) -7/2)
+      (assert= (type-of (/ 7 2)) :ratio)
+      ;; A float operand makes the result float, and an exact ratio converts on demand.
+      (assert= (/ 7 2.0) 3.5)
+      (assert= (/ 7.0 2) 3.5)
+      (assert= (->float (/ 7 2)) 3.5)
       true))
   (test "division by zero errors, never wraps or NaNs (int)"
     (do
