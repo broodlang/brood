@@ -122,6 +122,30 @@ slow-timeout = { period = "60s", terminate-after = 45 }
 # cannot be silently absorbed.
 retries = 1
 
+# `completion_never_fails_however_it_is_called` (nest/tests/complete.rs) is 96 child-process
+# spawns — 3 project shapes × (2 cheap cases + 6 hostile inputs × 5 completion positions) —
+# and the value-position ones each boot an interpreter. Measured SOLO on an idle box: **60.7 s
+# at `a57cc573`, 59.0 s on the following commit**, i.e. ~600 ms per spawn in a debug build.
+# Against the 120 s default that is only 2× headroom, and a case that shares the box with
+# `brood_suite_passes` (600 s in one case) plus the scaffold tests routinely runs ~2× slower —
+# so it TIMED OUT in a full `make test` (2026-08-14) having passed at 65 s in the run before.
+#
+# The instruction above — check whether a single case became slow before bumping a budget —
+# was followed, and the answer is no: nothing regressed (59.0 s vs 60.7 s across the commit
+# that was in flight), and a previous session had already trimmed this matrix once after an
+# exhaustive version took 40 s and destabilised `brood_suite_passes`. The cost is the spawns.
+# So this is a budget that only ever fitted an idle box; 300 s gives the measured ~60 s the
+# same kind of margin `binary(suite)` above was given for the same reason.
+#
+# If it needs raising again, prefer shrinking the work: the 6×5 value×position grid is a
+# *permutation* matrix, which is what the test's own comment says to avoid ("cover input
+# KINDS, not permutations"). Pairing each value with one position and each position with one
+# value would be ~39 spawns instead of 96 — a deliberate coverage trade, so it wants the
+# owner's call rather than a silent edit.
+[[profile.default.overrides]]
+filter = 'binary(complete) and test(completion_never_fails_however_it_is_called)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 # --- KI-38: warm the boot cache once, before ~50 binaries fan out ---
 #
 # The expanded-prelude cache is keyed on `build_id` = version + git sha + the
