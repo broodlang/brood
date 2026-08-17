@@ -185,6 +185,26 @@ jobs:
           grep -hoE 'Summary \[[^]]*\].*' tree-walker-nextest.log | tail -1 \
             | while IFS= read -r line; do echo "::error::tree-walker $line"; done || true
 
+          # UNCONDITIONAL FALLBACK. Run 32054863012 (2026-08-17) proves the greps above are not
+          # enough on their own: the step ran and SUCCEEDED (the `|| true` fix works) yet emitted
+          # no annotation at all — not even the Summary line, which nextest always prints. So the
+          # CI log differs from every local log in some way the patterns miss, and the run stayed
+          # undiagnosable because the uploaded artifact needs an authenticated download that a
+          # maintainer may not have to hand.
+          #
+          # A diagnostic that reports nothing when its patterns miss is the failure mode this
+          # whole step exists to avoid (KI-39 went three sightings without naming a case). So:
+          # if nothing above matched, annotate the log's tail verbatim. It is ugly and it is
+          # bounded, and it always says something.
+          if ! grep -qE '(FAIL \[|test failed:|Summary \[)' tree-walker-nextest.log; then
+            echo "::error::tree-walker: none of the failure patterns matched this log — dumping its tail"
+            tail -30 tree-walker-nextest.log | sed 's/[[:cntrl:]]//g' \
+              | while IFS= read -r line; do
+                  [ -n "$line" ] && echo "::error::tree-walker raw: $line"
+                done || true
+            echo "::error::tree-walker: log is $(wc -l < tree-walker-nextest.log) lines, $(wc -c < tree-walker-nextest.log) bytes"
+          fi
+
       - name: Upload the tree-walker log (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
