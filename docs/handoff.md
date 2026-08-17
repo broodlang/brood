@@ -827,7 +827,7 @@ mechanism with a switch, the switch on ONE binary is the attribution (§6).
 | Spawn placement spills off a backlogged worker | `BROOD_SPAWN_SPILL=999999` / `BROOD_SPAWN_RR=1` | `latency` p50 5×, p99 2.9× |
 | Receive-mark (ADR-195) | `BROOD_NO_RECV_MARK=1` | backlogged reply O(backlog) → O(1), 653 → 4 µs at 32k |
 | Fast-link deopt shape check is flag-free (KI-26) | — (correctness) | a peer's stale link no longer re-runs a journaled effect from ip 0 |
-| Registry updates are atomic (KI-22/23, ADR-202) | — (correctness) | ~40% of concurrent registrations were being lost |
+| Registry updates are atomic (KI-22/23) | — (correctness) | ~40% of concurrent registrations were being lost |
 
 **`std/` quadratics fixed** (each with a `scale_sweep.blsp` row so it cannot come back):
 `template/render` 318→24 ms · `last-index-of` 540→1 ms · `strip-ansi` 1583→109 ms ·
