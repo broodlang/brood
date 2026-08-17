@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site JIT inline** is dead: it requires a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ⚠️ correctness **fixed 2026-08-17** (both rows run, checksums match the other ports); the ~1.8× inline restoration is **OPEN** |
 | KI-43 | `remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a **fixed 5 s sleep**, but the observer needs 5.9–9.2 s under load to boot + `require 'observer'` + connect — so the target died first, `connect` refused, stdout empty. Failed BOTH retries in a loaded `make test`, passed standalone: the signature that gets written off as noise | ✅ **fixed 2026-08-14** — waits for the observer's attach report instead of a stopwatch; **8/8 under saturating load**, and 3.5 s instead of ~11 s |
 | KI-42 | the `breakage/` suite had rotted to **9 of 23 files failing** and nobody knew, because it is outside `make test` and had no CI job — a pin-syntax change (`~ref`→`^ref`), a renamed `string-contains?`, an assertion predating exact rationals, and a TCP file whose every phase was dead | ✅ **fixed 2026-08-13** — all 23 files pass and gate, nothing skipped; CI job added so it cannot rot silently again |
 | KI-41 | concurrent `require` of the same feature could **double-load** its file: a claimant whose `(contains? *features* key)` guard read the per-process global inline cache **missed** a racing loader's just-committed `provide` (the cache is version-gated on a `Relaxed` counter, no happens-before), won the released load-once claim, and reloaded the module. Surfaced as the ADR-225 co-located-secondary `nest test` flake (~1/77); reproduced on demand at 20 files × 40 requires | ✅ **fixed** 2026-08-13 — `require-one` re-checks `*features*` with a new cache-bypassing `%registry-member?` (reads the shared globals table directly) before loading; guard `breakage/chaos_concurrent_require_double_load.blsp` |
@@ -62,7 +63,7 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open issue; one watch item (KI-36).** KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**One open item — KI-44's performance half: the `sqrt` call-site JIT inline is dead, worth ~1.8x on `nbody` (its correctness half is fixed). One watch item (KI-36).** KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -72,6 +73,67 @@ walked straight through the helpers' 20 s / 30 s deadlines. Warming the cache on
 fan-out takes the three tests from a 20.1 s failure to 1.9–2.6 s. No bug in the *language or
 runtime* was implied at any point — every sighting was a boot wait, never an assertion about
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
+
+---
+
+## KI-44 — the `nbody` benchmark was dead, and the `sqrt` JIT call-site inline died with it
+
+**Status:** ⚠️ **correctness fixed 2026-08-17 (benchmark runs again, checksum verified);
+the ~1.8× performance half is OPEN** — see "what is left" below.
+
+**Two defects, one cause: ADR-227 moved `sqrt` out of the prelude into `std/math.blsp`, and
+nothing outside the brood repo was migrated.**
+
+**1. The row was broken outright.** `brood-benchmarks/bench/brood/nbody.blsp` calls `sqrt`
+bare, twice, on its hot path, and is a header-less script — so since 2026-08-14 it died with
+`unbound symbol: sqrt`. A published `bench/harness.py` run would have failed on it. `json.blsp`
+was dead too, calling `json/json-parse`/`json/json-encode` after stage 4 dropped the `json-`
+export prefix. Both fixed (`(require 'math)` + `math/sqrt`; `json/parse`/`json/encode`), and
+both verified against the other ports' checksums (`nbody` −169063618 = node = python, `json`
+364568836 = node) rather than merely "it runs now".
+
+This is the **KI-42 pattern**: a suite that gates nothing rots silently. `brood-benchmarks` is a
+separate repo, so the ADR-227 migration sweep — which did cover `breakage/`, `examples/`,
+`stress/`, `crates/`, `std/` — could not see it, and no CI job runs the benchmark programs for
+*correctness*. Worth fixing structurally: a cheap "every bench row still runs at BENCH_N=50"
+check would have caught both in seconds.
+
+**2. The `sqrt` call-site inline is now dead, worth ~1.8× on the row.** `resolve_prim1`
+(`eval/compile/mod.rs`) lowers `sqrt` to `PrimOp1::Sqrt` only when the head symbol is **bare
+`sqrt`** *and* resolves to a **PRELUDE** closure — a deliberately narrow test, so a user
+`(def sqrt …)` cleanly disables it. After the move neither spelling can satisfy it: bare `sqrt`
+is not bound at global (a `(:use math)` refers it per-module), and `math/sqrt` fails the name
+test and is a RUNTIME module closure. So every `sqrt` now pays a closure call plus the wrapper's
+two `cond` comparisons, where it used to be one inlined instruction.
+
+Measured (release, pinned):
+
+| | wall |
+|---|---|
+| 3M-iteration `%f64-sqrt` loop (what the inline gave) | 406–410 ms |
+| same loop through `math/sqrt` | 754–755 ms |
+| **`nbody` row, `%f64-sqrt`** | **0.38–0.40 s** |
+| **`nbody` row, `math/sqrt` (shipping)** | **0.66–0.74 s** |
+
+≈1.85× on the microbenchmark (~115 ns per call) and **≈1.8× on the published row**. Note the
+inner `%f64-sqrt` still inlines *inside* the wrapper's own body — what was lost is skipping the
+wrapper at the call site.
+
+**What is left (open).** Restore the call-site inline for the spelling that now exists. The
+work is not the name test — it is the *safety* argument: the PRELUDE-region check has to become
+something that still proves "this is the canonical `std/math` sqrt, not a redefinition", for a
+closure that now lives in RUNTIME where a rebind is possible. The existing epoch guard already
+re-validates on redefinition, so leaning on it is probably sufficient, and the deopt path (zero,
+negatives, NaN, bignum) must dispatch the *module* wrapper rather than the old prelude one.
+Deliberately not rushed in with the correctness fix. **Any `nbody` number published before this
+lands is ~1.8× off its pre-ADR-227 self, and should not be read as a runtime regression.**
+
+**The generalisation worth keeping.** A kernel fast path keyed on a *bare stdlib name* is a
+hidden coupling to the stdlib's shape: moving the function is a source-compatible change that
+silently deletes the optimisation. `resolve_prim`/`resolve_prim1` and the checker's
+`symbol_is`/curated-sig tables are all in this class — the same ADR-227 move left stale bare
+keys in `sigs.rs`, `infer.rs` and `walk.rs` (fixed 2026-08-17), one of which had been masking
+the unbound lint. When a stdlib function moves, grep the kernel for its bare name.
 
 ---
 
@@ -116,6 +178,17 @@ scales with machine load. Wait for the *event*: the marker read makes the wait p
 the box, and it strengthens the assertion, since "attached before the kill" is what the case
 actually means and is now checked rather than assumed. The 60 s deadline that remains is a
 hang backstop, not a timing assumption.
+
+**Three more fixed-deadline waits, seen once, not reproduced (2026-08-17).** Under a
+*self-inflicted* 2x load — two `make test-both` invocations overlapping on one box and one
+target dir, which is not a supported configuration — three in-language cases failed on the
+first attempt and passed on retry: `tcp: activity resets the timer` (got `:reaped-BUG`: the
+activity messages lost the race with the idle timer), and two `proc` cases waiting on a `cat`
+subprocess (`:timeout`). A clean run of the same tree was 983/983 on both engines with **no
+flaky marker at all**, so there is nothing to fix on today's evidence. They are recorded
+because they are the same *shape* as this issue — a deadline standing in for an event — and so
+are the next candidates if any of them is ever seen again: `tests/tcp_test.blsp:115`,
+`tests/proc_test.blsp:39` and `:57`.
 
 **Found in the same pass:** `completion_never_fails_however_it_is_called` timed out at the 120 s
 default for a related reason — it is 96 child-process spawns, measured at 59–61 s solo, so it had
