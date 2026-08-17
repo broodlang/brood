@@ -169,6 +169,18 @@ BREAKAGE_SKIP :=
 # documented backstop working, not a bug (it briefly looked like one on 2026-08-13).
 BREAKAGE_ENV_map_volcano := BROOD_MEM_SOFT_LIMIT=4000000000 BROOD_MEM_LIMIT=6000000000
 
+check-examples: ## Run every `examples/` program and fail on an unbound symbol — the gate `examples/` never had
+	# `examples/` sits outside `make test`, `nest check` AND the breakage suite, so nothing
+	# ever ran it — and it rotted three ways unnoticed: `examples/editor` has called a module
+	# that left the repo on 2026-05-31 (KI-45), ADR-227's stdlib move needed a `:use` in
+	# `life.blsp`, and ADR-229's `require` removal stopped `webserver`/`hot-reload`/`editor`
+	# loading at all. Same pattern as KI-42/43/44; this is the counter for examples/.
+	#
+	# It asserts NO `unbound symbol` diagnostic rather than exit 0, because several examples
+	# legitimately cannot finish here (servers run until killed, `node_client` wants a peer,
+	# `font-zoom` wants --features gui) — but an unbound name is never environment noise.
+	@./scripts/check-examples.sh
+
 breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwire armed) — try to break the JIT/VM/memory. NOT part of `make test`.
 	# These are deliberately abusive tests that live OUTSIDE tests/ (so neither
 	# `make test` nor `nest test` ever discovers them) and try to make the JIT
@@ -271,7 +283,15 @@ loom: ## Loom model-check of the dense-table migration protocol (exhaustive inte
 	cargo test -p brood --release --features brood/loom-model --test loom_table_protocol
 
 asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly + rust-src; system-alloc so ASAN can intercept allocations instead of mimalloc's un-instrumented arena). Catches genuine OOB / use-after-free in the unsafe substrate (mmap table, JIT codegen buffers) that TSAN and the logical GC tripwires miss. `--tests` skips doctests, which don't LINK under ASAN + -Zbuild-std (a toolchain quirk, not a finding).
-	RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --tests
+	# BROOD_STACK_BUDGET is raised because ASAN's redzones make every Rust frame far
+	# fatter: the prelude's macro-expansion recursion measured **15.2 MB** of stack under
+	# instrumentation against the 12 MiB default, so the runtime's own "recursion too deep"
+	# guard fired during BOOT and took `differential.rs` down with it (the panic poisoned a
+	# LazyLock, so the second test failed as a cascade). That looked like an ASAN finding and
+	# was not one — ASAN itself reported nothing on 581 passing tests. Left unset, this gate
+	# silently cannot run the differential corpus, which is most of its value. Found
+	# 2026-08-17; with 64 MiB both tests pass and ASAN's checks still apply unchanged.
+	BROOD_STACK_BUDGET=67108864 RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --tests
 
 repl: ## Start the REPL
 	$(CLI)
