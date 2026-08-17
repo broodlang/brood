@@ -30,7 +30,7 @@ language, not kernel work.
 | **`send` semantics** | ✅ meets | Deep-copy across per-process heaps; `{:name :node}` addressing; silent no-op to dead target (Erlang semantics). |
 | **gen_server** (`std/proc/gen.blsp`) | ✅ meets | `handle_call`/`cast`/`info`, `init`/`terminate`; `call` **monitors** the server so a dead server fails fast rather than hanging; 5 s default timeout. Bonus `query` clause for read-only replies. |
 | **Supervisor** (`std/proc/supervisor.blsp`) | ✅ meets | All three strategies (`:one-for-one`/`:one-for-all`/`:rest-for-one`); restart intensity (max_restarts/max_seconds); `:permanent`/`:transient`/`:temporary`; child specs; `start-child`/`terminate-child`/`count-children`/`which-children`; reverse-order shutdown; `:brutal-kill`/`:infinity`/ms. |
-| **Agent** (`std/agent.blsp`) | ✅ complete | `get`/`update`/`get-and-update` (atomic)/`cast`/`stop`. |
+| **Agent** (`std/proc/agent.blsp`) | ✅ complete | `get`/`update`/`get-and-update` (atomic)/`cast`/`stop`. |
 | **Task** (`std/task.blsp`) | ✅ mostly | async/await/cancel + debounce; missing `Task.Supervisor`/`async_stream`. |
 | **Links + `trap_exit`** | ✅ meets | Bidirectional links propagate exits; `trap-exit` converts a peer death to `[:EXIT pid reason]`. |
 | **Distribution** | ✅ **exceeds** | See below. |

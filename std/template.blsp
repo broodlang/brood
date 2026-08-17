@@ -1,4 +1,4 @@
-;; std/template.blsp — simple {{var}} string templating. (require 'template)
+;; std/template.blsp — simple {{var}} string templating.
 ;;
 ;; Substitutes `{{key}}` markers in a template string using values from a map.
 ;; Keys are trimmed; both string and keyword map lookups are tried.

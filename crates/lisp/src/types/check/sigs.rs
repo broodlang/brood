@@ -71,7 +71,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     ]);
     #[allow(non_upper_case_globals)]
     const bool_ty: Ty = Ty::of(Tag::Bool);
-    // `count`/`length` accept a string, map, bytes, or sequence (the prelude
+    // `count` accepts a string, map, bytes, or sequence (the prelude
     // `count` dispatches string?/map?/else-fold, and bytes counts its octets) —
     // but not a number/keyword/etc.
     #[allow(non_upper_case_globals)]
@@ -122,14 +122,35 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     //   abs        — `(if (< n 0) (- n) n)`: numeric in and out.
     //   not/zero?  — accept any value (truthiness / `=`), but pin the `bool`
     //                result, so a non-bool sink like `(+ 1 (not x))` is catchable.
-    //   count/len  — a string, map, or sequence → int.
-    put("even?", Sig::new(vec![num], bool_ty));
-    put("odd?", Sig::new(vec![num], bool_ty));
-    put("abs", Sig::new(vec![num], num));
+    //   count      — a string, map, or sequence → int.
+    //
+    // **Keyed QUALIFIED for the three ADR-227 moved out of the prelude.** An entry here
+    // does more than supply a type: a name in this table is one the checker treats as
+    // *known*, which suppressed the unbound lint. So after `even?`/`odd?`/`abs` moved into
+    // `std/math.blsp`, `nest check` stayed silent on a bare `(even? 4)` — no import, unbound
+    // at runtime — and reported a *type* warning on `(even? "x")` instead of the truth. Its
+    // sibling moves that were never curated (`sum`, `frequencies`) correctly said "unbound
+    // symbol", which is what pinned the cause. `nest check` is the gate that exits nonzero on
+    // any warning, so this let a program that dies on an unbound symbol pass CI.
+    //
+    // Keyed as `math/…`, all three cases come out right: a bare use with no import draws the
+    // unbound lint, a qualified `math/abs` gets the vetted signature (it previously got
+    // nothing — lookup is by exact symbol), and a `(:use math)` bare use is known via the
+    // module's exports and simply carries no curated sig, exactly like every other module
+    // function. If these are ever wanted for the `:use`d bare spelling too, the fix is a
+    // bare→owning-module index, NOT re-adding the bare key — that would restore the masking.
+    put("math/even?", Sig::new(vec![num], bool_ty));
+    put("math/odd?", Sig::new(vec![num], bool_ty));
+    put("math/abs", Sig::new(vec![num], num));
     put("not", Sig::new(vec![any], bool_ty));
     put("zero?", Sig::new(vec![any], bool_ty));
     put("count", Sig::new(vec![countable], int));
-    put("length", Sig::new(vec![countable], int));
+    // NO `length` entry: there is no `length` function, and there never was. It was added
+    // 2026-05-31 alongside `count` as if it were an alias ("each vetted against
+    // std/prelude.blsp" — this one was not), and because a curated entry marks its name
+    // *known* and so suppresses the unbound lint, `nest check` accepted `(length x)` in
+    // silence for months while the runtime raised `unbound symbol: length`. The string case
+    // is `string-length`, which has its own entry; sequences use `count`.
     // Output fns: println/eprintln/eprint are Brood closures with rest params,
     // so infer_sig bails — pin their nil result so `(+ 1 (println x))` is caught.
     for n in ["println", "eprintln", "eprint"] {
@@ -249,7 +270,9 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     //   index-where   — tail-recursive helper; 1-ary predicate.
     //   last-index-of — &optional before param; infer_sig bails.
     put("index-of", Sig::new(vec![any, any], int));
-    put("index-where", Sig::new(vec![cb1, seq], int));
+    // `enum/` since ADR-227 — keyed qualified for the same reason as `math/abs` above: a
+    // bare key here would suppress the unbound lint on a name that no longer exists bare.
+    put("enum/index-where", Sig::new(vec![cb1, seq], int));
     put("last-index-of", Sig::new(vec![str_ty, str_ty], int));
     m
 });

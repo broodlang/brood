@@ -1570,7 +1570,9 @@ fn gensym_is_unique_across_threads() {
 #[test]
 fn reset_units_prevents_reload_double_count() {
     let mut interp = Interp::new();
-    interp.eval_str("(require-one 'test)").expect("require test");
+    interp
+        .eval_str("(require-one 'test)")
+        .expect("require test");
     // Simulate a test file loaded twice into one image: two registrations.
     interp
         .eval_str(

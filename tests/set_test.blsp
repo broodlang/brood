@@ -13,7 +13,7 @@
 
 ;; This test file is itself a namespace so it can `(:use set)` — referring set's
 ;; functions (`set`/`conj`/`union`/…) bare. The framework is still root, so
-;; `(require 'test)`/`(:use test)` as before.
+;; `(:use test)` as before.
 (defmodule set-test (:use set) (:use test))
 
 ;; Tail-recursive [lo, hi) (the test body runs in a small-stack green process).

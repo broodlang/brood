@@ -1,4 +1,4 @@
-;; std/zlib.blsp — gzip / zlib / raw-deflate / brotli compression. (require 'zlib)
+;; std/zlib.blsp — gzip / zlib / raw-deflate / brotli compression.
 ;;
 ;; Four container formats, each an
 ;; encode/decode pair over a byte sequence.

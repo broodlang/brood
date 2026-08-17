@@ -4,7 +4,6 @@
 
 (defmodule proctree-test (:use test) (:use proctree))
 
-
 (describe "proctree/by-id"
   (test "sorts ascending by id (the flat view)"
     (assert= (map (fn (p) (get p :id)) (by-id [{:id 3} {:id 1} {:id 2}])) '(1 2 3))))

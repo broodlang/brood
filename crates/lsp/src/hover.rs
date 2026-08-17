@@ -241,7 +241,9 @@ mod tests {
                 dir.display()
             ))
             .expect("extend load-path");
-        interp.eval_str("(require-one 'greeter)").expect("load greeter");
+        interp
+            .eval_str("(require-one 'greeter)")
+            .expect("load greeter");
 
         let src = "(defmodule app (:use greeter))";
         let root = cst::parse(src);

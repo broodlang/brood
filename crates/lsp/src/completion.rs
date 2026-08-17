@@ -549,23 +549,24 @@ mod tests {
             ))
             .unwrap();
 
-        for src in ["(defmodule app (:use "] {
-            let root = cst::parse(src);
-            let tree = scope::analyze(&root, src);
-            let at = src.len() as u32;
-            let labels: Vec<String> = completions(&mut interp, &tree, &root, src, at, true)
-                .into_iter()
-                .map(|i| i.label)
-                .collect();
-            assert!(
-                labels.contains(&"greeter".to_string()),
-                "module missing in {src:?}: {labels:?}"
-            );
-            assert!(
-                !labels.contains(&"+".to_string()),
-                "generic global leaked into {src:?}"
-            );
-        }
+        // One case since ADR-229 removed the `require`-form cases this loop also covered
+        // (clippy rejects a loop over a single element under -D warnings).
+        let src = "(defmodule app (:use ";
+        let root = cst::parse(src);
+        let tree = scope::analyze(&root, src);
+        let at = src.len() as u32;
+        let labels: Vec<String> = completions(&mut interp, &tree, &root, src, at, true)
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(
+            labels.contains(&"greeter".to_string()),
+            "module missing in {src:?}: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"+".to_string()),
+            "generic global leaked into {src:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

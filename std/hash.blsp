@@ -1,4 +1,4 @@
-;; std/hash.blsp — cryptographic and non-cryptographic hashing. (require 'hash)
+;; std/hash.blsp — cryptographic and non-cryptographic hashing.
 ;;
 ;; All digests and HMACs are Brood over exactly two Rust primitives — `%digest`
 ;; and `%hmac` — each taking an algorithm keyword (:md5/:sha1/:sha256/:sha384/

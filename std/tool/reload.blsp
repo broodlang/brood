@@ -1,4 +1,4 @@
-;; std/reload.blsp — file-watcher hot reload. Loaded with (require 'reload).
+;; std/reload.blsp — file-watcher hot reload. Loaded on first `reload/…` reference.
 ;;
 ;; Mechanism vs. policy: the *language* already does hot reload (a top-level
 ;; `def` promotes new code into the shared RUNTIME region and rebinds the
@@ -140,7 +140,7 @@ behind a long-lived loop has changed since it started."
           (reload-loop path now on-reload)))))
 
 ;; Recursive .blsp collector. Returns a flat list of paths (relative to the
-;; original `dir` argument). Mirrors the walk in std/project.blsp; lives here
+;; original `dir` argument). Mirrors the walk in std/tool/project.blsp; lives here
 ;; too so std/reload stays prelude-only and require-able without project.
 (defn- reload-collect-blsp
   (dir)

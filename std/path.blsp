@@ -1,4 +1,4 @@
-;; std/path.blsp — path string manipulation. (require 'path)
+;; std/path.blsp — path string manipulation.
 ;;
 ;; This is the full path API (dirname/extension/stem/normalize/relative-to/…).
 ;; It is NOT a duplicate of the prelude's bootstrap `path-*` subset (path-join,

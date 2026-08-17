@@ -1,5 +1,4 @@
 ;; std/sse.blsp — Server-Sent Events (text/event-stream): a client + server framing.
-;; (require 'sse).
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - SSE is **not** request→response like `http-request`: it's a long-lived `GET`
@@ -14,7 +13,7 @@
 ;;    lines, `\n`/`\r\n`/`\r` terminators) is parsed by pure functions
 ;;    (`sse-parse-event`, `sse-frames`) that are unit-testable without a socket;
 ;;    only `sse-connect`/`sse-stream` touch IO.
-;;  - **Integrates with `ui-run` via `with-events`** (in `std/ui.blsp`): wrap a
+;;  - **Integrates with `ui-run` via `with-events`** (in `std/editor/ui.blsp`): wrap a
 ;;    display so its `:poll` surfaces queued `[:sse …]` messages as loop input — so
 ;;    pushed events drive the UI on the terminal *and* the GUI.
 ;;  - **Text-mode reads are deliberate** (ADR-141): SSE is a UTF-8 *text*
@@ -38,7 +37,7 @@ framing for pushing events over `http`'s streaming seam.
 event to `subscriber`'s mailbox as `[:sse {:event :data :id}]` (`[:sse-open status]`
 once connected, `[:sse-closed reason]` when the link ends); it returns that process's
 pid (kill it to disconnect). The `:data` is the raw payload — `parse` it
-yourself. Pair with `with-events` (std/ui.blsp) to feed events into a `ui-run` loop.
+yourself. Pair with `with-events` (std/editor/ui.blsp) to feed events into a `ui-run` loop.
 
 On the server side, `sse-headers` / `sse-frame` / `sse-send` turn payloads into wire
 frames: return `(http/stream-response 200 (sse-headers) (fn (sock) … (sse-send sock

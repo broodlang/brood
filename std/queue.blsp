@@ -1,5 +1,4 @@
 ;; std/queue.blsp — purely functional FIFO queue and min-priority-queue.
-;; (require 'queue)
 ;;
 ;; FIFO queue: amortised O(1) push/pop using two lists (front + reversed back).
 ;; Priority queue: O(n) insert / O(1) pop using a sorted list of [priority value]

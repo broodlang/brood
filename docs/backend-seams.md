@@ -1,5 +1,12 @@
 # Backend seams — swapping the JIT, swapping the engine, and reading performance
 
+> **Note on the background docs cited below.** `jit-tier2.md`, `jit-stage1.md`,
+> `value-repr.md` and `frame-representation.md` were trimmed in `fdce5400` once the work
+> they planned had shipped. Their conclusions are folded into this file, the ADR that
+> cites them, or the source; the full text is recoverable from git history
+> (`git show fdce5400^:docs/<name>.md`).
+
+
 > **Status: ALL FIVE ITEMS LANDED (2026-08-11).** This began as the session roadmap and is now
 > also the record of what was built. Where implementation contradicted the plan, the section
 > says so rather than being quietly rewritten — items 2, 5 and the benchmarking doc each got

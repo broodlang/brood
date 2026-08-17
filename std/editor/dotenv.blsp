@@ -1,4 +1,4 @@
-;; std/editor/dotenv.blsp — lexical .env (dotenv) highlighting. (require 'editor/dotenv).
+;; std/editor/dotenv.blsp — lexical .env (dotenv) highlighting.
 ;;
 ;; The dotenv analogue of editor/markdown / editor/highlight: a pure data→data
 ;; tokenizer, no IO and no kernel surface. `(env-spans src)` returns `[start end face]`

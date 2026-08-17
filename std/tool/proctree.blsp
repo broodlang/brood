@@ -1,5 +1,4 @@
 ;; std/proctree.blsp — order a flat process-info list as a parent→child forest.
-;; (require 'proctree).
 ;;
 ;; A pure, dependency-free transform over `process-info` maps (ADR-051): given the
 ;; flat `(map process-info (list-processes))` snapshot, produce a depth-tagged forest
@@ -10,8 +9,7 @@
 ;; ordering.
 
 (defmodule proctree
-  "Order a flat `process-info` list as a parent→child forest. `(require 'proctree)`.
-`tree-order` returns the procs re-ordered roots-first, each followed by its
+  "Order a flat `process-info` list as a parent→child forest. `tree-order` returns the procs re-ordered roots-first, each followed by its
 descendants (DFS by id), every map tagged with `:depth` (0 = root) for indentation;
 lineage is read from `:parent`. `by-id` is the plain ascending-by-id sort (the flat
 view). Pure — no IO, no UI deps — so a TUI (std/observer) and a buffer editor

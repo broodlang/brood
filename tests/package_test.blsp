@@ -1307,7 +1307,8 @@
       ;; names it — unlike `project-setup`); a real `nest release` is a fresh process where
       ;; it is the default `["src"]`, but this test shares an image with the rest of the
       ;; suite, so pin it here rather than inherit whatever a prior test left behind.
-      (pkg-write-project app-dir "app" "main" "(defn main () 1)"
+      (pkg-write-project app-dir
+        "app" "main" "(defn main () 1)"
         " :source-paths [\"src\"] :dependencies [[alpha :path \"../alpha\"] [beta :path \"../beta\"]]")
       ;; No error (two bare `parser`s would have tripped `bundle-reject-duplicate-names`),
       ;; and both modules are present under their ROOTED keys — never the bare name.

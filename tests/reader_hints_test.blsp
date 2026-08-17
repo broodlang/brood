@@ -31,7 +31,7 @@
     (let (e (try (read-string "#_(skip me)") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) ";"))))
-  (test "#\"…\" regex literal → parse error naming (require 'regex)"
+  (test "#\"…\" regex literal → parse error naming the regex module"
     (let (e (try (read-string "#\"[0-9]+\"") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) "regex"))))

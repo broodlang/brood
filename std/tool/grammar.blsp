@@ -1,5 +1,5 @@
 ;; std/tool/grammar.blsp — generate editor syntax grammars from the language's own
-;; introspection. `(require 'grammar)` / `nest grammar`.
+;; introspection. `grammar/…` (loads on reference) / `nest grammar`.
 ;;
 ;; One source of truth: `(special-forms)` — the kernel's canonical special-form +
 ;; core-macro list, already shared by the LSP and the REPL highlighter. This tool

@@ -1,5 +1,4 @@
 ;; std/url.blsp — URL encoding/decoding and parsing, written entirely in Brood.
-;; (require 'url)
 ;;
 ;; Provides percent-encoding (RFC 3986 unreserved characters are left as-is),
 ;; query-string encoding/decoding (with + for space), URL parsing/building.

@@ -1,5 +1,12 @@
 # JIT optimizing tier — killing the per-call protocol (scope)
 
+> **Note on the background docs cited below.** `jit-tier2.md`, `jit-stage1.md`,
+> `value-repr.md` and `frame-representation.md` were trimmed in `fdce5400` once the work
+> they planned had shipped. Their conclusions are folded into this file, the ADR that
+> cites them, or the source; the full text is recoverable from git history
+> (`git show fdce5400^:docs/<name>.md`).
+
+
 > **Status: SCOPE / design (2026-06-16).** Not yet implemented. This is the plan for the
 > next big JIT lever after the tier-2 template JIT (`docs/jit-tier2.md`) and the two 2026-06-16
 > call-path wins (`e672cee` no-clone fast-link, `eebfbd3` shared native code across processes).

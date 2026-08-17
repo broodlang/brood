@@ -1,5 +1,4 @@
 ;; std/task.blsp — run a thunk off the current process, with timeout + cancel.
-;; (require 'task).
 ;;
 ;; The generic "do this work off my loop and tell me when it's done" abstraction
 ;; that long-running interactive programs (the editor's async eval, ADR-046) keep
@@ -19,7 +18,6 @@
 ;; `:eval-proc` pid-match — a newer task's reply can't be clobbered by an older
 ;; one). See docs/concurrency.md.
 ;;
-;;     (require 'task)
 ;;     ;; async: returns a handle, delivers a message when done
 ;;     (def h (task (fn () (heavy-compute)) {:timeout 2000}))
 ;;     (receive
@@ -32,8 +30,8 @@
 ;;     (await (fn () (heavy-compute)) 2000)
 
 (defmodule task
-  "Run a thunk off the current process, with an optional timeout and cancellation
-(`(require 'task)`). `task` is asynchronous — it returns a *handle* and delivers
+  "Run a thunk off the current process, with an optional timeout and cancellation.
+`task` is asynchronous — it returns a *handle* and delivers
 `[:task-done handle value]` / `[:task-error handle message]` / `[:task-timeout
 handle]` to `:reply-to` (default the caller); `cancel-task` stops a task early;
 `await` is the synchronous form that blocks for the value (throwing on error or

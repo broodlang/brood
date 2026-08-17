@@ -1,5 +1,5 @@
 ;; std/telemetry.blsp — Erlang :telemetry-style instrumentation.
-;; Loaded with (require 'telemetry).
+;; Loaded on first `telemetry/…` reference.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings):
 ;;  - **Handlers run in a dedicated LISTENER process, never in the emitting process.**

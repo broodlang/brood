@@ -1,4 +1,4 @@
-;; std/stream.blsp — process-based pull streams. (require 'stream).
+;; std/stream.blsp — process-based pull streams.
 ;;
 ;; A stream is a PID implementing this two-message protocol:
 ;;
