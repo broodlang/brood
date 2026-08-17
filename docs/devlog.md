@@ -1230,12 +1230,14 @@ mentioning length" is true of an unbound warning too, so it proved nothing.
 **Two published benchmark rows were dead for three days (KI-44).** `nbody` died with `unbound
 symbol: sqrt` and `json` with the dropped `json-` prefix: ADR-227's migration sweep covered
 `breakage/`, `examples/`, `stress/`, `std/` and `crates/` but could not see `brood-benchmarks`,
-a separate repo. A published harness run would have failed outright. Both fixed with the ADR's
-header-less-script pattern and verified against the other ports' checksums (`nbody` −169063618
+a separate repo. A published harness run would have failed outright. Both fixed by qualifying the reference (which loads the module by
+inference) and verified against the other ports' checksums (`nbody` −169063618
 = node = python; `json` 364568836 = node), not merely "it runs now". The structural cause — that
 nothing runs those programs for *correctness*, only for timing, by hand, over tens of minutes —
 is fixed by `bench/smoke.py`: every row at the harness's own quick sizes, exit status only,
-about a minute, sabotage-verified. (First attempt used a flat `BENCH_N=50` and reported three
+about a minute, sabotage-verified — and it immediately paid for itself: ADR-229's `require`
+removal landed while this was in flight and broke `base64`, `json` and `regex` in that repo,
+which the check caught in one run. (First attempt used a flat `BENCH_N=50` and reported three
 false failures, because `BENCH_N` is an iteration count on some rows and a *problem size* on
 others — 50 means fib(50) on `pfib` and a 50×50 board on `nqueens`. It now imports the
 harness's `QUICK` table so the two cannot drift.)
