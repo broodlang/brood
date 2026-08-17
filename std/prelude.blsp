@@ -4679,6 +4679,21 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
           (let (cur (or (get m parent) nil))
             (if (member? key cur) m (assoc m parent (cons key cur)))))))))
 
+;; For an embedded module loaded via `%builtin-module`: if `key` is a package-rooted
+;; module `pkg/mod` whose `pkg` is a registered package (`*package-modules-of*`), return
+;; `pkg` as a symbol; otherwise nil. This is what separates a bundled DEPENDENCY module
+;; (a release bundle embeds each dep's module under its rooted key `pkg/mod` — ADR-070
+;; dev/release parity) from a baked-in std module or a bundle's unrooted root-project
+;; module, both of which load at ROOT. The slash guard is load-bearing: a root-project
+;; module whose unrooted name happens to equal a dep's package name (`foo`) has no
+;; prefix, so it must not be mistaken for that package.
+(defn- bundle-module-package
+  (key)
+  (let (seg (first (string-split key "/")))
+    (if (and (not (= seg key)) (contains? *package-modules-of* seg))
+      (symbol seg)
+      nil)))
+
 ;; The raw load of feature `key`: evaluate its embedded source (a baked-in std
 ;; module) or the first <key>.blsp found on *load-path*, then record it. No
 ;; loading-bookkeeping — callers manage *features-loading*. Errors if not found.
@@ -4704,12 +4719,24 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       ;; file (the branch below) goes through the ordinary `load`, so a package's
       ;; names are never reserved.
       ;;
-      ;; Load embedded std at ROOT: clear any ambient package context (ADR-070) around
-      ;; it and restore after. Embedded std is never a package module, so without this a
-      ;; project whose own module shares a std name (a local `json`/`set`/`format`) would
-      ;; misroot the baked-in `(defmodule json)` to `myproj/json` under that context.
+      ;; Load an embedded module. A baked-in std module loads at ROOT: clear any ambient
+      ;; package context (ADR-070) around it and restore after — embedded std is never a
+      ;; package module, so without this a project whose own module shares a std name (a
+      ;; local `json`/`set`/`format`) would misroot the baked-in `(defmodule json)` to
+      ;; `myproj/json` under that context. A bundled DEPENDENCY module, though, is embedded
+      ;; under its ROOTED key `pkg/mod` and must load under `pkg`'s context so its
+      ;; `(defmodule mod)` roots to `pkg/mod` and its intra-package `(:use …)` targets root
+      ;; — mirroring the disk `require-force-package` path so two deps providing a same-named
+      ;; module coexist in one flat bundle (dev/release parity). `bundle-module-package`
+      ;; picks the context; it returns nil for std and for a bundle's unrooted root-project
+      ;; module (both load at ROOT). In a non-bundle dev run this branch only ever fires for
+      ;; std (a dep loads from disk — `%builtin-module` returns nil), and std namespaces are
+      ;; never packages, so the check is a no-op there.
       (do
-        (let (prev (%set-package-context nil nil))
+        (let (prefix (bundle-module-package key)
+              prev (if prefix
+                     (%set-package-context prefix (get *package-modules-of* (name prefix)))
+                     (%set-package-context nil nil)))
           (%load-module-source src (%builtin-module-file key))
           (%set-package-context (first prev) (second prev)))
         (provide key))
