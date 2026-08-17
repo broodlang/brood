@@ -216,8 +216,13 @@ module's namespace-rooted globals (ADR-070) back to it."
     (map (fn (s) (docs-def-record s (eval s)))
       (filter (fn (s) (and (docs-documentable? (eval s)) (not (docs-private? s)))) syms))))
 
-;; One module entry of the doc model: `{:module :doc :defs}`.
-(defn- docs-module-model (title mdoc syms) {:module title :doc mdoc :defs (docs-def-records syms)})
+;; One module entry of the doc model: `{:module :doc :defs :qualified?}`. `:qualified? true`
+;; — a project/library module IS a namespace, so its defs render as their call form
+;; (`math/sqrt`, `web/endpoint/handler`), not bare (a bare `sqrt` is unbound; you reference
+;; the qualified name or `(:use)`). The prelude-category pseudo-modules the reference adds
+;; leave it false (their names — `+`, `map` — are genuinely bare).
+(defn- docs-module-model (title mdoc syms)
+  {:module title :doc mdoc :defs (docs-def-records syms) :qualified? true})
 
 ;; A file's declared module name — the `(defmodule NAME …)` symbol — or nil if the file
 ;; has no module header. Read from source (the form is discarded once loaded).
