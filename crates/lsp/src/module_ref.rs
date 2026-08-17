@@ -6,9 +6,9 @@
 //! scope analysis resolves them `Free`), which is exactly why the generic
 //! scope-driven hover/goto paths can't see them. We instead recognize them
 //! *structurally* from the CST: the cursor is on the form right after a `:use` /
-//! `:alias` / `:implements` keyword in a clause list. (`(require 'foo)` is handled
-//! separately in [`crate::definition`] — its argument is quoted, not a bare clause
-//! target, and it has no hover counterpart.)
+//! `:alias` / `:implements` keyword in a clause list. (There is no `require` form
+//! in the language — a module loads only via `(:use)`/`(:alias)`/`(:implements)`
+//! or a qualified `mod/name` reference.)
 
 use brood::syntax::cst::{Node, NodeKind};
 
