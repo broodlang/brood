@@ -133,9 +133,9 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         // Smart expand/shrink selection along the CST (symbol → form → outer
         // form → file) — especially natural for s-expressions.
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
-        // Clickable links over module names that resolve to a file — `(require
-        // 'foo)` arguments and `(:use foo)`/`(:alias foo)` clauses. No resolve
-        // step: each link carries its target URI up front.
+        // Clickable links over module names that resolve to a file —
+        // `(:use foo)`/`(:alias foo)` clauses. No resolve step: each link carries
+        // its target URI up front.
         document_link_provider: Some(DocumentLinkOptions {
             resolve_provider: Some(false),
             work_done_progress_options: Default::default(),
@@ -615,7 +615,7 @@ fn handle_request(
                     // Resolve a diagnostic's range to the byte offset of its
                     // start — where the unbound name sits, for `names_in_scope`.
                     let offset_of = |r: Range| a.line_index.offset(&doc.text, r.start);
-                    let mut acts = code_actions::code_actions(
+                    code_actions::code_actions(
                         interp,
                         &p.text_document.uri,
                         &a.cst,
@@ -624,20 +624,7 @@ fn handle_request(
                         &a.line_index,
                         offset_of,
                         &p.context.diagnostics,
-                    );
-                    // Structural fixes (not tied to a published diagnostic):
-                    // offer to remove a seemingly-unused require under the cursor.
-                    let req_start = a.line_index.offset(&doc.text, p.range.start);
-                    let req_end = a.line_index.offset(&doc.text, p.range.end);
-                    acts.extend(code_actions::unused_require_actions(
-                        &p.text_document.uri,
-                        &a.cst,
-                        &doc.text,
-                        &a.line_index,
-                        req_start,
-                        req_end,
-                    ));
-                    acts
+                    )
                 }
                 None => Vec::new(),
             };

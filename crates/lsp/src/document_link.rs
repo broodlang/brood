@@ -1,9 +1,9 @@
 //! `textDocument/documentLink`: make the module names that name *files* clickable
 //! — Ctrl-click to open. We link every module reference the buffer mentions in a
-//! load position: a `(require 'foo)` argument and a `(:use foo)` / `(:alias foo)`
-//! `defmodule` clause. Each resolves to its source file the same way `require`
-//! does (`introspect::module_file` over `*load-path*`); a name with no file (a
-//! baked-in std module, or one not on the path) simply gets no link.
+//! load position: a `(:use foo)` / `(:alias foo)` `defmodule` clause. Each
+//! resolves to its source file (`introspect::module_file` over `*load-path*`); a
+//! name with no file (a baked-in std module, or one not on the path) simply gets
+//! no link.
 //!
 //! This complements goto-definition (`definition.rs` / `module_ref.rs`): goto is
 //! cursor-driven and also covers `:implements`; document links are the
@@ -42,39 +42,26 @@ pub fn document_links(
         .collect()
 }
 
-/// Walk the CST collecting the symbol nodes that name a requireable module: the
-/// quoted argument(s) of a `(require …)` call, and the name in a `(:use …)` /
-/// `(:alias …)` clause. Recurses into every node so nested clauses are found.
+/// Walk the CST collecting the symbol nodes that name a loadable module: the name
+/// in a `(:use …)` / `(:alias …)` clause. Recurses into every node so nested
+/// clauses are found.
 fn collect_module_names<'a>(node: &'a Node, src: &str, out: &mut Vec<&'a Node>) {
-    // Don't descend into quoted / quasiquoted forms: a `(require 'foo)` (or a
-    // `(:use foo)`) written as *data* — `'(require 'foo)`, or a macro template —
-    // isn't a real load position, so it shouldn't get a link. (A genuine
-    // `(require 'foo)`'s own `'foo` argument is collected at the List level below,
-    // before this recursion reaches the quote, so real requires still link.)
+    // Don't descend into quoted / quasiquoted forms: a `(:use foo)` written as
+    // *data* — inside `'(defmodule … (:use foo))`, or a macro template — isn't a
+    // real load position, so it shouldn't get a link.
     if matches!(node.kind, NodeKind::Quote | NodeKind::Quasi) {
         return;
     }
     if node.kind == NodeKind::List {
         let mut forms = node.forms();
         if let Some(head) = forms.next() {
-            match head.kind {
-                // `(require 'a 'b …)` — each (quoted) symbol argument.
-                NodeKind::Symbol if head.text(src) == "require" => {
-                    for arg in forms {
-                        if let Some(sym) = quoted_symbol(arg) {
-                            out.push(sym);
-                        }
+            // `(:use foo …)` / `(:alias foo …)` — the form right after the keyword.
+            if head.kind == NodeKind::Keyword && matches!(head.text(src), ":use" | ":alias") {
+                if let Some(name) = node.forms().nth(1) {
+                    if name.kind == NodeKind::Symbol {
+                        out.push(name);
                     }
                 }
-                // `(:use foo …)` / `(:alias foo …)` — the form right after the keyword.
-                NodeKind::Keyword if matches!(head.text(src), ":use" | ":alias") => {
-                    if let Some(name) = node.forms().nth(1) {
-                        if name.kind == NodeKind::Symbol {
-                            out.push(name);
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -83,23 +70,14 @@ fn collect_module_names<'a>(node: &'a Node, src: &str, out: &mut Vec<&'a Node>) 
     }
 }
 
-/// The inner symbol of a `'sym` quote node, or `None` for any other form.
-fn quoted_symbol(node: &Node) -> Option<&Node> {
-    if node.kind != NodeKind::Quote {
-        return None;
-    }
-    let inner = node.forms().next()?;
-    (inner.kind == NodeKind::Symbol).then_some(inner)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use brood::syntax::cst;
 
     /// Resolve links against a temp dir holding `greeter.blsp`, returning the
-    /// linked name texts (sorted) — proves both the require and `:use` positions
-    /// link, and that an unresolvable name (`nope`) doesn't.
+    /// linked name texts (sorted) — proves the `:use` position links, and that an
+    /// unresolvable name (`nope`) doesn't.
     fn linked_names(tag: &str, src: &str) -> Vec<String> {
         // Unique per test: cargo runs these on threads of one process, so a
         // pid-only dir would be shared and racily removed by a sibling test.
@@ -146,14 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn links_a_require_argument() {
-        assert_eq!(
-            linked_names("require", "(require 'greeter)"),
-            vec!["greeter"]
-        );
-    }
-
-    #[test]
     fn links_a_use_clause_module() {
         assert_eq!(
             linked_names("use", "(defmodule app (:use greeter))"),
@@ -163,19 +133,15 @@ mod tests {
 
     #[test]
     fn skips_a_module_with_no_file() {
-        assert!(linked_names("nofile", "(require 'nope)").is_empty());
+        assert!(linked_names("nofile", "(defmodule app (:use nope))").is_empty());
     }
 
     #[test]
-    fn links_both_positions_in_one_file() {
-        let src = "(defmodule app (:use greeter))\n(require 'greeter)";
-        assert_eq!(linked_names("both", src), vec!["greeter", "greeter"]);
-    }
-
-    #[test]
-    fn does_not_link_a_require_inside_quoted_data() {
-        // `'(require 'greeter)` is data, not a load — must produce no link, even
-        // though `greeter.blsp` exists on the path.
-        assert!(linked_names("quoted", "(def x '(require 'greeter))").is_empty());
+    fn does_not_link_a_use_clause_inside_quoted_data() {
+        // A `(:use greeter)` written as data — inside `'(defmodule …)` — is not a
+        // load, so it must produce no link, even though `greeter.blsp` exists.
+        assert!(
+            linked_names("quoted", "(def x '(defmodule app (:use greeter)))").is_empty()
+        );
     }
 }

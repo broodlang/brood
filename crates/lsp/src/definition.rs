@@ -33,21 +33,10 @@ pub fn definition(
     index: &LineIndex,
     offset: u32,
 ) -> Option<Location> {
-    // Module navigation: a symbol that's an argument of `(require '…)` jumps to
-    // the module's source file, located on the live `*load-path*` exactly as
-    // `require` would. Checked first — a module name resolves `Free` in the CST
-    // (it binds nothing), so the generic path below would otherwise miss it.
-    if let Some(feature) = require_arg(root, text, offset) {
-        if let Some(file) = introspect::module_file(interp, feature) {
-            // Jump to the top of the module file.
-            let top = Position::new(0, 0);
-            return crate::path_to_uri(&file).map(|u| Location::new(u, Range::new(top, top)));
-        }
-    }
     // A `defmodule` clause target: `(:use foo)` / `(:alias foo)` jumps to the
-    // module's file (like `require`); `(:implements Bar)` jumps to the behaviour's
-    // declaration. Like a require argument, these resolve `Free` in the CST, so
-    // they're handled before the generic scope path below.
+    // module's file; `(:implements Bar)` jumps to the behaviour's declaration.
+    // These resolve `Free` in the CST (they bind nothing), so they're handled
+    // before the generic scope path below.
     match module_ref::clause_ref_at(root, text, offset) {
         Some(module_ref::ClauseRef::Module(name)) => {
             if let Some(file) = introspect::module_file(interp, name) {
@@ -79,56 +68,6 @@ pub fn definition(
         }
         Resolution::NotASymbol => None,
     }
-}
-
-/// If the symbol at `offset` is an argument of a `(require …)` form, return its
-/// text (the feature name). Walks the chain of nodes containing `offset` and
-/// looks for an enclosing `List` whose head symbol is `require` — so it matches
-/// `(require 'a 'b)` whether or not the name is quoted, and ignores a bare
-/// `require` reference that isn't a call argument.
-fn require_arg<'s>(root: &Node, src: &'s str, offset: u32) -> Option<&'s str> {
-    let node = root.node_at(offset)?;
-    if node.kind != NodeKind::Symbol {
-        return None;
-    }
-    // The head `require` itself isn't an argument — don't navigate from it.
-    let mut chain = Vec::new();
-    chain_to(root, offset, &mut chain);
-    let in_require = chain.iter().any(|n| head_sym(n, src) == Some("require"));
-    (in_require && head_sym_is_not(&chain, src, node)).then(|| node.text(src))
-}
-
-/// The chain of nodes from `root` down to the innermost one containing `offset`.
-fn chain_to<'a>(node: &'a Node, offset: u32, out: &mut Vec<&'a Node>) {
-    out.push(node);
-    for child in &node.children {
-        if child.span.start <= offset && offset < child.span.end {
-            chain_to(child, offset, out);
-            break; // children don't overlap — at most one contains the offset
-        }
-    }
-}
-
-/// The head symbol's text of a `List` node (`require` in `(require 'a)`), or `None`.
-fn head_sym<'s>(node: &Node, src: &'s str) -> Option<&'s str> {
-    if node.kind != NodeKind::List {
-        return None;
-    }
-    let first = node.forms().next()?;
-    (first.kind == NodeKind::Symbol).then(|| first.text(src))
-}
-
-/// True unless `node` is itself the `require` head symbol of some list in `chain`
-/// (so `M-.` on the word `require` doesn't try to open a `require.blsp`).
-fn head_sym_is_not(chain: &[&Node], src: &str, node: &Node) -> bool {
-    !chain.iter().any(|n| {
-        n.kind == NodeKind::List
-            && n.forms()
-                .next()
-                .map(|h| std::ptr::eq(h, node))
-                .unwrap_or(false)
-            && head_sym(n, src) == Some("require")
-    })
 }
 
 /// Locate the `(defbehaviour Name …)` / `(defability Name …)` that declares the
