@@ -13,7 +13,6 @@
 ;;;   - `round` / `floor` / `ceil` / `abs` on edge-case values
 ;;;   - Division that crosses the exact/inexact boundary mid-stream
 
-(require 'math)
 (println "--- basic IEEE 754 extremes ---")
 
 (def f-max 1.7976931348623157e308)

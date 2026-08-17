@@ -1,6 +1,6 @@
 ;; examples/editor/src/brood-mode.blsp — the editing layer for Brood (.blsp)
 ;; source. An *editor* module (policy: keys, file associations), loaded from the
-;; editor project's src/, not part of the language. (require 'brood-mode).
+;; editor project's src/, not part of the language.
 ;;
 ;; A `brood-mode` LAYER (in the `layers` sense) for Brood code: it reuses
 ;; `text-mode`'s motion commands, adds structural s-expression navigation
@@ -18,17 +18,16 @@
 (defmodule brood-mode
   "The editing layer for Brood (`.blsp`) source: `text-mode` motion + structural
 sexp navigation (`std/sexp`) + `C-x C-e` evaluate-last-sexp (`std/eval-command`,
-result into `:message`). Registers `.blsp` → `:brood` → this layer. `(require
-'brood-mode)`."
+result into `:message`). Registers `.blsp` → `:brood` → this layer."
   (:use editor/layers)
   (:use editor/keymap))
 
-(require 'editor/buffer)
-(require 'editor/layers)
-(require 'editor/keymap)
-(require 'sexp)
-(require 'eval-command)
-(require 'text-mode)
+;; `text-mode` is reached only through QUOTED symbols in the keymap below
+;; (`'text-mode/forward-char`), and a quoted symbol is not a reference — so
+;; load-by-inference cannot see it. That is ADR-229's pure effect-load case, and
+;; `require-one` is its mechanism. Everything else arrives via the `:use` clauses
+;; above or this module's own qualified `sexp/…` / `eval-command/…` references.
+(require-one 'text-mode)
 
 ;; C-x C-e: evaluate the last sexp before point; the result message (value +
 ;; captured output) goes in :message for the editor to show. Does not edit the

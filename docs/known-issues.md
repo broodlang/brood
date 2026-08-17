@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ⚠️ **OPEN** — needs a decision (delete the stale example / give it its own copy / drop the feature), not a patch |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site JIT inline** is dead: it requires a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ⚠️ correctness **fixed 2026-08-17** (both rows run, checksums match the other ports); the ~1.8× inline restoration is **OPEN** |
 | KI-43 | `remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a **fixed 5 s sleep**, but the observer needs 5.9–9.2 s under load to boot + `require 'observer'` + connect — so the target died first, `connect` refused, stdout empty. Failed BOTH retries in a loaded `make test`, passed standalone: the signature that gets written off as noise | ✅ **fixed 2026-08-14** — waits for the observer's attach report instead of a stopwatch; **8/8 under saturating load**, and 3.5 s instead of ~11 s |
 | KI-42 | the `breakage/` suite had rotted to **9 of 23 files failing** and nobody knew, because it is outside `make test` and had no CI job — a pin-syntax change (`~ref`→`^ref`), a renamed `string-contains?`, an assertion predating exact rationals, and a TCP file whose every phase was dead | ✅ **fixed 2026-08-13** — all 23 files pass and gate, nothing skipped; CI job added so it cannot rot silently again |
@@ -63,7 +64,7 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**One open item — KI-44's performance half: the `sqrt` call-site JIT inline is dead, worth ~1.8x on `nbody` (its correctness half is fixed). One watch item (KI-36).** KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**Two open items — KI-45 (a stale example, needs a decision) and KI-44's performance half: the `sqrt` call-site JIT inline is dead, worth ~1.8x on `nbody` (its correctness half is fixed). One watch item (KI-36).** KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -73,6 +74,40 @@ walked straight through the helpers' 20 s / 30 s deadlines. Warming the cache on
 fan-out takes the three tests from a 20.1 s failure to 1.9–2.6 s. No bug in the *language or
 runtime* was implied at any point — every sighting was a boot wait, never an assertion about
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
+
+---
+
+## KI-45 — `examples/editor` references `eval-command`, which left the repo in May
+
+**Status:** ⚠️ **OPEN — needs a product decision, not a patch.** Found 2026-08-17 while
+finishing the ADR-229 migration.
+
+`examples/editor/src/brood-mode.blsp` calls `eval-command/eval-last-sexp` for its `C-x C-e`
+binding, and `examples/editor/project.blsp` still advertises the example as built on
+"std/buffer, std/keymap, std/layers, std/sexp, **std/eval-command**". That module was moved
+**out of this repo on 2026-05-31** (`650eb89f`, "move eval-command (editor policy) out of std →
+the myedit project") and now lives in the sibling project — `../brood-edit/src/eval-command.blsp`.
+So the example has referenced a module this repo does not contain for two and a half months.
+`nest test` in `examples/editor` is 4 of 5, failing only that case with `unbound symbol:
+eval-command/eval-last-sexp`.
+
+Nothing gates it: `examples/` is outside `make test`, `nest check` and the breakage suite — the
+same blind spot as KI-42 (breakage), KI-43 (a suite outside the gate) and KI-44 (the benchmarks
+repo). This is the fourth instance of that one pattern.
+
+**Why this is not fixed here.** The three options are each a judgement about what the example is
+*for*, which belongs to the owner: (a) delete `examples/editor`, since `brood-edit` is now the
+real editor project and this is a stale duplicate; (b) give the example its own small
+`eval-command` module, since the 650eb89f rationale — "editor policy belongs to an app, not
+std" — applies to an example app just as well; or (c) drop the `C-x C-e` feature and its test and
+correct the manifest comment. Option (a) also removes 9 of the ADR-229 migration's edits.
+
+What *was* done: the example's `require` call sites were migrated (ADR-229), which is a strict
+improvement — the missing module now fails at its one call site instead of at load, so the other
+four tests run. `text-mode` is loaded with `require-one` in both `brood-mode` and the test,
+because it is reached only through **quoted** keymap symbols (`'text-mode/forward-char`) and a
+quoted symbol is not a reference, so load-by-inference cannot see it — ADR-229's pure
+effect-load case.
 
 ---
 

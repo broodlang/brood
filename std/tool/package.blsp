@@ -737,7 +737,6 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 ;; releases are immutable, so the server refuses a re-publish. A base URL override
 ;; may be passed to the registry functions (tests point it at a loopback server).
 
-
 (defn- registry-trim
   (url)
   "`url` without a trailing slash."

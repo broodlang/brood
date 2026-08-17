@@ -83,7 +83,7 @@
                            (fn (v)
                              (if (= (type-of v) :float)
                                ;; NaN != NaN — expected; count float as "special"
-                               (or (= v v) (string-contains? (pr-str v) "NaN"))
+                               (or (= v v) (includes? (pr-str v) "NaN"))
                                (= v v)))
                            soup))
                        (count soup)))
@@ -99,7 +99,6 @@
 (println "all strings?" (= (count (filter string? strs)) (count strs)))
 
 (println "--- type-of frequencies ---")
-(require 'enum)
 (def type-freq (enum/frequencies (map type-of soup)))
 (println "type frequencies:" (pr-str type-freq))
 

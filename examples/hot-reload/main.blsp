@@ -16,8 +16,6 @@
 ;; global lookup, so it sees the new binding on the next call. In-flight
 ;; calls keep the old code; only the *next* call swaps.
 
-(require 'reload)
-
 (def here (parent-dir (current-file)))
 (def greeter-path (path-join here "greeter.blsp"))
 
