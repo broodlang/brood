@@ -2766,6 +2766,10 @@ so a namespaced module (`net/sse`) keeps its namespace and resolves like the bak
 std. Errors if `root` is nil (not in a project)."
   (when (nil? root)
     (error "bundle-collect: not in a Brood project (no project.blsp found)"))
+  ;; Load `package` explicitly (project↔package cycle, as in project-ensure-deps-on-path):
+  ;; auto-require via the bare qualified ref below would load it mid-cycle, leaving
+  ;; `package/ensure-deps` unbound during `nest release` (not exercised by nest check/suite).
+  (require-one 'package)
   (let (manifest (slurp (path-join root "project.blsp")))
     ;; Apply the manifest as DATA (not `load`) to learn its source paths + deps,
     ;; mirroring `project-setup`. We don't load any source here — just read it.
