@@ -1886,7 +1886,9 @@ fn resolving_a_closure_arm_twice_reuses_one_memoized_handle() {
 #[test]
 fn sqrt_call_site_inline_recognizes_the_moved_math_wrapper() {
     let mut interp = crate::Interp::new();
-    interp.eval_str("(require-one 'math)").expect("load std/math");
+    interp
+        .eval_str("(require-one 'math)")
+        .expect("load std/math");
     assert_eq!(
         resolve_prim1(&interp.heap, value::intern("math/sqrt")),
         Some(PrimOp1::Sqrt),
