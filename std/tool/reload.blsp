@@ -1,4 +1,4 @@
-;; std/reload.blsp — file-watcher hot reload. Loaded with (require 'reload).
+;; std/reload.blsp — file-watcher hot reload. Loaded on first `reload/…` reference.
 ;;
 ;; Mechanism vs. policy: the *language* already does hot reload (a top-level
 ;; `def` promotes new code into the shared RUNTIME region and rebinds the

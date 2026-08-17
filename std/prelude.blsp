@@ -2571,7 +2571,7 @@ message already sent stays sent."
   nil)
 
 ;; Node-link auto-reconnect moved to `std/net/reconnect` (2026-07-18):
-;; `(require 'net/reconnect)` then `(net/reconnect/watch "name@host:port")` —
+;; `(net/reconnect/watch "name@host:port")` — the reference loads the module —
 ;; exponential backoff, [:nodeup]/[:nodedown] subscriber events, idempotent
 ;; named watchers. It supersedes the old prelude `ensure-link`.
 
@@ -4356,7 +4356,7 @@ Returns the directory. Pass `{}` to stop consulting an image."
 ; from another process WAITS for the load to finish instead of returning while the
 ; module is half-evaluated — the partial-load race: `require` returned, the caller
 ; called `mod/fn`, unbound. (Surfaced as a once-in-several-runs editor test flake
-; the moment two test processes raced an inline `(require 'proctree)`.)
+; the moment two test processes raced an inline load of `proctree`.)
 
 ;; ---- the general registry update: compare-and-swap + retry (KI-23) ------------
 ;;
@@ -4582,7 +4582,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
         _checked (map defmodule-check-clause clauses))
     ;; The feature/doc key is the module's ROOTED name (ADR-070): inside a dependency
     ;; `foo`, `(defmodule b)` provides `foo/b` and `(%in-ns 'b)` roots compile-ns to
-    ;; `foo/b`, so an outside `(require 'foo/b)` finds it and the file's defs become
+    ;; `foo/b`, so an outside `foo/b/…` reference finds it and the file's defs become
     ;; `foo/b/…`. At root (no package context) `%root-module-name` is the identity, so
     ;; the root project and std stay short. Computed at load time, when the context is set.
     `(let (root-key# (name (%root-module-name '~mod)))
@@ -4878,7 +4878,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; Open generic functions with nominal dispatch — Brood's unified polymorphism seam
 ;; (ADR-168/172). Folded into the prelude (was std/ability.blsp + std/show.blsp) so
 ;; `defability`/`impl`/`defrecord` and the always-on `Display`/`Inspect` protocol are
-;; core — no `(:use ability)`, no `(require 'show)`, no activation step. Dispatch is on
+;; core — no `(:use ability)`, no load step at all, no activation. Dispatch is on
 ;; the FIRST arg's identity (a built-in's `type-of` kind, or a `defrecord` value's
 ;; nominal `module/name` id); resolution is by PRECEDENCE tier, not load order:
 ;; app > type-owner > ability-owner > other.

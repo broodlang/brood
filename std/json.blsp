@@ -1,4 +1,4 @@
-;; std/json.blsp — JSON ↔ Brood data, written entirely in Brood. (require 'json).
+;; std/json.blsp — JSON ↔ Brood data, written entirely in Brood.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - **Policy in Brood, not Rust** (ADR-006): a JSON reader/writer is exactly the

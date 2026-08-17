@@ -1,4 +1,4 @@
-;; std/proc/supervisor.blsp — Erlang/OTP-style process supervision. (require 'proc/supervisor).
+;; std/proc/supervisor.blsp — Erlang/OTP-style process supervision.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - A supervisor is an ordinary green process running a receive loop. It

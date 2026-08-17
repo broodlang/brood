@@ -1,6 +1,5 @@
 ;; std/test.blsp — a tiny test framework, written in Brood itself.
 ;;
-;;   (require 'test)
 ;;   (describe "math"
 ;;     (test "adds"       (assert= (+ 1 2) 3))
 ;;     (test "multiplies" (assert= (* 2 3) 6) (assert-error (/ 1 0))))

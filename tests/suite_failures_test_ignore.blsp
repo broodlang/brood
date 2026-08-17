@@ -17,7 +17,7 @@
 ;; finishes by showing its report rather than dumping a backtrace.
 
 ;; A `defmodule` with `(:use test)` so the framework's macros refer bare —
-;; post-ADR-065 a plain `(require 'test)` only loads the module and leaves
+;; post-ADR-065 merely loading `test` leaves
 ;; `describe`/`test`/`assert=` qualified, which is why this file had stopped
 ;; running (and read as a wall of `unbound symbol` warnings).
 (defmodule suite-failures-demo

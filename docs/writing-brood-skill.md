@@ -109,7 +109,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 **Modules are namespaces (ADR-065).** `(defmodule name …)` compiles the file into
 namespace `name`: `def`/`defn` define `name/foo`. To call another module's names
 **bare**, add a `(:use mod)` clause to the header (`(defmodule app "…" (:use
-editor/display) (:use test))`); a plain `(require 'mod)` only *loads* it, leaving names
+editor/display) (:use test))`); merely *referencing* `mod/name` loads the module but leaves names
 qualified (`mod/foo`), and `(:require …)` is **not** a clause (silently ignored —
 bare calls then fail `unbound symbol`). Earmuffed `*foo*` names are ambient/bare,
 never namespaced. From outside a module (REPL, `nest mcp` eval) reach a `defn`
@@ -164,7 +164,7 @@ round-trips. Two faster moves:
   | `set!` / `swap!` / atoms | nothing — state is a process or a Rust handle (trap #1) |
   | `while`, `for`-loop | tail recursion (or a local `letrec`), or `fold`/`map`/`filter`/`reduce` (trap #2) |
   | a `flush` after `print` | nothing — `print` flushes stdout every call |
-  | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` (bare `(require 'editor/ansi)` leaves names qualified) → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — call them: `(print (ansi-clear))`, never `(print ansi-clear)` (prints `#<fn …>`). A render loop wants `std/display`. |
+  | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` (a bare `editor/ansi/…` reference loads it but leaves names qualified) → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — call them: `(print (ansi-clear))`, never `(print ansi-clear)` (prints `#<fn …>`). A render loop wants `std/display`. |
   | a built-in RNG (`rand`) | `rng`/`rand-int`/`rand-float`/`shuffle`/`sample` — pure & seedable, return `[value next-seed]`; thread the seed through your state |
   | a set / `#{}` | First-class kernel value (ADR-060): `#{1 2 3}` literal, `(set? s)` true, `(map? s)` **false**, prints `#{…}`, never `=` to a map. Collection protocol works with no import — `(contains? s x)`, `(conj s x)`/`(disj s x)`, `(get s x)` (element or nil), `count`/`first`/`map`/`fold`/`into`/`vec`/`seq` (as elements). `(:use set)` adds only `(set coll)` (dedup) + `union`/`intersection`/`difference`/`subset?`. |
 

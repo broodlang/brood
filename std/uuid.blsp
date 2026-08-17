@@ -1,4 +1,4 @@
-;; std/uuid.blsp — UUID generation. (require 'uuid)
+;; std/uuid.blsp — UUID generation.
 ;;
 ;; Versions: v3 (MD5 name-based), v4 (random), v5 (SHA-1 name-based),
 ;;           v7 (time-ordered random, RFC 9562).

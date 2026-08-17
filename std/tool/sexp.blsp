@@ -1,5 +1,4 @@
 ;; std/sexp.blsp — structural (s-expression) navigation over Brood's own CST.
-;; (require 'sexp).
 ;;
 ;; The "tree-sitter" for Brood code is the reader itself: `parse-source` returns a
 ;; lossless CST (typed nodes — :list/:vector/:map/:symbol/:str/:comment/:quote…),
@@ -29,7 +28,7 @@ structure-capped kill bound). Buffer commands `(buf key) -> buf` wrap each for a
 keymap: `forward` / `backward` / `list-forward` / `list-backward` / `up` /
 `up-forward` / `down` / `beginning-of-defun` / `end-of-defun` and
 `slurp-forward` / `barf-forward` / `slurp-backward` / `barf-backward` / `raise`
-/ `splice` / `wrap-round` / `transpose`. `(require 'sexp)`."
+/ `splice` / `wrap-round` / `transpose`."
   (:use editor/buffer))
 
 ;; ---- node-kind predicates ---------------------------------------------------

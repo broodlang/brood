@@ -1,5 +1,4 @@
 ;; std/crypto.blsp — symmetric encryption, key derivation, secure random bytes.
-;; (require 'crypto)
 ;;
 ;; Raw-byte operations return and accept `bytes` values; the byte-consuming
 ;; primitives also leniently accept a vector or list of ints 0–255.

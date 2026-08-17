@@ -1,4 +1,4 @@
-;; std/multimap.blsp — multi-valued maps. (require 'multimap)
+;; std/multimap.blsp — multi-valued maps.
 ;;
 ;; A multimap is a map from keys to lists of values, wrapped in a `multimap` RECORD.
 ;; Values are prepended on insert, so `multimap-get` returns them in reverse insertion

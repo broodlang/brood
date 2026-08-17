@@ -1,4 +1,4 @@
-;; std/observer.blsp — an interactive process observer. (require 'observer).
+;; std/observer.blsp — an interactive process observer.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - The first real app on the M3 display/input seam (ADR-046): an
@@ -621,7 +621,7 @@ body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
 ;; ---- display frontends + app loop now live in `ui` (std/ui.blsp) ------------
 ;; `*term-display*`, `(gui-display)`, `display-broadcast`, and the `ui-run` loop
 ;; were extracted into the reusable `ui` module so a new project (the editor) can
-;; build on the same seam. `(require 'ui)` above pulls them in; the observer is now
+;; build on the same seam. The `ui/…` references above pull them in; the observer is now
 ;; just a `ui-run` client — see `observe-view` / `observe-update` below.
 
 ;; ---- the eval minibuffer (a REPL inside the observer) ------------------------

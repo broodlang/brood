@@ -1,4 +1,4 @@
-;; std/fuzzy.blsp — fuzzy (subsequence) string matching + ranking. (require 'fuzzy).
+;; std/fuzzy.blsp — fuzzy (subsequence) string matching + ranking.
 ;;
 ;; The matcher completion UIs ride on: a query matches a candidate when its characters
 ;; appear IN ORDER somewhere in the candidate (case-insensitive) — "fb" matches
@@ -8,7 +8,7 @@
 ;; DP, but cheap and good in practice). Pure Brood, tail-recursive; zero kernel surface.
 
 (defmodule fuzzy
-  "Fuzzy (subsequence) matching + ranking (`(require 'fuzzy)`).
+  "Fuzzy (subsequence) matching + ranking.
 
     (fuzzy-match \"fb\" \"foo-bar\")   ; => {:score N :positions [0 4]}
     (fuzzy-match \"xz\" \"foo-bar\")   ; => nil

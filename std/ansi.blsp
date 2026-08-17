@@ -1,5 +1,5 @@
 ;; std/ansi.blsp — ANSI / VT100 escape-sequence stripping.
-;; Callers `(require 'ansi)` and use `ansi/strip-ansi`. Pure Brood over string
+;; Callers use `ansi/strip-ansi` — a qualified name loads the module. Pure Brood over string
 ;; primitives, no IO or editor dependency — reusable in any process that reads
 ;; pipe output from a subprocess that emits colour escapes (a shell, a build
 ;; tool, a test runner).

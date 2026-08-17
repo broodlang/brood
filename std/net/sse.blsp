@@ -1,5 +1,4 @@
 ;; std/sse.blsp — Server-Sent Events (text/event-stream): a client + server framing.
-;; (require 'sse).
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - SSE is **not** request→response like `http-request`: it's a long-lived `GET`

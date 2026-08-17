@@ -1,5 +1,4 @@
 ;; std/proc/gen.blsp — the gen_server-style process framework. Loaded with
-;; (require 'proc/gen).
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - Messages ride internal envelopes — [:$cast …] / [:$call from ref …] — so the

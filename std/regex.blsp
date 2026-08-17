@@ -1,5 +1,4 @@
 ;; std/regex.blsp — a small regular-expression engine, written in Brood.
-;; (require 'regex).
 ;;
 ;; A practical subset — enough for tokenising, filename/type matching, and most
 ;; text-processing — implemented as a recursive-descent parser to an AST, which is
@@ -25,7 +24,7 @@
 
 (defmodule regex
   "A small regular-expression engine in pure Brood, compiled to a Thompson NFA.
-`(require 'regex)`. `(regex/match? pattern s)` searches `s` for `pattern` (anchors
+`(regex/match? pattern s)` searches `s` for `pattern` (anchors
 `^`/`$` tie to the string's start/end); `(regex/matches? pattern s)` requires the
 whole string to match. The pattern is parsed and NFA-compiled once, then memoised.
 Subset: literals, `.`, `* + ?`, `^ $`, `[...]`/`[^...]` sets (explicit chars),

@@ -1,4 +1,4 @@
-;; std/repl.blsp — the read-eval-print loop, written in Brood. (require 'repl).
+;; std/repl.blsp — the read-eval-print loop, written in Brood.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - The REPL is policy, not mechanism: it's a loop over `read-line` (the one

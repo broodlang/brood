@@ -244,7 +244,7 @@ before working in any Rust component:
 ### `std/tool/test.blsp` — the test framework · ~395 LOC
 - **Owns:** ExUnit-style `describe`/`test`/`deftest`, the assertions, and the
   parallel-by-default runner with `:serial`/`:isolated` (over `spawn`/`%isolate`).
-- **Loaded on demand** via `(require 'test)`; embedded through `%builtin-module`.
+- **Loaded on demand** (a `test/…` reference, or `(:use test)`); embedded through `%builtin-module`.
 - **Work here independently:** see [testing.md](testing.md). Depends on the
   process primitives and `%isolate`.
 

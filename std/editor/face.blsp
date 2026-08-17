@@ -1,4 +1,4 @@
-;; std/face.blsp — named text faces + a theme registry for UI apps. (require 'face).
+;; std/face.blsp — named text faces + a theme registry for UI apps.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - An emacs-style **face system** shared by every UI on the display seam (the

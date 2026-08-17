@@ -26,8 +26,7 @@ match many versions with `version-match?` / `version-match-parts?` — that is t
 the resolver runs. Comparison is on the numeric `MAJOR.MINOR.PATCH` core, then on
 PRE-RELEASE precedence when the cores tie (`1.0.0-rc.1 < 1.0.0`; `version-prerelease` reads
 the identifiers). A plain range excludes pre-releases; one that names a pre-release admits
-them at that core (npm/Cargo rule). `+build` metadata never affects order or matching.
-`(require 'version)`.")
+them at that core (npm/Cargo rule). `+build` metadata never affects order or matching.")
 
 ;; ---- parsing ------------------------------------------------------------------
 

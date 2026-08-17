@@ -1,4 +1,4 @@
-;; std/editor/serve.blsp — serve a `ui-run` app to remote frontends. (require 'editor/serve).
+;; std/editor/serve.blsp — serve a `ui-run` app to remote frontends.
 ;;
 ;; The Emacs `--daemon` / `emacsclient` model (M4, ADR-090): the **app runs on the
 ;; daemon** — its model, `view`, and `update` all live in the serving runtime — and a
@@ -37,8 +37,7 @@ the frontend whose `:draw` sends the frame over the node link and whose `:poll`
 receives the client's input. The thin client is frontend-agnostic: `attach` paints to
 the terminal, `attach-display` to any `ui-run` display (e.g. `(gui-display)`, a native
 window) — same protocol, different frontend. Many clients may attach at once
-(independent sessions). Built purely on `ui-run` + the node-link primitives
-(`(require 'editor/serve)`)."
+(independent sessions). Built purely on `ui-run` + the node-link primitives."
   (:use editor/ui))
 
 ;; The registered name a daemon's session-manager listens under, and an attaching

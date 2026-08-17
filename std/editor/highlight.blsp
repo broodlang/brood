@@ -1,4 +1,4 @@
-;; std/highlight.blsp — lexical syntax highlighting + bracket/call analysis. (require 'highlight).
+;; std/highlight.blsp — lexical syntax highlighting + bracket/call analysis.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - Pure data → data, no IO and no kernel surface (the analogue of

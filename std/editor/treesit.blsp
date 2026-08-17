@@ -1,5 +1,4 @@
 ;; std/editor/treesit.blsp — generic services for tree-sitter language modes.
-;; (require 'editor/treesit).
 ;;
 ;; `tree-sitter-parse` (the Rust builtin, feature "treesit") yields a positioned
 ;; CST in the SAME node shape Brood's own reader gives — `{:kind :start :end

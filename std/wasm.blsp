@@ -1,5 +1,4 @@
 ;; std/wasm.blsp — WASM component interop, the Brood layer (ADR-071/145).
-;; (require 'wasm).
 ;;
 ;; A **component** is sandboxed native code: hash-pinned `.wasm` data a package
 ;; ships, instantiated by the embedded wasmtime host — linear memory only (it

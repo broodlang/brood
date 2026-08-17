@@ -1,5 +1,4 @@
 ;; std/csv.blsp — CSV parsing and emitting, written entirely in Brood.
-;; (require 'csv)
 ;;
 ;; Handles quoted fields (commas and newlines inside quotes), "" for escaped
 ;; quote, both \n and \r\n line endings.
