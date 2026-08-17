@@ -109,21 +109,26 @@
           (tcp-close ls)
           (assert= ev :alive)))))
   (test "activity resets the timer — an active connection is NOT reaped"
-    ;; idle bound 2000ms, but send every ~1200ms: the second send (at 1200ms)
-    ;; resets the timer, so at 2400ms — past a single idle window — the connection
-    ;; is still open. Without a reset it would have been reaped at ~2000ms.
+    ;; Idle bound 2000 ms, five sends 500 ms apart. Both halves of the property hold with
+    ;; margin: total elapsed (~2500 ms) is PAST the bound, so an implementation that ignored
+    ;; activity would have reaped by now — and no more than ~500 ms ever passes since a send,
+    ;; a **4x** margin under the bound.
+    ;;
+    ;; It used to send every 1200 ms, which left only 1.67x, and a `sleep` that overshoots
+    ;; (a green process rescheduled late on a loaded box) then crosses the bound and the test
+    ;; reports `:reaped-BUG`. Seen once 2026-08-17 under a doubled load — KI-43's shape, a
+    ;; deadline standing in for an event. Here the deadline is the *subject*, so it cannot be
+    ;; replaced by waiting on an event; the fix is margin on both sides instead.
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
         (tcp-controlling-process s (self))
         (tcp-set-idle-timeout c 2000)
-        (tcp-send c "a")
-        (sleep 1200)
-        ; resets the idle stamp at ~1200ms
-        (tcp-send c "b")
-        ; ~2400ms total, but only ~1200ms since activity
-        (sleep 1200)
+        ;; Each send resets the idle stamp; the last one leaves ~500 ms on the clock.
+        (dotimes (_ 5)
+          (tcp-send c "a")
+          (sleep 500))
         (let (still (receive ([:tcp-closed ^c] :reaped-BUG) (after 100 :alive)))
           (tcp-close c)
           (tcp-close s)
