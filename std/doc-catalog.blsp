@@ -122,8 +122,6 @@
    "check-file-deps" :meta
    "check-file-structured" :meta
    "check-string-structured" :meta
-   "chunk-by-acc" :collections
-   "chunk-every-acc" :collections
    "clipboard-get" :system
    "clipboard-set!" :system
    "cmp-ge" :math
@@ -161,7 +159,6 @@
    "decimal->float" :convert
    "decimal->string" :convert
    "decimal?" :predicates
-   "dedupe-acc" :collections
    "def-" :control
    "defability" :meta
    "defability-derive-fn" :meta
@@ -223,7 +220,6 @@
    "dynamic?" :meta
    "empty?" :predicates
    "ends-with?" :predicates
-   "enumerate-acc" :collections
    "eprint" :io
    "eprintln" :io
    "error" :errors
@@ -315,7 +311,6 @@
    "includes?" :predicates
    "index-of" :strings
    "index-of-seq-from" :strings
-   "index-where-from" :strings
    "infinite?" :predicates
    "inspect" :io
    "inspectln" :io
@@ -324,8 +319,6 @@
    "int->bytes-le" :bytes
    "int->char" :strings
    "int?" :predicates
-   "interleave-acc" :collections
-   "interpose-acc" :collections
    "into" :collections
    "iterate-times" :collections
    "iterate-times-acc" :collections
@@ -493,9 +486,6 @@
    "pattern-vars" :patterns
    "peak-threads" :meta
    "pid?" :predicates
-   "pow-acc" :math
-   "pow-inf?" :predicates
-   "pow-reciprocal" :math
    "pr-bounded" :io
    "pr-bounded-map" :io
    "pr-bounded-seq" :io
@@ -580,7 +570,6 @@
    "repeatedly" :collections
    "repeatedly-acc" :collections
    "replace" :strings
-   "require" :meta
    "require-await" :meta
    "require-find" :meta
    "require-force" :meta
@@ -606,7 +595,6 @@
    "runtime-collect" :meta
    "sample" :collections
    "satisfies?" :meta
-   "scan-acc" :collections
    "scan-form-start" :meta
    "scan-form-start-2" :meta
    "scan-source-extract" :meta
@@ -786,7 +774,6 @@
    "zero?" :predicates
    "zip" :collections
    "zip-acc" :collections
-   "zip-with-acc" :collections
    "zipmap" :maps})
 
 (defn category-of (function-name)
