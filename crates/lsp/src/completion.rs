@@ -39,9 +39,9 @@ pub fn completions(
     offset: u32,
     snippet_support: bool,
 ) -> Vec<CompletionItem> {
-    // Module-name context: inside `(require '…)` or a `(:use …)`/`(:alias …)`
-    // clause the only sensible candidates are requireable modules — offer those
-    // alone (a generic `+`/`if`/local would be noise there).
+    // Module-name context: inside a `(:use …)`/`(:alias …)` clause the only
+    // sensible candidates are loadable modules — offer those alone (a generic
+    // `+`/`if`/local would be noise there).
     if in_module_name_position(cst, offset, text) {
         return introspect::loadable_modules(interp)
             .into_iter()
@@ -219,10 +219,10 @@ fn enclosing_impl(node: &Node, offset: u32, src: &str) -> Option<String> {
     None
 }
 
-/// True when byte `offset` sits where a **module name** belongs: an argument of
-/// `(require …)`, or the module slot of a `(:use …)`/`(:alias …)` clause (after the
-/// keyword, before any `:only`/`:as` marker). End-inclusive, so a cursor typing at
-/// the end of a still-open form counts as inside it.
+/// True when byte `offset` sits where a **module name** belongs: the module slot
+/// of a `(:use …)`/`(:alias …)` clause (after the keyword, before any `:only`/`:as`
+/// marker). End-inclusive, so a cursor typing at the end of a still-open form
+/// counts as inside it.
 fn in_module_name_position(node: &Node, offset: u32, src: &str) -> bool {
     let Some(list) = innermost_list(node, offset) else {
         return false;
@@ -231,20 +231,17 @@ fn in_module_name_position(node: &Node, offset: u32, src: &str) -> bool {
     let Some(head) = forms.next() else {
         return false;
     };
-    match head.kind {
-        // `(require '…)` — any slot after the head symbol.
-        NodeKind::Symbol if head.text(src) == "require" => offset > head.span.end,
-        // `(:use mod …)` / `(:alias mod …)` — after the keyword, before a later
-        // `:only`/`:as`/`:refer` marker (so completing inside `:only [..]` doesn't
-        // offer modules).
-        NodeKind::Keyword if matches!(head.text(src), ":use" | ":alias") => {
-            offset > head.span.end
-                && !list
-                    .forms()
-                    .skip(1)
-                    .any(|f| f.kind == NodeKind::Keyword && f.span.end <= offset)
-        }
-        _ => false,
+    // `(:use mod …)` / `(:alias mod …)` — after the keyword, before a later
+    // `:only`/`:as`/`:refer` marker (so completing inside `:only [..]` doesn't
+    // offer modules).
+    if head.kind == NodeKind::Keyword && matches!(head.text(src), ":use" | ":alias") {
+        offset > head.span.end
+            && !list
+                .forms()
+                .skip(1)
+                .any(|f| f.kind == NodeKind::Keyword && f.span.end <= offset)
+    } else {
+        false
     }
 }
 
@@ -519,17 +516,15 @@ mod tests {
 
     #[test]
     fn module_position_detection() {
-        // require argument, :use slot → module position; the head/keyword itself
-        // and an :only operand → not.
+        // :use / :alias slot → module position; the keyword itself and an :only
+        // operand → not.
         let chk = |src: &str, needle: &str| {
             let root = cst::parse(src);
             let at = src.find(needle).unwrap() as u32;
             in_module_name_position(&root, at, src)
         };
-        assert!(chk("(require 'foo)", "foo"));
         assert!(chk("(defmodule a (:use foo))", "foo"));
         assert!(chk("(defmodule a (:alias foo))", "foo"));
-        assert!(!chk("(require 'foo)", "require")); // on the head
         assert!(!chk("(defmodule a (:use foo))", ":use")); // on the keyword
         assert!(!chk("(defmodule a (:use foo :only [bar]))", "bar")); // past :only
         assert!(!chk("(+ 1 2)", "+")); // ordinary call
@@ -540,9 +535,9 @@ mod tests {
     // unrelated object, so no module was ever found on it. Fixed 2026-07-26
     // (`Heap::localize_for_freeze`); keep this test as the regression guard.
     #[test]
-    fn completes_module_names_in_require_and_use() {
-        // A module on the load-path is offered inside `(require '…)` and `(:use …)`,
-        // and the generic globals are suppressed there.
+    fn completes_module_names_in_use() {
+        // A module on the load-path is offered inside `(:use …)`, and the generic
+        // globals are suppressed there.
         let dir = std::env::temp_dir().join(format!("brood_modcomp_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("greeter.blsp"), "(defmodule greeter)\n").unwrap();
@@ -554,7 +549,7 @@ mod tests {
             ))
             .unwrap();
 
-        for src in ["(require '", "(defmodule app (:use "] {
+        for src in ["(defmodule app (:use "] {
             let root = cst::parse(src);
             let tree = scope::analyze(&root, src);
             let at = src.len() as u32;
