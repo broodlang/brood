@@ -4277,11 +4277,26 @@ public `package-module-files`; (b) `:name` may be a symbol *or* a string in the 
 → normalized with `(name …)`; (c) an embedded std module requested while a project
 context is active (a project whose own module shares a std name, e.g. a local `json`)
 would have misrooted the *baked-in* `(defmodule json)` → the embedded-load path now clears
-the context around `%load-module-source`. **Known follow-ups (non-regressions):** LSP
-go-to/hover/rename resolution for rooted *project* modules, and `nest release` bundling of
-two dependencies that share a module name (a bundle currently loads unrooted but
-self-consistently, so simple bundles are unaffected) — both are new-scenario gaps, not
-breakage of existing behaviour, tracked for a later pass.
+the context around `%load-module-source`. Both **known follow-ups have since landed**: LSP
+go-to/hover/rename resolution for rooted *project* modules (2026-05-30, §5 of `namespaces.md`),
+and `nest release` bundling of two dependencies that share a module name.
+
+**Update (2026-08-17): `nest release` bundle rooting done — dev/release parity for deps.**
+A dependency's modules are now embedded under their **rooted** key (`foo/parser`), so two
+deps each providing a `parser` coexist in one flat bundle instead of tripping the interim
+`bundle-reject-duplicate-names` guard. `bundle-collect` keys dep modules from the
+`*package-module-files*` map `ensure-deps` already builds (root-project modules stay by their
+bare require-name); `run-bundle` rebuilds `*package-modules-of*` at boot from the embedded
+manifest's dep names + the embedded keys; and `require-force`'s embedded-load branch now sets
+each bundled dep's package context (via `bundle-module-package`) instead of always clearing it
+— the release mirror of the disk `require-force-package`. In a non-bundle dev run that branch
+still only ever fires for std (whose namespaces are never packages), so the change is a no-op
+there. The **root project itself stays unrooted in the bundle** (a single package can't collide
+with itself; the entry resolves `main/main` as before) — full Elixir-uniform root-project
+bundle-rooting has no consumer and stays deferred (ADR-011). The `bundle-reject-duplicate-names`
+guard is kept as a loud backstop for a genuine key collision. Covered by
+`crates/cli/tests/release_bundle.rs` (`bundled_deps_with_same_module_name_coexist_rooted`,
+end-to-end) and `tests/package_test.blsp` (bundle-collect keys deps rooted).
 
 **References.** ADR-065 (`namespaces.md` §8), ADR-037 (`packages.md`, the dep
 local-name model + the lock/resolution step that enforces this), ADR-011 (defer the

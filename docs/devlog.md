@@ -1204,3 +1204,35 @@ Rust `eval_str` bootstrap sites, **70 were dropped** (inference covers) and **24
 Verified: **full `cargo nextest` run green — 981 tests pass** (the in-language suite at 439–450s
 plus every Rust test), no crash, capped at 4 threads. The sibling projects (`hive`, `hatch`,
 `pong`, `bedit`, `store-postgres`, …) were migrated in parallel and each `nest check`s clean.
+
+## 2026-08-17 — `nest release` bundle rooting: dev/release parity for package-rooted deps (ADR-070)
+
+Closed the last ADR-070 follow-up. A release bundle used to embed every module by its bare
+require-name, so two dependencies each providing a `parser` collided and `bundle-collect`
+rejected the build (`bundle-reject-duplicate-names`) — the interim SAFE stop. Now a dependency's
+modules are embedded under their **rooted** key (`foo/parser`), so two same-named dep modules
+coexist in one flat bundle, exactly as they stay distinct at dev time. Brood-only change (no
+Rust): the archive already keys modules by an arbitrary string and `%builtin-module` already
+serves bundled deps.
+
+Three edits, mirroring the disk package-context path (`require-force-package`):
+- **`bundle-collect`** (`std/tool/project.blsp`) keys dep modules from the `*package-module-files*`
+  map `ensure-deps` already builds (rooted-name → path), filtered to files under a bundled dep
+  dir so it is independent of any earlier `project-setup`. Root-project modules stay by their bare
+  require-name (a single package can't collide with itself; the entry still resolves `main/main`).
+- **`run-bundle`** rebuilds `*package-modules-of*` at boot from the embedded manifest's dep names
+  + the embedded keys (`bundle-register-dep-rooting`), before loading any module.
+- **`require-force`'s embedded-load branch** (`std/prelude.blsp`) now sets a bundled dep's package
+  context via a new `bundle-module-package` helper instead of always clearing it. It returns nil
+  for std and for the bundle's unrooted root-project modules (both load at ROOT). In a non-bundle
+  dev run the branch only ever fires for std — whose namespaces are never packages — so the check
+  is a no-op there; a dep loads from disk (`%builtin-module` returns nil).
+
+Full root-project bundle-rooting (the Elixir-uniform `myproj/main/main`) has no consumer and
+stays deferred (ADR-011); the reject-guard is kept as a loud backstop for a genuine key clash.
+
+Coverage: `crates/cli/tests/release_bundle.rs` gains `bundled_deps_with_same_module_name_coexist_rooted`
+(end-to-end — two deps' `parser` each root their own `(:use util)`, printing `alpha:A|beta:B`);
+`tests/package_test.blsp` gains a bundle-collect case asserting deps key rooted and the root
+module stays bare. Baselines re-run green: release_bundle 3/3, namespace 51/51, package 110/110,
+every in-language `tests/*_test.blsp` file with no failures.
