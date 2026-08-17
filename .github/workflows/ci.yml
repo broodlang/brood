@@ -193,6 +193,43 @@ jobs:
           path: tree-walker-nextest.log
           retention-days: 14
 
+  # `examples/`: the user-facing programs, which no gate ran until 2026-08-17 — and they had
+  # rotted three separate ways by then. `examples/editor` had called a module that moved to a
+  # sibling project 2.5 months earlier (KI-45); ADR-227's stdlib move left `life.blsp` needing
+  # a `(:use …)`; and ADR-229's `require` removal stopped `webserver`/`hot-reload`/`editor`
+  # loading at all. Each was source-compatible-looking and silent. Same story as the breakage
+  # job below: a suite nothing runs is a suite that rots.
+  #
+  # It gates on `unbound symbol` diagnostics, not exit codes — servers run until killed,
+  # `node_client` wants a peer and `font-zoom` wants `--features gui`, so their exit codes are
+  # environment noise, while an unbound name never is. Cheap (~1 min), so it runs on PRs too.
+  examples:
+    name: examples still run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `nest` too: the example PROJECTS (examples/*/project.blsp) are checked with `nest test`.
+      - name: Build brood + nest
+        run: cargo build --release -p cli -p nest
+
+      - name: Check the examples
+        shell: bash
+        run: make check-examples 2>&1 | tee examples.log
+
+      - name: Annotate the failing examples (on failure)
+        if: failure()
+        shell: bash
+        run: |
+          if [ ! -f examples.log ]; then
+            echo "::error::examples: no log — the step failed before running"
+            exit 0
+          fi
+          grep -hoE '^  FAIL +.*' examples.log | sort -u | head -25 \
+            | while IFS= read -r line; do echo "::error::examples:$line"; done
+
   # The `breakage/` suite: deliberately abusive programs that try to make the JIT diverge
   # from the VM, overflow the eval stack, corrupt the heap or deadlock the scheduler. It is
   # NOT part of `make test` on purpose (slow, and abusive by design) — but that meant
