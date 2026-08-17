@@ -25,7 +25,7 @@ ADRs / topic docs.
 | KI-42 | the `breakage/` suite had rotted to **9 of 23 files failing** and nobody knew, because it is outside `make test` and had no CI job — a pin-syntax change (`~ref`→`^ref`), a renamed `string-contains?`, an assertion predating exact rationals, and a TCP file whose every phase was dead | ✅ **fixed 2026-08-13** — all 23 files pass and gate, nothing skipped; CI job added so it cannot rot silently again |
 | KI-41 | concurrent `require` of the same feature could **double-load** its file: a claimant whose `(contains? *features* key)` guard read the per-process global inline cache **missed** a racing loader's just-committed `provide` (the cache is version-gated on a `Relaxed` counter, no happens-before), won the released load-once claim, and reloaded the module. Surfaced as the ADR-225 co-located-secondary `nest test` flake (~1/77); reproduced on demand at 20 files × 40 requires | ✅ **fixed** 2026-08-13 — `require-one` re-checks `*features*` with a new cache-bypassing `%registry-member?` (reads the shared globals table directly) before loading; guard `breakage/chaos_concurrent_require_double_load.blsp` |
 | KI-40 | concurrent green processes running the **same** shared compiled arm on the VM contended on that arm's single `Arc<CompiledArm>` refcount — one cache line, N cores — costing **3.2×** wall on a 100-way fan-out and leaving the cores stalled at 769% instead of 1150% | ✅ **fixed 2026-08-13** (ADR-224 — a process-local `ArmHandle` interposed on the call path; `pfib` 54.4 s → 17.1 s) |
-| KI-39 | the CI `differential (tree-walker)` job failed intermittently (3 of 11 runs) with nextest exit 100; **0/15** in the faithful local shape, cold-boot-herd hypothesis measured dead, and whether it is still present is genuinely unknown (4 green runs is 28% likely either way) | ⚠️ **watching — recurred 2026-08-17** (run 32032421650, exit 100, the only red job of five). The self-reporting added for it **did not work**: its annotate step is `grep … \| … \| while` under `shell: bash` (`-eo pipefail`), so a non-matching grep exits 1 and kills the step before it prints anything — the run named no case. Hardened with `\|\| true` (all six annotate pipelines, CI-shell-verified), so the *next* sighting should finally self-report |
+| KI-39 | the CI `differential (tree-walker)` job failed intermittently (3 of 11 runs) with nextest exit 100; **0/15** in the faithful local shape, cold-boot-herd hypothesis measured dead, and whether it is still present is genuinely unknown (4 green runs is 28% likely either way) | ⚠️ **watching — recurred 2026-08-17** (run 32032421650, exit 100, the only red job of five). The self-reporting added for it **did not work**: its annotate step is `grep … \| … \| while` under `shell: bash` (`-eo pipefail`), so a non-matching grep exits 1 and kills the step before it prints anything — the run named no case. Hardened with `\|\| true` (all six annotate pipelines, CI-shell-verified), and that was NOT enough — run 32054863012 then failed with the annotate step SUCCEEDING and still emitting nothing, not even the `Summary` line nextest always prints, so an unconditional tail-dump fallback was added on top |
 | KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | ✅ fixed 2026-08-08 (warm the cache before the fan-out) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
 | KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07; +25 more idle passes) |
@@ -472,6 +472,22 @@ on `gh` below. **One candidate, unproven:** the deep-JSON case fixed the same da
 (`jit_tail_chain_depth_test.blsp`, native-stack guard at a 1.6 KB margin) is *more* likely to
 trip under `BROOD_VM=0`, where everything runs tree-walked and native stack use is far higher.
 It reproduces only in suite context, so it could not be confirmed against this run.
+
+**Second recurrence, 2026-08-17 (run `32054863012`, commit `f1c4336d`) — and the hardened
+diagnostic STILL said nothing.** Four of five jobs green (`breakage`, `rustfmt`, `examples still
+run`, `clippy + test`); only this one red, exit 100 again. The `|| true` fix demonstrably worked
+— the annotate step's own "exit code 1" annotation is gone and the step reports success — but it
+produced no annotation at all, **not even the `Summary [...]` line nextest always prints**. So
+the CI log differs from every local log in a way all three patterns miss, and the run stayed
+undiagnosable because the artifact needs an authenticated download.
+
+Local evidence continues to say the suite itself is fine: `BROOD_VM=0 cargo nextest run` passes
+**975/975** here, twice on different trees.
+
+Hence a third iteration on the instrument: an **unconditional fallback** that, when none of the
+patterns match, annotates the log's last 30 lines verbatim plus its size. A diagnostic that
+reports nothing when its patterns miss is precisely the failure this step exists to prevent —
+three sightings have now been lost to it.
 
 **Blocked on:** `gh`'s stored token is invalid (`gh auth status`: "The token in
 ~/.config/gh/hosts.yml is invalid"), so API calls fall back to the unauthenticated 60/hour
