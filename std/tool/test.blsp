@@ -1591,11 +1591,11 @@ the suite programmatically. Printed once, at the end, so parallel ordering is ir
   (let (total (count results)
         failed (count-failed results))
     (println (json/encode {:total total
-                                :passed (- total failed)
-                                :failed failed
-                                :failed-assertions (count-failures results)
-                                :ms elapsed
-                                :results (or (map test-result->data results) [])})))
+                           :passed (- total failed)
+                           :failed failed
+                           :failed-assertions (count-failures results)
+                           :ms elapsed
+                           :results (or (map test-result->data results) [])})))
   nil)
 
 (register-test-formatter "tap" test-fmt-tap)

@@ -133,6 +133,32 @@ pub enum VmCacheKey {
     Body(u64),
 }
 
+/// One compiling-VM body-cache entry: the compiled closure, plus the process-local
+/// [`ArmHandle`](crate::eval::compile::ArmHandle) memo that
+/// [`Heap::vm_cache_arm_handle`] fills on the first call of each arity.
+///
+/// The memo lives *inside* the entry so it shares the entry's lifetime exactly — every
+/// `vm_cache` `clear()` (free-epoch sync, hibernate's deep shrink, post-compaction) drops
+/// the handles with the arms they name, and a re-`put` replaces both together. That is what
+/// makes it obligation-free where a side table would not be; see `vm_cache_arm_handle`.
+pub struct VmCacheEntry {
+    /// The compiled body, or `None` for a closure this VM cannot compile (defer to the
+    /// tree-walker) — the state the cache records so the decision is made once.
+    cc: Option<Arc<crate::eval::compile::CompiledClosure>>,
+    /// `(argc, handle)`, memoized on first resolution. Inline for the arities a closure is
+    /// actually called at — nearly always one, occasionally two.
+    handles: smallvec::SmallVec<[(u32, Option<Arc<crate::eval::compile::ArmHandle>>); 2]>,
+}
+
+impl VmCacheEntry {
+    fn new(cc: Option<Arc<crate::eval::compile::CompiledClosure>>) -> Self {
+        Self {
+            cc,
+            handles: smallvec::SmallVec::new(),
+        }
+    }
+}
+
 impl VmCacheKey {
     /// The key's identity as one `u64`, for the **runtime-shared** compiled-closure map
     /// (whose key space must distinguish the two variants; the same fold as [`Hash`]).
@@ -180,14 +206,13 @@ impl Heap {
         }
     }
 
-    /// Look up the compiled body for closure key `k` (see [`VmCacheKey`]) and resolve
-    /// straight to the `argc` arm under the cache borrow, cloning **only** that
-    /// `Arc<CompiledArm>` — never the whole
-    /// `CompiledClosure`. The compiling VM's per-call hot path (`compiled_arm_for`)
-    /// uses this so each closure call pays one arm clone instead of a transient
-    /// `CompiledClosure` clone + an arm clone. Outer `None` = key absent (a cache
-    /// miss to compile); `Some(None)` = present but no VM arm for `argc` (defer to
-    /// the tree-walker); `Some(Some(arm))` = the compiled arm.
+    /// Read-only lookup of the `argc` arm for closure key `k` — no handle, no memo.
+    ///
+    /// For the two readers that want the arm itself and must leave the cache exactly as they
+    /// found it: the JIT's leaf probe (`probe_arm_for`, which must not install anything) and
+    /// the tiering election's `cached_arm_for` (a pure "is this still the same arm?" read,
+    /// where compiling would be re-entrant). Every path that is about to *call* the arm wants
+    /// [`Self::vm_cache_arm_handle`] instead.
     pub fn vm_cache_arm(
         &self,
         k: VmCacheKey,
@@ -197,7 +222,56 @@ impl Heap {
         self.vm_cache
             .borrow()
             .get(&k)
-            .map(|cc| cc.as_ref().and_then(|cc| cc.arm_for(argc).cloned()))
+            .map(|e| e.cc.as_ref().and_then(|cc| cc.arm_for(argc).cloned()))
+    }
+
+    /// Look up the compiled body for closure key `k` (see [`VmCacheKey`]) and resolve
+    /// straight to the `argc` arm's process-local [`ArmHandle`](crate::eval::compile::ArmHandle)
+    /// under the cache borrow — **memoized per `(key, argc)`**, so a repeated call to the
+    /// same closure clones a process-local `Arc` and nothing else. Outer `None` = key absent
+    /// (a cache miss to compile); `Some(None)` = present but no VM arm for `argc` (defer to
+    /// the tree-walker); `Some(Some(handle))` = the compiled arm's handle.
+    ///
+    /// **Why the memo is here and not at the call sites** (ADR-224 follow-up). Every caller
+    /// of `compiled_arm_for` wraps its result in an `ArmHandle`, and a **computed head takes
+    /// no inline cache** (`exec_chunk`'s call arm says so explicitly) — so before this, each
+    /// transducer step, HOF inner call, callback and message handler paid, *per call*, an
+    /// `Arc::new` for the handle **plus** an `Arc<CompiledArm>::clone`, i.e. an atomic RMW on
+    /// the one cross-process refcount cache line KI-40 is about. Memoizing the handle inside
+    /// the entry the path already consults removes both: no allocation, and the shared arm's
+    /// refcount is untouched on the hot path.
+    ///
+    /// ADR-224 rejected a *separate* `uid -> handle` intern table because it measured a wash
+    /// on `spawn-live` (whose processes call each arm about once, so nothing amortises) and
+    /// because it "brings a new invalidation obligation". Living inside the `vm_cache` entry,
+    /// this has **no** new obligation: it is dropped by the same `clear()` — `sync_free_epoch`
+    /// below, `deep_shrink`'s (hibernate) and `runtime_collect`'s post-compaction clear — and
+    /// it holds nothing alive that the entry's `CompiledClosure` did not already hold.
+    ///
+    /// The negative (`argc` has no VM arm) is memoized too, so that case stops re-scanning
+    /// `arm_for` on every call as well.
+    pub fn vm_cache_arm_handle(
+        &self,
+        k: VmCacheKey,
+        argc: usize,
+    ) -> Option<Option<Arc<crate::eval::compile::ArmHandle>>> {
+        self.sync_free_epoch();
+        let mut cache = self.vm_cache.borrow_mut();
+        let entry = cache.get_mut(&k)?;
+        let argc = argc as u32;
+        if let Some((_, h)) = entry.handles.iter().find(|(a, _)| *a == argc) {
+            return Some(h.clone());
+        }
+        // First resolution of this arity in this process: derive the handle once, from the
+        // arm the entry already owns, and remember it. `ArmHandle::new` is a plain
+        // allocation — nothing here re-enters the heap while the borrow is held.
+        let handle = entry
+            .cc
+            .as_ref()
+            .and_then(|cc| cc.arm_for(argc as usize).cloned())
+            .map(crate::eval::compile::ArmHandle::new);
+        entry.handles.push((argc, handle.clone()));
+        Some(handle)
     }
 
     /// ADR-175 Phase B off-switch: `BROOD_NO_SHARED_ARMS=1` makes every process
@@ -259,13 +333,16 @@ impl Heap {
         }
     }
 
-    /// Record the compile result for closure key `k` (eligible body or `None`).
+    /// Record the compile result for closure key `k` (eligible body or `None`). Any
+    /// previously memoized [`ArmHandle`](crate::eval::compile::ArmHandle)s go with the old
+    /// entry — a fresh compile means fresh arms, so a carried-over handle would name the
+    /// superseded one.
     pub fn vm_cache_put(
         &self,
         k: VmCacheKey,
         v: Option<Arc<crate::eval::compile::CompiledClosure>>,
     ) {
-        self.vm_cache.borrow_mut().insert(k, v);
+        self.vm_cache.borrow_mut().insert(k, VmCacheEntry::new(v));
     }
 
     /// Resolve **this process's IC block** for `arm` (ADR-175 Phase A): the pair of
