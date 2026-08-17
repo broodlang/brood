@@ -123,7 +123,6 @@ worker's mailbox so it can't satisfy a later test's receive."
 (describe "telemetry watch-runtime"
   :isolated
   (test "kernel events flow through the telemetry seam as [:runtime …] events"
-    (require 'telemetry)
     (telemetry/start-telemetry)
     (let (me (self))
       (telemetry/attach :t-spawn

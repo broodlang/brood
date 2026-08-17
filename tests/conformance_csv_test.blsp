@@ -17,8 +17,6 @@
 ;; is normalised — the field values are compared exactly.
 
 (defmodule conformance-csv-test (:use test) (:use corpus))
-(require 'csv)
-(require 'json)
 
 ;; EXCLUDED — `location_coordinates` is broken upstream, two ways. Its expectation
 ;; file is a bare JSON *object* where every other one is an array of row objects, and

@@ -4,7 +4,6 @@
 ;; cargo test, via crates/lisp/tests/suite.rs).
 
 (defmodule keymap-test (:use test) (:use editor/keymap))
-(require 'editor/keymap)
 
 ;; Commands are `(state key) -> state`; we accumulate a string so the path is
 ;; visible. Stored in keymaps as **qualified** symbols (resolved by `eval` at

@@ -29,7 +29,7 @@ mod path {
         bench_prog(
             bencher,
             format!(
-                "(require 'path) \
+                "\
                  (dotimes (i {n}) (path/join \"/usr\" \"local\" \"lib\" \"brood\"))"
             ),
         );
@@ -41,7 +41,7 @@ mod path {
         bench_prog(
             bencher,
             format!(
-                "(require 'path) \
+                "\
                  (dotimes (i {n}) (path/normalize \"/usr/local/lib/../share/./brood\"))"
             ),
         );
@@ -53,7 +53,7 @@ mod path {
         bench_prog(
             bencher,
             format!(
-                "(require 'path) \
+                "\
                  (dotimes (i {n}) \
                    (do (path/basename  \"/usr/local/lib/brood.tar.gz\") \
                        (path/dirname   \"/usr/local/lib/brood.tar.gz\") \
@@ -69,7 +69,7 @@ mod path {
         bench_prog(
             bencher,
             format!(
-                "(require 'path) \
+                "\
                  (dotimes (i {n}) (path/relative-to \"/a/b/x/y/z\" \"/a/b/c/d\"))"
             ),
         );
@@ -91,7 +91,7 @@ mod encoding {
         bench_prog(
             bencher,
             format!(
-                "(require 'encoding) \
+                "\
                  (def s {STR_64}) \
                  (dotimes (i {n}) (encoding/hex-encode s))"
             ),
@@ -104,7 +104,7 @@ mod encoding {
         bench_prog(
             bencher,
             format!(
-                "(require 'encoding) \
+                "\
                  (def s {STR_64}) \
                  (dotimes (i {n}) (encoding/hex-decode (encoding/hex-encode s)))"
             ),
@@ -117,7 +117,7 @@ mod encoding {
         bench_prog(
             bencher,
             format!(
-                "(require 'encoding) \
+                "\
                  (def s {STR_64}) \
                  (dotimes (i {n}) (encoding/base64-encode s))"
             ),
@@ -130,7 +130,7 @@ mod encoding {
         bench_prog(
             bencher,
             format!(
-                "(require 'encoding) \
+                "\
                  (def s {STR_64}) \
                  (dotimes (i {n}) (encoding/base64-decode (encoding/base64-encode s)))"
             ),
@@ -150,7 +150,7 @@ mod hash {
         bench_prog(
             bencher,
             format!(
-                "(require 'hash) \
+                "\
                  (dotimes (i {n}) (hash/sha256 \"hello, brood!\"))"
             ),
         );
@@ -162,7 +162,7 @@ mod hash {
         bench_prog(
             bencher,
             format!(
-                "(require 'hash) \
+                "\
                  (def s (string-repeat \"a\" 1024)) \
                  (dotimes (i {n}) (hash/sha256 s))"
             ),
@@ -175,7 +175,7 @@ mod hash {
         bench_prog(
             bencher,
             format!(
-                "(require 'hash) \
+                "\
                  (dotimes (i {n}) (hash/hmac-sha256 \"secret-key\" \"hello, brood!\"))"
             ),
         );
@@ -194,7 +194,7 @@ mod uuid {
         bench_prog(
             bencher,
             format!(
-                "(require 'uuid) \
+                "\
                  (dotimes (i {n}) (uuid/uuid-v4))"
             ),
         );
@@ -206,7 +206,7 @@ mod uuid {
         bench_prog(
             bencher,
             format!(
-                "(require 'uuid) \
+                "\
                  (dotimes (i {n}) (uuid/uuid-v7))"
             ),
         );
@@ -218,7 +218,7 @@ mod uuid {
         bench_prog(
             bencher,
             format!(
-                "(require 'uuid) \
+                "\
                  (dotimes (i {n}) (uuid/uuid-v5 uuid/ns-dns \"example.com\"))"
             ),
         );
@@ -237,7 +237,7 @@ mod crypto {
         bench_prog(
             bencher,
             format!(
-                "(require 'crypto) \
+                "\
                  (def key   (crypto/random-key)) \
                  (def nonce (crypto/random-nonce)) \
                  (def plain (into [] (range 64))) \
@@ -253,7 +253,7 @@ mod crypto {
         bench_prog(
             bencher,
             format!(
-                "(require 'crypto) \
+                "\
                  (dotimes (i {n}) (crypto/pbkdf2 \"password\" \"salt\" 1000 32))"
             ),
         );
@@ -272,7 +272,7 @@ mod datetime {
         bench_prog(
             bencher,
             format!(
-                "(require 'datetime) \
+                "\
                  (dotimes (i {n}) (datetime/parse-date \"2026-06-08\"))"
             ),
         );
@@ -284,7 +284,7 @@ mod datetime {
         bench_prog(
             bencher,
             format!(
-                "(require 'datetime) \
+                "\
                  (def d (datetime/date 2026 1 1)) \
                  (dotimes (i {n}) (datetime/dt-add d (datetime/days 30)))"
             ),
@@ -297,7 +297,7 @@ mod datetime {
         bench_prog(
             bencher,
             format!(
-                "(require 'datetime) \
+                "\
                  (def d (datetime/date 2026 6 8)) \
                  (dotimes (i {n}) (datetime/dt-format d \"%Y-%m-%d\"))"
             ),
@@ -310,7 +310,7 @@ mod datetime {
         bench_prog(
             bencher,
             format!(
-                "(require 'datetime) \
+                "\
                  (def d (datetime/date 2026 6 8)) \
                  (dotimes (i {n}) (datetime/epoch-ms->dt (datetime/dt->epoch-ms d)))"
             ),
@@ -329,7 +329,7 @@ mod csv {
             .map(|i| format!("{i},name_{i},{}", i * 100))
             .collect();
         let csv = format!("id,name,score\n{}", rows.join("\n"));
-        bench_prog(bencher, format!("(require 'csv) (def src {csv:?}) {body}"));
+        bench_prog(bencher, format!("(require-one 'csv) (def src {csv:?}) {body}"));
     }
 
     /// Parse a CSV string with `n` rows.
@@ -357,7 +357,7 @@ mod url {
         bench_prog(
             bencher,
             format!(
-                "(require 'url) \
+                "\
                  (dotimes (i {n}) \
                    (url/parse-url \"https://example.com/path/to/page?foo=bar&baz=qux#section\"))"
             ),
@@ -370,7 +370,7 @@ mod url {
         bench_prog(
             bencher,
             format!(
-                "(require 'url) \
+                "\
                  (dotimes (i {n}) (url/percent-encode \"hello world! foo=bar&baz=qux\"))"
             ),
         );
@@ -382,7 +382,7 @@ mod url {
         bench_prog(
             bencher,
             format!(
-                "(require 'url) \
+                "\
                  (def q {{:name \"Alice Doe\" :age \"30\" :city \"New York\"}}) \
                  (dotimes (i {n}) (url/query-decode (url/query-encode q)))"
             ),
@@ -402,7 +402,7 @@ mod stats {
         bench_prog(
             bencher,
             format!(
-                "(require 'stats) \
+                "\
                  (def xs (range {n})) \
                  (do (stats/mean xs) (stats/stddev xs))"
             ),
@@ -415,7 +415,7 @@ mod stats {
         bench_prog(
             bencher,
             format!(
-                "(require 'stats) \
+                "\
                  (def xs (map (fn (x) (rem (* x 7919) {n})) (range {n}))) \
                  (stats/median xs)"
             ),
@@ -428,7 +428,7 @@ mod stats {
         bench_prog(
             bencher,
             format!(
-                "(require 'stats) \
+                "\
                  (def xs (range {n})) \
                  (stats/percentile xs 95)"
             ),
@@ -450,7 +450,7 @@ mod template {
             // Double-brace escaping: {{ → { in the format! string, so we need
             // 4 braces to produce the {{name}} template syntax.
             format!(
-                "(require 'template) \
+                "\
                  (def tmpl \"Hello, {{{{name}}}}! You have {{{{count}}}} messages.\") \
                  (def ctx {{:name \"Alice\" :count \"5\"}}) \
                  (dotimes (i {n}) (template/render tmpl ctx))"
@@ -464,7 +464,7 @@ mod template {
         bench_prog(
             bencher,
             format!(
-                "(require 'template) \
+                "\
                  (def tmpl \"Hello, {{{{name}}}}!\") \
                  (def ctxs (map (fn (i) {{:name (str \"User\" i)}}) (range 10))) \
                  (dotimes (i {n}) (template/render-all tmpl ctxs))"
@@ -485,7 +485,7 @@ mod diff {
         bench_prog(
             bencher,
             format!(
-                "(require 'diff) \
+                "\
                  (def a (range {n})) \
                  (def b (filter (fn (x) (not= (rem x 10) 0)) (range {n}))) \
                  (diff/diff-seq a b)"
@@ -509,7 +509,7 @@ mod diff {
         bench_prog(
             bencher,
             format!(
-                "(require 'diff) \
+                "\
                  (diff/diff-lines {orig:?} {changed:?})"
             ),
         );
@@ -528,7 +528,7 @@ mod queue {
         bench_prog(
             bencher,
             format!(
-                "(require 'queue) \
+                "\
                  (defn fill (q k) \
                    (if (= k 0) q \
                      (fill (queue/queue-push q k) (- k 1)))) \
@@ -554,7 +554,7 @@ mod multimap {
         bench_prog(
             bencher,
             format!(
-                "(require 'multimap) \
+                "\
                  (def mm (fold (fn (m i) \
                                  (multimap/multimap-assoc m (rem i 10) i)) \
                                (multimap/multimap-new) \
@@ -577,7 +577,7 @@ mod agent {
         bench_prog(
             bencher,
             format!(
-                "(require 'proc/agent) \
+                "\
                  (def a (proc/agent/start (fn () 0))) \
                  (dotimes (i {n}) (proc/agent/update a inc)) \
                  (proc/agent/get a identity) \
@@ -592,7 +592,7 @@ mod agent {
         bench_prog(
             bencher,
             format!(
-                "(require 'proc/agent) \
+                "\
                  (def a (proc/agent/start (fn () 0))) \
                  (dotimes (i {n}) (proc/agent/get-and-update a (fn (s) [s (+ s 1)]))) \
                  (proc/agent/stop a)"

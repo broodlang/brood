@@ -9,8 +9,6 @@
   "Authenticated encryption (ChaCha20-Poly1305), PBKDF2 key derivation, and
 cryptographically secure random bytes.
 
-    (require 'crypto)
-    (require 'encoding)
 
     ;; generate a random 32-byte key and 12-byte nonce
     (def key   (crypto/random-bytes 32))

@@ -1,6 +1,4 @@
 (defmodule crypto-test (:use test))
-(require 'crypto)
-(require 'encoding)
 
 (describe "crypto/random-bytes"
   (test "returns a bytes value"

@@ -1026,7 +1026,6 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; as `project/…`, even though `project` is where they are declared.
 (defn- format-roots
   (root)
-  (require 'project)
   (append (project/project-abs-paths root *project-source-paths*)
     (project/project-abs-paths root *project-test-paths*)
     (project/project-abs-paths root (or *project-format-paths* (list)))))
@@ -1043,7 +1042,6 @@ retired the `comment-on-own-line?` distinction this used to need."
 
 (defn- format-require-root
   ()
-  (require 'project)
   (let (root (project/project-find-root (cwd)))
     (when (nil? root)
       (error "format: not in a Brood project (no project.blsp found from " (cwd) ")"))

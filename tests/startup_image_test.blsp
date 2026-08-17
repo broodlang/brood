@@ -154,7 +154,6 @@
   ;; silently empty. The loader must therefore decline the image under `BROOD_COVERAGE`.
   ;; Found by `nest::coverage_lines` failing, not by reasoning, which is why it is pinned.
   (test "an instrumented run declines the image"
-    (require 'project)
     (is (nil? (getenv "BROOD_COVERAGE")))
     (is (project/project-image-usable?))))
 

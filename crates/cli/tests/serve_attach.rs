@@ -30,8 +30,6 @@ fn attach_drives_a_served_app_over_the_link() {
     let daemon = format!(
         r#"
 (node-start :ed "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(require 'editor/serve)
-(require 'editor/display)
 (defn mk () {{:n 0}})
 (defn vw (m c r) [(editor/display/text 0 0 (str "n=" (get m :n)))])
 (defn up (m input c r)
@@ -51,7 +49,6 @@ fn attach_drives_a_served_app_over_the_link() {
     let client = format!(
         r#"
 (node-start :cli "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(require 'editor/serve)
 (def peer (connect "ed@127.0.0.1:{port_a}"))
 (monitor-node peer)
 (defn frame-text (f) (nth (first f) 3))

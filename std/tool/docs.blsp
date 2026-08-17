@@ -145,14 +145,13 @@ module's namespace-rooted globals (ADR-070) back to it."
   (let (key (name modname) src (docs-source key))
     (when (nil? src) (error "doc: cannot find module '" key "'"))
     (let (before (global-names))
-      (require modname)
+      (require-one modname)
       (docs-render key (docs-leading-doc src) (docs-added before (global-names))))))
 
 ;; Markdown for the whole project: find it from the cwd, put its sources on the
 ;; load-path, and document each source file in turn.
 (defn document-project ()
   "The Markdown documentation for the whole project (every source file under it), found from the cwd. Errors if not in a project."
-  (require 'project)
   ; project/project-find-root / --collect-sources / project-setup
   (let (root (project/project-find-root (cwd)))
     (when (nil? root) (error "doc: not in a Brood project (no project.blsp found from " (cwd) ")"))
@@ -260,13 +259,12 @@ module's namespace-rooted globals (ADR-070) back to it."
   (let (key (name modname) src (docs-source key))
     (when (nil? src) (error "docs: cannot find module '" key "'"))
     (let (before (global-names))
-      (require modname)
+      (require-one modname)
       (docs-module-model key (docs-leading-doc src) (docs-added before (global-names))))))
 
 (defn model-project ()
   "The whole-project doc model — `{:name :version :modules […]}` — found from the cwd,
   documenting every source file under it. Errors if not in a Brood project."
-  (require 'project)
   (let (root (project/project-find-root (cwd)))
     (when (nil? root) (error "docs: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project-setup root)
@@ -283,7 +281,6 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; name the catalogue doesn't know falls into the `:other` group.
 (defn- model-all
   ()
-  (require 'doc-catalog)
   ;; The language surface is the builtins and prelude — NOT the tooling modules
   ;; (`docs`/`project`/…) loaded to run this command. Those are namespaced (`docs/foo`);
   ;; exclude any name whose `/` has a non-empty prefix. A bare operator like `/` (its `/`
@@ -306,8 +303,6 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 (defn- write-site
   (out-dir model title)
-  (require 'json)
-  (require 'docsite)
   (when (not (dir? out-dir)) (make-dir out-dir))
   (spit (path-join out-dir "index.html") (docsite/render model {:title title}))
   (spit (path-join out-dir "model.json") (json/encode model))
@@ -554,7 +549,6 @@ module's namespace-rooted globals (ADR-070) back to it."
   it equals `result`, so documentation examples can't drift from behaviour. Loads the
   project's sources, prints a line per example, and returns the failure count (0 = all
   passed). The policy behind `nest doctest`."
-  (require 'project)
   (let (root (project/project-find-root (cwd)))
     (when (nil? root)
       (error "doctest: not in a Brood project (no project.blsp found from " (cwd) ")"))

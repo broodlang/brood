@@ -255,7 +255,7 @@ fn bignum_step_churn_via_mcp_does_not_corrupt_heap() {
 #[test]
 fn tools_list_returns_the_baked_std_catalogue() {
     // Step 3 ships `std/tool/mcp.blsp` as a baked-in `EMBEDDED_MODULES` entry, so
-    // `(require 'mcp) (mcp/mcp-tools)` succeeds in a fresh `Interp` and the
+    // `(require-one 'mcp) (mcp/mcp-tools)` succeeds in a fresh `Interp` and the
     // dispatcher exposes the initial tool catalogue without any project setup.
     let mut interp = Interp::new();
     let resp = round_trip(
@@ -295,7 +295,7 @@ fn tools_list_returns_the_baked_std_catalogue() {
 fn tools_list_projects_a_brood_defined_catalogue() {
     let mut interp = Interp::new();
     // Pre-define an `mcp-tools` catalogue inline; mark `'mcp` as already
-    // provided so the dispatcher's `(require 'mcp)` doesn't load the baked
+    // provided so the dispatcher's `(require-one 'mcp)` doesn't load the baked
     // `std/tool/mcp.blsp` and clobber our test catalogue. This is exactly the
     // override path a project's own `mcp.blsp` will use (step 5): provide
     // the feature themselves, then bind their own `mcp-tools`.
@@ -328,7 +328,7 @@ fn tools_list_projects_a_brood_defined_catalogue() {
 fn tools_call_dispatches_to_a_brood_handler() {
     let mut interp = Interp::new();
     // Same pattern as `tools_list_projects_a_brood_defined_catalogue`:
-    // claim the feature so the dispatcher's `(require 'mcp)` is a no-op
+    // claim the feature so the dispatcher's `(require-one 'mcp)` is a no-op
     // and our inline catalogue is what `(mcp/mcp-tools)` returns.
     interp
         .eval_str(
@@ -815,7 +815,6 @@ fn run_tests_structured_returns_a_structured_summary() {
     interp
         .eval_str(
             r#"
-                (require 'test)
                 (test/test "always-ok" (test/assert= 1 1))
                 "#,
         )
@@ -906,7 +905,7 @@ fn std_process_info_tool_looks_up_by_id() {
 /// sandboxed `write`/`edit` tools have a project to write into. Returns the
 /// root path. The first `eval` call triggers the dispatcher's `(require
 /// 'mcp)` (which loads `project`, defining `*project-root*` as nil); we then
-/// rebind it — a later `(require 'mcp)` is idempotent and won't reset it.
+/// rebind it — a later `(require-one 'mcp)` is idempotent and won't reset it.
 fn interp_with_project_root(tag: &str) -> (Interp, std::path::PathBuf) {
     let mut interp = Interp::new();
     let _ = invoke_tool(&mut interp, "eval", json!({ "source": "1" }));

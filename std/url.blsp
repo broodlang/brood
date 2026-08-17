@@ -7,7 +7,6 @@
 (defmodule url
   "URL encoding/decoding and parsing, written entirely in Brood (pure; opt-in).
 
-    (require 'url)
     (url/percent-encode \"hello world\")   ;; => \"hello%20world\"
     (url/percent-decode \"hello%20world\") ;; => \"hello world\"
     (url/query-encode {:q \"hello world\" :n \"42\"}) ;; => \"n=42&q=hello+world\"

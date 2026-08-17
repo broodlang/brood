@@ -4461,7 +4461,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
           ;; context. The same rooting form goes in both positions so require and refer
           ;; agree on the target (it is idempotent — evaluating it twice is harmless).
           rooted (list '%root-module-name (list 'quote mod)))
-      (list (list 'require rooted)
+      (list (list 'require-one rooted)
         (list '%refer rooted (list 'quote subset) (list 'quote exclude))))))
 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
@@ -4494,7 +4494,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
           rooted (list '%root-module-name (list 'quote mod)))
       ;; Grant BEFORE refer: a `--` name in the `:only` subset is a privacy breach
       ;; unless the internals grant is already recorded when `%refer` checks it.
-      (list (list 'require rooted)
+      (list (list 'require-one rooted)
         (list '%grant-internals rooted)
         (list '%refer rooted (list 'quote subset))))))
 
@@ -4521,7 +4521,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
         ;; Root an intra-package target to `foo/mod` (ADR-070); the local `short` alias
         ;; is unchanged — you still write `short/name` in this file.
         rooted (list '%root-module-name (list 'quote mod)))
-    (list (list 'require rooted)
+    (list (list 'require-one rooted)
       (list '%alias rooted (list 'quote short)))))
 
 (defn- defmodule-alias-forms
@@ -4873,12 +4873,6 @@ it waits for that load to finish (a half-evaluated module is never observable)."
                 (throw e)))))
         (%registry-update! '*features-loading* :dissoc [key] nil)
         key))))
-
-;; (require 'a 'b …) — load each feature once, left to right. Returns the names.
-(defn require (& mods)
-  "Load each feature once (a no-op for any already loaded); errors on one not
-found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
-  (map require-one mods))
 
 ;; ═══ Abilities + the Display protocol (core) ════════════════════════════════
 ;; Open generic functions with nominal dispatch — Brood's unified polymorphism seam

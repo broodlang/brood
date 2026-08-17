@@ -12,7 +12,7 @@ use libfuzzer_sys::fuzz_target;
 thread_local! {
     static INTERP: RefCell<Interp> = RefCell::new({
         let mut i = Interp::new();
-        i.eval_str("(require 'json)").expect("json loads");
+        i.eval_str("(require-one 'json)").expect("json loads");
         i
     });
 }

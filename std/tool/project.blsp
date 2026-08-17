@@ -1005,7 +1005,6 @@ it keeps them. Requires nothing, fetches nothing. An absent `dir` is [].
 `app` but demands a newer host than `app-version` is excluded, via the same
 `version-satisfies-all?` the resolver and `nest search` use. Naming `app` is what gates — an
 empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not count."
-  (require 'version)
   (let (app-symbol (symbol app)
         host {app-symbol app-version})
     (if (not (file-exists? dir))
@@ -1101,7 +1100,6 @@ rules merged in declaration order, then this project's own `:format-headers` on 
     (when (not (string? *project-brood*))
       (error "project: :brood must be a version-constraint string (e.g. \">= 0.2\"), got "
         (pr-str *project-brood*)))
-    (require 'version)
     (when (not (version/version-satisfies? (brood-version) *project-brood*))
       (error "project: this project requires Brood "
         (pr-str *project-brood*)
@@ -1162,7 +1160,6 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   (root)
   (if *project-name*
     (do
-      (require 'package)
       ;; `:name` may be written as a symbol (`:name demo`) or a string (`:name "demo"`)
       ;; — the manifest is read as data. Normalise to a string so the registry keys
       ;; (and `require-force-package`'s string-keyed lookup of them) always agree.
@@ -1198,8 +1195,6 @@ resolve in the advisory checker. Returns the project root."
   ;; Image-backed (ADR-218): a tooling image starts from the artifact when the tree
   ;; is unchanged, and writes one when it isn't — no separate build step, ever.
   (project-load-sources-cached root)
-  (require 'test)
-  (require 'format)
   root)
 
 ;; If the manifest declared :dependencies, resolve them (writing/refreshing
@@ -1211,9 +1206,12 @@ resolve in the advisory checker. Returns the project root."
   (root)
   ;; `package` is required here (not `:use`d) to avoid a project↔package load cycle;
   ;; qualify its entry points. It's needed for BOTH package-identity recording and deps.
-  (require 'package)
   ;; Package identity (ADR-172): the project's own modules → its package name, so the
   ;; ability system can tell an app module from a library. Always — even a depless project.
+  ;; Load `package` explicitly (via the loader, not a bare qualified ref) to control the
+  ;; project↔package load cycle: the auto-require a qualified ref triggers would load it
+  ;; mid-cycle, leaving its defs unbound. `require-one` here loads it in a controlled order.
+  (require-one 'package)
   (when *project-name*
     (package/package-record-ns-packages (map (fn (d) (list *project-name* d))
                                           (project-abs-paths root *project-source-paths*))))
@@ -2005,7 +2003,6 @@ resolve in the advisory checker. Returns the project root."
 
 (defn- project-cache-dir
   (root)
-  (require 'hash)
   (let (xdg (getenv "XDG_CACHE_HOME")
         home (getenv "HOME")
         base (cond
@@ -2462,7 +2459,6 @@ as unchanged (only when some were)."
     (when (nil? root)
       (error "run-project-tests: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project-setup root)
-    (require 'test)
     (project-load-sources-cached root)
     ; the project's own src/, so tests use it directly
     (test/reset-units!)
@@ -2534,17 +2530,14 @@ as unchanged (only when some were)."
 
 (defn- project-coverage-lines-begin!
   (root)
-  (require 'coverage)
   (coverage/coverage-line-begin! (project-abs-paths root *project-source-paths*)))
 
 (defn- project-coverage-lines-finish!
   (root)
-  (require 'coverage)
   (coverage/coverage-line-report root (project-abs-paths root *project-source-paths*)))
 
 (defn- project-coverage-branches-finish!
   (root)
-  (require 'coverage)
   (coverage/coverage-branch-report root (project-abs-paths root *project-source-paths*)))
 
 ;; --- coverage wiring (nest test --cover) --------------------------------------
@@ -2553,12 +2546,10 @@ as unchanged (only when some were)."
 ;; std/tool/coverage.blsp).
 (defn- project-coverage-begin!
   (root)
-  (require 'coverage)
   (coverage/coverage-begin! (project-abs-paths root *project-source-paths*)))
 
 (defn- project-coverage-finish!
   (root)
-  (require 'coverage)
   (coverage/coverage-report root))
 
 ;; Enforce `--cover-min N`: a coverage floor is only useful if it can fail the
@@ -2630,7 +2621,6 @@ as unchanged (only when some were)."
         (cwd)
         ")"))
     (project-setup root)
-    (require 'test)
     (project-load-sources-cached root)
     (test/reset-units!)
     ; drop any stale registrations so a re-run in a long-lived `nest mcp` image
@@ -2674,7 +2664,7 @@ as unchanged (only when some were)."
       ;; load — which builds one, so the next run is fast.
       (when (nil? (project-setup-lazy-image root))
         (project-load-sources-cached root))
-      (require modname)
+      (require-one modname)
       ;; A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
       ;; module file with no `defmodule` header defines it bare. Prefer the
       ;; qualified name, fall back to bare.
@@ -2747,7 +2737,6 @@ as unchanged (only when some were)."
 ;; Unchanged when it carries none, so a test-free file pays only one parse.
 (defn- strip-test-forms
   (source)
-  (require 'sexp)
   (let (spans (fold (fn (acc n)
                       (if (test-form-node? n source)
                         (cons [(get n :start) (get n :end)] acc)
@@ -2789,7 +2778,7 @@ std. Errors if `root` is nil (not in a project)."
     ;; shipped bundle. (This is the payoff of keeping dev-deps in their own slot.)
     (let (src-dirs (project-abs-paths root *project-source-paths*)
           dep-dirs (if *project-dependencies*
-                     (do (require 'package) (package/ensure-deps root *project-dependencies*))
+                     (do (package/ensure-deps root *project-dependencies*))
                      nil)
           all-dirs (append src-dirs dep-dirs))
       ;; Pair each file with the source dir it was found under, so its require-name
@@ -2851,7 +2840,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
   (let (entry (or *project-main-override* *project-main*)
         modname (first entry)
         fname (second entry))
-    (require modname)
+    (require-one modname)
     (let (qual (symbol (str (name modname) "/" (name fname))))
       (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
         (when (nil? target)

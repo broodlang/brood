@@ -656,7 +656,6 @@
 
 (describe "project: (brood-version)"
   (test "returns this runtime's semantic version as a valid MAJOR.MINOR.PATCH string"
-    (require 'version)
     (is (string? (brood-version)))
     (is (version/version-valid? (brood-version)))))
 
@@ -805,7 +804,7 @@
       (spit (path-join (path-join root "src") "shapes.blsp")
         "(defmodule shapes) (defn area () 7) (defmodule shapes-internal) (defn secret () 42)")
       (project/project-setup root)
-      (require 'pkgb/shapes-internal)
+      (require-one 'pkgb/shapes-internal)
       (assert= (pkgb/shapes-internal/secret) 42)
       ;; loading the file co-provided the sibling region
       (assert= (pkgb/shapes/area) 7)))
@@ -851,7 +850,7 @@
       (def pkge/twomod-internal/*loads* 0)
       (project/project-setup root)
       (let (me (self) n 8)
-        (map (fn (_) (spawn (fn () (do (require 'pkge/twomod-internal) (send me :done)))))
+        (map (fn (_) (spawn (fn () (do (require-one 'pkge/twomod-internal) (send me :done)))))
           (range n))
         (coloc-await-n n))
       (assert= pkge/twomod-internal/*loads* 1))))

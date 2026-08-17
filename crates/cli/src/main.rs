@@ -155,7 +155,7 @@ fn run(cli: Cli) {
     // (`process::exit` skips Drop). Restore is idempotent.
     let result = {
         let _guard = RawTermGuard;
-        interp.eval_str("(require 'repl) (repl/repl-run)")
+        interp.eval_str("(repl/repl-run)")
     };
     if let Err(e) = result {
         report_error(&e);
@@ -176,7 +176,7 @@ fn run_bundle(args: Vec<String>) {
         .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(a)))
         .collect::<Vec<_>>()
         .join(" ");
-    let code = format!("(require 'project) (project/run-bundle (list {list}))");
+    let code = format!("(project/run-bundle (list {list}))");
     let result = {
         let _guard = RawTermGuard;
         interp.eval_str(&code)
@@ -209,8 +209,8 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
         brood::core::alloc::TEST_DEFAULT_HARD,
         brood::core::alloc::TEST_DEFAULT_SOFT,
     );
-    // Ensure `run-tests` exists even if a file forgot to `(require 'test)`.
-    if let Err(e) = interp.eval_str("(require 'test)") {
+    // Ensure `run-tests` exists even if a file forgot to `(require-one 'test)`.
+    if let Err(e) = interp.eval_str("(require-one 'test)") {
         report_error(&e);
         std::process::exit(1);
     }

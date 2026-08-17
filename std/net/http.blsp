@@ -22,10 +22,7 @@
 ;; chunked downloads, and a WebSocket upgrade all build on; the kernel still adds
 ;; nothing.
 
-(require 'net/tcp)
-(require 'file)
 ; the single RFC-3986 parser — `parse-url` wraps it with HTTP defaults
-(require 'url)
 (defmodule net/http
   "A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062). `(serve port
 handler)` listens and runs one handler process per connection; a handler maps a

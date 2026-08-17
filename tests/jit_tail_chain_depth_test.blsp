@@ -46,7 +46,6 @@
   ;; exercised) without paying for the 100,000-level corpus document, which has its own
   ;; `:isolated` test in the JSON conformance runner.
   (test "deeply nested JSON is rejected, not fatal"
-    (require 'json)
     (let (deep (str (string-repeat "[" 5000)))
       (assert-error (json/parse deep)))
     ;; and the well-formed counterpart parses

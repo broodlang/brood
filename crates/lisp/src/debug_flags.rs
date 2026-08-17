@@ -288,7 +288,7 @@ pub fn print_catalogue() {
     println!("\nStart here:");
     println!("  make perf-brood                      # counters compiled in");
     println!("  BROOD_PERF_STATS=1 brood prog.blsp   # dump them at exit");
-    println!("  (require 'perf) (perf/summary)       # in-image, interpreted");
+    println!("  (perf/summary)                       # in-image, interpreted (auto-loads perf)");
     println!("  scripts/bench-ratio.sh               # TIMES (counter-free — never this build)");
 }
 

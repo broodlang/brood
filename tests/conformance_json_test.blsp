@@ -29,7 +29,6 @@
 ;; actual fix.
 
 (defmodule conformance-json-test (:use test) (:use corpus))
-(require 'json)
 
 (defn- js-verdict
   (path)

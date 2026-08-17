@@ -398,7 +398,7 @@ pub fn project_files(interp: &mut Interp) -> Vec<String> {
 /// The on-disk file a `require`able feature resolves to, found the same way
 /// `require` itself does: `require-find` over the live `*load-path*` (which
 /// `bootstrap_project` extends with the project's source dirs). Powers
-/// goto-definition on the module name in `(require 'foo)`. `None` for a baked-in
+/// goto-definition on the module name in `(require-one 'foo)`. `None` for a baked-in
 /// std module (it has no file — it's `%builtin-module` source) or a feature not
 /// on the path. `feature` is a CST symbol token; it's escaped before embedding.
 pub fn module_file(interp: &mut Interp, feature: &str) -> Option<String> {
@@ -417,7 +417,7 @@ pub fn module_file(interp: &mut Interp, feature: &str) -> Option<String> {
 
 /// Module names the buffer could `require` / `:use`: every already-loaded feature
 /// (the keys of `*features*`) plus every top-level `<name>.blsp` on the live `*load-path*`.
-/// Powers context-aware completion inside a `(require '…)` / `(:use …)` clause.
+/// Powers context-aware completion inside a `(require-one '…)` / `(:use …)` clause.
 /// Best-effort and de-duplicated (sorted): a nested `dir/mod` module appears only
 /// once it has been loaded (the path scan is one level deep, like a directory
 /// listing), which is the common case in a bootstrapped project.
@@ -552,7 +552,7 @@ pub fn macroexpand_to_string(
 pub fn format_source(interp: &mut Interp, src: &str) -> Result<String, String> {
     let cp = interp.heap.checkpoint();
     let escaped = escape_brood_string(src);
-    let code = format!("(require 'format) (format/format-source \"{escaped}\")");
+    let code = format!("(format/format-source \"{escaped}\")");
     let result = match interp.eval_str(&code) {
         Ok(Value::Str(id)) => Ok(interp.heap.string(id).to_string()),
         Ok(_) => Err("format-source did not return a string".to_string()),
@@ -670,7 +670,7 @@ pub fn call_form(fn_name: &str, string_args: &[&str]) -> String {
 /// thin typed seam Rust callers reach it through.
 pub fn load_tooling_image(interp: &mut Interp, root: &str) -> Result<(), String> {
     let code = format!(
-        "(require 'project) {}",
+        "(require-one 'project) {}",
         call_form("project/setup-tooling-image", &[root])
     );
     interp

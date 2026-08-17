@@ -16,7 +16,6 @@ mtime and re-`load`s it when it changes — the running program's globals
 rebind on the *next* call site (docs/shared-code.md). Opt-in: nothing is
 watched until you call `reload-on-change`.
 
-    (require 'reload)
     (reload-on-change \"greeter.blsp\")   ; one file
     (reload-on-change \"src\")            ; every .blsp under src/, recursively
                                           ; — new files added later are picked

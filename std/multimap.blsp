@@ -14,7 +14,6 @@
 (defmodule multimap
   "Multi-valued map: one key may have multiple associated values.
 
-    (require 'multimap)
     (let (mm (-> (multimap/multimap-new)
                  (multimap/multimap-assoc :color \"red\")
                  (multimap/multimap-assoc :color \"blue\")

@@ -25,10 +25,7 @@ land in a later slice."
   (:use-internals project))
 
 ; tree hashing over hash/sha256 + hash/sha256-bytes
-(require 'hash)
 ; version-range predicates + the backtracking version resolver (ADR-209)
-(require 'version)
-(require 'resolver)
 ;; --- canonical directory content hash (ADR-037 reproducibility) --------------
 ;; A directory's hash is Brood over the `hash/sha256` digest: walk files in
 ;; sorted order, and for each emit "<rel-path>\0<file-hash>\n", then hash the lot.
@@ -660,7 +657,6 @@ land in a later slice."
 
 (defn- package-http-fetch
   (url redirects-left)
-  (require 'net/http)
   (let (resp (net/http/http-get url)
         status (get resp :status))
     (cond
@@ -741,7 +737,6 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 ;; releases are immutable, so the server refuses a re-publish. A base URL override
 ;; may be passed to the registry functions (tests point it at a loopback server).
 
-(require 'json)
 
 (defn- registry-trim
   (url)
@@ -769,7 +764,6 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 (defn- registry-error-text
   (resp)
   "The server's `:error` message from a JSON error body, or a generic HTTP line."
-  (require 'net/http)
   (let (parsed (try (json/parse (net/http/body-text resp)) (catch _ nil)))
     (if (and (map? parsed) (get parsed :error))
       (get parsed :error)
@@ -780,7 +774,6 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
   "GET `url` and parse its JSON body. Returns `[:ok data]` on 2xx, `[:error status
   message]` on an error status (with the server's `:error` text when present), or
   `[:error 0 message]` on a transport failure."
-  (require 'net/http)
   (let (resp (net/http/http-get url)
         status (get resp :status))
     (cond
@@ -887,7 +880,6 @@ TOFU-pinned signing key, nil for an unsigned package)."
 ;; The hive-hosted tarball bytes for a release (root-level layout), erroring on a non-2xx.
 (defn- registry-download-hosted
   (base nm version)
-  (require 'net/http)
   (let (resp (net/http/http-get (registry-tarball-url base nm version))
         status (get resp :status))
     (when (not (and (>= status 200) (< status 300)))
@@ -897,7 +889,6 @@ TOFU-pinned signing key, nil for an unsigned package)."
 (defn- registry-download-extract
   (root dep
     base target nm version checksum source-url signature pubkey locked-pubkey)
-  (require 'net/http)
   (when (dir? target) (%rm-rf target))
   ;; A release may host its bytes EXTERNALLY — a `:source_url` (a GitHub/S3/CDN tarball),
   ;; in which case the registry holds only metadata + the checksum and the bytes are
@@ -949,8 +940,6 @@ TOFU-pinned signing key, nil for an unsigned package)."
 ;; signature verified (never pin a key that hasn't proven control by producing a valid signature).
 (defn- package-verify-signature
   (nm version checksum signature pubkey locked-pubkey)
-  (require 'crypto)
-  (require 'encoding)
   ;; `signature`/`pubkey`/`locked-pubkey` are attacker-controlled (registry JSON / the lock), so
   ;; type-guard to STRINGS before touching hex-decode — a non-string (a JSON number/array) would
   ;; otherwise throw out of hex-decode and turn this advisory check into a hard install block. The
@@ -1026,7 +1015,6 @@ TOFU-pinned signing key, nil for an unsigned package)."
 (defn registry-latest-version (nm)
   "The newest published version string of package `nm` (a symbol or string) at the configured
 registry, or nil if it is unpublished. Backs an app's 'is there an update?' check."
-  (require 'version)
   (let (base (registry-base-for nil)
         versions (registry-list-versions base (if (symbol? nm) nm (symbol nm))))
     (if (or (nil? versions) (empty? versions))
@@ -1050,7 +1038,6 @@ at runtime — the user-package install path, independent of any project `_deps`
 checksum mismatch (the same integrity guarantee `nest add` gives — the registry is never trusted
 for the bytes). Advisory signature/TOFU checking is a lock-file concern and is skipped here; the
 sha256 pin still holds."
-  (require 'net/http)
   (let (base (registry-base-for nil)
         name-sym (if (symbol? nm) nm (symbol nm))
         name-str (if (symbol? nm) (name nm) nm)
@@ -1540,7 +1527,6 @@ sha256 pin still holds."
 ;; Re-render `src` after applying `f` to its (project …) node. Comments survive.
 (defn- package-manifest-transform
   (src f)
-  (require 'format)
   (let (kids (vec->list (node-children (parse-source src))))
     (format/format-cst-root (apply vector
                               (map (fn (n) (if (package-project-list? n) (f n) n)) kids)))))
@@ -1602,7 +1588,6 @@ sha256 pin still holds."
 ;; cache dir (no HOME), so an edit is always serialised.
 (defn- package-manifest-lock
   (root)
-  (require 'hash)
   (let (dir (or (project/project-cache-dir root) "/tmp"))
     (path-join dir (str "manifest-" (hash/sha256 root) ".lock"))))
 
@@ -1722,7 +1707,6 @@ applications; libraries (the default kind) carry none, so the common case stays 
   "The search URL for `term`, narrowed to packages that ENHANCE `enhances` when that
 is given (a plain application name — the registry matches it against each package's
 published `:enhances` names and knows nothing else about it)."
-  (require 'url)
   (str base
     "/api/v1/packages?q="
     (url/percent-encode term)
@@ -1826,8 +1810,6 @@ ordinary library, which the server stores as \"nothing\"."
   "Generate an ed25519 signing keypair, store it at `<config>/brood/signing-key.blsp` (private
 written 0600), and print the public key to share so others can pin it (TOFU, ADR-212). Refuses
 to overwrite an existing key unless `:force true`. Backs `nest key gen`."
-  (require 'crypto)
-  (require 'encoding)
   (let (p (package-signing-key-path))
     (when (and (file-exists? p) (not (plist-get opts :force)))
       (error "package: a signing key already exists at "
@@ -1857,8 +1839,6 @@ to overwrite an existing key unless `:force true`. Backs `nest key gen`."
 ;; when there is no key (an unsigned publish).
 (defn- package-sign-checksum
   (checksum)
-  (require 'crypto)
-  (require 'encoding)
   (let (key (package-load-signing-key))
     (if (nil? key)
       nil
@@ -1903,8 +1883,6 @@ the registry records the URL and every downloader verifies the bytes it fetches 
 (ADR-211). `:index` overrides the configured `:registry` base URL. Auth: a Bearer token
 ($HIVE_TOKEN or the `:registry-token` config). Releases are immutable — a version already
 published is refused. Backs `nest publish`."
-  (require 'net/http)
-  (require 'encoding)
   (let (index (plist-get opts :index)
         source-url (plist-get opts :source-url))
     (package-in-project (fn (root)

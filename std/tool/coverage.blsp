@@ -276,7 +276,6 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   ;; requires `coverage` (for `nest test --cover`), so a top-level require would be
   ;; circular. This runtime require is idempotent (project is already loaded whenever
   ;; coverage runs from `nest`) and makes the `project/…` reference self-sufficient.
-  (require 'project)
   (let (hits (coverage-hit-index)
         instrumented (coverage-instrumented-index)
         files (or (coverage-safely (fn ()
@@ -395,7 +394,6 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 `covered` = branches with both edges taken, `partial` = the `[line col state]` triples
 with exactly one edge taken, `missing` = the `[line col]` points never reached. Only
 files under `source-dirs` are measured; files with no branches are omitted."
-  (require 'project)
   (let (taken-by-file (coverage-branch-taken-index)
         sites-by-file (coverage-branch-sites-index)
         files (or (coverage-safely (fn ()

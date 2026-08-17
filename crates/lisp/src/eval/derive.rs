@@ -1,11 +1,11 @@
-//! Inferred `require` from qualified references (ADR-227 follow-up).
+//! Inferred module loading from qualified references (ADR-227 follow-up).
 //!
-//! A qualified reference `mod/name` **infers `(require 'mod)`** — you never write a
-//! `require` line just to satisfy a `mod/…` reference. This holds for every module
-//! (`json`, `set`, your own project modules, the curated stdlib), so the rule is one
-//! line: *name where something comes from, and it loads on demand.* `(:use mod)` still
-//! exists — it additionally refers the module's names *bare* — and needs no separate
-//! `require` either (its expansion already requires).
+//! A qualified reference `mod/name` **infers a load of `mod`** — you never write a load
+//! line to satisfy a `mod/…` reference; naming where something comes from loads it on
+//! demand. This holds for every module (`json`, `set`, your own project modules, the
+//! curated stdlib). The load goes through the internal loader (`require-one`); there is
+//! **no user-facing `require` form** (removed). `(:use mod)` still exists — it
+//! additionally refers the module's names *bare* — and loads via the same internal loader.
 //!
 //! There is no bare-name magic: a bare `sqrt` with neither a `math/` prefix nor
 //! `(:use math)` stays unbound.
@@ -178,6 +178,17 @@ fn scan_refs(heap: &Heap, form: Value) {
         }
         ValueRef::Vector(id) => {
             for it in heap.vector(id).to_vec() {
+                scan_refs(heap, it);
+            }
+        }
+        ValueRef::Map(id) => {
+            for (k, v) in heap.map_entries(id) {
+                scan_refs(heap, k);
+                scan_refs(heap, v);
+            }
+        }
+        ValueRef::Set(id) => {
+            for it in heap.set_elems(id) {
                 scan_refs(heap, it);
             }
         }

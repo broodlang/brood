@@ -1,5 +1,4 @@
 (defmodule path-test (:use test))
-(require 'path)
 
 (describe "path/basename"
   (test "simple file"

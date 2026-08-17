@@ -10,7 +10,7 @@
 ;; rule rather than a convention.
 ;;
 ;; Register-only — discovered and run by `nest test`.
-(defmodule reserved-names-test (:use test))
+(defmodule reserved-names-test (:use test) (:use set) (:use path))
 
 ;; `eval-string` so the rejected forms are compiled at RUNTIME (a literal `(def get
 ;; …)` in this file would refuse at load and take the whole suite with it).
@@ -35,10 +35,9 @@
     (is (rn-refused? "(defmacro when (c & b) nil)"))
     (is (rn-refused? "(defmacro -> (x & f) x)")))
   (test "an embedded std module's functions are reserved once it has loaded"
-    (require 'set)
     (is (bound? 'set/union))
     (is (rn-refused? "(def set/union (fn (a b) :hacked))"))
-    (require 'path)
+    (is (bound? 'path/join))
     (is (rn-refused? "(def path/join (fn (& p) :hacked))")))
   (test "the error names the offending symbol and how to proceed"
     (let (msg (str (rn-try "(def first (fn (x) nil))")))
@@ -65,7 +64,7 @@
     ;; reserved", not "a shipped NAME is".
     (is (bound? '*load-path*))
     (assert= :allowed (rn-try "(add-load-path! \".\")"))
-    (assert= :allowed (rn-try "(require 'set)"))))
+    (assert= :allowed (rn-try "(require-one 'set)"))))
 
 (describe "a dynamic var is never reserved"
   ;; :isolated — this rebinds the global `*out*` port, which would otherwise swallow

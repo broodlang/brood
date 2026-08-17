@@ -377,13 +377,13 @@ fn list_tools(interp: &mut Interp) -> Vec<Json> {
     let roots_base = interp.heap.roots_len();
 
     // Building the catalogue shouldn't print, but a project `mcp.blsp` loaded by
-    // the `(require 'mcp)` below could — divert it off the JSON-RPC channel and
+    // the `(require-one 'mcp)` below could — divert it off the JSON-RPC channel and
     // discard it (a `tools/list` reply has no place to surface stray output).
     brood::builtins::begin_stdout_capture();
 
     // Best-effort require — silently ignore "no such module" so the server still
     // boots even if a project hasn't defined its own MCP extensions.
-    let _ = interp.eval_str("(require 'mcp)");
+    let _ = interp.eval_str("(require-one 'mcp)");
 
     let tools = match interp.eval_str("(mcp/mcp-tools)") {
         Ok(v) => {
@@ -508,7 +508,7 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
     // `eval`/`load` run arbitrary, possibly-runaway code; other tools (fast, or
     // legitimately long like `run-tests`) run unbounded. The deadline is armed
     // *inside* the closure — right before the handler `apply` — so the
-    // dispatcher's own overhead (the `(require 'mcp)` / catalogue rebuild below)
+    // dispatcher's own overhead (the `(require-one 'mcp)` / catalogue rebuild below)
     // doesn't eat the handler's budget. Checked inline in eval's loop (scheduler
     // deadline, ADR-063), so it surfaces as an ordinary error and leaves the
     // existing error / panic / output-capture handling intact.
@@ -518,7 +518,7 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
         // call (hot reload) reshapes the tool surface immediately. This runs
         // *before* the deadline is armed, so a slow catalogue rebuild doesn't
         // count against the handler's 30s.
-        let _ = interp.eval_str("(require 'mcp)");
+        let _ = interp.eval_str("(require-one 'mcp)");
         let tools = interp
             .eval_str("(mcp/mcp-tools)")
             .map_err(|_| RpcError::invalid_params(format!("no such tool: {name}")))?;

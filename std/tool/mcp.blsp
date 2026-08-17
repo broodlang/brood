@@ -265,7 +265,6 @@ text — unbalanced parens in `:form` can't break the host expression."
   "`format` — reformat `:source` via `std/format.blsp`'s `(format-source ...)`.
 Idempotent. The require is lazy and cached, so the per-call cost is a hash
 check after the first invocation."
-  (require 'format)
   (let (src (get args :source))
     (when (not (string? src))
       (throw "format: :source must be a string"))
@@ -282,7 +281,6 @@ position omitted when the checker can't supply one — ADR-024). Backed by
 so a clean project renders as `{:diagnostics []}` rather than `{:diagnostics
 null}` — agents shouldn't have to disambiguate \"no warnings\" from
 \"missing field\"."
-  (require 'project)
   (try
     {:diagnostics (or (check-project-structured) [])}
     (catch e
@@ -293,7 +291,6 @@ null}` — agents shouldn't have to disambiguate \"no warnings\" from
 result from `(run-project-tests-structured)` — `{:total :passed :failed
 :failed-assertions :ms :results [{:group :name :passed :ms :failures ...}]}`.
 Outside a Brood project, returns `{:error msg}`."
-  (require 'project)
   (try
     (run-project-tests-structured)
     (catch e
@@ -352,7 +349,6 @@ and VM stats plus the live-process count and the current telemetry metrics, all 
 call instead of scraping the individual stat builtins. Returns `{:gc :sched :vm :processes
 :metrics}`. The point-in-time companion to `watch-runtime` (which streams events); folds
 what `node`/`processes` expose behind one telemetry-fed view."
-  (require 'telemetry)
   (telemetry/runtime-snapshot))
 
 (defn- mcp-collect-runtime

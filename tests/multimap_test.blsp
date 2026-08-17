@@ -1,5 +1,4 @@
 (defmodule multimap-test (:use test))
-(require 'multimap)
 
 (describe "multimap basics"
   (test "new multimap is empty"
