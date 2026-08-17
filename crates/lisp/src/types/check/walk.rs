@@ -1811,7 +1811,9 @@ fn is_int_closed_op(head: Symbol) -> bool {
         || value::symbol_is(head, "quot")
         || value::symbol_is(head, "rem")
         || value::symbol_is(head, "mod")
-        || value::symbol_is(head, "abs")
+        // `math/` since ADR-227 — the bare spelling no longer exists, so keying it here
+        // left this rule dead for the spelling that does (mirrors `infer.rs`).
+        || value::symbol_is(head, "math/abs")
 }
 
 /// `(def name value)` — the binder is in position 1, the value in 2. Don't

@@ -529,7 +529,11 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     // perfect square / whole-number argument (`(sqrt 4)` → `2.0`). Only fires on a
     // known numeric argument (a non-numeric one is a separate arg-type error the
     // curated sig already flags).
-    let is_always_float = value::symbol_is(head, "sqrt")
+    //
+    // `sqrt` is keyed `math/sqrt`: ADR-227 moved it into `std/math.blsp`, so the bare
+    // spelling no longer exists (unbound without an import) and this rule was dead for the
+    // spelling that does. `sin`/`cos`/`tan` stay bare — they are still root natives.
+    let is_always_float = value::symbol_is(head, "math/sqrt")
         || value::symbol_is(head, "sin")
         || value::symbol_is(head, "cos")
         || value::symbol_is(head, "tan");
@@ -549,7 +553,8 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         || value::symbol_is(head, "quot")
         || value::symbol_is(head, "rem")
         || value::symbol_is(head, "mod")
-        || value::symbol_is(head, "abs");
+        // `math/` since ADR-227 — see the `math/sqrt` note above.
+        || value::symbol_is(head, "math/abs");
     if !is_contagious && !is_int_closed {
         return None;
     }
@@ -652,7 +657,8 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "rest")
         || value::symbol_is(head, "but-last")
         || value::symbol_is(head, "distinct")
-        || value::symbol_is(head, "dedupe")
+        // `enum/` since ADR-227; `distinct` stayed in the core protocol.
+        || value::symbol_is(head, "enum/dedupe")
     {
         let coll = *items.get(1)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
@@ -778,9 +784,10 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let b = callback_ret(heap, f, &[a], ctx);
         return list_result(b);
     }
-    // `(interpose sep coll)` — weave `sep` between `coll`'s elements; the result
+    // `(enum/interpose sep coll)` — weave `sep` between `coll`'s elements; the result
     // holds both, `nil | list<A | type(sep)>`. Both must be known, else flat.
-    if value::symbol_is(head, "interpose") && items.len() == 3 {
+    // Keyed qualified: `enum/` since ADR-227.
+    if value::symbol_is(head, "enum/interpose") && items.len() == 3 {
         let sep_ty = expr_ty(heap, items[1], ctx);
         let a = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
         return match (sep_ty, a) {

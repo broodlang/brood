@@ -1050,19 +1050,27 @@ fn dead_clause_let_local_respects_precision_gensym_and_compatibility() {
 
 #[test]
 fn curated_helper_sigs_catch_misuse() {
-    // even?/odd?/abs require a number.
-    assert!(warnings("(even? \"x\")")
+    // even?/odd?/abs require a number. Written QUALIFIED: they are `math/` since ADR-227,
+    // and the bare spelling is now unbound without `(:use math)`. Asserting the bare form
+    // here was testing a dead key — and worse, the bare entry it relied on is what
+    // suppressed the unbound lint on a name that no longer exists (see `sigs.rs`).
+    assert!(warnings("(math/even? \"x\")")
         .iter()
         .any(|w| w.contains("even?") && w.contains("number")));
-    assert!(warnings("(odd? :k)")
+    assert!(warnings("(math/odd? :k)")
         .iter()
         .any(|w| w.contains("odd?") && w.contains("number")));
-    assert!(warnings("(abs :k)")
+    assert!(warnings("(math/abs :k)")
         .iter()
         .any(|w| w.contains("abs") && w.contains("number")));
-    // count/length want a string | map | sequence, not a number.
+    // count wants a string | map | sequence, not a number.
     assert!(warnings("(count 5)").iter().any(|w| w.contains("count")));
-    assert!(warnings("(length :k)").iter().any(|w| w.contains("length")));
+    // There is no `length` function and never was (see `sigs.rs`) — so the right warning
+    // is UNBOUND, not a type mismatch. Asserted explicitly, because the old assertion
+    // ("some warning mentioning length") passes either way and so proved nothing.
+    assert!(warnings("(length :k)")
+        .iter()
+        .any(|w| w.contains("unbound") && w.contains("length")));
     // not/zero? accept any arg but pin a bool *result*, so feeding it to a
     // numeric sink is caught (the result-type payoff).
     assert!(warnings("(+ 1 (not x))")
@@ -1073,15 +1081,15 @@ fn curated_helper_sigs_catch_misuse() {
         .any(|w| w.contains('+') && w.contains("bool")));
     // Correct uses stay silent (no false positives).
     for ok in [
-        "(even? 4)",
-        "(abs -3)",
+        "(math/even? 4)",
+        "(math/abs -3)",
         "(count [1 2 3])",
         "(count \"hi\")",
         // `bytes` is seqable/countable: these iterate its octets at runtime.
         "(count (bytes 1 2 3))",
         "(first (bytes 1 2 3))",
         "(rest (bytes 1 2 3))",
-        "(every? odd? (bytes 1 3 5))",
+        "(every? math/odd? (bytes 1 3 5))",
         "(not x)",
         "(zero? n)",
     ] {
@@ -1091,6 +1099,35 @@ fn curated_helper_sigs_catch_misuse() {
             warnings(ok)
         );
     }
+}
+
+/// A curated sig must never be the reason a name looks *bound*.
+///
+/// An entry in `CURATED_SIGS` marks its name as one the checker knows, which suppresses the
+/// unbound lint — so a stale entry for a name that has moved out of the prelude makes
+/// `nest check` silent on code that dies at runtime. That is what happened after ADR-227
+/// moved `even?`/`odd?`/`abs` into `std/math.blsp`: a bare `(even? 4)` with no `(:use math)`
+/// is an unbound error when run, and `nest check` — the gate that exits nonzero on any
+/// warning — reported nothing at all, while its uncurated siblings `sum`/`frequencies`
+/// correctly said "unbound symbol". Nothing else in the tree observes this: the checker is
+/// advisory, so the only symptom is a program that passes CI and then fails.
+#[test]
+fn a_curated_sig_does_not_mask_the_unbound_lint_for_a_moved_name() {
+    for moved in ["even?", "odd?", "abs", "index-where"] {
+        let src = format!("(defn f () ({moved} 4))");
+        let ws = file_warnings(&src);
+        assert!(
+            ws.iter()
+                .any(|w| w.contains("unbound") && w.contains(moved)),
+            "bare `{moved}` is `math/`/`enum/` since ADR-227 and unbound without an import, \
+             so the checker must say so — a curated sig keyed on the bare name silences this \
+             and lets a runtime-unbound program pass `nest check`. Got: {ws:?}"
+        );
+    }
+    // The qualified spelling is the one that exists, and it still gets the vetted signature.
+    assert!(warnings("(math/abs :k)")
+        .iter()
+        .any(|w| w.contains("abs") && w.contains("number")));
 }
 
 #[test]
@@ -3527,7 +3564,7 @@ fn precise_body_inference_float_contagion() {
     for src in [
         "(sig f (int -> int)) (defn f (x) (+ x 1.5))",
         "(sig f (int -> int)) (defn f (x) (* x 2.0))",
-        "(sig f (int -> int)) (defn f (x) (sqrt x))",
+        "(sig f (int -> int)) (defn f (x) (math/sqrt x))",
         "(sig f (int -> int)) (defn f (x) (/ x 2.0))",
     ] {
         let w = file_warnings(src);
@@ -3976,13 +4013,10 @@ fn unexpandable_macro_calls_dont_false_flag() {
 
 #[test]
 fn transient_is_a_valid_count_and_contains_arg() {
-    // count/length/contains? dispatch to transient-* kernel hooks at runtime, so
-    // a live transient is a valid argument — the sigs must admit Tag::Transient.
-    for src in [
-        "(count (transient {}))",
-        "(length (transient {}))",
-        "(contains? (transient {}) :k)",
-    ] {
+    // count/contains? dispatch to transient-* kernel hooks at runtime, so a live
+    // transient is a valid argument — the sigs must admit Tag::Transient. (`length` was
+    // listed here too and does not exist; see `sigs.rs`.)
+    for src in ["(count (transient {}))", "(contains? (transient {}) :k)"] {
         let w = warnings(src);
         assert!(
             w.iter().all(|m| !m.contains("expects")),
@@ -4221,7 +4255,7 @@ fn element_type_flows_through_more_combinators() {
         r#"(+ 1 (first (rest ["a" "b"])))"#,
         r#"(+ 1 (first (but-last ["a" "b"])))"#,
         r#"(+ 1 (first (distinct ["a" "b"])))"#,
-        r#"(+ 1 (first (dedupe ["a" "b"])))"#,
+        r#"(+ 1 (first (enum/dedupe ["a" "b"])))"#,
         r#"(+ 1 (first (remove (fn (x) false) ["a" "b"])))"#,
         r#"(+ 1 (first (take-last 1 ["a" "b"])))"#,
         r#"(+ 1 (first (keep (fn (x) x) ["a" "b"])))"#,
@@ -4239,7 +4273,7 @@ fn element_type_flows_through_more_combinators() {
         "(+ 1 (second [10 20]))",
         "(+ 1 (first (rest [10 20])))",
         // interpose unions the separator: int|string includes int → valid for +.
-        r#"(+ 1 (first (interpose "z" [1 2])))"#,
+        r#"(+ 1 (first (enum/interpose "z" [1 2])))"#,
     ] {
         let w = warnings(src);
         assert!(
