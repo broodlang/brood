@@ -119,7 +119,7 @@ mod maps {
         bench_prog(
             bencher,
             format!(
-                "(do (require 'enum) (count (enum/frequencies (map (fn (x) (rem x 7)) (range {n})))))"
+                "(do (count (enum/frequencies (map (fn (x) (rem x 7)) (range {n})))))"
             ),
         );
     }

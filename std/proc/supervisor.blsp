@@ -68,7 +68,6 @@ ms before falling back to a hard kill. **Mark a supervisor child `:shutdown
 the grandchildren. (A supervisor *crash* tears the subtree down regardless, via
 link propagation — but a deliberate hard kill is untrappable, hence `:infinity`.)
 
-    (require 'proc/supervisor)
     (def sup (start-supervisor
                [{:id :a :start (fn () (spawn-link (worker-a)))}
                 {:id :b :start (fn () (spawn-link (worker-b))) :restart :transient}]

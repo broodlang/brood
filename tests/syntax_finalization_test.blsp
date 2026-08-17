@@ -185,7 +185,9 @@
           "unrecognised header form")))
 
   (test "a module docstring is the second form, and it registers"
-    (require 'encoding)
+    ;; naming an `encoding` export auto-loads the module, whose load is what
+    ;; registers the docstring we then introspect
+    (is (fn? encoding/base64-encode))
     (is (string? (module-doc 'encoding)))
     (is (> (string-length (module-doc 'encoding)) 100))))
 

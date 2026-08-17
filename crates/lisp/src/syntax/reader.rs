@@ -317,8 +317,9 @@ impl<'a> Parser<'a> {
             )
             .with_pos(pos)
             .with_hint(
-                "Brood regexes are library values: `(require 'regex)`, then \
-                 `(regex/match? \"pat\" s)` (or `regex/find`, `regex/replace`).",
+                "Brood regexes are library values in the `regex` module: \
+                 `(regex/match? \"pat\" s)` (or `regex/find`, `regex/replace`) — \
+                 referencing a `regex/…` name loads the module on demand.",
             )),
             // `#|…|#` — Scheme/CL block comment. Read as a bar-quoted symbol before
             // this arm existed, so it silently became a name instead of a comment.

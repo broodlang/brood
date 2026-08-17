@@ -85,7 +85,6 @@
   :tags
   [:slow]
   (test "a 100k-deep document parses in a spawned process after warming"
-    (require 'json)
     (let (p "tests/corpus/json/data/n_structure_100000_opening_arrays.json")
       (jdr-warm p (jdr-warm-count 3))
       (assert= (jdr-in-spawn p) :rejected)))
@@ -93,13 +92,11 @@
     ;; This one survived the FIRST cut of the fix: the stamp encoded "already inside the
     ;; margin" as limit 0, which the prologue read as *guard disabled* — switching the
     ;; check off at exactly the moment it was needed.
-    (require 'json)
     (let (p "tests/corpus/json/data/n_structure_open_array_object.json")
       (jdr-warm p (jdr-warm-count 2))
       (assert= (jdr-in-spawn p) :rejected)))
   (test "the whole n_ corpus scans in a spawned process after warming"
     ;; The scan the suite actually runs: 188 documents, warm parent then spawned child.
-    (require 'json)
     (let (all (filter (fn (f) (= (substring (path-basename f) 0 1) "n"))
                 (corpus-files "json"))
           ;; Discovery is asserted in full regardless of the knob; only the re-scan is

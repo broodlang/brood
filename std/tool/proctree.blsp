@@ -17,7 +17,6 @@ lineage is read from `:parent`. `by-id` is the plain ascending-by-id sort (the f
 view). Pure — no IO, no UI deps — so a TUI (std/observer) and a buffer editor
 (bedit) share one implementation.
 
-    (require 'proctree)
     (tree-order [{:id 1 :parent nil} {:id 2 :parent 1}])
     ; => [{:id 1 :parent nil :depth 0} {:id 2 :parent 1 :depth 1}]")
 

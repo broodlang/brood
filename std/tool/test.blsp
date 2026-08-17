@@ -1588,7 +1588,6 @@ order (deterministic — the results are already collected)."
   "One JSON object for the whole run: `{:total :passed :failed :failed-assertions :ms
 :results [...]}` — the same data `run-tests-structured` returns, for a tool that consumes
 the suite programmatically. Printed once, at the end, so parallel ordering is irrelevant."
-  (require 'json)
   (let (total (count results)
         failed (count-failed results))
     (println (json/encode {:total total

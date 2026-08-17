@@ -40,7 +40,6 @@
 multi-line input), evaluates each in the running image, and prints the result —
 until end of input (Ctrl-D).
 
-    (require 'repl)
     (repl-run)
 
 Driven from the shell by `brood` (no arguments) and `nest repl`. Interactively:
@@ -340,7 +339,7 @@ form that is unreadable on one line."
             ;; `format` is required lazily — pretty-printing an expansion is worth a
             ;; module load the first time you ask, but not on every REPL boot.
             text (try
-                   (do (require 'format) (trim (format/format-source (pr-str out))))
+                   (do (trim (format/format-source (pr-str out))))
                    (catch _ (pr-str out))))
         (println (if (stdout-tty?) (repl-colorize text) text)))
       (catch e (eprint (str (repl-error-message e) "\n"))))))

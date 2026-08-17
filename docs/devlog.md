@@ -1165,6 +1165,46 @@ bug (`flush_rt_value` only forwards handles in the source generation, so repeats
 a deep process being compacted pays O(frames × arm size) for O(distinct arms) of work — the
 KI-14 shape, in the walk that never got the fix. Same `seen_arms` set applies.
 
+## 2026-08-14 — Remove the user-facing `require` form; loading is inference + an internal `require-one`
+
+Follow-through on the auto-require work: **there is no longer a user-facing `require`.** Normal
+code loads modules by *referencing* them — a qualified `mod/name` auto-infers the load, and
+`(:use mod)` refers + loads — so the explicit `(require 'mod)` line is gone from every
+hand-written `.blsp` file in `std/`, the tests, and every `../*` sibling project (~450 call sites).
+`(defn require (& mods) (map require-one mods))` was deleted from the prelude.
+
+**A loader still exists, deliberately in Brood.** `require-one` (load-path search + cycle detection
++ feature tracking) stays as the internal loader — it can't be a Rust `%`-primitive without moving
+policy out of Brood (violating ADR-006). It is called only by the irreducible cases: the
+`:use`/`:alias`/`:use-internals` macro expansion, the genuine **project↔package mutual cycle**
+(where inference would load a half-built module mid-cycle), dynamic loads by a *computed* name
+(`docs`/`project` folding over module lists), and a handful of pure effect-loads in the Rust
+bootstrap (`(require-one 'test)` — load the framework where no `test/` reference follows). Where a
+qualified reference already covers the load, the explicit call was **dropped**, not renamed: of the
+Rust `eval_str` bootstrap sites, **70 were dropped** (inference covers) and **24 kept** (effect-loads
+/ format-placeholder refs).
+
+**What the removal touched beyond the call sites:**
+- The `:use`/`:alias` expansion now emits `(require-one …)`, not `(require …)`.
+- The **advisory checker** hardcoded the symbol `require` in three places (`is_require_form`,
+  `require_target`, and `ensure_loaded` — which *builds and evals* a load form so it can read a
+  `:use`d module's exports for the unused-import lint) plus the effectful-forms list in
+  `guard_effects`. All now recognise `require-one`. (Missed first pass → `unused_use_import_is_flagged`
+  regressed because `ensure_loaded` evaluated an unbound `require`.)
+- **Auto-require completeness fix:** the root-region scanner `scan_refs` (`eval/derive.rs`) recursed
+  into pairs and vectors but **not map/set literals**, so a qualified reference used only inside a
+  `{…}`/`#{…}` at the top level of a header-less script never inferred its load. It now recurses into
+  maps and sets. (Surfaced by `serve_attach`'s client, whose sole `editor/serve/serve-name` reference
+  lives in a map literal — the dropped `require` had been masking the gap.)
+- Rust/LSP/error-hint strings that suggested `(require 'mod)` (reader regex hint, mailbox reconnect
+  hint, `debug_flags`/`builtin-modules` help, `derive.rs` module doc) were reworded off `require`.
+  The LSP `require`-argument features (document-link / completion / definition / the "Add require"
+  code action) are now dead code — flagged for removal, non-breaking.
+
+Verified: **full `cargo nextest` run green — 981 tests pass** (the in-language suite at 439–450s
+plus every Rust test), no crash, capped at 4 threads. The sibling projects (`hive`, `hatch`,
+`pong`, `bedit`, `store-postgres`, …) were migrated in parallel and each `nest check`s clean.
+
 ## 2026-08-17 — The stale-bare-name sweep: a curated sig masking the unbound lint, two dead benchmark rows, and one GC walk
 
 Follow-up session to ADR-228. Four queued items; this covers two of them plus two findings

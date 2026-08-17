@@ -41,7 +41,6 @@ still trace — and the reply gains `:spy [{:kind :fn :args :value} …]` (bound
 `eval-capturing` is the reusable core: evaluate a source string and keep BOTH
 halves a REPL shows — the value and what it printed. `(require 'eval-server)`.")
 
-(require 'debug) ; trace-fn / untrace-all / *spy-sink* — the :trace support
 ;; The deadline applied when a request doesn't carry one. Module-scoped (plain
 ;; `def`, not `defdyn`): the server honours the per-request `:timeout-ms` first,
 ;; so a client that wants a different policy sends it rather than reaching in.

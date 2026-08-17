@@ -602,7 +602,6 @@ boot (or into a lean bundle) for a key most sessions never press."
   (let (text (get state :text)
         formatted (try
                     (do
-                      (require 'format)
                       (let (out (trim (format/format-source text)))
                         (if (= out "") nil out)))
                     (catch _ nil)))

@@ -47,11 +47,6 @@
 ;; Build a .tar.gz of fixture dir `<parent>/<wrapper>` (so the archive has the
 ;; single `<wrapper>/` prefix the resolver strips). Returns [file-url sha256] — a
 ;; file:// URL keeps :tarball resolution offline, like pkg-git-init's for :git.
-(require 'hash)
-(require 'net/http)
-(require 'encoding)
-(require 'crypto)
-(require 'json)
 (defn pkg-tar-init (parent wrapper)
   (let (archive (path-join parent (str wrapper ".tar.gz")))
     (run-process "tar" (list "-czf" archive "-C" parent wrapper))
@@ -1266,7 +1261,7 @@
         "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
       (let (dirs (ensure-deps app-dir (list (dep-path 'greeter "../greeter"))))
         (set-load-path! (append *load-path* dirs))
-        (require 'greeter)
+        (require-one 'greeter)
         ;; greeter is a `(defmodule greeter)`, so its `greet` is `greeter/greet`
         (assert= (greeter/greet "you") "hi you")))))
 
@@ -1285,7 +1280,7 @@
         (let (dirs (ensure-deps app-dir
                      (list (dep-git 'salutation url "v1.0.0" nil))))
           (set-load-path! (append *load-path* dirs))
-          (require 'salutation)
+          (require-one 'salutation)
           (assert= (salutation/hi "you") "yo you")
           ;; and the clone + lock landed under the app
           (is (dir? (path-join (path-join app-dir "_deps") "salutation")))

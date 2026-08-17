@@ -1,5 +1,4 @@
 (defmodule template-test (:use test))
-(require 'template)
 
 (describe "render"
   (test "substitutes a string key"

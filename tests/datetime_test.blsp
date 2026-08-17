@@ -2,7 +2,6 @@
 ;; Run via `nest test` or `cargo run -p cli -- --test tests/datetime_test.blsp`.
 
 (defmodule datetime-test (:use test))
-(require 'datetime)
 
 ;; ---- leap-year? -------------------------------------------------------------
 

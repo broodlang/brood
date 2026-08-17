@@ -1,7 +1,6 @@
 ;; Tests for std/csv.blsp — CSV parsing and emitting.
 
 (defmodule csv-test (:use test))
-(require 'csv)
 
 ;; ---- csv-parse --------------------------------------------------------------
 

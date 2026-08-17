@@ -1,5 +1,4 @@
 (defmodule zlib-test (:use test))
-(require 'zlib)
 
 (defn big (unit n)
   "A string of `unit` repeated `n` times — compressible test data."

@@ -559,7 +559,6 @@ then hands you the prompt. Drive the session with the `,resume` / `,step` meta-c
 (or any expression — `(debug/paused d)`, `(debug/resume-all d)`, `(debug/step …)`).
 Ctrl-D leaves and continues. Reuses `repl-run` — so it's the real REPL, not a
 re-implementation; it registers the `,resume`/`,step` commands via the REPL registry."
-  (require 'repl)
   (repl/register-repl-command {:names '("resume")
                                :usage ",resume [N]"
                                :summary "resume all parked (or the Nth) in this debug session"

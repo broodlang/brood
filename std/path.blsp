@@ -10,7 +10,6 @@
 (defmodule path
   "Path string manipulation: join, split, basename, dirname, extension, stem, normalize.
 
-    (require 'path)
     (path/join \"/usr\" \"local\" \"bin\")   ;; => \"/usr/local/bin\"
     (path/basename \"/usr/local/bin/ls\")    ;; => \"ls\"
     (path/dirname \"/usr/local/bin/ls\")     ;; => \"/usr/local/bin\"

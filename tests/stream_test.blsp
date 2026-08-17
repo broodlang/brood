@@ -1,7 +1,6 @@
 ;; Tests for std/stream.blsp — pull-stream protocol and combinators.
 
 (defmodule stream-test (:use test) (:use math))
-(require 'stream)
 
 ;; ---- sources ----------------------------------------------------------------
 

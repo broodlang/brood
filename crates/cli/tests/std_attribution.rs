@@ -55,7 +55,7 @@ fn instrumented_lines() -> (BTreeMap<String, Vec<u32>>, TempFile) {
     // misattribution was found on (`nest test --cover-lines` does this before the suite).
     std::fs::write(
         &script.path,
-        "(require 'log)\n(require 'set)\n(require 'json)\n\
+        "(require-one 'log)\n(require-one 'set)\n(require-one 'json)\n\
          (fold (fn (_ s)\n\
                  (when (= (type-of (eval s)) :fn) (%coverage-precompile (eval s))))\n\
            nil (global-names))\n\

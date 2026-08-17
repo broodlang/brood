@@ -6,7 +6,6 @@
 (defmodule template
   "Simple `{{var}}` string templating.
 
-    (require 'template)
     (template/render \"Hello, {{name}}!\" {\"name\" \"World\"})
     ;; => \"Hello, World!\"
 

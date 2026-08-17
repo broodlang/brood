@@ -341,7 +341,7 @@ fn collect_symbols<'t>(node: &'t Node, out: &mut Vec<&'t Node>) {
         out.push(node);
     }
     // A plain `'…` quote makes its contents *data*, not references: the module
-    // name in `(require 'foo)`, a quoted literal `'(a b)`, a symbol passed as a
+    // name in `(require-one 'foo)`, a quoted literal `'(a b)`, a symbol passed as a
     // value `(get m 'k)`. Find-references and rename must not touch them — so
     // don't descend into a `Quote`. (Quasiquote is left alone: its unquoted
     // `~x` parts *are* live references, and untangling those wants unquote-depth
@@ -489,7 +489,7 @@ mod tests {
     fn references_exclude_quoted_symbols() {
         // `'foo` (a require module name and a quoted datum) are data, not
         // references to the global `foo` — renaming `foo` must not touch them.
-        let src = "(defn foo (x) x) (require 'foo) (g 'foo) (foo 1)";
+        let src = "(defn foo (x) x) (require-one 'foo) (g 'foo) (foo 1)";
         let root = cst::parse(src);
         let tree = analyze(&root, src);
         // Only the def name and the `(foo 1)` call — the two `'foo`s are excluded.

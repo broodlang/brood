@@ -359,7 +359,7 @@ fn an_imaged_start_follows_a_headerless_files_require_edges() {
     write(
         &dir,
         "src/helpers.blsp",
-        "(require 'rootdemo/geom)\n\
+        "(require-one 'rootdemo/geom)\n\
          (defn helper-area (x) (geom/square x))\n",
     );
     write(
@@ -411,7 +411,7 @@ fn an_imaged_start_terminates_on_a_require_cycle() {
         &dir,
         "src/b.blsp",
         "(defmodule b)\n\
-         (require 'cyc/a)\n\
+         (require-one 'cyc/a)\n\
          (defn bee () \"b\")\n",
     );
     write(

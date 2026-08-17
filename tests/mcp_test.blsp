@@ -1,5 +1,4 @@
 (defmodule mcp-test (:use test))
-(require 'mcp)
 
 ;; The `eval` MCP tool must evaluate *every* form in a multi-form `:source` and
 ;; return the last value — not silently drop everything after the first form (the

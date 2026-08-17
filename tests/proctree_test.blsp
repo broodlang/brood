@@ -4,7 +4,6 @@
 
 (defmodule proctree-test (:use test) (:use proctree))
 
-(require 'proctree)
 
 (describe "proctree/by-id"
   (test "sorts ascending by id (the flat view)"

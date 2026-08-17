@@ -34,7 +34,6 @@
   "The render-op protocol for the display seam (M3, ADR-046): pure constructors
 that build a **frame** — a vector of render ops — as plain data.
 
-    (require 'display)
     (frame (clear)
            (text 0 0 \"hello\" {:bold true})
            (cursor 0 5))

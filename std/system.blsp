@@ -3,7 +3,6 @@
 (defmodule system
   "OS and process utilities: environment, argv, subprocess execution, OS type.
 
-    (require 'system)
     (system/env \"HOME\")               ;; => \"/home/alice\"
     (system/env-all)                    ;; => {:HOME \"/home/alice\" ...}
     (system/argv)                       ;; => [\"brood\" \"script.blsp\"]

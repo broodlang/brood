@@ -148,7 +148,7 @@ fn is_require_form(heap: &Heap, form: Value) -> bool {
     if let Value::Pair(p) = form {
         let (head, _) = heap.pair(p);
         if let Value::Sym(s) = head {
-            return crate::core::value::symbol_is(s, "require");
+            return crate::core::value::symbol_is(s, "require-one");
         }
     }
     false
@@ -325,7 +325,7 @@ fn extract_clause_modules(heap: &Heap, forms: &[Value], keywords: &[&str]) -> Ve
 fn require_target(heap: &Heap, form: Value) -> Option<String> {
     let items = list_items(heap, form)?;
     match items.first() {
-        Some(&Value::Sym(h)) if value::symbol_is(h, "require") => {}
+        Some(&Value::Sym(h)) if value::symbol_is(h, "require-one") => {}
         _ => return None,
     }
     match *items.get(1)? {
@@ -569,7 +569,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 Value::Sym(value::intern("quote")),
                 Value::Sym(mod_sym),
             ]);
-            let form = heap.list(vec![Value::Sym(value::intern("require")), quoted]);
+            let form = heap.list(vec![Value::Sym(value::intern("require-one")), quoted]);
             let root = heap.global();
             let _ = crate::eval::eval(heap, form, root);
         }

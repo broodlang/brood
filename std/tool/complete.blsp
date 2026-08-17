@@ -34,7 +34,6 @@ suggestions\", never to an error on the user's command line."
   ;; fails to load and every `complete-safely` net below is bypassed.
   (:use-internals project))
 
-(require 'project)
 
 ;; --- safety net ---------------------------------------------------------------
 ;; Run `thunk`, yielding nil on any failure. Wrapped around every filesystem or
@@ -251,7 +250,10 @@ suggestions\", never to an error on the user's command line."
 ;; restating it — a new template becomes completable with no change here.
 (defn complete-templates ()
   "The `nest new --template` names, from the scaffolder's own list."
-  (or (complete-safely (fn () (require 'scaffold) (into [] *project-templates*))) nil))
+  ;; `*project-templates*` is a `scaffold` ambient, so `scaffold` must be loaded
+  ;; for it to be bound. Naming a `scaffold` export (`scaffold/new-project`)
+  ;; auto-requires the module at load time; the value itself is unused.
+  (or (complete-safely (fn () (do scaffold/new-project (into [] *project-templates*)))) nil))
 
 (defn- complete-strip-extension
   (filename)
