@@ -982,7 +982,10 @@ fn is_canonical_sqrt_wrapper(heap: &Heap, id: ClosureId) -> bool {
     let Some(arm) = closure.select_arm(1) else {
         return false;
     };
-    if !arm.optionals.is_empty() || arm.rest.is_some() || arm.params.len() != 1 || arm.body.len() != 1
+    if !arm.optionals.is_empty()
+        || arm.rest.is_some()
+        || arm.params.len() != 1
+        || arm.body.len() != 1
     {
         return false;
     }
@@ -991,7 +994,9 @@ fn is_canonical_sqrt_wrapper(heap: &Heap, id: ClosureId) -> bool {
     let Some((h_outer, outer)) = call_parts(heap, arm.body[0]) else {
         return false;
     };
-    if !value::symbol_is(h_outer, "if") || outer.len() != 3 || !is_zero_guard(heap, outer[0], p, "<")
+    if !value::symbol_is(h_outer, "if")
+        || outer.len() != 3
+        || !is_zero_guard(heap, outer[0], p, "<")
     {
         return false;
     }
