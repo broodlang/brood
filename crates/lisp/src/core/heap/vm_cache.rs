@@ -365,11 +365,8 @@ impl Heap {
             let base = t.len();
             let new_len = base + arm.nsites as usize;
             t.resize_with(new_len, || None);
-            // Grow the IR-readable mirror in lockstep, so `vm_fast_links[base + site]`
-            // is always in range for any site `vm_call_ics` knows about.
-            self.vm_fast_links
-                .borrow_mut()
-                .resize(new_len, FastLink::EMPTY);
+            // The IR-readable `vm_fast_links` mirror is deliberately NOT grown here — see
+            // `fastlink_slot_grown`. A process that never JIT-links a site never allocates it.
             base as u32
         };
         #[cfg(debug_assertions)]
@@ -669,7 +666,7 @@ impl Heap {
         // Fully validated + installed at this epoch — publish into the one flat table that
         // both this probe's hot path (above) and JIT'd code (an epoch-guarded raw load)
         // read. One representation, one write.
-        if let Some(slot) = self.vm_fast_links.borrow_mut().get_mut(abs) {
+        if let Some(slot) = self.fastlink_slot_grown(abs).get_mut(abs) {
             *slot = FastLink {
                 epoch,
                 code: code as u64,
@@ -688,6 +685,39 @@ impl Heap {
         Some((code as *const u8, active_ns, *env, callee_bases))
     }
 
+    /// Grow the IR-readable [`FastLink`] mirror far enough to hold absolute site `abs`,
+    /// then hand back a mutable slot. **The only place that grows it.**
+    ///
+    /// `vm_arm_block` used to grow this table in lockstep with `vm_call_ics`, so entering an
+    /// arm allocated 48 B of mirror per call site the arm *has*, whether or not this process
+    /// would ever link one. Measured on `spawn-live` (2026-08-18): 19,968 of 20,001 unit
+    /// processes published into **none** of their slots, never being hot enough to tier.
+    ///
+    /// The saving is **48 B per call site entered**, which is ~193 B for a unit parked in
+    /// `receive` and ~672 B for one that has run its whole body (14 sites). The first number is
+    /// the one that matters for peak memory, because being parked is the state all N processes
+    /// are in simultaneously; confirmed by adding 24 call sites to the unit body, which moved
+    /// the measured saving to 1345.6 B ≈ 193 + 24 × 48.
+    ///
+    /// Growing here instead is safe by construction rather than by luck: every reader already
+    /// tolerates a short table. The VM probe reads it with `.get(abs)`, both publish paths went
+    /// through `.get_mut(abs)`, and JIT'd code bounds-checks `site < len` against the length
+    /// from [`brood_rt_fastlink_base`], which it **re-fetches after each Brood→Brood call
+    /// precisely because a cold nested call may grow and realloc this table**. A missing slot
+    /// therefore reads exactly like an unpublished one: fall to the slow path.
+    ///
+    /// It grows to the full `vm_call_ics` length rather than to `abs + 1`, so a process that
+    /// does tier pays one allocation and lands back on the old layout instead of reallocating
+    /// per newly-linked site.
+    fn fastlink_slot_grown(&self, abs: usize) -> std::cell::RefMut<'_, Vec<FastLink>> {
+        let mut fls = self.vm_fast_links.borrow_mut();
+        if abs >= fls.len() {
+            let want = self.vm_call_ics.borrow().len().max(abs + 1);
+            fls.resize(want, FastLink::EMPTY);
+        }
+        fls
+    }
+
     /// Publish a NATIVE (builtin) callee into the IR-readable [`FastLink`] mirror:
     /// `code` = the `NativeFnPtr` bits, `nslots == u32::MAX` is the native marker the
     /// IR branches on (a Brood link's `nslots` is a real frame size, never MAX). The
@@ -703,11 +733,8 @@ impl Heap {
         epoch: u64,
         func: u64,
     ) {
-        if let Some(slot) = self
-            .vm_fast_links
-            .borrow_mut()
-            .get_mut((self.cur_ic_base.get() + site) as usize)
-        {
+        let abs = (self.cur_ic_base.get() + site) as usize;
+        if let Some(slot) = self.fastlink_slot_grown(abs).get_mut(abs) {
             *slot = FastLink {
                 epoch,
                 code: func,

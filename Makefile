@@ -390,6 +390,19 @@ gui-debug: ## Build + install JIT+GUI brood/nest with GC debug-assertions ARMED,
 fmt: ## Format all Rust code
 	cargo fmt
 
+hooks: ## Install the local git pre-push hook (both format gates, before CI sees them)
+	# Opt-in and local: the hook lives in scripts/git-hooks/ so it is version-controlled
+	# and survives a fresh clone, but nothing installs it for you. It runs `cargo fmt
+	# --check` always, and `nest format --check` only when a .blsp is involved (that one
+	# is whole-project by design, ~50s) — so a Rust-only push stays under a second.
+	@mkdir -p .git/hooks
+	@if [ -e .git/hooks/pre-push ] && ! cmp -s scripts/git-hooks/pre-push .git/hooks/pre-push; then \
+		cp .git/hooks/pre-push .git/hooks/pre-push.bak; \
+		echo "existing hook backed up to .git/hooks/pre-push.bak"; \
+	fi
+	@cp scripts/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+	@echo "installed .git/hooks/pre-push (bypass a single push with --no-verify)"
+
 clippy: ## Lint with clippy (all targets + all features; warnings are FATAL via -D warnings)
 	# `--all-features` type-checks + lints the optional backends (the `gui`
 	# feature: winit/softbuffer/fontdue) too, so a dependency bump that breaks
