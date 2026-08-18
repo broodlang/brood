@@ -30,11 +30,35 @@ def strip_tree(s: str) -> str:
     return s.lstrip("│├╰└─┬ \t")
 
 
+def open_input(argv: list):
+    """Return the line source: a named file if one was given, else stdin.
+
+    Reading a bare `sys.stdin` that is a terminal blocks forever waiting for an EOF
+    that never arrives — the parser's most common way to "hang". Refuse that up front
+    with a usage message instead of stalling, and prefer an explicit file argument so
+    the bench output can be captured to disk and parsed as a separate, cheap step.
+    """
+    if len(argv) > 1:
+        path = argv[1]
+        if path in ("-h", "--help"):
+            print(f"usage: {argv[0]} [bench-output-file]   (reads stdin if no file given)")
+            sys.exit(0)
+        return open(path, "r", encoding="utf-8", errors="replace")
+    if sys.stdin.isatty():
+        print(
+            f"usage: {argv[0]} [bench-output-file]   (or pipe bench output on stdin)\n"
+            "  refusing to read an interactive terminal — it would block forever.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return sys.stdin
+
+
 def main() -> int:
     cur = None
     # data[bench][n][eng] = (display_str, nanoseconds)
     data: dict = {}
-    for raw in sys.stdin:
+    for raw in open_input(sys.argv):
         s = strip_tree(raw.rstrip("\n"))
         if not s:
             continue
