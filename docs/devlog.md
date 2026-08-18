@@ -1482,3 +1482,51 @@ Sabotage-verified, and the first attempt was wrong in an instructive way: gating
 `git diff $upstream..HEAD` alone meant a *dirty* `.blsp` was never checked, while the Rust half
 checks the working tree unconditionally. The condition now looks at the pushed commits, the working
 tree, the index and untracked files.
+
+## 2026-08-18 (perf) — the cold-call tax measured: a refuted premise, a 3× attribution error, and a lazy FastLink mirror
+
+With the tree green, back to the question this session opened with: the most profitable large perf
+change. `FRONTIER.md` named its own candidate — lever 2's generalisation, "~0.85 µs for one call in
+a cold process… whatever makes a first-call-in-a-process cheap would pay out across `spawn-live`…
+that is unmeasured and is the thing to look at first". So it got measured.
+
+**The tax is real; the premise about it was wrong.** The forwarder ladder reproduces at HEAD, 18%
+faster than August with the slope intact: **19.45 / 21.05 / 21.90 / 24.45 CPU µs per unit** for a
+direct `%vector-reduce`, one forwarder, two, and `fold`. But it is *not* a first-call effect —
+calling the **same arm again in the same process** costs the same as the first call (+2.21 / +2.15
+/ +1.40 µs for one/two/three nested `id1` calls), against a base-vs-base control of 1.5% on min
+and 3.75% on median. There is no warm-up to remove. Compilation is not the cost either:
+`BROOD_TRACE_COMPILE` counts a constant ~142 compiles whether the run spawns 100 processes or 400,
+so ADR-215's sharing holds. A symbolized profile put the added cost in memory traffic —
+`env_get` +560 ns/unit, kernel page faults +274, `is_dynamic` +232, `code_gen_pinned` +170,
+`alloc` +164, `RwLock::read_contended` +128 — which is what redirected this at per-process *bytes*.
+
+**Which found a 3× attribution error.** Instrumenting teardown on the real row: every unit process
+allocates **14 call-IC sites**, of which only **6–7 are ever populated**, costing **1568 B**
+(14 × [64 B `CallIcEntry` + 48 B `FastLink`]) — ~26% of the row's ~6.3 KB per-process footprint.
+`FRONTIER.md` had IC tables at "~536 B". At 1568 B they are the *largest* single attributed item,
+larger than the whole `Box<Process>` with its inline `Heap` (1376 B). `vm_arm_block` allocates an
+arm's block whole on first entry, sized by the arm's total `nsites`, whether or not this process
+will execute those sites — and a spawn-once-call-once unit never will.
+
+**Shipped: the mirror is allocated by its only writer.** `vm_arm_block` no longer pre-grows
+`vm_fast_links`; `Heap::fastlink_slot_grown` grows it on the first publish. Safe by construction,
+not by luck — every reader already tolerated a short table (VM probe `.get`, both publish paths
+`.get_mut`, and JIT'd code bounds-checks `site < len` against a length it re-fetches after each
+Brood→Brood call *precisely because a cold nested call may grow and realloc this table*). A missing
+slot reads exactly like an unpublished one.
+
+Measured: **19,968 of 20,001 unit processes now allocate 0 slots instead of 14** (mean 1 B/process,
+from 672). `spawn-live` RSS 6364 → 6093 B/process (−4.3%); 5821 → 5605 (−3.7%) with
+`MIMALLOC_PURGE_DELAY=0`. Time-neutral at **both** ceilings — default: fib +0.0%, pfib −1.3%,
+nqueens/pipeline +0.0%, sort −1.0%, spawn-live +0.6% against a 1.2% floor; tier 1 (`--tier 1`, the
+gate a call-path change actually needs): all noise. `fib` is the load-bearing row, since the in-IR
+fast-link is worth ~20% there — +0.0% is what proves linking still happens. 992/992 on both
+engines. The first sweep's `spawn` +3.4% was drift: best-of-15 gives +1.7% against a 1.7% floor.
+
+**The caution this leaves behind matters more than the win.** 672 B/process of allocation provably
+removed bought 216–271 B/process of RSS — about **1:0.35** — and page granularity does not explain
+it, because the saving stayed ~216 B with purging forced. So the two remaining IC fixes (shrink
+`CallIcEntry` 64 → ~48 B; share entries for frozen callees) should be sized at roughly a third of
+their allocated bytes until someone explains where the rest goes. On that arithmetic the shrink is
+~80–120 B/process observed, which is marginal for its complexity.
