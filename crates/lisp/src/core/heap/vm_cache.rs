@@ -690,10 +690,14 @@ impl Heap {
     ///
     /// `vm_arm_block` used to grow this table in lockstep with `vm_call_ics`, so entering an
     /// arm allocated 48 B of mirror per call site the arm *has*, whether or not this process
-    /// would ever link one. Measured on `spawn-live` (2026-08-18): every unit process
-    /// allocated 14 sites — 672 B of mirror — and, never being hot enough to tier, published
-    /// into **none** of them. That is ~11% of the row's ~6.3 KB per-process footprint spent on
-    /// a table only a JIT'd caller can read.
+    /// would ever link one. Measured on `spawn-live` (2026-08-18): 19,968 of 20,001 unit
+    /// processes published into **none** of their slots, never being hot enough to tier.
+    ///
+    /// The saving is **48 B per call site entered**, which is ~193 B for a unit parked in
+    /// `receive` and ~672 B for one that has run its whole body (14 sites). The first number is
+    /// the one that matters for peak memory, because being parked is the state all N processes
+    /// are in simultaneously; confirmed by adding 24 call sites to the unit body, which moved
+    /// the measured saving to 1345.6 B ≈ 193 + 24 × 48.
     ///
     /// Growing here instead is safe by construction rather than by luck: every reader already
     /// tolerates a short table. The VM probe reads it with `.get(abs)`, both publish paths went
