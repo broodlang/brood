@@ -70,50 +70,104 @@ fn scaffold(template: &str) -> (TempDir, std::path::PathBuf) {
     (tmp, root)
 }
 
-#[test]
-fn every_self_contained_template_scaffolds_format_clean() {
-    for template in SELF_CONTAINED {
-        let (_tmp, root) = scaffold(template);
-        let checked = nest(&root, &["format", "--check"]);
-        assert!(
-            checked.ok,
-            "`nest new --template {template}` produces source that `nest format --check` \
-             rejects, so a brand-new project fails its own format gate:\n{}",
-            checked.out
-        );
-    }
+/// The three toolchain gates, as functions over one template. The `#[test]` cases
+/// that call them are generated below, one per (template, gate) pair.
+fn assert_scaffolds_format_clean(template: &str) {
+    let (_tmp, root) = scaffold(template);
+    let checked = nest(&root, &["format", "--check"]);
+    assert!(
+        checked.ok,
+        "`nest new --template {template}` produces source that `nest format --check` \
+         rejects, so a brand-new project fails its own format gate:\n{}",
+        checked.out
+    );
 }
 
-#[test]
-fn every_self_contained_template_scaffolds_check_clean() {
-    for template in SELF_CONTAINED {
-        let (_tmp, root) = scaffold(template);
-        let checked = nest(&root, &["check"]);
-        assert!(
-            checked.ok,
-            "`nest new --template {template}` produces source with checker warnings:\n{}",
-            checked.out
-        );
-    }
+fn assert_scaffolds_check_clean(template: &str) {
+    let (_tmp, root) = scaffold(template);
+    let checked = nest(&root, &["check"]);
+    assert!(
+        checked.ok,
+        "`nest new --template {template}` produces source with checker warnings:\n{}",
+        checked.out
+    );
 }
 
-#[test]
-fn every_self_contained_template_ships_passing_tests() {
-    for template in SELF_CONTAINED {
-        let (_tmp, root) = scaffold(template);
-        let tested = nest(&root, &["test"]);
-        assert!(
-            tested.ok,
-            "`nest new --template {template}` ships failing tests:\n{}",
-            tested.out
-        );
-        // A template with no tests at all would pass the line above vacuously.
-        assert!(
-            tested.out.contains(" passed,"),
-            "{template}: expected a test summary, got:\n{}",
-            tested.out
-        );
-    }
+fn assert_ships_passing_tests(template: &str) {
+    let (_tmp, root) = scaffold(template);
+    let tested = nest(&root, &["test"]);
+    assert!(
+        tested.ok,
+        "`nest new --template {template}` ships failing tests:\n{}",
+        tested.out
+    );
+    // A template with no tests at all would pass the line above vacuously.
+    assert!(
+        tested.out.contains(" passed,"),
+        "{template}: expected a test summary, got:\n{}",
+        tested.out
+    );
+}
+
+/// ONE CASE PER (template, gate) PAIR — deliberately not one case looping over
+/// `SELF_CONTAINED`, which is how these were written until 2026-08-18.
+///
+/// Each of these scaffolds a project and runs a `nest` command over it, so a looping
+/// case sums five of those costs against ONE deadline. Measured in CI on 2026-08-17:
+/// `ships_passing_tests` 89.0 s, `scaffolds_check_clean` 80.4 s,
+/// `scaffolds_format_clean` 77.2 s — against nextest's 120 s hard kill, i.e. 1.35×
+/// margin on a 2-core runner that shares the box with the rest of the suite. That is
+/// the same shape as KI-39, where a fixed cost against a fixed deadline sat one
+/// contention spike from red for weeks and read as an intermittent flake.
+///
+/// Splitting is not a coverage trade: every template still gets every gate. It cuts
+/// each case to a single scaffold (~18 s), lets nextest run them in parallel, and
+/// makes a failure name its template in the case name instead of only in the message.
+///
+/// `hatch` and `web-api` stay out for the reason the module header gives: they scaffold
+/// `:path` deps on siblings that do not exist in a temp dir.
+macro_rules! template_gate_cases {
+    ($($module:ident => $template:literal),* $(,)?) => {
+        /// The templates the macro actually generated cases for. Exists so the list
+        /// below cannot drift from `SELF_CONTAINED` unnoticed — a template added there
+        /// but not here would otherwise silently lose all three gates, which is a worse
+        /// failure than the slow case this split was fixing.
+        const GATED_TEMPLATES: &[&str] = &[$($template),*];
+
+        #[test]
+        fn every_self_contained_template_has_generated_gate_cases() {
+            assert_eq!(
+                GATED_TEMPLATES, SELF_CONTAINED,
+                "the `template_gate_cases!` list has drifted from SELF_CONTAINED — add the \
+                 new template to the macro invocation so it gets format/check/test cases"
+            );
+        }
+
+        $(
+            mod $module {
+                #[test]
+                fn scaffolds_format_clean() {
+                    super::assert_scaffolds_format_clean($template);
+                }
+                #[test]
+                fn scaffolds_check_clean() {
+                    super::assert_scaffolds_check_clean($template);
+                }
+                #[test]
+                fn ships_passing_tests() {
+                    super::assert_ships_passing_tests($template);
+                }
+            }
+        )*
+    };
+}
+
+template_gate_cases! {
+    template_default => "default",
+    template_tui_loop => "tui-loop",
+    template_gen => "gen",
+    template_editor => "editor",
+    template_gui => "gui",
 }
 
 /// Regression: a comment trailing a form *inside* a list is re-emitted by the

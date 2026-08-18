@@ -1379,3 +1379,66 @@ change above was measured with it, and one interleaved 10M-element run settled a
 What the negative result implies for the frontier: the computed-head path's cost is the **call
 protocol itself** — frame setup and dispatch — not the resolution bookkeeping. That points back
 at call inlining and the interpreter's dispatch loop, and lever 3 is demoted accordingly.
+
+## 2026-08-18 — KI-39 was never a flake: a coloured log, an uncovered TIMEOUT, and a keypress that loaded 2967 lines
+
+Three CI sightings of the `differential (tree-walker)` job had failed to name a single case.
+With `gh auth` restored, the artifact was finally readable and the whole thing unwound in one
+sitting. Two independent bugs, one hiding the other.
+
+**The instrument was blind to colour.** nextest colours its output under CI even when piped to
+a file, so the log holds `Summary<ESC>[0m [1922.084s] …`. Every pattern in the annotate step
+anchors on `WORD [`, so `Summary \[` and `FAIL \[` matched **zero lines** of the real log —
+verified by replaying it. Local logs are uncoloured, which is exactly why the greps looked
+right here and were dead there. Worse, the failure was a **`TIMEOUT`**, a line shape no pattern
+covered at all. Fixed at the source (`--color never`), in the step (grep an ANSI-stripped
+copy), and in coverage (`TIMEOUT|SIGSEGV|SIGABRT|ABORT|LEAK` alongside `FAIL`). Replaying the
+real log through the patched step now annotates the case in one line.
+
+**The failure: `nest complete` loaded the whole project on every TAB press.**
+`completion_never_fails_however_it_is_called` spawns 96 `nest complete` subprocesses. Each one
+that reaches a value position boots an interpreter and requires `complete` — which opened with
+`(:use-internals project)` for four twenty-line helpers, and so loaded all 2967 lines of
+`project`, plus `scaffold`, plus `project` again behind it. Debug build, measured: **950 ms per
+completion, 770 ms of it that module load**; 96 × 950 ms = 64 s *alone on an idle 16-core box*,
+against nextest's 60 s slow line. The module's own header carries the rule it was breaking —
+"NEVER load the project image" — from the very first line of its `defmodule`.
+
+`std/tool/complete.blsp` is now dependency-free: a local root walk, one generic
+`complete-under` file collector, the manifest read as data, and a two-line `complete-plist-get`.
+Templates keep their `scaffold` dependency but pay it at call time (`require-one` inside the
+function) instead of by naming an export at load time, which under ADR-229 auto-requires. The
+module load went **848 ms → 24 ms**, a completion 950 ms → 121 ms (debug) and 92–123 ms →
+**18–19 ms** (release), and the test **63.8 s → 10.5 s**. All ten completion kinds were diffed
+byte-for-byte against the pre-change binary before and after.
+
+Method note, because the two release figures were not taken the same way: the pre-change one is
+single runs of the 2026-08-17 binary (measured before that binary was overwritten), the
+post-change one is best-of-5 on a warm boot cache. The gap is 5–6×, far outside anything
+best-of-N accounts for — but the debug pair is the rigorous one (same method, same fixture, both
+sides), and the release pair should be read as indicative.
+
+**It was never intermittent.** The entry called it a 3-of-11 flake; with the log readable,
+all 8 runs that day failed it, in *both* jobs that run the suite, on the same case. What varied
+was only whether the box was slow enough to cross the 300 s cap. A fixed cost against a fixed
+deadline looks random and isn't.
+
+**The latent bug the rewrite exposed.** The old code read `*project-source-paths*` /
+`*project-test-paths*` — ambients only `project`'s manifest loader sets, which completion never
+ran. So a project declaring `:source-paths ["lib"] :test-paths ["spec"]` completed **nothing**:
+no test files, no tags, no modules. Reading the manifest as data fixes it, verified on a
+fixture (`spec/w_test.blsp`, tag `integration` and module `widget` now offered; all three were
+empty before).
+
+**And the gate hole underneath all of it.** `nest check` checks `:source-paths`, which in this
+repo is `tests/support` — the standard library is embedded, not built as a project, so **nothing
+was checking the ~80 files every Brood program loads**. That is what let the rewrite keep a call
+to `project`'s `plist-get`: the reference was unbound, but every path in that module is wrapped
+in a `complete-safely` net by design, so `nest remove <TAB>` just silently offered nothing and
+no test failed. A module whose contract is "never raise" cannot be guarded by watching for
+raises. New suite gate `tests/std_check_test.blsp` runs `check-file` over every `std/**/*.blsp`
+(7.3 s; `check-file` resolves each file's own requires, so it is order-independent) and asserts
+zero warnings — sabotage-verified in both directions, and it names `file:line: unbound symbol:
+plist-get` when the bug is reintroduced. std/ is otherwise clean at 80 files, and the one
+warning the rewrite legitimately introduced (an ambient bound by a runtime `require-one`) is
+suppressed with `(check-allow :unbound …)`, the documented case for that lint.
