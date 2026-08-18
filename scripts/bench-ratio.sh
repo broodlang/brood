@@ -39,7 +39,23 @@ done
 # staying quick. Override with `-- --sample-count N`.
 default_args=(--sample-count 12 --max-time 3)
 
-NO_COLOR=1 cargo bench --quiet --bench eval -- \
-  "${default_args[@]}" "${extra[@]}" "$filter" 2>&1 \
-  | sed -E 's/\x1b\[[0-9;]*m//g' \
-  | python3 "$root/scripts/bench_ratio.py"
+# Run the (heavy) bench to a file FIRST, then parse that file as a separate cheap
+# step — never one pipeline. `cargo bench --bench eval` compiles + runs the whole
+# engine grid; on a loaded box it can spike memory hard enough to be OOM-killed, and
+# with `set -o pipefail` a death mid-pipe would take the parser (and an interactive
+# session driving this) down with it. Decoupling means a bench blowup loses only the
+# bench step, and the parser reads a file rather than a live pipe that could hang.
+out="$(mktemp -t bench-ratio.XXXXXX.txt)"
+trap 'rm -f "$out"' EXIT
+
+if ! NO_COLOR=1 cargo bench --quiet --bench eval -- \
+    "${default_args[@]}" "${extra[@]}" "$filter" 2>&1 \
+    | sed -E 's/\x1b\[[0-9;]*m//g' > "$out"; then
+  echo "bench-ratio: \`cargo bench --bench eval\` failed or was killed (see $out)." >&2
+  echo "  partial output was captured — inspect it, then re-run with a narrower filter" >&2
+  echo "  or fewer samples (e.g. \`$0 fib -- --sample-count 8\`) if the box ran out of memory." >&2
+  trap - EXIT  # keep the file for inspection on failure
+  exit 1
+fi
+
+python3 "$root/scripts/bench_ratio.py" "$out"
