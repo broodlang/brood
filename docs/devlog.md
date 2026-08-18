@@ -1530,3 +1530,34 @@ it, because the saving stayed ~216 B with purging forced. So the two remaining I
 `CallIcEntry` 64 → ~48 B; share entries for frozen callees) should be sized at roughly a third of
 their allocated bytes until someone explains where the rest goes. On that arithmetic the shrink is
 ~80–120 B/process observed, which is marginal for its complexity.
+
+### Correction, same day — the "1:0.35 allocation-to-RSS discount" was my own measurement error
+
+The entry above closed with a caution that 672 B/process of removed allocation bought only
+216–271 B of RSS, called the ratio ~1:0.35, and told the next person to size the remaining IC
+fixes at a third of face value. **That is wrong. Retracted.**
+
+The error: I compared a *measured* RSS delta against an *inferred* allocation delta. The 672 B came
+from a slot count taken at process **teardown** (14 sites × 48 B). Measuring allocated bytes
+directly with `(mem-bytes)` — which the runtime has exposed all along, via the `Counting` global
+allocator — gives the real figure: live bytes after spawn 504,375,386 → 485,113,258, i.e. **192.6 B
+per process**. Against that, the 216–271 B of RSS tracked the allocation *fully*. There is no
+discount and there was never a mystery.
+
+Why 193 and not 672: a unit parked in `receive` has entered only ~4 call sites' worth of arms. It
+reaches 14 only after running its body, by which time most units have died and freed. Peak memory
+is set by the parked state, because that is the state all N processes are in at once. Confirmed by
+construction: adding 24 call sites to the unit body moved the measured saving to **1345.6 B ≈
+193 + 24 × 48**, so the saving is exactly 48 B per call site entered.
+
+Two lessons worth keeping, both of which cost this session real time:
+
+1. **`(mem-bytes)` / `(mem-peak)` are the instrument for an allocation question, not RSS.** RSS
+   answers "what did the OS map", which is a different question and a noisier one.
+2. **A slot count is not a byte count until you say *when*.** The same structure measured at
+   teardown and while parked differs by 3.5× here, and only one of the two is what peak memory
+   sees. The `spawn-live` shape — spawn all, then release — makes the parked state the one that
+   matters; a workload that ran each process to completion serially would show the other.
+
+The change itself stands unaltered — same code, same time-neutrality, same 992/992 on both
+engines. Only the size claim and the bogus caution change.
