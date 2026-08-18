@@ -5,6 +5,63 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**As of 2026-08-18 (the per-process-memory / cold-call session, concluded).** Everything is
+**committed and pushed** (`be50b5f8`); `main` and `origin/main` agree, working tree clean.
+`known-issues.md` shows **no open bug** — KI-36 is the sole watch item (seen once 2026-08-07,
+never reproduced). Four issues closed on 08-17/08-18: **KI-44** (the `sqrt` call-site inline,
+~1.8× on `nbody`), **KI-45** (the stale `examples/editor`), **KI-39** (never a flake — a
+fixed cost under a fixed deadline), **KI-46** (the MCP `check` tool took its project from cwd
+and so type-checked this whole repo: 87 s → 2.5 s).
+
+**What landed last, and the thread it leaves open.** The session's question was "the most
+profitable large perf change", and it went at the cold-call tax:
+
+- **The premise `runtime-frontier.md` named was refuted.** The forwarder ladder reproduces
+  (19.45 / 21.05 / 21.90 / 24.45 CPU µs per unit), but it is **not** a first-call effect —
+  calling the same arm again in the same process costs the same. There is no warm-up to
+  remove, and compilation is not the cost (`BROOD_TRACE_COMPILE` counts a constant ~142
+  compiles whether the run spawns 100 processes or 400, so ADR-215's sharing holds).
+- **Shipped instead: the `vm_fast_links` mirror is allocated by its only writer**
+  (`Heap::fastlink_slot_grown`) rather than pre-grown in `vm_arm_block`. 19,968 of 20,001
+  `spawn-live` units now allocate 0 slots instead of 14; **192.6 B/process** measured with
+  `(mem-bytes)`; RSS 6364 → 6093 B/process. Time-neutral at *both* ceilings. 992/992 on both
+  engines.
+- **Open: the rest of M2b** — `vm_call_ics` (64 B/site) and `vm_global_ics` are still grown
+  eagerly per activated arm, and sharing them faces the unchanged read-protocol difficulty
+  recorded in `runtime-frontier.md` (both tables are hot, on *different* engines — the mirror
+  for JIT'd calls, the fat table for interpreted ones, so a lock there regresses every
+  un-JIT'd call site). The two named follow-ons are shrinking `CallIcEntry` 64 → ~48 B and
+  sharing entries for frozen callees; both are marginal for their complexity at the corrected
+  sizing, so **cost them before writing code**.
+
+⚠ **Two measurement traps this session paid for in real time — they generalise:**
+
+1. **`(mem-bytes)` / `(mem-peak)` are the instrument for an allocation question, not RSS.**
+   The session's first write-up compared a *measured* RSS delta against an *inferred*
+   allocation delta and concluded there was a "1:0.35 allocation-to-RSS discount", then told
+   the next reader to size remaining IC work at a third of face value. That was wrong and is
+   **retracted** (commit `be50b5f8`): measured directly, RSS tracked the allocation fully.
+   There is no discount. Do not resurrect it from an older copy of the frontier doc.
+2. **A slot count is not a byte count until you say *when*.** The same structure read 14 sites
+   × 48 B at *teardown* and ~4 sites while *parked* — 3.5× apart, and only the parked figure is
+   what peak memory sees, because `spawn-live` (spawn all, then release) has all N processes
+   parked at once. A workload that ran each process to completion serially would show the
+   other. Confirmed by construction: adding 24 call sites to the unit body moved the saving to
+   1345.6 B ≈ 193 + 24 × 48.
+
+**Docs reconciled 2026-08-18 (after the commits above).** `runtime-frontier.md`'s per-process
+allocation profile and M2b entry still described both IC tables as eagerly allocated and sized
+M2b at "~500 B/process"; both now carry the shipped state and the corrected sizing. This
+reconciliation is **docs only — no code changed**, so it inherits the verification above rather
+than adding to it.
+
+⚠ **Local-run discipline (carried forward from 2026-08-14, still in force).** Bare `make test` /
+`make test-both` OOM-kills this box (28-way nextest fan-out); even a capped single-binary run
+tipped it over when free RAM was already low. Check `free -h` before any build/test here and
+keep it single-process/targeted. See the `ram-pressure-background-suite` memory.
+
+**Previous session's entry follows.**
+
 **As of 2026-08-14 (the auto-derived-imports session, concluded).** Everything is **committed and
 pushed** (`a57cc573`); `main` and `origin/main` agree; full in-language suite green (single-process
 run, 470s, exit 0), the std-wide `nest check std/**/*.blsp tests/**/*.blsp` gate at zero warnings,
