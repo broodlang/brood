@@ -1676,12 +1676,19 @@ resolve in the advisory checker. Returns the project root."
 ;; count. Backs the `nest mcp` `check` tool (`std/tool/mcp.blsp`, step 1c-a).
 ;; Honors `BROOD_NO_CHECK=1` the same way `check-project` does: returns
 ;; an empty list under the flag.
-(defn check-project-structured ()
-  "Advisory type-check the whole project, returning a list of `{:file :line :col :message}` diagnostic maps (one per warning) instead of printing. Returns nil under `BROOD_NO_CHECK=1`. Errors if not in a project. Backs the `nest mcp` `check` tool."
-  (let (root (project-find-root (cwd)))
+(defn check-project-structured (&optional from)
+  "Advisory type-check a project, returning a list of `{:file :line :col :message}` diagnostic maps (one per warning) instead of printing. Returns nil under `BROOD_NO_CHECK=1`. `from` is the directory to find the project from — it defaults to `(cwd)`, and naming one lets a caller check a project other than the ambient one. Errors if there is no project there. Backs the `nest mcp` `check` tool."
+  ;; `from` exists because cwd was the ONLY way in, which made this function
+  ;; untestable without process-global state: the case covering the `check` MCP tool
+  ;; had to run wherever `cargo test` happened to be, so it type-checked the whole
+  ;; brood repository and took 87s in CI against a 120s cap (KI-46). The alternatives
+  ;; were all worse — a `set_current_dir` races sibling tests in the same binary under
+  ;; plain `cargo test`, and raising the budget is what hid KI-39 for weeks. A caller
+  ;; that names its root needs neither.
+  (let (root (project-find-root (or from (cwd))))
     (when (nil? root)
       (error "check-project-structured: not in a Brood project (no project.blsp found from "
-        (cwd)
+        (or from (cwd))
         ")"))
     (project-ensure-loaded root)
     (if (= (getenv "BROOD_NO_CHECK") "1")

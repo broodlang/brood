@@ -2632,9 +2632,19 @@ pub struct Heap {
     /// A slot is **valid** only when `epoch == global_epoch()`; a `def`/compaction bumps
     /// the epoch (so a stale or recycled slot misses the IR guard and falls to the slow
     /// path), and the table is cleared in lockstep with `vm_call_ics` on a
-    /// [`Self::runtime_collect`]. Grown by [`Self::vm_site_alloc`] so it stays the same
-    /// length as `vm_call_ics` (the IR bounds-checks `site < len` for a live arm whose
-    /// site ids outran a post-collect re-grow).
+    /// [`Self::runtime_collect`].
+    ///
+    /// **Allocated lazily, by its only writer.** It is NOT grown in lockstep with
+    /// `vm_call_ics` — `Heap::fastlink_slot_grown` grows it on the first *publish* into
+    /// this process, so a process that never JIT-links a site never allocates it at all.
+    /// Every reader already tolerated that: the VM probe uses `.get(abs)`, the publish
+    /// paths `.get_mut(abs)`, and the IR bounds-checks `site < len` against the length
+    /// from `brood_rt_fastlink_base`, which it re-fetches after each Brood→Brood call
+    /// because a cold nested call may grow and realloc this table. A missing slot reads
+    /// exactly like an unpublished one. Measured on `spawn-live` 2026-08-18: **99.8% of unit
+    /// processes now allocate 0 bytes here**, worth 48 B per call site entered — ~193 B while
+    /// parked in `receive` (the state that sets peak memory) and ~672 B for a process that has
+    /// run its whole body.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     vm_fast_links: RefCell<Vec<FastLink>>,
     /// DEBUG ONLY: per-call-site source position, recorded at compile time and indexed

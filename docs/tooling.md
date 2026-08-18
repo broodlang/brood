@@ -336,6 +336,19 @@ keypress budget allows (and a project whose sources don't compile would complete
 nothing). The trade-off is that a tag computed at runtime is invisible — acceptable,
 since a completion list is a hint, not a specification.
 
+3. **`std/tool/complete.blsp` carries no module dependencies, and that is load-bearing.**
+   The rule above is about not loading the *project*, but the same budget rules what the
+   completion module may `require` of itself: a `(:use …)` clause, or even a single bare
+   `mod/name` reference (which auto-requires under ADR-229), is paid on every TAB press
+   before any candidate is computed. It opened with `(:use-internals project)` for four
+   twenty-line helpers until 2026-08-18, which pulled in all 2967 lines of `project` plus
+   `scaffold` — **770 ms of the 950 ms** a completion took in a debug build, ~100 ms of
+   ~110 ms in release. So the module now finds the project root, reads the manifest as
+   data and walks directories itself, and the one completion that genuinely needs another
+   module (`--template`, from `scaffold`) calls `require-one` inside the function so only
+   that path pays. If you add a candidate kind, resist reaching for `project`: read what
+   you need off the filesystem, as the tag scanner already does.
+
 ## Documentation output: Markdown from `nest doc`
 
 `nest doc [module]` emits Markdown documentation to stdout: with no operand it

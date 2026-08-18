@@ -1380,6 +1380,188 @@ What the negative result implies for the frontier: the computed-head path's cost
 protocol itself** — frame setup and dispatch — not the resolution bookkeeping. That points back
 at call inlining and the interpreter's dispatch loop, and lever 3 is demoted accordingly.
 
+## 2026-08-18 — KI-39 was never a flake: a coloured log, an uncovered TIMEOUT, and a keypress that loaded 2967 lines
+
+Three CI sightings of the `differential (tree-walker)` job had failed to name a single case.
+With `gh auth` restored, the artifact was finally readable and the whole thing unwound in one
+sitting. Two independent bugs, one hiding the other.
+
+**The instrument was blind to colour.** nextest colours its output under CI even when piped to
+a file, so the log holds `Summary<ESC>[0m [1922.084s] …`. Every pattern in the annotate step
+anchors on `WORD [`, so `Summary \[` and `FAIL \[` matched **zero lines** of the real log —
+verified by replaying it. Local logs are uncoloured, which is exactly why the greps looked
+right here and were dead there. Worse, the failure was a **`TIMEOUT`**, a line shape no pattern
+covered at all. Fixed at the source (`--color never`), in the step (grep an ANSI-stripped
+copy), and in coverage (`TIMEOUT|SIGSEGV|SIGABRT|ABORT|LEAK` alongside `FAIL`). Replaying the
+real log through the patched step now annotates the case in one line.
+
+**The failure: `nest complete` loaded the whole project on every TAB press.**
+`completion_never_fails_however_it_is_called` spawns 96 `nest complete` subprocesses. Each one
+that reaches a value position boots an interpreter and requires `complete` — which opened with
+`(:use-internals project)` for four twenty-line helpers, and so loaded all 2967 lines of
+`project`, plus `scaffold`, plus `project` again behind it. Debug build, measured: **950 ms per
+completion, 770 ms of it that module load**; 96 × 950 ms = 64 s *alone on an idle 16-core box*,
+against nextest's 60 s slow line. The module's own header carries the rule it was breaking —
+"NEVER load the project image" — from the very first line of its `defmodule`.
+
+`std/tool/complete.blsp` is now dependency-free: a local root walk, one generic
+`complete-under` file collector, the manifest read as data, and a two-line `complete-plist-get`.
+Templates keep their `scaffold` dependency but pay it at call time (`require-one` inside the
+function) instead of by naming an export at load time, which under ADR-229 auto-requires. The
+module load went **848 ms → 24 ms**, a completion 950 ms → 121 ms (debug) and 92–123 ms →
+**18–19 ms** (release), and the test **63.8 s → 10.5 s**. All ten completion kinds were diffed
+byte-for-byte against the pre-change binary before and after.
+
+Method note, because the two release figures were not taken the same way: the pre-change one is
+single runs of the 2026-08-17 binary (measured before that binary was overwritten), the
+post-change one is best-of-5 on a warm boot cache. The gap is 5–6×, far outside anything
+best-of-N accounts for — but the debug pair is the rigorous one (same method, same fixture, both
+sides), and the release pair should be read as indicative.
+
+**It was never intermittent.** The entry called it a 3-of-11 flake; with the log readable,
+all 8 runs that day failed it, in *both* jobs that run the suite, on the same case. What varied
+was only whether the box was slow enough to cross the 300 s cap. A fixed cost against a fixed
+deadline looks random and isn't.
+
+**The latent bug the rewrite exposed.** The old code read `*project-source-paths*` /
+`*project-test-paths*` — ambients only `project`'s manifest loader sets, which completion never
+ran. So a project declaring `:source-paths ["lib"] :test-paths ["spec"]` completed **nothing**:
+no test files, no tags, no modules. Reading the manifest as data fixes it, verified on a
+fixture (`spec/w_test.blsp`, tag `integration` and module `widget` now offered; all three were
+empty before).
+
+**And the gate hole underneath all of it.** `nest check` checks `:source-paths`, which in this
+repo is `tests/support` — the standard library is embedded, not built as a project, so **nothing
+was checking the ~80 files every Brood program loads**. That is what let the rewrite keep a call
+to `project`'s `plist-get`: the reference was unbound, but every path in that module is wrapped
+in a `complete-safely` net by design, so `nest remove <TAB>` just silently offered nothing and
+no test failed. A module whose contract is "never raise" cannot be guarded by watching for
+raises. New suite gate `tests/std_check_test.blsp` runs `check-file` over every `std/**/*.blsp`
+(7.3 s; `check-file` resolves each file's own requires, so it is order-independent) and asserts
+zero warnings — sabotage-verified in both directions, and it names `file:line: unbound symbol:
+plist-get` when the bug is reintroduced. std/ is otherwise clean at 80 files, and the one
+warning the rewrite legitimately introduced (an ambient bound by a runtime `require-one`) is
+suppressed with `(check-allow :unbound …)`, the documented case for that lint.
+
+## 2026-08-18 (later) — the margin audit's own tail: KI-46, and a pre-push hook that only watched half the formatters
+
+CI came back **5 of 5 green** on `615b06be` — the first fully green run since 2026-08-14, and
+confirmation that KI-39 is dead. The green run's own numbers, from its tree-walker job:
+`completion_never_fails_however_it_is_called` **22.0 s** (it had been a 300 s TIMEOUT),
+`template_default::ships_passing_tests` **9.6 s** (was 89 s as a looping case), the whole suite
+**1217 s** against 1922 s, and **1 slow case** against 9.
+
+Two follow-ups closed with the tree green.
+
+**KI-46, the real fix rather than the documented plan.** The audit had left
+`std_check_tool_returns_structured_diagnostics_or_an_error` at 87 s (1.38× margin) with a note
+that the honest fix was an optional root argument. Done: `check-project-structured` takes an
+optional `from` (defaulting to `(cwd)`), and `mcp-check-tool` passes **`*project-root*`**. This is
+a consistency fix, not a test accommodation — the server serves one project, `*project-root*` is
+what its write sandbox is pinned to and what `project-all-files` already reads, and `check` was
+the single tool taking its project from wherever the host process was standing. **87 s → 2.5 s.**
+
+The interesting part was that the first version of the rewritten test was *too weak*, and the
+sabotage pass caught it: with `check` reverted to the cwd fallback the test still **passed**, just
+slowly (2.9 s → 21.7 s) — the same "a cost regression shows up only as slowness" failure this
+whole thread is about. So the fixture now plants a deliberate unbound-symbol warning and the test
+demands it back with `:file`/`:line`, plus asserts that no diagnostic comes from outside the temp
+root. Both sabotages (a stubbed tool, and the cwd fallback) now fail it. It also asserts strictly
+more than the version it replaced, which accepted `{:diagnostics []}` *or* `{:error …}` and so
+never proved the diagnostics path emits anything.
+
+**The pre-push hook watched only one of the two formatters.** A local `pre-push` hook has guarded
+`cargo fmt` since 2026-07-26 — but `nest format` is a *separate* gate, and it is the one that went
+red in a push earlier this month (its exit code was ignored in favour of its last printed line).
+The hook now checks both, and `make hooks` installs it from `scripts/git-hooks/pre-push` so it is
+version-controlled instead of living only on one machine. `nest format --check` is whole-project by
+design (`--changed` is ignored with `--check`, ~50 s), so it runs only when a `.blsp` is actually
+involved — a Rust-only push stays at **0.8 s**.
+
+Sabotage-verified, and the first attempt was wrong in an instructive way: gating on
+`git diff $upstream..HEAD` alone meant a *dirty* `.blsp` was never checked, while the Rust half
+checks the working tree unconditionally. The condition now looks at the pushed commits, the working
+tree, the index and untracked files.
+
+## 2026-08-18 (perf) — the cold-call tax measured: a refuted premise, a 3× attribution error, and a lazy FastLink mirror
+
+With the tree green, back to the question this session opened with: the most profitable large perf
+change. `FRONTIER.md` named its own candidate — lever 2's generalisation, "~0.85 µs for one call in
+a cold process… whatever makes a first-call-in-a-process cheap would pay out across `spawn-live`…
+that is unmeasured and is the thing to look at first". So it got measured.
+
+**The tax is real; the premise about it was wrong.** The forwarder ladder reproduces at HEAD, 18%
+faster than August with the slope intact: **19.45 / 21.05 / 21.90 / 24.45 CPU µs per unit** for a
+direct `%vector-reduce`, one forwarder, two, and `fold`. But it is *not* a first-call effect —
+calling the **same arm again in the same process** costs the same as the first call (+2.21 / +2.15
+/ +1.40 µs for one/two/three nested `id1` calls), against a base-vs-base control of 1.5% on min
+and 3.75% on median. There is no warm-up to remove. Compilation is not the cost either:
+`BROOD_TRACE_COMPILE` counts a constant ~142 compiles whether the run spawns 100 processes or 400,
+so ADR-215's sharing holds. A symbolized profile put the added cost in memory traffic —
+`env_get` +560 ns/unit, kernel page faults +274, `is_dynamic` +232, `code_gen_pinned` +170,
+`alloc` +164, `RwLock::read_contended` +128 — which is what redirected this at per-process *bytes*.
+
+**Which found a 3× attribution error.** Instrumenting teardown on the real row: every unit process
+allocates **14 call-IC sites**, of which only **6–7 are ever populated**, costing **1568 B**
+(14 × [64 B `CallIcEntry` + 48 B `FastLink`]) — ~26% of the row's ~6.3 KB per-process footprint.
+`FRONTIER.md` had IC tables at "~536 B". At 1568 B they are the *largest* single attributed item,
+larger than the whole `Box<Process>` with its inline `Heap` (1376 B). `vm_arm_block` allocates an
+arm's block whole on first entry, sized by the arm's total `nsites`, whether or not this process
+will execute those sites — and a spawn-once-call-once unit never will.
+
+**Shipped: the mirror is allocated by its only writer.** `vm_arm_block` no longer pre-grows
+`vm_fast_links`; `Heap::fastlink_slot_grown` grows it on the first publish. Safe by construction,
+not by luck — every reader already tolerated a short table (VM probe `.get`, both publish paths
+`.get_mut`, and JIT'd code bounds-checks `site < len` against a length it re-fetches after each
+Brood→Brood call *precisely because a cold nested call may grow and realloc this table*). A missing
+slot reads exactly like an unpublished one.
+
+Measured: **19,968 of 20,001 unit processes now allocate 0 slots instead of 14** (mean 1 B/process,
+from 672). `spawn-live` RSS 6364 → 6093 B/process (−4.3%); 5821 → 5605 (−3.7%) with
+`MIMALLOC_PURGE_DELAY=0`. Time-neutral at **both** ceilings — default: fib +0.0%, pfib −1.3%,
+nqueens/pipeline +0.0%, sort −1.0%, spawn-live +0.6% against a 1.2% floor; tier 1 (`--tier 1`, the
+gate a call-path change actually needs): all noise. `fib` is the load-bearing row, since the in-IR
+fast-link is worth ~20% there — +0.0% is what proves linking still happens. 992/992 on both
+engines. The first sweep's `spawn` +3.4% was drift: best-of-15 gives +1.7% against a 1.7% floor.
+
+**The caution this leaves behind matters more than the win.** 672 B/process of allocation provably
+removed bought 216–271 B/process of RSS — about **1:0.35** — and page granularity does not explain
+it, because the saving stayed ~216 B with purging forced. So the two remaining IC fixes (shrink
+`CallIcEntry` 64 → ~48 B; share entries for frozen callees) should be sized at roughly a third of
+their allocated bytes until someone explains where the rest goes. On that arithmetic the shrink is
+~80–120 B/process observed, which is marginal for its complexity.
+
+### Correction, same day — the "1:0.35 allocation-to-RSS discount" was my own measurement error
+
+The entry above closed with a caution that 672 B/process of removed allocation bought only
+216–271 B of RSS, called the ratio ~1:0.35, and told the next person to size the remaining IC
+fixes at a third of face value. **That is wrong. Retracted.**
+
+The error: I compared a *measured* RSS delta against an *inferred* allocation delta. The 672 B came
+from a slot count taken at process **teardown** (14 sites × 48 B). Measuring allocated bytes
+directly with `(mem-bytes)` — which the runtime has exposed all along, via the `Counting` global
+allocator — gives the real figure: live bytes after spawn 504,375,386 → 485,113,258, i.e. **192.6 B
+per process**. Against that, the 216–271 B of RSS tracked the allocation *fully*. There is no
+discount and there was never a mystery.
+
+Why 193 and not 672: a unit parked in `receive` has entered only ~4 call sites' worth of arms. It
+reaches 14 only after running its body, by which time most units have died and freed. Peak memory
+is set by the parked state, because that is the state all N processes are in at once. Confirmed by
+construction: adding 24 call sites to the unit body moved the measured saving to **1345.6 B ≈
+193 + 24 × 48**, so the saving is exactly 48 B per call site entered.
+
+Two lessons worth keeping, both of which cost this session real time:
+
+1. **`(mem-bytes)` / `(mem-peak)` are the instrument for an allocation question, not RSS.** RSS
+   answers "what did the OS map", which is a different question and a noisier one.
+2. **A slot count is not a byte count until you say *when*.** The same structure measured at
+   teardown and while parked differs by 3.5× here, and only one of the two is what peak memory
+   sees. The `spawn-live` shape — spawn all, then release — makes the parked state the one that
+   matters; a workload that ran each process to completion serially would show the other.
+
+The change itself stands unaltered — same code, same time-neutrality, same 992/992 on both
+engines. Only the size claim and the bogus caution change.
+
 
 ## 2026-08-18 — Stdlib namespacing, stage 5: the `string` library module (ADR-230)
 

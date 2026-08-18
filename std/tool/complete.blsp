@@ -16,6 +16,7 @@
 ;; 2. NEVER load the project image. Booting + loading sources costs far more than
 ;;    a keypress budget allows, and a project whose sources don't compile would
 ;;    complete nothing. Everything here is filesystem reads and textual scanning.
+;;    That rule binds this module's OWN dependencies too — see below.
 ;;
 ;; Consequence of rule 2: tags are found by scanning test source TEXT for
 ;; `:tags [...]`, not by registering the suite. That can't see a tag computed at
@@ -28,11 +29,21 @@
 names, module names, test files. Every function returns a (possibly empty) list
 and never raises: it runs on each TAB press, so a failure must degrade to \"no
 suggestions\", never to an error on the user's command line."
-  ;; `project-collect-tests` is module-private (ADR-146). Completion is tooling
-  ;; over the project, which is exactly what the internals grant is for — and note
-  ;; the privacy error fires at REQUIRE time, so without this the whole module
-  ;; fails to load and every `complete-safely` net below is bypassed.
-  (:use-internals project))
+  ;; DELIBERATELY DEPENDENCY-FREE. This module used to open with
+  ;; `(:use-internals project)` for four twenty-line helpers, which loaded all 2967
+  ;; lines of `project` (and `scaffold`, and `project` again behind it) on every TAB
+  ;; press: measured 2026-08-18, that was 770 ms of the 950 ms a single dynamic
+  ;; completion took in a debug build; release went 92-123 ms -> 18-19 ms. Rule 2 in
+  ;; the header says never load the project image; requiring the module that IS the
+  ;; project image broke that rule at the very top of the file.
+  ;;
+  ;; So the handful of things completion needs from the project — where its root is,
+  ;; which directories it declares, which files are under them — are read straight
+  ;; off the filesystem below. They are small, and reading them here is the same
+  ;; trade the tag scanner already makes on purpose: read the project as text and
+  ;; data, never by loading it. Keep it that way; a new `foo/bar` reference in this
+  ;; file silently re-introduces a load-time require (ADR-229 loads by inference).
+)
 
 ;; --- safety net ---------------------------------------------------------------
 ;; Run `thunk`, yielding nil on any failure. Wrapped around every filesystem or
@@ -40,7 +51,76 @@ suggestions\", never to an error on the user's command line."
 ;; costs a suggestion, not an error.
 (defn- complete-safely (thunk) (try (thunk) (catch _ nil)))
 
-(defn- complete-root () (complete-safely (fn () (project/project-find-root (cwd)))))
+;; --- the project's shape, read not loaded --------------------------------------
+;; Walk up from `dir` looking for project.blsp. `parent-dir` is its own fixed point
+;; at "/" and ".", which terminates the walk.
+(defn- complete-find-root
+  (dir)
+  (cond
+    (file-exists? (path-join dir "project.blsp")) dir
+    (= dir (parent-dir dir)) nil
+    else (complete-find-root (parent-dir dir))))
+
+(defn- complete-root () (complete-safely (fn () (complete-find-root (cwd)))))
+
+;; Every path under `dir` (recursively) whose filename ends in `suffix`.
+;;
+;; `cons` a file (O(1)); splice a subdirectory's list with `append-two`, which copies
+;; only that small list and SHARES `acc`. A plain `(append acc …)` recopies the
+;; growing accumulator once per entry — O(files²), which is quadratic on a large
+;; project. `project` learned that the hard way; don't reintroduce it here. Order is
+;; reversed (prepend), which is fine: callers sort or filter.
+(defn- complete-under
+  (dir suffix)
+  (if (dir? dir)
+    (fold (fn (acc entry)
+            (let (p (path-join dir entry))
+              (cond
+                (dir? p) (append-two (complete-under p suffix) acc)
+                (string/ends-with? entry suffix) (cons p acc)
+                else acc)))
+      nil
+      (list-dir dir))
+    nil))
+
+;; The value after key `k` in a flat kv list, or nil — the manifest is a plist.
+;;
+;; A local copy of `project`'s two-line `plist-get` on purpose: reaching for that one
+;; is what made this module require all of `project` in the first place. Two lines
+;; duplicated is the cheaper half of that trade, and it keeps rule 2 enforceable by
+;; inspection — this file has no `foo/bar` references at all.
+(defn- complete-plist-get
+  (kvs k)
+  (cond
+    (empty? kvs) nil
+    (= (first kvs) k) (second kvs)
+    else (complete-plist-get (rest (rest kvs)) k)))
+
+;; The manifest as DATA. `project` is a macro over literal data (it quotes its
+;; arguments), so the form can be read and inspected without evaluating anything —
+;; which is what rule 1 needs: a manifest that is half-typed or invalid yields nil
+;; here instead of raising.
+(defn- complete-manifest
+  (root)
+  (complete-safely (fn ()
+                     (let (form (read-first (slurp (path-join root "project.blsp"))))
+                       (if (and (pair? form) (= (first form) 'project)) form nil)))))
+
+;; The directories the manifest declares under `key`, as absolute paths, falling back
+;; to `default` when it declares none.
+;;
+;; This is also a fix, not just a move: the old code read the `*project-source-paths*`
+;; / `*project-test-paths*` ambients, which only `project`'s manifest loader ever sets
+;; — and completion never ran it. So a project declaring `:test-paths ["spec"]` got
+;; the `["tests"]` default and completed none of its own test files.
+(defn- complete-manifest-dirs
+  (root key default)
+  (let (form (complete-manifest root)
+        declared (if (nil? form) nil (complete-safely (fn () (complete-plist-get (rest form) key))))
+        rels (if (or (nil? declared) (not (or (vector? declared) (pair? declared))))
+               default
+               declared))
+    (map (fn (r) (path-join root r)) rels)))
 
 ;; Strip `root/` from an absolute path so completions read as the relative paths a
 ;; user actually types.
@@ -61,11 +141,9 @@ suggestions\", never to an error on the user's command line."
       nil
       (or (complete-safely (fn ()
                              (map (fn (p) (complete-relative p root))
-                               (fold (fn (acc dir)
-                                       (append acc (project/project-collect-tests dir)))
+                               (fold (fn (acc dir) (append acc (complete-under dir "_test.blsp")))
                                  nil
-                                 (project/project-abs-paths root
-                                   (or *project-test-paths* ["tests"]))))))
+                                 (complete-manifest-dirs root :test-paths ["tests"])))))
         nil))))
 
 (defn complete-blsp-files ()
@@ -76,15 +154,13 @@ suggestions\", never to an error on the user's command line."
       (or (complete-safely (fn ()
                              (map (fn (p) (complete-relative p root))
                                (append (fold (fn (acc dir)
-                                               (append acc (project/project-collect-sources dir)))
+                                               (append acc (complete-under dir ".blsp")))
                                          nil
-                                         (project/project-abs-paths root
-                                           (or *project-source-paths* ["src"])))
+                                         (complete-manifest-dirs root :source-paths ["src"]))
                                  (fold (fn (acc dir)
-                                         (append acc (project/project-collect-tests dir)))
+                                         (append acc (complete-under dir "_test.blsp")))
                                    nil
-                                   (project/project-abs-paths root
-                                     (or *project-test-paths* ["tests"])))))))
+                                   (complete-manifest-dirs root :test-paths ["tests"]))))))
         nil))))
 
 ;; --- tags ---------------------------------------------------------------------
@@ -201,12 +277,24 @@ suggestions\", never to an error on the user's command line."
   (let (root (complete-root))
     (if (nil? root)
       nil
+      ;; The NAME only, straight off each entry (element 0 of `[name :kind …]`), rather
+      ;; than through `project`'s validating parser. Two reasons beyond the load cost:
+      ;; that parser raises on the first malformed entry, which under rule 1 means one
+      ;; typo'd dep silently costs candidates for every valid one; and a name is all a
+      ;; completion needs, so validating kinds and URLs here is work with no output.
       (or (complete-safely (fn ()
-                             (let (form (read-first (slurp (path-join root "project.blsp"))))
-                               (if (and (pair? form) (= (first form) 'project))
-                                 (map (fn (d) (name (get d :name)))
-                                   (project/project-parse-deps (plist-get (rest form)
-                                                                 :dependencies)))
+                             (let (form (complete-manifest root)
+                                   deps (if (nil? form)
+                                          nil
+                                          (complete-plist-get (rest form) :dependencies)))
+                               (if (or (vector? deps) (pair? deps))
+                                 (filter (fn (n) (not (nil? n)))
+                                   (map (fn (d)
+                                          (complete-safely (fn ()
+                                                             (name (if (or (vector? d) (pair? d))
+                                                                     (first d)
+                                                                     d)))))
+                                     deps))
                                  nil))))
         nil))))
 
@@ -225,10 +313,11 @@ suggestions\", never to an error on the user's command line."
                                                     (complete-strip-extension (path-basename p)))
                                                (fold (fn (acc dir)
                                                        (append acc
-                                                         (project/project-collect-sources dir)))
+                                                         (complete-under dir ".blsp")))
                                                  nil
-                                                 (project/project-abs-paths root
-                                                   (or *project-source-paths* ["src"]))))))
+                                                 (complete-manifest-dirs root
+                                                   :source-paths
+                                                   ["src"])))))
                         nil))))))))
 
 (defn complete-project-modules ()
@@ -239,20 +328,29 @@ suggestions\", never to an error on the user's command line."
       (sort (or (complete-safely (fn ()
                                    (map (fn (p) (complete-strip-extension (path-basename p)))
                                      (fold (fn (acc dir)
-                                             (append acc (project/project-collect-sources dir)))
+                                             (append acc (complete-under dir ".blsp")))
                                        nil
-                                       (project/project-abs-paths root
-                                         (or *project-source-paths* ["src"]))))))
+                                       (complete-manifest-dirs root :source-paths ["src"])))))
               nil)))))
 
 ;; The scaffolder owns the template list, so read it from there rather than
 ;; restating it — a new template becomes completable with no change here.
 (defn complete-templates ()
   "The `nest new --template` names, from the scaffolder's own list."
-  ;; `*project-templates*` is a `scaffold` ambient, so `scaffold` must be loaded
-  ;; for it to be bound. Naming a `scaffold` export (`scaffold/new-project`)
-  ;; auto-requires the module at load time; the value itself is unused.
-  (or (complete-safely (fn () (do scaffold/new-project (into [] *project-templates*)))) nil))
+  ;; `*project-templates*` is a `scaffold` ambient, so `scaffold` must be loaded for
+  ;; it to be bound — but only HERE, on the one completion that needs it. Naming an
+  ;; export (`scaffold/new-project`) instead would auto-require it at load time
+  ;; (ADR-229), which is what made every unrelated TAB press pay for `scaffold` and,
+  ;; behind it, all of `project`. `require-one` at call time keeps that cost on the
+  ;; `nest new --template` path; the ambient read stays unqualified, so it resolves
+  ;; dynamically once the module is loaded.
+  ;; `:unbound` because that is exactly this lint's documented case: a global bound at
+  ;; RUNTIME (by the `require-one` on the line above) which the source checker, reading
+  ;; only this file, cannot see.
+  (or (complete-safely (fn ()
+                         (require-one 'scaffold)
+                         (check-allow :unbound (into [] *project-templates*))))
+    nil))
 
 (defn- complete-strip-extension
   (filename)

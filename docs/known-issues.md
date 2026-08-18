@@ -21,11 +21,12 @@ ADRs / topic docs.
 |---|---|---|
 | KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
+| KI-46 | **deadline margin, not a failure yet.** KI-39 was a fixed cost sitting under a fixed deadline for weeks while reading as a random flake, so every case's CI margin against nextest's 120 s hard kill was audited from the 2026-08-17 logs. `nest::bin/nest mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` is now the worst at **87 s = 1.38× margin** — it invokes the MCP `check` tool, which is cwd-based, so it type-checks **this whole repository**, and the cost grows as the repo does | ✅ **fixed 2026-08-18, the real way** (87 s → **2.5 s**) — the three cheap fixes were all worse than the problem: `BROOD_NO_CHECK=1` guts what the case proves, a temp-dir `set_current_dir` is process-global and would race its siblings under plain `cargo test` (trading a slow test for a nondeterministic one), and a bigger nextest budget is what hid KI-39. So the real fix was done instead: `check-project-structured` gained an optional `from` root, and `mcp-check-tool` now passes **`*project-root*`** — the root the server already pins its write sandbox to and that every other project-scoped tool already read. `check` was the one tool taking its project from cwd. The three next-worst (`scaffold_quality`, 89/80/77 s) **were** fixed the same day by splitting one case per template |
 | KI-43 | `remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a **fixed 5 s sleep**, but the observer needs 5.9–9.2 s under load to boot + `require 'observer'` + connect — so the target died first, `connect` refused, stdout empty. Failed BOTH retries in a loaded `make test`, passed standalone: the signature that gets written off as noise | ✅ **fixed 2026-08-14** — waits for the observer's attach report instead of a stopwatch; **8/8 under saturating load**, and 3.5 s instead of ~11 s |
 | KI-42 | the `breakage/` suite had rotted to **9 of 23 files failing** and nobody knew, because it is outside `make test` and had no CI job — a pin-syntax change (`~ref`→`^ref`), a renamed `string-contains?`, an assertion predating exact rationals, and a TCP file whose every phase was dead | ✅ **fixed 2026-08-13** — all 23 files pass and gate, nothing skipped; CI job added so it cannot rot silently again |
 | KI-41 | concurrent `require` of the same feature could **double-load** its file: a claimant whose `(contains? *features* key)` guard read the per-process global inline cache **missed** a racing loader's just-committed `provide` (the cache is version-gated on a `Relaxed` counter, no happens-before), won the released load-once claim, and reloaded the module. Surfaced as the ADR-225 co-located-secondary `nest test` flake (~1/77); reproduced on demand at 20 files × 40 requires | ✅ **fixed** 2026-08-13 — `require-one` re-checks `*features*` with a new cache-bypassing `%registry-member?` (reads the shared globals table directly) before loading; guard `breakage/chaos_concurrent_require_double_load.blsp` |
 | KI-40 | concurrent green processes running the **same** shared compiled arm on the VM contended on that arm's single `Arc<CompiledArm>` refcount — one cache line, N cores — costing **3.2×** wall on a 100-way fan-out and leaving the cores stalled at 769% instead of 1150% | ✅ **fixed 2026-08-13** (ADR-224 — a process-local `ArmHandle` interposed on the call path; `pfib` 54.4 s → 17.1 s) |
-| KI-39 | the CI `differential (tree-walker)` job failed intermittently (3 of 11 runs) with nextest exit 100; **0/15** in the faithful local shape, cold-boot-herd hypothesis measured dead, and whether it is still present is genuinely unknown (4 green runs is 28% likely either way) | ⚠️ **watching — recurred 2026-08-17** (run 32032421650, exit 100, the only red job of five). The self-reporting added for it **did not work**: its annotate step is `grep … \| … \| while` under `shell: bash` (`-eo pipefail`), so a non-matching grep exits 1 and kills the step before it prints anything — the run named no case. Hardened with `\|\| true` (all six annotate pipelines, CI-shell-verified), and that was NOT enough — run 32054863012 then failed with the annotate step SUCCEEDING and still emitting nothing, not even the `Summary` line nextest always prints, so an unconditional tail-dump fallback was added on top |
+| KI-39 | the CI `differential (tree-walker)` job failed intermittently (3 of 11 runs) with nextest exit 100; **0/15** in the faithful local shape, cold-boot-herd hypothesis measured dead, and whether it is still present is genuinely unknown (4 green runs is 28% likely either way) | ✅ **fixed 2026-08-18** (was: watching — recurred 2026-08-17, run 32032421650, exit 100, the only red job of five). The self-reporting added for it **did not work**: its annotate step is `grep … \| … \| while` under `shell: bash` (`-eo pipefail`), so a non-matching grep exits 1 and kills the step before it prints anything — the run named no case. Hardened with `\|\| true` (all six annotate pipelines, CI-shell-verified), and that was NOT enough — run 32054863012 failed with the annotate step SUCCEEDING and still emitting nothing. **DIAGNOSED AND FIXED 2026-08-18** once `gh auth` was restored and the artifact could be read: the log is ANSI-COLOURED, so `Summary \[` could never match `Summary<ESC>[0m [`, and the case was a **TIMEOUT**, a shape no pattern covered. The failure itself was `nest::complete completion_never_fails_however_it_is_called` — 96 subprocess spawns × a completion that loaded all of `project` (770 ms of 950 ms each), 64 s locally and past the 300 s cap under CI contention. Not intermittent: 8 of 8 runs that day. |
 | KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | ✅ fixed 2026-08-08 (warm the cache before the fan-out) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
 | KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07; +25 more idle passes) |
@@ -74,6 +75,68 @@ walked straight through the helpers' 20 s / 30 s deadlines. Warming the cache on
 fan-out takes the three tests from a 20.1 s failure to 1.9–2.6 s. No bug in the *language or
 runtime* was implied at any point — every sighting was a boot wait, never an assertion about
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
+
+---
+
+## KI-46 — the next test sitting under a deadline (a margin audit) ✅ FIXED 2026-08-18
+
+**Not a bug report. A margin.** KI-39 turned out to be a fixed cost under a fixed deadline that
+looked random for weeks, so once it was fixed every case's CI margin was audited from the
+2026-08-17 logs (both engine jobs) rather than waiting to be surprised by the next one.
+
+The ranking after the KI-39 fix, worst first, against nextest's **120 s** default hard kill
+(`slow-timeout = { period = "60s", terminate-after = 2 }`):
+
+| case | CI time | margin | status |
+|------|---------|--------|--------|
+| `mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` | 87 s | 1.38× | ⚠️ this entry |
+| `scaffold_quality::…ships_passing_tests` | 89 s | 1.35× | ✅ split per template |
+| `scaffold_quality::…scaffolds_check_clean` | 80 s | 1.50× | ✅ split per template |
+| `scaffold_quality::…scaffolds_format_clean` | 77 s | 1.56× | ✅ split per template |
+| `gc::collects_below_the_outermost_eval` | 80 s | 1.50× | real GC work, single operation |
+| `complete::completion_never_fails_…` | was 300 s+ | timed out | ✅ KI-39, now 10.5 s |
+
+The `scaffold_quality` three were one case each looping over five templates — five scaffolds plus
+five toolchain runs summed against one deadline. Splitting into one case per (template, gate)
+pair costs no coverage at all, takes each case to ~18 s, lets nextest run them in parallel, and
+names the failing template in the case name. A macro generates them, and a generated
+`GATED_TEMPLATES` const is asserted equal to `SELF_CONTAINED` so the list cannot drift.
+
+**Why the remaining one is left alone.** `std_check_tool_…` invokes the MCP `check` tool, and
+`check-project-structured` is **cwd-based** — so it type-checks this entire repository, and the
+cost grows with the repo. Every cheap fix is worse than the problem:
+
+- `BROOD_NO_CHECK=1` returns nil before doing any work, so the case would stop exercising the
+  implementation it exists to prove is wired up.
+- Scaffolding a one-file temp project needs `set_current_dir`, which is process-global. Under
+  nextest (a process per case) that is safe, but under plain `cargo test` — a documented way to
+  run this suite — it would race every sibling case in the same binary. Trading a slow test for
+  a nondeterministic one is the wrong direction.
+- Raising its nextest budget is precisely what let KI-39 hide for weeks.
+
+### Done the real way, same day
+
+`check-project-structured` gained an optional `from` root (defaulting to `(cwd)`, so no caller
+changes), and `mcp-check-tool` now passes **`*project-root*`** rather than relying on the ambient
+cwd. That is not a test accommodation — it is a consistency fix. The MCP server serves exactly
+one project: `*project-root*` is what its write sandbox is pinned to (`mcp-project-path`) and what
+every other project-scoped tool already reads (`project-all-files *project-root*`). `check` was
+the one tool that took its project from wherever the host process happened to be standing, so it
+could disagree with the rest of the server.
+
+The case is now scoped to a two-file temp project: **87 s → 2.5 s**, and it asserts more than it
+used to, not less. The old version accepted `{:diagnostics [...]}` *or* `{:error …}` and so never
+proved the diagnostics path emits anything at all. The new one plants a deliberate unbound-symbol
+warning and requires it back with `:file`/`:line` populated, then asserts no diagnostic comes from
+outside the temp root.
+
+That pair is deliberate, and it exists because the first version of this test was too weak. When
+the "tool ignores `*project-root*` and falls back to cwd" sabotage was run against it, the test
+still **passed** — it merely got slow again (2.9 s → 21.7 s), which is exactly the failure mode
+this entry is about. Planting a warning that only exists inside the temp project makes that
+regression a hard failure ("the planted unbound-symbol warning is missing: []") instead of a
+number nobody reads. Both sabotages — a stubbed tool, and the cwd fallback — are verified to fail
+the test.
 
 ---
 
@@ -451,7 +514,7 @@ silently flattens every sub-second row (the published harness uses Python's
 
 ---
 
-## KI-39 — the tree-walker CI job fails intermittently, and the log was unreadable
+## KI-39 — the tree-walker CI job fails intermittently, and the log was unreadable ✅ FIXED 2026-08-18
 
 **Recurrence 2026-08-17, and the diagnostic was broken.** Run `32032421650` failed this job
 with nextest exit 100 — the only red job of five (breakage, rustfmt, `examples still run` and
@@ -603,6 +666,48 @@ failing case. Until then this is a watch item, not a blocker: the VM job and rus
 green throughout, and the tree-walker gate exists to catch engine divergence, which
 `tests/differential.rs` and `tests/gabriel_engines.rs` also cover per-expression inside the
 normal run.
+
+
+### Resolved 2026-08-18 — two bugs, one hiding the other
+
+`gh auth login` was restored, the artifact downloaded, and both halves fell out at once.
+
+**Why the diagnostic said nothing (three sightings lost).** nextest colours its output under
+CI even when piped to a file, so the log holds
+
+    <ESC>[31;1m     Summary<ESC>[0m [1922.084s] 976 tests run: 975 passed, 1 timed out, 3 skipped
+
+Every pattern in the annotate step anchors on `WORD [` — `Summary \[`, `FAIL \[` — and none of
+them can match `Summary<ESC>[0m [`. Verified against the real log: **both patterns match zero
+lines.** Local logs are uncoloured (not a TTY, and no CI env), which is why the greps looked
+correct here and were dead there — and why "it prints nothing" was never a clue about the
+tests. The tail-dump fallback added the day before *did* fire and *did* carry the answer, but
+its `sed 's/[[:cntrl:]]//g'` stripped only the ESC byte, leaving `[31;1m` litter in the output.
+
+Fixed three ways: `--color never` on the nextest invocation (deterministic log at the source),
+the annotate step now greps an ANSI-stripped copy (correct even if colour returns), and
+`TIMEOUT`/`SIGSEGV`/`SIGABRT`/`ABORT`/`LEAK` joined `FAIL` in the pattern set. Re-verified by
+replaying the real coloured log through the patched step under `bash -eo pipefail`: it exits 0
+and annotates `TIMEOUT [ 300.010s] (901/976) nest::complete
+completion_never_fails_however_it_is_called` plus the summary line.
+
+**What was actually failing.** `nest::complete completion_never_fails_however_it_is_called`
+timed out at 300 s. It spawns 96 `nest complete` subprocesses, and every one that reaches a
+value position booted an interpreter and then `require`d `complete` — which opened with
+`(:use-internals project)` and so loaded all 2967 lines of `project`, plus `scaffold`, plus
+`project` again behind it. Measured 2026-08-18 in a debug build: **950 ms per completion, of
+which 770 ms was that module load**; 96 × 950 ms = the 64 s the test took *alone on an idle
+16-core box*, against nextest's 60 s slow line. On a 2-core runner sharing the machine with
+`brood_suite_passes` it crossed 300 s. Fixing the load cost (see the devlog) took the test to
+**10.5 s** and the completion to 121 ms.
+
+**It was never intermittent.** The original entry called this a 3-of-11 flake. With the log
+finally readable, every one of the 8 CI runs on 2026-08-17 failed this job, and the two jobs
+that run the suite (`clippy + test` and this one) failed on the *same* case. What varied was
+only whether the box was slow enough to cross the cap — the test had been sitting one
+contention spike away from red since it was written. A "flake" that is really a fixed cost
+against a fixed deadline looks random and is not.
+
 
 ## KI-38 — three boot-wait tests fail together under peak suite load · **fixed 2026-08-08**
 
