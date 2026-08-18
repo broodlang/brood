@@ -48,9 +48,9 @@ the `nest new` scaffolder."
       (or (get *ns-package* s)
         ;; not a module directly — treat it as a qualified name, strip the last `/`-segment
         ;; (the def/fn name) and look up its module.
-        (let (parts (string-split (str s) "/"))
+        (let (parts (string/split (str s) "/"))
           (if (> (count parts) 1)
-            (get *ns-package* (symbol (join "/" (take (- (count parts) 1) parts))))
+            (get *ns-package* (symbol (string/join "/" (take (- (count parts) 1) parts))))
             nil))))))
 
 (defn trace-with-packages (trace)
@@ -152,10 +152,10 @@ the `nest new` scaffolder."
 ;;   "app/start"  => (app start)
 (defn- project-parse-main-spec
   (spec)
-  (let (parts (string-split spec "/")
+  (let (parts (string/split spec "/")
         ; reject blank module/fn halves so a typo like "" or "/start" errors
         ; cleanly here, not as a malformed load downstream.
-        ok? (fn (p) (not (blank? p))))
+        ok? (fn (p) (not (string/blank? p))))
     (cond
       (and (= (count parts) 1) (ok? (first parts))) (list (symbol (first parts)) 'main)
       (and (= (count parts) 2) (ok? (first parts)) (ok? (second parts)))
@@ -487,7 +487,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
             (let (p (path-join dir entry))
               (cond
                 (dir? p) (append-two (project-collect-tests p) acc)
-                (ends-with? entry "_test.blsp") (cons p acc)
+                (string/ends-with? entry "_test.blsp") (cons p acc)
                 else acc)))
       nil
       (list-dir dir))
@@ -502,7 +502,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
             (let (p (path-join dir entry))
               (cond
                 (dir? p) (append-two (project-collect-sources p) acc)
-                (ends-with? entry ".blsp") (cons p acc)
+                (string/ends-with? entry ".blsp") (cons p acc)
                 else acc)))
       nil
       (list-dir dir))
@@ -685,7 +685,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; populates before any fingerprint is taken, on the cold and warm paths alike.
   (str (build-id)
     "\n"
-    (join "\n"
+    (string/join "\n"
       (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f)))
         (append-two files (project-dep-module-files))))))
 
@@ -739,10 +739,10 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; nil for a root-level name — a registry, or a def from a file with no `defmodule`.
 (defn- project-image-section-of
   (n)
-  (let (parts (string-split (name n) "/"))
+  (let (parts (string/split (name n) "/"))
     (cond
       (< (count parts) 2) nil
-      else (join "/" (take (- (count parts) 1) parts)))))
+      else (string/join "/" (take (- (count parts) 1) parts)))))
 
 ;; Whether module key `k` belongs to a DEPENDENCY rather than to this project. A project
 ;; roots its own modules under its `:name` (ADR-070) exactly as a dep's are rooted under
@@ -753,7 +753,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 (defn- project-image-dep-module?
   (k)
   (and (contains? *package-module-files* k)
-    (not (= (first (string-split k "/"))
+    (not (= (first (string/split k "/"))
            (if *project-name* (name *project-name*) nil)))))
 
 ;; Group the image's globals into per-module sections, so `require` can materialise one
@@ -1818,7 +1818,7 @@ resolve in the advisory checker. Returns the project root."
                   "' is defined in "
                   (count where)
                   " source files ("
-                  (join ", " where)
+                  (string/join ", " where)
                   ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
 
@@ -1851,7 +1851,7 @@ resolve in the advisory checker. Returns the project root."
                   "' is defined in "
                   (count where)
                   " source files ("
-                  (join ", " where)
+                  (string/join ", " where)
                   ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
 
@@ -2229,10 +2229,10 @@ and the pre-flight would 'check' the manifest and warn on it."
   (let (n (name feat)
         prefix (cond (nil? *project-name*) nil else (str *project-name* "/"))
         rel (cond
-              (and prefix (starts-with? n prefix)) (substring n (string-length prefix))
+              (and prefix (string/starts-with? n prefix)) (string/substring n (string/length prefix))
               else n)
         p (require-find (str rel ".blsp") *load-path*))
-    (when (and p (any? (fn (d) (starts-with? p d)) srcdirs)) p)))
+    (when (and p (any? (fn (d) (string/starts-with? p d)) srcdirs)) p)))
 
 ;; The project source files reachable from module `entry`, and the module names the walk
 ;; passed through. Walks OUTWARD from the entry through module headers, so it costs one
@@ -2718,19 +2718,19 @@ as unchanged (only when some were)."
     (let (head (first (sexp/forms-of node)))
       (and (not (nil? head))
         (= (get head :kind) :symbol)
-        (let (name (substring source (get head :start) (get head :end)))
+        (let (name (string/substring source (get head :start) (get head :end)))
           (or (= name "describe") (= name "deftest")))))))
 
 ;; `source` with each half-open [start end) span in `spans` (ascending,
 ;; non-overlapping) removed — the kept gaps concatenated.
 (defn- string-drop-spans
   (source spans)
-  (let (n (string-length source))
+  (let (n (string/length source))
     (letrec (go (fn (pos spans acc)
                   (if (empty? spans)
-                    (str acc (substring source pos n))
+                    (str acc (string/substring source pos n))
                     (let ([s e] (first spans))
-                      (go e (rest spans) (str acc (substring source pos s)))))))
+                      (go e (rest spans) (str acc (string/substring source pos s)))))))
       (go 0 spans ""))))
 
 ;; A source string with its co-located `deftest`/`describe` forms excised (ADR-225).
@@ -2749,12 +2749,12 @@ as unchanged (only when some were)."
 
 (defn- project-bundle-name
   (dir path)
-  (let (prefix (if (ends-with? dir "/") dir (str dir "/"))
-        rel (if (starts-with? path prefix)
-              (substring path (string-length prefix) (string-length path))
+  (let (prefix (if (string/ends-with? dir "/") dir (str dir "/"))
+        rel (if (string/starts-with? path prefix)
+              (string/substring path (string/length prefix) (string/length path))
               (path-basename path)))
-    (if (ends-with? rel ".blsp")
-      (substring rel 0 (- (string-length rel) 5))
+    (if (string/ends-with? rel ".blsp")
+      (string/substring rel 0 (- (string/length rel) 5))
       rel)))
 
 (defn bundle-collect (root)
@@ -2832,7 +2832,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; project's own when reading the `*package-module-files*` registry in `bundle-collect`.
 (defn- bundle-dep-file?
   (path dep-dirs)
-  (any? (fn (d) (starts-with? path (if (ends-with? d "/") d (str d "/")))) dep-dirs))
+  (any? (fn (d) (string/starts-with? path (if (string/ends-with? d "/") d (str d "/")))) dep-dirs))
 
 ;; Error on the first require-name two bundled files share (see `bundle-collect`);
 ;; returns nil when all are distinct (a guard, called for effect).
@@ -2863,10 +2863,10 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
     (map (fn (pkg)
            (let (marker (str pkg "/")
                  shorts (fold (fn (acc key)
-                                (if (starts-with? key marker)
-                                  (cons (symbol (substring key
-                                                  (string-length marker)
-                                                  (string-length key)))
+                                (if (string/starts-with? key marker)
+                                  (cons (symbol (string/substring key
+                                                  (string/length marker)
+                                                  (string/length key)))
                                     acc)
                                   acc))
                           nil keys))

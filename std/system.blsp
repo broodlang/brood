@@ -55,7 +55,7 @@ An optional second argument is a list or vector of string arguments.
 
 (defn cmd-out (result)
   "The stdout string from a `cmd` result, trimmed."
-  (trim (get result :stdout "")))
+  (string/trim (get result :stdout "")))
 
 ;; ---- process control --------------------------------------------------------
 

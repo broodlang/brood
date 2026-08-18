@@ -114,19 +114,19 @@
     (assert= "a1:btruenil" (str "a" 1 :b true nil)))
 
   (test "string-split on empty delimiter splits into individual characters"
-    (assert= '("a" "b" "c") (string-split "abc" "")))
+    (assert= '("a" "b" "c") (string/split "abc" "")))
 
   (test "string-split with no match returns the full string as a single element"
-    (assert= '("abc") (string-split "abc" "x")))
+    (assert= '("abc") (string/split "abc" "x")))
 
   (test "substring out of bounds raises"
-    (assert-error (substring "hello" 10 20)))
+    (assert-error (string/substring "hello" 10 20)))
 
   (test "substring with negative start raises"
-    (assert-error (substring "hello" -1 3)))
+    (assert-error (string/substring "hello" -1 3)))
 
   (test "substring with reversed range raises"
-    (assert-error (substring "hello" 3 1))))
+    (assert-error (string/substring "hello" 3 1))))
 
 ;; ── 5. Truthiness — Brood vs Clojure/Python/JS ───────────────────────────────
 

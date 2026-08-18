@@ -84,7 +84,7 @@
 
 (describe "mcp check-source tool"
   (test "flags a type error in a snippet"
-    (is (not (empty? (get (mcp/mcp-check-source-tool {:source "(defn f (x) (string-length 5))"})
+    (is (not (empty? (get (mcp/mcp-check-source-tool {:source "(defn f (x) (string/length 5))"})
                        :diagnostics)))))
   (test "is clean for well-typed code"
     (assert= {:diagnostics []} (mcp/mcp-check-source-tool {:source "(+ 1 2)"})))

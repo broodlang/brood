@@ -2,7 +2,7 @@
 ;; ROADMAP "OTP near-term"). Pure Brood policy: each timer is a green process
 ;; parked on the scheduler's timer wheel; the handle is its pid.
 ;;
-;; Timing assertions here are deliberately loose (lower bounds + generous
+;; Timing assertions here are deliberately loose (string/lower bounds + generous
 ;; receive timeouts) so a loaded CI worker can't flake them.
 
 (defmodule timer-test (:use test))

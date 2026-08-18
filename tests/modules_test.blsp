@@ -5,18 +5,18 @@
 (defmodule modules-test (:use test))
 (describe "strings: substring & affixes"
   (test "substring is char-indexed"
-    (assert= (substring "hello" 1 4) "ell")
-    (assert= (substring "hello" 0 0) "")
-    (assert= (substring "hello" 0 5) "hello"))
+    (assert= (string/substring "hello" 1 4) "ell")
+    (assert= (string/substring "hello" 0 0) "")
+    (assert= (string/substring "hello" 0 5) "hello"))
   (test "substring out of range raises"
-    (assert-error (substring "hi" 0 9))
-    (assert-error (substring "hi" -1 1)))
+    (assert-error (string/substring "hi" 0 9))
+    (assert-error (string/substring "hi" -1 1)))
   (test "starts-with? / ends-with?"
-    (is (starts-with? "foobar" "foo"))
-    (refute (starts-with? "foobar" "bar"))
-    (is (ends-with? "foo_test.blsp" "_test.blsp"))
-    (refute (ends-with? "foo.blsp" "_test.blsp"))
-    (is (ends-with? "x" ""))))
+    (is (string/starts-with? "foobar" "foo"))
+    (refute (string/starts-with? "foobar" "bar"))
+    (is (string/ends-with? "foo_test.blsp" "_test.blsp"))
+    (refute (string/ends-with? "foo.blsp" "_test.blsp"))
+    (is (string/ends-with? "x" ""))))
 
 (describe "paths"
   (test "path-join" (assert= (path-join "a" "b") "a/b") (assert= (path-join "a/" "b") "a/b"))
@@ -82,7 +82,7 @@
   (test "a concurrent load of the same module from many processes never sees it half-loaded"
     (let (path "/tmp/reqrace-mod.blsp"
           src (str "(defmodule reqrace-mod)\n"
-                (join "\n" (map (fn (i) (str "(def v" i " " i ")")) (range 400)))
+                (string/join "\n" (map (fn (i) (str "(def v" i " " i ")")) (range 400)))
                 "\n(defn ready () :ok)\n")
           saved-path *load-path*
           me (self))

@@ -59,7 +59,7 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(quote sym)",
         "(quote (1 2 3))",
         // primitive results
-        "(string-length \"hi\")",
+        "(string/length \"hi\")",
         "(+ 1 2)",
         "(- 10 3 2)",
         "(* 2 3)",
@@ -115,7 +115,7 @@ fn correct_programs_draw_no_type_disjointness_warning() {
     // — the path B1's `negate` over-approximation protects.
     let cases = [
         "(+ 1 (first [1 2 3]))",
-        "(string-length (str 1 2 3))",
+        "(string/length (str 1 2 3))",
         "(if (int? 5) (+ 5 1) :no)",
         "(if (number? 5) (* 5 5) :no)",
         "(let (x [1 2 3]) (if (vector? x) (first x) :no))",

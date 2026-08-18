@@ -64,7 +64,7 @@ land in a later slice."
 
 (defn package-tree-hash (dir)
   "The canonical SHA-256 (hex) of a directory's file contents — order-independent of the filesystem, stable across machines (ADR-037)."
-  (hash/sha256 (join ""
+  (hash/sha256 (string/join ""
                  (map (fn (rel) (str rel "\0" (package-sha256-file (path-join dir rel)) "\n"))
                    (package-tree-files dir)))))
 
@@ -548,8 +548,8 @@ land in a later slice."
 ;; `1.2.0` both read as the version 1.2.0). Returns the string as-is otherwise.
 (defn- package-git-tag-version
   (tag)
-  (if (and (> (string-length tag) 0) (= (substring tag 0 1) "v"))
-    (substring tag 1)
+  (if (and (> (string/length tag) 0) (= (string/substring tag 0 1) "v"))
+    (string/substring tag 1)
     tag))
 
 ;; PURE: from a remote's `tags` (names) pick the NEWEST that satisfies `range`,
@@ -599,7 +599,7 @@ land in a later slice."
                 " satisfies \""
                 range
                 "\" (tags: "
-                (if (empty? tags) "none" (join ", " tags))
+                (if (empty? tags) "none" (string/join ", " tags))
                 ")")
               (assoc dep :ref (first chosen) :resolved-version (second chosen)))))))))
 
@@ -677,8 +677,8 @@ land in a later slice."
   "The bytes at `url`: a `file://` path is read directly (offline / local artifact);
 an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and its
 2xx body returned. Throws on a non-2xx status or a transport error."
-  (if (starts-with? url "file://")
-    (slurp-bytes (substring url 7))
+  (if (string/starts-with? url "file://")
+    (slurp-bytes (string/substring url 7))
     (package-http-fetch url *package-max-redirects*)))
 
 (defn- package-tarball-cache-current?
@@ -740,7 +740,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 (defn- registry-trim
   (url)
   "`url` without a trailing slash."
-  (if (ends-with? url "/") (substring url 0 (- (string-length url) 1)) url))
+  (if (string/ends-with? url "/") (string/substring url 0 (- (string/length url) 1)) url))
 
 (defn- registry-base-for
   (index)
@@ -902,8 +902,8 @@ TOFU-pinned signing key, nil for an unsigned package)."
     ;; point the client at a `file://` (or other) local resource to read + extract (the sha256 pin
     ;; is no defence, since the same party supplies the checksum). Refuse it (ADR-211).
     (when (and external
-            (not (starts-with? source-url "https://"))
-            (not (starts-with? source-url "http://")))
+            (not (string/starts-with? source-url "https://"))
+            (not (string/starts-with? source-url "http://")))
       (error "package: "
         (name nm)
         " "
@@ -1123,7 +1123,7 @@ sha256 pin still holds."
            (let (full (path-join dir entry))
              (cond
                (dir? full) (package-blsp-files full)
-               (ends-with? entry ".blsp") (list full)
+               (string/ends-with? entry ".blsp") (list full)
                else nil)))
       (list-dir dir))))
 
@@ -1380,7 +1380,7 @@ sha256 pin still holds."
           (package-guard-collisions root entries)
           (write-lockfile root entries)
           (println (str "package: updated "
-                     (if (empty? names) "all dependencies" (join ", " names))
+                     (if (empty? names) "all dependencies" (string/join ", " names))
                      " ("
                      (count entries)
                      " locked)"))
@@ -1547,7 +1547,7 @@ sha256 pin still holds."
 ;; A CLI spec token: ":path"/":git"/":ref" → keyword; anything else → the string.
 (defn- package-spec-token
   (tok)
-  (if (starts-with? tok ":") (keyword (substring tok 1 (string-length tok))) tok))
+  (if (string/starts-with? tok ":") (keyword (string/substring tok 1 (string/length tok))) tok))
 
 (defn- package-has-dep? (deps nm) (any? (fn (d) (= (get d :name) nm)) deps))
 

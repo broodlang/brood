@@ -280,8 +280,8 @@ keyword** — including an integer-indexed collection, because `(:name deps)` wh
 
 The advisory checker knows the form (ADR-167): it flags a receiver that provably
 can't be keyed, a wrong arity, and flows a **typed record field** through the result —
-so `(string-length (:x p))` is caught for a `(defrecord pt ((x int) …))` exactly as
-`(string-length (get p :x))` is.
+so `(string/length (:x p))` is caught for a `(defrecord pt ((x int) …))` exactly as
+`(string/length (get p :x))` is.
 
 **Only keywords.** A map, vector or set in head position is still an error with a
 hint — `({:a 1} :a)` would be a second spelling of `get`, and a callable vector or set
@@ -585,7 +585,7 @@ tail is a real type the checker consumes, not a comment. Two things follow from 
 - **The return flows into inference at every call site.** An op is a generic `defn`
   whose body *is* the dispatch machinery, so its own type is opaque — the declared
   return is the only static handle on what the call yields. `(area shape)` for `(area
-  [self] :-> float)` types as `float`, so `(+ (area s) 1.0)` checks and `(string-length
+  [self] :-> float)` types as `float`, so `(+ (area s) 1.0)` checks and `(string/length
   (area s))` is flagged. This is the single most useful place to recover type
   information, because it's the polymorphic boundary where it would otherwise be lost.
 - **Each `impl` body is checked against it.** An impl of `(size [self] :-> int)` whose
@@ -1688,7 +1688,7 @@ provably wrong call against it (both the argument and the result type flow):
 (defn area (r) (* 3.14159 r r))
 
 (area "circle")           ; warning: area: argument 1 expects number, got string
-(string-length (area 2))  ; warning: string-length: argument 1 expects string, got number
+(string/length (area 2))  ; warning: string/length: argument 1 expects string, got number
 ```
 
 The type grammar: base names — `int float number decimal string symbol keyword
@@ -1743,7 +1743,7 @@ prelude freeze requires shared closures to capture only the global environment.
 
 Adoption started in `std/path`, `std/json`, and `std/set` (ADR-153); the checker
 enforces those declarations at every call site, in any module, and result types
-flow (a `bool` result handed to `string-length` is caught). The checker treats both identically. Writing a
+flow (a `bool` result handed to `string/length` is caught). The checker treats both identically. Writing a
 *type* never changes behaviour; opting into *enforcement* (`sig!`) does. Full
 design: [type-annotations.md](type-annotations.md) (ADR-082).
 
@@ -2378,7 +2378,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   in for the list it would produce. Chaining composes the stages onto one view,
   so the whole pipeline walks the source once, building nothing in between (≈3×
   faster than the eager form on large inputs). `(seqview? x)` tests for an
-  unrealised view; consume one with `fold`/`reduce`/`sum`/`count`/`into`/`join`/
+  unrealised view; consume one with `fold`/`reduce`/`sum`/`count`/`into`/`string/join`/
   `seq`/`first`, or realise it with `(seq v)` / `(into [] v)`. Two properties:
   like any lazy value a view defers its work (and any `throw` in its functions)
   until realised — **don't build a view for side effects**; use eager `map` or
@@ -2478,62 +2478,72 @@ The function combinators build the callbacks those ops take:
   common-case shortcuts.
 
 ### Strings
-`str`  `pr-str`  `string-length`  `substring`  `char-at`  `string->list`
-`list->string`  `string->codepoints`  `codepoints->string`  `upper`  `lower`
-`string->number`  `number->string`  `index-of`  `includes?`  `join`
-`string-split`  `replace`  `trim`  `triml`  `trimr`  `blank?`  `starts-with?`
-`ends-with?`  `string-repeat`  `pad-left`  `pad-right`  `to-fixed`  `format`
-`string->graphemes`  `grapheme-count`  `grapheme-at`  `substring-graphemes`
-`string-normalize`  `display-width`
+
+Every operation whose **subject is a string** lives in the `string` module
+(ADR-230): call it qualified, or `(:use string)` to refer them bare.
+
+`string/length`  `string/substring`  `string/char-at`  `string/to-list`
+`string/from-list`  `string/to-codepoints`  `string/from-codepoints`
+`string/upper`  `string/lower`  `string/capitalize`  `string/join`
+`string/split`  `string/replace`  `string/trim`  `string/triml`  `string/trimr`
+`string/blank?`  `string/starts-with?`  `string/ends-with?`  `string/repeat`
+`string/pad-left`  `string/pad-right`  `string/to-graphemes`
+`string/grapheme-count`  `string/grapheme-at`  `string/substring-graphemes`
+`string/normalize`  `string/fill`
+
+Bare in the prelude — these operate on *any* collection or bridge a string to
+another type, so they are **not** string-library ops:
+`str`  `pr-str`  `index-of`  `includes?`  `string->number`  `number->string`
+`string->symbol`  `symbol->string`  `to-fixed`  `format`  `fmt`  `display-width`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
 - There is **no distinct character type** (deferred): a "character" is just a
-  1-char string, so `(char-at s i)` and the elements of `(string->list s)` are
-  strings. All indices are **char-based**, matching `string-length` (so they are
+  1-char string, so `(string/char-at s i)` and the elements of `(string/to-list s)` are
+  strings. All indices are **char-based**, matching `string/length` (so they are
   correct for multi-byte UTF-8, not byte offsets).
-- `substring`, `char-at`, `string-length` are the char-indexed accessors;
-  `string->list` / `list->string` bridge to and from a list of chars.
-- `string->codepoints` gives the chars as a **vector of integer codepoints** in
+- `string/substring`, `string/char-at`, `string/length` are the char-indexed accessors;
+  `string/to-list` / `string/from-list` bridge to and from a list of chars.
+- `string/to-codepoints` gives the chars as a **vector of integer codepoints** in
   one O(n) native pass — the random-access form text parsers index with `nth`
   and compare as ints (`std/regex`/`std/json`/`std/encoding` all scan it);
-  `codepoints->string` is its inverse.
+  `string/from-codepoints` is its inverse.
 - **A code point is not a character — a grapheme cluster is.**
-  `string->graphemes` gives the extended grapheme clusters (UAX #29) as a vector of
+  `string/to-graphemes` gives the extended grapheme clusters (UAX #29) as a vector of
   strings: `"e"` + U+0301 is *two* code points but *one* cluster, and a flag emoji is
   four code points and one cluster. This is the unit to step a cursor by; stepping by
-  code point splits a cluster and corrupts the text. `(apply str (string->graphemes
+  code point splits a cluster and corrupts the text. `(apply str (string/to-graphemes
   s))` is `s`. `display-width` counts terminal cells over the same clusters (a CJK
   char or emoji is 2, a combining mark 0).
-- **The cluster-indexed accessors** are `grapheme-count`, `(grapheme-at s i
-  [default])`, and `(substring-graphemes s start [end])` — the grapheme-indexed
-  counterparts of `string-length`, `char-at`, and `substring`, which are all
+- **The cluster-indexed accessors** are `string/grapheme-count`, `(string/grapheme-at s i
+  [default])`, and `(string/substring-graphemes s start [end])` — the grapheme-indexed
+  counterparts of `string/length`, `string/char-at`, and `string/substring`, which are all
   *code-point*-indexed. Reach for these whenever an index is a cursor position:
-  `(substring s 1 2)` can slice a cluster in half (leaving a bare `e` and an orphan
-  combining mark) where `(substring-graphemes s 1 2)` keeps it whole. Out-of-range
+  `(string/substring s 1 2)` can slice a cluster in half (leaving a bare `e` and an orphan
+  combining mark) where `(string/substring-graphemes s 1 2)` keeps it whole. Out-of-range
   reads yield the default and ranges clamp, exactly like `nth`/`take`. They exist so
-  the correct spelling is also the fast one: `(nth (string->graphemes s) i)` was the
+  the correct spelling is also the fast one: `(nth (string/to-graphemes s) i)` was the
   only way to read one cluster, and it materialised every cluster in the string on
   every keystroke (ADR-159).
 - **`=` is byte-structural, so text that reads identically can compare unequal**:
-  `"é"` is U+00E9 *or* U+0065 U+0301. `(string-normalize s form)` normalises, with
+  `"é"` is U+00E9 *or* U+0065 U+0301. `(string/normalize s form)` normalises, with
   `form` one of `:nfc` `:nfd` `:nfkc` `:nfkd`. Canonical (`:nfc`/`:nfd`) preserves
   meaning; compatibility (`:nfkc`/`:nfkd`) also folds presentation — `"ﬁ"` → `"fi"`,
   `"²"` → `"2"` — which is what you want for search and identifier matching and not
   what you want for round-tripping text. Both are pinned by the UCD conformance
   corpora (`tests/conformance_ucd_test.blsp`).
-- `upper` / `lower` case-fold (Unicode-aware: `(upper "ß")` → `"SS"`).
+- `string/upper` / `string/lower` case-fold (Unicode-aware: `(string/upper "ß")` → `"SS"`).
 - `string->number` is a **strict** parse — int if it is one, else float, else
   `nil`; it rejects partial input (`(string->number "3abc")` → `nil`) and
-  surrounding whitespace (`trim` first if needed). `number->string` is its inverse
+  surrounding whitespace (`string/trim` first if needed). `number->string` is its inverse
   (just `str` on a number).
 - `index-of` returns the first char index of a substring or `-1`;
-  `includes?` is the boolean form. `join` puts a separator between strings;
-  `string-split` is its inverse (an empty separator splits into characters).
-  `replace` swaps every occurrence of one substring for another.
-- `trim` / `triml` / `trimr` strip whitespace (both ends / left / right);
-  `blank?` is true for an empty or all-whitespace string.
-- `string-repeat` concatenates n copies; `pad-left` / `pad-right` justify a
+  `includes?` is the boolean form. `string/join` puts a separator between strings;
+  `string/split` is its inverse (an empty separator splits into characters).
+  `string/replace` swaps every occurrence of one substring for another.
+- `string/trim` / `string/triml` / `string/trimr` strip whitespace (both ends / left / right);
+  `string/blank?` is true for an empty or all-whitespace string.
+- `string/repeat` concatenates n copies; `string/pad-left` / `string/pad-right` justify a
   string into a fixed-width field with spaces (never truncating). `to-fixed`
   renders a number with a fixed decimal count (`(to-fixed 3.14159 2)` → `"3.14"`)
   — the float→text op `str`/`pr-str` can't do, since they print the shortest
@@ -2542,7 +2552,7 @@ The function combinators build the callbacks those ops take:
 - `format` is a small `printf`-style wrapper: `(format "x = %d, y = %.2f" 42 3.14)`
   → `"x = 42, y = 3.14"`. Specifiers: `%s` (any, via `str`), `%d` (number),
   `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `to-fixed`), `%%` (literal
-  `%`). Width/justification isn't built in (compose with `pad-left`/`pad-right`).
+  `%`). Width/justification isn't built in (compose with `string/pad-left`/`string/pad-right`).
 - `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(to-fixed y 2)}")`
   splices each `{expr}` hole's value between the literal text, lowering to a plain
   `(str …)` — zero runtime cost, so it is just a terser `str`. `{{`/`}}` are literal
@@ -2553,19 +2563,19 @@ The function combinators build the callbacks those ops take:
   `nil`, extra args are ignored.
 
 ```clojure
-(string-split "a,b,c" ",")      ;=> ("a" "b" "c")
-(join "-" (list "x" "y" "z"))   ;=> "x-y-z"
-(replace "one fish two fish" "fish" "cat")  ;=> "one cat two cat"
-(upper (trim "  hi  "))         ;=> "HI"
+(string/split "a,b,c" ",")      ;=> ("a" "b" "c")
+(string/join "-" (list "x" "y" "z"))   ;=> "x-y-z"
+(string/replace "one fish two fish" "fish" "cat")  ;=> "one cat two cat"
+(string/upper (string/trim "  hi  "))         ;=> "HI"
 (string->number "3.5")          ;=> 3.5
 ```
 
-Only `upper`/`lower` (Unicode tables), `string->number` (strict parse-or-nil),
+Only `string/upper`/`string/lower` (Unicode tables), `string->number` (strict parse-or-nil),
 `to-fixed` (float formatting), and the O(n) char-access mechanisms
-(`string-split`, `string->codepoints`, `string-span`/`string-span-until`,
+(`string/split`, `string/to-codepoints`, `string-span`/`string-span-until`,
 `%str-index-of` — one native pass each, where the pure-Brood equivalent is a
 per-character loop) are Rust primitives; the rest of the library is Brood over
-`substring`/`str` (`std/prelude.blsp`) — the "write the language in the
+`string/substring`/`str` (`std/prelude.blsp`) — the "write the language in the
 language" principle.
 
 **Char indexing costs O(1), in both encoding regimes.** Strings are indexed by
@@ -2574,8 +2584,8 @@ offset. For pure-ASCII text the two numbers are equal. For multi-byte text the
 conversion used to walk from the start of the string — which quietly made every
 per-character or incremental-search loop O(n²) — and now goes through a sparse
 char→byte index built on the string's first conversion (ADR-213), so it is a
-lookup plus a bounded walk. `substring` is therefore O(result) rather than
-O(index), and a `char-at` loop or an `index-of` scan with a rising `from` is
+lookup plus a bounded walk. `string/substring` is therefore O(result) rather than
+O(index), and a `string/char-at` loop or an `index-of` scan with a rising `from` is
 linear on any text.
 
 ### I/O
@@ -2627,7 +2637,7 @@ String leaves are UTF-8 at text boundaries; a **binary**-mode socket/child
 (`tcp-set-binary`) keeps its byte-string rule — each string leaf's codepoints
 must be 0–255. Anything else as a leaf (a float, a keyword, an int > 255) is a
 type error. This deletes the O(n²) `(str acc chunk)` accumulation class:
-collect parts in a list and hand the tree to the boundary. `str`/`join` are
+collect parts in a list and hand the tree to the boundary. `str`/`string/join` are
 **not** iolist-aware — they render display forms (a list argument prints as a
 list); use `bytes-concat` (or `utf8-bytes->string` of it) to materialise an
 iolist in memory.
@@ -2966,7 +2976,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/multimap.blsp` | `'multimap` | Multi-valued map (one key → multiple values) |
 | `std/hash.blsp` | `'hash` | `sha256`/`sha1`/`sha384`/`sha512`/`md5` (hex over strings or byte vectors), raw-byte digests (`sha256-raw` … → byte vectors, for chaining over bytes), `bytes->hex` (byte seq → lowercase hex), `hmac-sha256` (RFC 2104) and raw-byte `hmac-sha256-raw`/`-sha1-raw`/`-sha512-raw` (byte-vector key+msg → byte vector, for binary-protocol auth), `hash-string` (djb2). All Brood over two Rust prims (`%digest`/`%hmac`). |
 | `std/diff.blsp` | `'diff` | LCS-based sequence diff: `diff-seq`, `diff-lines`, `diff-summary`, `diff-patch`, `diff-unified` |
-| `std/path.blsp` | `'path` | Path string manipulation: `join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `with-extension` |
+| `std/path.blsp` | `'path` | Path string manipulation: `string/join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `with-extension` |
 | `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `halt` (whole-machine `cwd`/`hostname` are root builtins) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
 | `std/proc/agent.blsp` | `'proc/agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |

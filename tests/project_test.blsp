@@ -603,7 +603,7 @@
     (assert= (scaffold/project-module-name "main") "main-lib"))
   (test "a non-ASCII name is not silently mangled into nothing"
     ;; Every character is replaced, but the result is still a usable symbol.
-    (is (> (string-length (scaffold/project-module-name "日本")) 0)))
+    (is (> (string/length (scaffold/project-module-name "日本")) 0)))
   (test "the derived name is stable"
     (assert= (scaffold/project-module-name "x") (scaffold/project-module-name "x"))))
 
@@ -781,7 +781,7 @@
             names (sort (map (fn (p) (name (first p))) pairs)))
         (assert= names (list "shapes" "shapes-internal"))
         ;; every declared module maps back to the one file that declares it
-        (is (every? (fn (p) (ends-with? (second p) "shapes.blsp")) pairs)))))
+        (is (every? (fn (p) (string/ends-with? (second p) "shapes.blsp")) pairs)))))
 
   (test "project-setup registers a co-located secondary module, rooted"
     (let (root (temp-dir "brood-coloc-"))

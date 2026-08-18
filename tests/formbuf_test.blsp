@@ -55,16 +55,16 @@
 
 (describe "skeleton (the generated part)"
   (test "region contents never reach the skeleton"
-    (let (other (replace boxed "(+ 1 2)" "(completely different)"))
+    (let (other (string/replace boxed "(+ 1 2)" "(completely different)"))
       (assert= (skeleton boxed (boxes boxed))
         (skeleton other (boxes other)))))
 
   (test "prose, delimiters and region COUNT all do"
     (let (a boxed)
       (is (not= (skeleton a (boxes a))
-            (let (b (replace a "prose" "PROSE")) (skeleton b (boxes b)))))
+            (let (b (string/replace a "prose" "PROSE")) (skeleton b (boxes b)))))
       (is (not= (skeleton a (boxes a))
-            (let (b (replace a ">>>\ntail" ">>>x\ntail")) (skeleton b (boxes b)))))))
+            (let (b (string/replace a ">>>\ntail" ">>>x\ntail")) (skeleton b (boxes b)))))))
 
   (test "no regions: the skeleton is the whole text"
     (assert= (skeleton "abc" ()) "abc")))
@@ -73,7 +73,7 @@
   (test "it is the complement of the regions — its text is exactly the skeleton"
     (let (rs (boxes boxed)
           spans (protected-spans boxed rs)
-          joined (apply str (map (fn (s) (let ([lo hi] s) (substring boxed lo hi))) spans)))
+          joined (apply str (map (fn (s) (let ([lo hi] s) (string/substring boxed lo hi))) spans)))
       (assert= joined (skeleton boxed rs))))
 
   (test "every editable region sits in a GAP between spans, never inside one"
@@ -119,21 +119,21 @@
 (describe "guard-veto"
   (test "an untouched skeleton passes"
     (let (before (ctx boxed (skeleton boxed (boxes boxed)))
-          after (ctx (replace boxed "(+ 1 2)" "(+ 1 3)") (:skeleton before)))
+          after (ctx (string/replace boxed "(+ 1 2)" "(+ 1 3)") (:skeleton before)))
       (assert= (guard-veto before after rt rs reject boxes) after)))
 
   (test "damage caused BY THIS EVENT is undone, and can explain itself"
     (let (before (ctx boxed (skeleton boxed (boxes boxed)))
-          after (ctx (replace boxed "prose" "PROSE") (:skeleton before))
+          after (ctx (string/replace boxed "prose" "PROSE") (:skeleton before))
           out (guard-veto before after rt rs reject boxes))
       (assert= (:text out) boxed) ; reverted
       (assert= (:echo out) "rejected")))
 
   (test "PRE-EXISTING damage does not veto later events (a form must never brick)"
-    (let (damaged (replace boxed "prose" "PROSE")
+    (let (damaged (string/replace boxed "prose" "PROSE")
           skel (skeleton boxed (boxes boxed))
           before (ctx damaged skel)
-          after (ctx (replace damaged "(+ 1 2)" "(+ 9 9)") skel)
+          after (ctx (string/replace damaged "(+ 1 2)" "(+ 9 9)") skel)
           out (guard-veto before after rt rs reject boxes))
       (assert= out after) ; let it through
       (assert= (:echo out) "")))

@@ -919,10 +919,14 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Fuzzy (subsequence) string matching + ranking: `fuzzy-match` / `fuzzy-filter`,
     // the matcher completion UIs ride on. Pure Brood, no dependencies. Opt-in.
     embedded_module!("fuzzy", "std/fuzzy.blsp"),
-    // Plain-text utilities (pure string->string): `fill` greedy word-wraps to a column
-    // width — the engine behind an editor's fill-paragraph / M-q, and reusable for
-    // wrapping help text or terminal output. No dependencies. Opt-in.
-    embedded_module!("text", "std/text.blsp"),
+    // The string-manipulation library (ADR-230): every op whose subject is a string —
+    // trim/pad/case/split/join/replace + char-content conversions + `fill` (greedy
+    // word-wrap to a column, formerly std/text.blsp). Pure Brood over the `string/*`
+    // primitives. Loaded by the prelude itself (`(require-one 'string)`) because the
+    // prelude's own get/path-*/fmt helpers reference `string/char-at` etc. by late
+    // binding — so it is always present, yet still an ordinary module (doc tooling sees
+    // the file; a project may `(:use string)`).
+    embedded_module!("string", "std/string.blsp"),
     embedded_module!("project", "std/tool/project.blsp"),
     embedded_module!("coverage", "std/tool/coverage.blsp"),
     embedded_module!("complete", "std/tool/complete.blsp"),

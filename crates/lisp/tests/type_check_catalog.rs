@@ -44,36 +44,36 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(map (fn (a b & c) a) (list 1 2 3))", "callback"), // variadic lambda needs >=2; map calls with 1
     ("(map (fn (a b &optional c) a) (list 1 2 3))", "callback"), // 2 required + optional; min 2 > 1
     // ---- element types from literals / constructors ----
-    ("(string-length (first [1 2 3]))", "string-length"),       // vector literal → int
+    ("(string/length (first [1 2 3]))", "string/length"),       // vector literal → int
     (r#"(+ 1 (first (list "a" "b")))"#, "+"),                    // (list …) → string
     // ---- parametric HOF results: types flow through ----
-    ("(string-length (first (map inc (list 1 2 3))))", "string-length"), // map → number
-    ("(string-length (first (filter even? (list 1 2 3))))", "string-length"), // filter preserves int
-    ("(string-length (reduce + 0 (list 1 2 3)))", "string-length"),      // reduce → number
+    ("(string/length (first (map inc (list 1 2 3))))", "string/length"), // map → number
+    ("(string/length (first (filter even? (list 1 2 3))))", "string/length"), // filter preserves int
+    ("(string/length (reduce + 0 (list 1 2 3)))", "string/length"),      // reduce → number
     (
-        "(string-length (fold (fn (acc x) (+ acc x)) 0 (list 1 2 3)))",
-        "string-length",
+        "(string/length (fold (fn (acc x) (+ acc x)) 0 (list 1 2 3)))",
+        "string/length",
     ), // fold → number (lambda callback)
     // ---- element types preserved through structural combinators ----
-    ("(string-length (first (reverse [1 2 3])))", "string-length"),      // reverse vector<int> → int
-    ("(string-length (first (sort [1 2 3])))", "string-length"),         // sort preserves int
-    ("(string-length (first (sort-by (fn (x) x) [1 2 3])))", "string-length"), // sort-by preserves int
-    ("(string-length (first (take 2 [1 2 3])))", "string-length"),       // take preserves int
-    ("(string-length (first (drop 1 [1 2 3])))", "string-length"),       // drop preserves int
-    ("(string-length (first (cons 1 (list 2 3))))", "string-length"),    // cons: int | int = int
-    ("(string-length (first (append [1 2] [3 4])))", "string-length"),   // append: int ∪ int = int
+    ("(string/length (first (reverse [1 2 3])))", "string/length"),      // reverse vector<int> → int
+    ("(string/length (first (sort [1 2 3])))", "string/length"),         // sort preserves int
+    ("(string/length (first (sort-by (fn (x) x) [1 2 3])))", "string/length"), // sort-by preserves int
+    ("(string/length (first (take 2 [1 2 3])))", "string/length"),       // take preserves int
+    ("(string/length (first (drop 1 [1 2 3])))", "string/length"),       // drop preserves int
+    ("(string/length (first (cons 1 (list 2 3))))", "string/length"),    // cons: int | int = int
+    ("(string/length (first (append [1 2] [3 4])))", "string/length"),   // append: int ∪ int = int
     // ---- type-variable sigs: return type resolved from argument types ----
     (
-        "(sig identity (?A -> ?A)) (defn identity (x) x) (string-length (identity 42))",
-        "string-length",
+        "(sig identity (?A -> ?A)) (defn identity (x) x) (string/length (identity 42))",
+        "string/length",
     ), // identity(?A → ?A) on int → int, not a string
     (
-        "(sig my-first ((list ?A) -> ?A)) (defn my-first (xs) (first xs)) (string-length (my-first (list 1 2 3)))",
-        "string-length",
+        "(sig my-first ((list ?A) -> ?A)) (defn my-first (xs) (first xs)) (string/length (my-first (list 1 2 3)))",
+        "string/length",
     ), // my-first on list<int> → int
     (
-        r#"(sig const (?A ?B -> ?A)) (defn const (x y) x) (string-length (const 42 "x"))"#,
-        "string-length",
+        r#"(sig const (?A ?B -> ?A)) (defn const (x y) x) (string/length (const 42 "x"))"#,
+        "string/length",
     ), // const(?A ?B → ?A) on (int str) → int
     // ---- expanded curated sigs: predicates return bool ----
     ("(+ 1 (number? 42))", "+"),              // number? → bool, not number
@@ -85,8 +85,8 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(+ 1 (every? int? (list 1 2)))", "+"),  // every? → bool
     // ---- expanded curated sigs: string converters ----
     (r#"(+ 1 (symbol->string 'foo))"#, "+"),  // symbol->string → string
-    (r#"(+ 1 (join ", " (list "a" "b")))"#, "+"), // join → string
-    (r#"(+ 1 (capitalize "hello"))"#, "+"), // capitalize → string
+    (r#"(+ 1 (string/join ", " (list "a" "b")))"#, "+"), // join → string
+    (r#"(+ 1 (string/capitalize "hello"))"#, "+"), // capitalize → string
     // ---- op names must be unique within a module (ADR-172) ----
     // two abilities declaring the same op name `area` clobber each other's generic fn.
     (
@@ -136,7 +136,7 @@ const SHOULD_NOT_WARN: &[&str] = &[
     // ---- unknown inputs → no refinement, no warning ----
     "(fn (xs) (+ 1 (first xs)))",               // unknown sequence
     "(fn (f) (map f (list 1 2 3)))",            // local callback, unknown arity
-    "(fn (init) (string-length (reduce + init (list 1 2 3))))", // unknown init type
+    "(fn (init) (string/length (reduce + init (list 1 2 3))))", // unknown init type
     // ---- structural combinators: correct uses stay silent ----
     "(+ 1 (first (reverse [1 2 3])))",          // int element is fine for +
     "(+ 1 (first (sort [1 2 3])))",
@@ -152,7 +152,7 @@ const SHOULD_NOT_WARN: &[&str] = &[
     // vector → the else-branch must NOT narrow m.
     "(fn (m) (if (and (vector? m) (%eq (vector-length m) 2)) (vector-ref m 0) (vector-ref m 0)))",
     // `%eq`: `m ≠ \"x\"` doesn't prove m isn't a string → else-branch not narrowed.
-    r#"(fn (m) (if (%eq m "x") :yes (string-length m)))"#,
+    r#"(fn (m) (if (%eq m "x") :yes (string/length m)))"#,
     // match: a list value against a vector pattern lowers to a guarded vector-ref
     // that must stay quiet (the scrutinee narrows to a vector inside the guard).
     "(match (list 1 2) ([a b] :vec) (_ :not-vec))",
@@ -162,8 +162,8 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(if (number? 42) :yes :no)",             // number? used as a predicate (bool is fine)
     "(if (empty? (list)) :yes :no)",          // empty? as predicate
     r#"(if (contains? {:a 1} :a) :yes :no)"#, // contains? as predicate
-    r#"(string-length (symbol->string 'foo))"#, // symbol→string→length is fine
-    r#"(string-length (join ", " (list "a")))"#, // join→string→length fine
+    r#"(string/length (symbol->string 'foo))"#, // symbol→string→length is fine
+    r#"(string/length (string/join ", " (list "a")))"#, // join→string→length fine
     // ---- type-variable sigs: correct uses stay silent ----
     "(sig identity (?A -> ?A)) (defn identity (x) x) (+ 1 (identity 42))",
     "(sig my-first ((list ?A) -> ?A)) (defn my-first (xs) (first xs)) (+ 1 (my-first (list 1 2 3)))",
@@ -234,8 +234,8 @@ fn warning_pos(src: &str, needle: &str) -> Option<(u32, u32)> {
 fn type_findings_anchor_at_the_offending_argument() {
     // `(+ 10 20)` starts at column 16; the call head `string-length` at 1.
     // Before the fix this pointed at column 1.
-    let src = "(string-length (+ 10 20))";
-    let (line, col) = warning_pos(src, "string-length").expect("a warning");
+    let src = "(string/length (+ 10 20))";
+    let (line, col) = warning_pos(src, "string/length").expect("a warning");
     assert_eq!(line, 1);
     assert_eq!(
         col, 16,
@@ -253,8 +253,8 @@ fn type_findings_anchor_at_the_offending_argument() {
     );
 
     // A bare (unpositioned) literal argument falls back to the call form.
-    let lit = "(string-length 42)";
-    let (l3, c3) = warning_pos(lit, "string-length").expect("a warning");
+    let lit = "(string/length 42)";
+    let (l3, c3) = warning_pos(lit, "string/length").expect("a warning");
     assert_eq!(
         (l3, c3),
         (1, 1),

@@ -144,12 +144,12 @@ shape `std/observer` draws by hand. Returns one `text` op.
   (s cells align)
   "`s` fitted to exactly `cells` characters — padded with spaces (positioned per
 `align`: `:left` / `:center` / `:right`) or truncated when longer."
-  (let (n (string-length s))
+  (let (n (string/length s))
     (cond
-      (>= n cells) (substring s 0 cells)
-      (= align :right) (pad-left s cells)
-      (= align :center) (pad-right (str (string-repeat " " (quot (- cells n) 2)) s) cells)
-      else (pad-right s cells))))
+      (>= n cells) (string/substring s 0 cells)
+      (= align :right) (string/pad-left s cells)
+      (= align :center) (string/pad-right (str (string/repeat " " (quot (- cells n) 2)) s) cells)
+      else (string/pad-right s cells))))
 
 (defn frame (& ops)
   "Collect render ops into a frame (a vector), dropping any `nil` ops so callers
@@ -233,13 +233,13 @@ widest line plus one cell of padding each side; `face` fills the surface, `fg` s
 text, and `opts` forwards `:border`/`:radius` to `card-surface`. GUI rounds the card; the
 terminal draws a flat panel."
   (let (n (count lines)
-        w (+ 2 (fold (fn (m s) (max m (string-length s))) 0 lines))
+        w (+ 2 (fold (fn (m s) (max m (string/length s))) 0 lines))
         [mr mc] (card-rect (- anchor-row n) anchor-col w n cols rows))
     (append (card-surface mr mc w n face gui? opts)
       (map (fn (i)
              (let (s (nth lines i))
                (text (+ mr i)
                  mc
-                 (str " " s (string-repeat " " (max 0 (- w 1 (string-length s)))))
+                 (str " " s (string/repeat " " (max 0 (- w 1 (string/length s)))))
                  fg)))
         (range n)))))

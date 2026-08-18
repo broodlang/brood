@@ -73,7 +73,7 @@ no edit is sent."
 (a registry's crash-recovery mirror, a log tailer, a test): apply `link-fold`'s
 `[:splice …]` action with this and its `[:text s]` action by replacement."
   (let ([lo hi repl] splice)
-    (str (substring text 0 lo) repl (substring text hi (string-length text)))))
+    (str (string/substring text 0 lo) repl (string/substring text hi (string/length text)))))
 
 ;; ---- the wire-view normalizer -------------------------------------------------
 
@@ -112,7 +112,7 @@ the link (unchanged when the texts are equal — pure movement sends nothing)."
       (let ([lo hi repl] splice)
         (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version))
         (assoc link
-          :pending (append (or (get link :pending) ()) (list [lo hi (string-length repl)])))))))
+          :pending (append (or (get link :pending) ()) (list [lo hi (string/length repl)])))))))
 
 (defn link-fold (link version view origin)
   "Fold one `[:buffer-updated proc version view origin]` push into `link`: returns
@@ -153,7 +153,7 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
                             (let ([plo phi plen] p
                                   [flo fhi frepl] splice
                                   [nlo nhi _] (splice-transform [plo phi ""]
-                                                [flo fhi (string-length frepl)]))
+                                                [flo fhi (string/length frepl)]))
                               [nlo nhi plen]))
                        pending)
                        (and splice

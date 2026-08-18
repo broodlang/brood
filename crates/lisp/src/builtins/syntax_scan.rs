@@ -408,7 +408,7 @@ fn scan_form_end_bytes(s: &str, start_byte: usize, start_ch: usize, nforms: i64)
 
 /// `(scan-form-end s from n-forms)` — the char offset just after `n-forms` top-level forms
 /// starting at char offset `from`, skipping strings/comments and tracking bracket depth, or
-/// `(string-length s)` if the text ends first. The forward window-end companion to
+/// `(string/length s)` if the text ends first. The forward window-end companion to
 /// `scan-form-start`: `tool/sexp`'s `narrow` uses the pair to bound structural motion to the
 /// neighbourhood of point (previous, enclosing, next form) in one native pass, where it used
 /// an interpreted `char-at` loop — the dominant cost of every keystroke-driven motion.

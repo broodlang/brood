@@ -217,9 +217,9 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     //   string-split   — accumulator recursion; returns a list of strings
     //                    (unrefined list — list<string> would warn on (first …) = nil).
     put("symbol->string", Sig::new(vec![sym_ty], str_ty));
-    put("join", Sig::new(vec![any, seq], str_ty));
-    put("capitalize", Sig::new(vec![str_ty], str_ty));
-    put("string-split", Sig::new(vec![str_ty, str_ty], Ty::LIST));
+    put("string/join", Sig::new(vec![any, seq], str_ty));
+    put("string/capitalize", Sig::new(vec![str_ty], str_ty));
+    put("string/split", Sig::new(vec![str_ty, str_ty], Ty::LIST));
     // Equality: `=`/`not=` are multi-arm closures; infer_sig bails on multi-arm.
     // Pin the bool result so `(+ 1 (= x y))` is caught.
     for n in ["=", "not="] {
@@ -233,36 +233,36 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // String predicates: nested calls or let+branch bodies.
     //   starts-with?/ends-with? — let + and + branch.
     //   blank?                  — let + cond recursion.
-    for n in ["starts-with?", "ends-with?"] {
+    for n in ["string/starts-with?", "string/ends-with?"] {
         put(n, Sig::new(vec![str_ty, str_ty], bool_ty));
     }
     //   includes? — polymorphic membership `(>= (index-of coll x) 0)` over
-    //   list/vector/string (substring) and map (values); both args stay `any`.
+    //   list/vector/string (string/substring) and map (values); both args stay `any`.
     put("includes?", Sig::new(vec![any, any], bool_ty));
-    put("blank?", Sig::new(vec![str_ty], bool_ty));
+    put("string/blank?", Sig::new(vec![str_ty], bool_ty));
     // String transforms: all call recursive helpers or use `apply`; infer_sig bails.
     //   trim/triml/trimr   — call tail-recursive aux helpers.
     //   replace            — if-branch over join/string-split.
     //   string-repeat      — (apply str (repeat n s)).
     //   pad-left/pad-right — let + if.
-    //   char-at            — (substring s i (inc i)): nested call.
-    for n in ["trim", "triml", "trimr"] {
+    //   char-at            — (string/substring s i (inc i)): nested call.
+    for n in ["string/trim", "string/triml", "string/trimr"] {
         put(n, Sig::new(vec![str_ty], str_ty));
     }
-    put("replace", Sig::new(vec![str_ty, str_ty, str_ty], str_ty));
-    put("string-repeat", Sig::new(vec![str_ty, int], str_ty));
-    for n in ["pad-left", "pad-right"] {
+    put("string/replace", Sig::new(vec![str_ty, str_ty, str_ty], str_ty));
+    put("string/repeat", Sig::new(vec![str_ty, int], str_ty));
+    for n in ["string/pad-left", "string/pad-right"] {
         put(n, Sig::new(vec![str_ty, int], str_ty));
     }
-    put("char-at", Sig::new(vec![str_ty, int], str_ty));
+    put("string/char-at", Sig::new(vec![str_ty, int], str_ty));
     // String/list conversions: recursive helpers or `apply`.
-    //   string->list        — (string-split s "").
+    //   string->list        — (string/split s "").
     //   list->string        — (apply str cs).
     //   codepoints->string  — (apply str (map int->char cs)).
-    // (string->codepoints is a primitive now — its sig rides on the NativeFn.)
-    put("string->list", Sig::new(vec![str_ty], Ty::LIST));
-    put("list->string", Sig::new(vec![seq], str_ty));
-    put("codepoints->string", Sig::new(vec![seq], str_ty));
+    // (string/to-codepoints is a primitive now — its sig rides on the NativeFn.)
+    put("string/to-list", Sig::new(vec![str_ty], Ty::LIST));
+    put("string/from-list", Sig::new(vec![seq], str_ty));
+    put("string/from-codepoints", Sig::new(vec![seq], str_ty));
     // format: variadic with a required string template arg and a string result.
     put("format", Sig::with_rest(vec![str_ty], any, str_ty));
     // Search → int: all have branchy/recursive/optional-param bodies.

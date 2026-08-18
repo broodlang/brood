@@ -24,8 +24,8 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
     (if (< n 0)
       (str "-" (dt-zero-pad (- n) (- width 1)))
       (let (s (number->string n)
-            pad (- width (string-length s)))
-        (if (> pad 0) (str (string-repeat "0" pad) s) s)))))
+            pad (- width (string/length s)))
+        (if (> pad 0) (str (string/repeat "0" pad) s) s)))))
 
 ;; ---- Gregorian <-> days-since-Unix-epoch ------------------------------------
 ;; Howard Hinnant's civil_from_days / days_from_civil algorithms.
@@ -213,19 +213,19 @@ milliseconds."
   (dt fmt i n acc)
   (if (>= i n)
     acc
-    (let (c (char-at fmt i))
+    (let (c (string/char-at fmt i))
       (if (and (= c "%") (< (+ i 1) n))
         (dt-fmt-loop dt
           fmt
           (+ i 2)
           n
-          (str acc (dt-fmt-code dt (char-at fmt (+ i 1)))))
+          (str acc (dt-fmt-code dt (string/char-at fmt (+ i 1)))))
         (dt-fmt-loop dt fmt (+ i 1) n (str acc c))))))
 
 (defn dt-format (dt fmt)
   "Format `dt` with %-codes: %Y year, %m month (01-12), %d day (01-31),
 %H hour (00-23), %M minute (00-59), %S second (00-59), %f ms (000-999), %% literal %."
-  (dt-fmt-loop dt fmt 0 (string-length fmt) ""))
+  (dt-fmt-loop dt fmt 0 (string/length fmt) ""))
 
 ;; ---- parsing ----------------------------------------------------------------
 
@@ -239,17 +239,17 @@ milliseconds."
   ;; Right-pad the fractional-second digits to 3 and parse as milliseconds.
   ;; "" → 0, "5" → 500, "05" → 50, "005" → 5, "123" → 123.
   (let (padded (str frac "000"))
-    (or (dt-parse-int (str (char-at padded 0) (char-at padded 1) (char-at padded 2)))
+    (or (dt-parse-int (str (string/char-at padded 0) (string/char-at padded 1) (string/char-at padded 2)))
       0)))
 
 (defn- dt-parse-time-str
   (s)
   ;; Parse "HH:MM:SS" or "HH:MM:SS.mmm" → a time-of-day, or nil.
-  (let (dot-parts (string-split s ".")
+  (let (dot-parts (string/split s ".")
         hms-str (first dot-parts)
         frac-str (if (> (count dot-parts) 1) (nth dot-parts 1) "")
         ms-val (dt-frac->ms frac-str)
-        parts (string-split hms-str ":"))
+        parts (string/split hms-str ":"))
     (when (= (count parts) 3)
       (let (h (dt-parse-int (nth parts 0))
             mn (dt-parse-int (nth parts 1))
@@ -259,7 +259,7 @@ milliseconds."
 
 (defn parse-date (s)
   "Parse an ISO 8601 date string \"YYYY-MM-DD\" → a `date`, or nil on failure."
-  (let (parts (string-split s "-"))
+  (let (parts (string/split s "-"))
     (when (= (count parts) 3)
       (let (y (dt-parse-int (nth parts 0))
             m (dt-parse-int (nth parts 1))
@@ -269,11 +269,11 @@ milliseconds."
 
 (defn parse-time (s)
   "Parse \"HH:MM:SS\" or \"HH:MM:SS.mmm\" (optional trailing Z) → a `time-of-day`, or nil."
-  (dt-parse-time-str (first (string-split s "Z"))))
+  (dt-parse-time-str (first (string/split s "Z"))))
 
 (defn parse-iso8601 (s)
   "Parse an ISO 8601 datetime string \"YYYY-MM-DDTHH:MM:SS[.mmm][Z]\" → a `datetime`, or nil."
-  (let (parts (string-split s "T"))
+  (let (parts (string/split s "T"))
     (when (= (count parts) 2)
       (let (d (parse-date (nth parts 0))
             t (parse-time (nth parts 1)))

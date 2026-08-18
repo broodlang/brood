@@ -49,7 +49,7 @@ of the two explicitly."
 — interior blank lines survive, since some corpora (CommonMark) are whitespace-
 significant and the rest ignore them anyway."
   (let (s (slurp path))
-    (string-split (if (ends-with? s "\n") (substring s 0 (dec (string-length s))) s)
+    (string/split (if (string/ends-with? s "\n") (string/substring s 0 (dec (string/length s))) s)
       "\n")))
 
 (defn corpus-forms (path)
@@ -93,12 +93,12 @@ reader, exactly as the Scheme harness's repeated `(read)` drops them."
   (s i n acc)
   (if (= i n)
     acc
-    (let (d (get corpus-hex-digits (char-at s i)))
+    (let (d (get corpus-hex-digits (string/char-at s i)))
       (if (nil? d)
-        (error "hex->int: not a hex digit: " (char-at s i))
+        (error "hex->int: not a hex digit: " (string/char-at s i))
         (corpus-hex-at s (inc i) n (+ (* acc 16) d))))))
 
 (defn hex->int (s)
   "The non-negative integer with hexadecimal spelling `s` (either case), promoting
 past i64 as needed. Throws on a non-hex character."
-  (corpus-hex-at s 0 (string-length s) 0))
+  (corpus-hex-at s 0 (string/length s) 0))

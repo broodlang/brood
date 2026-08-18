@@ -26,7 +26,7 @@
 ;; (`nest test`, `cargo test` via suite.rs, and a bare `--test` all differ).
 (def tests-dir
   (let (f (current-file) b (path-basename f))
-    (substring f 0 (- (string-length f) (string-length b)))))
+    (string/substring f 0 (- (string/length f) (string/length b)))))
 
 ;; This file quotes the two markers below as string literals, so scanning it would find
 ;; them in its own source and report a phantom prefix. Skip it by name.
@@ -34,7 +34,7 @@
 
 (defn- test-files
   ()
-  (filter (fn (e) (and (ends-with? e "_test.blsp") (not (= e self-name))))
+  (filter (fn (e) (and (string/ends-with? e "_test.blsp") (not (= e self-name))))
     (list-dir tests-dir)))
 
 ;; Every string literal appearing immediately after `marker`. Hand-rolled rather than
@@ -42,8 +42,8 @@
 ;; marker, then take each piece up to its closing quote.
 (defn- quoted-args
   (text marker)
-  (map (fn (p) (first (string-split p "\"")))
-    (rest (string-split text marker))))
+  (map (fn (p) (first (string/split p "\"")))
+    (rest (string/split text marker))))
 
 ;; The prefixes `file` passes to `temp-dir` and never purges. A purge line covers a prefix
 ;; it is a *prefix of* — `(purge-stale-temp "brood-file-")` legitimately covers
@@ -52,7 +52,7 @@
   (text)
   (let (used (quoted-args text "(temp-dir \"")
         purged (quoted-args text "(purge-stale-temp \""))
-    (filter (fn (u) (not (any? (fn (p) (starts-with? u p)) purged))) used)))
+    (filter (fn (u) (not (any? (fn (p) (string/starts-with? u p)) purged))) used)))
 
 (describe "temp fixtures: every prefix used is purged at load (KI-30)"
 

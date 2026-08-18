@@ -220,9 +220,9 @@ fn strings() {
 /// the in-language suite, `tests/strings_test.blsp`).
 #[test]
 fn string_kernel() {
-    assert_eq!(run("(upper \"abc\")"), "\"ABC\"");
-    assert_eq!(run("(lower \"ABC\")"), "\"abc\"");
-    assert_eq!(run("(upper \"ß\")"), "\"SS\""); // Unicode case folding
+    assert_eq!(run("(string/upper \"abc\")"), "\"ABC\"");
+    assert_eq!(run("(string/lower \"ABC\")"), "\"abc\"");
+    assert_eq!(run("(string/upper \"ß\")"), "\"SS\""); // Unicode case folding
     assert_eq!(run("(string->number \"42\")"), "42");
     assert_eq!(run("(string->number \"3.5\")"), "3.5");
     assert_eq!(run("(string->number \"3abc\")"), "nil"); // strict parse, not read-string
@@ -489,8 +489,8 @@ fn type_errors_are_self_identifying() {
         "type error: first: expected list, vector, set, map or bytes, got int (5)"
     );
     assert_eq!(
-        err("(string-length :k)"),
-        "type error: string-length: expected string, got keyword (:k)"
+        err("(string/length :k)"),
+        "type error: string/length: expected string, got keyword (:k)"
     );
 }
 
@@ -531,7 +531,7 @@ fn check_builtin_flags_provable_misuse() {
     // The advisory checker, end to end through the language. Provable primitive
     // misuse yields a warning; correct or not-statically-known code yields none.
     assert!(run("(check '(first 5))").contains("first: argument 1 expects"));
-    assert!(run("(check '(string-length :k))").contains("string-length"));
+    assert!(run("(check '(string/length :k))").contains("string/length"));
     assert_eq!(run("(check '(first (list 1 2)))"), "nil"); // arg type unknown → no warning
     assert_eq!(run("(check '(+ 1 2))"), "nil"); // closure, not a primitive
                                                 // It is advisory — it never raises, even on the misuse it reports.
@@ -824,7 +824,7 @@ fn throw_and_catch() {
     );
     // Same code for `substring` (different surface, same family).
     assert_eq!(
-        run("(try (substring \"hi\" 0 99) (catch e (get e :code)))"),
+        run("(try (string/substring \"hi\" 0 99) (catch e (get e :code)))"),
         "\"E0042\""
     );
     // E0050 file IO — slurp of a path that doesn't exist.

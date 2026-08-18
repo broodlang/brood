@@ -150,11 +150,11 @@ face carries no colour we map (leave that span the default colour)."
     "Emit `src` from offset `i`, wrapping each `[start end face]` span in its ANSI colour
   and leaving the gaps between spans uncoloured."
     (if (empty? spans)
-      (substring src i)
+      (string/substring src i)
       (let ([s e face] (first spans)
-            painted (let (chunk (substring src s e) sgr (repl-sgr face))
+            painted (let (chunk (string/substring src s e) sgr (repl-sgr face))
                       (if sgr (str sgr chunk repl-sgr-reset) chunk)))
-        (str (substring src i s) painted (repl-paint-spans src (rest spans) e))))))
+        (str (string/substring src i s) painted (repl-paint-spans src (rest spans) e))))))
 
 (defn- repl-colorize
   (src)
@@ -180,11 +180,11 @@ highlights. Used to colour a printed result on an interactive TTY."
 (defn- repl-meta-parts
   (line)
   "Split a `,cmd arg…` line (sans the leading `,`) into `[cmd rest]`, `rest` trimmed."
-  (let (t (trim line)
+  (let (t (string/trim line)
         sp (index-of t " "))
     (if (< sp 0)
       [t ""]
-      [(substring t 0 sp) (trim (substring t sp))])))
+      [(string/substring t 0 sp) (string/trim (string/substring t sp))])))
 
 (defn- repl-has-name?
   (names x)
@@ -215,15 +215,15 @@ registration order, the new one last). The extension seam tools use to add comma
 (defn- repl-meta?
   (line)
   "True when `line` is a recognised `,cmd` meta-command (a leading `,` + a registered name)."
-  (and (> (string-length line) 0)
-    (= (char-at line 0) ",")
-    (let ([cmd _] (repl-meta-parts (substring line 1)))
+  (and (> (string/length line) 0)
+    (= (string/char-at line 0) ",")
+    (let ([cmd _] (repl-meta-parts (string/substring line 1)))
       (not (nil? (repl-command-for cmd))))))
 
 (defn- repl-pad
   (s n)
   "Right-pad string `s` with spaces to at least width `n`."
-  (let (gap (- n (string-length s)))
+  (let (gap (- n (string/length s)))
     (if (<= gap 0) s (str s (apply str (map (constantly " ") (range gap)))))))
 
 (defn- repl-command-help-line
@@ -236,7 +236,7 @@ registration order, the new one last). The extension seam tools use to add comma
   "Print the `,help` table — generated from the command registry (skipping `:hidden`
 entries) plus the static Tab / `*1 *2 *3` footer."
   (println (str "\e[90m"
-             (join "\n"
+             (string/join "\n"
                (map repl-command-help-line (filter (fn (c) (not (get c :hidden))) *repl-commands*)))
              "\n"
              "  "
@@ -260,7 +260,7 @@ forms into the eval rather than fail cleanly."
       (try
         (let (d (eval-string (str "(doc " name ")"))
               a (eval-string (str "(arglist " name ")")))
-          (println (str "\e[36m(" name (if a (str " " (join " " (map str a))) "") ")\e[0m"))
+          (println (str "\e[36m(" name (if a (str " " (string/join " " (map str a))) "") ")\e[0m"))
           (println (if d (str "\e[90m" d "\e[0m") "\e[90m(no documentation)\e[0m")))
         (catch e (println (str "\e[90m(no such name: " name ")\e[0m")))))))
 
@@ -322,9 +322,9 @@ forms into the eval rather than fail cleanly."
   (s)
   "The first line of `s`, truncated to a terminal-ish width — a docstring's summary
 line, so a multi-paragraph doc doesn't turn one search hit into a screenful."
-  (let (line (first (string-split (or s "") "\n"))
+  (let (line (first (string/split (or s "") "\n"))
         max 96)
-    (if (> (string-length line) max) (str (substring line 0 max) "…") line)))
+    (if (> (string/length line) max) (str (string/substring line 0 max) "…") line)))
 
 (defn- repl-meta-expand
   (expr all)
@@ -339,7 +339,7 @@ form that is unreadable on one line."
             ;; `format` is required lazily — pretty-printing an expansion is worth a
             ;; module load the first time you ask, but not on every REPL boot.
             text (try
-                   (do (trim (format/format-source (pr-str out))))
+                   (do (string/trim (format/format-source (pr-str out))))
                    (catch _ (pr-str out))))
         (println (if (stdout-tty?) (repl-colorize text) text)))
       (catch e (eprint (str (repl-error-message e) "\n"))))))
@@ -348,7 +348,7 @@ form that is unreadable on one line."
   (line)
   "Dispatch a `,cmd` meta-command line (verified by `repl-meta?`) through the registry.
 Returns nil; the loop just continues to the next prompt."
-  (let ([cmd rest] (repl-meta-parts (substring line 1))
+  (let ([cmd rest] (repl-meta-parts (string/substring line 1))
         c (repl-command-for cmd))
     (when c ((get c :handler) rest))))
 
@@ -402,11 +402,11 @@ or part of a `;`-comment. Lets the loop ignore blank / comment-only lines at a
 fresh prompt without echoing `nil`."
   (if (>= i n)
     false
-    (let (c (char-at s i) j (inc i))
+    (let (c (string/char-at s i) j (inc i))
       (cond
         in-com (repl-content? s j n (not (= c "\n")))
         (= c ";") (repl-content? s j n true)
-        (blank? c) (repl-content? s j n false)
+        (string/blank? c) (repl-content? s j n false)
         else true))))
 
 ;; ---- evaluation -------------------------------------------------------------
@@ -422,7 +422,7 @@ code rather than re-scanning delimiters (ADR-049)."
   (tr)
   "Render an error map's :trace entries as `  at fn (file:line:col)` lines,
 innermost frame first (each location is the call site that entered the frame)."
-  (join ""
+  (string/join ""
     (map (fn (f)
            (str "\n  at "
              (or (get f :fn) "<fn>")
@@ -687,13 +687,13 @@ session is armed, else inline. The meta-command counterpart of `repl-eval`."
   "Serialize `history` (newest first) to file text: the most recent
 `*repl-history-max*` entries, oldest first, one per line. (Pure — the testable core
 of `repl-save-history`.)"
-  (join "\n" (reverse (take *repl-history-max* history))))
+  (string/join "\n" (reverse (take *repl-history-max* history))))
 
 (defn- repl-history<-text
   (text)
   "Parse history-file `text` into a history list (newest first), dropping blank
 lines. (Pure — the testable core of `repl-load-history`.)"
-  (reverse (filter (fn (l) (not (= l ""))) (string-split text "\n"))))
+  (reverse (filter (fn (l) (not (= l ""))) (string/split text "\n"))))
 
 (defn- repl-load-history
   ()
@@ -734,7 +734,7 @@ Returns `{:eof false :history h}`."
                      {:eof false :history h2})))
     (cond
       (repl-meta? form) (do (repl-run-meta form) (remember))
-      (not (repl-content? form 0 (string-length form) false)) {:eof false :history history}
+      (not (repl-content? form 0 (string/length form) false)) {:eof false :history history}
       else (do (repl-eval form) (remember)))))
 
 (defn- repl-read-eval-interactive
@@ -766,7 +766,7 @@ complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplet
               (eprint "error: incomplete input at end of input\n"))
             {:eof true :history history})
         (and (= acc "") (repl-meta? line)) (do (repl-run-meta line) {:eof false :history history})
-        (and (= acc "") (not (repl-content? line 0 (string-length line) false)))
+        (and (= acc "") (not (repl-content? line 0 (string/length line) false)))
           {:eof false
            :history history}
         else

@@ -29,8 +29,8 @@ primitives. The kernel also provides the always-available file primitives
   (let (text (slurp path))
     (cond
       (= text "") nil
-      (ends-with? text "\n") (string-split (substring text 0 (dec (string-length text))) "\n")
-      else (string-split text "\n"))))
+      (string/ends-with? text "\n") (string/split (string/substring text 0 (dec (string/length text))) "\n")
+      else (string/split text "\n"))))
 (sig read-lines (string -> (list string)))
 
 (defn write-lines (path lines)
@@ -40,9 +40,9 @@ primitives. The kernel also provides the always-available file primitives
   ;; the whole accumulator per line, so writing a file was O(total²): 2000 lines 37 ms,
   ;; 4000 144 ms, 8000 361 ms, 16 000 **1888 ms**. The same shape `read-lines`' sibling
   ;; comment at `:67` already warns about for `append`.
-  ;; The empty guard matters: `(join "\n" ())` is "", and an unguarded trailing "\n" would
+  ;; The empty guard matters: `(string/join "\n" ())` is "", and an unguarded trailing "\n" would
   ;; write a one-byte file where the fold wrote an empty one.
-  (spit path (if (empty? lines) "" (str (join "\n" lines) "\n"))))
+  (spit path (if (empty? lines) "" (str (string/join "\n" lines) "\n"))))
 ;; `lines` is `seqable`, not `(list string)` — `fold` accepts a list, vector, set or range,
 ;; so the broader domain checks the argument (a non-seqable is flagged) without false-flagging
 ;; a vector caller the way `(list string)` would.
@@ -85,19 +85,19 @@ primitives. The kernel also provides the always-available file primitives
   (s i)
   (cond
     (< i 0) -1
-    (= (substring s i (+ i 1)) ".") i
+    (= (string/substring s i (+ i 1)) ".") i
     else (file-last-dot s (dec i))))
 
 (defn path-extension (path)
   "The extension of `path` including the leading dot (\"a/b.txt\" -> \".txt\"), or \"\" if there is none. A leading-dot name (\".bashrc\") has no extension."
   (let (base (path-basename path)
-        i (file-last-dot base (dec (string-length base))))
-    (if (<= i 0) "" (substring base i (string-length base)))))
+        i (file-last-dot base (dec (string/length base))))
+    (if (<= i 0) "" (string/substring base i (string/length base)))))
 (sig path-extension (string -> string))
 
 (defn path-stem (path)
   "The basename of `path` with its extension removed (\"a/b.txt\" -> \"b\")."
   (let (base (path-basename path)
         ext (path-extension path))
-    (if (= ext "") base (substring base 0 (- (string-length base) (string-length ext))))))
+    (if (= ext "") base (string/substring base 0 (- (string/length base) (string/length ext))))))
 (sig path-stem (string -> string))

@@ -66,14 +66,14 @@
     (assert= (parse "\"a\\nb\"") "a\nb")
     (assert= (parse "\"a\\tb\"") "a\tb"))
   (test "\\b and \\f decode to single control chars (no codepoint primitive needed)"
-    (assert= (string-length (parse "\"\\b\"")) 1)
-    (assert= (string-length (parse "\"\\f\"")) 1))
+    (assert= (string/length (parse "\"\\b\"")) 1)
+    (assert= (string/length (parse "\"\\f\"")) 1))
   (test "\\uXXXX BMP escapes (via the reader's \\u{} mechanism)"
     (assert= (parse "\"\\u0041\"") "A")
     (assert= (parse "\"caf\\u00e9\"") "café"))
   (test "a surrogate pair combines into one astral code point"
     (assert= (parse "\"\\ud83d\\ude00\"") "😀")
-    (assert= (string-length (parse "\"\\ud83d\\ude00\"")) 1)))
+    (assert= (string/length (parse "\"\\ud83d\\ude00\"")) 1)))
 
 (describe "parse — arrays + objects"
   (test "arrays: empty, flat, mixed, nested"

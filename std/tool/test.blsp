@@ -113,7 +113,7 @@ docs/testing.md for the full guide.")
 (defn purge-stale-temp (prefix)
   "Best-effort remove every `/tmp/<prefix>*` left by an earlier run — a directory tree *or* a plain file (a fixture may be either). Call once at FILE LOAD (a top-level form), before any test creates fixtures, so it never deletes a live one. Bounds /tmp growth to a single run and recovers from crashed runs."
   (doseq (e (list-dir "/tmp"))
-    (when (starts-with? e prefix)
+    (when (string/starts-with? e prefix)
       (let (p (path-join "/tmp" e))
         (if (dir? p) (delete-dir p) (delete-file p))))))
 
@@ -531,10 +531,10 @@ the test rather than hanging the run."
   (let (i (index-of selector-string ":"))
     (if (< i 0)
       [selector-string ""]
-      [(substring selector-string 0 i)
-        (substring selector-string
+      [(string/substring selector-string 0 i)
+        (string/substring selector-string
           (+ i 1)
-          (string-length selector-string))])))
+          (string/length selector-string))])))
 
 ;; Build a filter spec from the raw strings a CLI hands over. Parsing lives here
 ;; rather than in `nest`, so the selector grammar has one definition and the Rust
@@ -561,9 +561,9 @@ the test rather than hanging the run."
 ;; select a test in a completely different file.
 (defn- test-path-suffix?
   (path needle)
-  (and (ends-with? path needle)
-    (let (cut (- (string-length path) (string-length needle)))
-      (or (= cut 0) (= (substring path (- cut 1) cut) "/")))))
+  (and (string/ends-with? path needle)
+    (let (cut (- (string/length path) (string/length needle)))
+      (or (= cut 0) (= (string/substring path (- cut 1) cut) "/")))))
 
 ;; Two paths may name the same file (the CLI gets what the user typed; the meta
 ;; carries what `current-file` recorded), so match on a path-suffix relationship
@@ -702,7 +702,7 @@ the test rather than hanging the run."
   (s)
   (let (h (fold (fn (acc c) (bit-and (* (bit-xor acc c) 16777619) test-fnv-mask))
             2166136261
-            (string->codepoints s)))
+            (string/to-codepoints s)))
     (bit-and (bit-xor h (bit-shift-right h 15)) test-fnv-mask)))
 
 ;; Keep only the tests belonging to shard `index` of `count` (0-based) — the
@@ -844,8 +844,8 @@ the test rather than hanging the run."
 (defn- test-relative-path
   (path)
   (let (here (str (cwd) "/"))
-    (if (starts-with? path here)
-      (substring path (string-length here) (string-length path))
+    (if (string/starts-with? path here)
+      (string/substring path (string/length here) (string/length path))
       path)))
 
 ;; --- colour --------------------------------------------------------------------
@@ -1436,7 +1436,7 @@ the test rather than hanging the run."
   (let (i (index-of line ": "))
     (if (< i 0)
       line
-      (str (test-dim (substring line 0 (+ i 1))) (substring line (+ i 1) (string-length line))))))
+      (str (test-dim (string/substring line 0 (+ i 1))) (string/substring line (+ i 1) (string/length line))))))
 
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
@@ -1450,8 +1450,8 @@ the test rather than hanging the run."
   (let (timings (map (fn (r) [(full-name r) (r-ms r)]) results))
     (fold (fn (_ entry)
             (println (str "  "
-                       (pad-right (str (first entry)) 28)
-                       (pad-left (str (rest entry)) 6)
+                       (string/pad-right (str (first entry)) 28)
+                       (string/pad-left (str (rest entry)) 6)
                        " ms")))
       nil
       (take n (sort-by-ms timings)))))
@@ -1472,7 +1472,7 @@ the test rather than hanging the run."
       (println "")
       (println (str "Slow tests (> " (secs-str over) "):"))
       (fold (fn (_ p)
-              (println (str "  " (pad-right (str (first p)) 40) " " (secs-str (second p)))))
+              (println (str "  " (string/pad-right (str (first p)) 40) " " (secs-str (second p)))))
         nil
         (sort-by-ms slow)))))
 
@@ -1611,7 +1611,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
       (error (str "unknown --formatter '"
                *test-formatter*
                "' (available: "
-               (join ", " (sort (keys *test-formatters*)))
+               (string/join ", " (sort (keys *test-formatters*)))
                ")"))
       (do
         (formatter-fn results elapsed)

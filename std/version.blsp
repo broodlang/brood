@@ -36,12 +36,12 @@ them at that core (npm/Cargo rule). `+build` metadata never affects order or mat
 `\"1.2\"` is `(1 2)` and `\"1.x\"` is `(1 0)` — lenient, because this is used to
 compare what a human typed in a manifest, not to validate it (that is
 `version-valid?`)."
-  (let (core (first (string-split (first (string-split v "+")) "-")))
-    (map (fn (p) (or (string->number p) 0)) (string-split core "."))))
+  (let (core (first (string/split (first (string/split v "+")) "-")))
+    (map (fn (p) (or (string->number p) 0)) (string/split core "."))))
 
 (defn- version-digit-run?
   (s)
-  (let (cps (string->codepoints s))
+  (let (cps (string/to-codepoints s))
     (and (not (empty? cps))
       (not (any? (fn (cp) (or (< cp 48) (> cp 57))) cps)))))
 
@@ -51,8 +51,8 @@ ASCII digits — ignoring any `-prerelease` / `+build` suffix. The check a regis
 applies on publish; `version-satisfies?` is deliberately more forgiving, since a
 CONSTRAINT is usually written short (`\">= 0.3\"`)."
   (and (string? v)
-    (let (core (first (string-split (first (string-split v "+")) "-"))
-          parts (string-split core "."))
+    (let (core (first (string/split (first (string/split v "+")) "-"))
+          parts (string/split core "."))
       (and (= (count parts) 3)
         (not (any? (fn (p) (not (version-digit-run? p))) parts))))))
 
@@ -73,11 +73,11 @@ more identifiers outrank a prefix). `+build` metadata never affects order."
   "The pre-release identifiers of version string `v` (`\"1.0.0-rc.1\"` → `(\"rc\" \"1\")`), or
 nil when there is none. Everything after the first `-` (and before any `+build`), split on
 `.`. A `+build` suffix is dropped first — build metadata is not part of precedence."
-  (let (no-build (first (string-split v "+"))
+  (let (no-build (first (string/split v "+"))
         dash (index-of-str no-build "-"))
     (if (nil? dash)
       nil
-      (string-split (substring no-build (+ dash 1) (string-length no-build)) "."))))
+      (string/split (string/substring no-build (+ dash 1) (string/length no-build)) "."))))
 
 (defn- index-of-str
   (s sub)
@@ -155,7 +155,7 @@ everything (the \"no release yet\" placeholder a registry starts from)."
 (def *version-operators* ["~>" "<=" ">=" "<" ">" "=" "^"]) ; longest first: "<=" before "<"
 (defn- version-digit-start?
   (s)
-  (let (cps (string->codepoints s))
+  (let (cps (string/to-codepoints s))
     (and (not (empty? cps)) (>= (first cps) 48) (<= (first cps) 57))))
 
 (defn- version-split-constraint
@@ -167,10 +167,10 @@ everything (the \"no release yet\" placeholder a registry starts from)."
   ;; is how `"~> 1.0"` once came out as a silent `false`: `version-core` read `"~> 1"`
   ;; as 0, so the comparison was against garbage and the caller was told, confidently,
   ;; "not satisfied". An operator with no meaning has to say so.
-  (let (c (trim constraint)
-        op (find (fn (o) (starts-with? c o)) *version-operators*))
+  (let (c (string/trim constraint)
+        op (find (fn (o) (string/starts-with? c o)) *version-operators*))
     (cond
-      (not (nil? op)) [op (trim (substring c (string-length op) (string-length c)))]
+      (not (nil? op)) [op (string/trim (string/substring c (string/length op) (string/length c)))]
       (version-digit-start? c) ["=" c]
       else
         (error "version-satisfies?: unknown operator in "
@@ -244,11 +244,11 @@ everything (the \"no release yet\" placeholder a registry starts from)."
   "Compile a constraint STRING into a form `version-match?` checks quickly (see this
 module's overview). nil / \"\" compile to nil (no constraint). Raises on a malformed term,
 the same as `version-satisfies?` — compiling is where a bad constraint is caught."
-  (if (or (nil? constraint) (= (trim constraint) ""))
+  (if (or (nil? constraint) (= (string/trim constraint) ""))
     nil
     (let (terms (map (fn (term) (version-compile-term term constraint))
-                  (keep (fn (t) (let (tt (trim t)) (when (not (= tt "")) tt)))
-                    (string-split constraint ","))))
+                  (keep (fn (t) (let (tt (string/trim t)) (when (not (= tt "")) tt)))
+                    (string/split constraint ","))))
       {:terms terms
        :pre-cores (keep (fn (t) (get t :pre-core)) terms)})))
 
@@ -273,18 +273,18 @@ the same as `version-satisfies?` — compiling is where a bad constraint is caug
         (= cp 124)
         (= cp 94)
         (= cp 126))) ; | ^ ~
-    (string->codepoints wanted)))
+    (string/to-codepoints wanted)))
 
 (defn- version-compile-term
   (term constraint)
   ;; `constraint` is the whole original string, carried only so an error names what the
   ;; user actually wrote.
   (let ([op wanted] (version-split-constraint term))
-    (when (= (trim wanted) "")
+    (when (= (string/trim wanted) "")
       (error "version-satisfies?: no version in constraint " (pr-str constraint)))
-    (when (version-junk-in-version? (trim wanted))
+    (when (version-junk-in-version? (string/trim wanted))
       (error "version-satisfies?: "
-        (pr-str (trim wanted))
+        (pr-str (string/trim wanted))
         " in constraint "
         (pr-str constraint)
         " is not a single version — separate the terms with a comma, as in >=1.0.0, <2.0.0"))

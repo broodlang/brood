@@ -219,7 +219,7 @@
     (assert= (error-of (+ 1 "x")) "type error: +: expected number, got string (\"x\")")
     (assert= (error-of (first 5))
       "type error: first: expected list, vector, set, map or bytes, got int (5)")
-    (assert= (error-of (string-length :k))
+    (assert= (error-of (string/length :k))
       "type error: string-length: expected string, got keyword (:k)")
     (assert= (error-of (1 2 3)) "type error: cannot call non-function: 1"))
   (test "arity errors name the fn, the expected count, and what arrived"

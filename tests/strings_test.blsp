@@ -7,12 +7,12 @@
 
 (describe "case folding"
   (test "upper / lower"
-    (assert= (upper "Hello, World!") "HELLO, WORLD!")
-    (assert= (lower "Hello, World!") "hello, world!"))
+    (assert= (string/upper "Hello, World!") "HELLO, WORLD!")
+    (assert= (string/lower "Hello, World!") "hello, world!"))
   (test "idempotent on already-cased / non-alpha"
-    (assert= (upper "ABC 123") "ABC 123")
-    (assert= (lower "abc 123") "abc 123"))
-  (test "Unicode-aware" (assert= (upper "ß") "SS") (assert= (upper "naïve") "NAÏVE")))
+    (assert= (string/upper "ABC 123") "ABC 123")
+    (assert= (string/lower "abc 123") "abc 123"))
+  (test "Unicode-aware" (assert= (string/upper "ß") "SS") (assert= (string/upper "naïve") "NAÏVE")))
 
 (describe "string <-> number"
   (test "integers parse to ints"
@@ -41,25 +41,25 @@
 
 (describe "characters & lists"
   (test "char-at is char-indexed"
-    (assert= (char-at "hello" 0) "h")
-    (assert= (char-at "hello" 4) "o"))
+    (assert= (string/char-at "hello" 0) "h")
+    (assert= (string/char-at "hello" 4) "o"))
   (test "string->list yields 1-char strings"
-    (assert= (string->list "abc") (list "a" "b" "c"))
-    (assert= (string->list "") nil))
+    (assert= (string/to-list "abc") (list "a" "b" "c"))
+    (assert= (string/to-list "") nil))
   (test "list->string reassembles"
-    (assert= (list->string (list "a" "b" "c")) "abc")
-    (assert= (list->string (string->list "round-trip")) "round-trip")))
+    (assert= (string/from-list (list "a" "b" "c")) "abc")
+    (assert= (string/from-list (string/to-list "round-trip")) "round-trip")))
 
 (describe "substring"
   (test "three-arg form takes the range [start, end)"
-    (assert= (substring "hello" 1 4) "ell")
-    (assert= (substring "hello" 0 0) ""))
+    (assert= (string/substring "hello" 1 4) "ell")
+    (assert= (string/substring "hello" 0 0) ""))
   (test "two-arg form runs from start to the end"
-    (assert= (substring "hello" 2) "llo")
-    (assert= (substring "hello" 0) "hello")
-    (assert= (substring "hello" 5) ""))
+    (assert= (string/substring "hello" 2) "llo")
+    (assert= (string/substring "hello" 0) "hello")
+    (assert= (string/substring "hello" 5) ""))
   (test "two-arg form is equivalent to passing the length"
-    (assert= (substring "hello" 2) (substring "hello" 2 (string-length "hello")))))
+    (assert= (string/substring "hello" 2) (string/substring "hello" 2 (string/length "hello")))))
 
 (describe "display-width"
   (test "ASCII is one cell per character (like string-length)"
@@ -71,7 +71,7 @@
     (assert= (display-width "中文") 4))
   (test "a multi-codepoint emoji cluster is one double-width glyph"
     ;; string-length counts codepoints (>1); display-width counts cells (2).
-    (is (> (string-length "👨‍👩‍👧") 1))
+    (is (> (string/length "👨‍👩‍👧") 1))
     (assert= (display-width "👨‍👩‍👧") 2)))
 
 ;; The grapheme-INDEXED accessors (ADR-159). `string->graphemes` already gave the
@@ -84,42 +84,42 @@
 (def gr-s (str "a" "e\u{301}" "👍" "b"))
 (describe "grapheme-count / grapheme-at / substring-graphemes"
   (test "cluster count differs from the codepoint count"
-    (assert= (grapheme-count gr-s) 4)
-    (assert= (string-length gr-s) 5)
-    (assert= (grapheme-count "") 0)
-    (assert= (grapheme-count "abc") 3))
+    (assert= (string/grapheme-count gr-s) 4)
+    (assert= (string/length gr-s) 5)
+    (assert= (string/grapheme-count "") 0)
+    (assert= (string/grapheme-count "abc") 3))
   (test "grapheme-at reads the i-th cluster whole"
-    (assert= (grapheme-at gr-s 0) "a")
-    (assert= (grapheme-at gr-s 1) "e\u{301}")
-    (assert= (grapheme-at gr-s 2) "👍")
-    (assert= (grapheme-at gr-s 3) "b"))
+    (assert= (string/grapheme-at gr-s 0) "a")
+    (assert= (string/grapheme-at gr-s 1) "e\u{301}")
+    (assert= (string/grapheme-at gr-s 2) "👍")
+    (assert= (string/grapheme-at gr-s 3) "b"))
   (test "grapheme-at agrees with string->graphemes at every index"
-    (let (v (string->graphemes gr-s))
-      (assert= (map (fn (i) (grapheme-at gr-s i)) (range (grapheme-count gr-s)))
+    (let (v (string/to-graphemes gr-s))
+      (assert= (map (fn (i) (string/grapheme-at gr-s i)) (range (string/grapheme-count gr-s)))
         (map (fn (i) (nth v i)) (range (count v))))))
   (test "out of range yields the default, never an error (like nth/get)"
-    (assert= (grapheme-at gr-s 99) nil)
-    (assert= (grapheme-at gr-s 99 :none) :none)
-    (assert= (grapheme-at gr-s -1) nil)
-    (assert= (grapheme-at gr-s -1 :none) :none)
-    (assert= (grapheme-at "" 0) nil))
+    (assert= (string/grapheme-at gr-s 99) nil)
+    (assert= (string/grapheme-at gr-s 99 :none) :none)
+    (assert= (string/grapheme-at gr-s -1) nil)
+    (assert= (string/grapheme-at gr-s -1 :none) :none)
+    (assert= (string/grapheme-at "" 0) nil))
   (test "substring-graphemes slices on cluster boundaries"
-    (assert= (substring-graphemes gr-s 1 3) (str "e\u{301}" "👍"))
-    (assert= (substring-graphemes gr-s 2) "👍b")
-    (assert= (substring-graphemes gr-s 0 1) "a"))
+    (assert= (string/substring-graphemes gr-s 1 3) (str "e\u{301}" "👍"))
+    (assert= (string/substring-graphemes gr-s 2) "👍b")
+    (assert= (string/substring-graphemes gr-s 0 1) "a"))
   (test "the range is clamped at both ends, like take/drop"
-    (assert= (substring-graphemes gr-s 0 99) gr-s)
-    (assert= (substring-graphemes gr-s 3 1) "")
-    (assert= (substring-graphemes gr-s 99) "")
-    (assert= (substring-graphemes gr-s -5 2) (str "a" "e\u{301}")))
+    (assert= (string/substring-graphemes gr-s 0 99) gr-s)
+    (assert= (string/substring-graphemes gr-s 3 1) "")
+    (assert= (string/substring-graphemes gr-s 99) "")
+    (assert= (string/substring-graphemes gr-s -5 2) (str "a" "e\u{301}")))
   (test "slicing round-trips the whole string"
-    (assert= (substring-graphemes gr-s 0) gr-s)
-    (assert= (str (substring-graphemes gr-s 0 2) (substring-graphemes gr-s 2)) gr-s))
+    (assert= (string/substring-graphemes gr-s 0) gr-s)
+    (assert= (str (string/substring-graphemes gr-s 0 2) (string/substring-graphemes gr-s 2)) gr-s))
   (test "codepoint substring CAN split a cluster — the reason these exist"
-    ;; `(substring gr-s 1 2)` takes the bare `e` and orphans the combining mark;
+    ;; `(string/substring gr-s 1 2)` takes the bare `e` and orphans the combining mark;
     ;; the grapheme form keeps them together.
-    (assert= (substring gr-s 1 2) "e")
-    (assert= (substring-graphemes gr-s 1 2) "e\u{301}")))
+    (assert= (string/substring gr-s 1 2) "e")
+    (assert= (string/substring-graphemes gr-s 1 2) "e\u{301}")))
 
 (describe "escapes"
   ;; Beyond the named `\e` / `\n` / `\t` / `\r` / `\0` / `\\` / `\"`, Brood
@@ -194,7 +194,7 @@
     (assert= (last-index-of "hello" "h" 0) -1))
 
   ;; `index-of`'s `from` and `last-index-of` both moved into the kernel: `from` no longer
-  ;; builds `(substring coll from n)` first, and `last-index-of` is one native pass instead
+  ;; builds `(string/substring coll from n)` first, and `last-index-of` is one native pass instead
   ;; of a Brood loop calling `index-of` per match (which was O(matches × length) — 16.5×
   ;; then 16.4× per 4× of input; it is now flat, 540 ms → 1 ms at 6400 repeats). These pin
   ;; the semantics that move touched, especially the ones a byte-vs-char slip would break.
@@ -225,37 +225,37 @@
   ;; as the "is this pure ASCII" test for char↔byte conversion, as wrong SEARCH results on
   ;; non-ASCII text specifically.
   (test "string-length counts code points, not bytes"
-    (assert= 5 (string-length "hello"))
-    (assert= 5 (string-length "héllo"))
-    (assert= 3 (string-length "a😀b"))
-    (assert= 0 (string-length ""))
-    (assert= 2 (string-length "😀😀")))
+    (assert= 5 (string/length "hello"))
+    (assert= 5 (string/length "héllo"))
+    (assert= 3 (string/length "a😀b"))
+    (assert= 0 (string/length ""))
+    (assert= 2 (string/length "😀😀")))
   (test "the length is right for a freshly built string, not just a literal"
-    (assert= 11 (string-length (str "héllo" " " "wörld")))
-    (assert= 4 (string-length (substring "héllo wörld" 0 4)))
-    (assert= 3 (string-length (apply str (repeat 3 "é"))))
+    (assert= 11 (string/length (str "héllo" " " "wörld")))
+    (assert= 4 (string/length (string/substring "héllo wörld" 0 4)))
+    (assert= 3 (string/length (apply str (repeat 3 "é"))))
     ;; 1300 chars / 2600 BYTES, and over SHARED_BLOB_THRESHOLD — so this also covers the
     ;; shared-blob construction path, where the count is measured through the blob rather
     ;; than an inline String.
-    (assert= 1300 (string-length (apply str (repeat 1300 "é")))))
+    (assert= 1300 (string/length (apply str (repeat 1300 "é")))))
   (test "the length survives a round-trip through another process"
     ;; A send deep-copies into the receiver's heap, rebuilding the slot — and so its count.
     (let (me (self))
-      (spawn (send me [:len (string-length "héllo 😀 wörld")]))
+      (spawn (send me [:len (string/length "héllo 😀 wörld")]))
       (assert= 13 (receive ([:len n] n) (after 5000 :timeout)))))
 
   ;; `substring` takes an ASCII fast path (char index == byte offset → a direct slice)
   ;; because `char-at`, `starts-with?` and `ends-with?` are all Brood over it, so its
   ;; per-call cost is the floor for most string code. It used to copy the whole source
-  ;; string per call: `(char-at s 3)` on a 216 KB string cost ~11.5 µs and scaled with the
+  ;; string per call: `(string/char-at s 3)` on a 216 KB string cost ~11.5 µs and scaled with the
   ;; string, not with the work. A byte offset escaping onto the non-ASCII path would split
   ;; a character, so this checks EVERY range against a char-level reference.
   (test "substring matches a char-level reference over every range"
-    (let (ref-sub (fn (s i j) (apply str (take (- j i) (drop i (string->list s)))))
+    (let (ref-sub (fn (s i j) (apply str (take (- j i) (drop i (string/to-list s)))))
           chk (fn (s)
-                (let (n (string-length s))
+                (let (n (string/length s))
                   (every? (fn (i)
-                            (every? (fn (j) (= (substring s i j) (ref-sub s i j)))
+                            (every? (fn (j) (= (string/substring s i j) (ref-sub s i j)))
                               (range i (inc n))))
                     (range 0 (inc n))))))
       (is (chk "hello world"))
@@ -266,24 +266,24 @@
       (is (chk ""))
       (is (chk "😀"))))
   (test "substring's 2-arg form and bounds are unchanged"
-    (assert= "llo" (substring "hello" 2))
-    (assert= "😀b" (substring "a😀b" 1))
-    (assert= "" (substring "abc" 3 3))
-    (is (try (do (substring "abc" 0 4) false) (catch e true)))
-    (is (try (do (substring "abc" -1 2) false) (catch e true))))
+    (assert= "llo" (string/substring "hello" 2))
+    (assert= "😀b" (string/substring "a😀b" 1))
+    (assert= "" (string/substring "abc" 3 3))
+    (is (try (do (string/substring "abc" 0 4) false) (catch e true)))
+    (is (try (do (string/substring "abc" -1 2) false) (catch e true))))
   (test "string-span scans runs correctly on non-ASCII text"
     ;; Same fast path, in the tokenizer inner loop: `start` is a CHAR index.
-    (assert= 3 (string-span "aaabbb" 0 "a"))
-    (assert= 6 (string-span "aaabbb" 3 "b"))
-    (assert= 3 (string-span "ééé😀" 0 "é"))
-    (assert= 4 (string-span "ééé😀" 3 "😀"))
-    (assert= 2 (string-span-until "ab|cd" 0 "|"))
-    (assert= 5 (string-span-until "éb|cd" 3 "|")))
+    (assert= 3 (string/span "aaabbb" 0 "a"))
+    (assert= 6 (string/span "aaabbb" 3 "b"))
+    (assert= 3 (string/span "ééé😀" 0 "é"))
+    (assert= 4 (string/span "ééé😀" 3 "😀"))
+    (assert= 2 (string/span-until "ab|cd" 0 "|"))
+    (assert= 5 (string/span-until "éb|cd" 3 "|")))
 
   (test "search on non-ASCII text agrees with the char count"
     ;; If the ASCII flag were computed wrongly, these would return byte offsets.
     (let (s "héllo wörld héllo")
-      (assert= 17 (string-length s))
+      (assert= 17 (string/length s))
       (assert= 12 (index-of s "héllo" 1))
       (assert= 12 (last-index-of s "héllo"))
       (assert= 7 (index-of s "ö"))))
@@ -318,57 +318,57 @@
     (refute (includes? {:a 1} 99))))
 
 (describe "join"
-  (test "places the separator between elements" (assert= (join ", " (list "a" "b" "c")) "a, b, c"))
-  (test "single element has no separator" (assert= (join ", " (list "solo")) "solo"))
-  (test "empty collection is the empty string" (assert= (join ", " nil) "")))
+  (test "places the separator between elements" (assert= (string/join ", " (list "a" "b" "c")) "a, b, c"))
+  (test "single element has no separator" (assert= (string/join ", " (list "solo")) "solo"))
+  (test "empty collection is the empty string" (assert= (string/join ", " nil) "")))
 
 (describe "split"
-  (test "splits on each occurrence" (assert= (string-split "a,b,c" ",") (list "a" "b" "c")))
-  (test "keeps empty fields" (assert= (string-split "a,,b" ",") (list "a" "" "b")))
+  (test "splits on each occurrence" (assert= (string/split "a,b,c" ",") (list "a" "b" "c")))
+  (test "keeps empty fields" (assert= (string/split "a,,b" ",") (list "a" "" "b")))
   (test "no separator present yields the whole string"
-    (assert= (string-split "abc" ",") (list "abc")))
-  (test "multi-char separator" (assert= (string-split "a::b::c" "::") (list "a" "b" "c")))
+    (assert= (string/split "abc" ",") (list "abc")))
+  (test "multi-char separator" (assert= (string/split "a::b::c" "::") (list "a" "b" "c")))
   (test "empty separator splits into characters"
-    (assert= (string-split "abc" "") (list "a" "b" "c")))
-  (test "split then join round-trips" (assert= (join "," (string-split "x,y,z" ",")) "x,y,z")))
+    (assert= (string/split "abc" "") (list "a" "b" "c")))
+  (test "split then join round-trips" (assert= (string/join "," (string/split "x,y,z" ",")) "x,y,z")))
 
 (describe "replace"
-  (test "replaces every occurrence" (assert= (replace "a-b-c" "-" "+") "a+b+c"))
+  (test "replaces every occurrence" (assert= (string/replace "a-b-c" "-" "+") "a+b+c"))
   (test "multi-char old / new"
-    (assert= (replace "one fish two fish" "fish" "cat") "one cat two cat"))
-  (test "absent pattern is unchanged" (assert= (replace "hello" "z" "!") "hello"))
-  (test "empty old leaves the string unchanged" (assert= (replace "hello" "" "!") "hello")))
+    (assert= (string/replace "one fish two fish" "fish" "cat") "one cat two cat"))
+  (test "absent pattern is unchanged" (assert= (string/replace "hello" "z" "!") "hello"))
+  (test "empty old leaves the string unchanged" (assert= (string/replace "hello" "" "!") "hello")))
 
 (describe "whitespace"
-  (test "blank?" (is (blank? "")) (is (blank? "   ")) (is (blank? "\t\n ")) (refute (blank? " x ")))
+  (test "blank?" (is (string/blank? "")) (is (string/blank? "   ")) (is (string/blank? "\t\n ")) (refute (string/blank? " x ")))
   (test "trim removes both ends"
-    (assert= (trim "  hi there  ") "hi there")
-    (assert= (trim "\n\thi\n") "hi")
-    (assert= (trim "no-padding") "no-padding"))
+    (assert= (string/trim "  hi there  ") "hi there")
+    (assert= (string/trim "\n\thi\n") "hi")
+    (assert= (string/trim "no-padding") "no-padding"))
   (test "triml / trimr remove one end"
-    (assert= (triml "  hi  ") "hi  ")
-    (assert= (trimr "  hi  ") "  hi"))
-  (test "all-whitespace trims to empty" (assert= (trim "    ") "")))
+    (assert= (string/triml "  hi  ") "hi  ")
+    (assert= (string/trimr "  hi  ") "  hi"))
+  (test "all-whitespace trims to empty" (assert= (string/trim "    ") "")))
 
 (describe "padding & repetition"
   (test "string-repeat concatenates n copies"
-    (assert= (string-repeat "=" 5) "=====")
-    (assert= (string-repeat "ab" 3) "ababab"))
+    (assert= (string/repeat "=" 5) "=====")
+    (assert= (string/repeat "ab" 3) "ababab"))
   (test "string-repeat with n <= 0 is empty"
-    (assert= (string-repeat "x" 0) "")
-    (assert= (string-repeat "x" -2) ""))
+    (assert= (string/repeat "x" 0) "")
+    (assert= (string/repeat "x" -2) ""))
   (test "pad-left right-justifies with spaces"
-    (assert= (pad-left "42" 6) "    42")
-    (assert= (pad-left "" 3) "   "))
+    (assert= (string/pad-left "42" 6) "    42")
+    (assert= (string/pad-left "" 3) "   "))
   (test "pad-right left-justifies with spaces"
-    (assert= (pad-right "hi" 6) "hi    ")
-    (assert= (pad-right "" 3) "   "))
+    (assert= (string/pad-right "hi" 6) "hi    ")
+    (assert= (string/pad-right "" 3) "   "))
   (test "pad-* never truncate an over-wide string"
-    (assert= (pad-left "toolong" 3) "toolong")
-    (assert= (pad-right "toolong" 3) "toolong"))
+    (assert= (string/pad-left "toolong" 3) "toolong")
+    (assert= (string/pad-right "toolong" 3) "toolong"))
   (test "pad-* are exact-width at the boundary"
-    (assert= (string-length (pad-left "ab" 2)) 2)
-    (assert= (string-length (pad-right "ab" 5)) 5)))
+    (assert= (string/length (string/pad-left "ab" 2)) 2)
+    (assert= (string/length (string/pad-right "ab" 5)) 5)))
 
 (describe "to-fixed (fixed-decimal rendering)"
   (test "renders exactly n decimal places"
@@ -388,7 +388,7 @@
   (test "a generous-but-bounded count is still allowed"
     (assert= (count (to-fixed 1.0 1000)) 1002))
   (test "lines up in a fixed-width column via pad-left"
-    (assert= (pad-left (to-fixed 1.5 2) 7) "   1.50")))
+    (assert= (string/pad-left (to-fixed 1.5 2) 7) "   1.50")))
 
 (describe "format (printf-style)"
   (test "a format string with no specifiers is returned unchanged"
@@ -430,7 +430,7 @@
 ;; across per-process heaps); the parent fans in and checks the strings survived
 ;; the round-trip intact. :isolated so it doesn't contend for the runner's
 ;; mailbox with the parallel suite.
-(defn str-pad-worker (parent i) (send parent [:p i (pad-left (number->string i) 4)]))
+(defn str-pad-worker (parent i) (send parent [:p i (string/pad-left (number->string i) 4)]))
 (defn str-spawn-padders (parent n)
   (when (> n 0) (spawn (str-pad-worker parent n)) (str-spawn-padders parent (- n 1))))
 (defn str-collect (got total acc)
@@ -446,64 +446,64 @@
       (assert= (get merged 20) "  20")))
   (test "string-repeat result survives a send"
     (let (me (self))
-      (spawn (send me (string-repeat "-" 8)))
+      (spawn (send me (string/repeat "-" 8)))
       (assert= (receive) "--------"))))
 
 (describe "capitalize"
   (test "basic"
-    (assert= (capitalize "hello") "Hello"))
+    (assert= (string/capitalize "hello") "Hello"))
   (test "already capitalized"
-    (assert= (capitalize "Hello World") "Hello world"))
+    (assert= (string/capitalize "Hello World") "Hello world"))
   (test "all caps lowered except first"
-    (assert= (capitalize "HELLO") "Hello"))
+    (assert= (string/capitalize "HELLO") "Hello"))
   (test "empty string"
-    (assert= (capitalize "") ""))
+    (assert= (string/capitalize "") ""))
   (test "single char"
-    (assert= (capitalize "a") "A")))
+    (assert= (string/capitalize "a") "A")))
 
 (describe "string->codepoints / codepoints->string"
   (test "ASCII codepoints"
-    (assert= (string->codepoints "ABC") [65 66 67]))
+    (assert= (string/to-codepoints "ABC") [65 66 67]))
   (test "empty string"
-    (assert= (string->codepoints "") []))
+    (assert= (string/to-codepoints "") []))
   (test "roundtrip via codepoints"
     (let (s "Hello, 世界")
-      (assert= s (codepoints->string (string->codepoints s)))))
+      (assert= s (string/from-codepoints (string/to-codepoints s)))))
   (test "codepoints->string from a vector"
-    (assert= "ABC" (codepoints->string [65 66 67])))
+    (assert= "ABC" (string/from-codepoints [65 66 67])))
   (test "non-ASCII codepoint"
-    (assert= (string->codepoints "é") [233]))
+    (assert= (string/to-codepoints "é") [233]))
   (test "astral codepoint (one code point, not surrogates)"
-    (assert= (string->codepoints "🙂") [128578]))
+    (assert= (string/to-codepoints "🙂") [128578]))
   (test "across processes: codes vector survives send/receive"
     (let (me (self))
-      (spawn (send me [:codes (string->codepoints "héλ🙂")]))
+      (spawn (send me [:codes (string/to-codepoints "héλ🙂")]))
       (receive
         ([:codes v] (do
                       (assert= v [104 233 955 128578])
-                      (assert= "héλ🙂" (codepoints->string v))))))))
+                      (assert= "héλ🙂" (string/from-codepoints v))))))))
 
 (describe "string-span / string-span-until (native char-class scanners)"
   ; at end → end
   (test "string-span: end of the run of set-members from start"
     ; three spaces
-    (assert= (string-span "   abc" 0 " \t\n") 3)
+    (assert= (string/span "   abc" 0 " \t\n") 3)
     ; first char not in set → start
-    (assert= (string-span "abc" 0 " ") 0)
-    (assert= (string-span "aaab" 0 "a") 3)
-    (assert= (string-span "abc" 3 "x") 3))
+    (assert= (string/span "abc" 0 " ") 0)
+    (assert= (string/span "aaab" 0 "a") 3)
+    (assert= (string/span "abc" 3 "x") 3))
   (test "string-span-until: end of the run of NON-members (stops at a set char)"
     ; up to the space
-    (assert= (string-span-until "abc def" 0 " ") 3)
+    (assert= (string/span-until "abc def" 0 " ") 3)
     ; no delimiter → whole string
-    (assert= (string-span-until "abc" 0 ";") 3)
-    (assert= (string-span-until "(foo bar)" 1 " ()") 4))
+    (assert= (string/span-until "abc" 0 ";") 3)
+    (assert= (string/span-until "(foo bar)" 1 " ()") 4))
   ; 'é' is one char
   (test "char-indexed, not byte-indexed (multibyte)"
-    (assert= (string-span-until "é x" 0 " ") 1))
+    (assert= (string/span-until "é x" 0 " ") 1))
   (test "empty set: span is empty, span-until is the whole tail"
-    (assert= (string-span "abc" 0 "") 0)
-    (assert= (string-span-until "abc" 0 "") 3)))
+    (assert= (string/span "abc" 0 "") 0)
+    (assert= (string/span-until "abc" 0 "") 3)))
 
 ;; ---- long multi-byte strings: char<->byte conversion ------------------------
 ;;
@@ -519,7 +519,7 @@
 ;; 1-, 2-, 3- and 4-byte chars in every stride position; 500 chars / 1000 bytes.
 (def- mb-unit "aé漢🙂x")
 (def- mb-text (apply str (repeat 100 mb-unit)))
-(def- mb-chars (into [] (string->list mb-text)))
+(def- mb-chars (into [] (string/to-list mb-text)))
 ;; The other shape that matters: an ASCII run whose string is non-ASCII only at the end,
 ;; so a conversion inside the run cannot take either fast path.
 (def- mb-tail (str (apply str (repeat 400 "x")) "é"))
@@ -533,14 +533,14 @@
 
 (describe "long multi-byte strings (indexed char<->byte conversion)"
   (test "every char index agrees with the code-point reference"
-    (assert= (into [] (map (fn (i) (char-at mb-text i)) (range 0 (string-length mb-text))))
+    (assert= (into [] (map (fn (i) (string/char-at mb-text i)) (range 0 (string/length mb-text))))
       mb-chars))
   (test "substring from a rising start is the reference tail"
-    (assert= (into [] (map (fn (i) (substring mb-text i (+ i 5))) [0 1 31 32 33 100 495]))
+    (assert= (into [] (map (fn (i) (string/substring mb-text i (+ i 5))) [0 1 31 32 33 100 495]))
       (into [] (map (fn (i) (apply str (subvec mb-chars i (+ i 5)))) [0 1 31 32 33 100 495]))))
   (test "substring to the end, and the whole string"
-    (assert= (substring mb-text 497) "漢🙂x")
-    (assert= (substring mb-text 0 (string-length mb-text)) mb-text))
+    (assert= (string/substring mb-text 497) "漢🙂x")
+    (assert= (string/substring mb-text 0 (string/length mb-text)) mb-text))
   (test "an incremental scan finds every occurrence at its char index"
     ;; `🙂` is char 3 of each 5-char unit. This is the `inc-scan` sweep row's shape.
     (assert= (into [] (mb-scan mb-text "🙂" 0 nil))
@@ -551,14 +551,14 @@
     (assert= (last-index-of mb-text "漢" 3) 2)
     (assert= (last-index-of mb-text "zz") -1))
   (test "char-class scans start from a converted offset"
-    (assert= (string-span-until mb-text 100 "🙂") 103)
-    (assert= (string-span mb-tail 0 "x") 400)
-    (assert= (string-span-until mb-tail 32 "é") 400))
+    (assert= (string/span-until mb-text 100 "🙂") 103)
+    (assert= (string/span mb-tail 0 "x") 400)
+    (assert= (string/span-until mb-tail 32 "é") 400))
   (test "a non-ASCII string with an ASCII interior converts inside the run"
-    (assert= (char-at mb-tail 399) "x")
-    (assert= (char-at mb-tail 400) "é")
+    (assert= (string/char-at mb-tail 399) "x")
+    (assert= (string/char-at mb-tail 400) "é")
     (assert= (index-of mb-tail "é" 100) 400)
-    (assert= (substring mb-tail 398 401) "xxé"))
+    (assert= (string/substring mb-tail 398 401) "xxé"))
   (test "across processes: the receiver's own slot converts the same way"
     ;; The string crosses as a deep copy into a fresh slot, so the receiver builds its
     ;; own index — the send path must not carry a stale one.
@@ -567,7 +567,7 @@
                [:idx
                  (index-of mb-text "🙂" 400)
                  :sub
-                 (substring mb-text 400 405)
+                 (string/substring mb-text 400 405)
                  :last
                  (last-index-of mb-text "漢")]))
       (receive

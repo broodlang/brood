@@ -29,14 +29,14 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
 (defn- env-lead-ws
   (line i n)
   "The column where `line`'s leading whitespace (spaces / tabs) ends."
-  (if (and (< i n) (or (= (char-at line i) " ") (= (char-at line i) "\t")))
+  (if (and (< i n) (or (= (string/char-at line i) " ") (= (string/char-at line i) "\t")))
     (env-lead-ws line (inc i) n)
     i))
 
 (defn- env-find
   (line i n ch)
   "The offset of the next single-char `ch` at or after `i` in `line`, or -1."
-  (cond (>= i n) -1 (= (char-at line i) ch) i else (env-find line (inc i) n ch)))
+  (cond (>= i n) -1 (= (string/char-at line i) ch) i else (env-find line (inc i) n ch)))
 
 (defn- env-key-char?
   (c)
@@ -46,7 +46,7 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
     (= c ".")))
 (defn- env-key-end
   (line i n)
-  (if (and (< i n) (env-key-char? (char-at line i))) (env-key-end line (inc i) n) i))
+  (if (and (< i n) (env-key-char? (string/char-at line i))) (env-key-end line (inc i) n) i))
 
 ;; ---- per-line spans ---------------------------------------------------------
 
@@ -54,8 +54,8 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
   (line base v n)
   "A one-element string span for a quoted value starting at offset `v` (to its closing
 quote, or end of line if unclosed); `()` for an unquoted value (the default face)."
-  (if (and (< v n) (or (= (char-at line v) "\"") (= (char-at line v) "'")))
-    (let (q (char-at line v) close (env-find line (inc v) n q) e (if (< close 0) n (inc close)))
+  (if (and (< v n) (or (= (string/char-at line v) "\"") (= (string/char-at line v) "'")))
+    (let (q (string/char-at line v) close (env-find line (inc v) n q) e (if (< close 0) n (inc close)))
       (list [(+ base v) (+ base e) env-face-string]))
     '()))
 
@@ -63,11 +63,11 @@ quote, or end of line if unclosed); `()` for an unquoted value (the default face
   (line base lead n)
   "Spans for a `KEY=value` line (offsets shifted by `base`): an `export` keyword when
 present, the key, and a quoted value. `()` when the line isn't an assignment."
-  (let (rest (substring line lead n)
-        exp? (starts-with? rest "export ")
+  (let (rest (string/substring line lead n)
+        exp? (string/starts-with? rest "export ")
         ks (if exp? (+ lead 7) lead)
         ke (env-key-end line ks n))
-    (if (and (> ke ks) (< ke n) (= (char-at line ke) "="))
+    (if (and (> ke ks) (< ke n) (= (string/char-at line ke) "="))
       (append (if exp? (list [(+ base lead) (+ base (+ lead 6)) env-face-export]) '())
         (cons [(+ base ks) (+ base ke) env-face-key]
           (env-value-spans line base (inc ke) n)))
@@ -77,10 +77,10 @@ present, the key, and a quoted value. `()` when the line isn't an assignment."
   (line base)
   "The spans for one `line` starting at offset `base`: a `#` comment whole, else the
 assignment spans (key / export / quoted value), else none."
-  (let (n (string-length line) lead (env-lead-ws line 0 n))
+  (let (n (string/length line) lead (env-lead-ws line 0 n))
     (cond
       (>= lead n) '()
-      (= (char-at line lead) "#") (list [(+ base lead) (+ base n) env-face-comment])
+      (= (string/char-at line lead) "#") (list [(+ base lead) (+ base n) env-face-comment])
       else (env-assign-spans line base lead n))))
 
 (defn- env-lex
@@ -89,8 +89,8 @@ assignment spans (key / export / quoted value), else none."
 spans in reverse."
   (if (>= i n)
     (reverse acc)
-    (let (e (min n (string-span-until src i "\n"))
-          spans (env-line-spans (substring src i e) i))
+    (let (e (min n (string/span-until src i "\n"))
+          spans (env-line-spans (string/substring src i e) i))
       (env-lex src (inc e) n (fold (fn (a s) (cons s a)) acc spans)))))
 
 (defn env-spans (src)
@@ -99,4 +99,4 @@ spans in reverse."
 editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Covers `#`
 comments, the `export` keyword, the `KEY` of an assignment, and quoted values. Spans
 are ascending and non-overlapping; unquoted values carry no span (the default face)."
-  (env-lex src 0 (string-length src) '()))
+  (env-lex src 0 (string/length src) '()))

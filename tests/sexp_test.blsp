@@ -67,7 +67,7 @@
       ; not the in-docstring (x)
       (let ([base sub] (narrow src dp))
         (assert= base 0))
-      (assert= (point-forward src dp) (string-length src)))))
+      (assert= (point-forward src dp) (string/length src)))))
 ;; Structural motion narrows to the forms around point (`sexp/narrow`) so it's
 ;; O(neighbouring forms), not O(buffer). These pin that the narrowed answer equals the
 ;; whole-buffer one, including deep in a file with many preceding top-level forms (where
@@ -82,9 +82,9 @@
     (let (prev (last (filter (fn (f) (<= (get f :end) point)) (forms-of (bf-enc text point)))))
       (if (nil? prev) point (get prev :start))))
   (def many
-    (str (join "" (map (fn (i) (str "(defn f" i " () " i ")\n")) (range 300)))
+    (str (string/join "" (map (fn (i) (str "(defn f" i " () " i ")\n")) (range 300)))
       "(map g (h x))"))
-  (def n (string-length many))
+  (def n (string/length many))
   (test "narrowed motion matches the whole-buffer walk at many points (incl. deep + boundaries)"
     (doseq (p [0 1 25 (- n 13) (- n 12) (- n 7) (- n 6) (- n 1)])
       (assert= (point-forward many p) (bf-forward many p))
@@ -92,8 +92,8 @@
   (test "narrow genuinely slices (base ≤ point, slice shorter than the whole text)"
     (let ([base sub] (narrow many (- n 6)))
       (is (<= base (- n 6)))
-      (is (> (string-length sub) 0))
-      (is (< (string-length sub) n)))))
+      (is (> (string/length sub) 0))
+      (is (< (string/length sub) n)))))
 
 ;; `scan-form-end` is the native forward window-end scan `narrow` uses (it replaced an
 ;; interpreted `char-at` loop that was ~85% of every structural motion). It counts
@@ -244,6 +244,6 @@
                                 a
                                 (cons [text p] a)))
                         acc
-                        (range 0 (+ 2 (string-length text)))))
+                        (range 0 (+ 2 (string/length text)))))
                 nil texts))
       (assert= 0 (count bad)))))

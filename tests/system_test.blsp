@@ -33,7 +33,7 @@
 (describe "system/cmd"
   (test "echo returns stdout"
     (let (r (system/cmd "echo" ["hello"]))
-      (assert= "hello" (trim (get r :stdout)))))
+      (assert= "hello" (string/trim (get r :stdout)))))
   (test "exit code 0 for success"
     (let (r (system/cmd "true"))
       (assert= 0 (get r :exit))))
@@ -42,7 +42,7 @@
       (assert= 1 (get r :exit))))
   (test "stderr is captured"
     (let (r (system/cmd "sh" ["-c" "echo err >&2"]))
-      (assert= "err" (trim (get r :stderr)))))
+      (assert= "err" (string/trim (get r :stderr)))))
   (test "result has :stdout :stderr :exit"
     (let (r (system/cmd "true"))
       (is (contains? r :stdout))
@@ -63,10 +63,10 @@
   (test "returns a string"
     (is (string? (cwd))))
   (test "is an absolute path"
-    (is (starts-with? (cwd) "/"))))
+    (is (string/starts-with? (cwd) "/"))))
 
 (describe "hostname"
   (test "returns a string"
     (is (string? (hostname))))
   (test "is non-empty"
-    (is (> (string-length (hostname)) 0))))
+    (is (> (string/length (hostname)) 0))))

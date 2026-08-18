@@ -410,7 +410,7 @@
     (let (path (get req :path)
           release-path (str "/api/v1/packages/" nm "/releases/" version))
       (cond
-        (starts-with? path "/api/v1/packages?")
+        (string/starts-with? path "/api/v1/packages?")
           (net/http/ok (str "{\"packages\":[{\"name\":\""
                          nm "\",\"latest_version\":\"" version "\",\"description\":\"" desc "\"}]}"))
         (= path (str release-path "/tarball"))
@@ -710,12 +710,12 @@
 ;; resolver's prefetch relies on): `{:releases [{:version V :dependencies [...]} ...]}`.
 (defn rr-releases-json (releases)
   (str "{\"releases\":["
-    (join ","
+    (string/join ","
       (map (fn (kv)
              (str "{\"version\":\""
                (first kv)
                "\",\"dependencies\":["
-               (join ","
+               (string/join ","
                  (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}"))
                    (get (second kv) :deps)))
                "]}"))
@@ -728,7 +728,7 @@
     "\",\"version\":\""
     version
     "\",\"dependencies\":["
-    (join ","
+    (string/join ","
       (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}")) deps))
     "]}"))
 
@@ -745,7 +745,7 @@
 ;; …/releases/<v> (metadata), …/releases/<v>/tarball (bytes).
 (defn rr-handler (spec)
   (fn (req)
-    (let (parts (string-split (get req :path) "/")
+    (let (parts (string/split (get req :path) "/")
           n (count parts))
       (let (nm (nth parts 4)
             releases (get spec nm))

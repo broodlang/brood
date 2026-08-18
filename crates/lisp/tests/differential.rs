@@ -160,7 +160,7 @@ const CORPUS: &[&str] = &[
     "(defn ma ((x) :one) ((x y) :two) ((x y & r) [:many (count r)])) [(ma 1) (ma 1 2) (ma 1 2 3 4)]",
     // a variadic helper driven in a tail loop (rest list rebuilt each call)
     "(defn vmax (& xs) (reduce (fn (a b) (if (< a b) b a)) (first xs) (rest xs))) (vmax 3 9 2 7 1)",
-    // pattern-dispatch fns (lower to match* whose no-match arm is `(throw [:match-error
+    // pattern-dispatch fns (string/lower to match* whose no-match arm is `(throw [:match-error
     // (quote ctx) m (quote pats)])`): the VM now compiles `quote` + vector/map literals,
     // so these run on the VM instead of deferring. Recursive + non-total + the throw path.
     "(defn pfib ((0) 0) ((1) 1) ((n) (+ (pfib (- n 1)) (pfib (- n 2))))) (pfib 12)",

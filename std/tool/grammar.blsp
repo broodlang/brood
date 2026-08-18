@@ -28,7 +28,7 @@ over `(special-forms)` + `encode`."
 `(special-forms)` minus the `def…` heads (those get a distinct name-capturing rule,
 so they must not also land in the keyword alternation). The shared input to every
 grammar target."
-  (filter (fn (k) (not (starts-with? k "def"))) (special-forms)))
+  (filter (fn (k) (not (string/starts-with? k "def"))) (special-forms)))
 
 ;; ---- regex helpers (TextMate uses the Oniguruma engine) ----------------------
 
@@ -45,13 +45,13 @@ grammar target."
   (s)
   "Backslash-escape regex metacharacters in `s`, so a literal keyword matches itself
 (a `*` in a keyword name → `\\*`)."
-  (fold (fn (acc c) (replace acc c (str "\\" c))) s grammar-meta))
+  (fold (fn (acc c) (string/replace acc c (str "\\" c))) s grammar-meta))
 
 (defn- grammar-alternation
   (keywords)
   "An escaped, longest-first `a|b|c` regex alternation. Longest-first so a prefix
 can't shadow a longer form (`->>` before `->`)."
-  (join "|" (map grammar-escape (sort-by (fn (k) (- (count k))) keywords))))
+  (string/join "|" (map grammar-escape (sort-by (fn (k) (- (count k))) keywords))))
 
 ;; ---- TextMate grammar (VS Code) ----------------------------------------------
 
@@ -125,7 +125,7 @@ node-text, so no regex escaping)."
     ";; special forms + core macros in head position (the canonical (special-forms)).\n"
     "((list . (symbol) @keyword.control)\n"
     " (#any-of? @keyword.control "
-    (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
+    (string/join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
     "))\n"))
 
 ;; ---- Emacs font-lock list ----------------------------------------------------
@@ -135,7 +135,7 @@ node-text, so no regex escaping)."
 `special-keywords`, so `brood-mode` can generate its highlight list too."
   (str "(defconst brood-special-forms\n"
     "  '("
-    (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
+    (string/join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
     ")\n"
     "  \"Brood special forms and core macros to highlight.\n"
     "Generated from `(special-forms)` by `nest grammar emacs` — do not edit by hand.\")\n"))

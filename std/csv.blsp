@@ -213,7 +213,7 @@ escaped quote inside a quoted field, and both `\\n` and `\\r\\n` line endings.
 An empty string returns an empty list."
   (if (= s "")
     nil
-    (let (v (into [] (string->list s)))
+    (let (v (into [] (string/to-list s)))
       ; index a code-point vector: O(1) nth, O(n) scan
       (csv-parse-loop v 0 (count v) :field-start nil nil nil))))
 
@@ -261,19 +261,19 @@ emits as its digits, and a record emits as the string its type defines rather th
 field map (or, as before `to-str`, a type error out of the quoting scan)."
   (let (s (if (string? v) v (to-str v)))
     (if (csv-field-needs-quoting? s)
-      (str "\"" (replace s "\"" "\"\"") "\"")
+      (str "\"" (string/replace s "\"" "\"\"") "\"")
       s)))
 
 (defn- csv-emit-row
   (fields)
   "Emit a single CSV row as a string (no trailing newline)."
-  (join "," (map csv-emit-field (seq fields))))
+  (string/join "," (map csv-emit-field (seq fields))))
 
 (defn- csv-emit-rows
   (rows acc)
   "Emit a list of rows into a newline-separated string."
   (if (empty? rows)
-    (join "\n" (reverse acc))
+    (string/join "\n" (reverse acc))
     (csv-emit-rows (rest rows) (cons (csv-emit-row (first rows)) acc))))
 
 (defn csv-emit (rows)

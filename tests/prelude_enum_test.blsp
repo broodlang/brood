@@ -65,7 +65,7 @@
 
 (describe "min-by"
   (test "by string length"
-    (assert= "a" (min-by string-length '("ccc" "bb" "a"))))
+    (assert= "a" (min-by string/length '("ccc" "bb" "a"))))
   (test "by identity"
     (assert= 1 (min-by identity '(3 1 2))))
   (test "by negative"
@@ -73,7 +73,7 @@
 
 (describe "max-by"
   (test "by string length"
-    (assert= "ccc" (max-by string-length '("ccc" "bb" "a"))))
+    (assert= "ccc" (max-by string/length '("ccc" "bb" "a"))))
   (test "by identity"
     (assert= 3 (max-by identity '(3 1 2))))
   (test "by negative"

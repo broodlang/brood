@@ -58,8 +58,8 @@ UTF-8-encodes a string."
 ;; Codepoint → nibble value (int keys — the decode loop walks a `string->codepoints`
 ;; vector, so lookups hash an int, not a fresh 1-char string per char).
 (def- encoding-hex-val
-  (let (lower (string->codepoints "0123456789abcdef")
-        upper (string->codepoints "0123456789ABCDEF"))
+  (let (lower (string/to-codepoints "0123456789abcdef")
+        upper (string/to-codepoints "0123456789ABCDEF"))
     (fold (fn (m i) (assoc (assoc m (nth lower i) i) (nth upper i) i))
       {}
       (range 16))))
@@ -85,7 +85,7 @@ UTF-8-encodes a string."
   (s)
   (let (
         ; codepoint vector: O(1) nth, int lookups
-        s (string->codepoints s)
+        s (string/to-codepoints s)
         n (count s))
     (if (= (rem n 2) 0)
       (encoding-hex-decode-loop s 0 n nil)
@@ -112,8 +112,8 @@ binary payload (digests, salts, wire bytes)."
 ;; ASCII byte codes and builds the string ONCE with utf8-bytes->string — like
 ;; hex-encode. The old `(str acc …)` per 3-byte group was O(n^2) (each str copies
 ;; the whole accumulator) and spiked peak RSS on large inputs.
-(def- encoding-b64-std-codes (string->codepoints encoding-b64-std))
-(def- encoding-b64-url-codes (string->codepoints encoding-b64-url))
+(def- encoding-b64-std-codes (string/to-codepoints encoding-b64-std))
+(def- encoding-b64-url-codes (string/to-codepoints encoding-b64-url))
 ; the code point of "="
 (def- encoding-b64-pad 61)
 ;; Encode a byte sequence to base64 using the given 64-entry code-point vector.
@@ -174,7 +174,7 @@ UTF-8 form."
 ;; not a fresh 1-char string per char).
 (defn- encoding-b64-val-map
   (alpha)
-  (let (cs (string->codepoints alpha))
+  (let (cs (string/to-codepoints alpha))
     (fold (fn (m i) (assoc m (nth cs i) i))
       {}
       (range 64))))
@@ -189,7 +189,7 @@ UTF-8 form."
   (s vals)
   (let (
         ; codepoint vector: O(1) nth, int lookups
-        s (string->codepoints (replace s "=" ""))
+        s (string/to-codepoints (string/replace s "=" ""))
         n (count s)
         tail (rem n 4))
     (if (= tail 1)

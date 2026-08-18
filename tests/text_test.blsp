@@ -1,7 +1,9 @@
 ;; Plain-text utilities (std/text.blsp): `fill` — greedy word-wrap to a column width.
 ;; Register-only; discovered and run by `nest test` and cargo test (crates/lisp/tests/
-;; suite.rs). This file is a namespace so it can `(:use text)` and refer `fill` bare.
-(defmodule text-test (:use text) (:use test))
+;; suite.rs). This file is a namespace so it can `(:use string)` and refer `fill` bare.
+;; `:exclude [repeat]` keeps the prelude's generic `(repeat n x)` in scope — `string`
+;; also defines a `repeat` (string×count concatenation), which we don't use here.
+(defmodule text-test (:use string :exclude [repeat]) (:use test))
 
 ; 5 > 4 — breaks
 (describe "text/fill — greedy word wrap"

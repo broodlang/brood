@@ -31,13 +31,13 @@
 
 (defn escape (raw)
   "HTML-escape `&`, `<`, `>` in `raw` (coerced to a string). `&` must go first."
-  (-> (str raw) (replace "&" "&amp;") (replace "<" "&lt;") (replace ">" "&gt;")))
+  (-> (str raw) (string/replace "&" "&amp;") (string/replace "<" "&lt;") (string/replace ">" "&gt;")))
 
 (defn- inline
   ;; One paragraph as HTML: split on backticks, wrap the odd (inside-a-pair) segments
   ;; in <code>, escape every segment. An unbalanced backtick just leaves a stray token.
   (para)
-  (let (parts (string-split para "`"))
+  (let (parts (string/split para "`"))
     (apply str
       (map (fn (pair)
              (let ([index segment] pair)
@@ -49,8 +49,8 @@
 (defn- leading-space-count
   (line i)
   "The number of leading space/tab characters in `line`, scanning from `i`."
-  (if (and (< i (string-length line))
-        (let (c (substring line i (+ i 1))) (or (= c " ") (= c "\t"))))
+  (if (and (< i (string/length line))
+        (let (c (string/substring line i (+ i 1))) (or (= c " ") (= c "\t"))))
     (leading-space-count line (+ i 1))
     i))
 
@@ -59,36 +59,36 @@
   "True if `block` is an indented code example — its first non-blank line starts with
   whitespace. Such a block's newlines are significant (each example on its own line), so it must
   render as `<pre>` rather than a `<p>` whose newlines HTML would collapse into one run-on line."
-  (let (lines (filter (fn (l) (not (= (trim l) ""))) (string-split block "\n")))
+  (let (lines (filter (fn (l) (not (= (string/trim l) ""))) (string/split block "\n")))
     (and (not (empty? lines)) (> (leading-space-count (first lines) 0) 0))))
 
 (defn- dedent
   (block)
   "Strip the common leading indentation from every line of `block`, so an indented docstring
   code example renders flush-left in its `<pre>` rather than doubly indented."
-  (let (lines (string-split block "\n")
-        non-blank (filter (fn (l) (not (= (trim l) ""))) lines)
+  (let (lines (string/split block "\n")
+        non-blank (filter (fn (l) (not (= (string/trim l) ""))) lines)
         n (if (empty? non-blank) 0 (apply min (map (fn (l) (leading-space-count l 0)) non-blank))))
-    (join "\n"
-      (map (fn (l) (if (>= (string-length l) n) (substring l n (string-length l)) l)) lines))))
+    (string/join "\n"
+      (map (fn (l) (if (>= (string/length l) n) (string/substring l n (string/length l)) l)) lines))))
 
 (defn prose (text)
   "Render a docstring as safe HTML: blank-line-separated blocks become `<p>` paragraphs (with
   inline `code` spans), except an indented block, which becomes a `<pre>` code example with its
   line breaks preserved. Every value is HTML-escaped. Empty/nil text renders to the empty string."
-  (if (or (nil? text) (= (trim (str text)) ""))
+  (if (or (nil? text) (= (string/trim (str text)) ""))
     ""
     (apply str
       (map (fn (block)
              (if (code-block? block)
                (str "<pre class=\"doc-example\"><code>" (escape (dedent block)) "</code></pre>")
                (str "<p>" (inline block) "</p>")))
-        (filter (fn (block) (not (= (trim block) "")))
-          (string-split (str text) "\n\n"))))))
+        (filter (fn (block) (not (= (string/trim block) "")))
+          (string/split (str text) "\n\n"))))))
 
 ;; ---- anchors ----------------------------------------------------------------
 
-(defn- slug (raw) (replace (replace (str raw) "/" "-") " " "-"))
+(defn- slug (raw) (string/replace (string/replace (str raw) "/" "-") " " "-"))
 (defn module-anchor (module-name) (str "m-" (slug module-name)))
 (defn def-anchor (module-name definition-name)
   (str "d-" (slug module-name) "-" (slug definition-name)))
@@ -103,7 +103,7 @@
   (module-name sig)
   (cond
     (nil? sig) sig
-    (starts-with? sig "(") (str "(" module-name "/" (substring sig 1))
+    (string/starts-with? sig "(") (str "(" module-name "/" (string/substring sig 1))
     else (str module-name "/" sig)))
 
 (defn- definition-html

@@ -119,10 +119,10 @@ string, not absolute (`/…`) or home-anchored (`~…`), with no `..` segment. T
 first (cheap) of two gates; the second is the symlink-resolving check in
 `mcp-project-path`."
   (and (string? rel)
-    (> (string-length rel) 0)
-    (not (starts-with? rel "/"))
-    (not (starts-with? rel "~"))
-    (not (includes? (string-split rel "/") ".."))))
+    (> (string/length rel) 0)
+    (not (string/starts-with? rel "/"))
+    (not (string/starts-with? rel "~"))
+    (not (includes? (string/split rel "/") ".."))))
 
 (defn- mcp-under-root?
   (abs)
@@ -135,7 +135,7 @@ the tree through a symlink)."
         root (canonicalize *project-root*))
     (and (string? real)
       (string? root)
-      (or (= real root) (starts-with? real (str root "/"))))))
+      (or (= real root) (string/starts-with? real (str root "/"))))))
 
 (defn- mcp-project-path
   (rel)
@@ -159,7 +159,7 @@ sandbox boundary the `write`/`edit` tools share."
   "The shared tail of `write`/`edit`: a `.blsp` file at absolute `abs` is loaded
 + checked (so the result mirrors `load`'s `:diagnostics`/`:shadows`) and tagged
 with its project-relative `:path`; any other file just confirms the write."
-  (if (ends-with? rel ".blsp")
+  (if (string/ends-with? rel ".blsp")
     (assoc (mcp-load-checked abs) :path rel)
     {:ok true :path rel}))
 
@@ -208,14 +208,14 @@ image stays in sync with disk."
         (if (not (file-exists? abs))
           {:ok false :error (str "edit: no such file: " rel)}
           (let (text (slurp abs)
-                hits (- (count (string-split text old)) 1))
+                hits (- (count (string/split text old)) 1))
             (cond
               (= hits 0) {:ok false :error (str "edit: :old not found in " rel)}
               (> hits 1)
                 {:ok false
                  :error (str "edit: :old occurs "
                           hits " times in " rel " — make it unique")}
-              else (let (_w (spit abs (replace text old new)))
+              else (let (_w (spit abs (string/replace text old new)))
                      (mcp-write-result rel abs))))))
       (catch e
         {:ok false :error (mcp-error-shape e)}))))
@@ -699,7 +699,7 @@ Brood pattern, `std/tool/explain.blsp`)."
               :required ["name"]}
      :handler mcp-callers-tool}
     {:name "apropos"
-     :description "Discover globals whose name contains a pattern (substring search over the flat namespace). Returns {:matches [name ...]}. Use this to find out whether something exists before guessing exact names."
+     :description "Discover globals whose name contains a pattern (string/substring search over the flat namespace). Returns {:matches [name ...]}. Use this to find out whether something exists before guessing exact names."
      :schema {:type "object"
               :properties {:pattern {:type "string"
                                      :description "Substring to search for in global names"}}

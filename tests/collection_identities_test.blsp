@@ -58,7 +58,7 @@
     (= (count (reverse v)) (count v))))
 
 (defn str-laws (a b)
-  (and (= (string-length (str a b)) (+ (string-length a) (string-length b)))
+  (and (= (string/length (str a b)) (+ (string/length a) (string/length b)))
     (= (str a "") a)
     (= (str "" a) a)))
 
@@ -101,20 +101,20 @@
     (apply str acc)
     (mb-build (lcg s) (- n 1) (cons (nth mb-alphabet (rem s 7)) acc))))
 (def- mb-text (mb-build 8675309 600 nil))
-(def- mb-cps (into [] (string->list mb-text)))
-(def- mb-len (string-length mb-text))
+(def- mb-cps (into [] (string/to-list mb-text)))
+(def- mb-len (string/length mb-text))
 
 (defn- mb-laws
   (i j)
-  (and (= (char-at mb-text i) (nth mb-cps i))
+  (and (= (string/char-at mb-text i) (nth mb-cps i))
     ; the char index the language speaks
-    (= (substring mb-text i j) (apply str (subvec mb-cps i j)))
-    (= (string-length (substring mb-text i j)) (- j i))
+    (= (string/substring mb-text i j) (apply str (subvec mb-cps i j)))
+    (= (string/length (string/substring mb-text i j)) (- j i))
     ; forward search from i lands on i, since the char at i is the needle
-    (= (index-of mb-text (char-at mb-text i) i) i)
+    (= (index-of mb-text (string/char-at mb-text i) i) i)
     ; and the last occurrence strictly before i+1 is i
-    (= (last-index-of mb-text (char-at mb-text i) (+ i 1)) i)
-    (if (< i j) (= (index-of mb-text (substring mb-text i j) i) i) true)))
+    (= (last-index-of mb-text (string/char-at mb-text i) (+ i 1)) i)
+    (if (< i j) (= (index-of mb-text (string/substring mb-text i j) i) i) true)))
 
 (defn check-mb (s n)
   (if (= n 0)

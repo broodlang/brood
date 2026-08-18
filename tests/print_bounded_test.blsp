@@ -30,13 +30,13 @@
     (assert= "\"xxxx…\"" (binding (*print-string-length* 4) (pr-str-bounded (long-string 100)))))
   (test "the elision marker sits INSIDE the quotes, so the form is still closed"
     (let (s (binding (*print-string-length* 8) (pr-str-bounded (long-string 50))))
-      (assert= "\"" (substring s (dec (string-length s)) (string-length s)))
-      (assert= 11 (string-length s)))) ; 2 quotes + 8 chars + the marker
+      (assert= "\"" (string/substring s (dec (string/length s)) (string/length s)))
+      (assert= 11 (string/length s)))) ; 2 quotes + 8 chars + the marker
   (test "a string within the bound prints exactly as pr-str does"
     (assert= (pr-str "hello") (binding (*print-string-length* 10) (pr-str-bounded "hello"))))
   (test "nil lifts the bound"
     (assert= 102
-      (string-length (binding (*print-string-length* nil)
+      (string/length (binding (*print-string-length* nil)
                        (pr-str-bounded (long-string 100))))))
   (test "the VALUE is cut before printing, so an escape is never halved"
     ;; cutting `pr-str`'s output at 3 would leave `"a\` — a dangling escape and an
@@ -46,7 +46,7 @@
   (test "a huge string is bounded by DEFAULT — no binding needed"
     ;; the point of the whole exercise: a display protocol that forgot to think about
     ;; size still cannot flood, because the printer already did the thinking
-    (is (< (string-length (pr-str-bounded (long-string 100000))) 5000)))
+    (is (< (string/length (pr-str-bounded (long-string 100000))) 5000)))
   (test "a bounded string leaf INSIDE a collection is bounded too"
     (assert= "[\"xx…\" 1]"
       (binding (*print-string-length* 2)

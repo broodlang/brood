@@ -10,7 +10,7 @@
   (test "special-keywords is exactly (special-forms) minus the def… heads"
     (let (kw (special-keywords))
       ;; def-heads get a distinct name-capturing rule, so they're excluded here
-      (is (every? (fn (k) (not (starts-with? k "def"))) kw))
+      (is (every? (fn (k) (not (string/starts-with? k "def"))) kw))
       (is (not (includes? kw "defn")))
       (is (not (includes? kw "defmodule")))
       ;; everything else from the canonical list is present
@@ -20,7 +20,7 @@
       (is (includes? kw "->>"))
       ;; the count matches: the canonical list with def-heads filtered out
       (assert= (count kw)
-        (count (filter (fn (k) (not (starts-with? k "def"))) (special-forms))))))
+        (count (filter (fn (k) (not (string/starts-with? k "def"))) (special-forms))))))
 
   (test "(tmlanguage) is valid JSON of the TextMate shape"
     (let (g (parse (tmlanguage)))

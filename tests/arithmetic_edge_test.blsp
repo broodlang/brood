@@ -100,7 +100,7 @@
     ;; two elements: MAX-1000 and (MAX-1000)+1000 would be MAX (excluded), so just one
     (assert= (reduce + 0 (range (- I64-MAX 1) I64-MAX 1000)) (- I64-MAX 1)))
   (test "join over a range ending at MAX doesn't overflow the walker"
-    (assert= (join "," (range (- I64-MAX 1) I64-MAX 1000)) (str (- I64-MAX 1))))
+    (assert= (string/join "," (range (- I64-MAX 1) I64-MAX 1000)) (str (- I64-MAX 1))))
   (test "materialising a range near MAX terminates cleanly"
     (assert= (into [] (range (- I64-MAX 2) I64-MAX 1)) [(- I64-MAX 2) (- I64-MAX 1)])))
 

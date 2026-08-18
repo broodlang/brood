@@ -37,7 +37,7 @@
     (do (json/parse (slurp path)) :ok)
     (catch e :rejected)))
 
-(defn- js-kind (path) (substring (path-basename path) 0 1))
+(defn- js-kind (path) (string/substring (path-basename path) 0 1))
 
 ;; [oks rejects wrongs] for one class, where `wrongs` lists the offending basenames.
 (defn- js-scan

@@ -336,14 +336,14 @@
   "The public names `module` contributes to the flat table — read from `global-names`, so it
 is what a `:use` would actually import, not what the source looks like."
   (let (prefix (str module "/")
-        plen (string-length prefix))
+        plen (string/length prefix))
     (into #{}
-      (map (fn (n) (substring n plen (string-length n)))
+      (map (fn (n) (string/substring n plen (string/length n)))
         (filter
           (fn (n)
-            (and (starts-with? n prefix)
+            (and (string/starts-with? n prefix)
               ;; a nested module (`editor/x` under `editor`) is not an export
-              (not (includes? (substring n plen (string-length n)) "/"))
+              (not (includes? (string/substring n plen (string/length n)) "/"))
               (not (private? (symbol n))))) ; module-private (ADR-146, recorded fact)
           (map name (global-names)))))))
 

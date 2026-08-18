@@ -21,13 +21,13 @@
   (test "deeply nested parens are rejected cleanly (reader depth bound)"
     ;; Construct (((((... 1000 deep ...))))). The reader should error out,
     ;; not blow the host stack. `read-string` evaluates to a value or throws.
-    (let (src (str (string-repeat "(" 1000) "x" (string-repeat ")" 1000)))
+    (let (src (str (string/repeat "(" 1000) "x" (string/repeat ")" 1000)))
       (assert-error (read-string src))))
 
   (test "a very long atom is fine"
     ;; A bare 3000-char token reads as a *symbol* (not a string), so compare its
     ;; spelling — `(= a-string a-symbol)` is always false (different types).
-    (let (long (string-repeat "abc" 1000)
+    (let (long (string/repeat "abc" 1000)
           parsed (read-string long))
       (is (symbol? parsed))
       (assert= long (str parsed)))))
@@ -83,8 +83,8 @@
 
   (test "1 MB string allocates as a Shared blob"
     (when (bound? '%blob-ptr)
-      (let (big (string-repeat "X" 1048576))
-        (assert= 1048576 (string-length big))
+      (let (big (string/repeat "X" 1048576))
+        (assert= 1048576 (string/length big))
         (is (not (nil? (%blob-ptr big)))))))
 
   (test "30 000-element cons list build + traverse"
@@ -156,15 +156,15 @@
 
   (test "boundary: 255 B is Inline, 256 B is Shared (nil vs ptr)"
     (when (bound? '%blob-ptr)
-      (assert= nil (%blob-ptr (string-repeat "x" 255)))
-      (is (not (nil? (%blob-ptr (string-repeat "x" 256)))))
+      (assert= nil (%blob-ptr (string/repeat "x" 255)))
+      (is (not (nil? (%blob-ptr (string/repeat "x" 256)))))
       (assert= nil (%blob-ptr ""))))
 
   (test "200-worker fan-out: every worker observes the same blob ptr"
     (when (bound? '%blob-ptr)
       (let (n 200
             ; 10 KB Shared blob
-            big (string-repeat "F" 10240)
+            big (string/repeat "F" 10240)
             parent-ptr (%blob-ptr big)
             me (self)
             ws (adv-spawn-echoers me n nil))
@@ -177,7 +177,7 @@
   (test "5000 sequential sends of one blob to one worker keep identity stable"
     (when (bound? '%blob-ptr)
       (let (n 5000
-            big (string-repeat "B" 4096)
+            big (string/repeat "B" 4096)
             parent-ptr (%blob-ptr big)
             me (self)
             w (spawn (adv-bombard-echo me n)))
@@ -187,7 +187,7 @@
 
   (test "blob sent to a worker and echoed back keeps the same SharedBlob ptr"
     (when (bound? '%blob-ptr)
-      (let (big (string-repeat "R" 1024)
+      (let (big (string/repeat "R" 1024)
             parent-ptr (%blob-ptr big)
             me (self)
             w (spawn (adv-echo-back me)))

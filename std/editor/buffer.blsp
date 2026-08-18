@@ -54,7 +54,7 @@ never the buffer itself. Drive it with `buffer-edit` / `buffer-query`."
   "The column at the end of `line` — its length excluding any trailing newline.
 Where `end-of-line` lands and the rightmost column point can hold on that line."
   (let (lt (rope-line (get buf :rope) line))
-    (if (ends-with? lt "\n") (dec (string-length lt)) (string-length lt))))
+    (if (string/ends-with? lt "\n") (dec (string/length lt)) (string/length lt))))
 
 ;; ---- construction -----------------------------------------------------------
 ;;
@@ -243,17 +243,17 @@ line editor's M-f/M-b notion of a word."
 (defn- buffer-scan-fwd
   (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
-  (if (or (>= i n) (not (pred (char-at text i)))) i (buffer-scan-fwd text (inc i) n pred)))
+  (if (or (>= i n) (not (pred (string/char-at text i)))) i (buffer-scan-fwd text (inc i) n pred)))
 
 (defn- buffer-scan-bwd
   (text i pred)
   "Largest index ≤ `i` (down to 0) whose preceding char fails `pred` — retreat while `pred`."
-  (if (or (<= i 0) (not (pred (char-at text (dec i))))) i (buffer-scan-bwd text (dec i) pred)))
+  (if (or (<= i 0) (not (pred (string/char-at text (dec i))))) i (buffer-scan-bwd text (dec i) pred)))
 
 (defn forward-word (buf)
   "Point moved to the end of the next word forward (skip non-word chars, then the word)."
   (let (text (buffer-text buf)
-        n (string-length text)
+        n (string/length text)
         i (buffer-scan-fwd text (get buf :point) n (fn (c) (not (buffer-word-char? c)))))
     (goto-char buf (buffer-scan-fwd text i n buffer-word-char?))))
 
@@ -285,7 +285,7 @@ the line is blank or all whitespace."
 (defn- buffer-line-blank?
   (buf line)
   "True if buffer `line` is empty or whitespace-only (a paragraph separator)."
-  (blank? (buffer-line-at buf line)))
+  (string/blank? (buffer-line-at buf line)))
 
 (defn- buffer-scan-lines
   (buf line n step want-blank?)
@@ -333,7 +333,7 @@ buffer if none) — Emacs `forward-paragraph` (M-})."
   (text i n)
   "Index past the run of closing quotes/brackets at `i` — what may sit between a
 sentence's terminator and the whitespace after it (`he said \"stop.\"`)."
-  (if (or (>= i n) (not (includes? buffer-sentence-closers (char-at text i))))
+  (if (or (>= i n) (not (includes? buffer-sentence-closers (string/char-at text i))))
     i
     (buffer-sentence-closers-end text (inc i) n)))
 
@@ -341,10 +341,10 @@ sentence's terminator and the whitespace after it (`he said \"stop.\"`)."
   (text i n)
   "Index just past a sentence ending AT `i` — a terminator, its closing quotes/brackets,
 then whitespace or `n` — or nil when `i` doesn't end a sentence."
-  (if (not (includes? buffer-sentence-enders (char-at text i)))
+  (if (not (includes? buffer-sentence-enders (string/char-at text i)))
     nil
     (let (j (buffer-sentence-closers-end text (inc i) n))
-      (if (or (>= j n) (buffer-sentence-space? (char-at text j))) j nil))))
+      (if (or (>= j n) (buffer-sentence-space? (string/char-at text j))) j nil))))
 
 (defn- buffer-scan-sentence-fwd
   (text i limit)
@@ -550,19 +550,19 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
 (defn- undo-common-prefix
   (a b i)
   ;; how many leading chars `a` and `b` share — bounds the char diff to what changed
-  (if (or (>= i (string-length a))
-        (>= i (string-length b))
-        (not= (char-at a i) (char-at b i)))
+  (if (or (>= i (string/length a))
+        (>= i (string/length b))
+        (not= (string/char-at a i) (string/char-at b i)))
     i
     (undo-common-prefix a b (inc i))))
 
 (defn- undo-common-suffix
   (a b lo k)
   ;; how many trailing chars they share, never eating into the shared prefix `lo`
-  (let (la (string-length a) lb (string-length b))
+  (let (la (string/length a) lb (string/length b))
     (if (or (>= k (- la lo))
           (>= k (- lb lo))
-          (not= (char-at a (- la k 1)) (char-at b (- lb k 1))))
+          (not= (string/char-at a (- la k 1)) (string/char-at b (- lb k 1))))
       k
       (undo-common-suffix a b lo (inc k)))))
 
@@ -588,7 +588,7 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
   ;; the current text really has there.
   (let (adds (undo-hunk-chars hunk :insert)
         dels (undo-hunk-chars hunk :delete)
-        na (string-length adds)
+        na (string/length adds)
         overlap (if (> na 0)
                   (and (< n hi) (> (+ n na) lo))
                   (and (>= n lo) (<= n hi)))
@@ -606,25 +606,25 @@ Cheap despite being character-level: the shared prefix and suffix are trimmed fi
 the diff only ever runs over the span that actually changed."
   (let (pre (undo-common-prefix old new 0)
         suf (undo-common-suffix old new pre 0)
-        o-mid (substring old pre (- (string-length old) suf))
-        n-mid (substring new pre (- (string-length new) suf))
-        head (substring new 0 pre)
-        tail (substring new (- (string-length new) suf) (string-length new)))
+        o-mid (string/substring old pre (- (string/length old) suf))
+        n-mid (string/substring new pre (- (string/length new) suf))
+        head (string/substring new 0 pre)
+        tail (string/substring new (- (string/length new) suf) (string/length new)))
     (cond
       ;; nothing changed
       (and (= o-mid "") (= n-mid "")) new
       ;; too large to diff character-wise: treat the whole span as one change
-      (> (max (string-length o-mid) (string-length n-mid)) *undo-region-char-budget*)
+      (> (max (string/length o-mid) (string/length n-mid)) *undo-region-char-budget*)
         (if (and (< pre
                    hi)
               (> (+ pre
-                   (string-length n-mid))
+                   (string/length n-mid))
                 lo))
           (str head
             o-mid tail)
           new)
       else
-        (let (ops (diff/diff-seq (string->list o-mid) (string->list n-mid))
+        (let (ops (diff/diff-seq (string/to-list o-mid) (string/to-list n-mid))
               r (fold (fn (acc op)
                         (let ([n out hunk] acc
                               [tag c] op)
@@ -875,21 +875,21 @@ inside the range collapses to `lo`, one at/after `hi` moves left by the deleted 
   "Insert string `s` at point; point advances past it. Recorded for undo. Markers after the
 insertion point shift with the text. Throws if `buf` is read-only."
   (buffer-barf-if-read-only buf)
-  (if (= (string-length s) 0)
+  (if (= (string/length s) 0)
     buf
     (let (p (get buf :point)
           _ (buffer-barf-if-protected-insert buf p)
           buf (buffer-push-undo buf))
       (buffer-adjust-spans (buffer-adjust-markers (assoc buf
                                                     :rope (rope-insert (get buf :rope) p s)
-                                                    :point (+ p (string-length s))
+                                                    :point (+ p (string/length s))
                                                     :mark nil)
                              :insert
                              p
-                             (string-length s))
+                             (string/length s))
         :insert
         p
-        (string-length s)))))
+        (string/length s)))))
 
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
@@ -1037,13 +1037,13 @@ line's start does **not** pull that trailing line in (Emacs's line-wise conventi
 
 (defn- buffer-ws-run-start
   (txt i)
-  (if (and (> i 0) (buffer-horizontal-space? (char-at txt (dec i))))
+  (if (and (> i 0) (buffer-horizontal-space? (string/char-at txt (dec i))))
     (buffer-ws-run-start txt (dec i))
     i))
 
 (defn- buffer-ws-run-end
   (txt i n)
-  (if (and (< i n) (buffer-horizontal-space? (char-at txt i)))
+  (if (and (< i n) (buffer-horizontal-space? (string/char-at txt i)))
     (buffer-ws-run-end txt (inc i) n)
     i))
 
@@ -1058,7 +1058,7 @@ replaces it, `fixup-whitespace` decides what to leave in it, and a cycling comma
 the original text out of it before touching anything."
   (let (txt (buffer-text buf)
         p (buffer-point buf))
-    [(buffer-ws-run-start txt p) (buffer-ws-run-end txt p (string-length txt))]))
+    [(buffer-ws-run-start txt p) (buffer-ws-run-end txt p (string/length txt))]))
 
 (defn collapse-whitespace (buf keep)
   "The run of spaces/tabs SURROUNDING point replaced by `keep` — `\" \"` for Emacs's
@@ -1221,7 +1221,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                        (buffer-serve nb
                                          subs
                                          v
-                                         (take 64 (cons [v lo hi (string-length repl) origin] rec))))))
+                                         (take 64 (cons [v lo hi (string/length repl) origin] rec))))))
       ;; A BASED splice: computed against `base`, so first TRANSFORM it over every
       ;; splice applied since (the `rec` ring, oldest-first over the window) — two
       ;; people typing in different places inside one round-trip window both land
@@ -1254,7 +1254,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                               subs
                                               v
                                               (take 64
-                                                (cons [v tlo thi (string-length trepl) origin] rec))))))
+                                                (cons [v tlo thi (string/length trepl) origin] rec))))))
       ;; A cursor move as data: no text change at all — the push carries markers + names
       ;; only, so presence traffic on a large document never ships its text.
       ([:marker-set id pos origin] (let (nb (buffer-marker-set buf id pos) v (inc version))
@@ -1282,7 +1282,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                          (buffer-serve nb
                            subs
                            v
-                           (take 64 (cons [v n n (string-length s) nil] rec))))))
+                           (take 64 (cons [v n n (string/length s) nil] rec))))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer-serve buf subs version rec)))
       ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
       ;; its copy after an ambiguous collision needs the text AND the version it

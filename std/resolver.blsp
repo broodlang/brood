@@ -522,7 +522,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
   (let (lines (pg-report ctx ic)
         leaves (pg-cause-leaves (get ic :cause) nil))
     (str "dependency resolution failed:\n"
-      (join "\n" (map (fn (l) (str "  " l)) lines))
+      (string/join "\n" (map (fn (l) (str "  " l)) lines))
       (pg-availability-lines ctx leaves))))
 
 ;; Whether a cause / incompatibility is an original fact (a leaf) rather than a [:derived …]
@@ -554,10 +554,10 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
               allowed (pg-term-allows ctx pkg (nth kv 1)))
           (if (empty? allowed)
             (str "no version of " (name pkg) " satisfies every requirement on it")
-            (str (name pkg) " must be " (join " or " allowed))))
+            (str (name pkg) " must be " (string/join " or " allowed))))
       else
         (str "the requirements on "
-          (join " and " (map (fn (kv) (name (nth kv 0))) reals))
+          (string/join " and " (map (fn (kv) (name (nth kv 0))) reals))
           " cannot all hold"))))
 
 ;; One premise's rendering: an external cause is its plain fact; a derived cause is stated by
@@ -660,7 +660,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
                  (name pkg)
                  (if (empty? real)
                    " has no versions available"
-                   (str " available: " (join ", " real))))))
+                   (str " available: " (string/join ", " real))))))
         pkgs))))
 
 (defn pg-no-versions-msg (state ctx ics pkg)
@@ -670,7 +670,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
       (str "dependency resolution failed:\n  no version of "
         (name pkg)
         " satisfies every requirement (available: "
-        (join ", " universe)
+        (string/join ", " universe)
         ")"))))
 
 ;; A requirement's constraint rendered as a trailing suffix — " <constraint>" for a real range,

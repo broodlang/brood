@@ -689,28 +689,28 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // string
     def(
         heap,
-        "string-length",
+        "string/length",
         Arity::exact(1),
         Sig::new(vec![string], int),
         string_length,
     );
     def(
         heap,
-        "substring",
+        "string/substring",
         Arity::range(2, 3),
         Sig::with_rest(vec![string, int], int, string),
         substring,
     );
     def(
         heap,
-        "string-span",
+        "string/span",
         Arity::exact(3),
         Sig::new(vec![string, int, string], int),
         string_span,
     );
     def(
         heap,
-        "string-span-until",
+        "string/span-until",
         Arity::exact(3),
         Sig::new(vec![string, int, string], int),
         string_span_until,
@@ -753,7 +753,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // ~840 ms in the editor's project-file scan. Rust's `str::split` is one O(n) pass.
     def(
         heap,
-        "string-split",
+        "string/split",
         Arity::exact(2),
         Sig::new(vec![string, string], list_ty),
         string_split,
@@ -764,7 +764,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // call per char. One O(n) pass to the vector the text parsers index.
     def(
         heap,
-        "string->codepoints",
+        "string/to-codepoints",
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(int)),
         string_to_codepoints,
@@ -775,7 +775,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // reads the same compare the same under Brood's byte-structural `=`.
     def(
         heap,
-        "string->graphemes",
+        "string/to-graphemes",
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(string)),
         string_to_graphemes,
@@ -785,28 +785,28 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // of every cluster in the string, per keystroke. These walk to the index instead.
     def(
         heap,
-        "grapheme-count",
+        "string/grapheme-count",
         Arity::exact(1),
         Sig::new(vec![string], int),
         grapheme_count,
     );
     def(
         heap,
-        "grapheme-at",
+        "string/grapheme-at",
         Arity::range(2, 3),
         Sig::new(vec![string, int], any),
         grapheme_at,
     );
     def(
         heap,
-        "substring-graphemes",
+        "string/substring-graphemes",
         Arity::range(2, 3),
         Sig::new(vec![string, int], string),
         substring_graphemes,
     );
     def(
         heap,
-        "string-normalize",
+        "string/normalize",
         Arity::exact(2),
         Sig::new(vec![string, kw], string),
         string_normalize,
@@ -827,14 +827,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // these + `substring`/`%str-index-of`/`str` (std/prelude.blsp).
     def(
         heap,
-        "upper",
+        "string/upper",
         Arity::exact(1),
         Sig::new(vec![string], string),
         upper,
     );
     def(
         heap,
-        "lower",
+        "string/lower",
         Arity::exact(1),
         Sig::new(vec![string], string),
         lower,
@@ -3309,32 +3309,32 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%set-remove", &["s", "x"], "A fresh set like s with element x removed (absent → unchanged). O(log n)."),
     ("%set-has?", &["s", "x"], "Is x an element of set s? O(log n)."),
     ("%set-count", &["s"], "The number of elements in set s. O(1) — the CHAMP root tracks its size."),
-    ("string-length", &["s"], "The number of characters in string s."),
+    ("string/length", &["s"], "The number of characters in string s."),
     ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length."),
-    ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
-    ("string-split", &["s", "sep"], "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters."),
-    ("string->codepoints", &["s"], "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes))."),
+    ("string/substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string/length s), so (string/substring s start) is \"from start to the end\"."),
+    ("string/split", &["s", "sep"], "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters."),
+    ("string/to-codepoints", &["s"], "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes))."),
     (
-        "grapheme-count",
+        "string/grapheme-count",
         &["s"],
         "How many extended grapheme clusters s has — the length a human means, and the exclusive upper bound for grapheme-at. One O(n) pass, no allocation.",
     ),
     (
-        "grapheme-at",
+        "string/grapheme-at",
         &["s", "i", "default"],
         "The i-th grapheme cluster of s as a string, or default (else nil) when i is out of range. The grapheme-indexed char-at: walks to i instead of materialising every cluster, so a cursor step is not O(line length).",
     ),
     (
-        "substring-graphemes",
+        "string/substring-graphemes",
         &["s", "start", "end"],
         "The half-open grapheme-cluster range [start, end) of s (end optional = to the end), clamped to the ends. The grapheme-indexed substring — plain substring is codepoint-indexed and can slice a cluster in half.",
     ),
-    ("string->graphemes", &["s"], "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string->codepoints; (apply str (string->graphemes s)) is s."),
-    ("string-normalize", &["s", "form"], "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text."),
-    ("string-span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string-span-until."),
-    ("string-span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string-length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string-span."),
-    ("upper", &["s"], "s upper-cased (Unicode-aware)."),
-    ("lower", &["s"], "s lower-cased (Unicode-aware)."),
+    ("string/to-graphemes", &["s"], "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string->codepoints; (apply str (string/to-graphemes s)) is s."),
+    ("string/normalize", &["s", "form"], "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text."),
+    ("string/span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string-span-until."),
+    ("string/span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string/length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string-span."),
+    ("string/upper", &["s"], "s upper-cased (Unicode-aware)."),
+    ("string/lower", &["s"], "s lower-cased (Unicode-aware)."),
     ("char->int", &["s"], "Unicode codepoint of the first character of string s (identical to the byte value for ASCII)."),
     ("int->char", &["n"], "A 1-char string for Unicode codepoint n. Errors on an invalid codepoint."),
     ("string->utf8-bytes", &["s"], "The UTF-8 encoding of s as a bytes value."),
@@ -3429,7 +3429,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("scan-tokens", &["s"], "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens)."),
     ("scan-form-start-2", &["s", "pos"], "[prev start] — the greatest column-0 form-start offset <= pos AND the one before it, from a SINGLE forward pass. What tool/sexp narrowing actually wants: computing the pair as two scan-form-start calls runs the O(pos) lexical pass twice over the same prefix. prev is 0 when there is no earlier form start, matching what the second call returned there."),
     ("scan-form-start", &["s", "pos"], "The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer."),
-    ("scan-form-end", &["s", "from", "n-forms"], "The char offset just after n-forms top-level forms starting at char offset from, skipping strings/comments and tracking bracket depth, or (string-length s) if the text ends first. The forward window-end companion to scan-form-start: tool/sexp narrowing uses the pair to bound structural motion to the neighbourhood of point in ONE native pass, replacing an interpreted char-at loop that was the dominant cost of every keystroke-driven motion."),
+    ("scan-form-end", &["s", "from", "n-forms"], "The char offset just after n-forms top-level forms starting at char offset from, skipping strings/comments and tracking bracket depth, or (string/length s) if the text ends first. The forward window-end companion to scan-form-start: tool/sexp narrowing uses the pair to bound structural motion to the neighbourhood of point in ONE native pass, replacing an interpreted char-at loop that was the dominant cost of every keystroke-driven motion."),
     ("span-runs", &["text", "base", "spans", "ranges"], "Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. With optional overlay ranges ([lo hi face], may overlap/be unordered) each char's face is its span face with every covering range face merged on top (later wins). Adjacent equal-face runs coalesce. The highlight span->runs tiler (fontify-runs), in Rust. Faces are opaque maps."),
     ("clipboard-get", &[], "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature)."),
     ("clipboard-set!", &["s"], "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."),

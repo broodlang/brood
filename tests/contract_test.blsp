@@ -139,7 +139,7 @@
 (defn c-sum (& xs) (reduce + 0 xs))
 (sig! c-sum (& int -> int))
 
-(defn c-join-strs (sep & parts) (join sep parts))
+(defn c-join-strs (sep & parts) (string/join sep parts))
 (sig! c-join-strs (string & string -> string))
 
 (describe "rest param contracts (sig! with &)"

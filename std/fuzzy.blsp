@@ -43,7 +43,7 @@ recursion — not the native search underneath it. Optimise there, and measure f
 `qlow` isn't a subsequence of `clow`. Both args are already lower-cased."
   (if (>= qi qn)
     (reverse acc)
-    (let (pos (fuzzy-next clow (char-at qlow qi) ci cn))
+    (let (pos (fuzzy-next clow (string/char-at qlow qi) ci cn))
       (if (< pos 0)
         nil
         (fuzzy-positions qlow clow (inc qi) qn (inc pos) cn (cons pos acc))))))
@@ -55,16 +55,16 @@ recursion — not the native search underneath it. Optimise there, and measure f
 (defn- fuzzy-upper?
   (ch)
   "True if 1-char string `ch` is an upper-case letter."
-  (not (= (lower ch) ch)))
+  (not (= (string/lower ch) ch)))
 
 (defn- fuzzy-boundary?
   (cand pos)
   "True if char `pos` starts a word in `cand`: index 0, after a separator, or a
 camelCase hump (an upper preceded by a non-upper)."
   (or (= pos 0)
-    (let (prev (char-at cand (dec pos)))
+    (let (prev (string/char-at cand (dec pos)))
       (or (includes? fuzzy-separators prev)
-        (and (fuzzy-upper? (char-at cand pos)) (not (fuzzy-upper? prev)))))))
+        (and (fuzzy-upper? (string/char-at cand pos)) (not (fuzzy-upper? prev)))))))
 
 (defn- fuzzy-score-step
   (cand st pos)
@@ -88,9 +88,9 @@ camelCase hump (an upper preceded by a non-upper)."
 (defn- fuzzy-match-lc
   (qlow qn cand)
   "Like `fuzzy-match` but with the query already lower-cased (`qlow`) and measured (`qn`),
-so a filter loop pays `(lower query)` / its length **once**, not per candidate. `cand` is
+so a filter loop pays `(string/lower query)` / its length **once**, not per candidate. `cand` is
 still lowered here — the case-insensitive subsequence test needs the lower-cased candidate."
-  (let (positions (fuzzy-positions qlow (lower cand) 0 qn 0 (string-length cand) '()))
+  (let (positions (fuzzy-positions qlow (string/lower cand) 0 qn 0 (string/length cand) '()))
     (if (nil? positions)
       nil
       {:score (fuzzy-score cand positions) :positions positions})))
@@ -101,7 +101,7 @@ still lowered here — the case-insensitive subsequence test needs the lower-cas
 handled directly, since its empty position list is indistinguishable from `nil`."
   (if (= query "")
     {:score 0 :positions ()}
-    (fuzzy-match-lc (lower query) (string-length query) cand)))
+    (fuzzy-match-lc (string/lower query) (string/length query) cand)))
 (sig fuzzy-match (string string -> (or nil map)))
 
 (defn fuzzy-filter (query cands)
@@ -114,13 +114,13 @@ per-comparison rebuild of `[(-score) len text]` (a vector alloc + map lookup + l
 That rebuild dominated ranking large candidate sets (thousands of project files)."
   (if (= query "")
     cands
-    (let (qlow (lower query)
-          qn (string-length query)
+    (let (qlow (string/lower query)
+          qn (string/length query)
           decorated (fold (fn (acc c)
                             (let (m (fuzzy-match-lc qlow qn c))
                               (if (nil? m)
                                 acc
-                                (cons [[(- 0 (get m :score)) (string-length c) c] c] acc))))
+                                (cons [[(- 0 (get m :score)) (string/length c) c] c] acc))))
                       '() cands))
       (map second (sort-by first decorated)))))
 ;; `cands` and the result are `seqable` (empty query returns `cands` as-is, else a ranked

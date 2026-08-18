@@ -32,13 +32,13 @@ always — useful for content-based IDs and idempotent generation.")
   (if (= n 0)
     acc
     (uuid-int->hex-loop (quot n 16)
-      (str (char-at uuid-hex-digits (rem n 16)) acc))))
+      (str (string/char-at uuid-hex-digits (rem n 16)) acc))))
 
 (defn- uuid-pad-hex
   (s n)
   "Left-pad hex string `s` with zeros to exactly `n` characters."
-  (if (>= (string-length s) n)
-    (substring s (- (string-length s) n) (string-length s))
+  (if (>= (string/length s) n)
+    (string/substring s (- (string/length s) n) (string/length s))
     (uuid-pad-hex (str "0" s) n)))
 
 ;; ---- UUID v4 ----------------------------------------------------------------
@@ -60,17 +60,17 @@ always — useful for content-based IDs and idempotent generation.")
 (defn- uuid-variant-char
   (raw-hex-char)
   "Map any hex char to one of 8/9/a/b for the RFC 4122 variant nibble."
-  (char-at uuid-variant-chars (rem (uuid-hex-nibble raw-hex-char) 4)))
+  (string/char-at uuid-variant-chars (rem (uuid-hex-nibble raw-hex-char) 4)))
 
 (defn uuid-v4 ()
   "Generate a random RFC 4122 version 4 UUID string."
   (let (raw (random-token 16)
         ;; raw is 32 lowercase hex chars; inject version (pos 12) and variant (pos 16)
-        p0 (substring raw 0 8)
-        p1 (substring raw 8 12)
-        p2 (str "4" (substring raw 13 16))
-        p3 (str (uuid-variant-char (char-at raw 16)) (substring raw 17 20))
-        p4 (substring raw 20 32))
+        p0 (string/substring raw 0 8)
+        p1 (string/substring raw 8 12)
+        p2 (str "4" (string/substring raw 13 16))
+        p3 (str (uuid-variant-char (string/char-at raw 16)) (string/substring raw 17 20))
+        p4 (string/substring raw 20 32))
     (str p0 "-" p1 "-" p2 "-" p3 "-" p4)))
 
 (defn uuid-nil ()
@@ -101,11 +101,11 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
         ;; p2 (4 hex = bytes 6-7): "7" + 1 rand nibble + rand byte
         ;; p3 (4 hex = bytes 8-9): variant char + 3 rand hex chars
         ;; p4 (12 hex = bytes 10-15): 6 random bytes
-        p0 (substring ts 0 8)
-        p1 (substring ts 8 12)
-        p2 (str "7" (char-at rand 1) (substring rand 2 4))
-        p3 (str (uuid-variant-char (char-at rand 4)) (substring rand 5 8))
-        p4 (substring rand 8 20))
+        p0 (string/substring ts 0 8)
+        p1 (string/substring ts 8 12)
+        p2 (str "7" (string/char-at rand 1) (string/substring rand 2 4))
+        p3 (str (uuid-variant-char (string/char-at rand 4)) (string/substring rand 5 8))
+        p4 (string/substring rand 8 20))
     (str p0 "-" p1 "-" p2 "-" p3 "-" p4)))
 
 ;; ---- validation -------------------------------------------------------------
@@ -119,29 +119,29 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
 
 (defn- uuid-valid-segment?
   (s expected-len)
-  (and (= (string-length s) expected-len)
+  (and (= (string/length s) expected-len)
     (uuid-all-hex? s 0 expected-len)))
 
 (defn- uuid-all-hex?
   (s i n)
   (if (>= i n)
     true
-    (if (uuid-hex? (char-at s i))
+    (if (uuid-hex? (string/char-at s i))
       (uuid-all-hex? s (+ i 1) n)
       false)))
 
 (defn uuid? (s)
   "True if `s` is a well-formed UUID string (8-4-4-4-12 hex, any case, with dashes)."
-  (and (= (string-length s) 36)
-    (= (char-at s 8) "-")
-    (= (char-at s 13) "-")
-    (= (char-at s 18) "-")
-    (= (char-at s 23) "-")
-    (uuid-valid-segment? (substring s 0 8) 8)
-    (uuid-valid-segment? (substring s 9 13) 4)
-    (uuid-valid-segment? (substring s 14 18) 4)
-    (uuid-valid-segment? (substring s 19 23) 4)
-    (uuid-valid-segment? (substring s 24 36) 12)))
+  (and (= (string/length s) 36)
+    (= (string/char-at s 8) "-")
+    (= (string/char-at s 13) "-")
+    (= (string/char-at s 18) "-")
+    (= (string/char-at s 23) "-")
+    (uuid-valid-segment? (string/substring s 0 8) 8)
+    (uuid-valid-segment? (string/substring s 9 13) 4)
+    (uuid-valid-segment? (string/substring s 14 18) 4)
+    (uuid-valid-segment? (string/substring s 19 23) 4)
+    (uuid-valid-segment? (string/substring s 24 36) 12)))
 
 ;; ---- name-based UUIDs (v3 and v5) -------------------------------------------
 ;;
@@ -166,14 +166,14 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
 (defn- uuid-str->bytes
   (s)
   "Parse a UUID string (with dashes) into a list of 16 byte ints."
-  (uuid-parse-bytes (replace s "-" "") 0 nil))
+  (uuid-parse-bytes (string/replace s "-" "") 0 nil))
 
 (defn- uuid-parse-bytes
   (hex i acc)
-  (if (>= i (string-length hex))
+  (if (>= i (string/length hex))
     (reverse acc)
-    (let (hi (uuid-hex-nibble (char-at hex i))
-          lo (uuid-hex-nibble (char-at hex (+ i 1))))
+    (let (hi (uuid-hex-nibble (string/char-at hex i))
+          lo (uuid-hex-nibble (string/char-at hex (+ i 1))))
       (uuid-parse-bytes hex (+ i 2) (cons (+ (* hi 16) lo) acc)))))
 
 (defn- uuid-bytes->str
@@ -188,19 +188,19 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
         hex (fold (fn (acc i)
                     (let (b (if (= i 6) b6 (if (= i 8) b8 (nth bv i))))
                       (str acc
-                        (char-at uuid-hex-digits (quot b 16))
-                        (char-at uuid-hex-digits (rem b 16)))))
+                        (string/char-at uuid-hex-digits (quot b 16))
+                        (string/char-at uuid-hex-digits (rem b 16)))))
               ""
               (range 16)))
-    (str (substring hex 0 8)
+    (str (string/substring hex 0 8)
       "-"
-      (substring hex 8 12)
+      (string/substring hex 8 12)
       "-"
-      (substring hex 12 16)
+      (string/substring hex 12 16)
       "-"
-      (substring hex 16 20)
+      (string/substring hex 16 20)
       "-"
-      (substring hex 20 32))))
+      (string/substring hex 20 32))))
 
 (defn- uuid-name-based
   (ns-uuid name hash-fn version)
@@ -210,7 +210,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
         input (append (into [] ns-bytes) (into [] name-bytes))
         digest-hex (hash-fn input)
         ;; Take first 16 bytes (32 hex chars) of the hash output
-        digest-16 (uuid-parse-bytes (substring digest-hex 0 32) 0 nil))
+        digest-16 (uuid-parse-bytes (string/substring digest-hex 0 32) 0 nil))
     (uuid-bytes->str digest-16 version)))
 
 (defn uuid-v3 (ns-uuid name)

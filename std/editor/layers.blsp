@@ -338,7 +338,7 @@ rule wins — a project can override a default."
 (defn- layers-file-matches?
   (file spec)
   "Does `file` satisfy a `:match` spec — a suffix string, or a predicate fn?"
-  (if (string? spec) (ends-with? file spec) (spec file)))
+  (if (string? spec) (string/ends-with? file spec) (spec file)))
 
 (defn- layers-match-file
   (file rules)

@@ -91,7 +91,7 @@
 (defrecord counting-port (target))
 (impl Port
   io-test/counting-port
-  (io-write [p s] (io-write (get p :target) (str "[" (string-length s) "] " s))))
+  (io-write [p s] (io-write (get p :target) (str "[" (string/length s) "] " s))))
 
 (describe "io: a third-party port type"
   (test "a record from another module is a port once it impls Port"

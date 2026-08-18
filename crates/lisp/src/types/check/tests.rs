@@ -253,11 +253,11 @@ fn ability_op_return_type_flows_to_call_site() {
         "\
          (defability Size (size [self] :-> int))\n\
          (impl Size :int (size [n] n))\n\
-         (defn bad () (string-length (size 5)))",
+         (defn bad () (string/length (size 5)))",
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("string-length") && w.contains("int")),
+            .any(|w| w.contains("string/length") && w.contains("int")),
         "the op's :-> int return should flow so string-length flags it: {ws:?}"
     );
 }
@@ -486,10 +486,10 @@ fn sealed_ability_type_in_op_return_position() {
          (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
          (defability Scaled (scaled [self] :-> Shape))\n\
          (impl Scaled :int (scaled [n] (circle n)))\n\
-         (defn bad (x) (string-length (scaled x)))",
+         (defn bad (x) (string/length (scaled x)))",
     );
     assert!(
-        ws.iter().any(|w| w.contains("string-length")),
+        ws.iter().any(|w| w.contains("string/length")),
         "a `:-> Shape` return should flow as the member union: {ws:?}"
     );
 }
@@ -608,9 +608,9 @@ fn flags_literal_misuse_of_primitives() {
         .any(|w| w.contains("first") && w.contains("got 5")));
     // A keyword literal now infers as its singleton type, so the diagnostic
     // names the exact value (`:k`) rather than the coarse `keyword` tag.
-    assert!(warnings("(string-length :k)")
+    assert!(warnings("(string/length :k)")
         .iter()
-        .any(|w| w.contains("string-length") && w.contains(":k")));
+        .any(|w| w.contains("string/length") && w.contains(":k")));
     assert!(warnings("(%add 1 \"x\")")
         .iter()
         .any(|w| w.contains("%add")));
@@ -625,13 +625,13 @@ fn no_false_positives_when_type_is_unknown_or_right() {
     assert!(warnings("(first xs)").is_empty()); // variable → dynamic
     assert!(warnings("(first [1 2 3])").is_empty()); // vector is allowed
     assert!(warnings("(%add 1 2)").is_empty());
-    assert!(warnings("(string-length \"hi\")").is_empty());
+    assert!(warnings("(string/length \"hi\")").is_empty());
 }
 
 #[test]
 fn propagates_primitive_result_types() {
     // string-length returns int; first wants a list/vector → flag the int.
-    assert!(warnings("(first (string-length \"a\"))")
+    assert!(warnings("(first (string/length \"a\"))")
         .iter()
         .any(|w| w.contains("first") && w.contains("int")));
 }
@@ -640,7 +640,7 @@ fn propagates_primitive_result_types() {
 fn an_any_result_is_not_a_false_positive() {
     // vector-ref's result type is `any` (unknown), so feeding it to
     // string-length (wants string) must NOT warn — `any` overlaps `string`.
-    assert!(warnings("(string-length (vector-ref [1] 0))").is_empty());
+    assert!(warnings("(string/length (vector-ref [1] 0))").is_empty());
 }
 
 #[test]
@@ -676,10 +676,10 @@ fn sig_declaration_is_read_by_the_checker() {
         "declared param type should flag (f \"s\"): {w:?}"
     );
     // The declared *result* flows out: f : int, string-length wants string.
-    let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(string-length (f 3))");
+    let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(string/length (f 3))");
     assert!(
-        w.iter().any(|m| m.contains("string-length")),
-        "declared result type should flag string-length: {w:?}"
+        w.iter().any(|m| m.contains("string/length")),
+        "declared result type should flag string/length: {w:?}"
     );
     // Correct uses stay silent.
     let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(f 3)\n(+ 1 (f 4))");
@@ -706,10 +706,10 @@ fn keyword_literal_types_in_a_sig_are_enforced() {
     );
     // The declared literal *result* flows out and is checked too.
     let w = file_warnings(
-            "(sig mode (-> (or :maximized :fullscreen)))\n(defn mode () :maximized)\n(string-length (mode))",
+            "(sig mode (-> (or :maximized :fullscreen)))\n(defn mode () :maximized)\n(string/length (mode))",
         );
     assert!(
-        w.iter().any(|m| m.contains("string-length")),
+        w.iter().any(|m| m.contains("string/length")),
         "a keyword-literal result feeding string-length should flag: {w:?}"
     );
 }
@@ -725,9 +725,9 @@ fn sig_declaration_handles_arity_unions_and_bad_exprs() {
     );
     // Union result type: (or int nil) — feeding it to a sink that wants a
     // string is still a provable mismatch.
-    let w = file_warnings("(sig h (int -> (or int nil)))\n(defn h (x) x)\n(string-length (h 1))");
+    let w = file_warnings("(sig h (int -> (or int nil)))\n(defn h (x) x)\n(string/length (h 1))");
     assert!(
-        w.iter().any(|m| m.contains("string-length")),
+        w.iter().any(|m| m.contains("string/length")),
         "union result (int|nil) is disjoint from string: {w:?}"
     );
     // An unparseable type-expr is dropped — never a false signal.
@@ -827,7 +827,7 @@ fn optional_sig_params_parse_and_check() {
     // can't be nil) is still caught.
     let w = file_warnings(
         "(sig g (int &optional string -> int))\n\
-             (defn g (a &optional b) (if (nil? b) a (+ a (string-length b))))",
+             (defn g (a &optional b) (if (nil? b) a (+ a (string/length b))))",
     );
     assert!(
         w.is_empty(),
@@ -896,30 +896,30 @@ fn tuple_sig_params_parse_and_check() {
     // (not the coarse union every other element access falls back to),
     // so a mismatch on the specific position used is caught.
     let w = file_warnings(
-        "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (first t)))",
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (string/length (first t)))",
     );
     assert!(
         w.iter()
-            .any(|m| m.contains("string-length: argument 1 expects string") && m.contains("int")),
+            .any(|m| m.contains("string/length: argument 1 expects string") && m.contains("int")),
         "first on a tuple must resolve to position 0's exact type: {w:?}"
     );
     let w = file_warnings(
-        "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (second t)))",
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (string/length (second t)))",
     );
     assert!(
         w.is_empty(),
         "second on this tuple is already a string — no warning: {w:?}"
     );
     let w = file_warnings(
-        "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 0)))",
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (string/length (nth t 0)))",
     );
     assert!(
         w.iter()
-            .any(|m| m.contains("string-length: argument 1 expects string") && m.contains("int")),
+            .any(|m| m.contains("string/length: argument 1 expects string") && m.contains("int")),
         "a literal-index nth on a tuple must resolve position-exactly: {w:?}"
     );
     let w = file_warnings(
-        "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 1)))",
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (string/length (nth t 1)))",
     );
     assert!(
         w.is_empty(),
@@ -1148,9 +1148,9 @@ fn curated_output_and_numeric_sigs() {
         .iter()
         .any(|w| w.contains("max") && w.contains("number")));
     // min/max return a number — feeding to a string sink is caught.
-    assert!(warnings("(string-length (min 1 2))")
+    assert!(warnings("(string/length (min 1 2))")
         .iter()
-        .any(|w| w.contains("string-length")));
+        .any(|w| w.contains("string/length")));
     // Correct uses stay silent.
     for ok in [
         "(println \"hi\")",
@@ -1274,13 +1274,13 @@ fn curated_equality_and_string_sigs() {
         .iter()
         .any(|w| w.contains("number->string") && w.contains("number")));
     // number->string returns a string — feeding to string-length is fine (silent).
-    assert!(warnings("(string-length (number->string 42))").is_empty());
+    assert!(warnings("(string/length (number->string 42))").is_empty());
     // string->symbol requires a string.
     assert!(warnings("(string->symbol 99)")
         .iter()
         .any(|w| w.contains("string->symbol") && w.contains("string")));
     // String predicates require string args.
-    for f in ["starts-with?", "ends-with?"] {
+    for f in ["string/starts-with?", "string/ends-with?"] {
         assert!(
             warnings(&format!("({f} 5 \"x\")"))
                 .iter()
@@ -1288,11 +1288,11 @@ fn curated_equality_and_string_sigs() {
             "{f}: expected string-domain warning"
         );
     }
-    assert!(warnings("(blank? 0)")
+    assert!(warnings("(string/blank? 0)")
         .iter()
-        .any(|w| w.contains("blank?") && w.contains("string")));
+        .any(|w| w.contains("string/blank?") && w.contains("string")));
     // String transforms require string args and return strings.
-    for f in ["trim", "triml", "trimr"] {
+    for f in ["string/trim", "string/triml", "string/trimr"] {
         assert!(
             warnings(&format!("({f} 5)"))
                 .iter()
@@ -1301,21 +1301,21 @@ fn curated_equality_and_string_sigs() {
         );
         // Result is string — safe to pass to string-length.
         assert!(
-            warnings(&format!("(string-length ({f} s))")).is_empty(),
+            warnings(&format!("(string/length ({f} s))")).is_empty(),
             "{f}: result should type as string"
         );
     }
-    assert!(warnings("(replace 5 \"a\" \"b\")")
+    assert!(warnings("(string/replace 5 \"a\" \"b\")")
         .iter()
-        .any(|w| w.contains("replace") && w.contains("string")));
-    assert!(warnings("(string-repeat 3 5)")
+        .any(|w| w.contains("string/replace") && w.contains("string")));
+    assert!(warnings("(string/repeat 3 5)")
         .iter()
-        .any(|w| w.contains("string-repeat") && w.contains("string")));
+        .any(|w| w.contains("string/repeat") && w.contains("string")));
     assert!(warnings("(format 5 \"extra\")")
         .iter()
         .any(|w| w.contains("format") && w.contains("string")));
     // format returns a string.
-    assert!(warnings("(string-length (format \"hi %s\" x))").is_empty());
+    assert!(warnings("(string/length (format \"hi %s\" x))").is_empty());
     // index-of/index-where/last-index-of return int — safe to add.
     assert!(warnings("(+ 1 (index-of coll x))").is_empty());
     assert!(warnings("(+ 1 (last-index-of s needle))").is_empty());
@@ -1323,10 +1323,10 @@ fn curated_equality_and_string_sigs() {
     for ok in [
         "(= 1 2)",
         "(not= x y)",
-        "(starts-with? s \"pre\")",
-        "(ends-with? s \".blsp\")",
-        "(trim s)",
-        "(replace s \"a\" \"b\")",
+        "(string/starts-with? s \"pre\")",
+        "(string/ends-with? s \".blsp\")",
+        "(string/trim s)",
+        "(string/replace s \"a\" \"b\")",
     ] {
         assert!(
             warnings(ok).iter().all(|w| !w.contains("expects")),
@@ -1356,11 +1356,11 @@ fn map_kv_refinement_flows_through_checker() {
     let src = "
 (defn f (m) (get m :k))
 (sig f ((map keyword int) -> int))
-(string-length (f {:a 1}))
+(string/length (f {:a 1}))
 ";
     let w = file_warnings(src);
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "expected string-length warning for int|nil arg, got {w:?}"
     );
 
@@ -1369,11 +1369,11 @@ fn map_kv_refinement_flows_through_checker() {
     let src2 = "
 (defn g (m) (keys m))
 (sig g ((map keyword int) -> (list keyword)))
-(string-length (g {:a 1}))
+(string/length (g {:a 1}))
 ";
     let w2 = file_warnings(src2);
     assert!(
-        w2.iter().any(|s| s.contains("string-length")),
+        w2.iter().any(|s| s.contains("string/length")),
         "expected string-length warning for list<keyword> arg, got {w2:?}"
     );
 
@@ -1424,11 +1424,11 @@ fn record_field_refinement_flows_through_checker() {
     let src = "
 (defn f (m) (get m :a))
 (sig f ((record :a int) -> int))
-(string-length (f {:a 1}))
+(string/length (f {:a 1}))
 ";
     let w = file_warnings(src);
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "expected string-length warning for int|nil arg, got {w:?}"
     );
 
@@ -1436,7 +1436,7 @@ fn record_field_refinement_flows_through_checker() {
     // are open, so this must NOT warn (no false positive on an
     // undeclared/dynamic key).
     assert!(
-        warnings("(let (m {:a 1}) (string-length (get m :other)))")
+        warnings("(let (m {:a 1}) (string/length (get m :other)))")
             .iter()
             .all(|w| !w.contains("expects")),
         "undeclared record field should stay unresolved, not warn"
@@ -1446,16 +1446,16 @@ fn record_field_refinement_flows_through_checker() {
     // (`:a` required, type int) directly from the literal, no `sig`
     // needed — feeding the field straight to a sink warns.
     assert!(
-        warnings("(string-length (get {:a 1} :a))")
+        warnings("(string/length (get {:a 1} :a))")
             .iter()
-            .any(|w| w.contains("string-length")),
+            .any(|w| w.contains("string/length")),
         "expected a warning from the inferred record-literal shape"
     );
 
     // Correct uses stay silent.
     for ok in [
         "(get {:a 1} :a)",
-        "(string-length (get {:a \"x\"} :a))",
+        "(string/length (get {:a \"x\"} :a))",
         "(get {:a 1} :b)", // undeclared key — unresolved, not a warning
     ] {
         assert!(
@@ -1473,11 +1473,11 @@ fn overload_refinement_flows_through_checker() {
     let src = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
-(string-length (f 1))
+(string/length (f 1))
 ";
     let w = file_warnings(src);
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "an int arg should resolve to the int arm's return type, got {w:?}"
     );
 
@@ -1485,7 +1485,7 @@ fn overload_refinement_flows_through_checker() {
     let src2 = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
-(string-length (f \"hi\"))
+(string/length (f \"hi\"))
 ";
     assert!(
         file_warnings(src2).is_empty(),
@@ -1511,7 +1511,7 @@ fn overload_refinement_flows_through_checker() {
     let src4 = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
-(defn g (y) (string-length (f y)))
+(defn g (y) (string/length (f y)))
 ";
     assert!(
         file_warnings(src4).is_empty(),
@@ -1573,11 +1573,11 @@ fn int_literal_return_type_flows_through_checker() {
     let src = "
 (defn f (x) x)
 (sig f ((or 200 404 500) -> (or 200 404 500)))
-(string-length (f 200))
+(string/length (f 200))
 ";
     let w = file_warnings(src);
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "expected string-length warning for an int-literal return, got {w:?}"
     );
 
@@ -1944,9 +1944,9 @@ fn covers_the_other_signed_primitives() {
     assert!(warnings("(vector-length 5)")
         .iter()
         .any(|w| w.contains("vector-length")));
-    assert!(warnings("(substring \"hi\" \"a\" 1)")
+    assert!(warnings("(string/substring \"hi\" \"a\" 1)")
         .iter()
-        .any(|w| w.contains("substring") && w.contains("argument 2")));
+        .any(|w| w.contains("string/substring") && w.contains("argument 2")));
     assert!(warnings("(%lt 1 :k)").iter().any(|w| w.contains("%lt")));
 }
 
@@ -2005,7 +2005,7 @@ fn primitive_sigs_are_read_from_native_fn() {
     // next to its `Arity` in `builtins.rs`. If we ever drop the sig field
     // (or set it wrong), this catches it.
     let interp = crate::Interp::new();
-    let sig = primitive_sig(&interp.heap, crate::core::value::intern("string-length"))
+    let sig = primitive_sig(&interp.heap, crate::core::value::intern("string/length"))
         .expect("string-length is a primitive");
     assert_eq!(sig.params, vec![Ty::of(Tag::Str)]);
     assert_eq!(sig.ret, Ty::of(Tag::Int));
@@ -2067,9 +2067,9 @@ fn inferred_return_type_propagates() {
     // (defn bump (x) (+ x 1)) returns the number `+` returns; feeding it into
     // `string-length` (wants string) is a provable misuse. (Not `inc` — the fixture
     // is evaluated, and shipped names are reserved, ADR-166.)
-    let w = check_with_defs(&["(defn bump (x) (+ x 1))"], "(string-length (bump 1))");
+    let w = check_with_defs(&["(defn bump (x) (+ x 1))"], "(string/length (bump 1))");
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "expected a `string-length` warning, got {:?}",
         w
     );
@@ -2085,13 +2085,13 @@ fn inferred_params_intersect_across_positions() {
 #[test]
 fn same_file_caller_checked_against_inferred_return() {
     // The file being checked isn't loaded, so this exercises Pass 2.8's form-based inference:
-    // `dbl` is inferred (same-file) to return a number, so `(string-length (dbl 5))` is caught
+    // `dbl` is inferred (same-file) to return a number, so `(string/length (dbl 5))` is caught
     // — a same-file caller now gets the checking a loaded-function caller already did.
     let w = file_warnings(
-        "(defmodule t)\n(defn dbl (x) (+ x 1))\n(defn bad () (string-length (dbl 5)))",
+        "(defmodule t)\n(defn dbl (x) (+ x 1))\n(defn bad () (string/length (dbl 5)))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "same-file inferred return should flow to a caller: {w:?}"
     );
 }
@@ -2130,10 +2130,10 @@ fn infers_a_tail_recursive_function_return_from_its_base_case() {
     // made the return uninferrable and the misuse went uncaught.
     let w = check_with_defs(
         &["(defn count-down (n) (if (<= n 0) :done (count-down (- n 1))))"],
-        "(string-length (count-down 5))",
+        "(string/length (count-down 5))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "a recursive fn's base-case return should flow to its caller: {w:?}"
     );
 }
@@ -2145,10 +2145,10 @@ fn recursive_inference_defers_when_the_base_case_is_unknown() {
     // a caller using its result in any way is NOT false-flagged.
     let w = check_with_defs(
         &["(defn sum-acc (xs acc) (if (empty? xs) acc (sum-acc (rest xs) (+ acc (first xs)))))"],
-        "(string-length (sum-acc (list 1 2) 0))",
+        "(string/length (sum-acc (list 1 2) 0))",
     );
     assert!(
-        !w.iter().any(|s| s.contains("string-length")),
+        !w.iter().any(|s| s.contains("string/length")),
         "an unknown (param) base case must defer, not false-flag: {w:?}"
     );
 }
@@ -2160,10 +2160,10 @@ fn infers_a_multi_arity_return_as_the_union_of_its_arms() {
     // is a provable misuse. (Before, a multi-arity closure was skipped entirely.)
     let w = check_with_defs(
         &["(defn describe ((x) :one) ((x y) :two))"],
-        "(string-length (describe 5))",
+        "(string/length (describe 5))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "a multi-arity fn's union return should flow: {w:?}"
     );
 }
@@ -2213,10 +2213,10 @@ fn infers_through_let_alias() {
     // the body is still one straight-line call — inference should work.
     let w = check_with_defs(
         &["(defn double (x) (let (y x) (* y 2)))"],
-        "(string-length (double 3))",
+        "(string/length (double 3))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "let-alias wrapper should not block infer_sig: {:?}",
         w
     );
@@ -2231,13 +2231,13 @@ fn infers_through_let_alias() {
     // A non-param let (binding a computed value) isn't peeled by the precise
     // *parameter*-inferring tier — but the sound **return-only** tier still
     // infers `wrap`'s result as `number` (`wrap 3` = 8), so a real misuse of
-    // that result is caught (`(string-length 8)` genuinely errors at runtime).
+    // that result is caught (`(string/length 8)` genuinely errors at runtime).
     let w = check_with_defs(
         &["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"],
-        "(string-length (wrap 3))",
+        "(string/length (wrap 3))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "return-only inference should type wrap's result as number: {:?}",
         w
     );
@@ -2337,7 +2337,7 @@ fn earmuffed_global_types_as_unknown_not_its_default() {
     // it to `nil` and flag a string-demanding use. (Regression guard for the false
     // positive the sound param-inference tier would otherwise surface at, e.g.,
     // `(path-join *project-root* rel)` after its `nil?` guard.)
-    let w = check_with_defs(&["(def *root* nil)"], "(string-length *root*)");
+    let w = check_with_defs(&["(def *root* nil)"], "(string/length *root*)");
     assert!(
         w.is_empty(),
         "earmuffed global must type as unknown, not its default nil: {:?}",
@@ -2345,9 +2345,9 @@ fn earmuffed_global_types_as_unknown_not_its_default() {
     );
     // A non-earmuffed global is still pinned to its value (unchanged behaviour): a
     // real disjoint use is still caught.
-    let w = check_with_defs(&["(def plain-root nil)"], "(string-length plain-root)");
+    let w = check_with_defs(&["(def plain-root nil)"], "(string/length plain-root)");
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "a plain (non-earmuffed) global is still typed by its value: {:?}",
         w
     );
@@ -2359,10 +2359,10 @@ fn return_only_inference_is_sound() {
     // union of the possible results), so misusing the *result* is caught…
     let w = check_with_defs(
         &["(defn pick (c) (if c 1 2))"],
-        "(string-length (pick true))",
+        "(string/length (pick true))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "a numeric-returning branchy body's result misuse must warn: {w:?}"
     );
     // …but a parameter used as a number only *inside a guard* must NOT be
@@ -2425,7 +2425,7 @@ fn let_binding_propagates_its_rhs_type() {
 fn let_binding_from_nested_call_propagates() {
     // RHS is a known primitive whose return type is int. So `x : int`,
     // and `(first x)` flags.
-    let w = warnings("(let (x (string-length \"hi\")) (first x))");
+    let w = warnings("(let (x (string/length \"hi\")) (first x))");
     assert!(
         w.iter().any(|s| s.contains("first") && s.contains("int")),
         "expected a `first x` warning where x : int, got {:?}",
@@ -2572,10 +2572,10 @@ fn and_falsy_does_not_narrow_the_else_branch() {
 fn or_same_var_narrows_both_branches() {
     // Every disjunct a biconditional guard over the same var: the then-branch is the
     // union (a truthy `or` ⇒ some disjunct holds), the else-branch its complement (a
-    // falsy `or` ⇒ none hold). So `(string-length c)` in the else flags — c is not string.
-    let w = warnings_expanded("(if (or (nil? c) (string? c)) 0 (string-length c))");
+    // falsy `or` ⇒ none hold). So `(string/length c)` in the else flags — c is not string.
+    let w = warnings_expanded("(if (or (nil? c) (string? c)) 0 (string/length c))");
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "the else of an all-same-var `or` should narrow c to ¬(nil|string): {w:?}"
     );
     // But a valid use in either branch stays silent — `str` accepts anything, and the
@@ -2591,9 +2591,9 @@ fn or_same_var_narrows_both_branches() {
 fn or_over_different_vars_does_not_narrow() {
     // Disjuncts over *different* variables give no single-variable narrowing — the
     // else-branch must not flag a use of either (would be a false positive).
-    let w = warnings_expanded("(if (or (nil? a) (string? b)) 0 (string-length a))");
+    let w = warnings_expanded("(if (or (nil? a) (string? b)) 0 (string/length a))");
     assert!(
-        !w.iter().any(|s| s.contains("string-length")),
+        !w.iter().any(|s| s.contains("string/length")),
         "an `or` over different vars must not narrow: {w:?}"
     );
 }
@@ -2717,9 +2717,9 @@ fn flags_too_few_arguments() {
         .iter()
         .any(|w| w.contains("first") && w.contains("expected 1") && w.contains("got 0")));
     // `string-length` expects exactly 1.
-    assert!(warnings("(string-length)")
+    assert!(warnings("(string/length)")
         .iter()
-        .any(|w| w.contains("string-length") && w.contains("expected 1")));
+        .any(|w| w.contains("string/length") && w.contains("expected 1")));
 }
 
 #[test]
@@ -3088,11 +3088,11 @@ fn eq_between_two_variables_is_not_a_guard() {
 fn eq_guard_does_not_narrow_the_else_branch() {
     // `(= m "x")` being *false* does NOT prove `m` isn't a string — it could
     // be another string. So the else-branch must not narrow `m` to `¬string`
-    // and flag a valid `(string-length m)`. (Same then-only soundness as the
+    // and flag a valid `(string/length m)`. (Same then-only soundness as the
     // `and` guard.)
-    let w = warnings(r#"(if (%eq m "x") :yes (string-length m))"#);
+    let w = warnings(r#"(if (%eq m "x") :yes (string/length m))"#);
     assert!(
-        w.iter().all(|s| !s.contains("string-length")),
+        w.iter().all(|s| !s.contains("string/length")),
         "the else-branch of an `=`/`%eq` guard must not be narrowed: {w:?}"
     );
     // The then-branch must still narrow (sanity): `(= m 5)` true ⇒ m : int.
@@ -3597,33 +3597,33 @@ fn path_narrowing_through_a_record_field_guard() {
     // `(if (int? (get r :age)) …)` narrows the *path* `(get r :age)` to `int`
     // in the then-branch — so feeding it to `string-length` (wants string) is
     // caught, the miss occurrence typing on bare symbols couldn't reach.
-    let w = file_warnings("(defn f (r) (if (int? (get r :age)) (string-length (get r :age)) 0))");
+    let w = file_warnings("(defn f (r) (if (int? (get r :age)) (string/length (get r :age)) 0))");
     assert!(
         w.iter()
-            .any(|m| m.contains("string-length") && m.contains("got int")),
+            .any(|m| m.contains("string/length") && m.contains("got int")),
         "an int-narrowed path fed to string-length must warn: {w:?}"
     );
     // A **nested** path narrows too: `(get (get cfg :db) :port)`.
     let nested = file_warnings(
         "(defn n (cfg) (if (int? (get (get cfg :db) :port)) \
-             (string-length (get (get cfg :db) :port)) 0))",
+             (string/length (get (get cfg :db) :port)) 0))",
     );
     assert!(
         nested
             .iter()
-            .any(|m| m.contains("string-length") && m.contains("got int")),
+            .any(|m| m.contains("string/length") && m.contains("got int")),
         "an int-narrowed nested path must warn: {nested:?}"
     );
     // Uses consistent with the narrowed type — and an unguarded access (wide
     // type) — must NOT warn.
     for src in [
         "(defn g (r) (if (int? (get r :age)) (+ 1 (get r :age)) 0))",
-        "(defn h (r) (if (string? (get r :n)) (string-length (get r :n)) 0))",
-        "(defn m (r) (string-length (get r :age)))",
+        "(defn h (r) (if (string? (get r :n)) (string/length (get r :n)) 0))",
+        "(defn m (r) (string/length (get r :age)))",
         // else-branch use of a `¬string`-narrowed path must not misfire.
         "(defn k (r) (if (string? (get r :x)) :s (get r :x)))",
         // a *different* nested path than the one narrowed must not warn.
-        "(defn p (c) (if (int? (get (get c :db) :port)) (string-length (get (get c :web) :h)) 0))",
+        "(defn p (c) (if (int? (get (get c :db) :port)) (string/length (get (get c :web) :h)) 0))",
     ] {
         let w = file_warnings(src);
         assert!(
@@ -3638,22 +3638,22 @@ fn path_narrowing_through_index_paths() {
     // `(nth t 0)` / `(first t)` / `(second …)` / `(third …)` narrow like a
     // field path: an int-narrowed index fed to `string-length` is caught.
     for src in [
-        "(defn f (t) (if (int? (nth t 0)) (string-length (nth t 0)) 0))",
-        "(defn f (t) (if (int? (first t)) (string-length (first t)) 0))",
+        "(defn f (t) (if (int? (nth t 0)) (string/length (nth t 0)) 0))",
+        "(defn f (t) (if (int? (first t)) (string/length (first t)) 0))",
         // mixed field + index path.
-        "(defn f (r) (if (int? (nth (get r :xs) 0)) (string-length (nth (get r :xs) 0)) 0))",
+        "(defn f (r) (if (int? (nth (get r :xs) 0)) (string/length (nth (get r :xs) 0)) 0))",
     ] {
         let w = file_warnings(src);
         assert!(
             w.iter()
-                .any(|m| m.contains("string-length") && m.contains("got int")),
+                .any(|m| m.contains("string/length") && m.contains("got int")),
             "an int-narrowed index path must warn ({src}): {w:?}"
         );
     }
     // A *different* index than the one narrowed must not warn (index-specific),
     // and a consistent use must not warn.
     for src in [
-        "(defn f (t) (if (int? (nth t 0)) (string-length (nth t 1)) 0))",
+        "(defn f (t) (if (int? (nth t 0)) (string/length (nth t 1)) 0))",
         "(defn f (t) (if (int? (nth t 0)) (+ 1 (nth t 0)) 0))",
     ] {
         let w = file_warnings(src);
@@ -3831,17 +3831,17 @@ fn undeclared_global_current_type_gates_its_use() {
     // Gap A (docs/type-gating.md): an *undeclared* global defined exactly once
     // by `(def g 5)` gets its inferred current-image type (`int`), so misusing
     // it is caught — via `dynamic_within` (the `∩` relation), reload-safe.
-    let w = file_warnings("(def g 5) (defn f () (string-length g))");
+    let w = file_warnings("(def g 5) (defn f () (string/length g))");
     assert!(
         w.iter()
-            .any(|m| m.contains("string-length") && m.contains("got 5")),
+            .any(|m| m.contains("string/length") && m.contains("got 5")),
         "an undeclared int global misused must warn: {w:?}"
     );
     // Consistent use, a redefined (ambiguous) global, and a function global
     // must NOT warn.
     for src in [
         "(def g 5) (defn f () (+ 1 g))", // int used as int
-        "(def g 5) (def g \"s\") (defn f () (string-length g))", // redefined → dynamic
+        "(def g 5) (def g \"s\") (defn f () (string/length g))", // redefined → dynamic
         "(defn g (x) x) (defn f () (+ 1 (g 2)))", // function global, not a value
     ] {
         let w = file_warnings(src);
@@ -3858,19 +3858,19 @@ fn cross_file_undeclared_global_gates_via_loaded_image() {
     // the image) is typed from its heap value where it's used elsewhere — the
     // same mechanism `infer_sig` uses for functions. `check_with_defs` evals
     // the def, then checks a separate form (the cross-context path).
-    let w = check_with_defs(&["(def gg 5)"], "(string-length gg)");
+    let w = check_with_defs(&["(def gg 5)"], "(string/length gg)");
     assert!(
         w.iter()
-            .any(|m| m.contains("string-length") && m.contains("got 5")),
+            .any(|m| m.contains("string/length") && m.contains("got 5")),
         "a cross-file undeclared int global misused must warn: {w:?}"
     );
     // A **dynamic variable** must be excluded — its heap value is only the
     // default; `binding` rebinds it to any type, so typing a use against the
-    // default would false-positive. `(binding (*dv* "s") (string-length *dv*))`
+    // default would false-positive. `(binding (*dv* "s") (string/length *dv*))`
     // is valid and must NOT warn.
     let w = check_with_defs(
         &["(defdyn *dv* 0)"],
-        "(binding (*dv* \"s\") (string-length *dv*))",
+        "(binding (*dv* \"s\") (string/length *dv*))",
     );
     assert!(
         w.iter().all(|m| !m.contains("expects")),
@@ -3888,10 +3888,10 @@ fn cross_file_undeclared_global_gates_via_loaded_image() {
 fn declared_global_type_flows_into_value_position() {
     // `(sig g int)` makes `g`'s declared type visible where it's used, so a
     // disjoint use is caught — even though `g` is a redefinable global.
-    let w = file_warnings("(sig g int) (def g 5) (def r (string-length g))");
+    let w = file_warnings("(sig g int) (def g 5) (def r (string/length g))");
     assert!(
         w.iter()
-            .any(|m| m.contains("string-length") && m.contains("int")),
+            .any(|m| m.contains("string/length") && m.contains("int")),
         "a declared int global used where a string is wanted must warn: {w:?}"
     );
     // A compatible use defers (int ⊆ number).
@@ -4196,9 +4196,9 @@ fn and_guard_does_not_narrow_the_else_branch() {
         "the else-branch of an `and` guard must not be narrowed: {w:?}"
     );
     // The then-branch still narrows (sanity: the guard didn't go silent).
-    let w = warnings_expanded(r#"(fn (m) (if (and (int? m) true) (string-length m) 0))"#);
+    let w = warnings_expanded(r#"(fn (m) (if (and (int? m) true) (string/length m) 0))"#);
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "the then-branch should still narrow m to int: {w:?}"
     );
 }
@@ -4209,7 +4209,7 @@ fn or_guard_does_not_falsely_narrow() {
     // nothing about it). `(or (int? x) true)` is always true, so the then
     // branch keeps `x`'s full (string) type — and a genuine misuse there is
     // still seen. (Guards against the `and`-fix over-reaching into `or`.)
-    let w = warnings_expanded(r#"(let (x "s") (if (or (int? x) true) (string-length x) 0))"#);
+    let w = warnings_expanded(r#"(let (x "s") (if (or (int? x) true) (string/length x) 0))"#);
     assert!(
         w.iter().all(|s| !s.contains("expects")),
         "a correct use under an `or` guard must not warn: {w:?}"
@@ -4222,9 +4222,9 @@ fn or_guard_does_not_falsely_narrow() {
 fn map_result_flows_the_callback_return() {
     // `(map inc (list 1 2 3))` : list<number>, so `(first …)` is number|nil —
     // disjoint from string → string-length flags it.
-    let w = warnings("(string-length (first (map inc (list 1 2 3))))");
+    let w = warnings("(string/length (first (map inc (list 1 2 3))))");
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "map's element type (number) should flow to first: {w:?}"
     );
     // ...and a numeric sink is fine (number overlaps).
@@ -4238,9 +4238,9 @@ fn map_result_flows_the_callback_return() {
 #[test]
 fn filter_preserves_the_element_type() {
     // `(filter even? (list 1 2 3))` : list<int> — element type unchanged.
-    let w = warnings("(string-length (first (filter even? (list 1 2 3))))");
+    let w = warnings("(string/length (first (filter even? (list 1 2 3))))");
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "filter should preserve the int element type: {w:?}"
     );
 }
@@ -4259,7 +4259,7 @@ fn element_type_flows_through_more_combinators() {
         r#"(+ 1 (first (remove (fn (x) false) ["a" "b"])))"#,
         r#"(+ 1 (first (take-last 1 ["a" "b"])))"#,
         r#"(+ 1 (first (keep (fn (x) x) ["a" "b"])))"#,
-        "(string-length (first (range 5)))",
+        "(string/length (first (range 5)))",
     ] {
         let w = warnings(src);
         assert!(
@@ -4287,9 +4287,9 @@ fn element_type_flows_through_more_combinators() {
 fn identity_lambda_preserves_element_type() {
     // `(map (fn (x) x) (list 1 2 3))` : list<int> — the lambda returns its
     // argument, so B = the element type A.
-    let w = warnings("(string-length (first (map (fn (x) x) (list 1 2 3))))");
+    let w = warnings("(string/length (first (map (fn (x) x) (list 1 2 3))))");
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "an identity callback should preserve the element type: {w:?}"
     );
 }
@@ -4297,22 +4297,22 @@ fn identity_lambda_preserves_element_type() {
 #[test]
 fn map_filter_do_not_refine_when_uncertain() {
     // Unknown callback (a local) → no refinement → no warning.
-    let w = warnings("(fn (g) (string-length (first (map g (list 1 2 3)))))");
+    let w = warnings("(fn (g) (string/length (first (map g (list 1 2 3)))))");
     assert!(
-        w.iter().all(|s| !s.contains("string-length")),
+        w.iter().all(|s| !s.contains("string/length")),
         "an unknown callback must not refine the result: {w:?}"
     );
     // Identity callback + unknown collection → B depends on the (unknown)
     // element type → no refinement.
-    let w = warnings("(fn (xs) (string-length (first (map (fn (x) x) xs))))");
+    let w = warnings("(fn (xs) (string/length (first (map (fn (x) x) xs))))");
     assert!(
-        w.iter().all(|s| !s.contains("string-length")),
+        w.iter().all(|s| !s.contains("string/length")),
         "an identity callback over an unknown collection must not refine: {w:?}"
     );
     // Branchy lambda body → can't type it → bail to flat (no false positive).
-    let w = warnings(r#"(string-length (first (map (fn (x) (if x 1 "a")) (list 1 2 3))))"#);
+    let w = warnings(r#"(string/length (first (map (fn (x) (if x 1 "a")) (list 1 2 3))))"#);
     assert!(
-        w.iter().all(|s| !s.contains("string-length")),
+        w.iter().all(|s| !s.contains("string/length")),
         "a branchy lambda body must bail to a flat result: {w:?}"
     );
 }
@@ -4323,9 +4323,9 @@ fn map_filter_do_not_refine_when_uncertain() {
 fn reduce_result_is_the_accumulator_type() {
     // `(reduce + 0 (list 1 2 3))` : number (init int ∪ +'s number return) —
     // disjoint from string → flagged.
-    let w = warnings("(string-length (reduce + 0 (list 1 2 3)))");
+    let w = warnings("(string/length (reduce + 0 (list 1 2 3)))");
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "reduce's accumulator type should flow out: {w:?}"
     );
     // ...and a numeric sink is fine.
@@ -4340,9 +4340,9 @@ fn reduce_result_is_the_accumulator_type() {
 fn fold_with_a_lambda_callback_types_the_result() {
     // `(fold (fn (acc x) (+ acc x)) 0 …)` : number — the 2-arg callback's
     // return (number) joined with the init (int).
-    let w = warnings("(string-length (fold (fn (acc x) (+ acc x)) 0 (list 1 2 3)))");
+    let w = warnings("(string/length (fold (fn (acc x) (+ acc x)) 0 (list 1 2 3)))");
     assert!(
-        w.iter().any(|s| s.contains("string-length")),
+        w.iter().any(|s| s.contains("string/length")),
         "fold should type the accumulator from a lambda callback: {w:?}"
     );
 }
@@ -4350,15 +4350,15 @@ fn fold_with_a_lambda_callback_types_the_result() {
 #[test]
 fn reduce_fold_bail_when_init_or_callback_unknown() {
     // Unknown callback (local) → flat, no warning.
-    let w = warnings("(fn (g) (string-length (reduce g 0 (list 1 2 3))))");
+    let w = warnings("(fn (g) (string/length (reduce g 0 (list 1 2 3))))");
     assert!(
-        w.iter().all(|s| !s.contains("string-length")),
+        w.iter().all(|s| !s.contains("string/length")),
         "an unknown reduce callback must not refine: {w:?}"
     );
     // Unknown init type (a fn param) → flat, no warning.
-    let w = warnings("(fn (init) (string-length (reduce + init (list 1 2 3))))");
+    let w = warnings("(fn (init) (string/length (reduce + init (list 1 2 3))))");
     assert!(
-        w.iter().all(|s| !s.contains("string-length")),
+        w.iter().all(|s| !s.contains("string/length")),
         "an unknown init must not refine the reduce result: {w:?}"
     );
 }
@@ -4439,16 +4439,16 @@ fn keyword_accessor_arity_is_checked() {
 fn keyword_accessor_result_type_matches_get() {
     // A record field's declared type flows through the keyword spelling exactly as
     // it does through `get`, so a misuse of the RESULT is caught either way.
-    let src = "(defrecord pt ((x int) (y int)))\n(defn a () (string-length (:x (pt 1 2))))";
+    let src = "(defrecord pt ((x int) (y int)))\n(defn a () (string/length (:x (pt 1 2))))";
     let w = file_warnings(src);
     assert!(
         w.iter()
-            .any(|m| m.contains("string-length") && m.contains("int")),
+            .any(|m| m.contains("string/length") && m.contains("int")),
         "the keyword spelling must flow the field type: {w:?}"
     );
     // and the two spellings agree
     let via_get = file_warnings(
-        "(defrecord pt ((x int) (y int)))\n(defn a () (string-length (get (pt 1 2) :x)))",
+        "(defrecord pt ((x int) (y int)))\n(defn a () (string/length (get (pt 1 2) :x)))",
     );
     assert_eq!(w.len(), via_get.len(), "get: {via_get:?} vs kw: {w:?}");
 }

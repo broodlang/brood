@@ -72,12 +72,12 @@
         (and (<= e1 s2) (md-test-non-overlapping? (rest spans))))))
 
 ;; `markdown-spans` walks PRE-SPLIT lines with a running offset rather than
-;; `(substring src i e)` per line, because that substring is O(i) off the ASCII fast path and
+;; `(string/substring src i e)` per line, because that substring is O(i) off the ASCII fast path and
 ;; made the whole document scan quadratic on any text containing one non-ASCII character
 ;; (measured 5.03x then 6.92x rising, against 3.81x/3.88x for the same text in ASCII).
 ;;
 ;; The risk the rewrite carries is the offset arithmetic — the next line now starts at
-;; `i + (string-length line) + 1` instead of one past a scanned newline — and `string-split`'s
+;; `i + (string/length line) + 1` instead of one past a scanned newline — and `string-split`'s
 ;; trailing "" for a newline-terminated source, where the old `(>= i n)` loop simply stopped.
 ;; So pin absolute offsets, and pin that a trailing newline changes nothing.
 (describe "markdown-spans line offsets survive the pre-split walk"
@@ -90,7 +90,7 @@
       ;; the backtick run starts at offset 17 ("plain first line\n" is 17 chars) + 5 = 22.
       ;; An offset computed per-line rather than per-document reads 5 here.
       (assert= 22 (nth code 0))
-      (assert= (substring src (nth code 0) (nth code 1)) "`code`")))
+      (assert= (string/substring src (nth code 0) (nth code 1)) "`code`")))
 
   (test "a trailing newline adds no spans (string-split's trailing empty is dropped)"
     (assert= (markdown-spans "# Head") (markdown-spans "# Head\n")))

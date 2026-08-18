@@ -531,7 +531,7 @@ the Nth if a number is given (`,resume 2`). No-op note when no session is active
   (let (dbg *debug-session*)
     (if (nil? dbg)
       (println "\e[90m(no active debug session)\e[0m")
-      (let (r (trim rest))
+      (let (r (string/trim rest))
         (if (= r "")
           (println (str "resumed " (resume-all dbg) " parked"))
           (let (entries (vec (get (dbg-state dbg) :paused)))
@@ -612,7 +612,7 @@ no raw-terminal setup and works when piped."
     (let (raw (read-line))
       (if (nil? raw)
         :done
-        (let (line (trim raw) parts (string-split line " ") cmd (first parts))
+        (let (line (string/trim raw) parts (string/split line " ") cmd (first parts))
           (cond
             (= line "q") :done
             (or (= line "") (= line "p")) (debug-repl dbg)

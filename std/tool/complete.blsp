@@ -47,10 +47,10 @@ suggestions\", never to an error on the user's command line."
 (defn- complete-relative
   (path root)
   (if (and (not (nil? root))
-        (starts-with? path root)
-        (> (string-length path)
-          (+ (string-length root) 1)))
-    (substring path (+ (string-length root) 1) (string-length path))
+        (string/starts-with? path root)
+        (> (string/length path)
+          (+ (string/length root) 1)))
+    (string/substring path (+ (string/length root) 1) (string/length path))
     path))
 
 ;; --- files --------------------------------------------------------------------
@@ -116,15 +116,15 @@ suggestions\", never to an error on the user's command line."
           (complete-in-string? text i) (complete-tags-in text acc (+ i 5))
           else
             (complete-tags-in text
-              (append acc (complete-keywords (substring text (+ open 1) close)))
+              (append acc (complete-keywords (string/substring text (+ open 1) close)))
               (+ close 1)))))))
 
 ;; `index-of` has no start offset, so scan a suffix and re-base the result.
 (defn- index-of-from
   (text needle from)
-  (if (>= from (string-length text))
+  (if (>= from (string/length text))
     -1
-    (let (i (index-of (substring text from (string-length text)) needle))
+    (let (i (index-of (string/substring text from (string/length text)) needle))
       (if (< i 0) -1 (+ from i)))))
 
 ;; Is index `i` inside a string literal? Checked within `i`'s own LINE, using native
@@ -143,22 +143,22 @@ suggestions\", never to an error on the user's command line."
 
 (defn- complete-in-string?
   (text i)
-  (let (prefix (substring text (complete-line-start text i) i)
+  (let (prefix (string/substring text (complete-line-start text i) i)
         ;; An escaped \" neither opens nor closes, so drop those pairs first.
-        cleaned (replace prefix "\\\"" ""))
+        cleaned (string/replace prefix "\\\"" ""))
     ;; Odd number of quotes before the position ⇒ still inside one.
-    (= 1 (rem (- (count (string-split cleaned "\"")) 1) 2))))
+    (= 1 (rem (- (count (string/split cleaned "\"")) 1) 2))))
 
 ;; The bare names of the `:keyword`s in a whitespace-separated fragment.
 (defn- complete-keywords
   (fragment)
   (fold (fn (acc token)
-          (if (and (starts-with? token ":") (> (string-length token) 1))
-            (let (name (substring token 1 (string-length token)))
+          (if (and (string/starts-with? token ":") (> (string/length token) 1))
+            (let (name (string/substring token 1 (string/length token)))
               (if (complete-tag-name? name) (append acc (list name)) acc))
             acc))
     nil
-    (filter (fn (s) (not (= s ""))) (string-split (trim fragment) " "))))
+    (filter (fn (s) (not (= s ""))) (string/split (string/trim fragment) " "))))
 
 ;; Could `name` be a keyword's name? A tag is written `:name`, so anything holding a
 ;; quote, bracket, paren or backslash came from surrounding syntax rather than from a
@@ -171,7 +171,7 @@ suggestions\", never to an error on the user's command line."
   (and (not (= name ""))
     (fold (fn (ok ch) (and ok (not (includes? *complete-tag-reject* ch))))
       true
-      (string-split name ""))))
+      (string/split name ""))))
 
 (defn complete-tags ()
   "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why."
@@ -256,8 +256,8 @@ suggestions\", never to an error on the user's command line."
 
 (defn- complete-strip-extension
   (filename)
-  (if (ends-with? filename ".blsp")
-    (substring filename 0 (- (string-length filename) 5))
+  (if (string/ends-with? filename ".blsp")
+    (string/substring filename 0 (- (string/length filename) 5))
     filename))
 
 ;; --- dispatch -----------------------------------------------------------------
@@ -280,6 +280,6 @@ suggestions\", never to an error on the user's command line."
   "Print one candidate per line for `kind`, keeping only those starting with `prefix` — the form `nest complete` consumes. Prints nothing (and never raises) when there is nothing to suggest, so the shell falls back to filename completion."
   (fold (fn (_ c) (println c))
     nil
-    (filter (fn (c) (or (= prefix "") (starts-with? c prefix)))
+    (filter (fn (c) (or (= prefix "") (string/starts-with? c prefix)))
       (or (complete-safely (fn () (complete-for kind))) nil)))
   :ok)

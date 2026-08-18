@@ -57,19 +57,19 @@
   ;; success is not guaranteed. "It passed at 2000 on my machine" is not evidence.
   (test "deeply nested JSON is rejected, not fatal"
     ;; Past every cap: must raise a catchable error, never abort the process.
-    (let (deep (str (string-repeat "[" 5000)))
+    (let (deep (str (string/repeat "[" 5000)))
       (assert-error (json/parse deep)))
     ;; Past the 1500-level native cap, so the VM drain path is exercised: the contract here
     ;; is only what this test is named for — NOT FATAL. Either outcome is correct; an
     ;; uncaught error escaping, or an abort, is not.
-    (let (edge (str (string-repeat "[" 2000) (string-repeat "]" 2000))
+    (let (edge (str (string/repeat "[" 2000) (string/repeat "]" 2000))
           outcome (try
                     (if (vector? (json/parse edge)) :parsed :not-a-vector)
                     (catch e :rejected)))
       (is (or (= outcome :parsed) (= outcome :rejected))))
     ;; Well inside the envelope on any thread: a valid document MUST parse, so the depth
     ;; cap cannot be silently rejecting well-formed input.
-    (let (ok (str (string-repeat "[" 800) (string-repeat "]" 800)))
+    (let (ok (str (string/repeat "[" 800) (string/repeat "]" 800)))
       (is (vector? (json/parse ok)))))
 
   ;; The shapes that always worked, kept so a future depth change has to keep them

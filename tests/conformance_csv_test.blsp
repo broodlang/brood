@@ -29,7 +29,7 @@
 (defn- csv-stem
   (path)
   (let (b (path-basename path) i (index-of b "."))
-    (if (< i 0) b (substring b 0 i))))
+    (if (< i 0) b (string/substring b 0 i))))
 
 ;; A row map keyed by keyword -> the same map keyed by the header string.
 (defn- csv-stringify-keys

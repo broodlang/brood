@@ -104,7 +104,7 @@ as a keyword. Mirrors the LSP's SPECIAL_FORMS list."
   "True if `tok` reads as a number (so it colours as one rather than a symbol). A cheap
 first-char gate skips the `string->number` parse for the common case — an identifier
 that can't begin a number — since this runs on every atom on the fontify hot path."
-  (and (includes? "+-.0123456789" (char-at tok 0))
+  (and (includes? "+-.0123456789" (string/char-at tok 0))
     (not (nil? (string->number tok)))))
 
 ;; ---- scanning primitives (shared by lexer + matchers) -----------------------
@@ -117,23 +117,23 @@ that can't begin a number — since this runs on every atom on the fontify hot p
 (defn- hl-to-eol
   (src i n)
   "Index of the newline ending the line containing `i` (or `n` at end of input)."
-  (min n (string-span-until src i "\n")))
+  (min n (string/span-until src i "\n")))
 
 ; backslash: skip it and the escaped char
 (defn- hl-string-end
   (src i n)
   "Index just past the closing quote of a string whose body starts at `i` (one past
 the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
-  (let (j (string-span-until src i "\\\""))
+  (let (j (string/span-until src i "\\\""))
     ; first backslash or quote (or end)
     (cond
       (>= j n) n
-      (= (char-at src j) "\"") (inc j)
+      (= (string/char-at src j) "\"") (inc j)
       else (hl-string-end src (+ j 2) n))))
 (defn- hl-atom-end
   (src i n)
   "Index of the first delimiter at or after `i` — the end of an atom token."
-  (min n (string-span-until src i hl-delim-chars)))
+  (min n (string/span-until src i hl-delim-chars)))
 
 ;; ---- the lexer: source -> colour spans --------------------------------------
 
@@ -275,7 +275,7 @@ one-char range `[pos (inc pos) face]`."
 `depth` 0, or -1. Skips strings/comments so their brackets don't count."
   (if (>= i n)
     -1
-    (let (c (char-at full i))
+    (let (c (string/char-at full i))
       (cond
         (= c "\"") (hl-fwd-match full (hl-string-end full (inc i) n) n depth)
         (= c ";") (hl-fwd-match full (hl-to-eol full (inc i) n) n depth)
@@ -289,7 +289,7 @@ one-char range `[pos (inc pos) face]`."
 return the matching opener (top of stack) or -1. Skips strings/comments."
   (if (>= i n)
     -1
-    (let (c (char-at full i))
+    (let (c (string/char-at full i))
       (cond
         (= c "\"") (hl-opener-scan full (hl-string-end full (inc i) n) n cp stack)
         (= c ";") (hl-opener-scan full (hl-to-eol full (inc i) n) n cp stack)
@@ -306,14 +306,14 @@ matched bracket pair, `a` the opener) when the bracket adjacent to the cursor (t
 one just left of it, else the one under it) has a match, `[p :unmatched]` when it
 has none, or nil when the cursor isn't next to a bracket. Brackets inside strings
 and comments are ignored."
-  (let (n (string-length full)
+  (let (n (string/length full)
         bi (cond
-             (and (> pos 0) (hl-bracket? (char-at full (dec pos)))) (dec pos)
-             (and (< pos n) (hl-bracket? (char-at full pos))) pos
+             (and (> pos 0) (hl-bracket? (string/char-at full (dec pos)))) (dec pos)
+             (and (< pos n) (hl-bracket? (string/char-at full pos))) pos
              else -1))
     (if (< bi 0)
       nil
-      (let (c (char-at full bi))
+      (let (c (string/char-at full bi))
         (if (hl-open? c)
           (let (m (hl-fwd-match full (inc bi) n 0))
             (if (< m 0) [bi :unmatched] [bi m]))
@@ -328,7 +328,7 @@ doesn't count as nesting.
 Public because it is the one fact an auto-indenter needs — which form am I inside,
 and where does it start — and `enclosing-call` (right below) already computes it for
 signature hints; exposing it beats a second, subtly-different scan in the editor."
-  (hl-enc-scan full 0 pos (string-length full) '()))
+  (hl-enc-scan full 0 pos (string/length full) '()))
 
 ;; ---- enclosing call (for signature hints) -----------------------------------
 
@@ -339,7 +339,7 @@ innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped a
 `pos`)."
   (if (>= i pos)
     (if (empty? stack) -1 (first stack))
-    (let (c (char-at full i))
+    (let (c (string/char-at full i))
       (cond
         (= c "\"") (hl-enc-scan full (min pos (hl-string-end full (inc i) n)) pos n stack)
         (= c ";") (hl-enc-scan full (min pos (hl-to-eol full (inc i) n)) pos n stack)
@@ -353,7 +353,7 @@ innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped a
 level — atoms, strings, and whole bracketed forms each count once."
   (if (>= i end)
     acc
-    (let (c (char-at full i))
+    (let (c (string/char-at full i))
       (cond
         (hl-ws? c) (hl-datum-starts full (inc i) end n acc)
         (= c ";") (hl-datum-starts full (hl-to-eol full (inc i) n) end n acc)
@@ -375,23 +375,23 @@ rather than offset 0: head-position state is known-balanced at a column-0 form s
 the scan walks only the *current* defun, not every character above `pos`. This makes
 eldoc O(enclosing-form) instead of O(pos) — instant versus a multi-second stall when the
 cursor sits deep in a large file."
-  (let (n (string-length full)
+  (let (n (string/length full)
         op (hl-enc-scan full (safe-restart full pos) pos n '()))
-    (if (or (< op 0) (not (= (char-at full op) "(")))
+    (if (or (< op 0) (not (= (string/char-at full op) "(")))
       nil
       (let (end (min pos n)
             starts (reverse (hl-datum-starts full (inc op) end n '())))
         (if (empty? starts)
           nil
           (let (cstart (first starts)
-                cchar (char-at full cstart))
+                cchar (string/char-at full cstart))
             (if (or (hl-open? cchar) (= cchar "\"") (= cchar ":"))
               nil
-              (let (callee (substring full cstart (hl-atom-end full (inc cstart) n)))
+              (let (callee (string/substring full cstart (hl-atom-end full (inc cstart) n)))
                 (if (hl-number? callee)
                   nil
                   (let (afterc (dec (count starts))
-                        in-datum (and (> pos 0) (not (hl-delim? (char-at full (dec pos)))))
+                        in-datum (and (> pos 0) (not (hl-delim? (string/char-at full (dec pos)))))
                         argi (if in-datum (max 0 (dec afterc)) afterc))
                     [callee argi]))))))))))
 
@@ -400,22 +400,22 @@ cursor sits deep in a large file."
 (defn- hl-sym-start
   (full i)
   "The offset where the symbol token ending at `i` begins."
-  (if (or (<= i 0) (hl-delim? (char-at full (dec i)))) i (hl-sym-start full (dec i))))
+  (if (or (<= i 0) (hl-delim? (string/char-at full (dec i)))) i (hl-sym-start full (dec i))))
 
 (defn symbol-prefix-at (full pos)
   "Return `[start prefix]` for the symbol token ending at cursor offset `pos` —
 `start` its offset, `prefix` its text — or `[pos \"\"]` when the cursor isn't on a
 symbol."
-  (let (s (hl-sym-start full pos)) [s (substring full s pos)]))
+  (let (s (hl-sym-start full pos)) [s (string/substring full s pos)]))
 
 (defn- hl-cp2
   (a b)
   "The longest common prefix of two strings."
-  (hl-cp2-at a b 0 (min (string-length a) (string-length b))))
+  (hl-cp2-at a b 0 (min (string/length a) (string/length b))))
 (defn- hl-cp2-at
   (a b i n)
-  (if (or (>= i n) (not (= (char-at a i) (char-at b i))))
-    (substring a 0 i)
+  (if (or (>= i n) (not (= (string/char-at a i) (string/char-at b i))))
+    (string/substring a 0 i)
     (hl-cp2-at a b (inc i) n)))
 
 (defn common-prefix (strs)

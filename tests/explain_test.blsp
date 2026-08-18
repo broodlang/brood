@@ -28,8 +28,8 @@
   (test "every catalogue entry is complete (summary + fix present)"
     (doseq (code (keys *error-explanations*))
       (let (e (explain-error code))
-        (is (> (string-length (get e :summary)) 0))
-        (is (> (string-length (get e :fix)) 0))))))
+        (is (> (string/length (get e :summary)) 0))
+        (is (> (string/length (get e :fix)) 0))))))
 
 (describe "find-pattern"
   (test "an intent word finds the idiom (case-insensitive)"

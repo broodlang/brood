@@ -359,7 +359,7 @@
   (test "buffer-region-bounds matches the buffer-region span"
     (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4))
           [lo hi] (buffer-region-bounds b))
-      (assert= (substring (buffer-text b) lo hi) (buffer-region b)))))
+      (assert= (string/substring (buffer-text b) lo hi) (buffer-region b)))))
 
 (describe "replace-region (the splice primitive)"
   ; 6 + len("there")
@@ -588,7 +588,7 @@
     (let (bp (spawn-buffer (make-buffer "hello world")))
       (assert= (buffer-edit-value bp
                  (fn (b)
-                   [(delete-char (goto-char b 0) 6) (substring (buffer-text b) 0 6)]))
+                   [(delete-char (goto-char b 0) 6) (string/substring (buffer-text b) 0 6)]))
         "hello ")
       (assert= (buffer-query bp buffer-text) "world")
       (stop-buffer bp)))

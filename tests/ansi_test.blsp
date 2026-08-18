@@ -10,7 +10,7 @@
     (assert= (ansi-home) (str "\e" "[H"))
     ; `clear` is screen-erase then home — the per-frame reset
     (assert= (ansi-clear) (str (ansi-clear-screen) (ansi-home)))
-    (assert= (string-length (ansi-clear)) 7))
+    (assert= (string/length (ansi-clear)) 7))
   (test "cursor moves to a 1-based (row, col)"
     (assert= (ansi-cursor 3 5) (str "\e" "[3;5H"))
     (assert= (ansi-cursor 1 1) (str "\e" "[1;1H")))

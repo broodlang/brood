@@ -54,15 +54,15 @@ buffer wants — the user should be able to see where they may type."
                 (if (empty? lines)
                   (reverse acc)
                   (let (line (first lines)
-                        next-off (+ off (string-length line) 1))
+                        next-off (+ off (string/length line) 1))
                     (cond
-                      (starts-with? line open-prefix)
+                      (string/starts-with? line open-prefix)
                         (go (rest lines)
                           (inc lineno)
                           next-off
                           {:open-line lineno :start next-off}
                           acc)
-                      (and open (starts-with? line close-prefix))
+                      (and open (string/starts-with? line close-prefix))
                         (go (rest lines)
                           (inc lineno)
                           next-off
@@ -76,13 +76,13 @@ buffer wants — the user should be able to see where they may type."
                                  :close-line lineno}
                             acc))
                       else (go (rest lines) (inc lineno) next-off open acc))))))
-    (go (string-split text "\n") 0 0 nil '())))
+    (go (string/split text "\n") 0 0 nil '())))
 
 (defn tail-region (text start)
   "The single region from `start` to the end of `text` — the shape a prompt buffer
 wants (everything after the prompt is yours). A list of one, so it composes with
 the region functions below."
-  (list {:start (min start (string-length text)) :end (string-length text)}))
+  (list {:start (min start (string/length text)) :end (string/length text)}))
 
 ;; ---- region algebra -----------------------------------------------------------
 
@@ -98,7 +98,7 @@ counts as inside), or nil."
 
 (defn region-text (text region)
   "The text of one region."
-  (substring text (get region :start) (get region :end)))
+  (string/substring text (get region :start) (get region :end)))
 
 (defn region-texts (text regions)
   "The text of every region, in order."
@@ -110,11 +110,11 @@ and the thing to compare against to notice damage. Independent of what the user
 typed inside the regions, so it is stable while they work."
   (let (r (fold (fn (acc region)
                   (let ([pos parts] acc)
-                    [(get region :end) (cons (substring text pos (get region :start)) parts)]))
+                    [(get region :end) (cons (string/substring text pos (get region :start)) parts)]))
             [0 '()]
             regions)
         [pos parts] r)
-    (apply str (reverse (cons (substring text pos (string-length text)) parts)))))
+    (apply str (reverse (cons (string/substring text pos (string/length text)) parts)))))
 
 (defn protected-spans (text regions)
   "The COMPLEMENT of `regions` over `text` — the `[lo hi)` ranges *outside* every editable
@@ -123,7 +123,7 @@ this returns its ranges, which is exactly what `buffer/set-read-only-spans` free
 edit primitives refuse a keystroke that would damage the generated part — enforcement at
 the mutator instead of a skeleton comparison run after each key (which every edit path has
 to remember to run). An empty region contributes no gap on either side beyond its neighbours'."
-  (let (len (string-length text)
+  (let (len (string/length text)
         r (fold (fn (acc region)
                   (let ([pos spans] acc
                         s (get region :start))
@@ -149,12 +149,12 @@ changed shape, and there is no honest correspondence to preserve)."
                             old (nth old-regions i))
                         [(get region :end)
                           (cons (region-text old-text old)
-                            (cons (substring new-text pos (get region :start))
+                            (cons (string/substring new-text pos (get region :start))
                               parts))]))
                 [0 '()]
                 (enumerate new-regions))
             [pos parts] r)
-        (apply str (reverse (cons (substring new-text pos (string-length new-text)) parts)))))))
+        (apply str (reverse (cons (string/substring new-text pos (string/length new-text)) parts)))))))
 
 ;; ---- the guard policies (a `:post-key` facet body) -----------------------------
 

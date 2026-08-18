@@ -163,7 +163,7 @@ mod hash {
             bencher,
             format!(
                 "\
-                 (def s (string-repeat \"a\" 1024)) \
+                 (def s (string/repeat \"a\" 1024)) \
                  (dotimes (i {n}) (hash/sha256 s))"
             ),
         );

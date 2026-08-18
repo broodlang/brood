@@ -99,7 +99,7 @@ behind a long-lived loop has changed since it started."
   (let (key (reload-package-key path))
     (if (nil? key)
       (thunk)
-      (let (prefix (symbol (first (string-split key "/")))
+      (let (prefix (symbol (first (string/split key "/")))
             modules (get *package-modules-of* (name prefix))
             prev (%set-package-context prefix modules)
             restore (fn () (%set-package-context (first prev) (second prev))))
@@ -152,7 +152,7 @@ behind a long-lived loop has changed since it started."
             ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
             (dir? p) (append-two (reload-collect-blsp p) acc)
-            (ends-with? entry ".blsp") (cons p acc)
+            (string/ends-with? entry ".blsp") (cons p acc)
             else acc)))
       nil
       (list-dir dir))

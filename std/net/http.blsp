@@ -134,7 +134,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   (let (i (index-of s sep))
     (if (< i 0)
       (list s "")
-      (list (substring s 0 i) (substring s (+ i (string-length sep)) (string-length s))))))
+      (list (string/substring s 0 i) (string/substring s (+ i (string/length sep)) (string/length s))))))
 
 (defn- http-parse-headers
   (lines)
@@ -143,10 +143,10 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
             (if (< i 0)
               m
               (assoc m
-                (lower (trim (substring line 0 i)))
-                  (trim (substring line
+                (string/lower (string/trim (string/substring line 0 i)))
+                  (string/trim (string/substring line
                           (+ i 1)
-                          (string-length line)))))))
+                          (string/length line)))))))
     {}
     lines))
 
@@ -157,7 +157,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   ;; a fractional length (`3.9`) could never be reached exactly, parking the
   ;; worker until the read timeout, and a negative one is meaningless. (The read
   ;; timeout already bounds an honestly-shaped but lying huge length.)
-  (let (lines (string-split head "\r\n")
+  (let (lines (string/split head "\r\n")
         v (get (http-parse-headers (rest lines)) "content-length"))
     (if (nil? v)
       0
@@ -178,8 +178,8 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
         head-end (if (< marker 0) (byte-length raw) marker)
         head (utf8-bytes->string (subbytes raw 0 head-end))
         body (if (< marker 0) #b"" (subbytes raw (+ marker 4) (byte-length raw)))
-        lines (string-split head "\r\n")
-        req (string-split (first lines) " "))
+        lines (string/split head "\r\n")
+        req (string/split (first lines) " "))
     {:method (nth req 0 "GET")
      :path (nth req 1 "/")
      :version (nth req 2 "HTTP/1.0")
@@ -413,8 +413,8 @@ keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
         head-end (if (< marker 0) (byte-length raw) marker)
         head (utf8-bytes->string (subbytes raw 0 head-end))
         body (if (< marker 0) #b"" (subbytes raw (+ marker 4) (byte-length raw)))
-        lines (string-split head "\r\n")
-        status (string-split (first lines) " "))
+        lines (string/split head "\r\n")
+        status (string/split (first lines) " "))
     (response (let (n (string->number (nth status 1 "0"))) (if (nil? n) 0 n))
       (http-parse-headers (rest lines))
       body)))
@@ -435,7 +435,7 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
 ;; a multibyte string, which only loosens the cap — fine for a DoS bound.
 (defn- http-chunk-size
   (d)
-  (if (string? d) (string-length d) (byte-length d)))
+  (if (string? d) (string/length d) (byte-length d)))
 
 ;; Collect the response delivered as messages until close; [:ok bytes] or
 ;; [:error msg]. `acc` is the chunks in reverse, `have` their running byte total;

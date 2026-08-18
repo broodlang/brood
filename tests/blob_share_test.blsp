@@ -45,7 +45,7 @@
 ;; A def-bound big string: its right-hand-side is a LOCAL Shared string, but
 ;; `def` promotes it to RUNTIME (a `boxcar::Vec<String>`), so %blob-ptr should
 ;; answer nil for it. Used by the RUNTIME-region assertion below.
-(def bs-big-runtime-string (string-repeat "u" 300))
+(def bs-big-runtime-string (string/repeat "u" 300))
 
 ;; Allocate past the GC floor so Stage B's automatic copying collection fires at
 ;; the safepoint (this spin is the worker's depth-1 tail loop), flipping the LOCAL
@@ -77,18 +77,18 @@
 
   (test "a >= 256 B string is allocated as Shared (has a non-nil blob ptr)"
     (when (bound? '%blob-ptr)
-      (let (big (string-repeat "x" 1024))
-        (assert= 1024 (string-length big))
+      (let (big (string/repeat "x" 1024))
+        (assert= 1024 (string/length big))
         (is (not (nil? (%blob-ptr big)))))))
 
   (test "a < 256 B string is inline (returns nil from %blob-ptr)"
     (when (bound? '%blob-ptr)
       (assert= nil (%blob-ptr "short"))
-      (assert= nil (%blob-ptr (string-repeat "x" 255)))))
+      (assert= nil (%blob-ptr (string/repeat "x" 255)))))
 
   (test "a big string sent to a worker keeps the same SharedBlob identity"
     (when (bound? '%blob-ptr)
-      (let (big (string-repeat "y" 512)
+      (let (big (string/repeat "y" 512)
             parent-ptr (%blob-ptr big)
             me (self)
             w (spawn (bs-blob-worker me)))
@@ -99,7 +99,7 @@
     (when (bound? '%blob-ptr)
       (let (n 8
             ;; ~1 KB string, well above threshold
-            big (string-repeat "abcdefghij0123456789" 64)
+            big (string/repeat "abcdefghij0123456789" 64)
             parent-ptr (%blob-ptr big)
             me (self)
             workers (bs-spawn-workers me n))
@@ -117,13 +117,13 @@
 
   (test "strong count is 1 for a freshly-allocated big string"
     (when (bound? '%blob-strong-count)
-      (let (big (string-repeat "z" 300))
+      (let (big (string/repeat "z" 300))
         ;; No other process holds it yet — the count is 1.
         (assert= 1 (%blob-strong-count big)))))
 
   (test "a GC arena flip preserves SharedBlob identity for a surviving big string"
     (when (bound? '%blob-ptr)
-      (let (big (string-repeat "h" 400)
+      (let (big (string/repeat "h" 400)
             me (self)
             w (spawn (bs-hib-worker me)))
         ;; Worker receives `big` via send (lands as LOCAL Shared in worker),

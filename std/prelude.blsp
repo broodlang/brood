@@ -809,7 +809,7 @@ and a set its elements, as everywhere else `seq` applies."
     ;; A lazy seq-view counts by fusing a counting reducer through `fold` — walks
     ;; the source once, no list materialised.
     (seqview? coll) (fold (fn (n _) (%add n 1)) 0 coll)
-    (string? coll) (string-length coll)
+    (string? coll) (string/length coll)
     (vector? coll) (vector-length coll)
     (bytes? coll) (byte-length coll)
     ;; a record counts as its `Seqable` view (its fields, id-free, by default) — not the
@@ -940,7 +940,7 @@ a wrong-typed one."
               (nil? coll) nil
               (string? coll)
                 (if (int? k)
-                  (if (and (>= k 0) (< k (string-length coll))) (char-at coll k) nil)
+                  (if (and (>= k 0) (< k (string/length coll))) (string/char-at coll k) nil)
                   (get-unanswerable coll k))
               (int? k) (nth coll k nil)
               else (get-unanswerable coll k)))
@@ -950,8 +950,8 @@ a wrong-typed one."
                       (nil? coll) default
                       (string? coll)
                         (if (int? k)
-                          (if (and (>= k 0) (< k (string-length coll)))
-                            (char-at coll k)
+                          (if (and (>= k 0) (< k (string/length coll)))
+                            (string/char-at coll k)
                             default)
                           (get-unanswerable coll k))
                       (int? k) (nth coll k default)
@@ -962,8 +962,8 @@ a wrong-typed one."
                         (nil? coll) (first default)
                         (string? coll)
                           (if (int? k)
-                            (if (and (>= k 0) (< k (string-length coll)))
-                              (char-at coll k)
+                            (if (and (>= k 0) (< k (string/length coll)))
+                              (string/char-at coll k)
                               (first default))
                             (get-unanswerable coll k))
                         (int? k) (nth coll k (first default))
@@ -2390,9 +2390,9 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
 ;; tool that appends "\n") still matches the bytes we minted.
 (defn- node-chomp
   (s)
-  (let (n (string-length s))
-    (if (and (> n 0) (= (substring s (dec n) n) "\n"))
-      (node-chomp (substring s 0 (dec n)))
+  (let (n (string/length s))
+    (if (and (> n 0) (= (string/substring s (dec n) n) "\n"))
+      (node-chomp (string/substring s 0 (dec n)))
       s)))
 
 (defn node-cookie ()
@@ -2424,7 +2424,7 @@ on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override.
   (s i n)
   (cond
     (>= i n) -1
-    (= (substring s i (inc i)) "@") i
+    (= (string/substring s i (inc i)) "@") i
     else (node-at s (inc i) n)))
 
 ;; Last index of `:` in s (or -1) — needed to split "name@host:port" into the
@@ -2433,7 +2433,7 @@ on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override.
   (s i n last)
   (cond
     (>= i n) last
-    (= (substring s i (inc i)) ":") (node-last-colon s (inc i) n i)
+    (= (string/substring s i (inc i)) ":") (node-last-colon s (inc i) n i)
     else (node-last-colon s (inc i) n last)))
 
 ;; The bare name-part of a node name (before any `@`). Used for the local Unix
@@ -2441,16 +2441,16 @@ on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override.
 ;; identity only, not part of the path.
 (defn- node-name-part
   (s)
-  (let (at (node-at s 0 (string-length s)))
-    (if (>= at 0) (substring s 0 at) s)))
+  (let (at (node-at s 0 (string/length s)))
+    (if (>= at 0) (string/substring s 0 at) s)))
 
 ;; The host part of a "host:port" address (everything before the last colon),
 ;; IPv6-safe. So a TCP node's name host == the host peers dial, keeping
 ;; `connect`/`net/reconnect` name-derivation consistent with the node's identity.
 (defn- node-addr-host
   (addr)
-  (let (lc (node-last-colon addr 0 (string-length addr) -1))
-    (if (>= lc 0) (substring addr 0 lc) addr)))
+  (let (lc (node-last-colon addr 0 (string/length addr) -1))
+    (if (>= lc 0) (string/substring addr 0 lc) addr)))
 
 ;; Qualify a node name to `name@host` (ADR-073), Erlang-style:
 ;;   - already `name@host` → verbatim (an explicit long/FQDN name);
@@ -2461,7 +2461,7 @@ on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override.
   (nm addr)
   (let (s (name nm))
     (cond
-      (>= (node-at s 0 (string-length s)) 0) (keyword s)
+      (>= (node-at s 0 (string/length s)) 0) (keyword s)
       (nil? addr) (keyword (str s "@" (hostname)))
       else (keyword (str s "@" (node-addr-host addr))))))
 
@@ -2489,7 +2489,7 @@ authenticated with this runtime's `(node-cookie)`. Returns the peer's authoritat
 node — call `(node-start …)` first."
   (when (= (node-name) :nonode)
     (error "connect: this runtime is not a node yet — call (node-start name) first"))
-  (let (n (string-length spec)
+  (let (n (string/length spec)
         at (node-at spec 0 n))
     (if (< at 0)
       ;; Bare name → local Unix node. The peer's real name is `name@thishost`;
@@ -2502,8 +2502,8 @@ node — call `(node-start …)` first."
         (when (<= lc at)
           (error "connect: a remote node needs \"name@host:port\" (a bare name is local), got "
             spec))
-        (%node-connect (keyword (substring spec 0 lc))
-          (str "tcp:" (substring spec (inc at) n)))))))
+        (%node-connect (keyword (string/substring spec 0 lc))
+          (str "tcp:" (string/substring spec (inc at) n)))))))
 
 (defn node-also-listen (&optional addr)
   "Add another listener to this (already-started) node so it serves several
@@ -3568,36 +3568,9 @@ an absent feature is still **bound** and still raises when called, so `(bound?
 to degrade rather than fail asks the build."
   (includes? (features) name))
 
-(defn capitalize (s)
-  "Return `s` with the first character upper-cased and the rest lower-cased."
-  (if (= (string-length s) 0)
-    s
-    (str (upper (substring s 0 1)) (lower (substring s 1)))))
-
-(defn codepoints->string (cs)
-  "Build a string from a list (or vector) of Unicode codepoint integers — the
-inverse of the `string->codepoints` primitive."
-  (apply str (map int->char cs)))
-
-(defn char-at (s i)
-  "The character (a 1-char string) at char index `i` of `s`."
-  (substring s i (inc i)))
-
 (defn number->string (n)
   "The textual form of number `n` — the inverse of `string->number`."
   (str n))
-
-(defn string->list (s)
-  "The characters of `s` as a list of 1-char strings."
-  ;; One native O(n) `chars()` pass. A pure-Brood `(substring s i (inc i))` loop
-  ;; is O(n^2) — `substring` walks to char boundary `i` each call — which silently
-  ;; makes every `(into [] (string->list s))` code-point vector O(n^2) to build
-  ;; (it defeated the json/base64 char-indexing rewrites; see docs/devlog.md).
-  (string-split s ""))
-
-(defn list->string (cs)
-  "Concatenate a list of strings (e.g. from `string->list`) into one string."
-  (apply str cs))
 
 (defn- index-of-seq-from
   (coll x i from)
@@ -3616,7 +3589,7 @@ what incremental search rides on (formerly the separate `index-of`)."
       ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood
       ;; scan would be O(n²) (char indexing is O(index)), which is too slow for
       ;; whole-namespace `doc-search`/`apropos` use. The `from` offset goes to the
-      ;; primitive, which searches in place. It used to be `(%str-index-of (substring
+      ;; primitive, which searches in place. It used to be `(%str-index-of (string/substring
       ;; coll s0 n) x)` — which COPIED the suffix on every call, so the incremental
       ;; search this offset exists for was itself quadratic. `last-index-of` is where that
       ;; measurably mattered (540 ms → 1 ms at 6400 matches); `fuzzy-next` also calls it
@@ -3628,7 +3601,7 @@ what incremental search rides on (formerly the separate `index-of`)."
 
 (defn last-index-of (s needle &optional before)
   "The 0-based char index of the **last** occurrence of `needle` in string `s` whose
-start is strictly **before** `before` (default `(string-length s)`), or -1 if there is
+start is strictly **before** `before` (default `(string/length s)`), or -1 if there is
 none. The backward counterpart of `(index-of s needle from)` — what reverse
 incremental search rides on."
   ;; One native pass. This used to walk forward in Brood calling `(index-of s needle i)`
@@ -3639,82 +3612,25 @@ incremental search rides on."
   ;; `lineedit` finds the current line's start on every keystroke. The empty-needle rule
   ;; (matches at every position, so the answer is `before - 1` clamped) lives in the
   ;; primitive now, unchanged.
-  (%str-last-index-of s needle (or before (string-length s))))
+  (%str-last-index-of s needle (or before (string/length s))))
 
 (defn includes? (coll x)
-  "True if `coll` contains `x`. Works on lists, vectors, strings (substring), and maps (membership among values — use `contains?` for keys)."
+  "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), and maps (membership among values — use `contains?` for keys)."
   (cond
     (map? coll) (member? x (vals coll))
     else (>= (index-of coll x) 0)))
 
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
 ;; recursively, reversed), then build the string in one `apply str` pass.
-(defn- join-parts
-  (sep coll acc)
-  (if (empty? coll) acc (join-parts sep (rest coll) (cons (first coll) (cons sep acc)))))
-(defn join (sep coll)
-  "Concatenate the strings in `coll` with `sep` between adjacent elements."
-  ;; For the common case — a string separator over a list/vector/range — the
-  ;; native `%string-join` walks `coll` once into one buffer (no intermediate
-  ;; parts list, no reverse). The all-Brood path stays as a fallback for an
-  ;; exotic (non-string) separator: it builds the interleaved parts list
-  ;; (reversed) then concatenates in one `apply str` pass.
-  ;; A lazy seq-view is realised first (the native walks it via `seq_items`,
-  ;; which can't run a transducer). NOTE: this materialises the mapped strings —
-  ;; the `strings` benchmark's full fusion would need a string-builder reducer
-  ;; (a follow-up); today join over a view matches the old eager-`map` behaviour.
-  (let (coll (if (seqview? coll) (seq coll) coll))
-    (if (string? sep)
-      (%string-join sep coll)
-      (if (empty? coll)
-        ""
-        (apply str (cons (first coll) (reverse (join-parts sep (rest coll) nil))))))))
 
 ;; `string-split` is now a native builtin (crates/lisp/src/builtins/mod.rs) — one O(n)
 ;; pass via Rust's `str::split`. The former pure-Brood version re-`substring`ed the
 ;; tail each step, which is O(n²) (char-indexed substring is O(index)); a 174 KB
 ;; `git ls-files` output took ~840 ms in the editor's project scan, now ~10 ms.
 
-(defn replace (s old new)
-  "Return `s` with every occurrence of `old` replaced by `new`. An empty `old`
-leaves `s` unchanged."
-  (if (= old "") s (join new (string-split s old))))
-
-(defn- string-whitespace? (c) (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
-
-(defn blank? (s)
-  "Is `s` empty or made up only of whitespace?"
-  (let (n (string-length s))
-    (cond (= n 0) true (string-whitespace? (char-at s 0)) (blank? (substring s 1 n)) else false)))
-
-(defn- triml-from
-  (s i n)
-  (if (and (< i n) (string-whitespace? (char-at s i))) (triml-from s (inc i) n) (substring s i n)))
-(defn triml (s) "Remove leading whitespace from `s`." (triml-from s 0 (string-length s)))
-
-(defn- trimr-to
-  (s n)
-  (if (and (> n 0) (string-whitespace? (char-at s (dec n))))
-    (trimr-to s (dec n))
-    (substring s 0 n)))
-(defn trimr (s) "Remove trailing whitespace from `s`." (trimr-to s (string-length s)))
-
-(defn trim (s) "Remove leading and trailing whitespace from `s`." (triml (trimr s)))
-
 ;; ---- string padding & repetition --------------------------------------------
 ;; Column formatting for tabular/console output. `pad-*` left unchanged when the
 ;; string already meets the width (they never truncate).
-(defn string-repeat (s n)
-  "The string `s` concatenated `n` times (the empty string if `n` <= 0)."
-  (apply str (repeat n s)))
-
-(defn pad-left (s w &optional (pad " "))
-  "Right-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the left; `s` is returned unchanged if it is already at least `w` wide."
-  (let (n (string-length s)) (if (>= n w) s (str (string-repeat pad (- w n)) s))))
-
-(defn pad-right (s w &optional (pad " "))
-  "Left-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the right; `s` is returned unchanged if it is already at least `w` wide."
-  (let (n (string-length s)) (if (>= n w) s (str s (string-repeat pad (- w n))))))
 
 ;; ---- string interpolation ---------------------------------------------------
 ;; `(fmt "…{expr}…")` builds a string from a template, splicing the value of each
@@ -3759,7 +3675,7 @@ leaves `s` unchanged."
 (defmacro fmt (template)
   "Build a string from a template, splicing each `{expr}` hole's value between the literal text: `(fmt \"x={x} sum={(+ a b)}\")`. `{{`/`}}` are literal braces; braces nest inside a hole. Expands to a plain `(str …)`."
   (if (string? template)
-    (cons 'str (fmt-lit (string->list template) nil nil))
+    (cons 'str (fmt-lit (string/to-list template) nil nil))
     (error "fmt: template must be a string literal, got " (pr-str template))))
 
 ;; ---- string formatting ------------------------------------------------------
@@ -3777,63 +3693,55 @@ leaves `s` unchanged."
 ;; as `nil` (debuggable), extra args are ignored.
 (defn format (fmt & args)
   "Render `fmt`, replacing each %-specifier with the next of `args`. Supports `%s` `%d` `%f` `%.Nf` `%%`; use `pad-left`/`pad-right` for width."
-  (format-loop fmt 0 (string-length fmt) args ""))
+  (format-loop fmt 0 (string/length fmt) args ""))
 
 (defn- format-loop
   (fmt i n args acc)
   (cond
     (>= i n) acc
-    (= (char-at fmt i) "%") (format-spec fmt (inc i) n args acc)
-    else (format-loop fmt (inc i) n args (str acc (char-at fmt i)))))
+    (= (string/char-at fmt i) "%") (format-spec fmt (inc i) n args acc)
+    else (format-loop fmt (inc i) n args (str acc (string/char-at fmt i)))))
 
 (defn- format-spec
   (fmt i n args acc)
   ;; called with `i` pointing one past the `%`
   (cond
     (>= i n) (error "format: unterminated specifier (lone '%' at end of format string)")
-    (= (char-at fmt i) "%") (format-loop fmt (inc i) n args (str acc "%"))
-    (= (char-at fmt i) "s") (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
-    (= (char-at fmt i) "d") (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
-    (= (char-at fmt i) "f")
+    (= (string/char-at fmt i) "%") (format-loop fmt (inc i) n args (str acc "%"))
+    (= (string/char-at fmt i) "s") (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (string/char-at fmt i) "d") (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (string/char-at fmt i) "f")
       (format-loop fmt
         (inc i)
         n
         (rest args)
         (str acc (to-fixed (first args) 6)))
-    (= (char-at fmt i) ".") (format-prec fmt (inc i) n args acc 0)
-    else (error (str "format: unrecognized specifier '%" (char-at fmt i) "' at column " i))))
+    (= (string/char-at fmt i) ".") (format-prec fmt (inc i) n args acc 0)
+    else (error (str "format: unrecognized specifier '%" (string/char-at fmt i) "' at column " i))))
 
 (defn- format-prec
   (fmt i n args acc p)
   ;; called with `i` pointing one past the `.`, accumulating precision in `p`
   (cond
     (>= i n) (error "format: unterminated %.Nf specifier")
-    (= (char-at fmt i) "f")
+    (= (string/char-at fmt i) "f")
       (format-loop fmt
         (inc i)
         n
         (rest args)
         (str acc (to-fixed (first args) p)))
     else
-      (let (d (string->number (char-at fmt i)))
+      (let (d (string->number (string/char-at fmt i)))
         (if (and (int? d) (>= d 0) (<= d 9))
           (format-prec fmt (inc i) n args acc (+ (* p 10) d))
           (error (str "format: expected digit or 'f' after '.' in specifier, got '"
-                   (char-at fmt i)
+                   (string/char-at fmt i)
                    "' at column "
                    i))))))
 
 ;; ---- strings & paths --------------------------------------------------------
 ;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough
 ;; to live in core; the module system and the project tooling build on them.
-(defn starts-with? (s prefix)
-  "Does string `s` begin with `prefix`?"
-  (let (n (string-length prefix)) (and (>= (string-length s) n) (= (substring s 0 n) prefix))))
-
-(defn ends-with? (s suffix)
-  "Does string `s` end with `suffix`?"
-  (let (sl (string-length s) ql (string-length suffix))
-    (and (>= sl ql) (= (substring s (- sl ql) sl) suffix))))
 
 ;; The bootstrap `path-*` subset (path-join/path-basename/path-absolute/parent-dir):
 ;; the minimal path ops tooling needs *before* any module can be required. The full
@@ -3844,18 +3752,18 @@ leaves `s` unchanged."
 ;; no char accessor yet; paths are short, so a substring scan is fine.)
 (defn- path-last-slash
   (s i)
-  (cond (< i 0) -1 (= (substring s i (inc i)) "/") i else (path-last-slash s (dec i))))
+  (cond (< i 0) -1 (= (string/substring s i (inc i)) "/") i else (path-last-slash s (dec i))))
 
 ;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
 ;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.
 (defn parent-dir (path)
   "The directory containing `path` (\"/a/b/c\" -> \"/a/b\", \"/foo\" -> \"/\", \"rel\" -> \".\")."
-  (let (i (path-last-slash path (dec (string-length path))))
-    (cond (< i 0) "." (= i 0) "/" else (substring path 0 i))))
+  (let (i (path-last-slash path (dec (string/length path))))
+    (cond (< i 0) "." (= i 0) "/" else (string/substring path 0 i))))
 
 (defn path-join (a b)
   "Join path segments `a` and `b` with a single `/` separator."
-  (if (ends-with? a "/") (str a b) (str a "/" b)))
+  (if (string/ends-with? a "/") (str a b) (str a "/" b)))
 
 (defn temp-path (prefix)
   "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
@@ -3873,11 +3781,11 @@ of file with your privileges. Neither is possible with a name they cannot predic
   "The final component of `path` (\"/a/b/c\" -> \"c\", \"/foo\" -> \"foo\",
 \"foo\" -> \"foo\"). The empty string returns itself; a trailing slash isn't
 stripped (`(cwd)` doesn't produce one, which is the primary caller)."
-  (let (n (string-length path))
+  (let (n (string/length path))
     (if (= n 0)
       ""
       (let (i (path-last-slash path (dec n)))
-        (if (< i 0) path (substring path (inc i) n))))))
+        (if (< i 0) path (string/substring path (inc i) n))))))
 
 (defn path-absolute (path &optional base)
   "Resolve `path` to an absolute path: a `/`-rooted path is returned unchanged, a
@@ -3885,9 +3793,9 @@ stripped (`(cwd)` doesn't produce one, which is the primary caller)."
 onto `base` (default the current directory, `(cwd)`). The empty string is returned as
 is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segments."
   (cond
-    (or (= path "") (starts-with? path "/")) path
+    (or (= path "") (string/starts-with? path "/")) path
     (= path "~") (or (getenv "HOME") path)
-    (starts-with? path "~/") (str (or (getenv "HOME") "~") (substring path 1 (string-length path)))
+    (string/starts-with? path "~/") (str (or (getenv "HOME") "~") (string/substring path 1 (string/length path)))
     else (path-join (or base (cwd)) path)))
 
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
@@ -3989,7 +3897,7 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 (defn- pr-elide
   (parts over)
   "`parts` joined for display, with the `…` length marker appended when `over`."
-  (join " " (if over (append parts (list "…")) parts)))
+  (string/join " " (if over (append parts (list "…")) parts)))
 
 (defn- pr-limit
   (items)
@@ -4038,12 +3946,12 @@ string costs four output characters per byte, so cutting after the fact would st
 have built the flood this bound exists to prevent."
   (let (limit *print-string-length*
         bytes (= :bytes (type-of x))
-        length (if bytes (count x) (string-length x)))
+        length (if bytes (count x) (string/length x)))
     (if (or (nil? limit) (<= length limit))
       (pr-str x)
-      (let (printed (pr-str (if bytes (subbytes x 0 limit) (substring x 0 limit))))
+      (let (printed (pr-str (if bytes (subbytes x 0 limit) (string/substring x 0 limit))))
         ;; drop the closing quote, mark the elision, close again
-        (str (substring printed 0 (dec (string-length printed))) "…\"")))))
+        (str (string/substring printed 0 (dec (string/length printed))) "…\"")))))
 
 (defn- pr-bounded
   (x level)
@@ -4098,7 +4006,7 @@ of each consumer inventing its own cap."
 (defn- doc-search-terms
   (query)
   "Lowercased, whitespace-separated terms of `query`, with blanks removed."
-  (filter (fn (t) (not (blank? t))) (string-split (lower query) " ")))
+  (filter (fn (t) (not (string/blank? t))) (string/split (string/lower query) " ")))
 
 (defn doc-search (query)
   "Globals whose name or docstring matches `query`, ranked by how many of its
@@ -4115,7 +4023,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
           (keep (fn (s)
                   (let (d (try (doc (eval s)) (catch _ nil)))
                     (when (string? d)
-                      (let (hay (lower (str s " " d))
+                      (let (hay (string/lower (str s " " d))
                             hits (count (filter (fn (t) (includes? hay t)) terms)))
                         (when (> hits 0) [hits s d])))))
             (global-names)))))))
@@ -4507,7 +4415,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; web/views/counter → counter  (a module name's last `/`-segment, as a symbol).
 (defn- defmodule-last-segment
   (mod)
-  (symbol (last (string-split (name mod) "/"))))
+  (symbol (last (string/split (name mod) "/"))))
 
 ;; The `(require …)`+`(%alias …)` forms for one `(:alias mod [:as short])` clause:
 ;; load the module, then register a prefix alias so a later `short/name` resolves to
@@ -4626,7 +4534,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
   ;; Every `.blsp` on `dirs` (searched top-level, not recursively) that declares `key-name`.
   (fold (fn (acc dir)
           (fold (fn (a entry)
-                  (if (and (ends-with? entry ".blsp")
+                  (if (and (string/ends-with? entry ".blsp")
                         (require-file-declares? (path-join dir entry) key-name))
                     (cons (path-join dir entry) a)
                     a))
@@ -4689,7 +4597,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 ;; prefix, so it must not be mistaken for that package.
 (defn- bundle-module-package
   (key)
-  (let (seg (first (string-split key "/")))
+  (let (seg (first (string/split key "/")))
     (if (and (not (= seg key)) (contains? *package-modules-of* seg))
       (symbol seg)
       nil)))
@@ -4804,8 +4712,8 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 its first segment names a module baked into this binary, so a package taking it would
 root its own modules onto stdlib namespaces. Backs the `nest new` / `nest publish` /
 load-time (`require`) guards."
-  (let (seg (first (string-split (name nm) "/"))
-        owned (distinct (map (fn (m) (first (string-split m "/"))) (builtin-modules))))
+  (let (seg (first (string/split (name nm) "/"))
+        owned (distinct (map (fn (m) (first (string/split m "/"))) (builtin-modules))))
     (includes? owned seg)))
 
 ;; Load a dependency module file `path` under package `key`'s context (ADR-070): set
@@ -4815,7 +4723,7 @@ load-time (`require`) guards."
 ;; prefix is the rooted key's first segment (package local names are single-segment).
 (defn- require-force-package
   (key path)
-  (let (prefix (symbol (first (string-split key "/"))))
+  (let (prefix (symbol (first (string/split key "/"))))
     ;; Refuse a package whose name the standard library owns, BEFORE touching the
     ;; ambient context — a `:path`/`:git`/registry dep (or a root project) named after
     ;; a baked-in module would silently root its modules onto stdlib namespaces.
@@ -4900,6 +4808,16 @@ it waits for that load to finish (a half-evaluated module is never observable)."
                 (throw e)))))
         (%registry-update! '*features-loading* :dissoc [key] nil)
         key))))
+
+;; ---- load the string library ------------------------------------------------
+;; std/string.blsp (ADR-230) holds every op whose subject is a string. The prelude's
+;; own `get`/`path-*`/`fmt`/`doc-search` helpers reference `string/char-at`,
+;; `string/ends-with?`, `string/blank?`, … by late binding, so the module must be
+;; loaded before any of them runs — boot's namespace-resolve is a no-op for the root
+;; prelude, so the qualified refs don't auto-require. It stays an ordinary embedded
+;; module (doc tooling sees the file; a project may `(:use string)`); loading it here
+;; just makes it always-present, like the abilities below.
+(require-one 'string)
 
 ;; ═══ Abilities + the Display protocol (core) ════════════════════════════════
 ;; Open generic functions with nominal dispatch — Brood's unified polymorphism seam
@@ -5068,9 +4986,9 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 (defn- impl-id-owner
   (key)
   (if (keyword? key)
-    (let (parts (string-split (name key) "/"))
+    (let (parts (string/split (name key) "/"))
       (if (> (count parts) 1)
-        (join "/" (take (- (count parts) 1) parts))
+        (string/join "/" (take (- (count parts) 1) parts))
         nil))
     nil))
 
@@ -5309,9 +5227,9 @@ it waits for that load to finish (a half-evaluated module is never observable)."
           cut (last-index-of nm "/"))
       (if (< cut 0)
         (defrecord-qualify nm)
-        (keyword (str (name (%root-module-name (symbol (substring nm 0 cut))))
+        (keyword (str (name (%root-module-name (symbol (string/substring nm 0 cut))))
                    "/"
-                   (substring nm (inc cut) (string-length nm))))))
+                   (string/substring nm (inc cut) (string/length nm))))))
     m))
 
 (defn- defability-op-call
