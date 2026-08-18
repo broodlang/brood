@@ -100,18 +100,18 @@ lineedit state to pick — a tiny per-prompt 'mode' for path navigation."
 (defn- lineedit-fwd
   (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
-  (if (or (>= i n) (not (pred (char-at text i)))) i (lineedit-fwd text (inc i) n pred)))
+  (if (or (>= i n) (not (pred (string/char-at text i)))) i (lineedit-fwd text (inc i) n pred)))
 
 (defn- lineedit-bwd
   (text i pred)
   "Largest index ≤ `i` (down to 0) whose preceding char fails `pred`."
-  (if (or (<= i 0) (not (pred (char-at text (dec i))))) i (lineedit-bwd text (dec i) pred)))
+  (if (or (<= i 0) (not (pred (string/char-at text (dec i))))) i (lineedit-bwd text (dec i) pred)))
 
 (defn- lineedit-fwd-word
   (text p word?)
   "Point after the next word forward from `p` (skip non-word, then word), where `word?`
 is the word-constituent predicate (`lineedit-word-pred` picks it per mode)."
-  (let (n (string-length text)
+  (let (n (string/length text)
         i (lineedit-fwd text p n (fn (c) (not (word? c)))))
     (lineedit-fwd text i n word?)))
 
@@ -136,18 +136,18 @@ newline, or 0)."
   (text p)
   "Offset of the end of the line containing point `p` (the next newline, or the end)."
   (let (j (index-of text "\n" p))
-    (if (< j 0) (string-length text) j)))
+    (if (< j 0) (string/length text) j)))
 
 (defn- lineedit-count-nl
   (s)
   "How many newlines are in `s` (deleting them and measuring the length drop)."
-  (- (string-length s) (string-length (replace s "\n" ""))))
+  (- (string/length s) (string/length (string/replace s "\n" ""))))
 
 (defn- lineedit-cursor-rc
   (text p)
   "Point `p` as `[row col]` — `row` the count of newlines before `p`, `col` the offset
 within that line."
-  [(lineedit-count-nl (substring text 0 p)) (- p (lineedit-line-start text p))])
+  [(lineedit-count-nl (string/substring text 0 p)) (- p (lineedit-line-start text p))])
 
 (defn- lineedit-up-point
   (text p)
@@ -166,7 +166,7 @@ when `p` is already on the first line."
   "Point one line down from `p`, keeping the column (clamped), or nil when `p` is on
 the last line."
   (let (le (lineedit-line-end text p))
-    (if (>= le (string-length text))
+    (if (>= le (string/length text))
       nil
       (let (col (- p (lineedit-line-start text p))
             next-start (inc le))
@@ -174,7 +174,7 @@ the last line."
 
 ;; ---- pure edit operations ---------------------------------------------------
 
-(defn- lineedit-clamp (text p) (max 0 (min (string-length text) p)))
+(defn- lineedit-clamp (text p) (max 0 (min (string/length text) p)))
 
 (defn- lineedit-move
   (state p)
@@ -186,8 +186,8 @@ the last line."
   "State with string `s` inserted at point; point advances past it."
   (let (text (get state :text) p (get state :point))
     (assoc state
-      :text (str (substring text 0 p) s (substring text p (string-length text)))
-      :point (+ p (string-length s))
+      :text (str (string/substring text 0 p) s (string/substring text p (string/length text)))
+      :point (+ p (string/length s))
       :hist-idx -1)))
 
 (defn- lineedit-del-back
@@ -197,40 +197,40 @@ the last line."
     (if (= p 0)
       state
       (assoc state
-        :text (str (substring text 0 (dec p)) (substring text p (string-length text)))
+        :text (str (string/substring text 0 (dec p)) (string/substring text p (string/length text)))
         :point (dec p)
         :hist-idx -1))))
 
 (defn- lineedit-del-fwd
   (state)
   "State with the char at point deleted (delete / C-d mid-line)."
-  (let (text (get state :text) p (get state :point) n (string-length text))
+  (let (text (get state :text) p (get state :point) n (string/length text))
     (if (>= p n)
       state
-      (assoc state :text (str (substring text 0 p) (substring text (inc p) n)) :hist-idx -1))))
+      (assoc state :text (str (string/substring text 0 p) (string/substring text (inc p) n)) :hist-idx -1))))
 
 (defn- lineedit-kill-end
   (state)
   "State with the text from point to end killed into `:kill` (C-k)."
-  (let (text (get state :text) p (get state :point) n (string-length text))
-    (assoc state :text (substring text 0 p) :kill (substring text p n) :hist-idx -1)))
+  (let (text (get state :text) p (get state :point) n (string/length text))
+    (assoc state :text (string/substring text 0 p) :kill (string/substring text p n) :hist-idx -1)))
 
 (defn- lineedit-kill-begin
   (state)
   "State with the text from start to point killed into `:kill`, point to 0 (C-u)."
-  (let (text (get state :text) p (get state :point) n (string-length text))
-    (assoc state :text (substring text p n) :kill (substring text 0 p) :point 0 :hist-idx -1)))
+  (let (text (get state :text) p (get state :point) n (string/length text))
+    (assoc state :text (string/substring text p n) :kill (string/substring text 0 p) :point 0 :hist-idx -1)))
 
 (defn- lineedit-kill-word
   (state)
   "State with the word before point killed into `:kill` (C-w)."
   (let (text (get state :text)
         p (get state :point)
-        n (string-length text)
+        n (string/length text)
         s (lineedit-bwd-word text p (lineedit-word-pred state)))
     (assoc state
-      :text (str (substring text 0 s) (substring text p n))
-      :kill (substring text s p)
+      :text (str (string/substring text 0 s) (string/substring text p n))
+      :kill (string/substring text s p)
       :point s
       :hist-idx -1)))
 
@@ -239,25 +239,25 @@ the last line."
   "State with the word *after* point killed into `:kill` (M-d), point unchanged."
   (let (text (get state :text)
         p (get state :point)
-        n (string-length text)
+        n (string/length text)
         e (lineedit-fwd-word text p (lineedit-word-pred state)))
     (assoc state
-      :text (str (substring text 0 p) (substring text e n))
-      :kill (substring text p e)
+      :text (str (string/substring text 0 p) (string/substring text e n))
+      :kill (string/substring text p e)
       :hist-idx -1)))
 
 (defn- lineedit-transpose
   (state)
   "State with the two characters around point swapped, point advanced (C-t) — at
 end of line, swaps the last two. No-op on a line shorter than 2 or at column 0."
-  (let (text (get state :text) p (get state :point) n (string-length text))
+  (let (text (get state :text) p (get state :point) n (string/length text))
     (if (or (< n 2) (= p 0))
       state
       (let (q (if (>= p n) (dec n) p)
-            a (char-at text (dec q))
-            b (char-at text q))
+            a (string/char-at text (dec q))
+            b (string/char-at text q))
         (assoc state
-          :text (str (substring text 0 (dec q)) b a (substring text (inc q) n))
+          :text (str (string/substring text 0 (dec q)) b a (string/substring text (inc q) n))
           :point (min n (inc q))
           :hist-idx -1)))))
 
@@ -278,14 +278,14 @@ first time, so ↓ can restore it."
       (let (ni (min (dec n) (inc idx))
             saved (if (= idx -1) (get state :text) (get state :saved))
             entry (nth hist ni))
-        (assoc state :hist-idx ni :saved saved :text entry :point (string-length entry))))))
+        (assoc state :hist-idx ni :saved saved :text entry :point (string/length entry))))))
 
 (defn lineedit-remember (history src)
   "Push submitted source `src` onto `history` (newest first) for ↑/↓ recall —
 internal newlines collapsed to spaces (so a multi-line form recalls as one line),
 trimmed, dropping blanks and consecutive duplicates. Shared by the REPL and the
 observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
-  (let (entry (trim (replace src "\n" " ")))
+  (let (entry (string/trim (string/replace src "\n" " ")))
     (if (or (= entry "")
           (and (not (empty? history)) (= (first history) entry)))
       history
@@ -299,10 +299,10 @@ observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
       (< idx 0) state
       (= idx 0)
         (let (s (get state :saved))
-          (assoc state :hist-idx -1 :text s :point (string-length s)))
+          (assoc state :hist-idx -1 :text s :point (string/length s)))
       else
         (let (ni (dec idx) entry (nth (get state :hist) ni))
-          (assoc state :hist-idx ni :text entry :point (string-length entry))))))
+          (assoc state :hist-idx ni :text entry :point (string/length entry))))))
 
 ;; ---- reverse incremental history search (C-r) -------------------------------
 ;; A modal sub-state on `:search` = `{:query :idx :orig-text :orig-point}`. While
@@ -331,7 +331,7 @@ as a substring, or -1. An empty query matches the newest entry."
       (let (entry (nth (get state :hist) found))
         (assoc state
           :text entry
-          :point (string-length entry)
+          :point (string/length entry)
           :search (assoc s :query query :idx found))))))
 
 (defn- lineedit-search-cancel
@@ -358,9 +358,9 @@ as a substring, or -1. An empty query matches the newest entry."
         (lineedit-search-step state
           (if (= q "")
             ""
-            (substring q 0 (dec (string-length q))))
+            (string/substring q 0 (dec (string/length q))))
           0)
-      (and (string? key) (= (string-length key) 1)) (lineedit-search-step state (str q key) idx)
+      (and (string? key) (= (string/length key) 1)) (lineedit-search-step state (str q key) idx)
       ; extend; keep current match if it still matches
       else (lineedit-handle (lineedit-search-accept state) key))))
 
@@ -382,7 +382,7 @@ can restore it, and selecting the newest match (empty query → newest entry)."
   "Sorted global names beginning with `pfx` — the default Tab-completion source.
 Reads the live image (`global-names`), so globals + macros (defn/when/cond/…) are
 all in (and a new project's own globals, since it's the live runtime)."
-  (sort (filter (fn (s) (starts-with? s pfx)) (map str (global-names)))))
+  (sort (filter (fn (s) (string/starts-with? s pfx)) (map str (global-names)))))
 
 ;; The completion source: a `(fn pfx -> sorted-candidate-strings)`. Defaults to the
 ;; live globals; a project that wants to complete its *own* vocabulary (buffer
@@ -416,14 +416,14 @@ across in equal columns (row-major, as bash lists), capped at
 fit. Each row is truncated to `width - 1` columns so it can never wrap (a wrapped row
 would desync the `[:up n]` cursor restore)."
   (let (room (max 1 (- width 1))
-        colw (+ 2 (fold (fn (w c) (max w (string-length c))) 0 cands))
+        colw (+ 2 (fold (fn (w c) (max w (string/length c))) 0 cands))
         ncols (max 1 (quot room colw))
         total (count cands)
         shown (min total (* ncols *lineedit-completion-max-rows*))
         more (- total shown)
         rows (map (fn (row)
-                    (let (line (trimr (apply str (map (fn (c) (pad-right c colw)) row))))
-                      (if (> (string-length line) room) (substring line 0 room) line)))
+                    (let (line (string/trimr (apply str (map (fn (c) (string/pad-right c colw)) row))))
+                      (if (> (string/length line) room) (string/substring line 0 room) line)))
                (lineedit-chunk ncols (take shown cands))))
     (if (> more 0) (append rows (list (str "… +" more " more"))) rows)))
 
@@ -455,14 +455,14 @@ alternatives when it can't — so a second Tab on `str` lists rather than sittin
 Any other key clears the listing (`lineedit-handle`)."
   (let (text (get state :text)
         p (get state :point)
-        n (string-length text)
+        n (string/length text)
         ins (cond
               (empty? cands) pfx
               (empty? (rest cands)) (first cands)
               else (common-prefix cands)))
     (assoc state
-      :text (str (substring text 0 sstart) ins (substring text p n))
-      :point (+ sstart (string-length ins))
+      :text (str (string/substring text 0 sstart) ins (string/substring text p n))
+      :point (+ sstart (string/length ins))
       :hist-idx -1
       :completions (if (and (= ins pfx) (not (empty? cands)) (not (empty? (rest cands))))
                      cands
@@ -570,14 +570,14 @@ the column of the innermost unclosed `(`/`[`, one past a `{`, and 0 at top level
     (if (< open 0)
       0
       (let (col (- open (lineedit-line-start text open)))
-        (if (= (char-at text open) "{")
+        (if (= (string/char-at text open) "{")
           (inc col)
           (+ col *lineedit-indent-width*))))))
 
 (defn lineedit-newline-and-indent (state)
   "Insert a newline and indent the new line to its structural column."
   (lineedit-insert state
-    (str "\n" (string-repeat " " (lineedit-indent-for (get state :text) (get state :point))))))
+    (str "\n" (string/repeat " " (lineedit-indent-for (get state :text) (get state :point))))))
 
 (defn- lineedit-same-forms?
   (a b)
@@ -602,14 +602,14 @@ boot (or into a lean bundle) for a key most sessions never press."
   (let (text (get state :text)
         formatted (try
                     (do
-                      (let (out (trim (format/format-source text)))
+                      (let (out (string/trim (format/format-source text)))
                         (if (= out "") nil out)))
                     (catch _ nil)))
     (if (or (nil? formatted)
           (= formatted text)
           (not (lineedit-same-forms? text formatted)))
       state
-      (assoc state :text formatted :point (string-length formatted) :hist-idx -1))))
+      (assoc state :text formatted :point (string/length formatted) :hist-idx -1))))
 
 (defn lineedit-submit (state _)
   "Enter: submit the form. In multi-line mode (a `:complete?` predicate is on the
@@ -683,7 +683,7 @@ customise the REPL from the REPL: `(lineedit-bind :ctrl-x 'lineedit-clear-screen
   (state key)
   "The unbound-key fallback: a printable 1-char key self-inserts, anything else is
 a no-op. Passed to `keymap-dispatch` as the keymap's default."
-  (if (and (string? key) (= (string-length key) 1))
+  (if (and (string? key) (= (string/length key) 1))
     (lineedit-self-insert state key)
     state))
 
@@ -751,10 +751,10 @@ in `full`, or nil when there's no call (or its head isn't a known function)."
 never wraps (which would desync the `[:up 1]` cursor restore)."
   (if (or (empty? pieces) (<= room 0))
     (reverse acc)
-    (let ([s f] (first pieces) w (string-length s))
+    (let ([s f] (first pieces) w (string/length s))
       (if (<= w room)
         (lineedit-fit (rest pieces) (- room w) (cons [s f] acc))
-        (reverse (cons [(substring s 0 room) f] acc))))))
+        (reverse (cons [(string/substring s 0 room) f] acc))))))
 
 (defn lineedit-overrides (full pos)
   "Bracket-match colour overrides (`[pos face]` list) for the cursor at `pos`: the
@@ -793,7 +793,7 @@ terminal multiplexer), which is the same reason `lineedit-init` is public."
   "Recompute the horizontal-scroll window so point is visible, and cache the width,
 available text columns, and prompt width for rendering."
   (let (width (lineedit-cols)
-        promptw (string-length (lineedit-display-prompt state))
+        promptw (string/length (lineedit-display-prompt state))
         avail (max 1 (- width promptw))
         point (get state :point)
         hs (get state :hscroll)
@@ -822,10 +822,10 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
         avail (get st :avail)
         promptw (get st :promptw)
         prev-row (or (get st :last-row) 0)
-        base (string-length prefix)
+        base (string/length prefix)
         full (str prefix text)
-        len (string-length text)
-        vis (substring text hs (min len (+ hs avail)))
+        len (string/length text)
+        vis (string/substring text hs (min len (+ hs avail)))
         cursorpos (+ base point)
         overrides (lineedit-overrides full cursorpos)
         chunks (highlight-chunks full (+ base hs) vis overrides)
@@ -865,7 +865,7 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
         (append here
           (lineedit-multi-line-ops (rest lines)
             (inc i)
-            (+ offset (string-length line) 1)
+            (+ offset (string/length line) 1)
             base
             full
             overrides
@@ -884,15 +884,15 @@ tested in isolation."
         prompt (lineedit-display-prompt st)
         cont (or (get st :cont-prompt) prompt)
         prev-row (or (get st :last-row) 0)
-        base (string-length prefix)
+        base (string/length prefix)
         full (str prefix text)
         cursorpos (+ base point)
         overrides (lineedit-overrides full cursorpos)
-        lines (string-split text "\n")
+        lines (string/split text "\n")
         nlines (count lines)
         cand-rows (lineedit-completion-lines st)
         [cur-row cur-col] (lineedit-cursor-rc text point)
-        promptw (string-length (if (= cur-row 0) prompt cont))
+        promptw (string/length (if (= cur-row 0) prompt cont))
         col (+ promptw cur-col)
         ;; The listing rows sit below the last form line, so the climb back to the
         ;; cursor's row spans the remaining form lines *plus* the listing.
@@ -933,9 +933,9 @@ lines; moves up over any leftover render block first."
         text (get state :text)
         prefix (get state :prefix)
         prev-row (or (get state :last-row) 0)
-        base (string-length prefix)
+        base (string/length prefix)
         full (str prefix text)
-        lines (string-split text "\n"))
+        lines (string/split text "\n"))
     (term-emit (into []
                  (append (if (> prev-row 0) (list [:up prev-row]) '())
                    (list [:cr] [:clear-below])

@@ -124,7 +124,7 @@ backreferences yet.")
 (defn- regex-parse
   (pattern)
   "Parse `pattern` into its list of top-level branches."
-  (first (regex-alt (apply vector (string->list pattern)) 0)))
+  (first (regex-alt (apply vector (string/to-list pattern)) 0)))
 
 ;; ---- compile: AST -> Thompson NFA -------------------------------------------
 ;; The NFA is a flat vector of STATES; index 0 is always the accepting `:match`
@@ -286,7 +286,7 @@ object's per-call clone-out stays a few words — see the cache note above."
 (defn- regex-letter?
   (c)
   "ASCII/Unicode cased letter: upper-case ≠ lower-case."
-  (not (= (upper c) (lower c))))
+  (not (= (string/upper c) (string/lower c))))
 
 (defn- regex-class-match?
   (k c)
@@ -492,7 +492,7 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table-get
   "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the
 start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a suffix."
   (let (obj (regex-compile pattern)
-        codes (string->codepoints s)
+        codes (string/to-codepoints s)
         n (count codes))
     (if (= n 0)
       (regex-empty-input? pattern (nth obj 1))
@@ -510,7 +510,7 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
 (defn matches? (pattern s)
   "True if `pattern` matches the **entire** string `s` (anchored both ends)."
   (let (obj (regex-compile pattern)
-        codes (string->codepoints s)
+        codes (string/to-codepoints s)
         n (count codes))
     (if (= n 0)
       (regex-empty-input? pattern (nth obj 1))

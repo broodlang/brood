@@ -34,20 +34,20 @@ case-insensitively), and quoted-string arguments. Pure, so independently testabl
 
 (defn- dk-lead-ws
   (line i n)
-  (if (and (< i n) (or (= (char-at line i) " ") (= (char-at line i) "\t")))
+  (if (and (< i n) (or (= (string/char-at line i) " ") (= (string/char-at line i) "\t")))
     (dk-lead-ws line (inc i) n)
     i))
 
 (defn- dk-word-end
   (line i n)
   "The offset just past the non-whitespace run starting at `i`."
-  (if (and (< i n) (not (= (char-at line i) " ")) (not (= (char-at line i) "\t")))
+  (if (and (< i n) (not (= (string/char-at line i) " ")) (not (= (string/char-at line i) "\t")))
     (dk-word-end line (inc i) n)
     i))
 
 (defn- dk-find
   (line i n ch)
-  (cond (>= i n) -1 (= (char-at line i) ch) i else (dk-find line (inc i) n ch)))
+  (cond (>= i n) -1 (= (string/char-at line i) ch) i else (dk-find line (inc i) n ch)))
 
 (defn- dk-strings
   (line base i n acc)
@@ -55,8 +55,8 @@ case-insensitively), and quoted-string arguments. Pure, so independently testabl
 each consumed whole so spans stay non-overlapping; returns them ascending."
   (cond
     (>= i n) (reverse acc)
-    (or (= (char-at line i) "\"") (= (char-at line i) "'"))
-      (let (q (char-at line i)
+    (or (= (string/char-at line i) "\"") (= (string/char-at line i) "'"))
+      (let (q (string/char-at line i)
             close (dk-find line (inc i) n q)
             e (if (< close 0) n (inc close)))
         (dk-strings line
@@ -75,14 +75,14 @@ each consumed whole so spans stay non-overlapping; returns them ascending."
   (line base)
   "The spans for one `line` starting at offset `base`: a `#` comment whole, else a
 leading instruction keyword (when the first word is one) plus quoted-string args."
-  (let (n (string-length line) lead (dk-lead-ws line 0 n))
+  (let (n (string/length line) lead (dk-lead-ws line 0 n))
     (cond
       (>= lead n) '()
-      (= (char-at line lead) "#") (list [(+ base lead) (+ base n) dk-face-comment])
+      (= (string/char-at line lead) "#") (list [(+ base lead) (+ base n) dk-face-comment])
       else
         (let (we (dk-word-end line lead n)
-              word (substring line lead we))
-          (if (member? (upper word) dk-instructions)
+              word (string/substring line lead we))
+          (if (member? (string/upper word) dk-instructions)
             (cons [(+ base lead) (+ base we) dk-face-instruction]
               (dk-strings line base we n '()))
             (dk-strings line base lead n '()))))))
@@ -91,8 +91,8 @@ leading instruction keyword (when the first word is one) plus quoted-string args
   (src i n acc)
   (if (>= i n)
     (reverse acc)
-    (let (e (min n (string-span-until src i "\n"))
-          spans (dk-line-spans (substring src i e) i))
+    (let (e (min n (string/span-until src i "\n"))
+          spans (dk-line-spans (string/substring src i e) i))
       (dk-lex src (inc e) n (fold (fn (a s) (cons s a)) acc spans)))))
 
 (defn dockerfile-spans (src)
@@ -101,4 +101,4 @@ leading instruction keyword (when the first word is one) plus quoted-string args
 editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Covers `#`
 comments, leading instruction keywords (case-insensitive), and quoted strings. Spans
 are ascending and non-overlapping; everything else carries the default face."
-  (dk-lex src 0 (string-length src) '()))
+  (dk-lex src 0 (string/length src) '()))

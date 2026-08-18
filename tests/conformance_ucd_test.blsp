@@ -33,7 +33,7 @@
 (defn- ucd-payload
   (line)
   (let (i (index-of line "#"))
-    (replace (if (< i 0) line (substring line 0 i)) "\t" " ")))
+    (string/replace (if (< i 0) line (string/substring line 0 i)) "\t" " ")))
 
 (defn- ucd-codes->string (codes) (apply str (map int->char codes)))
 
@@ -68,7 +68,7 @@
 (defn- gb-case
   (line)
   "[input expected-clusters] for a test line, or nil if the line has no test."
-  (let (toks (remove blank? (string-split (ucd-payload line) " ")))
+  (let (toks (remove string/blank? (string/split (ucd-payload line) " ")))
     (if (nil? toks)
       nil
       (let (clusters (gb-fold toks nil nil))
@@ -84,7 +84,7 @@
         (= (first c) gb-upstream-gap) (gb-scan (rest lines) ran bad)
         else
           (let ([input want] c
-                got (string->graphemes input))
+                got (string/to-graphemes input))
             (gb-scan (rest lines)
               (inc ran)
               (if (= got want) bad (cons [(pr-str input) want got] bad))))))))
@@ -94,15 +94,15 @@
 ;; ---- NormalizationTest -------------------------------------------------------
 
 ;; "0044 0307" -> the string it spells.
-(defn- nt-field (s) (ucd-codes->string (map hex->int (remove blank? (string-split s " ")))))
+(defn- nt-field (s) (ucd-codes->string (map hex->int (remove string/blank? (string/split s " ")))))
 
 (defn- nt-case
   (line)
   "The five columns [source nfc nfd nfkc nfkd] as strings, or nil for a non-test line."
   (let (p (ucd-payload line))
-    (if (or (blank? p) (starts-with? (trim p) "@"))
+    (if (or (string/blank? p) (string/starts-with? (string/trim p) "@"))
       nil
-      (let (cols (string-split p ";"))
+      (let (cols (string/split p ";"))
         (if (< (count cols) 5)
           nil
           (into [] (map nt-field (take 5 cols))))))))
@@ -112,15 +112,15 @@
 (defn- nt-test-line?
   (line)
   (let (p (ucd-payload line))
-    (and (not (blank? p)) (not (starts-with? (trim p) "@")) (>= (count (string-split p ";")) 5))))
+    (and (not (string/blank? p)) (not (string/starts-with? (string/trim p) "@")) (>= (count (string/split p ";")) 5))))
 
 ;; "@Part1 # Character by character test" -> "Part1", else nil. The corpus divides itself
 ;; into six sections and the runner uses them to split the sweep — see the describe below.
 (defn- nt-part
   (line)
-  (let (t (trim line))
-    (if (starts-with? t "@")
-      (first (string-split (substring t 1) " "))
+  (let (t (string/trim line))
+    (if (string/starts-with? t "@")
+      (first (string/split (string/substring t 1) " "))
       nil)))
 
 ;; UAX #15's conformance closure: NFC of columns 1,2,3 is column 2 and of 4,5 is
@@ -131,7 +131,7 @@
   (cols)
   (let ([c1 c2 c3 c4 c5] cols
         expect (fn (form sources want)
-                 (first (remove (fn (s) (= (string-normalize s form) want)) sources)))
+                 (first (remove (fn (s) (= (string/normalize s form) want)) sources)))
         fails (remove nil?
                 (list (expect :nfc (list c1 c2 c3) c2)
                   (expect :nfc (list c4 c5) c4)
@@ -182,10 +182,10 @@
 ;; real parsing, on the lines a slice actually tests.
 (defn- nt-case-line?
   (line)
-  (and (not (blank? line))
-    (not (starts-with? (trim line) "@"))
-    (not (starts-with? (trim line) "#"))
-    (>= (count (string-split line ";")) 5)))
+  (and (not (string/blank? line))
+    (not (string/starts-with? (string/trim line) "@"))
+    (not (string/starts-with? (string/trim line) "#"))
+    (>= (count (string/split line ";")) 5)))
 
 (defn- nt-collect
   (want lines here acc)
@@ -276,7 +276,7 @@
     (is (corpus-present? "ucd"))
     ;; Bump this together with UCD_VERSION in scripts/fetch-corpus.sh, and only
     ;; after checking Cargo.lock — see the header note on version skew.
-    (assert= (trim (slurp (ucd-file "VERSION"))) "16.0.0"))
+    (assert= (string/trim (slurp (ucd-file "VERSION"))) "16.0.0"))
 
   (test "string->graphemes segments every GraphemeBreakTest case"
     (let ([ran bad] (gb-scan gb-lines 0 nil))
@@ -338,41 +338,41 @@
     ;; "e" + COMBINING ACUTE is one grapheme, two code points. Spelled with escapes
     ;; on BOTH sides deliberately: a literal "é" in this file is the precomposed
     ;; U+00E9, which is a different string, and `=` would rightly reject it.
-    (assert= (string->graphemes "e\u{301}f") ["e\u{301}" "f"])
-    (assert= (count (string->codepoints "e\u{301}f")) 3)
+    (assert= (string/to-graphemes "e\u{301}f") ["e\u{301}" "f"])
+    (assert= (count (string/to-codepoints "e\u{301}f")) 3)
     ;; a regional-indicator pair is one flag, not two letters
-    (assert= (count (string->graphemes "\u{1F1FF}\u{1F1E6}")) 1)
+    (assert= (count (string/to-graphemes "\u{1F1FF}\u{1F1E6}")) 1)
     ;; CRLF is one cluster — splitting it is the classic off-by-one
-    (assert= (count (string->graphemes "\r\n")) 1))
+    (assert= (count (string/to-graphemes "\r\n")) 1))
 
   (test "graphemes reassemble to the original string"
     (dolist (s ["" "plain" "e\u{301}f" "\u{1F1FF}\u{1F1E6}x" "\r\n" "ne\u{301}e\u{301}"])
-      (assert= (apply str (string->graphemes s)) s)))
+      (assert= (apply str (string/to-graphemes s)) s)))
 
   (test "normalization makes text that reads the same compare the same"
     ;; U+00E9 vs U+0065 U+0301 — different strings, same text
     (refute (= "\u{E9}" "e\u{301}"))
-    (assert= (string-normalize "e\u{301}" :nfc) "\u{E9}")
-    (assert= (string-normalize "\u{E9}" :nfd) "e\u{301}")
-    (assert= (string-normalize "\u{E9}" :nfc) (string-normalize "e\u{301}" :nfc)))
+    (assert= (string/normalize "e\u{301}" :nfc) "\u{E9}")
+    (assert= (string/normalize "\u{E9}" :nfd) "e\u{301}")
+    (assert= (string/normalize "\u{E9}" :nfc) (string/normalize "e\u{301}" :nfc)))
 
   (test "compatibility forms fold presentation, canonical forms do not"
     ;; U+FB01 LATIN SMALL LIGATURE FI
-    (assert= (string-normalize "\u{FB01}" :nfkc) "fi")
-    (assert= (string-normalize "\u{FB01}" :nfc) "\u{FB01}")
+    (assert= (string/normalize "\u{FB01}" :nfkc) "fi")
+    (assert= (string/normalize "\u{FB01}" :nfc) "\u{FB01}")
     ;; U+00B2 SUPERSCRIPT TWO
-    (assert= (string-normalize "\u{B2}" :nfkc) "2")
-    (assert= (string-normalize "\u{B2}" :nfd) "\u{B2}"))
+    (assert= (string/normalize "\u{B2}" :nfkc) "2")
+    (assert= (string/normalize "\u{B2}" :nfd) "\u{B2}"))
 
   (test "every form is idempotent"
     (dolist (form [:nfc :nfd :nfkc :nfkd])
       (dolist (s ["e\u{301}" "\u{E9}" "\u{FB01}" "\u{1E0A}\u{323}"])
-        (assert= (string-normalize (string-normalize s form) form)
-          (string-normalize s form)))))
+        (assert= (string/normalize (string/normalize s form) form)
+          (string/normalize s form)))))
 
   (test "an unknown form is rejected rather than silently passed through"
-    (assert-error (string-normalize "x" :nfz))
-    (assert-error (string-normalize "x" "nfc")))
+    (assert-error (string/normalize "x" :nfz))
+    (assert-error (string/normalize "x" "nfc")))
 
   ;; The single case excluded from the sweep above, asserted as it CURRENTLY behaves
   ;; rather than as UAX #29 requires — so the day `unicode-segmentation` adds U+2701
@@ -380,8 +380,8 @@
   ;; exclusion. See the comment on `gb-upstream-gap`.
   (test "the one upstream gap: U+2701 is missing from Extended_Pictographic"
     ;; UAX #29 GB11 says one cluster; the crate gives two.
-    (assert= (count (string->graphemes "\u{2701}\u{200D}\u{2701}")) 2)
+    (assert= (count (string/to-graphemes "\u{2701}\u{200D}\u{2701}")) 2)
     ;; the rule itself is correct for every other pictographic
-    (assert= (count (string->graphemes "\u{270A}\u{200D}\u{270A}")) 1)
-    (assert= (count (string->graphemes "\u{1F468}\u{200D}\u{1F469}")) 1)
-    (assert= (count (string->graphemes "\u{2764}\u{200D}\u{1F525}")) 1)))
+    (assert= (count (string/to-graphemes "\u{270A}\u{200D}\u{270A}")) 1)
+    (assert= (count (string/to-graphemes "\u{1F468}\u{200D}\u{1F469}")) 1)
+    (assert= (count (string/to-graphemes "\u{2764}\u{200D}\u{1F525}")) 1)))

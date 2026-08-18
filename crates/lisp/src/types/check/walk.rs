@@ -115,7 +115,7 @@ fn is_gensym_sym(s: Symbol) -> bool {
 
 /// The finding position for a call **argument**: the argument's own source
 /// position when it has one (a nested call / vector — the reader positions
-/// pairs, so `(string-length (+ 1 2))` anchors the type finding at `(+ 1 2)`,
+/// pairs, so `(string/length (+ 1 2))` anchors the type finding at `(+ 1 2)`,
 /// not the call head), falling back to the whole call form for a bare literal
 /// or symbol (which the pair-keyed position table doesn't record). Finer LSP /
 /// `nest check` spans without threading `Pos` through the whole walk.

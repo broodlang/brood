@@ -100,7 +100,7 @@ attach). Drive the standalone app from the shell with `nest observe`."
 (defn- observe-fit
   (s w)
   "Truncate `s` to at most `w` characters so a rendered row never wraps."
-  (if (> (string-length s) w) (substring s 0 (max 0 w)) s))
+  (if (> (string/length s) w) (string/substring s 0 (max 0 w)) s))
 
 (defn- observe-bytes->human
   (n)
@@ -122,21 +122,21 @@ attach). Drive the standalone app from the shell with `nest observe`."
 the reductions/second since the last refresh, so a *currently* busy process
 stands out at a glance (cumulative only tells you lifetime work). `mem` and
 `rate` arrive pre-rendered (a string or `\"-\"`)."
-  (str (pad-left (str id) 5)
+  (str (string/pad-left (str id) 5)
     " "
-    (pad-right nm 12)
+    (string/pad-right nm 12)
     " "
-    (pad-right status 8)
+    (string/pad-right status 8)
     " "
-    (pad-left (str mbox) 6)
+    (string/pad-left (str mbox) 6)
     " "
-    (pad-left mem 8)
+    (string/pad-left mem 8)
     " "
-    (pad-left (str reds) 9)
+    (string/pad-left (str reds) 9)
     " "
-    (pad-left rate 8)
+    (string/pad-left rate 8)
     " "
-    (pad-left (str mon) 4)))
+    (string/pad-left (str mon) 4)))
 
 (defn- observe-proc-cells
   (p)
@@ -144,7 +144,7 @@ stands out at a glance (cumulative only tells you lifetime work). `mem` and
 `:depth`, which indents the NAME (clipped to its column so the rest stay aligned)."
   (let (depth (or (get p :depth) 0)
         nm (observe-opt (get p :name) name)
-        nm (if (> depth 0) (observe-fit (str (string-repeat "  " depth) nm) 12) nm))
+        nm (if (> depth 0) (observe-fit (str (string/repeat "  " depth) nm) 12) nm))
     (observe-cells (get p :id)
       nm
       (observe-opt (get p :status) name)
@@ -247,7 +247,7 @@ on screen (roughly centred), clamped so the window never runs past the end."
     (let ([s f] (first chunks))
       (observe-chunk-ops-acc (rest chunks)
         row
-        (+ col (string-length s))
+        (+ col (string/length s))
         (cons (text row col s f) acc)))))
 
 (defn- observe-chunk-ops
@@ -265,12 +265,12 @@ line editor uses (`highlight-chunks` / `lineedit/lineedit-overrides` over
 pure, so it shares the REPL's colouring rather than re-implementing it. (Tab
 completion already works via `lineedit/lineedit-handle`'s keymap in `observe-command-key`.)"
   (let (prompt (observe-fit (get edit :prompt) cols)
-        promptw (string-length prompt)
+        promptw (string/length prompt)
         input (get edit :text)
         hs (or (get edit :hscroll) 0)
         avail (max 0 (- cols promptw))
-        len (string-length input)
-        vis (substring input hs (min len (+ hs avail)))
+        len (string/length input)
+        vis (string/substring input hs (min len (+ hs avail)))
         point (get edit :point)
         overrides (editor/lineedit/lineedit-overrides input point)
         chunks (highlight-chunks input hs vis overrides)
@@ -330,22 +330,22 @@ the observer's testable core; `observe-loop` feeds it live data."
                    confirm
                      [(text (dec rows)
                         0
-                        (observe-fit (pad-right (observe-confirm-line confirm) cols) cols)
+                        (observe-fit (string/pad-right (observe-confirm-line confirm) cols) cols)
                         (face :observer/confirm))]
                    else
                      [(text (dec rows)
                         0
-                        (observe-fit (pad-right footer cols) cols)
+                        (observe-fit (string/pad-right footer cols) cols)
                         (face :observer/footer))]))
     (apply frame
       (append [(clear)
                 (text 0
                   0
-                  (observe-fit (pad-right (nth lines 0) cols) cols)
+                  (observe-fit (string/pad-right (nth lines 0) cols) cols)
                   (face :observer/header))
                 (text 1
                   0
-                  (observe-fit (pad-right (nth lines 1) cols) cols)
+                  (observe-fit (string/pad-right (nth lines 1) cols) cols)
                   (face :observer/node-stats))
                 (text 2
                   0
@@ -355,7 +355,7 @@ the observer's testable core; `observe-loop` feeds it live data."
                     cols)
                   (face :observer/col-header))]
         body
-        [(text (- rows 2) 0 (observe-fit (pad-right detail cols) cols) (face :observer/detail))]
+        [(text (- rows 2) 0 (observe-fit (string/pad-right detail cols) cols) (face :observer/detail))]
         last-row))))
 
 ;; ---- live data --------------------------------------------------------------

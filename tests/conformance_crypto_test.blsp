@@ -28,8 +28,8 @@
 ;; A `.rsp` field line: "Msg = d3" -> "d3". nil for a non-field line.
 (defn- cy-field
   (line key)
-  (if (starts-with? line (str key " = "))
-    (trim (substring line (+ (string-length key) 3)))
+  (if (string/starts-with? line (str key " = "))
+    (string/trim (string/substring line (+ (string/length key) 3)))
     nil))
 
 ;; `Len = 0` is spelled with a placeholder `Msg = 00`, which is NOT the byte 0x00 — the
@@ -68,7 +68,7 @@
               len
               msg
               (inc ran)
-              (if (= got (lower d)) bad (cons [algo len (lower d) got] bad))))
+              (if (= got (string/lower d)) bad (cons [algo len (string/lower d) got] bad))))
         else (cy-sha-scan algo (rest lines) len msg ran bad)))))
 
 (defn- cy-sha-file
@@ -85,14 +85,14 @@
 ;; "[L=20]" -> 20, else nil.
 (defn- cy-section-l
   (line)
-  (if (and (starts-with? line "[L=") (ends-with? line "]"))
-    (string->number (substring line 3 (dec (string-length line))))
+  (if (and (string/starts-with? line "[L=") (string/ends-with? line "]"))
+    (string->number (string/substring line 3 (dec (string/length line))))
     nil))
 
 ;; `Tlen` is in BYTES and truncates the MAC; the hex is 2 chars per byte.
 (defn- cy-hmac-mac
   (algo key msg tlen)
-  (substring (encoding/hex-encode-bytes (%hmac algo key msg)) 0 (* 2 tlen)))
+  (string/substring (encoding/hex-encode-bytes (%hmac algo key msg)) 0 (* 2 tlen)))
 
 (defn- cy-hmac-scan
   (lines algo tlen key msg ran skipped bad)
@@ -124,7 +124,7 @@
                 msg
                 (inc ran)
                 skipped
-                (if (= got (lower mac)) bad (cons [algo tlen (lower mac) got] bad)))))
+                (if (= got (string/lower mac)) bad (cons [algo tlen (string/lower mac) got] bad)))))
         else (cy-hmac-scan (rest lines) algo tlen key msg ran skipped bad)))))
 
 (describe "NIST CAVP: SHA byte vectors"

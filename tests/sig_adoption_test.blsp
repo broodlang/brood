@@ -30,7 +30,7 @@
           "argument 1 expects string")))
 
   (test "the RESULT type flows too — a bool result into a string position"
-    (is (warns-about? "(defmodule t3 (:use path)) (defn f () (string-length (is-dir? \"/tmp\")))"
+    (is (warns-about? "(defmodule t3 (:use path)) (defn f () (string/length (is-dir? \"/tmp\")))"
           "expects string")))
 
   (test "correct calls stay silent (no false positives)"
@@ -76,16 +76,16 @@
     ;; written above its `defn` breaks `BROOD_CONTRACTS=1` for that whole module,
     ;; and nothing in the default-mode suite would notice.
     (dolist (m (list "path" "json" "set"))
-      (let (lines (string-split (or (%builtin-module m) "") "\n"))
+      (let (lines (string/split (or (%builtin-module m) "") "\n"))
         (assert= (sig-misplaced lines) nil)))))
 
 ;; Does line `b` define the name `(sig NAME …)` line `a` declares? That adjacency is
 ;; the placement that breaks under contracts mode.
 (defn- sig-above-def?
   (a b)
-  (and (starts-with? a "(sig ")
-    (let (nm (second (string-split a " ")))
-      (or (starts-with? b (str "(defn " nm " ")) (starts-with? b (str "(def " nm " "))))))
+  (and (string/starts-with? a "(sig ")
+    (let (nm (second (string/split a " ")))
+      (or (string/starts-with? b (str "(defn " nm " ")) (string/starts-with? b (str "(def " nm " "))))))
 
 ;; Every misplaced `(sig …)` line in `lines` (empty when the invariant holds).
 (defn- sig-misplaced
@@ -100,15 +100,15 @@
 ;; errors at runtime — never a false positive.
 (describe "occurrence typing — inferred params flag callers"
   (test "a param inferred from a primitive use checks callers"
-    (is (warns-about? "(defmodule ot1) (defn needstr (s) (string-length s)) (defn c () (needstr 5))"
+    (is (warns-about? "(defmodule ot1) (defn needstr (s) (string/length s)) (defn c () (needstr 5))"
           "expects string")))
   (test "a correct caller is silent"
-    (assert= (warns-of "(defmodule ot2) (defn needstr (s) (string-length s)) (defn c () (needstr \"hi\"))")
+    (assert= (warns-of "(defmodule ot2) (defn needstr (s) (string/length s)) (defn c () (needstr \"hi\"))")
       nil))
   (test "an unconstrained param never flags (no demand → sound)"
     (assert= (warns-of "(defmodule ot3) (defn id2 (s) s) (defn c () (id2 5))") nil))
   (test "a guarded use never constrains the param (sound)"
-    (assert= (warns-of "(defmodule ot4) (defn g (s) (if (string? s) (string-length s) 0)) (defn c () (g 5))")
+    (assert= (warns-of "(defmodule ot4) (defn g (s) (if (string? s) (string/length s) 0)) (defn c () (g 5))")
       nil)))
 
 (describe "occurrence typing — a sealed ability op derives the param"

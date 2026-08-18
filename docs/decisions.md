@@ -15483,3 +15483,71 @@ deploy, which fetches libraries from the registry) break until those libraries a
 require-less. The migration of a library's *source* is not enough; it must be re-published and
 re-fetched. This is the one real cost of the removal, accepted deliberately: pre-1.0, greenfield,
 better a small language now than a redundant form kept forever (ADR-011).
+
+
+## ADR-230 — The `string` library: every op whose subject is a string lives under `string/*`
+
+**Status:** accepted, shipped 2026-08-18. Follows ADR-065 (namespaces), ADR-227 (`enum`/`math`
+namespacing), ADR-229 (auto-require).
+
+**Context.** The string surface had rotted into three inconsistent homes: bare-and-unprefixed in the
+prelude (`trim`, `pad-left`, `replace`, `char-at`, `join`, `capitalize`, `blank?`,
+`starts-with?`/`ends-with?`), bare-but-`string-`-prefixed Rust builtins (`string-length`,
+`string-split`, `string-normalize`, `string-span`), and a one-function `text` module (`text/fill`).
+`(trim s)` and `(string-split s ",")` sat side by side — same type, two conventions — and a caller
+had to *memorise* which string operation was "core enough" to be bare. That is the opposite of the
+namespaced, discoverable surface ADR-065/227 established for `enum`/`map`/`math`.
+
+**Decision.** Introduce `std/string.blsp` — a real `(defmodule string)` — as the single canonical
+home for **every operation whose subject is a string**, and move the whole surface there with one
+name per op (`string/trim`, `string/split`, `string/length`, `string/pad-left`, `string/join`, …).
+No bare forwarders, no compatibility aliases (greenfield, ADR-011): callers write the qualified name
+or `(:use string)`.
+
+**The boundary rule — what is a `string/*` op and what stays bare.**
+- **`string/*`** = "the first argument is a string": trimming, padding, case (`upper`/`lower`/
+  `capitalize`), search (`starts-with?`/`ends-with?`), split/join, `substring`/`char-at`/`length`,
+  Unicode (`normalize`/`grapheme-*`/`span`), and the **char-content conversions** that decompose a
+  string into or build it from its own characters (`to-list`/`from-list`/`to-codepoints`/
+  `from-codepoints`/`to-graphemes`).
+- **bare** = operations over ANY collection, which are *not* string-specific and several of which
+  are load-bearing during the prelude's own bootstrap: `map`/`filter`/`reduce`/`count`/`contains?`/
+  `member?`/`includes?`/`index-of`. These are the universal collection surface (ADR-227's rule for
+  `enum`), not string ops — `index-of`/`includes?` are already polymorphic over strings *and*
+  sequences. Also bare: the primitives `str`/`string?`/`string`, and the **scalar bridges** that
+  merely *reinterpret* a string as another scalar type — `string->number`/`number->string`,
+  `string->symbol`/`symbol->string`. A bridge keeps its bare name with its reverse partner; it is
+  not a string-manipulation verb. (Byte-encoding bridges `string->utf8-bytes`/`utf8-bytes->string`
+  stay bare too — that is `std/encoding`'s domain, not the string library's.)
+
+**Why `join` is `string/join` but `contains?` is bare.** `join` reduces a collection *into a
+string* — its product and its idiom are string-flavoured, so it belongs to the string library.
+`contains?`/`member?`/`includes?` answer a membership question over any container; their subject is
+the collection, not a string.
+
+**Mechanism (no boot-loader surgery).** `string` is an ordinary embedded module
+(`embedded_module!("string", "std/string.blsp")`), so doc tooling — including hive's source-parsing
+`docbuild` — sees a normal module file and groups its functions under `string`. The prelude's own
+`get`/`path-*`/`fmt`/`doc-search` helpers reference `string/char-at`/`string/ends-with?`/… by late
+binding, and boot's namespace-resolve is a no-op for the root prelude (so those qualified refs do
+*not* auto-require), so the prelude loads the module explicitly with a single `(require-one 'string)`
+placed right after the loader is defined. This makes `string` always-present (like the core
+abilities) while keeping it a real, `(:use string)`-able module. The low-level kernel primitives are
+re-registered directly under their `string/…` names (`string/length`, `string/substring`,
+`string/split`, `string/upper`, `string/lower`, `string/normalize`, `string/span`/`span-until`,
+`string/grapheme-*`, `string/substring-graphemes`, `string/to-codepoints`/`to-graphemes`) — the
+builtin *is* the canonical name, no wrapper, no indirection. `std/text.blsp` is deleted; its `fill`
+folds in as `string/fill`.
+
+**Note — `Display` already exists.** The recurring "make `number->string` an ability that any type
+can implement" idea is already served: the prelude carries an always-on `Display`/`Inspect` protocol
+(ADR-168/172) dispatching on the first arg's identity (including a built-in's `type-of` kind), so a
+user type renders itself through that, and `str` stays the fast Rust default. No new protocol is
+needed; `number->string`/`decimal->string` stay bare.
+
+**Scope.** ~915 call sites rewritten across `std/` + `tests/` + `examples/` + the Rust-embedded
+Brood in `crates/` (checker tests, benches), plus the checker sigs (`sigs.rs`), `PRIMITIVE_DOCS`,
+the `doc-catalog` categorisation (public entries renamed, private helpers `join-parts`/`triml-from`/
+`trimr-to` dropped as module internals, per ADR-227's precedent), and `docs/language.md`. Every
+`../*` sibling project is migrated in the same pass. **Breaking for the published ecosystem** (as
+ADR-229): a published library calling a now-moved bare name is incompatible until republished.

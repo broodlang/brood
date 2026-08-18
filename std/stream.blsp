@@ -388,7 +388,7 @@ after EOF is emitted as a last line (for streams without a trailing newline)."
 ;; so that element is the new `buf` and everything before it is a complete line.
 (defn- stream-lines-split
   (up all r)
-  (let (parts (string-split all "\n")
+  (let (parts (string/split all "\n")
         n (count parts)
         tail (nth parts (dec n))
         lines (map stream-strip-cr (take (dec n) parts)))
@@ -402,8 +402,8 @@ after EOF is emitted as a last line (for streams without a trailing newline)."
 (defn- stream-strip-cr
   (line)
   "Drop one trailing `\\r`, so `\\r\\n` and `\\n` line endings both yield the bare line."
-  (if (ends-with? line "\r")
-    (substring line 0 (dec (string-length line)))
+  (if (string/ends-with? line "\r")
+    (string/substring line 0 (dec (string/length line)))
     line))
 
 ;; ---- terminals --------------------------------------------------------------

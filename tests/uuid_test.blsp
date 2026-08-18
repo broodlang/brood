@@ -2,17 +2,17 @@
 
 (describe "uuid-v4"
   (test "produces a 36-character string"
-    (assert= 36 (string-length (uuid/uuid-v4))))
+    (assert= 36 (string/length (uuid/uuid-v4))))
   (test "has dashes at positions 8 13 18 23"
     (let (u (uuid/uuid-v4))
-      (is (= (char-at u 8) "-"))
-      (is (= (char-at u 13) "-"))
-      (is (= (char-at u 18) "-"))
-      (is (= (char-at u 23) "-"))))
+      (is (= (string/char-at u 8) "-"))
+      (is (= (string/char-at u 13) "-"))
+      (is (= (string/char-at u 18) "-"))
+      (is (= (string/char-at u 23) "-"))))
   (test "version nibble is 4"
-    (assert= "4" (char-at (uuid/uuid-v4) 14)))
+    (assert= "4" (string/char-at (uuid/uuid-v4) 14)))
   (test "variant nibble is one of 8/9/a/b"
-    (let (vc (char-at (uuid/uuid-v4) 19))
+    (let (vc (string/char-at (uuid/uuid-v4) 19))
       (is (or (= vc "8") (= vc "9") (= vc "a") (= vc "b")))))
   (test "passes uuid? validation"
     (is (uuid/uuid? (uuid/uuid-v4))))
@@ -28,25 +28,25 @@
 
 (describe "uuid-v7"
   (test "produces a 36-character string"
-    (assert= 36 (string-length (uuid/uuid-v7))))
+    (assert= 36 (string/length (uuid/uuid-v7))))
   (test "has dashes at positions 8 13 18 23"
     (let (u (uuid/uuid-v7))
-      (is (= (char-at u 8) "-"))
-      (is (= (char-at u 13) "-"))
-      (is (= (char-at u 18) "-"))
-      (is (= (char-at u 23) "-"))))
+      (is (= (string/char-at u 8) "-"))
+      (is (= (string/char-at u 13) "-"))
+      (is (= (string/char-at u 18) "-"))
+      (is (= (string/char-at u 23) "-"))))
   (test "version nibble is 7"
-    (assert= "7" (char-at (uuid/uuid-v7) 14)))
+    (assert= "7" (string/char-at (uuid/uuid-v7) 14)))
   (test "variant nibble is one of 8/9/a/b"
-    (let (vc (char-at (uuid/uuid-v7) 19))
+    (let (vc (string/char-at (uuid/uuid-v7) 19))
       (is (or (= vc "8") (= vc "9") (= vc "a") (= vc "b")))))
   (test "passes uuid? validation"
     (is (uuid/uuid? (uuid/uuid-v7))))
   (test "timestamp prefix is all hex"
     (let (u (uuid/uuid-v7)
           ;; Timestamp in positions 0-7 (p0) and 9-12 (p1), skipping dash at 8
-          ts (str (substring u 0 8) (substring u 9 13)))
-      (assert= 12 (string-length ts))
+          ts (str (string/substring u 0 8) (string/substring u 9 13)))
+      (assert= 12 (string/length ts))
       (is (uuid/uuid-all-hex? ts 0 12))))
   (test "generates unique values"
     (let (a (uuid/uuid-v7) b (uuid/uuid-v7))
@@ -54,11 +54,11 @@
 
 (describe "uuid-v3"
   (test "produces a 36-character string"
-    (assert= 36 (string-length (uuid/uuid-v3 uuid/ns-dns "example.com"))))
+    (assert= 36 (string/length (uuid/uuid-v3 uuid/ns-dns "example.com"))))
   (test "version nibble is 3"
-    (assert= "3" (char-at (uuid/uuid-v3 uuid/ns-dns "example.com") 14)))
+    (assert= "3" (string/char-at (uuid/uuid-v3 uuid/ns-dns "example.com") 14)))
   (test "variant nibble is 8/9/a/b"
-    (let (vc (char-at (uuid/uuid-v3 uuid/ns-dns "example.com") 19))
+    (let (vc (string/char-at (uuid/uuid-v3 uuid/ns-dns "example.com") 19))
       (is (or (= vc "8") (= vc "9") (= vc "a") (= vc "b")))))
   (test "passes uuid? validation"
     (is (uuid/uuid? (uuid/uuid-v3 uuid/ns-dns "example.com"))))
@@ -74,11 +74,11 @@
 
 (describe "uuid-v5"
   (test "produces a 36-character string"
-    (assert= 36 (string-length (uuid/uuid-v5 uuid/ns-dns "example.com"))))
+    (assert= 36 (string/length (uuid/uuid-v5 uuid/ns-dns "example.com"))))
   (test "version nibble is 5"
-    (assert= "5" (char-at (uuid/uuid-v5 uuid/ns-dns "example.com") 14)))
+    (assert= "5" (string/char-at (uuid/uuid-v5 uuid/ns-dns "example.com") 14)))
   (test "variant nibble is 8/9/a/b"
-    (let (vc (char-at (uuid/uuid-v5 uuid/ns-dns "example.com") 19))
+    (let (vc (string/char-at (uuid/uuid-v5 uuid/ns-dns "example.com") 19))
       (is (or (= vc "8") (= vc "9") (= vc "a") (= vc "b")))))
   (test "passes uuid? validation"
     (is (uuid/uuid? (uuid/uuid-v5 uuid/ns-dns "example.com"))))

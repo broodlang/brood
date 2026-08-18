@@ -130,7 +130,7 @@
       (assert= (sort (fn (x y) (< (vector-ref x 0) (vector-ref y 0))) pairs)
         (list [0 :b] [0 :d] [1 :a] [1 :c]))))
   (test "sort-by orders by a key function"
-    (assert= (sort-by (fn (s) (string-length s)) (list "ccc" "a" "bb")) (list "a" "bb" "ccc"))
+    (assert= (sort-by (fn (s) (string/length s)) (list "ccc" "a" "bb")) (list "a" "bb" "ccc"))
     (assert= (sort-by abs (list -3 1 -2 4)) (list 1 -2 -3 4)))
   (test "sort handles a larger, reversed input correctly"
     (assert= (sort (range 50 0 -1)) (range 1 51)))
@@ -401,7 +401,7 @@
     (refute (empty? (lfilter even? (range 10))))
     (assert= (into [] (lmap inc [1 2 3])) [2 3 4])
     (assert= (lmap inc [1 2 3]) (list 2 3 4))
-    (assert= (join "," (lmap number->string (range 4))) "0,1,2,3")
+    (assert= (string/join "," (lmap number->string (range 4))) "0,1,2,3")
     (assert= (apply + (lmap inc [1 2 3])) 9)
     (assert= (str (lmap inc [1 2 3])) "(2 3 4)"))
 

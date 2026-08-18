@@ -50,7 +50,7 @@
     ;; rewrite's chunk ordering — an off-by-one in the split/join reverses or drops text.
     (let (tmpl (apply str (repeat 500 "x{{a}}"))
           out (template/render tmpl {"a" "-"}))
-      (assert= 1000 (string-length out))
+      (assert= 1000 (string/length out))
       (assert= (apply str (repeat 500 "x-")) out))))
 
 (describe "render-all"

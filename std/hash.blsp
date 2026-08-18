@@ -35,13 +35,13 @@
 
 (defn- hash-byte->hex
   (b)
-  (str (char-at hash-hex-digits (quot b 16))
-    (char-at hash-hex-digits (rem b 16))))
+  (str (string/char-at hash-hex-digits (quot b 16))
+    (string/char-at hash-hex-digits (rem b 16))))
 
 (defn bytes->hex (bytes)
   "Lowercase hex string of a byte sequence (bytes value, vector, or list of byte
 ints 0–255). The output shaping for every digest/HMAC below."
-  (join "" (map hash-byte->hex (seq bytes))))
+  (string/join "" (map hash-byte->hex (seq bytes))))
 
 ;; ---- MD5 --------------------------------------------------------------------
 
@@ -166,4 +166,4 @@ bytes value (raw MAC, not hex)."
 Suitable for hash tables and sharding; NOT cryptographically secure."
   (fold (fn (h c) (bit-xor (* h 31) (char->int c)))
     5381
-    (string->list s)))
+    (string/to-list s)))

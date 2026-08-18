@@ -270,8 +270,8 @@
   (test "(str nil) returns \"nil\""
     (assert= "nil" (str nil)))
 
-  (test "(string-length nil) raises type error"
-    (assert-error (string-length nil)))
+  (test "(string/length nil) raises type error"
+    (assert-error (string/length nil)))
 
   (test "(includes? nil ...) returns false — nil is treated as empty string"
     (assert= false (includes? nil "x")))

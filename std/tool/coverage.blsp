@@ -59,9 +59,9 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (fold (fn (found dir)
           (or found
             (and (not (nil? path))
-              (starts-with? path dir)
-              (or (= (string-length path) (string-length dir))
-                (= (substring path (string-length dir) (+ (string-length dir) 1)) "/")))))
+              (string/starts-with? path dir)
+              (or (= (string/length path) (string/length dir))
+                (= (string/substring path (string/length dir) (+ (string/length dir) 1)) "/")))))
     false
     (or dirs (list))))
 
@@ -153,9 +153,9 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; Shorten an absolute path to a project-relative one for display.
 (defn- coverage-relative
   (path root)
-  (if (and (not (nil? root)) (starts-with? path root))
-    (let (cut (+ (string-length root) 1))
-      (if (> (string-length path) cut) (substring path cut (string-length path)) path))
+  (if (and (not (nil? root)) (string/starts-with? path root))
+    (let (cut (+ (string/length root) 1))
+      (if (> (string/length path) cut) (string/substring path cut (string/length path)) path))
     path))
 
 (defn coverage-report (root)
@@ -176,8 +176,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
                       file-total (count file-results)
                       file-covered (count (coverage-covered file-results)))
                   (println (str "  "
-                             (pad-right (coverage-relative (first entry) root) 44)
-                             (pad-left (str (coverage-percent file-covered file-total)) 4)
+                             (string/pad-right (coverage-relative (first entry) root) 44)
+                             (string/pad-left (str (coverage-percent file-covered file-total)) 4)
                              "%  ("
                              file-covered
                              "/"
@@ -309,8 +309,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
         (println "Line coverage (executable lines that ran):")
         (fold (fn (_ r)
                 (println (str "  "
-                           (pad-right (coverage-relative (get r :file) root) 44)
-                           (pad-left (str (coverage-percent (get r :covered) (get r :total))) 4)
+                           (string/pad-right (coverage-relative (get r :file) root) 44)
+                           (string/pad-left (str (coverage-percent (get r :covered) (get r :total))) 4)
                            "%  ("
                            (get r :covered)
                            "/"
@@ -331,7 +331,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
               ;; Capped: a barely-exercised file would print hundreds of numbers and
               ;; bury the summary. The count above is the truth.
               (println (str "  "
-                         (join ", " (map (fn (l) (str l)) (take 24 (get r :missing))))
+                         (string/join ", " (map (fn (l) (str l)) (take 24 (get r :missing))))
                          (if (> (count (get r :missing)) 24) ", …" "")))))
           nil
           results)
@@ -421,8 +421,8 @@ files under `source-dirs` are measured; files with no branches are omitted."
 (defn- coverage-branch-line
   (root r)
   (println (str "  "
-             (pad-right (coverage-relative (get r :file) root) 44)
-             (pad-left (str (coverage-percent (get r :covered) (get r :total))) 4)
+             (string/pad-right (coverage-relative (get r :file) root) 44)
+             (string/pad-left (str (coverage-percent (get r :covered) (get r :total))) 4)
              "%  ("
              (get r :covered)
              "/"

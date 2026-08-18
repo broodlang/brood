@@ -95,7 +95,7 @@
 (defn diff-lines (a b)
   "Diff two strings line-by-line. `a` and `b` are split on `\\n` first.
 Returns a list of `[:keep line]`, `[:delete line]`, `[:insert line]` ops."
-  (diff-seq (string-split a "\n") (string-split b "\n")))
+  (diff-seq (string/split a "\n") (string/split b "\n")))
 
 ;; ---- utilities --------------------------------------------------------------
 

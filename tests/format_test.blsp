@@ -340,9 +340,9 @@
         (let (ruled (format-source src))
           (def *format-headers-extra* {})
           ;; no rule → call-style: the event name sits alone, the signature splits
-          (assert= (starts-with? plain "(zzz-clause \"event\"\n") true)
+          (assert= (string/starts-with? plain "(zzz-clause \"event\"\n") true)
           ;; rule = 2 → event name + (params model) ride the head line
-          (assert= (starts-with? ruled "(zzz-clause \"event\" (params model)\n") true))))))
+          (assert= (string/starts-with? ruled "(zzz-clause \"event\" (params model)\n") true))))))
 
 ;; DATA SAFETY. The CST the formatter walks is lossless and error-TOLERANT, so it
 ;; happily represents an unclosed list — and its recovery used to RESTRUCTURE the

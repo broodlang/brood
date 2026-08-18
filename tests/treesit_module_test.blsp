@@ -84,7 +84,7 @@
       ;; from col 0 the next top-level node is the whole `def…end` method
       (let (end (editor/treesit/point-forward rb :ruby 0))
         (is (> end 0))
-        (assert= (substring rb 0 3) "def")))
+        (assert= (string/substring rb 0 3) "def")))
 
     (test "point-defun-start finds the enclosing top-level node"
       ;; col 11 is inside the body; the method begins at 0
@@ -107,4 +107,4 @@
 
     (test "motions are no-ops with nothing to move to"
       ;; past the end, forward stays put
-      (assert= (editor/treesit/point-forward rb :ruby (string-length rb)) (string-length rb)))))
+      (assert= (editor/treesit/point-forward rb :ruby (string/length rb)) (string/length rb)))))

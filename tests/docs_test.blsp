@@ -12,7 +12,7 @@
   (test "comments before the string are skipped"
     (assert= (docs/docs-leading-doc ";; a comment\n\"Hi.\"\n(def x 1)") "Hi."))
   (test "the baked-in test module carries a module docstring"
-    (is (starts-with? (docs/docs-leading-doc (%builtin-module "test")) "A tiny ExUnit"))))
+    (is (string/starts-with? (docs/docs-leading-doc (%builtin-module "test")) "A tiny ExUnit"))))
 
 (describe "docs: name attribution (global-names delta)"
   (test "added names are those in after but not before"
@@ -149,7 +149,7 @@
     ;; warning is about headroom, not an observed failure. `string-split` on N separators
     ;; yields N+1 pieces.
     (let (src (apply str (map (fn (_) "[a](u)") (range 0 2000))))
-      (assert= 2001 (count (string-split (docs/md-links src) "<a href="))))))
+      (assert= 2001 (count (string/split (docs/md-links src) "<a href="))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The doc catalogue must not name things that do not exist.

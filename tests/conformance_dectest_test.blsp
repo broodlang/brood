@@ -40,8 +40,8 @@
 ;; exponent. Excludes NaN / sNaN / Infinity / the `#` null operand by construction.
 (defn- dt-numeric?
   (s)
-  (and (> (string-length s) 0)
-    (let (cs (string->list s))
+  (and (> (string/length s) 0)
+    (let (cs (string/to-list s))
       (and (nil? (first (remove (fn (c) (includes? "0123456789+-.eE" c)) cs)))
         ;; at least one digit — rules out a bare sign and dectest's `#` null
         (not (nil? (first (filter (fn (c) (includes? "0123456789" c)) cs))))))))
@@ -51,23 +51,23 @@
 ;; exponents into plain digits, so guard the expansion regardless of how we got here.
 (defn- dt-in-range?
   (s)
-  (let (i (index-of (lower s) "e"))
+  (let (i (index-of (string/lower s) "e"))
     (or (< i 0)
-      (< (abs (or (string->number (substring s (inc i))) 0)) 400))))
+      (< (abs (or (string->number (string/substring s (inc i))) 0)) 400))))
 
 (defn- dt-unquote
   (w)
-  (if (and (> (string-length w) 1)
-        (or (starts-with? w "'") (starts-with? w "\"")))
-    (substring w 1 (dec (string-length w)))
+  (if (and (> (string/length w) 1)
+        (or (string/starts-with? w "'") (string/starts-with? w "\"")))
+    (string/substring w 1 (dec (string/length w)))
     w))
 
 ;; Split on runs of whitespace, dropping the trailing `-- comment` if any.
 (defn- dt-words
   (line)
-  (let (s (replace line "\t" " ")
+  (let (s (string/replace line "\t" " ")
         i (index-of s "--"))
-    (remove blank? (string-split (if (< i 0) s (substring s 0 i)) " "))))
+    (remove string/blank? (string/split (if (< i 0) s (string/substring s 0 i)) " "))))
 
 ;; The computed result as a canonical decimal string, or nil when the case does not
 ;; apply to Brood's decimal. `compare` answers -1/0/1, so it renders as an int.
@@ -99,7 +99,7 @@
     (if (or (< n 4) (< arrow 2))
       nil
       (let (id (nth words 0)
-            op (lower (nth words 1))
+            op (string/lower (nth words 1))
             args (map dt-unquote (subvec (into [] words) 2 arrow))
             want (dt-unquote (nth words (inc arrow)))
             conditions (- n (+ arrow 2))

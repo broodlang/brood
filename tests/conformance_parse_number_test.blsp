@@ -20,21 +20,21 @@
 
 ;; The f64 bit pattern the corpus expects for a line, and the input it expects it
 ;; from. Columns are fixed-width — see the corpus README.
-(defn- pn-expected (line) (hex->int (substring line 14 30)))
-(defn- pn-input (line) (substring line 31))
+(defn- pn-expected (line) (hex->int (string/substring line 14 30)))
+(defn- pn-input (line) (string/substring line 31))
 
 ;; nil when the line round-trips, else [input expected-hex actual-hex] for the report.
 (defn- pn-mismatch
   (line)
-  (if (< (string-length line) 32)
+  (if (< (string/length line) 32)
     nil
     (let (input (pn-input line)
           want (pn-expected line)
           n (string->number input))
       (cond
-        (nil? n) [input (substring line 14 30) "unparseable"]
+        (nil? n) [input (string/substring line 14 30) "unparseable"]
         (= (float->bits n) want) nil
-        else [input (substring line 14 30) (float->bits n)]))))
+        else [input (string/substring line 14 30) (float->bits n)]))))
 
 ;; Fold one file into [checked mismatches]; mismatches accumulate in reverse.
 (defn- pn-scan-lines
@@ -43,7 +43,7 @@
     [checked bad]
     (let (m (pn-mismatch (first lines)))
       (pn-scan-lines (rest lines)
-        (if (< (string-length (first lines)) 32) checked (inc checked))
+        (if (< (string/length (first lines)) 32) checked (inc checked))
         (if m (cons m bad) bad)))))
 
 (defn- pn-scan-files

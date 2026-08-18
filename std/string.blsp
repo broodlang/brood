@@ -1,0 +1,177 @@
+;; std/string.blsp — the string-manipulation library (ADR-230).
+;;
+;; A namespace (ADR-065): its functions are `string/trim`, `string/split`,
+;; `string/pad-left`, … — call them qualified, or `(:use string)` to refer them
+;; bare. This is the Elixir-`String`-flavour home for every operation whose *subject
+;; is a string*: trimming, padding, case, search, splitting/joining, and the
+;; char-content conversions.
+;;
+;; What lives here vs. bare in the prelude — the boundary rule (ADR-230):
+;;   - `string/*`  = "the first argument is a string" (this module).
+;;   - bare        = operations over ANY collection (`map`/`filter`/`reduce`/`count`/
+;;                   `contains?`/`member?`/`includes?`/`index-of`/`join`? no — `join`
+;;                   is string-flavoured, so it is here), plus the primitives
+;;                   `str`/`string?`/`string` and the scalar bridges that merely
+;;                   REINTERPRET a string as another type (`string->number`,
+;;                   `string->symbol`) — those stay bare with their reverse partners.
+;;
+;; Kernel seam: the low-level primitives are Rust builtins registered directly under
+;; their `string/…` names — `string/length` `string/substring` `string/split`
+;; `string/upper` `string/lower` `string/normalize` `string/span`/`span-until`
+;; `string/grapheme-*`/`substring-graphemes` `string/to-codepoints`/`to-graphemes`.
+;; The functions below are pure Brood over those. Brood has no distinct char type, so
+;; a "character" is a 1-char string; all indices are char-based, matching
+;; `string/length`. The helpers are tail-recursive (stack-safe over long strings).
+;;
+;; This module is `require`d by the prelude itself (its own `get`/`path-*`/`fmt`
+;; helpers call `string/char-at`/`string/starts-with?`/… by late binding), so it is
+;; always loaded — but it is still an ordinary embedded module: doc tooling sees it,
+;; and a project may `(:use string)`.
+(defmodule string
+  "The string-manipulation library — every operation whose subject is a string:
+trimming, padding, case folding, search, split/join, and char-content conversions.
+The low-level primitives (`string/length` `string/substring` `string/split`
+`string/upper` `string/lower` …) are Rust builtins; the rest is pure Brood over them.
+Bare-in-the-prelude by contrast: the generic collection ops (`map`/`filter`/`count`/
+`contains?`/`member?`/`includes?`/`index-of`) and the scalar bridges (`string->number`,
+`string->symbol`) that reinterpret a string as another type.")
+
+;; ---- case -------------------------------------------------------------------
+
+(defn capitalize (s)
+  "Return `s` with the first character upper-cased and the rest lower-cased."
+  (if (= (string/length s) 0)
+    s
+    (str (string/upper (string/substring s 0 1)) (string/lower (string/substring s 1)))))
+
+;; ---- char access & content conversions --------------------------------------
+
+(defn char-at (s i)
+  "The character (a 1-char string) at char index `i` of `s`."
+  (string/substring s i (inc i)))
+
+(defn to-list (s)
+  "The characters of `s` as a list of 1-char strings."
+  ;; One native O(n) `chars()` pass (via `string/split` on the empty separator). A
+  ;; pure-Brood `(string/substring s i (inc i))` loop is O(n^2) — `substring` walks to char
+  ;; boundary `i` each call — which silently makes every `(into [] (string/to-list s))`
+  ;; code-point vector O(n^2) to build (it defeated the json/base64 char-indexing
+  ;; rewrites; see docs/devlog.md).
+  (string/split s ""))
+
+(defn from-list (cs)
+  "Concatenate a list of strings (e.g. from `string/to-list`) into one string."
+  (apply str cs))
+
+(defn from-codepoints (cs)
+  "Build a string from a list (or vector) of Unicode codepoint integers — the
+inverse of the `string/to-codepoints` primitive."
+  (apply str (map int->char cs)))
+
+;; ---- join -------------------------------------------------------------------
+
+;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
+;; recursively, reversed), then build the string in one `apply str` pass.
+(defn- join-parts
+  (sep coll acc)
+  (if (empty? coll) acc (join-parts sep (rest coll) (cons (first coll) (cons sep acc)))))
+(defn join (sep coll)
+  "Concatenate the strings in `coll` with `sep` between adjacent elements."
+  ;; For the common case — a string separator over a list/vector/range — the
+  ;; native `%string-join` walks `coll` once into one buffer (no intermediate
+  ;; parts list, no reverse). The all-Brood path stays as a fallback for an
+  ;; exotic (non-string) separator: it builds the interleaved parts list
+  ;; (reversed) then concatenates in one `apply str` pass.
+  ;; A lazy seq-view is realised first (the native walks it via `seq_items`,
+  ;; which can't run a transducer). NOTE: this materialises the mapped strings —
+  ;; the `strings` benchmark's full fusion would need a string-builder reducer
+  ;; (a follow-up); today join over a view matches the old eager-`map` behaviour.
+  (let (coll (if (seqview? coll) (seq coll) coll))
+    (if (string? sep)
+      (%string-join sep coll)
+      (if (empty? coll)
+        ""
+        (apply str (cons (first coll) (reverse (join-parts sep (rest coll) nil))))))))
+
+;; ---- search & replace -------------------------------------------------------
+
+(defn replace (s old new)
+  "Return `s` with every occurrence of `old` replaced by `new`. An empty `old`
+leaves `s` unchanged."
+  (if (= old "") s (join new (string/split s old))))
+
+(defn starts-with? (s prefix)
+  "Does string `s` begin with `prefix`?"
+  (let (n (string/length prefix)) (and (>= (string/length s) n) (= (string/substring s 0 n) prefix))))
+
+(defn ends-with? (s suffix)
+  "Does string `s` end with `suffix`?"
+  (let (sl (string/length s) ql (string/length suffix))
+    (and (>= sl ql) (= (string/substring s (- sl ql) sl) suffix))))
+
+;; ---- whitespace: trimming & blank test --------------------------------------
+
+(defn- whitespace? (c) (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
+
+(defn blank? (s)
+  "Is `s` empty or made up only of whitespace?"
+  (let (n (string/length s))
+    (cond (= n 0) true (whitespace? (char-at s 0)) (blank? (string/substring s 1 n)) else false)))
+
+(defn- triml-from
+  (s i n)
+  (if (and (< i n) (whitespace? (char-at s i))) (triml-from s (inc i) n) (string/substring s i n)))
+(defn triml (s) "Remove leading whitespace from `s`." (triml-from s 0 (string/length s)))
+
+(defn- trimr-to
+  (s n)
+  (if (and (> n 0) (whitespace? (char-at s (dec n))))
+    (trimr-to s (dec n))
+    (string/substring s 0 n)))
+(defn trimr (s) "Remove trailing whitespace from `s`." (trimr-to s (string/length s)))
+
+(defn trim (s) "Remove leading and trailing whitespace from `s`." (triml (trimr s)))
+
+;; ---- padding & repetition ---------------------------------------------------
+;; Column formatting for tabular/console output. `pad-*` left unchanged when the
+;; string already meets the width (they never truncate).
+
+(defn repeat (s n)
+  "The string `s` concatenated `n` times (the empty string if `n` <= 0)."
+  ;; Build the list of copies with the generic `range`/`map` (NOT the generic
+  ;; `repeat`, which this name would shadow inside the `string` namespace), then
+  ;; concatenate in one `apply str` pass.
+  (apply str (map (fn (_) s) (range (max 0 n)))))
+
+(defn pad-left (s w &optional (pad " "))
+  "Right-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the left; `s` is returned unchanged if it is already at least `w` wide."
+  (let (n (string/length s)) (if (>= n w) s (str (repeat pad (- w n)) s))))
+
+(defn pad-right (s w &optional (pad " "))
+  "Left-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the right; `s` is returned unchanged if it is already at least `w` wide."
+  (let (n (string/length s)) (if (>= n w) s (str s (repeat pad (- w n))))))
+
+;; ---- fill: greedy word-wrap (was std/text.blsp) -----------------------------
+
+(defn- fill-pack
+  (acc word width)
+  "Greedy line-accumulator step. `acc` is `[cur done]`: the current (in-progress) line and
+the completed lines, newest first. Extend `cur` with `word` when the result still fits in
+`width` columns; otherwise flush `cur` onto `done` and start a fresh line at `word`.
+Prepending to `done` is O(1) (the caller reverses once), so a whole fill is O(words)."
+  (let ([cur done] acc)
+    (cond
+      (= cur "") [word done]
+      (<= (+ (string/length cur) 1 (string/length word)) width) [(str cur " " word) done]
+      else [word (cons cur done)])))
+
+(defn fill (s width)
+  "Greedily wrap `s` to `width` columns: collapse every run of whitespace (newlines, tabs,
+spaces) to a single space, then re-break on word boundaries so each line is as full as it
+can be without exceeding `width`. A single word longer than `width` keeps its own
+(over-long) line rather than being split. Returns the rewrapped text, lines joined by
+`\\n`; the empty string for blank input."
+  (let (flat (replace (replace s "\n" " ") "\t" " ")
+        words (filter (fn (w) (not (= w ""))) (string/split flat " "))
+        [cur done] (fold (fn (acc w) (fill-pack acc w width)) ["" ()] words))
+    (join "\n" (reverse (if (= cur "") done (cons cur done))))))

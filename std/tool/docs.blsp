@@ -50,9 +50,9 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; The bare module title from a file path: "a/b/foo.blsp" -> "foo".
 (defn- docs-basename
   (path)
-  (let (i (path-last-slash path (dec (string-length path)))
-        file (if (< i 0) path (substring path (inc i) (string-length path))))
-    (if (ends-with? file ".blsp") (substring file 0 (- (string-length file) 5)) file)))
+  (let (i (path-last-slash path (dec (string/length path)))
+        file (if (< i 0) path (string/substring path (inc i) (string/length path))))
+    (if (string/ends-with? file ".blsp") (string/substring file 0 (- (string/length file) 5)) file)))
 
 ;; --- which names a module defines (global-table delta) -----------------------
 
@@ -171,7 +171,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- docs-public?
   (sym)
   (let (nm (name sym))
-    (and (not (includes? nm "--")) (not (starts-with? nm "%")))))
+    (and (not (includes? nm "--")) (not (string/starts-with? nm "%")))))
 
 (defn document-all ()
   "The Markdown reference for every *public* global currently bound in the image — each builtin and prelude function/macro with its signature and one-line summary. The complete primitive reference (`nest doc --all`); read this once instead of probing names one at a time. Opt-in std modules (`display`, `buffer`, `ansi`, …) aren't loaded here — `nest doc <module>` documents those."
@@ -192,7 +192,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; so those keep their whole name.
 (defn- docs-bare
   (sym)
-  (let (nm (name sym) segments (string-split nm "/"))
+  (let (nm (name sym) segments (string/split nm "/"))
     (if (= (last segments) "") nm (last segments))))
 
 ;; One definition as a data record for the model: bare name (for anchors/headings),
@@ -238,7 +238,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; dependencies to whichever file pulled them in.
 (defn- docs-namespace-syms
   (modname)
-  (let (prefix (str modname "/")) (filter (fn (s) (starts-with? (name s) prefix)) (global-names))))
+  (let (prefix (str modname "/")) (filter (fn (s) (string/starts-with? (name s) prefix)) (global-names))))
 
 (defn model-file (path)
   "The doc-model module entry for the file at `path`: load it, then collect its module's
@@ -336,14 +336,14 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; reference. A small Markdown subset: ATX headings, fenced code, `- ` lists, blank-line
 ;; paragraphs, and inline `code`/[text](url) links — enough for a getting-started guide.
 
-(defn- md-escape (s) (-> (str s) (replace "&" "&amp;") (replace "<" "&lt;") (replace ">" "&gt;")))
+(defn- md-escape (s) (-> (str s) (string/replace "&" "&amp;") (string/replace "<" "&lt;") (string/replace ">" "&gt;")))
 
 ;; Escape a URL for an `href="…"` attribute (adds `"` to `md-escape`) and neutralise a
 ;; `javascript:` link, so a guide's Markdown can't break out of the attribute or inject
 ;; script into the generated site.
 (defn- md-attr
   (url)
-  (if (starts-with? (trim url) "javascript:") "#" (replace (md-escape url) "\"" "&quot;")))
+  (if (string/starts-with? (string/trim url) "javascript:") "#" (string/replace (md-escape url) "\"" "&quot;")))
 
 ;; A non-code text run: turn `[text](url)` into a link, HTML-escape everything else.
 (defn- md-links
@@ -369,27 +369,27 @@ module's namespace-rooted globals (ADR-070) back to it."
       (or (not (number? close-bracket)) (< close-bracket open-bracket))
         (cons (md-escape text) chunks)
       ;; `[text](url)` — a real link
-      (= (substring text (+ close-bracket 1) (min (+ close-bracket 2) (string-length text))) "(")
-        (let (rest (substring text (+ close-bracket 2) (string-length text))
+      (= (string/substring text (+ close-bracket 1) (min (+ close-bracket 2) (string/length text))) "(")
+        (let (rest (string/substring text (+ close-bracket 2) (string/length text))
               close-paren (index-of rest ")"))
           (if (and (number? close-paren) (>= close-paren 0))
-            (md-links-acc (substring rest (+ close-paren 1) (string-length rest))
+            (md-links-acc (string/substring rest (+ close-paren 1) (string/length rest))
               (cons "</a>"
-                (cons (md-escape (substring text (+ open-bracket 1) close-bracket))
+                (cons (md-escape (string/substring text (+ open-bracket 1) close-bracket))
                   (cons "\">"
-                    (cons (md-attr (substring rest 0 close-paren))
+                    (cons (md-attr (string/substring rest 0 close-paren))
                       (cons "<a href=\""
-                        (cons (md-escape (substring text 0 open-bracket)) chunks)))))))
+                        (cons (md-escape (string/substring text 0 open-bracket)) chunks)))))))
             (cons (md-escape text) chunks)))
       ;; a `[…]` that isn't a link — emit it literally, continue past the `]`
       else
-        (md-links-acc (substring text (+ close-bracket 1) (string-length text))
-          (cons (md-escape (substring text 0 (+ close-bracket 1))) chunks)))))
+        (md-links-acc (string/substring text (+ close-bracket 1) (string/length text))
+          (cons (md-escape (string/substring text 0 (+ close-bracket 1))) chunks)))))
 
 ;; Inline Markdown for one text run: `code` spans (backtick pairs) plus links via `md-links`.
 (defn- md-inline
   (text)
-  (let (parts (string-split text "`"))
+  (let (parts (string/split text "`"))
     (apply str
       (map (fn (pair)
              (let ([i seg] pair)
@@ -403,7 +403,7 @@ module's namespace-rooted globals (ADR-070) back to it."
     (cond
       (= mode :para)
         (assoc state
-          :out (str out "<p>" (md-inline (join " " (reverse buf))) "</p>")
+          :out (str out "<p>" (md-inline (string/join " " (reverse buf))) "</p>")
           :mode :none
           :buf nil)
       (= mode :list)
@@ -418,16 +418,16 @@ module's namespace-rooted globals (ADR-070) back to it."
       ;; an unclosed ``` fence at end-of-input: emit what was buffered rather than drop it
       (= mode :code)
         (assoc state
-          :out (str out "<pre><code>" (md-escape (join "\n" (reverse buf))) "</code></pre>")
+          :out (str out "<pre><code>" (md-escape (string/join "\n" (reverse buf))) "</code></pre>")
           :mode :none
           :buf nil)
       else state)))
 
 (defn- md-line
   (state line)
-  (let (mode (get state :mode) t (trim line) end (string-length (trim line)))
+  (let (mode (get state :mode) t (string/trim line) end (string/length (string/trim line)))
     (cond
-      (starts-with? t "```")
+      (string/starts-with? t "```")
         (if (= mode :code)
           (assoc state
             :mode :none
@@ -435,22 +435,22 @@ module's namespace-rooted globals (ADR-070) back to it."
             :out
               (str (get state :out)
                 "<pre><code>"
-                (md-escape (join "\n" (reverse (get state :buf))))
+                (md-escape (string/join "\n" (reverse (get state :buf))))
                 "</code></pre>"))
           (assoc (md-flush state) :mode :code :buf nil))
       (= mode :code) (assoc state :buf (cons line (get state :buf)))
-      (starts-with? t "### ")
+      (string/starts-with? t "### ")
         (let (s (md-flush state))
-          (assoc s :out (str (get s :out) "<h3>" (md-inline (substring t 4 end)) "</h3>")))
-      (starts-with? t "## ")
+          (assoc s :out (str (get s :out) "<h3>" (md-inline (string/substring t 4 end)) "</h3>")))
+      (string/starts-with? t "## ")
         (let (s (md-flush state))
-          (assoc s :out (str (get s :out) "<h2>" (md-inline (substring t 3 end)) "</h2>")))
-      (starts-with? t "# ")
+          (assoc s :out (str (get s :out) "<h2>" (md-inline (string/substring t 3 end)) "</h2>")))
+      (string/starts-with? t "# ")
         (let (s (md-flush state))
-          (assoc s :out (str (get s :out) "<h1>" (md-inline (substring t 2 end)) "</h1>")))
-      (or (starts-with? t "- ") (starts-with? t "* "))
+          (assoc s :out (str (get s :out) "<h1>" (md-inline (string/substring t 2 end)) "</h1>")))
+      (or (string/starts-with? t "- ") (string/starts-with? t "* "))
         (let (s (if (= mode :list) state (md-flush state)))
-          (assoc s :mode :list :buf (cons (substring t 2 end) (get s :buf))))
+          (assoc s :mode :list :buf (cons (string/substring t 2 end) (get s :buf))))
       (= t "") (md-flush state)
       else
         (let (s (if (= mode :para) state (md-flush state)))
@@ -460,14 +460,14 @@ module's namespace-rooted globals (ADR-070) back to it."
   "Render a Markdown string to HTML — a small subset (ATX headings, fenced ``` code, `- `
   lists, blank-line paragraphs, inline `code`/links). Everything is HTML-escaped; not a
   full CommonMark parser. Used for doc guides."
-  (get (md-flush (fold md-line {:out "" :mode :none :buf nil} (string-split md "\n"))) :out))
+  (get (md-flush (fold md-line {:out "" :mode :none :buf nil} (string/split md "\n"))) :out))
 
 ;; A guide's display title from its filename: `getting-started.md` -> `Getting started`.
 (defn- guide-title
   (path)
-  (let (file (last (string-split path "/"))
-        stem (if (ends-with? file ".md") (substring file 0 (- (string-length file) 3)) file))
-    (capitalize (replace stem "-" " "))))
+  (let (file (last (string/split path "/"))
+        stem (if (string/ends-with? file ".md") (string/substring file 0 (- (string/length file) 3)) file))
+    (string/capitalize (string/replace stem "-" " "))))
 
 ;; Every `guides/*.md` under the project root, rendered — `[{:title :html}]`, sorted by
 ;; filename. Empty when there is no `guides/` directory.
@@ -478,7 +478,7 @@ module's namespace-rooted globals (ADR-070) back to it."
       []
       (apply vector
         (map (fn (path) {:title (guide-title path) :html (markdown->html (slurp path))})
-          (sort (filter (fn (p) (ends-with? p ".md"))
+          (sort (filter (fn (p) (string/ends-with? p ".md"))
                   (map (fn (f) (path-join dir f)) (list-dir dir)))))))))
 
 ;; --- doctests (`nest doctest`) -----------------------------------------------
@@ -491,14 +491,14 @@ module's namespace-rooted globals (ADR-070) back to it."
   (line)
   (let (i (index-of line ";=>"))
     (when (and (number? i) (> i 0))
-      (let (expr (trim (substring line 0 i))
-            expected (trim (substring line (+ i 3) (string-length line))))
+      (let (expr (string/trim (string/substring line 0 i))
+            expected (string/trim (string/substring line (+ i 3) (string/length line))))
         (when (and (not (= expr "")) (not (= expected ""))) [expr expected])))))
 
 ;; Every `expr ;=> expected` example in a docstring, in source order.
 (defn- doctests-in
   (docstring)
-  (filter (fn (x) (not (nil? x))) (map doctest-of-line (string-split docstring "\n"))))
+  (filter (fn (x) (not (nil? x))) (map doctest-of-line (string/split docstring "\n"))))
 
 ;; Evaluate one example: `[:ok]`, `[:fail actual expected]`, or `[:error message]`.
 (defn- run-one-doctest
@@ -514,7 +514,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- collect-doctests
   (prefix)
   (fold (fn (acc sym)
-          (if (not (starts-with? (name sym) prefix))
+          (if (not (string/starts-with? (name sym) prefix))
             acc
             (let (v (try (eval sym) (catch _ nil))
                   d (when v (try (doc v) (catch _ nil))))

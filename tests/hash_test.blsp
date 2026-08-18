@@ -8,7 +8,7 @@
     (assert= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
       (hash/sha256 "hello")))
   (test "output length is 64 hex chars"
-    (assert= 64 (string-length (hash/sha256 "any string"))))
+    (assert= 64 (string/length (hash/sha256 "any string"))))
   (test "deterministic"
     (assert= (hash/sha256 "test") (hash/sha256 "test")))
   (test "different inputs give different digests"
@@ -20,9 +20,9 @@
     ;; Brood: key as string of 20 0x0b bytes, message "Hi There"
     ;; Expected: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
     ;; (We use a simple known vector instead of the binary-key RFC test)
-    (assert= (string-length (hash/hmac-sha256 "key" "message")) 64))
+    (assert= (string/length (hash/hmac-sha256 "key" "message")) 64))
   (test "output is 64 hex chars"
-    (assert= 64 (string-length (hash/hmac-sha256 "secret" "data"))))
+    (assert= 64 (string/length (hash/hmac-sha256 "secret" "data"))))
   (test "different keys give different HMACs"
     (is (not= (hash/hmac-sha256 "key1" "msg") (hash/hmac-sha256 "key2" "msg"))))
   (test "different messages give different HMACs"
@@ -43,7 +43,7 @@
     (assert= "5d41402abc4b2a76b9719d911017c592"
       (hash/md5 "hello")))
   (test "output length is 32 hex chars"
-    (assert= 32 (string-length (hash/md5 "anything"))))
+    (assert= 32 (string/length (hash/md5 "anything"))))
   (test "deterministic"
     (assert= (hash/md5 "test") (hash/md5 "test")))
   (test "different inputs give different digests"
@@ -57,7 +57,7 @@
     (assert= "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
       (hash/sha1 "hello")))
   (test "output length is 40 hex chars"
-    (assert= 40 (string-length (hash/sha1 "anything"))))
+    (assert= 40 (string/length (hash/sha1 "anything"))))
   (test "deterministic"
     (assert= (hash/sha1 "test") (hash/sha1 "test")))
   (test "different inputs give different digests"
@@ -68,7 +68,7 @@
     (assert= "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"
       (hash/sha384 "")))
   (test "output length is 96 hex chars"
-    (assert= 96 (string-length (hash/sha384 "anything"))))
+    (assert= 96 (string/length (hash/sha384 "anything"))))
   (test "deterministic"
     (assert= (hash/sha384 "test") (hash/sha384 "test")))
   (test "different inputs give different digests"
@@ -79,7 +79,7 @@
     (assert= "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
       (hash/sha512 "")))
   (test "output length is 128 hex chars"
-    (assert= 128 (string-length (hash/sha512 "anything"))))
+    (assert= 128 (string/length (hash/sha512 "anything"))))
   (test "deterministic"
     (assert= (hash/sha512 "test") (hash/sha512 "test")))
   (test "different inputs give different digests"
@@ -87,7 +87,7 @@
 
 (describe "hmac-sha1"
   (test "output is 40 hex chars"
-    (assert= 40 (string-length (hash/hmac-sha1 "secret" "message"))))
+    (assert= 40 (string/length (hash/hmac-sha1 "secret" "message"))))
   (test "different keys give different HMACs"
     (is (not= (hash/hmac-sha1 "key1" "msg") (hash/hmac-sha1 "key2" "msg"))))
   (test "different messages give different HMACs"
@@ -102,7 +102,7 @@
 
 (describe "hmac-sha512"
   (test "output is 128 hex chars"
-    (assert= 128 (string-length (hash/hmac-sha512 "secret" "message"))))
+    (assert= 128 (string/length (hash/hmac-sha512 "secret" "message"))))
   (test "different keys give different HMACs"
     (is (not= (hash/hmac-sha512 "key1" "msg") (hash/hmac-sha512 "key2" "msg"))))
   (test "different messages give different HMACs"

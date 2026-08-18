@@ -336,7 +336,7 @@
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
-        (tcp-send c (string-repeat "x" 200))
+        (tcp-send c (string/repeat "x" 200))
         (let (r (tcp-read-until s "\r\n\r\n" {:max-bytes 64 :timeout-ms 2000}))
           (tcp-close c)
           (tcp-close s)
@@ -571,7 +571,7 @@
         (tcp-set-binary s true)
         (let (r (tcp-read-until s
                   "\r\n\r\n"
-                  {:seed (string->utf8-bytes (string-repeat "x" 200))
+                  {:seed (string->utf8-bytes (string/repeat "x" 200))
                    :max-bytes 64
                    :timeout-ms 2000}))
           (tcp-close c)

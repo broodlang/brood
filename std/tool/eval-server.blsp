@@ -106,9 +106,9 @@ lines (see the module preamble on stray output)."
 
 (defn- eval-server-bound-output
   (s)
-  (if (<= (string-length s) *output-cap-chars*)
+  (if (<= (string/length s) *output-cap-chars*)
     s
-    (str (substring s 0 *output-cap-chars*) "\n…[output truncated]")))
+    (str (string/substring s 0 *output-cap-chars*) "\n…[output truncated]")))
 
 (defn- eval-server-process-report
   (before)

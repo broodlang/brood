@@ -79,7 +79,7 @@ mod strings {
     fn join(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(string-length (join \", \" (map number->string (range {n}))))"),
+            format!("(string/length (string/join \", \" (map number->string (range {n}))))"),
         );
     }
 
@@ -89,7 +89,7 @@ mod strings {
     fn split(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(count (string-split (join \",\" (map number->string (range {n}))) \",\"))"),
+            format!("(count (string/split (string/join \",\" (map number->string (range {n}))) \",\"))"),
         );
     }
 }
@@ -240,14 +240,14 @@ mod concurrency {
         bench_prog(
             bencher,
             format!(
-                "(defn bsf-w (p) (receive (s (send p (string-length s))))) \
+                "(defn bsf-w (p) (receive (s (send p (string/length s))))) \
                  (defn bsf-sw (parent big k) \
                    (if (= k 0) nil \
                      (do (send (spawn (bsf-w parent)) big) \
                          (bsf-sw parent big (- k 1))))) \
                  (defn bsf-coll (acc k) \
                    (if (= k 0) acc (bsf-coll (+ acc (receive (x x))) (- k 1)))) \
-                 (let (me (self) big (string-repeat \"a\" {payload_bytes})) \
+                 (let (me (self) big (string/repeat \"a\" {payload_bytes})) \
                    (bsf-sw me big {n}) \
                    (bsf-coll 0 {n}))"
             ),

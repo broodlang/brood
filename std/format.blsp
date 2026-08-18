@@ -66,23 +66,23 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 
 (defn count-newlines (s)
   "How many `\\n` characters appear in string `s`."
-  ;; Native O(n) split. A per-char `(substring s i (inc i))` loop is O(n^2) —
+  ;; Native O(n) split. A per-char `(string/substring s i (inc i))` loop is O(n^2) —
   ;; `substring` walks to char boundary `i` each call.
-  (dec (count (string-split s "\n"))))
+  (dec (count (string/split s "\n"))))
 
 ;; (`string-repeat` is the prelude's — it used to be redefined here with an
 ;; accumulator that did `(str acc s)` each step (O(total length²)); the prelude's
 ;; `(apply str (repeat n s))` is a single O(total length) pass. The runtime shares
 ;; one global table, so this local copy clobbered the prelude's for the whole image
 ;; once `format` was required. Use the prelude's.)
-(defn indent-of (n) (string-repeat " " n))
+(defn indent-of (n) (string/repeat " " n))
 
 ;; The whitespace inside a comment node is `";; foo\n"` — the trailing newline
 ;; is part of the node. We strip it before emitting so glue logic owns the
 ;; spacing between blocks.
 (defn- comment-strip-trailing-nl
   (text)
-  (if (ends-with? text "\n") (substring text 0 (dec (string-length text))) text))
+  (if (string/ends-with? text "\n") (string/substring text 0 (dec (string/length text))) text))
 
 ;; ---- header table -----------------------------------------------------------
 ;; The number of args that ride on the same line as the head when a list breaks.
@@ -250,7 +250,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 
 (defn- single-line-seq-build
   (forms open close)
-  (let (parts (map single-line forms)) (if (any-nil? parts) nil (str open (join " " parts) close))))
+  (let (parts (map single-line forms)) (if (any-nil? parts) nil (str open (string/join " " parts) close))))
 
 (defn any-nil? (xs) (cond (nil? xs) false (nil? (first xs)) true else (any-nil? (rest xs))))
 
@@ -278,7 +278,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   ;; Reader-macro wrappers don't introduce their own break: render the child at
   ;; the current column. (A long `'(foo bar)` will break inside the list, which
   ;; is what we want.)
-  (str prefix (render child (+ indent (string-length prefix)))))
+  (str prefix (render child (+ indent (string/length prefix)))))
 
 (defn- render-seq
   (n indent open close)
@@ -303,7 +303,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   (let (keep-broken (had-author-newlines? n)
         one (if keep-broken nil (single-line n)))
     (cond
-      (and one (<= (+ indent (string-length one)) (format-width))) one
+      (and one (<= (+ indent (string/length one)) (format-width))) one
       (= (node-kind n) :map) (render-pair-break (node-children n) indent "{" "}")
       else (render-break (node-children n) indent open close))))
 
@@ -529,13 +529,13 @@ retired the `comment-on-own-line?` distinction this used to need."
         (render (first items) indent))
     pair-bind-first?
       (let (item (first items)
-            col (+ indent (string-length acc) 1)
+            col (+ indent (string/length acc) 1)
             part (if (= (node-kind item) :list)
                    (render-pair-list item col)
                    (render item col)))
         (render-head-line-build (rest items) false indent (str acc " " part)))
     else
-      (let (part (render (first items) (+ indent (string-length acc) 1)))
+      (let (part (render (first items) (+ indent (string/length acc) 1)))
         (render-head-line-build (rest items) false indent (str acc " " part)))))
 
 ;; ---- pair-list emit (let / letrec / binding / ... bindings) -----------------
@@ -550,7 +550,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   (let (keep-broken (had-author-newlines? n)
         one (if keep-broken nil (single-line n)))
     (cond
-      (and one (<= (+ indent (string-length one)) (format-width))) one
+      (and one (<= (+ indent (string/length one)) (format-width))) one
       else (render-pair-break (node-children n) indent "(" ")"))))
 
 (defn- render-pair-break
@@ -616,7 +616,7 @@ retired the `comment-on-own-line?` distinction this used to need."
                 pair-ind
                 0
                 (str acc (render-pair-sep acc nl pair-ind false) arendr))
-              (let (brendr (render (vector-ref kids j) (+ pair-ind (string-length arendr) 1))
+              (let (brendr (render (vector-ref kids j) (+ pair-ind (string/length arendr) 1))
                     pair-body (str arendr " " brendr)
                     tc (trailing-comment-at kids (inc j) n))
                 (if (nil? tc)
@@ -711,13 +711,13 @@ retired the `comment-on-own-line?` distinction this used to need."
                     ;; is idempotent. `value-ind` is +2 from the key's indent.
                     vflat (single-line vnode)
                     pair-fits (and vflat
-                                (<= (+ body-ind (string-length arendr) 1 (string-length vflat))
+                                (<= (+ body-ind (string/length arendr) 1 (string/length vflat))
                                   (format-width)))
                     value-ind (+ body-ind 2)
                     pair-str (if pair-fits
                                (str arendr
                                  " "
-                                 (render vnode (+ body-ind (string-length arendr) 1)))
+                                 (render vnode (+ body-ind (string/length arendr) 1)))
                                (str arendr "\n" (indent-of value-ind) (render vnode value-ind)))
                     tc (trailing-comment-at kids (inc j) n))
                 (if (nil? tc)
@@ -823,7 +823,7 @@ retired the `comment-on-own-line?` distinction this used to need."
                 form-rendr (render c body-ind)
                 tc-idx (trailing-comment-at kids (inc i) n)
                 single (not (includes? form-rendr "\n"))
-                w (string-length form-rendr)
+                w (string/length form-rendr)
                 ;; Ride onto the current line when: filling is allowed, the
                 ;; previous item left a fillable column, this arg is single-line,
                 ;; no blank line or trailing comment forces a break, and it fits.
@@ -893,7 +893,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   ;; forms. A shape that creeps *up* across bases is the opposite of the warm-up signature
   ;; that clears a row, and it was mistakenly cleared once on the small-N numbers alone.
   (let (out (apply str (reverse (format-cst-root-walk kids 0 (vector-length kids) 0 ()))))
-    (cond (= out "") "" (ends-with? out "\n") out else (str out "\n"))))
+    (cond (= out "") "" (string/ends-with? out "\n") out else (str out "\n"))))
 
 ;; The walker threads `nl-since-last`: the newline count between the last
 ;; emitted block and the cursor. Whitespace adds its newline count; a comment
@@ -976,7 +976,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   (or (= name "target")
     (= name "_deps")
     (= name "node_modules")
-    (and (> (string-length name) 0) (= (substring name 0 1) "."))))
+    (and (> (string/length name) 0) (= (string/substring name 0 1) "."))))
 
 (defn- format-collect-blsp
   (dir)
@@ -995,8 +995,8 @@ retired the `comment-on-own-line?` distinction this used to need."
             ;; Skip generated lock files (`project.lock.blsp`): they're machine-
             ;; written ("do not edit by hand") and re-serialized by `nest fetch` on
             ;; every project-setup, so formatting them just fights the resolver.
-            (ends-with? entry ".lock.blsp") acc
-            (ends-with? entry ".blsp") (cons p acc)
+            (string/ends-with? entry ".lock.blsp") acc
+            (string/ends-with? entry ".blsp") (cons p acc)
             else acc)))
       nil
       (list-dir dir))
@@ -1013,8 +1013,8 @@ retired the `comment-on-own-line?` distinction this used to need."
             (let (p (path-join root entry))
               (cond
                 (dir? p) acc
-                (ends-with? entry ".lock.blsp") acc
-                (ends-with? entry ".blsp") (cons p acc)
+                (string/ends-with? entry ".lock.blsp") acc
+                (string/ends-with? entry ".blsp") (cons p acc)
                 else acc)))
       nil
       (list-dir root))
@@ -1120,7 +1120,7 @@ that does not parse is reported and skipped, never rewritten."
       :not-a-repo
       (let (project (format-set-of (format-every-blsp root)))
         (filter (fn (p) (contains? project p))
-          (filter (fn (p) (ends-with? p ".blsp")) changed))))))
+          (filter (fn (p) (string/ends-with? p ".blsp")) changed))))))
 
 (defn format-project-changed ()
   "Format only the .blsp files git reports as changed (modified/staged/untracked)

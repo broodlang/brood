@@ -250,7 +250,7 @@
           cands (get a :completions))
       (is (not (nil? cands)))
       (is (any? (fn (c) (= c "str")) cands))
-      (is (every? (fn (c) (starts-with? c "str")) cands)))))
+      (is (every? (fn (c) (string/starts-with? c "str")) cands)))))
 
 (describe "lineedit/lineedit-completion-rows — pure listing layout"
   (test "candidates lay out across in equal columns, one row when they fit"
@@ -262,12 +262,12 @@
     (let (rows (editor/lineedit/lineedit-completion-rows (list "map" "max" "mapcat") 12))
       ; colw 8, room 11 -> 1 column
       (assert= (count rows) 3)
-      (is (every? (fn (r) (<= (string-length r) 11)) rows))))
+      (is (every? (fn (r) (<= (string/length r) 11)) rows))))
   (test "a candidate wider than the terminal is truncated, not wrapped"
-    (let (rows (editor/lineedit/lineedit-completion-rows (list (string-repeat "x" 50)
-                                                           (string-repeat "y" 50))
+    (let (rows (editor/lineedit/lineedit-completion-rows (list (string/repeat "x" 50)
+                                                           (string/repeat "y" 50))
                  20))
-      (is (every? (fn (r) (<= (string-length r) 19)) rows))))
+      (is (every? (fn (r) (<= (string/length r) 19)) rows))))
   (test "an over-long list is capped with a trailing count of the remainder"
     ;; one column (colw 12 in a 13-column room) x 6 max rows = 6 shown of 9.
     (let (cands (map (fn (i) (str "candidate-" i)) (range 0 9))
@@ -349,7 +349,7 @@
           mk (fn (text)
                (assoc (editor/lineedit/lineedit-init "x> " "" '() {:complete? complete?})
                  :text text
-                 :point (string-length text))))
+                 :point (string/length text))))
       ;; incomplete form: Enter adds a newline INDENTED to the structural column
       ;; (opener at col 0 -> continuation at col 2), and does NOT submit
       (let (st (editor/lineedit/lineedit-submit (mk "(defn f") nil))

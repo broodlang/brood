@@ -406,7 +406,7 @@
   (test "an op's declared return type flows into inference at the call site"
     ;; `size :-> int`, so `(size 5)` is an int; feeding it to `string-length` (wants a
     ;; string) is a provable mismatch — the declared return reached the call site.
-    (is (abt-warns-about? "(defability S (sz [self] :-> int)) (impl S :int (sz [n] n)) (defn f () (string-length (sz 5)))"
+    (is (abt-warns-about? "(defability S (sz [self] :-> int)) (impl S :int (sz [n] n)) (defn f () (string/length (sz 5)))"
           "int")))
   (test "an impl body that disagrees with the declared return is flagged"
     (is (abt-warns-about? "(defability S (sz [self] :-> int)) (impl S :int (sz [n] \"hi\"))"

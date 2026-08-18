@@ -1379,3 +1379,42 @@ change above was measured with it, and one interleaved 10M-element run settled a
 What the negative result implies for the frontier: the computed-head path's cost is the **call
 protocol itself** — frame setup and dispatch — not the resolution bookkeeping. That points back
 at call inlining and the interpreter's dispatch loop, and lever 3 is demoted accordingly.
+
+
+## 2026-08-18 — Stdlib namespacing, stage 5: the `string` library module (ADR-230)
+
+Moved the whole string surface into a real `std/string.blsp` `(defmodule string)`, one name per op,
+no bare forwarders (greenfield). The boundary rule: **`string/*` = "the first argument is a
+string"** (trim/pad/case/search/split-join/substring/Unicode + the char-content conversions
+`to-list`/`from-list`/`to-codepoints`/`from-codepoints`/`to-graphemes`); **bare** = the polymorphic
+collection ops (`index-of`/`includes?`/`contains?`/`member?`) and the scalar bridges that reinterpret
+a string as another type (`string->number`/`number->string`, `string->symbol`/`symbol->string`).
+`join` is `string/join` (it reduces a collection *into a string*); `string->number` stays bare (it
+produces a number, and pairs with `number->string`). `std/text.blsp` is deleted, its `fill` folded
+in as `string/fill`.
+
+**Mechanism, no boot-loader surgery.** `string` is an ordinary `embedded_module!`, so hive's
+source-parsing `docbuild` and every doc tool see a normal module file and group its functions. The
+13 kernel primitives are re-registered *directly* under their `string/…` names (`string/length`,
+`string/substring`, `string/split`, `string/upper`, …) — the builtin is the canonical name, no
+wrapper. The prelude's own `get`/`path-*`/`fmt`/`doc-search` helpers reference `string/char-at`
+etc. by late binding; since boot's namespace-resolve is a no-op for the root prelude (so those refs
+don't auto-require), the prelude loads the module with one explicit `(require-one 'string)` right
+after the loader is defined — making `string` always-present yet still `(:use string)`-able.
+
+**Two mechanism facts worth recording.** (1) Bare names auto-qualify to `<ns>/name` only for
+**def-heads the file declares** (the forward-ref pre-scan) — a *builtin* registered as `string/length`
+is not a def-head, so inside `string.blsp` the renamed builtins (`length`/`substring`/`split`/`upper`/
+`lower`) must be written qualified; the module's own sibling fns stay bare. (2) A call-position sweep
+(`(name` → `(string/name`) is self-checking when it runs over Rust as well: the one false hit was a
+Cranelift `Block` variable named `join` in `jit_lower/prim.rs`, and it failed to compile rather than
+corrupting anything silently.
+
+**Correction to an earlier note:** the "make `number->string` an extensible ability" idea is already
+served — the prelude carries an always-on `Display`/`Inspect` protocol (ADR-168/172) dispatching on
+the first arg's identity, so any type renders itself through that. No new protocol; the bridges stay
+bare.
+
+Scope: ~915 call sites across `std/`+`tests/`+`examples/`+Rust-embedded Brood, plus `sigs.rs`,
+`PRIMITIVE_DOCS`, the `doc-catalog` (public entries renamed, private helpers dropped per ADR-227),
+`docs/language.md`, and every `../*` sibling project. See ADR-230.

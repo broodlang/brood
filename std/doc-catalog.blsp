@@ -85,7 +85,7 @@
    "bit-shift-right" :math
    "bit-xor" :math
    "bits->float" :convert
-   "blank?" :predicates
+   "string/blank?" :predicates
    "bool?" :predicates
    "bound?" :meta
    "brood-version" :meta
@@ -108,13 +108,13 @@
    "bytes?" :predicates
    "cancel-timer" :processes
    "canonicalize" :system
-   "capitalize" :strings
+   "string/capitalize" :strings
    "case" :control
    "case-check-test" :control
    "case-clauses" :control
    "chain?" :predicates
    "char->int" :strings
-   "char-at" :strings
+   "string/char-at" :strings
    "check" :meta
    "check-allow" :meta
    "check-deps-fp" :meta
@@ -127,7 +127,7 @@
    "cmp-ge" :math
    "cmp-gt" :math
    "cmp-le" :math
-   "codepoints->string" :strings
+   "string/from-codepoints" :strings
    "comment" :control
    "comp" :functions
    "comp-compose" :functions
@@ -219,7 +219,7 @@
    "drop-while" :collections
    "dynamic?" :meta
    "empty?" :predicates
-   "ends-with?" :predicates
+   "string/ends-with?" :predicates
    "eprint" :io
    "eprintln" :io
    "error" :errors
@@ -272,8 +272,8 @@
    "get-unanswerable" :maps
    "getenv" :system
    "global-names" :meta
-   "grapheme-at" :strings
-   "grapheme-count" :strings
+   "string/grapheme-at" :strings
+   "string/grapheme-count" :strings
    "gui-bg!" :system
    "gui-close" :system
    "gui-drag-move" :system
@@ -322,8 +322,7 @@
    "into" :collections
    "iterate-times" :collections
    "iterate-times-acc" :collections
-   "join" :strings
-   "join-parts" :strings
+   "string/join" :strings
    "keep" :collections
    "keys" :maps
    "keyword" :convert
@@ -333,7 +332,7 @@
    "lfilter" :collections
    "link" :processes
    "list" :collections
-   "list->string" :strings
+   "string/from-list" :strings
    "list-dir" :filesystem
    "list-processes" :processes
    "list?" :predicates
@@ -343,7 +342,7 @@
    "load" :meta
    "log10" :math
    "log2" :math
-   "lower" :strings
+   "string/lower" :strings
    "lremove" :collections
    "macroexpand" :meta
    "macroexpand-1" :meta
@@ -470,8 +469,8 @@
    "offload" :processes
    "or" :control
    "ord-compare" :meta
-   "pad-left" :strings
-   "pad-right" :strings
+   "string/pad-left" :strings
+   "string/pad-right" :strings
    "pair?" :predicates
    "parent-dir" :filesystem
    "parse-source" :meta
@@ -569,7 +568,7 @@
    "repeat-acc" :collections
    "repeatedly" :collections
    "repeatedly-acc" :collections
-   "replace" :strings
+   "string/replace" :strings
    "require-await" :meta
    "require-find" :meta
    "require-force" :meta
@@ -653,29 +652,28 @@
    "spy-walk-let" :meta
    "spy-walk-seq" :meta
    "start-remote-spawn" :processes
-   "starts-with?" :predicates
+   "string/starts-with?" :predicates
    "stdin-tty?" :system
    "stdout-tty?" :system
    "steal-count" :meta
    "str" :strings
-   "string->codepoints" :strings
-   "string->graphemes" :strings
-   "string->list" :strings
+   "string/to-codepoints" :strings
+   "string/to-graphemes" :strings
+   "string/to-list" :strings
    "string->number" :convert
    "string->rope" :strings
    "string->symbol" :strings
    "string->utf8-bytes" :bytes
-   "string-length" :strings
-   "string-normalize" :strings
-   "string-repeat" :strings
-   "string-span" :strings
-   "string-span-until" :strings
-   "string-split" :strings
-   "string-whitespace?" :predicates
+   "string/length" :strings
+   "string/normalize" :strings
+   "string/repeat" :strings
+   "string/span" :strings
+   "string/span-until" :strings
+   "string/split" :strings
    "string?" :predicates
    "subbytes" :bytes
-   "substring" :strings
-   "substring-graphemes" :strings
+   "string/substring" :strings
+   "string/substring-graphemes" :strings
    "subvec" :collections
    "swap-registry!" :meta
    "symbol" :convert
@@ -731,11 +729,9 @@
    "tree-sitter-forget" :meta
    "tree-sitter-parse" :meta
    "tree-sitter-reparse" :meta
-   "trim" :strings
-   "triml" :strings
-   "triml-from" :strings
-   "trimr" :strings
-   "trimr-to" :strings
+   "string/trim" :strings
+   "string/triml" :strings
+   "string/trimr" :strings
    "try" :errors
    "try-class-catch?" :predicates
    "type-matches?" :predicates
@@ -748,7 +744,7 @@
    "unregister-impl" :meta
    "update" :maps
    "update-in" :maps
-   "upper" :strings
+   "string/upper" :strings
    "utf8-bytes->string" :bytes
    "vals" :maps
    "vec" :convert

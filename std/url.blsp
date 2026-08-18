@@ -38,7 +38,7 @@
 (defn- url-byte->pct
   (b)
   "Encode a single byte `b` as a %XX string (uppercase hex)."
-  (str "%" (char-at url-hex-upper (quot b 16)) (char-at url-hex-upper (rem b 16))))
+  (str "%" (string/char-at url-hex-upper (quot b 16)) (string/char-at url-hex-upper (rem b 16))))
 
 ;; `acc` is the emitted pieces in reverse; `percent-encode` joins once. `(str acc …)`
 ;; per byte rebuilt the whole accumulator each step — O(n^2) over a long input.
@@ -111,7 +111,7 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 (defn percent-decode (s)
   "Decode percent-encoded sequences in `s`, returning the original string.
 Invalid or incomplete %XX sequences are passed through as-is."
-  (let (v (into [] (string->list s)))
+  (let (v (into [] (string/to-list s)))
     (url-pct-decode-loop v 0 (count v) nil)))
 
 ;; ---- query string encoding --------------------------------------------------
@@ -168,7 +168,7 @@ defines rather than as its field map."
 (defn- url-qdecode-str
   (s)
   "Decode a query-string value: replace + with space, then percent-decode."
-  (percent-decode (replace s "+" " ")))
+  (percent-decode (string/replace s "+" " ")))
 
 (defn- url-parse-query-pairs
   (parts acc)
@@ -183,17 +183,17 @@ defines rather than as its field map."
           (assoc acc (url-qdecode-str part) ""))
         (url-parse-query-pairs (rest parts)
           (assoc acc
-            (url-qdecode-str (substring part 0 eq))
-              (url-qdecode-str (substring part
+            (url-qdecode-str (string/substring part 0 eq))
+              (url-qdecode-str (string/substring part
                                  (+ eq 1)
-                                 (string-length part)))))))))
+                                 (string/length part)))))))))
 
 (defn query-decode (s)
   "Parse a query string `key=value&key=value` into a string→string map,
 decoding + as space and %XX sequences."
   (if (= s "")
     {}
-    (url-parse-query-pairs (string-split s "&") {})))
+    (url-parse-query-pairs (string/split s "&") {})))
 
 ;; ---- URL parsing ------------------------------------------------------------
 ;;
@@ -207,7 +207,7 @@ decoding + as space and %XX sequences."
   (let (i (index-of s sep))
     (if (< i 0)
       nil
-      [(substring s 0 i) (substring s (+ i (string-length sep)) (string-length s))])))
+      [(string/substring s 0 i) (string/substring s (+ i (string/length sep)) (string/length s))])))
 
 (defn- url-parse-authority
   (auth)
@@ -215,9 +215,9 @@ decoding + as space and %XX sequences."
   (let (colon (index-of auth ":"))
     (if (< colon 0)
       {:host auth :port nil}
-      (let (port-str (substring auth (+ colon 1) (string-length auth))
+      (let (port-str (string/substring auth (+ colon 1) (string/length auth))
             port-n (string->number port-str))
-        {:host (substring auth 0 colon) :port port-n}))))
+        {:host (string/substring auth 0 colon) :port port-n}))))
 
 (defn parse-url (s)
   "Parse URL string `s` into a map `{:scheme :host :port :path :query :fragment}`.
@@ -240,10 +240,10 @@ have nil `:scheme`, `:host`, and `:port`."
         (let (slash (index-of rest-url "/")
               authority (if (< slash 0)
                           (if (nil? scheme) "" rest-url)
-                          (substring rest-url 0 slash))
+                          (string/substring rest-url 0 slash))
               path (if (< slash 0)
                      (if (nil? scheme) rest-url "/")
-                     (substring rest-url slash (string-length rest-url)))
+                     (string/substring rest-url slash (string/length rest-url)))
               auth-map (if (= authority "")
                          {:host nil :port nil}
                          (url-parse-authority authority)))

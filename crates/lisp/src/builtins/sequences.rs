@@ -1054,9 +1054,9 @@ pub(super) fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     match v {
         // O(1): the char count is cached on the slot. It used to be `chars().count()`
         // here — a full scan on every call, which is why a loop bounded by
-        // `(string-length s)` was quadratic before it did anything else.
+        // `(string/length s)` was quadratic before it did anything else.
         Value::Str(id) => Ok(Value::int(heap.str_metrics(id).0 as i64)),
-        _ => Err(LispError::wrong_type(heap, "string-length", "string", v)),
+        _ => Err(LispError::wrong_type(heap, "string/length", "string", v)),
     }
 }
 
@@ -1112,7 +1112,7 @@ pub(super) fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         s @ Value::Str(_) => printer::display(heap, s),
         v => return Err(LispError::wrong_type(heap, "%string-join", "string", v)),
     };
-    // Streaming fast path for a lazy int range (`(join "," (range n))`): format
+    // Streaming fast path for a lazy int range (`(string/join "," (range n))`): format
     // each integer straight into the buffer in one pass — no intermediate Vec of
     // `Value`s, no per-element string allocation. The range stays immutable; this
     // only changes how its joined string is *constructed*.
@@ -1214,9 +1214,9 @@ pub(super) fn to_keyword(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     }
 }
 
-/// `(substring s start [end])` — the characters of `s` in `[start, end)`,
+/// `(string/substring s start [end])` — the characters of `s` in `[start, end)`,
 /// char-indexed (consistent with `string-length`). `end` defaults to the
-/// string's length, so `(substring s start)` is "from `start` to the end".
+/// string's length, so `(string/substring s start)` is "from `start` to the end".
 /// Errors if out of range.
 
 pub(super) fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -1224,23 +1224,23 @@ pub(super) fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     // (`std/prelude.blsp`), so its per-call cost is the floor for most string code. It had
     // three separate O(whole string) steps for what is usually a tiny result — an owned
     // `expect_string` copy, a `chars().count()` length, and a `chars().skip()` walk. With
-    // a 216 KB haystack, `(char-at s 3)` cost ~11.5 µs and did not care that it was reading
+    // a 216 KB haystack, `(string/char-at s 3)` cost ~11.5 µs and did not care that it was reading
     // the 4th character: measured with the CALL COUNT FIXED, the cost tracked the string's
     // size (1/6/23 ms as it grew 13.5k → 54k → 216k chars).
     let v = arg(args, 0);
-    let start = expect_int(heap, "substring", arg(args, 1))?;
+    let start = expect_int(heap, "string/substring", arg(args, 1))?;
     let sub: String = {
         let h: &Heap = heap;
-        let a = expect_str_arg(h, "substring", v)?;
+        let a = expect_str_arg(h, "string/substring", v)?;
         // The cached char count, O(1) — it used to be a `chars().count()` per call.
         let len = a.chars as i64;
         let end = match args.get(2) {
-            Some(_) => expect_int(h, "substring", arg(args, 2))?,
+            Some(_) => expect_int(h, "string/substring", arg(args, 2))?,
             None => len,
         };
         if start < 0 || end < start || end > len {
             return Err(LispError::runtime(format!(
-                "substring: range [{}, {}) out of bounds for length {}",
+                "string/substring: range [{}, {}) out of bounds for length {}",
                 start, end, len
             ))
             .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
@@ -1296,19 +1296,19 @@ pub(super) fn string_span_impl(
     Ok(Value::int(idx as i64))
 }
 
-/// `(string-span s start chars)` — the char index just past the maximal run of chars
+/// `(string/span s start chars)` — the char index just past the maximal run of chars
 /// drawn from the set `chars`, beginning at `start` (so `start` itself when the char
 /// there isn't in the set). For skipping a run *of* a class — whitespace, digits.
 pub(super) fn string_span(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    string_span_impl(args, heap, "string-span", true)
+    string_span_impl(args, heap, "string/span", true)
 }
 
-/// `(string-span-until s start chars)` — the char index of the first char in the set
+/// `(string/span-until s start chars)` — the char index of the first char in the set
 /// `chars` at or after `start` (or the length if none): the maximal run of chars
 /// *not* in the set. For scanning up to a delimiter — comment-to-newline,
 /// atom-to-delimiter, string-body-to-quote.
 pub(super) fn string_span_until(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    string_span_impl(args, heap, "string-span-until", false)
+    string_span_impl(args, heap, "string/span-until", false)
 }
 
 /// Lexical category of an atom token (a maximal run of non-delimiter chars), matching
@@ -1348,7 +1348,7 @@ pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     let a = expect_str_arg(h, "%str-index-of", arg(args, 0))?;
     let needle = expect_string_ref(h, "%str-index-of", arg(args, 1))?;
     // Optional 3rd arg: the CHAR index to start searching at. It exists so `index-of`'s
-    // `from` does not have to build `(substring coll from n)` first — that copy is what
+    // `from` does not have to build `(string/substring coll from n)` first — that copy is what
     // made "incremental search" over one string quadratic, the same trap the comment
     // above `string-split`'s registration describes for splitting. Searching a suffix
     // must not allocate one.
@@ -1494,13 +1494,13 @@ pub(super) fn str_splice_diff(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     Ok(heap.alloc_vector(vec![Value::int(lo), Value::int(hi), repl]))
 }
 
-/// `(string-split s sep)` — split `s` into a list of substrings on each occurrence
+/// `(string/split s sep)` — split `s` into a list of substrings on each occurrence
 /// of `sep`, in one O(n) pass. An empty separator splits `s` into its individual
 /// characters (1-char strings). Mirrors the semantics of the former pure-Brood
 /// `string-split`/`string->list`, but without the O(n²) tail-substring rebuild.
 pub(super) fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "string-split", arg(args, 0))?;
-    let sep = expect_string(heap, "string-split", arg(args, 1))?;
+    let s = expect_string(heap, "string/split", arg(args, 0))?;
+    let sep = expect_string(heap, "string/split", arg(args, 1))?;
     let out: Vec<Value> = if sep.is_empty() {
         s.chars()
             .map(|c| heap.alloc_string(&c.to_string()))
@@ -1513,11 +1513,11 @@ pub(super) fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(heap.list_from_slice(&out))
 }
 
-/// `(string->codepoints s)` — the characters of `s` as a **vector of integer Unicode
+/// `(string/to-codepoints s)` — the characters of `s` as a **vector of integer Unicode
 /// codepoints**, one O(n) pass. The random-access text-scanning primitive:
 /// parsers (std/regex, std/json, std/encoding) index code points with O(1)
 /// `nth` and compare them as ints. Building the same vector in Brood —
-/// `(apply vector (map char->int (string->list s)))` — costs a 1-char string
+/// `(apply vector (map char->int (string/to-list s)))` — costs a 1-char string
 /// allocation per char plus a closure call per char, and measured ~40 % of the
 /// whole regex benchmark. Like `string-split`/`string-span`, this is text-access
 /// *mechanism*; the parsers themselves stay in Brood.
@@ -1525,13 +1525,13 @@ pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) ->
     // Borrowed: the codepoints are ints, so nothing is allocated while the borrow is
     // live — one copy of the string saved per call, on the parsers' hot path.
     let codes: Vec<Value> = {
-        let s = expect_string_ref(heap, "string->codepoints", arg(args, 0))?;
+        let s = expect_string_ref(heap, "string/to-codepoints", arg(args, 0))?;
         s.chars().map(|c| Value::int(c as i64)).collect()
     };
     Ok(heap.alloc_vector(codes))
 }
 
-/// `(string->graphemes s)` — the **extended grapheme clusters** of `s` as a vector
+/// `(string/to-graphemes s)` — the **extended grapheme clusters** of `s` as a vector
 /// of strings, one O(n) pass. The sibling of `string->codepoints`, and the unit a
 /// human means by "character": `"é"` written as `e` + U+0301 is two code points but
 /// one grapheme, and a flag emoji is four code points and one grapheme. Cursor
@@ -1541,7 +1541,7 @@ pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) ->
 /// express. `display-width` already segments the same way internally.
 pub(super) fn string_to_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_segmentation::UnicodeSegmentation;
-    let s = expect_string(heap, "string->graphemes", arg(args, 0))?;
+    let s = expect_string(heap, "string/to-graphemes", arg(args, 0))?;
     // `true` = *extended* grapheme clusters (UAX #29's recommended default, and
     // what the renderer and `display-width` use).
     let parts: Vec<String> = s.graphemes(true).map(|g| g.to_string()).collect();
@@ -1549,28 +1549,28 @@ pub(super) fn string_to_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> 
     Ok(heap.alloc_vector(vals))
 }
 
-/// `(grapheme-count s)` — how many **extended grapheme clusters** `s` has: the
+/// `(string/grapheme-count s)` — how many **extended grapheme clusters** `s` has: the
 /// length a human means, and the exclusive upper bound for `grapheme-at`. One O(n)
 /// segmentation pass that allocates nothing (`string->graphemes` had to build a
 /// vector of n strings just to be counted).
 pub(super) fn grapheme_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_segmentation::UnicodeSegmentation;
-    let s = expect_string_ref(heap, "grapheme-count", arg(args, 0))?;
+    let s = expect_string_ref(heap, "string/grapheme-count", arg(args, 0))?;
     Ok(Value::int(s.graphemes(true).count() as i64))
 }
 
-/// `(grapheme-at s i)` / `(grapheme-at s i default)` — the `i`-th grapheme cluster
+/// `(string/grapheme-at s i)` / `(string/grapheme-at s i default)` — the `i`-th grapheme cluster
 /// of `s` as a string, or `default`/`nil` when `i` is out of range (never an error,
 /// matching `nth`/`get`).
 ///
-/// Why this is a primitive and not `(nth (string->graphemes s) i)`: the docs require
+/// Why this is a primitive and not `(nth (string/to-graphemes s) i)`: the docs require
 /// a cursor to step by *cluster*, so that spelling was the only correct way to read
 /// one character — and it builds a vector of every cluster in the string on **every
 /// keystroke**. This walks to `i` and stops, allocating one string. The editor's
 /// hottest path stops being O(n) in the buffer line's length.
 pub(super) fn grapheme_at(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_segmentation::UnicodeSegmentation;
-    let i = expect_int(heap, "grapheme-at", arg(args, 1))?;
+    let i = expect_int(heap, "string/grapheme-at", arg(args, 1))?;
     let default = args.get(2).copied().unwrap_or(Value::nil());
     if i < 0 {
         return Ok(default);
@@ -1578,7 +1578,7 @@ pub(super) fn grapheme_at(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     // Borrowed — the editor reads a cluster per keystroke, so a copy of the line (or the
     // buffer) per call is exactly what this path cannot afford.
     let found = {
-        let s = expect_string_ref(heap, "grapheme-at", arg(args, 0))?;
+        let s = expect_string_ref(heap, "string/grapheme-at", arg(args, 0))?;
         s.graphemes(true).nth(i as usize).map(|g| g.to_string())
     };
     match found {
@@ -1587,20 +1587,20 @@ pub(super) fn grapheme_at(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     }
 }
 
-/// `(substring-graphemes s start)` / `(… s start end)` — the half-open cluster range
+/// `(string/substring-graphemes s start)` / `(… s start end)` — the half-open cluster range
 /// `[start, end)` of `s` as a string, clamped to the ends (so it never errors, like
 /// `take`/`drop`). The grapheme-indexed counterpart of `substring`, which is
 /// codepoint-indexed and will happily slice a cluster in half — splitting `"é"`
 /// (e + U+0301) into a bare `e` and an orphan combining mark.
 pub(super) fn substring_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_segmentation::UnicodeSegmentation;
-    let start = expect_int(heap, "substring-graphemes", arg(args, 1))?.max(0) as usize;
+    let start = expect_int(heap, "string/substring-graphemes", arg(args, 1))?.max(0) as usize;
     let end = match args.get(2) {
         None | Some(Value::Nil) => None,
-        Some(_) => Some(expect_int(heap, "substring-graphemes", arg(args, 2))?.max(0) as usize),
+        Some(_) => Some(expect_int(heap, "string/substring-graphemes", arg(args, 2))?.max(0) as usize),
     };
     let out: String = {
-        let s = expect_string_ref(heap, "substring-graphemes", arg(args, 0))?;
+        let s = expect_string_ref(heap, "string/substring-graphemes", arg(args, 0))?;
         match end {
             Some(e) if e <= start => String::new(),
             Some(e) => s.graphemes(true).skip(start).take(e - start).collect(),
@@ -1610,7 +1610,7 @@ pub(super) fn substring_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> 
     Ok(heap.alloc_string(&out))
 }
 
-/// `(string-normalize s form)` — `s` in Unicode normalisation `form`, one of the
+/// `(string/normalize s form)` — `s` in Unicode normalisation `form`, one of the
 /// keywords `:nfc` `:nfd` `:nfkc` `:nfkd`. Text that a human reads as identical can
 /// be several different strings — "é" is U+00E9 *or* U+0065 U+0301 — and Brood's `=`
 /// is byte-structural, so only normalisation makes those compare equal. Canonical
@@ -1620,14 +1620,14 @@ pub(super) fn substring_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> 
 /// One primitive with a form keyword rather than four functions (ADR-011).
 pub(super) fn string_normalize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_normalization::UnicodeNormalization;
-    let s = expect_string(heap, "string-normalize", arg(args, 0))?;
+    let s = expect_string(heap, "string/normalize", arg(args, 0))?;
     let form = arg(args, 1);
     let name = match form {
         Value::Keyword(k) => crate::core::value::symbol_name(k),
         _ => {
             return Err(LispError::wrong_type(
                 heap,
-                "string-normalize",
+                "string/normalize",
                 "keyword",
                 form,
             ))
@@ -1640,7 +1640,7 @@ pub(super) fn string_normalize(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         "nfkd" => s.nfkd().collect(),
         other => {
             return Err(LispError::runtime(format!(
-                "string-normalize: unknown form :{other} (expected :nfc, :nfd, :nfkc or :nfkd)"
+                "string/normalize: unknown form :{other} (expected :nfc, :nfd, :nfkc or :nfkd)"
             )))
         }
     };
@@ -1679,17 +1679,17 @@ pub(super) fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(heap.alloc_string(&s))
 }
 
-/// `(upper s)` — `s` with every character upper-cased. Case folding is
+/// `(string/upper s)` — `s` with every character upper-cased. Case folding is
 /// Unicode-aware (e.g. `ß` → `SS`), so it leans on the standard library's tables
 /// rather than being expressible in Brood.
 pub(super) fn upper(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string_ref(heap, "upper", arg(args, 0))?;
+    let s = expect_string_ref(heap, "string/upper", arg(args, 0))?;
     Ok(heap.alloc_string(&s.to_uppercase()))
 }
 
-/// `(lower s)` — `s` with every character lower-cased (Unicode-aware, like `upper`).
+/// `(string/lower s)` — `s` with every character lower-cased (Unicode-aware, like `upper`).
 pub(super) fn lower(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string_ref(heap, "lower", arg(args, 0))?;
+    let s = expect_string_ref(heap, "string/lower", arg(args, 0))?;
     Ok(heap.alloc_string(&s.to_lowercase()))
 }
 

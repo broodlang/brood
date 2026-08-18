@@ -25,7 +25,7 @@
   (let (n (to-fixed (get m :amount) 2)
         symbol (money-symbol (get m :currency)))
     (case locale
-      :de (str (replace n "." ",") " " symbol)
+      :de (str (string/replace n "." ",") " " symbol)
       (str symbol n))))
 
 ;; `Localize` — rich, parameterized rendering dispatched on the VALUE's type, and

@@ -85,7 +85,7 @@
         t1 (gen-term (lcg (lcg s)))
         t2 (gen-term (lcg (lcg (lcg s))))
         terms (if two [t1 t2] [t1])
-        cstr (join ", " (map (fn (t) (nth t 2)) terms))
+        cstr (string/join ", " (map (fn (t) (nth t 2)) terms))
         expected (every? (fn (t) (ref-term? v (nth t 0) (nth t 1))) terms)
         actual (version-satisfies? vs cstr)
         ;; consistency: compile-once + match? must equal the one-shot satisfies?

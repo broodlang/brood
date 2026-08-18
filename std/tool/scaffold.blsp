@@ -12,9 +12,9 @@ test discovery, lints, release, config)."
 ;; index yet, and project names/paths are short).
 (defn str-contains? (s ch)
   (cond
-    (= (string-length s) 0) false
-    (= (substring s 0 1) ch) true
-    else (str-contains? (substring s 1 (string-length s)) ch)))
+    (= (string/length s) 0) false
+    (= (string/substring s 0 1) ch) true
+    else (str-contains? (string/substring s 1 (string/length s)) ch)))
 
 ;; A project name must be a single, fresh path component in the current
 ;; directory: non-empty, no path separators or whitespace, no NUL, and not
@@ -37,10 +37,10 @@ test discovery, lints, release, config)."
 ;; library module can't collide with the project's own entry module.
 (defn- project-module-name
   (nm)
-  (let (cleaned (join "" (map project-name-char (string-split nm "")))
-        prefixed (if (and (> (string-length cleaned) 0)
+  (let (cleaned (string/join "" (map project-name-char (string/split nm "")))
+        prefixed (if (and (> (string/length cleaned) 0)
                        (includes? "0123456789"
-                         (substring cleaned 0 1)))
+                         (string/substring cleaned 0 1)))
                    (str "p-" cleaned)
                    cleaned))
     (cond
@@ -55,7 +55,7 @@ test discovery, lints, release, config)."
   (fold (fn (found ch)
           (or found (includes? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ch)))
     false
-    (string-split s "")))
+    (string/split s "")))
 
 (defn- project-name-char
   (ch)
@@ -63,7 +63,7 @@ test discovery, lints, release, config)."
 
 (defn- project-valid-name?
   (nm)
-  (and (> (string-length nm) 0)
+  (and (> (string/length nm) 0)
     (not (= nm "."))
     (not (= nm ".."))
     (not (str-contains? nm "/"))
@@ -72,9 +72,9 @@ test discovery, lints, release, config)."
     (not (str-contains? nm "\t"))
     (not (str-contains? nm "\n"))
     (not (str-contains? nm "\0"))
-    (not (= (substring nm 0 1) "."))
-    (not (= (substring nm 0 1) "-"))
-    (not (= (substring nm 0 1) "~"))))
+    (not (= (string/substring nm 0 1) "."))
+    (not (= (string/substring nm 0 1) "-"))
+    (not (= (string/substring nm 0 1) "~"))))
 
 ;; --- file templates (the starter skeleton) ---
 (defn- project-manifest-template
@@ -166,7 +166,7 @@ test discovery, lints, release, config)."
     ";; State is threaded through a tail-recursive loop — no mutation, no `while`.\n" "\n"
     "(defn render (pos width)\n"
     "  \"One frame: a marker at column `pos` on a `width`-wide track.\"\n"
-    "  (str \"[\" (string-repeat \" \" pos) \"*\" (string-repeat \" \" (- width pos 1)) \"]\"))\n"
+    "  (str \"[\" (string/repeat \" \" pos) \"*\" (string/repeat \" \" (- width pos 1)) \"]\"))\n"
     "\n" "(defn step (pos dir width)\n"
     "  \"Advance one cell, bouncing off either wall. Returns [pos dir].\"\n"
     "  (let (nxt (+ pos dir))\n" "    (cond\n" "      (< nxt 0)      [1 1]\n"
@@ -241,30 +241,30 @@ test discovery, lints, release, config)."
     "  \"Move the cursor by [drow dcol], clamped to the buffer and the target line.\"\n"
     "  (let (lines (get m :lines)\n"
     "        row (max 0 (min (dec (count lines)) (+ (get m :row) drow)))\n"
-    "        col (max 0 (min (string-length (nth lines row)) (+ (get m :col) dcol))))\n"
+    "        col (max 0 (min (string/length (nth lines row)) (+ (get m :col) dcol))))\n"
     "    (assoc m :row row :col col)))\n" "\n" "(defn ed-insert (m ch)\n"
     "  \"Insert the printable string `ch` at the cursor.\"\n"
     "  (let (ln (ed-line m) col (get m :col)\n"
-    "        ln2 (str (substring ln 0 col) ch (substring ln col (string-length ln))))\n"
+    "        ln2 (str (string/substring ln 0 col) ch (string/substring ln col (string/length ln))))\n"
     "    (assoc m :lines (ed-set-line (get m :lines) (get m :row) ln2)\n"
-    "             :col (+ col (string-length ch)))))\n" "\n" "(defn ed-newline (m)\n"
+    "             :col (+ col (string/length ch)))))\n" "\n" "(defn ed-newline (m)\n"
     "  \"Split the current line at the cursor into two lines.\"\n"
     "  (let (ln (ed-line m) row (get m :row) col (get m :col) lines (get m :lines))\n"
     "    (assoc m\n" "           :lines (append (take row lines)\n"
-    "                          (list (substring ln 0 col) (substring ln col (string-length ln)))\n"
+    "                          (list (string/substring ln 0 col) (string/substring ln col (string/length ln)))\n"
     "                          (drop (inc row) lines))\n" "           :row (inc row) :col 0)))\n"
     "\n" "(defn ed-backspace (m)\n"
     "  \"Delete the char before the cursor; at column 0, join with the previous line.\"\n"
     "  (let (row (get m :row) col (get m :col) lines (get m :lines))\n" "    (cond\n"
     "      (> col 0)\n" "        (let (ln (ed-line m))\n"
     "          (assoc m :lines (ed-set-line lines row\n"
-    "                            (str (substring ln 0 (dec col)) (substring ln col (string-length ln))))\n"
+    "                            (str (string/substring ln 0 (dec col)) (string/substring ln col (string/length ln))))\n"
     "                   :col (dec col)))\n" "      (> row 0)\n"
     "        (let (prev (nth lines (dec row)))\n" "          (assoc m\n"
     "                 :lines (append (take (dec row) lines)\n"
     "                                (cons (str prev (ed-line m)) (drop (inc row) lines)))\n"
-    "                 :row (dec row) :col (string-length prev)))\n" "      else m)))\n" "\n"
-    "(defn ed-fit (s w) \"Clip `s` to `w` columns.\" (if (> (string-length s) w) (substring s 0 w) s))\n"
+    "                 :row (dec row) :col (string/length prev)))\n" "      else m)))\n" "\n"
+    "(defn ed-fit (s w) \"Clip `s` to `w` columns.\" (if (> (string/length s) w) (string/substring s 0 w) s))\n"
     "\n" "(defn ed-view (m cols rows)\n"
     "  \"ui-run view: a `text` op per line, a reverse-video status bar, cursor at point.\"\n"
     "  (apply frame\n" "    (append\n" "      [(clear)]\n"
@@ -329,7 +329,7 @@ test discovery, lints, release, config)."
     "  {:count 0 :done false :tick-ms 1000})\n" "\n"
     "(defn app-step (m d) \"Change the counter by `d` (pure).\" (assoc m :count (+ (get m :count) d)))\n"
     "\n" "(defn app-center (s cols) \"Left column that centres `s` in `cols`.\"\n"
-    "  (max 0 (quot (- cols (string-length s)) 2)))\n" "\n" "(defn app-view (m cols rows)\n"
+    "  (max 0 (quot (- cols (string/length s)) 2)))\n" "\n" "(defn app-view (m cols rows)\n"
     "  \"ui-run view: a centred title, the counter, and key hints (pure).\"\n"
     "  (let (mid   (quot rows 2)\n" "        title \"" nm "\"\n"
     "        count (str \"count: \" (get m :count))\n"
@@ -642,7 +642,7 @@ test discovery, lints, release, config)."
     "        [:button {:class \"btn btn-primary\"} \"Post\"]]]])\n" "\n" "(defn create (conn)\n"
     "  \"POST /messages -- validate, insert into Postgres, and PRG-redirect.\"\n"
     "  (let (name (or (param conn \"name\") \"\")\n"
-    "        body (or (param conn \"body\") \"\"))\n" "    (if (or (blank? name) (blank? body))\n"
+    "        body (or (param conn \"body\") \"\"))\n" "    (if (or (string/blank? name) (string/blank? body))\n"
     "      (-> conn\n"
     "        (web/session/put-flash \"info\" \"Name and message are required.\")\n"
     "        (redirect-resp \"/messages\"))\n" "      (do\n"
@@ -900,7 +900,7 @@ test discovery, lints, release, config)."
 (defn- scaffold-format-generated!
   (paths)
   (dolist (p paths)
-    (when (ends-with? p ".blsp") (try (format/format-file p) (catch _ nil)))))
+    (when (string/ends-with? p ".blsp") (try (format/format-file p) (catch _ nil)))))
 
 (defn new-project (nm &optional template)
   "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime), `\"hatch\"` (a Hatch web app with a Postgres-backed message board — requires hatch + store-postgres as sibling path deps; run `nest run --main db-setup` once to create the database, then `nest run` to start), or `\"web-api\"` (a minimal Hatch JSON API — no live layer, no database; requires hatch as a sibling path dep; `nest run` to start). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
@@ -914,7 +914,7 @@ test discovery, lints, release, config)."
         reusing-dir (file-exists? nm)
         tmpl (or template "default"))
     (unless (includes? *project-templates* tmpl)
-      (error "new: unknown template '" tmpl "' (use one of: " (join ", " *project-templates*) ")"))
+      (error "new: unknown template '" tmpl "' (use one of: " (string/join ", " *project-templates*) ")"))
     (unless (or in-place (project-valid-name? nm))
       (error "new: invalid project name '" nm "' (no '/' or spaces, and not empty)"))
     (when (and in-place (= actual-name ""))
@@ -1003,7 +1003,7 @@ test discovery, lints, release, config)."
       (println (str "Next:  " enter "nest test && nest run"))
       (do
         (println (str "This template depends on "
-                   (join " and " (map (fn (d) (str "../" d)) siblings))
+                   (string/join " and " (map (fn (d) (str "../" d)) siblings))
                    (if (= (count siblings) 1) " as a sibling path dep," " as sibling path deps,")))
         (println (str "so `nest` commands will fail until "
                    (if (= (count siblings) 1) "it is" "they are")

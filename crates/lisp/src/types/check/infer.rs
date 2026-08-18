@@ -103,7 +103,7 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
         // A bare symbol is a variable reference — looked up in the local ctx
         // (let-bound RHS / if-guard narrowing). A miss falls back to a `(sig x T)`
         // value-type declaration on a *global*: a redefinable global with a declared
-        // type contributes `T` to the disjointness check, so `(string-length g)` for
+        // type contributes `T` to the disjointness check, so `(string/length g)` for
         // `(sig g int)` is caught. Sound — the disjointness check only warns on a
         // provable mismatch with the declared (contract) type and defers on overlap,
         // exactly `dynamic(T)`'s behaviour (contract #4). A lexical local shadows it.
@@ -180,7 +180,7 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 // **Keyword accessor** `(:key coll [default])` (ADR-165) — the same
                 // record-field rule the `(get m :k)` case below applies, so the two
                 // spellings type identically. Without this, `(:x p)` on a typed record
-                // had NO result type, and `(string-length (:x p))` went uncaught while
+                // had NO result type, and `(string/length (:x p))` went uncaught while
                 // the `get` spelling was flagged. `V | nil` for a `map<K,V>`, since a
                 // key may be absent; an unknown key on a record falls through (records
                 // are open, so the type is genuinely unknown, not an error).

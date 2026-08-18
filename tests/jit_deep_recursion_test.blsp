@@ -97,7 +97,7 @@
       (assert= (jdr-in-spawn p) :rejected)))
   (test "the whole n_ corpus scans in a spawned process after warming"
     ;; The scan the suite actually runs: 188 documents, warm parent then spawned child.
-    (let (all (filter (fn (f) (= (substring (path-basename f) 0 1) "n"))
+    (let (all (filter (fn (f) (= (string/substring (path-basename f) 0 1) "n"))
                 (corpus-files "json"))
           ;; Discovery is asserted in full regardless of the knob; only the re-scan is
           ;; sampled. `index mod n` so the slice spreads across the corpus (and so keeps

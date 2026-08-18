@@ -23,16 +23,16 @@
 Keys in the template are trimmed of whitespace; both string and keyword keys are
 tried. Unknown keys render as empty string. Nested `{{` are not supported."
   ;; One native split, then one join. This used to be a recursive scan that, per marker,
-  ;; sliced the REST of the template (`(substring s (+ open 2) …)`) and re-`str`'d the
+  ;; sliced the REST of the template (`(string/substring s (+ open 2) …)`) and re-`str`'d the
   ;; whole output so far — both O(remaining), so the whole render was O(n²): measured
   ;; 12.0× then 13.4× per 4× of input across three points, where linear is 4×.
   ;;
   ;; Note an offset scan (`index-of s "{{" from`) would NOT have fixed it: for a string
-  ;; with a non-zero `from`, `index-of` searches `(substring coll s0 n)` — it copies the
+  ;; with a non-zero `from`, `index-of` searches `(string/substring coll s0 n)` — it copies the
   ;; suffix on every call, so "incremental search" over one string is quadratic too.
   ;; Splitting sidesteps the whole question: `string-split` is a single native pass, and
   ;; every `substring` below is bounded by ONE piece, so the total stays O(n).
-  (let (parts (string-split tmpl "{{"))
+  (let (parts (string/split tmpl "{{"))
     (apply str
       (cons (first parts)
         (map (fn (p) (template-marker p data)) (rest parts))))))
@@ -46,8 +46,8 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported."
   (let (close (index-of p "}}"))
     (if (< close 0)
       (str "{{" p)
-      (str (template-lookup data (trim (substring p 0 close)))
-        (substring p (+ close 2) (string-length p))))))
+      (str (template-lookup data (string/trim (string/substring p 0 close)))
+        (string/substring p (+ close 2) (string/length p))))))
 
 (defn- template-lookup
   (data key)

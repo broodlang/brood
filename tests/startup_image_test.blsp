@@ -167,14 +167,14 @@
   :isolated
 
   (test "a global bound to a builtin restores as the callable primitive"
-    (def si-prim string-length) ; :native — no portable data form
+    (def si-prim string/length) ; :native — no portable data form
     (let (p (img-tmp "prim"))
       (%image-write p [["" ['startup-image-test/si-prim]]] "fp-prim")
       (def si-prim :clobbered)
       (let (idx (%image-index p "fp-prim")) (si-load-all p idx))
       (assert= 4 (si-prim "abcd")))) ; re-resolved to the real primitive, by name
   (test "a map of builtins round-trips (the *term-display* display-map shape)"
-    (def si-display {:len string-length :up upper})
+    (def si-display {:len string/length :up string/upper})
     (let (p (img-tmp "display"))
       (%image-write p [["" ['startup-image-test/si-display]]] "fp-display")
       (def si-display :clobbered)
