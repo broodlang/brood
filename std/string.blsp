@@ -2,9 +2,9 @@
 ;;
 ;; A namespace (ADR-065): its functions are `string/trim`, `string/split`,
 ;; `string/pad-left`, … — call them qualified, or `(:use string)` to refer them
-;; bare. This is the Elixir-`String`-flavour home for every operation whose *subject
-;; is a string*: trimming, padding, case, search, splitting/joining, and the
-;; char-content conversions.
+;; bare. This is the home for every operation whose *subject is a string*:
+;; trimming, padding, case, search, splitting/joining, and the char-content
+;; conversions.
 ;;
 ;; What lives here vs. bare in the prelude — the boundary rule (ADR-230):
 ;;   - `string/*`  = "the first argument is a string" (this module).
