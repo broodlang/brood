@@ -1,0 +1,43 @@
+#!/bin/sh
+# Local pre-push guard: catch the two format gates here instead of five minutes into
+# CI. Install with `make hooks`. Bypass with --no-verify if you must.
+#
+# Rust half: unformatted Rust reached main three times on 2026-07-26 (ADR-165,
+# ADR-167, plus a clippy unused_mut).
+#
+# Brood half added 2026-08-18: the hook only ever checked `cargo fmt`, so `nest
+# format` was the gate that could still go red in a push — and did, when a merge was
+# pushed with the formatter red because its *last line* was read instead of its exit
+# code. Two different formatters, two different gates; the hook needs both.
+if ! cargo fmt --all --check >/dev/null 2>&1; then
+    echo "pre-push: rustfmt would fail CI. Run: cargo fmt --all" >&2
+    cargo fmt --all --check 2>&1 | grep '^Diff in' | sed 's/^/  /' >&2
+    exit 1
+fi
+
+# `nest format --check` is whole-project by design (`--changed` is documented as
+# ignored with `--check`), so it costs ~50s with a debug binary and there is no
+# cheaper subset to check. Only pay that when the push actually carries Brood
+# changes — most pushes here are Rust-only and stay fast.
+# Both the commits being pushed AND the working tree, because `nest format --check`
+# reads the tree: gating only on the pushed commits left a dirty .blsp unchecked while
+# the Rust half above checks the tree unconditionally. Whichever shows a .blsp, look.
+upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo origin/main)
+blsp_touched=$( { git diff --name-only "$upstream..HEAD" 2>/dev/null; \
+                  git diff --name-only HEAD 2>/dev/null; \
+                  git diff --name-only --cached 2>/dev/null; \
+                  git ls-files --others --exclude-standard 2>/dev/null; } | grep -c '\.blsp$' )
+if [ "$blsp_touched" -gt 0 ]; then
+    # Prefer a release binary, then debug, then whatever is installed. If none
+    # exists, skip: a missing build must never block a push.
+    for candidate in ./target/release/nest ./target/debug/nest "$(command -v nest 2>/dev/null)"; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] && nest_bin="$candidate" && break
+    done
+    if [ -z "$nest_bin" ]; then
+        echo "pre-push: .blsp files changed but no nest binary found — skipping the format check." >&2
+    elif ! "$nest_bin" format --check >/dev/null 2>&1; then
+        echo "pre-push: nest format would fail CI. Run: nest format" >&2
+        "$nest_bin" format --check 2>&1 | tail -5 | sed 's/^/  /' >&2
+        exit 1
+    fi
+fi

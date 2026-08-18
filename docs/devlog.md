@@ -1442,3 +1442,43 @@ zero warnings — sabotage-verified in both directions, and it names `file:line:
 plist-get` when the bug is reintroduced. std/ is otherwise clean at 80 files, and the one
 warning the rewrite legitimately introduced (an ambient bound by a runtime `require-one`) is
 suppressed with `(check-allow :unbound …)`, the documented case for that lint.
+
+## 2026-08-18 (later) — the margin audit's own tail: KI-46, and a pre-push hook that only watched half the formatters
+
+CI came back **5 of 5 green** on `615b06be` — the first fully green run since 2026-08-14, and
+confirmation that KI-39 is dead. The green run's own numbers, from its tree-walker job:
+`completion_never_fails_however_it_is_called` **22.0 s** (it had been a 300 s TIMEOUT),
+`template_default::ships_passing_tests` **9.6 s** (was 89 s as a looping case), the whole suite
+**1217 s** against 1922 s, and **1 slow case** against 9.
+
+Two follow-ups closed with the tree green.
+
+**KI-46, the real fix rather than the documented plan.** The audit had left
+`std_check_tool_returns_structured_diagnostics_or_an_error` at 87 s (1.38× margin) with a note
+that the honest fix was an optional root argument. Done: `check-project-structured` takes an
+optional `from` (defaulting to `(cwd)`), and `mcp-check-tool` passes **`*project-root*`**. This is
+a consistency fix, not a test accommodation — the server serves one project, `*project-root*` is
+what its write sandbox is pinned to and what `project-all-files` already reads, and `check` was
+the single tool taking its project from wherever the host process was standing. **87 s → 2.5 s.**
+
+The interesting part was that the first version of the rewritten test was *too weak*, and the
+sabotage pass caught it: with `check` reverted to the cwd fallback the test still **passed**, just
+slowly (2.9 s → 21.7 s) — the same "a cost regression shows up only as slowness" failure this
+whole thread is about. So the fixture now plants a deliberate unbound-symbol warning and the test
+demands it back with `:file`/`:line`, plus asserts that no diagnostic comes from outside the temp
+root. Both sabotages (a stubbed tool, and the cwd fallback) now fail it. It also asserts strictly
+more than the version it replaced, which accepted `{:diagnostics []}` *or* `{:error …}` and so
+never proved the diagnostics path emits anything.
+
+**The pre-push hook watched only one of the two formatters.** A local `pre-push` hook has guarded
+`cargo fmt` since 2026-07-26 — but `nest format` is a *separate* gate, and it is the one that went
+red in a push earlier this month (its exit code was ignored in favour of its last printed line).
+The hook now checks both, and `make hooks` installs it from `scripts/git-hooks/pre-push` so it is
+version-controlled instead of living only on one machine. `nest format --check` is whole-project by
+design (`--changed` is ignored with `--check`, ~50 s), so it runs only when a `.blsp` is actually
+involved — a Rust-only push stays at **0.8 s**.
+
+Sabotage-verified, and the first attempt was wrong in an instructive way: gating on
+`git diff $upstream..HEAD` alone meant a *dirty* `.blsp` was never checked, while the Rust half
+checks the working tree unconditionally. The condition now looks at the pushed commits, the working
+tree, the index and untracked files.

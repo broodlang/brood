@@ -277,12 +277,21 @@ check after the first invocation."
   "`check` — advisory type-check the project. Returns
 `{:diagnostics [{:file :line :col :message} ...]}` (one entry per warning,
 position omitted when the checker can't supply one — ADR-024). Backed by
-`(check-project-structured)` in `std/tool/project.blsp` (step 1c-a). `(or … [])`
+`(check-project-structured *project-root*)` in `std/tool/project.blsp` (step 1c-a). `(or … [])`
 so a clean project renders as `{:diagnostics []}` rather than `{:diagnostics
 null}` — agents shouldn't have to disambiguate \"no warnings\" from
 \"missing field\"."
   (try
-    {:diagnostics (or (check-project-structured) [])}
+    ;; `*project-root*` explicitly, not the implicit `(cwd)` this used to rely on. The
+    ;; server serves ONE project — that root is what the write sandbox is pinned to
+    ;; (`mcp-project-path`) and what every other project-scoped tool here already reads
+    ;; (`project-all-files *project-root*`) — so taking the checked project from cwd
+    ;; made `check` the one tool that could disagree with the rest if the host process
+    ;; ever moved. It also made the tool untestable without process-global state, which
+    ;; is how its test came to type-check the whole brood repo (KI-46). Nil root keeps
+    ;; the old behaviour: `check-project-structured` falls back to `(cwd)` and reports
+    ;; "not in a Brood project" the same way.
+    {:diagnostics (or (check-project-structured *project-root*) [])}
     (catch e
       {:error (mcp-error-shape e)})))
 
