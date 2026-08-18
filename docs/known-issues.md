@@ -21,7 +21,7 @@ ADRs / topic docs.
 |---|---|---|
 | KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
-| KI-46 | **deadline margin, not a failure yet.** KI-39 was a fixed cost sitting under a fixed deadline for weeks while reading as a random flake, so every case's CI margin against nextest's 120 s hard kill was audited from the 2026-08-17 logs. `nest::bin/nest mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` is now the worst at **87 s = 1.38× margin** — it invokes the MCP `check` tool, which is cwd-based, so it type-checks **this whole repository**, and the cost grows as the repo does | ⚠️ **watching, deliberately not "fixed"** — the three cheap fixes are all worse than the problem: `BROOD_NO_CHECK=1` guts what the case proves, a temp-dir `set_current_dir` is process-global and would race its siblings under plain `cargo test` (trading a slow test for a nondeterministic one), and a bigger nextest budget is what hid KI-39. The real fix is an optional root argument on `check-project-structured` / the `check` tool so the test can point at a one-file fixture. The three next-worst (`scaffold_quality`, 89/80/77 s) **were** fixed the same day by splitting one case per template |
+| KI-46 | **deadline margin, not a failure yet.** KI-39 was a fixed cost sitting under a fixed deadline for weeks while reading as a random flake, so every case's CI margin against nextest's 120 s hard kill was audited from the 2026-08-17 logs. `nest::bin/nest mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` is now the worst at **87 s = 1.38× margin** — it invokes the MCP `check` tool, which is cwd-based, so it type-checks **this whole repository**, and the cost grows as the repo does | ✅ **fixed 2026-08-18, the real way** (87 s → **2.5 s**) — the three cheap fixes were all worse than the problem: `BROOD_NO_CHECK=1` guts what the case proves, a temp-dir `set_current_dir` is process-global and would race its siblings under plain `cargo test` (trading a slow test for a nondeterministic one), and a bigger nextest budget is what hid KI-39. So the real fix was done instead: `check-project-structured` gained an optional `from` root, and `mcp-check-tool` now passes **`*project-root*`** — the root the server already pins its write sandbox to and that every other project-scoped tool already read. `check` was the one tool taking its project from cwd. The three next-worst (`scaffold_quality`, 89/80/77 s) **were** fixed the same day by splitting one case per template |
 | KI-43 | `remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a **fixed 5 s sleep**, but the observer needs 5.9–9.2 s under load to boot + `require 'observer'` + connect — so the target died first, `connect` refused, stdout empty. Failed BOTH retries in a loaded `make test`, passed standalone: the signature that gets written off as noise | ✅ **fixed 2026-08-14** — waits for the observer's attach report instead of a stopwatch; **8/8 under saturating load**, and 3.5 s instead of ~11 s |
 | KI-42 | the `breakage/` suite had rotted to **9 of 23 files failing** and nobody knew, because it is outside `make test` and had no CI job — a pin-syntax change (`~ref`→`^ref`), a renamed `string-contains?`, an assertion predating exact rationals, and a TCP file whose every phase was dead | ✅ **fixed 2026-08-13** — all 23 files pass and gate, nothing skipped; CI job added so it cannot rot silently again |
 | KI-41 | concurrent `require` of the same feature could **double-load** its file: a claimant whose `(contains? *features* key)` guard read the per-process global inline cache **missed** a racing loader's just-committed `provide` (the cache is version-gated on a `Relaxed` counter, no happens-before), won the released load-once claim, and reloaded the module. Surfaced as the ADR-225 co-located-secondary `nest test` flake (~1/77); reproduced on demand at 20 files × 40 requires | ✅ **fixed** 2026-08-13 — `require-one` re-checks `*features*` with a new cache-bypassing `%registry-member?` (reads the shared globals table directly) before loading; guard `breakage/chaos_concurrent_require_double_load.blsp` |
@@ -78,7 +78,7 @@ behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed
 
 ---
 
-## KI-46 — the next test sitting under a deadline (a margin audit, not a failure)
+## KI-46 — the next test sitting under a deadline (a margin audit) ✅ FIXED 2026-08-18
 
 **Not a bug report. A margin.** KI-39 turned out to be a fixed cost under a fixed deadline that
 looked random for weeks, so once it was fixed every case's CI margin was audited from the
@@ -114,10 +114,29 @@ cost grows with the repo. Every cheap fix is worse than the problem:
   a nondeterministic one is the wrong direction.
 - Raising its nextest budget is precisely what let KI-39 hide for weeks.
 
-The real fix is an **optional root argument** on `check-project-structured` and the `check` MCP
-tool, so the test can point at a one-file fixture with no ambient state. That is a small API
-addition, not a workaround, and it is the thing to do when this case next comes up — or the
-first time it goes red.
+### Done the real way, same day
+
+`check-project-structured` gained an optional `from` root (defaulting to `(cwd)`, so no caller
+changes), and `mcp-check-tool` now passes **`*project-root*`** rather than relying on the ambient
+cwd. That is not a test accommodation — it is a consistency fix. The MCP server serves exactly
+one project: `*project-root*` is what its write sandbox is pinned to (`mcp-project-path`) and what
+every other project-scoped tool already reads (`project-all-files *project-root*`). `check` was
+the one tool that took its project from wherever the host process happened to be standing, so it
+could disagree with the rest of the server.
+
+The case is now scoped to a two-file temp project: **87 s → 2.5 s**, and it asserts more than it
+used to, not less. The old version accepted `{:diagnostics [...]}` *or* `{:error …}` and so never
+proved the diagnostics path emits anything at all. The new one plants a deliberate unbound-symbol
+warning and requires it back with `:file`/`:line` populated, then asserts no diagnostic comes from
+outside the temp root.
+
+That pair is deliberate, and it exists because the first version of this test was too weak. When
+the "tool ignores `*project-root*` and falls back to cwd" sabotage was run against it, the test
+still **passed** — it merely got slow again (2.9 s → 21.7 s), which is exactly the failure mode
+this entry is about. Planting a warning that only exists inside the temp project makes that
+regression a hard failure ("the planted unbound-symbol warning is missing: []") instead of a
+number nobody reads. Both sabotages — a stubbed tool, and the cwd fallback — are verified to fail
+the test.
 
 ---
 

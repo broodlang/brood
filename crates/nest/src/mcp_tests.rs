@@ -829,24 +829,101 @@ fn run_tests_structured_returns_a_structured_summary() {
 }
 
 #[test]
-fn std_check_tool_returns_structured_diagnostics_or_an_error() {
-    // After step 1c-a, `check` calls `(project/check-project-structured)` and
-    // returns either `{:diagnostics [...]}` (when invoked from inside a
-    // Brood project — the workspace root in `cargo test`'s cwd usually
-    // is one) or `{:error msg}` (when it isn't). Either shape passes;
-    // what *must not* be present is the old "not yet wired" stub marker.
+fn std_check_tool_returns_structured_diagnostics_for_the_served_project() {
+    // `check` calls `(project/check-project-structured *project-root*)` and returns
+    // `{:diagnostics [...]}`, or `{:error msg}` when there is no project. What *must
+    // not* be present is the old "not yet wired" stub marker.
+    //
+    // Scoped to a ONE-FILE temp project, via the same `*project-root*` the server pins
+    // its write sandbox to. This case used to invoke the tool with no root at all,
+    // which fell through to `(cwd)` — so under `cargo test` it type-checked the whole
+    // brood repository and took **87 s in CI against a 120 s hard kill** (KI-46), a
+    // margin that only ever shrinks as the repo grows. Naming the root is not a
+    // shortcut around the work: the tool, the JSON-RPC round trip and the real
+    // `check-project-structured` all still run, over a project whose size this test
+    // controls instead of one it inherits from wherever it happens to be run.
+    let tmp = std::env::temp_dir().join(format!(
+        "nest-mcp-check-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(tmp.join("src")).unwrap();
+    std::fs::write(
+        tmp.join("project.blsp"),
+        b"(project :name \"mcpcheck\" :version \"0.1.0\" :source-paths [\"src\"])\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.join("src/main.blsp"),
+        b"(defmodule main \"d\")\n\n(defn main () nil)\n",
+    )
+    .unwrap();
+    // One deliberate warning, so the assertions below can prove WHICH project was
+    // checked rather than merely that something came back. An unbound global is the
+    // cheapest lint that certainly fires, and it is a check-time warning only — the
+    // file still loads, since nothing calls `go`.
+    std::fs::write(
+        tmp.join("src/oops.blsp"),
+        b"(defmodule oops \"d\")\n\n(defn go () (definitely-not-a-real-global 1))\n",
+    )
+    .unwrap();
+
     let mut interp = Interp::new();
+    interp
+        .eval_str(&format!(
+            "(require-one 'project) (def *project-root* \"{}\")",
+            brood::introspect::escape_brood_string(&tmp.to_string_lossy())
+        ))
+        .expect("pin the served project root");
+
     let (_, body) = invoke_tool(&mut interp, "check", json!({}));
     let body = body.unwrap();
-    let has_diag = body["diagnostics"].is_array();
-    let has_err = body["error"].is_string();
-    assert!(
-        has_diag || has_err,
-        "neither :diagnostics nor :error: {body:?}"
-    );
     if let Some(err) = body["error"].as_str() {
-        assert!(!err.contains("not yet wired"), "still a stub: {err:?}");
+        panic!("check reported an error instead of diagnostics for the temp project: {err:?}");
     }
+    let diagnostics = body["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no :diagnostics array: {body:?}"));
+
+    // The planted warning must be here, with the documented fields populated. The old
+    // cwd-dependent version accepted an empty array OR an error, so it never once
+    // proved the diagnostics path produces an entry at all.
+    let planted = diagnostics
+        .iter()
+        .find(|d| {
+            d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("definitely-not-a-real-global"))
+        })
+        .unwrap_or_else(|| {
+            panic!("the planted unbound-symbol warning is missing: {diagnostics:?}")
+        });
+    assert!(
+        planted["file"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("oops.blsp")),
+        "diagnostic does not name the file it came from: {planted:?}"
+    );
+    assert!(planted["line"].is_number(), "no :line: {planted:?}");
+
+    // And nothing from OUTSIDE the temp project. This is the assertion that pins the
+    // scoping: if `check` ever stops honouring `*project-root*` and falls back to
+    // `(cwd)`, it checks the brood repo instead — where the planted warning does not
+    // exist, so the `find` above fails outright. Without this pair the regression would
+    // show up only as the test getting slow again, which is precisely how KI-46 hid.
+    let root = tmp.to_string_lossy().to_string();
+    for d in diagnostics {
+        let file = d["file"].as_str().unwrap_or_default();
+        assert!(
+            file.starts_with(&root),
+            "checked a file outside the served project root ({root}): {d:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
