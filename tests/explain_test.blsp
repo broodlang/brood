@@ -1,33 +1,33 @@
 ;; The teach-the-error + intent→idiom catalogues (std/tool/explain.blsp,
-;; LLM-native errors). explain-error maps a code / caught error / kind keyword
+;; LLM-native errors). error maps a code / caught error / kind keyword
 ;; to a structured explanation; find-pattern keyword-searches the idiom cookbook.
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
 (defmodule explain-test (:use test) (:use explain))
 
-(describe "explain-error"
+(describe "error"
   (test "a known code returns summary/causes/fix/example + the code"
-    (let (e (explain-error "E0040"))
+    (let (e (error "E0040"))
       (assert= (get e :code) "E0040")
       ; div/Division
       (is (includes? (get e :summary) "ision"))
       (is (includes? (get e :fix) "zero?"))
       (is (string? (get e :example)))))
   (test "a caught error MAP is explained via its :code"
-    (let (e (explain-error (try (/ 1 0) (catch err err))))
+    (let (e (error (try (/ 1 0) (catch err err))))
       (assert= (get e :code) "E0040")
       (is (includes? (get e :fix) "divisor"))))
   (test "a kind keyword resolves to its representative code"
-    (assert= (get (explain-error :type) :code) "E0030")
-    (assert= (get (explain-error :unbound) :code) "E0010"))
+    (assert= (get (error :type) :code) "E0030")
+    (assert= (get (error :unbound) :code) "E0010"))
   (test "an unknown code is reported cleanly, not thrown"
-    (let (e (explain-error "E9999"))
+    (let (e (error "E9999"))
       (assert= (get e :code) "E9999")
       (is (includes? (get e :summary) "No explanation"))))
   (test "every catalogue entry is complete (summary + fix present)"
     (doseq (code (keys *error-explanations*))
-      (let (e (explain-error code))
+      (let (e (error code))
         (is (> (string/length (get e :summary)) 0))
         (is (> (string/length (get e :fix)) 0))))))
 

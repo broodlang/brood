@@ -955,7 +955,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // the `%wasm-*` primitives (feature `wasm`; without it the primitives are
     // unbound and requiring this module errors clearly). Opt-in.
     embedded_module!("wasm", "std/wasm.blsp"),
-    // Teach-the-error + intent→idiom lookup (LLM-native errors): explain-error
+    // Teach-the-error + intent→idiom lookup (LLM-native errors): error
     // (a stable E-code → summary/causes/fix/example) and find-pattern (an
     // intent → the idiomatic Brood pattern). Curated Brood data; backs the
     // `nest mcp` tools of the same names. Opt-in.

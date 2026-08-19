@@ -3,19 +3,19 @@
 ;;
 ;; Two curated Brood-data catalogues an agent (or a human at the REPL) reads:
 ;;   - `*error-explanations*` — stable error code → {:summary :causes :fix
-;;     :example}. `explain-error` takes a code, a caught error map, or a kind
+;;     :example}. `error` takes a code, a caught error map, or a kind
 ;;     keyword and returns the entry.
 ;;   - `*idiom-cookbook*` — intent → the Brood-idiomatic pattern, with a runnable
 ;;     example. `find-pattern` keyword-searches it ("how do I loop / mutate /
 ;;     build a string / make a set …").
 ;;
-;; The `nest mcp` tools `explain-error` and `find-pattern` are thin wrappers over
+;; The `nest mcp` tools `error` and `find-pattern` are thin wrappers over
 ;; these (std/tool/mcp.blsp). Policy (the content) is Brood; nothing here needs
 ;; the kernel beyond string ops.
 
 (defmodule explain
   "Teach-the-error and intent→idiom lookup for agents and the REPL:
-`(explain-error \"E0030\")` explains an error code (or a caught error map);
+`(error \"E0030\")` explains an error code (or a caught error map);
 `(find-pattern \"loop\")` returns the idiomatic Brood pattern for a task. Backs
 the `nest mcp` tools of the same names.")
 
@@ -87,12 +87,12 @@ the `nest mcp` tools of the same names.")
             :fix "Read the message and `:trace` (the caught map carries an innermost-first frame list). Branch on `:kind`/`:code`, not the message text."
             :example "(try (risky) (catch e (get e :trace)))"}})
 
-;; A kind keyword → representative code, so `explain-error` accepts a `:kind`
+;; A kind keyword → representative code, so `error` accepts a `:kind`
 ;; from a caught error map, not only a code.
 (def *kind->code*
   {:parse "E0001" :unbound "E0010" :arity "E0020" :type "E0030" :runtime "E0099"})
 
-(defn explain-error (what)
+(defn error (what)
   "Explain an error: `what` may be a code string (\"E0030\"), a caught error map
 (from `(try … (catch e e))` — its `:code` or `:kind` is used), or a kind keyword
 (`:type`). Returns `{:code :summary :causes :fix :example}`, or
