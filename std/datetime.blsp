@@ -239,7 +239,9 @@ milliseconds."
   ;; Right-pad the fractional-second digits to 3 and parse as milliseconds.
   ;; "" → 0, "5" → 500, "05" → 50, "005" → 5, "123" → 123.
   (let (padded (str frac "000"))
-    (or (dt-parse-int (str (string/char-at padded 0) (string/char-at padded 1) (string/char-at padded 2)))
+    (or (dt-parse-int (str (string/char-at padded 0)
+                        (string/char-at padded 1)
+                        (string/char-at padded 2)))
       0)))
 
 (defn- dt-parse-time-str

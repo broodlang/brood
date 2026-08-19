@@ -310,7 +310,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
         (fold (fn (_ r)
                 (println (str "  "
                            (string/pad-right (coverage-relative (get r :file) root) 44)
-                           (string/pad-left (str (coverage-percent (get r :covered) (get r :total))) 4)
+                           (string/pad-left (str (coverage-percent (get r :covered) (get r :total)))
+                             4)
                            "%  ("
                            (get r :covered)
                            "/"

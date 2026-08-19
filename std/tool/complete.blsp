@@ -261,7 +261,7 @@ suggestions\", never to an error on the user's command line."
                             (append acc
                               (or (complete-safely (fn ()
                                                      (complete-tags-in (file/slurp (path-join root
-                                                                                rel))
+                                                                                     rel))
                                                        nil 0)))
                                 nil)))
                       nil files)))))))

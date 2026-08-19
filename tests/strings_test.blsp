@@ -318,7 +318,8 @@
     (refute (includes? {:a 1} 99))))
 
 (describe "join"
-  (test "places the separator between elements" (assert= (string/join ", " (list "a" "b" "c")) "a, b, c"))
+  (test "places the separator between elements"
+    (assert= (string/join ", " (list "a" "b" "c")) "a, b, c"))
   (test "single element has no separator" (assert= (string/join ", " (list "solo")) "solo"))
   (test "empty collection is the empty string" (assert= (string/join ", " nil) "")))
 
@@ -330,7 +331,8 @@
   (test "multi-char separator" (assert= (string/split "a::b::c" "::") (list "a" "b" "c")))
   (test "empty separator splits into characters"
     (assert= (string/split "abc" "") (list "a" "b" "c")))
-  (test "split then join round-trips" (assert= (string/join "," (string/split "x,y,z" ",")) "x,y,z")))
+  (test "split then join round-trips"
+    (assert= (string/join "," (string/split "x,y,z" ",")) "x,y,z")))
 
 (describe "replace"
   (test "replaces every occurrence" (assert= (string/replace "a-b-c" "-" "+") "a+b+c"))
@@ -340,7 +342,11 @@
   (test "empty old leaves the string unchanged" (assert= (string/replace "hello" "" "!") "hello")))
 
 (describe "whitespace"
-  (test "blank?" (is (string/blank? "")) (is (string/blank? "   ")) (is (string/blank? "\t\n ")) (refute (string/blank? " x ")))
+  (test "blank?"
+    (is (string/blank? ""))
+    (is (string/blank? "   "))
+    (is (string/blank? "\t\n "))
+    (refute (string/blank? " x ")))
   (test "trim removes both ends"
     (assert= (string/trim "  hi there  ") "hi there")
     (assert= (string/trim "\n\thi\n") "hi")

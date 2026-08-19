@@ -250,7 +250,8 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 
 (defn- single-line-seq-build
   (forms open close)
-  (let (parts (map single-line forms)) (if (any-nil? parts) nil (str open (string/join " " parts) close))))
+  (let (parts (map single-line forms))
+    (if (any-nil? parts) nil (str open (string/join " " parts) close))))
 
 (defn any-nil? (xs) (cond (nil? xs) false (nil? (first xs)) true else (any-nil? (rest xs))))
 
@@ -991,7 +992,8 @@ retired the `comment-on-own-line?` distinction this used to need."
           (cond
             ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
-            (file/dir? p) (if (format-ignored-dir? entry) acc (append-two (format-collect-blsp p) acc))
+            (file/dir? p)
+              (if (format-ignored-dir? entry) acc (append-two (format-collect-blsp p) acc))
             ;; Skip generated lock files (`project.lock.blsp`): they're machine-
             ;; written ("do not edit by hand") and re-serialized by `nest fetch` on
             ;; every project-setup, so formatting them just fights the resolver.

@@ -355,7 +355,10 @@ the observer's testable core; `observe-loop` feeds it live data."
                     cols)
                   (face :observer/col-header))]
         body
-        [(text (- rows 2) 0 (observe-fit (string/pad-right detail cols) cols) (face :observer/detail))]
+        [(text (- rows 2)
+           0
+           (observe-fit (string/pad-right detail cols) cols)
+           (face :observer/detail))]
         last-row))))
 
 ;; ---- live data --------------------------------------------------------------

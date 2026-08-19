@@ -215,8 +215,9 @@ image stays in sync with disk."
                 {:ok false
                  :error (str "edit: :old occurs "
                           hits " times in " rel " — make it unique")}
-              else (let (_w (file/spit abs (string/replace text old new)))
-                     (mcp-write-result rel abs))))))
+              else
+                (let (_w (file/spit abs (string/replace text old new)))
+                  (mcp-write-result rel abs))))))
       (catch e
         {:ok false :error (mcp-error-shape e)}))))
 

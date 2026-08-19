@@ -365,7 +365,9 @@ on malformed input or trailing content. Pure."
 (defn- enc-u
   (cp)
   "The `\\u00XX` escape for a control code point `cp` (< 0x20)."
-  (str "\\u00" (string/char-at json-hex-digits (quot cp 16)) (string/char-at json-hex-digits (rem cp 16))))
+  (str "\\u00"
+    (string/char-at json-hex-digits (quot cp 16))
+    (string/char-at json-hex-digits (rem cp 16))))
 
 ;; `[raw escape]` for every control char the named escapes below don't cover —
 ;; strict JSON forbids any raw char < U+0020 in a string, named escape or not.

@@ -2209,7 +2209,9 @@ resolve in the advisory checker. Returns the project root."
   "Like `check-project`, but checks only the project's source paths (skips `tests/`, whose files reference test-framework macros). Used by `nest run`'s pre-flight."
   (let (root (project-find-root (file/cwd)))
     (when (nil? root)
-      (error "check-project-sources: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
+      (error "check-project-sources: not in a Brood project (no project.blsp found from "
+        (file/cwd)
+        ")"))
     (project-ensure-loaded root)
     (let (srcs (project-source-files root)
           extracts (project-gather-extracts srcs)
@@ -2240,7 +2242,8 @@ and the pre-flight would 'check' the manifest and warn on it."
   (let (n (name feat)
         prefix (cond (nil? *project-name*) nil else (str *project-name* "/"))
         rel (cond
-              (and prefix (string/starts-with? n prefix)) (string/substring n (string/length prefix))
+              (and prefix (string/starts-with? n prefix))
+                (string/substring n (string/length prefix))
               else n)
         p (require-find (str rel ".blsp") *load-path*))
     (when (and p (any? (fn (d) (string/starts-with? p d)) srcdirs)) p)))
@@ -2468,7 +2471,9 @@ as unchanged (only when some were)."
   "Discover, load (register-only), and run the project's whole test suite once, from the cwd. `opts` pass through to `run-tests` (e.g. `:slow`). Runs an advisory `check-project` pre-flight. Errors if not in a project or if any test fails. Backs `nest test`."
   (let (root (project-find-root (file/cwd)))
     (when (nil? root)
-      (error "run-project-tests: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
+      (error "run-project-tests: not in a Brood project (no project.blsp found from "
+        (file/cwd)
+        ")"))
     (project-setup root)
     (project-load-sources-cached root)
     ; the project's own src/, so tests use it directly

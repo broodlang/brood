@@ -31,7 +31,10 @@
 
 (defn escape (raw)
   "HTML-escape `&`, `<`, `>` in `raw` (coerced to a string). `&` must go first."
-  (-> (str raw) (string/replace "&" "&amp;") (string/replace "<" "&lt;") (string/replace ">" "&gt;")))
+  (-> (str raw)
+    (string/replace "&" "&amp;")
+    (string/replace "<" "&lt;")
+    (string/replace ">" "&gt;")))
 
 (defn- inline
   ;; One paragraph as HTML: split on backticks, wrap the odd (inside-a-pair) segments

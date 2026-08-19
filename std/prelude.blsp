@@ -3708,8 +3708,10 @@ incremental search rides on."
   (cond
     (>= i n) (error "format: unterminated specifier (lone '%' at end of format string)")
     (= (string/char-at fmt i) "%") (format-loop fmt (inc i) n args (str acc "%"))
-    (= (string/char-at fmt i) "s") (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
-    (= (string/char-at fmt i) "d") (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (string/char-at fmt i) "s")
+      (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (string/char-at fmt i) "d")
+      (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
     (= (string/char-at fmt i) "f")
       (format-loop fmt
         (inc i)
@@ -3795,7 +3797,8 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
   (cond
     (or (= path "") (string/starts-with? path "/")) path
     (= path "~") (or (getenv "HOME") path)
-    (string/starts-with? path "~/") (str (or (getenv "HOME") "~") (string/substring path 1 (string/length path)))
+    (string/starts-with? path "~/")
+      (str (or (getenv "HOME") "~") (string/substring path 1 (string/length path)))
     else (path-join (or base (file/cwd)) path)))
 
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------

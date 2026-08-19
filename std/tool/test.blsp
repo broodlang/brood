@@ -1436,7 +1436,8 @@ the test rather than hanging the run."
   (let (i (index-of line ": "))
     (if (< i 0)
       line
-      (str (test-dim (string/substring line 0 (+ i 1))) (string/substring line (+ i 1) (string/length line))))))
+      (str (test-dim (string/substring line 0 (+ i 1)))
+        (string/substring line (+ i 1) (string/length line))))))
 
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
