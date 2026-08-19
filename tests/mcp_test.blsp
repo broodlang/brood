@@ -7,33 +7,33 @@
 (describe "mcp eval tool"
   (test "runs every form in a multi-form source, returns the last value"
     (assert= {:value "21"}
-      (mcp/mcp-eval-tool {:source "(defn mcpt-a (x) (* x 2)) (defn mcpt-b (x) (+ x 1)) (mcpt-b (mcpt-a 10))"})))
+      (mcp/eval-tool {:source "(defn mcpt-a (x) (* x 2)) (defn mcpt-b (x) (+ x 1)) (mcpt-b (mcpt-a 10))"})))
   (test "a def and its use in the same batch both take effect"
-    (assert= {:value "42"} (mcp/mcp-eval-tool {:source "(def mcpt-q 41) (+ mcpt-q 1)"})))
+    (assert= {:value "42"} (mcp/eval-tool {:source "(def mcpt-q 41) (+ mcpt-q 1)"})))
   (test "a single form still works"
-    (assert= {:value "5"} (mcp/mcp-eval-tool {:source "(+ 2 3)"})))
+    (assert= {:value "5"} (mcp/eval-tool {:source "(+ 2 3)"})))
   (test "a non-string :source is rejected (thrown for the dispatcher to catch)"
-    (assert-error (mcp/mcp-eval-tool {:source 42})))
+    (assert-error (mcp/eval-tool {:source 42})))
   (test "a parse error surfaces as :error, not a drop"
-    (is (contains? (mcp/mcp-eval-tool {:source "(+ 1"}) :error))))
+    (is (contains? (mcp/eval-tool {:source "(+ 1"}) :error))))
 
 ;; The LLM-native tools explain-error and find-pattern (thin wrappers over
 ;; std/tool/explain.blsp — 2026-07-23).
 (describe "mcp explain-error / find-pattern tools"
   (test "explain-error returns the structured explanation for a code"
-    (let (r (mcp/mcp-explain-error-tool {:code "E0044"}))
+    (let (r (mcp/explain-error-tool {:code "E0044"}))
       (assert= (get r :code) "E0044")
       (is (includes? (get r :fix) "tail-recursive"))))
   (test "explain-error rejects a non-string :code"
-    (assert-error (mcp/mcp-explain-error-tool {:code 44})))
+    (assert-error (mcp/explain-error-tool {:code 44})))
   (test "find-pattern returns idiom matches for an intent"
-    (let (r (mcp/mcp-find-pattern-tool {:query "build a string"}))
+    (let (r (mcp/find-pattern-tool {:query "build a string"}))
       (is (> (count (get r :matches)) 0))
       (is (any? (fn (e) (includes? (get e :idiom) "iolist")) (get r :matches)))))
   (test "find-pattern rejects a non-string :query"
-    (assert-error (mcp/mcp-find-pattern-tool {:query 1})))
+    (assert-error (mcp/find-pattern-tool {:query 1})))
   (test "both tools are in the catalogue"
-    (let (names (map (fn (t) (get t :name)) (mcp/mcp-tools)))
+    (let (names (map (fn (t) (get t :name)) (mcp/tools)))
       (is (includes? names "explain-error"))
       (is (includes? names "find-pattern")))))
 
@@ -48,7 +48,7 @@
     ;; a burst of trivial short-lived processes, from a helper process (so the
     ;; watcher — this test process — sees their :spawn/:exit, not its own)
     (spawn (do (sleep 20) (mcpt-burst 12)))
-    (let (r (mcp/mcp-watch-runtime-tool {:ms 300})
+    (let (r (mcp/watch-runtime-tool {:ms 300})
           evs (get r :events)
           kinds (map (fn (e) (get e :kind)) evs))
       (is (> (get r :count) 0))
@@ -58,20 +58,20 @@
       (is (every? (fn (e) (and (contains? e :kind) (contains? e :pid) (contains? e :detail))) evs))))
   (test "the :filter selects only the requested kinds"
     (spawn (do (sleep 20) (mcpt-burst 10)))
-    (let (r (mcp/mcp-watch-runtime-tool {:ms 300 :filter {:exit true}})
+    (let (r (mcp/watch-runtime-tool {:ms 300 :filter {:exit true}})
           evs (get r :events))
       (is (> (count evs) 0))
       (is (every? (fn (e) (= (get e :kind) :exit)) evs))))
   (test "the tool is in the catalogue"
-    (is (includes? (map (fn (t) (get t :name)) (mcp/mcp-tools)) "watch-runtime"))))
+    (is (includes? (map (fn (t) (get t :name)) (mcp/tools)) "watch-runtime"))))
 
 ;; Ability/record introspection + snippet type-check + lookup :type (2026-07-30).
 (describe "mcp ability introspection tools"
   (test "abilities lists the core abilities"
-    (is (includes? (get (mcp/mcp-abilities-tool {}) :abilities) "Display")))
+    (is (includes? (get (mcp/abilities-tool {}) :abilities) "Display")))
   (test "ability describes ops, sealed members, requires, and impls"
-    (mcp/mcp-eval-tool {:source "(defrecord mcpt-circle (r)) (defability McptShape :sealed [mcpt-circle] (mcpt-area [self] :-> float) (mcpt-big? [self o] :-> bool (> (mcpt-area self) 0))) (impl McptShape mcpt-circle (mcpt-area [c] 1.0))"})
-    (let (r (mcp/mcp-ability-tool {:name "McptShape"}))
+    (mcp/eval-tool {:source "(defrecord mcpt-circle (r)) (defability McptShape :sealed [mcpt-circle] (mcpt-area [self] :-> float) (mcpt-big? [self o] :-> bool (> (mcpt-area self) 0))) (impl McptShape mcpt-circle (mcpt-area [c] 1.0))"})
+    (let (r (mcp/ability-tool {:name "McptShape"}))
       (assert= (get r :sealed) true)
       (is (includes? (get r :members) "mcpt-circle"))
       (is (includes? (get r :impls) "mcpt-circle"))
@@ -80,17 +80,17 @@
       (let (provided (filter (fn (o) (get o :provided)) (get r :ops)))
         (assert= (count provided) 1))))
   (test "an unknown ability name returns an :error map, not a throw"
-    (is (contains? (mcp/mcp-ability-tool {:name "NoSuchAbilityXyz"}) :error))))
+    (is (contains? (mcp/ability-tool {:name "NoSuchAbilityXyz"}) :error))))
 
 (describe "mcp check-source tool"
   (test "flags a type error in a snippet"
-    (is (not (empty? (get (mcp/mcp-check-source-tool {:source "(defn f (x) (string/length 5))"})
+    (is (not (empty? (get (mcp/check-source-tool {:source "(defn f (x) (string/length 5))"})
                        :diagnostics)))))
   (test "is clean for well-typed code"
-    (assert= {:diagnostics []} (mcp/mcp-check-source-tool {:source "(+ 1 2)"})))
+    (assert= {:diagnostics []} (mcp/check-source-tool {:source "(+ 1 2)"})))
   (test "a non-string :source is rejected"
-    (assert-error (mcp/mcp-check-source-tool {:source 42}))))
+    (assert-error (mcp/check-source-tool {:source 42}))))
 
 (describe "mcp lookup carries the checker type"
   (test "lookup includes a :type signature string"
-    (is (string? (get (mcp/mcp-lookup-tool {:name "count"}) :type)))))
+    (is (string? (get (mcp/lookup-tool {:name "count"}) :type)))))

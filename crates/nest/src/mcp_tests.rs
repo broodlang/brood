@@ -4,7 +4,7 @@ use std::io::Cursor;
 #[test]
 fn staleness_guard_fires_once_when_binary_is_newer_than_start() {
     // Binary present, mtime (now) > started (epoch) → stale: fires once, latches.
-    let tmp = std::env::temp_dir().join(format!("nest-mcp-stale-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("nest-stale-{}", std::process::id()));
     std::fs::write(&tmp, b"x").unwrap();
     let mut g = StalenessGuard {
         started: std::time::UNIX_EPOCH,
@@ -16,7 +16,7 @@ fn staleness_guard_fires_once_when_binary_is_newer_than_start() {
     let _ = std::fs::remove_file(&tmp);
 
     // Binary older than the start time → not stale.
-    let tmp2 = std::env::temp_dir().join(format!("nest-mcp-fresh-{}", std::process::id()));
+    let tmp2 = std::env::temp_dir().join(format!("nest-fresh-{}", std::process::id()));
     std::fs::write(&tmp2, b"x").unwrap();
     let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
     let mut g2 = StalenessGuard {
@@ -255,7 +255,7 @@ fn bignum_step_churn_via_mcp_does_not_corrupt_heap() {
 #[test]
 fn tools_list_returns_the_baked_std_catalogue() {
     // Step 3 ships `std/tool/mcp.blsp` as a baked-in `EMBEDDED_MODULES` entry, so
-    // `(require-one 'mcp) (mcp/mcp-tools)` succeeds in a fresh `Interp` and the
+    // `(require-one 'mcp) (mcp/tools)` succeeds in a fresh `Interp` and the
     // dispatcher exposes the initial tool catalogue without any project setup.
     let mut interp = Interp::new();
     let resp = round_trip(
@@ -294,16 +294,16 @@ fn tools_list_returns_the_baked_std_catalogue() {
 #[test]
 fn tools_list_projects_a_brood_defined_catalogue() {
     let mut interp = Interp::new();
-    // Pre-define an `mcp-tools` catalogue inline; mark `'mcp` as already
+    // Pre-define an `tools` catalogue inline; mark `'mcp` as already
     // provided so the dispatcher's `(require-one 'mcp)` doesn't load the baked
     // `std/tool/mcp.blsp` and clobber our test catalogue. This is exactly the
     // override path a project's own `mcp.blsp` will use (step 5): provide
-    // the feature themselves, then bind their own `mcp-tools`.
+    // the feature themselves, then bind their own `tools`.
     interp
         .eval_str(
             r#"
                 (provide 'mcp)
-                (defn mcp/mcp-tools ()
+                (defn mcp/tools ()
                   (list
                     {:name "echo"
                      :description "Echo the :msg argument back"
@@ -329,12 +329,12 @@ fn tools_call_dispatches_to_a_brood_handler() {
     let mut interp = Interp::new();
     // Same pattern as `tools_list_projects_a_brood_defined_catalogue`:
     // claim the feature so the dispatcher's `(require-one 'mcp)` is a no-op
-    // and our inline catalogue is what `(mcp/mcp-tools)` returns.
+    // and our inline catalogue is what `(mcp/tools)` returns.
     interp
         .eval_str(
             r#"
                 (provide 'mcp)
-                (defn mcp/mcp-tools ()
+                (defn mcp/tools ()
                   (list
                     {:name "double"
                      :schema {:type "object" :properties {:n {:type "integer"}}}
@@ -372,7 +372,7 @@ fn handler_print_is_captured_not_leaked_onto_the_channel() {
         .eval_str(
             r#"
                 (provide 'mcp)
-                (defn mcp/mcp-tools ()
+                (defn mcp/tools ()
                   (list
                     {:name "chatty"
                      :schema {:type "object" :properties {}}
@@ -843,7 +843,7 @@ fn std_check_tool_returns_structured_diagnostics_for_the_served_project() {
     // `check-project-structured` all still run, over a project whose size this test
     // controls instead of one it inherits from wherever it happens to be run.
     let tmp = std::env::temp_dir().join(format!(
-        "nest-mcp-check-{}-{}",
+        "nest-check-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -986,7 +986,7 @@ fn std_process_info_tool_looks_up_by_id() {
 fn interp_with_project_root(tag: &str) -> (Interp, std::path::PathBuf) {
     let mut interp = Interp::new();
     let _ = invoke_tool(&mut interp, "eval", json!({ "source": "1" }));
-    let root = std::env::temp_dir().join(format!("brood-mcp-{tag}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("brood-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     interp
         .eval_str(&format!(
@@ -1186,7 +1186,7 @@ fn uncaught_handler_throw_projects_structured_data() {
         .eval_str(
             r#"
                 (provide 'mcp)
-                (defn mcp/mcp-tools ()
+                (defn mcp/tools ()
                   (list
                     {:name "blow-up"
                      :schema {:type "object" :properties {}}
@@ -1244,7 +1244,7 @@ fn handler_panic_is_caught_and_server_keeps_serving() {
         .eval_str(
             r#"
                 (provide 'mcp)
-                (defn mcp/mcp-tools ()
+                (defn mcp/tools ()
                   (list
                     {:name "boom"
                      :schema {:type "object" :properties {}}
@@ -1356,7 +1356,7 @@ fn a_tools_call_with_a_progress_token_streams_notifications() {
                     "tools/call",
                     json!({
                         "name": "eval",
-                        "arguments": { "source": "(mcp/mcp-progress 1 3 \"step-one\")" },
+                        "arguments": { "source": "(mcp/progress 1 3 \"step-one\")" },
                         "_meta": { "progressToken": "tok-42" }
                     }),
                 ),
@@ -1385,13 +1385,13 @@ fn without_a_progress_token_no_notifications_are_sent() {
                     // Same call, no _meta.progressToken.
                     json!({
                         "name": "eval",
-                        "arguments": { "source": "(mcp/mcp-progress 1 3 \"step-one\")" }
+                        "arguments": { "source": "(mcp/progress 1 3 \"step-one\")" }
                     }),
                 ),
                 notif("exit", json!(null)),
             ],
         );
-        // The handler still succeeds — mcp-progress is a no-op returning
+        // The handler still succeeds — progress is a no-op returning
         // false (the eval tool wraps it as {:value "false"}).
         let text = resp[0]["result"]["content"][0]["text"].as_str().unwrap();
         let body: Json = serde_json::from_str(text).unwrap();

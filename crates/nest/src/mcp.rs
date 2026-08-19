@@ -15,7 +15,7 @@
 //!
 //! - `initialize`            — return server info + capabilities.
 //! - `initialized` (notif)    — acknowledged, no reply.
-//! - `tools/list`            — call `(mcp/mcp-tools)` in the session's Brood image
+//! - `tools/list`            — call `(mcp/tools)` in the session's Brood image
 //!                             and project the catalogue to MCP's
 //!                             `{name, description, inputSchema}` shape.
 //! - `tools/call`            — convert the JSON `arguments` to a Brood map,
@@ -34,7 +34,7 @@
 //!
 //! One [`Interp`] for the connection's lifetime; the `def`s a `tools/call`
 //! creates promote into RUNTIME and survive between calls (the hot-reload
-//! contract, ADR-013). `(mcp/mcp-tools)` is re-evaluated on every `tools/list`
+//! contract, ADR-013). `(mcp/tools)` is re-evaluated on every `tools/list`
 //! and `tools/call`, so an agent that redefines the catalogue mid-session
 //! sees its own changes — agreed by design (`docs/mcp.md`).
 //!
@@ -165,7 +165,7 @@ enum Outcome {
 /// Detects, per request, whether the running binary has been **rebuilt since this
 /// server started** — a long-lived `nest mcp` otherwise silently serves the
 /// *pre-rebuild* runtime. A stale server pinned to a pre-fix binary was the cause of
-/// the 2026-05-31 GC `flush_oob` report (`docs/gc-flush-panic-mcp-2026-05-31.md`),
+/// the 2026-05-31 GC `flush_oob` report (`docs/gc-flush-panic-2026-05-31.md`),
 /// so we warn loudly (once) and tell the operator to restart.
 ///
 /// Best-effort: if the executable path or its mtime can't be read, the guard simply
@@ -216,7 +216,7 @@ fn staleness_message(exe: Option<&str>) -> String {
         "⚠ nest mcp is serving a STALE runtime: {} was rebuilt after this server \
          started, so it is still running the old, pre-rebuild code. Restart the \
          `nest mcp` server to pick up the new build — a stale server on a pre-fix \
-         binary caused the GC flush_oob crashes (docs/gc-flush-panic-mcp-2026-05-31.md). \
+         binary caused the GC flush_oob crashes (docs/gc-flush-panic-2026-05-31.md). \
          Results from this session may reflect the old runtime.",
         exe.unwrap_or("the nest binary"),
     )
@@ -368,7 +368,7 @@ fn initialize_result() -> Json {
 // `tools/list` + `tools/call`
 // ============================================================================
 
-/// Project the Brood-side tool catalogue (`(mcp/mcp-tools)`, in `std/tool/mcp.blsp`,
+/// Project the Brood-side tool catalogue (`(mcp/tools)`, in `std/tool/mcp.blsp`,
 /// plus any project-side extensions a project's own `mcp.blsp` conses on) to the
 /// JSON shape `tools/list` requires. Any error building the catalogue collapses to
 /// an empty list — the server stays useful, just with no tools.
@@ -385,7 +385,7 @@ fn list_tools(interp: &mut Interp) -> Vec<Json> {
     // boots even if a project hasn't defined its own MCP extensions.
     let _ = interp.eval_str("(require-one 'mcp)");
 
-    let tools = match interp.eval_str("(mcp/mcp-tools)") {
+    let tools = match interp.eval_str("(mcp/tools)") {
         Ok(v) => {
             interp.heap.push_root(v);
             project_tool_catalogue(&interp.heap, v).unwrap_or_default()
@@ -460,7 +460,7 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
         .unwrap_or_else(|| json!({}));
 
     // MCP progress (the streaming tier): if the request carried a
-    // `_meta.progressToken`, arm a sink so the handler's `(mcp-progress …)`
+    // `_meta.progressToken`, arm a sink so the handler's `(progress …)`
     // calls stream `notifications/progress` messages to the client on the same
     // stdout channel — *during* this synchronous call. The stdout lock is
     // reentrant, so writing from here is safe even though `main_loop` holds it.
@@ -520,7 +520,7 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
         // count against the handler's 30s.
         let _ = interp.eval_str("(require-one 'mcp)");
         let tools = interp
-            .eval_str("(mcp/mcp-tools)")
+            .eval_str("(mcp/tools)")
             .map_err(|_| RpcError::invalid_params(format!("no such tool: {name}")))?;
         interp.heap.push_root(tools);
 

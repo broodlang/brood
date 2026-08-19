@@ -1,11 +1,11 @@
 (defmodule mcp
   "Model Context Protocol tool surface for `nest mcp` (ADR-036, docs/mcp.md).
 
-The dispatcher in `crates/nest/src/mcp.rs` reads `(mcp-tools)` on every
+The dispatcher in `crates/nest/src/mcp.rs` reads `(tools)` on every
 `tools/list` *and* `tools/call`, so a `def` in a previous `eval` (hot reload,
 ADR-013) reshapes the surface immediately — and a project's own `mcp.blsp`
 can shadow this entire catalogue (step 5 territory; the dispatcher already
-does the right thing if the project rebinds `mcp-tools`).
+does the right thing if the project rebinds `tools`).
 
 Each catalogue entry is a map: `:name` (string, the MCP tool name),
 `:description` (optional, agent-visible), `:schema` (JSON Schema for the
@@ -35,11 +35,11 @@ as errors."
 ;; come through as the value itself, so we wrap them as `{:kind :user :payload
 ;; v}` to keep `:error` always a map for the agent's JSON consumers. The
 ;; asymmetry — built-in vs user — is deliberate per `docs/llm-native.md` §4.
-(defn- mcp-error-shape
+(defn- error-shape
   (e)
   (if (map? e) e {:kind :user :payload e}))
 
-(defn mcp-eval-tool (args)
+(defn eval-tool (args)
   "`eval` — evaluate `:source` in the session's global env. State persists
 across calls (hot reload, ADR-013): a `def` here is visible to the next call
 and to spawned processes. Returns `{:value pr-str-of-result}` on success and
@@ -55,7 +55,7 @@ error inside the user expression surfaces here as the `:error` branch."
       (let (value (eval-string src))
         {:value (pr-str value)})
       (catch e
-        {:error (mcp-error-shape e)}))))
+        {:error (error-shape e)}))))
 
 ;; Cross-file shadow warnings involving `file`: the *qualified* names
 ;; (`ns/name`, per `project-file-def-names`) this file defines that another
@@ -63,7 +63,7 @@ error inside the user expression surfaces here as the `:error` branch."
 ;; reused across distinct namespaces is not a collision, only a same-namespace
 ;; (or ambient/root) rebinding is. Empty (and silent) outside a project.
 ;; Best-effort — never raises.
-(defn- mcp-shadows-for
+(defn- shadows-for
   (file)
   (try
     (let (root (project/project-find-root (file/cwd)))
@@ -77,7 +77,7 @@ error inside the user expression surfaces here as the `:error` branch."
             (project-duplicate-def-warnings extracts source-set)))))
     (catch _ nil)))
 
-(defn- mcp-load-checked
+(defn- load-checked
   (file)
   "Load `file` into the session image and report the result as `{:ok true
 :diagnostics [...] :shadows [...]}` (or `{:ok false :error ...}` on failure) —
@@ -89,11 +89,11 @@ cross-file flat-namespace collisions."
       (load file)
       {:ok true
        :diagnostics (or (check-file-structured file) [])
-       :shadows (or (mcp-shadows-for file) [])})
+       :shadows (or (shadows-for file) [])})
     (catch e
-      {:ok false :error (mcp-error-shape e)})))
+      {:ok false :error (error-shape e)})))
 
-(defn mcp-load-tool (args)
+(defn load-tool (args)
   "`load` — load a `.blsp` file into the session and check it. Side-effects
 (`def`, `defn`, `defmacro`) persist. Returns `{:ok true :diagnostics [...]
 :shadows [...]}` — `diagnostics` are advisory `{:file :line :col :message}`
@@ -104,27 +104,27 @@ defines (the silent flat-namespace collision). On a load error:
   (let (file (get args :file))
     (when (not (string? file))
       (throw "load: :file must be a string"))
-    (mcp-load-checked file)))
+    (load-checked file)))
 
 ;; ---- the project sandbox for write/edit -----------------------------------
-;; Every file the MCP server writes goes through `mcp-project-path`, which
+;; Every file the MCP server writes goes through `project-path`, which
 ;; refuses to resolve anything outside `*project-root*`. That's the whole
 ;; guarantee the `write`/`edit` tools rest on: an agent driving nest mcp can only
 ;; touch files **inside the project it serves**, never the wider filesystem.
 
-(defn- mcp-safe-rel?
+(defn- safe-rel?
   (rel)
   "Whether `rel` passes the LEXICAL bar for a project-relative path: a non-empty
 string, not absolute (`/…`) or home-anchored (`~…`), with no `..` segment. The
 first (cheap) of two gates; the second is the symlink-resolving check in
-`mcp-project-path`."
+`project-path`."
   (and (string? rel)
     (> (string/length rel) 0)
     (not (string/starts-with? rel "/"))
     (not (string/starts-with? rel "~"))
     (not (includes? (string/split rel "/") ".."))))
 
-(defn- mcp-under-root?
+(defn- under-root?
   (abs)
   "Whether real path `abs` is the project root itself or lies strictly under it —
 compared after `canonicalize` on both sides, so a **symlinked directory inside
@@ -137,7 +137,7 @@ the tree through a symlink)."
       (string? root)
       (or (= real root) (string/starts-with? real (str root "/"))))))
 
-(defn- mcp-project-path
+(defn- project-path
   (rel)
   "Resolve project-relative `rel` to an absolute path under `*project-root*`, or
 `throw` if it would escape the project — a lexical violation (absolute/`~`/`..`,
@@ -145,25 +145,25 @@ or no project root), OR a **symlink** whose real target is outside the tree. The
 sandbox boundary the `write`/`edit` tools share."
   (when (nil? *project-root*)
     (throw "no project root — nest mcp must run inside a Brood project"))
-  (when (not (mcp-safe-rel? rel))
+  (when (not (safe-rel? rel))
     (throw (str "path must be project-relative — no leading '/' or '~', no '..': " (pr-str rel))))
   (let (abs (path-join *project-root* rel))
-    (when (not (mcp-under-root? abs))
+    (when (not (under-root? abs))
       (throw (str "path escapes the project sandbox — its real target (following symlinks) "
                "is outside the project root: "
                (pr-str rel))))
     abs))
 
-(defn- mcp-write-result
+(defn- write-result
   (rel abs)
   "The shared tail of `write`/`edit`: a `.blsp` file at absolute `abs` is loaded
 + checked (so the result mirrors `load`'s `:diagnostics`/`:shadows`) and tagged
 with its project-relative `:path`; any other file just confirms the write."
   (if (string/ends-with? rel ".blsp")
-    (assoc (mcp-load-checked abs) :path rel)
+    (assoc (load-checked abs) :path rel)
     {:ok true :path rel}))
 
-(defn mcp-write-tool (args)
+(defn write-tool (args)
   "`write` — create or overwrite a project file through the live image. `:path`
 is **project-relative** (sandboxed under the project root — an absolute path,
 `~`, or any `..` segment is rejected); `:content` is the full new file contents.
@@ -178,14 +178,14 @@ through nest mcp, never the raw filesystem."
     (when (not (string? content))
       (throw "write: :content must be a string"))
     (try
-      (let (abs (mcp-project-path rel)
+      (let (abs (project-path rel)
             _dir (file/mkdir (parent-dir abs))
             _w (file/spit abs content))
-        (mcp-write-result rel abs))
+        (write-result rel abs))
       (catch e
-        {:ok false :error (mcp-error-shape e)}))))
+        {:ok false :error (error-shape e)}))))
 
-(defn mcp-edit-tool (args)
+(defn edit-tool (args)
   "`edit` — exact-string replacement in a project file through the live image.
 `:path` is **project-relative** (the same sandbox as `write`); `:old` must occur
 **exactly once** in the file (so the edit is unambiguous) and is replaced by
@@ -204,7 +204,7 @@ image stays in sync with disk."
     (when (= old "")
       (throw "edit: :old must be non-empty"))
     (try
-      (let (abs (mcp-project-path rel))
+      (let (abs (project-path rel))
         (if (not (file/exists? abs))
           {:ok false :error (str "edit: no such file: " rel)}
           (let (text (file/slurp abs)
@@ -215,13 +215,12 @@ image stays in sync with disk."
                 {:ok false
                  :error (str "edit: :old occurs "
                           hits " times in " rel " — make it unique")}
-              else
-                (let (_w (file/spit abs (string/replace text old new)))
-                  (mcp-write-result rel abs))))))
+              else (let (_w (file/spit abs (string/replace text old new)))
+                     (write-result rel abs))))))
       (catch e
-        {:ok false :error (mcp-error-shape e)}))))
+        {:ok false :error (error-shape e)}))))
 
-(defn mcp-lookup-tool (args)
+(defn lookup-tool (args)
   "`lookup` — describe a global name. Returns `{:name :arglist :doc :type
 :source-location}` (arglist a list of param symbols incl. `&optional`/`&`
 markers; doc a string or nil; type the checker's arrow signature string or nil;
@@ -242,9 +241,9 @@ the agent can branch on `(get r :error)` cleanly."
            :type (type-signature sym)
            :source-location (source-location sym)})
         (catch e
-          {:name name :error (mcp-error-shape e)})))))
+          {:name name :error (error-shape e)})))))
 
-(defn mcp-macroexpand-tool (args)
+(defn macroexpand-tool (args)
   "`macroexpand` — expand `:form` (a source string) once (`:mode \"1\"`, the
 default) or recursively (`:mode \"all\"`). Returns `{:expanded pr-str}`.
 Reads the form ourselves rather than letting it interpolate into surrounding
@@ -260,9 +259,9 @@ text — unbalanced parens in `:form` can't break the host expression."
                   (macroexpand-1 form)))
         {:expanded (pr-str out)})
       (catch e
-        {:error (mcp-error-shape e)}))))
+        {:error (error-shape e)}))))
 
-(defn mcp-format-tool (args)
+(defn format-tool (args)
   "`format` — reformat `:source` via `std/format.blsp`'s `(format-source ...)`.
 Idempotent. The require is lazy and cached, so the per-call cost is a hash
 check after the first invocation."
@@ -272,9 +271,9 @@ check after the first invocation."
     (try
       {:formatted (format-source src)}
       (catch e
-        {:error (mcp-error-shape e)}))))
+        {:error (error-shape e)}))))
 
-(defn mcp-check-tool (args)
+(defn check-tool (args)
   "`check` — advisory type-check the project. Returns
 `{:diagnostics [{:file :line :col :message} ...]}` (one entry per warning,
 position omitted when the checker can't supply one — ADR-024). Backed by
@@ -285,7 +284,7 @@ null}` — agents shouldn't have to disambiguate \"no warnings\" from
   (try
     ;; `*project-root*` explicitly, not the implicit `(file/cwd)` this used to rely on. The
     ;; server serves ONE project — that root is what the write sandbox is pinned to
-    ;; (`mcp-project-path`) and what every other project-scoped tool here already reads
+    ;; (`project-path`) and what every other project-scoped tool here already reads
     ;; (`project-all-files *project-root*`) — so taking the checked project from cwd
     ;; made `check` the one tool that could disagree with the rest if the host process
     ;; ever moved. It also made the tool untestable without process-global state, which
@@ -294,9 +293,9 @@ null}` — agents shouldn't have to disambiguate \"no warnings\" from
     ;; "not in a Brood project" the same way.
     {:diagnostics (or (check-project-structured *project-root*) [])}
     (catch e
-      {:error (mcp-error-shape e)})))
+      {:error (error-shape e)})))
 
-(defn mcp-run-tests-tool (args)
+(defn run-tests-tool (args)
   "`run-tests` — run the project test suite. Returns the structured runner
 result from `(run-project-tests-structured)` — `{:total :passed :failed
 :failed-assertions :ms :results [{:group :name :passed :ms :failures ...}]}`.
@@ -304,16 +303,16 @@ Outside a Brood project, returns `{:error msg}`."
   (try
     (run-project-tests-structured)
     (catch e
-      {:error (mcp-error-shape e)})))
+      {:error (error-shape e)})))
 
-(defn- mcp-process-infos
+(defn- process-infos
   ()
   "A `(process-info pid)` stat map for every live process, dropping any that died
 mid-scan. The shared snapshot behind both the `processes` and `process-info`
 tools — one definition of \"what we know about a process\"."
   (remove nil? (map process-info (or (list-processes) []))))
 
-(defn mcp-processes-tool (args)
+(defn processes-tool (args)
   "`processes` — snapshot every live green process with its runtime stats.
 Returns `{:processes [{:id :pid :node :name :status :mailbox :memory
 :collections :reductions :monitored-by :parent} ...]}` — the same
@@ -322,9 +321,9 @@ backlog, cumulative reductions (Erlang's work counter — is it busy?),
 heap bytes, GC count and monitors per process, not just the id. Order
 is unspecified — sort by `:id` (or `:reductions` to find the busiest)
 if you need stability."
-  {:processes (mcp-process-infos)})
+  {:processes (process-infos)})
 
-(defn mcp-process-info-tool (args)
+(defn process-info-tool (args)
   "`process-info` — the full stat map for a single process by `:id` (an
 integer from a `processes` listing). Returns the `(process-info pid)`
 map (`{:id :pid :node :name :status :mailbox :memory :collections
@@ -333,10 +332,10 @@ process carries that id."
   (let (id (get args :id))
     (when (not (int? id))
       (throw "process-info: :id must be an integer"))
-    (or (find (fn (p) (= (get p :id) id)) (mcp-process-infos))
+    (or (find (fn (p) (= (get p :id) id)) (process-infos))
       {:error (str "no live process with id " id)})))
 
-(defn mcp-node-tool (args)
+(defn node-tool (args)
   "`node` — runtime-wide stats, the header the observer shows: which node
 this is, the scheduler's worker-thread pool size, the high-water marks
 for concurrency and memory, the total processes spawned since start,
@@ -353,7 +352,7 @@ overview, complementing per-process `processes`."
    :mem-peak (mem-peak)
    :peers (or (nodes) [])})
 
-(defn mcp-vitals-tool (args)
+(defn vitals-tool (args)
   "`vitals` — the unified runtime snapshot (`telemetry/runtime-snapshot`): GC, scheduler,
 and VM stats plus the live-process count and the current telemetry metrics, all behind ONE
 call instead of scraping the individual stat builtins. Returns `{:gc :sched :vm :processes
@@ -361,16 +360,16 @@ call instead of scraping the individual stat builtins. Returns `{:gc :sched :vm 
 what `node`/`processes` expose behind one telemetry-fed view."
   (telemetry/runtime-snapshot))
 
-(defn- mcp-collect-runtime
+(defn- collect-runtime
   (acc)
   "Drain the `[:system kind pid detail]` runtime events already in this process's
 mailbox into a list of maps (chronological). Non-blocking: stops at the first empty
 receive."
   (receive
-    ([:system kind pid detail] (mcp-collect-runtime (cons {:kind kind :pid pid :detail detail} acc)))
+    ([:system kind pid detail] (collect-runtime (cons {:kind kind :pid pid :detail detail} acc)))
     (after 0 (reverse acc))))
 
-(defn mcp-watch-runtime-tool (args)
+(defn watch-runtime-tool (args)
   "`watch-runtime` — collect the kernel runtime-event STREAM (a trace, not a
 snapshot) for a bounded window, then return it. Arms `system-monitor` on this
 handler process, sleeps `:ms`, disarms, and drains the collected
@@ -391,11 +390,11 @@ complementing the point-in-time `processes`/`node` snapshots."
     (sleep ms)
     ; disarm before draining
     (system-monitor nil)
-    (let (events (into [] (mcp-collect-runtime '())))
+    (let (events (into [] (collect-runtime '())))
       ; [] (not nil) when empty
       {:events events :count (count events) :ms ms})))
 
-(defn mcp-callers-tool (args)
+(defn callers-tool (args)
   "`callers` — every reference to the global `:name` across the project's source
 and test files, as `{:references [{:file :line :col} ...]}` (1-based line/col).
 Cross-file under the flat module model (ADR-019): a global is one binding
@@ -413,7 +412,7 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
                              (catch _ nil)))
                    (project-all-files *project-root*))}))
 
-(defn mcp-apropos-tool (args)
+(defn apropos-tool (args)
   "`apropos` — discover globals whose name contains a pattern. Returns
 `{:matches [name ...]}` (names as strings, sorted). The way to answer \"does X
 exist?\" without guessing names one at a time."
@@ -422,12 +421,12 @@ exist?\" without guessing names one at a time."
       (throw "apropos: :pattern must be a string"))
     {:matches (map name (apropos pattern))}))
 
-(defn mcp-all-globals-tool (args)
+(defn all-globals-tool (args)
   "`all-globals` — every globally bound name in the image. Returns
 `{:globals [name ...]}` (sorted strings)."
   {:globals (map name (global-names))})
 
-(defn mcp-doc-search-tool (args)
+(defn doc-search-tool (args)
   "`doc-search` — find globals whose docstring contains a query string. Returns
 `{:results [{:name :doc} ...]}` — searches behaviour, not just names."
   (let (query (get args :query))
@@ -435,7 +434,7 @@ exist?\" without guessing names one at a time."
       (throw "doc-search: :query must be a string"))
     {:results (map (fn (pair) {:name (name (first pair)) :doc (second pair)}) (doc-search query))}))
 
-(defn mcp-progress (progress &optional (total nil) (message nil))
+(defn progress (progress &optional (total nil) (message nil))
   "Report incremental progress from a `nest mcp` tool handler (the streaming
 tier): `progress` units done, optional `total` (denominator) and `message`
 (label). Streams a `notifications/progress` to the client when the current
@@ -446,7 +445,7 @@ reported from a `spawn`ed worker process is silently dropped. (The core `check`
 tool reports per-file this way; its fold is sequential, on the handler thread.)"
   (%mcp-progress progress total message))
 
-(defn mcp-explain-error-tool (args)
+(defn explain-error-tool (args)
   "`explain-error` — explain a Brood error code (or a caught error's `:code`).
 Returns `{:code :summary :causes :fix :example}` from the curated catalogue
 (`std/tool/explain.blsp`). The teach-the-error tool: an agent that hits `E0044`
@@ -456,7 +455,7 @@ gets the tail-recursion fix, not just the message."
       (throw "explain-error: :code must be a string (e.g. \"E0030\")"))
     (explain-error code)))
 
-(defn mcp-find-pattern-tool (args)
+(defn find-pattern-tool (args)
   "`find-pattern` — the idiomatic Brood pattern for a task/intent (a keyword
 search over the intent→idiom cookbook). Returns `{:matches [{:intent :idiom
 :example :see} ...]}`. Use it BEFORE writing non-obvious code — 'how do I loop /
@@ -467,14 +466,14 @@ Clojure/Scheme reflex."
       (throw "find-pattern: :query must be a string"))
     (find-pattern query)))
 
-(defn- mcp-bench-loop
+(defn- bench-loop
   (form n)
   "Eval `form` `n` more times for timing, discarding the results; returns nil."
   (when (> n 0)
     (eval form)
-    (mcp-bench-loop form (- n 1))))
+    (bench-loop form (- n 1))))
 
-(defn mcp-bench-tool (args)
+(defn bench-tool (args)
   "`bench` — time evaluating `:source` in the session image. Runs it
 `:iterations` times (default 1) and returns `{:ms total :iterations n
 :per-iter-ms float :value pr-str-of-last-result}`. Resolution is the
@@ -491,18 +490,18 @@ like `eval`. Returns `{:error msg}` on failure."
       (let (form (read-first src)
             t0 (now)
             value (eval form)
-            _done (mcp-bench-loop form (- iters 1))
+            _done (bench-loop form (- iters 1))
             total (- (now) t0))
         {:ms total
          :iterations iters
          :per-iter-ms (/ (* 1.0 total) iters)
          :value (pr-str value)})
       (catch e
-        {:error (mcp-error-shape e)}))))
+        {:error (error-shape e)}))))
 
 ;; ---- ability / record introspection ----------------------------------------
 
-(defn- mcp-op-provided?
+(defn- op-provided?
   (spec)
   "Does an op spec `(name [params] :-> ret? body…)` carry a body (a provided
 default) rather than being a bare required op? Skip the name + params, then the
@@ -511,7 +510,7 @@ optional `:-> ret`, and check whether anything remains."
         tail (if (= (first tail) :->) (drop 2 tail) tail))
     (not (empty? tail))))
 
-(defn- mcp-ability-impls
+(defn- ability-impls
   (aname ops)
   "The type keys (as strings) that implement any op of ability `aname`, unioned
 across its ops via the `*impls*` registry."
@@ -523,12 +522,12 @@ across its ops via the `*impls*` registry."
                     op-names))
     (sort (map name (vec type-keys)))))
 
-(defn mcp-abilities-tool (args)
+(defn abilities-tool (args)
   "`abilities` — list every ability defined in the image, sorted. Returns
 `{:abilities [name …]}`. The discovery entry point for `ability`."
   {:abilities (sort (map str (keys *abilities*)))})
 
-(defn mcp-ability-tool (args)
+(defn ability-tool (args)
   "`ability` — describe one ability: its ops (each with params and whether it's a
 provided default), whether it's sealed and its member types, what it `:requires`,
 its owner namespace, whether it's derivable, and which types implement it. Returns
@@ -548,16 +547,16 @@ its owner namespace, whether it's derivable, and which types implement it. Retur
            :ops (map (fn (spec)
                        {:op (str (first spec))
                         :params (map str (second spec))
-                        :provided (mcp-op-provided? spec)})
+                        :provided (op-provided? spec)})
                   ops)
            :sealed (not (nil? members))
            :members (if members (map name members) [])
            :requires (if reqs (map str reqs) [])
            :owner (if owner (str owner) nil)
            :derivable (not (nil? (ability-derive-recipe aname)))
-           :impls (mcp-ability-impls aname ops)})))))
+           :impls (ability-impls aname ops)})))))
 
-(defn mcp-check-source-tool (args)
+(defn check-source-tool (args)
   "`check-source` — advisory type-check a source STRING (not the whole project),
 for iterating on a snippet before committing it to a file. Returns
 `{:diagnostics [{:line :col :message} …]}` — empty when clean or when `:source`
@@ -568,13 +567,13 @@ doesn't parse (incomplete input). Backed by `check-string-structured`."
     (try
       {:diagnostics (or (check-string-structured src) [])}
       (catch e
-        {:error (mcp-error-shape e)}))))
+        {:error (error-shape e)}))))
 
 ;; ---- catalogue -------------------------------------------------------------
 
-(defn mcp-tools ()
+(defn tools ()
   "The tool catalogue `nest mcp` reads on every `tools/list`/`tools/call`.
-A project's own `mcp.blsp` (loaded after this) can replace `mcp-tools` with
+A project's own `mcp.blsp` (loaded after this) can replace `tools` with
 its own list that conses additional entries onto this one — `def` rebinds
 globals (ADR-013), so the dispatcher sees the project's version on its next
 fetch.
@@ -602,13 +601,13 @@ Brood pattern, `std/tool/explain.blsp`)."
          :schema {:type "object"
                   :properties {:source {:type "string" :description "Brood source to evaluate"}}
                   :required ["source"]}
-         :handler mcp-eval-tool}
+         :handler eval-tool}
     {:name "load"
      :description "Load a `.blsp` file into the session's image. Side-effects (def/defn/defmacro) persist."
      :schema {:type "object"
               :properties {:file {:type "string" :description "Path to a .blsp file"}}
               :required ["file"]}
-     :handler mcp-load-tool}
+     :handler load-tool}
     {:name "write"
      :description "Create or overwrite a project file (the way to write code through nest mcp, not the raw filesystem). :path is project-relative and sandboxed under the project root — absolute paths, '~', and '..' are rejected. A .blsp file is loaded into the session and checked, so the result carries :diagnostics + :shadows like `load`. Returns {:ok true :path :diagnostics :shadows} or {:ok false :error}."
      :schema {:type "object"
@@ -616,7 +615,7 @@ Brood pattern, `std/tool/explain.blsp`)."
                                   :description "Project-relative file path (no leading '/' or '~', no '..')"}
                            :content {:type "string" :description "Full new file contents"}}
               :required ["path" "content"]}
-     :handler mcp-write-tool}
+     :handler write-tool}
     {:name "edit"
      :description "Exact-string replacement in a project file (sandboxed like `write`). :old must occur exactly once in the file and is replaced by :new. A .blsp file is reloaded and checked (result carries :diagnostics/:shadows). Returns {:ok true :path ...} or {:ok false :error}."
      :schema {:type "object"
@@ -626,31 +625,31 @@ Brood pattern, `std/tool/explain.blsp`)."
                                  :description "Exact text to replace — must be unique in the file"}
                            :new {:type "string" :description "Replacement text"}}
               :required ["path" "old" "new"]}
-     :handler mcp-edit-tool}
+     :handler edit-tool}
     {:name "lookup"
      :description "Look up a global name: returns its arglist, docstring, type signature (the checker's arrow string, e.g. \"(int -> int)\"), and source location (file/line/col)."
      :schema {:type "object"
               :properties {:name {:type "string"
                                   :description "The name to look up (no leading quote)"}}
               :required ["name"]}
-     :handler mcp-lookup-tool}
+     :handler lookup-tool}
     {:name "abilities"
      :description "List every ability (generic-function interface) defined in the image, sorted. Returns {:abilities [name ...]}. The discovery entry point — pass a name to `ability` for details."
      :schema {:type "object" :properties {}}
-     :handler mcp-abilities-tool}
+     :handler abilities-tool}
     {:name "ability"
      :description "Describe an ability: its ops (each with params and whether it's a provided default), whether it's :sealed and its member types, what it :requires (super-abilities), its owner namespace, whether it's derivable (:derives), and which types implement it. Returns {:name :ops :sealed :members :requires :owner :derivable :impls}, or {:name :error} for an unknown name. Use it to understand a dispatch point before writing an `impl`."
      :schema {:type "object"
               :properties {:name {:type "string"
                                   :description "The ability name (no leading quote), e.g. \"Display\""}}
               :required ["name"]}
-     :handler mcp-ability-tool}
+     :handler ability-tool}
     {:name "check-source"
      :description "Advisory type-check a source STRING (not the whole project) — for iterating on a snippet before writing it to a file. Returns {:diagnostics [{:line :col :message} ...]}, empty when clean. Complements `check` (whole project) and `eval` (which runs code without type advice)."
      :schema {:type "object"
               :properties {:source {:type "string" :description "Brood source to type-check"}}
               :required ["source"]}
-     :handler mcp-check-source-tool}
+     :handler check-source-tool}
     {:name "macroexpand"
      :description "Macro-expand a form. Default is one step (`:mode \"1\"`); pass `:mode \"all\"` for full expansion."
      :schema {:type "object"
@@ -659,40 +658,40 @@ Brood pattern, `std/tool/explain.blsp`)."
                                   :seq ["1" "all"]
                                   :description "\"1\" (default) or \"all\""}}
               :required ["form"]}
-     :handler mcp-macroexpand-tool}
+     :handler macroexpand-tool}
     {:name "format"
      :description "Reformat Brood source. Idempotent — formatting the result is a fixed point."
      :schema {:type "object"
               :properties {:source {:type "string" :description "Brood source to reformat"}}
               :required ["source"]}
-     :handler mcp-format-tool}
+     :handler format-tool}
     {:name "check"
      :description "Advisory type-check the project. Returns one diagnostic per warning ({:diagnostics [...]})."
      :schema {:type "object" :properties {}}
-     :handler mcp-check-tool}
+     :handler check-tool}
     {:name "run-tests"
      :description "Run the project test suite. Returns the structured runner result ({:total :passed :failed ...})."
      :schema {:type "object" :properties {}}
-     :handler mcp-run-tests-tool}
+     :handler run-tests-tool}
     {:name "processes"
      :description "Snapshot every live green process with its runtime stats — id, name, status, mailbox backlog, memory, GC collections, cumulative reductions (Erlang's work counter), monitors and parent. The same per-process view the observer shows. Returns {:processes [{:id :status :mailbox :reductions ...} ...]}. Sort by :reductions to find the busiest process."
      :schema {:type "object" :properties {}}
-     :handler mcp-processes-tool}
+     :handler processes-tool}
     {:name "process-info"
      :description "Full stat map for one process by numeric :id (from a `processes` listing): status, mailbox, memory, collections, reductions, monitors, parent. Returns the process-info map, or {:error msg} if no live process has that id."
      :schema {:type "object"
               :properties {:id {:type "integer"
                                 :description "The numeric process id (as shown in `processes`)"}}
               :required ["id"]}
-     :handler mcp-process-info-tool}
+     :handler process-info-tool}
     {:name "node"
      :description "Runtime-wide stats (the observer's header): node name, scheduler worker count, peak concurrency, total spawned, current live-process count, current/peak memory, connected peers. Returns {:node :workers :peak-threads :spawned :process-count :mem-bytes :mem-peak :peers}."
      :schema {:type "object" :properties {}}
-     :handler mcp-node-tool}
+     :handler node-tool}
     {:name "vitals"
      :description "The unified runtime snapshot behind ONE call (telemetry/runtime-snapshot): {:gc {…} :sched {…} :vm {…} :processes N :metrics {…}} — GC, scheduler and VM stats plus the live-process count and current telemetry metrics, instead of scraping the individual stat builtins. The point-in-time companion to `watch-runtime` (which streams events over an interval)."
      :schema {:type "object" :properties {}}
-     :handler mcp-vitals-tool}
+     :handler vitals-tool}
     {:name "watch-runtime"
      :description "Watch the kernel runtime-event STREAM (a trace, not a snapshot) for :ms milliseconds (default 500, capped 5000), then return the collected events: {:events [{:kind :pid :detail} ...] :count :ms}. Kinds: :gc (detail {:pause-us :collections :live}), :spawn (detail=parent pid), :exit (detail=exit reason), :deopt (detail=JIT fn name or nil). Use it to SEE runtime activity over an interval — GC pauses, spawn/exit churn, JIT deopts — that a point-in-time `processes`/`node` snapshot can't show. Pass :filter (e.g. {:gc true :gc-min-pause-us 1000 :exit true}) to select kinds. Events about the watcher itself are excluded."
      :schema {:type "object"
@@ -700,31 +699,31 @@ Brood pattern, `std/tool/explain.blsp`)."
                                 :description "How long to watch, in milliseconds (default 500, capped at 5000)"}
                            :filter {:type "object"
                                     :description "Optional kind selector, e.g. {\"gc\": true, \"exit\": true, \"gc-min-pause-us\": 1000}; omit to collect every kind"}}}
-     :handler mcp-watch-runtime-tool}
+     :handler watch-runtime-tool}
     {:name "callers"
      :description "Find every reference to a global name across the project's source and test files (cross-file find-references). Returns {:references [{:file :line :col} ...]}. Complements `lookup`, which gives the definition site."
      :schema {:type "object"
               :properties {:name {:type "string"
                                   :description "The global name to find references to (no leading quote)"}}
               :required ["name"]}
-     :handler mcp-callers-tool}
+     :handler callers-tool}
     {:name "apropos"
      :description "Discover globals whose name contains a pattern (string/substring search over the flat namespace). Returns {:matches [name ...]}. Use this to find out whether something exists before guessing exact names."
      :schema {:type "object"
               :properties {:pattern {:type "string"
                                      :description "Substring to search for in global names"}}
               :required ["pattern"]}
-     :handler mcp-apropos-tool}
+     :handler apropos-tool}
     {:name "all-globals"
      :description "List every globally bound name in the image (prelude + project), sorted. Returns {:globals [name ...]}."
      :schema {:type "object" :properties {}}
-     :handler mcp-all-globals-tool}
+     :handler all-globals-tool}
     {:name "doc-search"
      :description "Find globals whose docstring contains a query string — searches behaviour, not just names. Returns {:results [{:name :doc} ...]}. Complements apropos (which matches names)."
      :schema {:type "object"
               :properties {:query {:type "string" :description "Text to search for in docstrings"}}
               :required ["query"]}
-     :handler mcp-doc-search-tool}
+     :handler doc-search-tool}
     {:name "bench"
      :description "Time evaluating a Brood expression in the session image. Runs it :iterations times (default 1) and returns {:ms :iterations :per-iter-ms :value}. Side effects persist (it really runs the code). Raise :iterations to amortise sub-millisecond expressions against the ms clock."
      :schema {:type "object"
@@ -732,26 +731,26 @@ Brood pattern, `std/tool/explain.blsp`)."
                            :iterations {:type "integer"
                                         :description "How many times to run it (default 1); raise to amortise sub-ms expressions"}}
               :required ["source"]}
-     :handler mcp-bench-tool}
+     :handler bench-tool}
     {:name "explain-error"
      :description "Explain a Brood error code (e.g. \"E0030\", \"E0044\") — or the :code from a caught error map. Returns {:code :summary :causes :fix :example}: what it means, why it happens, and the Brood-idiomatic fix. Call it when a tool result or the check tool surfaces an error code you want to resolve, not just describe."
      :schema {:type "object"
               :properties {:code {:type "string" :description "The error code, e.g. \"E0030\""}}
               :required ["code"]}
-     :handler mcp-explain-error-tool}
+     :handler explain-error-tool}
     {:name "find-pattern"
      :description "The idiomatic Brood pattern for a task — a keyword search over the intent→idiom cookbook. Returns {:matches [{:intent :idiom :example :see} ...]}. Query with a task word like \"loop\", \"mutate\", \"build a string\", \"set\", \"spawn\", \"error\", \"parse binary\". Use it BEFORE writing non-obvious code to get the Brood way instead of a Clojure/Scheme reflex."
      :schema {:type "object"
               :properties {:query {:type "string"
                                    :description "A task/intent word, e.g. \"loop\" or \"mutable state\""}}
               :required ["query"]}
-     :handler mcp-find-pattern-tool}))
+     :handler find-pattern-tool}))
 
 ;; ---- project-defined extensions (step 5b) ---------------------------------
 ;; If the project root has its own `mcp.blsp`, load it now so it can:
 ;;   - bind additional `defn`s the catalogue references,
-;;   - `def mcp-tools` to a richer list (e.g. wrap the std catalogue:
-;;     `(let (base mcp-tools) (defn mcp-tools () (append (base) (list ...))))`).
+;;   - `def tools` to a richer list (e.g. wrap the std catalogue:
+;;     `(let (base tools) (defn tools () (append (base) (list ...))))`).
 ;; Runs **once**: this whole file body executes once per session (the dispatcher
 ;; loads `mcp`, which `provide`s 'mcp early, so subsequent loads
 ;; are no-ops). Failures in the project mcp.blsp surface as load errors during
