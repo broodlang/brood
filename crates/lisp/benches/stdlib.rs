@@ -534,12 +534,12 @@ mod queue {
                 "\
                  (defn fill (q k) \
                    (if (= k 0) q \
-                     (fill (queue/queue-push q k) (- k 1)))) \
+                     (fill (queue/push q k) (- k 1)))) \
                  (defn drain (q acc) \
-                   (if (queue/queue-empty? q) acc \
-                     (let (r (queue/queue-pop q)) \
+                   (if (queue/empty? q) acc \
+                     (let (r (queue/pop q)) \
                        (drain (second r) (+ acc (first r)))))) \
-                 (drain (fill (queue/queue-new) {n}) 0)"
+                 (drain (fill (queue/new) {n}) 0)"
             ),
         );
     }

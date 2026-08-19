@@ -1,39 +1,24 @@
-;; std/queue.blsp — purely functional FIFO queue and min-priority-queue.
+;; std/queue.blsp — purely functional FIFO queue.
 ;;
-;; FIFO queue: amortised O(1) push/pop using two lists (front + reversed back).
-;; Priority queue: O(n) insert / O(1) pop using a sorted list of [priority value]
-;; pairs. Simple enough for typical use; swap to a heap if n gets large.
+;; Amortised O(1) push/pop using two lists (front + reversed back). The min-priority
+;; queue is its sibling module `pq` (std/pq.blsp).
 
 (defmodule queue
-  "Purely functional FIFO queue and min-priority queue.
+  "Purely functional FIFO queue.
 
+    (let (q (-> (queue/new)
+                (queue/push 1)
+                (queue/push 2)
+                (queue/push 3)))
+      (queue/pop q))        ;; => [1 #<queue 2 front=2>]
 
-    ;; FIFO queue
-    (let (q (-> (queue/queue-new)
-                (queue/queue-push 1)
-                (queue/queue-push 2)
-                (queue/queue-push 3)))
-      (queue/queue-pop q))        ;; => [1 #<queue 2 front=2>]
-
-    ;; Priority queue (min first)
-    (let (pq (-> (queue/pq-new)
-                 (queue/pq-insert 3 :low)
-                 (queue/pq-insert 1 :high)
-                 (queue/pq-insert 2 :med)))
-      (queue/pq-pop pq))          ;; => [:high #<pq 2 min=2>]
-
-Both are **records**, so each is its own type rather than a map or list that happens to
-have the right shape: `queue?`/`pq?` are real predicates, neither is ever `=` to a
-look-alike, and each prints as itself (`inspect` shows the contents).")
+A queue is a **record**, so it is its own type rather than a map that happens to have the
+right shape: `queue/queue?` is a real predicate, a queue is never `=` to a look-alike map, and
+it prints as `#<queue …>` instead of leaking its two-list representation.")
 
 ;; ============================================================================
-;; FIFO queue — a `queue` RECORD of {front: list, back: reversed list, size: int}.
+;; A `queue` RECORD of {front: list, back: reversed list, size: int}.
 ;; Invariant: if front is nil, back is also nil (rebalance on push to empty).
-;;
-;; A record, not a bare map, so a queue has a nominal identity: `queue?` is a real
-;; predicate (not "a map that happens to carry a :front key"), a queue is never `=` to a
-;; look-alike map, it prints as `#<queue …>` instead of leaking its two-list
-;; representation, and it can carry impls of its own (`Display`/`Inspect` below).
 ;; ============================================================================
 
 (defrecord queue (front back size))
@@ -42,158 +27,70 @@ look-alike, and each prints as itself (`inspect` shows the contents).")
   "True if `x` is a FIFO queue — by identity, not by shape."
   (and (record? x) (= (record-id x) :queue/queue)))
 
-(defn queue-new ()
+(defn new ()
   "An empty FIFO queue."
   (queue nil nil 0))
 
-(defn queue-empty? (q)
+(defn empty? (q)
   "True if the queue has no elements."
   (= (get q :size) 0))
 
-;; Replaces `defrecord`'s generated `:size` accessor with an identical, documented one.
-(defn queue-size (q)
+(defn size (q)
   "Number of elements in the queue."
   (get q :size))
 
-(defn- queue-balance
+(defn- balance
   (front back size)
   "Rebalance: if front is nil, reverse back to front."
   (if (nil? front)
     (queue (reverse back) nil size)
     (queue front back size)))
 
-(defn queue-push (q v)
+(defn push (q v)
   "Return a queue with `v` added at the back."
-  (queue-balance (get q :front) (cons v (get q :back)) (+ (get q :size) 1)))
+  (balance (get q :front) (cons v (get q :back)) (+ (get q :size) 1)))
 
-(defn queue-pop (q)
+(defn pop (q)
   "Return `[front-value new-queue]`, or `:empty` if the queue is empty."
-  (if (queue-empty? q)
+  (if (empty? q)
     :empty
     (let (front (get q :front))
-      [(first front) (queue-balance (rest front) (get q :back) (- (get q :size) 1))])))
+      [(first front) (balance (rest front) (get q :back) (- (get q :size) 1))])))
 
-(defn queue-peek (q)
+(defn peek (q)
   "Return the front value without removing it, or `:empty` if empty."
-  (if (queue-empty? q)
+  (if (empty? q)
     :empty
     (first (get q :front))))
 
 ;; The queue joins the collection protocol (ADR-172 §7): `Seqable` gives it the generic
 ;; `seq`/`count`/`map`/`filter`/`fold`/`for` and `into`-from-a-queue; `Conjable` gives it
-;; `conj` and `into`-into-a-queue. So a queue is a first-class collection — the `queue-*`
-;; helpers below are now thin aliases over the protocol, not a parallel API.
+;; `conj` and `into`-into-a-queue. So a queue is a first-class collection — the helpers
+;; below are thin aliases over the protocol, not a parallel API.
 (impl Seqable
   queue/queue
   (to-seq [q]
     (if (= (get q :size) 0) nil (append (get q :front) (reverse (get q :back))))))
-(impl Conjable queue/queue (-conj [q v] (queue-push q v)))
+(impl Conjable queue/queue (-conj [q v] (push q v)))
 
-(defn queue-to-list (q)
+(defn to-list (q)
   "All elements in FIFO order as a list — the queue's `Seqable` view. `(seq q)` /
 `(into [] q)` / `(map f q)` / `(fold f init q)` / `(for (x q) …)` all work directly."
   (seq q))
 
-(defn queue-from-list (xs)
-  "Build a queue from a list or vector, front → back — i.e. `(into (queue-new) xs)`."
-  (into (queue-new) xs))
+(defn from-list (xs)
+  "Build a queue from a list or vector, front → back — i.e. `(into (queue/new) xs)`."
+  (into (new) xs))
 
-;; A queue shows its shape, not its two-list representation: `Display` is the O(1)
-;; summary (size + the element that pops next), `Inspect` the full FIFO contents for a
-;; log line or the REPL.
+;; A queue shows its shape, not its two-list representation: `Display` is the O(1) summary
+;; (size + the element that pops next), `Inspect` the full FIFO contents.
 (impl Display
   queue/queue
   (to-str [q]
-    (if (queue-empty? q)
+    (if (empty? q)
       "#<queue empty>"
-      (str "#<queue " (get q :size) " front=" (to-str (queue-peek q)) ">"))))
+      (str "#<queue " (get q :size) " front=" (to-str (peek q)) ">"))))
 
 (impl Inspect
   queue/queue
-  (inspect [q] (str "#<queue " (pr-str (queue-to-list q)) ">")))
-
-;; ============================================================================
-;; Min-priority queue — a `pq` RECORD wrapping a sorted list of [priority value]
-;; pairs, min priority first.
-;;
-;; The record earns its wrapper twice over. It gives the pq an identity (`pq?`, its own
-;; `Display`, never `=` to a bare list of pairs), and — because `()` ≡ `nil` is the one
-;; FALSY collection in Brood — it makes an *empty* pq truthy: the old representation was
-;; a bare list, so `(if pq …)` silently took the else branch on an empty queue while the
-;; same test on a non-empty one passed. That trap is now unrepresentable.
-;; ============================================================================
-
-(defrecord pq (entries))
-
-(defn pq? (x)
-  "True if `x` is a min-priority queue — by identity, not by shape."
-  (and (record? x) (= (record-id x) :queue/pq)))
-
-(defn pq-new ()
-  "An empty min-priority queue."
-  (pq nil))
-
-(defn pq-empty? (q)
-  "True if the priority queue has no elements."
-  (empty? (get q :entries)))
-
-(defn pq-size (q)
-  "Number of elements in the priority queue."
-  (count (get q :entries)))
-
-(defn pq-insert (q priority value)
-  "Return a priority queue with `[priority value]` inserted (min priority at front).
-Stable: among equal priorities, earlier inserts pop first (FIFO)."
-  (pq (pq-sorted-insert (get q :entries) priority value)))
-
-(defn- pq-sorted-insert
-  (entries pri val)
-  ;; Tail-recursive: accumulate the (reversed) higher-priority prefix and splice
-  ;; the new entry once, so a large queue can't overflow the stack on insert.
-  ;; Strict `<` so a new item stops *after* existing equal-priority items —
-  ;; keeping ties in insertion order (FIFO) rather than popping newest-first.
-  (letrec (go (fn (acc xs)
-                (cond
-                  (nil? xs) (reverse-onto acc (list [pri val]))
-                  (< pri (first (first xs))) (reverse-onto acc (cons [pri val] xs))
-                  else (go (cons (first xs) acc) (rest xs)))))
-    (go nil entries)))
-
-(defn pq-pop (q)
-  "Return `[min-value new-pq]`, or `:empty` if the queue is empty."
-  (if (pq-empty? q)
-    :empty
-    (let (entries (get q :entries))
-      [(second (first entries)) (pq (rest entries))])))
-
-(defn pq-peek (q)
-  "Return the minimum-priority value without removing it, or `:empty` if empty."
-  (if (pq-empty? q)
-    :empty
-    (second (first (get q :entries)))))
-
-(defn pq-peek-priority (q)
-  "Return the minimum priority (the key), or `:empty` if empty."
-  (if (pq-empty? q)
-    :empty
-    (first (first (get q :entries)))))
-
-;; The pq joins the protocol too: `Seqable` yields its values in priority order, so
-;; `seq`/`count`/`map`/`fold`/`for`/`into`-from work on a pq. (No `Conjable`: inserting
-;; needs a priority, which `conj`'s single element can't carry — use `pq-insert`.)
-(impl Seqable queue/pq (to-seq [q] (map second (get q :entries))))
-
-(defn pq-to-list (q)
-  "All values in priority order (min first) as a list — the pq's `Seqable` view (`(seq q)`)."
-  (seq q))
-
-(impl Display
-  queue/pq
-  (to-str [q]
-    (if (pq-empty? q)
-      "#<pq empty>"
-      (str "#<pq " (pq-size q) " min=" (to-str (pq-peek-priority q)) ">"))))
-
-(impl Inspect
-  queue/pq
-  (inspect [q] (str "#<pq " (pr-str (get q :entries)) ">")))
+  (inspect [q] (str "#<queue " (pr-str (to-list q)) ">")))

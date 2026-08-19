@@ -15785,3 +15785,38 @@ and is unchanged (already derived dynamically). Import state stays per-file: `Am
 same `set_imports` save/restore as `One`. Guarded by the new "clashes resolve lazily" cases in
 `namespace_test.blsp` (coexist / ambiguous-use-errors / qualified / `:exclude`) and the rewritten
 `modules_test.blsp` clash case.
+
+## ADR-236 — Stdlib functions drop the redundant module-name prefix (`queue/push`, not `queue/queue-push`)
+
+**Context.** Many std modules prefixed every function with their own module name — `queue-push`,
+`stream-map`, `version-compare`, `mcp-*-tool`, `sse-send`. Qualified, that reads doubled:
+`queue/queue-push`, `stream/stream-map`. The prefix was a pre-namespacing crutch for bare
+usability (`queue-push` self-describes; `stream-map` avoids colliding with core `map`), but under
+namespacing (ADR-065/070) the module qualifier already says which module a name is from, so the
+prefix is pure noise in the qualified spelling — and `set/union`, `map/merge-with`, `json/parse`,
+`string/split` already show the house style.
+
+**Decision.** Drop the redundant module-name prefix from **operation** functions: `queue/push`,
+`queue/pop`, `stream/map`, `version/compare`, `uuid/v4`, `http/get`, `log/info`. Three deliberate
+carve-outs:
+
+1. **`defrecord`-generated `-field` accessors stay** (`point-x`, `queue-front`). That is the Common
+   Lisp `defstruct` idiom, reads fine, and changing it would ripple through every record type in
+   the language for little gain — a different, bigger decision.
+2. **The type constructor and predicate keep the type name**, which equals the module name:
+   `queue/queue` (record constructor), `queue/queue?` (predicate) — mirroring `set/set`,
+   `set/subset?`. These name the *type*, they do not merely repeat the module.
+3. **A module holding two types splits**, because the un-prefixed operations would collide:
+   `queue` (FIFO: `push`/`pop`/`peek`) splits from `pq` (min-priority: `insert`/`pop`/`peek`),
+   co-existing as two modules.
+
+Where dropping the prefix makes an operation shadow a core name inside its own module (`pq/empty?`
+vs core `empty?`, `stream/map` vs core `map`), the body reaches the core one via the `/name` root
+escape (`(/empty? …)`), so a self-call cannot become accidental recursion.
+
+**Consequence.** Qualified calls read as intended — `queue/push`, `pq/insert`. Rolled out
+module-by-module (this ADR lands the `queue`/`pq` exemplar); each module is its own commit. Lazy
+`(:use …)` resolution (ADR-235) makes the bare-use shadowing (`(:use stream)` then bare `map`) a
+soft, at-use concern rather than a load-time wall, which is what makes the un-prefixed names safe to
+adopt now. The resolver's `pg-*` (PubGrub) internals are handled in the same pass by making them
+module-private rather than renaming — an over-export cleanup, not just a prefix drop.

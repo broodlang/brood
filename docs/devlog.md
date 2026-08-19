@@ -1834,3 +1834,19 @@ there is nothing to maintain in a second place (the whole point of the exercise)
 behavioural cases (coexist / ambiguous-use-errors / qualified / `:exclude`), and rewrote
 `modules_test.blsp`'s clash case from "eager hard error" to "lazy, only when used". `reserved-package-name?`
 (package-vs-module) is a different clash and is unchanged. All resolution-sensitive suites green.
+
+## 2026-08-19 — Stdlib prefix cleanup, exemplar: `queue`/`pq` (ADR-236)
+
+Started dropping the redundant module-name prefix from std operation functions — `queue/queue-push`
+→ `queue/push`, the smell being that the module qualifier already namespaces the name so repeating
+it (`queue/queue-push`, `stream/stream-map`) is noise. `set/union`/`json/parse` were already the
+house style. Carve-outs: `defrecord`'s `-field` accessors stay (CL `defstruct` idiom); the type
+constructor/predicate keep the type name (`queue/queue`, `queue/queue?`, like `set/set`).
+
+`queue` held two types, so it split: module `queue` (FIFO `push`/`pop`/`peek`/`new`/`empty?`/`size`/
+`to-list`/`from-list`) and new module `pq` (`insert`/`pop`/`peek`/`peek-priority`/…), same-shaped
+files (`std/queue.blsp` + `std/pq.blsp`, both embedded). `pq/empty?`'s body reaches core `empty?` as
+`/empty?` so the un-prefixed name can't self-recurse. Both are reserved package names now. queue_test
+repointed (27 pass); Display/Inspect verified (`#<queue 1 front=5>`, `#<pq 1 min=1>`). Next modules:
+`stream`, `version`, `uuid`, `log`, `http`, `sse`, `tcp`, `wasm`, `multimap`, `mcp`, and the resolver
+`pg-*` privacy cleanup — one commit each.

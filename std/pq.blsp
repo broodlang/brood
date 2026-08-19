@@ -1,0 +1,95 @@
+;; std/pq.blsp — purely functional min-priority queue.
+;;
+;; O(n) insert / O(1) pop using a sorted list of [priority value] pairs, min
+;; priority first. Simple enough for typical use; swap to a heap if n gets large.
+;; The FIFO queue is its sibling module `queue` (std/queue.blsp).
+
+(defmodule pq
+  "Purely functional min-priority queue (min priority pops first).
+
+    (let (q (-> (pq/new)
+                (pq/insert 3 :low)
+                (pq/insert 1 :high)
+                (pq/insert 2 :med)))
+      (pq/pop q))          ;; => [:high #<pq 2 min=2>]
+
+A `pq` is a **record**, so it is its own type rather than a list that happens to have the
+right shape: `pq/pq?` is a real predicate, it is never `=` to a look-alike, and it prints as
+itself. The record wrapper also makes an *empty* pq truthy — a bare list `()` is Brood's one
+falsy collection, so `(if pq …)` used to take the else branch on an empty queue; unrepresentable now.")
+
+;; A `pq` RECORD wrapping a sorted list of [priority value] pairs, min priority first.
+(defrecord pq (entries))
+
+(defn pq? (x)
+  "True if `x` is a min-priority queue — by identity, not by shape."
+  (and (record? x) (= (record-id x) :pq/pq)))
+
+(defn new ()
+  "An empty min-priority queue."
+  (pq nil))
+
+(defn empty? (q)
+  "True if the priority queue has no elements."
+  (/empty? (get q :entries)))
+
+(defn size (q)
+  "Number of elements in the priority queue."
+  (count (get q :entries)))
+
+(defn- sorted-insert
+  (entries pri val)
+  ;; Tail-recursive: accumulate the (reversed) higher-priority prefix and splice
+  ;; the new entry once, so a large queue can't overflow the stack on insert.
+  ;; Strict `<` so a new item stops *after* existing equal-priority items —
+  ;; keeping ties in insertion order (FIFO) rather than popping newest-first.
+  (letrec (go (fn (acc xs)
+                (cond
+                  (nil? xs) (reverse-onto acc (list [pri val]))
+                  (< pri (first (first xs))) (reverse-onto acc (cons [pri val] xs))
+                  else (go (cons (first xs) acc) (rest xs)))))
+    (go nil entries)))
+
+(defn insert (q priority value)
+  "Return a priority queue with `[priority value]` inserted (min priority at front).
+Stable: among equal priorities, earlier inserts pop first (FIFO)."
+  (pq (sorted-insert (get q :entries) priority value)))
+
+(defn pop (q)
+  "Return `[min-value new-pq]`, or `:empty` if the queue is empty."
+  (if (empty? q)
+    :empty
+    (let (entries (get q :entries))
+      [(second (first entries)) (pq (rest entries))])))
+
+(defn peek (q)
+  "Return the minimum-priority value without removing it, or `:empty` if empty."
+  (if (empty? q)
+    :empty
+    (second (first (get q :entries)))))
+
+(defn peek-priority (q)
+  "Return the minimum priority (the key), or `:empty` if empty."
+  (if (empty? q)
+    :empty
+    (first (first (get q :entries)))))
+
+;; The pq joins the collection protocol too: `Seqable` yields its values in priority order,
+;; so `seq`/`count`/`map`/`fold`/`for`/`into`-from work on a pq. (No `Conjable`: inserting
+;; needs a priority, which `conj`'s single element can't carry — use `pq/insert`.)
+(impl Seqable pq/pq (to-seq [q] (map second (get q :entries))))
+
+(defn to-list (q)
+  "All values in priority order (min first) as a list — the pq's `Seqable` view (`(seq q)`)."
+  (seq q))
+
+(impl Display
+  pq/pq
+  (to-str [q]
+    (if (empty? q)
+      "#<pq empty>"
+      (str "#<pq " (size q) " min=" (to-str (peek-priority q)) ">"))))
+
+(impl Inspect
+  pq/pq
+  (inspect [q] (str "#<pq " (pr-str (get q :entries)) ">")))
