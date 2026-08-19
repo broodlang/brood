@@ -496,7 +496,7 @@ so this is the whole of it — nothing is unattributed any more:
 |---|---|---|
 | 1184 × 1 | 1184 | the `Box<Process>` (the `Heap` is inline in it) |
 | 256 × 2 | 510 | one is `vm_call_ics` (4 × 64 B) |
-| 160 × 2 | 319 | one is `vm_fast_links` (4 × 40 B) |
+| 160 × 2 | 319 | one is `vm_fast_links` (4 × 40 B) — **no longer allocated on this path since 2026-08-18**, see below |
 | 184 × 1 | 184 | `Arc<Mailbox>` (168 B + Arc header) |
 | 180 × 1 | 179 | |
 | 84 × 2 | 167 | one is `arm_ic_blocks` |
@@ -507,10 +507,33 @@ Identities come from differencing the same workload with `(hibernate)`, which dr
 one 256, one 160 and one 84 — so **the IC tables really are ~500 B/process**, confirming the
 536 B estimate by direct measurement rather than by adding up `size_of`s.
 
+> **Updated 2026-08-18 — the `vm_fast_links` row above is now zero for a parked process.**
+> The mirror is allocated by its only writer (`Heap::fastlink_slot_grown`) instead of being
+> pre-grown in `vm_arm_block`, so a process that never JIT-links a site never allocates it:
+> 19,968 of 20,001 `spawn-live` units allocate **0** slots instead of 14. Measured with
+> `(mem-bytes)`, the saving is **192.6 B/process** — and the accompanying RSS drop
+> (6364 → 6093 B/process, −4.3%) tracked that allocation *fully*.
+>
+> **Size these items at the parked state, not at teardown.** A teardown slot count read
+> 14 sites × 48 B = 672 B and was 3.5× too high, because a unit parked in `receive` has
+> entered only ~4 call sites' worth of arms; it reaches 14 only after running its body, by
+> which time most units have died and freed. Peak memory is set by the parked state, since
+> that is the state all N processes are in at once. Confirmed by construction: adding 24
+> call sites to the unit body moved the saving to 1345.6 B ≈ 193 + 24 × 48, i.e. exactly
+> **48 B per call site entered**. (An earlier version of this note inferred a "1:0.35
+> allocation-to-RSS discount" from that 672 B and told the next reader to size the remaining
+> IC fixes at a third of face value. That was a measured-vs-inferred comparison error and is
+> **retracted** — there is no discount. `(mem-bytes)`/`(mem-peak)` are the instrument for an
+> allocation question; RSS answers a different and noisier one.)
+
 What this changes:
 
 - **M2b is the single biggest reducible item** at ~500 B/process (≈150 MB at 300k), second
-  only to the `Box<Process>` itself, which is irreducible without M7.
+  only to the `Box<Process>` itself, which is irreducible without M7. *(2026-08-18: the
+  mirror half of that ~500 B is shipped — see the note above. What remains reducible here is
+  `vm_call_ics` + `vm_global_ics`, which `vm_arm_block` still grows eagerly per activated
+  arm — `vm_call_ics` at a measured 64 B per site; `vm_global_ics` is unmeasured, so size it
+  before costing any work against it.)*
 - The **second 256 / 160 / 84 of each pair survives hibernate** and is still unidentified by
   *name* (though now pinned by size). Identifying them needs allocation backtraces, not more
   differencing — that is the next measurement, and it is cheap: tag the histogram at
@@ -537,6 +560,26 @@ What this changes:
 > resolution point exists.
 
 - [ ] **M2b — sharing the IC tables. Two findings, one of which corrects the other.**
+  **Partly shipped 2026-08-18: the `vm_fast_links` mirror is no longer allocated eagerly.**
+  `vm_arm_block` pre-grew *both* tables by the arm's total `nsites` on first entry, whether
+  or not this process would ever execute those sites — and a spawn-once-call-once process
+  never does. The mirror now grows in `Heap::fastlink_slot_grown`, its only writer. That is
+  not sharing; it is *not allocating what is never written*, and it took the cheaper half of
+  M2b's win (192.6 B/process measured) **without** touching the read protocol below. Safe by
+  construction rather than by luck: every reader already tolerated a short table — the VM
+  probe reads `.get(abs)`, both publish paths `.get_mut(abs)`, and JIT'd code bounds-checks
+  `site < len` against a length it re-fetches after each Brood→Brood call precisely because a
+  cold nested call may grow and realloc this table. A missing slot reads exactly like an
+  unpublished one. Time-neutral at both ceilings (`fib` is the load-bearing row — the in-IR
+  fast link is worth ~20% there, so +0.0% is what proves linking still happens).
+
+  **What is left of M2b is the fat table**, `vm_call_ics`, still grown eagerly per activated
+  arm at 64 B/site — plus `vm_global_ics`. Sharing it faces the unchanged difficulty below.
+  Two smaller follow-ons were named alongside the mirror work: shrink `CallIcEntry` 64 → ~48 B,
+  and share entries for frozen callees. **Cost them at the parked state (48 B per call site
+  *entered*, ~4 while parked), not at a teardown slot count** — see the 2026-08-18 note in the
+  allocation profile above, which retracts the earlier "size these at a third of face value"
+  caution as a measurement error.
 
   **Still true and useful:** `vm_call_ics` is *never read raw by JIT code* — only
   `vm_fast_links` is, via `vm_fast_links_base()`. Verified by grep: no reference to
