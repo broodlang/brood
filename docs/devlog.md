@@ -1634,6 +1634,79 @@ Living-doc references in `tooling.md`/`module-index.md`/`node-connect.md` update
 historical entries in `decisions.md` and `devlog-archive.md` are left as the record of what those
 primitives were called at the time. See ADR-231.
 
+
+## 2026-08-19 — Bump to 0.4.0: the stdlib-namespacing renames are a compatibility boundary
+
+The `string/*` (ADR-230) and `file/*` (ADR-231) renames removed the old bare/`string-`/`file-`
+primitive names — a hard break for any published package that called them. They shipped while the
+workspace version still read `0.3.11`, so `(brood-version)` reported the *same* number before and
+after the break, and a package's `:brood` runtime-version constraint (ADR-209) had no way to gate
+it: `:brood ">= 0.3.11"` was satisfied by a brood that predated the renames, and the only symptom of
+running on the wrong one was a pile of `unbound symbol` errors deep in a dependency. (That is
+exactly how the hive deploy silently pinned an incompatible brood.)
+
+Bump the workspace version **0.3.11 → 0.4.0** so post-rename brood reports a strictly higher number,
+and the ecosystem's packages now declare `:brood ">= 0.4.0"` — a real gate that fails setup with a
+clear message instead of a cryptic unbound-symbol cascade. This is the first version bump used to
+*mark* a break rather than just accrue features; the lesson is to bump on the break, not after it
+bites. (Greenfield still means we break freely — 0.4.0 is a signpost, not a stability promise.)
+
+
+## 2026-08-19 — The dependency resolver is now brood-version aware (ADR-209)
+
+The root-project `:brood` gate was only ever checked at setup on the *root* manifest — the resolver
+picked dependency versions with no idea what runtime any of them needed. So the newest release of a
+dep could require a brood the running one didn't have, and you'd learn that only as `unbound symbol`
+errors deep inside it, not as a resolution failure.
+
+Now `:brood` rides through the whole registry path. Publish sends it in the release metadata
+envelope; hive stores it in a new `releases.brood` column (idempotent `ADD COLUMN`, NULL =
+unconstrained) and serves it in the `/releases` resolution slice; and the resolver's pure provider
+**filters candidate releases to the ones the running brood satisfies** — so a version the runtime
+can't load is never selected. When a package's releases are *all* incompatible, a pre-solve pass
+raises a clear, brood-specific error ("no published release of X is compatible with the brood you
+are running (0.4.0) — X's releases require Brood >= 0.5.0 — upgrade brood, or depend on an older X")
+instead of the backtracker's opaque "no version satisfies". Backward compatible: a release with no
+stored `:brood` (everything published before this) reads as unconstrained, so existing resolution is
+unchanged — verified by resolving `store 0.2.2` off the live registry, which serves no `:brood`.
+
+Bootstrap note: hive *is* one of the packages, so the first publish of the migrated deps necessarily
+lands on the pre-feature registry (their `:brood` is sent but not stored); the resolver serves it for
+every release published once the upgraded hive is live.
+
+
+## 2026-08-19 — Release bundles: root a dependency module only when its name collides
+
+A `nest release` bundle embeds every dependency module under a package-rooted key (`store/repo`,
+ADR-070). The boot loader (`run-bundle` → `require-force-in`) then loaded each one UNDER its
+package context, so its `(defmodule repo)` bound `store/repo/…`. But a real app references a dep
+module by its BARE name — hive's `(:alias repo)`, a bare `web/router/through-handler` — exactly as
+it does in a dev run, where a dep module is found by basename on the load-path and binds bare. So
+the bundle bound `store/repo/*` while every consumer (and dev) referenced `repo/*`: hive's bundle
+crash-looped on `require: cannot find module 'repo'`, then on the next dep once that was patched.
+Rooting was **all-or-nothing** and mismatched dev.
+
+Rooting exists for exactly one reason — two dependencies that ship a module of the SAME name
+(`alpha/parser` + `beta/parser`) must stay distinct — so make it fire for exactly that:
+
+- **`bundle-module-package` roots a key only when its short name collides** across packages
+  (`bundle-short-collides?` over the rebuilt `*package-modules-of*`). A uniquely-named dep module
+  loads at ROOT and binds bare (`repo`, `pool`, `wire/bytes`) — matching dev and matching how apps
+  reference it. A colliding one stays rooted, and the consumer references it qualified
+  (`alpha/parser`) — the ADR-070 guarantee, still green.
+- **`bundle-resolve-bare` makes a bare require order-independent**: a bare `repo` / `pool` that
+  isn't embedded directly resolves to the dependency's embedded rooted key, so a root module
+  required before the dep whose module it uses still loads (and both names are marked provided, so
+  the load-all loop never re-evaluates the source — no redefined-macro double-load).
+- The full transitive dependency set the collision test needs is baked into the bundle manifest as
+  `:bundled-packages` by `bundle-collect` (the direct `:dependencies` list omits transitive deps
+  like `store`, which is exactly the one hive tripped on) and rebuilt into `*package-modules-of*`
+  at boot.
+
+Verified: the ADR-070 same-name-deps bundle test stays green, the hive bundle boots through to its
+DB connection (was `cannot find module`), and the full suite is 4674/4674. This is a real dev/release
+parity fix, not hive-specific — any app with a transitive or bare-referenced dependency was affected.
+
 ## 2026-08-19 — KI-36 reproduced and fixed: the deadline analysis was aimed at the wrong branch
 
 A repeated-run gate before opening new work — three consecutive `make test` passes on the merged
