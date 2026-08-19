@@ -1633,3 +1633,20 @@ the primitive, so they must track the rename — e.g. a failing read now reads `
 Living-doc references in `tooling.md`/`module-index.md`/`node-connect.md` updated too; the dated
 historical entries in `decisions.md` and `devlog-archive.md` are left as the record of what those
 primitives were called at the time. See ADR-231.
+
+
+## 2026-08-19 — Bump to 0.4.0: the stdlib-namespacing renames are a compatibility boundary
+
+The `string/*` (ADR-230) and `file/*` (ADR-231) renames removed the old bare/`string-`/`file-`
+primitive names — a hard break for any published package that called them. They shipped while the
+workspace version still read `0.3.11`, so `(brood-version)` reported the *same* number before and
+after the break, and a package's `:brood` runtime-version constraint (ADR-209) had no way to gate
+it: `:brood ">= 0.3.11"` was satisfied by a brood that predated the renames, and the only symptom of
+running on the wrong one was a pile of `unbound symbol` errors deep in a dependency. (That is
+exactly how the hive deploy silently pinned an incompatible brood.)
+
+Bump the workspace version **0.3.11 → 0.4.0** so post-rename brood reports a strictly higher number,
+and the ecosystem's packages now declare `:brood ">= 0.4.0"` — a real gate that fails setup with a
+clear message instead of a cryptic unbound-symbol cascade. This is the first version bump used to
+*mark* a break rather than just accrue features; the lesson is to bump on the break, not after it
+bites. (Greenfield still means we break freely — 0.4.0 is a signpost, not a stability promise.)
