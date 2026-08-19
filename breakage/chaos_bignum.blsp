@@ -19,23 +19,23 @@
 (println "--- growing the monster ---")
 (def monster (repeated-square 2 20))
 (def monster-str (number->string monster))
-(println "digit count:" (string-length monster-str))
+(println "digit count:" (string/length monster-str))
 
 ;; the string should start with 1 and end with 6 (2^any is always even, but
 ;; 2^(large even) mod 10 … let's just print first and last chars)
-(println "first digit:" (char-at monster-str 0))
-(println "last  digit:" (char-at monster-str (- (string-length monster-str) 1)))
+(println "first digit:" (string/char-at monster-str 0))
+(println "last  digit:" (string/char-at monster-str (- (string/length monster-str) 1)))
 
 (println "--- arithmetic on the monster ---")
 ;; Add: result has same number of digits or one more
 (def monster+1 (+ monster 1))
 (println "monster+1 last digit:"
-  (char-at (number->string monster+1) (- (string-length (number->string monster+1)) 1)))
+  (string/char-at (number->string monster+1) (- (string/length (number->string monster+1)) 1)))
 
 ;; Multiply by a large prime: 2^(2^20) × 999_999_937
 (def mega-prime 999999937)
 (def big-product (* monster mega-prime))
-(println "big-product digit count:" (string-length (number->string big-product)))
+(println "big-product digit count:" (string/length (number->string big-product)))
 
 ;; Modular reduction: monster mod a small prime should be fast (single division)
 (def small-prime 999999893)
@@ -46,7 +46,7 @@
 (def divisor 123456789012345678)
 (def q (quot monster divisor))
 (def r (rem monster divisor))
-(println "quot digit count:" (string-length (number->string q)))
+(println "quot digit count:" (string/length (number->string q)))
 (println "remainder:" r)
 ;; Verify: q*divisor + r == monster
 (println "reconstruction ok?" (= (* q divisor) (- monster r)))
@@ -56,7 +56,7 @@
 (def reparsed (string->number monster-str))
 (println "round-trip equal?" (= reparsed monster))
 ;; Substring of the digit string, parsed as a number
-(def chunk (substring monster-str 0 18))
+(def chunk (string/substring monster-str 0 18))
 (println "first 18 digits as int:" (string->number chunk))
 
 (println "--- GCD stress: gcd(monster, monster+1) must be 1 ---")
@@ -68,7 +68,7 @@
 ;; fac(1000) has ~2568 digits; stresses a different allocation pattern (many small muls)
 (defn fac (n acc) (if (= n 0) acc (fac (- n 1) (* acc n))))
 (def fac1000 (fac 1000 1))
-(println "1000! digit count:" (string-length (number->string fac1000)))
+(println "1000! digit count:" (string/length (number->string fac1000)))
 (println "1000! mod 1000000007:" (rem fac1000 1000000007))
 
 (println "--- DONE ---")

@@ -72,11 +72,11 @@
 ;; Build a source string for a long `do` block with 500 `def` forms
 (defn make-def-src (n)
   (str "(do "
-    (join " " (map (fn (i) (str "(def chaos-var-" i " " (* i i) ")")) (range n)))
+    (string/join " " (map (fn (i) (str "(def chaos-var-" i " " (* i i) ")")) (range n)))
     ")"))
 
 (def big-do-src (make-def-src 500))
-(println "big-do-src length:" (string-length big-do-src))
+(println "big-do-src length:" (string/length big-do-src))
 
 ;; Read it back as a value (s-expression)
 (def big-do-form (read-string big-do-src))

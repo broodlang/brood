@@ -75,7 +75,7 @@
       us)))
 
 (defn report (what us)
-  (println (str (pad-right what 16)
+  (println (str (string/pad-right what 16)
              " chunks="
              chunks
              " size="

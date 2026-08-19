@@ -42,7 +42,7 @@
               (mk (+ n 3))
               (mk (+ n 4))
               (mk (+ n 5))))
-      (pressure (- n 1) (str acc (substring r 0 1))))))
+      (pressure (- n 1) (str acc (string/substring r 0 1))))))
 
 ;; diff--at shape: vector/map handle operands held across nth/assoc sub-calls.
 (defn vdiff (old new i n acc)
@@ -62,7 +62,7 @@
   (let (s (pressure 150 "")
         v (into [] (range 12))
         d (vdiff v v 0 1200 {}))
-    (send parent [:done (+ (string-length s) (count d))])))
+    (send parent [:done (+ (string/length s) (count d))])))
 
 (defn c3-spawn (parent n)
   (when (> n 0) (spawn (c3-worker parent n)) (c3-spawn parent (- n 1))))
