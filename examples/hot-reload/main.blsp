@@ -7,7 +7,7 @@
 ;; iteration — without restarting.
 ;;
 ;; One line of opt-in is all it takes (the `reload/…` reference loads the module):
-;;   (reload/reload-on-change "…path…")
+;;   (reload/on-change "…path…")
 ;;
 ;; Mechanism (docs/shared-code.md): `load` re-runs the file's top-level
 ;; `(defn greet …)`, which rebinds the `greeter/greet` global in the shared RUNTIME
@@ -19,7 +19,7 @@
 (def greeter-path (path-join here "greeter.blsp"))
 
 (load greeter-path)
-(reload/reload-on-change greeter-path)
+(reload/on-change greeter-path)
 
 (defn ticker (n)
   (greeter/greet)

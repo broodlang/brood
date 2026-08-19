@@ -1221,7 +1221,7 @@ fn cmd_run(
     // reuses ADR-119 Phase 2's incremental cache, so only the changed file and
     // whatever depended on it actually get re-checked; everything else is a
     // cheap fingerprint compare. Its own errors are swallowed by
-    // `reload-on-change`'s `on-reload` contract, same as a broken reload. Safe
+    // `on-change`'s `on-reload` contract, same as a broken reload. Safe
     // to call from every watched file's own reload process concurrently — the
     // dependency recorder is per-`Heap` (`Heap::check_dep_rec`), not a shared
     // thread-local, so parallel dep-capture across a directory watch's many
@@ -1240,7 +1240,7 @@ fn cmd_run(
             .iter()
             .map(|p| {
                 format!(
-                    "(reload/reload-on-change \"{}\" {})",
+                    "(reload/on-change \"{}\" {})",
                     brood::introspect::escape_brood_string(p),
                     on_reload
                 )

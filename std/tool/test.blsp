@@ -1235,7 +1235,7 @@ the test rather than hanging the run."
     (receive
       ([:all-results rs]
         ;; The driver exits right after sending its results, which fires a monitor
-        ;; `:down`. Drop the monitor and flush that late `:down` (the gen-call idiom,
+        ;; `:down`. Drop the monitor and flush that late `:down` (the call idiom,
         ;; std/proc/gen.blsp) so it can't pile up in this process's mailbox: a scoped
         ;; run calls `drain-runner` once PER FILE from one long-lived process, and a
         ;; leaked `:down` per file made every later `receive` scan past them all — O(n²)

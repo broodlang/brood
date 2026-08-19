@@ -204,12 +204,12 @@
                  "daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854")
         (encoding/hex-encode-bytes m)))))
 
-(describe "hash-string"
+(describe "string"
   (test "returns an integer"
-    (is (int? (hash/hash-string "hello"))))
+    (is (int? (hash/string "hello"))))
   (test "deterministic"
-    (assert= (hash/hash-string "foo") (hash/hash-string "foo")))
+    (assert= (hash/string "foo") (hash/string "foo")))
   (test "different strings give different hashes (usually)"
-    (is (not= (hash/hash-string "abc") (hash/hash-string "xyz"))))
+    (is (not= (hash/string "abc") (hash/string "xyz"))))
   (test "empty string"
-    (is (int? (hash/hash-string "")))))
+    (is (int? (hash/string "")))))

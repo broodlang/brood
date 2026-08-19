@@ -23,7 +23,7 @@
   (swap-registry! protocol/*protocols* (fn (m) (assoc m pname specs)))
   nil)
 
-(defn protocol-ops (pname)
+(defn ops (pname)
   "The op specs declared for interface `pname` (or nil) — which ops a module claiming
   `(:implements pname)` must define, and at what arities."
   (get *protocols* pname))

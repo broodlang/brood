@@ -11,10 +11,10 @@
 
 (describe "behaviours record their ops for the checker"
   (test "a behaviour registers ops without defining dispatching fns"
-    (assert= (protocol-ops 'Renderable)
+    (assert= (ops 'Renderable)
       (list '(render-it [model]) '(mount-it [params]))))
   (test "declaring a behaviour defines no function of its own"
     ;; unlike an ability op, which defines a generic fn
     (refute (bound? 'render-it)))
   (test "an unknown behaviour has no ops"
-    (assert= (protocol-ops 'No-Such) nil)))
+    (assert= (ops 'No-Such) nil)))

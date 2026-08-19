@@ -17,17 +17,17 @@
     (call [:set x] [n x]))
   ; reply old, set new
 
-  (test "a cast threads new state; gen-call reads it synchronously"
-    (let (c (spawn-server counter 0)) (! c :inc) (! c [:add 10]) (assert= (gen-call c :value) 11)))
+  (test "a cast threads new state; call reads it synchronously"
+    (let (c (spawn-server counter 0)) (! c :inc) (! c [:add 10]) (assert= (call c :value) 11)))
 
   (test "a no-op cast leaves state unchanged"
-    (let (c (spawn-server counter 5)) (! c :ping) (assert= (gen-call c :value) 5)))
+    (let (c (spawn-server counter 5)) (! c :ping) (assert= (call c :value) 5)))
 
   (test "a call can both reply and update state"
     (let (c (spawn-server counter 7))
-      (assert= (gen-call c [:set 100]) 7)
+      (assert= (call c [:set 100]) 7)
       ; replies the OLD value
-      (assert= (gen-call c :value) 100)))
+      (assert= (call c :value) 100)))
   ; and the new state took effect
 
   (test "casts are ordered, and a later call observes all of them"
@@ -35,7 +35,7 @@
       (! c :inc)
       (! c :inc)
       (! c :inc)
-      (assert= (gen-call c :value) 3))))
+      (assert= (call c :value) 3))))
 
 (describe "gen: sleep"
   :isolated
@@ -54,8 +54,8 @@
   (test "two gen-calls to two servers get their own replies"
     (let (a (spawn-server echo nil) b (spawn-server echo nil))
       ;; refs tag each call, so interleaved replies can't be confused
-      (assert= (gen-call a [:double 3]) 6)
-      (assert= (gen-call b [:double 21]) 42))))
+      (assert= (call a [:double 3]) 6)
+      (assert= (call b [:double 21]) 42))))
 
 (describe "gen: query and stop"
   :isolated
@@ -72,12 +72,12 @@
     (let (s (spawn-server kv {}))
       (! s [:put :a 1])
       (! s [:put :b 2])
-      (assert= (gen-call s [:get :a]) 1)
-      (assert= (gen-call s [:get :b]) 2)
-      (assert= (gen-call s :size) 2)
+      (assert= (call s [:get :a]) 1)
+      (assert= (call s [:get :b]) 2)
+      (assert= (call s :size) 2)
       ;; another cast confirms state survived the queries
       (! s [:put :c 3])
-      (assert= (gen-call s :size) 3)))
+      (assert= (call s :size) 3)))
 
   (test "(stop pid) ends the receive loop cleanly"
     ;; After stop, further casts to the dead pid are silently dropped (sends to
@@ -86,7 +86,7 @@
     ;; the surrounding test completes (i.e. the process doesn't deadlock).
     (let (s (spawn-server kv {}))
       (! s [:put :a 1])
-      (assert= (gen-call s :size) 1)
+      (assert= (call s :size) 1)
       (assert= (stop s) nil))))
 
 (describe "gen: info handles non-envelope messages"
@@ -107,14 +107,14 @@
     (let (s (spawn-server inbox nil))
       (send s [:note 42])
       ; not a cast/call — goes to `info`
-      (assert= (gen-call s :last) 42)))
+      (assert= (call s :last) 42)))
 
   (test "a message matched by no clause is dropped, not leaked"
     (let (s (spawn-server inbox nil))
       (send s [:junk :unhandled])
       ; matches nothing → default catch-all drops it
       (send s [:note 7])
-      (assert= (gen-call s :last) 7)))
+      (assert= (call s :last) 7)))
   ; server still responsive
 
   (test "an info clause receives the [:down …] of a monitored process"
@@ -126,7 +126,7 @@
       (stop w)
       ; w exits normally → [:down ref w :normal]
       (sleep 30)
-      (assert= (gen-call s :last) :normal))))
+      (assert= (call s :last) :normal))))
 
 (describe "gen: init runs once"
   :isolated
@@ -140,10 +140,10 @@
   (test "init transforms the seed exactly once (not per message)"
     (let (s (spawn-server doubler 10))
       ; init: 10*2 = 20
-      (assert= (gen-call s :value) 20)
+      (assert= (call s :value) 20)
       (! s :inc)
       (! s :inc)
-      (assert= (gen-call s :value) 22))))
+      (assert= (call s :value) 22))))
 ; 20+1+1, not re-doubled
 
 (describe "gen: terminate runs on stop"
@@ -155,26 +155,26 @@
 
   (test "terminate fires on (stop) with reason :normal"
     (let (s (spawn-server closer (self)))
-      (assert= (gen-call s :ping) :pong)
+      (assert= (call s :ping) :pong)
       (stop s)
       (assert= (receive ([:closed r] r) (after *test-wait-ms* :no-terminate)) :normal))))
 
-(describe "gen: gen-call timeout and death"
+(describe "gen: call timeout and death"
   :isolated
   ;; A server with no call/query clause never replies to a call — the call
   ;; envelope is dropped by the catch-all, so the caller must time out.
   (defprocess silent (s) (cast :ignore s))
 
-  (test "gen-call-timeout raises when the server never replies"
+  (test "call-timeout raises when the server never replies"
     (let (s (spawn-server silent nil))
-      (assert= (try (gen-call-timeout s :anything 30) (catch e :timed-out)) :timed-out)))
+      (assert= (try (call-timeout s :anything 30) (catch e :timed-out)) :timed-out)))
 
-  (test "gen-call raises promptly when the server is already dead"
+  (test "call raises promptly when the server is already dead"
     (let (s (spawn-server silent nil))
       (stop s)
       (sleep 20)
       ;; the monitor on a dead pid fires [:down … :noproc] at once — no 2 s wait
-      (assert= (try (gen-call-timeout s :anything 2000) (catch e :died)) :died))))
+      (assert= (try (call-timeout s :anything 2000) (catch e :died)) :died))))
 
 (describe "gen: named and linked spawn"
   :isolated
@@ -183,12 +183,12 @@
   (test "spawn-server-named registers the server for whereis"
     (let (p (spawn-server-named :echo-srv echo2 nil))
       (assert= (whereis :echo-srv) p)
-      (assert= (gen-call (whereis :echo-srv) [:echo 99]) 99)
+      (assert= (call (whereis :echo-srv) [:echo 99]) 99)
       (stop p)))
 
   (test "spawn-server-link links the server but a normal stop won't take us down"
     (let (p (spawn-server-link echo2 nil))
-      (assert= (gen-call p [:echo 5]) 5)
+      (assert= (call p [:echo 5]) 5)
       (stop p)
       (is true))))
 ; reached here ⇒ the linked normal exit didn't kill us
@@ -209,18 +209,18 @@
 
   (test "code-change runs the migration clause, reshaping the loop state"
     (let (c (spawn-server migrating 5))
-      (assert= (gen-call c :shape) :int)
-      (assert= (gen-call c :value) 5)
+      (assert= (call c :shape) :int)
+      (assert= (call c :value) 5)
       (code-change c)
       ;; the next query observes the migrated state — same server, new shape
-      (assert= (gen-call c :shape) :map)
-      (assert= (gen-call c :value) {:count 5 :ver 2})
+      (assert= (call c :shape) :map)
+      (assert= (call c :value) {:count 5 :ver 2})
       (stop c)))
 
   (test "code-change on a server without the clause is a safe no-op"
     (let (p (spawn-server plain 7))
       (code-change p)
-      (assert= (gen-call p :value) 7) ; dropped by the catch-all; state unchanged
+      (assert= (call p :value) 7) ; dropped by the catch-all; state unchanged
       (stop p)))
 
   ;; Cross-process: build the pre-migration state in one process, ship the server's
@@ -231,5 +231,5 @@
       (spawn (send me (spawn-server migrating 3)))
       (let (c (receive (p p)))
         (code-change c)
-        (assert= (gen-call c :value) {:count 3 :ver 2})
+        (assert= (call c :value) {:count 3 :ver 2})
         (stop c)))))

@@ -81,7 +81,7 @@ no edit is sent."
   "Normalize a push `view` to `{:text :splice :cursors :names}`. Three wire shapes:
 the presence triple `[text markers names]` (closure edits and the seed), a DELTA map
 `{:splice [lo hi repl]? :markers … :participants …}` (structured `buffer-splice` /
-`buffer-marker-move` / `[:io-write]` ops — O(change), the document never ships), or a
+`buffer-marker-move` / `[:write]` ops — O(change), the document never ships), or a
 bare text string (plain projections, tests)."
   (cond
     (map? view)

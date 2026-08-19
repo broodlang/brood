@@ -2,7 +2,7 @@
 ;; Verifies that `with-out`/`with-err` reroute the prelude's print/println to a
 ;; port, that the default ports are unchanged (so `with-out-str` still captures),
 ;; and that a `process-port` carries output across a process boundary as
-;; `[:io-write s]` (the buffer/editor path). Register-only — `nest test` discovers it.
+;; `[:write s]` (the buffer/editor path). Register-only — `nest test` discovers it.
 
 (defmodule io-test (:use test) (:use io))
 
@@ -12,27 +12,27 @@
   (test "with-out routes println to a process-port"
     (let (me (self))
       (with-out (process-port me) (println "hi"))
-      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "hi\n")))
+      (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "hi\n")))
 
   (test "with-out routes print (no newline) and joins args with spaces"
     (let (me (self))
       (with-out (process-port me) (print "a" "b" 42))
-      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "a b 42")))
+      (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "a b 42")))
 
   (test "fn-port hands each written string to a callback"
     (let (me (self))
-      (with-out (fn-port (fn (s) (send me [:io-write s]))) (println "cb"))
-      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "cb\n")))
+      (with-out (fn-port (fn (s) (send me [:write s]))) (println "cb"))
+      (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "cb\n")))
 
-  (test "io-write writes a string straight to a port"
+  (test "write writes a string straight to a port"
     (let (me (self))
-      (io-write (process-port me) "direct")
-      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "direct")))
+      (write (process-port me) "direct")
+      (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "direct")))
 
   (test "with-err reroutes eprintln"
     (let (me (self))
       (with-err (process-port me) (eprintln "err"))
-      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "err\n"))))
+      (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "err\n"))))
 
 (describe "io: the prelude defaults are untouched"
   (test "with-out-str still captures stdout (regression for the print rewire)"
@@ -50,15 +50,15 @@
       (assert= (with-out-str (println "after-throw")) "after-throw\n"))))
 
 ;; ---- the Port ability -------------------------------------------------------
-;; `io-write` is an ability op, so a port is any value with an impl: a bare 1-arg fn
+;; `write` is an ability op, so a port is any value with an impl: a bare 1-arg fn
 ;; (the original representation, kept working by the `:fn` impl) or a record that
 ;; carries its target and prints as itself.
 
 (describe "io: ports are Port impls"
   (test "a bare 1-arg fn is a port"
     (let (me (self))
-      (io-write (fn (s) (send me [:io-write s])) "raw fn")
-      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "raw fn")))
+      (write (fn (s) (send me [:write s])) "raw fn")
+      (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "raw fn")))
   (test "port? is true for a fn port and for each port record"
     (is (port? (fn (s) s)))
     (is (port? (stdout-port)))
@@ -75,13 +75,13 @@
     (assert= (to-str (file-port "/tmp/x.log")) "#<port file /tmp/x.log>")
     (is (includes? (to-str (process-port (self))) "#<port process ")))
   (test "a stdout port record still routes through the capture stack"
-    (assert= (with-out-str (io-write (stdout-port) "captured")) "captured"))
+    (assert= (with-out-str (write (stdout-port) "captured")) "captured"))
   (test "port-fn adapts a record port to the bare fn *out* holds"
     (let (me (self)
           f (port-fn (process-port me)))
       (is (fn? f))
       (f "adapted")
-      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "adapted")))
+      (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "adapted")))
   (test "port-fn passes a fn port straight through"
     (let (f (fn (s) s))
       (is (= (port-fn f) f)))))
@@ -91,15 +91,15 @@
 (defrecord counting-port (target))
 (impl Port
   io-test/counting-port
-  (io-write [p s] (io-write (get p :target) (str "[" (string/length s) "] " s))))
+  (write [p s] (write (get p :target) (str "[" (string/length s) "] " s))))
 
 (describe "io: a third-party port type"
   (test "a record from another module is a port once it impls Port"
     (is (port? (counting-port (stdout-port))))
-    (assert= (with-out-str (io-write (counting-port (stdout-port)) "abc")) "[3] abc"))
+    (assert= (with-out-str (write (counting-port (stdout-port)) "abc")) "[3] abc"))
   (test "with-out installs a third-party port like any other"
     (let (me (self))
       (with-out (counting-port (process-port me)) (print "xy"))
-      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "[2] xy")))
+      (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "[2] xy")))
   (test "a value with no Port impl raises the named ability error"
-    (assert-error (io-write 42 "nope"))))
+    (assert-error (write 42 "nope"))))

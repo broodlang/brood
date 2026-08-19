@@ -13,7 +13,7 @@
 ;; `file-`/`fn-` shorthands) is an `io` port (the redirectable string sink —
 ;; std/io.blsp) plus a minimum level, a filter, and a formatter: it gates the record and
 ;; writes one formatted line. So "log to a buffer" is a `process-backend` whose port
-;; sends `[:io-write s]` to the process that owns the buffer (e.g. an editor's
+;; sends `[:write s]` to the process that owns the buffer (e.g. an editor's
 ;; *Messages*) — the same share-nothing path `print` redirection uses, never a
 ;; mutated value. The logger reuses ports rather than inventing its own sink.
 ;;
@@ -23,7 +23,7 @@
 ;; LogBackend` in *your* module, with no change here. Reuse `backend-passes?` for the
 ;; standard level/filter gate.
 
-; ports + io-write
+; ports + write
 (defmodule log
   "An async, safe logger. A `gen` process holds a list of
 backends; each log call is a cast, so it never blocks the caller, and the single
@@ -92,7 +92,7 @@ backend's policy — a custom `LogBackend` should call this so it honours the sa
   log/line-backend
   (backend-emit [b record]
     (when (backend-passes? b record)
-      (io-write (get b :sink) ((get b :format) record)))
+      (write (get b :sink) ((get b :format) record)))
     nil))
 
 (impl Display
@@ -133,7 +133,7 @@ For a backend that does something other than write one line, `defrecord` your ow
   (apply backend (stderr-port) opts))
 
 (defn process-backend (pid & opts)
-  "A backend that sends each formatted line to process `pid` as `[:io-write s]` —
+  "A backend that sends each formatted line to process `pid` as `[:write s]` —
 e.g. an editor appending to its `*Messages*` buffer. Async and share-nothing."
   (apply backend (process-port pid) opts))
 
