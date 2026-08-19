@@ -920,9 +920,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `drop` `range` `zip` `partition` `repeat` `repeatedly`. The derived
   sequence helpers — `frequencies` `enumerate` `group-by` `chunk-by`
   `chunk-every` `interpose` `interleave` `scan` `zip-with` `min-by` `max-by`
-  `reduce-while` `index-where` `dedupe` `distinct-by` — live in the **`enum`
-  module** (`enum/…`, or `(:use seq)`; a qualified `seq/frequencies`
-  auto-loads it) (ADR-227).
+  `reduce-while` `index-where` `dedupe` `distinct-by` — live in the **`seq`
+  module** (`(:use seq)` for bare access, or a qualified `seq/frequencies`
+  auto-loads it) (ADR-227, renamed from `enum` in ADR-234).
 - **iteration** (macros, for effect — there is no `while`/`for`-loop): `for`
   (list comprehension, with `:when`), `doseq` (destructuring/`:when`),
   `dotimes` `(i n)`, `dolist` `(x coll)`. All return `nil` except `for`.

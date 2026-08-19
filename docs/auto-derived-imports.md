@@ -9,7 +9,7 @@ is what shipped; the *trigger* changed. Read "What actually shipped" next; every
 ## What actually shipped (read this first)
 
 A **qualified** reference `mod/name` infers `(require 'mod)` — you never write a `require`
-line just to satisfy a `mod/…` reference, for **any** module (`enum`/`map`/`math`, `json`,
+line just to satisfy a `mod/…` reference, for **any** module (`seq`/`map`/`math`, `json`,
 `set`, your own project modules), not just a curated three. **There is no bare-name magic:**
 a bare `sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. `(:use mod)`
 still refers a module's names bare and needs no separate require either. The rule is one
@@ -47,22 +47,22 @@ and is neutralized to a no-op (its `required_mods`/`raw_qualified` scaffolding r
 ## The goal
 
 A file uses `dedupe`, `sqrt`, `update-vals` **bare, with no `(:use …)`**, and it Just Works —
-while `enum/dedupe` still resolves qualified, **local names and explicit `(:use …)` always
+while `seq/dedupe` still resolves qualified, **local names and explicit `(:use …)` always
 win**, and a genuinely ambiguous bare name is a **loud compile error**, never a silent wrong
-pick. This deletes every `(:use enum/map/math)` line the three stages added, and the whole
+pick. This deletes every `(:use seq/map/math)` line the three stages added, and the whole
 class of missed-import bugs (see "Why", below).
 
 ## Chosen design: B (lazy auto-derive), not A (eager auto-load)
 
 We evaluated two ways to get bare names working:
-- **A — eager auto-load:** at boot, `(:use enum) (:use map) (:use math)` into the root
+- **A — eager auto-load:** at boot, `(:use seq) (:use map) (:use math)` into the root
   namespace; their names become global. *Rejected:* it puts the names back in the global
   namespace (the thing we moved them out of), so the module split becomes cosmetic; it grows
   the global surface and turns any future two-module name collision into a **boot failure**.
 - **B — lazy auto-derive (chosen):** an unresolved bare name that exactly one *curated*
   module exports is resolved to that module's qualified name **per use, on demand**; nothing
-  is referred until used. Keeps the namespace boundary *semantic* (a file depends on `enum`
-  only if it uses an enum name), keeps the global surface small as the library grows, and
+  is referred until used. Keeps the namespace boundary *semantic* (a file depends on `seq`
+  only if it uses an seq name), keeps the global surface small as the library grows, and
   enables dependency-aware tooling / tree-shaking later. Its one cost — a bare name can become
   *ambiguous* if a future curated module adds a colliding name — is small, local, loud, and
   guarded by a "no two curated modules share a name" test.
@@ -78,20 +78,20 @@ names a file actually uses, and only when nothing else claimed them.
 
 ## Settled decisions (do not re-litigate without reason)
 
-1. **Curated set = `enum`, `map`, `math` only** — the formerly-prelude core. Mark them with an
+1. **Curated set = `seq`, `map`, `math` only** — the formerly-prelude core. Mark them with an
    opt-in flag (a field on `EmbeddedModule`, or a hardcoded list in the index builder).
    `json`/`csv`/`set`/`http`/… stay explicit `require`/`:use` (auto-deriving them would make
    bare `parse` ambiguously conjure a module).
 2. **Lowest priority.** Resolution order stays: locals → slash/alias → ambient (`defdyn`) →
    own-namespace → explicit `(:use …)` → prelude/root → **then auto-derive**. Local and
    explicit always win.
-3. **Per-name granularity.** Import the single name used (`add_import(dedupe, enum/dedupe)`),
-   not a whole `(:use enum)` refer-all. Lighter, and it's what makes #B-correctness work.
+3. **Per-name granularity.** Import the single name used (`add_import(dedupe, seq/dedupe)`),
+   not a whole `(:use seq)` refer-all. Lighter, and it's what makes #B-correctness work.
 4. **Ambiguity is a loud error** naming the candidates ("qualify, or `:use` one"). Plus a test
    asserting the curated set has **no name collisions** (so ambiguity can't arise silently
    today; the error is future-proofing).
 5. **Applied uniformly** — user code, std modules, and (see open question) scripts. After it
-   works, strip every `(:use enum/map/math)` line the three stages added.
+   works, strip every `(:use seq/map/math)` line the three stages added.
 6. **Checker mirrors it** (it reuses the resolver, so mostly free) — and add a way to *see* a
    file's derived deps so implicit imports stay discoverable (e.g. `nest check` reports them).
 
@@ -109,7 +109,7 @@ Two decisive questions both resolved favorably, so this is **small-to-medium** w
 - Every curated module's **full source is baked into the binary** as `CORE_MODULES`
   (`crates/lisp/src/builtins/system.rs` ~914; `EmbeddedModule { key, source, path }`), reachable
   via `%builtin-module`.
-- **⇒ Build a curated `name → module` reverse index once at boot** by parsing enum/map/math's
+- **⇒ Build a curated `name → module` reverse index once at boot** by parsing seq/map/math's
   embedded source and running `scan_regions` with a **public/private head filter** (skip
   `DEF_PRIVATE`/`DEFN_PRIVATE`; the head string is in hand at scan_def_form). No module load.
 
@@ -149,7 +149,7 @@ Two decisive questions both resolved favorably, so this is **small-to-medium** w
 
 ### The checker — mostly free
 - The checker reuses the resolver: `check.rs` ~834 calls `eval::macros::compile(...)`, so a
-  `dedupe`→`enum/dedupe` rewrite flows into it automatically (no false "unbound").
+  `dedupe`→`seq/dedupe` rewrite flows into it automatically (no false "unbound").
 - The remaining touch: `is_unbound` (`crates/lisp/src/types/check/walk.rs` ~378-400) gates a
   *qualified* name on `module_is_known`. Teach it (or its curated-sig path) that curated
   modules are known even when not loaded, mirroring the pre-load export index you give the
@@ -170,12 +170,12 @@ Two decisive questions both resolved favorably, so this is **small-to-medium** w
 5. **Prelude-boot safety:** the fallback must no-op at root (`compile_ns == None` → `resolve` is
    identity, macros.rs ~1091) and can never fire for prelude names (they resolve earlier). Add a
    guard so it only fires with `compile_ns = Some(...)`. Verify boot is unaffected.
-6. **Strip the explicit imports.** Remove every `(:use enum)`, `(:use map)`, `(:use math)` (and
+6. **Strip the explicit imports.** Remove every `(:use seq)`, `(:use map)`, `(:use math)` (and
    the `:only [abs]` on `telemetry_metrics_test`, and the `require 'math` + `math/…`
    qualifications in `breakage/chaos_float_pathology.blsp` + `breakage/chaos2_bigint_edge.blsp`)
    added in stages 1-3. Keep the modules. Find them with:
-   `grep -rn "(:use \(enum\|map\|math\))" std/ tests/ stress/ && grep -rn "(:use enum)" std/tool/scaffold.blsp`
-   (the scaffold **editor template** emits `(:use enum)` inside a string — update the template too).
+   `grep -rn "(:use \(seq\|map\|math\))" std/ tests/ stress/ && grep -rn "(:use seq)" std/tool/scaffold.blsp`
+   (the scaffold **editor template** emits `(:use seq)` inside a string — update the template too).
 7. **Tests** (`tests/*_test.blsp`, in-language, per `docs/brood-for-claude.md` + the
    `brood-testing` skill): bare curated name resolves with no `:use`; qualified still works;
    **local name wins** over auto-derive; **explicit `(:use …)` wins** (the `telemetry/sum`
@@ -205,7 +205,7 @@ Two decisive questions both resolved favorably, so this is **small-to-medium** w
 
 `make test` and `make test-both` fully green; `nest check` 0 warnings; `nest format --check`
 clean; the new resolution tests pass; boot + `nest run`-twice unaffected; and the strip in
-step 6 leaves **zero** `(:use enum/map/math)` lines in the tree (grep returns nothing).
+step 6 leaves **zero** `(:use seq/map/math)` lines in the tree (grep returns nothing).
 
 ## Pointers
 - Principle + the three stages + the migration lesson that motivated this: **ADR-227**

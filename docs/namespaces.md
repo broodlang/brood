@@ -322,31 +322,40 @@ namespaced macros like `test/describe` emitting bare helper calls broke in consu
 namespaces (the β-interim wall). β (hand-qualify every cross-ns ref) was rejected:
 with packages shipping third-party macros, it makes every macro a latent capture bug.
 
-## 7b. Two modules, one short name (`:use` of both is an error)
+## 7b. Two modules, one short name — resolved lazily (ADR-235)
 
 Namespacing means two modules may legitimately export the same *short* name — `sexp` and
 `editor/treesit` both offer `point-forward` (over a Brood form, and over a tree-sitter tree
-with a `lang`); `format` and `template` both `render`. Importing both bare is refused with
-**E0099**, naming the two providers, rather than letting one silently win:
+with a `lang`); `format` and `template` both `render`. **`(:use …)` of both is allowed.** The
+clash is *not* an error at import time — it is recorded as an ambiguity and reported **only if
+the shared name is actually used bare**, at the point of use, naming the candidates:
 
 ```
-(:use editor/treesit) refers `point-forward`, but it is already referred as
-`sexp/point-forward` from another module — resolve the clash with `:only [...]`
-or `:exclude [...]` on one of the uses
+`point-forward` is imported from more than one module (`editor/treesit/point-forward`
+and `sexp/point-forward`) — the bare name is ambiguous. Qualify it (e.g.
+`editor/treesit/point-forward`), or disambiguate the `(:use …)` with `:only [...]` /
+`:exclude [...]` / an alias.
 ```
 
-Three resolutions, in the order usually wanted:
+This is *lazy resolution*: importing two overlapping modules and only touching their
+non-overlapping names just works, and you pay attention to an overlap exactly when — and where
+— it actually bites. `nest check` reports the same ambiguity statically (advisory), so you
+still learn about it before running.
 
-1. **`require` + qualified calls** — the module is loaded, nothing is imported, no name can
-   clash. Best when the call sites want to *say* which one they mean anyway (myedit's
+Four resolutions, in the order usually wanted:
+
+1. **A qualified call** — `sexp/point-forward`. Nothing is imported for that name, so nothing
+   can clash. Best when the call sites want to *say* which one they mean anyway (myedit's
    structural commands call `sexp/…` for Brood source and `editor/treesit/…` for a foreign
    language, one line apart).
 2. **`:only [...]`** on one use — import just the names wanted.
 3. **`:exclude [...]`** on one use — import everything except the clashing names.
+4. **An alias** (`(:alias sexp sx)` → `sx/point-forward`) — a short prefix per module.
 
 Reach for a rename only when the two names mean the *same* thing; the pairs in std do not.
-The full set of std overlaps is enumerated and pinned in `tests/namespace_test.blsp`, so a
-new one is a decision at review time rather than a consumer's editor failing to load.
+Because the clash self-reports at the point of use, there is **no std-wide overlap list to
+maintain** — the eager check (and the hand-pinned overlap table it forced) were removed in
+ADR-235.
 
 ## 8. OPEN — namespace-name collision moves up a level
 

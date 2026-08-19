@@ -1804,3 +1804,33 @@ different domain; namespacing keeps them apart), but four real misplacements fel
 All affected suites green (path/file/http/hash/crypto/strings/scram/uuid/seq/namespace). The
 overlap completeness test (ADR-233) confirmed no new overlap slipped in. Next: ADR-235 makes the
 overlap *list itself* unnecessary by resolving `:use` clashes lazily at point-of-use.
+
+## 2026-08-19 — `(:use …)` clashes resolve lazily; the maintained overlap list is gone (ADR-235)
+
+The `(:use …)` importer used to reject an overlapping name **eagerly**: `(:use sexp) (:use telemetry)`
+failed to load just because both export `forward`, even if you only wanted non-overlapping names.
+That eagerness is exactly why `namespace_test.blsp` had to pin `ns-known-overlaps` — a hand-curated
+list of every std cross-module overlap (which drifted to 15-vs-25 and was rebuilt drift-proof only
+this morning). The runtime already knew the overlaps; the list just re-encoded them in a second place.
+
+Made resolution lazy. The import table value is now `ImportEntry::One(q) | Ambiguous([q…])`. On a
+clash `refer_add` records `Ambiguous` instead of erroring; the resolver raises **only when the
+ambiguous bare name is actually used**, at the use site, naming the candidates and the fixes:
+
+```
+`forward` is imported from more than one module (`sexp/forward` and `telemetry/forward`) —
+the bare name is ambiguous. Qualify it (e.g. `sexp/forward`), or disambiguate the
+`(:use …)` with `:only [...]` / `:exclude [...]` / an alias.
+```
+
+Plumbing mirrors the existing auto-require channel: `resolve_sym` records the ambiguous use to a
+thread-local (`record_ambiguous`, armed only under `RECORDING`, so the read-only LSP path never
+hard-errors), drained by `take_ambiguous_error` right after `resolve` in the macroexpand driver so
+the error points at the form. The checker demotes the same way (`Heap::add_import_lazy`) and reports
+it advisorily; `is_unbound` no longer double-flags an ambiguous name as "unbound".
+
+Deleted `ns-known-overlaps`, its helpers, and the completeness test — overlaps self-report now, so
+there is nothing to maintain in a second place (the whole point of the exercise). Replaced with four
+behavioural cases (coexist / ambiguous-use-errors / qualified / `:exclude`), and rewrote
+`modules_test.blsp`'s clash case from "eager hard error" to "lazy, only when used". `reserved-package-name?`
+(package-vs-module) is a different clash and is unchanged. All resolution-sensitive suites green.
