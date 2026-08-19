@@ -1953,3 +1953,15 @@ safely, leaving only the genuinely-unforceable:
 and every module's private `defn- mod-*` helpers (never exported). The lesson across the whole
 rollout: drop the prefix, except where the bare name is a core MACRO, a HOF-value, or a pervasive
 accessor/primitive the module itself leans on — there the prefix is disambiguation, not noise.
+
+## 2026-08-19 — Going-live namespace policy recorded (ADR-237)
+
+Consolidated the "how does the stdlib grow post-1.0 without clashing" decision into ADR-237. The
+enforcement already exists (the three `reserved-package-name?` seams: publish / add-fetch-resolve /
+require), so this is the policy write-up + the going-live commitment: the unprefixed root is
+stdlib-owned; a dependency's local name can't be a stdlib name, so stdlib namespaces are
+**un-shadowable**; therefore there is deliberately **no** `/enum/foo` namespace escape (nothing to
+disambiguate, nothing to cargo-cult); `/name` stays only for the irreducible builtin shadow (a
+library like `stats` defining `min`), with a future `nest check` redundant-escape lint to keep it
+honest; and new stdlib names are additive + clash-recoverable (a grandfathered same-named dep errors
+loudly and locally, never a silent shadow). Stronger than Elixir's convention-only stance.

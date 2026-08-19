@@ -15824,3 +15824,65 @@ module-by-module (this ADR lands the `queue`/`pq` exemplar); each module is its 
 soft, at-use concern rather than a load-time wall, which is what makes the un-prefixed names safe to
 adopt now. The resolver's `pg-*` (PubGrub) internals are handled in the same pass by making them
 module-private rather than renaming — an over-export cleanup, not just a prefix drop.
+
+## ADR-237 — Going-live namespace policy: the unprefixed root is stdlib-owned, and stdlib namespaces are un-shadowable
+
+**Context.** Pre-1.0, `reserved-package-name?` reserving every current stdlib module name is
+enough — no external packages exist. Post-1.0 that stops scaling in two directions: (1) we will
+want to **add** stdlib namespaces we haven't invented yet, and can't reserve a name in advance;
+(2) a qualified reference **auto-requires** its module (a bare `enum/foo` loads `enum`), so if a
+package could contribute the `enum` namespace it could silently shadow the stdlib. The question is
+how the stdlib grows without clashing, and how a consumer reaches the stdlib version if something
+does shadow it — **without** the answer becoming a defensive convention (`/enum/foo` sprinkled
+everywhere "to be safe").
+
+**Prior art.** Clojure reserves one prefix forever (`clojure.*`) and everyone else uses
+reverse-domain names. Rust has a global crate registry, reserves `std`, allows `use … as …`
+renaming, and gates breaking additions behind **editions**. Go sidesteps it with URL import paths
+and short stdlib names. Elixir has **no** hard reservation: Hex gives globally-unique *package*
+names, the convention is to nest modules under your app name (`Ecto.Query`), `Kernel` is the
+shadowable-but-warned base, and import conflicts warn. Elixir's is convention + rarity + non-fatal
+resolution; Brood can do better because dependencies are reached under a **project-controlled local
+name** (ADR-037/070), not a global one.
+
+**Decision.**
+
+1. **The unprefixed module-name root belongs to the standard library.** Every third-party
+   dependency is reachable only under its name (which the importing project controls), and that
+   name **may not be a stdlib name**. This is enforced at all three seams by the one
+   `reserved-package-name?` predicate: **publish** (the hive gate), **add/fetch/resolve**
+   (`package-guard-reserved-names` — a `:path`/`:git`/registry dep named `json`/`set`/`enum`/… is
+   rejected fast, with "the stdlib owns the '…' namespace"), and **require** (the load-time guard).
+   A package's own modules root under *its* name anyway (ADR-070), so the only collision surface —
+   "a dependency whose prefix equals a stdlib name" — is exactly the one this forbids.
+
+2. **Therefore stdlib namespaces are un-shadowable, and there is no namespace escape.** A qualified
+   `enum/foo` unambiguously means the stdlib, always, everywhere — no auto-require race, no
+   precedence rule, no per-call-site escape. We deliberately **do not** add a `/enum/foo` form:
+   the situation it would resolve cannot arise, and an escape that exists only for a case that
+   can't happen would rot into a "to be safe" convention. Want a third-party `json`? Name the
+   dependency something else and write `json2/parse`.
+
+3. **`/name` survives only for the irreducible builtin shadow.** A module that itself *defines* a
+   bare name shadowing a kernel/prelude name (a library like `stats` defining `min`) reaches the
+   original as `/min` (leading `/` = "root, skip namespace resolution"; ADR-236). This is **not**
+   for namespace disambiguation, and it is structurally safe *because* there is no `/`-prefixed
+   package a dependency can claim — a kernel escape you can't forge beats a readable `brood/min`
+   whose `brood` prefix a rooted package could, in principle, define. To keep even this from being
+   cargo-culted, `nest check` **should** flag a redundant `/name` (one whose `name` is not shadowed
+   in the current scope) as a lint — deferred, but recorded here as the intended guard.
+
+4. **Growing the stdlib post-1.0 is additive and clash-recoverable.** Adding a namespace reserves
+   the name going forward (new packages/deps are rejected as above). A consumer with a
+   *grandfathered* dependency of that name gets a hard, specific error — "`graphql` is now a
+   standard-library namespace; this dependency must be renamed by its author / aliased locally to
+   another name" — a one-time mechanical fix, never a silent shadow. No edition machinery is
+   needed because the failure is loud and local.
+
+**Consequence.** Stdlib names are inviolable at publish, add, and require — strictly stronger than
+Elixir's convention-only stance — so the stdlib can grow indefinitely without a collision that
+breaks a build silently. Because shadowing is impossible, no namespace escape exists to build habits
+around; the single `/name` escape is confined to the one case (a library redefining a bare builtin)
+where it is irreducible, and a future lint keeps it honest. Most of this is already implemented
+(the three `reserved-package-name?` seams, the `/name` escape); this ADR is the consolidation and
+the going-live commitment. The `nest check` redundant-escape lint is the one open follow-up.
