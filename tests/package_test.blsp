@@ -396,9 +396,9 @@
 (defn mock-registry-start (handler)
   (let (me (self))
     (spawn (do
-             (let (ls (net/http/http-listen 0))
+             (let (ls (http/http-listen 0))
                (send me [:reg-port (tcp-local-port ls)])
-               (net/http/serve-loop ls handler))))
+               (http/serve-loop ls handler))))
     (let (port (receive ([:reg-port p] p) (after *test-wait-ms* :timeout)))
       (str "http://127.0.0.1:" port))))
 
@@ -411,16 +411,16 @@
           release-path (str "/api/v1/packages/" nm "/releases/" version))
       (cond
         (string/starts-with? path "/api/v1/packages?")
-          (net/http/ok (str "{\"packages\":[{\"name\":\""
+          (http/ok (str "{\"packages\":[{\"name\":\""
                          nm "\",\"latest_version\":\"" version "\",\"description\":\"" desc "\"}]}"))
         (= path (str release-path "/tarball"))
-          (net/http/response 200
+          (http/response 200
             {"Content-Type" "application/gzip"}
             bytes)
         (= path release-path)
-          (net/http/ok (str "{\"checksum\":\""
+          (http/ok (str "{\"checksum\":\""
                          checksum "\",\"version\":\"" version "\",\"dependencies\":[]}"))
-        else (net/http/not-found)))))
+        else (http/not-found)))))
 
 ;; Build a root-level tarball of a fixture package (files at the archive root, the
 ;; layout hive serves and the resolver extracts with strip 0). Returns [bytes sha256].
@@ -441,13 +441,13 @@
           src (str (table-get cfg :base "") "/ext/" nm ".tar.gz"))
       (cond
         (= path (str "/ext/" nm ".tar.gz"))
-          (net/http/response 200 {"Content-Type" "application/gzip"} wrapped-bytes)
+          (http/response 200 {"Content-Type" "application/gzip"} wrapped-bytes)
         (= path (str "/api/v1/packages/" nm "/releases/" version))
-          (net/http/ok (json/encode {:checksum checksum
+          (http/ok (json/encode {:checksum checksum
                                      :version version
                                      :source_url src
                                      :dependencies []}))
-        else (net/http/not-found)))))
+        else (http/not-found)))))
 
 ;; Build a WRAPPED tarball — files under a single `nm/` dir, the `tar czf pkg/` / GitHub
 ;; layout an external source uses (extracted with strip 1). Returns [bytes sha256].
@@ -466,14 +466,14 @@
           release-path (str "/api/v1/packages/" nm "/releases/" version))
       (cond
         (= path (str release-path "/tarball"))
-          (net/http/response 200 {"Content-Type" "application/gzip"} bytes)
+          (http/response 200 {"Content-Type" "application/gzip"} bytes)
         (= path release-path)
-          (net/http/ok (json/encode {:checksum checksum
+          (http/ok (json/encode {:checksum checksum
                                      :version version
                                      :signature signature
                                      :pubkey pubkey
                                      :dependencies []}))
-        else (net/http/not-found)))))
+        else (http/not-found)))))
 
 ;; A valid [signature-hex pubkey-hex] over the release's canonical payload (name, version,
 ;; checksum — the same bytes package-signing-payload builds), from a fresh keypair.
@@ -554,11 +554,11 @@
           ;; serve metadata whose source_url is the file:// URL, and a matching checksum
           base (mock-registry-start (fn (req)
                                       (if (= (get req :path) "/api/v1/packages/evil/releases/1.0.0")
-                                        (net/http/ok (json/encode {:checksum checksum
+                                        (http/ok (json/encode {:checksum checksum
                                                                    :version "1.0.0"
                                                                    :source_url file-url
                                                                    :dependencies []}))
-                                        (net/http/not-found)))))
+                                        (http/not-found)))))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (is (includes? (try
                        (package/package-resolve-registry app-dir
@@ -617,16 +617,16 @@
                                             rp "/api/v1/packages/weird/releases/1.0.0")
                                         (cond
                                           (= path (str rp "/tarball"))
-                                            (net/http/response 200
+                                            (http/response 200
                                               {"Content-Type" "application/gzip"}
                                               bytes)
                                           (= path rp)
-                                            (net/http/ok (json/encode {:checksum checksum
+                                            (http/ok (json/encode {:checksum checksum
                                                                        :version "1.0.0"
                                                                        :signature 123
                                                                        :pubkey 456
                                                                        :dependencies []}))
-                                          else (net/http/not-found))))))
+                                          else (http/not-found))))))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (let (e (package/package-resolve-registry app-dir (dep-registry 'weird "1.0.0") nil base))
         (assert= (get e :version) "1.0.0")
@@ -750,19 +750,19 @@
       (let (nm (nth parts 4)
             releases (get spec nm))
         (cond
-          (nil? releases) (net/http/not-found)
-          (and (= n 6) (= (nth parts 5) "releases")) (net/http/ok (rr-releases-json releases))
+          (nil? releases) (http/not-found)
+          (and (= n 6) (= (nth parts 5) "releases")) (http/ok (rr-releases-json releases))
           (and (= n 7) (= (nth parts 5) "releases"))
             (let (rel (get releases (nth parts 6)))
               (if (nil? rel)
-                (net/http/not-found)
-                (net/http/ok (rr-release-json (nth parts 6) (get rel :checksum) (get rel :deps)))))
+                (http/not-found)
+                (http/ok (rr-release-json (nth parts 6) (get rel :checksum) (get rel :deps)))))
           (and (= n 8) (= (nth parts 7) "tarball"))
             (let (rel (get releases (nth parts 6)))
               (if (nil? rel)
-                (net/http/not-found)
-                (net/http/response 200 {"Content-Type" "application/gzip"} (get rel :bytes))))
-          else (net/http/not-found))))))
+                (http/not-found)
+                (http/response 200 {"Content-Type" "application/gzip"} (get rel :bytes))))
+          else (http/not-found))))))
 
 (describe "package: version-range resolution (ADR-209)"
   (test "the registry provider lists versions and reads a release's dep ranges"
@@ -1328,7 +1328,7 @@
   (test "a plain symbol name is accepted"
     (is (package/package-valid-dep-name? "parser")))
   (test "kebab-case is accepted" (is (package/package-valid-dep-name? "my-dep")))
-  (test "a namespaced name is accepted" (is (package/package-valid-dep-name? "net/http")))
+  (test "a namespaced name is accepted" (is (package/package-valid-dep-name? "http")))
   (test "a non-ASCII identifier is accepted" (is (package/package-valid-dep-name? "日本語")))
   (test "the empty string is rejected" (refute (package/package-valid-dep-name? "")))
   (test "a space-only name is rejected" (refute (package/package-valid-dep-name? " ")))

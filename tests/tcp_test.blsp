@@ -8,7 +8,7 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(defmodule tcp-test (:use test) (:use net/tcp))
+(defmodule tcp-test (:use test) (:use tcp))
 
 (describe "tcp: predicate + handles"
   :isolated

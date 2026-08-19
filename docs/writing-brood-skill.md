@@ -96,7 +96,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 - `foo?` predicate · `*foo*` dynamic/module var · `foo->bar` conversion.
   Kebab-case. **Don't add a trailing `!`** — nothing mutates, so it warns of
   nothing (the few in-tree `!` names mean unrelated things: `sig!` = enforced,
-  `set-load-path!` = a root setter, `(! pid msg)` = a `proc/gen` cast).
+  `set-load-path!` = a root setter, `(! pid msg)` = a `gen` cast).
 - **Private = `defn-` / `def-`**, not a marker in the name (ADR-146). The name
   stays clean at the def and every call site; `(private? 'mod/name)` asks the
   image. The retired `--`-in-name convention still appears in old code — ignore it.

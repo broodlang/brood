@@ -331,10 +331,10 @@ is nearly free.
 ### Reserved names — you can't name a package after the stdlib (ADR-220)
 
 The standard library owns its short module names — `json`, `set`, `text`, `test`,
-and the group prefixes `net` (which owns `net/tcp`, `net/http`, …) and `proc`
-(`proc/gen`, `proc/supervisor`, …). A package — a dependency **or** your own
+and the group prefixes `net` (which owns `tcp`, `http`, …) and `proc`
+(`gen`, `supervisor`, …). A package — a dependency **or** your own
 project — **may not take one of these names**. Its name becomes a load-time package
-prefix, so a package called `net` would provide `net/tcp` — exactly the baked-in
+prefix, so a package called `net` would provide `tcp` — exactly the baked-in
 module — and even a non-colliding stdlib name (`json` providing `json/parser`)
 squats the stdlib's prefix. This is the Elixir "you can't name your app `Enum`"
 rule, but enforced mechanically rather than by convention.

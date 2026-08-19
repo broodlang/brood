@@ -18,7 +18,7 @@
 ;; The delimiter is planted in the LAST chunk only, so every earlier chunk is a full
 ;; miss — the worst case, and the drip-fed slow-loris shape.
 
-(defmodule net-framed-scale (:use net/tcp))
+(defmodule net-framed-scale (:use tcp))
 
 (def chunks (let (e (getenv "CHUNKS")) (if e (string->number e) 2000)))
 (def size (let (e (getenv "SIZE")) (if e (string->number e) 64)))

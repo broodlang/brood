@@ -1,7 +1,7 @@
 ;; std/log.blsp — an async, safe logger.
 ;;
 ;; Async + safe fall straight out of the process model (ADR-006):
-;;  - A logger is one long-lived `proc/gen` process carrying {:level :backends}.
+;;  - A logger is one long-lived `gen` process carrying {:level :backends}.
 ;;  - A log call is a CAST (`!`) — fire-and-forget, so the caller never blocks on
 ;;    a slow or stuck backend. That is the "async".
 ;;  - One process owns every write, so lines never interleave and a backend that
@@ -25,7 +25,7 @@
 
 ; ports + io-write
 (defmodule log
-  "An async, safe logger. A `proc/gen` process holds a list of
+  "An async, safe logger. A `gen` process holds a list of
 backends; each log call is a cast, so it never blocks the caller, and the single
 process serialises writes (no interleaving) and isolates a crashing backend.
 
@@ -45,7 +45,7 @@ build it with `stdout-backend` / `stderr-backend` / `process-backend` / `file-ba
 `fn-backend`. For anything else (batching, JSON lines, sampling), `defrecord` your own
 and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
   ; defprocess / spawn-server / ! / stop
-  (:use proc/gen)
+  (:use gen)
   (:use io))
 ;; ---- levels -----------------------------------------------------------------
 (def- log-ranks {:debug 0 :info 1 :warn 2 :error 3})

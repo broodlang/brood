@@ -21,11 +21,11 @@
 ;;    valid prefix per chunk, split multibyte characters carried to the next
 ;;    read — is exactly the right framing for it, so events surface as strings
 ;;    with no decode step here. Binary-mode `bytes` reads are for *binary*
-;;    protocols (see net/http's request path).
+;;    protocols (see http's request path).
 ;;  - Opt-in (`require`), never in the prelude. http (not https) for now — the
 ;;    target is a localhost daemon.
 
-(defmodule net/sse
+(defmodule sse
   "Server-Sent Events (`text/event-stream`) in Brood: a client, and server-side
 framing for pushing events over `http`'s streaming seam.
 
@@ -42,7 +42,7 @@ yourself. Pair with `with-events` (std/editor/ui.blsp) to feed events into a `ui
 On the server side, `sse-headers` / `sse-frame` / `sse-send` turn payloads into wire
 frames: return `(http/stream-response 200 (sse-headers) (fn (sock) … (sse-send sock
 data) …))` from an `http` handler to push events to a browser `EventSource`."
-  (:use net/http))
+  (:use http))
 
 ; reuse http/parse-url + http/request-headers for the handshake
 ;; The reader consumes UNTRUSTED server output. A malicious endpoint that never
@@ -184,11 +184,11 @@ as `[:sse {:event :data :id}]` messages — `[:sse-open status]` once connected,
 `receive`, holding no worker) and returns that process's pid; `(exit pid :kill)` to
 disconnect. The socket is owned by the reader process, so call this for the process
 that should receive the events (typically the UI process — see `with-events`)."
-  (let (u (net/http/parse-url url)
+  (let (u (http/parse-url url)
         req (str "GET "
               (get u :path)
               " HTTP/1.1\r\n"
-              (net/http/render-headers (net/http/request-headers u
+              (http/render-headers (http/request-headers u
                                          ""
                                          {"Accept" "text/event-stream" "Connection" "keep-alive"}))
               "\r\n"))

@@ -15663,3 +15663,43 @@ dist: dropped inbound message for unregistered name :echo (no process holds this
 itself on first occurrence instead of surfacing as a distant timeout, in user applications as much
 as in this repo's tests. Guarded by `a_dropped_send_to_an_unregistered_name_warns_once`
 (sabotage-verified: with the warning stubbed out, the test fails on the dedup assertion).
+
+## ADR-233 — Flat, single-segment module names for the `proc/*` and `net/*` families
+
+**Context.** The standard library carried two conventions for a directory of related
+modules. The toolchain `std/tool/*` used **bare, single-segment** module names — the file
+is `std/tool/test.blsp` but the module is just `test`, so a qualified call reads
+`test/run`; the `embedded_module!("test", "std/tool/test.blsp")` mapping decouples the name
+from the path. But `proc/*`, `net/*`, and `editor/*` mirrored the directory *into* the
+module name (`proc/gen`, `net/http`), so a qualified call carried two slashes:
+`proc/agent/start`, `net/http/get`. Module resolution (`eval::derive::module_to_require`)
+already takes the module as everything before the **last** slash, so the directory prefix
+in these names bought nothing the bare name didn't — it was directory-as-namespace where
+the directory is really just filing.
+
+**Decision.** `proc/*` and `net/*` adopt bare module names, matching `tool/*`. The files
+stay under `std/proc/` and `std/net/`; only the `defmodule` form and the `embedded_module!`
+key change:
+
+- `proc/gen → gen`, `proc/supervisor → supervisor`, `proc/agent → agent`
+- `net/http → http`, `net/sse → sse`, `net/tcp → tcp`, `net/reconnect → reconnect`
+
+A qualified call is now `gen/spawn-server`, `agent/start`, `supervisor/start-child`,
+`http/get`, `sse/events`, `tcp/connect` — **one slash, never two.**
+
+`editor/*` is the deliberate exception: it is a cohesive framework, not a filing bucket. Its
+~19 modules' names (`buffer`, `ui`, `pane`, `face`, `layers`, `ansi`) are intentionally
+generic and only make sense *scoped* by the `editor/` qualifier; bare, they would land-grab
+the most valuable top-level names, and `editor/ansi` would collide head-on with the existing
+top-level `std/ansi.blsp`. The rule is therefore **not** "one slash always" but "the prefix
+must earn its keep": a genuine namespace (editor) keeps it; a filing convenience (proc, net,
+tool) does not.
+
+**Consequence.** `reserved-package-name?` (ADR-070/166/220) is derived from the embedded
+module list, so it now reserves the **flat** names (`http`, `tcp`, `sse`, `reconnect`, `gen`,
+`agent`, `supervisor`) and no longer reserves `net`/`proc` as group prefixes — a package may
+now legitimately be named `net` or `proc`, but not `http`/`gen`/etc. `editor` remains a
+reserved group prefix. This is a breaking rename with no compatibility shim (greenfield;
+consistent with the 0.4.0 stdlib-namespacing compatibility boundary — ADR-230/231). Guarded
+by the updated reserved-name cases in `namespace_test.blsp` and the full proc/net test suites
+(`agent`/`gen`/`supervisor`/`http`/`sse`/`tcp`/`tls`), all green.

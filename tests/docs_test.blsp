@@ -50,7 +50,7 @@
 
 (describe "docs: structured model (nest docs)"
   (test "docs-bare strips the module namespace to the last segment"
-    (assert= (docs/docs-bare 'net/http/get) "get")
+    (assert= (docs/docs-bare 'http/get) "get")
     (assert= (docs/docs-bare 'map) "map")
     ; a bare operator name (empty last segment) keeps its whole name
     (assert= (docs/docs-bare '/) "/"))

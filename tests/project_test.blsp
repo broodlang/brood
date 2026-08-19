@@ -257,11 +257,11 @@
 
 (describe "project: bundle module naming (ADR-038)"
   ;; A release bundle keys modules by require-name, not bare stem, so a namespaced
-  ;; module (net/sse) keeps its namespace and resolves through %builtin-module — the
-  ;; bug behind `./app: require: cannot find module 'net/sse'` after `nest release`.
+  ;; module (sse) keeps its namespace and resolves through %builtin-module — the
+  ;; bug behind `./app: require: cannot find module 'sse'` after `nest release`.
   (test "project-bundle-name keeps the namespace relative to the source dir"
     (assert= (project/project-bundle-name "/p/src" "/p/src/main.blsp") "main")
-    (assert= (project/project-bundle-name "/p/src" "/p/src/net/sse.blsp") "net/sse")
+    (assert= (project/project-bundle-name "/p/src" "/p/src/sse.blsp") "sse")
     (assert= (project/project-bundle-name "/p/src/" "/p/src/a/b/c.blsp") "a/b/c"))
   (test "a path not under the source dir falls back to its bare stem"
     (assert= (project/project-bundle-name "/other" "/p/src/x.blsp") "x")))
@@ -649,7 +649,7 @@
                      (catch e e))
           "same module name")))
   (test "distinct require-names pass"
-    (assert= (project/bundle-reject-duplicate-names (list "app" "net/sse" "lib")) nil)))
+    (assert= (project/bundle-reject-duplicate-names (list "app" "sse" "lib")) nil)))
 
 ;; ---- the :brood runtime-version gate (ADR-209) -------------------------------
 ;; A project may require a minimum/compatible runtime with `:brood "<constraint>"`,

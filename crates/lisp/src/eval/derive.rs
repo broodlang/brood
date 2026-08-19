@@ -51,7 +51,7 @@ thread_local! {
 /// name, a root-escape (`/foo`) or bare `/`, or an alias prefix (`m/…` from
 /// `(require … :as m)` — its target was loaded by that require). Otherwise the module
 /// symbol, **rooted** for an intra-package reference (ADR-070). The module is everything
-/// before the *last* slash, so `net/http/get` yields `net/http`.
+/// before the *last* slash, so `http/get` yields `http`.
 pub fn module_to_require(heap: &Heap, s: Symbol) -> Option<Symbol> {
     let name = value::symbol_name_ref(s);
     let first = name.find('/')?;

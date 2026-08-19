@@ -720,7 +720,7 @@ pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispEr
         .with_code(crate::error::error_codes::DISTRIBUTION)
         .with_hint(
             "reconnect with (connect addr) — or run a supervised reconnector \
-             via net/reconnect/watch — then resend",
+             via reconnect/watch — then resend",
         ));
     }
     Ok(())
