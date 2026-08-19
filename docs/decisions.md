@@ -15551,3 +15551,62 @@ the `doc-catalog` categorisation (public entries renamed, private helpers `join-
 `trimr-to` dropped as module internals, per ADR-227's precedent), and `docs/language.md`. Every
 `../*` sibling project is migrated in the same pass. **Breaking for the published ecosystem** (as
 ADR-229): a published library calling a now-moved bare name is incompatible until republished.
+
+## ADR-231 — The `file` library: every filesystem operation lives under `file/*`
+
+**Status:** accepted, shipped 2026-08-18. Follows ADR-230 (the `string` library) — the same
+treatment, one stage later — and ADR-065 (namespaces), ADR-227 (`enum`/`math` namespacing),
+ADR-229 (auto-require).
+
+**Context.** The filesystem surface had the same rot ADR-230 fixed for strings, in a different
+key: a grab-bag of spellings with no discoverable prefix. Whole-file I/O borrowed Clojure's
+`slurp`/`spit`; metadata used a `file-` prefix (`file-exists?`, `file-mtime`, `file-size`,
+`file-stat`); directory ops used verb-noun (`make-dir`, `list-dir`, `delete-file`, `delete-dir`,
+`rename-file`, `copy-file`); and `cwd`/`dir?` were bare. Nothing told a caller that `slurp`,
+`file-mtime`, and `make-dir` were the *same domain* — you had to memorise which of three
+conventions each fs operation happened to use.
+
+**Decision.** Give the filesystem the same single-home, one-name-per-op treatment: every operation
+that touches the filesystem is registered under `file/*`, with no bare forwarders and no
+compatibility aliases (greenfield, ADR-011). The 18 kernel primitives become `file/slurp`,
+`file/slurp-bytes`, `file/spit`, `file/spit-append`, `file/spit-bytes`, `file/spit-private`,
+`file/exists?`, `file/dir?`, `file/stat`, `file/mtime`, `file/size`, `file/ls`, `file/mkdir`,
+`file/rm`, `file/rmdir`, `file/rename`, `file/cp`, `file/cwd`. The rename also normalises the
+spellings the old names disagreed on: `list-dir`→`file/ls`, `make-dir`→`file/mkdir`,
+`delete-file`→`file/rm`, `delete-dir`→`file/rmdir`, `rename-file`→`file/rename`,
+`copy-file`→`file/cp`.
+
+**The boundary rule — what is a `file/*` op and what stays bare.**
+- **`file/*`** = "the operation touches the filesystem": whole-file and byte I/O
+  (`slurp`/`spit`/`spit-append`/`spit-bytes`/`spit-private`), metadata (`exists?`/`dir?`/`stat`/
+  `mtime`/`size`), and directory listing/mutation and the cwd (`ls`/`mkdir`/`rm`/`rmdir`/`rename`/
+  `cp`/`cwd`). Each of these makes a syscall.
+- **bare** = the pure path-*string* helpers in the prelude — `path-join`, `path-basename`,
+  `parent-dir`, `path-absolute`, `temp-path`. They manipulate a path as text and never call the
+  filesystem, so they are string plumbing, not fs operations. (`temp-path` only *builds* an
+  unpredictable name; it deliberately does not create anything — you `file/spit`/`file/mkdir` it
+  yourself.)
+
+**The `std/file.blsp` policy layer.** The Brood-level file library keeps its own bare module names
+(`read-lines`/`write-lines`/`list-files`/`list-dirs`/`walk-files`/`path-extension`/`path-stem`),
+usable qualified as `file/read-lines` or bare under `(:use file)`. Its old `file?` predicate — "is
+this a regular file" — was **freed and reintroduced as `regular?`**: under the new namespace
+`file/file?` would read as "a file that is a file", and `regular?` (regular file, as distinct from
+a directory or symlink) says what it tests.
+
+**Mechanism.** Identical to ADR-230: `file` is an ordinary `embedded_module!`, the kernel
+primitives are re-registered directly under their `file/…` names (the builtin *is* the canonical
+name, no wrapper), and inside `file.blsp` the renamed builtins are written qualified — a builtin
+registered as `file/slurp` is not a def-head, so the forward-ref pre-scan does not auto-qualify a
+bare `slurp`. Two classes of straggler the call-position sweep does not reach were fixed by hand:
+the checker's guard-effect list (`guard_effects.rs`, which names effectful primitives as string
+literals for the advisory guard-purity lint) and the user-facing `format!("<op>: …")` error
+prefixes in `io.rs`/`system.rs` (the prefix names the primitive, so a failing read must now report
+`file/slurp: …`).
+
+**Scope.** The fs call sites across `std/` + `tests/` + `examples/` + Rust-embedded Brood, plus
+`PRIMITIVE_DOCS`, the `doc-catalog`, and the living docs (`language.md`, `tooling.md`,
+`module-index.md`, `node-connect.md`). Dated historical entries in `decisions.md` and
+`devlog-archive.md` are left as the record of what those primitives were called at the time.
+**Breaking for the published ecosystem** (as ADR-229/230): a published library calling a now-moved
+name is incompatible until republished.

@@ -93,7 +93,7 @@ count, or forward however it likes."
 
 (defrecord file-port (path))
 
-(impl Port io/file-port (io-write [p s] (spit-append (get p :path) s) nil))
+(impl Port io/file-port (io-write [p s] (file/spit-append (get p :path) s) nil))
 (impl Display io/file-port (to-str [p] (str "#<port file " (get p :path) ">")))
 
 ;; ---- installing a port for a dynamic extent ---------------------------------

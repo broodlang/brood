@@ -29,16 +29,16 @@
     ;; is safe.
     (with-out-str
       (let (dir (temp-dir "brood-reload-"))
-        (make-dir dir)
+        (file/mkdir dir)
         (let (f (path-join dir "w.blsp"))
-          (spit f "(def rwt-val 1)\n")
+          (file/spit f "(def rwt-val 1)\n")
           (load f)
           (reload-on-change f (fn (p) (println "[reload-watch-test] on-reload fired" p)))
           ;; `file-mtime` is millisecond-resolution; without a gap here the two
           ;; `spit`s can land in the same millisecond and the watcher correctly
           ;; sees no change at all (not a watcher bug — a race in the test).
           (sleep 100)
-          (spit f "(def rwt-val 2)\n")
+          (file/spit f "(def rwt-val 2)\n")
           (is (reload-watch-test-wait (fn () (= (eval 'rwt-val) 2)) 3000))
           (assert= (eval 'rwt-val) 2)))))
 
@@ -51,19 +51,19 @@
     ;; body cannot hide a failure.
     (with-out-str
       (let (dir (temp-dir "brood-reload-"))
-        (make-dir dir)
+        (file/mkdir dir)
         (let (f (path-join dir "w2.blsp"))
-          (spit f "(def rwt-val2 1)\n")
+          (file/spit f "(def rwt-val2 1)\n")
           (load f)
           ;; A callback that always throws — the def must still take effect
           ;; (on-reload runs *after* reload-defs already succeeded) and the
           ;; watcher must survive to reload again on a later edit.
           (reload-on-change f (fn (_p) (throw "boom")))
           (sleep 100)
-          (spit f "(def rwt-val2 2)\n")
+          (file/spit f "(def rwt-val2 2)\n")
           (is (reload-watch-test-wait (fn () (= (eval 'rwt-val2) 2)) 3000))
           (assert= (eval 'rwt-val2) 2)
           (sleep 100)
-          (spit f "(def rwt-val2 3)\n")
+          (file/spit f "(def rwt-val2 3)\n")
           (is (reload-watch-test-wait (fn () (= (eval 'rwt-val2) 3)) 3000))
           (assert= (eval 'rwt-val2) 3))))))

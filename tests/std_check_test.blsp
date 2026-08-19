@@ -24,15 +24,15 @@
 ;; walk stays linear in the file count.
 (defn- std-check-files
   (dir)
-  (if (dir? dir)
+  (if (file/dir? dir)
     (fold (fn (acc entry)
             (let (p (path-join dir entry))
               (cond
-                (dir? p) (append-two (std-check-files p) acc)
+                (file/dir? p) (append-two (std-check-files p) acc)
                 (string/ends-with? entry ".blsp") (cons p acc)
                 else acc)))
       nil
-      (list-dir dir))
+      (file/ls dir))
     nil))
 
 (describe "the standard library carries no checker warnings"

@@ -920,7 +920,7 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
 // the project test runner can resolve load paths and discover test files. Path
 // manipulation and all policy live in Brood (`std/prelude.blsp`, `std/tool/project.blsp`).
 
-/// `(cwd)` — the process's current working directory as a string.
+/// `(file/cwd)` — the process's current working directory as a string.
 /// `(exe-path)` — the absolute path of the RUNNING executable, or nil when the platform
 /// won't say (a sandbox with no `/proc/self/exe`-equivalent). Nil rather than an error: a
 /// program asking where it lives is asking opportunistically, and the answer is allowed to
@@ -948,9 +948,9 @@ pub(super) fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
-/// `(file-exists? path)` — true if a file or directory exists at `path`.
+/// `(file/exists? path)` — true if a file or directory exists at `path`.
 pub(super) fn file_exists(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "file-exists?", arg(args, 0))?;
+    let path = expect_string(heap, "file/exists?", arg(args, 0))?;
     Ok(Value::boolean(std::path::Path::new(&path).exists()))
 }
 
@@ -1012,23 +1012,23 @@ pub(super) fn path_canonicalize(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     Ok(heap.alloc_string(&out.to_string_lossy()))
 }
 
-/// `(dir? path)` — true if `path` exists and is a directory.
+/// `(file/dir? path)` — true if `path` exists and is a directory.
 pub(super) fn is_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "dir?", arg(args, 0))?;
+    let path = expect_string(heap, "file/dir?", arg(args, 0))?;
     Ok(Value::boolean(std::path::Path::new(&path).is_dir()))
 }
 
-/// `(list-dir path)` — the entry names (not full paths) directly under a
+/// `(file/ls path)` — the entry names (not full paths) directly under a
 /// directory, sorted for determinism. Errors if `path` isn't a readable directory.
 pub(super) fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "list-dir", arg(args, 0))?;
+    let path = expect_string(heap, "file/ls", arg(args, 0))?;
     let mut names: Vec<String> = match std::fs::read_dir(&path) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect(),
         Err(e) => {
-            return Err(LispError::runtime(format!("list-dir: {}: {}", path, e))
+            return Err(LispError::runtime(format!("file/ls: {}: {}", path, e))
                 .with_code(crate::error::error_codes::FILE_IO))
         }
     };
@@ -1040,37 +1040,37 @@ pub(super) fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(heap.list(items))
 }
 
-/// `(make-dir path)` — create `path` and any missing parents (like `mkdir -p`).
+/// `(file/mkdir path)` — create `path` and any missing parents (like `mkdir -p`).
 /// Returns nil. Used by the project scaffolder (`nest new`).
 pub(super) fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "make-dir", arg(args, 0))?;
+    let path = expect_string(heap, "file/mkdir", arg(args, 0))?;
     std::fs::create_dir_all(&path).map_err(|e| {
-        LispError::runtime(format!("make-dir: {}: {}", path, e))
+        LispError::runtime(format!("file/mkdir: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
 }
 
-/// `(spit path content)` — write `content` (a string) to `path`, replacing any
+/// `(file/spit path content)` — write `content` (a string) to `path`, replacing any
 /// existing file. Returns nil. The write-side counterpart to `load`.
 pub(super) fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pv = arg(args, 0);
     let path = match pv {
         Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::wrong_type(heap, "spit", "string path", pv)),
+        _ => return Err(LispError::wrong_type(heap, "file/spit", "string path", pv)),
     };
     // Content is any iolist (ADR-139): describe the file as a tree of
     // strings/bytes and it is flattened exactly once, here at the write.
     let mut content = Vec::new();
-    flatten_iolist(heap, "spit", arg(args, 1), &mut content)?;
+    flatten_iolist(heap, "file/spit", arg(args, 1), &mut content)?;
     std::fs::write(&path, content).map_err(|e| {
-        LispError::runtime(format!("spit: {}: {}", path, e))
+        LispError::runtime(format!("file/spit: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
 }
 
-/// `(spit-append path content)` — append `content` (a string) to the file at
+/// `(file/spit-append path content)` — append `content` (a string) to the file at
 /// `path`, creating it if absent. Returns nil. Unlike `spit` (which truncates),
 /// this opens in append mode, so each call's write lands at end-of-file — the
 /// atomic-append the OS guarantees for an `O_APPEND` handle, which is what makes a
@@ -1078,38 +1078,38 @@ pub(super) fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// of `append-bytes`.
 pub(super) fn spit_append(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use std::io::Write;
-    let path = expect_string(heap, "spit-append", arg(args, 0))?;
+    let path = expect_string(heap, "file/spit-append", arg(args, 0))?;
     // Content is any iolist (ADR-139) — one flatten, one O_APPEND write.
     let mut content = Vec::new();
-    flatten_iolist(heap, "spit-append", arg(args, 1), &mut content)?;
+    flatten_iolist(heap, "file/spit-append", arg(args, 1), &mut content)?;
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(&path)
         .map_err(|e| {
-            LispError::runtime(format!("spit-append: {}: {}", path, e))
+            LispError::runtime(format!("file/spit-append: {}: {}", path, e))
                 .with_code(crate::error::error_codes::FILE_IO)
         })?;
     f.write_all(&content).map_err(|e| {
-        LispError::runtime(format!("spit-append: {}: {}", path, e))
+        LispError::runtime(format!("file/spit-append: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
 }
 
-/// `(spit-bytes path bytes)` — write a byte sequence (a `bytes` value, a vector,
+/// `(file/spit-bytes path bytes)` — write a byte sequence (a `bytes` value, a vector,
 /// or a list of byte ints 0–255) to `path` byte-faithfully, replacing any
 /// existing file. Returns nil. The binary write-side counterpart to `slurp-bytes`:
 /// `spit` is UTF-8 string-only and would reject (or corrupt) raw bytes, so this is
 /// what materialises a received image / archive / any binary asset to disk.
 pub(super) fn spit_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "spit-bytes", arg(args, 0))?;
+    let path = expect_string(heap, "file/spit-bytes", arg(args, 0))?;
     // Any iolist (ADR-139) — a strict superset of the old bytes/vector/list-of-ints
     // surface (byte ints are iolist leaves), plus strings (UTF-8) and nesting.
     let mut bytes = Vec::new();
-    flatten_iolist(heap, "spit-bytes", arg(args, 1), &mut bytes)?;
+    flatten_iolist(heap, "file/spit-bytes", arg(args, 1), &mut bytes)?;
     std::fs::write(&path, &bytes).map_err(|e| {
-        LispError::runtime(format!("spit-bytes: {}: {}", path, e))
+        LispError::runtime(format!("file/spit-bytes: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
@@ -1218,27 +1218,27 @@ pub(super) fn read_line(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&line))
 }
 
-/// `(slurp path)` — read the whole file at `path` and return it as a string. The
+/// `(file/slurp path)` — read the whole file at `path` and return it as a string. The
 /// read-side counterpart to `spit`; unlike `load` it does not evaluate, so the
 /// doc tooling can inspect a module's source (e.g. its leading docstring form).
 pub(super) fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "slurp", arg(args, 0))?;
+    let path = expect_string(heap, "file/slurp", arg(args, 0))?;
     let content = std::fs::read_to_string(&path).map_err(|e| {
-        LispError::runtime(format!("slurp: {}: {}", path, e))
+        LispError::runtime(format!("file/slurp: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(heap.alloc_string(&content))
 }
 
-/// `(slurp-bytes path)` — read the whole file at `path` as a bytes value. The
+/// `(file/slurp-bytes path)` — read the whole file at `path` as a bytes value. The
 /// byte-faithful read `slurp` can't be: `slurp` is UTF-8 and throws
 /// on a non-text file, whereas this reads any bytes (images, archives, a binary
 /// asset to hash via `hash/sha256-bytes`). Pairs with `hash/sha256-bytes` /
 /// `hash/sha256-raw` and the `encoding` byte variants.
 pub(super) fn slurp_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "slurp-bytes", arg(args, 0))?;
+    let path = expect_string(heap, "file/slurp-bytes", arg(args, 0))?;
     let bytes = std::fs::read(&path).map_err(|e| {
-        LispError::runtime(format!("slurp-bytes: {}: {}", path, e))
+        LispError::runtime(format!("file/slurp-bytes: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(bytes_to_value(&bytes, heap))
@@ -1249,21 +1249,21 @@ pub(super) fn slurp_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// scalar — no `Value` handle is held across an allocation or eval (and a builtin
 /// never fires GC mid-execution; see `docs/memory-model.md`).
 pub(super) fn file_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "file-size", arg(args, 0))?;
+    let path = expect_string(heap, "file/size", arg(args, 0))?;
     match std::fs::metadata(&path) {
         Ok(meta) => Ok(Value::int(meta.len() as i64)),
         Err(_) => Ok(Value::nil()),
     }
 }
 
-/// `(delete-file path)` — remove the file at `path`. Idempotent (nil if already
+/// `(file/rm path)` — remove the file at `path`. Idempotent (nil if already
 /// absent); errors on a real I/O failure (e.g. it's a directory, or permission).
 pub(super) fn delete_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "delete-file", arg(args, 0))?;
+    let path = expect_string(heap, "file/rm", arg(args, 0))?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(Value::nil()),
         Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::nil()),
-        Err(e) => Err(LispError::runtime(format!("delete-file: {}: {}", path, e))
+        Err(e) => Err(LispError::runtime(format!("file/rm: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)),
     }
 }
@@ -1272,11 +1272,11 @@ pub(super) fn delete_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// recursive sibling of `delete-file`; idempotent (nil if already absent),
 /// errors on a real I/O failure. The mechanism behind test-fixture teardown.
 pub(super) fn delete_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "delete-dir", arg(args, 0))?;
+    let path = expect_string(heap, "file/rmdir", arg(args, 0))?;
     match std::fs::remove_dir_all(&path) {
         Ok(()) => Ok(Value::nil()),
         Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::nil()),
-        Err(e) => Err(LispError::runtime(format!("delete-dir: {}: {}", path, e))
+        Err(e) => Err(LispError::runtime(format!("file/rmdir: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)),
     }
 }
@@ -1284,10 +1284,10 @@ pub(super) fn delete_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// `(rename-file from to)` — rename/move `from` to `to` (replacing `to` if it
 /// exists, per the platform). Returns nil; errors on failure.
 pub(super) fn rename_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let from = expect_string(heap, "rename-file", arg(args, 0))?;
-    let to = expect_string(heap, "rename-file", arg(args, 1))?;
+    let from = expect_string(heap, "file/rename", arg(args, 0))?;
+    let to = expect_string(heap, "file/rename", arg(args, 1))?;
     std::fs::rename(&from, &to).map_err(|e| {
-        LispError::runtime(format!("rename-file: {} -> {}: {}", from, to, e))
+        LispError::runtime(format!("file/rename: {} -> {}: {}", from, to, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
@@ -1298,10 +1298,10 @@ pub(super) fn rename_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// Returns nil; errors on failure. The binary-safe counterpart to a `slurp`+`spit`
 /// (which is UTF-8 string I/O and would corrupt non-text files / drop the mode).
 pub(super) fn copy_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let from = expect_string(heap, "copy-file", arg(args, 0))?;
-    let to = expect_string(heap, "copy-file", arg(args, 1))?;
+    let from = expect_string(heap, "file/cp", arg(args, 0))?;
+    let to = expect_string(heap, "file/cp", arg(args, 1))?;
     std::fs::copy(&from, &to).map_err(|e| {
-        LispError::runtime(format!("copy-file: {} -> {}: {}", from, to, e))
+        LispError::runtime(format!("file/cp: {} -> {}: {}", from, to, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
@@ -1361,7 +1361,7 @@ pub(super) fn image_thumb(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// only when it changes. Resolution is platform-dependent (typically nanoseconds
 /// on Linux, truncated to ms here).
 pub(super) fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "file-mtime", arg(args, 0))?;
+    let path = expect_string(heap, "file/mtime", arg(args, 0))?;
     let Ok(meta) = std::fs::metadata(&path) else {
         return Ok(Value::nil());
     };
@@ -1382,7 +1382,7 @@ pub(super) fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// `:dir? true` so it's navigable, yet `:symlink? true` so it can be marked). Off
 /// unix there are no permission bits, so `:mode` is 0 and `:exec?` is false.
 pub(super) fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "file-stat", arg(args, 0))?;
+    let path = expect_string(heap, "file/stat", arg(args, 0))?;
     // lstat for the link's own nature; stat (follows) for size/mtime/dir?-of-target.
     let Ok(lmeta) = std::fs::symlink_metadata(&path) else {
         return Ok(Value::nil());

@@ -57,11 +57,11 @@ suggestions\", never to an error on the user's command line."
 (defn- complete-find-root
   (dir)
   (cond
-    (file-exists? (path-join dir "project.blsp")) dir
+    (file/exists? (path-join dir "project.blsp")) dir
     (= dir (parent-dir dir)) nil
     else (complete-find-root (parent-dir dir))))
 
-(defn- complete-root () (complete-safely (fn () (complete-find-root (cwd)))))
+(defn- complete-root () (complete-safely (fn () (complete-find-root (file/cwd)))))
 
 ;; Every path under `dir` (recursively) whose filename ends in `suffix`.
 ;;
@@ -72,15 +72,15 @@ suggestions\", never to an error on the user's command line."
 ;; reversed (prepend), which is fine: callers sort or filter.
 (defn- complete-under
   (dir suffix)
-  (if (dir? dir)
+  (if (file/dir? dir)
     (fold (fn (acc entry)
             (let (p (path-join dir entry))
               (cond
-                (dir? p) (append-two (complete-under p suffix) acc)
+                (file/dir? p) (append-two (complete-under p suffix) acc)
                 (string/ends-with? entry suffix) (cons p acc)
                 else acc)))
       nil
-      (list-dir dir))
+      (file/ls dir))
     nil))
 
 ;; The value after key `k` in a flat kv list, or nil — the manifest is a plist.
@@ -103,7 +103,7 @@ suggestions\", never to an error on the user's command line."
 (defn- complete-manifest
   (root)
   (complete-safely (fn ()
-                     (let (form (read-first (slurp (path-join root "project.blsp"))))
+                     (let (form (read-first (file/slurp (path-join root "project.blsp"))))
                        (if (and (pair? form) (= (first form) 'project)) form nil)))))
 
 ;; The directories the manifest declares under `key`, as absolute paths, falling back
@@ -260,7 +260,7 @@ suggestions\", never to an error on the user's command line."
                     (fold (fn (acc rel)
                             (append acc
                               (or (complete-safely (fn ()
-                                                     (complete-tags-in (slurp (path-join root
+                                                     (complete-tags-in (file/slurp (path-join root
                                                                                 rel))
                                                        nil 0)))
                                 nil)))

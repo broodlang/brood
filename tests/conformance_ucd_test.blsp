@@ -276,7 +276,7 @@
     (is (corpus-present? "ucd"))
     ;; Bump this together with UCD_VERSION in scripts/fetch-corpus.sh, and only
     ;; after checking Cargo.lock — see the header note on version skew.
-    (assert= (string/trim (slurp (ucd-file "VERSION"))) "16.0.0"))
+    (assert= (string/trim (file/slurp (ucd-file "VERSION"))) "16.0.0"))
 
   (test "string->graphemes segments every GraphemeBreakTest case"
     (let ([ran bad] (gb-scan gb-lines 0 nil))

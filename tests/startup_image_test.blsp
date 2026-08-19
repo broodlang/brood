@@ -81,7 +81,7 @@
   (test "an absent or corrupt image is a miss"
     (is (nil? (%image-index (img-tmp "no-such-file-at-all") "fp")))
     (let (p (img-tmp "corrupt"))
-      (spit p "this is not a brood image")
+      (file/spit p "this is not a brood image")
       (is (nil? (%image-index p "fp")))))
 
   ;; The point of sectioning: a module materialises on its own, and loading one section

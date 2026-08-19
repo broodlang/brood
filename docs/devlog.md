@@ -1600,3 +1600,36 @@ bare.
 Scope: ~915 call sites across `std/`+`tests/`+`examples/`+Rust-embedded Brood, plus `sigs.rs`,
 `PRIMITIVE_DOCS`, the `doc-catalog` (public entries renamed, private helpers dropped per ADR-227),
 `docs/language.md`, and every `../*` sibling project. See ADR-230.
+
+
+## 2026-08-18 — Stdlib namespacing, stage 6: the `file` library module (ADR-231)
+
+Same treatment for the filesystem surface, mirroring stage 5. The 18 kernel fs primitives are
+re-registered directly under `file/*` — `file/slurp`, `file/slurp-bytes`, `file/spit`,
+`file/spit-append`, `file/spit-bytes`, `file/spit-private`, `file/exists?`, `file/dir?`,
+`file/stat`, `file/mtime`, `file/size`, `file/ls`, `file/mkdir`, `file/rm`, `file/rmdir`,
+`file/rename`, `file/cp`, `file/cwd` — no bare forwarders (greenfield). The old
+verb-noun/adjective spellings are gone: `list-dir`→`file/ls`, `make-dir`→`file/mkdir`,
+`delete-file`→`file/rm`, `delete-dir`→`file/rmdir`, `rename-file`→`file/rename`,
+`copy-file`→`file/cp`, `file-exists?`→`file/exists?`, `file-mtime`→`file/mtime`,
+`file-size`→`file/size`. `std/file.blsp`'s policy layer keeps its bare module names
+(`read-lines`/`write-lines`/`list-files`/`list-dirs`/`walk-files`/`path-extension`/`path-stem`);
+its `file?` predicate was freed and reintroduced as `regular?` (the `file/` prefix would have
+read as "a file that is a file").
+
+**The boundary rule: `file/*` = "the operation touches the filesystem"** (whole-file and byte
+I/O, metadata/stat, directory listing and mutation, the cwd). **Bare** stays for the pure
+path-*string* helpers in the prelude — `path-join`, `path-basename`, `parent-dir`,
+`path-absolute`, `temp-path` — which manipulate a path as text and never call a syscall. Same
+mechanism as stage 5: `file` is an ordinary `embedded_module!`, the builtins are canonical under
+their `file/…` names with no wrapper, and inside `file.blsp` the renamed builtins are written
+qualified (a builtin registered as `file/slurp` is not a def-head, so the forward-ref pre-scan
+won't auto-qualify a bare `slurp`).
+
+Two stragglers the call-position sweep did not reach, fixed here: the checker's guard-effect
+list (`guard_effects.rs` still named `slurp`/`spit`/`spit-append` as effectful-in-guard), and
+the user-facing `format!("<op>: {path}: {e}")` error prefixes in `io.rs`/`system.rs` (they name
+the primitive, so they must track the rename — e.g. a failing read now reads `file/slurp: …`).
+Living-doc references in `tooling.md`/`module-index.md`/`node-connect.md` updated too; the dated
+historical entries in `decisions.md` and `devlog-archive.md` are left as the record of what those
+primitives were called at the time. See ADR-231.

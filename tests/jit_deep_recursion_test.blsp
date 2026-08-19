@@ -35,7 +35,7 @@
 
 (defn- jdr-parse
   (path)
-  (try (do (json/parse (slurp path)) :ok) (catch e :rejected)))
+  (try (do (json/parse (file/slurp path)) :ok) (catch e :rejected)))
 
 ;; Warm in THIS process so the parser arms tier to native before the spawned run.
 ;; One pass already tiers the arms; extra passes only buy confidence, so they are the

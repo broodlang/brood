@@ -90,7 +90,7 @@ The vocabulary you'll use most:
   the model, not the command layer, so no consumer can forget to check. Build a
   generated/`special-mode` buffer (a process list, a help page) with `make-buffer`
   *then* `set-read-only` it — construction never checks the flag.
-- **Files:** `buffer-from-file` (slurp) · `save-buffer` (spit)
+- **Files:** `buffer-from-file` (file/slurp) · `save-buffer` (file/spit)
 
 Because operations are pure, you compose them with `->` and they never surprise
 you with aliasing. A command is just a function `buffer -> buffer`.
@@ -262,7 +262,7 @@ state — until a command returns `:quit`.
 (defn run (path)
   "Open `path` and run the editor. Pairs with a Rust-side terminal-restore guard
 (like `nest observe`) so a crash never wrecks the terminal."
-  (let (buf (if (file-exists? path) (buffer-from-file path) (make-buffer "" path path)))
+  (let (buf (if (file/exists? path) (buffer-from-file path) (make-buffer "" path path)))
     (term-enter)
     (editor--loop {:buffer buf :top 0 :height 1})))
 

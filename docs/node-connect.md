@@ -87,9 +87,9 @@ nest run --name foobar app.blsp     # brings the node up, then runs app.blsp
 - **As built, this lives in Brood, not Rust.** The original plan was a Rust
   `dist::default_cookie()`; the implementation instead made cookie resolution
   *policy in Brood* — `(node-cookie)` in `std/prelude.blsp` (ADR-068) over the
-  `getenv` / `random-token` / `spit-private` primitives (the kernel carries only
-  bytes). `spit-private` is the primitive that does the `0600` write a plain
-  `spit` can't, so the file-mode mechanism stays in Rust while the resolution
+  `getenv` / `random-token` / `file/spit-private` primitives (the kernel carries only
+  bytes). `file/spit-private` is the primitive that does the `0600` write a plain
+  `file/spit` can't, so the file-mode mechanism stays in Rust while the resolution
   logic stays in Brood — mirroring Erlang's `~/.erlang.cookie` but expressed in
   the language. There is **no** `dist::default_cookie()` symbol in the tree.
 

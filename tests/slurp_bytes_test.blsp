@@ -11,15 +11,15 @@
 
 (defn sb-tmp ()
   (let (d (temp-dir "brood-slurpb-"))
-    (make-dir d)
+    (file/mkdir d)
     d))
 
 (describe "slurp-bytes: text files"
   (test "returns a bytes value equal to the file's UTF-8 bytes"
     (let (p (path-join (sb-tmp) "t.txt"))
       ; 'é' is two UTF-8 bytes
-      (spit p "héllo")
-      (let (bs (slurp-bytes p))
+      (file/spit p "héllo")
+      (let (bs (file/slurp-bytes p))
         (is (bytes? bs))
         (assert= bs (string->utf8-bytes "héllo")))))
 
@@ -27,9 +27,9 @@
     ;; The reason switching package-sha256-file to bytes doesn't churn existing
     ;; lock hashes: for a text file the two are byte-identical.
     (let (p (path-join (sb-tmp) "src.blsp"))
-      (spit p "(defn f (x) (* x x))\n")
-      (assert= (hash/sha256-bytes (slurp-bytes p))
-        (hash/sha256 (slurp p))))))
+      (file/spit p "(defn f (x) (* x x))\n")
+      (assert= (hash/sha256-bytes (file/slurp-bytes p))
+        (hash/sha256 (file/slurp p))))))
 
 (describe "slurp-bytes: binary files (what slurp can't read)"
   :isolated
@@ -43,58 +43,58 @@
   (test "slurp throws on a non-UTF-8 file but slurp-bytes reads its bytes"
     (let (path (path-join (sb-tmp) "blob.bin"))
       (sb-write-binary path)
-      (assert-error (slurp path))
-      (assert= (into [] (slurp-bytes path)) [255 128 65])))
+      (assert-error (file/slurp path))
+      (assert= (into [] (file/slurp-bytes path)) [255 128 65])))
 
   (test "hashing a binary file matches the OS sha256 (printf '\\377\\200\\101')"
     ;; printf '\377\200\101' | sha256sum
     (let (path (path-join (sb-tmp) "blob2.bin"))
       (sb-write-binary path)
       (assert= "93a574562e1a3a9d1d3532381b3e3fab4679e0a1fd5de5794e91e8ddee34cca9"
-        (hash/sha256-bytes (slurp-bytes path)))
+        (hash/sha256-bytes (file/slurp-bytes path)))
       ;; and the raw-byte digest agrees (hex of it == the hex digest)
       (assert= "93a574562e1a3a9d1d3532381b3e3fab4679e0a1fd5de5794e91e8ddee34cca9"
-        (encoding/hex-encode-bytes (hash/sha256-raw (slurp-bytes path)))))))
+        (encoding/hex-encode-bytes (hash/sha256-raw (file/slurp-bytes path)))))))
 
 (describe "spit-bytes: byte-faithful file writes (the write side of slurp-bytes)"
-  (test "round-trips a bytes value (spit accepts it too — ADR-139 iolists)"
+  (test "round-trips a bytes value (file/spit accepts it too — ADR-139 iolists)"
     (let (p (path-join (sb-tmp) "w.bin")
           data (string->utf8-bytes "PNG\0\1\2 héllo ☃"))
       ;; Since ADR-139 every write boundary takes an iolist, so plain `spit`
       ;; writes a bytes value byte-faithfully as well — same file either way.
-      (spit p data)
-      (assert= (slurp-bytes p) data)
-      (spit-bytes p data)
-      (assert= (slurp-bytes p) data)))
+      (file/spit p data)
+      (assert= (file/slurp-bytes p) data)
+      (file/spit-bytes p data)
+      (assert= (file/slurp-bytes p) data)))
 
   (test "writes non-UTF-8 bytes directly — no printf subprocess needed"
     (let (p (path-join (sb-tmp) "raw.bin"))
       ; 0xFF 0x80 is not valid UTF-8
-      (spit-bytes p [255 128 65])
+      (file/spit-bytes p [255 128 65])
       ; so slurp can't read it back
-      (assert-error (slurp p))
-      (assert= (into [] (slurp-bytes p)) [255 128 65])
+      (assert-error (file/slurp p))
+      (assert= (into [] (file/slurp-bytes p)) [255 128 65])
       ;; byte-for-byte faithful: the digest matches the OS sha256 of those bytes
       (assert= "93a574562e1a3a9d1d3532381b3e3fab4679e0a1fd5de5794e91e8ddee34cca9"
-        (hash/sha256-bytes (slurp-bytes p)))))
+        (hash/sha256-bytes (file/slurp-bytes p)))))
 
   (test "accepts a bytes value, a vector, or a list of byte ints alike"
     (let (p (path-join (sb-tmp) "seq.bin"))
       ; a list → "hi"
-      (spit-bytes p (list 104 105))
-      (assert= (slurp p) "hi")
+      (file/spit-bytes p (list 104 105))
+      (assert= (file/slurp p) "hi")
       ; a vector → "hi"
-      (spit-bytes p [104 105])
-      (assert= (slurp p) "hi")
+      (file/spit-bytes p [104 105])
+      (assert= (file/slurp p) "hi")
       ; a bytes value → "hi"
-      (spit-bytes p (string->utf8-bytes "hi"))
-      (assert= (slurp p) "hi")))
+      (file/spit-bytes p (string->utf8-bytes "hi"))
+      (assert= (file/slurp p) "hi")))
 
   (test "a byte int out of 0–255 range is rejected, not silently truncated"
-    (assert-error (spit-bytes (path-join (sb-tmp) "bad.bin") [256])))
+    (assert-error (file/spit-bytes (path-join (sb-tmp) "bad.bin") [256])))
 
   (test "replaces an existing file rather than appending"
     (let (p (path-join (sb-tmp) "over.bin"))
-      (spit-bytes p (string->utf8-bytes "longer first write"))
-      (spit-bytes p (string->utf8-bytes "short"))
-      (assert= (slurp p) "short"))))
+      (file/spit-bytes p (string->utf8-bytes "longer first write"))
+      (file/spit-bytes p (string->utf8-bytes "short"))
+      (assert= (file/slurp p) "short"))))

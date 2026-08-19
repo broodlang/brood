@@ -44,7 +44,7 @@ Resolution and location are re-derived in many places, each answering one slice 
 "where does this name live":
 
 - **Filename bijection** — `module foo → foo.blsp`, resolved by `require-force-in`
-  (`std/prelude.blsp`) walking `*load-path*` with `file-exists?` probes. Simple, always
+  (`std/prelude.blsp`) walking `*load-path*` with `file/exists?` probes. Simple, always
   fresh, human-computable — but it *is* why only one module may live per file (the name
   is the address, so a second module in a file has no file of its own name to be found
   by).

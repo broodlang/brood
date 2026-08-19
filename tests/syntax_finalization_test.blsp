@@ -96,10 +96,10 @@
     ;; Two modules writing `(def *width* …)` used to share — and clobber — one root
     ;; binding; the second load silently changed the first module's reads.
     (let (dir (temp-dir "brood-ambient-"))
-      (make-dir dir)
+      (file/mkdir dir)
       (let (fa (path-join dir "sfa.blsp") fb (path-join dir "sfb.blsp"))
-        (spit fa "(defmodule sfa)\n(def *sf-width* 10)\n(defn w () *sf-width*)\n")
-        (spit fb "(defmodule sfb)\n(def *sf-width* 999)\n(defn w () *sf-width*)\n")
+        (file/spit fa "(defmodule sfa)\n(def *sf-width* 10)\n(defn w () *sf-width*)\n")
+        (file/spit fb "(defmodule sfb)\n(def *sf-width* 999)\n(defn w () *sf-width*)\n")
         (load fa)
         (load fb)
         (assert= (sfa/w) 10)
@@ -110,10 +110,10 @@
 
   (test "a defdyn name IS ambient: one root binding any module can set"
     (let (dir (temp-dir "brood-ambient2-"))
-      (make-dir dir)
+      (file/mkdir dir)
       (let (f (path-join dir "sfc.blsp"))
         (defdyn *sf-knob* 1)
-        (spit f
+        (file/spit f
           "(defmodule sfc)\n(defn read-knob () *sf-knob*)\n(defn bump () (def *sf-knob* 42))\n")
         (load f)
         (assert= (sfc/read-knob) 1)

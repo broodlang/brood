@@ -66,7 +66,7 @@ error inside the user expression surfaces here as the `:error` branch."
 (defn- mcp-shadows-for
   (file)
   (try
-    (let (root (project/project-find-root (cwd)))
+    (let (root (project/project-find-root (file/cwd)))
       (if (nil? root)
         nil
         (let (defined (project-file-def-names file)
@@ -179,8 +179,8 @@ through nest mcp, never the raw filesystem."
       (throw "write: :content must be a string"))
     (try
       (let (abs (mcp-project-path rel)
-            _dir (make-dir (parent-dir abs))
-            _w (spit abs content))
+            _dir (file/mkdir (parent-dir abs))
+            _w (file/spit abs content))
         (mcp-write-result rel abs))
       (catch e
         {:ok false :error (mcp-error-shape e)}))))
@@ -205,9 +205,9 @@ image stays in sync with disk."
       (throw "edit: :old must be non-empty"))
     (try
       (let (abs (mcp-project-path rel))
-        (if (not (file-exists? abs))
+        (if (not (file/exists? abs))
           {:ok false :error (str "edit: no such file: " rel)}
-          (let (text (slurp abs)
+          (let (text (file/slurp abs)
                 hits (- (count (string/split text old)) 1))
             (cond
               (= hits 0) {:ok false :error (str "edit: :old not found in " rel)}
@@ -215,7 +215,7 @@ image stays in sync with disk."
                 {:ok false
                  :error (str "edit: :old occurs "
                           hits " times in " rel " — make it unique")}
-              else (let (_w (spit abs (string/replace text old new)))
+              else (let (_w (file/spit abs (string/replace text old new)))
                      (mcp-write-result rel abs))))))
       (catch e
         {:ok false :error (mcp-error-shape e)}))))
@@ -282,14 +282,14 @@ so a clean project renders as `{:diagnostics []}` rather than `{:diagnostics
 null}` — agents shouldn't have to disambiguate \"no warnings\" from
 \"missing field\"."
   (try
-    ;; `*project-root*` explicitly, not the implicit `(cwd)` this used to rely on. The
+    ;; `*project-root*` explicitly, not the implicit `(file/cwd)` this used to rely on. The
     ;; server serves ONE project — that root is what the write sandbox is pinned to
     ;; (`mcp-project-path`) and what every other project-scoped tool here already reads
     ;; (`project-all-files *project-root*`) — so taking the checked project from cwd
     ;; made `check` the one tool that could disagree with the rest if the host process
     ;; ever moved. It also made the tool untestable without process-global state, which
     ;; is how its test came to type-check the whole brood repo (KI-46). Nil root keeps
-    ;; the old behaviour: `check-project-structured` falls back to `(cwd)` and reports
+    ;; the old behaviour: `check-project-structured` falls back to `(file/cwd)` and reports
     ;; "not in a Brood project" the same way.
     {:diagnostics (or (check-project-structured *project-root*) [])}
     (catch e
@@ -408,7 +408,7 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
     {:references (mapcat (fn (f)
                            (try
                              (map (fn (lc) {:file f :line (first lc) :col (second lc)})
-                               (references-in-source name (slurp f)))
+                               (references-in-source name (file/slurp f)))
                              (catch _ nil)))
                    (project-all-files *project-root*))}))
 
@@ -756,8 +756,8 @@ Brood pattern, `std/tool/explain.blsp`)."
 ;; are no-ops). Failures in the project mcp.blsp surface as load errors during
 ;; `nest mcp` startup, which is exactly when the agent's `.mcp.json` would
 ;; have wired it up — the right time for a hard error.
-(let (root (project/project-find-root (cwd)))
+(let (root (project/project-find-root (file/cwd)))
   (when root
     (let (project-mcp (path-join root "mcp.blsp"))
-      (when (file-exists? project-mcp)
+      (when (file/exists? project-mcp)
         (load project-mcp)))))

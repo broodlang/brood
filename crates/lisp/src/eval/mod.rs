@@ -1530,13 +1530,13 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         "string-index-of" => {
             "Brood spells `string-index-of` as `index-of` (with an `&optional from`)."
         }
-        "string-upcase" => "Brood spells `string-upcase` as `upper`.",
-        "string-downcase" => "Brood spells `string-downcase` as `lower`.",
-        "string-capitalize" => "Brood spells `string-capitalize` as `capitalize`.",
-        "read-file" => "Brood spells `read-file` as `slurp` (`slurp-bytes` for bytes).",
-        "write-file" => "Brood spells `write-file` as `spit` (`spit-append` to append).",
-        "path-exists?" => "Brood spells `path-exists?` as `file-exists?`.",
-        "working-dir" => "Brood spells `working-dir` as `cwd`.",
+        "string-upcase" => "Brood spells `string-upcase` as `string/upper`.",
+        "string-downcase" => "Brood spells `string-downcase` as `string/lower`.",
+        "string-capitalize" => "Brood spells `string-capitalize` as `string/capitalize`.",
+        "read-file" => "Brood spells `read-file` as `file/slurp` (`file/slurp-bytes` for bytes).",
+        "write-file" => "Brood spells `write-file` as `file/spit` (`file/spit-append` to append).",
+        "path-exists?" => "Brood spells `path-exists?` as `file/exists?`.",
+        "working-dir" => "Brood spells `working-dir` as `file/cwd`.",
         // The `#` arm fires when `#` itself is read as a bare symbol — i.e. for a
         // reader macro Brood lacks. It used to claim `#{…}` was one of them; sets
         // have been a real literal since ADR-060, and `#b"…"` bytes since ADR-139.

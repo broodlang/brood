@@ -143,7 +143,7 @@ e.g. an editor appending to its `*Messages*` buffer. Async and share-nothing."
 
 (defn file-backend (path & opts)
   "A backend that appends each formatted line to the file at `path` (low-volume —
-`spit-append` is a non-atomic read-modify-write today)."
+`file/spit-append` is a non-atomic read-modify-write today)."
   (apply backend (file-port path) opts))
 
 ;; ---- the logger process -----------------------------------------------------

@@ -298,7 +298,7 @@
   (test "the prelude is idempotent (format(format(prelude)) == format(prelude))"
     ;; The prelude is the largest single-file Brood program we have; idempotency
     ;; on it is a high-confidence smoke test of the whole walker.
-    (let (src (slurp "std/prelude.blsp") once (format-source src) twice (format-source once))
+    (let (src (file/slurp "std/prelude.blsp") once (format-source src) twice (format-source once))
       (assert= once twice))))
 
 ;; Tail-recursive (the test green-process stack is small, so O(1) stack): format
@@ -369,21 +369,21 @@
           path (path-join dir "broken.blsp")
           ;; f's paren is never closed; g is a separate top-level defn
           source "(defn f (x)\n  (+ x 1)\n\n(defn g (y)\n  (* y 2))\n")
-      (make-dir dir)
-      (spit path source)
+      (file/mkdir dir)
+      (file/spit path source)
       (assert= (format/format-file path) :unparseable)
-      (assert= (slurp path) source)))
+      (assert= (file/slurp path) source)))
   (test "a badly-laid-out but PARSEABLE file is still rewritten"
     (let (dir (temp-dir "brood-fmt-safe-")
           path (path-join dir "ugly.blsp"))
-      (make-dir dir)
-      (spit path "(defn f (x)\n        (+ x 1))\n")
+      (file/mkdir dir)
+      (file/spit path "(defn f (x)\n        (+ x 1))\n")
       (assert= (format/format-file path) :rewrote)
-      (is (format/format-parses? (slurp path)))))
+      (is (format/format-parses? (file/slurp path)))))
   (test "an already-formatted file is left unchanged"
     (let (dir (temp-dir "brood-fmt-safe-")
           path (path-join dir "clean.blsp"))
-      (make-dir dir)
-      (spit path "(defn f (x) (+ x 1))\n")
+      (file/mkdir dir)
+      (file/spit path "(defn f (x) (+ x 1))\n")
       (format/format-file path)
       (assert= (format/format-file path) :unchanged))))

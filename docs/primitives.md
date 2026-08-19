@@ -123,25 +123,25 @@ arg silently becoming `nil`.
 | **Symbols** | `name` | 1 | a symbol/keyword's spelling as a string (no leading `:`) |
 | | `symbol` | 1 | coerce a string / symbol / keyword to the matching symbol (intern as needed). Lenient inverse of `name`; strict `string->symbol` is a Brood wrapper |
 | | `keyword` | 1 | coerce a string / symbol / keyword to the matching keyword (intern as needed). Mirrors `symbol`; they share an interner so `(= (name 'x) (name :x))` |
-| **Filesystem** | `cwd` | 0 | current working directory |
-| | `file-exists?` `dir?` | 1 | path exists / is a directory → bool |
-| | `list-dir` | 1 | entry names directly under a directory (sorted) |
-| | `make-dir` | 1 | create a directory and parents (`mkdir -p`) |
-| | `spit` | 2 | write a string to a file (write-side of `load`) |
-| | `slurp` | 1 | read a whole file into a string (read-side of `spit`; unlike `load`, does not evaluate) |
-| | `file-mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `load` for hot-reload) |
-| | `file-stat` | 1 | one-stat metadata map `{:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}`, or nil if missing (collapses `dir?`+`file-size`+`file-mtime` for a directory lister + a recency sort) |
-| | `slurp-bytes` | 1 | Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset. |
-| | `spit-bytes` | 2 | Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. |
+| **Filesystem** | `file/cwd` | 0 | current working directory |
+| | `file/exists?` `file/dir?` | 1 | path exists / is a directory → bool |
+| | `file/ls` | 1 | entry names directly under a directory (sorted) |
+| | `file/mkdir` | 1 | create a directory and parents (`mkdir -p`) |
+| | `file/spit` | 2 | write a string to a file (write-side of `load`) |
+| | `file/slurp` | 1 | read a whole file into a string (read-side of `file/spit`; unlike `load`, does not evaluate) |
+| | `file/mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `load` for hot-reload) |
+| | `file/stat` | 1 | one-stat metadata map `{:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}`, or nil if missing (collapses `file/dir?`+`file/size`+`file/mtime` for a directory lister + a recency sort) |
+| | `file/slurp-bytes` | 1 | Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (file/slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset. |
+| | `file/spit-bytes` | 2 | Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. |
 | | `append-bytes` | 2 | Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. |
-| | `spit-append` | 2 | Append s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, creating it if absent (unlike spit, which truncates). Returns nil. |
-| | `spit-private` | 2 | Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file). |
+| | `file/spit-append` | 2 | Append s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, creating it if absent (unlike file/spit, which truncates). Returns nil. |
+| | `file/spit-private` | 2 | Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (file/spit leaves a world-readable file). |
 | | `%file-swap` | 4 | Replace the entire contents of data-path with new, but ONLY if they currently equal expected; returns true when swapped, false when they differ (re-read, recompute, retry). |
 | | `canonicalize` | 1 | The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. |
-| | `copy-file` | 2 | Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure. |
-| | `rename-file` | 2 | Rename/move file `from` to `to`. Returns nil; errors on failure. |
-| | `delete-file` | 1 | Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure. |
-| | `delete-dir` | 1 | Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure. |
+| | `file/cp` | 2 | Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure. |
+| | `file/rename` | 2 | Rename/move file `from` to `to`. Returns nil; errors on failure. |
+| | `file/rm` | 1 | Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure. |
+| | `file/rmdir` | 1 | Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure. |
 | **System** | `getenv` | 1 | environment-variable value, or nil if unset |
 | | `run-process` | 2 | run an external program (`prog`, args list), inherit stdio → exit code |
 | | `hostname` | 0 | This machine's short hostname (no domain). Used to qualify a node name as name@host. |

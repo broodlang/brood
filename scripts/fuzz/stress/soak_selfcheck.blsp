@@ -35,7 +35,7 @@
 (defn rss-kb ()
   ;; /proc/self/status has "VmRSS:\t   12345 kB" — tab-then-spaces, so scan for the digit
   ;; run rather than splitting on a separator.
-  (let (txt (slurp "/proc/self/status")
+  (let (txt (file/slurp "/proc/self/status")
         i (index-of txt "VmRSS:"))
     (if (< i 0)
       0

@@ -701,7 +701,7 @@ lines. (Pure — the testable core of `repl-load-history`.)"
 read error — a missing or unreadable history file must never stop the REPL starting."
   (try
     (let (path (repl-history-path))
-      (if (file-exists? path) (repl-history<-text (slurp path)) '()))
+      (if (file/exists? path) (repl-history<-text (file/slurp path)) '()))
     (catch e '())))
 
 (defn- repl-save-history
@@ -709,7 +709,7 @@ read error — a missing or unreadable history file must never stop the REPL sta
   "Write the most recent `*repl-history-max*` entries to the history file (oldest
 first, one per line). Best-effort: a write failure is swallowed, never breaking the
 loop."
-  (try (spit (repl-history-path) (repl-history->text history)) (catch e nil)))
+  (try (file/spit (repl-history-path) (repl-history->text history)) (catch e nil)))
 
 ;; ---- I/O loop ---------------------------------------------------------------
 
@@ -826,7 +826,7 @@ from your home directory doesn't load the same file twice."
                (let (home (getenv "HOME")) (if home (path-join home ".broodrc.blsp") nil)))
         ;; Compared against the *absolute* local path, since `user` is absolute — a
         ;; bare "./.broodrc.blsp" would never match it and we'd load twice.
-        local (try (path-join (cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
+        local (try (path-join (file/cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
     (filter (fn (p) (not (nil? p)))
       (if (= user local) (list user) (list user local)))))
 
@@ -844,7 +844,7 @@ the loop spawns so its `def`s are in place for the first prompt."
   (when (not *repl-rc-loaded*)
     (def- *repl-rc-loaded* true)
     (fold (fn (_ path)
-            (when (try (file-exists? path) (catch _ false))
+            (when (try (file/exists? path) (catch _ false))
               (try
                 (load path)
                 (catch e

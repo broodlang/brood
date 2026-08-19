@@ -506,7 +506,7 @@
 (describe "buffer file round-trip"
   (test "buffer-from-file reads, save-buffer writes back"
     (let (path (str (temp-dir "brood-buf-") ".txt"))
-      (spit path "first line\nsecond line\n")
+      (file/spit path "first line\nsecond line\n")
       (let (b (buffer-from-file path))
         (assert= (buffer-text b) "first line\nsecond line\n")
         (assert= (buffer-file b) path)
@@ -520,7 +520,7 @@
   ;; empty buffer backed by the path (so the first save creates the file).
   (test "find-file-buffer reads an existing file"
     (let (path (str (temp-dir "brood-buf-") ".txt"))
-      (spit path "hi\n")
+      (file/spit path "hi\n")
       (let (b (find-file-buffer path))
         (assert= (buffer-text b) "hi\n")
         (assert= (buffer-file b) path))))

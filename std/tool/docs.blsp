@@ -6,7 +6,7 @@ the definitions it adds to the global table.
 `(generate-docs)` documents the whole project (every source file under it);
 `(generate-docs name)` documents a single module — a baked-in std module, or one
 found as <name>.blsp on `*load-path*`. This is policy built on the introspection
-primitives (`doc` / `arglist` / `global-names`), `slurp`, and the project model
+primitives (`doc` / `arglist` / `global-names`), `file/slurp`, and the project model
 in `std/tool/project.blsp`; Rust supplies only that mechanism (ADR-006).
 
 Attribution uses a `(global-names)` delta around loading the module, so it can't
@@ -30,7 +30,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   (let (embedded (%builtin-module key))
     (if embedded
       embedded
-      (let (path (require-find (str key ".blsp") *load-path*)) (when path (slurp path))))))
+      (let (path (require-find (str key ".blsp") *load-path*)) (when path (file/slurp path))))))
 
 ;; The module docstring: a module's first top-level form, when it is a string
 ;; literal (mirrors the function-docstring rule). nil if there's no leading
@@ -126,7 +126,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   bound (transitively loaded, or materialised from a startup image, ADR-218) and modules the
   file's own load pulls in. Files with no module header, or read outside a project, fall back
   to the delta."
-  (let (src (slurp path)
+  (let (src (file/slurp path)
         declared (docs-module-name src)
         feature (try (project/project-file-feature path) (catch _ nil))
         before (global-names))
@@ -153,8 +153,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn document-project ()
   "The Markdown documentation for the whole project (every source file under it), found from the cwd. Errors if not in a project."
   ; project/project-find-root / --collect-sources / project-setup
-  (let (root (project/project-find-root (cwd)))
-    (when (nil? root) (error "doc: not in a Brood project (no project.blsp found from " (cwd) ")"))
+  (let (root (project/project-find-root (file/cwd)))
+    (when (nil? root) (error "doc: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project-setup root)
     (let (dirs (project/project-abs-paths root *project-source-paths*)
           files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
@@ -248,7 +248,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   so the namespace is taken from `project-file-feature` (the rooted name) while the
   module is *displayed* under its declared name. A file with no module header, or read
   outside a project, falls back to the load delta."
-  (let (src (slurp path)
+  (let (src (file/slurp path)
         declared (docs-module-name src)
         feature (try (project/project-file-feature path) (catch _ nil))
         before (global-names))
@@ -271,8 +271,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn model-project ()
   "The whole-project doc model — `{:name :version :modules […]}` — found from the cwd,
   documenting every source file under it. Errors if not in a Brood project."
-  (let (root (project/project-find-root (cwd)))
-    (when (nil? root) (error "docs: not in a Brood project (no project.blsp found from " (cwd) ")"))
+  (let (root (project/project-find-root (file/cwd)))
+    (when (nil? root) (error "docs: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project-setup root)
     (let (dirs (project/project-abs-paths root *project-source-paths*)
           files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
@@ -309,9 +309,9 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 (defn- write-site
   (out-dir model title)
-  (when (not (dir? out-dir)) (make-dir out-dir))
-  (spit (path-join out-dir "index.html") (docsite/render model {:title title}))
-  (spit (path-join out-dir "model.json") (json/encode model))
+  (when (not (file/dir? out-dir)) (file/mkdir out-dir))
+  (file/spit (path-join out-dir "index.html") (docsite/render model {:title title}))
+  (file/spit (path-join out-dir "model.json") (json/encode model))
   (println (str "Wrote "
              (path-join out-dir "index.html")
              " and model.json ("
@@ -474,12 +474,12 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- collect-guides
   (root)
   (let (dir (path-join root "guides"))
-    (if (not (dir? dir))
+    (if (not (file/dir? dir))
       []
       (apply vector
-        (map (fn (path) {:title (guide-title path) :html (markdown->html (slurp path))})
+        (map (fn (path) {:title (guide-title path) :html (markdown->html (file/slurp path))})
           (sort (filter (fn (p) (string/ends-with? p ".md"))
-                  (map (fn (f) (path-join dir f)) (list-dir dir)))))))))
+                  (map (fn (f) (path-join dir f)) (file/ls dir)))))))))
 
 ;; --- doctests (`nest doctest`) -----------------------------------------------
 ;; A doctest is a docstring line of the form `<expr> ;=> <expected>` (the expression
@@ -555,9 +555,9 @@ module's namespace-rooted globals (ADR-070) back to it."
   it equals `result`, so documentation examples can't drift from behaviour. Loads the
   project's sources, prints a line per example, and returns the failure count (0 = all
   passed). The policy behind `nest doctest`."
-  (let (root (project/project-find-root (cwd)))
+  (let (root (project/project-find-root (file/cwd)))
     (when (nil? root)
-      (error "doctest: not in a Brood project (no project.blsp found from " (cwd) ")"))
+      (error "doctest: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project-setup root)
     (project/project-load-sources-cached root)
     (doctest-report (collect-doctests (str *project-name* "/")))))

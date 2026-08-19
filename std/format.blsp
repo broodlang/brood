@@ -980,18 +980,18 @@ retired the `comment-on-own-line?` distinction this used to need."
 
 (defn- format-collect-blsp
   (dir)
-  ;; Every .blsp file beneath `dir` (recursive), sorted by `list-dir`'s order.
+  ;; Every .blsp file beneath `dir` (recursive), sorted by `file/ls`'s order.
   ;; Returns a flat list of absolute paths. Symlinks aren't followed — we read
-  ;; whatever `dir?` + `list-dir` see, which is sufficient for the typical
+  ;; whatever `file/dir?` + `file/ls` see, which is sufficient for the typical
   ;; project layout.
-  (if (dir? dir)
+  (if (file/dir? dir)
     (fold
       (fn (acc entry)
         (let (p (path-join dir entry))
           (cond
             ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
-            (dir? p) (if (format-ignored-dir? entry) acc (append-two (format-collect-blsp p) acc))
+            (file/dir? p) (if (format-ignored-dir? entry) acc (append-two (format-collect-blsp p) acc))
             ;; Skip generated lock files (`project.lock.blsp`): they're machine-
             ;; written ("do not edit by hand") and re-serialized by `nest fetch` on
             ;; every project-setup, so formatting them just fights the resolver.
@@ -999,7 +999,7 @@ retired the `comment-on-own-line?` distinction this used to need."
             (string/ends-with? entry ".blsp") (cons p acc)
             else acc)))
       nil
-      (list-dir dir))
+      (file/ls dir))
     nil))
 
 ;; The root's OWN .blsp files, non-recursively — `project.blsp` and any top-level
@@ -1008,16 +1008,16 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; `project.lock.blsp` is skipped by the `.lock.blsp` rule below, as before.
 (defn- format-root-files
   (root)
-  (if (dir? root)
+  (if (file/dir? root)
     (fold (fn (acc entry)
             (let (p (path-join root entry))
               (cond
-                (dir? p) acc
+                (file/dir? p) acc
                 (string/ends-with? entry ".lock.blsp") acc
                 (string/ends-with? entry ".blsp") (cons p acc)
                 else acc)))
       nil
-      (list-dir root))
+      (file/ls root))
     nil))
 
 ;; The directories this project owns: its source and test paths, plus whatever
@@ -1042,9 +1042,9 @@ retired the `comment-on-own-line?` distinction this used to need."
 
 (defn- format-require-root
   ()
-  (let (root (project/project-find-root (cwd)))
+  (let (root (project/project-find-root (file/cwd)))
     (when (nil? root)
-      (error "format: not in a Brood project (no project.blsp found from " (cwd) ")"))
+      (error "format: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project/project-setup root)
     root))
 
@@ -1063,11 +1063,11 @@ retired the `comment-on-own-line?` distinction this used to need."
 
 (defn format-file (path)
   "Format the file at `path` in place. Returns `:unchanged`, `:rewrote`, or `:unparseable` — a file that does not parse is left untouched, since there is no program to re-lay-out and the tolerant CST would restructure it."
-  (let (src (slurp path))
+  (let (src (file/slurp path))
     (if (not (format-parses? src))
       :unparseable
       (let (out (format-source src))
-        (if (= src out) :unchanged (do (spit path out) :rewrote))))))
+        (if (= src out) :unchanged (do (file/spit path out) :rewrote))))))
 
 (defn format-project ()
   "Format every .blsp under the current project (sources + tests). Prints one line
@@ -1186,7 +1186,7 @@ number of files rewritten."
   (if (nil? files)
     (reverse acc)
     (let (path (first files)
-          src (slurp path))
+          src (file/slurp path))
       (format-check (rest files)
         (cond
           (not (format-parses? src)) (cons [path :unparseable] acc)

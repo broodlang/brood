@@ -997,7 +997,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   probing names one at a time.
 - **timing**: `now` (ms since epoch) `now-ns` (ns since epoch) `bench`
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
-- **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`.
+- **I/O**: `print` `println` `file/slurp` `file/spit` `load` `eval-string` `read-string`.
   `print`/`println` **space-join** their args (Python-style, via `%render`) —
   distinct from `str`, which concatenates. A **record** defines how it prints on screen
   (Elixir's `String.Chars`) via the core, always-on `Display` ability: just
@@ -1013,7 +1013,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `(print ansi-clear)` (a bare symbol prints `#<fn …>` and emits no escape). The
   ESC byte is the `\e` string escape. (For a render-op frame buffer, use
   `std/display`.)
-- **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime` `file-stat`
+- **Filesystem (stat-class)**: `file/exists?` `file/dir?` `file/ls` `file/mtime` `file/stat`
 - **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`) `spawn-link`
   `send` `receive` `self` `ref` `monitor` `demonitor` `link` `unlink` `trap-exit`
   `register` `whereis`

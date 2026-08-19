@@ -152,7 +152,7 @@ Extra positional args after `run` are passed to the entry fn as strings, so
 (`(defn main () …)`) or variadic (`(defn main (& args) …)`); a fixed-arity
 mismatch surfaces as a normal Brood error.
 
-`run-project` (in `std/tool/project.blsp`) walks from `cwd` up to `project.blsp`,
+`run-project` (in `std/tool/project.blsp`) walks from `file/cwd` up to `project.blsp`,
 loads the manifest (which may override `*project-main*`), puts the project's
 source paths on `*load-path*`, `require`s the entry module — pulling in
 everything it transitively requires — then `apply`s the entry fn to the CLI
@@ -365,7 +365,7 @@ Policy is Brood (`std/tool/docs.blsp`); Rust supplies only the mechanism. The to
 **loads the module and introspects it** rather than parsing source: it snapshots
 `(global-names)`, loads the module, and the new names are what it defined — read
 back via the existing `(doc f)` / `(arglist f)`. The module docstring is read
-from source with `slurp` + `read-string` (a leading string form is discarded on
+from source with `file/slurp` + `read-string` (a leading string form is discarded on
 load, so it can't be recovered by introspection). This reuses the canonical
 docstring machinery and is one-shot, unlike the continuously-running LSP, which
 must never evaluate user code (see `docs/lsp.md`).
