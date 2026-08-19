@@ -1901,7 +1901,7 @@ namespace (everything usable without `(:use …)`), and a `defmodule` file would
 names — so it's split into **9 numbered bare-root files** (`std/prelude/00-core.blsp` …
 `80-tools.blsp`) at section boundaries and concatenated **in order** into the `PRELUDE`
 const via `concat!(include_str!(…), …)`. Evaluation order is load-bearing (macros before
-use, forward refs), so the numeric prefixes fix the order; the concatenation was verified
+use, forward refs), so the `concat!` list in lib.rs is the authoritative order; the concatenation was verified
 byte-identical to the former single file before wiring it up. `PRELUDE` is now a `pub const`
 (one source of truth — `crates/nest/src/mcp.rs`'s `brood://prelude` resource uses it too
 instead of re-`include_str!`ing the removed file). Runtime behaviour, source positions, and

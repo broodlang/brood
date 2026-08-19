@@ -550,21 +550,22 @@ impl Default for Interp {
 }
 
 /// The standard prelude, written in Brood and baked into the binary. Split across
-/// `std/prelude/*.blsp` for navigability (ADR-236) and concatenated **in order** here —
-/// the pieces are bare-root prelude source, so evaluation order is load-bearing (macros
-/// before use, forward references), and the numeric filename prefixes fix that order. The
-/// concatenation is byte-identical to the former single `std/prelude.blsp`, so runtime
-/// behaviour, source positions, and the materialized `prelude.blsp` copy are unchanged.
+/// `std/prelude/*.blsp` for navigability and concatenated **in order** here — the pieces are
+/// bare-root prelude source, so evaluation order is load-bearing (macros before use, forward
+/// references). **This list is the authoritative order**; a new prelude file must be added at
+/// the right position here. The concatenation is byte-identical to the former single
+/// `std/prelude.blsp`, so runtime behaviour, source positions, and the materialized
+/// `prelude.blsp` copy are unchanged.
 pub const PRELUDE: &str = concat!(
-    include_str!("../../../std/prelude/00-core.blsp"),
-    include_str!("../../../std/prelude/10-predicates.blsp"),
-    include_str!("../../../std/prelude/20-map.blsp"),
-    include_str!("../../../std/prelude/30-control.blsp"),
-    include_str!("../../../std/prelude/40-match.blsp"),
-    include_str!("../../../std/prelude/50-process.blsp"),
-    include_str!("../../../std/prelude/60-seq.blsp"),
-    include_str!("../../../std/prelude/70-string.blsp"),
-    include_str!("../../../std/prelude/80-tools.blsp"),
+    include_str!("../../../std/prelude/core.blsp"),
+    include_str!("../../../std/prelude/predicates.blsp"),
+    include_str!("../../../std/prelude/map.blsp"),
+    include_str!("../../../std/prelude/control.blsp"),
+    include_str!("../../../std/prelude/match.blsp"),
+    include_str!("../../../std/prelude/process.blsp"),
+    include_str!("../../../std/prelude/seq.blsp"),
+    include_str!("../../../std/prelude/string.blsp"),
+    include_str!("../../../std/prelude/tools.blsp"),
 );
 
 /// Materialize the embedded prelude to a stable, read-only-ish cache file and
