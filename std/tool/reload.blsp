@@ -88,9 +88,9 @@ behind a long-lived loop has changed since it started."
 (defn- reload-package-key
   (path)
   ;; The rooted key (`"foo/b"`) whose file is `path`, or nil — reverse of
-  ;; `*package-module-files*` (a root registry the package manager fills).
+  ;; `*module-files*` (a root registry the package manager fills).
   (fold (fn (found kv) (if found found (if (= (second kv) path) (first kv) nil)))
-    nil *package-module-files*))
+    nil *module-files*))
 
 (defn- reload-in-package-context
   (path thunk)

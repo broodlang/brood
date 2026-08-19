@@ -358,14 +358,14 @@
   (test "requiring a package rooted under a reserved name is refused at load time"
     ;; Register a rooted module file so `require` reaches the package-load path; the
     ;; reserved-name guard fires BEFORE the file is opened, so a bogus path is fine.
-    (%registry-update! '*package-module-files* :assoc ["set/thing"] "/nonexistent/thing.blsp")
+    (%registry-update! '*module-files* :assoc ["set/thing"] "/nonexistent/thing.blsp")
     (let (msg (try
                 (do (require-one 'set/thing) :no-error)
                 (catch e (error-message e))))
       (is (includes? (str msg) "reserved"))))
 
   (test "an ordinary package name passes the reserved-name guard (fails only to find its file)"
-    (%registry-update! '*package-module-files* :assoc ["greeter/thing"] "/nonexistent/thing.blsp")
+    (%registry-update! '*module-files* :assoc ["greeter/thing"] "/nonexistent/thing.blsp")
     (let (msg (try
                 (do (require-one 'greeter/thing) :no-error)
                 (catch e (error-message e))))
@@ -374,7 +374,7 @@
 ;; ── require by name for a CO-LOCATED module, nameless project / bare run (ADR-223) ──────
 ;; A module declared beside another in one file (region model, ADR-223 Phase 1) whose name is
 ;; not the file's is invisible to the `<name>.blsp` filename probe. A named project registers
-;; it (rooted) in `*package-module-files*`; a nameless project or a bare `brood file.blsp` run
+;; it (rooted) in `*module-files*`; a nameless project or a bare `brood file.blsp` run
 ;; has no such registry, so `require` scans `*load-path*` for the declaring file. `:isolated`
 ;; so each test's `set-load-path!` mutation stays on its private globals copy.
 (describe "require: co-located module by name (nameless project / bare run, ADR-223)"

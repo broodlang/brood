@@ -588,7 +588,7 @@ fn handle_request(
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
-            // `&mut interp` (format-source evaluates the Brood formatter) plus the
+            // `&mut interp` (source evaluates the Brood formatter) plus the
             // immutable `docs` borrow — inline like goto-definition to keep both.
             let result = match docs.get(&p.text_document.uri) {
                 Some(doc) => formatting::formatting(interp, &doc.text, &doc.analysis.line_index),

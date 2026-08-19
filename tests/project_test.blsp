@@ -450,7 +450,7 @@
 ;; release bundle strips them so tests never ship. These pin detection, discovery,
 ;; stripping, and the empty-describe warning.
 ;; `:isolated` — these call `project-setup`/`bundle-collect`, which rebind SHARED
-;; project globals (`*package-module-files*`, `*project-source-paths*`, rooting). A
+;; project globals (`*module-files*`, `*project-source-paths*`, rooting). A
 ;; private copy of the globals per test keeps that mutation from racing other project
 ;; tests (notably the ADR-223 concurrent-require case) under the parallel runner.
 (describe "project: co-located tests (ADR-225)"
@@ -762,9 +762,9 @@
 ;; ── ADR-223 Phase 2: cross-file require-by-name for a co-located module ──────────
 ;; Phase 1 let a file declare more than one `(defmodule …)`; Phase 2 makes a co-located
 ;; SECONDARY module reachable across files by its own name. The whole mechanism is one
-;; generalization — the file→module scan (`package/package-module-files`) now emits EVERY
+;; generalization — the file→module scan (`package/module-files`) now emits EVERY
 ;; declared module, so `project-setup` registers `pkg/secondary → file` and the existing
-;; `*package-module-files*` require branch loads it. Named (ADR-070 rooted) projects only.
+;; `*module-files*` require branch loads it. Named (ADR-070 rooted) projects only.
 ;; These blocks mutate the process-global registries, so they run `:isolated` and each uses
 ;; a unique project/module name to avoid cross-test registry contamination.
 
@@ -781,7 +781,7 @@
       (file/mkdir dir)
       (file/spit (path-join dir "shapes.blsp")
         "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
-      (let (pairs (package/package-module-files dir)
+      (let (pairs (package/module-files dir)
             names (sort (map (fn (p) (name (first p))) pairs)))
         (assert= names (list "shapes" "shapes-internal"))
         ;; every declared module maps back to the one file that declares it
@@ -795,7 +795,7 @@
       (file/spit (path-join (path-join root "src") "shapes.blsp")
         "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
       (project/project-setup root)
-      (is (contains? *package-module-files* "pkga/shapes-internal"))
+      (is (contains? *module-files* "pkga/shapes-internal"))
       (is (includes? (get *package-modules-of* "pkga") 'shapes-internal))))
 
   (test "a secondary module resolves by name before its file is otherwise loaded"

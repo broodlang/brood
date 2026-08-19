@@ -63,21 +63,21 @@
   (test "is deterministic for the same content"
     (let (root (pkg-fixture-root))
       (pkg-write-project root "a" "a" "(defn f () 1)" "")
-      (assert= (package-tree-hash root) (package-tree-hash root))))
+      (assert= (tree-hash root) (tree-hash root))))
   (test "changes when a file's content changes"
     (let (root (pkg-fixture-root))
       (pkg-write-project root "a" "a" "(defn f () 1)" "")
-      (let (h1 (package-tree-hash root))
+      (let (h1 (tree-hash root))
         (file/spit (path-join (path-join root "src") "a.blsp")
           "(defmodule a \"fixture\")\n(defn f () 2)\n")
-        (refute (= h1 (package-tree-hash root))))))
+        (refute (= h1 (tree-hash root))))))
   (test "skips _deps/ so a nested cache doesn't perturb the hash"
     (let (root (pkg-fixture-root))
       (pkg-write-project root "a" "a" "(defn f () 1)" "")
-      (let (h1 (package-tree-hash root))
+      (let (h1 (tree-hash root))
         (file/mkdir (path-join root "_deps"))
         (file/spit (path-join (path-join root "_deps") "junk.blsp") "(def x 1)")
-        (assert= h1 (package-tree-hash root))))))
+        (assert= h1 (tree-hash root))))))
 
 (describe "package: reading a dependency's manifest"
   (test "extracts a dep's own :dependencies"

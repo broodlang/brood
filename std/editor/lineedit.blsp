@@ -591,7 +591,7 @@ the column of the innermost unclosed `(`/`[`, one past a `{`, and 0 at top level
   "True when texts `a` and `b` read as the *same* forms — the guard that a reformat
 preserved meaning. False if either fails to read.
 
-This is not belt-and-braces. `format-source` does not raise on incomplete input, it
+This is not belt-and-braces. `source` does not raise on incomplete input, it
 completes it: mid-typing, `(defn f (x` came back as `(defn f (x ) )`, silently closing
 brackets the user had not closed yet. Comparing the parsed forms rejects that (and any
 future rewrite that changes structure) while correctly ignoring comment and whitespace
@@ -609,7 +609,7 @@ boot (or into a lean bundle) for a key most sessions never press."
   (let (text (get state :text)
         formatted (try
                     (do
-                      (let (out (string/trim (format/format-source text)))
+                      (let (out (string/trim (format/source text)))
                         (if (= out "") nil out)))
                     (catch _ nil)))
     (if (or (nil? formatted)
