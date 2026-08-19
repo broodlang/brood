@@ -195,7 +195,7 @@ crates/lsp/src/main.rs   the `brood-lsp` binary — language server (ADR-025, do
 crates/playground/src/   the `brood-playground` cdylib — a wasm-bindgen shim exposing
                          a Brood `eval()` to the browser (the in-browser playground)
 std/                     standard library written in Brood, grouped (ADR-085):
-                         prelude/ (split across ~9 numbered bare-root files, concatenated at build) + ~30 bare-core modules (io, file, set, regex,
+                         prelude/ (split across ~9 bare-root files (core, predicates, map, …), concatenated in the order lib.rs lists) + ~30 bare-core modules (io, file, set, regex,
                          json, format, task, log, version, resolver, crypto, hash, csv,
                          datetime, encoding, url, uuid, template, stream, …); the
                          perf-triage module `std/tool/perf.blsp` (`perf/report`,
