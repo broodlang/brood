@@ -45,8 +45,6 @@ collector cannot reclaim, and is the tool to start with.
   `.config/nextest.toml` claims 10.5 s post-KI-39. Both drive `fib 30` / 96 subprocess spawns; the
   KI-39-shaped fix is to cut the per-unit cost, not the budget. **Any reduction must be proven to
   still tier** (`BROOD_JIT_DUMP_IR=1`), or a slow-but-real test becomes a fast-but-hollow one.
-- **`scratchpad-fsmoke.txt`** at the repo root — 5 bytes, `hello`, committed in `fe4e05af`, nothing
-  references it. Left for the owner to delete.
 - **The rename-sweep gap.** `breakage/`, `stress/` and `scripts/fuzz/stress/` are outside every test
   runner, so each rename wave rots them and CI finds out one red build later. Three times in one day.
   Including them in whatever sweep a rename commit runs over `std/`/`tests/` would make renames land
