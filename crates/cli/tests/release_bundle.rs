@@ -140,3 +140,37 @@ fn bundled_app_receives_argv() {
     );
     let _ = std::fs::remove_dir_all(app.parent().unwrap());
 }
+
+#[test]
+fn bundled_bare_reference_to_unique_dep_module_resolves() {
+    // A dependency's uniquely-named module referenced by its BARE `(defmodule)` name — the idiom
+    // every real app uses (hive's `(:alias repo)`), and the way a dev run binds it (found by
+    // basename on the load-path, never rooted). The bundle embeds it under its rooted key
+    // `store/repo`; `:bundled-packages` records that `store` ships it (bundle-collect bakes that
+    // set, since a transitive dependency is absent from the manifest's `:dependencies`). With a
+    // unique name it must bind BARE so the bare reference resolves — this crash-looped with
+    // `require: cannot find module 'repo'` before rooting became collision-only (ADR-070).
+    let (app, cwd) = write_app(
+        "bare-dep-ref",
+        "(project :name \"t\" :version \"0\" :bundled-packages [\"store\"])",
+        &[
+            (
+                "main",
+                "(defmodule main (:alias repo))\n(defn main () (println (repo/tag)))",
+            ),
+            ("store/repo", "(defmodule repo)\n(defn tag () \"bare-dep-ok\")"),
+        ],
+    );
+    let mut cmd = Command::new(&app);
+    cmd.current_dir(&cwd);
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run bundled app");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "bare-dep-ok");
+    let _ = std::fs::remove_dir_all(app.parent().unwrap());
+}
