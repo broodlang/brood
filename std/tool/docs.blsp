@@ -154,7 +154,8 @@ module's namespace-rooted globals (ADR-070) back to it."
   "The Markdown documentation for the whole project (every source file under it), found from the cwd. Errors if not in a project."
   ; project/project-find-root / --collect-sources / project-setup
   (let (root (project/project-find-root (file/cwd)))
-    (when (nil? root) (error "doc: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
+    (when (nil? root)
+      (error "doc: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project-setup root)
     (let (dirs (project/project-abs-paths root *project-source-paths*)
           files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
@@ -238,7 +239,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; dependencies to whichever file pulled them in.
 (defn- docs-namespace-syms
   (modname)
-  (let (prefix (str modname "/")) (filter (fn (s) (string/starts-with? (name s) prefix)) (global-names))))
+  (let (prefix (str modname "/"))
+    (filter (fn (s) (string/starts-with? (name s) prefix)) (global-names))))
 
 (defn model-file (path)
   "The doc-model module entry for the file at `path`: load it, then collect its module's
@@ -272,7 +274,8 @@ module's namespace-rooted globals (ADR-070) back to it."
   "The whole-project doc model — `{:name :version :modules […]}` — found from the cwd,
   documenting every source file under it. Errors if not in a Brood project."
   (let (root (project/project-find-root (file/cwd)))
-    (when (nil? root) (error "docs: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
+    (when (nil? root)
+      (error "docs: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project-setup root)
     (let (dirs (project/project-abs-paths root *project-source-paths*)
           files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
@@ -336,14 +339,18 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; reference. A small Markdown subset: ATX headings, fenced code, `- ` lists, blank-line
 ;; paragraphs, and inline `code`/[text](url) links — enough for a getting-started guide.
 
-(defn- md-escape (s) (-> (str s) (string/replace "&" "&amp;") (string/replace "<" "&lt;") (string/replace ">" "&gt;")))
+(defn- md-escape
+  (s)
+  (-> (str s) (string/replace "&" "&amp;") (string/replace "<" "&lt;") (string/replace ">" "&gt;")))
 
 ;; Escape a URL for an `href="…"` attribute (adds `"` to `md-escape`) and neutralise a
 ;; `javascript:` link, so a guide's Markdown can't break out of the attribute or inject
 ;; script into the generated site.
 (defn- md-attr
   (url)
-  (if (string/starts-with? (string/trim url) "javascript:") "#" (string/replace (md-escape url) "\"" "&quot;")))
+  (if (string/starts-with? (string/trim url) "javascript:")
+    "#"
+    (string/replace (md-escape url) "\"" "&quot;")))
 
 ;; A non-code text run: turn `[text](url)` into a link, HTML-escape everything else.
 (defn- md-links
@@ -369,7 +376,8 @@ module's namespace-rooted globals (ADR-070) back to it."
       (or (not (number? close-bracket)) (< close-bracket open-bracket))
         (cons (md-escape text) chunks)
       ;; `[text](url)` — a real link
-      (= (string/substring text (+ close-bracket 1) (min (+ close-bracket 2) (string/length text))) "(")
+      (= (string/substring text (+ close-bracket 1) (min (+ close-bracket 2) (string/length text)))
+        "(")
         (let (rest (string/substring text (+ close-bracket 2) (string/length text))
               close-paren (index-of rest ")"))
           (if (and (number? close-paren) (>= close-paren 0))
@@ -466,7 +474,9 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- guide-title
   (path)
   (let (file (last (string/split path "/"))
-        stem (if (string/ends-with? file ".md") (string/substring file 0 (- (string/length file) 3)) file))
+        stem (if (string/ends-with? file ".md")
+               (string/substring file 0 (- (string/length file) 3))
+               file))
     (string/capitalize (string/replace stem "-" " "))))
 
 ;; Every `guides/*.md` under the project root, rendered — `[{:title :html}]`, sorted by

@@ -350,7 +350,12 @@ new open (paredit `wrap-round`)."
     (if (nil? nxt)
       nil
       (let (ns (get nxt :start) ne (get nxt :end))
-        [(str (string/substring text 0 ns) "(" (string/substring text ns ne) ")" (string/substring text ne)) (inc ns)]))))
+        [(str (string/substring text 0 ns)
+           "("
+           (string/substring text ns ne)
+           ")"
+           (string/substring text ne))
+          (inc ns)]))))
 
 (defn point-transpose (text point)
   "Interchange the sexp before `point` with the one after it, point landing just past both

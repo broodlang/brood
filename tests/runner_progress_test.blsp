@@ -137,7 +137,10 @@
 ;; vanish entirely when an assertion carried no recorded position.
 (describe "test runner: failure anchors"
   (test "a per-assertion position is used, shown relative to the cwd"
-    (let (r (list "g" "t" (list (list (list (str (file/cwd) "/tests/a_test.blsp") 4 2) (list "x"))) 1)
+    (let (r (list "g"
+              "t"
+              (list (list (list (str (file/cwd) "/tests/a_test.blsp") 4 2) (list "x")))
+              1)
           rec (first (test/r-fails r)))
       (assert= (test/fail-where r rec) "tests/a_test.blsp:4:2")))
   (test "an absolute path outside the cwd is left alone rather than mangled"

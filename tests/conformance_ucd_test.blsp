@@ -112,7 +112,9 @@
 (defn- nt-test-line?
   (line)
   (let (p (ucd-payload line))
-    (and (not (string/blank? p)) (not (string/starts-with? (string/trim p) "@")) (>= (count (string/split p ";")) 5))))
+    (and (not (string/blank? p))
+      (not (string/starts-with? (string/trim p) "@"))
+      (>= (count (string/split p ";")) 5))))
 
 ;; "@Part1 # Character by character test" -> "Part1", else nil. The corpus divides itself
 ;; into six sections and the runner uses them to split the sweep — see the describe below.

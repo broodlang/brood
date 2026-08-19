@@ -295,10 +295,16 @@ land in a later slice."
               (empty? (filter package-release-brood-ok? releases)))
         (let (needed (distinct (filter (fn (c) (and c (not (= c ""))))
                                  (map (fn (r) (get r :brood)) releases))))
-          (error "package: no published release of " (name nm)
-            " is compatible with the brood you are running (" (brood-version) "). "
-            (name nm) "'s releases require Brood " (string/join " / " needed)
-            " — upgrade brood, or depend on an older " (name nm)
+          (error "package: no published release of "
+            (name nm)
+            " is compatible with the brood you are running ("
+            (brood-version)
+            "). "
+            (name nm)
+            "'s releases require Brood "
+            (string/join " / " needed)
+            " — upgrade brood, or depend on an older "
+            (name nm)
             " that predates the requirement."))))))
 
 ;; `versions` reads the release list — filtered to the brood-compatible releases, so the
@@ -833,15 +839,17 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 range]...]} ...]`, in ONE request. An unknown package (404) is nil (the resolver reports it
 as having no versions rather than raising mid-search); any other error raises."
   (match (registry-get-json (registry-releases-url base nm))
-    ([:ok data] (map (fn (release)
-                       {:version (get release :version)
-                        ;; the release's runtime-version constraint (ADR-209), nil/"" if the
-                        ;; release predates it or the registry doesn't serve it — treated as
-                        ;; unconstrained, so this stays backward-compatible with old releases.
-                        :brood (get release :brood)
-                        :dependencies (map (fn (d) [(symbol (get d :name)) (get d :version)])
-                                        (or (get release :dependencies) nil))})
-                  (or (get data :releases) nil)))
+    ([:ok data]
+      (map
+        (fn (release)
+          {:version (get release :version)
+           ;; the release's runtime-version constraint (ADR-209), nil/"" if the
+           ;; release predates it or the registry doesn't serve it — treated as
+           ;; unconstrained, so this stays backward-compatible with old releases.
+           :brood (get release :brood)
+           :dependencies (map (fn (d) [(symbol (get d :name)) (get d :version)])
+                           (or (get release :dependencies) nil))})
+        (or (get data :releases) nil)))
     ([:error 404 _message] nil)
     ([:error _status message] (error "package: listing releases of " (name nm) " failed: " message))))
 

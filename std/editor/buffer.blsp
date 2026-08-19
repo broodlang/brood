@@ -248,7 +248,9 @@ line editor's M-f/M-b notion of a word."
 (defn- buffer-scan-bwd
   (text i pred)
   "Largest index ≤ `i` (down to 0) whose preceding char fails `pred` — retreat while `pred`."
-  (if (or (<= i 0) (not (pred (string/char-at text (dec i))))) i (buffer-scan-bwd text (dec i) pred)))
+  (if (or (<= i 0) (not (pred (string/char-at text (dec i)))))
+    i
+    (buffer-scan-bwd text (dec i) pred)))
 
 (defn forward-word (buf)
   "Point moved to the end of the next word forward (skip non-word chars, then the word)."

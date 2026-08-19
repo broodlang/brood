@@ -85,7 +85,8 @@
   (a b)
   (and (string/starts-with? a "(sig ")
     (let (nm (second (string/split a " ")))
-      (or (string/starts-with? b (str "(defn " nm " ")) (string/starts-with? b (str "(def " nm " "))))))
+      (or (string/starts-with? b (str "(defn " nm " "))
+        (string/starts-with? b (str "(def " nm " "))))))
 
 ;; Every misplaced `(sig …)` line in `lines` (empty when the invariant holds).
 (defn- sig-misplaced

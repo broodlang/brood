@@ -19,7 +19,9 @@
 ;; Use fold to build the string iteratively (avoids non-tail recursion).
 ;; Start from the innermost body and wrap it in (let (vN vN^2) ...) repeatedly.
 (defn build-nested-let-src (depth)
-  (let (inner-body (str "(fn () (+ " (string/join " " (map (fn (j) (str "v" j)) (range depth))) "))")
+  (let (inner-body (str "(fn () (+ "
+                     (string/join " " (map (fn (j) (str "v" j)) (range depth)))
+                     "))")
         ;; fold from the outside in: wrap the accumulated string with another let
         ;; We want (let (v0 0) (let (v1 1) ... inner-body ...))
         ;; So fold from depth-1 down to 0, wrapping each time

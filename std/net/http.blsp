@@ -134,7 +134,8 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   (let (i (index-of s sep))
     (if (< i 0)
       (list s "")
-      (list (string/substring s 0 i) (string/substring s (+ i (string/length sep)) (string/length s))))))
+      (list (string/substring s 0 i)
+        (string/substring s (+ i (string/length sep)) (string/length s))))))
 
 (defn- http-parse-headers
   (lines)
@@ -145,8 +146,8 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
               (assoc m
                 (string/lower (string/trim (string/substring line 0 i)))
                   (string/trim (string/substring line
-                          (+ i 1)
-                          (string/length line)))))))
+                                 (+ i 1)
+                                 (string/length line)))))))
     {}
     lines))
 

@@ -29,7 +29,8 @@
 ;; A pattern that can't exist: three consecutive 'a's
 (println "contains? 'aaa':" (includes? leviathan "aaa"))
 ;; index-of near the end — should walk the whole string
-(def needle (str (string/substring leviathan (- (string/length leviathan) 10) (string/length leviathan))))
+(def needle
+  (str (string/substring leviathan (- (string/length leviathan) 10) (string/length leviathan))))
 (println "index-of last-10-chars:" (index-of leviathan needle))
 
 (println "--- substring & slicing ---")
@@ -78,7 +79,8 @@
 (def padded (string/pad-left "hello" 100))
 (println "pad-left length:" (string/length padded))
 (println "pad-left first char:" (pr-str (string/char-at padded 0)))
-(println "pad-left last 5:" (string/substring padded (- (string/length padded) 5) (string/length padded)))
+(println "pad-left last 5:"
+  (string/substring padded (- (string/length padded) 5) (string/length padded)))
 ;; Pad right: pad to 100 chars
 (def rpadded (string/pad-right "hello" 100))
 (println "pad-right length:" (string/length rpadded))

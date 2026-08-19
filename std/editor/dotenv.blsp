@@ -55,7 +55,9 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
   "A one-element string span for a quoted value starting at offset `v` (to its closing
 quote, or end of line if unclosed); `()` for an unquoted value (the default face)."
   (if (and (< v n) (or (= (string/char-at line v) "\"") (= (string/char-at line v) "'")))
-    (let (q (string/char-at line v) close (env-find line (inc v) n q) e (if (< close 0) n (inc close)))
+    (let (q (string/char-at line v)
+          close (env-find line (inc v) n q)
+          e (if (< close 0) n (inc close)))
       (list [(+ base v) (+ base e) env-face-string]))
     '()))
 

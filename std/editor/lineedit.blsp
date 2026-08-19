@@ -207,7 +207,9 @@ the last line."
   (let (text (get state :text) p (get state :point) n (string/length text))
     (if (>= p n)
       state
-      (assoc state :text (str (string/substring text 0 p) (string/substring text (inc p) n)) :hist-idx -1))))
+      (assoc state
+        :text (str (string/substring text 0 p) (string/substring text (inc p) n))
+        :hist-idx -1))))
 
 (defn- lineedit-kill-end
   (state)
@@ -219,7 +221,11 @@ the last line."
   (state)
   "State with the text from start to point killed into `:kill`, point to 0 (C-u)."
   (let (text (get state :text) p (get state :point) n (string/length text))
-    (assoc state :text (string/substring text p n) :kill (string/substring text 0 p) :point 0 :hist-idx -1)))
+    (assoc state
+      :text (string/substring text p n)
+      :kill (string/substring text 0 p)
+      :point 0
+      :hist-idx -1)))
 
 (defn- lineedit-kill-word
   (state)
@@ -422,7 +428,8 @@ would desync the `[:up n]` cursor restore)."
         shown (min total (* ncols *lineedit-completion-max-rows*))
         more (- total shown)
         rows (map (fn (row)
-                    (let (line (string/trimr (apply str (map (fn (c) (string/pad-right c colw)) row))))
+                    (let (line (string/trimr (apply str
+                                               (map (fn (c) (string/pad-right c colw)) row))))
                       (if (> (string/length line) room) (string/substring line 0 room) line)))
                (lineedit-chunk ncols (take shown cands))))
     (if (> more 0) (append rows (list (str "… +" more " more"))) rows)))

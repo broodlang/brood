@@ -102,7 +102,8 @@ leaves `s` unchanged."
 
 (defn starts-with? (s prefix)
   "Does string `s` begin with `prefix`?"
-  (let (n (string/length prefix)) (and (>= (string/length s) n) (= (string/substring s 0 n) prefix))))
+  (let (n (string/length prefix))
+    (and (>= (string/length s) n) (= (string/substring s 0 n) prefix))))
 
 (defn ends-with? (s suffix)
   "Does string `s` end with `suffix`?"

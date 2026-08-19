@@ -642,8 +642,8 @@ test discovery, lints, release, config)."
     "        [:button {:class \"btn btn-primary\"} \"Post\"]]]])\n" "\n" "(defn create (conn)\n"
     "  \"POST /messages -- validate, insert into Postgres, and PRG-redirect.\"\n"
     "  (let (name (or (param conn \"name\") \"\")\n"
-    "        body (or (param conn \"body\") \"\"))\n" "    (if (or (string/blank? name) (string/blank? body))\n"
-    "      (-> conn\n"
+    "        body (or (param conn \"body\") \"\"))\n"
+    "    (if (or (string/blank? name) (string/blank? body))\n" "      (-> conn\n"
     "        (web/session/put-flash \"info\" \"Name and message are required.\")\n"
     "        (redirect-resp \"/messages\"))\n" "      (do\n"
     "        (db/insert-message {:name name :body body})\n" "        (-> conn\n"
@@ -914,7 +914,11 @@ test discovery, lints, release, config)."
         reusing-dir (file/exists? nm)
         tmpl (or template "default"))
     (unless (includes? *project-templates* tmpl)
-      (error "new: unknown template '" tmpl "' (use one of: " (string/join ", " *project-templates*) ")"))
+      (error "new: unknown template '"
+        tmpl
+        "' (use one of: "
+        (string/join ", " *project-templates*)
+        ")"))
     (unless (or in-place (project-valid-name? nm))
       (error "new: invalid project name '" nm "' (no '/' or spaces, and not empty)"))
     (when (and in-place (= actual-name ""))
