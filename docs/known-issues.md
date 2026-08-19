@@ -29,7 +29,7 @@ ADRs / topic docs.
 | KI-39 | the CI `differential (tree-walker)` job failed intermittently (3 of 11 runs) with nextest exit 100; **0/15** in the faithful local shape, cold-boot-herd hypothesis measured dead, and whether it is still present is genuinely unknown (4 green runs is 28% likely either way) | ✅ **fixed 2026-08-18** (was: watching — recurred 2026-08-17, run 32032421650, exit 100, the only red job of five). The self-reporting added for it **did not work**: its annotate step is `grep … \| … \| while` under `shell: bash` (`-eo pipefail`), so a non-matching grep exits 1 and kills the step before it prints anything — the run named no case. Hardened with `\|\| true` (all six annotate pipelines, CI-shell-verified), and that was NOT enough — run 32054863012 failed with the annotate step SUCCEEDING and still emitting nothing. **DIAGNOSED AND FIXED 2026-08-18** once `gh auth` was restored and the artifact could be read: the log is ANSI-COLOURED, so `Summary \[` could never match `Summary<ESC>[0m [`, and the case was a **TIMEOUT**, a shape no pattern covered. The failure itself was `nest::complete completion_never_fails_however_it_is_called` — 96 subprocess spawns × a completion that loaded all of `project` (770 ms of 950 ms each), 64 s locally and past the 300 s cap under CI contention. Not intermittent: 8 of 8 runs that day. |
 | KI-38 | three tests that wait for a freshly spawned debug `brood` to boot fail together under peak suite load — a **cold expanded-prelude boot cache** (11x a warm boot, all macro-expansion) times the concurrent herd | ✅ fixed 2026-08-08 (warm the cache before the fan-out) |
 | KI-37 | an imaged start never followed a module's require edges, so a transitively-reached module was never materialised — `nest run` died on the second run | ✅ **fixed** 2026-08-07 |
-| KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ⚠️ **watching** (seen once 2026-08-07; +25 more idle passes) |
+| KI-36 | `reconnect_watcher_heals_a_fallen_link` failed once at 22.6 s and passed on retry, during a suite run with a 4000-module image build beside it | ✅ **fixed 2026-08-19** — reproduced at last (3rd sighting, `make test` run 3 of a repeated-run gate), and it was **never the nodedown stall this entry inferred**: B2 opened its listener *before* registering `:echo`, so A's ping-on-nodeup could arrive at a name that did not exist yet and be silently dropped. `register` now precedes `node-start` |
 | KI-35 | `*method-from*` was never imaged, so an imaged start stopped reporting cross-module `defmethod` conflicts | ✅ **fixed** 2026-08-07 |
 | KI-34 | the startup image was written on every cold start and **never read from** — two defects, either sufficient | ✅ **fixed** 2026-08-07 |
 | KI-33 | fully consuming a stream leaked its producer process — an exhausted stream parked in `stream-done-loop` forever instead of exiting | ✅ **fixed** 2026-08-07 |
@@ -65,7 +65,7 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open items. One watch item (KI-36).** KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**No open items, and no watch item — KI-36 was reproduced and fixed 2026-08-19.** KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -996,7 +996,66 @@ it does.
 
 ---
 
-## KI-36 — a single `reconnect_watcher_heals_a_fallen_link` failure · **watching, seen once 2026-08-07**
+## KI-36 — a single `reconnect_watcher_heals_a_fallen_link` failure · ✅ **FIXED 2026-08-19**
+
+**Resolved.** The third sighting finally carried its output, and the answer was not what the
+analysis below predicted. **The failing branch was `TIMEOUT-no-pong`, not the nodedown deadline.**
+
+**Root cause — a race in the test's own round-2 script, not in the runtime.** B2 ran
+
+```
+(node-start :b …)                                  ; listener open → A's watcher connects
+(let (echoer (spawn …)) (register :echo echoer) …)  ; …but :echo exists only from here
+```
+
+A pings `{:name :echo :node up}` the *instant* it receives `[:nodeup]`, and by that point it has
+already restored `(process-flag :send-errors nil)`. So a ping that lands before `register` is
+**silently dropped** — no error, no reply — and A then waits out its full 20 s pong deadline for a
+message that was never queued. No deadline extension could ever have fixed it.
+
+**Why only this test, out of 16 sites with the same ordering.** Everywhere else the peer is
+spawned *after* `wait_until_listening`, and booting a fresh `brood` costs ~150 ms–4 s — far longer
+than B's spawn+register, so B always wins. This test is the sole case where the peer is **already
+running and hot-looping a 100–400 ms backoff `connect`**, so it can land within milliseconds of the
+listener opening. The other 15 are the same shape with no exposure; left as-is deliberately.
+
+**Fix:** `register` precedes `node-start`, so the name is live before any peer can reach the node.
+
+**Verified by sabotage, in both directions:**
+
+| condition | result |
+|---|---|
+| pre-fix, 3 s delay inserted between `node-start` and `register` | **100% fail**, `TIMEOUT-no-pong`, byte-identical to the wild failure |
+| post-fix, that 3 s delay **retained** | pass (1.44 s) |
+| post-fix, 6 CPU burners at equal priority | **10/10 pass** |
+| post-fix, 12 burners at *higher* priority than the test | failures are all `wait_until_listening gave up` (boot-class); **zero** `TIMEOUT-no-pong` |
+
+**The original inference below was wrong, and worth reading as a lesson.** It reasoned that 22.6 s
+"can only be the nodedown deadline (15 s + startup), not the nodeup deadline, which would have
+taken at least 45 s." The flaw: reaching the *pong* branch does not cost the 45 s nodeup deadline —
+nodeup fires promptly, because the harness restarts B2 ~400 ms after B1 exits. So the arithmetic is
+setup (~2.6 s) + the 20 s pong deadline ≈ 22.6 s, matching the original sighting exactly. **The
+hunt was aimed at a stall that never existed**, which is the most likely reason 25 idle runs and 14
+loaded runs all came back clean. When a deadline analysis rules a branch out, check the *time to
+reach* that branch, not just the branch's own timeout.
+
+**Two red herrings, both recorded so the next reader discards them fast:**
+
+1. `dist: incoming connection failed: failed to fill whole buffer` in B2's stderr is **benign
+   harness noise**: `wait_until_listening` opens a bare `TcpStream::connect` and drops it with no
+   handshake bytes, which is exactly an EOF mid-read on B2's accept loop. It appears on passing
+   runs too.
+2. This entry's own **method trap fired again**, on me, in the same shape it warns about. A first
+   verification loop classified on "did the success line appear" and reported 8/12 failures — all
+   of which turned out to be my 12 default-priority spinners starving a `nice -n 19` test's child
+   boots (a priority inversion I created), not the race. **Capture and classify the output; a
+   failure you cannot name is not evidence.**
+
+The original entry follows, unaltered.
+
+---
+
+### (original entry, superseded) — **watching, seen once 2026-08-07**
 
 **Seen once**, in the full `make test` that gated the dependency-imaging change: `TRY 1 FAIL
 [22.567s]`, passed on nextest's retry, suite otherwise 970/970. The box was **not idle** — a

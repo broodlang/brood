@@ -100,6 +100,37 @@ two ways:
    remote pid directly. This is the payoff: no special-casing "remote" at the call
    site.
 
+#### Startup invariant: the listener goes up **last**
+
+**Register everything a peer may address *before* calling `node-start`.** `node-start` is the
+moment this node becomes reachable, and a peer can connect and send within milliseconds of it —
+so any name registered *after* it has a window in which the name does not yet exist. A message
+that arrives in that window is **dropped**, not queued: `send` is fire-and-forget, and a
+registered name that no process holds is a silent no-op by design (Erlang semantics, and the
+right ones — the name may legitimately be gone).
+
+```brood
+;; wrong — the listener is open before :echo exists
+(node-start :b "127.0.0.1:9001" cookie)
+(register :echo (spawn (serve)))
+
+;; right — the name is live before anyone can reach the node
+(register :echo (spawn (serve)))
+(node-start :b "127.0.0.1:9001" cookie)
+```
+
+This is OTP's own rule (the dist listener comes up after the supervision tree), and it is not
+theoretical: violating it is exactly **KI-36**, which cost twelve days and three sightings
+because the dropped message left no trace anywhere. It usually hides, because a peer normally
+has to *boot* (~150 ms–4 s) before it can send, which is far longer than the register gap. It
+bites when the peer is **already running** — a reconnect watcher retrying on a 100–400 ms
+backoff will land inside the gap.
+
+Since 2026-08-19 the node that drops such a message **warns once per name** on stderr
+(`dist: dropped inbound message for unregistered name :echo …`), so this failure names itself
+instead of surfacing as a distant timeout. The drop behaviour is unchanged; only the silence is.
+Silence it with `BROOD_NO_DROP_WARN=1`.
+
 ### Transport (off the scheduler)
 `node-start` binds a listener — a `UnixListener` for a local name or a
 `TcpListener` for `host:port` — and runs an acceptor thread; `connect` dials the

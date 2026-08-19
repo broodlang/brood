@@ -2018,11 +2018,23 @@ fn reconnect_watcher_heals_a_fallen_link() {
 
     // Node B, round 2: same identity + port; echo one ping so A can prove the
     // healed link routes messages.
+    //
+    // ORDERING IS LOAD-BEARING (KI-36): `register` must precede `node-start`. A pings
+    // `{:name :echo}` the instant it sees `[:nodeup]`, and by then it has already set
+    // `send-errors` back to nil — so a ping that arrives before the name exists is
+    // *silently dropped*, and A then waits out its 20 s pong deadline for a reply that was
+    // never queued. Opening the listener first means the peer can reach this node during
+    // the spawn+register gap, which is exactly the window that widens under suite load.
+    // Registering first closes it: the name is live before anyone can connect. Verified by
+    // sabotage — a 3 s delay between `node-start` and `register` fails 100% of the time
+    // with `TIMEOUT-no-pong`, and passes with this ordering even with that delay retained.
+    // Do not "simplify" this back into node-start-first order; a longer deadline cannot fix
+    // a dropped message.
     let b_round2 = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (let (echoer (spawn (receive ([:ping from] (send from [:pong])))))
   (register :echo echoer)
+  (node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
   (sleep 30000))
 "#
     );
@@ -2134,4 +2146,98 @@ fn allocated_ports_are_outside_the_kernel_ephemeral_range() {
         );
         assert!(seen.insert(port), "free_port() handed out {port} twice");
     }
+}
+
+/// KI-36's structural fix: a message addressed to a **registered name no process holds** is
+/// still dropped — Erlang semantics, deliberately unchanged — but the node that drops it now
+/// *says so*, once per name.
+///
+/// Why this test exists at all. `send` is fire-and-forget, so the sender has already moved on
+/// and cannot be told; the receiving node is the only party that knows the message died, and it
+/// used to say nothing to anyone. That silence is what made KI-36 cost twelve days and three
+/// sightings: a node opened its dist listener before registering the name its peer would
+/// immediately address, and the only available symptom was a 20 s deadline expiring with no
+/// information. This asserts the line that would have named it in one.
+///
+/// Covers **both** drop sites (inbound-from-a-peer and local), the **dedup** (a repeated send
+/// warns once, so a hot loop cannot flood), and the **opt-out** — the last of which is what
+/// gives the other assertions teeth: the same program with `BROOD_NO_DROP_WARN=1` must print
+/// nothing, so a warning that fired unconditionally regardless of the code under test would
+/// fail here.
+#[test]
+fn a_dropped_send_to_an_unregistered_name_warns_once() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-dropwarn-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // B registers NOTHING, so every inbound named send lands in the hole under test.
+    let b_src = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(sleep 6000)
+"#
+    );
+    // A addresses a name nobody holds: twice remotely (to prove the dedup) and once locally
+    // (the second drop site, inside `route`).
+    let a_src = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(def peer (connect "b@127.0.0.1:{port_b}"))
+(send {{:name :ghost :node peer}} [:x])
+(send {{:name :ghost :node peer}} [:x])
+;; Address the LOCAL node by its authoritative `name@host` (ADR-073) — a bare `:a` is
+;; not this node's name, so it would take the unknown-*node* path instead of the
+;; unregistered-*name* path this half of the test is about.
+(send {{:name :localghost :node (node-name)}} [:x])
+(sleep 1200)
+(println "A-DONE")
+"#
+    );
+
+    let run = |quiet: bool| -> (String, String) {
+        let env: Vec<(&str, &str)> = if quiet {
+            vec![("BROOD_NO_DROP_WARN", "1")]
+        } else {
+            vec![]
+        };
+        let mut b = spawn_brood_env(&dir, "dw_b.blsp", &b_src, &env);
+        wait_until_listening(port_b);
+        let a = spawn_brood_env(&dir, "dw_a.blsp", &a_src, &env);
+        let a_out = a.wait_with_output().expect("A finished");
+        let _ = b.kill();
+        let b_out = b.wait_with_output().ok();
+        let a_err = String::from_utf8_lossy(&a_out.stderr).to_string();
+        let b_err = b_out
+            .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+            .unwrap_or_default();
+        (a_err, b_err)
+    };
+
+    // --- armed (the default) ---
+    let (a_err, b_err) = run(false);
+    let inbound = b_err
+        .matches("dropped inbound message for unregistered name :ghost")
+        .count();
+    assert_eq!(
+        inbound, 1,
+        "B should warn exactly once for the repeated inbound send (dedup).\n\
+         --- B stderr ---\n{b_err}\n--- A stderr ---\n{a_err}"
+    );
+    assert!(
+        a_err.contains("dropped local message for unregistered name :localghost"),
+        "A should warn for the local unregistered name.\n--- A stderr ---\n{a_err}"
+    );
+
+    // --- opt-out: same program, silenced. This is what proves the assertions above have teeth.
+    let (a_quiet, b_quiet) = run(true);
+    assert!(
+        !b_quiet.contains("unregistered name") && !a_quiet.contains("unregistered name"),
+        "BROOD_NO_DROP_WARN=1 must silence both sites.\n\
+         --- B stderr ---\n{b_quiet}\n--- A stderr ---\n{a_quiet}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

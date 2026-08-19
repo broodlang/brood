@@ -241,6 +241,11 @@ pub const FLAGS: &[DebugFlag] = &[
         SCHED,
         "drop the L1 fast path's leading-keyword tag, defeating the selective-receive pre-filter",
     ),
+    f(
+        "BROOD_NO_DROP_WARN",
+        SCHED,
+        "silence the once-per-name warning that a message was dropped for an unregistered name",
+    ),
     // ---- engine ----
     f(
         "BROOD_TIER",
