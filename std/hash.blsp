@@ -156,7 +156,7 @@ bytes value (raw MAC, not hex)."
 
 ;; ---- non-cryptographic ------------------------------------------------------
 
-(defn hash-string (s)
+(defn string (s)
   "A fast non-cryptographic integer hash of string `s` (djb2 variant).
 Suitable for hash tables and sharding; NOT cryptographically secure."
   (fold (fn (h c) (bit-xor (* h 31) (char->int c)))

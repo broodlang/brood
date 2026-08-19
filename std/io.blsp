@@ -1,6 +1,6 @@
 ;; std/io.blsp — output ports: the redirectable sink behind print/println.
 ;;
-;; A *port* is any value with a **`Port` impl** — the ability whose one op, `io-write`,
+;; A *port* is any value with a **`Port` impl** — the ability whose one op, `write`,
 ;; is the single seam every output path goes through. Two shapes matter:
 ;;
 ;;   - a bare **1-arg fn** `(fn (s) …)` that consumes a ready string. This was the whole
@@ -9,11 +9,11 @@
 ;;   - a **port record** — `standard-port` / `process-port` / `file-port` — which carries
 ;;     its target (a label, a pid, a path), prints as itself (`#<port stdout>`), and can
 ;;     own its write policy. This is the "richer port value (named, introspectable)"
-;;     `io-write` was always the seam for; the ability is what made it expressible
+;;     `write` was always the seam for; the ability is what made it expressible
 ;;     without touching a single caller.
 ;;
 ;; A third-party port needs nothing from this module: `defrecord` your own, `impl Port`
-;; for it, and every `io-write` / `with-out` / logger backend accepts it.
+;; for it, and every `write` / `with-out` / logger backend accepts it.
 ;;
 ;; `*out*`/`*err*` (declared in the prelude) still hold a plain **1-arg fn** — the
 ;; prelude's `print`/`println` call it directly, so printing pays no dispatch cost.
@@ -22,7 +22,7 @@
 ;;
 ;; The buffer case — an editor showing output in its `*Messages*` buffer — is a
 ;; `process-port` to the process that owns the buffer: the string crosses as an
-;; `[:io-write s]` message (async, share-nothing), never a mutated value. That is
+;; `[:write s]` message (async, share-nothing), never a mutated value. That is
 ;; the same safe mechanism the logger's `process-backend` uses (std/log.blsp).
 
 (defmodule io
@@ -37,37 +37,37 @@ redirect output for a dynamic extent with `with-out`/`with-err`:
     (with-out (process-port editor) (println \"into the editor's buffer\"))
     (with-out (fn-port (fn (s) (collect s))) (println \"into a callback\"))
 
-A `process-port` sends `[:io-write s]` to its target — async and share-nothing, so
+A `process-port` sends `[:write s]` to its target — async and share-nothing, so
 output crosses process boundaries with no shared mutable state. (Dynamic bindings
 do not reach a `spawn`ed child — a child starts from the default `*out*`; pass it
 a port explicitly if it should redirect too.)
 
-Your own port type is a `defrecord` plus an `impl Port` for it — `io-write`,
+Your own port type is a `defrecord` plus an `impl Port` for it — `write`,
 `with-out`, and every logger backend then accept it with no change here.")
 
 ;; ---- the Port ability -------------------------------------------------------
 
 (defability Port
-  "Where written output goes. `io-write` is the one seam every output path passes
+  "Where written output goes. `write` is the one seam every output path passes
   through, so a port may be any value with an impl."
-  (io-write [self s] :-> nil))
+  (write [self s] :-> nil))
 
 ;; A bare 1-arg sink fn is a port — the original representation, still first-class.
 ;; This impl is what keeps `%write-out`, `fn-port`, and every hand-written `(fn (s) …)`
 ;; working unchanged.
-(impl Port :fn (io-write [f s] (f s)))
+(impl Port :fn (write [f s] (f s)))
 
 (defn port? (x)
   "True if `x` can be written to — it has a `Port` impl (a 1-arg sink fn, a port record,
 or your own type). The check a function taking a port can branch on instead of letting
-`io-write` raise."
+`write` raise."
   (satisfies? 'Port x))
 
 ;; ---- port values ------------------------------------------------------------
 
 (defrecord standard-port (label write))
 
-(impl Port io/standard-port (io-write [p s] ((get p :write) s)))
+(impl Port io/standard-port (write [p s] ((get p :write) s)))
 (impl Display io/standard-port (to-str [p] (str "#<port " (get p :label) ">")))
 
 (defn stdout-port ()
@@ -88,22 +88,22 @@ count, or forward however it likes."
 
 (defrecord process-port (pid))
 
-(impl Port io/process-port (io-write [p s] (send (get p :pid) [:io-write s]) nil))
+(impl Port io/process-port (write [p s] (send (get p :pid) [:write s]) nil))
 (impl Display io/process-port (to-str [p] (str "#<port process " (get p :pid) ">")))
 
 (defrecord file-port (path))
 
-(impl Port io/file-port (io-write [p s] (file/spit-append (get p :path) s) nil))
+(impl Port io/file-port (write [p s] (file/spit-append (get p :path) s) nil))
 (impl Display io/file-port (to-str [p] (str "#<port file " (get p :path) ">")))
 
 ;; ---- installing a port for a dynamic extent ---------------------------------
 
 (defn port-fn (port)
   "`port` as a bare 1-arg sink fn: itself when it already is one, else a closure that
-`io-write`s to it. The adapter at the `*out*`/`*err*` boundary — those dynamic vars hold
+`write`s to it. The adapter at the `*out*`/`*err*` boundary — those dynamic vars hold
 a plain fn so the prelude's `print` can call it directly with no dispatch, while a record
 port still reaches them through this. `with-out`/`with-err` apply it for you."
-  (if (fn? port) port (fn (s) (io-write port s))))
+  (if (fn? port) port (fn (s) (write port s))))
 
 (defmacro with-out (port & body)
   "Evaluate `body` with `*out*` bound to `port` (a fn port or a port record — adapted

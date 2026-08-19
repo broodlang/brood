@@ -1127,7 +1127,7 @@ the resulting buffer."
 ;; *closures* (`buffer -> buffer` and `buffer -> view`), shipped by closure-as-
 ;; data (ADR-033); the read closure must return a non-rope value.
 ;;
-;; A buffer process is also a first-class **`io` sink**: it answers `[:io-write s]`
+;; A buffer process is also a first-class **`io` sink**: it answers `[:write s]`
 ;; by appending `s` (the same message `std/io`'s `process-port` and thus `std/log`'s
 ;; `process-backend` send), so `(add-backend (process-backend a-buffer-pid))` streams
 ;; log output straight into a buffer — async, share-nothing, no glue. The append is
@@ -1164,7 +1164,7 @@ subscriber verbatim, bypassing projections: one small value, fanned as-is."
   "The receive loop of a buffer process over its immutable `buf`, tracking `subs` (subscriber
 `{:pid :proj}` records) and a monotonic `version`. `:edit` applies a change, bumps the
 version, and **pushes** the new projection to every subscriber — the collaboration seam:
-two panes or sessions subscribed to one buffer both see every edit. `:io-write` is an
+two panes or sessions subscribed to one buffer both see every edit. `:write` is an
 end-append expressed as a structured splice (delta push, ring-recorded). `:get` replies a
 derived view synchronously; `:subscribe`/`:unsubscribe` manage the push set (a new
 subscriber is seeded with the current state at once, and monitored); `:stop` ends. The
@@ -1178,7 +1178,7 @@ are already part of the basis its positions were computed against (its local cop
 applied them first — local-apply-first), so transforming over them would double-shift
 a second keystroke sent before the first's echo folded. Every content path records
 in the ring except CLOSURE edits, which are invisible to it — so on a
-transform-collaborated buffer, content changes should arrive as splices or `:io-write`
+transform-collaborated buffer, content changes should arrive as splices or `:write`
 (closure edits are for markers/metadata).
 
 **Subscriber lifecycle:** every subscriber is monitored, so a dead one (crash, detach, link
@@ -1271,20 +1271,20 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
       ;; RECORD it in the ring (a based splice computed before the append still transforms
       ;; correctly over it), and push the DELTA — so a log-backed buffer is as cheap to
       ;; subscribe to as a collaborative one (O(line), not O(document), per line).
-      ([:io-write s] (let (n (buffer-length buf)
-                           nb (replace-region buf n n s)
-                           v (inc version))
-                       (do
-                         (buffer-push-view subs
-                           v
-                           {:splice [n n s]
-                            :markers (buffer-markers nb)
-                            :participants (get nb :participants {})}
-                           nil)
-                         (buffer-serve nb
-                           subs
-                           v
-                           (take 64 (cons [v n n (string/length s) nil] rec))))))
+      ([:write s] (let (n (buffer-length buf)
+                        nb (replace-region buf n n s)
+                        v (inc version))
+                    (do
+                      (buffer-push-view subs
+                        v
+                        {:splice [n n s]
+                         :markers (buffer-markers nb)
+                         :participants (get nb :participants {})}
+                        nil)
+                      (buffer-serve nb
+                        subs
+                        v
+                        (take 64 (cons [v n n (string/length s) nil] rec))))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer-serve buf subs version rec)))
       ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
       ;; its copy after an ambiguous collision needs the text AND the version it
@@ -1459,7 +1459,7 @@ crashed, before the [:down] has been folded)."
 
 (defn create-buffer (&optional (name "*scratch*"))
   "Spawn a fresh, empty buffer process named `name` and return its **pid**. The
-process serves `buffer-edit` / `buffer-query` and accepts `[:io-write s]`, so it is a
+process serves `buffer-edit` / `buffer-query` and accepts `[:write s]`, so it is a
 valid `io`/logger sink — `(add-backend (process-backend (create-buffer \"*log*\")))`
 streams log output straight into it. Tear it down with `delete-buffer`. (High-volume
 sinks may want `(buffer-edit pid disable-undo)` so appends don't grow undo history.)"

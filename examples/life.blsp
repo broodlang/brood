@@ -1,9 +1,9 @@
 (defmodule life
   "Conway's Game of Life. The board is a set of live cells (a map [x y] -> true, so
 the world is unbounded); a `gen` process owns it, advanced by cast (`!`) and
-read by call (`gen-call`). Run:  ./bin/cli examples/life.blsp"
+read by call (`call`). Run:  ./bin/cli examples/life.blsp"
   (:use seq)
-  ;; `:use` both refers `gen-call`/`!` bare and loads the module
+  ;; `:use` both refers `call`/`!` bare and loads the module
   ;; (ADR-229 removed `require`; a `:use` needs no separate load).
   (:use gen))
 
@@ -40,7 +40,7 @@ the animation through these is the demo of process calls."
   "Animate `frames` generations, advancing and reading the board by process call.
 Redraws in place — each cell overwrites the last, so no clear and no flicker."
   (doseq (gen (range frames))
-    (let (board (gen-call srv :board))
+    (let (board (call srv :board))
       ; call: fetch the current board
       (unless (= gen 0) (print (str "\e[" (+ h 1) "A")))
       ; move the cursor back up

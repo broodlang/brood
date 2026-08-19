@@ -11,7 +11,7 @@
 (defmodule buffer-test (:use test) (:use-internals editor/buffer))
 
 ;; The buffer-as-log-sink integration test drives a real logger; `log` and
-;; `gen` (for `gen-call`, to flush the logger's casts before asserting) are
+;; `gen` (for `call`, to flush the logger's casts before asserting) are
 ;; auto-required by the qualified `log/…` / `gen/…` references below.
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-buf-")
@@ -572,12 +572,12 @@
       (stop-buffer a)
       (stop-buffer b)))
 
-  ;; A buffer process is an `io` sink: `[:io-write s]` appends. create-buffer /
+  ;; A buffer process is an `io` sink: `[:write s]` appends. create-buffer /
   ;; delete-buffer are the lifecycle pair. Same-sender ordering makes this exact.
-  (test "create-buffer + [:io-write] appends; delete-buffer stops it"
+  (test "create-buffer + [:write] appends; delete-buffer stops it"
     (let (bp (create-buffer "*log*"))
-      (send bp [:io-write "hello\n"])
-      (send bp [:io-write "world\n"])
+      (send bp [:write "hello\n"])
+      (send bp [:write "world\n"])
       (assert= (buffer-query bp buffer-text) "hello\nworld\n")
       (assert= (delete-buffer bp) :stopped)))
 
@@ -641,14 +641,14 @@
       (sleep 50)
       (assert= (stop-buffer bp) :no-reply)))
 
-  ;; :io-write is a structured splice: subscribers get the O(line) DELTA, not their
+  ;; :write is a structured splice: subscribers get the O(line) DELTA, not their
   ;; full projection — a streamed log buffer stays cheap however large it grows.
-  (test "[:io-write] pushes an end-append splice delta to subscribers"
+  (test "[:write] pushes an end-append splice delta to subscribers"
     (let (bp (spawn-buffer (make-buffer "ab")))
       (subscribe-buffer bp buffer-text)
       ; drain the seed
       (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
-      (send bp [:io-write "cd"])
+      (send bp [:write "cd"])
       (let (view (receive ([:buffer-updated _bp _ v _] v) (after 2000 :none)))
         (assert= (get view :splice) [2 2 "cd"]))
       (stop-buffer bp)))
@@ -656,10 +656,10 @@
   ;; …and it is RECORDED in the transform ring: a based splice computed before the
   ;; append transforms over it, so a log line landing mid-round-trip can't misplace
   ;; a concurrent edit (an insert at the old end lands after the appended line).
-  (test "a based splice computed before an [:io-write] transforms over the append"
+  (test "a based splice computed before an [:write] transforms over the append"
     (let (bp (spawn-buffer (make-buffer "ab")))
       ; v1: "abcd"
-      (send bp [:io-write "cd"])
+      (send bp [:write "cd"])
       ; computed at v0 against "ab": insert at its end
       (buffer-splice bp 2 2 "X" nil 0)
       ; shifted past the append, not "abXcd"
@@ -675,7 +675,7 @@
       (log/info "server up")
       (log/warn "disk low")
       ; the logger has now dispatched both casts → bp
-      (gen/gen-call lg :config)
+      (gen/call lg :config)
       (let (txt (buffer-query bp buffer-text))
         (is (includes? txt "server up"))
         (is (includes? txt "disk low")))

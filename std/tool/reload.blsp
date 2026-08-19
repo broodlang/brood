@@ -14,10 +14,10 @@
   "Hot-reload helpers. A reloader is a green process that polls a file's
 mtime and re-`load`s it when it changes — the running program's globals
 rebind on the *next* call site (docs/shared-code.md). Opt-in: nothing is
-watched until you call `reload-on-change`.
+watched until you call `on-change`.
 
-    (reload-on-change \"greeter.blsp\")   ; one file
-    (reload-on-change \"src\")            ; every .blsp under src/, recursively
+    (on-change \"greeter.blsp\")   ; one file
+    (on-change \"src\")            ; every .blsp under src/, recursively
                                           ; — new files added later are picked
                                           ; up automatically on the next dir
                                           ; scan.
@@ -164,7 +164,7 @@ behind a long-lived loop has changed since it started."
 ;;   - for every path we didn't know about, `load` it (so its defs become
 ;;     live without waiting for a second save) and spawn a per-file watcher
 ;;     for future edits.
-;; `known` is pre-seeded by `reload-on-change` with the initial scan, so the
+;; `known` is pre-seeded by `on-change` with the initial scan, so the
 ;; first tick is silent — only *genuinely new* files after startup trigger a
 ;; "+ <path>" line.
 ;; File *deletions* aren't reaped here — the orphaned per-file watcher just
@@ -188,7 +188,7 @@ behind a long-lived loop has changed since it started."
     (sleep *reload-scan-ms*)
     (reload-dir-loop dir current on-reload)))
 
-(defn reload-on-change (path &optional on-reload)
+(defn on-change (path &optional on-reload)
   "Watch `path` for changes and `load` it on every modification. Dispatches:
 
   - **File** — spawn one watcher polling `file/mtime` every
@@ -208,7 +208,7 @@ swallowed — the watcher keeps running. Returns nil. To stop watching, kill
 the parent process (per-watcher stop is deferred; there's no compelling
 use yet)."
   (cond
-    (not (file/exists? path)) (error "reload-on-change: no such path: " path)
+    (not (file/exists? path)) (error "on-change: no such path: " path)
     (file/dir? path)
     ;; Two-step setup for a directory:
     ;;   1. spawn a per-file watcher for every .blsp currently in the tree

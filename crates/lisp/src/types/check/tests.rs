@@ -4378,8 +4378,8 @@ fn unused_use_import_is_flagged() {
 
 #[test]
 fn used_use_import_is_silent() {
-    // `io-write` is one of io's public exports; using it makes the :use needed.
-    let ws = file_warnings("(defmodule test/mod (:use io))\n(defn foo (port s) (io-write port s))");
+    // `write` is one of io's public exports; using it makes the :use needed.
+    let ws = file_warnings("(defmodule test/mod (:use io))\n(defn foo (port s) (write port s))");
     assert!(
         !ws.iter().any(|w| w.contains("unused :use import")),
         "used :use import should be silent, got {ws:?}"

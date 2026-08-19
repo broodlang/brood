@@ -22,7 +22,7 @@
     (<= budget-ms 0) false
     else (do (sleep 100) (reload-watch-test-wait pred (- budget-ms 100)))))
 
-(describe "reload-on-change: on-reload callback"
+(describe "on-change: on-reload callback"
   (test "fires after a successful reload, with the reloaded path"
     ;; The watcher (and this test's own callback) announce the reload on stdout;
     ;; captured so the suite's output stays clean. See the next test for why this
@@ -33,7 +33,7 @@
         (let (f (path-join dir "w.blsp"))
           (file/spit f "(def rwt-val 1)\n")
           (load f)
-          (reload-on-change f (fn (p) (println "[reload-watch-test] on-reload fired" p)))
+          (on-change f (fn (p) (println "[reload-watch-test] on-reload fired" p)))
           ;; `file-mtime` is millisecond-resolution; without a gap here the two
           ;; `spit`s can land in the same millisecond and the watcher correctly
           ;; sees no change at all (not a watcher bug — a race in the test).
@@ -58,7 +58,7 @@
           ;; A callback that always throws — the def must still take effect
           ;; (on-reload runs *after* reload-defs already succeeded) and the
           ;; watcher must survive to reload again on a later edit.
-          (reload-on-change f (fn (_p) (throw "boom")))
+          (on-change f (fn (_p) (throw "boom")))
           (sleep 100)
           (file/spit f "(def rwt-val2 2)\n")
           (is (reload-watch-test-wait (fn () (= (eval 'rwt-val2) 2)) 3000))
