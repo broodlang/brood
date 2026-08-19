@@ -15,7 +15,7 @@
 ;; non-concurrency tests below already exercise maps on multiple cores. The final
 ;; :isolated block adds explicit spawn/send/receive coverage.
 
-(defmodule maps-test (:use test) (:use enum) (:use map))
+(defmodule maps-test (:use test) (:use seq) (:use map))
 
 ;; ---- file-local helpers (defined once at load; survive :isolated rollback) ----
 

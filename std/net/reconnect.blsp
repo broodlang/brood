@@ -18,7 +18,7 @@
 ;; this with `(process-flag :send-errors true)`: the send raises `:noconnection`
 ;; (E0060) instead of dropping, so it can queue and resend on `[:nodeup …]`.
 
-(defmodule net/reconnect
+(defmodule reconnect
   "Supervised node auto-reconnect (dist self-healing): `watch` keeps the link to
 a peer node alive with exponential-backoff `(connect …)` retries; `subscribe`
 delivers `[:nodeup name]` / `[:nodedown name]` to your mailbox; `unwatch` stops.
@@ -28,7 +28,7 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
 (defn- reconnect-proc-name
   (spec)
   "The watcher's registered name for `spec` — one watcher per spec."
-  (keyword (str "net/reconnect:" spec)))
+  (keyword (str "reconnect:" spec)))
 
 (defn- reconnect-notify
   (subs event)
@@ -100,7 +100,7 @@ first): you'll receive `[:nodeup name]` when a reconnect lands and
 `[:nodedown name]` when the link falls. Returns the caller's pid."
   (let (pid (whereis (reconnect-proc-name spec)))
     (when (nil? pid)
-      (error "net/reconnect: no watcher for " spec " — call watch first"))
+      (error "reconnect: no watcher for " spec " — call watch first"))
     (send pid [:reconnect-subscribe (self)])
     (self)))
 

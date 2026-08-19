@@ -581,3 +581,13 @@
                                    (assert= i 403)
                                    (assert= s mb-unit)
                                    (assert= l 497)))))))
+
+(describe "string/to-bytes + string/from-bytes"
+  (test "to-bytes returns a bytes value"
+    (is (bytes? (string/to-bytes "hello"))))
+  (test "from-bytes round-trips a string"
+    (assert= "hello, brood!" (string/from-bytes (string/to-bytes "hello, brood!"))))
+  (test "empty string round-trips"
+    (assert= "" (string/from-bytes (string/to-bytes ""))))
+  (test "UTF-8 multi-byte character"
+    (assert= "café" (string/from-bytes (string/to-bytes "café")))))

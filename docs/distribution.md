@@ -43,7 +43,7 @@ local node up before running `app.blsp` (the Emacs `--daemon` model).
 A node's identity is `name@host`, Erlang-style — globally unique, carried in every
 pid (`#<pid a@whkbus/3>`). `node-start` qualifies a bare name: a **local** node
 takes this machine's short `(hostname)` (`:a@whkbus`); a **TCP** node takes its
-listen address's host (`:a@127.0.0.1`), so peers and `net/reconnect` derive the same
+listen address's host (`:a@127.0.0.1`), so peers and `reconnect` derive the same
 name. Pass an explicit `:name@host` for a long/FQDN name. **`connect` returns the
 peer's authoritative `name@host`** — address peers with that value (a `let`/`def`
 binding, or `(nodes)`), not a bare literal.
@@ -217,12 +217,12 @@ independent symbol interners. (In-process messages keep the interned id.)
     `fire_nodedown` beside the monitor path). This is what makes cross-node
     supervision work (`std/proc/supervisor.blsp`). See the `remote_link_death_*`,
     `remote_exit_kills_*`, and `supervisor_restarts_a_remote_child` tests.
-  - **Auto-reconnect** — `(net/reconnect/watch "name@host:port")` (Brood policy
-    in `std/net/reconnect.blsp`, `(require 'net/reconnect)`; superseded the
+  - **Auto-reconnect** — `(reconnect/watch "name@host:port")` (Brood policy
+    in `std/net/reconnect.blsp`, `(require 'reconnect)`; superseded the
     prelude's `ensure-link`, 2026-07-18) maintains a peer link across restarts:
     a named, idempotent watcher `monitor-node`s the peer and retries `connect`
     with exponential backoff (`:min-ms` 500 → `:max-ms` 30000) on every
-    `[:nodedown …]`; `net/reconnect/subscribe` delivers `[:nodeup name]` /
+    `[:nodedown …]`; `reconnect/subscribe` delivers `[:nodeup name]` /
     `[:nodedown name]` to your mailbox (pair with
     `(process-flag :send-errors true)` for queue-and-retry senders). See
     `ensure_link_reconnects_across_a_node_restart` and
@@ -382,7 +382,7 @@ to exactly the nodes you dial, with no transitive discovery.
 **Limitations (v1, ADR-011 — additive when a consumer needs more).**
 - *No auto-reconnect / re-heal.* The mesh forms on join; a transient link drop
   isn't re-dialed on its own (consistent with Erlang). Use
-  `net/reconnect/watch` for a persistently-maintained link.
+  `reconnect/watch` for a persistently-maintained link.
 - *Address must be routable from the discoverer.* A node advertises its own
   listen address; meshing assumes peers can route to it (the same assumption
   `name@host` already makes). A unix-only node gossiped to a different machine

@@ -56,7 +56,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    `count`/`empty?`/`first`/`rest`/`last`/`map`/`filter`/`fold`/`reduce`/`into`/
    `vec`/`seq` walk a list, vector, `bytes`, a **set** (its elements) or a **map**
    (its `[k v]` pairs) — so no `(zip (keys m) (vals m))`, and `(first {:a 1})` is
-   `[:a 1]`. Map order is hash-driven, so compare with `enum/frequencies`.
+   `[:a 1]`. Map order is hash-driven, so compare with `seq/frequencies`.
    `conj`/`into` insert at each kind's natural point and **preserve the kind**;
    `conj`/`disj`/`get`/`contains?` on a set are prelude (no `(:use set)` — that
    module is only `set`/`union`/`intersection`/`difference`/`subset?`). Two
@@ -96,7 +96,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 - `foo?` predicate · `*foo*` dynamic/module var · `foo->bar` conversion.
   Kebab-case. **Don't add a trailing `!`** — nothing mutates, so it warns of
   nothing (the few in-tree `!` names mean unrelated things: `sig!` = enforced,
-  `set-load-path!` = a root setter, `(! pid msg)` = a `proc/gen` cast).
+  `set-load-path!` = a root setter, `(! pid msg)` = a `gen` cast).
 - **Private = `defn-` / `def-`**, not a marker in the name (ADR-146). The name
   stays clean at the def and every call site; `(private? 'mod/name)` asks the
   image. The retired `--`-in-name convention still appears in old code — ignore it.

@@ -11,8 +11,8 @@
 (defmodule buffer-test (:use test) (:use-internals editor/buffer))
 
 ;; The buffer-as-log-sink integration test drives a real logger; `log` and
-;; `proc/gen` (for `gen-call`, to flush the logger's casts before asserting) are
-;; auto-required by the qualified `log/…` / `proc/gen/…` references below.
+;; `gen` (for `gen-call`, to flush the logger's casts before asserting) are
+;; auto-required by the qualified `log/…` / `gen/…` references below.
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-buf-")
 
@@ -675,7 +675,7 @@
       (log/log-info "server up")
       (log/log-warn "disk low")
       ; the logger has now dispatched both casts → bp
-      (proc/gen/gen-call lg :config)
+      (gen/gen-call lg :config)
       (let (txt (buffer-query bp buffer-text))
         (is (includes? txt "server up"))
         (is (includes? txt "disk low")))

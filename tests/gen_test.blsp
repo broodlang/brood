@@ -2,7 +2,7 @@
 ;; spawn/send/receive/ref. :isolated because each test spawns processes and we
 ;; (re)define servers as globals.
 
-(defmodule gen-test (:use test) (:use proc/gen))
+(defmodule gen-test (:use test) (:use gen))
 
 (describe "gen: cast and call"
   :isolated
