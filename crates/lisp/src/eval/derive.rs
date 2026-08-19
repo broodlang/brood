@@ -35,7 +35,7 @@ use std::cell::{Cell, RefCell};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Symbol, Value, ValueRef};
-use crate::error::LispResult;
+use crate::error::{LispError, LispResult};
 
 thread_local! {
     /// Whether `resolve_sym` should *record* the qualified references it resolves. Off
@@ -45,6 +45,13 @@ thread_local! {
     /// Modules a qualified reference in the current compile pass pulled in, deduped,
     /// drained by [`drain_pending`].
     static PENDING: RefCell<Vec<Symbol>> = const { RefCell::new(Vec::new()) };
+    /// Bare names the current compile pass used that are `(:use …)`-imported from two or
+    /// more modules at once (ADR-235): `(bare, sorted candidate qualifieds)`. Recorded by
+    /// `resolve_sym` at the point the ambiguous name is referenced, raised as a use-site
+    /// error by [`take_ambiguous_error`]. Only armed under `RECORDING` (the read-only LSP
+    /// path must not hard-error a hover).
+    static PENDING_AMBIGUOUS: RefCell<Vec<(Symbol, Vec<Symbol>)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// The module a qualified reference `s` should auto-require, if any. `None` for a bare
@@ -131,6 +138,53 @@ fn record_module(module: Symbol) {
             pending.push(module);
         }
     });
+}
+
+/// Record that the bare name `bare` — used in the form currently being resolved — is
+/// `(:use …)`-imported from more than one module (`candidates`), so it cannot resolve
+/// unambiguously (ADR-235). A no-op unless recording is armed (the read-only LSP resolve
+/// must not raise). Pure — pushes to a thread-local, no heap/GC — so it is safe under
+/// `resolve_sym`'s GC/macro blocks. Drained and raised by [`take_ambiguous_error`].
+pub fn record_ambiguous(bare: Symbol, candidates: Vec<Symbol>) {
+    if !RECORDING.with(|recording| recording.get()) {
+        return;
+    }
+    PENDING_AMBIGUOUS.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if !pending.iter().any(|(b, _)| *b == bare) {
+            pending.push((bare, candidates));
+        }
+    });
+}
+
+/// If the current compile pass referenced any ambiguous bare name (ADR-235), take the
+/// first and turn it into a use-site clash error naming the candidate modules; else `None`.
+/// Called right after `resolve` in the macroexpand driver, so the error points at the form
+/// that used the name. Always clears the channel (so a caught error does not leak into the
+/// next pass). Candidates are sorted by their qualified spelling for a stable message.
+pub fn take_ambiguous_error() -> Option<LispError> {
+    let first = PENDING_AMBIGUOUS.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if pending.is_empty() {
+            return None;
+        }
+        let taken = std::mem::take(&mut *pending);
+        taken.into_iter().next()
+    });
+    let (bare, mut candidates) = first?;
+    candidates.sort_by(|a, b| value::symbol_name_ref(*a).cmp(value::symbol_name_ref(*b)));
+    let names: Vec<String> = candidates
+        .iter()
+        .map(|q| format!("`{}`", value::symbol_name_ref(*q)))
+        .collect();
+    Some(LispError::runtime(format!(
+        "`{}` is imported from more than one module ({}) — the bare name is ambiguous. \
+         Qualify it (e.g. `{}`), or disambiguate the `(:use …)` with `:only [...]` / \
+         `:exclude [...]` / an alias.",
+        value::symbol_name_ref(bare),
+        names.join(" and "),
+        value::symbol_name_ref(candidates[0]),
+    )))
 }
 
 /// Scan a **root-region** form (a header-less script or REPL input, where there is no

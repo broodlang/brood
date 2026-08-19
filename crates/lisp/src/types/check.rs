@@ -603,12 +603,12 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                             if heap.is_private(qual) && !granted {
                                 continue;
                             }
-                            heap.add_import(bare, qual);
+                            heap.add_import_lazy(bare, qual);
                         }
                     }
                     None => {
                         for (bare, qual) in deps::obs_module_exports(heap, &prefix) {
-                            heap.add_import(bare, qual);
+                            heap.add_import_lazy(bare, qual);
                         }
                     }
                 }
@@ -621,7 +621,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 let excluded: std::collections::HashSet<Symbol> = excluded.into_iter().collect();
                 for (bare, qual) in deps::obs_module_exports(heap, &prefix) {
                     if !excluded.contains(&bare) {
-                        heap.add_import(bare, qual);
+                        heap.add_import_lazy(bare, qual);
                     }
                 }
             }
