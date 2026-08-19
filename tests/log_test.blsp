@@ -35,7 +35,7 @@
   (test "a log call delivers a formatted line to a backend"
     (let (me (self))
       (start-logger {:level :debug :backends [(lt-collect me)]})
-      (log-info "hello")
+      (info "hello")
       (let (line (lt-line))
         (stop-logger)
         (is (includes? line "hello"))
@@ -53,8 +53,8 @@
   (test "a level below the logger's global minimum is dropped"
     (let (me (self))
       (start-logger {:level :info :backends [(lt-collect me)]})
-      (log-debug "drop-me")
-      (log-info "keep-me")
+      (debug "drop-me")
+      (info "keep-me")
       ;; only the :info line should arrive; the first one through must be it
       (let (line (lt-line))
         (stop-logger)
@@ -65,8 +65,8 @@
       (start-logger {:level :debug
                      :backends [(backend (fn-port (fn (s) (send me [:line s])))
                                   {:min-level :warn})]})
-      (log-info "below")
-      (log-error "above")
+      (info "below")
+      (error "above")
       (let (line (lt-line))
         (stop-logger)
         (is (includes? line "above")))))
@@ -86,8 +86,8 @@
                                                              :meta)
                                                         :category)
                                                      :lsp)))})]})
-      (log-info "to-lsp" {:category :lsp})
-      (log-info "to-other")
+      (info "to-lsp" {:category :lsp})
+      (info "to-other")
       ;; collect the two delivered lines, tagged by which backend sent them
       (let (a (receive ([:line tag s] [tag s]) (after *test-wait-ms* :timeout))
             b (receive ([:line tag s] [tag s]) (after *test-wait-ms* :timeout)))
@@ -108,7 +108,7 @@
       (add-backend (lt-collect me))
       (sleep 40)
       ; let the add-backend cast land first
-      (log-info "after-add")
+      (info "after-add")
       (let (line (lt-line))
         (stop-logger)
         (is (includes? line "after-add")))))
@@ -119,7 +119,7 @@
     ; let any prior logger's name clear from the registry
     (is (nil? (logger)))
     ;; fallback path writes to stderr; the call must still return nil cleanly
-    (assert= (log-info "nowhere") nil)))
+    (assert= (info "nowhere") nil)))
 
 ;; ---- the LogBackend ability -------------------------------------------------
 ;; A backend is any value with a `LogBackend` impl, so a backend that does something
@@ -141,7 +141,7 @@
   (test "a custom backend record receives records instead of formatted lines"
     (let (me (self))
       (start-logger {:level :debug :backends [(raw-backend me :debug nil)]})
-      (log-info "structured" {:category :lsp})
+      (info "structured" {:category :lsp})
       (let (rec (receive ([:rec r] r) (after *test-wait-ms* :timeout)))
         (stop-logger)
         (assert= (get rec :level) :info)
@@ -150,15 +150,15 @@
   (test "a custom backend reusing backend-passes? honours :min-level"
     (let (me (self))
       (start-logger {:level :debug :backends [(raw-backend me :warn nil)]})
-      (log-info "dropped")
-      (log-error "kept")
+      (info "dropped")
+      (error "kept")
       (let (rec (receive ([:rec r] r) (after *test-wait-ms* :timeout)))
         (stop-logger)
         (assert= (get rec :msg) "kept"))))
   (test "custom and stock backends coexist on one logger"
     (let (me (self))
       (start-logger {:level :debug :backends [(raw-backend me :debug nil) (lt-collect me)]})
-      (log-info "both")
+      (info "both")
       ;; one record from the custom backend, one formatted line from the stock one
       (let (first-message (receive
                             ([:rec r] [:rec r])
@@ -196,7 +196,7 @@
   (test "N processes each log once; every line arrives, none lost or interleaved"
     (let (me (self) n 40)
       (start-logger {:level :debug :backends [(lt-collect me)]})
-      (fold (fn (acc i) (spawn (log-info (str "w" i))) acc) nil (lt-upto n))
+      (fold (fn (acc i) (spawn (info (str "w" i))) acc) nil (lt-upto n))
       (let (got (lt-drain n nil))
         (stop-logger)
         (assert= (count got) n)

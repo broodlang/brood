@@ -672,8 +672,8 @@
   (test "a logger process-backend streams log lines into a buffer process"
     (let (bp (create-buffer "*app-log*")
           lg (log/start-logger {:level :info :backends [(log/process-backend bp)]}))
-      (log/log-info "server up")
-      (log/log-warn "disk low")
+      (log/info "server up")
+      (log/warn "disk low")
       ; the logger has now dispatched both casts → bp
       (gen/gen-call lg :config)
       (let (txt (buffer-query bp buffer-text))
