@@ -110,7 +110,7 @@ test discovery, lints, release, config)."
     "  ;; fire-and-forget, and one process serialises every write, so lines never\n"
     "  ;; interleave). The default backend writes to stdout at :info and up.\n"
     "  (start-logger)\n"
-    "  (log-info \"starting "
+    "  (info \"starting "
     nm
     "\")\n"
     "  ;; Add backends to fan output out — e.g. to a file, or to a process that\n"

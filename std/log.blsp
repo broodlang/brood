@@ -30,7 +30,7 @@ backends; each log call is a cast, so it never blocks the caller, and the single
 process serialises writes (no interleaving) and isolates a crashing backend.
 
     (start-logger)                       ; default: stdout, :info and up
-    (log-info \"server up\" {:port 8080}) ; structured fields optional
+    (info \"server up\" {:port 8080}) ; structured fields optional
     (log :warn \"disk low\")
     (add-backend (file-backend \"app.log\"))
     (add-backend (process-backend editor-pid))  ; → an editor's *Messages*
@@ -155,7 +155,7 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
   (fold (fn (acc b) (backend-emit b rec) acc) nil backends)
   nil)
 
-(defprocess log-server
+(defprocess server
   (cfg)
   "The logger process: carries `{:level :backends}` and dispatches each
 `[:log rec]` cast to every backend that passes the global and per-backend levels."
@@ -176,7 +176,7 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
   (let (o (if (empty? opts) {} (first opts))
         level (or (get o :level) :info)
         backends (or (get o :backends) [(stdout-backend)])
-        pid (spawn-server log-server {:level level :backends backends}))
+        pid (spawn-server server {:level level :backends backends}))
     (register :logger pid)
     pid))
 
@@ -196,7 +196,7 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
     (when pid (! pid [:add-backend b])))
   nil)
 
-(defn set-log-level (level)
+(defn set-level (level)
   "Set the running logger's global minimum severity (a cast). Returns nil."
   (let (pid (logger))
     (when pid (! pid [:set-level level])))
@@ -221,7 +221,7 @@ line falls back to stderr so a log is never lost. Returns nil."
       (eprint (log-default-format rec))))
   nil)
 
-(defn log-debug (msg & meta) "Log `msg` at `:debug`." (apply log :debug msg meta))
-(defn log-info (msg & meta) "Log `msg` at `:info`." (apply log :info msg meta))
-(defn log-warn (msg & meta) "Log `msg` at `:warn`." (apply log :warn msg meta))
-(defn log-error (msg & meta) "Log `msg` at `:error`." (apply log :error msg meta))
+(defn debug (msg & meta) "Log `msg` at `:debug`." (apply log :debug msg meta))
+(defn info (msg & meta) "Log `msg` at `:info`." (apply log :info msg meta))
+(defn warn (msg & meta) "Log `msg` at `:warn`." (apply log :warn msg meta))
+(defn error (msg & meta) "Log `msg` at `:error`." (apply log :error msg meta))
