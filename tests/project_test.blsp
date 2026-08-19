@@ -661,7 +661,7 @@
 (describe "project: (brood-version)"
   (test "returns this runtime's semantic version as a valid MAJOR.MINOR.PATCH string"
     (is (string? (brood-version)))
-    (is (version/version-valid? (brood-version)))))
+    (is (version/valid? (brood-version)))))
 
 (describe "project: the :brood runtime gate"
   (test "no constraint is a no-op (nothing to satisfy)"

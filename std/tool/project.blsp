@@ -72,7 +72,7 @@ the `nest new` scaffolder."
 ;; name → version constraint (`{bedit ">= 0.3"}`). Debian's `Enhances:` field: a
 ;; plugin declares what it plugs into, and the *application* checks the constraint
 ;; against its own version when it loads the package (`std/version`
-;; `version-satisfies-all?`). Distinct from dependency resolution (ADR-209): `:enhances`
+;; `version/satisfies-all?`). Distinct from dependency resolution (ADR-209): `:enhances`
 ;; is a load-time compatibility check a host runs against a plugin it already has —
 ;; nothing here is fetched or version-selected.
 ;;
@@ -406,7 +406,7 @@ to `:enhances`: a plugin is an ordinary `:library` that also declares what it en
 ordinary library). Names may be written as symbols (`{bedit \">= 0.3\"}`, matching
 how dep names are written) or strings; both normalize to symbols, so a consumer
 looks a name up one way. A constraint of `\"\"` means \"this application, any
-version\", which `version-satisfies?` accepts.
+version\", which `version/satisfies?` accepts.
 
 Validated here rather than at load time: a manifest typo should fail when the
 manifest is read, naming the key, not later inside whoever consumes the map."
@@ -1007,7 +1007,7 @@ it keeps them. Requires nothing, fetches nothing. An absent `dir` is [].
 
 `app`/`app-version` are the host's own name and version: a package whose `:enhances` names
 `app` but demands a newer host than `app-version` is excluded, via the same
-`version-satisfies-all?` the resolver and `nest search` use. Naming `app` is what gates — an
+`version/satisfies-all?` the resolver and `nest search` use. Naming `app` is what gates — an
 empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not count."
   (let (app-symbol (symbol app)
         host {app-symbol app-version})
@@ -1017,7 +1017,7 @@ empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not 
                      (let (enhances (manifest-enhances (path-join (path-join dir dep-name)
                                                          "project.blsp")))
                        (and (get enhances app-symbol)
-                         (version/version-satisfies-all? host enhances))))
+                         (version/satisfies-all? host enhances))))
              (file/ls dir))))))
 
 (defn installed-enhancers (root app app-version)
@@ -1104,7 +1104,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
     (when (not (string? *project-brood*))
       (error "project: :brood must be a version-constraint string (e.g. \">= 0.2\"), got "
         (pr-str *project-brood*)))
-    (when (not (version/version-satisfies? (brood-version) *project-brood*))
+    (when (not (version/satisfies? (brood-version) *project-brood*))
       (error "project: this project requires Brood "
         (pr-str *project-brood*)
         " but you are running "

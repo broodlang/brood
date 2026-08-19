@@ -354,7 +354,7 @@
           (let (deps (rt-o-deps universe nm chosen))
             (if (every? (fn (d)
                           (let (dep-version (get assignment (nth d 0)))
-                            (and dep-version (version/version-satisfies? dep-version (nth d 1)))))
+                            (and dep-version (version/satisfies? dep-version (nth d 1)))))
                   deps)
               (rt-o-closure-ok? (append (rest queue) (map (fn (d) (nth d 0)) deps))
                 universe
@@ -367,7 +367,7 @@
 (defn rt-o-resolves? (roots universe assignment)
   (and (every? (fn (r)
                  (let (v (get assignment (nth r 0)))
-                   (and v (version/version-satisfies? v (nth r 1)))))
+                   (and v (version/satisfies? v (nth r 1)))))
          roots)
     (rt-o-closure-ok? (map (fn (r) (nth r 0)) roots) universe assignment {})))
 

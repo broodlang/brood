@@ -1,6 +1,6 @@
 ;; A generative ORACLE for std/version.blsp — the analogue of the resolver's oracle
 ;; (tests/resolver_test.blsp), filling the gap the ADR-209 work exposed: no generator
-;; covered version *matching*, so a version-comparison bug could survive to be found by
+;; covered version *matching*, so a comparison bug could survive to be found by
 ;; hand (and one did). Two independent implementations of the same semver spec disagreeing
 ;; on a random (version, constraint) pair ⇒ a real bug, surfaced as a self-describing
 ;; counterexample.
@@ -87,9 +87,9 @@
         terms (if two [t1 t2] [t1])
         cstr (string/join ", " (map (fn (t) (nth t 2)) terms))
         expected (every? (fn (t) (ref-term? v (nth t 0) (nth t 1))) terms)
-        actual (version-satisfies? vs cstr)
+        actual (satisfies? vs cstr)
         ;; consistency: compile-once + match? must equal the one-shot satisfies?
-        via-compiled (version-match? (version-compile cstr) vs))
+        via-compiled (match? (compile cstr) vs))
     (cond
       (not (= expected actual))
         (do
@@ -106,18 +106,18 @@
 (defn check-oracle (s n)
   (if (= n 0) true (if (oracle-ok? s) (check-oracle (lcg s) (- n 1)) false)))
 
-;; --- version-compare ordering laws (include pre-releases; no reference needed) --------
+;; --- compare ordering laws (include pre-releases; no reference needed) --------
 (defn gen-ver-str (s)
   (let (core (tuple->str (gen-tuple s)))
     (if (= (rem (lcg s) 3) 0) (str core "-rc." (pick (lcg (lcg s)) 0 3)) core)))
 
 (defn cmp-laws-ok? (a b c)
-  (and (= (version-compare a a) 0)
+  (and (= (compare a a) 0)
     ; reflexive
-    (= (version-compare a b) (- (version-compare b a))) ; antisymmetric (sign flip)
+    (= (compare a b) (- (compare b a))) ; antisymmetric (sign flip)
     ;; transitive: a ≤ b and b ≤ c ⇒ a ≤ c
-    (if (and (<= (version-compare a b) 0) (<= (version-compare b c) 0))
-      (<= (version-compare a c) 0)
+    (if (and (<= (compare a b) 0) (<= (compare b c) 0))
+      (<= (compare a c) 0)
       true)))
 
 (defn check-cmp (s n)
@@ -133,7 +133,7 @@
     (is (check-oracle 2468013 3000)))
   (test "a second, differently-seeded matching sweep"
     (is (check-oracle 99990001 3000)))
-  (test "version-compare is a total order over 1500 cases (incl. pre-releases)"
+  (test "compare is a total order over 1500 cases (incl. pre-releases)"
     (is (check-cmp 13571357 1500)))
 
   ;; A couple of fixed spot-checks so a totally-broken generator can't pass vacuously.
