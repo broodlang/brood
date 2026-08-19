@@ -158,7 +158,10 @@ fn bundled_bare_reference_to_unique_dep_module_resolves() {
                 "main",
                 "(defmodule main (:alias repo))\n(defn main () (println (repo/tag)))",
             ),
-            ("store/repo", "(defmodule repo)\n(defn tag () \"bare-dep-ok\")"),
+            (
+                "store/repo",
+                "(defmodule repo)\n(defn tag () \"bare-dep-ok\")",
+            ),
         ],
     );
     let mut cmd = Command::new(&app);
