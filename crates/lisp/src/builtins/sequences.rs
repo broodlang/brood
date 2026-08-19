@@ -1597,7 +1597,9 @@ pub(super) fn substring_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> 
     let start = expect_int(heap, "string/substring-graphemes", arg(args, 1))?.max(0) as usize;
     let end = match args.get(2) {
         None | Some(Value::Nil) => None,
-        Some(_) => Some(expect_int(heap, "string/substring-graphemes", arg(args, 2))?.max(0) as usize),
+        Some(_) => {
+            Some(expect_int(heap, "string/substring-graphemes", arg(args, 2))?.max(0) as usize)
+        }
     };
     let out: String = {
         let s = expect_string_ref(heap, "string/substring-graphemes", arg(args, 0))?;
