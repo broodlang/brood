@@ -98,7 +98,8 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
 ;; nothing. Kept LAST in the universe so `pg-pick-version` never prefers "not selected".
 (def pg-none :%none)
 
-(defn pg-universe (ctx pkg)
+(defn- pg-universe
+  (ctx pkg)
   "The package's available versions newest-first, plus the NONE sentinel; memoized."
   (if (= pkg pg-root-pkg)
     (list pg-root-version)
@@ -116,18 +117,19 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
         versions)
       hit)))
 
-(defn pg-set-matching (ctx pkg constraint)
+(defn- pg-set-matching
+  (ctx pkg constraint)
   "The subset of `pkg`'s REAL versions matching `constraint` (a version string; nil/\"\" =
 all). NONE never matches — a version constraint is about a selected version."
   (let (compiled (version/compile constraint))
     (filter (fn (v) (and (not (= v pg-none)) (version/match? compiled v)))
       (pg-universe ctx pkg))))
 
-(defn pg-intersect (a b) (filter (fn (v) (includes? b v)) a))
-(defn pg-subset? (a b) (every? (fn (v) (includes? b v)) a))
-(defn pg-disjoint? (a b) (not (any? (fn (v) (includes? b v)) a)))
-(defn pg-complement (ctx pkg s) (filter (fn (v) (not (includes? s v))) (pg-universe ctx pkg)))
-(defn pg-empty? (s) (empty? s))
+(defn- pg-intersect (a b) (filter (fn (v) (includes? b v)) a))
+(defn- pg-subset? (a b) (every? (fn (v) (includes? b v)) a))
+(defn- pg-disjoint? (a b) (not (any? (fn (v) (includes? b v)) a)))
+(defn- pg-complement (ctx pkg s) (filter (fn (v) (not (includes? s v))) (pg-universe ctx pkg)))
+(defn- pg-empty? (s) (empty? s))
 
 ;; --- incompatibilities -----------------------------------------------------------
 ;; An INCOMPATIBILITY is a set of terms (at most one per package) that cannot all hold at
@@ -136,11 +138,12 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; `[:derived a b]` (the resolvent of two incompatibilities during conflict resolution) —
 ;; kept so a failure can render the derivation that proves no solution exists.
 
-(defn pg-ic (terms cause) {:terms terms :cause cause})
+(defn- pg-ic (terms cause) {:terms terms :cause cause})
 
 ;; The incompatibilities a package's release contributes: for each dep `[Q R]`, "P=V and Q
 ;; outside R is forbidden" — i.e. choosing P=V forces Q into R.
-(defn pg-dep-ics (ctx pkg version)
+(defn- pg-dep-ics
+  (ctx pkg version)
   (map
     (fn (dep)
       (let (dep-name (nth dep 0)
@@ -159,7 +162,8 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; The root requirements as incompatibilities: "root is chosen AND P is outside R" is
 ;; forbidden — so once the (always-decided) root is in, P must land in R. Binary, exactly a
 ;; dependency of the virtual root, which is what makes even a permissive requirement select P.
-(defn pg-root-ics (ctx roots)
+(defn- pg-root-ics
+  (ctx roots)
   (map (fn (r)
          (let (pkg (nth r 0) constraint (nth r 1))
            (pg-ic {pg-root-pkg (list pg-root-version)
@@ -177,15 +181,17 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; `:pending` is the work-list of required-but-undecided packages, maintained incrementally
 ;; (enqueued the first time a package is constrained, popped when decided) so choosing the next
 ;; package is not an O(n) scan of every constrained package each step.
-(defn pg-state () {:assigns nil :pos {} :decs {} :level 0 :pending nil})
+(defn- pg-state () {:assigns nil :pos {} :decs {} :level 0 :pending nil})
 
-(defn pg-pos (state ctx pkg)
+(defn- pg-pos
+  (state ctx pkg)
   ;; the package's currently-allowed set — its accumulated term, or its whole universe if
   ;; nothing has constrained it yet.
   (let (p (get (get state :pos) pkg :none))
     (if (= p :none) (pg-universe ctx pkg) p)))
 
-(defn pg-derive (state ctx pkg s cause)
+(defn- pg-derive
+  (state ctx pkg s cause)
   (let (narrowed (pg-intersect (pg-pos state ctx pkg) s)
         newly-required (not (contains? (get state :pos) pkg)))
     (assoc state
@@ -195,7 +201,8 @@ all). NONE never matches — a version constraint is about a selected version."
       :pos (assoc (get state :pos) pkg narrowed)
       :pending (if newly-required (cons pkg (get state :pending)) (get state :pending)))))
 
-(defn pg-decide (state ctx pkg version)
+(defn- pg-decide
+  (state ctx pkg version)
   (let (level (+ 1 (get state :level)))
     (assoc state
       :level level
@@ -207,7 +214,8 @@ all). NONE never matches — a version constraint is about a selected version."
 
 ;; Drop every assignment above `level`, then rebuild `pos`/`decs` from what remains — the
 ;; backjump. `assigns` is newest-first, so kept assignments keep their order.
-(defn pg-backtrack (state level)
+(defn- pg-backtrack
+  (state level)
   (let (kept (filter (fn (a) (<= (get a :level) level)) (get state :assigns))
         pos (fold (fn (m a)
                     (assoc m
@@ -226,7 +234,8 @@ all). NONE never matches — a version constraint is about a selected version."
 
 ;; --- term / incompatibility relations --------------------------------------------
 
-(defn pg-term-rel (state ctx pkg s)
+(defn- pg-term-rel
+  (state ctx pkg s)
   ;; how the partial solution's set for `pkg` relates to term set `s`.
   (let (p (pg-pos state ctx pkg))
     (cond
@@ -234,7 +243,8 @@ all). NONE never matches — a version constraint is about a selected version."
       (pg-disjoint? p s) :contradicted
       else :inconclusive)))
 
-(defn pg-ic-rel (state ctx ic)
+(defn- pg-ic-rel
+  (state ctx ic)
   ;; :satisfied (all terms hold → conflict), :contradicted (some term can't hold → moot),
   ;; [:almost pkg] (all but one hold; that one is the unit), or :inconclusive.
   (pg-ic-rel-go state ctx (map-pairs (get ic :terms)) :none))
@@ -257,7 +267,8 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; propagating a just-changed package scans only the incompatibilities that can involve it —
 ;; not the whole growing set. Without this, a 300-package solve is quadratic in the number of
 ;; dependencies; with it, propagation is proportional to what actually touches each package.
-(defn pg-index-add (index ics)
+(defn- pg-index-add
+  (index ics)
   (fold (fn (idx ic)
           (fold (fn (i pkg) (assoc i pkg (cons ic (get i pkg nil))))
             idx
@@ -269,7 +280,8 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; consequence. `:satisfied` is a conflict (returned for resolution); an `:almost` gives a
 ;; unit — the loose term's package must AVOID that term, so we derive its complement.
 
-(defn pg-propagate (state ctx index changed)
+(defn- pg-propagate
+  (state ctx index changed)
   (pg-propagate-changed state ctx index (list changed)))
 
 (defn- pg-propagate-changed
@@ -319,7 +331,8 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; with the one that caused it (union the other terms, drop the shared package) and repeat.
 ;; Terminates in a solvable-from-here backjump, or in a proof of no-solution.
 
-(defn pg-conflict-resolution (state ctx ics ic)
+(defn- pg-conflict-resolution
+  (state ctx ics ic)
   (resolver-tick ctx)
   (let (chrono (reverse (get state :assigns)) ; oldest-first
         satisfier-idx (pg-satisfier-index state ctx ic chrono)
@@ -341,10 +354,12 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; The earliest assignment (index into oldest-first `chrono`) after which `ic` is satisfied.
 ;; The full partial solution satisfies `ic` (it was a conflict), so a satisfier always
 ;; exists; running off the end signals a resolvent bug rather than looping forever.
-(defn pg-satisfier-index (state ctx ic chrono)
+(defn- pg-satisfier-index
+  (state ctx ic chrono)
   (pg-first-index-satisfying ctx ic chrono 0 (pg-state) (count chrono)))
 
-(defn pg-first-index-satisfying (ctx ic chrono i acc limit)
+(defn- pg-first-index-satisfying
+  (ctx ic chrono i acc limit)
   (when (>= i limit)
     (throw {:resolver-budget-exceeded true
             :message "dependency resolution hit an internal inconsistency (no satisfier)"}))
@@ -356,7 +371,8 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; The decision level to backjump to: the earliest assignment before the satisfier such that
 ;; that prefix PLUS the satisfier already satisfies `ic` (1 — the root floor — if the
 ;; satisfier alone does it). This is the level where the conflict became inevitable.
-(defn pg-previous-satisfier-level (state ctx ic chrono satisfier-idx satisfier)
+(defn- pg-previous-satisfier-level
+  (state ctx ic chrono satisfier-idx satisfier)
   (pg-prev-level-go ctx ic chrono satisfier-idx satisfier 0 (pg-state)))
 
 (defn- pg-prev-level-go
@@ -371,7 +387,8 @@ all). NONE never matches — a version constraint is about a selected version."
 
 ;; Replay one assignment onto a scratch state (for the satisfier search) — like pg-derive/
 ;; pg-decide but without recording history, just updating `pos`.
-(defn pg-apply (ctx state a)
+(defn- pg-apply
+  (ctx state a)
   (assoc state
     :pos
       (assoc (get state :pos)
@@ -380,7 +397,8 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; The resolvent of two incompatibilities over their shared package `pkg`: union every OTHER
 ;; package's terms (intersection within a universe — both must hold), and drop `pkg` (the two
 ;; sides constrain it oppositely, so it cancels).
-(defn pg-resolvent (ctx ic cause pkg satisfier-set)
+(defn- pg-resolvent
+  (ctx ic cause pkg satisfier-set)
   (let (ic-pkg-set (or (get (get ic :terms) pkg) nil)
         ;; the part of the satisfier's own term that reaches OUTSIDE the conflict's term for
         ;; this package: if empty, the satisfier fully explains it and the package cancels;
@@ -440,13 +458,14 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
           [:error (get e :message)]
           (throw e))))))
 
-(defn pg-cleanup (ctx) (table-drop (get ctx :universes)) (table-drop (get ctx :steps)))
+(defn- pg-cleanup (ctx) (table-drop (get ctx :universes)) (table-drop (get ctx :steps)))
 
 ;; The PubGrub main loop. `ics` is the growing incompatibility set; `state` the partial
 ;; solution; `known` the packages discovered so far (to decide over). Propagate from the
 ;; last-changed package; on a conflict, resolve+backjump and learn the cause; when quiet,
 ;; make the next decision (whose deps add incompatibilities and reveal new packages).
-(defn pg-solve (ctx index state changed-list)
+(defn- pg-solve
+  (ctx index state changed-list)
   (resolver-tick ctx)
   (match (pg-propagate-list state ctx index changed-list)
     ([:conflict ic conflict-state]
@@ -467,7 +486,8 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
                                                                        discovered))
                     ([:no-versions pkg] [:error (pg-no-versions-msg state2 ctx index pkg)])))))
 
-(defn pg-propagate-list (state ctx index changed-list)
+(defn- pg-propagate-list
+  (state ctx index changed-list)
   (if (empty? changed-list)
     [:ok state]
     (match (pg-propagate state ctx index (first changed-list))
@@ -478,7 +498,8 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; not yet decided. Fewest allowed versions first (fail-fast). Return the decision + the
 ;; incompatibilities its chosen version introduces + the packages it reveals; or :done when
 ;; everything required is decided; or [:no-versions pkg] when a required package's set is empty.
-(defn pg-next-decision (state ctx index)
+(defn- pg-next-decision
+  (state ctx index)
   ;; pop the next undecided package off the work-list (skipping any that a decision has since
   ;; covered). Returns the popped state so the decision is threaded on top of it.
   (cond
@@ -503,11 +524,13 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 
 ;; Newest allowed version, unless a `preferred` (locked) version is still allowed — then that,
 ;; keeping a re-solve stable. `allowed` is already newest-first.
-(defn pg-pick-version (ctx pkg allowed)
+(defn- pg-pick-version
+  (ctx pkg allowed)
   (let (pin (get (get ctx :preferred) pkg))
     (if (and pin (includes? allowed pin)) pin (first allowed))))
 
-(defn pg-min-by (f items)
+(defn- pg-min-by
+  (f items)
   (fold (fn (best x) (if (< (f x) (f best)) x best)) (first items) (rest items)))
 
 ;; --- error rendering: the derivation (pub-style structured proof) ----------------
@@ -518,7 +541,8 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; <consequence>." lines that expands a derived premise on its own line(s) first and states
 ;; each step's consequence, so the reader follows the reasoning down to "version solving
 ;; failed". The packages named are then listed with what they actually offer.
-(defn pg-error (ctx ic)
+(defn- pg-error
+  (ctx ic)
   (let (lines (pg-report ctx ic)
         leaves (pg-cause-leaves (get ic :cause) nil))
     (str "dependency resolution failed:\n"
@@ -527,19 +551,21 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 
 ;; Whether a cause / incompatibility is an original fact (a leaf) rather than a [:derived …]
 ;; resolution step.
-(defn pg-cause-external? (cause) (match cause ([:derived _ _] false) (_ true)))
-(defn pg-ic-external? (ic) (pg-cause-external? (get ic :cause)))
+(defn- pg-cause-external? (cause) (match cause ([:derived _ _] false) (_ true)))
+(defn- pg-ic-external? (ic) (pg-cause-external? (get ic :cause)))
 
 ;; A package's REAL versions (never NONE) an incompatibility term ALLOWS — the complement of
 ;; its forbidden set — for phrasing a step's consequence.
-(defn pg-term-allows (ctx pkg forbidden)
+(defn- pg-term-allows
+  (ctx pkg forbidden)
   (filter (fn (v) (not (= v pg-none))) (pg-complement ctx pkg forbidden)))
 
 ;; The fact a derived incompatibility establishes going forward, phrased for prose. An
 ;; incompatibility forbids all its terms holding at once; dropping the (always-true) root term,
 ;; if what remains pins a single package we say what it must — or cannot — be, and an empty
 ;; remainder is the final contradiction ("version solving failed").
-(defn pg-consequence-str (ctx ic)
+(defn- pg-consequence-str
+  (ctx ic)
   ;; Keep only the terms that actually CONSTRAIN: not the always-true root, and not a vacuous
   ;; empty-set term (`P → {}` forbids nothing, so its complement is the whole universe — rendering
   ;; it as "P must be <every version>" is both wrong and unbounded; such a term can arise as an
@@ -562,7 +588,8 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 
 ;; One premise's rendering: an external cause is its plain fact; a derived cause is stated by
 ;; its consequence (its own supporting lines are emitted before it is referenced).
-(defn pg-premise-str (ctx ic)
+(defn- pg-premise-str
+  (ctx ic)
   (if (pg-ic-external? ic) (pg-explain-leaf (get ic :cause)) (pg-consequence-str ctx ic)))
 
 ;; Walk the derivation into ordered lines: a post-order over the `[:derived]` nodes so a step's
@@ -572,7 +599,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; count, so plain recursion could overflow on a large tangled graph. The deepest
 ;; (both-premises-external) step opens with "Because"; steps layered on it continue "And
 ;; because", and a step over two derived premises reads "Thus".
-(defn pg-report (ctx ic) (pg-report-drive ctx (list [:visit ic]) nil))
+(defn- pg-report (ctx ic) (pg-report-drive ctx (list [:visit ic]) nil))
 
 (defn- pg-report-drive
   (ctx work acc)
@@ -615,7 +642,8 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
                         else (str "Thus, " conseq "."))))
     (_ "")))
 
-(defn pg-cause-leaves (cause acc)
+(defn- pg-cause-leaves
+  (cause acc)
   ;; distinct leaves of the derivation tree, in first-seen (left-to-right) order.
   ;; An explicit worklist keeps this tail-recursive, so a deep derivation (up to
   ;; one level per resolution step on a large tangled graph) can't overflow.
@@ -634,7 +662,8 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
         (leaf (pg-cause-leaves-loop more
                 (if (includes? acc leaf) acc (append acc (list leaf)))))))))
 
-(defn pg-explain-leaf (leaf)
+(defn- pg-explain-leaf
+  (leaf)
   (match leaf
     ([:root pkg constraint] (str "your project requires "
                               (name pkg)
@@ -646,12 +675,14 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
                                                   (name dep-name)
                                                   (resolver-constraint-suffix dep-constraint)))))
 
-(defn pg-leaf-packages (leaf)
+(defn- pg-leaf-packages
+  (leaf)
   (match leaf
     ([:root pkg _] (list pkg))
     ([:dep pkg _ dep-name _] (list pkg dep-name))))
 
-(defn pg-availability-lines (ctx leaves)
+(defn- pg-availability-lines
+  (ctx leaves)
   (let (pkgs (distinct (apply append (map pg-leaf-packages leaves))))
     (apply str
       (map (fn (pkg)
@@ -663,7 +694,8 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
                    (str " available: " (string/join ", " real))))))
         pkgs))))
 
-(defn pg-no-versions-msg (state ctx ics pkg)
+(defn- pg-no-versions-msg
+  (state ctx ics pkg)
   (let (universe (pg-universe ctx pkg))
     (if (empty? universe)
       (str "dependency resolution failed:\n  no versions of " (name pkg) " are available")
