@@ -559,10 +559,10 @@ mod multimap {
             format!(
                 "\
                  (def mm (fold (fn (m i) \
-                                 (multimap/multimap-assoc m (rem i 10) i)) \
-                               (multimap/multimap-new) \
+                                 (multimap/assoc m (rem i 10) i)) \
+                               (multimap/new) \
                                (range {n}))) \
-                 (multimap/multimap-get mm 0)"
+                 (multimap/get mm 0)"
             ),
         );
     }

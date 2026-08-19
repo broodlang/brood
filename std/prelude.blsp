@@ -5038,6 +5038,10 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   "True if `x` is a min-priority queue (`std/pq`) — by identity, not by shape."
   (%eq (record-id x) :pq/pq))
 
+(defn multimap? (x)
+  "True if `x` is a multi-valued map (`std/multimap`) — by identity, not by shape."
+  (%eq (record-id x) :multimap/multimap))
+
 ; ---- registration -----------------------------------------------------------
 
 ; The owning module of a record id keyword `:mod/name` (as a string), or nil for a
