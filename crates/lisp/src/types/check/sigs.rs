@@ -249,7 +249,10 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     for n in ["string/trim", "string/triml", "string/trimr"] {
         put(n, Sig::new(vec![str_ty], str_ty));
     }
-    put("string/replace", Sig::new(vec![str_ty, str_ty, str_ty], str_ty));
+    put(
+        "string/replace",
+        Sig::new(vec![str_ty, str_ty, str_ty], str_ty),
+    );
     put("string/repeat", Sig::new(vec![str_ty, int], str_ty));
     for n in ["string/pad-left", "string/pad-right"] {
         put(n, Sig::new(vec![str_ty, int], str_ty));

@@ -89,7 +89,9 @@ mod strings {
     fn split(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(count (string/split (string/join \",\" (map number->string (range {n}))) \",\"))"),
+            format!(
+                "(count (string/split (string/join \",\" (map number->string (range {n}))) \",\"))"
+            ),
         );
     }
 }
