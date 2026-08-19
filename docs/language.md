@@ -2291,8 +2291,8 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
 `distinct`  `flatten`  `repeat`  `repeatedly`
 
-> **The `enum` namespace (ADR-227).** The higher-level, *derived* sequence helpers
-> live in the `enum` module rather than the bare prelude: `dedupe`, `distinct-by`,
+> **The `seq` namespace (ADR-227; renamed from `enum` in ADR-234).** The higher-level,
+> *derived* sequence helpers live in the `seq` module rather than the bare prelude: `dedupe`, `distinct-by`,
 > `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`,
 > `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`.
 > The *core* protocol above (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/

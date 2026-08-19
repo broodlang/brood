@@ -2069,6 +2069,19 @@ pub(crate) struct CheckDepRec {
 /// downward is worth a class.
 ///
 /// Allocated lazily by [`Heap::cold_mut`] on first write; readers go through
+/// What a bare name in the `(:use …)` import table resolves to (ADR-235). One
+/// contributing module → `One`; two or more `(:use …)`d modules exporting the same
+/// bare name → `Ambiguous`, which is not an error until the name is actually referenced
+/// bare, at which point the resolver reports the candidates. This lazy shape is what
+/// lets `(:use a) (:use b)` coexist when the caller only touches non-overlapping names.
+#[derive(Clone, Debug)]
+pub enum ImportEntry {
+    /// Imported from exactly one module — the qualified global to resolve to.
+    One(Symbol),
+    /// Contributed by two or more modules — the sorted candidate qualified globals.
+    Ambiguous(Vec<Symbol>),
+}
+
 /// [`Heap::cold`] and treat `None` as empty, which is exactly right — an absent
 /// `ColdHeap` means "this process has loaded nothing and checked nothing".
 #[derive(Default)]
@@ -2102,8 +2115,12 @@ pub(crate) struct ColdHeap {
     /// Compiling a form that has **no** whole-file pre-scan behind it (a runtime
     /// `eval`), so `ns_known_names` cannot answer "will this namespace define it?".
     pub(crate) ns_assume_own: bool,
-    /// `(:use …)` import map for the namespace being compiled.
-    pub(crate) imports: HashMap<Symbol, Symbol>,
+    /// `(:use …)` import map for the namespace being compiled: bare name → what it
+    /// resolves to. A name imported from one module is `One(qualified)`; a name two or
+    /// more `(:use …)`d modules both export is `Ambiguous([…])` — not an error at import
+    /// time (ADR-235), only if the bare name is actually *used*, at which point the
+    /// resolver names the candidates. Rides the same per-file save/restore as the rest.
+    pub(crate) imports: HashMap<Symbol, ImportEntry>,
     /// Package-rooted namespaces (ADR-070): while loading a *dependency* `foo`, its
     /// local name is the active prefix, so a module the file declares `(defmodule b)`
     /// roots to `foo/b` and its intra-package `(:use b)`/`(:alias b …)` targets root
@@ -3837,26 +3854,96 @@ impl Heap {
     }
 
     /// Replace the current file's `(:use …)` import table, returning the prior one
-    /// so the caller can restore it (loads nest). Maps bare → qualified.
-    pub fn set_imports(&mut self, imports: HashMap<Symbol, Symbol>) -> HashMap<Symbol, Symbol> {
+    /// so the caller can restore it (loads nest). Maps bare → [`ImportEntry`].
+    pub fn set_imports(
+        &mut self,
+        imports: HashMap<Symbol, ImportEntry>,
+    ) -> HashMap<Symbol, ImportEntry> {
         std::mem::replace(&mut self.cold_mut().imports, imports)
     }
 
     /// Add one imported binding (bare name → qualified global). Used by `%refer`.
+    /// The clash-handling in `%refer` (`refer_add`) calls the ambiguity helpers below
+    /// instead when a second module contributes the same bare name.
     pub fn add_import(&mut self, bare: Symbol, qualified: Symbol) {
-        self.cold_mut().imports.insert(bare, qualified);
+        self.cold_mut()
+            .imports
+            .insert(bare, ImportEntry::One(qualified));
     }
 
-    /// The qualified global a bare name was `(:use …)`-imported to, if any.
+    /// Add an imported binding, demoting to ambiguous on a clash (ADR-235): a fresh name
+    /// becomes `One`; a second module contributing the same name (or a further one on an
+    /// already-`Ambiguous` entry) becomes `Ambiguous`; re-adding the identical qualified is
+    /// a no-op. The lazy counterpart of `add_import`, sharing `%refer`'s clash semantics so
+    /// the checker's import setup agrees with the runtime's. (No shadow warning — that is a
+    /// runtime-only concern handled in `refer_add`.)
+    pub fn add_import_lazy(&mut self, bare: Symbol, qualified: Symbol) {
+        match self.import_of(bare) {
+            Some(existing) if existing == qualified => {} // idempotent
+            Some(_) => self.mark_import_ambiguous(bare, qualified),
+            None if self.ambiguous_import_of(bare).is_some() => {
+                self.mark_import_ambiguous(bare, qualified)
+            }
+            None => self.add_import(bare, qualified),
+        }
+    }
+
+    /// The qualified global a bare name was `(:use …)`-imported to, if it resolves to a
+    /// single module. `None` for an unimported name **and** for an ambiguous one — an
+    /// ambiguous bare name has no single target, so callers that want a definite import
+    /// (aliases, the resolver's happy path) correctly see nothing; use
+    /// [`ambiguous_import_of`](Self::ambiguous_import_of) to detect the ambiguous case.
     pub fn import_of(&self, bare: Symbol) -> Option<Symbol> {
-        self.cold().and_then(|c| c.imports.get(&bare).copied())
+        match self.cold().and_then(|c| c.imports.get(&bare)) {
+            Some(ImportEntry::One(q)) => Some(*q),
+            _ => None,
+        }
+    }
+
+    /// The candidate qualified names a bare name is `(:use …)`-imported to from **more
+    /// than one** module — `Some(sorted candidates)` iff the name is ambiguous, else
+    /// `None`. Used by the resolver to raise a use-site clash error (ADR-235).
+    pub fn ambiguous_import_of(&self, bare: Symbol) -> Option<Vec<Symbol>> {
+        match self.cold().and_then(|c| c.imports.get(&bare)) {
+            Some(ImportEntry::Ambiguous(v)) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record that a bare name is imported from two modules at once — demote a prior
+    /// `One` to `Ambiguous`, or append a further candidate to an existing `Ambiguous`.
+    /// Candidates are kept sorted and deduped so the use-site error reads deterministically.
+    pub fn mark_import_ambiguous(&mut self, bare: Symbol, candidate: Symbol) {
+        let entry = self
+            .cold_mut()
+            .imports
+            .entry(bare)
+            .or_insert(ImportEntry::Ambiguous(Vec::new()));
+        let mut names = match entry {
+            ImportEntry::One(q) => vec![*q],
+            ImportEntry::Ambiguous(v) => std::mem::take(v),
+        };
+        if !names.contains(&candidate) {
+            names.push(candidate);
+        }
+        names.sort_unstable(); // Symbol = u32; deterministic dedup order (the resolver sorts by name when it formats)
+        *entry = ImportEntry::Ambiguous(names);
     }
 
     /// Every `(bare, qualified)` import pair in the current file's table — for the
-    /// LSP to offer imported names as bare completion candidates (ADR-065 §6).
+    /// LSP to offer imported names as bare completion candidates (ADR-065 §6). Only the
+    /// unambiguous (`One`) imports; an ambiguous name is not usable bare.
     pub fn imported_pairs(&self) -> Vec<(Symbol, Symbol)> {
         self.cold()
-            .map(|c| c.imports.iter().map(|(&b, &q)| (b, q)).collect())
+            .map(|c| {
+                c.imports
+                    .iter()
+                    .filter_map(|(&b, e)| match e {
+                        ImportEntry::One(q) => Some((b, *q)),
+                        ImportEntry::Ambiguous(_) => None,
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
