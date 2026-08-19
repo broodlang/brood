@@ -17,14 +17,14 @@
   (test "a parse error surfaces as :error, not a drop"
     (is (contains? (mcp/eval-tool {:source "(+ 1"}) :error))))
 
-;; The LLM-native tools explain-error and find-pattern (thin wrappers over
+;; The LLM-native tools error and find-pattern (thin wrappers over
 ;; std/tool/explain.blsp — 2026-07-23).
-(describe "mcp explain-error / find-pattern tools"
-  (test "explain-error returns the structured explanation for a code"
+(describe "mcp error / find-pattern tools"
+  (test "error returns the structured explanation for a code"
     (let (r (mcp/explain-error-tool {:code "E0044"}))
       (assert= (get r :code) "E0044")
       (is (includes? (get r :fix) "tail-recursive"))))
-  (test "explain-error rejects a non-string :code"
+  (test "error rejects a non-string :code"
     (assert-error (mcp/explain-error-tool {:code 44})))
   (test "find-pattern returns idiom matches for an intent"
     (let (r (mcp/find-pattern-tool {:query "build a string"}))
@@ -34,7 +34,7 @@
     (assert-error (mcp/find-pattern-tool {:query 1})))
   (test "both tools are in the catalogue"
     (let (names (map (fn (t) (get t :name)) (mcp/tools)))
-      (is (includes? names "explain-error"))
+      (is (includes? names "error"))
       (is (includes? names "find-pattern")))))
 
 ;; watch-runtime — the runtime-event STREAM tool (a trace, not a snapshot;

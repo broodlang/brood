@@ -446,14 +446,14 @@ tool reports per-file this way; its fold is sequential, on the handler thread.)"
   (%mcp-progress progress total message))
 
 (defn explain-error-tool (args)
-  "`explain-error` — explain a Brood error code (or a caught error's `:code`).
+  "`error` — explain a Brood error code (or a caught error's `:code`).
 Returns `{:code :summary :causes :fix :example}` from the curated catalogue
 (`std/tool/explain.blsp`). The teach-the-error tool: an agent that hits `E0044`
 gets the tail-recursion fix, not just the message."
   (let (code (get args :code))
     (when (not (string? code))
-      (throw "explain-error: :code must be a string (e.g. \"E0030\")"))
-    (explain-error code)))
+      (throw "error: :code must be a string (e.g. \"E0030\")"))
+    (error code)))
 
 (defn find-pattern-tool (args)
   "`find-pattern` — the idiomatic Brood pattern for a task/intent (a keyword
@@ -593,7 +593,7 @@ snapshot) — which, with the now-enriched
 (`std/tool/observer.blsp`) shows — the project-scoped editing pair `write`
 (create/overwrite a file) and `edit` (exact-string replace), both sandboxed
 under `*project-root*` so an agent writes code *through* nest mcp rather than
-the raw filesystem, and the LLM-native pair `explain-error` (a stable error
+the raw filesystem, and the LLM-native pair `error` (a stable error
 code → its Brood-idiomatic fix) and `find-pattern` (an intent → the idiomatic
 Brood pattern, `std/tool/explain.blsp`)."
   (list {:name "eval"
@@ -732,7 +732,7 @@ Brood pattern, `std/tool/explain.blsp`)."
                                         :description "How many times to run it (default 1); raise to amortise sub-ms expressions"}}
               :required ["source"]}
      :handler bench-tool}
-    {:name "explain-error"
+    {:name "error"
      :description "Explain a Brood error code (e.g. \"E0030\", \"E0044\") — or the :code from a caught error map. Returns {:code :summary :causes :fix :example}: what it means, why it happens, and the Brood-idiomatic fix. Call it when a tool result or the check tool surfaces an error code you want to resolve, not just describe."
      :schema {:type "object"
               :properties {:code {:type "string" :description "The error code, e.g. \"E0030\""}}
