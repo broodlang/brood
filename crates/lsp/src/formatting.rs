@@ -7,7 +7,7 @@
 //! [`TextEdit`]. No range/`onType` formatting — the formatter operates on whole
 //! files and is cheap, so the simple shape is the right one (ADR-011).
 //!
-//! On a parse error in the buffer `source` can't produce a faithful
+//! On a parse error in the buffer `format/source` can't produce a faithful
 //! result, so we return `None` (the editor leaves the text untouched) rather
 //! than risk emitting a mangled edit.
 
@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn already_formatted_yields_no_edit() {
-        // A canonical buffer round-trips: source is idempotent, so the
+        // A canonical buffer round-trips: format/source is idempotent, so the
         // output equals the input and we emit nothing.
         let canonical = {
             let mut interp = Interp::new();
