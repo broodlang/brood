@@ -126,10 +126,39 @@ thread_local! {
 /// **Never default this to `0`/unlimited** — a pathological non-collecting path (or
 /// the prelude *builder*, where GC is off) could still eat host RAM; an unlimited
 /// default once OOM-froze the machine.
-pub const TEST_DEFAULT_HARD: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
-/// Soft default for the test runners — 1 GiB, so a runaway/accumulating run fails
-/// *cleanly* (catchable `E0043`) before the hard abort and far below host RAM.
-pub const TEST_DEFAULT_SOFT: usize = 1024 * 1024 * 1024; // 1 GiB
+/// **Raised 2 → 3 GiB on 2026-08-19**, with the soft cap below; see that note.
+pub const TEST_DEFAULT_HARD: usize = 3 * 1024 * 1024 * 1024; // 3 GiB
+/// Soft default for the test runners, so a runaway/accumulating run fails *cleanly*
+/// (catchable `E0043`) before the hard abort and far below host RAM.
+///
+/// **Raised 1 → 2 GiB on 2026-08-19.** The `differential (tree-walker)` CI job went red
+/// on every run from the ADR-230/231 stdlib-namespacing merge onward (green through run
+/// 32141480911, red from 32221892676), always as the same three `adversarial_test.blsp`
+/// heap-allocation cases dying on `E0043`. Those cases were not the cause: this is a
+/// threshold, so the cases that die are simply whichever are running when the *suite's*
+/// process-wide total crosses it.
+///
+/// Measured locally, in-language suite, debug build, `BROOD_VM=0`: **1 145 412 425 bytes
+/// against the 1 073 741 824-byte cap** — 6.7% over — with the runner reporting a
+/// 996.6 MB peak. CI measured 1 149 317 883 on the same job. The VM arm stays under and
+/// is unaffected; the tree-walker allocates far more by design, so it crosses first.
+///
+/// **This is a backstop doing what it documents it must not do** — "never trip on
+/// legitimate parallel load". 1.145 GB is not a runaway (the comment above notes a real
+/// one "heads to many GB"); it is the working set. Hence the raise rather than a hunt for
+/// 7%, which a growing suite would re-cross anyway.
+///
+/// ⚠ **The claim above that the suite "peaks ~240 MB under collection" is stale, and the
+/// gap is worth someone's attention.** The measured peak is now ~4.8× that figure, so this
+/// raise restores roughly a 2× margin, not the 4× that sizing intended. Whether that growth
+/// is legitimate (the suite and the module count both grew) or a regression is *unmeasured*
+/// — the namespace refactor is only the commit that pushed it over the line, not necessarily
+/// the commit that caused the growth. Do not read this raise as evidence the growth is fine.
+/// Tried and rejected first: `hibernate` per isolated test in `run-unit-fresh`. It shrinks
+/// only the *calling* process's slabs (148× on a microbenchmark) while this cap counts
+/// process-wide allocation across every green process and the shared regions, so it did not
+/// move the suite total.
+pub const TEST_DEFAULT_SOFT: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
 
 /// Allocator wrapper that tallies bytes in/out and enforces [`HARD_LIMIT`],
 /// delegating the actual alloc/free to [`BACKEND`] (mimalloc).
