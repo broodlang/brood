@@ -441,6 +441,10 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (def *project-description* (plist-get opts :description))
   (def *project-repository* (plist-get opts :repository))
   (def *project-brood* (plist-get opts :brood))
+  ;; Release-bundle only (ADR-070): the FULL set of dependency packages rooted in the bundle
+  ;; — transitive included — written by `bundle-collect` so `run-bundle` roots every one, not
+  ;; just the direct deps `:dependencies` lists. nil for an ordinary (non-bundle) manifest.
+  (def *project-bundled-packages* (plist-get opts :bundled-packages))
   (def *project-enhances* (project-parse-enhances (plist-get opts :enhances)))
   (def *project-kind* (project-parse-kind (plist-get opts :kind)))
   (let (src (plist-get opts :source-paths)
@@ -2825,14 +2829,40 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                                   acc)))
                         nil
                         (seq *package-module-files*))
-            pairs (append project-pairs dep-pairs))
+            pairs (append project-pairs dep-pairs)
+            ;; The FULL set of dependency packages rooted in this bundle (transitive included):
+            ;; the distinct leading segment of every DEP-rooted key (`store/repo` -> `store`).
+            ;; `dep-pairs` is exactly the dependency modules — the root project's own `web/…`
+            ;; modules are in `project-pairs`, so they never leak in here as a bogus package.
+            ;; Baked into the manifest as `:bundled-packages` so `run-bundle` roots every one,
+            ;; fixing the transitive-dep case the old direct-deps-only rooting missed.
+            dep-packages (distinct (map (fn (p) (bundle-key-package (first p))) dep-pairs)))
         ;; With deps rooted, a same-named module in two deps no longer clashes. This guard now
         ;; only catches a genuine bundle-key collision — two of your own source files declaring
         ;; the same module, or a root-project module keyed identically to a dep's rooted name —
         ;; a loud stop beats the silent last-embedded-wins clobber.
         (bundle-reject-duplicate-names (map first pairs))
-        (cons manifest
+        (cons (bundle-augment-manifest manifest dep-packages)
           (fold (fn (acc p) (cons (first p) (cons (second p) acc))) nil pairs))))))
+
+;; The package segment of a rooted bundle key: `store/repo` -> `store`, `hatch/web/router`
+;; -> `hatch`, and a bare key (a root-project module) -> itself.
+(defn- bundle-key-package
+  (key)
+  (first (string/split key "/")))
+
+;; Re-emit the bundle manifest with `:bundled-packages` (every rooted dependency package,
+;; transitive included) added, so `run-bundle` roots all of them — not just the direct deps
+;; `:dependencies` names. Serialised as DATA: the embedded manifest is only ever read back with
+;; `read-first` + `project-apply`, so dropping comments/formatting is fine.
+(defn- bundle-augment-manifest
+  (manifest dep-packages)
+  (let (form (read-first manifest))
+    (if (and (pair? form) (= (first form) 'project))
+      (pr-str (cons 'project
+                (append (rest form)
+                  (list :bundled-packages (apply vector dep-packages)))))
+      manifest)))
 
 ;; True if `path` (an absolute .blsp file) lives under one of `dep-dirs` (the bundled
 ;; dependency source dirs) — separates a dependency's rooted module from the root
@@ -2865,7 +2895,11 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; are not registered here), so they load at ROOT, matching how `bundle-collect` embedded them.
 (defn- bundle-register-dep-rooting
   ()
-  (let (dep-names (map (fn (d) (name (get d :name))) *project-dependencies*)
+  ;; `*project-bundled-packages*` is the FULL rooted-package set `bundle-collect` baked into the
+  ;; manifest (transitive deps included) — use it. Fall back to the direct `:dependencies` names
+  ;; for a bundle built before this field existed (its transitive deps stay unrooted, as before).
+  (let (dep-names (or *project-bundled-packages*
+                    (map (fn (d) (name (get d :name))) *project-dependencies*))
         keys (%bundle-module-names))
     (map (fn (pkg)
            (let (marker (str pkg "/")

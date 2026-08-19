@@ -4587,20 +4587,52 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
           (let (cur (or (get m parent) nil))
             (if (member? key cur) m (assoc m parent (cons key cur)))))))))
 
-;; For an embedded module loaded via `%builtin-module`: if `key` is a package-rooted
-;; module `pkg/mod` whose `pkg` is a registered package (`*package-modules-of*`), return
-;; `pkg` as a symbol; otherwise nil. This is what separates a bundled DEPENDENCY module
-;; (a release bundle embeds each dep's module under its rooted key `pkg/mod` — ADR-070
-;; dev/release parity) from a baked-in std module or a bundle's unrooted root-project
-;; module, both of which load at ROOT. The slash guard is load-bearing: a root-project
-;; module whose unrooted name happens to equal a dep's package name (`foo`) has no
-;; prefix, so it must not be mistaken for that package.
+;; The short module name of a rooted bundle key: `store/repo` -> `repo`, `sp/wire/bytes` ->
+;; `wire/bytes` (everything after the FIRST `/`, i.e. the package prefix).
+(defn- bundle-key-short
+  (key pkg)
+  (symbol (string/substring key (+ 1 (string/length pkg)) (string/length key))))
+
+;; True if SHORT module name `short` is provided by MORE THAN ONE registered package — a genuine
+;; cross-dependency name collision (two deps each shipping a `parser`). Only such a name needs
+;; the rooted `pkg/mod` binding to stay distinct; a uniquely-named module does not.
+(defn- bundle-short-collides?
+  (short)
+  (> (count (filter (fn (pkg) (member? short (get *package-modules-of* pkg)))
+              (map first (map-pairs *package-modules-of*))))
+    1))
+
+;; For an embedded module loaded via `%builtin-module`: the package `pkg` a rooted key `pkg/mod`
+;; should load UNDER (rooting its `(defmodule mod)` to `pkg/mod`), or nil to load at ROOT.
+;;
+;; A bundled dependency module roots ONLY when its short name collides across packages — then the
+;; rooted key keeps the two apart and the consumer references it qualified (`alpha/parser`), which
+;; is the ADR-070 guarantee. A UNIQUELY-named dependency module loads at ROOT (bare `(defmodule
+;; repo)`), exactly as a dev run binds it (found by basename on the load-path, never rooted) and
+;; exactly as apps reference it — hive's `(:alias repo)`, a bare `web/router/through-handler`.
+;; This makes the flat bundle bind the same names the dev image does, the parity that was missing.
+;; Std modules and a bundle's unrooted root-project modules have no package prefix and stay ROOT.
 (defn- bundle-module-package
   (key)
   (let (seg (first (string/split key "/")))
-    (if (and (not (= seg key)) (contains? *package-modules-of* seg))
+    (if (and (not (= seg key))
+          (contains? *package-modules-of* seg)
+          (bundle-short-collides? (bundle-key-short key seg)))
       (symbol seg)
       nil)))
+
+;; The embedded rooted key `pkg/key` a registered package provides for a request whose bare
+;; name isn't embedded directly, or nil. A consumer references a dependency module by its bare
+;; `(defmodule)` name (`repo`, `pool`, `wire/bytes`); the bundle embeds it under `pkg/name`, so
+;; this is the basename lookup that finds it — the dev load-path parity that makes a bare require
+;; order-independent (a root module can be required before the dep whose module it uses). `key`
+;; may itself be namespaced; a rooted key like `store/repo` is never in a short set, so a direct
+;; rooted request finds no owner here and simply loads its own embedded source.
+(defn- bundle-resolve-bare
+  (key)
+  (let (owner (find (fn (pkg) (member? (symbol key) (get *package-modules-of* pkg)))
+                (map first (map-pairs *package-modules-of*))))
+    (if owner (str owner "/" key) nil)))
 
 ;; The raw load of feature `key`: evaluate its embedded source (a baked-in std
 ;; module) or the first <key>.blsp found on *load-path*, then record it. No
@@ -4616,7 +4648,15 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 ;; `require-force`'s body, split out only so the dynamic binding above wraps every branch.
 (defn- require-force-in
   (key)
-  (let (src (%builtin-module key))
+  ;; `key`'s embedded source. If a bare key isn't embedded directly, resolve it to the
+  ;; dependency module embedded under its rooted key `pkg/key` (`bundle-resolve-bare`) — the
+  ;; bundle's basename lookup, so a bare `(:alias repo)` / `pool` reference finds `store/repo`
+  ;; / `store-postgres/pool` regardless of load order. The load below uses the resolved key for
+  ;; both its context (`bundle-module-package`) and its source file.
+  (let (direct (%builtin-module key)
+        alt (if direct nil (bundle-resolve-bare key))
+        src (or direct (if alt (%builtin-module alt) nil))
+        load-key (if direct key alt))
     (cond
       src
       ;; Attribute the baked-in source to the file it was WRITTEN in, not to whichever
@@ -4641,13 +4681,17 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       ;; std (a dep loads from disk — `%builtin-module` returns nil), and std namespaces are
       ;; never packages, so the check is a no-op there.
       (do
-        (let (prefix (bundle-module-package key)
+        (let (prefix (bundle-module-package load-key)
               prev (if prefix
                      (%set-package-context prefix (get *package-modules-of* (name prefix)))
                      (%set-package-context nil nil)))
-          (%load-module-source src (%builtin-module-file key))
+          (%load-module-source src (%builtin-module-file load-key))
           (%set-package-context (first prev) (second prev)))
-        (provide key))
+        (provide key)
+        ;; Reached by resolving a bare name to the embedded rooted key `pkg/key`: mark the
+        ;; rooted key loaded too, so the run-bundle load-all loop, requiring `pkg/key`
+        ;; directly, does not re-evaluate the same source and redefine its macros.
+        (when (and alt (not (= alt key))) (provide alt)))
       ;; A feature can come from a startup IMAGE instead of a source file (ADR-218): its
       ;; bindings are materialised from a byte range rather than evaluated. This is the
       ;; seam that makes an imaged project load LAZILY — `require` stays the unit of
