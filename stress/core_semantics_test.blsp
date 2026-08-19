@@ -102,22 +102,22 @@
   (test "length and indexing count CHARS, not bytes"
     (do
       (assert= (string-length "hé€") 3)
-      (assert= (char-at "hé€" 1) "é")
-      (assert= (char-at "hé€" 2) "€")
-      (assert= (substring "hé€xyz" 1 4) "é€x")
+      (assert= (string/char-at "hé€" 1) "é")
+      (assert= (string/char-at "hé€" 2) "€")
+      (assert= (string/substring "hé€xyz" 1 4) "é€x")
       true))
   (test "split/join round-trip"
     (do
-      (assert= (join "," (string-split "a,b,,c" ",")) "a,b,,c")
+      (assert= (string/join "," (string-split "a,b,,c" ",")) "a,b,,c")
       (assert= (string-split "aXbXc" "X") (list "a" "b" "c"))
       true))
   (test "case, trim, predicates"
     (do
-      (assert= (upper "abÉ") "ABÉ")
-      (assert= (lower "ABÉ") "abé")
-      (assert= (trim "  x  ") "x")
-      (assert= (starts-with? "hé€" "hé") true)
-      (assert= (ends-with? "hé€" "€") true)
+      (assert= (string/upper "abÉ") "ABÉ")
+      (assert= (string/lower "ABÉ") "abé")
+      (assert= (string/trim "  x  ") "x")
+      (assert= (string/starts-with? "hé€" "hé") true)
+      (assert= (string/ends-with? "hé€" "€") true)
       (assert= (includes? "hé€" "é") true)
       true))
   (test "number<->string round trips"

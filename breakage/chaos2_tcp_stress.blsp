@@ -170,7 +170,7 @@
 (println "=== P40: 512KB payload integrity ===")
 
 (let (me (self)
-      big (string-repeat "BROOD" (quot 524288 5)))
+      big (string/repeat "BROOD" (quot 524288 5)))
   ; ~512KB
 
   ;; Server: owns the listener; receive all chunks, concatenate, report length
@@ -196,7 +196,7 @@
     (tcp-send c big)
     (tcp-close c)
     (let (r (receive ([:p40-received s] s) (after 15000 :timeout)))
-      (println "P40: sent:" (string-length big) "received:" (string-length r))
+      (println "P40: sent:" (string/length big) "received:" (string/length r))
       (println "P40-correct:" (= big r)))))
 
 ;;; ---- P41: tcp-local-port after close returns nil ----

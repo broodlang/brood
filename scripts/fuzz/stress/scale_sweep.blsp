@@ -54,7 +54,7 @@
 ;;
 ;; 2026-08-04: `editor/markdown` markdown-spans WAS quadratic on MULTI-BYTE ONLY — linear in
 ;; ASCII (3.81x/3.88x) and 5.03x then 6.92x rising with one non-ASCII char, because the
-;; per-line `(substring src i e)` and newline scan are O(i) off the ASCII fast path. Fixed
+;; per-line `(string/substring src i e)` and newline scan are O(i) off the ASCII fast path. Fixed
 ;; with one `string-split` + a running offset (the `stream-lines` fix again): 6400 lines
 ;; 1287 -> 559 ms, and multi-byte now EQUALS ASCII (559 vs 556). Lesson: a row can be linear
 ;; in ASCII and quadratic in UTF-8, so sweep BOTH — a pure-ASCII corpus hides this entirely.
@@ -300,7 +300,7 @@
 ;; interpreted `char-at` loop measuring ~85% of every motion). Linear; this row's job is
 ;; to keep it that way. Measure the SEQUENCE — one motion looks fine at any buffer size.
 (defn sexp-motions (k)
-  (let (text (join "" (sweep-src k nil)))
+  (let (text (string/join "" (sweep-src k nil)))
     (fold (fn (p _) (let (np (point-forward text p)) (if (or (nil? np) (= np p)) p np)))
       0
       (range 0 k))))
