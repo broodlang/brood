@@ -204,11 +204,16 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          keymap, face, highlight, lineedit, pane, layers, ansi, serve);
                          the process framework `std/proc/*` (`gen`, `supervisor`,
                          `agent`); the net *library* `std/net/*` (`http`, `sse`, `tcp`,
-                         `reconnect`); the toolchain `std/tool/*` — grouped on disk but
-                         BARE module names (test, project, package, complete, coverage,
-                         debug, docs, eval-server, explain, grammar, mcp, observer,
-                         proctree, repl, scaffold, sexp, reload). The
-                         net library and `proc/supervisor` were briefly externalized (Move 2)
+                         `reconnect`); the toolchain `std/tool/*` — all four grouped on
+                         disk but with BARE (single-segment) module names, so a qualified
+                         call is `gen/spawn-server`, `http/get`, `test/run` — never a
+                         double slash (test, project, package, complete, coverage, debug,
+                         docs, eval-server, explain, grammar, mcp, observer, proctree,
+                         repl, scaffold, sexp, reload). `std/editor/*` is the one
+                         exception — it keeps the `editor/` prefix (a cohesive framework
+                         whose names, `buffer`/`ui`/`pane`/`ansi`, are deliberately generic
+                         and would collide/land-grab bare; `ansi` already exists top-level). The
+                         net library and `supervisor` were briefly externalized (Move 2)
                          then re-bundled in-tree (ADR-097, batteries-included default);
                          the Rust socket *mechanism* stays in-tree too
                          (`crates/lisp/src/net.rs`, ADR-062). The REPL is Brood too

@@ -700,7 +700,7 @@ land in a later slice."
 
 (defn- package-http-fetch
   (url redirects-left)
-  (let (resp (net/http/http-get url)
+  (let (resp (http/http-get url)
         status (get resp :status))
     (cond
       (and (>= status 200) (< status 300)) (get resp :body)
@@ -806,7 +806,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 (defn- registry-error-text
   (resp)
   "The server's `:error` message from a JSON error body, or a generic HTTP line."
-  (let (parsed (try (json/parse (net/http/body-text resp)) (catch _ nil)))
+  (let (parsed (try (json/parse (http/body-text resp)) (catch _ nil)))
     (if (and (map? parsed) (get parsed :error))
       (get parsed :error)
       (str "HTTP " (get resp :status)))))
@@ -816,11 +816,11 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
   "GET `url` and parse its JSON body. Returns `[:ok data]` on 2xx, `[:error status
   message]` on an error status (with the server's `:error` text when present), or
   `[:error 0 message]` on a transport failure."
-  (let (resp (net/http/http-get url)
+  (let (resp (http/http-get url)
         status (get resp :status))
     (cond
       (= status 0) [:error 0 (str "cannot reach the registry at " url ": " (get resp :error))]
-      (and (>= status 200) (< status 300)) [:ok (json/parse (net/http/body-text resp))]
+      (and (>= status 200) (< status 300)) [:ok (json/parse (http/body-text resp))]
       else [:error status (registry-error-text resp)])))
 
 ;; --- the resolver's registry provider (ADR-209) ---------------------------------
@@ -928,7 +928,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
 ;; The hive-hosted tarball bytes for a release (root-level layout), erroring on a non-2xx.
 (defn- registry-download-hosted
   (base nm version)
-  (let (resp (net/http/http-get (registry-tarball-url base nm version))
+  (let (resp (http/http-get (registry-tarball-url base nm version))
         status (get resp :status))
     (when (not (and (>= status 200) (< status 300)))
       (error "package: downloading " nm " " version " failed (HTTP " status ")"))
@@ -1248,7 +1248,7 @@ sha256 pin still holds."
           (package-provided-modules dir))))))
 
 ;; A dependency may not be NAMED after a standard-library module (ADR-070/166): its
-;; name becomes a load-time package prefix, so a dep called `net` would provide `net/tcp`
+;; name becomes a load-time package prefix, so a dep called `net` would provide `tcp`
 ;; — the baked-in module — and even a stdlib name that would not collide (`json`, `set`)
 ;; is a trap. Reject at resolution so a `:path`/`:git`/registry dep fails fast at
 ;; `nest fetch`/`add`, not only when its module is first `require`d (`reserved-package-name?`
@@ -1999,7 +1999,7 @@ published is refused. Backs `nest publish`."
 
 (defn- registry-post-publish
   (base token body meta-header)
-  (let (resp (net/http/http-post (str base "/api/v1/publish")
+  (let (resp (http/http-post (str base "/api/v1/publish")
                body
                {:headers {"Content-Type" "application/gzip"
                           "X-Brood-Publish" meta-header

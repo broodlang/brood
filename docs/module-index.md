@@ -98,7 +98,7 @@ query. Proposed schema (illustrative, not final):
 
 ```
 ;; symbol → its definition
-name  → { :module  "net/http"        ; the qualified module it belongs to
+name  → { :module  "http"        ; the qualified module it belongs to
           :file    "std/net/http.blsp"
           :line    128
           :private false             ; ADR-146 recorded fact
@@ -123,7 +123,7 @@ Three properties make it safe and useful:
 
 - **Symbol-level find with no load / no scan.** "Where is `parse-headers`?" is O(1).
   Direct substrate for the ADR-206 auto-import code action, O(1) cross-file go-to-def, and
-  turning the "did you mean `(:use net/http)`?" hint from a heuristic into a lookup.
+  turning the "did you mean `(:use http)`?" hint from a heuristic into a lookup.
 - **Collision / reserved checks fall out for free.** ADR-070 detect-and-reject *is* an
   index build — a duplicate key is the collision. Reserved-name enforcement, prelude-shadow
   warnings, and the duplicate-def pass become index queries rather than separate passes.

@@ -233,7 +233,7 @@ processes were rare enough that they simply stay public.
 A trailing `!` is **rare and not a mutation warning** — nothing mutates, so the
 Scheme/Clojure reading is vacuous here and `!` is per-context by decision (ADR-163):
 `sig!` = a signature *enforced* at runtime, `set-load-path!` / `clipboard-set!` = the
-few root/OS-state setters, `(! pid payload)` = the Erlang-style cast in `proc/gen`.
+few root/OS-state setters, `(! pid payload)` = the Erlang-style cast in `gen`.
 **Don't add a `!` to a name of your own.**
 
 **Names come from whichever language named the thing best** — `partition` (Clojure)
@@ -404,7 +404,7 @@ edit the library. Beyond the core `Display` (`to-str`, what `println` shows) and
 | `JsonEncode` — `(to-json x)`, from `json` | `json/encode` handles your type (a record's wire shape; a pid/fn/datetime at all). **No `:default`** — an unimpl'd kind still errors loudly. |
 | `Port` — `(io-write p s)`, from `io` | your value is an output port (`with-out`, logger sinks). A bare 1-arg fn already is one. |
 | `LogBackend` — `(backend-emit b rec)`, from `log` | a backend that batches / emits JSON lines / samples. `backend-passes?` is the stock level+filter gate. |
-| `Response` — `(send-response r sock)`, from `net/http` | a response kind with its own wire behaviour, including who closes the socket. |
+| `Response` — `(send-response r sock)`, from `http` | a response kind with its own wire behaviour, including who closes the socket. |
 | `Dependency` (**sealed**), from `package` · `Temporal` — `(to-iso x)` (**sealed**), from `datetime` | a new manifest dep kind / calendar type. Sealed ⇒ `nest check` demands every op. |
 
 Also: `std/`'s value types are **records**, not plain maps — `buffer`, `queue`, `pq`,
@@ -678,7 +678,7 @@ named form.
 ```
 
 Use it for anything supervised — `std/proc/supervisor.blsp`'s `:start` thunks are
-`(fn () (spawn-link (worker …)))`, and `proc/gen`'s `spawn-server-link` is the
+`(fn () (spawn-link (worker …)))`, and `gen`'s `spawn-server-link` is the
 same idea for a `defprocess` server.
 
 ## Distributed nodes — named processes & cross-node addressing
@@ -722,10 +722,10 @@ quits or crashes is detected without any app-level goodbye message.
 cleanly — no need for an ad-hoc `[:bye]` broadcast. Returns `true` if a link
 existed.
 
-## Stateful servers — the `proc/gen` framework (`(:use proc/gen)`)
+## Stateful servers — the `gen` framework (`(:use gen)`)
 
 Raw `spawn`/`receive` is the substrate; for a process that **holds state and
-answers messages** (a gen_server / actor), use `proc/gen`. State is immutable —
+answers messages** (a gen_server / actor), use `gen`. State is immutable —
 each clause *returns the next state* to carry through the loop. Two message
 kinds:
 
@@ -737,7 +737,7 @@ kinds:
   Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
-(defmodule my-counter "…" (:use proc/gen))   ; (:use proc/gen) to write
+(defmodule my-counter "…" (:use gen))   ; (:use gen) to write
                                           ; defprocess/cast/gen-call bare
 
 (defprocess counter (n)                 ; n is the state
@@ -757,7 +757,7 @@ kinds:
 
 Other primitives: `(sleep ms)` parks the current process without touching its
 mailbox (it does *not* block a worker thread). `(stop pid)` ends a server
-process's receive loop cleanly — every `proc/gen` process automatically handles
+process's receive loop cleanly — every `gen` process automatically handles
 the stop envelope, no `:stop` clause needed.
 
 **Worker pool — fan out work, fan in results** (plain `spawn`/`receive`, the
@@ -1017,7 +1017,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`) `spawn-link`
   `send` `receive` `self` `ref` `monitor` `demonitor` `link` `unlink` `trap-exit`
   `register` `whereis`
-  — plus the **`proc/gen`** framework below
+  — plus the **`gen`** framework below
 - **lazy fusing views**: `lmap` `lfilter` `lkeep` `lremove` (thread with `->>`;
   realise with `seq`/`into`) plus `comp` for function composition
 

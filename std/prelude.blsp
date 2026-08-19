@@ -2446,7 +2446,7 @@ on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override.
 
 ;; The host part of a "host:port" address (everything before the last colon),
 ;; IPv6-safe. So a TCP node's name host == the host peers dial, keeping
-;; `connect`/`net/reconnect` name-derivation consistent with the node's identity.
+;; `connect`/`reconnect` name-derivation consistent with the node's identity.
 (defn- node-addr-host
   (addr)
   (let (lc (node-last-colon addr 0 (string/length addr) -1))
@@ -2571,7 +2571,7 @@ message already sent stays sent."
   nil)
 
 ;; Node-link auto-reconnect moved to `std/net/reconnect` (2026-07-18):
-;; `(net/reconnect/watch "name@host:port")` — the reference loads the module —
+;; `(reconnect/watch "name@host:port")` — the reference loads the module —
 ;; exponential backoff, [:nodeup]/[:nodedown] subscriber events, idempotent
 ;; named watchers. It supersedes the old prelude `ensure-link`.
 
@@ -4487,7 +4487,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
   "Declare module/namespace `mod` and compile the rest of the file into it —
 definitions become `mod/name`; bare references resolve there, then through
 `(:use …)` imports, then root. Records an optional docstring and `provide`s the
-feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
+feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
   (let (doc (if (string? (first more)) (first more) nil)
         clauses (if (string? (first more)) (rest more) more)
         _checked (map defmodule-check-clause clauses))
@@ -4748,7 +4748,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 
 ;; A package (dependency or root project) may not take a name the standard library
 ;; already owns. Its name becomes a load-time package prefix (ADR-070), so a package
-;; called `net` would provide `net/tcp` — exactly the baked-in module — and even where
+;; called `net` would provide `tcp` — exactly the baked-in module — and even where
 ;; the rooted names would not collide, a package sharing a stdlib name (`json`, `set`,
 ;; `test`) is a trap. The reserved set is the first path segment of every module baked
 ;; into this binary (`(builtin-modules)`). Enforced in THREE layers: at `nest new`

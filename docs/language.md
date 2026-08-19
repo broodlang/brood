@@ -728,7 +728,7 @@ type with no change to it.
 | `JsonEncode` | `(to-json x)` | `json` | open | `json-encode` accepts your type — a record picks its wire shape, and a kind JSON has no rule for (a pid, a datetime) stops erroring. No `:default`. |
 | `Port` | `(io-write port s)` | `io` | open | Your value is an output port: `io-write`, `with-out`/`with-err`, and every logger backend take it. A bare 1-arg fn is a port via the `:fn` impl. |
 | `LogBackend` | `(backend-emit b record)` | `log` | open | A backend that does something other than "format one line and write it" — batching, JSON lines, sampling. Reuse `backend-passes?` for the standard level/filter gate. |
-| `Response` | `(send-response r sock)` | `net/http` | open | A response kind with its own wire behaviour (sendfile, chunked, a 101 upgrade), including whether it closes the socket. |
+| `Response` | `(send-response r sock)` | `http` | open | A response kind with its own wire behaviour (sendfile, chunked, a 101 upgrade), including whether it closes the socket. |
 | `Dependency` | `dep-kind`, `dep-resolve`, `dep-check-compatible`, `dep-lock-vec`, `dep-entry-node` | `package` | **sealed** | A new manifest dependency kind. Sealed, so `nest check` reports any op you forget. |
 | `Temporal` | `(to-iso x)` | `datetime` | **sealed** | ISO 8601 rendering for a calendar value. |
 
@@ -1630,7 +1630,7 @@ dispatch cost, `print` gains no special cases, and `with-out-str` is unaffected;
 ### Logging
 
 `std/log.blsp` is an **async, safe logger** built on the same idea. A logger is
-one long-lived process (a `proc/gen` server) holding a list of *backends*; each
+one long-lived process (a `gen` server) holding a list of *backends*; each
 log call is a fire-and-forget cast, so it never blocks the caller, and the single
 process serialises every write — lines never interleave, and a backend that throws
 takes down only that line, not the caller.
@@ -1907,18 +1907,18 @@ timeout). This `await` is a userland convenience for bounding a single
 computation — distinct from the gen_server `call` idiom above, which is the
 right tool for request/reply to a long-lived process.
 
-### The `proc/gen` server framework (gen_server in Brood)
+### The `gen` server framework (gen_server in Brood)
 
 `std/proc/gen.blsp` packages the request/reply idiom above into a
 gen_server-style framework — ~180 lines of Brood over `spawn`/`send`/`receive`/
 `ref`/`monitor`, no kernel surface (ADR-099). A server carries one immutable
 state value through a tail-recursive `receive` loop; `defprocess` declares how it
-handles each kind of message. Pull it in with `(:use proc/gen)` so `defprocess`,
-`spawn-server` and `!` read bare (otherwise a qualified `proc/gen/…` reference
+handles each kind of message. Pull it in with `(:use gen)` so `defprocess`,
+`spawn-server` and `!` read bare (otherwise a qualified `gen/…` reference
 auto-loads it but leaves the names qualified):
 
 ```clojure
-(defmodule my-app (:use proc/gen))
+(defmodule my-app (:use gen))
 
 (defprocess counter (n)
   (init  (do (println "up") n))            ; runs once at startup; returns the initial state
@@ -1951,7 +1951,7 @@ hanging); `(gen-call-timeout pid payload ms)` sets a custom deadline; `(stop pid
 ends the loop. Spawn with `spawn-server`, `spawn-server-link` (Erlang
 `start_link` — links the server to the caller), or `spawn-server-named` (registers
 it for `whereis`). A `defprocess` server composes directly under
-`proc/supervisor` (see `std/proc/supervisor.blsp`).
+`supervisor` (see `std/proc/supervisor.blsp`).
 
 ### Monitors
 
@@ -1996,7 +1996,7 @@ in turn. A `:normal` exit never kills a non-trapping peer. The propagated death
 carries the **originating reason**: if `a` crashes with `[:error {…}]`, a linked
 non-trapping `b` dies with that same reason (and so does `c` linked to `b`), so
 monitors anywhere in the fallen tree report the root cause — not a blanket
-`:kill`. Links are what `proc/supervisor`'s trapping supervisor loop is built
+`:kill`. Links are what `supervisor`'s trapping supervisor loop is built
 on; remote (cross-node) links deliver the same shapes, plus `:noconnection` on
 a net-split.
 
@@ -2035,7 +2035,7 @@ merely sometimes-wrong: drop the `after` above and `link` usually wins, so the
 failure only appears under load — exactly where a supervisor matters.
 
 **Use `spawn-link` for anything supervised.** `std/proc/supervisor.blsp`'s
-`:start` thunks do (`(fn () (spawn-link (worker …)))`), and `proc/gen`'s
+`:start` thunks do (`(fn () (spawn-link (worker …)))`), and `gen`'s
 `spawn-server-link` is the same guarantee for a `defprocess` server. The prelude
 macro expands to the `%spawn-link` primitive (ADR-067).
 
@@ -2166,9 +2166,9 @@ heartbeat node-down detection, and mesh join have all shipped — full reference
 drops the message (Erlang's default). A process that must not lose messages opts
 in with `(process-flag :send-errors true)` — its sends then raise a catchable
 `E0060` noconnection error, so it can queue and resend. Pair it with
-**`net/reconnect`** (a `net/reconnect/…` reference auto-loads it): `(net/reconnect/watch spec)`
+**`reconnect`** (a `reconnect/…` reference auto-loads it): `(reconnect/watch spec)`
 keeps the link alive with exponential-backoff reconnects, and
-`(net/reconnect/subscribe spec)` delivers `[:nodedown name]` / `[:nodeup name]`
+`(reconnect/subscribe spec)` delivers `[:nodedown name]` / `[:nodeup name]`
 to your mailbox — resend the queue on `[:nodeup …]`.
 
 ## Builtins
@@ -2979,18 +2979,18 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/path.blsp` | `'path` | Path string manipulation: `string/join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `with-extension` |
 | `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `halt` (whole-machine `file/cwd`/`hostname` are root builtins) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
-| `std/proc/agent.blsp` | `'proc/agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
+| `std/proc/agent.blsp` | `'agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
 | `std/protocol.blsp` | `'protocol` | Behaviour contracts — the *module*-satisfies-a-contract seam: `defbehaviour` declares the ops a module must define (no value dispatch), claimed with `(:implements Name)` in a module header; `protocol-ops` is the introspection hook the checker and LSP read. Value dispatch is `ability` — `defprotocol`/`defimpl` were retired (ADR-168) |
 | `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |
 
 The following modules are also opt-in and live under `std/net/` and `std/tool/`.
-Load each the same way — reference it qualified (`net/tcp/tcp-listen`, which
+Load each the same way — reference it qualified (`tcp/tcp-listen`, which
 auto-loads) or `(:use name)` for bare names:
 
 ```clojure
-net/tcp      ; tcp-listen / tcp-connect / tcp-send / tcp-close … (thin wrapper over the net primitives)
-net/http     ; http-get / http-post / http-request / serve / stream-response
-net/sse      ; Server-Sent Events helpers
+tcp      ; tcp-listen / tcp-connect / tcp-send / tcp-close … (thin wrapper over the net primitives)
+http     ; http-get / http-post / http-request / serve / stream-response
+sse      ; Server-Sent Events helpers
 test         ; describe / test / assert= / is — the test framework
 format       ; printf-style string formatting
 json         ; json-encode / json-decode

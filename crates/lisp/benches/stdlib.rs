@@ -581,10 +581,10 @@ mod agent {
             bencher,
             format!(
                 "\
-                 (def a (proc/agent/start (fn () 0))) \
-                 (dotimes (i {n}) (proc/agent/update a inc)) \
-                 (proc/agent/get a identity) \
-                 (proc/agent/stop a)"
+                 (def a (agent/start (fn () 0))) \
+                 (dotimes (i {n}) (agent/update a inc)) \
+                 (agent/get a identity) \
+                 (agent/stop a)"
             ),
         );
     }
@@ -596,9 +596,9 @@ mod agent {
             bencher,
             format!(
                 "\
-                 (def a (proc/agent/start (fn () 0))) \
-                 (dotimes (i {n}) (proc/agent/get-and-update a (fn (s) [s (+ s 1)]))) \
-                 (proc/agent/stop a)"
+                 (def a (agent/start (fn () 0))) \
+                 (dotimes (i {n}) (agent/get-and-update a (fn (s) [s (+ s 1)]))) \
+                 (agent/stop a)"
             ),
         );
     }

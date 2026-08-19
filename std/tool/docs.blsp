@@ -189,7 +189,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; --- structured doc model (`nest docs` — HTML site via `docsite`) ------------
 
 ;; The bare (unqualified) name of a symbol: the last "/"-separated segment, e.g.
-;; `net/http/get` -> `get`. Bare-named operators like `/` have an empty last segment,
+;; `http/get` -> `get`. Bare-named operators like `/` have an empty last segment,
 ;; so those keep their whole name.
 (defn- docs-bare
   (sym)

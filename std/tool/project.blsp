@@ -2716,8 +2716,8 @@ as unchanged (only when some were)."
 ;; The module name `require` knows a source file by — its path **relative to the
 ;; source dir it lives under**, without the `.blsp` extension. For a top-level file
 ;; that's just the stem (`src/main.blsp` → `main`); for a namespaced module it keeps
-;; the namespace (`…/net/sse.blsp` under `…/src` → `net/sse`), exactly the key
-;; `require 'net/sse` looks up. So a bundle keyed this way resolves through the same
+;; the namespace (`…/sse.blsp` under `…/src` → `sse`), exactly the key
+;; `require 'sse` looks up. So a bundle keyed this way resolves through the same
 ;; `%builtin-module` path as the baked-in std (whose table is likewise keyed by full
 ;; name, e.g. `editor/buffer`) — with no load-path on disk.
 ;; ── Co-located test stripping (ADR-225) ─────────────────────────────────────
@@ -2778,7 +2778,7 @@ as unchanged (only when some were)."
 strings `(manifest-src name0 src0 name1 src1 …)` the `nest` side embeds in the
 binary (ADR-038). Includes resolved dependency sources; excludes `tests/`. The
 root project's own modules are keyed by their require-name — the path relative to the
-source dir, sans `.blsp`, so a namespaced module (`net/sse`) keeps its namespace and
+source dir, sans `.blsp`, so a namespaced module (`sse`) keeps its namespace and
 resolves like the baked-in std. A DEPENDENCY's modules are keyed by their PACKAGE-ROOTED
 name (`foo/parser`), so two deps each providing a `parser` coexist in one flat bundle —
 dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not in a project)."
@@ -2807,7 +2807,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                      (do (package/ensure-deps root *project-dependencies*))
                      nil))
       ;; The ROOT PROJECT's own modules are embedded by their UNROOTED require-name
-      ;; (`src/main.blsp` → `main`, `src/net/sse.blsp` → `net/sse`) — a single package cannot
+      ;; (`src/main.blsp` → `main`, `src/sse.blsp` → `sse`) — a single package cannot
       ;; collide with itself, so the root project stays unrooted in the bundle exactly as it
       ;; loads there (at ROOT context). Only DEPENDENCIES root. Strip each file's co-located
       ;; `deftest`/`describe` forms (ADR-225) as it is slurped: tests run under `nest test`

@@ -312,24 +312,24 @@
 ;; best one for both) rather than an accident nobody notices until a `:use` breaks.
 (def- ns-known-overlaps
   ;; name -> the modules that export it, sorted. Modules unlikely to be `:use`d together
-  ;; (`package` + `proc/agent`) are as legitimate here as the pair that prompted the audit.
+  ;; (`package` + `agent`) are as legitimate here as the pair that prompted the audit.
   ;; (an earlier audit also listed `bytes-`; that was a prefix match on `bytes->hex`, not an
   ;; export — hence this test reads the flat table rather than trusting a source scan.)
   {"attach" ["editor/serve" "telemetry"]
    "forward" ["sexp" "telemetry"]
-   "parse-url" ["net/http" "url"]
+   "parse-url" ["http" "url"]
    "point-backward" ["editor/treesit" "sexp"]
    "point-defun-start" ["editor/treesit" "sexp"]
    "point-down" ["editor/treesit" "sexp"]
    "point-forward" ["editor/treesit" "sexp"]
    "point-up" ["editor/treesit" "sexp"]
    "render" ["format" "template"]
-   "serve" ["editor/serve" "net/http"]
+   "serve" ["editor/serve" "http"]
    "span" ["debug" "telemetry"]
    "splice" ["editor/formbuf" "sexp"]
-   "stop" ["proc/agent" "proc/gen"]
+   "stop" ["agent" "gen"]
    "tree" ["package" "sexp"]
-   "update" ["package" "proc/agent"]})
+   "update" ["package" "agent"]})
 
 (defn- ns-exports-of
   (module)
@@ -375,7 +375,8 @@ is what a `:use` would actually import, not what the source looks like."
 
 ;; A package (dependency or root project) may not take a name the standard library
 ;; owns: its name becomes a load-time package prefix (ADR-070), so a package called
-;; `net` would provide `net/tcp` — exactly the baked-in module. `reserved-package-name?`
+;; `http` would shadow the baked-in `http` module (or `editor` its whole group).
+;; `reserved-package-name?`
 ;; (prelude) is the single predicate the `nest new`, `nest publish`, and load-time
 ;; (`require`) guards share. Here we exercise the predicate and the deepest layer:
 ;; `require`'s refusal of a module rooted under a reserved prefix — the layer that
@@ -386,8 +387,9 @@ is what a `:use` would actually import, not what the source looks like."
   (test "reserved-package-name? is true for a baked-in module (flat and group prefixes)"
     (is (reserved-package-name? 'json))
     (is (reserved-package-name? "set"))
-    (is (reserved-package-name? 'net)) ; owns net/tcp, net/http, …
-    (is (reserved-package-name? 'proc))) ; owns proc/gen, proc/supervisor, …
+    (is (reserved-package-name? 'http))  ; a flat net module (was net/http)
+    (is (reserved-package-name? 'gen))   ; a flat proc module (was proc/gen)
+    (is (reserved-package-name? 'editor))) ; a group prefix — owns buffer, ui, …
   (test "reserved-package-name? is false for an ordinary package name"
     (is (not (reserved-package-name? 'myapp)))
     (is (not (reserved-package-name? "greeter"))))

@@ -939,13 +939,13 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("package", "std/tool/package.blsp"),
     // TCP sockets (ADR-062): active-socket helpers + a spawn-per-connection
     // server over the non-blocking tcp-* primitives. Opt-in, never in the prelude.
-    embedded_module!("net/tcp", "std/net/tcp.blsp"),
+    embedded_module!("tcp", "std/net/tcp.blsp"),
     // The file & filesystem library: whole-file/line I/O, directory walking, path
     // helpers — Brood over the fs primitives. Opt-in, never in the prelude.
     embedded_module!("file", "std/file.blsp"),
     // A minimal HTTP/1.0 server (ADR-062) over the tcp + file libraries — request
     // parsing, response rendering, a router, static files. Opt-in.
-    embedded_module!("net/http", "std/net/http.blsp"),
+    embedded_module!("http", "std/net/http.blsp"),
     // JSON ↔ Brood data, written entirely in Brood (a recursive-descent parser +
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
@@ -963,22 +963,22 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Supervised node auto-reconnect (dist self-healing): `watch` keeps a peer
     // link alive with exponential-backoff `(connect …)` retries; subscribers get
     // [:nodeup]/[:nodedown]. Pure Brood over connect/monitor-node/nodes. Opt-in.
-    embedded_module!("net/reconnect", "std/net/reconnect.blsp"),
+    embedded_module!("reconnect", "std/net/reconnect.blsp"),
     // Server-Sent Events (text/event-stream): a client reader process that streams
     // events to a subscriber's mailbox (pairs with ui's `with-events`) + server-side
     // framing. Pure frame parsing + a thin IO loop over tcp; reuses http's URL/header
     // helpers. Opt-in.
-    embedded_module!("net/sse", "std/net/sse.blsp"),
+    embedded_module!("sse", "std/net/sse.blsp"),
     // The process framework, bundled in the default install (ADR-085 amended —
-    // batteries-included, not externalized). `proc/gen` is the gen_server-style
+    // batteries-included, not externalized). `gen` is the gen_server-style
     // server loop (`defprocess` / `spawn-server` / `!` / `gen-call` / `stop`); the
-    // core `log` module is a `proc/gen` process. `proc/supervisor` is OTP-style
-    // supervision — independent of `proc/gen`, both over the same kernel primitives.
-    embedded_module!("proc/gen", "std/proc/gen.blsp"),
-    embedded_module!("proc/supervisor", "std/proc/supervisor.blsp"),
+    // core `log` module is a `gen` process. `supervisor` is OTP-style
+    // supervision — independent of `gen`, both over the same kernel primitives.
+    embedded_module!("gen", "std/proc/gen.blsp"),
+    embedded_module!("supervisor", "std/proc/supervisor.blsp"),
     // Process-backed state cell: start/get/update/get-and-update/cast/stop.
     // A thin Brood layer over spawn/send/receive for the common "stateful process" case.
-    embedded_module!("proc/agent", "std/proc/agent.blsp"),
+    embedded_module!("agent", "std/proc/agent.blsp"),
     // Order a flat process-info snapshot as a parent→child forest (depth-tagged, DFS
     // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
     // the dev observer's tree sort *and* a shipped app's process list (bedit's
@@ -989,7 +989,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
     // version of the editor's hand-rolled async-eval watchdog. Opt-in.
     embedded_module!("task", "std/task.blsp"),
-    // An async, safe logger (ADR-006): a `proc/gen` process holding a list of
+    // An async, safe logger (ADR-006): a `gen` process holding a list of
     // backends, each an `io` port + a min level + a formatter. Log calls are casts
     // (fire-and-forget = async); the one process serialises writes (no interleaving)
     // and isolates a backend crash. Opt-in, never in the prelude.

@@ -23,7 +23,7 @@
 ;; nothing.
 
 ; the single RFC-3986 parser — `parse-url` wraps it with HTTP defaults
-(defmodule net/http
+(defmodule http
   "A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062). `(serve port
 handler)` listens and runs one handler process per connection; a handler maps a
 request map to a response map. Includes request parsing, response rendering, a
@@ -223,7 +223,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
 
 ;; A plain response owns the whole exchange: render head + body, then close.
 (impl Response
-  net/http/response
+  http/response
   (send-response [resp sock]
     (tcp-send sock (render-response resp))
     (tcp-close sock)
@@ -293,7 +293,7 @@ whose body is written incrementally over the socket afterwards (see
 ;; A streaming response sends only the head, then hands the socket to its `:stream` fn,
 ;; which owns it from there — so this impl must NOT close it.
 (impl Response
-  net/http/stream-response
+  http/stream-response
   (send-response [resp sock]
     (tcp-send sock (render-head (get resp :status 200) (or (get resp :headers) {})))
     ((get resp :stream) sock)
@@ -302,7 +302,7 @@ whose body is written incrementally over the socket afterwards (see
 (defn streaming? (resp)
   "True if `resp` is a `stream-response` — the connection is handed to its `:stream` fn
 rather than closed after a body. An identity check on the record, not a key sniff."
-  (and (record? resp) (= (record-id resp) :net/http/stream-response)))
+  (and (record? resp) (= (record-id resp) :http/stream-response)))
 
 ;; ---- static files -----------------------------------------------------------
 (def *http-mime*
