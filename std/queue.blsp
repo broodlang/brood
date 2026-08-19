@@ -23,9 +23,7 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
 
 (defrecord queue (front back size))
 
-(defn queue? (x)
-  "True if `x` is a FIFO queue — by identity, not by shape."
-  (and (record? x) (= (record-id x) :queue/queue)))
+;; The bare `queue?` type predicate lives in the prelude alongside `set?`/`map?` (ADR-236).
 
 (defn new ()
   "An empty FIFO queue."

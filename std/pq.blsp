@@ -21,9 +21,7 @@ falsy collection, so `(if pq …)` used to take the else branch on an empty queu
 ;; A `pq` RECORD wrapping a sorted list of [priority value] pairs, min priority first.
 (defrecord pq (entries))
 
-(defn pq? (x)
-  "True if `x` is a min-priority queue — by identity, not by shape."
-  (and (record? x) (= (record-id x) :pq/pq)))
+;; The bare `pq?` type predicate lives in the prelude alongside `set?`/`map?` (ADR-236).
 
 (defn new ()
   "An empty min-priority queue."

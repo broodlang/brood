@@ -105,15 +105,15 @@
 ;; either from comparing `=` to a look-alike, and what carries their print form.
 (describe "queue and pq are records with their own identity"
   (test "queue? / pq? are true only for the real thing"
-    (is (queue/queue? (queue/new)))
-    (is (queue/queue? (queue/push (queue/new) 1)))
-    (is (not (queue/queue? (pq/new))))
-    (is (pq/pq? (pq/new)))
-    (is (pq/pq? (pq/insert (pq/new) 1 :a)))
-    (is (not (pq/pq? (queue/new)))))
+    (is (queue? (queue/new)))
+    (is (queue? (queue/push (queue/new) 1)))
+    (is (not (queue? (pq/new))))
+    (is (pq? (pq/new)))
+    (is (pq? (pq/insert (pq/new) 1 :a)))
+    (is (not (pq? (queue/new)))))
   (test "neither is a plain collection in disguise"
-    (is (not (queue/queue? {:front nil :back nil :size 0})))
-    (is (not (pq/pq? (list [1 :a]))))
+    (is (not (queue? {:front nil :back nil :size 0})))
+    (is (not (pq? (list [1 :a]))))
     (is (not (= (queue/new) {:front nil :back nil :size 0}))))
   (test "each carries its record id"
     (assert= (record-id (queue/new)) :queue/queue)
@@ -144,7 +144,7 @@
         (spawn (send me [:q (queue/from-list (list i (+ i 10)))])))
       (let (results (map (fn (_) (receive ([:q q] q) (after *test-wait-ms* :timeout)))
                       (range 4)))
-        (is (every? queue/queue? results))
+        (is (every? queue? results))
         (is (every? (fn (q) (= (queue/size q) 2)) results))
         (assert= (into [] (sort (map (fn (q) (queue/peek q)) results))) [0 1 2 3]))))
   (test "a pq survives a round trip and keeps its ordering"
@@ -152,5 +152,5 @@
           pq (-> (pq/new) (pq/insert 3 :c) (pq/insert 1 :a)))
       (spawn (send me [:pq pq]))
       (let (back (receive ([:pq p] p) (after *test-wait-ms* :timeout)))
-        (is (pq/pq? back))
+        (is (pq? back))
         (assert= (into [] (pq/to-list back)) [:a :c])))))
