@@ -98,71 +98,71 @@
 
 (describe "wasm: scalar exports round-trip"
   (test "s32 add and f64 scale"
-    (let (inst (wasm-instantiate *scalars-wat*))
-      (assert= (wasm-call inst "add" 2 40) 42)
-      (assert= (wasm-call inst "scale" 2.5 4.0) 10.0)
-      (wasm-close inst)))
+    (let (inst (instantiate *scalars-wat*))
+      (assert= (call inst "add" 2 40) 42)
+      (assert= (call inst "scale" 2.5 4.0) 10.0)
+      (close inst)))
   (test "exports are introspectable as [name arity]"
-    (let (inst (wasm-instantiate *scalars-wat*))
-      (assert= (wasm-exports inst) [["add" 2] ["scale" 2]])
-      (wasm-close inst)))
+    (let (inst (instantiate *scalars-wat*))
+      (assert= (exports inst) [["add" 2] ["scale" 2]])
+      (close inst)))
   (test "an s32 out-of-range argument is a clean error, not a wrap"
-    (let (inst (wasm-instantiate *scalars-wat*))
-      (is (= (try (wasm-call inst "add" 5000000000 1) (catch e :range))
+    (let (inst (instantiate *scalars-wat*))
+      (is (= (try (call inst "add" 5000000000 1) (catch e :range))
             :range))
-      (wasm-close inst))))
+      (close inst))))
 
 (describe "wasm: strings and lists cross the canonical ABI"
   (test "a string round-trips through guest linear memory"
-    (let (inst (wasm-instantiate *memory-wat*))
-      (assert= (wasm-call inst "echo" "hello from the brood") "hello from the brood")
+    (let (inst (instantiate *memory-wat*))
+      (assert= (call inst "echo" "hello from the brood") "hello from the brood")
       ;; non-ASCII UTF-8 crosses byte-faithfully
-      (assert= (wasm-call inst "echo" "héllo ☃") "héllo ☃")
-      (wasm-close inst)))
+      (assert= (call inst "echo" "héllo ☃") "héllo ☃")
+      (close inst)))
   (test "a list<s32> lowers from a vector or a list"
-    (let (inst (wasm-instantiate *memory-wat*))
-      (assert= (wasm-call inst "sum" [1 2 3 4 5]) 15)
-      (assert= (wasm-call inst "sum" (list 10 20 30)) 60)
-      (assert= (wasm-call inst "sum" []) 0)
-      (wasm-close inst))))
+    (let (inst (instantiate *memory-wat*))
+      (assert= (call inst "sum" [1 2 3 4 5]) 15)
+      (assert= (call inst "sum" (list 10 20 30)) 60)
+      (assert= (call inst "sum" []) 0)
+      (close inst))))
 
 (describe "wasm: bytes marshal in and out (list<u8>)"
   (test "a bytes value lowers into a list<u8> param and lifts back to bytes"
-    (let (inst (wasm-instantiate *memory-wat*))
+    (let (inst (instantiate *memory-wat*))
       ;; high bytes (\x00, \xff) prove the round-trip is byte-faithful — not
       ;; routed through UTF-8 like `echo`/string would mangle.
-      (let (out (wasm-call inst "blob-echo" #b"hi\x00\xff\x80"))
+      (let (out (call inst "blob-echo" #b"hi\x00\xff\x80"))
         (is (bytes? out))
         (assert= out #b"hi\x00\xff\x80"))
-      (wasm-close inst)))
+      (close inst)))
   (test "byte-sum reads the octets — a bytes value or an int vector both lower"
-    (let (inst (wasm-instantiate *memory-wat*))
-      (assert= (wasm-call inst "byte-sum" #b"\x01\x02\x03") 6)
+    (let (inst (instantiate *memory-wat*))
+      (assert= (call inst "byte-sum" #b"\x01\x02\x03") 6)
       ; an int vector still lowers
-      (assert= (wasm-call inst "byte-sum" [10 20 30]) 60)
-      (assert= (wasm-call inst "byte-sum" #b"") 0)
-      (wasm-close inst)))
+      (assert= (call inst "byte-sum" [10 20 30]) 60)
+      (assert= (call inst "byte-sum" #b"") 0)
+      (close inst)))
   (test "an empty list<u8> result is the documented edge — an empty vector, not bytes"
-    (let (inst (wasm-instantiate *memory-wat*))
-      (assert= (wasm-call inst "blob-echo" #b"") [])
-      (wasm-close inst))))
+    (let (inst (instantiate *memory-wat*))
+      (assert= (call inst "blob-echo" #b"") [])
+      (close inst))))
 
 (describe "wasm: the sandbox holds"
   (test "a runaway guest is stopped by the fuel meter — a catchable error"
-    (let (inst (wasm-instantiate *spin-wat*))
-      (is (= (try (wasm-call inst "spin") (catch e :trapped)) :trapped))
+    (let (inst (instantiate *spin-wat*))
+      (is (= (try (call inst "spin") (catch e :trapped)) :trapped))
       ;; the instance survives the trap for further (well-behaved) use? A
       ;; trapped store is poisoned — a later call errors cleanly, not UB.
-      (wasm-close inst)))
+      (close inst)))
   (test "an unknown export and a closed instance are clean errors"
-    (let (inst (wasm-instantiate *scalars-wat*))
-      (is (= (try (wasm-call inst "nope" 1) (catch e :no-export)) :no-export))
-      (wasm-close inst)
+    (let (inst (instantiate *scalars-wat*))
+      (is (= (try (call inst "nope" 1) (catch e :no-export)) :no-export))
+      (close inst)
       ; idempotent
-      (wasm-close inst)
-      (is (= (try (wasm-call inst "add" 1 2) (catch e :closed)) :closed))))
+      (close inst)
+      (is (= (try (call inst "add" 1 2) (catch e :closed)) :closed))))
   (test "garbage source is a clean load error"
-    (is (= (try (wasm-instantiate "(component (bogus") (catch e :bad)) :bad)))
+    (is (= (try (instantiate "(component (bogus") (catch e :bad)) :bad)))
   (test "a component demanding memory past the 256 MiB cap fails to load (not OOM)"
     ;; 5000 pages * 64 KiB = ~327 MiB initial memory > the per-instance limiter
     ;; cap — instantiation must be denied cleanly (fuel bounds instructions, the
@@ -170,33 +170,33 @@
     (let (huge "(component
                   (core module $m (memory (export \"m\") 5000))
                   (core instance $i (instantiate $m)))")
-      (is (= (try (do (wasm-instantiate huge) :loaded) (catch e :denied)) :denied)))))
+      (is (= (try (do (instantiate huge) :loaded) (catch e :denied)) :denied)))))
 
 (describe "wasm: use-native binds exports as Brood functions"
   (test "bound names call straight through"
     ;; `add`/`scale` are defined at RUNTIME by use-native — invisible to the
     ;; source checker, hence :unbound (the category exists for exactly this).
     (check-allow :unbound
-      (let (inst (wasm-instantiate *scalars-wat*))
+      (let (inst (instantiate *scalars-wat*))
         (let (names (use-native inst))
           (is (member? 'add names))
           (assert= (add 20 22) 42)
           (assert= (scale 3.0 3.0) 9.0))
-        (wasm-close inst)))))
+        (close inst)))))
 
 (describe "wasm: concurrency"
   (test "calls from many processes serialize safely on one instance"
-    (let (inst (wasm-instantiate *scalars-wat*)
+    (let (inst (instantiate *scalars-wat*)
           me (self)
           n 8)
       (dotimes (i n)
-        (spawn (do (send me [:r i (wasm-call inst "add" i i)]))))
+        (spawn (do (send me [:r i (call inst "add" i i)]))))
       (dotimes (_ n)
         (receive
           ([:r i r] (assert= r (* 2 i)))
           (after 10000 (is false))))
-      (wasm-close inst)))
-  (test "a long call rides the offload pool (wasm-call-blocking)"
-    (let (inst (wasm-instantiate *scalars-wat*))
-      (assert= (wasm-call-blocking inst "add" 1000 337) 1337)
-      (wasm-close inst))))
+      (close inst)))
+  (test "a long call rides the offload pool (call-blocking)"
+    (let (inst (instantiate *scalars-wat*))
+      (assert= (call-blocking inst "add" 1000 337) 1337)
+      (close inst))))

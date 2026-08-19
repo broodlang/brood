@@ -19,40 +19,40 @@
 
 (defmodule wasm
   "WASM component interop (ADR-071/145): load sandboxed native components and
-call their exports as ordinary functions. `wasm-load` a `.wasm` (or WAT text
-via `wasm-instantiate`), `wasm-call` its exports, or `use-native` to bind every
+call their exports as ordinary functions. `load` a `.wasm` (or WAT text
+via `instantiate`), `call` its exports, or `use-native` to bind every
 export as a named Brood function. Calls are fuel-metered and sandboxed; long
-calls go through the dirty-offload pool (`wasm-call-blocking`).")
+calls go through the dirty-offload pool (`call-blocking`).")
 
-(defn wasm-load (path)
+(defn load (path)
   "Instantiate the compiled WASM component at `path` (a `.wasm` file). Returns
-an instance handle for `wasm-call`/`use-native`. An instance is a **manual
-resource** — its store, code, and linear memory live until you `wasm-close` it
-(there is no GC finalizer yet), so `wasm-load` in a loop without closing leaks.
+an instance handle for `call`/`use-native`. An instance is a **manual
+resource** — its store, code, and linear memory live until you `close` it
+(there is no GC finalizer yet), so `load` in a loop without closing leaks.
 Load once and reuse for a long-lived codec; close a short-lived one."
   (%wasm-load (file/slurp-bytes path)))
 
-(defn wasm-instantiate (source)
+(defn instantiate (source)
   "Instantiate a WASM component from in-memory `source`: a `bytes` value (a
 compiled component) or a string of WAT text — the REPL/testing path."
   (%wasm-load source))
 
-(defn wasm-exports (inst)
+(defn exports (inst)
   "The instance's exported functions, as a vector of `[name arity]` pairs."
   (%wasm-exports inst))
 
-(defn wasm-call (inst name & args)
+(defn call (inst name & args)
   "Call export `name` (a string) of `inst` with `args`, marshalled by the
 export's WIT parameter types. Runs inline, fuel-capped — for short compute.
 A trap (including out-of-fuel) raises a catchable error."
   (%wasm-call inst name (into [] args)))
 
-(defn wasm-call-blocking (inst name & args)
-  "Like `wasm-call`, but on the dirty-offload OS pool (ADR-144): only this
+(defn call-blocking (inst name & args)
+  "Like `call`, but on the dirty-offload OS pool (ADR-144): only this
 process waits, never a scheduler worker. For long-running guest calls."
   (offload %wasm-call inst name (into [] args)))
 
-(defn wasm-close (inst)
+(defn close (inst)
   "Drop `inst`: the sandbox and everything the guest owns is freed. Idempotent."
   (%wasm-close inst))
 
@@ -60,7 +60,7 @@ process waits, never a scheduler worker. For long-running guest calls."
   "Bind every export of `inst` as a global Brood function of the same name —
 the `use Rustler` moment, driven by the component's own interface. Returns the
 list of names bound. The bindings are ordinary `def`s (hot-reloadable); each
-calls the export inline — wrap with `wasm-call-blocking` yourself for exports
+calls the export inline — wrap with `call-blocking` yourself for exports
 that run long."
   (map (fn (e)
          (let (name (first e))
@@ -69,4 +69,4 @@ that run long."
                    '(& args)
                    (list '%wasm-call inst name '(into [] args))))
            (string->symbol name)))
-    (wasm-exports inst)))
+    (exports inst)))
