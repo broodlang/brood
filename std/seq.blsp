@@ -1,13 +1,13 @@
-;; std/enum.blsp — the sequence-helper library (ADR-227).
-;; A namespace (ADR-065): its functions are `enum/dedupe`, `enum/group-by`, … —
-;; consumers `(:use enum)` to refer them bare, or call them qualified.
+;; std/seq.blsp — the sequence-helper library (ADR-227).
+;; A namespace (ADR-065): its functions are `seq/dedupe`, `seq/group-by`, … —
+;; consumers `(:use seq)` to refer them bare, or call them qualified.
 ;;
 ;; The *core* sequence protocol stays bare in the prelude — `map`/`filter`/`reduce`/
 ;; `fold`/`seq`/`into`/`count`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`
 ;; and friends are the universal collection surface (and several are load-bearing
 ;; during the prelude's own bootstrap, so they cannot move). This module is the
 ;; higher-level, derived helpers layered on top — the Elixir-`Enum`-flavour extras.
-(defmodule enum
+(defmodule seq
   "Sequence helpers — the derived enumeration API over the bare collection protocol.
 
 The core ops (`map` `filter` `reduce` `fold` `into` `count` `take` `drop`

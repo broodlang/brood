@@ -5,7 +5,7 @@
 ;; :sha512) and byte-sequence input, returning the RAW digest/MAC as a bytes
 ;; value. The two axes of variation the kernel used to carry as 21 separate prims
 ;; — string-vs-bytes input and hex-vs-raw output — are pure policy and live here:
-;; string input is `string->utf8-bytes`, hex output is `bytes->hex`. (ADR-006.)
+;; string input is `string->utf8-bytes`, hex output is `encoding/hex-encode-bytes`. (ADR-006.)
 ;;
 ;; Use sha256 or sha512 for security-sensitive work; md5 and sha1 are broken for
 ;; collision resistance but remain useful for checksums and legacy protocols
@@ -30,18 +30,12 @@
     ;; => \"8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b\"")
 
 ;; ---- hex encoding -----------------------------------------------------------
+;; Hex shaping is the `encoding` module's job — this is a private delegation so
+;; the digests below can read as `(bytes->hex …)` without hash re-implementing
+;; (and re-exporting) an operation `encoding/hex-encode-bytes` already owns (ADR-234).
 
-(def- hash-hex-digits "0123456789abcdef")
-
-(defn- hash-byte->hex
-  (b)
-  (str (string/char-at hash-hex-digits (quot b 16))
-    (string/char-at hash-hex-digits (rem b 16))))
-
-(defn bytes->hex (bytes)
-  "Lowercase hex string of a byte sequence (bytes value, vector, or list of byte
-ints 0–255). The output shaping for every digest/HMAC below."
-  (string/join "" (map hash-byte->hex (seq bytes))))
+(defn- bytes->hex (bytes)
+  (encoding/hex-encode-bytes bytes))
 
 ;; ---- MD5 --------------------------------------------------------------------
 

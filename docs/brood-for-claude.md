@@ -574,14 +574,14 @@ The combinators above read well, but in a function called hundreds of times per
 frame their *intermediate allocations* dominate. Two rules for code on a hot
 path:
 
-- **`mapcat`-then-reduce builds a list only to walk it once.** `(enum/frequencies
+- **`mapcat`-then-reduce builds a list only to walk it once.** `(seq/frequencies
   (mapcat f xs))` materialises the entire `(len-of-each × count)` list of items
-  before `enum/frequencies` tallies it — thousands of throwaway cells per frame. Fuse
+  before `seq/frequencies` tallies it — thousands of throwaway cells per frame. Fuse
   the two into one `fold` so nothing intermediate is built:
 
   ```lisp
   ;; allocates the full neighbour list, then counts it
-  (enum/frequencies (mapcat neighbours cells))
+  (seq/frequencies (mapcat neighbours cells))
   ;; fused: tally straight into the map, no intermediate list
   (fold (fn (counts cell)
           (fold (fn (c n) (assoc c n (inc (get c n 0)))) counts (neighbours cell)))
@@ -921,7 +921,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   sequence helpers — `frequencies` `enumerate` `group-by` `chunk-by`
   `chunk-every` `interpose` `interleave` `scan` `zip-with` `min-by` `max-by`
   `reduce-while` `index-where` `dedupe` `distinct-by` — live in the **`enum`
-  module** (`enum/…`, or `(:use enum)`; a qualified `enum/frequencies`
+  module** (`enum/…`, or `(:use seq)`; a qualified `seq/frequencies`
   auto-loads it) (ADR-227).
 - **iteration** (macros, for effect — there is no `while`/`for`-loop): `for`
   (list comprehension, with `:when`), `doseq` (destructuring/`:when`),
@@ -948,7 +948,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `(count m)` / `(into [] m)` all walk the map as its `[k v]` pairs — no need
   for `(zip (keys m) (vals m))`. Iteration order (`keys`/`vals`/print/`seq`) is
   **hash-derived (ADR-040), NOT insertion order and NOT sorted** — don't rely on
-  it; `(sort (keys m))` for a defined order, or compare via `enum/frequencies`.
+  it; `(sort (keys m))` for a defined order, or compare via `seq/frequencies`.
 - **set**: a **first-class kernel value** (`Value::Set`, ADR-060), written with a
   `#{1 2 3}` literal (evaluates its elements and dedups). It is its *own* kind:
   `(set? s)` is true, `(map? s)` is **false**, `(type-of s)` is `:set`, it prints

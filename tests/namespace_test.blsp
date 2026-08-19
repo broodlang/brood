@@ -321,7 +321,6 @@
   ;; overlaps are by design — `path/join` vs `string/join`, `math/sum` vs `telemetry/sum` are
   ;; the same word for different domains, and namespacing keeps them apart.
   {"attach" ["editor/serve" "telemetry"]
-   "exists?" ["file" "path"]
    "forward" ["sexp" "telemetry"]
    "join" ["path" "string"]
    "normalize" ["path" "string"]

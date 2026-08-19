@@ -1119,7 +1119,7 @@ fn a_curated_sig_does_not_mask_the_unbound_lint_for_a_moved_name() {
         assert!(
             ws.iter()
                 .any(|w| w.contains("unbound") && w.contains(moved)),
-            "bare `{moved}` is `math/`/`enum/` since ADR-227 and unbound without an import, \
+            "bare `{moved}` is `math/`/`seq/` since ADR-227 and unbound without an import, \
              so the checker must say so — a curated sig keyed on the bare name silences this \
              and lets a runtime-unbound program pass `nest check`. Got: {ws:?}"
         );
@@ -4255,7 +4255,7 @@ fn element_type_flows_through_more_combinators() {
         r#"(+ 1 (first (rest ["a" "b"])))"#,
         r#"(+ 1 (first (but-last ["a" "b"])))"#,
         r#"(+ 1 (first (distinct ["a" "b"])))"#,
-        r#"(+ 1 (first (enum/dedupe ["a" "b"])))"#,
+        r#"(+ 1 (first (seq/dedupe ["a" "b"])))"#,
         r#"(+ 1 (first (remove (fn (x) false) ["a" "b"])))"#,
         r#"(+ 1 (first (take-last 1 ["a" "b"])))"#,
         r#"(+ 1 (first (keep (fn (x) x) ["a" "b"])))"#,
@@ -4273,7 +4273,7 @@ fn element_type_flows_through_more_combinators() {
         "(+ 1 (second [10 20]))",
         "(+ 1 (first (rest [10 20])))",
         // interpose unions the separator: int|string includes int → valid for +.
-        r#"(+ 1 (first (enum/interpose "z" [1 2])))"#,
+        r#"(+ 1 (first (seq/interpose "z" [1 2])))"#,
     ] {
         let w = warnings(src);
         assert!(

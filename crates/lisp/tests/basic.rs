@@ -161,11 +161,11 @@ fn maps_structural_keys_and_equality() {
     // ADR-040 (CHAMP): iteration order is hash-driven, not insertion.
     // The key *set* survives assoc; assert via frequencies-as-map equality.
     assert_eq!(
-        run("(= (enum/frequencies (keys (assoc {:a 1 :b 2} :a 9))) {:a 1 :b 1})"),
+        run("(= (seq/frequencies (keys (assoc {:a 1 :b 2} :a 9))) {:a 1 :b 1})"),
         "true"
     );
     assert_eq!(
-        run("(= (enum/frequencies (keys (assoc {:a 1} :b 2))) {:a 1 :b 1})"),
+        run("(= (seq/frequencies (keys (assoc {:a 1} :b 2))) {:a 1 :b 1})"),
         "true"
     );
 }

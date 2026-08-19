@@ -30,7 +30,7 @@
           "argument 1 expects string")))
 
   (test "the RESULT type flows too — a bool result into a string position"
-    (is (warns-about? "(defmodule t3 (:use path)) (defn f () (string/length (is-dir? \"/tmp\")))"
+    (is (warns-about? "(defmodule t3 (:use path)) (defn f () (string/length (absolute? \"/tmp\")))"
           "expects string")))
 
   (test "correct calls stay silent (no false positives)"

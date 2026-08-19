@@ -7,7 +7,7 @@
 
 (defmodule sequence-test
   (:use test)
-  (:use enum)
+  (:use seq)
   (:use math))
 
 (describe "range"

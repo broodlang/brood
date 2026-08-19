@@ -321,7 +321,7 @@ rather than closed after a body. An identity check on the record, not a key snif
 
 (defn mime-type (path)
   "A guessed Content-Type for `path` based on its extension."
-  (get *http-mime* (path-extension path) "application/octet-stream"))
+  (get *http-mime* (path/extension path) "application/octet-stream"))
 
 (defn serve-file (path)
   "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is missing."

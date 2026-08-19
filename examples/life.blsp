@@ -2,7 +2,7 @@
   "Conway's Game of Life. The board is a set of live cells (a map [x y] -> true, so
 the world is unbounded); a `gen` process owns it, advanced by cast (`!`) and
 read by call (`gen-call`). Run:  ./bin/cli examples/life.blsp"
-  (:use enum)
+  (:use seq)
   ;; `:use` both refers `gen-call`/`!` bare and loads the module
   ;; (ADR-229 removed `require`; a `:use` needs no separate load).
   (:use gen))

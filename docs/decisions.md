@@ -15703,3 +15703,48 @@ reserved group prefix. This is a breaking rename with no compatibility shim (gre
 consistent with the 0.4.0 stdlib-namespacing compatibility boundary — ADR-230/231). Guarded
 by the updated reserved-name cases in `namespace_test.blsp` and the full proc/net test suites
 (`agent`/`gen`/`supervisor`/`http`/`sse`/`tcp`/`tls`), all green.
+
+## ADR-234 — Stdlib function placement: `path` is pure, `file` is I/O, and no module re-implements another's job
+
+**Context.** A review of every module's public exports (79 modules, ~1000 functions) surfaced
+a cluster of misplacements where two modules owned the same operation, split across two consumer
+bases so neither was obviously redundant:
+
+- **`file` vs `path`.** `path` is meant to be pure path-string manipulation and `file` filesystem
+  I/O, but each reached into the other. `file` carried pure ops `path-extension`/`path-stem`
+  (duplicating `path/extension`/`path/stem`), while `path` carried I/O predicates `exists?`/
+  `is-file?`/`is-dir?` that just delegated to `file/exists?`/`file/dir?` — and used a second naming
+  convention (`is-file?` vs `file/regular?`) for the same concept.
+- **`hash` vs `encoding`.** `hash/bytes->hex` re-implemented hex encoding (its own digit table +
+  per-byte loop) that `encoding/hex-encode-bytes` already owns in an optimized form, and exported
+  it as public API beside encoding's.
+- **`crypto` vs `string`.** `crypto/str->bytes`/`bytes->str` were general UTF-8 string↔bytes
+  codecs (thin aliases over the `string->utf8-bytes`/`utf8-bytes->string` kernel prims) parked in
+  the crypto module.
+- **`enum` module name.** The `enum` module held general sequence utilities (`chunk-by`, `dedupe`,
+  `group-by`, `zip-with`, `interpose`, `scan`, `frequencies`, …) — nothing to do with enumerated
+  types. A consumer would not look there.
+
+**Decision.**
+
+- `path` becomes pure (no filesystem access): delete `path/exists?`/`path/is-file?`/`path/is-dir?`.
+  Existence/type predicates are I/O and live only in `file` (`file/exists?`/`file/regular?`/
+  `file/dir?`). `file` loses the pure path-string ops `path-extension`/`path-stem`; those are
+  `path/extension`/`path/stem`.
+- `hash/bytes->hex` becomes a private one-line delegation to `encoding/hex-encode-bytes` — the
+  duplicate implementation and the duplicate public export both go away.
+- The UTF-8 codec moves to `string` as `string/to-bytes`/`string/from-bytes`; `crypto` no longer
+  defines it.
+- `enum` is renamed to **`seq`** (file `std/seq.blsp`, module `seq`), so qualified calls read
+  `seq/group-by`, `seq/zip-with`. The core `seq` *function* is unaffected — a module name is not a
+  value binding, so `(seq coll)` and the `seq/` qualifier never collide.
+
+Greenfield, so every rename updates all callers with no compatibility shim (ADR-006 / project
+convention). No overlap is created: `string/to-bytes`/`from-bytes` and the `seq/*` names collide
+with nothing; removing `path/exists?` drops one recorded overlap.
+
+**Consequence.** Each operation now has exactly one home, chosen by domain (pure-string → `path`,
+filesystem → `file`, hex → `encoding`, UTF-8 codec → `string`, sequence utils → `seq`). The
+`ns-known-overlaps` completeness test (ADR-233) confirmed the result introduced no new overlaps.
+This is a placement pass only; the separate question of *how clashes are surfaced* — the
+maintained overlap list itself — is addressed by the lazy-resolution mechanism in ADR-235.

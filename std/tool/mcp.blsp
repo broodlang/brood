@@ -656,7 +656,7 @@ Brood pattern, `std/tool/explain.blsp`)."
      :schema {:type "object"
               :properties {:form {:type "string" :description "Source for the form to expand"}
                            :mode {:type "string"
-                                  :enum ["1" "all"]
+                                  :seq ["1" "all"]
                                   :description "\"1\" (default) or \"all\""}}
               :required ["form"]}
      :handler mcp-macroexpand-tool}
