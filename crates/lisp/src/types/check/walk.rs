@@ -379,6 +379,12 @@ fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
     if ctx.is_local(s) || is_globally_bound(heap, s) || curated_sig(s).is_some() {
         return false;
     }
+    // An ambiguous `(:use …)` import (ADR-235) is not "unbound" — it has candidate
+    // bindings, just no single one. The compile pass already reports the precise
+    // ambiguity ("imported from more than one module"), so don't double-flag it as unbound.
+    if heap.ambiguous_import_of(s).is_some() {
+        return false;
+    }
     let nm = name_of(s);
     if is_syntactic_keyword(&nm) || is_debug_only_primitive(&nm) {
         return false;

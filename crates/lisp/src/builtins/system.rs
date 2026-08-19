@@ -2492,10 +2492,13 @@ pub(super) fn mark_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// Add one `(:use …)` import (bare → qualified) to the current file's table,
 /// enforcing the two Elixir-style import rules:
 ///
-/// - **Clash (error).** If `bare` is already imported from a *different* module, it's
-///   a hard error naming both — resolvable with `:only`/`:exclude` on one of the uses.
-///   Re-importing the *same* qualified name (a re-`:use` of the same module) is a
-///   no-op, so idempotent reloads are fine.
+/// - **Clash (lazy, ADR-235).** If `bare` is already imported from a *different* module,
+///   the two do NOT error here — importing both modules is fine as long as the caller
+///   never uses the shared name bare. The name is recorded as *ambiguous*; the resolver
+///   raises a use-site error naming the candidates only when `bare` is actually referenced
+///   without qualification (resolvable then with `:only`/`:exclude`, an alias, or a
+///   qualified call). Re-importing the *same* qualified name (a re-`:use` of the same
+///   module) is a no-op, so idempotent reloads are fine.
 /// - **Shadow (warning).** If `bare` already names a live root/prelude/builtin global,
 ///   the import shadows it — allowed (the resolver gives an import precedence over
 ///   root), but warned, exactly as Elixir warns when an import shadows an
@@ -2514,16 +2517,19 @@ fn refer_add(
     if value::is_dynamic(bare) {
         return Ok(());
     }
+    // Clash → ambiguous, not an error (ADR-235). A `One` from a different module or an
+    // existing `Ambiguous` both fold this candidate in; the resolver reports it only if the
+    // bare name is used. Re-`:use` of the same module (same qualified) stays a no-op.
     if let Some(existing) = heap.import_of(bare) {
         if existing == qualified {
             return Ok(()); // idempotent — same module referred again (e.g. reload)
         }
-        return Err(LispError::runtime(format!(
-            "(:use {mod_name}) refers `{}`, but it is already referred as `{}` from another \
-             module — resolve the clash with `:only [...]` or `:exclude [...]` on one of the uses",
-            value::symbol_name(bare),
-            value::symbol_name(existing),
-        )));
+        heap.mark_import_ambiguous(bare, qualified);
+        return Ok(());
+    }
+    if heap.ambiguous_import_of(bare).is_some() {
+        heap.mark_import_ambiguous(bare, qualified);
+        return Ok(());
     }
     if heap.env_get(value::EnvId::GLOBAL, bare).is_some()
         && std::env::var_os("BROOD_NO_SHADOW_WARN").is_none()

@@ -299,125 +299,39 @@
       (send w (mm-p2/make))
       (is (= (receive) {:t 'mm-p1/tag :n 7})))))
 
-;; ---- std's own cross-module name overlaps, enumerated ------------------------
-;; Namespacing means two modules MAY export the same short name; `(:use A) (:use B)` then
-;; raises E0099 and the consumer resolves it (`:only`/`:exclude`, or `require` + qualified
-;; calls). That is by design — but the SET of overlaps should be known rather than
-;; discovered by a consumer whose editor stopped loading, which is how this list was found:
-;; `sexp` and `editor/treesit` both grew structural motions (`point-forward`, …), and myedit
-;; `:use`d both.
-;;
-;; So the set is pinned here. A NEW overlap fails this test, which is the point: adding one
-;; is a decision (the modules are unlikely to be used together; the name is genuinely the
-;; best one for both) rather than an accident nobody notices until a `:use` breaks.
-(def- ns-known-overlaps
-  ;; name -> the modules that export it, sorted. Modules unlikely to be `:use`d together
-  ;; (`package` + `agent`) are as legitimate here as the pair that prompted the audit.
-  ;; (an earlier audit also listed `bytes-`; that was a prefix match on `bytes->hex`, not an
-  ;; export — hence this test reads the flat table rather than trusting a source scan.)
-  ;; This map is AUTHORITATIVE: the "no surprising overlaps" test below recomputes the real
-  ;; overlap set from `(builtin-modules)` and asserts it equals this map exactly, so a new
-  ;; overlap (or a changed module set for an existing name) fails until recorded here. Most
-  ;; overlaps are by design — `path/join` vs `string/join`, `math/sum` vs `telemetry/sum` are
-  ;; the same word for different domains, and namespacing keeps them apart.
-  {"attach" ["editor/serve" "telemetry"]
-   "forward" ["sexp" "telemetry"]
-   "join" ["path" "string"]
-   "normalize" ["path" "string"]
-   "parse-url" ["http" "url"]
-   "point-backward" ["editor/treesit" "sexp"]
-   "point-defun-end" ["editor/treesit" "sexp"]
-   "point-defun-start" ["editor/treesit" "sexp"]
-   "point-down" ["editor/treesit" "sexp"]
-   "point-forward" ["editor/treesit" "sexp"]
-   "point-list-backward" ["editor/treesit" "sexp"]
-   "point-list-forward" ["editor/treesit" "sexp"]
-   "point-up" ["editor/treesit" "sexp"]
-   "point-up-forward" ["editor/treesit" "sexp"]
-   "render" ["docsite" "format" "template"]
-   "serve" ["editor/serve" "http"]
-   "span" ["debug" "string" "telemetry"]
-   "splice" ["editor/formbuf" "sexp"]
-   "split" ["path" "string"]
-   "stop" ["agent" "gen"]
-   "sum" ["math" "telemetry"]
-   "summary" ["perf" "telemetry"]
-   "tree" ["package" "sexp"]
-   "update" ["agent" "package"]})
 
-(defn- ns-exports-of
-  (module)
-  "The public names `module` contributes to the flat table — read from `global-names`, so it
-is what a `:use` would actually import, not what the source looks like."
-  (let (prefix (str module "/")
-        plen (string/length prefix))
-    (into #{}
-      (map (fn (n) (string/substring n plen (string/length n)))
-        (filter
-          (fn (n)
-            (and (string/starts-with? n prefix)
-              ;; a nested module (`editor/x` under `editor`) is not an export
-              (not (includes? (string/substring n plen (string/length n)) "/"))
-              (not (private? (symbol n))))) ; module-private (ADR-146, recorded fact)
-          (map name (global-names)))))))
+;; ---- lazy `(:use …)` clash resolution (ADR-235) -----------------------------
+;; Namespacing means two modules MAY export the same short name. Importing both is fine;
+;; the clash surfaces only when the shared name is actually USED bare, and the error then
+;; names the candidate modules. So there is NO std-wide "overlap set" to maintain — overlaps
+;; self-report at the point of use, and stay silent when a caller only touches non-overlapping
+;; names. (`sexp` and `telemetry` both export `forward` — the pair exercised here; before
+;; ADR-235 this whole section pinned a hand-maintained list of every std overlap.)
+(defn- ns-loads? (src)
+  "True if `src` loads without error — the clash, if any, never fired."
+  (try (do (%load-string src) true) (catch e false)))
 
-(defn- ns-actual-overlaps
-  ()
-  "The REAL cross-module overlap map, recomputed from the binary: name -> sorted vector of the
-`(builtin-modules)` that export it, for every name exported by more than one. Loading every
-baked-in module first is what puts all their names in the flat table. This is the ground truth
-`ns-known-overlaps` is pinned against, so the completeness test below cannot silently drift when
-a module gains or renames an export (the failure mode ADR-233's rename would have hit unnoticed)."
-  (let (mods (builtin-modules))
-    (doseq (m mods) (try (require-one (symbol m)) (catch e nil)))
-    (let (inv (reduce
-                (fn (acc m)
-                  (reduce (fn (a nm) (assoc a nm (conj (get a nm []) m)))
-                    acc (into [] (ns-exports-of m))))
-                {} mods))
-      (into {}
-        (map (fn (kv) [(first kv) (into [] (sort (second kv)))])
-          (filter (fn (kv) (> (count (second kv)) 1)) (into [] inv)))))))
+(defn- ns-load-error (src)
+  (try (do (%load-string src) "") (catch e (str (error-message e)))))
 
-(defn- ns-normalize-overlaps
-  (m)
-  "Both maps normalized to name -> sorted vector so `=` compares them structurally."
-  (into {} (map (fn (kv) [(first kv) (into [] (sort (second kv)))]) (into [] m))))
+(describe "namespaces: `(:use …)` clashes resolve lazily (ADR-235)"
+  :isolated
 
-(describe "std cross-module name overlaps are known, not surprising"
-  :serial
-  (test "the recorded overlap set matches reality exactly — no new, removed, or shifted overlap"
-    ;; The single authoritative assertion: the real overlap map computed from `(builtin-modules)`
-    ;; equals `ns-known-overlaps`. A NEW overlap, a REMOVED one, or an existing name that GAINED
-    ;; or LOST a module all fail here — the drift ADR-233 introduced (net/proc renamed, the map
-    ;; unpinned) is exactly what this now catches. Update `ns-known-overlaps` when the diff is a
-    ;; deliberate decision, never to silence it.
-    (assert= (ns-normalize-overlaps ns-known-overlaps)
-      (ns-actual-overlaps)))
+  (test "importing two modules that share a name is fine when the name is not used bare"
+    ;; `up` is sexp-only and `forward` (shared) is never referenced — no error.
+    (is (ns-loads? "(defmodule lz-ok (:use sexp) (:use telemetry)) (defn f (x) (up x))")))
 
-  (test "each recorded overlap is still real — both modules export the name"
-    ;; loading them is what puts their names in the flat table
-    (doseq (kv ns-known-overlaps)
-      (let ([nm mods] kv)
-        (doseq (mod mods) (try (require-one (symbol mod)) (catch e nil)))
-        (doseq (mod mods)
-          (is (includes? (ns-exports-of mod) nm))))))
+  (test "using the shared bare name is a use-site error naming both candidates"
+    (let (msg (ns-load-error "(defmodule lz-bad (:use sexp) (:use telemetry)) (defn f (x) (forward x))"))
+      (is (includes? msg "ambiguous"))
+      (is (includes? msg "sexp/forward"))
+      (is (includes? msg "telemetry/forward"))))
 
-  (test "the pair that prompted this: sexp and editor/treesit overlap on nine motions"
-    (do
-      (let (shared (filter (fn (n) (includes? (ns-exports-of "editor/treesit") n))
-                     (into [] (ns-exports-of "sexp"))))
-        ;; The structural-motion set both provide — sexp over a Brood form, treesit over a
-        ;; foreign-language tree (ADR-205 §7b). Grew from five to nine as parallel motions
-        ;; (`point-list-*`, `point-up-forward`, `point-defun-end`) were added to both; a
-        ;; deliberate mirror, pinned so a *new* overlap is a review decision, not a surprise.
-        (assert= (sort shared)
-          (list "point-backward"
-            "point-defun-end" "point-defun-start" "point-down" "point-forward" "point-list-backward"
-            "point-list-forward" "point-up" "point-up-forward"))
-        ;; and they are DIFFERENT operations, not duplicates: treesit's take a `lang`
-        (assert= 3 (count (arglist editor/treesit/point-forward)))
-        (assert= 2 (count (arglist sexp/point-forward)))))))
+  (test "a qualified call sidesteps the clash"
+    (is (ns-loads? "(defmodule lz-q (:use sexp) (:use telemetry)) (defn f (x) (sexp/forward x x))")))
+
+  (test ":exclude on one use makes the bare name unambiguous"
+    (is (ns-loads? "(defmodule lz-x (:use sexp) (:use telemetry :exclude [forward])) (defn f (x) (forward x x))"))))
 
 ;; A package (dependency or root project) may not take a name the standard library
 ;; owns: its name becomes a load-time package prefix (ADR-070), so a package called

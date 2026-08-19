@@ -15748,3 +15748,40 @@ filesystem → `file`, hex → `encoding`, UTF-8 codec → `string`, sequence ut
 `ns-known-overlaps` completeness test (ADR-233) confirmed the result introduced no new overlaps.
 This is a placement pass only; the separate question of *how clashes are surfaced* — the
 maintained overlap list itself — is addressed by the lazy-resolution mechanism in ADR-235.
+
+## ADR-235 — `(:use …)` name clashes resolve lazily, at the point of use
+
+**Context.** Two modules may legitimately export the same short name (`sexp` and `telemetry`
+both `forward`; `format` and `template` both `render`) — namespacing is what makes that safe.
+The `(:use …)` importer (`refer_add`) enforced it **eagerly**: importing a bare name a *different*
+already-`:use`d module also exported was a hard error at the import site, whether or not the
+consumer ever referenced the shared name. Two costs followed:
+
+- **False friction.** `(:use sexp) (:use telemetry)` failed to load just because both export
+  `forward`, even for a consumer that only wanted `sexp/up` and `telemetry/emit`.
+- **A maintained list, in a second place.** Because a std consumer's `(:use a) (:use b)` could
+  explode on an overlap the consumer didn't know about, `tests/namespace_test.blsp` pinned a
+  hand-curated table of every std cross-module overlap (`ns-known-overlaps`) so a new one was a
+  deliberate review decision. That table drifted (ADR-233 caught it 15-vs-25 out of date) and was
+  pure maintenance — the runtime already *knew* the overlaps; the list just re-encoded them.
+
+**Decision.** Resolve clashes **lazily**. `refer_add` no longer errors on a clash — it records the
+bare name as `ImportEntry::Ambiguous([candidates])` in the per-file import table (demoting a prior
+`One`, or appending to an existing `Ambiguous`). Importing overlapping modules is always fine. The
+resolver (`resolve_sym`) raises a use-site error **only when the ambiguous bare name is actually
+referenced** — after a same-namespace def and any local have had their shadowing chance — naming
+the candidate modules and the fixes (qualify, `:only`/`:exclude`, alias). The error is deferred
+through a thread-local channel (`record_ambiguous` → `take_ambiguous_error`) drained right after
+`resolve` in the macroexpand driver, exactly like the auto-require channel, so it points at the
+form that used the name. The checker mirrors the demotion (`Heap::add_import_lazy`) and surfaces
+the same message advisorily; `is_unbound` treats an ambiguous name as bound-with-candidates so it
+does not also mis-report it as "unbound".
+
+**Consequence.** `(:use a) (:use b)` on overlapping modules composes freely; you meet an overlap
+exactly where it bites, with a precise fix. The `ns-known-overlaps` table and its completeness
+test (ADR-233) are **deleted** — overlaps self-report, so there is nothing to maintain in a second
+place, which was the point. `reserved-package-name?` (package-name-vs-module) is a different clash
+and is unchanged (already derived dynamically). Import state stays per-file: `Ambiguous` rides the
+same `set_imports` save/restore as `One`. Guarded by the new "clashes resolve lazily" cases in
+`namespace_test.blsp` (coexist / ambiguous-use-errors / qualified / `:exclude`) and the rewritten
+`modules_test.blsp` clash case.

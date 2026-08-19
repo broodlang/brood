@@ -676,7 +676,7 @@ pub struct NsLoadScope<'a> {
     compile_ns: Option<Symbol>,
     known: HashSet<Symbol>,
     known_by_module: std::collections::HashMap<Symbol, HashSet<Symbol>>,
-    imports: std::collections::HashMap<Symbol, Symbol>,
+    imports: std::collections::HashMap<Symbol, crate::core::heap::ImportEntry>,
     assume_own: bool,
 }
 
@@ -762,6 +762,11 @@ pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
         }
         resolved
     };
+    // A bare name used in this form that is `(:use …)`-imported from two or more modules is
+    // a use-site clash (ADR-235) — raise it now, at the point of use, naming the candidates.
+    if let Some(error) = crate::eval::derive::take_ambiguous_error() {
+        return Err(error);
+    }
     // `drain_pending` loads any inferred modules, which collects — so `resolved`
     // (a LOCAL handle we still need for the quasiquote pass below) must be rooted
     // across it, or it goes stale (use-after-GC). The nested loads push and truncate
@@ -1251,6 +1256,15 @@ fn resolve_sym(
     let qsym = value::intern(&format!("{}/{}", ns_name, name));
     if heap.ns_knows_name(s) || heap.env_get(value::EnvId::GLOBAL, qsym).is_some() {
         qsym
+    } else if let Some(candidates) = heap.ambiguous_import_of(s) {
+        // Imported bare from two or more modules (ADR-235). A same-namespace def or a
+        // local (checked above / at the top) would have shadowed it; reaching here means
+        // the bare name is genuinely ambiguous. Record a use-site clash error — raised by
+        // the driver after `resolve`, so it points at the form that used the name. The
+        // returned symbol is irrelevant (compilation is about to be abandoned); leave it
+        // bare so nothing spuriously resolves before the error surfaces.
+        crate::eval::derive::record_ambiguous(s, candidates);
+        s
     } else if let Some(imported) = heap.import_of(s) {
         imported
     } else if heap.ns_assume_own()
