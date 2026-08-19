@@ -117,8 +117,8 @@ the `nest new` scaffolder."
 ; a whitelist, so a directory holding .blsp the project authors but does not build from
 ; (`std/`, `examples/`, `scripts/`) has to be named here to be formatted. Ambient so
 ; `std/format.blsp` reads it without importing the manifest.
-(defdyn *project-format-width* nil)
-; the manifest's :format-width (an integer column budget for `nest format`, e.g. 80);
+(defdyn *project-width* nil)
+; the manifest's :width (an integer column budget for `nest format`, e.g. 80);
 ; nil = use the formatter's built-in default. Ambient so `std/format.blsp` reads it
 ; directly, like the other project knobs the formatter consults.
 
@@ -464,7 +464,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
       (project-parse-deps (plist-get opts :dev-dependencies))))
   (def *project-format-headers* (plist-get opts :format-headers))
   (def *project-format-plugins* (plist-get opts :format-plugins))
-  (def *project-format-width* (plist-get opts :format-width))
+  (def *project-width* (plist-get opts :width))
   *project-name*)
 
 ;; --- finding the project + discovering tests ---------------------------------
@@ -654,7 +654,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     ;; ADR-070's dependency-module maps. The image already carries a dep's bindings, and
     ;; restoring these would only send `require` down the source-load branch for modules the
     ;; image can serve directly.
-    '*package-module-files* '*package-modules-of*])
+    '*module-files* '*package-modules-of*])
 
 (defn project-image-path (root)
   "Where `root`'s startup image lives."
@@ -685,7 +685,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; DEPENDENCY files count too, because their bindings are in the image (ADR-070/218): a
   ;; dep lives outside `:source-paths` — in `_deps/`, or anywhere at all for a `:path` dep —
   ;; so the source-tree walk alone cannot see one change, and an imaged start would go on
-  ;; serving the old code. They come from `*package-module-files*`, which `project-setup`
+  ;; serving the old code. They come from `*module-files*`, which `project-setup`
   ;; populates before any fingerprint is taken, on the cold and warm paths alike.
   (str (build-id)
     "\n"
@@ -694,17 +694,17 @@ manifest is read, naming the key, not later inside whoever consumes the map."
         (append-two files (project-dep-module-files))))))
 
 ;; The file behind every DEPENDENCY module, sorted for a stable fingerprint. A project roots
-;; its own modules under its `:name` too (ADR-070), so both live in `*package-module-files*`
+;; its own modules under its `:name` too (ADR-070), so both live in `*module-files*`
 ;; and the prefix is what separates them — the project's own files are already in the source
 ;; walk, and listing them twice would only make the key longer.
 (defn- project-dep-module-files
   ()
   ;; `distinct`: a dep file declaring more than one module (ADR-223) now has one
-  ;; `*package-module-files*` entry per module, all pointing at the same path — the
+  ;; `*module-files*` entry per module, all pointing at the same path — the
   ;; fingerprint wants each file once, not once per module it declares.
   (sort (distinct (map second
                     (remove (fn (kv) (not (project-image-dep-module? (first kv))))
-                      (seq *package-module-files*))))))
+                      (seq *module-files*))))))
 
 ;; `before` as a SET. As a list, `member?` is a linear scan run once per global — ~4000 x
 ;; ~313 000 on a big project, which measured 7 s of a 9 s image write and was invisible
@@ -735,7 +735,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
             (or (member? n *project-image-registry-exclusions*)
               (and (not (contains? seen n))
                 (let (mod (project-image-section-of n))
-                  (and mod (contains? *package-module-files* mod))))))
+                  (and mod (contains? *module-files* mod))))))
     (%registry-names)))
 
 ;; The module a global belongs to: its name minus the last segment, which IS the feature
@@ -750,13 +750,13 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 
 ;; Whether module key `k` belongs to a DEPENDENCY rather than to this project. A project
 ;; roots its own modules under its `:name` (ADR-070) exactly as a dep's are rooted under
-;; theirs, so both appear in `*package-module-files*` and membership alone does not separate
+;; theirs, so both appear in `*module-files*` and membership alone does not separate
 ;; them — the prefix does. Used for the fingerprint (a dep's files are outside the source
 ;; walk, so they must be stat'd from the registry) rather than to exclude anything: a dep's
 ;; modules ARE imaged, which is why its files have to be in the staleness key.
 (defn- project-image-dep-module?
   (k)
-  (and (contains? *package-module-files* k)
+  (and (contains? *module-files* k)
     (not (= (first (string/split k "/"))
            (if *project-name* (name *project-name*) nil)))))
 
@@ -787,7 +787,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
         (remove
           (fn (k)
             ;; A non-root section is materialised from the image only for the project's
-            ;; own modules and its dependencies — both live in `*package-module-files*`
+            ;; own modules and its dependencies — both live in `*module-files*`
             ;; (a project roots its own modules under its `:name` too, ADR-070). A
             ;; std/embedded module (regex, editor/ui, …) always loads from its baked-in
             ;; source, so its section would never be read back — writing it is dead
@@ -795,7 +795,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
             ;; `regex/regex-states-cache` (a mutable cache table) makes the whole image
             ;; write fail. Skip it. (Its bare globals still ride the always-materialised
             ;; root section; a builtin there images by name.)
-            (or (= k "") (not (contains? *package-module-files* k))))
+            (or (= k "") (not (contains? *module-files* k))))
           (keys grouped))))))
 
 (defn project-write-image (root before)
@@ -1158,7 +1158,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
 ;; Register the project's OWN modules as package-rooted under its `:name`, and set the
 ;; ambient package context so every source loaded from here on roots (ADR-070). A no-op
 ;; when the project is nameless (a bare `brood file.blsp`, or a manifest with no :name):
-;; then modules stay short, exactly as before rooting. `package-module-files` is the
+;; then modules stay short, exactly as before rooting. `module-files` is the
 ;; same static `(defmodule …)`-name scan the dep path uses.
 (defn- project-root-project-rooting
   (root)
@@ -1169,7 +1169,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
       ;; (and `require-force-package`'s string-keyed lookup of them) always agree.
       (let (pkg (name *project-name*)
             dirs (project-abs-paths root *project-source-paths*)
-            module-files (apply append (map package/package-module-files dirs))
+            module-files (apply append (map package/module-files dirs))
             short-modules (map first module-files))
         (register-package-modules! pkg short-modules)
         (map (fn (mf)
@@ -1187,7 +1187,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
 ;; Load a full project image for **tooling** (the LSP and the `nest mcp` server):
 ;; put the project's sources on *load-path* and load them (so cross-module names
 ;; resolve), then require the `test` and `format` frameworks so their macros and
-;; functions (`describe`/`test`/`assert=`/`is`, `format-source`) are bound too —
+;; functions (`describe`/`test`/`assert=`/`is`, `source`) are bound too —
 ;; otherwise a buffer that uses them false-positives as "unbound" in the advisory
 ;; checker the tooling runs. One definition both servers share, so they can't
 ;; drift on which frameworks a tooling image carries. Returns `root`.
@@ -1217,8 +1217,8 @@ resolve in the advisory checker. Returns the project root."
   ;; mid-cycle, leaving its defs unbound. `require-one` here loads it in a controlled order.
   (require-one 'package)
   (when *project-name*
-    (package/package-record-ns-packages (map (fn (d) (list *project-name* d))
-                                          (project-abs-paths root *project-source-paths*))))
+    (package/record-ns-packages (map (fn (d) (list *project-name* d))
+                                  (project-abs-paths root *project-source-paths*))))
   ;; Dev/test setup sees BOTH the production deps and the `:dev-dependencies` (ADR-172):
   ;; a `nest test`/`nest run` in a dev image resolves and load-paths them all, exactly
   ;; like Cargo's dev-dependencies being available for tests locally. The release bundle
@@ -2800,7 +2800,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
     ;; shipped bundle. (This is the payoff of keeping dev-deps in their own slot.)
     (let (src-dirs (project-abs-paths root *project-source-paths*)
           ;; `ensure-deps` resolves the deps AND, via `package-register-rooting`, writes each
-          ;; dep module's ROOTED name → path into `*package-module-files*` — the exact map the
+          ;; dep module's ROOTED name → path into `*module-files*` — the exact map the
           ;; dep-embedding below reads. Returns the dep source dirs (used only to attribute
           ;; those registry entries to a bundled dep).
           dep-dirs (if *project-dependencies*
@@ -2823,7 +2823,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
             ;; DEPENDENCY modules are embedded by their ROOTED name (`foo/parser`) so two deps
             ;; each providing a `parser` coexist in one flat bundle — dev/release parity for
             ;; package-rooting (ADR-070). The rooted-name → path entries are what `ensure-deps`
-            ;; just wrote into `*package-module-files*`; take those whose file lives under a
+            ;; just wrote into `*module-files*`; take those whose file lives under a
             ;; bundled dep dir (so this is independent of any earlier `project-setup` that may
             ;; also have registered the root project's own rooted modules there). `run-bundle`
             ;; rebuilds the matching `*package-modules-of*` at boot and loads each under context.
@@ -2833,7 +2833,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                                   (cons (list rooted-key (strip-test-forms (file/slurp path))) acc)
                                   acc)))
                         nil
-                        (seq *package-module-files*))
+                        (seq *module-files*))
             pairs (append project-pairs dep-pairs)
             ;; The FULL set of dependency packages rooted in this bundle (transitive included):
             ;; the distinct leading segment of every DEP-rooted key (`store/repo` -> `store`).
@@ -2871,7 +2871,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 
 ;; True if `path` (an absolute .blsp file) lives under one of `dep-dirs` (the bundled
 ;; dependency source dirs) — separates a dependency's rooted module from the root
-;; project's own when reading the `*package-module-files*` registry in `bundle-collect`.
+;; project's own when reading the `*module-files*` registry in `bundle-collect`.
 (defn- bundle-dep-file?
   (path dep-dirs)
   (any? (fn (d) (string/starts-with? path (if (string/ends-with? d "/") d (str d "/")))) dep-dirs))

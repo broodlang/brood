@@ -105,21 +105,21 @@ listener."
     (register :telemetry pid)
     pid))
 
-(defn telemetry-pid ()
+(defn pid ()
   "The listener pid, or nil if telemetry isn't started."
   (whereis :telemetry))
 
 (defn stop-telemetry ()
   "Stop the listener if running. Returns nil. (Handlers stay registered in the global;
 a later `start-telemetry` reuses them.)"
-  (let (pid (telemetry-pid)) (when pid (send pid :stop)) nil))
+  (let (pid (pid)) (when pid (send pid :stop)) nil))
 
-(defn telemetry-sync ()
+(defn sync ()
   "Block until the listener has processed every emit queued before this call (a FIFO
 round-trip), or 2s. For ordering in tests and for flushing before shutdown. Safe: it
 times out rather than hanging if the listener is down, and never runs handler code in
 the caller."
-  (let (pid (telemetry-pid))
+  (let (pid (pid))
     (if pid
       (let (r (ref))
         (send pid [:ping (self) r])
@@ -133,7 +133,7 @@ the caller."
 event is `send`-ed to the listener and handlers run THERE — so this never blocks the
 caller and no handler can crash or hang it. Returns nil; a cheap no-op if telemetry
 isn't started."
-  (let (pid (telemetry-pid))
+  (let (pid (pid))
     (when pid (send pid [:emit event (or measurements {}) (or metadata {})]))
     nil))
 
@@ -184,7 +184,7 @@ handler logic in a process you own, off even the listener. Returns `id`."
 ;; runtime presence-checking (`*telemetry-validate*`), and raw `emit` still works for
 ;; undeclared events.
 
-(defonce *telemetry-events* {})
+(defonce *events* {})
 
 (defn- telemetry-spec-name
   (spec)
@@ -205,22 +205,22 @@ handler logic in a process you own, off even the listener. Returns `id`."
 (defn register-event (event schema)
   "Register `schema` (`{:name :measurements :metadata :doc}`) for telemetry `event` — the
 introspection + runtime-validation registry `defevent` populates. Returns `event`."
-  (swap-registry! telemetry/*telemetry-events* (fn (m) (assoc m event schema)))
+  (swap-registry! telemetry/*events* (fn (m) (assoc m event schema)))
   event)
 
 (defn event-schema (event)
   "The declared schema for `event` (from `defevent`), or nil if undeclared."
-  (get *telemetry-events* event))
-(defn telemetry-events ()
+  (get *events* event))
+(defn events ()
   "The declared-event registry: `event → {:name :measurements :metadata :doc}`."
-  *telemetry-events*)
+  *events*)
 
 (defmacro defevent (fname event & opts)
   "Declare telemetry `event` (the value passed to `emit`/`attach`) with a typed schema, and
 define a typed EMITTER function `name` the checker validates. `opts`:
 `:measurements ((field type) …)` and `:metadata ((field type) …)` (each field a bare symbol
 = `any`, or `(symbol type)`), plus an optional `:doc`. Expands to a schema registration
-(`*telemetry-events*`, for `event-schema` + `*telemetry-validate*`), a `(sig name …)`, and
+(`*events*`, for `event-schema` + `*telemetry-validate*`), a `(sig name …)`, and
 `(defn name (m-fields… md-fields…) (emit event {measurements} {metadata}))`. So
 `(request-stop 42 \"/\" 200)` is checked like any typed call — 'events as data with a
 declared schema', delivered through the `sig` seam (the same trick `defrecord` uses for
@@ -266,7 +266,7 @@ runtime presence-check of a declared event.
 ;; be visible across processes — set it with `(def *telemetry-validate* true)`.
 (def *telemetry-validate* false)
 
-(defn telemetry-validate! (on)
+(defn validate! (on)
   "Enable (`true`) or disable runtime schema presence-checking of declared events. Off by
 default. Must be a function (not a bare `def` from your module) so the rebind lands on
 telemetry's own global, which the listener process reads. Returns `on`."
@@ -282,7 +282,7 @@ telemetry's own global, which the listener process reads. Returns `on`."
   "The declared keys missing from a declared event's payload, as `[kind key]` pairs
 (`kind` = `:measurements` / `:metadata`); empty when `event` is undeclared or complete.
 Pure — the listener turns each pair into a stderr warning. Types are the checker's job."
-  (let (schema (get *telemetry-events* event))
+  (let (schema (get *events* event))
     (if (nil? schema)
       nil
       (append (map (fn (k) [:measurements k])
@@ -452,7 +452,7 @@ folding the kernel snapshot builtins behind the same attach seam as `watch-runti
   nil)
 
 ;; ---- remote tier: subscribe to a peer node's telemetry stream (ADR-053) ------
-;; Location-transparency for the attach seam: a runtime opts in with `telemetry-serve`
+;; Location-transparency for the attach seam: a runtime opts in with `serve`
 ;; (an agent registered as `:telemetry-remote`, like the observer's `:observe`), and a
 ;; peer `subscribe-remote`s a chosen event. The target attaches a forwarding handler that
 ;; `send`s each matching emit to the subscriber (routing over the node link — a `send` to
@@ -478,20 +478,20 @@ detach it. `subs` tracks the attached ids so a `:stop` cleans them all up."
     (:stop (do (doseq (id subs) (detach id)) nil))
     (_ (telemetry-serve-loop subs))))
 
-(defn telemetry-serve ()
+(defn serve ()
   "Make THIS runtime's telemetry stream subscribable from a peer node: spawn an agent and
 register it `:telemetry-remote`, so a remote `subscribe-remote` can stream a chosen event's
 emits over the node link. Requires `(node-start name addr cookie)` first — opt-in, like
 `observe-serve` (a program isn't observable unless it opens itself up). Returns the agent
-pid; `stop-telemetry-serve` (or killing it) tears down every remote subscription."
+pid; `stop-serve` (or killing it) tears down every remote subscription."
   (if (= (node-name) :nonode)
-    (error "telemetry-serve: call (node-start name addr cookie) first")
+    (error "serve: call (node-start name addr cookie) first")
     (let (agent (spawn (telemetry-serve-loop nil)))
       (register :telemetry-remote agent)
       agent)))
 
-(defn stop-telemetry-serve (agent)
-  "Stop a `telemetry-serve` agent and detach every remote-subscription forwarder. Returns nil."
+(defn stop-serve (agent)
+  "Stop a `serve` agent and detach every remote-subscription forwarder. Returns nil."
   (send agent :stop)
   nil)
 
@@ -522,7 +522,7 @@ testable without a live node. Returns the watcher pid."
 into THIS runtime's telemetry stream as `local-event` (default `[:remote event]`), with
 `{:remote-event event}` in the metadata — so local handlers/aggregators consume a peer's
 events through the same attach seam (location-transparent). The peer must have called
-`(telemetry-serve)`. Returns the watcher pid; `stop-subscribe-remote` (or killing it)
+`(serve)`. Returns the watcher pid; `stop-subscribe-remote` (or killing it)
 unsubscribes and exits."
   (telemetry-subscribe-to {:name :telemetry-remote :node peer}
     event

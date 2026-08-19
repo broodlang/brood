@@ -62,7 +62,7 @@ land in a later slice."
 ;; bytes are the file bytes), so existing lock hashes don't churn.
 (defn- package-sha256-file (path) (hash/sha256-bytes (file/slurp-bytes path)))
 
-(defn package-tree-hash (dir)
+(defn tree-hash (dir)
   "The canonical SHA-256 (hex) of a directory's file contents — order-independent of the filesystem, stable across machines (ADR-037)."
   (hash/sha256 (string/join ""
                  (map (fn (rel) (str rel "\0" (package-sha256-file (path-join dir rel)) "\n"))
@@ -527,7 +527,7 @@ land in a later slice."
       (error "package: :path dependency " (get dep :name) " not found at " abs))
     (assoc dep
       :resolved-path abs
-      :sha256 (package-tree-hash abs)
+      :sha256 (tree-hash abs)
       :deps (package-manifest-deps (path-join abs "project.blsp")))))
 
 ;; --- git deps (ADR-037 Slice 2) ---------------------------------------------
@@ -671,7 +671,7 @@ land in a later slice."
         ;; The clone (network, possibly minutes) runs on the offload pool —
         ;; parks only this process, never a scheduler worker (ADR-144).
         (offload %git-clone url target ref commit)
-        (let (sha (package-tree-hash target))
+        (let (sha (tree-hash target))
           (package-write-pkg-meta target url ref commit sha)
           (assoc dep
             :commit commit
@@ -684,7 +684,7 @@ land in a later slice."
   (locked commit target)
   (if (and locked (= (plist-get locked :commit) commit) (plist-get locked :sha256))
     (plist-get locked :sha256)
-    (package-tree-hash target)))
+    (tree-hash target)))
 
 ;; --- tarball deps (ADR-037 v2) ----------------------------------------------
 ;; A :tarball dep names a URL and a MANDATORY :sha256 of the archive bytes — the
@@ -1196,7 +1196,7 @@ sha256 pin still holds."
 ;; PUBLIC (no `--`): the project loader (`project-root-project-rooting`) also scans
 ;; its own source dirs with it to root the root project's modules, a legitimate
 ;; cross-module use.
-(defn package-module-files (src-dir)
+(defn module-files (src-dir)
   (if (not (file/dir? src-dir))
     nil
     (apply append
@@ -1328,7 +1328,7 @@ sha256 pin still holds."
 ;; Record each `[package-name src-dir]` provider's `(defmodule …)` names under its package
 ;; in `*ns-package*` (ADR-172 package identity). A static scan — the same `defmodule`-name
 ;; reads the collision check does — so it never touches the `require`/`defmodule` hot path.
-(defn package-record-ns-packages (pkg-dir-pairs)
+(defn record-ns-packages (pkg-dir-pairs)
   "Record the modules of each `[package-name src-dir]` pair under that package name in the
   ambient `*ns-package*` map. The ability system's app-vs-library seam; called at setup."
   (def *ns-package*
@@ -1348,7 +1348,7 @@ sha256 pin still holds."
   (entries)
   (map (fn (e)
          (let (pkg (name (get e :name))
-               module-files (package-module-files (package-dep-src-dir e)))
+               module-files (module-files (package-dep-src-dir e)))
            (register-package-modules! pkg (map first module-files))
            (map (fn (mf)
                   (register-package-module! (str pkg "/" (name (first mf))) (second mf)))
@@ -1370,8 +1370,8 @@ sha256 pin still holds."
           "' — rename one (package identity keys the ability app tier on it, ADR-172)"))
       (package-write-lockfile-if-changed root entries)
       ;; identity: each dep's modules → the dep's `:name`.
-      (package-record-ns-packages (map (fn (e) (list (get e :name) (package-dep-src-dir e)))
-                                    entries))
+      (record-ns-packages (map (fn (e) (list (get e :name) (package-dep-src-dir e)))
+                            entries))
       ;; package-rooting: each dep's modules → `depname/module`, loadable from its file.
       (package-register-rooting entries)
       (map package-dep-src-dir entries))))
@@ -1483,7 +1483,7 @@ sha256 pin still holds."
 ;; These mutate project.blsp's :dependencies clause while preserving the rest of
 ;; the file — crucially its comments. We do it over the lossless CST (parse-source
 ;; + std/format.blsp): parse → splice an entry node in/out of the :dependencies
-;; vector → re-render with `format/format-cst-root` (which keeps comments). The
+;; vector → re-render with `format/cst-root` (which keeps comments). The
 ;; manifest is reformatted in the process, which is fine for a tool-managed file.
 ;; The pure text transforms (`package-manifest-add`/`-remove`) take a manifest
 ;; string and return a new one, so they unit-test without touching the filesystem.
@@ -1576,8 +1576,8 @@ sha256 pin still holds."
 (defn- package-manifest-transform
   (src f)
   (let (kids (vec->list (node-children (parse-source src))))
-    (format/format-cst-root (apply vector
-                              (map (fn (n) (if (package-project-list? n) (f n) n)) kids)))))
+    (format/cst-root (apply vector
+                       (map (fn (n) (if (package-project-list? n) (f n) n)) kids)))))
 
 (defn- package-manifest-add
   (src entry-node)

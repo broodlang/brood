@@ -262,14 +262,14 @@ text — unbalanced parens in `:form` can't break the host expression."
         {:error (error-shape e)}))))
 
 (defn format-tool (args)
-  "`format` — reformat `:source` via `std/format.blsp`'s `(format-source ...)`.
+  "`format` — reformat `:source` via `std/format.blsp`'s `(source ...)`.
 Idempotent. The require is lazy and cached, so the per-call cost is a hash
 check after the first invocation."
   (let (src (get args :source))
     (when (not (string? src))
       (throw "format: :source must be a string"))
     (try
-      {:formatted (format-source src)}
+      {:formatted (source src)}
       (catch e
         {:error (error-shape e)}))))
 

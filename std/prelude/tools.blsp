@@ -248,20 +248,20 @@ Returns the directory. Pass `{}` to stop consulting an image."
 ;; The package manager populates these two registries when it resolves dependencies
 ;; (`std/tool/package.blsp`); they are empty for a bare `brood file.blsp` run with no
 ;; project, and the root project's OWN modules stay short (unrooted) — only deps root.
-;;   *package-module-files* : a rooted module name (string, `"foo/b"`) → the .blsp file
+;;   *module-files* : a rooted module name (string, `"foo/b"`) → the .blsp file
 ;;     that provides it. `require-force` consults it before the load-path, and a hit
 ;;     drives the package-context load below.
 ;;   *package-modules-of*   : a package's local name (string, `"foo"`) → the list of
 ;;     SHORT module-name symbols it provides — the set that tells `%root-module-name`
 ;;     which references in `foo`'s files are intra-package (root them) vs external.
-(def *package-module-files* {})
+(def *module-files* {})
 (def *package-modules-of* {})
 
 ;; The rooted-key setters (root code, like `set-load-path!`): the package manager
 ;; calls these to register a dependency's modules before its first `require`.
 (defn register-package-module! (rooted-key path)
   "Record that rooted module `rooted-key` (e.g. \"foo/b\") is provided by file `path`."
-  (%registry-update! '*package-module-files* :assoc [rooted-key] path)
+  (%registry-update! '*module-files* :assoc [rooted-key] path)
   rooted-key)
 (defn register-package-modules! (prefix short-modules)
   "Record package `prefix`'s SHORT module names (a list of symbols) — the intra-package set."
@@ -525,7 +525,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 
 ;; The co-located-module fallback (ADR-223). A module whose name is not its file's —
 ;; declared beside another `(defmodule …)` in one file — is invisible to the `<name>.blsp`
-;; filename probe. A NAMED project registers every declared module in `*package-module-files*`
+;; filename probe. A NAMED project registers every declared module in `*module-files*`
 ;; (rooted), so `require` finds it there; a NAMELESS project or a bare `brood file.blsp` run
 ;; has no such registry, so `require` instead scans `*load-path*` for the file that declares
 ;; the name. Reached only AFTER the filename probe misses, so the common path is untouched.
@@ -710,7 +710,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
       ;; consult it, never how to build one (that is `std/tool/project.blsp`).
       ;;
       ;; BEFORE the package branch, and that ordering is load-bearing: a project roots its
-      ;; OWN modules too (ADR-070), so `*package-module-files*` holds `myproj/shapes` as
+      ;; OWN modules too (ADR-070), so `*module-files*` holds `myproj/shapes` as
       ;; surely as it holds a dependency's `foo/b`. Consulted after it, the image branch was
       ;; unreachable for every module of every named project — the image was written on each
       ;; cold start and then never read from. Preferring it is also the right precedence on
@@ -738,9 +738,8 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
       ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
       ;; manager mapped to a file. Load it under `foo`'s package context so its
       ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
-      (contains? *package-module-files* key)
-        (require-force-package key
-          (get *package-module-files* key))
+      (contains? *module-files* key) (require-force-package key
+                                       (get *module-files* key))
       else
       ;; Filename probe first (the fast, overwhelmingly common path: module `foo` in
       ;; `foo.blsp`). On a miss, fall back to the co-located scan (ADR-223) — a module

@@ -1122,11 +1122,11 @@ fn cmd_format(interp: &mut Interp, check: bool, changed: bool) {
     let entry = if check {
         // --check is CI's clean-tree gate: it must see the whole project, so
         // --changed doesn't narrow it (a stale committed file would slip by).
-        "(format/format-project-check)"
+        "(format/project-check)"
     } else if changed {
-        "(format/format-project-changed)"
+        "(format/project-changed)"
     } else {
-        "(format/format-project)"
+        "(format/project)"
     };
     let code = format!("(project/load-config) (require-one 'format) {}", entry);
     run(interp, &code);

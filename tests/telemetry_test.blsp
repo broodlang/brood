@@ -1,7 +1,7 @@
 ;; std/telemetry.blsp — Erlang :telemetry-style instrumentation (listener model).
 ;; A thorough suite: emit→handler delivery, measurements/metadata, event filtering,
 ;; attach/detach/detach-all/re-attach, multiple handlers, introspection, the span
-;; lifecycle, forward, cross-process + concurrent emit, telemetry-sync ordering, the
+;; lifecycle, forward, cross-process + concurrent emit, sync ordering, the
 ;; not-started/after-stop no-ops, and — the headline guarantee — that a handler runs
 ;; in the LISTENER and can crash ONLY the listener, never the emitting process.
 ;;
@@ -59,7 +59,7 @@
       (detach-all)
       (attach :h :other (tel-fwd me))
       (emit :evt {:n 1})
-      (telemetry-sync)
+      (sync)
       (let (r (tel-none))
         (stop-telemetry)
         (assert= r :none))))
@@ -83,7 +83,7 @@
       (attach :h :evt (tel-fwd me))
       (detach :h)
       (emit :evt {:n 1})
-      (telemetry-sync)
+      (sync)
       (let (r (tel-none))
         (stop-telemetry)
         (assert= r :none))))
@@ -130,8 +130,8 @@
       (emit :evt {:n 1})
       (let (got (tel-recv))
         ; ensure dispatch (incl. detach) completed
-        (telemetry-sync)
-        (let (alive (= (telemetry-pid) lpid)
+        (sync)
+        (let (alive (= (pid) lpid)
               ids (tel-ids :evt))
           (stop-telemetry)
           (assert= got [:evt {:n 1} {}])
@@ -219,11 +219,11 @@
   (test "emit and span are no-ops when telemetry isn't started"
     (do
       (stop-telemetry)
-      (assert= (telemetry-pid) nil)
+      (assert= (pid) nil)
       (assert= (emit :x {:a 1}) nil)
       ; span still runs its body and returns it
       (assert= (span :x {} 99) 99)
-      (assert= (telemetry-sync) :no-listener)))
+      (assert= (sync) :no-listener)))
 
   (test "emit after stop is a no-op (no crash)"
     (do
@@ -235,14 +235,14 @@
 ;; ---- concurrency ------------------------------------------------------------
 (describe "telemetry: concurrent emitters"
   :isolated
-  (test "telemetry-sync flushes: after sync the handler effect is observable"
+  (test "sync flushes: after sync the handler effect is observable"
     (let (me (self))
       (start-telemetry)
       (detach-all)
       (attach :h :evt (tel-fwd me))
       (emit :evt {:n 1})
       ; listener has now processed the emit
-      (telemetry-sync)
+      (sync)
       (let (got (receive ([:ev e m md] [e m md]) (after 0 :none)))
         (stop-telemetry)
         (assert= got [:evt {:n 1} {}]))))

@@ -894,13 +894,13 @@ test discovery, lints, release, config)."
 ;; template cannot reintroduce the drift, and a change to the formatter's style is
 ;; picked up for free.
 ;;
-;; `format-file` leaves a file it cannot parse untouched, so a malformed template
+;; `file` leaves a file it cannot parse untouched, so a malformed template
 ;; degrades to "written as-is" rather than mangled; failures are swallowed because a
 ;; cosmetic pass must never break scaffolding.
 (defn- scaffold-format-generated!
   (paths)
   (dolist (p paths)
-    (when (string/ends-with? p ".blsp") (try (format/format-file p) (catch _ nil)))))
+    (when (string/ends-with? p ".blsp") (try (format/file p) (catch _ nil)))))
 
 (defn new-project (nm &optional template)
   "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime), `\"hatch\"` (a Hatch web app with a Postgres-backed message board — requires hatch + store-postgres as sibling path deps; run `nest run --main db-setup` once to create the database, then `nest run` to start), or `\"web-api\"` (a minimal Hatch JSON API — no live layer, no database; requires hatch as a sibling path dep; `nest run` to start). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."

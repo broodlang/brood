@@ -9,7 +9,7 @@
 //! 1. `project-install-image` ran `(def *image-sections* …)` inside module `project`,
 //!    which binds `project/*image-sections*` — while `require-force`, root code, kept
 //!    reading the empty root global.
-//! 2. `require-force` consulted `*package-module-files*` before `*image-sections*`, and
+//! 2. `require-force` consulted `*module-files*` before `*image-sections*`, and
 //!    a project roots its OWN modules (ADR-070), so the package branch matched first for
 //!    every module of every named project.
 //!

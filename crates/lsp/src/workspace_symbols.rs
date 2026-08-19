@@ -7,7 +7,7 @@
 //! across the project costs one parse per file and no evaluation.
 //!
 //! Matching is a **case-insensitive subsequence** test (the fuzzy model editors
-//! expect: `fl0` matches `format-source` via f…o…). The client typically filters
+//! expect: `fl0` matches `source` via f…o…). The client typically filters
 //! again, but a server-side filter keeps the payload small on a big project. An
 //! empty query returns every symbol (the "show all" affordance some clients use).
 
@@ -133,11 +133,11 @@ mod tests {
     #[test]
     fn subsequence_matching() {
         assert!(matches("", "anything"));
-        assert!(matches("fs", "format-source"));
-        assert!(matches("FORMAT", "format-source")); // case-insensitive
-        assert!(matches("frmtsrc", "format-source"));
-        assert!(!matches("xyz", "format-source"));
-        assert!(!matches("sf", "format-source")); // order matters
+        assert!(matches("fs", "source"));
+        assert!(matches("FORMAT", "source")); // case-insensitive
+        assert!(matches("frmtsrc", "source"));
+        assert!(!matches("xyz", "source"));
+        assert!(!matches("sf", "source")); // order matters
     }
 
     #[test]

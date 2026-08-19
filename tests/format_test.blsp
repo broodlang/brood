@@ -2,7 +2,7 @@
 ;; discovered and run by `nest test` (and cargo test, via crates/lisp/tests/
 ;; suite.rs).
 ;;
-;; The contract is: format-source is idempotent on every well-formed input,
+;; The contract is: source is idempotent on every well-formed input,
 ;; preserves comments, preserves blank-line intent between top-level forms,
 ;; collapses short forms onto a single line, and breaks long ones over multiple.
 
@@ -24,34 +24,34 @@
   ;; One case per leaf kind the reader can produce, so the next literal kind added
   ;; without teaching the formatter fails here instead of quietly disfiguring the tree.
   (test "a ratio literal does not force a break"
-    (assert= (format-source "(sqrt 9/4)") "(sqrt 9/4)\n")
-    (assert= (format-source "(assert= (sqrt 9/4) 1.5)") "(assert= (sqrt 9/4) 1.5)\n")
-    (assert= (format-source "(list 1/2 -3/4 22/7)") "(list 1/2 -3/4 22/7)\n"))
+    (assert= (source "(sqrt 9/4)") "(sqrt 9/4)\n")
+    (assert= (source "(assert= (sqrt 9/4) 1.5)") "(assert= (sqrt 9/4) 1.5)\n")
+    (assert= (source "(list 1/2 -3/4 22/7)") "(list 1/2 -3/4 22/7)\n"))
   (test "a decimal literal does not force a break"
-    (assert= (format-source "(floor 1.5M)") "(floor 1.5M)\n")
-    (assert= (format-source "(list 1.50M 0M -3.14M)") "(list 1.50M 0M -3.14M)\n"))
+    (assert= (source "(floor 1.5M)") "(floor 1.5M)\n")
+    (assert= (source "(list 1.50M 0M -3.14M)") "(list 1.50M 0M -3.14M)\n"))
   (test "every leaf kind inlines: symbol keyword int float ratio decimal bool nil string"
-    (assert= (format-source "(f a :k 1 1.5 1/2 1.5M true nil \"s\")")
+    (assert= (source "(f a :k 1 1.5 1/2 1.5M true nil \"s\")")
       "(f a :k 1 1.5 1/2 1.5M true nil \"s\")\n"))
   ;; The contract that actually protects the tree: formatting must not GROW a file that
   ;; is already canonical. A forced break is visible as extra lines.
   (test "a canonical one-line form is unchanged, so re-formatting cannot grow it"
     (dolist (src (list "(sqrt 9/4)" "(floor 1.5M)" "(list 1/2)" "(f 22/7 1.5M)"))
-      (let (out (format-source src))
+      (let (out (source src))
         (assert= out (str src "\n"))
         (assert= (count-newlines out) 1)
         ;; and idempotent
-        (assert= (format-source out) out)))))
+        (assert= (source out) out)))))
 
 (describe "format: trivial inputs"
-  (test "empty input yields empty output" (assert= (format-source "") ""))
-  (test "a single form gets a trailing newline" (assert= (format-source "(+ 1 2)") "(+ 1 2)\n"))
+  (test "empty input yields empty output" (assert= (source "") ""))
+  (test "a single form gets a trailing newline" (assert= (source "(+ 1 2)") "(+ 1 2)\n"))
   (test "whitespace is normalised inside a form"
-    (assert= (format-source "(+   1    2)") "(+ 1 2)\n"))
+    (assert= (source "(+   1    2)") "(+ 1 2)\n"))
   (test "extra blank lines between top-level forms collapse to one"
-    (assert= (format-source "(def a 1)\n\n\n\n(def b 2)") "(def a 1)\n\n(def b 2)\n"))
+    (assert= (source "(def a 1)\n\n\n\n(def b 2)") "(def a 1)\n\n(def b 2)\n"))
   (test "no blank line between forms stays no-blank"
-    (assert= (format-source "(def a 1)\n(def b 2)") "(def a 1)\n(def b 2)\n")))
+    (assert= (source "(def a 1)\n(def b 2)") "(def a 1)\n(def b 2)\n")))
 
 (describe "format: short forms collapse"
   ;; The formatter respects author newlines on forms the user already broke
@@ -60,38 +60,38 @@
   ;; line is normalised. Tests written before that change pinned the collapse
   ;; behaviour; the new behaviour pins the preservation.
   (test "a single-line let stays a single line"
-    (assert= (format-source "(let (a 1     b 2) (+ a b))") "(let (a 1 b 2) (+ a b))\n"))
+    (assert= (source "(let (a 1     b 2) (+ a b))") "(let (a 1 b 2) (+ a b))\n"))
   (test "an already-multi-line let stays multi-line"
-    (assert= (format-source "(let (a 1\n      b 2)\n  (+ a b))")
+    (assert= (source "(let (a 1\n      b 2)\n  (+ a b))")
       "(let (a 1\n      b 2)\n  (+ a b))\n"))
   (test "a single-line defn stays a single line"
-    (assert= (format-source "(defn add (x y) (+   x  y))") "(defn add (x y) (+ x y))\n"))
+    (assert= (source "(defn add (x y) (+   x  y))") "(defn add (x y) (+ x y))\n"))
   (test "an already-multi-line defn keeps the body break but normalises the header"
     ;; defn header (name + params) is always one line by rule, so the input's
     ;; `defn\n  (x y)` collapses to `defn add (x y)`. The body's newline before
     ;; `(+ x y)` is the author's break — the formatter preserves it.
-    (assert= (format-source "(defn add\n  (x y)\n  (+ x y))")
+    (assert= (source "(defn add\n  (x y)\n  (+ x y))")
       "(defn add (x y)\n  (+ x y))\n")))
 
 (describe "format: long forms break"
   (test "a long generic call rides the first arg on the head line, rest at +2"
     (let (in "(very-long-function-name aaaaaaaaaaaaa bbbbbbbbbbbbb cccccccccccccc ddddddddddddd eeeeeeeeeeeee ffffffffffff)"
-          out (format-source in))
+          out (source in))
       ;; Call-style with first-arg-ride: head + arg1 on first line, rest at +2.
       (is (includes? out "(very-long-function-name aaaaaaaaaaaaa\n  bbbbbbbbbbbbb"))))
   (test "a too-long defn keeps name + params on the head line + indents the body"
     (let (in "(defn long-function-name (x y z) (some-long-body-form x y z w v u u1 u2) (another-long-body x y z w v))"
-          out (format-source in))
+          out (source in))
       ;; defn is in the header table (count = 2): name + params ride along.
       (is (includes? out "(defn long-function-name (x y z)\n  (some-long-body-form"))))
   (test "let bindings break as pairs aligned under the first element"
     (let (in "(let (aaaaaaaaaaa-binding 1 bbbbbbbbbbb-binding 2 ccccccccccc-binding 3 ddddddddddd-binding 4 eeeeeeeeeee-binding 5) body)"
-          out (format-source in))
+          out (source in))
       ;; Each binding pair on its own line, aligned at column 6 (one past `(`).
       (is (includes? out "aaaaaaaaaaa-binding 1\n      bbbbbbbbbbb-binding 2"))))
   (test "cond clauses break as test+result pairs at +2"
     (let (in "(cond (some-test-form x y z) (some-result-form a b) (another-test-form x y z) (another-result-form a b) else default)"
-          out (format-source in))
+          out (source in))
       ;; Each `test result` pair on one body-indent line.
       (is (includes? out
             "(some-test-form x y z) (some-result-form a b)\n  (another-test-form")))))
@@ -101,19 +101,19 @@
   ;; the collection rides the head line and each k/v pair sits on one body line
   ;; (the *format-pair-body* shape), not one element per line.
   (test "a broken assoc pairs key+value, collection on the head line"
-    (let (out (format-source "(assoc m\n :alpha 1 :beta 2 :gamma 3)"))
+    (let (out (source "(assoc m\n :alpha 1 :beta 2 :gamma 3)"))
       (is (includes? out "(assoc m\n  :alpha 1\n  :beta 2\n  :gamma 3)"))
       ;; never one element per line
       (is (not (includes? out ":alpha\n")))))
   (test "a width-busting assoc pairs rather than splits"
-    (let (out (format-source "(assoc configuration-map :alpha-key 100 :beta-key 200 :gamma-key 300 :delta-key 400 :epsilon-key 500 :zeta-key 600)"))
+    (let (out (source "(assoc configuration-map :alpha-key 100 :beta-key 200 :gamma-key 300 :delta-key 400 :epsilon-key 500 :zeta-key 600)"))
       (is (includes? out ":alpha-key 100\n"))
       (is (not (includes? out ":alpha-key\n")))))
   (test "a short assoc stays on one line"
-    (assert= (format-source "(assoc m :a 1 :b 2)") "(assoc m :a 1 :b 2)\n"))
+    (assert= (source "(assoc m :a 1 :b 2)") "(assoc m :a 1 :b 2)\n"))
   (test "assoc is idempotent when broken"
-    (let (out (format-source "(assoc m\n :alpha 1 :beta 2 :gamma 3)"))
-      (assert= out (format-source out)))))
+    (let (out (source "(assoc m\n :alpha 1 :beta 2 :gamma 3)"))
+      (assert= out (source out)))))
 
 (describe "format: receive breaks cond-style"
   ;; `receive` has no scrutinee — every clause is a body form, so a broken
@@ -121,33 +121,33 @@
   ;; like `cond`), rather than riding the first clause up onto the head line.
   (test "a broken receive keeps each clause on its own line, head alone"
     ;; an author newline after the head forces the broken shape (keep-broken)
-    (let (out (format-source "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"))
+    (let (out (source "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"))
       (is (includes? out
             "(receive\n  (:stop (cleanup))\n  ([:go x] (run x))\n  (after t (tick)))"))))
   (test "a short receive stays on one line"
-    (assert= (format-source "(receive ([:sse ev] ev))") "(receive ([:sse ev] ev))\n"))
+    (assert= (source "(receive ([:sse ev] ev))") "(receive ([:sse ev] ev))\n"))
   (test "receive is idempotent when broken"
-    (let (out (format-source "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"))
-      (assert= out (format-source out)))))
+    (let (out (source "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"))
+      (assert= out (source out)))))
 
 (describe "format: comments are preserved"
   (test "a top-level comment is kept"
-    (assert= (format-source ";; hello\n(def x 1)") ";; hello\n(def x 1)\n"))
+    (assert= (source ";; hello\n(def x 1)") ";; hello\n(def x 1)\n"))
   (test "an inline comment forces multi-line on its enclosing list"
-    (let (in "(defn f (x) ;; doc\n  x)" out (format-source in))
+    (let (in "(defn f (x) ;; doc\n  x)" out (source in))
       (is (includes? out ";; doc"))
       ;; The body item moves to a new line at +2 indent.
       (is (includes? out "\n  x)"))))
   (test "blank lines between two top-level comments are preserved"
-    (assert= (format-source ";; a\n\n;; b\n(def x 1)") ";; a\n\n;; b\n(def x 1)\n"))
+    (assert= (source ";; a\n\n;; b\n(def x 1)") ";; a\n\n;; b\n(def x 1)\n"))
   ;; Same-line trailing comments are left WHERE THE AUTHOR PUT THEM. They used to be
   ;; hoisted onto their own line above the form, which is what made `nest format`
   ;; disagree with this tree (98 lines of its red) and destroyed the alignment that
   ;; makes a column of trailing comments readable.
   (test "a trailing comment on a top-level form stays on its line"
-    (assert= (format-source "(def x 5) ;; note") "(def x 5) ;; note\n"))
+    (assert= (source "(def x 5) ;; note") "(def x 5) ;; note\n"))
   (test "a trailing comment on a body form stays on its line"
-    (let (out (format-source "(defn f (x)\n  (foo) ;; note\n  (bar))"))
+    (let (out (source "(defn f (x)\n  (foo) ;; note\n  (bar))"))
       (is (includes? out "(foo) ;; note"))
       (is (not (includes? out ";; note\n  (foo)"))))))
 
@@ -158,25 +158,25 @@
   ;; comments out the `)` and leaves the list unclosed — an unparseable file.
   ; never swallowed
   (test "the closing paren drops below a trailing comment, not into it"
-    (let (out (format-source "(describe \"x\"\n  (test \"a\" (is true))\n  ;; note\n  )"))
+    (let (out (source "(describe \"x\"\n  (test \"a\" (is true))\n  ;; note\n  )"))
       ; `)` on its own line
       (is (includes? out ";; note\n)"))
       (is (not (includes? out ";; note)")))))
   (test "the result is re-readable (not just CST-parseable)"
     ;; parse-source is lenient on unclosed lists; the real reader is not — pin it.
-    (let (out (format-source "(describe \"x\"\n  (test \"a\")\n  ;; note\n  )"))
+    (let (out (source "(describe \"x\"\n  (test \"a\")\n  ;; note\n  )"))
       (is (= (read-string (str "(do " out ")")) (read-string "(do (describe \"x\" (test \"a\")))")))))
   (test "idempotent with a trailing comment"
-    (let (out (format-source "(foo\n  (bar)\n  ;; note\n  )"))
-      (assert= out (format-source out))))
+    (let (out (source "(foo\n  (bar)\n  ;; note\n  )"))
+      (assert= out (source out))))
   ;; The pair-body emitter (cond/case) used to skip over a comment while hunting
   ;; for a clause's partner form, DROPPING the comment. It must be preserved.
   (test "a comment after the last cond clause is not dropped"
-    (let (out (format-source "(cond\n  (a 1)\n  ;; fallback\n  )"))
+    (let (out (source "(cond\n  (a 1)\n  ;; fallback\n  )"))
       (is (includes? out ";; fallback"))
       (is (includes? out ";; fallback\n)"))))
   (test "a comment between cond clauses is preserved and breaks the pair"
-    (let (out (format-source "(cond\n  (a 1)\n  ;; mid\n  (b 2))"))
+    (let (out (source "(cond\n  (a 1)\n  ;; mid\n  (b 2))"))
       (is (includes? out ";; mid"))
       (is (includes? out "(b 2)"))))
   ;; A comment in a let bindings list used to disable pair-grouping entirely,
@@ -185,7 +185,7 @@
   ;; pair, an own-line comment sits on its own line at the pair indent.
   ; name never split from its value
   (test "a trailing comment in let bindings stays on its pair's line"
-    (let (out (format-source "(let (a 1\n      b 2  ; note\n      c 3)\n  body)"))
+    (let (out (source "(let (a 1\n      b 2  ; note\n      c 3)\n  body)"))
       (is (includes? out "b 2 ; note"))
       (is (not (includes? out "; note\n      b 2")))
       ;; a name is still never split from its value
@@ -195,89 +195,89 @@
   ;; commenting out the `)` and leaving the file unparseable. Only reachable now that
   ;; a trailing comment can be the last thing emitted.
   (test "a bindings list ending in a trailing comment still closes legally"
-    (let (out (format-source "(let (a 1 ; the a\n      b 2 ; the b\n      )\n  (+ a b))"))
+    (let (out (source "(let (a 1 ; the a\n      b 2 ; the b\n      )\n  (+ a b))"))
       (is (includes? out "b 2 ; the b\n"))
       (is (not (includes? out "; the b)")))
       ;; and it still parses
-      (is (= (format-source out) out))))
+      (is (= (source out) out))))
   (test "an own-line comment in let bindings stays on its own line, pairs intact"
-    (let (out (format-source "(let (a 1\n      ;; mid\n      b 2)\n  body)"))
+    (let (out (source "(let (a 1\n      ;; mid\n      b 2)\n  body)"))
       (is (includes? out "a 1\n      ;; mid\n      b 2"))))
   (test "a comment in a map pairs up like bindings (not one element per line)"
-    (let (out (format-source "(def m {:a 1\n        :b 2  ; note\n        :c 3})"))
+    (let (out (source "(def m {:a 1\n        :b 2  ; note\n        :c 3})"))
       (is (includes? out "; note"))
       ; hoisted above, not inline
       (is (not (includes? out ":b 2  ; note")))
       (is (not (includes? out ":b\n")))))
   (test "comments in pair-lists are idempotent"
-    (let (out (format-source "(let (a 1\n      b 2  ; note\n      ;; mid\n      c 3)\n  body)"))
-      (assert= out (format-source out)))))
+    (let (out (source "(let (a 1\n      b 2  ; note\n      ;; mid\n      c 3)\n  body)"))
+      (assert= out (source out)))))
 
 (describe "format: comment markers preserved verbatim"
   ;; Lisp convention is `;` for trailing comments, `;;` at the current code
   ;; column, `;;;` for top-level banners. The formatter must not "normalise"
   ;; the marker count — that's authorial intent.
   (test "single ; marker survives"
-    (let (out (format-source "; one\n(def x 1)"))
+    (let (out (source "; one\n(def x 1)"))
       (is (includes? out "; one"))))
   (test ";; marker (current-line column) survives"
-    (let (out (format-source ";; section\n(def x 1)"))
+    (let (out (source ";; section\n(def x 1)"))
       (is (includes? out ";; section"))))
   (test ";;; marker (top-level banner) survives"
-    (let (out (format-source ";;; banner\n(def x 1)"))
+    (let (out (source ";;; banner\n(def x 1)"))
       (is (includes? out ";;; banner"))))
   (test "a trailing comment stays after the code, marker preserved verbatim"
-    (assert= (format-source "(def x 1) ; trailing") "(def x 1) ; trailing\n"))
+    (assert= (source "(def x 1) ; trailing") "(def x 1) ; trailing\n"))
   (test "a trailing comment after a closing paren stays put"
-    (assert= (format-source "(defn f () 0) ;; nullary") "(defn f () 0) ;; nullary\n"))
+    (assert= (source "(defn f () 0) ;; nullary") "(defn f () 0) ;; nullary\n"))
   (test "a cond clause keeps its trailing comment on the clause line"
-    (let (out (format-source "(cond\n  (p x) :yes ; when p\n  else :no)"))
+    (let (out (source "(cond\n  (p x) :yes ; when p\n  else :no)"))
       (is (includes? out ":yes ; when p"))
-      (is (= (format-source out) out))))
+      (is (= (source out) out))))
   (test "comment-only input gets a single trailing newline, nothing else"
-    (assert= (format-source ";; just a comment") ";; just a comment\n")))
+    (assert= (source ";; just a comment") ";; just a comment\n")))
 
 (describe "format: strings"
   (test "a short string literal is preserved byte-for-byte"
-    (assert= (format-source "(def s \"hello world\")") "(def s \"hello world\")\n"))
+    (assert= (source "(def s \"hello world\")") "(def s \"hello world\")\n"))
   (test "escape sequences inside a string survive unchanged"
-    (assert= (format-source "(def s \"a\\tb\\nc\")") "(def s \"a\\tb\\nc\")\n"))
+    (assert= (source "(def s \"a\\tb\\nc\")") "(def s \"a\\tb\\nc\")\n"))
   (test "a multi-line string literal preserves its internal newlines"
     (let (in "(def doc \"line one\nline two\nline three\")"
-          out (format-source in))
+          out (source in))
       ;; The string content stays byte-for-byte — including the literal
       ;; newlines (we can't reflow inside a string literal).
       (is (includes? out "\"line one\nline two\nline three\""))))
   (test "a string longer than the width budget pushes itself to its own line, content untouched"
     (let (long-content "this is a really long string that exceeds the eighty column width budget the formatter uses"
           in (str "(def msg \"" long-content "\")")
-          out (format-source in))
+          out (source in))
       ;; Content is preserved verbatim.
       (is (includes? out (str "\"" long-content "\"")))
       ;; And the form breaks: string lands on its own line at +2 indent.
       (is (includes? out (str "(def msg\n  \"" long-content "\""))))))
 
 (describe "format: reader macros + collections"
-  (test "quote stays attached to its form" (assert= (format-source "'(a b c)") "'(a b c)\n"))
+  (test "quote stays attached to its form" (assert= (source "'(a b c)") "'(a b c)\n"))
   (test "quasi / unquote / splice are emitted with their prefixes"
-    (assert= (format-source "`(a ~b ~@c)") "`(a ~b ~@c)\n"))
-  (test "vectors fit on one line when they fit" (assert= (format-source "[ 1  2  3 ]") "[1 2 3]\n"))
+    (assert= (source "`(a ~b ~@c)") "`(a ~b ~@c)\n"))
+  (test "vectors fit on one line when they fit" (assert= (source "[ 1  2  3 ]") "[1 2 3]\n"))
   (test "maps keep alternating key/value pairs"
-    (assert= (format-source "{ :a 1   :b 2 }") "{:a 1 :b 2}\n"))
+    (assert= (source "{ :a 1   :b 2 }") "{:a 1 :b 2}\n"))
   ;; A set literal `#{…}` keeps its `#{` glued and lays out flat like a vector.
   ;; Regression: `#{}` was once re-emitted as `# {}` (a lone `#` symbol + an empty
   ;; map), which no longer reads back as a set and crashes at runtime.
   (test "an empty set keeps its #{ glued"
-    (assert= (format-source "#{}") "#{}\n"))
+    (assert= (source "#{}") "#{}\n"))
   (test "a set stays flat and normalises inner spacing"
-    (assert= (format-source "#{ 1   2  3 }") "#{1 2 3}\n"))
+    (assert= (source "#{ 1   2  3 }") "#{1 2 3}\n"))
   (test "a set as a get default round-trips"
-    (assert= (format-source "(get m k #{})") "(get m k #{})\n"))
+    (assert= (source "(get m k #{})") "(get m k #{})\n"))
   (test "empty containers stay empty"
-    (assert= (format-source "()") "()\n")
-    (assert= (format-source "[]") "[]\n")
-    (assert= (format-source "{}") "{}\n")
-    (assert= (format-source "#{}") "#{}\n")))
+    (assert= (source "()") "()\n")
+    (assert= (source "[]") "[]\n")
+    (assert= (source "{}") "{}\n")
+    (assert= (source "#{}") "#{}\n")))
 
 (describe "format: idempotency"
   (test "idempotent on a representative grab-bag"
@@ -293,12 +293,12 @@
                     "(defn f () 0) ;; nullary" "(def s \"hello world\")" "(def s \"a\\tb\\nc\")"
                     "(def doc \"line one\nline two\nline three\")"))
       (fold (fn (_ s)
-              (let (once (format-source s) twice (format-source once)) (assert= once twice)))
+              (let (once (source s) twice (source once)) (assert= once twice)))
         nil samples)))
   (test "the prelude is idempotent (format(format(prelude)) == format(prelude))"
-    ;; The prelude is the largest single-file Brood program we have; idempotency
-    ;; on it is a high-confidence smoke test of the whole walker.
-    (let (src (file/slurp "std/prelude.blsp") once (format-source src) twice (format-source once))
+    ;; The prelude (now split across std/prelude/*.blsp) is the largest Brood program we
+    ;; have; idempotency on its biggest file is a high-confidence smoke test of the walker.
+    (let (src (file/slurp "std/prelude/tools.blsp") once (source src) twice (source once))
       (assert= once twice))))
 
 ;; Tail-recursive (the test green-process stack is small, so O(1) stack): format
@@ -307,7 +307,7 @@
   (src want i n)
   (cond
     (>= i n) true
-    (= (format-source src) want) (format-stable? src want (+ i 1) n)
+    (= (source src) want) (format-stable? src want (+ i 1) n)
     else false))
 
 (describe "format: stays correct once the formatter tiers (regression)"
@@ -315,15 +315,15 @@
   ;; 2026-06-14): admitting `Const(Bool)` to the JIT lowering subset let the
   ;; formatter's bool-returning predicates (whitespace?/comment?/node?/…) tier to
   ;; native, where they miscompiled and returned `()` — so `nest format` silently
-  ;; rewrote every form to `()`. A single `format-source` is correct; the
+  ;; rewrote every form to `()`. A single `source` is correct; the
   ;; corruption only appears once those arms are hot, so this formats the same
   ;; source many times (past the tier threshold) and asserts the output never
   ;; drifts from the correct (single-shot) result.
   ;; NB: only bites under `--features jit` — the JIT is off in the default `make
   ;; test` build, so run the suite with the JIT to actually exercise this.
-  (test "repeated format-source does not drift under tiering"
+  (test "repeated source does not drift under tiering"
     (let (src "(def y 5)\n(+ a b c)\n(if a b c)\n(defn g (x) x)\n")
-      (is (format-stable? src (format-source src) 0 300)))))
+      (is (format-stable? src (source src) 0 300)))))
 
 (describe "format: project/plugin-extensible headers"
   ;; *format-headers-extra* lets a project (and its :format-plugins deps) teach the
@@ -335,9 +335,9 @@
   (test "an extra header rule keeps the clause signature on the head line"
     (let (src "(zzz-clause \"event\" (params model)\n  (handler params model))")
       (def *format-headers-extra* {})
-      (let (plain (format-source src))
+      (let (plain (source src))
         (def *format-headers-extra* {'zzz-clause 2})
-        (let (ruled (format-source src))
+        (let (ruled (source src))
           (def *format-headers-extra* {})
           ;; no rule → call-style: the event name sits alone, the signature splits
           (assert= (string/starts-with? plain "(zzz-clause \"event\"\n") true)
@@ -371,19 +371,19 @@
           source "(defn f (x)\n  (+ x 1)\n\n(defn g (y)\n  (* y 2))\n")
       (file/mkdir dir)
       (file/spit path source)
-      (assert= (format/format-file path) :unparseable)
+      (assert= (format/file path) :unparseable)
       (assert= (file/slurp path) source)))
   (test "a badly-laid-out but PARSEABLE file is still rewritten"
     (let (dir (temp-dir "brood-fmt-safe-")
           path (path-join dir "ugly.blsp"))
       (file/mkdir dir)
       (file/spit path "(defn f (x)\n        (+ x 1))\n")
-      (assert= (format/format-file path) :rewrote)
+      (assert= (format/file path) :rewrote)
       (is (format/format-parses? (file/slurp path)))))
   (test "an already-formatted file is left unchanged"
     (let (dir (temp-dir "brood-fmt-safe-")
           path (path-join dir "clean.blsp"))
       (file/mkdir dir)
       (file/spit path "(defn f (x) (+ x 1))\n")
-      (format/format-file path)
-      (assert= (format/format-file path) :unchanged))))
+      (format/file path)
+      (assert= (format/file path) :unchanged))))

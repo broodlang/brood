@@ -15,20 +15,20 @@ line — e.g. `defn` keeps the name + params there so the body indents under
 them. Comments inside a list force the multi-line shape; they're re-emitted on
 their own lines at the surrounding indent.
 
-Idempotency is a contract: `(= (format-source (format-source s)) (format-source s))`
+Idempotency is a contract: `(= (source (source s)) (source s))`
 for every well-formed input. Hand-checked across the brood repo's std/ and tests/."
   (:use project))
 
 ;; ---- knobs ------------------------------------------------------------------
-(def *format-width* 100)
+(def *width* 100)
 ; column budget for the single-line attempt (the built-in default)
 
-;; The effective column budget: a project's manifest `:format-width` (ambient
-;; `*project-format-width*`, set by `project-setup`) when present, else the built-in
+;; The effective column budget: a project's manifest `:width` (ambient
+;; `*project-width*`, set by `project-setup`) when present, else the built-in
 ;; default. So `nest format` / the LSP / `nest mcp` all honour a project that pins,
-;; say, `:format-width 80`, and a bare `brood`-run format uses the default.
-(defn format-width ()
-  (or *project-format-width* *format-width*))
+;; say, `:width 80`, and a bare `brood`-run format uses the default.
+(defn width ()
+  (or *project-width* *width*))
 
 ;; ---- CST node accessors -----------------------------------------------------
 ;; Every node is a vector [kind payload]. For leaves payload is the raw source
@@ -304,7 +304,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   (let (keep-broken (had-author-newlines? n)
         one (if keep-broken nil (single-line n)))
     (cond
-      (and one (<= (+ indent (string/length one)) (format-width))) one
+      (and one (<= (+ indent (string/length one)) (width))) one
       (= (node-kind n) :map) (render-pair-break (node-children n) indent "{" "}")
       else (render-break (node-children n) indent open close))))
 
@@ -551,7 +551,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   (let (keep-broken (had-author-newlines? n)
         one (if keep-broken nil (single-line n)))
     (cond
-      (and one (<= (+ indent (string/length one)) (format-width))) one
+      (and one (<= (+ indent (string/length one)) (width))) one
       else (render-pair-break (node-children n) indent "(" ")"))))
 
 (defn- render-pair-break
@@ -713,7 +713,7 @@ retired the `comment-on-own-line?` distinction this used to need."
                     vflat (single-line vnode)
                     pair-fits (and vflat
                                 (<= (+ body-ind (string/length arendr) 1 (string/length vflat))
-                                  (format-width)))
+                                  (width)))
                     value-ind (+ body-ind 2)
                     pair-str (if pair-fits
                                (str arendr
@@ -785,7 +785,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   ;; and the first body item (a blank there would be ugly and isn't user intent).
   ;;
   ;; `fill?` (true only for a **generic call** — never a body/special form) packs
-  ;; consecutive single-line args onto one line up to `*format-width*`, so an
+  ;; consecutive single-line args onto one line up to `*width*`, so an
   ;; overflowing `(error "a: " x " b: " y …)` wraps as a few filled lines rather
   ;; than one tall stack. The +2 indent is kept (no align-to-head, which would
   ;; reflow on every rename). `col` = the column the next arg would fill to, or nil
@@ -833,7 +833,7 @@ retired the `comment-on-own-line?` distinction this used to need."
                            single
                            (nil? tc-idx)
                            (< nl 2)
-                           (<= (+ col 1 w) (format-width)))
+                           (<= (+ col 1 w) (width)))
                 ;; The column a following arg would fill to: end of this arg on
                 ;; its line, or nil when it is multi-line (can't fill after it).
                 next-col (if single (+ body-ind w) nil))
@@ -878,14 +878,14 @@ retired the `comment-on-own-line?` distinction this used to need."
                   nil)))))))
 
 ;; ---- top-level walk ---------------------------------------------------------
-;; `format-source src` parses src, renders the root, and ensures exactly one
+;; `source src` parses src, renders the root, and ensures exactly one
 ;; trailing newline. Top-level forms are joined by a single `\n`, with a blank
 ;; line preserved between any pair the author separated with one.
-(defn format-source (src)
+(defn source (src)
   "Format `src` as a Brood source string. Idempotent."
-  (let (root (parse-source src)) (format-cst-root (node-children root))))
+  (let (root (parse-source src)) (cst-root (node-children root))))
 
-(defn format-cst-root (kids)
+(defn cst-root (kids)
   ;; The walk accumulates the top-level blocks as a REVERSED chunk list, joined once here.
   ;; It used to accumulate the output string itself — `(str acc "\n" block)` per top-level
   ;; form — which recopies everything emitted so far, i.e. O(forms × file). That reads as
@@ -1063,15 +1063,15 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; half-typed file into silently different code.
 (defn- format-parses? (src) (try (do (read-all src) true) (catch _ false)))
 
-(defn format-file (path)
+(defn file (path)
   "Format the file at `path` in place. Returns `:unchanged`, `:rewrote`, or `:unparseable` — a file that does not parse is left untouched, since there is no program to re-lay-out and the tolerant CST would restructure it."
   (let (src (file/slurp path))
     (if (not (format-parses? src))
       :unparseable
-      (let (out (format-source src))
+      (let (out (source src))
         (if (= src out) :unchanged (do (file/spit path out) :rewrote))))))
 
-(defn format-project ()
+(defn project ()
   "Format every .blsp under the current project (sources + tests). Prints one line
 per rewritten file and a summary; returns the number of files rewritten. A file
 that does not parse is reported and skipped, never rewritten."
@@ -1098,7 +1098,7 @@ that does not parse is reported and skipped, never rewritten."
   (if (nil? files)
     (list rewrote skipped)
     (let (path (first files)
-          r (format-file path))
+          r (file path))
       (when (= r :rewrote) (println (str "  rewrote " path)))
       (when (= r :unparseable) (println (str "  skipped (does not parse): " path)))
       (format-apply (rest files)
@@ -1124,7 +1124,7 @@ that does not parse is reported and skipped, never rewritten."
         (filter (fn (p) (contains? project p))
           (filter (fn (p) (string/ends-with? p ".blsp")) changed))))))
 
-(defn format-project-changed ()
+(defn project-changed ()
   "Format only the .blsp files git reports as changed (modified/staged/untracked)
 under the current project — the git-aware narrower scope of `nest format`
 (`--changed`). Falls back to the whole project if not in a git repo. Returns the
@@ -1133,7 +1133,7 @@ number of files rewritten."
     (if (= changed :not-a-repo)
       (do
         (println "format: not a git repository — formatting the whole project.")
-        (format-project))
+        (project))
       (let (counts (format-apply changed 0 0)
             rewrote (first counts)
             skipped (second counts))
@@ -1148,9 +1148,9 @@ number of files rewritten."
                    "."))
         rewrote))))
 
-(defn format-project-check ()
+(defn project-check ()
   "Check (don't write): print each file whose contents differ from
-`(format-source …)` and raise if any do. Used by `nest format --check`."
+`(source …)` and raise if any do. Used by `nest format --check`."
   (let (root (format-require-root) files (format-every-blsp root))
     (let (changed (format-check files nil))
       (cond
@@ -1180,7 +1180,7 @@ number of files rewritten."
                 ".")))))))
 
 ;; An unparseable file is reported as `[path :unparseable]` rather than as "needs
-;; formatting": `nest format` will NOT rewrite it (see `format-file`), so calling
+;; formatting": `nest format` will NOT rewrite it (see `file`), so calling
 ;; it unformatted would promise a fix that never comes. It still fails the check —
 ;; a file that doesn't parse is not a clean tree.
 (defn- format-check
@@ -1192,5 +1192,5 @@ number of files rewritten."
       (format-check (rest files)
         (cond
           (not (format-parses? src)) (cons [path :unparseable] acc)
-          (= src (format-source src)) acc
+          (= src (source src)) acc
           else (cons [path :needs-formatting] acc))))))
