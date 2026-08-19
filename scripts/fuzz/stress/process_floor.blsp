@@ -31,7 +31,7 @@
 (def n (let (e (getenv "N")) (if e (string->number e) 20000)))
 
 (defn rss-kb ()
-  (let (txt (slurp "/proc/self/status") i (index-of txt "VmRSS:"))
+  (let (txt (file/slurp "/proc/self/status") i (index-of txt "VmRSS:"))
     (if (< i 0)
       0
       (let (chunk (substring txt (+ i 6) (+ i 32))

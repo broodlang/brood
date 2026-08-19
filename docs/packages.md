@@ -597,7 +597,7 @@ in the lock on first install and a key change is flagged. Verification is **advi
 it warns, it never blocks an install.
 
 **Eval still runs `require`d code.** A malicious package, once
-`(require)`d, can do anything Brood can — `run-process`, `spit`, network
+`(require)`d, can do anything Brood can — `run-process`, `file/spit`, network
 I/O via future primitives. **Don't `(require)` untrusted code**, same as
 `import` in Python or `require` in npm. The package manager doesn't (and
 shouldn't) sandbox.
@@ -670,7 +670,7 @@ out-of-scope for v1.
 - `(%digest algo bytes)` — hash a byte sequence → a bytes digest. The **only**
   hashing primitive (with `%hmac`); `std/hash.blsp` is Brood over it, exposing
   `hash/sha256` (hex over a string) and `hash/sha256-bytes`. Per-file hashing is
-  `(hash/sha256-bytes (slurp-bytes path))` — byte-level, so a binary asset hashes
+  `(hash/sha256-bytes (file/slurp-bytes path))` — byte-level, so a binary asset hashes
   correctly — and the canonical directory hash is a Brood tree-walk combining
   per-file hashes (see [Reproducibility notes](#reproducibility-notes) below); both
   live in `std/tool/package.blsp`, not the kernel. Also hashes the lock manifest.
@@ -716,7 +716,7 @@ dep's content hash) and `.git/`.
 As implemented in `std/tool/package.blsp`:
 
 ```lisp
-(defn package--sha256-file (path) (hash/sha256-bytes (slurp-bytes path)))
+(defn package--sha256-file (path) (hash/sha256-bytes (file/slurp-bytes path)))
 
 (defn package-tree-hash (dir)
   (hash/sha256 (join ""
@@ -724,9 +724,9 @@ As implemented in `std/tool/package.blsp`:
                    (package--tree-files dir)))))
 ```
 
-Per-file hashing reads **bytes** (`slurp-bytes` + `hash/sha256-bytes`), so a dep
+Per-file hashing reads **bytes** (`file/slurp-bytes` + `hash/sha256-bytes`), so a dep
 containing a binary asset (image, font, …) hashes correctly — the earlier
-`slurp`-as-string form threw on any non-UTF-8 file. For a text file the hash is
+`file/slurp`-as-string form threw on any non-UTF-8 file. For a text file the hash is
 identical (its UTF-8 bytes *are* the file bytes), so existing lock hashes did not
 churn when this changed.
 

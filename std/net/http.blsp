@@ -324,8 +324,8 @@ rather than closed after a body. An identity check on the record, not a key snif
 
 (defn serve-file (path)
   "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is missing."
-  (if (file? path)
-    (response 200 {"Content-Type" (mime-type path)} (slurp path))
+  (if (regular? path)
+    (response 200 {"Content-Type" (mime-type path)} (file/slurp path))
     (not-found)))
 
 ;; ---- routing ----------------------------------------------------------------

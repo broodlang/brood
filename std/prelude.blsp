@@ -2401,10 +2401,10 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
 on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override."
   (or (getenv "BROOD_COOKIE")
     (let (path (node-cookie-path))
-      (if (file-exists? path)
-        (node-chomp (slurp path))
+      (if (file/exists? path)
+        (node-chomp (file/slurp path))
         (let (secret (random-token 32))
-          (spit-private path secret)
+          (file/spit-private path secret)
           secret)))))
 
 ;; The per-user dir holding local node sockets. $XDG_RUNTIME_DIR is the right
@@ -2834,7 +2834,7 @@ message already sent stays sent."
 ;; closures still runs on every closure, so the invariant itself is unchanged.
 ;; (The original observation is devlog 2026-07-22.)
 (defn offload (f & args)
-  "Run the blocking native `f` (e.g. `slurp-bytes`, `%git-clone`,
+  "Run the blocking native `f` (e.g. `file/slurp-bytes`, `%git-clone`,
 `%pbkdf2-sha256-bytes`) with `args` on the dirty-offload OS pool and wait for
 the result — parking only this process, never a scheduler worker. An error in
 the native rethrows here, catchable as usual. Only long/blocking
@@ -3767,20 +3767,20 @@ incremental search rides on."
 
 (defn temp-path (prefix)
   "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
-`spit` a file there or `make-dir` a directory. The name comes from `random-token`, so
+`file/spit` a file there or `file/mkdir` a directory. The name comes from `random-token`, so
 it is unique across processes and across runs, and cannot be guessed ahead of time.
 
 Reach for this instead of writing a program-specific constant like
 `/tmp/myapp-worker.blsp`. A fixed name in a world-writable directory is two bugs: two
 copies of the program fight over one file, and anyone on the machine can create that
-path first — as a symlink to something you own — so the `spit` overwrites their choice
+path first — as a symlink to something you own — so the `file/spit` overwrites their choice
 of file with your privileges. Neither is possible with a name they cannot predict."
   (path-join "/tmp" (str prefix (random-token 16))))
 
 (defn path-basename (path)
   "The final component of `path` (\"/a/b/c\" -> \"c\", \"/foo\" -> \"foo\",
 \"foo\" -> \"foo\"). The empty string returns itself; a trailing slash isn't
-stripped (`(cwd)` doesn't produce one, which is the primary caller)."
+stripped (`(file/cwd)` doesn't produce one, which is the primary caller)."
   (let (n (string/length path))
     (if (= n 0)
       ""
@@ -3790,13 +3790,13 @@ stripped (`(cwd)` doesn't produce one, which is the primary caller)."
 (defn path-absolute (path &optional base)
   "Resolve `path` to an absolute path: a `/`-rooted path is returned unchanged, a
 `~`/`~/…` path is expanded against `$HOME`, and any other (relative) path is joined
-onto `base` (default the current directory, `(cwd)`). The empty string is returned as
+onto `base` (default the current directory, `(file/cwd)`). The empty string is returned as
 is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segments."
   (cond
     (or (= path "") (string/starts-with? path "/")) path
     (= path "~") (or (getenv "HOME") path)
     (string/starts-with? path "~/") (str (or (getenv "HOME") "~") (string/substring path 1 (string/length path)))
-    else (path-join (or base (cwd)) path)))
+    else (path-join (or base (file/cwd)) path)))
 
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
 ;; Brood has no global mutable state, so randomness is *threaded*: every step
@@ -4510,7 +4510,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
   (filename dirs)
   (cond
     (empty? dirs) nil
-    (file-exists? (path-join (first dirs) filename)) (path-join (first dirs) filename)
+    (file/exists? (path-join (first dirs) filename)) (path-join (first dirs) filename)
     else (require-find filename (rest dirs))))
 
 ;; The co-located-module fallback (ADR-223). A module whose name is not its file's —
@@ -4528,7 +4528,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
             (= (first form) 'defmodule)
             (not (empty? (rest form)))
             (= (name (first (rest form))) key-name)))
-    (try (read-all (slurp path)) (catch _ nil))))
+    (try (read-all (file/slurp path)) (catch _ nil))))
 (defn- require-colocated-files
   (key-name dirs)
   ;; Every `.blsp` on `dirs` (searched top-level, not recursively) that declares `key-name`.
@@ -4539,7 +4539,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
                     (cons (path-join dir entry) a)
                     a))
             acc
-            (or (try (list-dir dir) (catch _ nil)) nil)))
+            (or (try (file/ls dir) (catch _ nil)) nil)))
     nil dirs))
 (defn- require-find-colocated
   (key)

@@ -28,12 +28,12 @@ because half the corpora encode their expectations as hex.")
 
 (defn corpus-present? (suite)
   "Whether `suite` has been fetched (`scripts/fetch-corpus.sh <suite>`)."
-  (dir? (corpus-dir suite)))
+  (file/dir? (corpus-dir suite)))
 
 ;; Absolute paths of every entry directly under `dir`, sorted — nil if absent.
 (defn- corpus-entries
   (dir)
-  (if (dir? dir) (map (fn (e) (path-join dir e)) (sort (list-dir dir))) nil))
+  (if (file/dir? dir) (map (fn (e) (path-join dir e)) (sort (file/ls dir))) nil))
 
 (defn corpus-files (suite &optional subdir)
   "The corpus files of `suite`, sorted: the complete upstream under `full/` when it
@@ -48,7 +48,7 @@ of the two explicitly."
   "The lines of corpus file `path`. Only the file's own trailing newline is dropped
 — interior blank lines survive, since some corpora (CommonMark) are whitespace-
 significant and the rest ignore them anyway."
-  (let (s (slurp path))
+  (let (s (file/slurp path))
     (string/split (if (string/ends-with? s "\n") (string/substring s 0 (dec (string/length s))) s)
       "\n")))
 
@@ -58,7 +58,7 @@ significant and the rest ignore them anyway."
 count, the arguments and the expected result — so a runner compares against
 upstream's own bytes instead of a retyped expectation. Comments are dropped by the
 reader, exactly as the Scheme harness's repeated `(read)` drops them."
-  (read-all (slurp path)))
+  (read-all (file/slurp path)))
 
 ;; ---- hex ---------------------------------------------------------------------
 ;; Several corpora (parse-number's bit patterns, the UCD code points, the crypto

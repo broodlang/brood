@@ -55,7 +55,7 @@ The Brood standard library is **not** in the archive: the prelude and all `std/`
 modules are already compiled into `brood` itself (`include_str!` +
 `EMBEDDED_MODULES`). A release ships only your own code on top of that runtime.
 
-It is **code-only**: runtime file reads (`(slurp "data.txt")`, `(list-dir …)`)
+It is **code-only**: runtime file reads (`(file/slurp "data.txt")`, `(file/ls …)`)
 still go to the real filesystem on the target — the bundle is not a virtual FS.
 If you need data files, ship them alongside for now.
 
@@ -129,14 +129,14 @@ no-Rust release.
 
 ## Extending a shipped app at runtime (`init.blsp`)
 
-A bundled binary is a full evaluator — `load`, `slurp`, `require`, and
+A bundled binary is a full evaluator — `load`, `file/slurp`, `require`, and
 `eval-string` all read the **real filesystem**, and `def` rebinds globals (live
 hot reload). So a shipped app reads external `.blsp` to extend/reconfigure itself
 exactly like an editor reading `~/.config/app/init.blsp`:
 
 ```lisp
 (defn main ()
-  (when (file-exists? (init-path))
+  (when (file/exists? (init-path))
     (load (init-path)))     ; user code redefines/extends the running runtime
   (app-loop (initial-state)))
 ```

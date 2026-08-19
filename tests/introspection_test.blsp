@@ -207,8 +207,8 @@
     ;; real place to look
     (let (p (exe-path))
       (when (string? p)
-        (is (file-exists? p))
-        (is (dir? (parent-dir p))))))
+        (is (file/exists? p))
+        (is (file/dir? (parent-dir p))))))
 
   (test "it is stable within a process"
     (assert= (exe-path) (exe-path))))

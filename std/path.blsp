@@ -200,15 +200,15 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
 
 (defn exists? (p)
   "True if `p` exists (file or directory)."
-  (file-exists? p))
+  (file/exists? p))
 (sig exists? (string -> bool))
 
 (defn is-file? (p)
   "True if `p` exists and is a regular file (not a directory)."
-  (and (file-exists? p) (not (dir? p))))
+  (and (file/exists? p) (not (file/dir? p))))
 (sig is-file? (string -> bool))
 
 (defn is-dir? (p)
   "True if `p` exists and is a directory."
-  (dir? p))
+  (file/dir? p))
 (sig is-dir? (string -> bool))

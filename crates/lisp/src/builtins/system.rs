@@ -1844,10 +1844,10 @@ pub(super) fn random_token(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// policy that uses it is Brood (`node-cookie`, ADR-068).
 pub(super) fn spit_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use std::io::Write as _;
-    let path = expect_string(heap, "spit-private", arg(args, 0))?;
-    let content = expect_string(heap, "spit-private", arg(args, 1))?;
+    let path = expect_string(heap, "file/spit-private", arg(args, 0))?;
+    let content = expect_string(heap, "file/spit-private", arg(args, 1))?;
     let err = |e: std::io::Error| {
-        LispError::runtime(format!("spit-private: {path}: {e}"))
+        LispError::runtime(format!("file/spit-private: {path}: {e}"))
             .with_code(crate::error::error_codes::FILE_IO)
     };
     if let Some(parent) = std::path::Path::new(&path).parent() {
@@ -2757,11 +2757,11 @@ const OFFLOAD_ALLOWED: &[&str] = &[
     "%zlib-uncompress",
     "%deflate",
     "%inflate",
-    "slurp",
-    "slurp-bytes",
-    "spit",
-    "spit-bytes",
-    "spit-append",
+    "file/slurp",
+    "file/slurp-bytes",
+    "file/spit",
+    "file/spit-bytes",
+    "file/spit-append",
     "append-bytes",
     "tls-self-signed",
     // A long guest call is exactly what the pool is for (docs/interop.md):

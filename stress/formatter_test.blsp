@@ -8,7 +8,7 @@
 (defmodule formatter-stress-test (:use test) (:use format))
 
 (defn check-file! (path)
-  (let (src (slurp path)
+  (let (src (file/slurp path)
         fmt (format-source src))
     (do
       ;; semantic preservation: same forms before and after. Compared via
@@ -23,7 +23,7 @@
 
 (defn blsp-files (dir)
   (filter (fn (p) (ends-with? p ".blsp"))
-    (map (fn (e) (path-join dir e)) (list-dir dir))))
+    (map (fn (e) (path-join dir e)) (file/ls dir))))
 
 (defn check-dir! (dir)
   (do

@@ -2048,7 +2048,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
 
     // filesystem — mechanism for the Brood module system + project test runner
-    def(heap, "cwd", Arity::exact(0), Sig::nullary(string), cwd);
+    def(heap, "file/cwd", Arity::exact(0), Sig::nullary(string), cwd);
     // Where this binary lives — for finding what was installed beside it (a shipped app
     // cannot trust PATH; a desktop launch's PATH often lacks ~/.local/bin).
     def(
@@ -2060,7 +2060,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "file-exists?",
+        "file/exists?",
         Arity::exact(1),
         Sig::new(vec![string], bool_ty),
         file_exists,
@@ -2074,35 +2074,35 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "dir?",
+        "file/dir?",
         Arity::exact(1),
         Sig::new(vec![string], bool_ty),
         is_dir,
     );
     def(
         heap,
-        "list-dir",
+        "file/ls",
         Arity::exact(1),
         Sig::new(vec![string], list_ty),
         list_dir,
     );
     def(
         heap,
-        "make-dir",
+        "file/mkdir",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
         make_dir,
     );
     def(
         heap,
-        "spit",
+        "file/spit",
         Arity::exact(2),
         Sig::new(vec![string, iolist], nil_ty),
         spit,
     );
     def(
         heap,
-        "spit-append",
+        "file/spit-append",
         Arity::exact(2),
         Sig::new(vec![string, iolist], nil_ty),
         spit_append,
@@ -2119,21 +2119,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "slurp",
+        "file/slurp",
         Arity::exact(1),
         Sig::new(vec![string], string),
         slurp,
     );
     def(
         heap,
-        "slurp-bytes",
+        "file/slurp-bytes",
         Arity::exact(1),
         Sig::new(vec![string], bytes_ty),
         slurp_bytes,
     );
     def(
         heap,
-        "spit-bytes",
+        "file/spit-bytes",
         Arity::exact(2),
         Sig::new(vec![string, any], nil_ty),
         spit_bytes,
@@ -2147,21 +2147,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "file-mtime",
+        "file/mtime",
         Arity::exact(1),
         Sig::new(vec![string], int.union(nil_ty)),
         file_mtime,
     );
     def(
         heap,
-        "file-size",
+        "file/size",
         Arity::exact(1),
         Sig::new(vec![string], int.union(nil_ty)),
         file_size,
     );
     def(
         heap,
-        "file-stat",
+        "file/stat",
         Arity::exact(1),
         Sig::new(vec![string], map_ty.union(nil_ty)),
         file_stat,
@@ -2175,28 +2175,28 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "delete-file",
+        "file/rm",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
         delete_file,
     );
     def(
         heap,
-        "delete-dir",
+        "file/rmdir",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
         delete_dir,
     );
     def(
         heap,
-        "rename-file",
+        "file/rename",
         Arity::exact(2),
         Sig::new(vec![string, string], nil_ty),
         rename_file,
     );
     def(
         heap,
-        "copy-file",
+        "file/cp",
         Arity::exact(2),
         Sig::new(vec![string, string], nil_ty),
         copy_file,
@@ -3169,7 +3169,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "spit-private",
+        "file/spit-private",
         Arity::exact(2),
         Sig::new(vec![string, string], nil_ty),
         spit_private,
@@ -3445,28 +3445,28 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("name", &["x"], "The spelling of a symbol or keyword as a string (no leading colon)."),
     ("symbol", &["x"], "Coerce a string, symbol, or keyword to the matching symbol (interning if needed)."),
     ("keyword", &["x"], "Coerce a string, symbol, or keyword to the matching keyword (interning if needed)."),
-    ("cwd", &[], "The current working directory."),
+    ("file/cwd", &[], "The current working directory."),
     ("exe-path", &[], "The absolute path of the running executable, or nil when the platform won't say (a sandbox with no /proc/self/exe equivalent). For locating something installed ALONGSIDE this binary: a shipped app cannot assume PATH — a desktop launch inherits the session's, which routinely lacks ~/.local/bin — so \"the runtime that installed me is my sibling\" is the reliable lookup. Nil rather than an error, because asking where you live is opportunistic."),
-    ("file-exists?", &["path"], "Whether path exists."),
+    ("file/exists?", &["path"], "Whether path exists."),
     ("canonicalize", &["path"], "The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. Use it to make path sandboxing symlink-escape-proof."),
-    ("dir?", &["path"], "Whether path is a directory."),
-    ("list-dir", &["path"], "The entry names directly under directory path, sorted."),
-    ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
-    ("spit", &["path", "s"], "Write s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, replacing any existing file."),
-    ("spit-append", &["path", "s"], "Append s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, creating it if absent (unlike spit, which truncates). Returns nil. Opens in append mode so each write lands at end-of-file — the OS-atomic append that makes a log safe to write from several processes at once. The string sibling of append-bytes."),
+    ("file/dir?", &["path"], "Whether path is a directory."),
+    ("file/ls", &["path"], "The entry names directly under directory path, sorted."),
+    ("file/mkdir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
+    ("file/spit", &["path", "s"], "Write s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, replacing any existing file."),
+    ("file/spit-append", &["path", "s"], "Append s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, creating it if absent (unlike file/spit, which truncates). Returns nil. Opens in append mode so each write lands at end-of-file — the OS-atomic append that makes a log safe to write from several processes at once. The string sibling of append-bytes."),
     ("%file-swap", &["lock-path", "data-path", "expected", "new"], "Replace the entire contents of data-path with new, but ONLY if they currently equal expected; returns true when swapped, false when they differ (re-read, recompute, retry). Serialised across processes by a blocking exclusive lock on lock-path (a separate file — the data file is replaced by rename, so a lock on it would exclude nobody), and crash-atomic (temp file + rename, so a crash leaves the old contents intact). A missing data-path reads as \"\", so the same call creates it. The mechanism behind a safe read-modify-write whose modify step is Brood code."),
-    ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
-    ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
-    ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
+    ("file/spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (file/spit leaves a world-readable file)."),
+    ("file/slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use file/slurp-bytes for binary."),
+    ("file/slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read file/slurp can't be (file/slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
     ("%image-write", &["path", "sections", "fingerprint"], "Write a sectioned startup image to `path`, stamped with the opaque `fingerprint` string; returns the number of entries written. `sections` is a sequence of [name syms] pairs — `name` is the section key (a module's feature name, or `\"\"` for the always-materialised root), `syms` the global names it holds; declared sigs are added to the root section automatically. An unbound name is skipped; a value with no portable form (a pid, a socket) raises rather than silently dropping a binding. Two kinds are carried specially at a *top-level binding* (never nested inside a structure): a **builtin** rides by name, and a **table** rides as its contents — the snapshot is imaged and a fresh table rebuilt from it on restore, since a handle is per-runtime. Two globals aliasing ONE table raise, because restoring them would split it. Mechanism only (ADR-218) — the grouping and the staleness policy are Brood in std/tool/project.blsp."),
     ("%registry-names", &[], "Every global a registry update (%registry-update! / %registry-cas!) has written in this runtime, sorted by spelling. The derived answer to \"which globals does LOADING mutate rather than create?\" — the ones a startup image has to carry deliberately, because the (global-names) diff it is built from cannot see them (ADR-218). Naming them by hand went stale three times, silently; std/tool/project.blsp filters this instead."),
     ("%image-index", &["path", "fingerprint"], "Open the sectioned startup image at `path` if its stamp equals `fingerprint`, returning its section directory as a map {name -> [offset len]} — `\"\"` is the always-materialised root section, every other key a module's feature name. nil for any miss (absent, unreadable, older format, stale), which is the rebuild-me signal. Reads the header and directory only, never the payload (ADR-218)."),
     ("%image-load-section", &["path", "offset", "len"], "Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. Returns how many entries were defined, or nil if the bytes could not be read or decoded. Seeks straight to the section, so loading one module never reads the rest of the image (ADR-218)."),
-    ("spit-bytes", &["path", "bytes"], "Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. The binary write-side counterpart to slurp-bytes (spit is UTF-8 string-only) — materialises a received image / archive / any binary asset to disk."),
+    ("file/spit-bytes", &["path", "bytes"], "Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. The binary write-side counterpart to file/slurp-bytes (file/spit is UTF-8 string-only) — materialises a received image / archive / any binary asset to disk."),
     ("append-bytes", &["path", "bytes"], "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. The incremental counterpart to spit-bytes (which truncates) — lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory."),
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),
     ("%digest", &["algo", "bytes"], "Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp."),
-    ("%offload", &["f", "args"], "Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. Only long/blocking data-in/data-out natives are allowed (%git-clone, %git-resolve-ref, %git-list-tags, %pbkdf2-sha256-bytes, %digest, %hmac, slurp, slurp-bytes, spit, spit-bytes, spit-append, append-bytes, tls-self-signed) — anything heap-sharing or env-reading is refused. Prefer the prelude `offload` wrapper, which parks in a selective receive and rethrows errors."),
+    ("%offload", &["f", "args"], "Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. Only long/blocking data-in/data-out natives are allowed (%git-clone, %git-resolve-ref, %git-list-tags, %pbkdf2-sha256-bytes, %digest, %hmac, file/slurp, file/slurp-bytes, file/spit, file/spit-bytes, file/spit-append, append-bytes, tls-self-signed) — anything heap-sharing or env-reading is refused. Prefer the prelude `offload` wrapper, which parks in a selective receive and rethrows errors."),
     ("%hmac", &["algo", "key-bytes", "msg-bytes"], "HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp."),
     ("%gzip", &["bytes", "level"], "gzip-compress a byte sequence (RFC 1952, the `Content-Encoding: gzip` wire format), returned as a bytes value. Optional `level` is 0-9 (0 = store, 9 = best; default 6). The one gzip primitive; the `zlib/gzip` wrapper is Brood over it in std/zlib.blsp."),
     ("%gunzip", &["bytes"], "Decompress gzip data (RFC 1952) back to a bytes value; errors on data that isn't valid gzip. See `zlib/gunzip`."),
@@ -3483,13 +3483,13 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%rm-rf", &["path"], "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037)."),
     ("%untar-gz", &["archive", "dest", "strip"], "Extract a gzip'd tar `archive` into `dest`, stripping `strip` leading path components (package convention: 1). Shells to `tar`. Returns :ok or throws. The tarball-dep delivery mechanism (ADR-037)."),
     ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
-    ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
-    ("file-size", &["path"], "Size of the file at path in bytes, or nil if it is missing."),
-    ("file-stat", &["path"], "Metadata for path in ONE stat as a map {:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}, or nil if missing. :symlink? reads the link itself (lstat); the rest follow it. :mtime/:atime are epoch-ms last-modified/last-access (nil if unreadable; :atime may be coarse under relatime/noatime mounts); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix); :nlink the hard-link count; :uid/:gid the numeric ids; :owner/:group their resolved names (the numeric id as a string if unresolved). Everything an `ls -l` row + a recency sort needs in one syscall."),
-    ("delete-file", &["path"], "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure."),
-    ("delete-dir", &["path"], "Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure."),
-    ("rename-file", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
-    ("copy-file", &["from", "to"], "Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure."),
+    ("file/mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
+    ("file/size", &["path"], "Size of the file at path in bytes, or nil if it is missing."),
+    ("file/stat", &["path"], "Metadata for path in ONE stat as a map {:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}, or nil if missing. :symlink? reads the link itself (lstat); the rest follow it. :mtime/:atime are epoch-ms last-modified/last-access (nil if unreadable; :atime may be coarse under relatime/noatime mounts); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix); :nlink the hard-link count; :uid/:gid the numeric ids; :owner/:group their resolved names (the numeric id as a string if unresolved). Everything an `ls -l` row + a recency sort needs in one syscall."),
+    ("file/rm", &["path"], "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure."),
+    ("file/rmdir", &["path"], "Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure."),
+    ("file/rename", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
+    ("file/cp", &["from", "to"], "Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure."),
     ("image-thumb", &["bytes", "max-w", "max-h"], "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("hostname", &[], "This machine's short hostname (no domain). Used to qualify a node name as name@host."),

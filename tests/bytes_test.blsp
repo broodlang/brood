@@ -207,15 +207,15 @@
     (is (= (try (bytes-concat [:kw]) (catch e :rejected)) :rejected)))
   (test "spit/slurp round-trips an iolist tree; spit-append appends one"
     (let (path (str "/tmp/brood-iolist-" (random-token 8) ".txt"))
-      (spit path ["a" ["b" nil "c"] (bytes 100) 101])
-      (is (= (slurp path) "abcde"))
-      (spit-append path [":" (bytes 120 121)])
-      (is (= (slurp path) "abcde:xy"))
-      (spit-bytes path ["A" [66] (bytes 67)])
-      (is (= (slurp-bytes path) #b"ABC"))
+      (file/spit path ["a" ["b" nil "c"] (bytes 100) 101])
+      (is (= (file/slurp path) "abcde"))
+      (file/spit-append path [":" (bytes 120 121)])
+      (is (= (file/slurp path) "abcde:xy"))
+      (file/spit-bytes path ["A" [66] (bytes 67)])
+      (is (= (file/slurp-bytes path) #b"ABC"))
       (append-bytes path [[68] "E"])
-      (is (= (slurp-bytes path) #b"ABCDE"))
-      (delete-file path)))
+      (is (= (file/slurp-bytes path) #b"ABCDE"))
+      (file/rm path)))
   (test "deep nesting flattens (and survives the heap walkers)"
     ;; 40k-deep left-nested list. The flattener uses an explicit worklist, and
     ;; since the 2026-07-20 walker hardening (stacker segmented growth) the

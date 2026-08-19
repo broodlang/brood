@@ -50,17 +50,17 @@ land in a later slice."
               rel (if (= prefix "") entry (str prefix "/" entry)))
           ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
           ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
-          (if (dir? full)
+          (if (file/dir? full)
             (append-two (package-tree-files-walk full rel) acc)
             (cons rel acc)))))
     nil
-    (list-dir dir)))
+    (file/ls dir)))
 
-;; Hash the file's raw bytes, not a UTF-8 string: `slurp` throws on a binary
-;; asset (image, font, …), so the old `(hash/sha256 (slurp path))` couldn't hash a
+;; Hash the file's raw bytes, not a UTF-8 string: `file/slurp` throws on a binary
+;; asset (image, font, …), so the old `(hash/sha256 (file/slurp path))` couldn't hash a
 ;; tree that contained one. For a text file the hash is identical (its UTF-8
 ;; bytes are the file bytes), so existing lock hashes don't churn.
-(defn- package-sha256-file (path) (hash/sha256-bytes (slurp-bytes path)))
+(defn- package-sha256-file (path) (hash/sha256-bytes (file/slurp-bytes path)))
 
 (defn package-tree-hash (dir)
   "The canonical SHA-256 (hex) of a directory's file contents — order-independent of the filesystem, stable across machines (ADR-037)."
@@ -75,9 +75,9 @@ land in a later slice."
 ;; root project's *project-* globals.
 (defn- package-manifest-deps
   (manifest-path)
-  (if (not (file-exists? manifest-path))
+  (if (not (file/exists? manifest-path))
     nil
-    (let (form (read-first (slurp manifest-path)))
+    (let (form (read-first (file/slurp manifest-path)))
       (if (and (pair? form) (= (first form) 'project))
         (project/project-parse-deps (plist-get (rest form) :dependencies))
         nil))))
@@ -480,7 +480,7 @@ land in a later slice."
 (defn- package-resolve-path
   (root dep)
   (let (abs (path-join root (get dep :path)))
-    (when (not (dir? abs))
+    (when (not (file/dir? abs))
       (error "package: :path dependency " (get dep :name) " not found at " abs))
     (assoc dep
       :resolved-path abs
@@ -523,16 +523,16 @@ land in a later slice."
 (defn- package-cache-current?
   (target commit)
   (let (meta (package-pkg-meta-path target))
-    (and (dir? target)
-      (file-exists? meta)
-      (let (form (read-first (slurp meta)))
+    (and (file/dir? target)
+      (file/exists? meta)
+      (let (form (read-first (file/slurp meta)))
         (and (pair? form)
           (= (first form) 'brood-pkg)
           (= commit (plist-get (rest form) :commit)))))))
 
 (defn- package-write-pkg-meta
   (target url ref commit sha)
-  (spit (package-pkg-meta-path target)
+  (file/spit (package-pkg-meta-path target)
     (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
       (pr-str (list 'brood-pkg :git url :ref ref :commit commit :sha256 sha :fetched-at (now)))
       "\n")))
@@ -624,7 +624,7 @@ land in a later slice."
         :deps (package-manifest-deps (path-join target "project.blsp")))
       ;; Cache miss: (re)clone the pinned commit, hash the tree, record the meta.
       (do
-        (when (dir? target) (%rm-rf target))
+        (when (file/dir? target) (%rm-rf target))
         ;; The clone (network, possibly minutes) runs on the offload pool —
         ;; parks only this process, never a scheduler worker (ADR-144).
         (offload %git-clone url target ref commit)
@@ -678,22 +678,22 @@ land in a later slice."
 an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and its
 2xx body returned. Throws on a non-2xx status or a transport error."
   (if (string/starts-with? url "file://")
-    (slurp-bytes (string/substring url 7))
+    (file/slurp-bytes (string/substring url 7))
     (package-http-fetch url *package-max-redirects*)))
 
 (defn- package-tarball-cache-current?
   (target sha)
   (let (meta (package-pkg-meta-path target))
-    (and (dir? target)
-      (file-exists? meta)
-      (let (form (read-first (slurp meta)))
+    (and (file/dir? target)
+      (file/exists? meta)
+      (let (form (read-first (file/slurp meta)))
         (and (pair? form)
           (= (first form) 'brood-pkg)
           (= sha (plist-get (rest form) :sha256)))))))
 
 (defn- package-write-tarball-meta
   (target url sha)
-  (spit (package-pkg-meta-path target)
+  (file/spit (package-pkg-meta-path target)
     (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
       (pr-str (list 'brood-pkg :tarball url :sha256 sha :fetched-at (now)))
       "\n")))
@@ -709,7 +709,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
         :resolved-path target
         :deps (package-manifest-deps (path-join target "project.blsp")))
       (do
-        (when (dir? target) (%rm-rf target))
+        (when (file/dir? target) (%rm-rf target))
         (let (bytes (package-fetch-bytes url)
               got (hash/sha256-bytes bytes))
           (when (not (= got sha))
@@ -717,11 +717,11 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
               nm " sha256 mismatch — the manifest pins " sha " but the download hashed to " got
               " (tampered, wrong URL, or a moved artifact — verify and re-pin)"))
           (let (archive (path-join (package-deps-dir root) (str (name nm) ".tar.gz")))
-            (make-dir (package-deps-dir root))
-            (spit-bytes archive bytes)
+            (file/mkdir (package-deps-dir root))
+            (file/spit-bytes archive bytes)
             ;; Extraction (large archives) runs on the offload pool, like the clone.
             (offload %untar-gz archive target 1)
-            (delete-file archive)
+            (file/rm archive)
             (package-write-tarball-meta target url sha)
             (assoc dep
               :resolved-path target
@@ -888,7 +888,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
 (defn- registry-download-extract
   (root dep
     base target nm version checksum source-url signature pubkey locked-pubkey)
-  (when (dir? target) (%rm-rf target))
+  (when (file/dir? target) (%rm-rf target))
   ;; A release may host its bytes EXTERNALLY — a `:source_url` (a GitHub/S3/CDN tarball),
   ;; in which case the registry holds only metadata + the checksum and the bytes are
   ;; fetched from there. An external archive follows the `tar czf pkg-x.y.z/` / GitHub
@@ -924,11 +924,11 @@ TOFU-pinned signing key, nil for an unsigned package)."
       ;; to PIN in the lock (the pinned one wins — TOFU is sticky, first-seen).
       (let (pinned (package-verify-signature nm version checksum signature pubkey locked-pubkey)
             archive (path-join (package-deps-dir root) (str (name nm) ".tar.gz")))
-        (make-dir (package-deps-dir root))
-        (spit-bytes archive bytes)
+        (file/mkdir (package-deps-dir root))
+        (file/spit-bytes archive bytes)
         ;; Extraction of a large archive runs on the offload pool, like a clone.
         (offload %untar-gz archive target (if external 1 0))
-        (delete-file archive)
+        (file/rm archive)
         (registry-write-meta target base nm version checksum)
         (registry-resolved dep target version checksum pinned)))))
 
@@ -990,7 +990,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
 
 (defn- registry-write-meta
   (target base nm version checksum)
-  (spit (package-pkg-meta-path target)
+  (file/spit (package-pkg-meta-path target)
     (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
       (pr-str (list 'brood-pkg
                 :registry
@@ -1060,11 +1060,11 @@ sha256 pin still holds."
                         " (tampered or corrupted — not installed)"))
                     (let (target (path-join dest-dir name-str)
                           archive (path-join dest-dir (str name-str ".tar.gz")))
-                      (when (dir? target) (%rm-rf target))
-                      (make-dir dest-dir)
-                      (spit-bytes archive bytes)
+                      (when (file/dir? target) (%rm-rf target))
+                      (file/mkdir dest-dir)
+                      (file/spit-bytes archive bytes)
                       (offload %untar-gz archive target (if external 1 0))
-                      (delete-file archive)
+                      (file/rm archive)
                       {:name name-str :version version :path target :checksum checksum}))))))
 
 ;; Two resolutions of the same name must agree on their source. Different kinds can
@@ -1108,7 +1108,7 @@ sha256 pin still holds."
     (map second
       (filter (fn (form)
                 (and (pair? form) (= (first form) 'defmodule) (symbol? (second form))))
-        (read-all (slurp file))))
+        (read-all (file/slurp file))))
     (catch _ nil)))
 
 ;; Every `.blsp` file at or under `dir`, recursively (full paths). A hierarchical
@@ -1122,10 +1122,10 @@ sha256 pin still holds."
     (map (fn (entry)
            (let (full (path-join dir entry))
              (cond
-               (dir? full) (package-blsp-files full)
+               (file/dir? full) (package-blsp-files full)
                (string/ends-with? entry ".blsp") (list full)
                else nil)))
-      (list-dir dir))))
+      (file/ls dir))))
 
 ;; Every module name a source dir provides: each `(defmodule …)` of each `.blsp`
 ;; file in it, recursively (so nested `gui/window` and co-located secondary modules
@@ -1133,7 +1133,7 @@ sha256 pin still holds."
 ;; declared module, not just each file's first.
 (defn- package-provided-modules
   (src-dir)
-  (if (not (dir? src-dir))
+  (if (not (file/dir? src-dir))
     nil
     (apply append
       (map package-module-names-of (package-blsp-files src-dir)))))
@@ -1148,7 +1148,7 @@ sha256 pin still holds."
 ;; its own source dirs with it to root the root project's modules, a legitimate
 ;; cross-module use.
 (defn package-module-files (src-dir)
-  (if (not (dir? src-dir))
+  (if (not (file/dir? src-dir))
     nil
     (apply append
       (map (fn (file)
@@ -1250,14 +1250,14 @@ sha256 pin still holds."
 
 (defn write-lockfile (root entries)
   "Write project.lock.blsp under `root` from resolved `entries`."
-  (spit (package-lockfile-path root) (package-lockfile-content entries)))
+  (file/spit (package-lockfile-path root) (package-lockfile-content entries)))
 
 (defn read-lockfile (root)
   "The :dependencies vector from project.lock.blsp under `root`, or nil if absent."
   (let (path (package-lockfile-path root))
-    (if (not (file-exists? path))
+    (if (not (file/exists? path))
       nil
-      (let (form (read-first (slurp path)))
+      (let (form (read-first (file/slurp path)))
         (if (and (pair? form) (= (first form) 'lock))
           (plist-get (rest form) :dependencies)
           nil)))))
@@ -1268,8 +1268,8 @@ sha256 pin still holds."
   (root entries)
   (let (path (package-lockfile-path root)
         new (package-lockfile-content entries)
-        old (if (file-exists? path) (slurp path) nil))
-    (when (not (= old new)) (spit path new))))
+        old (if (file/exists? path) (file/slurp path) nil))
+    (when (not (= old new)) (file/spit path new))))
 
 ;; --- load-path integration ---------------------------------------------------
 ;; A dep's source dir (its <resolved>/src by default). :path deps load here in
@@ -1335,8 +1335,8 @@ sha256 pin still holds."
 ;; own manifest read.
 (defn- package-load-manifest
   (path)
-  (when (file-exists? path)
-    (let (form (read-first (slurp path)))
+  (when (file/exists? path)
+    (let (form (read-first (file/slurp path)))
       (when (and (pair? form) (= (first form) 'project))
         (project/project-apply (rest form))))))
 
@@ -1344,7 +1344,7 @@ sha256 pin still holds."
 ;; and hand the root to `body-fn`. Shared preamble for the verbs below.
 (defn- package-in-project
   (body-fn)
-  (let (root (project/project-find-root (cwd)))
+  (let (root (project/project-find-root (file/cwd)))
     (when (nil? root) (error "package: not inside a Brood project (no project.blsp found)"))
     (package-load-manifest (path-join root "project.blsp"))
     (body-fn root)))
@@ -1569,7 +1569,7 @@ sha256 pin still holds."
 
 ;; --- editing project.blsp safely --------------------------------------------
 ;; The manifest edit is a read-modify-write: read the source, splice an entry in or
-;; out (Brood code), write it back. Done with a plain `slurp`/`spit` that LOSES an
+;; out (Brood code), write it back. Done with a plain `file/slurp`/`file/spit` that LOSES an
 ;; update under concurrency — two `nest add`s both read the original, both append,
 ;; the second write erases the first, and both report success. Measured before the
 ;; fix: three concurrent adds landed between one and three of them.
@@ -1607,7 +1607,7 @@ sha256 pin still holds."
   (if (<= attempts 0)
     (error "package: project.blsp kept changing while this command tried to edit it — "
       "is another `nest add`/`nest remove` running? Nothing was written; re-run it.")
-    (let (old (slurp manifest)
+    (let (old (file/slurp manifest)
           new (transform old))
       (if (%file-swap lock manifest old new)
         [old new]
@@ -1684,7 +1684,7 @@ sha256 pin still holds."
           (package-edit-manifest! root (fn (src) (package-manifest-remove src name-sym)))
           (package-load-manifest manifest)
           ; drop its _deps/ cache, if any
-          (when (dir? target) (%rm-rf target))
+          (when (file/dir? target) (%rm-rf target))
           (write-lockfile root (resolve-deps root *project-dependencies* (read-lockfile root)))
           (println (str "package: removed " nm)))))))
 
@@ -1746,8 +1746,8 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
   stray tarball. Returns the archive path (under `_deps/`, which the excludes skip)."
   (let (out (path-join (package-deps-dir root)
               (str *project-name* "-" *project-version* ".tar.gz")))
-    (make-dir (package-deps-dir root))
-    (when (file-exists? out) (delete-file out))
+    (file/mkdir (package-deps-dir root))
+    (when (file/exists? out) (file/rm out))
     (let (code (run-process "tar"
                  (list "-czf"
                    out "-C" root "--exclude=./_deps" "--exclude=./_build" "--exclude=./.git"
@@ -1798,8 +1798,8 @@ ordinary library, which the server stores as \"nothing\"."
   ()
   "The publisher's stored keypair as `{:public <hex> :private <hex>}`, or nil if none exists."
   (let (p (package-signing-key-path))
-    (if (file-exists? p)
-      (let (form (read-first (slurp p)))
+    (if (file/exists? p)
+      (let (form (read-first (file/slurp p)))
         (if (and (pair? form) (= (first form) 'signing-key))
           {:public (plist-get (rest form) :public) :private (plist-get (rest form) :private)}
           nil))
@@ -1810,14 +1810,14 @@ ordinary library, which the server stores as \"nothing\"."
 written 0600), and print the public key to share so others can pin it (TOFU, ADR-212). Refuses
 to overwrite an existing key unless `:force true`. Backs `nest key gen`."
   (let (p (package-signing-key-path))
-    (when (and (file-exists? p) (not (plist-get opts :force)))
+    (when (and (file/exists? p) (not (plist-get opts :force)))
       (error "package: a signing key already exists at "
         p " — `nest key gen --force` replaces it (invalidating signatures made with the old key)"))
     (let (kp (crypto/keypair)
           public-hex (encoding/hex-encode-bytes (get kp :public))
           private-hex (encoding/hex-encode-bytes (get kp :private)))
-      (make-dir (package-config-dir))
-      (spit-private p
+      (file/mkdir (package-config-dir))
+      (file/spit-private p
         (str ";; Brood package signing key (ADR-212). KEEP :private SECRET — never commit or share it.\n"
           (pr-str (list 'signing-key :public public-hex :private private-hex))
           "\n"))
@@ -1904,10 +1904,10 @@ published is refused. Backs `nest publish`."
 (defn- registry-publish-hosted
   (root base token)
   (let (archive (registry-build-tarball root)
-        bytes (slurp-bytes archive)
+        bytes (file/slurp-bytes archive)
         checksum (hash/sha256-bytes bytes)
         sig (package-sign-checksum checksum))
-    (delete-file archive)
+    (file/rm archive)
     (println (str "package: publishing "
                *project-name*
                " "

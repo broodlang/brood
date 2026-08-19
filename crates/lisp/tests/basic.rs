@@ -357,7 +357,7 @@ fn slurp_round_trips_a_file() {
     path.push(format!("brood-slurp-{}.tmp", std::process::id()));
     let path = path.to_string_lossy().replace('\\', "\\\\");
     let src = format!(
-        "(spit \"{p}\" \"hello\\n\") (= (slurp \"{p}\") \"hello\\n\")",
+        "(file/spit \"{p}\" \"hello\\n\") (= (file/slurp \"{p}\") \"hello\\n\")",
         p = path
     );
     assert_eq!(run(&src), "true");
@@ -452,7 +452,7 @@ fn defn_private_records_privacy_at_the_def_site() {
 #[test]
 fn slurp_of_a_missing_file_errors() {
     Interp::new()
-        .eval_str("(slurp \"/no/such/brood/file.blsp\")")
+        .eval_str("(file/slurp \"/no/such/brood/file.blsp\")")
         .expect_err("slurp of a missing path should error");
 }
 
@@ -829,7 +829,7 @@ fn throw_and_catch() {
     );
     // E0050 file IO — slurp of a path that doesn't exist.
     assert_eq!(
-        run("(try (slurp \"/does/not/exist/anywhere\") (catch e (get e :code)))"),
+        run("(try (file/slurp \"/does/not/exist/anywhere\") (catch e (get e :code)))"),
         "\"E0050\""
     );
     assert_eq!(

@@ -14,18 +14,18 @@
           pooled (offload %digest :sha256 data))
       (is (bytes? pooled))
       (assert= pooled direct)))
-  (test "file IO through the pool: spit, slurp-bytes, cleanup"
+  (test "file IO through the pool: file/spit, file/slurp-bytes, cleanup"
     (let (path (str "/tmp/brood-offload-" (now-ns) ".bin")
           payload (bytes 0 255 128 65 7))
-      (offload spit-bytes path payload)
-      (let (back (offload slurp-bytes path))
-        (delete-file path)
+      (offload file/spit-bytes path payload)
+      (let (back (offload file/slurp-bytes path))
+        (file/rm path)
         (assert= back payload)))))
 
 (describe "offload: errors and refusals are clean"
   (test "an error inside the offloaded native rethrows here, catchable"
     (is (= (try
-             (offload slurp "/definitely/not/a/file/brood-offload-test")
+             (offload file/slurp "/definitely/not/a/file/brood-offload-test")
              (catch e :caught))
           :caught)))
   (test "a native outside the allow list is refused"

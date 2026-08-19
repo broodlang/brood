@@ -27,7 +27,7 @@ use support::*;
 /// wait for a *fully booted* child rather than racing one still inside `exec`.
 fn parked_src(marker: &std::path::Path) -> String {
     format!(
-        "(spit \"{}\" \"up\")\n(defn park () (receive (_ (park))))\n(park)\n",
+        "(file/spit \"{}\" \"up\")\n(defn park () (receive (_ (park))))\n(park)\n",
         marker.display()
     )
 }

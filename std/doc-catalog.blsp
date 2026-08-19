@@ -147,13 +147,13 @@
    "contains?" :predicates
    "contract-check-args" :meta
    "contract-check-rest" :meta
-   "copy-file" :filesystem
+   "file/cp" :filesystem
    "cos" :math
    "count" :collections
    "count-acc" :collections
    "current-file" :meta
    "current-ns" :meta
-   "cwd" :filesystem
+   "file/cwd" :filesystem
    "dec" :math
    "decimal" :convert
    "decimal->float" :convert
@@ -190,14 +190,14 @@
    "defrecord-ftype" :maps
    "defrecord-qualify" :maps
    "defseq" :collections
-   "delete-dir" :filesystem
-   "delete-file" :filesystem
+   "file/rmdir" :filesystem
+   "file/rm" :filesystem
    "demonitor" :processes
    "demonitor-node" :processes
    "denominator" :math
    "deprecation-warning" :meta
    "derive-into" :meta
-   "dir?" :filesystem
+   "file/dir?" :filesystem
    "disconnect" :processes
    "disj" :sets
    "display-width" :strings
@@ -233,10 +233,10 @@
    "feature?" :predicates
    "features" :meta
    "fields" :maps
-   "file-exists?" :filesystem
-   "file-mtime" :filesystem
-   "file-size" :filesystem
-   "file-stat" :filesystem
+   "file/exists?" :filesystem
+   "file/mtime" :filesystem
+   "file/size" :filesystem
+   "file/stat" :filesystem
    "filter" :collections
    "filterv" :collections
    "find" :collections
@@ -333,7 +333,7 @@
    "link" :processes
    "list" :collections
    "string/from-list" :strings
-   "list-dir" :filesystem
+   "file/ls" :filesystem
    "list-processes" :processes
    "list?" :predicates
    "lkeep" :collections
@@ -348,7 +348,7 @@
    "macroexpand-1" :meta
    "macroexpand-loop" :meta
    "mailbox-size" :processes
-   "make-dir" :filesystem
+   "file/mkdir" :filesystem
    "map" :collections
    "map-assoc" :maps
    "map-count" :maps
@@ -563,7 +563,7 @@
    "remote-spawn-sync" :processes
    "remove" :collections
    "remove-nth" :collections
-   "rename-file" :filesystem
+   "file/rename" :filesystem
    "repeat" :collections
    "repeat-acc" :collections
    "repeatedly" :collections
@@ -618,8 +618,8 @@
    "sig-pos" :meta
    "sin" :math
    "sleep" :processes
-   "slurp" :filesystem
-   "slurp-bytes" :filesystem
+   "file/slurp" :filesystem
+   "file/slurp-bytes" :filesystem
    "some->" :control
    "some->>" :control
    "some-thread-build" :control
@@ -633,10 +633,10 @@
    "spawn-link" :processes
    "spawn-thunk-form?" :predicates
    "special-forms" :meta
-   "spit" :filesystem
-   "spit-append" :filesystem
-   "spit-bytes" :filesystem
-   "spit-private" :filesystem
+   "file/spit" :filesystem
+   "file/spit-append" :filesystem
+   "file/spit-bytes" :filesystem
+   "file/spit-private" :filesystem
    "split-at" :collections
    "split-at-acc" :collections
    "spy" :meta

@@ -1,32 +1,33 @@
 ;; std/file.blsp — the file & filesystem standard library.
 ;;
-;; A coherent Brood surface over the kernel's irreducible fs primitives — `slurp`,
-;; `spit`, `file-exists?`, `dir?`, `list-dir`, `make-dir`, `file-mtime`, `cwd` —
-;; plus the prelude's `path-join` / `path-basename` / `parent-dir`. Everything
-;; here is policy (ADR-006): whole-file and line I/O, directory walking, and the
-;; path helpers the prelude doesn't already provide. No new Rust.
+;; A coherent Brood surface over the kernel's irreducible fs primitives —
+;; `file/slurp`, `file/spit`, `file/exists?`, `file/dir?`, `file/ls`, `file/mkdir`,
+;; `file/mtime`, `file/cwd` — plus the prelude's `path-join` / `path-basename` /
+;; `parent-dir`. Everything here is policy (ADR-006): whole-file and line I/O,
+;; directory walking, and the path helpers the prelude doesn't already provide.
+;; No new Rust.
 ;;
-;; (Deletion / rename / file-size are kernel primitives; `spit-append` is the
-;; atomic `spit-append` primitive — each write lands at end-of-file.)
+;; (Deletion / rename / file/size are kernel primitives; `file/spit-append` is the
+;; atomic append primitive — each write lands at end-of-file.)
 
 (defmodule file
   "The file & filesystem library: whole-file and line read/write
-(`slurp`/`spit`/`read-lines`/`write-lines`/`spit-append`), predicates
-(`file?`/`dir?`/`file-exists?`), directory listing (`list-files`/`list-dirs`/
+(`file/slurp`/`file/spit`/`read-lines`/`write-lines`/`file/spit-append`), predicates
+(`regular?`/`file/dir?`/`file/exists?`), directory listing (`list-files`/`list-dirs`/
 `walk-files`), and path helpers (`path-extension`/`path-stem`, complementing the
 prelude's `path-join`/`path-basename`/`parent-dir`). Pure Brood over the fs
 primitives. The kernel also provides the always-available file primitives
-`slurp`/`spit`/`make-dir`/`file-exists?`/`dir?`/`list-dir`/`file-mtime`/`file-size`/
-`delete-file`/`delete-dir`/`rename-file`/`copy-file`/`cwd`.")
+`file/slurp`/`file/spit`/`file/mkdir`/`file/exists?`/`file/dir?`/`file/ls`/`file/mtime`/`file/size`/
+`file/rm`/`file/rmdir`/`file/rename`/`file/cp`/`file/cwd`.")
 
 ;; --- whole-file read / write ------------------------------------------------
-;; Whole-file I/O is the kernel's `slurp` / `spit` / `spit-append` (Clojure
-;; heritage); `spit-append` lands each write at end-of-file, so it is safe from
+;; Whole-file I/O is the kernel's `file/slurp` / `file/spit` / `file/spit-append` (Clojure
+;; heritage); `file/spit-append` lands each write at end-of-file, so it is safe from
 ;; concurrent processes. This module adds the line-oriented helpers on top.
 
 (defn read-lines (path)
   "The lines of the file at `path` as a list of strings, without their newlines. A trailing newline does not yield an empty final line; an empty file yields nil."
-  (let (text (slurp path))
+  (let (text (file/slurp path))
     (cond
       (= text "") nil
       (string/ends-with? text "\n") (string/split (string/substring text 0 (dec (string/length text))) "\n")
@@ -42,7 +43,7 @@ primitives. The kernel also provides the always-available file primitives
   ;; comment at `:67` already warns about for `append`.
   ;; The empty guard matters: `(string/join "\n" ())` is "", and an unguarded trailing "\n" would
   ;; write a one-byte file where the fold wrote an empty one.
-  (spit path (if (empty? lines) "" (str (string/join "\n" lines) "\n"))))
+  (file/spit path (if (empty? lines) "" (str (string/join "\n" lines) "\n"))))
 ;; `lines` is `seqable`, not `(list string)` — `fold` accepts a list, vector, set or range,
 ;; so the broader domain checks the argument (a non-seqable is flagged) without false-flagging
 ;; a vector caller the way `(list string)` would.
@@ -50,34 +51,34 @@ primitives. The kernel also provides the always-available file primitives
 
 ;; --- predicates -------------------------------------------------------------
 
-(defn file? (path)
+(defn regular? (path)
   "True if `path` exists and is a regular file (not a directory)."
-  (and (file-exists? path) (not (dir? path))))
-(sig file? (string -> bool))
+  (and (file/exists? path) (not (file/dir? path))))
+(sig regular? (string -> bool))
 
 ;; --- directory listing ------------------------------------------------------
 (defn list-files (dir)
   "The names of regular files directly under `dir` (excluding subdirectories), sorted."
-  (filter (fn (e) (not (dir? (path-join dir e)))) (list-dir dir)))
+  (filter (fn (e) (not (file/dir? (path-join dir e)))) (file/ls dir)))
 (sig list-files (string -> (list string)))
 
 (defn list-dirs (dir)
   "The names of subdirectories directly under `dir`, sorted."
-  (filter (fn (e) (dir? (path-join dir e))) (list-dir dir)))
+  (filter (fn (e) (file/dir? (path-join dir e))) (file/ls dir)))
 (sig list-dirs (string -> (list string)))
 
 (defn walk-files (dir)
   "Every file path under `dir`, recursively (full paths, depth-first). nil if `dir` is not a directory."
-  (if (not (dir? dir))
+  (if (not (file/dir? dir))
     nil
     ;; `cons` a file (O(1)); `append-two` a subdir's list (copies the small list, SHARES
     ;; `acc`). A plain `(append acc …)` recopies the growing accumulator per entry → O(files²)
     ;; on a large tree. Order is reversed (prepend) — fine for an unordered file set.
     (fold (fn (acc e)
             (let (p (path-join dir e))
-              (if (dir? p) (append-two (walk-files p) acc) (cons p acc))))
+              (if (file/dir? p) (append-two (walk-files p) acc) (cons p acc))))
       nil
-      (list-dir dir))))
+      (file/ls dir))))
 (sig walk-files (string -> (list string)))
 
 ;; --- path helpers (complement prelude path-join / path-basename / parent-dir)

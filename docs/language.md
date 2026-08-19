@@ -2066,13 +2066,13 @@ hood, so other mailbox messages stay queued), and errors rethrow at the call
 site, catchable as usual.
 
 ```clojure
-(offload slurp-bytes "big-archive.tar")     ; the worker keeps running others
+(offload file/slurp-bytes "big-archive.tar")     ; the worker keeps running others
 (offload %pbkdf2-sha256-bytes pw salt 600000 32)
 ```
 
 Only long/blocking **data-in/data-out** natives are allowed (`%git-clone`,
-`%git-resolve-ref`, `%pbkdf2-sha256-bytes`, `%digest`, `%hmac`, `slurp`,
-`slurp-bytes`, `spit`, `spit-bytes`, `spit-append`, `append-bytes`,
+`%git-resolve-ref`, `%pbkdf2-sha256-bytes`, `%digest`, `%hmac`, `file/slurp`,
+`file/slurp-bytes`, `file/spit`, `file/spit-bytes`, `file/spit-append`, `append-bytes`,
 `tls-self-signed`); anything heap-sharing or env-reading is refused with a
 clear error. Args and the result are deep-copied across (like `send`), so
 they must be sendable values. The package manager's clones already ride it.
@@ -2620,8 +2620,8 @@ linear on any text.
 
 ### Iolists (write-boundary trees)
 
-The byte-producing write boundaries — `tcp-send`, `proc-send`, `spit`,
-`spit-append`, `spit-bytes`, `append-bytes`, and the in-memory materialiser
+The byte-producing write boundaries — `tcp-send`, `proc-send`, `file/spit`,
+`file/spit-append`, `file/spit-bytes`, `append-bytes`, and the in-memory materialiser
 `bytes-concat` — accept any **iolist** (ADR-139, the Erlang/Elixir model): a
 **string**, a **`bytes`** value, a **byte int 0–255**, or an arbitrarily nested
 **list/vector** of iolists (`nil` is empty; an improper tail is a final leaf).
@@ -2803,7 +2803,7 @@ docstring on the floor.)
 (defmodule editor "the editor core"
   (:use editor/buffer)                 ; refer buffer's public names bare
   (:use text :only [insert]))  ; refer just text/insert as `insert`
-(defn open (path) (insert (new-buffer) 0 (slurp path)))   ; insert → text/insert
+(defn open (path) (insert (new-buffer) 0 (file/slurp path)))   ; insert → text/insert
 ```
 
 **Ambient names are ambient by declaration, not by spelling** (ADR-151). A name
@@ -2956,7 +2956,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 
 | Module | name | What it provides |
 |--------|---------------|-----------------|
-| `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `file?`, `list-files`, `list-dirs`, `walk-files`, `path-extension`, `path-stem`. All Brood (ADR-006), no new Rust |
+| `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `regular?`, `list-files`, `list-dirs`, `walk-files`, `path-extension`, `path-stem`. All Brood (ADR-006), no new Rust |
 | `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
 | `std/enum.blsp` | `'enum` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. The core ops (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stay bare in the prelude; `(:use enum)` for bare access or call qualified |
@@ -2977,7 +2977,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/hash.blsp` | `'hash` | `sha256`/`sha1`/`sha384`/`sha512`/`md5` (hex over strings or byte vectors), raw-byte digests (`sha256-raw` … → byte vectors, for chaining over bytes), `bytes->hex` (byte seq → lowercase hex), `hmac-sha256` (RFC 2104) and raw-byte `hmac-sha256-raw`/`-sha1-raw`/`-sha512-raw` (byte-vector key+msg → byte vector, for binary-protocol auth), `hash-string` (djb2). All Brood over two Rust prims (`%digest`/`%hmac`). |
 | `std/diff.blsp` | `'diff` | LCS-based sequence diff: `diff-seq`, `diff-lines`, `diff-summary`, `diff-patch`, `diff-unified` |
 | `std/path.blsp` | `'path` | Path string manipulation: `string/join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `with-extension` |
-| `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `halt` (whole-machine `cwd`/`hostname` are root builtins) |
+| `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `halt` (whole-machine `file/cwd`/`hostname` are root builtins) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
 | `std/proc/agent.blsp` | `'proc/agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
 | `std/protocol.blsp` | `'protocol` | Behaviour contracts — the *module*-satisfies-a-contract seam: `defbehaviour` declares the ops a module must define (no value dispatch), claimed with `(:implements Name)` in a module header; `protocol-ops` is the introspection hook the checker and LSP read. Value dispatch is `ability` — `defprotocol`/`defimpl` were retired (ADR-168) |

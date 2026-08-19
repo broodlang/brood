@@ -37,7 +37,7 @@
 (def maxsecs (let (e (getenv "MAXSECS")) (if e (string->number e) 60)))
 
 (defn rss-kb ()
-  (let (txt (slurp "/proc/self/status") i (index-of txt "VmRSS:"))
+  (let (txt (file/slurp "/proc/self/status") i (index-of txt "VmRSS:"))
     (if (< i 0)
       0
       (let (chunk (substring txt (+ i 6) (+ i 32))

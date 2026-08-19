@@ -45,10 +45,10 @@
   ;; so `slurp` — which promises a Brood string — must refuse it outright rather than
   ;; lossily substituting U+FFFD.
   (test "slurp refuses a malformed file instead of substituting U+FFFD"
-    (assert-error (slurp (u8-file))))
+    (assert-error (file/slurp (u8-file))))
 
   (test "slurp-bytes reads it byte-for-byte"
-    (let (bs (slurp-bytes (u8-file)))
+    (let (bs (file/slurp-bytes (u8-file)))
       (is (bytes? bs))
       ;; Kuhn's 2015-08-28 revision, as pinned in the corpus README.
       (assert= (count bs) 22781))))

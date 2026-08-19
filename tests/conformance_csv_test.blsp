@@ -41,9 +41,9 @@
   (let (p (first (filter (fn (f) (= (csv-stem f) stem)) (csv-dir "json"))))
     (if (nil? p)
       (error "conformance-csv: no json expectation for " stem)
-      (into [] (map csv-stringify-keys (json/parse (slurp p)))))))
+      (into [] (map csv-stringify-keys (json/parse (file/slurp p)))))))
 
-(defn- csv-actual (path) (into [] (csv/csv-parse-maps (slurp path))))
+(defn- csv-actual (path) (into [] (csv/csv-parse-maps (file/slurp path))))
 
 ;; [checked mismatches], mismatches as [stem expected actual].
 (defn- csv-scan

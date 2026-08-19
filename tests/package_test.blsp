@@ -50,13 +50,13 @@
 (defn pkg-tar-init (parent wrapper)
   (let (archive (path-join parent (str wrapper ".tar.gz")))
     (run-process "tar" (list "-czf" archive "-C" parent wrapper))
-    (list (str "file://" archive) (hash/sha256-bytes (slurp-bytes archive)))))
+    (list (str "file://" archive) (hash/sha256-bytes (file/slurp-bytes archive)))))
 
 (defn pkg-write-project (root nm src-module body deps-line)
-  (make-dir (path-join root "src"))
-  (spit (path-join root "project.blsp")
+  (file/mkdir (path-join root "src"))
+  (file/spit (path-join root "project.blsp")
     (str "(project :name \"" nm "\" :version \"0.1.0\"" deps-line ")\n"))
-  (spit (path-join (path-join root "src") (str src-module ".blsp"))
+  (file/spit (path-join (path-join root "src") (str src-module ".blsp"))
     (str "(defmodule " src-module " \"fixture\")\n" body "\n")))
 
 (describe "package: canonical tree hash"
@@ -68,15 +68,15 @@
     (let (root (pkg-fixture-root))
       (pkg-write-project root "a" "a" "(defn f () 1)" "")
       (let (h1 (package-tree-hash root))
-        (spit (path-join (path-join root "src") "a.blsp")
+        (file/spit (path-join (path-join root "src") "a.blsp")
           "(defmodule a \"fixture\")\n(defn f () 2)\n")
         (refute (= h1 (package-tree-hash root))))))
   (test "skips _deps/ so a nested cache doesn't perturb the hash"
     (let (root (pkg-fixture-root))
       (pkg-write-project root "a" "a" "(defn f () 1)" "")
       (let (h1 (package-tree-hash root))
-        (make-dir (path-join root "_deps"))
-        (spit (path-join (path-join root "_deps") "junk.blsp") "(def x 1)")
+        (file/mkdir (path-join root "_deps"))
+        (file/spit (path-join (path-join root "_deps") "junk.blsp") "(def x 1)")
         (assert= h1 (package-tree-hash root))))))
 
 (describe "package: reading a dependency's manifest"
@@ -154,8 +154,8 @@
             (assert= (get e :ref) "v1.0.0")
             (is (string? (get e :commit)))
             (is (string? (get e :sha256)))
-            (is (dir? (path-join (path-join app-dir "_deps") "greeter")))
-            (is (file-exists? (path-join (path-join (path-join app-dir "_deps") "greeter")
+            (is (file/dir? (path-join (path-join app-dir "_deps") "greeter")))
+            (is (file/exists? (path-join (path-join (path-join app-dir "_deps") "greeter")
                                 ".brood-pkg.blsp"))))))))
   (test "a second resolve reuses the locked commit (cache hit, no re-clone)"
     (let (parent (pkg-fixture-root)
@@ -346,11 +346,11 @@
             (assert= (dep-kind e) :tarball)
             (assert= (get e :url) url)
             (assert= (get e :sha256) sha)
-            (is (dir? target))
+            (is (file/dir? target))
             ;; strip-components=1 dropped the wrapper: the manifest is at the dep root
-            (is (file-exists? (path-join target "project.blsp")))
-            (is (file-exists? (path-join target "src/greeter.blsp")))
-            (is (file-exists? (path-join target ".brood-pkg.blsp"))))))))
+            (is (file/exists? (path-join target "project.blsp")))
+            (is (file/exists? (path-join target "src/greeter.blsp")))
+            (is (file/exists? (path-join target ".brood-pkg.blsp"))))))))
   (test "a wrong :sha256 errors loudly (the integrity pin)"
     (let (parent (pkg-fixture-root)
           dep-dir (path-join parent "greeter")
@@ -429,7 +429,7 @@
     (pkg-write-project dep-dir nm nm "(defn greet (w) w)" "")
     (let (archive (path-join parent (str nm ".tar.gz")))
       (run-process "tar" (list "-czf" archive "-C" dep-dir "."))
-      (let (bytes (slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
+      (let (bytes (file/slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
 
 ;; A handler whose release points at an EXTERNAL tarball — it serves the wrapped tarball over
 ;; HTTP at `/ext/<nm>.tar.gz` (the client rejects a non-http(s) source_url) and metadata whose
@@ -456,7 +456,7 @@
     (pkg-write-project dep-dir nm nm "(defn greet (w) w)" "")
     (let (archive (path-join parent (str nm "-wrapped.tar.gz")))
       (run-process "tar" (list "-czf" archive "-C" parent nm))
-      [(slurp-bytes archive) (hash/sha256-bytes (slurp-bytes archive))])))
+      [(file/slurp-bytes archive) (hash/sha256-bytes (file/slurp-bytes archive))])))
 
 ;; A handler serving a SIGNED hosted release (ADR-212): its metadata carries `:signature` +
 ;; `:pubkey` (hex) alongside the checksum, and the tarball at `/tarball`.
@@ -496,8 +496,8 @@
         (assert= (get e :version) "1.0.0")
         (assert= (get e :sha256) checksum)
         (let (extracted (path-join (path-join app-dir "_deps") "greeter"))
-          (is (dir? extracted))
-          (is (file-exists? (path-join extracted "project.blsp"))))
+          (is (file/dir? extracted))
+          (is (file/exists? (path-join extracted "project.blsp"))))
         ;; lock row: [greeter :registry "1.0.0" :sha256 <sha> :deps …]
         (let (row (dep-lock-vec e))
           (assert= (vector-ref row 1) :registry)
@@ -520,9 +520,9 @@
         (assert= (get e :version) "1.0.0")
         (assert= (get e :sha256) checksum)
         (let (extracted (path-join (path-join app-dir "_deps") "extdep"))
-          (is (dir? extracted))
+          (is (file/dir? extracted))
           ;; strip-1 put the wrapped package's project.blsp at the package root
-          (is (file-exists? (path-join extracted "project.blsp")))))))
+          (is (file/exists? (path-join extracted "project.blsp")))))))
   (test "an external-URL release still refuses a sha256 mismatch"
     ;; the checksum is verified regardless of source — the registry is never trusted for bytes
     (let (parent (pkg-fixture-root)
@@ -548,9 +548,9 @@
           [wrapped-bytes _sha] (mock-package-tarball-wrapped parent "evil")
           ;; write the wrapped tarball to disk and point source_url at it via file://
           local (path-join parent "evil-local.tar.gz")
-          _ (spit-bytes local wrapped-bytes)
+          _ (file/spit-bytes local wrapped-bytes)
           file-url (str "file://" local)
-          checksum (hash/sha256-bytes (slurp-bytes local))
+          checksum (hash/sha256-bytes (file/slurp-bytes local))
           ;; serve metadata whose source_url is the file:// URL, and a matching checksum
           base (mock-registry-start (fn (req)
                                       (if (= (get req :path) "/api/v1/packages/evil/releases/1.0.0")
@@ -596,7 +596,7 @@
       ;; resolves anyway (advisory never blocks), and the extraction lands
       (let (e (package/package-resolve-registry app-dir (dep-registry 'sigbad "1.0.0") nil base))
         (assert= (get e :version) "1.0.0")
-        (is (dir? (path-join (path-join app-dir "_deps") "sigbad"))))))
+        (is (file/dir? (path-join (path-join app-dir "_deps") "sigbad"))))))
   (test "an unsigned release pins no key and leaves the lock uncluttered"
     (let (parent (pkg-fixture-root)
           app-dir (path-join parent "app")
@@ -739,7 +739,7 @@
     (pkg-write-project dir nm nm "(defn f () 1)" deps-line)
     (let (archive (path-join parent (str nm "-" version ".tar.gz")))
       (run-process "tar" (list "-czf" archive "-C" dir "."))
-      (let (bytes (slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
+      (let (bytes (file/slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
 
 ;; A handler serving `spec`. Path shapes: …/packages/<n>/releases (list),
 ;; …/releases/<v> (metadata), …/releases/<v>/tarball (bytes).
@@ -801,8 +801,8 @@
           ;; bar: pulled in transitively by foo 1.5.0's ^2.0, newest is 2.1.0
           (assert= "2.1.0" (get (get by-name 'bar) :version))
           ;; both are on disk under _deps/
-          (is (dir? (path-join (path-join app-dir "_deps") "foo")))
-          (is (dir? (path-join (path-join app-dir "_deps") "bar")))
+          (is (file/dir? (path-join (path-join app-dir "_deps") "foo")))
+          (is (file/dir? (path-join (path-join app-dir "_deps") "bar")))
           ;; the lock rows carry the CONCRETE resolved versions
           (let (foo-row (dep-lock-vec (get by-name 'foo)))
             (assert= :registry (vector-ref foo-row 1))
@@ -877,7 +877,7 @@
           (assert= "1.0.0" (get (get by-name 'a) :version)) ; fell back from 2.0.0
           (assert= "1.0.0" (get (get by-name 'b) :version))
           (assert= "2.0.0" (get (get by-name 'c) :version))
-          (is (dir? (path-join (path-join app-dir "_deps") "c")))))))
+          (is (file/dir? (path-join (path-join app-dir "_deps") "c")))))))
 
   (test "an unsatisfiable range set errors, naming the package"
     (let (parent (pkg-fixture-root)
@@ -927,14 +927,14 @@
     ;; restore the root instead, the way a manifest-reading tool would leave it.
     (let (root (pkg-fixture-root)
           saved *project-enhances*)
-      (make-dir (path-join root "src"))
-      (spit (path-join root "project.blsp")
+      (file/mkdir (path-join root "src"))
+      (file/spit (path-join root "project.blsp")
         (str "(project :name \"bedit-zig\" :version \"0.1.0\""
           " :enhances {bedit \">= 0.1\"})\n"))
       ;; `rest`: the `project` MACRO passes only the opts plist to `project-apply`, so
       ;; handing it the whole `(project …)` form would shift every key by one and find
       ;; nothing — the same mistake as reading a manifest with `plist-get` on the form.
-      (project/project-apply (rest (read-string (slurp (path-join root "project.blsp")))))
+      (project/project-apply (rest (read-string (file/slurp (path-join root "project.blsp")))))
       (assert= ">= 0.1" (get *project-enhances* 'bedit))
       (def *project-enhances* saved)))
   (test "the publish envelope carries it with STRING keys (JSON has no symbols)"
@@ -963,10 +963,10 @@
       (assert= (package/package-provided-modules (path-join root "src")) (list 'alpha))))
   (test "provided-modules reads the defmodule name, not the filename"
     (let (root (pkg-fixture-root))
-      (make-dir (path-join root "src"))
+      (file/mkdir (path-join root "src"))
       ;; file is helpers.blsp but it declares (defmodule json) — json is the
       ;; namespace that would clobber, so that's what we must report.
-      (spit (path-join (path-join root "src") "helpers.blsp")
+      (file/spit (path-join (path-join root "src") "helpers.blsp")
         "(defmodule json \"x\")\n(defn p () 1)\n")
       (assert= (package/package-provided-modules (path-join root "src")) (list 'json))))
   ;; Post-package-rooting (ADR-070): two *dependencies* providing the same module
@@ -1007,20 +1007,20 @@
   (test "provided-modules finds a nested-directory module"
     (let (root (pkg-fixture-root)
           gui (path-join (path-join root "src") "gui"))
-      (make-dir gui)
-      (spit (path-join (path-join root "src") "top.blsp") "(defmodule top)\n")
-      (spit (path-join gui "window.blsp") "(defmodule gui/window)\n")
+      (file/mkdir gui)
+      (file/spit (path-join (path-join root "src") "top.blsp") "(defmodule top)\n")
+      (file/spit (path-join gui "window.blsp") "(defmodule gui/window)\n")
       (assert= (sort (map name (package/package-provided-modules (path-join root "src"))))
         (list "gui/window" "top"))))
   (test "two providers of the same NESTED module name collide loudly"
     (let (parent (pkg-fixture-root)
           a (path-join parent "a")
           b (path-join parent "b"))
-      (make-dir (path-join (path-join a "src") "gui"))
-      (make-dir (path-join (path-join b "src") "gui"))
-      (spit (path-join (path-join (path-join a "src") "gui") "window.blsp")
+      (file/mkdir (path-join (path-join a "src") "gui"))
+      (file/mkdir (path-join (path-join b "src") "gui"))
+      (file/spit (path-join (path-join (path-join a "src") "gui") "window.blsp")
         "(defmodule gui/window)\n(defn f () 1)\n")
-      (spit (path-join (path-join (path-join b "src") "gui") "window.blsp")
+      (file/spit (path-join (path-join (path-join b "src") "gui") "window.blsp")
         "(defmodule gui/window)\n(defn g () 2)\n")
       (is (includes? (try
                        (package/package-check-namespace-collisions (list (list "dependency 'a'"
@@ -1090,12 +1090,12 @@
         ;; the dir is the dep's src/ (relative ".." is left unnormalised — the OS
         ;; resolves it; normalisation is a deferred nicety)
         (is (includes? (first dirs) "greeter/src"))
-        (is (file-exists? (path-join app-dir "project.lock.blsp"))))))
+        (is (file/exists? (path-join app-dir "project.lock.blsp"))))))
   (test "no deps means no load-path entries and no lock file"
     (let (app (pkg-fixture-root))
-      (make-dir app)
+      (file/mkdir app)
       (assert= (ensure-deps app nil) nil)
-      (refute (file-exists? (path-join app "project.lock.blsp"))))))
+      (refute (file/exists? (path-join app "project.lock.blsp"))))))
 
 ;; Editing the manifest — pure string→string transforms (comment-preserving),
 ;; so they test without the filesystem. The add/remove *verbs* are cwd-driven
@@ -1230,7 +1230,7 @@
                      (catch e e))
           "two different git URLs"))))
 
-;; The `fetch`/`tree` verbs themselves are cwd-driven (they walk from `(cwd)` to a
+;; The `fetch`/`tree` verbs themselves are cwd-driven (they walk from `(file/cwd)` to a
 ;; project root), so — like `run-project` — they can't be isolated from the brood
 ;; repo the suite runs inside. The hand check is `nest fetch`/`nest tree` in a
 ;; scaffolded project. Here we cover their pure, cwd-free helpers.
@@ -1283,8 +1283,8 @@
           (require-one 'salutation)
           (assert= (salutation/hi "you") "yo you")
           ;; and the clone + lock landed under the app
-          (is (dir? (path-join (path-join app-dir "_deps") "salutation")))
-          (is (file-exists? (path-join app-dir "project.lock.blsp"))))))))
+          (is (file/dir? (path-join (path-join app-dir "_deps") "salutation")))
+          (is (file/exists? (path-join app-dir "project.lock.blsp"))))))))
 
 ;; `nest release` bundle collection: a dependency's modules are embedded under their
 ;; PACKAGE-ROOTED name (`alpha/parser`), so two deps each providing a `parser` coexist in

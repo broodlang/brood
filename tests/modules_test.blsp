@@ -86,7 +86,7 @@
                 "\n(defn ready () :ok)\n")
           saved-path *load-path*
           me (self))
-      (spit path src)
+      (file/spit path src)
       (set-load-path! (cons "/tmp" *load-path*))
       (doseq (k (range 8))
         (spawn (send me
@@ -97,7 +97,7 @@
       (let (results (map (fn (_) (receive ([:req-race r] r) (after *test-wait-ms* :timeout)))
                       (range 8)))
         (set-load-path! saved-path)
-        (delete-file path)
+        (file/rm path)
         (is (every? (fn (r) (= r :ok)) results)))))
 
   ;; A FAILED load must clear the in-flight marker: a stale self-marker would make
@@ -118,11 +118,11 @@
           ;; the module requires ITSELF mid-file — the degenerate cycle
           src "(defmodule reqcirc-mod)\n(require-one 'reqcirc-mod)\n(defn ok () :yes)\n"
           saved-path *load-path*)
-      (spit path src)
+      (file/spit path src)
       (set-load-path! (cons "/tmp" *load-path*))
       (require-one 'reqcirc-mod)
       (set-load-path! saved-path)
-      (delete-file path)
+      (file/rm path)
       (assert= (reqcirc-mod/ok) :yes))))
 
 ;; `:implements` is read by the type checker (types/check/protocol.rs), which pulls the
@@ -200,10 +200,10 @@
           a2 (str dir "/cyca2.blsp")
           b2 (str dir "/cycb2.blsp")
           saved *load-path*)
-      (spit a1 "(defmodule cyca (:use cycb))\n(defn a-one () 1)\n")
-      (spit b1 "(defmodule cycb (:use cyca))\n(defn b-one () 1)\n")
-      (spit a2 "(defmodule cyca2 (:use cycb2 :only [b-one]))\n(defn a-one () 1)\n")
-      (spit b2 "(defmodule cycb2 (:use cyca2 :only [a-one]))\n(defn b-one () (a-one))\n")
+      (file/spit a1 "(defmodule cyca (:use cycb))\n(defn a-one () 1)\n")
+      (file/spit b1 "(defmodule cycb (:use cyca))\n(defn b-one () 1)\n")
+      (file/spit a2 "(defmodule cyca2 (:use cycb2 :only [b-one]))\n(defn a-one () 1)\n")
+      (file/spit b2 "(defmodule cycb2 (:use cyca2 :only [a-one]))\n(defn b-one () (a-one))\n")
       (set-load-path! (cons dir *load-path*))
       (let (refer-all-err (try
                             (do (require-one 'cyca) :no-error)
@@ -212,6 +212,6 @@
                       (do (require-one 'cyca2) (cycb2/b-one))
                       (catch e [:err (error-message e)])))
         (set-load-path! saved)
-        (doseq (p (list a1 b1 a2 b2)) (delete-file p))
+        (doseq (p (list a1 b1 a2 b2)) (file/rm p))
         (is (includes? (str refer-all-err) "circular"))
         (assert= only-ok 1)))))

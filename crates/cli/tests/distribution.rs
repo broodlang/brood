@@ -1855,8 +1855,8 @@ fn cluster_mesh_converges_to_full_mesh_from_a_chain() {
             "(node-start :{name} \"127.0.0.1:{port}\" \"secret-test-cookie-16+\")\n\
              {connect}\
              (defn watch (n)\n\
-                (cond (= 3 (count (nodes))) (spit \"{r}\" \"FULL\")\n\
-                      (<= n 0) (spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
+                (cond (= 3 (count (nodes))) (file/spit \"{r}\" \"FULL\")\n\
+                      (<= n 0) (file/spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
                       else (do (sleep 100) (watch (- n 1)))))\n\
              (watch 250)\n\
              (defn idle () (do (sleep 1000) (idle))) (idle)\n",
@@ -1925,8 +1925,8 @@ fn cluster_mesh_simultaneous_joins_converge() {
     let hub_src = format!(
         "(node-start :h \"127.0.0.1:{hub_port}\" \"secret-test-cookie-16+\")\n\
          (defn watch (n)\n\
-            (cond (= 4 (count (nodes))) (spit \"{r}\" \"FULL\")\n\
-                  (<= n 0) (spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
+            (cond (= 4 (count (nodes))) (file/spit \"{r}\" \"FULL\")\n\
+                  (<= n 0) (file/spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
                   else (do (sleep 100) (watch (- n 1)))))\n\
          (watch 250)\n\
          (defn idle () (do (sleep 1000) (idle))) (idle)\n",
@@ -1942,8 +1942,8 @@ fn cluster_mesh_simultaneous_joins_converge() {
             "(node-start :{name} \"127.0.0.1:{p}\" \"secret-test-cookie-16+\")\n\
              (connect \"x@127.0.0.1:{hub_port}\")\n\
              (defn watch (n)\n\
-                (cond (= 4 (count (nodes))) (spit \"{r}\" \"FULL\")\n\
-                      (<= n 0) (spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
+                (cond (= 4 (count (nodes))) (file/spit \"{r}\" \"FULL\")\n\
+                      (<= n 0) (file/spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
                       else (do (sleep 100) (watch (- n 1)))))\n\
              (watch 250)\n\
              (defn idle () (do (sleep 1000) (idle))) (idle)\n",

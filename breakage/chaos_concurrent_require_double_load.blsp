@@ -39,11 +39,11 @@
     (let (root (temp-path "/tmp/brood-chaos-require-")
           files 20
           nreq 40)
-      (make-dir root)
-      (make-dir (path-join root "src"))
-      (spit (path-join root "project.blsp") "(project :name \"crp\" :source-paths [\"src\"])")
+      (file/mkdir root)
+      (file/mkdir (path-join root "src"))
+      (file/spit (path-join root "project.blsp") "(project :name \"crp\" :source-paths [\"src\"])")
       (map (fn (k)
-             (spit (path-join (path-join root "src") (str "m" k ".blsp"))
+             (file/spit (path-join (path-join root "src") (str "m" k ".blsp"))
                (str "(defmodule m"
                  k ") (defmodule sec" k ") "
                  "(%registry-update! '*chaos-loads* :cons-new nil (self))")))

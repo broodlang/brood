@@ -42,9 +42,9 @@ const EFFECTFUL_IN_GUARD: &[&str] = &[
     // I/O
     "println",
     "print",
-    "spit",
-    "spit-append",
-    "slurp",
+    "file/spit",
+    "file/spit-append",
+    "file/slurp",
     "read-line",
     "os-cmd",
     "run-process",

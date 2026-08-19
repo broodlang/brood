@@ -35,7 +35,7 @@
 (defn- test-files
   ()
   (filter (fn (e) (and (string/ends-with? e "_test.blsp") (not (= e self-name))))
-    (list-dir tests-dir)))
+    (file/ls tests-dir)))
 
 ;; Every string literal appearing immediately after `marker`. Hand-rolled rather than
 ;; regex because std/regex is a deliberate subset with no capture groups: split on the
@@ -62,7 +62,7 @@
     (let (offenders (fold (fn (acc f)
                             (append acc
                               (map (fn (p) [f p])
-                                (unpurged-prefixes (slurp (str tests-dir f))))))
+                                (unpurged-prefixes (file/slurp (str tests-dir f))))))
                       (list)
                       (test-files)))
       (assert= offenders (list))))
@@ -73,7 +73,7 @@
   (test "the scanner actually finds the corpus's temp-dir uses"
     (let (total (fold (fn (acc f)
                         (+ acc
-                          (count (quoted-args (slurp (str tests-dir f))
+                          (count (quoted-args (file/slurp (str tests-dir f))
                                    "(temp-dir \""))))
                   0
                   (test-files)))

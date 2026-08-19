@@ -54,7 +54,7 @@ behind a long-lived loop has changed since it started."
 
 ;; The per-file watcher loop. Tail-recursive on (path, last-seen-mtime).
 ;; Each tick:
-;;   - stat the file (`file-mtime` is the cheap path — no read);
+;;   - stat the file (`file/mtime` is the cheap path — no read);
 ;;   - if it vanished, complain once and keep polling (the editor may be
 ;;     mid-rename);
 ;;   - if mtime unchanged, sleep and recur;
@@ -109,7 +109,7 @@ behind a long-lived loop has changed since it started."
 
 (defn- reload-loop
   (path last &optional on-reload)
-  (let (now (file-mtime path))
+  (let (now (file/mtime path))
     (cond
       (nil? now)
         (do
@@ -144,18 +144,18 @@ behind a long-lived loop has changed since it started."
 ;; too so std/reload stays prelude-only and require-able without project.
 (defn- reload-collect-blsp
   (dir)
-  (if (dir? dir)
+  (if (file/dir? dir)
     (fold
       (fn (acc entry)
         (let (p (path-join dir entry))
           (cond
             ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
-            (dir? p) (append-two (reload-collect-blsp p) acc)
+            (file/dir? p) (append-two (reload-collect-blsp p) acc)
             (string/ends-with? entry ".blsp") (cons p acc)
             else acc)))
       nil
-      (list-dir dir))
+      (file/ls dir))
     nil))
 
 ;; The directory watcher loop. Holds the set of files we've already noticed.
@@ -184,14 +184,14 @@ behind a long-lived loop has changed since it started."
                 (on-reload p)
                 (catch e (println "[reload] on-reload failed:" p "—" e)))))
           (catch e (println "[reload] +load failed:" p "—" e)))
-        (spawn (reload-loop p (file-mtime p) on-reload))))
+        (spawn (reload-loop p (file/mtime p) on-reload))))
     (sleep *reload-scan-ms*)
     (reload-dir-loop dir current on-reload)))
 
 (defn reload-on-change (path &optional on-reload)
   "Watch `path` for changes and `load` it on every modification. Dispatches:
 
-  - **File** — spawn one watcher polling `file-mtime` every
+  - **File** — spawn one watcher polling `file/mtime` every
     `*reload-poll-ms*` (250 ms).
   - **Directory** — spawn one watcher per `.blsp` under it (recursive), plus
     a directory watcher that re-scans every `*reload-scan-ms*` (1 s) and
@@ -208,8 +208,8 @@ swallowed — the watcher keeps running. Returns nil. To stop watching, kill
 the parent process (per-watcher stop is deferred; there's no compelling
 use yet)."
   (cond
-    (not (file-exists? path)) (error "reload-on-change: no such path: " path)
-    (dir? path)
+    (not (file/exists? path)) (error "reload-on-change: no such path: " path)
+    (file/dir? path)
     ;; Two-step setup for a directory:
     ;;   1. spawn a per-file watcher for every .blsp currently in the tree
     ;;      (silently — no "+" line; these files were already loaded by the
@@ -219,8 +219,8 @@ use yet)."
     ;;      `load` + per-file watcher for each.
     (let (initial (reload-collect-blsp path))
       (dolist (p initial)
-        (spawn (reload-loop p (file-mtime p) on-reload)))
+        (spawn (reload-loop p (file/mtime p) on-reload)))
       (spawn (reload-dir-loop path initial on-reload))
       nil)
       else
-    (do (spawn (reload-loop path (file-mtime path) on-reload)) nil)))
+    (do (spawn (reload-loop path (file/mtime path) on-reload)) nil)))

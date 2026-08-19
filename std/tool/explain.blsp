@@ -68,8 +68,8 @@ the `nest mcp` tools of the same names.")
             :example "(process-flag :max-heap 10000000)   ; per-process, in bytes"}
    "E0050" {:summary "File I/O failed — a path couldn't be read or written."
             :causes "A missing file, a permissions problem, a wrong path (relative to the cwd, not the project)."
-            :fix "Check the path exists (`(file-exists? p)`); use `(cwd)` to see the working directory. For binary data use `slurp-bytes`/`spit-bytes`."
-            :example "(when (file-exists? p) (slurp p))"}
+            :fix "Check the path exists (`(file/exists? p)`); use `(file/cwd)` to see the working directory. For binary data use `file/slurp-bytes`/`file/spit-bytes`."
+            :example "(when (file/exists? p) (file/slurp p))"}
    "E0051" {:summary "Subprocess failed to start — the program couldn't be spawned."
             :causes "The program isn't on PATH; a wrong executable name."
             :fix "Confirm the binary is installed and on PATH; pass an absolute path if needed."
@@ -170,7 +170,7 @@ the `nest mcp` tools of the same names.")
     {:intent "run a slow / blocking native call without stalling"
      :keywords ["blocking" "slow" "offload" "git" "long" "io" "dirty"]
      :idiom "Run an allow-listed blocking native on the offload pool: `(offload f & args)` parks only this process, never a scheduler worker."
-     :example "(offload slurp-bytes \"big.tar\")"
+     :example "(offload file/slurp-bytes \"big.tar\")"
      :see "docs/language.md §Blocking natives (offload)"}
     {:intent "define a private helper / hide an implementation detail"
      :keywords ["private" "hidden" "internal" "encapsulate" "defp" "defn-" "def-"]
