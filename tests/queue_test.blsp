@@ -2,46 +2,46 @@
 
 (describe "FIFO queue"
   (test "new queue is empty"
-    (is (queue/queue-empty? (queue/queue-new))))
+    (is (queue/empty? (queue/new))))
   (test "size 0 when empty"
-    (assert= 0 (queue/queue-size (queue/queue-new))))
+    (assert= 0 (queue/size (queue/new))))
   (test "push increases size"
-    (assert= 1 (queue/queue-size (queue/queue-push (queue/queue-new) :a))))
+    (assert= 1 (queue/size (queue/push (queue/new) :a))))
   (test "pop returns empty on empty queue"
-    (assert= :empty (queue/queue-pop (queue/queue-new))))
+    (assert= :empty (queue/pop (queue/new))))
   (test "peek returns empty on empty queue"
-    (assert= :empty (queue/queue-peek (queue/queue-new))))
+    (assert= :empty (queue/peek (queue/new))))
   (test "FIFO order preserved"
-    (let (q (-> (queue/queue-new)
-              (queue/queue-push 1)
-              (queue/queue-push 2)
-              (queue/queue-push 3)))
-      (let (r1 (queue/queue-pop q)
-            r2 (queue/queue-pop (second r1))
-            r3 (queue/queue-pop (second r2)))
+    (let (q (-> (queue/new)
+              (queue/push 1)
+              (queue/push 2)
+              (queue/push 3)))
+      (let (r1 (queue/pop q)
+            r2 (queue/pop (second r1))
+            r3 (queue/pop (second r2)))
         (assert= 1 (first r1))
         (assert= 2 (first r2))
         (assert= 3 (first r3))
-        (is (queue/queue-empty? (second r3))))))
+        (is (queue/empty? (second r3))))))
   (test "peek does not remove"
-    (let (q (queue/queue-push (queue/queue-new) :x))
-      (assert= :x (queue/queue-peek q))
-      (assert= :x (queue/queue-peek q))
-      (assert= 1 (queue/queue-size q))))
-  (test "queue-to-list preserves order"
-    (let (q (-> (queue/queue-new)
-              (queue/queue-push :a)
-              (queue/queue-push :b)
-              (queue/queue-push :c)))
-      (assert= [:a :b :c] (into [] (queue/queue-to-list q)))))
-  (test "queue-from-list"
-    (let (q (queue/queue-from-list [10 20 30]))
-      (assert= 10 (queue/queue-peek q))
-      (assert= 3 (queue/queue-size q))))
+    (let (q (queue/push (queue/new) :x))
+      (assert= :x (queue/peek q))
+      (assert= :x (queue/peek q))
+      (assert= 1 (queue/size q))))
+  (test "queue/to-list preserves order"
+    (let (q (-> (queue/new)
+              (queue/push :a)
+              (queue/push :b)
+              (queue/push :c)))
+      (assert= [:a :b :c] (into [] (queue/to-list q)))))
+  (test "queue/from-list"
+    (let (q (queue/from-list [10 20 30]))
+      (assert= 10 (queue/peek q))
+      (assert= 3 (queue/size q))))
   ;; a queue is a first-class collection — the generic ops work on it directly
   ;; (Seqable + Conjable, ADR-172 §7), not just the bespoke `queue-*` functions.
   (test "generic collection ops work on a queue"
-    (let (q (queue/queue-from-list [1 2 3 4]))
+    (let (q (queue/from-list [1 2 3 4]))
       (assert= [1 2 3 4] (into [] q)) ; Seqable
       (assert= 4 (count q))
       (assert= (list 10 20 30 40) (map (fn (n) (* n 10)) q))
@@ -49,88 +49,88 @@
       (assert= (list 2 4) (filter even? q))
       (assert= [1 2 3 4 5] (into [] (conj q 5))))) ; Conjable
   (test "interleaved push/pop"
-    (let (q0 (queue/queue-new)
-          q1 (queue/queue-push q0 :a)
-          q2 (queue/queue-push q1 :b)
-          r1 (queue/queue-pop q2)
-          q3 (queue/queue-push (second r1) :c)
-          r2 (queue/queue-pop q3)
-          r3 (queue/queue-pop (second r2)))
+    (let (q0 (queue/new)
+          q1 (queue/push q0 :a)
+          q2 (queue/push q1 :b)
+          r1 (queue/pop q2)
+          q3 (queue/push (second r1) :c)
+          r2 (queue/pop q3)
+          r3 (queue/pop (second r2)))
       (assert= :a (first r1))
       (assert= :b (first r2))
       (assert= :c (first r3)))))
 
 (describe "min-priority queue"
   (test "new pq is empty"
-    (is (queue/pq-empty? (queue/pq-new))))
+    (is (pq/empty? (pq/new))))
   (test "size 0"
-    (assert= 0 (queue/pq-size (queue/pq-new))))
+    (assert= 0 (pq/size (pq/new))))
   (test "pop empty returns :empty"
-    (assert= :empty (queue/pq-pop (queue/pq-new))))
+    (assert= :empty (pq/pop (pq/new))))
   (test "peek empty returns :empty"
-    (assert= :empty (queue/pq-peek (queue/pq-new))))
+    (assert= :empty (pq/peek (pq/new))))
   (test "min priority comes out first"
-    (let (pq (-> (queue/pq-new)
-               (queue/pq-insert 3 :low)
-               (queue/pq-insert 1 :high)
-               (queue/pq-insert 2 :med)))
-      (assert= :high (queue/pq-peek pq))
-      (let (r1 (queue/pq-pop pq)
-            r2 (queue/pq-pop (second r1))
-            r3 (queue/pq-pop (second r2)))
+    (let (pq (-> (pq/new)
+               (pq/insert 3 :low)
+               (pq/insert 1 :high)
+               (pq/insert 2 :med)))
+      (assert= :high (pq/peek pq))
+      (let (r1 (pq/pop pq)
+            r2 (pq/pop (second r1))
+            r3 (pq/pop (second r2)))
         (assert= :high (first r1))
         (assert= :med (first r2))
         (assert= :low (first r3))
-        (is (queue/pq-empty? (second r3))))))
-  (test "pq-to-list in priority order"
-    (let (pq (-> (queue/pq-new)
-               (queue/pq-insert 5 :e)
-               (queue/pq-insert 1 :a)
-               (queue/pq-insert 3 :c)))
-      (assert= [:a :c :e] (into [] (queue/pq-to-list pq)))))
+        (is (pq/empty? (second r3))))))
+  (test "pq/to-list in priority order"
+    (let (pq (-> (pq/new)
+               (pq/insert 5 :e)
+               (pq/insert 1 :a)
+               (pq/insert 3 :c)))
+      (assert= [:a :c :e] (into [] (pq/to-list pq)))))
   (test "equal priorities"
-    (let (pq (-> (queue/pq-new)
-               (queue/pq-insert 1 :x)
-               (queue/pq-insert 1 :y)))
-      (assert= 2 (queue/pq-size pq))))
+    (let (pq (-> (pq/new)
+               (pq/insert 1 :x)
+               (pq/insert 1 :y)))
+      (assert= 2 (pq/size pq))))
   (test "equal priorities pop in insertion order (stable / FIFO)"
-    (let (pq (-> (queue/pq-new)
-               (queue/pq-insert 1 :a)
-               (queue/pq-insert 1 :b)
-               (queue/pq-insert 1 :c)))
-      (assert= [:a :b :c] (into [] (queue/pq-to-list pq))))))
+    (let (pq (-> (pq/new)
+               (pq/insert 1 :a)
+               (pq/insert 1 :b)
+               (pq/insert 1 :c)))
+      (assert= [:a :b :c] (into [] (pq/to-list pq))))))
 
 ;; Both structures are records, so each has a nominal identity rather than being "a map
 ;; with the right keys" / "a list of pairs". That is what `queue?`/`pq?` test, what keeps
 ;; either from comparing `=` to a look-alike, and what carries their print form.
 (describe "queue and pq are records with their own identity"
   (test "queue? / pq? are true only for the real thing"
-    (is (queue/queue? (queue/queue-new)))
-    (is (queue/queue? (queue/queue-push (queue/queue-new) 1)))
-    (is (not (queue/queue? (queue/pq-new))))
-    (is (queue/pq? (queue/pq-new)))
-    (is (queue/pq? (queue/pq-insert (queue/pq-new) 1 :a)))
-    (is (not (queue/pq? (queue/queue-new)))))
+    (is (queue/queue? (queue/new)))
+    (is (queue/queue? (queue/push (queue/new) 1)))
+    (is (not (queue/queue? (pq/new))))
+    (is (pq/pq? (pq/new)))
+    (is (pq/pq? (pq/insert (pq/new) 1 :a)))
+    (is (not (pq/pq? (queue/new)))))
   (test "neither is a plain collection in disguise"
     (is (not (queue/queue? {:front nil :back nil :size 0})))
-    (is (not (queue/pq? (list [1 :a]))))
-    (is (not (= (queue/queue-new) {:front nil :back nil :size 0}))))
+    (is (not (pq/pq? (list [1 :a]))))
+    (is (not (= (queue/new) {:front nil :back nil :size 0}))))
   (test "each carries its record id"
-    (assert= (record-id (queue/queue-new)) :queue/queue)
-    (assert= (record-id (queue/pq-new)) :queue/pq))
+    (assert= (record-id (queue/new)) :queue/queue)
+    (assert= (record-id (pq/new)) :pq/pq))
   ;; An EMPTY pq used to be `nil` (a bare list), and `()` is the one falsy collection in
   ;; Brood — so `(if pq …)` took the else branch on an empty queue. A record is truthy.
   (test "an empty pq is truthy, unlike the bare list it used to be"
-    (is (if (queue/pq-new) true false))
-    (is (queue/pq-empty? (queue/pq-new))))
+    (is (if (pq/new) true false))
+    (is (pq/empty? (pq/new))))
   (test "a queue displays as a summary and inspects as its contents"
-    (assert= (to-str (queue/queue-new)) "#<queue empty>")
-    (let (q (queue/queue-from-list (list 1 2 3)))
+    (assert= (to-str (queue/new)) "#<queue empty>")
+    (let (q (queue/from-list (list 1 2 3)))
       (assert= (to-str q) "#<queue 3 front=1>")
       (assert= (inspect q) "#<queue (1 2 3)>")))
   (test "a pq displays as a summary and inspects as its entries"
-    (assert= (to-str (queue/pq-new)) "#<pq empty>")
-    (let (pq (-> (queue/pq-new) (queue/pq-insert 2 :b) (queue/pq-insert 1 :a)))
+    (assert= (to-str (pq/new)) "#<pq empty>")
+    (let (pq (-> (pq/new) (pq/insert 2 :b) (pq/insert 1 :a)))
       (assert= (to-str pq) "#<pq 2 min=1>")
       (assert= (inspect pq) "#<pq ([1 :a] [2 :b])>"))))
 
@@ -141,16 +141,16 @@
   (test "queues built in workers arrive as queues and pop in order"
     (let (me (self))
       (doseq (i (range 4))
-        (spawn (send me [:q (queue/queue-from-list (list i (+ i 10)))])))
+        (spawn (send me [:q (queue/from-list (list i (+ i 10)))])))
       (let (results (map (fn (_) (receive ([:q q] q) (after *test-wait-ms* :timeout)))
                       (range 4)))
         (is (every? queue/queue? results))
-        (is (every? (fn (q) (= (queue/queue-size q) 2)) results))
-        (assert= (into [] (sort (map (fn (q) (queue/queue-peek q)) results))) [0 1 2 3]))))
+        (is (every? (fn (q) (= (queue/size q) 2)) results))
+        (assert= (into [] (sort (map (fn (q) (queue/peek q)) results))) [0 1 2 3]))))
   (test "a pq survives a round trip and keeps its ordering"
     (let (me (self)
-          pq (-> (queue/pq-new) (queue/pq-insert 3 :c) (queue/pq-insert 1 :a)))
+          pq (-> (pq/new) (pq/insert 3 :c) (pq/insert 1 :a)))
       (spawn (send me [:pq pq]))
       (let (back (receive ([:pq p] p) (after *test-wait-ms* :timeout)))
-        (is (queue/pq? back))
-        (assert= (into [] (queue/pq-to-list back)) [:a :c])))))
+        (is (pq/pq? back))
+        (assert= (into [] (pq/to-list back)) [:a :c])))))

@@ -1039,6 +1039,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Purely functional FIFO queue (two-list, amortised O(1)) and min-priority
     // queue (sorted-list, O(n) insert / O(1) pop).
     embedded_module!("queue", "std/queue.blsp"),
+    embedded_module!("pq", "std/pq.blsp"),
     // Multi-valued map: one key may hold multiple values (a map of lists).
     // multimap-assoc, multimap-get, multimap-get-all, multimap-dissoc, …
     embedded_module!("multimap", "std/multimap.blsp"),
