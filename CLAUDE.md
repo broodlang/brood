@@ -188,14 +188,14 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   coverage.rs  line-coverage instrumentation (ADR-148); perf.rs/profile.rs VM counters;
                debug_flags.rs the `BROOD_*` catalogue behind `brood --debug-flags`
   error.rs     LispError / LispResult / source Pos
-  lib.rs       the `Interp` entry point; bundles std/prelude.blsp
+  lib.rs       the `Interp` entry point; bundles std/prelude/*.blsp (concatenated in order)
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
 crates/nest/src/         the `nest` binary — project tooling (main.rs + mcp.rs) — ADR-028
 crates/lsp/src/main.rs   the `brood-lsp` binary — language server (ADR-025, docs/lsp.md)
 crates/playground/src/   the `brood-playground` cdylib — a wasm-bindgen shim exposing
                          a Brood `eval()` to the browser (the in-browser playground)
 std/                     standard library written in Brood, grouped (ADR-085):
-                         prelude.blsp + ~30 bare-core modules (io, file, set, regex,
+                         prelude/ (split across ~9 numbered bare-root files, concatenated at build) + ~30 bare-core modules (io, file, set, regex,
                          json, format, task, log, version, resolver, crypto, hash, csv,
                          datetime, encoding, url, uuid, template, stream, …); the
                          perf-triage module `std/tool/perf.blsp` (`perf/report`,

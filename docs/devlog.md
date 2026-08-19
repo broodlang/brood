@@ -1893,3 +1893,18 @@ files (`std/queue.blsp` + `std/pq.blsp`, both embedded). `pq/empty?`'s body reac
 repointed (27 pass); Display/Inspect verified (`#<queue 1 front=5>`, `#<pq 1 min=1>`). Next modules:
 `stream`, `version`, `uuid`, `log`, `http`, `sse`, `tcp`, `wasm`, `multimap`, `mcp`, and the resolver
 `pg-*` privacy cleanup — one commit each.
+
+## 2026-08-19 — Prelude split into std/prelude/*.blsp (organizational)
+
+The prelude was one 5779-line file. It can't become modules — it defines the bare root
+namespace (everything usable without `(:use …)`), and a `defmodule` file would qualify its
+names — so it's split into **9 numbered bare-root files** (`std/prelude/00-core.blsp` …
+`80-tools.blsp`) at section boundaries and concatenated **in order** into the `PRELUDE`
+const via `concat!(include_str!(…), …)`. Evaluation order is load-bearing (macros before
+use, forward refs), so the numeric prefixes fix the order; the concatenation was verified
+byte-identical to the former single file before wiring it up. `PRELUDE` is now a `pub const`
+(one source of truth — `crates/nest/src/mcp.rs`'s `brood://prelude` resource uses it too
+instead of re-`include_str!`ing the removed file). Runtime behaviour, source positions, and
+the materialized `~/.cache/brood/prelude.blsp` LSP copy are unchanged. `nest format`
+normalized the split files (trailing blank at each boundary); boot + maps/strings/namespace
+suites green.

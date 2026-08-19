@@ -549,8 +549,23 @@ impl Default for Interp {
     }
 }
 
-/// The standard prelude, written in Brood and baked into the binary.
-const PRELUDE: &str = include_str!("../../../std/prelude.blsp");
+/// The standard prelude, written in Brood and baked into the binary. Split across
+/// `std/prelude/*.blsp` for navigability (ADR-236) and concatenated **in order** here —
+/// the pieces are bare-root prelude source, so evaluation order is load-bearing (macros
+/// before use, forward references), and the numeric filename prefixes fix that order. The
+/// concatenation is byte-identical to the former single `std/prelude.blsp`, so runtime
+/// behaviour, source positions, and the materialized `prelude.blsp` copy are unchanged.
+pub const PRELUDE: &str = concat!(
+    include_str!("../../../std/prelude/00-core.blsp"),
+    include_str!("../../../std/prelude/10-predicates.blsp"),
+    include_str!("../../../std/prelude/20-map.blsp"),
+    include_str!("../../../std/prelude/30-control.blsp"),
+    include_str!("../../../std/prelude/40-match.blsp"),
+    include_str!("../../../std/prelude/50-process.blsp"),
+    include_str!("../../../std/prelude/60-seq.blsp"),
+    include_str!("../../../std/prelude/70-string.blsp"),
+    include_str!("../../../std/prelude/80-tools.blsp"),
+);
 
 /// Materialize the embedded prelude to a stable, read-only-ish cache file and
 /// return its path — the file the prelude's def-sites point at, so tools (the
