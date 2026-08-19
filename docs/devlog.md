@@ -1965,3 +1965,11 @@ disambiguate, nothing to cargo-cult); `/name` stays only for the irreducible bui
 library like `stats` defining `min`), with a future `nest check` redundant-escape lint to keep it
 honest; and new stdlib names are additive + clash-recoverable (a grandfathered same-named dep errors
 loudly and locally, never a silent shadow). Stronger than Elixir's convention-only stance.
+
+## 2026-08-19 — Release 0.5.0: the stdlib-naming compatibility boundary
+
+Bumped to 0.5.0 — this release is the compatibility boundary for the session's stdlib renames
+(proc/* + net/* flattened to bare, enum→seq, path/file/hash/crypto placement, the ADR-236 prefix
+rollout: queue/push, version/compare, uuid/v4, log/info, multimap/assoc, stream/map, tcp/drain,
+sse/emit, …). Installed and used to migrate the local project ecosystem (bedit, hatch, chat, life,
+terminal, pong, s3, store, mylife, hive, …) to the new names — each `nest check`-clean and green.
