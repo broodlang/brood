@@ -1834,3 +1834,46 @@ there is nothing to maintain in a second place (the whole point of the exercise)
 behavioural cases (coexist / ambiguous-use-errors / qualified / `:exclude`), and rewrote
 `modules_test.blsp`'s clash case from "eager hard error" to "lazy, only when used". `reserved-package-name?`
 (package-vs-module) is a different clash and is unchanged. All resolution-sensitive suites green.
+
+## 2026-08-19 (later) — KI-47: the tree-walker job was a memory threshold, not the tests it named
+
+`main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run
+since the ADR-230/231 namespacing merge. Three jobs had been red: `rustfmt`, `breakage suite`, and
+`differential (tree-walker)`. The first two were straightforward rot; the third took the session.
+
+**rustfmt / nest format.** The rename commits lengthened call sites past the width limit and the
+formatters were not re-run, so both halves of the format gate were red — three separate breaks in
+one day (`066be566`, `242e688c` on the Rust side; `48a658ef`, `c8dbf0ea` on the Brood side). The
+`make hooks` pre-push hook checks both in seconds and blocked two of my own pushes correctly; it is
+cheaper than a red build each time.
+
+**breakage.** The KI-42 pattern recurred **three times** — `string/*`, `file/*`, then `enum` → `seq`.
+Each rename swept the directories a test run discovers (`std/`, `tests/`) and missed the ones nothing
+discovers, so `breakage/` died on `unbound symbol: string-length`, then `substring`/`char-at`, then
+`list->string`, then `enum/frequencies`. 108 call sites across 17 files. Two traps worth keeping:
+`string->number`/`number->string`/`string->rope` survive the rename and must **not** be rewritten,
+and rewriting `(name ` does **not** mean "a call" — in Lisp that also matches a `defn` parameter list
+and a `let` binding pair, which is how a first pass produced `(defn echo-server-loop (file/ls
+remaining)` out of a local listen-socket binding named `ls`.
+
+**KI-47** is the interesting one, and it was mis-triaged three ways before it was understood — see
+`known-issues.md` for the full record. Short version: the suite's process-wide allocation had reached
+1.145 GB against a 1 GiB backstop; the three `adversarial_test.blsp` cases that "failed" were merely
+the ones running when the line was crossed. Raised to 2 GiB soft / 3 GiB hard, which is what that cap
+documents itself to be. Two fixes were built and discarded first — `gc-collect` (rested on a comment
+ADR-061 had made false) and `hibernate` (a real 148× on a microbenchmark, wrong scope for a
+process-wide cap).
+
+**What this session did not resolve, and should not be read as resolving:** that cap was sized
+against a ~240 MB suite peak, and the suite now peaks ~1 GB. The raise restores a ~2× margin instead
+of the intended 4×, and whether the 4.8× growth is legitimate or a regression is **unmeasured**.
+
+**A methodological note, because it dominated the day.** Six separate checks produced confident,
+plausible, wrong output — and none of them errored: `rustfmt --check` piped to `/dev/null` (it writes
+its diff to stderr, so dirty read as clean); a `(name ` regex matching binding positions; a stale
+`nest` binary reporting `cannot find module 'string'` after `cargo clean` removed the current one; a
+load-generator whose failures were all priority inversion I had created; a hand-rolled string-state
+normalizer that desynced and declared reflow to be code changes; and a pre-push hook silently falling
+back to a 0.3.11 binary. Every one looked authoritative. The pattern is the same one KI-36 and KI-39
+embody, and it is the argument for ADR-232: make the *runtime* say something, rather than adding
+another flag someone has to know to arm.

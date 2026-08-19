@@ -5,6 +5,66 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**As of 2026-08-19 (the green-the-tree session, concluded).** `main` is **green on all five CI
+jobs** at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing
+merge. `known-issues.md` shows **no open bug and no watch item**: KI-36 and KI-47 were both found and
+fixed this day.
+
+**What landed.** Three CI jobs were red and all three are fixed:
+
+- **KI-36** (the last watch item, unreproduced since 2026-08-07 across 25 idle and 14 loaded runs)
+  reproduced in run 3 of a repeated-run gate and is fixed at the root. It was never the nodedown
+  stall its entry inferred — B2 opened its dist listener *before* registering `:echo`, so A's
+  ping-on-nodeup landed on a name that did not exist yet and was **silently dropped**. `register`
+  now precedes `node-start`. Verified by sabotage in both directions.
+- **ADR-232** closes the diagnosability gap under it: a message dropped for a registered name no
+  process holds now **warns once per name**, at the receiving node — the only party that knows.
+  Semantics unchanged (still dropped, Erlang parity intact); default-on deliberately, because a flag
+  you must arm before the bug is absent when it matters (that is KI-39, whose *retroactive*
+  self-reporting also failed to fire). `BROOD_NO_DROP_WARN=1` opts out.
+- **KI-47** — the tree-walker job was a **memory threshold**, not the three `adversarial_test.blsp`
+  cases it named. Process-wide allocation reached 1.145 GB against a 1 GiB backstop; raised to 2 GiB
+  soft / 3 GiB hard.
+- Plus the rot: **108 stale names** across `breakage/`/`stress/`/`scripts/fuzz/stress/` (three
+  separate rename waves) and **34 files** across the two format gates.
+
+⚠ **The one thing this session deliberately did NOT resolve — start here.** The memory backstop was
+sized against a **~240 MB** suite peak; the suite now peaks **~1 GB**. KI-47's raise restores a ~2×
+margin instead of the intended 4×, and **whether that 4.8× growth is legitimate or a regression is
+unmeasured**. The namespacing merge is the commit that pushed it over the line, not necessarily the
+one that caused the growth. Do not read KI-47's closure as evidence the growth is fine.
+`BROOD_TRACE_PROMOTE=1` ranks what enters the append-only shared RUNTIME region, which the local
+collector cannot reclaim, and is the tool to start with.
+
+**Also open, smaller:**
+
+- **Two thin deadline margins**, measured across four suite runs and stable (fixed cost, not
+  variance): `inlined_two_stage_swap_then_deopt_stays_correct` at **65.9–71.5 s against the 120 s
+  cap (1.68×)** — the worst in the suite, and thinner than anything KI-46's audit found — and
+  `completion_never_fails_however_it_is_called` at 75–80 s against its 180 s override, where
+  `.config/nextest.toml` claims 10.5 s post-KI-39. Both drive `fib 30` / 96 subprocess spawns; the
+  KI-39-shaped fix is to cut the per-unit cost, not the budget. **Any reduction must be proven to
+  still tier** (`BROOD_JIT_DUMP_IR=1`), or a slow-but-real test becomes a fast-but-hollow one.
+- **`scratchpad-fsmoke.txt`** at the repo root — 5 bytes, `hello`, committed in `fe4e05af`, nothing
+  references it. Left for the owner to delete.
+- **The rename-sweep gap.** `breakage/`, `stress/` and `scripts/fuzz/stress/` are outside every test
+  runner, so each rename wave rots them and CI finds out one red build later. Three times in one day.
+  Including them in whatever sweep a rename commit runs over `std/`/`tests/` would make renames land
+  atomically.
+
+⚠ **Method warning, and the day's real lesson.** Six separate checks produced confident, plausible,
+wrong output, and **none of them errored**: `rustfmt --check` piped to `/dev/null` (it writes its
+diff to *stderr*, so dirty reads as clean); a `(name ` regex that also matches `defn` parameter lists
+and `let` bindings; a stale `nest` after `cargo clean` reporting `cannot find module 'string'`; a
+load-generator whose every failure was priority inversion I had created; a hand-rolled normalizer
+that desynced on a string literal; and the pre-push hook silently falling back to a 0.3.11 binary.
+Concretely: **`nest test` (release) and `brood_suite_passes` (debug, Rust suite binary) are different
+harnesses with different allocation profiles** — the former passed 4652/4652 while the latter failed.
+Reproduce CI with CI's harness. And do not mutate the working tree while a verification runs; that
+invalidated two 25-minute runs here.
+
+**Previous session's entry follows.**
+
 **As of 2026-08-18 (the per-process-memory / cold-call session, concluded).** Everything is
 **committed and pushed** (`be50b5f8`); `main` and `origin/main` agree, working tree clean.
 `known-issues.md` shows **no open bug** — KI-36 is the sole watch item (seen once 2026-08-07,
