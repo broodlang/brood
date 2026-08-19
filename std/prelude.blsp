@@ -5023,6 +5023,21 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   give (so those don't leak `:__id__`). A plain map is returned unchanged."
   (if (record? x) (dissoc x :__id__) x))
 
+; ---- library type predicates ------------------------------------------------
+; Every TYPE PREDICATE is bare (`list?`/`vector?`/`map?`/`set?`/`record?`), so a value's
+; type reads the same way whatever its type. A few std library types are records rather
+; than core kinds — their predicates live here too (a small record-id check keyed by the
+; type's `:module/name` id) so `queue?`/`pq?` sit alongside `set?`/`map?` instead of doubling
+; as `queue/queue?` inside their own module (ADR-236). The check is pure and needs no module
+; loaded: a non-record, or a record of another id, is simply false.
+(defn queue? (x)
+  "True if `x` is a FIFO queue (`std/queue`) — by identity, not by shape."
+  (%eq (record-id x) :queue/queue))
+
+(defn pq? (x)
+  "True if `x` is a min-priority queue (`std/pq`) — by identity, not by shape."
+  (%eq (record-id x) :pq/pq))
+
 ; ---- registration -----------------------------------------------------------
 
 ; The owning module of a record id keyword `:mod/name` (as a string), or nil for a

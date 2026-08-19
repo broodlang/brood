@@ -15803,9 +15803,13 @@ carve-outs:
 1. **`defrecord`-generated `-field` accessors stay** (`point-x`, `queue-front`). That is the Common
    Lisp `defstruct` idiom, reads fine, and changing it would ripple through every record type in
    the language for little gain — a different, bigger decision.
-2. **The type constructor and predicate keep the type name**, which equals the module name:
-   `queue/queue` (record constructor), `queue/queue?` (predicate) — mirroring `set/set`,
-   `set/subset?`. These name the *type*, they do not merely repeat the module.
+2. **The type predicate is bare**, in the prelude, alongside every other type predicate
+   (`list?`/`vector?`/`map?`/`set?`/`record?` are all bare). A library record type's
+   predicate (`queue?`, `pq?`) is a small `record-id` check that lives in `std/prelude.blsp`
+   too, so a value's type reads the same way whatever its type — not a doubled `queue/queue?`
+   inside its own module. The **constructor keeps the type name** (`queue/queue`, the
+   `defrecord`-generated one; the public empty constructor is the clean `queue/new`), mirroring
+   `set/set`.
 3. **A module holding two types splits**, because the un-prefixed operations would collide:
    `queue` (FIFO: `push`/`pop`/`peek`) splits from `pq` (min-priority: `insert`/`pop`/`peek`),
    co-existing as two modules.
