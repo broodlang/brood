@@ -315,21 +315,36 @@
   ;; (`package` + `agent`) are as legitimate here as the pair that prompted the audit.
   ;; (an earlier audit also listed `bytes-`; that was a prefix match on `bytes->hex`, not an
   ;; export — hence this test reads the flat table rather than trusting a source scan.)
+  ;; This map is AUTHORITATIVE: the "no surprising overlaps" test below recomputes the real
+  ;; overlap set from `(builtin-modules)` and asserts it equals this map exactly, so a new
+  ;; overlap (or a changed module set for an existing name) fails until recorded here. Most
+  ;; overlaps are by design — `path/join` vs `string/join`, `math/sum` vs `telemetry/sum` are
+  ;; the same word for different domains, and namespacing keeps them apart.
   {"attach" ["editor/serve" "telemetry"]
+   "exists?" ["file" "path"]
    "forward" ["sexp" "telemetry"]
+   "join" ["path" "string"]
+   "normalize" ["path" "string"]
    "parse-url" ["http" "url"]
    "point-backward" ["editor/treesit" "sexp"]
+   "point-defun-end" ["editor/treesit" "sexp"]
    "point-defun-start" ["editor/treesit" "sexp"]
    "point-down" ["editor/treesit" "sexp"]
    "point-forward" ["editor/treesit" "sexp"]
+   "point-list-backward" ["editor/treesit" "sexp"]
+   "point-list-forward" ["editor/treesit" "sexp"]
    "point-up" ["editor/treesit" "sexp"]
-   "render" ["format" "template"]
+   "point-up-forward" ["editor/treesit" "sexp"]
+   "render" ["docsite" "format" "template"]
    "serve" ["editor/serve" "http"]
-   "span" ["debug" "telemetry"]
+   "span" ["debug" "string" "telemetry"]
    "splice" ["editor/formbuf" "sexp"]
+   "split" ["path" "string"]
    "stop" ["agent" "gen"]
+   "sum" ["math" "telemetry"]
+   "summary" ["perf" "telemetry"]
    "tree" ["package" "sexp"]
-   "update" ["package" "agent"]})
+   "update" ["agent" "package"]})
 
 (defn- ns-exports-of
   (module)
@@ -347,8 +362,40 @@ is what a `:use` would actually import, not what the source looks like."
               (not (private? (symbol n))))) ; module-private (ADR-146, recorded fact)
           (map name (global-names)))))))
 
+(defn- ns-actual-overlaps
+  ()
+  "The REAL cross-module overlap map, recomputed from the binary: name -> sorted vector of the
+`(builtin-modules)` that export it, for every name exported by more than one. Loading every
+baked-in module first is what puts all their names in the flat table. This is the ground truth
+`ns-known-overlaps` is pinned against, so the completeness test below cannot silently drift when
+a module gains or renames an export (the failure mode ADR-233's rename would have hit unnoticed)."
+  (let (mods (builtin-modules))
+    (doseq (m mods) (try (require-one (symbol m)) (catch e nil)))
+    (let (inv (reduce
+                (fn (acc m)
+                  (reduce (fn (a nm) (assoc a nm (conj (get a nm []) m)))
+                    acc (into [] (ns-exports-of m))))
+                {} mods))
+      (into {}
+        (map (fn (kv) [(first kv) (into [] (sort (second kv)))])
+          (filter (fn (kv) (> (count (second kv)) 1)) (into [] inv)))))))
+
+(defn- ns-normalize-overlaps
+  (m)
+  "Both maps normalized to name -> sorted vector so `=` compares them structurally."
+  (into {} (map (fn (kv) [(first kv) (into [] (sort (second kv)))]) (into [] m))))
+
 (describe "std cross-module name overlaps are known, not surprising"
   :serial
+  (test "the recorded overlap set matches reality exactly — no new, removed, or shifted overlap"
+    ;; The single authoritative assertion: the real overlap map computed from `(builtin-modules)`
+    ;; equals `ns-known-overlaps`. A NEW overlap, a REMOVED one, or an existing name that GAINED
+    ;; or LOST a module all fail here — the drift ADR-233 introduced (net/proc renamed, the map
+    ;; unpinned) is exactly what this now catches. Update `ns-known-overlaps` when the diff is a
+    ;; deliberate decision, never to silence it.
+    (assert= (ns-normalize-overlaps ns-known-overlaps)
+      (ns-actual-overlaps)))
+
   (test "each recorded overlap is still real — both modules export the name"
     ;; loading them is what puts their names in the flat table
     (doseq (kv ns-known-overlaps)
