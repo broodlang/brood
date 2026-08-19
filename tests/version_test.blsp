@@ -7,229 +7,229 @@
 ;; `">= 1.2"` means 1.2.0 — what a human writing a short constraint means by it.
 (defmodule version-test (:use test) (:use version))
 
-(describe "version-core / version-valid?"
+(describe "core / valid?"
   (test "the numeric core, ignoring any prerelease or build suffix"
-    (assert= (list 1 2 3) (version-core "1.2.3"))
-    (assert= (list 1 2 3) (version-core "1.2.3-rc.1"))
-    (assert= (list 1 2 3) (version-core "1.2.3+build.7"))
-    (assert= (list 1 2) (version-core "1.2")))
+    (assert= (list 1 2 3) (core "1.2.3"))
+    (assert= (list 1 2 3) (core "1.2.3-rc.1"))
+    (assert= (list 1 2 3) (core "1.2.3+build.7"))
+    (assert= (list 1 2) (core "1.2")))
   (test "a non-numeric segment reads as 0 rather than raising"
     ;; lenient on purpose: this parses what a human typed in a manifest
-    (assert= (list 1 0) (version-core "1.x")))
+    (assert= (list 1 0) (core "1.x")))
   (test "valid? wants three digit segments"
-    (is (version-valid? "0.1.0"))
-    (is (version-valid? "10.20.30"))
-    (is (version-valid? "1.2.3-rc.1"))
-    (refute (version-valid? "1.2"))
-    (refute (version-valid? "1.2.x"))
-    (refute (version-valid? ""))
-    (refute (version-valid? 123))))
+    (is (valid? "0.1.0"))
+    (is (valid? "10.20.30"))
+    (is (valid? "1.2.3-rc.1"))
+    (refute (valid? "1.2"))
+    (refute (valid? "1.2.x"))
+    (refute (valid? ""))
+    (refute (valid? 123))))
 
-(describe "version-compare / version-newer?"
+(describe "compare / newer?"
   (test "orders on major, then minor, then patch"
-    (assert= -1 (version-compare "1.0.0" "2.0.0"))
-    (assert= 1 (version-compare "1.3.0" "1.2.9"))
-    (assert= 1 (version-compare "1.2.10" "1.2.9")) ; numeric, not lexicographic
-    (assert= 0 (version-compare "1.2.3" "1.2.3")))
+    (assert= -1 (compare "1.0.0" "2.0.0"))
+    (assert= 1 (compare "1.3.0" "1.2.9"))
+    (assert= 1 (compare "1.2.10" "1.2.9")) ; numeric, not lexicographic
+    (assert= 0 (compare "1.2.3" "1.2.3")))
   (test "a missing segment is 0, so 1.2 and 1.2.0 are the same version"
-    (assert= 0 (version-compare "1.2" "1.2.0"))
-    (assert= -1 (version-compare "1.2" "1.2.1")))
+    (assert= 0 (compare "1.2" "1.2.0"))
+    (assert= -1 (compare "1.2" "1.2.1")))
   (test "newer? treats the empty string as older than everything"
-    (is (version-newer? "0.0.1" ""))
-    (refute (version-newer? "" "0.0.1"))
-    (refute (version-newer? "" ""))
-    (refute (version-newer? "1.0.0" "1.0.0"))))
+    (is (newer? "0.0.1" ""))
+    (refute (newer? "" "0.0.1"))
+    (refute (newer? "" ""))
+    (refute (newer? "1.0.0" "1.0.0"))))
 
-(describe "version-satisfies?"
+(describe "satisfies?"
   (test "every operator, with and without a space"
-    (is (version-satisfies? "1.2.3" ">= 1.2.0"))
-    (is (version-satisfies? "1.2.3" ">=1.2.0"))
-    (is (version-satisfies? "1.2.3" "> 1.2.2"))
-    (is (version-satisfies? "1.2.3" "<= 1.2.3"))
-    (is (version-satisfies? "1.2.3" "< 2"))
-    (is (version-satisfies? "1.2.3" "= 1.2.3"))
-    (refute (version-satisfies? "1.2.3" ">= 1.3"))
-    (refute (version-satisfies? "1.2.3" "> 1.2.3"))
-    (refute (version-satisfies? "2.0.0" "< 2")))
+    (is (satisfies? "1.2.3" ">= 1.2.0"))
+    (is (satisfies? "1.2.3" ">=1.2.0"))
+    (is (satisfies? "1.2.3" "> 1.2.2"))
+    (is (satisfies? "1.2.3" "<= 1.2.3"))
+    (is (satisfies? "1.2.3" "< 2"))
+    (is (satisfies? "1.2.3" "= 1.2.3"))
+    (refute (satisfies? "1.2.3" ">= 1.3"))
+    (refute (satisfies? "1.2.3" "> 1.2.3"))
+    (refute (satisfies? "2.0.0" "< 2")))
   (test "a bare version means ="
-    (is (version-satisfies? "1.2.3" "1.2.3"))
-    (refute (version-satisfies? "1.2.4" "1.2.3")))
+    (is (satisfies? "1.2.3" "1.2.3"))
+    (refute (satisfies? "1.2.4" "1.2.3")))
   (test "a short constraint compares on the core, so 0.3.1 satisfies >= 0.3"
     ;; the case a plugin manifest actually writes
-    (is (version-satisfies? "0.3.1" ">= 0.3"))
-    (is (version-satisfies? "0.3.0" ">= 0.3"))
-    (refute (version-satisfies? "0.2.9" ">= 0.3")))
+    (is (satisfies? "0.3.1" ">= 0.3"))
+    (is (satisfies? "0.3.0" ">= 0.3"))
+    (refute (satisfies? "0.2.9" ">= 0.3")))
   (test "no constraint is satisfied by anything"
-    (is (version-satisfies? "0.1.0" ""))
-    (is (version-satisfies? "0.1.0" "   "))
-    (is (version-satisfies? "0.1.0" nil)))
+    (is (satisfies? "0.1.0" ""))
+    (is (satisfies? "0.1.0" "   "))
+    (is (satisfies? "0.1.0" nil)))
   (test "a malformed constraint raises instead of silently passing"
     ;; a typo'd constraint must not load a plugin into an application that can't run it
-    (is (includes? (try (version-satisfies? "1.0.0" ">=") (catch e (error-message e)))
+    (is (includes? (try (satisfies? "1.0.0" ">=") (catch e (error-message e)))
           "no version in constraint"))
-    (is (includes? (try (version-satisfies? "1.0.0" "!= 1.0") (catch e (error-message e)))
+    (is (includes? (try (satisfies? "1.0.0" "!= 1.0") (catch e (error-message e)))
           "unknown operator")))
   (test "a range from another ecosystem raises instead of silently widening"
     ;; Terms are separated by a COMMA here. A space-separated npm/cargo range used to
     ;; compile to just its first term — `">=1.0.0 <2.0.0"` became a bare `>=1.0.0`, so
-    ;; 3.0.0 satisfied it and a breaking major resolved clean. `version-core` is
+    ;; 3.0.0 satisfied it and a breaking major resolved clean. `core` is
     ;; deliberately lenient (a non-numeric segment reads as 0, which is what makes "1.x"
     ;; and the short ">= 0.3" work) and that leniency swallowed the dropped term whole.
     ;; Same rule as the operator check above: a term with no meaning has to say so.
-    (is (includes? (try (version-satisfies? "3.0.0" ">=1.0.0 <2.0.0") (catch e (error-message e)))
+    (is (includes? (try (satisfies? "3.0.0" ">=1.0.0 <2.0.0") (catch e (error-message e)))
           "is not a single version"))
-    (is (includes? (try (version-satisfies? "1.0.0" "^1.0.0 || ^2.0.0") (catch e (error-message e)))
+    (is (includes? (try (satisfies? "1.0.0" "^1.0.0 || ^2.0.0") (catch e (error-message e)))
           "is not a single version"))
-    (is (includes? (try (version-satisfies? "1.5.0" "1.0.0 - 2.0.0") (catch e (error-message e)))
+    (is (includes? (try (satisfies? "1.5.0" "1.0.0 - 2.0.0") (catch e (error-message e)))
           "is not a single version"))
-    (is (includes? (try (version-satisfies? "1.0.0" "1.0.0 junk") (catch e (error-message e)))
+    (is (includes? (try (satisfies? "1.0.0" "1.0.0 junk") (catch e (error-message e)))
           "is not a single version")))
   (test "the intended leniency survives the junk check"
     ;; The check rejects whitespace and operator characters INSIDE a version, not short
-    ;; or wildcard-ish forms — those are the reason `version-core` is lenient at all.
-    (is (version-satisfies? "1.0.0" ">= 1.0.0")) ; space between operator and version
-    (is (version-satisfies? "1.2.0" ">= 1.2")) ; short form
-    (is (version-satisfies? "1.0.0" "1.0.0+build")) ; build metadata
-    (is (version-satisfies? "1.0.0-alpha" ">=1.0.0-alpha")))) ; prerelease hyphen
-(describe "version-satisfies? — caret ranges (^)"
+    ;; or wildcard-ish forms — those are the reason `core` is lenient at all.
+    (is (satisfies? "1.0.0" ">= 1.0.0")) ; space between operator and version
+    (is (satisfies? "1.2.0" ">= 1.2")) ; short form
+    (is (satisfies? "1.0.0" "1.0.0+build")) ; build metadata
+    (is (satisfies? "1.0.0-alpha" ">=1.0.0-alpha")))) ; prerelease hyphen
+(describe "satisfies? — caret ranges (^)"
   (test "^MAJOR.MINOR.PATCH keeps the major fixed when major is non-zero"
     ;; ^1.2.3 := >= 1.2.3, < 2.0.0
-    (is (version-satisfies? "1.2.3" "^1.2.3"))
-    (is (version-satisfies? "1.5.0" "^1.2.3"))
-    (is (version-satisfies? "1.99.99" "^1.2.3"))
-    (refute (version-satisfies? "1.2.2" "^1.2.3"))
-    (refute (version-satisfies? "2.0.0" "^1.2.3")))
+    (is (satisfies? "1.2.3" "^1.2.3"))
+    (is (satisfies? "1.5.0" "^1.2.3"))
+    (is (satisfies? "1.99.99" "^1.2.3"))
+    (refute (satisfies? "1.2.2" "^1.2.3"))
+    (refute (satisfies? "2.0.0" "^1.2.3")))
   (test "^0.MINOR.PATCH keeps the MINOR fixed — 0.x treats minor as the breaking axis"
     ;; ^0.2.3 := >= 0.2.3, < 0.3.0
-    (is (version-satisfies? "0.2.3" "^0.2.3"))
-    (is (version-satisfies? "0.2.9" "^0.2.3"))
-    (refute (version-satisfies? "0.3.0" "^0.2.3"))
-    (refute (version-satisfies? "0.2.2" "^0.2.3")))
+    (is (satisfies? "0.2.3" "^0.2.3"))
+    (is (satisfies? "0.2.9" "^0.2.3"))
+    (refute (satisfies? "0.3.0" "^0.2.3"))
+    (refute (satisfies? "0.2.2" "^0.2.3")))
   (test "^0.0.PATCH pins exactly — every 0.0.x is a potential break"
     ;; ^0.0.3 := >= 0.0.3, < 0.0.4
-    (is (version-satisfies? "0.0.3" "^0.0.3"))
-    (refute (version-satisfies? "0.0.4" "^0.0.3"))
-    (refute (version-satisfies? "0.0.2" "^0.0.3")))
+    (is (satisfies? "0.0.3" "^0.0.3"))
+    (refute (satisfies? "0.0.4" "^0.0.3"))
+    (refute (satisfies? "0.0.2" "^0.0.3")))
   (test "a short caret fills missing segments with 0"
     ;; ^1.2 := >= 1.2.0, < 2.0.0 ; ^0 := >= 0.0.0, < 1.0.0
-    (is (version-satisfies? "1.2.0" "^1.2"))
-    (is (version-satisfies? "1.9.9" "^1.2"))
-    (refute (version-satisfies? "2.0.0" "^1.2"))
-    (is (version-satisfies? "0.9.9" "^0"))
-    (refute (version-satisfies? "1.0.0" "^0"))))
+    (is (satisfies? "1.2.0" "^1.2"))
+    (is (satisfies? "1.9.9" "^1.2"))
+    (refute (satisfies? "2.0.0" "^1.2"))
+    (is (satisfies? "0.9.9" "^0"))
+    (refute (satisfies? "1.0.0" "^0"))))
 
-(describe "version-satisfies? — tilde ranges (~>)"
+(describe "satisfies? — tilde ranges (~>)"
   (test "~> MAJOR.MINOR.PATCH allows only the patch to move"
     ;; ~> 1.2.3 := >= 1.2.3, < 1.3.0
-    (is (version-satisfies? "1.2.3" "~> 1.2.3"))
-    (is (version-satisfies? "1.2.9" "~> 1.2.3"))
-    (refute (version-satisfies? "1.3.0" "~> 1.2.3"))
-    (refute (version-satisfies? "1.2.2" "~> 1.2.3")))
+    (is (satisfies? "1.2.3" "~> 1.2.3"))
+    (is (satisfies? "1.2.9" "~> 1.2.3"))
+    (refute (satisfies? "1.3.0" "~> 1.2.3"))
+    (refute (satisfies? "1.2.2" "~> 1.2.3")))
   (test "~> MAJOR.MINOR allows the minor to move"
     ;; ~> 1.2 := >= 1.2.0, < 2.0.0
-    (is (version-satisfies? "1.2.0" "~> 1.2"))
-    (is (version-satisfies? "1.9.0" "~> 1.2"))
-    (refute (version-satisfies? "2.0.0" "~> 1.2"))
-    (refute (version-satisfies? "1.1.9" "~> 1.2")))
+    (is (satisfies? "1.2.0" "~> 1.2"))
+    (is (satisfies? "1.9.0" "~> 1.2"))
+    (refute (satisfies? "2.0.0" "~> 1.2"))
+    (refute (satisfies? "1.1.9" "~> 1.2")))
   (test "the operator tolerates any spacing"
-    (is (version-satisfies? "1.2.9" "~>1.2.3"))
-    (is (version-satisfies? "1.2.9" "~>   1.2.3"))))
+    (is (satisfies? "1.2.9" "~>1.2.3"))
+    (is (satisfies? "1.2.9" "~>   1.2.3"))))
 
-(describe "version-satisfies? — conjunctions (comma-separated terms)"
+(describe "satisfies? — conjunctions (comma-separated terms)"
   (test "every term must hold"
-    (is (version-satisfies? "1.5.0" ">= 1.2, < 2.0"))
-    (refute (version-satisfies? "2.1.0" ">= 1.2, < 2.0"))
-    (refute (version-satisfies? "1.1.0" ">= 1.2, < 2.0")))
+    (is (satisfies? "1.5.0" ">= 1.2, < 2.0"))
+    (refute (satisfies? "2.1.0" ">= 1.2, < 2.0"))
+    (refute (satisfies? "1.1.0" ">= 1.2, < 2.0")))
   (test "three terms, mixed operators"
-    (is (version-satisfies? "1.5.0" ">= 1.0, < 2.0, > 1.4"))
-    (refute (version-satisfies? "1.3.0" ">= 1.0, < 2.0, > 1.4")))
+    (is (satisfies? "1.5.0" ">= 1.0, < 2.0, > 1.4"))
+    (refute (satisfies? "1.3.0" ">= 1.0, < 2.0, > 1.4")))
   (test "a caret combined with an extra upper bound narrows further"
     ;; ^1.2 already means < 2.0; adding < 1.5 tightens the top
-    (is (version-satisfies? "1.4.9" "^1.2, < 1.5"))
-    (refute (version-satisfies? "1.5.0" "^1.2, < 1.5")))
+    (is (satisfies? "1.4.9" "^1.2, < 1.5"))
+    (refute (satisfies? "1.5.0" "^1.2, < 1.5")))
   (test "surrounding and trailing whitespace/empty terms are ignored"
-    (is (version-satisfies? "1.5.0" " >= 1.2 , < 2.0 ,"))))
+    (is (satisfies? "1.5.0" " >= 1.2 , < 2.0 ,"))))
 
-(describe "version-satisfies? — range edge cases"
+(describe "satisfies? — range edge cases"
   (test "an all-zero caret pins the last written component (^0.0.0 = >=0.0.0, <0.0.1)"
-    (is (version-satisfies? "0.0.0" "^0.0.0"))
-    (refute (version-satisfies? "0.0.1" "^0.0.0"))
+    (is (satisfies? "0.0.0" "^0.0.0"))
+    (refute (satisfies? "0.0.1" "^0.0.0"))
     ;; ^0.0 keeps the last written (minor): >= 0.0.0, < 0.1.0
-    (is (version-satisfies? "0.0.9" "^0.0"))
-    (refute (version-satisfies? "0.1.0" "^0.0")))
+    (is (satisfies? "0.0.9" "^0.0"))
+    (refute (satisfies? "0.1.0" "^0.0")))
   (test "a single-segment tilde still pins the major (~> 1 = >=1.0.0, <2.0.0)"
-    (is (version-satisfies? "1.9.9" "~> 1"))
-    (refute (version-satisfies? "2.0.0" "~> 1"))
-    (refute (version-satisfies? "0.9.9" "~> 1")))
+    (is (satisfies? "1.9.9" "~> 1"))
+    (refute (satisfies? "2.0.0" "~> 1"))
+    (refute (satisfies? "0.9.9" "~> 1")))
   (test "+build metadata is ignored; a plain range still excludes pre-releases"
-    (is (version-satisfies? "1.5.0+build.9" "~> 1.2")) ; build metadata never affects matching
-    (refute (version-satisfies? "1.2.3-rc.1" "^1.2.0")) ; ^1.2.0 names no pre-release → excludes rc
-    (is (version-satisfies? "1.2.3" "^1.2.3-rc.1"))) ; a RELEASE always matches (even a pre-naming range)
+    (is (satisfies? "1.5.0+build.9" "~> 1.2")) ; build metadata never affects matching
+    (refute (satisfies? "1.2.3-rc.1" "^1.2.0")) ; ^1.2.0 names no pre-release → excludes rc
+    (is (satisfies? "1.2.3" "^1.2.3-rc.1"))) ; a RELEASE always matches (even a pre-naming range)
   (test "^ or ~> with no version after it raises, not a silent false"
-    (is (includes? (try (version-satisfies? "1.0.0" "^") (catch e (error-message e)))
+    (is (includes? (try (satisfies? "1.0.0" "^") (catch e (error-message e)))
           "no version in constraint"))
-    (is (includes? (try (version-satisfies? "1.0.0" "~>") (catch e (error-message e)))
+    (is (includes? (try (satisfies? "1.0.0" "~>") (catch e (error-message e)))
           "no version in constraint")))
   (test "a bare zero version means = 0.0.0"
-    (is (version-satisfies? "0.0.0" "0"))
-    (refute (version-satisfies? "0.0.1" "0"))))
+    (is (satisfies? "0.0.0" "0"))
+    (refute (satisfies? "0.0.1" "0"))))
 
 (describe "version: pre-release ordering (semver §11)"
-  (test "version-prerelease parses the identifiers"
-    (assert= (list "rc" "1") (version-prerelease "1.0.0-rc.1"))
-    (assert= (list "alpha") (version-prerelease "2.3.4-alpha"))
-    (assert= nil (version-prerelease "1.0.0"))
-    (assert= nil (version-prerelease "1.0.0+build.7")) ; build metadata is not pre-release
-    (assert= (list "rc" "1") (version-prerelease "1.0.0-rc.1+build.7")))
+  (test "prerelease parses the identifiers"
+    (assert= (list "rc" "1") (prerelease "1.0.0-rc.1"))
+    (assert= (list "alpha") (prerelease "2.3.4-alpha"))
+    (assert= nil (prerelease "1.0.0"))
+    (assert= nil (prerelease "1.0.0+build.7")) ; build metadata is not pre-release
+    (assert= (list "rc" "1") (prerelease "1.0.0-rc.1+build.7")))
   (test "a pre-release is LESS than its release"
-    (assert= -1 (version-compare "1.0.0-rc.1" "1.0.0"))
-    (assert= 1 (version-compare "1.0.0" "1.0.0-rc.1")))
+    (assert= -1 (compare "1.0.0-rc.1" "1.0.0"))
+    (assert= 1 (compare "1.0.0" "1.0.0-rc.1")))
   (test "pre-releases order identifier by identifier"
-    (assert= -1 (version-compare "1.0.0-rc.1" "1.0.0-rc.2"))
-    (assert= -1 (version-compare "1.0.0-alpha" "1.0.0-beta"))
-    (assert= -1 (version-compare "1.0.0-rc" "1.0.0-rc.0")) ; fewer identifiers < more
-    (assert= -1 (version-compare "1.0.0-1" "1.0.0-alpha")) ; numeric < alphanumeric
-    (assert= 0 (version-compare "1.0.0-rc.1" "1.0.0-rc.1")))
+    (assert= -1 (compare "1.0.0-rc.1" "1.0.0-rc.2"))
+    (assert= -1 (compare "1.0.0-alpha" "1.0.0-beta"))
+    (assert= -1 (compare "1.0.0-rc" "1.0.0-rc.0")) ; fewer identifiers < more
+    (assert= -1 (compare "1.0.0-1" "1.0.0-alpha")) ; numeric < alphanumeric
+    (assert= 0 (compare "1.0.0-rc.1" "1.0.0-rc.1")))
   (test "the core still dominates the pre-release"
-    (assert= -1 (version-compare "1.0.0" "1.0.1-rc.1")) ; 1.0.0 < 1.0.1-rc even though rc
-    (assert= 1 (version-compare "2.0.0-rc.1" "1.9.9"))))
+    (assert= -1 (compare "1.0.0" "1.0.1-rc.1")) ; 1.0.0 < 1.0.1-rc even though rc
+    (assert= 1 (compare "2.0.0-rc.1" "1.9.9"))))
 
-(describe "version-satisfies? — pre-release matching (npm/Cargo rule)"
+(describe "satisfies? — pre-release matching (npm/Cargo rule)"
   (test "a plain range excludes pre-releases"
-    (refute (version-satisfies? "1.0.0-rc.1" "^1.0.0"))
-    (refute (version-satisfies? "1.0.0-rc.1" ">= 1.0.0"))
-    (refute (version-satisfies? "2.0.0-rc.1" "^1.0.0"))
-    (is (version-satisfies? "1.2.0" "^1.0.0"))) ; releases unaffected
+    (refute (satisfies? "1.0.0-rc.1" "^1.0.0"))
+    (refute (satisfies? "1.0.0-rc.1" ">= 1.0.0"))
+    (refute (satisfies? "2.0.0-rc.1" "^1.0.0"))
+    (is (satisfies? "1.2.0" "^1.0.0"))) ; releases unaffected
   (test "a range that NAMES a pre-release admits pre-releases at that core"
-    (is (version-satisfies? "1.0.0-rc.2" ">= 1.0.0-rc"))
-    (is (version-satisfies? "1.0.0-rc.1" "^1.0.0-rc.1")) ; caret on a pre-release
-    (is (version-satisfies? "1.0.0-rc.1" "= 1.0.0-rc.1"))
-    (refute (version-satisfies? "1.0.0-rc.1" "= 1.0.0-rc.2")))
+    (is (satisfies? "1.0.0-rc.2" ">= 1.0.0-rc"))
+    (is (satisfies? "1.0.0-rc.1" "^1.0.0-rc.1")) ; caret on a pre-release
+    (is (satisfies? "1.0.0-rc.1" "= 1.0.0-rc.1"))
+    (refute (satisfies? "1.0.0-rc.1" "= 1.0.0-rc.2")))
   (test "a pre-release at a DIFFERENT core is still excluded"
     ;; >= 1.0.0-rc names a pre-release at 1.0.0, not at 1.5.0
-    (refute (version-satisfies? "1.5.0-rc.1" ">= 1.0.0-rc"))
-    (is (version-satisfies? "1.5.0" ">= 1.0.0-rc"))) ; the release is fine
+    (refute (satisfies? "1.5.0-rc.1" ">= 1.0.0-rc"))
+    (is (satisfies? "1.5.0" ">= 1.0.0-rc"))) ; the release is fine
   (test "a release always satisfies a pre-release-naming range within bounds"
-    (is (version-satisfies? "1.0.0" "^1.0.0-rc.1"))
-    (is (version-satisfies? "1.0.0" ">= 1.0.0-rc.1"))))
+    (is (satisfies? "1.0.0" "^1.0.0-rc.1"))
+    (is (satisfies? "1.0.0" ">= 1.0.0-rc.1"))))
 
-(describe "version-satisfies-all? / version-unsatisfied — the :enhances shape"
+(describe "satisfies-all? / unsatisfied — the :enhances shape"
   (test "every named constraint met"
-    (is (version-satisfies-all? {'bedit "0.4.0"} {'bedit ">= 0.3"}))
-    (is (version-satisfies-all? {'bedit "0.4.0" 'waggle "1.0.0"}
+    (is (satisfies-all? {'bedit "0.4.0"} {'bedit ">= 0.3"}))
+    (is (satisfies-all? {'bedit "0.4.0" 'waggle "1.0.0"}
           {'bedit ">= 0.3" 'waggle ">= 1"})))
   (test "an empty constraint map is satisfied by anything — an ordinary library"
-    (is (version-satisfies-all? {} {}))
-    (is (version-satisfies-all? {'bedit "0.4.0"} {})))
+    (is (satisfies-all? {} {}))
+    (is (satisfies-all? {'bedit "0.4.0"} {})))
   (test "a constraint naming something absent FAILS CLOSED"
     ;; \"this plugin wants an application I am not\" — the safety case
-    (refute (version-satisfies-all? {'bedit "0.4.0"} {'hatch ">= 1.0"}))
-    (refute (version-satisfies-all? {} {'bedit ">= 0.1"})))
+    (refute (satisfies-all? {'bedit "0.4.0"} {'hatch ">= 1.0"}))
+    (refute (satisfies-all? {} {'bedit ">= 0.1"})))
   (test "a version below the constraint fails"
-    (refute (version-satisfies-all? {'bedit "0.2.0"} {'bedit ">= 0.3"})))
+    (refute (satisfies-all? {'bedit "0.2.0"} {'bedit ">= 0.3"})))
   (test "unsatisfied reports what to tell the user: name, constraint, and what we have"
     (assert= (list ['bedit ">= 0.3" "0.2.0"])
-      (version-unsatisfied {'bedit "0.2.0"} {'bedit ">= 0.3"}))
+      (unsatisfied {'bedit "0.2.0"} {'bedit ">= 0.3"}))
     (assert= (list ['hatch ">= 1.0" nil])
-      (version-unsatisfied {'bedit "0.4.0"} {'hatch ">= 1.0"}))
-    (assert= '() (version-unsatisfied {'bedit "0.4.0"} {'bedit ">= 0.3"}))))
+      (unsatisfied {'bedit "0.4.0"} {'hatch ">= 1.0"}))
+    (assert= '() (unsatisfied {'bedit "0.4.0"} {'bedit ">= 0.3"}))))

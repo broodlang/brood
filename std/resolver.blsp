@@ -109,7 +109,7 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
   (let (cache (get ctx :universes)
         hit (table-get cache pkg :miss))
     (if (= hit :miss)
-      (let (versions (append (sort (fn (a b) (> (version/version-compare a b) 0))
+      (let (versions (append (sort (fn (a b) (> (version/compare a b) 0))
                                (or (provider-versions (get ctx :provider) pkg) nil))
                        (list pg-none)))
         (table-put cache pkg versions)
@@ -119,8 +119,8 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
 (defn pg-set-matching (ctx pkg constraint)
   "The subset of `pkg`'s REAL versions matching `constraint` (a version string; nil/\"\" =
 all). NONE never matches — a version constraint is about a selected version."
-  (let (compiled (version/version-compile constraint))
-    (filter (fn (v) (and (not (= v pg-none)) (version/version-match? compiled v)))
+  (let (compiled (version/compile constraint))
+    (filter (fn (v) (and (not (= v pg-none)) (version/match? compiled v)))
       (pg-universe ctx pkg))))
 
 (defn pg-intersect (a b) (filter (fn (v) (includes? b v)) a))

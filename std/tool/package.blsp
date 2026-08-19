@@ -278,7 +278,7 @@ land in a later slice."
   (let (constraint (get release :brood))
     (or (nil? constraint)
       (= constraint "")
-      (version/version-satisfies? (brood-version) constraint))))
+      (version/satisfies? (brood-version) constraint))))
 
 ;; Guard: raise a CLEAR, brood-specific error if any package in the closure has releases but
 ;; NONE the running brood can satisfy. Without this the resolver reports an opaque "no version
@@ -339,7 +339,7 @@ land in a later slice."
   (locked registry-reqs)
   (every? (fn (d)
             (let (pinned (get locked (get d :name)))
-              (and pinned (version/version-satisfies? pinned (get d :version)))))
+              (and pinned (version/satisfies? pinned (get d :version)))))
     registry-reqs))
 
 ;; --- the Dependency ability (ADR-172) ---------------------------------------
@@ -408,7 +408,7 @@ land in a later slice."
     (let (other-range (get other :version))
       (if other-range
         (let (pin (package-git-pin-version d))
-          (when (or (nil? pin) (not (version/version-satisfies? pin other-range)))
+          (when (or (nil? pin) (not (version/satisfies? pin other-range)))
             (package-conflict other
               (str "pinned to " (get d :ref) ", which does not satisfy \"" other-range "\""))))
         (when (not (= (get d :ref) (get other :ref)))
@@ -445,7 +445,7 @@ land in a later slice."
   (entry)
   (or (get entry :resolved-version)
     (let (v (package-git-tag-version (get entry :ref)))
-      (if (version/version-valid? v) v nil))))
+      (if (version/valid? v) v nil))))
 
 (impl Dependency
   project/dep-tarball
@@ -584,7 +584,7 @@ land in a later slice."
 ;; A git dep may track a `:version` RANGE instead of pinning an exact `:ref`. The
 ;; range is resolved GREEDILY to the newest published tag that satisfies it — one
 ;; `ls-remote` (no per-candidate manifest fetch); the chosen tag then flows through
-;; the exact-ref clone path unchanged. `version/version-match?` gives plain-range
+;; the exact-ref clone path unchanged. `version/match?` gives plain-range
 ;; excludes-prerelease for free, so a `1.4.0-rc.1` tag is skipped by `^1.2.0`.
 
 ;; A tag's candidate version: strip one optional leading `v` (so `v1.2.0` and
@@ -601,18 +601,18 @@ land in a later slice."
 ;; (`latest`, `nightly`) is ignored. Offline-testable — the range-selection unit.
 (defn- package-select-git-version
   (tags range)
-  (let (compiled (version/version-compile range)
+  (let (compiled (version/compile range)
         candidates (fold (fn (acc tag)
                            (let (v (package-git-tag-version tag))
-                             (if (and (version/version-valid? v)
-                                   (version/version-match? compiled v))
+                             (if (and (version/valid? v)
+                                   (version/match? compiled v))
                                (cons [tag v] acc)
                                acc)))
                      nil tags))
     (if (empty? candidates)
       nil
       (fold (fn (best cand)
-              (if (> (version/version-compare (second cand) (second best)) 0) cand best))
+              (if (> (version/compare (second cand) (second best)) 0) cand best))
         (first candidates)
         (rest candidates)))))
 
@@ -630,7 +630,7 @@ land in a later slice."
             locked-version (and locked
                              (= (plist-get locked :git) url)
                              (plist-get locked :version)))
-        (if (and locked-version (version/version-satisfies? locked-version range))
+        (if (and locked-version (version/satisfies? locked-version range))
           (assoc dep :ref (plist-get locked :ref) :resolved-version locked-version)
           (let (tags (or (offload %git-list-tags url) nil)
                 chosen (package-select-git-version tags range))
@@ -1067,7 +1067,7 @@ registry, or nil if it is unpublished. Backs an app's 'is there an update?' chec
         versions (registry-list-versions base (if (symbol? nm) nm (symbol nm))))
     (if (or (nil? versions) (empty? versions))
       nil
-      (fold (fn (best v) (if (or (nil? best) (version/version-newer? v best)) v best))
+      (fold (fn (best v) (if (or (nil? best) (version/newer? v best)) v best))
         nil versions))))
 
 (defn registry-enhancers (app)
