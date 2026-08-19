@@ -1,0 +1,670 @@
+;; Brood prelude / core library
+;; ------------------------------
+;; Most of the language lives here, in Brood itself. Rust provides only a small
+;; primitive kernel (see crates/lisp/src/builtins/mod.rs — the `%`-prefixed ops and
+;; a few constructors/predicates); everything below is ordinary Brood.
+;;
+;; Style note: code is made of lists, so parameter lists are written as lists —
+;; (defn f (x y) ...). Vectors [ ] are a *data* type (O(1) indexing); they are
+;; still accepted in parameter/binding positions, but lists are idiomatic.
+;;
+;; The very first definition is `defn`, a macro. Everything after it is written
+;; with `defn`, so the library is defined exactly the way you would define your
+;; own functions — including `+`, which is "just a function".
+
+;; ---- bootstrap: the list builders the quasiquote expander emits ----
+;; `quasiquote` is a compile/eval-time transform: `` `(a ~b ~@c) `` becomes builder
+;; code `(append (list 'a) (list b) c)`. The very first macro below (`defn`) already
+;; uses a backtick template, so the symbols that builder code names must be bound
+;; before any prelude form runs. `cons`/`vector`/`hash-map`/`apply` are kernel
+;; builtins; `list` and `append` are not — so seed minimal versions here (raw
+;; `def`/`fn`, no backtick, no quasiquote dependency). The full seq-generic,
+;; tail-recursive `list`/`append` further down simply `def`-rebind these.
+(def list (fn (& xs) "A list of the given arguments." xs))
+(def append-empty?
+  (fn (x)
+    (if (%eq (type-of x) :nil)
+      true
+      (if (%eq (type-of x) :vector) (%eq (vector-length x) 0) false))))
+(def append-rev
+  (fn (src acc)
+    ;; Reverse seq `src` (a list or vector) onto list `acc`. Tail-recursive.
+    (if (append-empty? src) acc (append-rev (rest src) (cons (first src) acc)))))
+(def append-2
+  (fn (a b)
+    ;; Cons every element of seq `a` (a list or vector) onto list `b` — via a
+    ;; double reverse, so even the bootstrap builder is O(1) stack like the full
+    ;; `append` below that rebinds it (`check-allow` doesn't exist yet up here).
+    (append-rev (append-rev a nil) b)))
+(def append
+  (fn (& lists)
+    ;; Concatenate any number of sequences into one list, left to right.
+    (if (append-empty? lists)
+      nil
+      (append-2 (first lists) (apply append (rest lists))))))
+
+;; `defmacro` itself — a macro, not a core special form. A macro is just a `fn`
+;; the expander calls on the *unexpanded* argument forms; `%make-macro` (the one
+;; Rust primitive this needs) tags a closure as one. Bootstrapped with raw
+;; `def`/`fn` because `defmacro` can't define itself; every later `(defmacro …)`
+;; expands through this into `(def name (%make-macro (fn …)))`.
+(def defmacro
+  (%make-macro (fn (name & body)
+                 "Define `name` as a macro: a `fn` run at expansion time on the unevaluated argument forms, whose returned form replaces the call."
+                 `(def ~name (%make-macro (fn ~@body))))))
+
+;; `defn` itself: forwards everything after the name to `fn`, so it inherits
+;; both single-clause — (defn f (x) ...) => (def f (fn (x) ...)) — and the
+;; multi-clause pattern form — (defn f ((0) 1) ((n) ...)) => (def f (fn ((0) 1) ((n) ...))).
+(defmacro defn (name & clauses)
+  "Define a global function `name`, forwarding the clauses to `fn` — so it supports both the single-clause form `(defn f (x) body...)` and multi-clause pattern dispatch."
+  `(def ~name (fn ~@clauses)))
+
+;; `defn-` / `def-` — the PRIVATE variants (ADR-146). Identical to `defn`/`def`
+;; except the defined name is module-private: a qualified reference from another
+;; module is a compile error (unless granted with `(:use-internals mod)`), and a
+;; `(:use mod)` refer-all skips it. Privacy is a property the def form declares —
+;; recorded via `%mark-private` — not a marker in the name, so the name stays clean
+;; at the definition and at every call site. The `def` runs first so the global
+;; exists when `%mark-private` qualifies it.
+(defmacro defn- (name & clauses)
+  "Define a MODULE-PRIVATE function `name` (ADR-146) — like `defn`, but the name is not exported and a cross-module reference to it is a compile error."
+  `(do (def ~name (fn ~@clauses)) (%mark-private '~name)))
+(defmacro def- (name value)
+  "Define a MODULE-PRIVATE global `name` (ADR-146) — like `def`, but the name is not exported outside its module."
+  `(do (def ~name ~value) (%mark-private '~name)))
+
+;; ---- logic ----
+(defn not (x)
+  "Logical negation: `nil`/`false` become `true`, everything else `false`."
+  (if x false true))
+
+;; `empty?` — true for the empty value of any collection. Defined here, before
+;; `fold`/`reduce` use it, so it's written with the raw kernel ops (`%eq`,
+;; `type-of`, `string-length`, `vector-length`, `map-count`) rather than the type
+;; predicates / `cond`, which are defined further down. (Not a Rust primitive: the
+;; empty list is `nil`, and every other collection's emptiness is a length the
+;; kernel already exposes.)
+;; `empty?` is a native builtin (builtins.rs) for Prim1-level dispatch speed.
+
+;; ---- universal list view ----
+;; `seq` is what lets every list-shaped op (map/filter/fold/reduce/…) walk a
+;; *map* without callers reaching for `(zip (keys m) (vals m))`: a map becomes
+;; its `[k v]` pairs in one O(n) `map-pairs` pass; lists, vectors, strings, and
+;; `nil` pass through unchanged. Defined here with raw kernel ops (`%eq`,
+;; `type-of`, `map-pairs`) because `fold` calls it before the `map?` predicate /
+;; `cond` macro are available.
+(defn seq (coll)
+  "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; a bytes value becomes its list of ints; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
+  (if (range? coll)
+    (%range->list coll)
+    (if (seqview? coll)
+      (%seqview-realize coll)
+      (let (t (type-of coll))
+        ;; A `bytes` value is realised to a list ONCE here: without this, fold/map/
+        ;; filter/reduce would walk it with `first`/`rest`, and `(rest bytes)` copies
+        ;; all-but-the-first byte — O(n) per step, O(n^2) total (a 50k-byte reduce
+        ;; spiked ~1.3 GB RSS). `bytes->list` is a single O(n) native pass.
+        (if (%eq t :map)
+          ;; A record (a map carrying `:__id__`) takes its `Seqable` view — the fields,
+          ;; id-free, by default — so it never leaks `:__id__` into map/fold/keys and a
+          ;; custom collection can define its own iteration. `to-seq` is only reached for
+          ;; records (never at boot, which has none), so its late definition is fine.
+          (if (map-get coll :__id__ nil)
+            (to-seq coll)
+            (map-pairs coll))
+          (if (%eq t :bytes) (bytes->list coll) coll))))))
+
+;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
+;; The public entry coerces once via `seq`; the inner `fold-loop` then stays in
+;; list form for the recursion, so a map costs one extra `map-pairs` pass total
+;; rather than O(n) per step.
+(defn fold (f acc coll)
+  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no intermediate lists."
+  ;; DISPATCH ORDER IS LOAD-BEARING. A vector is tested first, with the one-call
+  ;; `vector?` predicate rather than `type-of` + `%eq` from the bottom of the chain.
+  ;; The branches are disjoint (`type-of` is `:vector` for a vector and `:pair` for a
+  ;; range, a seq-view AND a list), so no value changes branch — this is pure ordering.
+  ;;
+  ;; Measured 2026-08-10, 300k small folds of a 16-cell container, containers hoisted
+  ;; out of the loop so only dispatch + reduce is timed (median of 3):
+  ;;
+  ;;     vector 533 -> 410 ns   range 230 -> 183 ns   list 3595 -> 3248 ns
+  ;;
+  ;; Note the range row IMPROVES even though a range now pays an extra `vector?` first:
+  ;; flattening the chain is worth more than the check costs. That is why this is not
+  ;; the trade it looks like — nothing regresses. On the spawn-live shape (each unit
+  ;; folds a 16-cell payload in a cold process) the rung went 28.3 -> 27.1 us/unit.
+  (if (vector? coll)
+    (%vector-reduce f acc coll)
+    (if (range? coll)
+      (%range-reduce f acc coll)
+      (if (seqview? coll)
+        ;; Fuse: `(xform f)` is the wrapped reducer; fold it over the source (a
+        ;; range → counted loop, a list → fold-loop, a nested view → fuses again).
+        ;; Raw kernel ops (`if`/`let`/`vector-ref`) only — `fold` is defined before
+        ;; `cond`/`second`.
+        (let (parts (%seqview-parts coll))
+          (fold ((vector-ref parts 1) f) acc (vector-ref parts 0)))
+        (fold-loop f acc (seq coll))))))
+(defn- fold-loop
+  (f acc coll)
+  (if (empty? coll) acc (fold-loop f (f acc (first coll)) (rest coll))))
+
+;; `cons` with its arguments flipped — the workhorse passed to `fold` to build a
+;; list in reverse (then reversed once at the end). Hoisted to the top level so
+;; the list builders that reverse-accumulate don't each allocate a fresh closure
+;; on every call.
+(defn flip-cons (acc x) (cons x acc))
+
+;; A dedicated loop, not `(fold flip-cons …)`: `reverse` is the final pass of
+;; nearly every sequence builder (`map`/`filter`/`take`/`zip`/`range`/…), so
+;; dropping the per-element `flip-cons` `apply` frame here pays off across the
+;; whole library. Coerce a map to its pairs once via `seq`, as `fold` did.
+(defn- reverse-acc
+  (coll acc)
+  (if (empty? coll) acc (reverse-acc (rest coll) (cons (first coll) acc))))
+(defn reverse (coll)
+  "The items of `coll` in reverse order, as a list."
+  (reverse-acc (seq coll) nil))
+
+(defn reverse-onto (coll tail)
+  "The items of `coll` reversed, prepended onto `tail`. `(reverse-onto xs ys)` is
+`(append (reverse xs) ys)` — but it walks `xs` **once**, so it is the spelling to
+reach for when a tail-recursive loop has accumulated a reversed prefix and wants to
+splice it back in front of the remainder."
+  ;; This is THE shape every tail-recursive rewrite lands in: walk a list building a
+  ;; reversed accumulator, then splice at the stopping point. Written as
+  ;; `(append (reverse acc) tail)` it costs four passes — `reverse` walks `acc`, then
+  ;; `append` folds both lists onto nil and reverses the result — and the checker's
+  ;; non-tail-recursion advice produces more of these every time it is followed. So
+  ;; the idiom gets a name and one pass. Measured, 20k splices of a 500-element
+  ;; prefix: `(append (reverse acc) tail)` 2739 ms, `(fold flip-cons tail acc)`
+  ;; 1674 ms, this 601 ms (4.6x). The `fold` form loses because of the per-element
+  ;; `flip-cons` apply frame, which is exactly why `reverse-acc` is a dedicated loop.
+  (reverse-acc (seq coll) tail))
+
+;; Realise a lazy seq-view to a concrete list by running its transducer. Folding
+;; `flip-cons` over the view hits `fold`'s seq-view branch, which wraps the
+;; transducer around `flip-cons` and folds over the source — producing the
+;; transduced items in reverse, so one `reverse` puts them in order. The kernel
+;; `first`/`rest`/`apply` builtins call this (by name) for a view that escapes the
+;; fusing path; `seq` calls it to coerce. No intermediate list beyond the result.
+(defn %seqview-realize (sv) (reverse (fold flip-cons nil sv)))
+
+;; reduce supports both (reduce f init coll) and (reduce f coll). The 2-arg
+;; form must seq-coerce `x` itself before splitting head/tail, because the bare
+;; `(first x)`/`(rest x)` calls bypass fold's coercion and a map would error.
+(defn reduce (f x & more)
+  "Reduce a collection with `f`. Either `(reduce f init coll)` or `(reduce f coll)` (using the first item as the initial value). Maps reduce as their `[k v]` pairs."
+  (if (empty? more)
+    (let (s (seq x)) (fold f (first s) (rest s)))
+    (fold f x (first more))))
+
+;; ---- arithmetic (variadic, built on the 2-arg primitives) ----
+;; Multi-arity (ADR-047): the 0/1/2-argument clauses bind their parameters
+;; *directly* and call the primitive — no `& xs` rest-list, no `fold`, just one
+;; env frame — so the overwhelmingly common 2-argument call (`(+ a b)`) is ~40×
+;; cheaper than folding over a variadic rest-list. Only the 3+-argument fallback
+;; folds, starting from the first two combined so it never re-walks them. (This
+;; is the dogfooding payoff: writing `+` in Brood surfaced the missing
+;; multi-arity dispatch; we built that capability rather than moving `+` to Rust
+;; — CLAUDE.md "dogfood first; optimize by building the language up".)
+(defn + "Sum of all arguments (0 with none)."
+  (() 0)
+  ((a) a)
+  ((a b) (%add a b))
+  ((a b & more) (fold %add (%add a b) more)))
+(defn * "Product of all arguments (1 with none)."
+  (() 1)
+  ((a) a)
+  ((a b) (%mul a b))
+  ((a b & more) (fold %mul (%mul a b) more)))
+(defn - "Subtract the rest from `x`; negate `x` if it's the only argument."
+  ((x) (%sub 0 x))
+  ((a b) (%sub a b))
+  ((x & xs) (fold %sub x xs)))
+(defn / "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero."
+  ((x) (%div 1 x))
+  ((a b) (%div a b))
+  ((x & xs) (fold %div x xs)))
+
+(defn inc (n) "Return `n` + 1." (%add n 1))
+(defn dec (n) "Return `n` - 1." (%sub n 1))
+
+;; ---- comparison & equality (variadic chains over %lt / %eq) ----
+;; chain? checks a predicate holds for every adjacent pair: (chain? < (1 2 3)).
+(defn chain? (pred xs)
+  (if (empty? xs)
+    true
+    (if (empty? (rest xs))
+      true
+      (if (pred (first xs) (first (rest xs))) (chain? pred (rest xs)) false))))
+
+;; Binary comparison kernels, hoisted to the top level so the variadic chains
+;; below pass an *existing* function to `chain?` rather than allocating a fresh
+;; closure on every call. `<` and `=` reuse the `%lt`/`%eq` primitives directly;
+;; the swapped/negated ones get a named Brood helper (still policy in Brood).
+(defn- cmp-gt (a b) (%lt b a))
+(defn- cmp-le (a b) (not (%lt b a)))
+(defn- cmp-ge (a b) (not (%lt a b)))
+
+;; Multi-arity like arithmetic above: a direct 2-argument clause (the common
+;; case — `(< a b)`, `(= a b)`) calls the primitive with one env frame; the
+;; variadic clause chains over adjacent pairs for 3+ (or 0/1, trivially true).
+(defn < "True if the arguments are in strictly increasing order."
+  ((a b) (%lt a b))
+  ((& xs) (chain? %lt xs)))
+(defn > "True if the arguments are in strictly decreasing order."
+  ((a b) (%lt b a))
+  ((& xs) (chain? cmp-gt xs)))
+(defn <= "True if the arguments are in non-decreasing order."
+  ;; 2-arg body is a direct primitive call (a <= b) so the ADR-069 thin-wrapper
+  ;; elision reaches it — the old `(not (%lt b a))` was a nested call it couldn't.
+  ((a b) (%le a b))
+  ((& xs) (chain? cmp-le xs)))
+(defn >= "True if the arguments are in non-increasing order."
+  ;; a >= b  ==  b <= a — still a single passthrough (%le with args swapped).
+  ((a b) (%le b a))
+  ((& xs) (chain? cmp-ge xs)))
+(defn = "True if all arguments are structurally equal."
+  ((a b) (%eq a b))
+  ((& xs) (chain? %eq xs)))
+(defn not= "True if the arguments are not all equal."
+  ((a b) (not (%eq a b)))
+  ((& xs) (not (apply = xs))))
+
+;; ---- control-flow macros ----
+;; These read like special forms but are ordinary macros over `if`/`do`/`let`.
+;; The compile pass (macroexpand-all) expands them once, so they cost nothing at
+;; runtime while the evaluator's core stays just `if`/`do`/`let`/`fn`/… — policy
+;; in Brood, mechanism in Rust (ADR-006/008). There is no `while`: data is
+;; immutable and there's no local mutation (ADR-026), so loops are recursion (TCO
+;; keeps the stack O(1)) or processes.
+
+(defmacro when (test & body)
+  "Evaluate `body` (returning the last) when `test` is truthy, else `nil`."
+  `(if ~test (do ~@body) nil))
+
+(defmacro unless (test & body)
+  "Evaluate `body` (returning the last) when `test` is falsy, else `nil`."
+  `(if ~test nil (do ~@body)))
+
+;; `defonce` — define only if the name is not already bound. The point is
+;; hot-reload: re-evaluating a file (via `reload-defs` or `load`) re-runs every
+;; `def…` form, which would reset top-level state and re-create singletons (a
+;; fresh `(spawn …)`, a reopened connection) on every save. `defonce` makes the
+;; init run *once* — the value survives reload, exactly like Emacs `defvar`.
+;; Idiomatic for global state and resources: (defonce *server* (spawn (serve))),
+;; (defonce *registry* {}). Plain behaviour stays `defn`/`def`. To force re-init,
+;; restart or re-`def` explicitly. (`bound?` returns false on an unbound symbol,
+;; so this is safe on first definition — docs/live-editing.md Stage 1.)
+
+;; The name a module-level `def` of `sym` actually BINDS — `sym` prefixed with the
+;; loading module's namespace. `defonce`'s bound? check must name the same binding the
+;; `def` writes, and inside a module `(def *x* v)` writes `mod/*x*` while a bare quoted
+;; `'*x*` is data the resolver never rewrites (it would read at root, never see the
+;; binding, and re-def every reload — the bug this fixes). Computed at LOAD time, where
+;; `current-ns` is the module being loaded; a bare/root context (no current-ns) or an
+;; already-qualified name passes through, matching `def`.
+(defn defonce-qualified-name (sym)
+  (let (ns (current-ns))
+    (if (or (nil? ns) (includes? (str sym) "/"))
+      sym
+      (symbol (str (name ns) "/" (str sym))))))
+
+(defmacro defonce (name val)
+  "Bind `name` to `val` only if it isn't already bound, so the value survives
+hot-reload (cf. Emacs `defvar`). Once bound, re-evaluating is a no-op; restart
+or re-`def` to force re-init. Works for a module-level name: the bound? check is
+resolved against the LOADING module's namespace (`defonce-qualified-name`), the same
+binding `def` writes — a bare `(bound? '~name)` would read at root and miss it."
+  `(unless (bound? (defonce-qualified-name '~name)) (def ~name ~val)))
+
+;; `(comment …)` — the dev-scratch block every Lisp has. Its body is read (so it
+;; must still be balanced sexps) but never evaluated, which is the point: a
+;; worked example, a REPL snippet, or a disabled call can sit next to the code it
+;; documents without being commented out line by line. Brood has no `#_`
+;; form-discard reader macro, so this is the only form-level "don't run this".
+(defmacro comment (& _body)
+  "Ignore the body entirely and return nil — a scratch block for examples and
+disabled snippets. The body is still *read*, so it must be balanced sexps; use
+`;` for prose or anything that wouldn't parse."
+  nil)
+
+;; `(sig name (params… -> ret))` — a type-signature declaration the advisory
+;; checker reads (it parses the type-expression and treats it as `name`'s
+;; authoritative signature, ahead of inferred/curated ones). Normally a runtime
+;; no-op (expands to `nil`); set BROOD_CONTRACTS=1 to enforce every `(sig …)`
+;; as a runtime contract (same as `(sig! …)`) for a dev/test run. See
+;; `docs/type-annotations.md`. NOTE: the checker reads the *un-expanded* form, so
+;; this macro intentionally discards its arguments.
+(defmacro sig (name type)
+  "Declare a type signature for `name`, e.g. `(sig area (number -> number))`.
+Read by the advisory type checker; a runtime no-op unless `BROOD_CONTRACTS=1`
+is set, in which case it installs a runtime contract like `(sig! …)`. Type
+grammar: base names (`int` `string` `number` `list` `vector` `map` `fn` `any` …),
+arrows `(p… -> r)`, `(list E)`/`(vector E)`, `(or A B)`, and `(& rest-type)`
+for variadic tails."
+  ;; Always register the declaration on the heap (keyed by the module-qualified
+  ;; global name, resolved as `def` would) so the checker treats it as `name`'s
+  ;; authoritative signature everywhere — intra-module and cross-module — not just
+  ;; in a bare file's per-file ctx. Then keep the existing semantics: a runtime
+  ;; no-op, or a `sig!` runtime contract under BROOD_CONTRACTS=1.
+  `(do
+     ~(if (= (getenv "BROOD_CONTRACTS") "1") nil `(%register-sig '~name '~type))
+     ~(if (= (getenv "BROOD_CONTRACTS") "1")
+        ;; Contracts mode turns this *declaration* into an *action*: `sig!` rebinds
+        ;; `name` to a checking wrapper, so the definition must already exist. A
+        ;; `sig` written above its `defn` — the natural place, since a signature is
+        ;; documentation — then failed with a bare `unbound symbol: mod/name` and
+        ;; took the whole module load down with it (found by annotating `std/` for
+        ;; real, 2026-07-26). Name the fix instead of dying sideways.
+        ;; `bound?` on a QUOTED symbol is not namespace-resolved — inside
+        ;; `(defmodule path)` it would ask about bare `basename` while the
+        ;; definition is `path/basename`, and report "not defined yet" for a
+        ;; perfectly-placed sig. `%register-sig` already returns the qualified
+        ;; symbol it keyed the declaration under, so ask about *that*.
+        `(if (bound? (%register-sig '~name '~type))
+           (sig! ~name ~type)
+           (error "sig: "
+             '~name " is not defined yet, and BROOD_CONTRACTS=1 makes "
+             "`sig` install a runtime contract (which rebinds the name). Move this " "`(sig " '~name
+             " …)` BELOW the definition, or unset BROOD_CONTRACTS "
+             "to use it as a pure declaration."))
+        nil)))
+
+;; ---- checker suppression: `(check-allow :category form…)` -------------------
+;; A form-level opt-out for an advisory lint the author deliberately trips — a
+;; non-tail-recursive function written to exercise the deep-recursion path, a
+;; redundant `match` clause under test. The reader strips comments before the
+;; checker runs, so a `;;`-directive can't reach it; this macro expands to a
+;; marker (`%lint-allow`) that survives macroexpansion and that `nest check`
+;; reads. A pure runtime no-op — it just yields the wrapped body's value.
+;; Recognised categories: `:non-tail-recursion`, `:unreachable-clause`,
+;; `:type-mismatch` (a `sig`-declared return/argument the body deliberately
+;; violates — e.g. a negative test proving a `sig!` runtime contract throws).
+;; Wraps one or many forms (top-level defns or an inner expression).
+;; See docs/type-annotations.md.
+(defn %lint-allow (category value)
+  "Identity on `value` — the runtime side of `check-allow` (a checker marker)."
+  value)
+(defmacro check-allow (category & body)
+  "Suppress an advisory checker lint over the wrapped forms. `category` is a
+keyword: `:non-tail-recursion`, `:unreachable-clause`, `:type-mismatch`, or
+`:unbound` (globals defined at runtime — an `eval`-driven `def`, the wasm
+`use-native` binding — that the checker cannot see in source). A runtime
+no-op; the marker is read only by the type checker (`nest check`)."
+  `(%lint-allow ~category (do ~@body)))
+
+;; ---- runtime contracts: `(sig! …)` enforces a signature at call time --------
+;; The opt-in *sound* half of the type system (the paper's "strong arrow", done
+;; Brood-side). `(sig …)` informs only the checker; `(sig! …)` *also* wraps the
+;; function so each argument and the result are checked at run time and a
+;; mismatch throws — so a value the static checker trusted can never silently
+;; slip through. All policy, no new primitive. See `docs/type-annotations.md`.
+
+; unknown base name → accept
+(defn type-matches? (t v)
+  "True if value `v` inhabits the (sig …) type-expression `t`. Unknown type
+names accept anything, so a contract never throws on a type it can't interpret."
+  (cond
+    (nil? t) (nil? v)
+    ; the `nil` type reads as the nil literal
+    (pair? t)
+      (let (h (first t))
+        (cond
+          (%eq h 'or) (any? (fn (s) (type-matches? s v)) (rest t))
+          (%eq h 'and) (every? (fn (s) (type-matches? s v)) (rest t))
+          (%eq h 'list)
+            (and (list? v)
+              (let (elem (first (rest t)))
+                (or (nil? elem)
+                  (every? (fn (x) (type-matches? elem x)) v))))
+          (%eq h 'vector)
+            (and (vector? v)
+              (let (elem (first (rest t)))
+                (or (nil? elem)
+                  (every? (fn (x) (type-matches? elem x)) v))))
+          (%eq h 'map)
+            (and (map? v)
+              (let (ktype (first (rest t))
+                    vtype (first (rest (rest t))))
+                (or (and (nil? ktype) (nil? vtype))
+                  (every? (fn (kv)
+                            (and (type-matches? ktype (first kv))
+                              (type-matches? vtype (second kv))))
+                    (map-pairs v)))))
+          (%eq h 'record)
+          ;; A field's type may be wrapped `(optional T)` — allowed to
+          ;; be absent/nil. Every other field is required: `(get v k)`
+          ;; on a missing key is nil, so `type-matches?` on the bare
+          ;; field type naturally fails unless that type accepts nil —
+          ;; no separate presence check needed. Extra keys are ignored
+          ;; (open records).
+          (and (map? v)
+            (every? (fn (field)
+                      (let (k (first field)
+                            ftype (second field))
+                        (if (and (pair? ftype) (%eq (first ftype) 'optional))
+                          (or (nil? (get v k))
+                            (type-matches? (second ftype) (get v k)))
+                          (type-matches? ftype (get v k)))))
+              (partition 2 (rest t))))
+            (%eq h
+              'tuple)
+          ;; A fixed-arity positional vector shape (ADR-128): exact
+          ;; arity, then each position checked against its own
+          ;; declared type.
+          (and (vector? v)
+            (= (count v) (count (rest t)))
+            (every? (fn (i) (type-matches? (nth (rest t) i) (nth v i)))
+              (range (count v))))
+            else
+          true))
+    ; arrow param / unknown compound → accept
+    (keyword? t) (= t v)
+    ; a keyword type-expr is a literal: match it exactly
+    (int? t) (= t v)
+    ; an int type-expr is a literal too (ADR-117)
+    (bool? t) (= t v)
+    ; likewise for bool and string (ADR-120)
+    (string? t) (= t v)
+    (%eq t 'any) true
+    (%eq t 'number) (number? v)
+    (%eq t 'int) (int? v)
+    (%eq t 'float) (float? v)
+    (%eq t 'decimal) (decimal? v)
+    (%eq t 'ratio) (ratio? v)
+    (%eq t 'string) (string? v)
+    (%eq t 'bool) (bool? v)
+    (%eq t 'keyword) (keyword? v)
+    (%eq t 'symbol) (symbol? v)
+    (%eq t 'pair) (pair? v)
+    (%eq t 'map) (map? v)
+    (%eq t 'fn) (fn? v)
+    (%eq t 'list) (list? v)
+    (%eq t 'vector) (vector? v)
+    else true))
+(defn- contract-check-args
+  (name ptypes args i)
+  "Throw if any argument fails its declared type. Pairwise over the overlap —
+arity itself is the static checker's job."
+  (when (and (pair? ptypes) (pair? args))
+    (unless (type-matches? (first ptypes) (first args))
+      (throw (str name
+               ": argument "
+               i
+               " expected "
+               (first ptypes)
+               ", got "
+               (type-of (first args))
+               " ("
+               (pr-str (first args))
+               ")")))
+    (contract-check-args name (rest ptypes) (rest args) (inc i))))
+
+(defn- contract-check-rest
+  (name rtype args)
+  "Throw if any rest argument fails its declared rest type."
+  (when (pair? args)
+    (unless (type-matches? rtype (first args))
+      (throw (str name
+               ": rest argument expected "
+               rtype
+               ", got "
+               (type-of (first args))
+               " ("
+               (pr-str (first args))
+               ")")))
+    (contract-check-rest name rtype (rest args))))
+
+(defn- sig-pos
+  (xs x n)
+  "Position of `x` in the list `xs` (from index `n`), or -1. Expansion-time helper
+for `sig!` that predates `index-of` in the prelude's own load order."
+  (cond
+    (nil? xs) -1
+    (%eq (first xs) x) n
+    else (sig-pos (rest xs) x (%add n 1))))
+
+(defmacro sig! (name type)
+  "Like `(sig …)` but also installs a *runtime* contract: each argument and the
+result are checked at every call and a mismatch throws (an opt-in 'strong
+arrow'). Place it AFTER the function's definition — it rebinds `name`, preserving
+arity (so introspection and the reload-arity check are undisturbed). The checker
+reads it exactly like `(sig …)`. Supports a `&` rest marker:
+`(sig! f (int & number -> string))` checks fixed args then every rest arg."
+  ;; Register the declaration on the heap for the checker (keyed by the
+  ;; module-qualified global name) — same as `(sig …)` — then install the runtime
+  ;; contract. The `(do …)` keeps both effects at top level.
+  `(do
+     (%register-sig '~name '~type)
+     ~(let (i (sig-pos type '-> 0))
+        (if (< i 0)
+          ; not a (… -> …) type — nothing to enforce
+          nil
+          (let (ptypes (take i type)
+                rtype (nth type (inc i))
+                amp-pos (sig-pos ptypes '& 0))
+            (if (< amp-pos 0)
+              ;; fixed arity
+              (let (params (map (fn (_) (gensym "arg")) (range (count ptypes)))
+                    orig (gensym "orig")
+                    r (gensym "ret"))
+                `(def ~name
+                   (let (~orig ~name)
+                     (fn (~@params)
+                       (contract-check-args '~name '~ptypes (list ~@params) 1)
+                       (let (~r (~orig ~@params))
+                         (unless (type-matches? '~rtype ~r)
+                           (throw (str '~name
+                                    ": result expected "
+                                    '~rtype
+                                    ", got "
+                                    (type-of ~r)
+                                    " ("
+                                    (pr-str ~r)
+                                    ")")))
+                         ~r)))))
+              ;; variadic: (fixed… & rest-type -> ret)
+              (let (fixed-ptypes (take amp-pos ptypes)
+                    rest-ptype (nth ptypes (inc amp-pos))
+                    fixed-params (map (fn (_) (gensym "arg")) (range amp-pos))
+                    rest-param (gensym "rest")
+                    orig (gensym "orig")
+                    r (gensym "ret"))
+                `(def ~name
+                   (let (~orig ~name)
+                     (fn (~@fixed-params & ~rest-param)
+                       (contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
+                       (contract-check-rest '~name '~rest-ptype ~rest-param)
+                       (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
+                         (unless (type-matches? '~rtype ~r)
+                           (throw (str '~name
+                                    ": result expected "
+                                    '~rtype
+                                    ", got "
+                                    (type-of ~r)
+                                    " ("
+                                    (pr-str ~r)
+                                    ")")))
+                         ~r)))))))))))
+
+;; `and`/`or` short-circuit left-to-right and return the deciding value, with
+;; each subexpression evaluated at most once (a gensym holds it across the test).
+(defmacro and (& xs)
+  "Logical AND: evaluate left-to-right, short-circuiting on the first falsy value (which it returns); `true` if none. Each argument is evaluated at most once."
+  (if (empty? xs)
+    true
+    (if (empty? (rest xs))
+      (first xs)
+      (let (g (gensym "and")) `(let (~g ~(first xs)) (if ~g (and ~@(rest xs)) ~g))))))
+
+(defmacro or (& xs)
+  "Logical OR: evaluate left-to-right, short-circuiting on the first truthy value (which it returns); `nil` if none. Each argument is evaluated at most once."
+  (if (empty? xs)
+    nil
+    (if (empty? (rest xs))
+      (first xs)
+      (let (g (gensym "or")) `(let (~g ~(first xs)) (if ~g ~g (or ~@(rest xs))))))))
+
+;; cond: flat test/expr pairs (ADR-004); a final `else` is the catch-all.
+;;
+;; `else` needs the special case below: a bare symbol would otherwise be an unbound
+;; reference. `:else` never did — a keyword is self-evaluating and truthy, so it
+;; already worked the way `true` or any other truthy test does. Special-casing it
+;; too made the language carry a second blessed spelling for no gain, so that case
+;; is gone (2026-07-26). `(cond … :else x)` still returns `x` — as an ordinary
+;; truthy test, via `if` — but `else` is the spelling the language knows.
+;; Bootstrap helper for cond's guard: walks clauses two at a time, returning
+;; the orphan last element when count is odd, nil when even. Uses only
+;; `if`/`empty?`/`first`/`rest` — all kernel primitives — so it's safe to call
+;; during prelude loading before `odd?`/`count`/`last` are defined.
+(defn- cond-orphan
+  (clauses)
+  (if (empty? clauses)
+    nil
+    (if (empty? (rest clauses))
+      (first clauses)
+      (cond-orphan (rest (rest clauses))))))
+
+(defmacro cond (& clauses)
+  "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` test always matches; `nil` if none do."
+  (let (orphan (cond-orphan clauses))
+    (if (and (not (nil? orphan)) (not (%eq orphan 'else)))
+      (error "cond: odd number of clauses — expected test/expression pairs. "
+        "Did you forget an expression for '"
+        (pr-str orphan)
+        "'?")
+      (if (empty? clauses)
+        nil
+        (let (test (first clauses) expr (first (rest clauses)) more (rest (rest clauses)))
+          ;; compare with the `%eq` primitive, not the variadic `=` — `=` builds a
+          ;; lambda, and doing that *at expansion time* during the prelude's own
+          ;; compile pass would strand a local-env closure (breaks the freeze).
+          (if (%eq test 'else) expr `(if ~test ~expr (cond ~@more))))))))
+
+;; ---- macro expansion --------------------------------------------------------
+;; Fully expand `form`'s head macro by iterating the single-step `macroexpand-1`
+;; primitive to a fixpoint. Written in Brood, not Rust (ADR-064): the loop's state
+;; is an env-bound local the evaluator already roots, so it can't strand a handle
+;; across a GC safepoint the way a hand-rooted Rust loop could. `macroexpand-1` is
+;; the irreducible single-shot primitive (one expansion, holding nothing across
+;; its `apply`); this just drives it. Tail-recursive, so it is O(1) stack.
+;; Bounded (kernel audit): a macro that forever expands to another macro call
+;; would otherwise spin here. Mirrors the kernel expander's own cap
+;; (`MAX_EXPAND_ROUNDS` in eval/macros.rs) — keep the two in step.
+(def- macroexpand-max-rounds 256)
+
+(defn- macroexpand-loop
+  (form n)
+  (if (= n 0)
+    (error "macroexpand: no fixpoint after "
+      macroexpand-max-rounds " rounds (a macro that expands to itself?)")
+    (let (stepped (macroexpand-1 form))
+      (if (= stepped form) form (macroexpand-loop stepped (- n 1))))))
+
+(defn macroexpand (form)
+  "Repeatedly expand `form`'s head macro until the head is no longer a macro call."
+  (macroexpand-loop form macroexpand-max-rounds))

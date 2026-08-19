@@ -1,0 +1,461 @@
+;; ---- symbol / keyword conversions -------------------------------------------
+;; `symbol` and `keyword` (Rust) are lenient — they take string/symbol/keyword.
+;; These are the strict named conversions: each errors on the wrong input shape,
+;; matching the Scheme/Clojure tradition. Thin Brood wrappers, no new kernel.
+
+(defn symbol->string (s)
+  "The spelling of symbol `s` as a string. Errors if `s` isn't a symbol."
+  (if (symbol? s) (name s) (error "symbol->string: expected a symbol, got " (type-of s))))
+
+(defn string->symbol (s)
+  "The symbol whose spelling is the string `s`. Errors if `s` isn't a string."
+  (if (string? s) (symbol s) (error "string->symbol: expected a string, got " (type-of s))))
+
+;; ---- strings ----------------------------------------------------------------
+;; The string library, written over the kernel primitives `substring` /
+;; `string-length` / `str` and `upper` / `lower` / `string->number`. Brood has no
+;; distinct char type, so a "character" is a 1-char string; all indices are
+;; char-based, matching `string-length`. The helpers below are tail-recursive
+;; (stack-safe over long strings).
+;;
+;; Cost note, corrected 2026-08-02: `substring` used to be O(index) — plus a copy of the
+;; WHOLE source string per call — so a char-by-char scan was O(n²) regardless of content.
+;; It now takes a byte-slice fast path when the string is pure ASCII (a char index is then
+;; its byte offset, tested in O(1) against the cached char count), making it O(result). So
+;; a full scan is **linear on ASCII text** and still O(n²) on text with any multi-byte
+;; character, where the `chars().skip(index)` walk remains. Measured, char-by-char over
+;; 4k/16k/64k chars: ASCII 6/7/27 ms (ratios 1.16, 3.85) vs non-ASCII 2/21/242 ms (10.50,
+;; 11.52). Either way the rope/buffer engine (M2) is still the home for large-text editing.
+
+(defn feature? (name)
+  "True if this runtime was built with the optional feature `name` (a keyword —
+`:gui`, `:jit`, `:audio`, `:treesit`, …). See `(features)` for the whole list.
+
+Reach for this instead of `bound?` when a capability is optional: a builtin from
+an absent feature is still **bound** and still raises when called, so `(bound?
+'gui-open)` answers yes on a runtime that cannot open a window. An app that wants
+to degrade rather than fail asks the build."
+  (includes? (features) name))
+
+(defn number->string (n)
+  "The textual form of number `n` — the inverse of `string->number`."
+  (str n))
+
+(defn- index-of-seq-from
+  (coll x i from)
+  ;; scan from the head; only start matching once the running index reaches `from`
+  (cond
+    (empty? coll) -1
+    (and (>= i from) (= (first coll) x)) i
+    else (index-of-seq-from (rest coll) x (inc i) from)))
+(defn index-of (coll x &optional from)
+  "The 0-based index of `x` in `coll` at or after `from` (default 0), or -1 if absent.
+For a string, `x` is a substring (multi-char ok; the empty string matches at `from`);
+for a list or vector, `x` is an element compared structurally. The `from` offset is
+what incremental search rides on (formerly the separate `index-of`)."
+  (let (start (or from 0))
+    (cond
+      ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood
+      ;; scan would be O(n²) (char indexing is O(index)), which is too slow for
+      ;; whole-namespace `doc-search`/`apropos` use. The `from` offset goes to the
+      ;; primitive, which searches in place. It used to be `(%str-index-of (string/substring
+      ;; coll s0 n) x)` — which COPIED the suffix on every call, so the incremental
+      ;; search this offset exists for was itself quadratic. `last-index-of` is where that
+      ;; measurably mattered (540 ms → 1 ms at 6400 matches); `fuzzy-next` also calls it
+      ;; per query char per candidate, but making the scan cheap barely moved ranking —
+      ;; see the note there before assuming this is anyone's bottleneck. The empty needle
+      ;; still matches at `from`, and a `from` past the end still finds nothing.
+      (string? coll) (%str-index-of coll x (max 0 start))
+      else (index-of-seq-from coll x 0 start))))
+
+(defn last-index-of (s needle &optional before)
+  "The 0-based char index of the **last** occurrence of `needle` in string `s` whose
+start is strictly **before** `before` (default `(string/length s)`), or -1 if there is
+none. The backward counterpart of `(index-of s needle from)` — what reverse
+incremental search rides on."
+  ;; One native pass. This used to walk forward in Brood calling `(index-of s needle i)`
+  ;; per match; every one of those re-derives a char offset (and, before `index-of` took a
+  ;; `from`, allocated a copy of the suffix), so a reverse search was O(matches × length) —
+  ;; measured 16.5× then 16.4× per 4× of input, where linear is 4×. It is on an editor hot
+  ;; path in both directions: `buffer`'s reverse search runs over whole buffer text, and
+  ;; `lineedit` finds the current line's start on every keystroke. The empty-needle rule
+  ;; (matches at every position, so the answer is `before - 1` clamped) lives in the
+  ;; primitive now, unchanged.
+  (%str-last-index-of s needle (or before (string/length s))))
+
+(defn includes? (coll x)
+  "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), and maps (membership among values — use `contains?` for keys)."
+  (cond
+    (map? coll) (member? x (vals coll))
+    else (>= (index-of coll x) 0)))
+
+;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
+;; recursively, reversed), then build the string in one `apply str` pass.
+
+;; `string-split` is now a native builtin (crates/lisp/src/builtins/mod.rs) — one O(n)
+;; pass via Rust's `str::split`. The former pure-Brood version re-`substring`ed the
+;; tail each step, which is O(n²) (char-indexed substring is O(index)); a 174 KB
+;; `git ls-files` output took ~840 ms in the editor's project scan, now ~10 ms.
+
+;; ---- string padding & repetition --------------------------------------------
+;; Column formatting for tabular/console output. `pad-*` left unchanged when the
+;; string already meets the width (they never truncate).
+
+;; ---- string interpolation ---------------------------------------------------
+;; `(fmt "…{expr}…")` builds a string from a template, splicing the value of each
+;; `{expr}` hole — any Brood expression, read at macro-expansion time — between the
+;; literal chunks. `{{` / `}}` are literal braces; braces *inside* a hole nest, so
+;; `{ {:a 1} }` reads a map. It expands to a plain `(str chunk expr …)`, so there is
+;; zero runtime machinery — it is exactly the hand-written `str` call, minus the
+;; quote-chopping. Reach for it wherever a message interleaves text and values:
+;; `(error (fmt "json: bad number '{tok}' at index {i}"))`.
+(defn- fmt-flush
+  (buf parts)
+  ;; push the accumulated literal chunk (reversed chars) onto `parts`, if non-empty
+  (if (empty? buf) parts (cons (apply str (reverse buf)) parts)))
+(defn- fmt-hole
+  (chars expr depth parts)
+  ;; inside a {…} hole: accumulate the expression text until the matching `}`, then
+  ;; `read-string` it into a form. Braces nest by `depth` (a map/set literal inside).
+  (cond
+    (empty? chars) (error "fmt: unterminated '{' in template")
+    (and (= (first chars) "}") (= depth 0))
+      (fmt-lit (rest chars)
+        nil
+        (cons (read-string expr) parts))
+    (= (first chars) "{") (fmt-hole (rest chars) (str expr "{") (inc depth) parts)
+    (= (first chars) "}") (fmt-hole (rest chars) (str expr "}") (dec depth) parts)
+    else (fmt-hole (rest chars) (str expr (first chars)) depth parts)))
+(defn- fmt-lit
+  (chars buf parts)
+  ;; scanning literal text: `buf` = reversed literal chars, `parts` = reversed forms
+  (cond
+    (empty? chars) (reverse (fmt-flush buf parts))
+    (and (= (first chars) "{") (= (second chars) "{"))
+      (fmt-lit (rest (rest chars))
+        (cons "{" buf)
+        parts)
+    (and (= (first chars) "}") (= (second chars) "}"))
+      (fmt-lit (rest (rest chars))
+        (cons "}" buf)
+        parts)
+    (= (first chars) "{") (fmt-hole (rest chars) "" 0 (fmt-flush buf parts))
+    else (fmt-lit (rest chars) (cons (first chars) buf) parts)))
+(defmacro fmt (template)
+  "Build a string from a template, splicing each `{expr}` hole's value between the literal text: `(fmt \"x={x} sum={(+ a b)}\")`. `{{`/`}}` are literal braces; braces nest inside a hole. Expands to a plain `(str …)`."
+  (if (string? template)
+    (cons 'str (fmt-lit (string/to-list template) nil nil))
+    (error "fmt: template must be a string literal, got " (pr-str template))))
+
+;; ---- string formatting ------------------------------------------------------
+;; A small `printf`-style helper for inline rendering. The supported specifiers
+;; are a deliberate subset — the common cases for demos and tooling output:
+;;   %s    any value, rendered via `str`
+;;   %d    integer (any number; the type tag is a hint for the reader, not a
+;;         converter — float in / float out, same as %s)
+;;   %f    float with 6 fractional digits (matches the C/Java default)
+;;   %.Nf  float with N fractional digits, rounded — uses `to-fixed`
+;;   %%    a literal `%`
+;; Width / justification aren't built in — `pad-left` / `pad-right` cover those
+;; explicitly. Hex/octal/etc. aren't here; add them on demand. Errors on an
+;; unknown spec or a format string that ends inside one; a missing arg renders
+;; as `nil` (debuggable), extra args are ignored.
+(defn format (fmt & args)
+  "Render `fmt`, replacing each %-specifier with the next of `args`. Supports `%s` `%d` `%f` `%.Nf` `%%`; use `pad-left`/`pad-right` for width."
+  (format-loop fmt 0 (string/length fmt) args ""))
+
+(defn- format-loop
+  (fmt i n args acc)
+  (cond
+    (>= i n) acc
+    (= (string/char-at fmt i) "%") (format-spec fmt (inc i) n args acc)
+    else (format-loop fmt (inc i) n args (str acc (string/char-at fmt i)))))
+
+(defn- format-spec
+  (fmt i n args acc)
+  ;; called with `i` pointing one past the `%`
+  (cond
+    (>= i n) (error "format: unterminated specifier (lone '%' at end of format string)")
+    (= (string/char-at fmt i) "%") (format-loop fmt (inc i) n args (str acc "%"))
+    (= (string/char-at fmt i) "s")
+      (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (string/char-at fmt i) "d")
+      (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (string/char-at fmt i) "f")
+      (format-loop fmt
+        (inc i)
+        n
+        (rest args)
+        (str acc (to-fixed (first args) 6)))
+    (= (string/char-at fmt i) ".") (format-prec fmt (inc i) n args acc 0)
+    else (error (str "format: unrecognized specifier '%" (string/char-at fmt i) "' at column " i))))
+
+(defn- format-prec
+  (fmt i n args acc p)
+  ;; called with `i` pointing one past the `.`, accumulating precision in `p`
+  (cond
+    (>= i n) (error "format: unterminated %.Nf specifier")
+    (= (string/char-at fmt i) "f")
+      (format-loop fmt
+        (inc i)
+        n
+        (rest args)
+        (str acc (to-fixed (first args) p)))
+    else
+      (let (d (string->number (string/char-at fmt i)))
+        (if (and (int? d) (>= d 0) (<= d 9))
+          (format-prec fmt (inc i) n args acc (+ (* p 10) d))
+          (error (str "format: expected digit or 'f' after '.' in specifier, got '"
+                   (string/char-at fmt i)
+                   "' at column "
+                   i))))))
+
+;; ---- strings & paths --------------------------------------------------------
+;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough
+;; to live in core; the module system and the project tooling build on them.
+
+;; The bootstrap `path-*` subset (path-join/path-basename/path-absolute/parent-dir):
+;; the minimal path ops tooling needs *before* any module can be required. The full
+;; path library is `std/path.blsp` (`path/dirname`/`normalize`/`relative-to`/…) — a
+;; deliberate layer on top, with its own (slightly different) contracts. Not a dup.
+;;
+;; Index of the last `/` in `s`, scanning down from `i`, or -1 if none. (Brood has
+;; no char accessor yet; paths are short, so a substring scan is fine.)
+(defn- path-last-slash
+  (s i)
+  (cond (< i 0) -1 (= (string/substring s i (inc i)) "/") i else (path-last-slash s (dec i))))
+
+;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
+;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.
+(defn parent-dir (path)
+  "The directory containing `path` (\"/a/b/c\" -> \"/a/b\", \"/foo\" -> \"/\", \"rel\" -> \".\")."
+  (let (i (path-last-slash path (dec (string/length path))))
+    (cond (< i 0) "." (= i 0) "/" else (string/substring path 0 i))))
+
+(defn path-join (a b)
+  "Join path segments `a` and `b` with a single `/` separator."
+  (if (string/ends-with? a "/") (str a b) (str a "/" b)))
+
+(defn temp-path (prefix)
+  "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
+`file/spit` a file there or `file/mkdir` a directory. The name comes from `random-token`, so
+it is unique across processes and across runs, and cannot be guessed ahead of time.
+
+Reach for this instead of writing a program-specific constant like
+`/tmp/myapp-worker.blsp`. A fixed name in a world-writable directory is two bugs: two
+copies of the program fight over one file, and anyone on the machine can create that
+path first — as a symlink to something you own — so the `file/spit` overwrites their choice
+of file with your privileges. Neither is possible with a name they cannot predict."
+  (path-join "/tmp" (str prefix (random-token 16))))
+
+(defn path-basename (path)
+  "The final component of `path` (\"/a/b/c\" -> \"c\", \"/foo\" -> \"foo\",
+\"foo\" -> \"foo\"). The empty string returns itself; a trailing slash isn't
+stripped (`(file/cwd)` doesn't produce one, which is the primary caller)."
+  (let (n (string/length path))
+    (if (= n 0)
+      ""
+      (let (i (path-last-slash path (dec n)))
+        (if (< i 0) path (string/substring path (inc i) n))))))
+
+(defn path-absolute (path &optional base)
+  "Resolve `path` to an absolute path: a `/`-rooted path is returned unchanged, a
+`~`/`~/…` path is expanded against `$HOME`, and any other (relative) path is joined
+onto `base` (default the current directory, `(file/cwd)`). The empty string is returned as
+is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segments."
+  (cond
+    (or (= path "") (string/starts-with? path "/")) path
+    (= path "~") (or (getenv "HOME") path)
+    (string/starts-with? path "~/")
+      (str (or (getenv "HOME") "~") (string/substring path 1 (string/length path)))
+    else (path-join (or base (file/cwd)) path)))
+
+;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
+;; Brood has no global mutable state, so randomness is *threaded*: every step
+;; takes a seed and returns `[value next-seed]`. Pass `next-seed` to the next
+;; call; thread the seed through your loop state exactly like any other value.
+;; Seed a fresh stream from any integer (e.g. `(now)`) via `rand-seed`.
+;;
+;; The generator is Marsaglia's xorshift32 — fast and good enough for
+;; simulations, sampling, shuffling, jitter, and ids; NOT for cryptography. Each
+;; left shift can exceed 32 bits, so we mask back to 32 bits with `*rand-mask*`,
+;; which also keeps every intermediate well within i64 (no overflow).
+
+; 2^32 - 1
+(def *rand-mask* 4294967295)
+(defn rand-seed (n)
+  "Normalize integer `n` into a valid nonzero 32-bit PRNG seed (xorshift32 cannot start from 0)."
+  (let (m (bit-and n *rand-mask*))
+    (if (= m 0) 2463534242 m)))
+
+(defn- rand-step
+  (state)
+  ;; One xorshift32 transition over a nonzero 32-bit `state`.
+  (let (x (bit-and (bit-xor state (bit-shift-left state 13)) *rand-mask*)
+        x (bit-xor x (bit-shift-right x 17))
+        x (bit-and (bit-xor x (bit-shift-left x 5)) *rand-mask*))
+    x))
+
+(defn rng (seed)
+  "Step the PRNG: returns `[value next-seed]`, where `value` is a pseudo-random non-negative 32-bit integer and `next-seed` feeds the next call. `seed` is any integer (normalized via `rand-seed`)."
+  (let (s (rand-step (rand-seed seed)))
+    [s s]))
+
+(defn rand-int (seed n)
+  "Returns `[i next-seed]` with `i` a pseudo-random integer in `[0, n)`. `n` must be positive."
+  (if (<= n 0)
+    (error "rand-int: bound must be positive: " n)
+    (let (s (rand-step (rand-seed seed)))
+      [(rem s n) s])))
+
+(defn rand-float (seed)
+  "Returns `[f next-seed]` with `f` a pseudo-random float in `[0.0, 1.0)`."
+  (let (s (rand-step (rand-seed seed)))
+    [(/ s 4294967296.0) s]))
+
+(defn sample (seed coll)
+  "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."
+  (let (items (into [] coll)
+        n (count items))
+    (if (= n 0)
+      (error "sample: cannot sample from an empty collection")
+      (let (s (rand-step (rand-seed seed)))
+        [(nth items (rem s n)) s]))))
+
+(defn- shuffle-acc
+  (state remaining acc)
+  (if (= (count remaining) 0)
+    [acc state]
+    (let (s (rand-step state)
+          i (rem s (count remaining)))
+      (shuffle-acc s
+        (append (take i remaining) (drop (inc i) remaining))
+        (cons (nth remaining i) acc)))))
+
+(defn shuffle (seed coll)
+  "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
+  (shuffle-acc (rand-seed seed) (into [] coll) nil))
+
+;; ---- bounded printing -------------------------------------------------------
+;; `pr-str` is *faithful*: whatever it returns reads back as the same value, so it
+;; can never elide anything. That's the right contract for serialization and the
+;; wrong one for a screen — one 100k-element list at a REPL prompt scrolls your
+;; session away, and there is no way to ask for less.
+;;
+;; So bounding is a SEPARATE function rather than a flag on `pr-str`: nothing that
+;; round-trips data can accidentally acquire an eliding printer, and `pr-str`
+;; remains the escape hatch for seeing everything (`(pr-str *1)` after a truncated
+;; result). The two knobs are `defdyn`s, so they are ambient (usable bare from any
+;; namespace) and scopable with `binding`.
+;;
+;; Both markers are `…`, meaning "elided here" — for length as a trailing item, for
+;; depth in place of the subform. Deliberately ONE marker rather than Clojure's
+;; `…`/`#` pair: two symbols for one concept is a thing to learn for no gain, and a
+;; bare `#` would read as the start of a `#{…}` set to anything re-lexing the output
+;; (the REPL's result highlighter does exactly that).
+;;
+;; Only *containers* are traversed; every leaf and every value this doesn't know
+;; about (records with an `impl Display`, ropes, tables, functions) is handed to
+;; `pr-str` unchanged, so custom printing keeps working and this stays small.
+
+(defdyn *print-length* 100)
+(defdyn *print-level* 8)
+;; The third bound, and in practice the one that saves a display: a TEXT leaf's
+;; length. Neither bound above touches a leaf, so a single 10 MB string sails past
+;; both — `*print-length*` counts a collection's items and a string is one item.
+;; 4096 matches Elixir's `Inspect` `:printable_limit`, which exists for exactly this.
+(defdyn *print-string-length* 4096)
+
+(defn- pr-elide
+  (parts over)
+  "`parts` joined for display, with the `…` length marker appended when `over`."
+  (string/join " " (if over (append parts (list "…")) parts)))
+
+(defn- pr-limit
+  (items)
+  "`[shown over?]` for `items` under `*print-length*` — at most that many items,
+plus whether any were dropped. Takes one extra item to detect the overflow, so a
+long collection is never walked past the limit."
+  (let (lim *print-length*)
+    (if (nil? lim)
+      [items false]
+      (let (taken (take (inc lim) items)
+            over (> (count taken) lim))
+        [(if over (take lim taken) taken) over]))))
+
+(defn- pr-safely
+  (thunk x)
+  "Run `thunk`, falling back to `(pr-str x)` if it raises. The guard for a value
+that looks like a container but doesn't walk like one — an improper/dotted pair
+such as `(cons 1 2)` is the real case. Per-node, so one odd subtree degrades to
+faithful printing instead of losing the bound on the whole value."
+  (try (thunk) (catch _ (pr-str x))))
+
+(defn- pr-bounded-seq
+  (x level open close)
+  (let ([shown over] (pr-limit x))
+    (str open (pr-elide (map (fn (i) (pr-bounded i (inc level))) shown) over) close)))
+
+(defn- pr-bounded-map
+  (x level)
+  (let ([shown over] (pr-limit (map-pairs x)))
+    (str "{"
+      (pr-elide (map (fn ([k v])
+                       (str (pr-bounded k (inc level)) " " (pr-bounded v (inc level))))
+                  shown)
+        over)
+      "}")))
+
+(defn- pr-bounded-text
+  (x)
+  "A text leaf — a string or a byte string — under `*print-string-length*`: at most
+that many characters (bytes) print, with the `…` marker inside the closing quote
+(`\"abc…\"`, `#b\"ab…\"`).
+
+The VALUE is cut before it is printed, never `pr-str`'s output: truncating the
+printed form could halve an escape (`\\n`) or drop the closing quote, and a byte
+string costs four output characters per byte, so cutting after the fact would still
+have built the flood this bound exists to prevent."
+  (let (limit *print-string-length*
+        bytes (= :bytes (type-of x))
+        length (if bytes (count x) (string/length x)))
+    (if (or (nil? limit) (<= length limit))
+      (pr-str x)
+      (let (printed (pr-str (if bytes (subbytes x 0 limit) (string/substring x 0 limit))))
+        ;; drop the closing quote, mark the elision, close again
+        (str (string/substring printed 0 (dec (string/length printed))) "…\"")))))
+
+(defn- pr-bounded
+  (x level)
+  "`x` printed at nesting `level`, honouring every bound. Containers recurse, text
+leaves are length-bounded, anything else goes to `pr-str`.
+
+The depth bound is tested on *entering a container*, never on a leaf — so
+`*print-level*` 2 on `{:a {:b {:c 1}}}` elides the whole third map (`{:a {:b …}}`)
+rather than each of its keys and values separately (`{:a {:b {… …}}}`). A non-text
+leaf always prints whole: eliding an atom would cost a character and save nothing,
+and the values that print unboundedly LONG are the text ones (a rope and a table
+already print as a summary handle, `#<rope :chars 11 :lines 1>`)."
+  (let (t (type-of x)
+        container (or (= t :pair) (= t :vector) (= t :set) (= t :map)))
+    (cond
+      (and container *print-level* (>= level *print-level*)) "…"
+      (= t :pair) (pr-safely (fn () (pr-bounded-seq x level "(" ")")) x)
+      (= t :vector) (pr-safely (fn () (pr-bounded-seq x level "[" "]")) x)
+      (= t :set) (pr-safely (fn () (pr-bounded-seq x level "#{" "}")) x)
+      (= t :map) (pr-safely (fn () (pr-bounded-map x level)) x)
+      (or (= t :string) (= t :bytes)) (pr-safely (fn () (pr-bounded-text x)) x)
+      else (pr-str x))))
+
+(defn pr-str-bounded (x)
+  "Like `pr-str`, but eliding with `…` past `*print-length*` items per collection,
+`*print-level*` levels of nesting, and `*print-string-length*` characters of a
+string or byte string (`nil` for any of them means no limit). For *display* — the
+result does not read back, so use `pr-str` when you need the whole value.
+
+**Every display protocol should print through this**, not `pr-str`: the REPL's
+results, `spy`'s trace entries, an editor's echo area. A protocol whose job is to
+show a value to a human has no business flooding the screen (or a pipe, or a log)
+with a megabyte, and one bounded printer is how that stays true everywhere instead
+of each consumer inventing its own cap."
+  (pr-bounded x 0))

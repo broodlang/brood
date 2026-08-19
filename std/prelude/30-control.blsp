@@ -1,0 +1,346 @@
+;; ---- I/O --------------------------------------------------------------------
+;; Output is redirectable. A *port* is just a 1-arg fn that consumes a ready
+;; string (`(fn (s) …)`); `*out*`/`*err*` are dynamic vars holding the current
+;; stdout/stderr ports, and `print`/`println`/`eprint`/`eprintln` render their
+;; args (Rust `%render` — the exact text stdout would show) and hand the string to
+;; the port. The defaults are the kernel writers `%write-out`/`%write-err`; rebind
+;; with `binding` (or `std/io`'s `with-out`/`with-err`) to send output to a
+;; process, a buffer, or any callback — see std/io.blsp. The default `*out*` stays
+;; `%write-out`, which honours the capture stack, so `with-out-str` is unaffected.
+;;
+;; Declared with the `%declare-dynamic` primitive directly because the `defdyn`
+;; macro isn't defined until further down the prelude (and `print` lives here).
+(%declare-dynamic '*out*)
+(def *out* %write-out)
+(%declare-dynamic '*err*)
+(def *err* %write-err)
+;; `*show*` — a late-bound per-argument display transform for the SCREEN printers
+;; (`print`/`println`/`eprint`/`eprintln`). Declared here; the Display protocol (core,
+;; defined at the end of this prelude) sets it to `show-print-hook`, which routes a
+;; *record* through the `Display` ability's `to-str` op so a record can define how it
+;; prints (Elixir's `String.Chars` model) while built-ins keep the fast native render.
+;; An ordinary dynamic var, so `(binding (*show* nil) …)` disables the transform for a
+;; scope. Only the screen printers consult it; `str`/`pr-str`/`fmt` stay native.
+(%declare-dynamic '*show*)
+(def *show* nil)
+(defn- show-args
+  (xs)
+  ;; Each print argument, run through the installed `*show*` transform — or the
+  ;; arguments untouched when none is installed (the default fast path).
+  (if *show* (map *show* xs) xs))
+(defn print (& xs)
+  "Write the display forms of the arguments to the current `*out*` port (stdout by default); returns nil."
+  (*out* (apply %render (show-args xs)))
+  nil)
+(defn println (& xs)
+  "Write the display forms of the arguments to the current `*out*` port, followed by a newline."
+  (*out* (str (apply %render (show-args xs)) "\n"))
+  nil)
+(defn eprint (& xs)
+  "Write the display forms of the arguments to the current `*err*` port (stderr by default); returns nil."
+  (*err* (apply %render (show-args xs)))
+  nil)
+(defn eprintln (& xs)
+  "Write the display forms of the arguments to the current `*err*` port, followed by a newline."
+  (*err* (str (apply %render (show-args xs)) "\n"))
+  nil)
+
+;; `with-out-str` runs `body` for effect with stdout diverted into a capture
+;; buffer, and returns the captured text (a string) instead of `body`'s value —
+;; the standard "what did this print?" sink. Capture is process-scoped *and*
+;; inherited by anything `body` spawns, so a printer running in a child process is
+;; captured too. Captures nest (the buffer is a stack), so a `with-out-str` inside
+;; an outer capture — e.g. a `nest mcp` tool handler — drains only its own output.
+;; The buffer is popped even if `body` throws (the `catch` re-raises), so a thrown
+;; error never leaves a dangling capture diverting all later output.
+(defmacro with-out-str (& body)
+  "Evaluate `body` with stdout captured, and return everything it printed as a
+string (`\"\"` if it printed nothing), discarding `body`'s own value. Output from
+processes `body` spawns is captured too; nested `with-out-str`s compose."
+  `(do
+     (%capture-begin)
+     (try
+       (do ~@body (%capture-take))
+       (catch e (do (%capture-take) (throw e))))))
+
+;; The stderr counterpart of `with-out-str`. It works differently, and has to:
+;; stdout capture is a kernel buffer (`%capture-begin`), while `eprint`/`eprintln`
+;; write through the `*err*` PORT — so this rebinds that port to a collecting sink
+;; instead. Consequences worth knowing: it captures only what goes through `*err*`
+;; (a Rust-side `eprintln!`, e.g. a kernel reload diagnostic, is NOT interceptable
+;; this way), and it does not follow into spawned processes the way `with-out-str`
+;; does. Accumulation uses a `Table` because data is immutable — the one sanctioned
+;; mutable structure, and a local one that never escapes.
+(defmacro with-err-str (& body)
+  "Evaluate `body` with the `*err*` port captured, returning everything written to it as a string (`\"\"` if nothing was), discarding `body`'s own value. For asserting on a warning — and for keeping an expected warning out of a test run's output. Only intercepts writes through `*err*` (`eprint`/`eprintln`), not stderr written by the kernel itself."
+  (let (sink (gensym "err-sink"))
+    `(let (~sink (table))
+       (try
+         (do
+           (binding (*err* (fn (s)
+                             (table-put ~sink :text (str (table-get ~sink :text "") s))
+                             nil))
+             ~@body)
+           (table-get ~sink :text ""))
+         (catch e (do (table-drop ~sink) (throw e)))))))
+
+;; ---- threading macros (demonstrate that macros compute at expansion time) ----
+;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
+;; (->> x (f a) (g b)) =>  (g b (f a x))   ; thread as LAST argument
+(defn thread-first-step (acc form)
+  (if (pair? form) (cons (first form) (cons acc (rest form))) (list form acc)))
+(defmacro -> (x & forms)
+  "Thread `x` through the forms as each one's *first* argument: `(-> x (f a) (g b))` is `(g (f x a) b)`."
+  (reduce thread-first-step x forms))
+
+(defn thread-last-step (acc form) (if (pair? form) (append form (list acc)) (list form acc)))
+(defmacro ->> (x & forms)
+  "Thread `x` through the forms as each one's *last* argument: `(->> x (f a) (g b))` is `(g b (f a x))`."
+  (reduce thread-last-step x forms))
+
+;; (as-> x name (f a name) (g name b)) — thread `x` as `name`, in ANY position.
+;; Brood's `let` is sequential and re-binds a repeated name, so this is one `let`:
+;;   (as-> 5 $ (+ $ 1) (* $ 2))  =>  (let ($ 5  $ (+ $ 1)  $ (* $ 2)) $)  =>  12
+(defmacro as-> (expr name & forms)
+  "Thread `expr` through `forms`, re-binding it to `name` at each step so it can sit in *any* argument position: `(as-> 5 $ (+ $ 1) (* $ 2))` is `12`."
+  (let (steps (reduce (fn (acc form) (append acc (list name form))) (list name expr) forms))
+    `(let ~steps ~name)))
+
+;; ---- conditional threading & short-circuit threading ------------------------
+;; `some->`/`some->>` thread like `->`/`->>` but stop and yield `nil` the moment a
+;; step produces `nil`; `cond->`/`cond->>` thread `x` only through the forms whose
+;; guard is truthy. Both build on the `thread-first-step`/`thread-last-step`
+;; placement helpers above, so "where does the value go" is defined once.
+;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
+(check-allow :non-tail-recursion
+  (defn- some-thread-build
+    (place forms step)
+    (if (empty? forms)
+      place
+      `(if (nil? ~place)
+         nil
+         (let (~place ~(step place (first forms)))
+           ~(some-thread-build place (rest forms) step))))))
+(defmacro some-> (x & forms)
+  "Thread `x` through `forms` as each one's *first* argument (like `->`), but short-circuit to `nil` as soon as any step yields `nil`."
+  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread-build v forms thread-first-step))))
+(defmacro some->> (x & forms)
+  "Thread `x` through `forms` as each one's *last* argument (like `->>`), but short-circuit to `nil` as soon as any step yields `nil`."
+  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread-build v forms thread-last-step))))
+
+;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
+(check-allow :non-tail-recursion
+  (defn- cond-thread-build
+    (place clauses step)
+    (if (empty? clauses)
+      place
+      `(let (~place (if ~(first clauses) ~(step place (second clauses)) ~place))
+         ~(cond-thread-build place (rest (rest clauses)) step)))))
+(defmacro cond-> (x & clauses)
+  "Thread `x` through the `test form` clause pairs, applying each `form` (as its *first* argument, like `->`) only when its `test` is truthy: `(cond-> {} add-a? (assoc :a 1))`."
+  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread-build v clauses thread-first-step))))
+(defmacro cond->> (x & clauses)
+  "Thread `x` through the `test form` clause pairs, applying each `form` (as its *last* argument, like `->>`) only when its `test` is truthy."
+  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread-build v clauses thread-last-step))))
+
+(defmacro doto (x & forms)
+  "Evaluate `x` once, run each `form` with it spliced in as the *first* argument (for side effects), then return `x`: `(doto (table) (table-put :a 1) (table-put :b 2))`."
+  (let (v (gensym "v"))
+    `(let (~v ~x)
+       ~@(map (fn (form) (thread-first-step v form)) forms)
+       ~v)))
+
+;; `tap`/`then` — the single-function pipe helpers (Elixir's `Kernel.tap`/`then`).
+;; `doto` splices *forms* (`->`-style); these take a *function value*, so they compose
+;; with `->` where a plain function or a one-off closure is what you have in hand.
+(defn tap (x f)
+  "Call `(f x)` for its side effects and return `x` unchanged — a pass-through probe for a `->` pipeline: `(-> v (tap log) (process))` logs `v` and keeps threading it. Elixir's `Kernel.tap`."
+  (do (f x) x))
+(defn then (x f)
+  "Return `(f x)` — apply `f` to `x`. Lets a `->` pipeline step call an arbitrary function on the threaded value, not only splice it as a first argument: `(-> v (then (fn (n) (g n other))))`. Elixir's `Kernel.then`."
+  (f x))
+
+;; ---- binding-conditionals: bind, test the *source* value, branch -------------
+;; `if-let`/`when-let` evaluate the binding expression once, branch on its
+;; truthiness, and bind the target (a symbol or destructuring pattern) to it in
+;; the truthy branch. Testing a fresh temp (not the pattern) is what makes
+;; destructuring targets — `(when-let ([k v] (first-entry m)) …)` — behave.
+(defmacro if-let (binding then & else)
+  "Bind `(name expr)`; if `expr` is truthy, evaluate `then` with `name` bound to it, else evaluate `else` (or `nil`). `name` may be a destructuring pattern."
+  (let (name (first binding) expr (second binding) v (gensym "v"))
+    `(let (~v ~expr) (if ~v (let (~name ~v) ~then) ~@else))))
+(defmacro when-let (binding & body)
+  "Bind `(name expr)`; when `expr` is truthy, evaluate `body` (returning the last) with `name` bound to it, else `nil`. `name` may be a destructuring pattern."
+  (let (name (first binding) expr (second binding) v (gensym "v"))
+    `(let (~v ~expr) (when ~v (let (~name ~v) ~@body)))))
+
+;; ---- with: sequential match-binding with fall-through -----------------------
+;; Elixir's `with`, spelled as flat `pattern expr` pairs (the `let` shape). Each
+;; `expr` is matched against its `pattern` in order; the first value that does
+;; NOT match short-circuits, and the body runs only when every step matched, with
+;; all bindings in scope. Pure sugar over nested `match`. A trailing `:else`
+;; section (its own `match` clauses) runs the short-circuited value through them;
+;; with no `:else`, the value that failed to match falls straight through as the
+;; result — so an `[:error …]` becomes the answer untouched.
+(defn- with-split-else
+  (forms before)
+  ;; [happy-forms else-clauses] — split `forms` at the first bare `:else` keyword.
+  (cond
+    (empty? forms) [(reverse before) nil]
+    (= (first forms) :else) [(reverse before) (rest forms)]
+    else (with-split-else (rest forms) (cons (first forms) before))))
+;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
+(check-allow :non-tail-recursion
+  (defn- with-build
+    (bindings body else-clauses)
+    (if (empty? bindings)
+      `(do ~@body)
+      (let (pattern (first bindings)
+            expr (second bindings)
+            more (rest (rest bindings))
+            miss (gensym "miss"))
+        `(match ~expr
+           (~pattern ~(with-build more body else-clauses))
+           (~miss ~(if (empty? else-clauses) miss `(match ~miss ~@else-clauses))))))))
+(defmacro with (bindings & body)
+  "Sequentially match each `pattern expr` pair in `bindings`; the first value that fails its pattern short-circuits, else `body` runs (returning its last form) with every binding in scope. A trailing `:else` section of `match` clauses handles the short-circuited value; without one it is returned as-is. Brood's flat `with`, like Elixir's."
+  (let ([happy else-clauses] (with-split-else body []))
+    (with-build bindings happy else-clauses)))
+
+;; ---- local loops: just use `letrec` -----------------------------------------
+;; Brood has no `loop`/`recur` macro. A self-contained *local* loop is a `letrec`-
+;; bound closure you call by name:
+;;   (letrec (go (fn (i acc) (if (= i n) acc (go (inc i) (+ acc i))))) (go 0 0))
+;; It closes over the enclosing scope (thread only the *changing* state; the loop's
+;; params are exactly what evolves), and a tail call to `go` is a proper tail call —
+;; O(1) stack. A top-level `defn` works too when the loop needs no enclosing locals.
+;; (`loop`/`recur` were prototyped then dropped: `recur` is a workaround for runtimes
+;; without tail calls — which Brood has — and `loop` was just `letrec` sugar not worth
+;; a reserved word. See ADR-154 / deferred.md.)
+
+;; ---- side-effecting iteration (function form of `doseq`) --------------------
+(defn run! (f coll)
+  "Apply `f` to each item of `coll` for its side effects, returning `nil`. The function-valued counterpart of `doseq`: `(run! println xs)`."
+  (fold (fn (acc x) (f x) acc) nil coll)
+  nil)
+
+;; ---- error handling ----
+;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything
+;; user-facing — `error`, `try`/`catch` — is written here in Brood.
+(defn last (xs) "The last item of `xs`." (first (reverse xs)))
+(defn but-last (xs) "All but the last item of `xs`, as a list." (reverse (rest (reverse xs))))
+
+(defn error (& parts)
+  "Raise an error whose message is the concatenated display forms of `parts`."
+  (throw (apply str parts)))
+
+;; `(catch Type e body…)` — Clojure/Java's *typed* catch. Brood's `catch` binds
+;; ONE bare symbol and has no exception class, so this shape is not an error the
+;; reader can see: the class name silently becomes the binding and the intended
+;; binder is evaluated as a statement. It produces a WRONG PROGRAM, not a
+;; diagnostic — `(catch Exception e (println "caught" e))` binds the value to
+;; `Exception` and prints the prelude's `e` (2.718…). Detected by shape: a symbol
+;; binder whose handler *starts* with a bare symbol and has more forms after it.
+;; There is no legitimate reading to protect — a leading bare symbol followed by
+;; more body is dead code in every case — so this is a zero-false-positive guard.
+(defn- try-class-catch?
+  (clause)
+  (let (handler (rest (rest clause)))
+    (and (symbol? (second clause))
+      (> (count handler) 1)
+      (symbol? (first handler)))))
+
+;; (try body... (catch e handler...)) => (%try (fn () body...) (fn (e) handler...))
+;; With no catch clause, it's just (do body...).
+(defmacro try (& body)
+  "Evaluate `body`; if a final `(catch e handler...)` clause is present, run it with the raised value bound to `e` when `body` throws."
+  (let (clause (last body))
+    (if (and (pair? clause) (= (first clause) 'catch))
+      (let (init (but-last body) evar (second clause) handler (rest (rest clause)))
+        (if (try-class-catch? clause)
+          (error "try: `(catch "
+            (str evar)
+            " "
+            (str (first handler))
+            " …)` looks like Clojure's typed catch, which Brood does not have. "
+            "`catch` takes ONE bare binding and no exception class: write `(catch "
+            (str (first handler))
+            " …)` and branch on the caught value's shape in the body "
+            "(`(get e :kind)`, `match`, `error-message`). As written, `"
+            (str evar)
+            "` would be bound to the raised value and `"
+            (str (first handler))
+            "` evaluated as a statement.")
+          `(%try (fn () ~@init) (fn (~evar) ~@handler))))
+      (if (and (pair? clause) (= (first clause) 'fn))
+        ;; Common mistake: (try body (fn (e) handler)) instead of (try body (catch e handler)).
+        ;; Fail loud at macro-expansion time so the bug is caught before it silently becomes
+        ;; (do body (fn (e) ...)) — a handler that is never installed.
+        (error "try: last form is `"
+          (pr-str clause)
+          "` — did you mean `(catch "
+          (let (params (second clause))
+            (if (and (pair? params) (not (nil? params)))
+              (str (first params))
+              "e"))
+          " ...)`? Syntax: (try body... (catch e handler...))")
+        `(do ~@body)))))
+
+;; A thrown value has no single shape: `(throw x)` hands `catch` the value `x`
+;; verbatim (a bare string from `error`, a keyword, a `[:tag …]` vector, …),
+;; while every *kernel* error is the canonical `{:kind :message [:code :file
+;; :line :col :hint]}` map. `error-message` is the one accessor that turns any of
+;; them into a human string, so a `(catch e …)` handler never has to branch on
+;; the shape itself.
+(defn error-message (e)
+  "A human-readable message string for a caught value `e`: a raised string
+as-is, the `:message` of a structured error map (what the kernel throws), else
+its printed form."
+  (cond
+    (string? e) e
+    (and (map? e) (get e :message)) (get e :message)
+    else (pr-str e)))
+
+;; ---- dynamic variables ------------------------------------------------------
+;; Process-scoped, dynamically-bound variables (Lisp "special" vars), for
+;; config-style knobs like *print-depth*. `defdyn` declares one with a default;
+;; `binding` rebinds it for the dynamic extent of a body, restoring on exit (even
+;; on error). A reference to the var resolves to the innermost active `binding`,
+;; else the default. Bindings are per-process — they do NOT reach a `spawn`ed
+;; child (it starts from the defaults). The kernel supplies only `%declare-dynamic`,
+;; `%binding`, and `dynamic?`; the surface is these two macros (the `try` precedent).
+
+;; (defdyn *x* 10) => declare *x* dynamic, then def its default.
+(defmacro defdyn (name default)
+  "Declare `name` a dynamic (process-scoped special) variable with the given default, rebindable via `binding`. Also marks the name **ambient** — never namespaced, so a `def` of it from any module rebinds this one root binding."
+  (do
+    ;; Declare at EXPANSION time as well as at run time. `defdyn` is the *only* door
+    ;; to an ambient (never-namespaced) name, and the compile pass resolves
+    ;; namespaces AFTER macroexpansion — so the mark has to exist before the `def`
+    ;; head below is qualified, or `(defdyn *x* 0)` inside a module would define
+    ;; `mod/*x*` while `binding` and every reader looked for bare `*x*`. The runtime
+    ;; `%declare-dynamic` stays for a `defdyn` form built and `eval`'d dynamically.
+    (%declare-dynamic name)
+    `(do (%declare-dynamic '~name) (def ~name ~default))))
+
+;; Split a flat binding list (*a* va *b* vb) into its names and value forms, at
+;; expansion time (like the threading-macro helpers above).
+;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
+(check-allow :non-tail-recursion
+  (defn- binding-names (b) (if (nil? b) nil (cons (first b) (binding-names (rest (rest b)))))))
+;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
+(check-allow :non-tail-recursion
+  (defn- binding-vals (b) (if (nil? b) nil (cons (second b) (binding-vals (rest (rest b)))))))
+
+;; (binding (*a* 1 *b* 2) body...) => (%binding '(*a* *b*) [1 2] (fn () body...))
+;; The names go out as a quoted list and the values as a vector literal — both
+;; reader/evaluator syntax, never function calls — so a locally-shadowed `list`
+;; or `map` can't break the expansion (`fn`/`quote` are special forms).
+(defmacro binding (bindings & body)
+  "Rebind the dynamic variables in `bindings` (a flat `name value ...` list) for the dynamic extent of `body`, restoring them on exit (even on error)."
+  (if (vector? bindings)
+    (error "binding: bindings must be a list, not a vector: write (binding (*a* 1 *b* 2) …)."
+      " Brood is lists-for-code, vectors-for-data (unlike Clojure).")
+    (if (= 1 (rem (count bindings) 2))
+      (error "binding: bindings must be name/value pairs, got " bindings)
+      `(%binding (quote ~(binding-names bindings)) [~@(binding-vals bindings)] (fn () ~@body)))))

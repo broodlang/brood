@@ -1,0 +1,678 @@
+;; ---- sequence library -------------------------------------------------------
+;; All in Brood over the list primitives (`first`/`rest`/`cons`/`empty?`) and
+;; `take`/`drop`. Every builder is tail-recursive (it accumulates a reversed list
+;; and reverses once at the end), so these stay stack-safe on long inputs — which
+;; matters because a `test` body runs in a green process with a small coroutine
+;; stack. Sequences are cons-lists; `zip` pairs are 2-vectors (the tuple idiom).
+
+;; (range hi) -> 0..hi-1 ; (range lo hi) -> lo..hi-1 ; (range lo hi step).
+(defn range (a & more)
+  "A range of integers: `(range hi)` is 0..hi-1, `(range lo hi)` is lo..hi-1, `(range lo hi step)` strides by `step`. The result is a *lazy* range — `fold`/`reduce`/`sum`/`count` walk it without building a list (O(1) memory); every other op treats it as the list of those integers. Empty ranges are `nil`."
+  (cond
+    (empty? more) (%range 0 a 1)
+    (empty? (rest more)) (%range a (first more) 1)
+    else (%range a (first more) (second more))))
+
+;; (take n coll) -> the first n elements (fewer if coll is shorter).
+(defn take (n coll)
+  "The first `n` items of `coll` (fewer if it is shorter), as a list."
+  (take-acc n coll nil))
+(defn- take-acc
+  (n coll acc)
+  (if (or (<= n 0) (empty? coll))
+    (reverse acc)
+    (take-acc (- n 1) (rest coll) (cons (first coll) acc))))
+
+;; (drop n coll) -> coll without its first n elements.
+(defn drop (n coll)
+  "`coll` without its first `n` items."
+  (if (or (<= n 0) (empty? coll)) coll (drop (- n 1) (rest coll))))
+
+;; (take-while pred coll) / (drop-while pred coll) split on the first failure.
+(defn take-while (pred coll)
+  "The leading items of `coll` for which `(pred x)` holds."
+  (take-while-acc pred coll nil))
+(defn- take-while-acc
+  (pred coll acc)
+  (if (and (pair? coll) (pred (first coll)))
+    (take-while-acc pred (rest coll) (cons (first coll) acc))
+    (reverse acc)))
+(defn drop-while (pred coll)
+  "`coll` with its leading items for which `(pred x)` holds removed."
+  (if (and (pair? coll) (pred (first coll))) (drop-while pred (rest coll)) coll))
+
+;; (any? pred coll) -> true if pred holds for any element; (every? pred coll) ->
+;; true if it holds for all (vacuously true on the empty list). Booleans, by the
+;; `?` convention — use `find` to recover the matching element itself.
+(defn any? (pred coll)
+  "True if `(pred x)` holds for at least one item of `coll`."
+  (cond (empty? coll) false (pred (first coll)) true else (any? pred (rest coll))))
+(defn every? (pred coll)
+  "True if `(pred x)` holds for every item of `coll` (vacuously true if empty)."
+  (cond (empty? coll) true (pred (first coll)) (every? pred (rest coll)) else false))
+
+;; (find pred coll) -> the first element satisfying pred, or nil.
+(defn find (pred coll)
+  "The first item of `coll` for which `(pred x)` holds, or `nil`."
+  (cond (empty? coll) nil (pred (first coll)) (first coll) else (find pred (rest coll))))
+
+;; (zip a b) -> a list of [x y] vectors, stopping at the shorter input.
+(defn zip (a b)
+  "A list of `[x y]` pairs from `a` and `b`, stopping at the shorter input."
+  (zip-acc a b nil))
+(defn- zip-acc
+  (a b acc)
+  (if (or (empty? a) (empty? b))
+    (reverse acc)
+    (zip-acc (rest a) (rest b) (cons [(first a) (first b)] acc))))
+
+;; (partition n coll) -> consecutive n-sized chunks; a trailing partial chunk is
+;; dropped (Clojure `partition` semantics). `has-at-least?` avoids re-counting.
+(defn has-at-least? (n coll)
+  (cond (<= n 0) true (empty? coll) false else (has-at-least? (- n 1) (rest coll))))
+(defn partition (n coll)
+  "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped."
+  (partition-acc n coll nil))
+(defn- partition-acc
+  (n coll acc)
+  (if (has-at-least? n coll)
+    (partition-acc n (drop n coll) (cons (take n coll) acc))
+    (reverse acc)))
+
+;; (sort coll) ascending via `<` (numbers) or structural order (anything else);
+;; (sort less? coll) with a strict less-than predicate. (sort-by key-fn coll)
+;; sorts by `(< (key-fn x) (key-fn y))`. A stable, O(n log n) merge sort: the
+;; merge prefers the left run on ties (stable) and is tail-recursive; recursion
+;; depth is O(log n), so it's stack-safe.
+;;
+;; The single-arg `(sort coll)` case has two Rust fast paths: `%sort-asc` for
+;; the all-numeric case (~50× faster than the in-Brood mergesort because every
+;; comparison is a Rust `match` instead of an `eval::apply` round-trip), and
+;; `%sort-cmp` for the heterogeneous / structural case (vectors, strings,
+;; keywords, …). Dispatch checks the first item — non-empty fast since
+;; `(number? (first a))` is one tag-of compare. Empty coll → empty list.
+;; Custom-comparator `(sort less? coll)` stays on the Brood-side `merge-sort`.
+(defn sort (a & more)
+  "Sort a collection (stable). `(sort coll)` is ascending by `<` for numbers, or by structural order (lexicographic on vectors/lists, text order on strings/symbols/keywords) for anything else. `(sort less? coll)` uses a strict less-than predicate."
+  (cond
+    (not (empty? more)) (merge-sort a (first more))
+    (empty? a) nil
+    (number? (first a)) (%sort-asc a)
+    ;; a record element sorts by its `Ord` (`compare-to`, STRICT — no structural default,
+    ;; ADR-179: sorting records without a method is a no-method error), so a type can
+    ;; define its own order; every built-in keeps the native `%sort-cmp` path.
+    (record? (first a)) (merge-sort (fn (x y) (< (ord-compare x y) 0)) a)
+    else (%sort-cmp a)))
+(defn sort-by (key-fn coll)
+  "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the
+structural order (`compare`) — or a key's own `Ord` if the key is a record. Numeric,
+string, keyword, vector, and record keys all work."
+  (merge-sort (fn (x y) (< (ord-compare (key-fn x) (key-fn y)) 0)) coll))
+;; Split `coll` into its first `n` items and the rest in ONE pass — what
+;; merge-sort needs instead of a separate `take` + `drop` (two walks). Generally
+;; useful, so it's public.
+(defn- split-at-acc
+  (n coll acc)
+  (if (or (<= n 0) (empty? coll))
+    [(reverse acc) coll]
+    (split-at-acc (dec n) (rest coll) (cons (first coll) acc))))
+(defn split-at (n coll)
+  "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`."
+  (split-at-acc n coll nil))
+
+;; Length-carrying merge sort: count once up front and halve `n` down the
+;; recursion, and split each run in a single `split-at` pass. The previous form
+;; re-`count`ed and ran a separate `take`+`drop` at every level — three O(n)
+;; walks per level, O(n log n) wasted overall — purely to find the midpoint.
+(defn merge-sort (less? coll) (merge-sort-n less? coll (count coll)))
+;; check-allow: deliberately non-tail — depth = log2 of the length — ~60 frames for any feasible list.
+(check-allow :non-tail-recursion
+  (defn- merge-sort-n
+    (less? coll n)
+    (if (<= n 1)
+      coll
+      (let (h (quot n 2)
+            parts (split-at h coll))
+        (merge-runs less?
+          (merge-sort-n less? (nth parts 0) h)
+          (merge-sort-n less? (nth parts 1) (- n h)))))))
+(defn- merge-runs (less? a b) (merge-acc less? a b nil))
+(defn- merge-acc
+  (less? a b acc)
+  (cond
+    ;; `acc` holds the merged prefix reversed; `reverse-onto` splices it in front of
+    ;; the remaining run in ONE pass — the old `(append (reverse acc) …)` reversed
+    ;; `acc` and then re-walked it. (This was `(fold flip-cons tail acc)`, already
+    ;; one pass, but paying a `flip-cons` apply frame per element: 1674 ms vs 601 ms
+    ;; over 20k splices of a 500-element prefix.)
+    (empty? a) (reverse-onto acc b)
+    (empty? b) (reverse-onto acc a)
+    ;; strict `<` on b-vs-a: equal elements take from `a` first, so it's stable.
+    (less? (first b) (first a)) (merge-acc less? a (rest b) (cons (first b) acc))
+    else (merge-acc less? (rest a) b (cons (first a) acc))))
+
+;; `mapcat` uses `append-onto` instead of `cons` to splice each sublist straight
+;; onto the reversed accumulator, then reverse once — so we never materialise the
+;; intermediate list-of-sublists nor spread it through `apply append`.
+(defseq mapcat
+  (f)
+  "Map `f` over `coll` and concatenate the resulting lists into one."
+  (append-onto acc (f item)))
+
+(defn into (to from)
+  "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a **set**, items are added and duplicates collapse (set result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work."
+  (cond
+    ;; Map target: build via the kernel's GC-quiet CHAMP builder (`%map-into`) —
+    ;; an implementation detail of *constructing* a fresh immutable map (it writes
+    ;; only build-local trie nodes inside one GC-quiet builtin; no `Value` is ever
+    ;; mutable), so O(result-nodes) allocation, not O(n) fresh path-copies. A map
+    ;; `from` is read as its entries first (`%map-into` takes a list/vector of `[k v]`).
+    ;; a record target conj's each item via `Conjable` (a custom collection defines how);
+    ;; a plain map uses the GC-quiet CHAMP builder. `map-get` tells them apart.
+    (map? to)
+      (if (map-get to :__id__ nil)
+        (fold conj-one to (seq from))
+        (%map-into to (if (map? from) (map-pairs from) from)))
+    ;; Set target: add each item (duplicates collapse). Without this branch the
+    ;; `else` poured a set into a LIST — `(into #{} [1 1 2])` was `(1 1 2)`.
+    (set? to) (fold %set-add to from)
+    ;; `append to from` is always a list (fold-of-flip-cons), so we re-vectorise.
+    ;; That's an extra O(n) pass — acceptable; the previous code silently
+    ;; returned a list even when `to` was a vector.
+    (vector? to) (apply vector (append to from))
+    else (append to from)))
+
+;; conj's per-element step: each collection kind has a natural insertion point.
+(defn- conj-one
+  (coll x)
+  (cond
+    (nil? coll) (list x)
+    (vector? coll) (into coll [x])
+    (set? coll) (%set-add coll x)
+    ;; a record dispatches to its `Conjable` impl (default: the map behaviour below); a
+    ;; custom-collection record defines its own insertion. `map-get` distinguishes it from
+    ;; a plain map, and `-conj` is only reached for records, so its late definition is fine.
+    (map? coll)
+      (if (map-get coll :__id__ nil)
+        (-conj coll x)
+        (cond
+          (map? x) (merge coll x)
+          (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
+          else (error "conj: adding to a map takes a [k v] pair or a map, got "
+                 (pr-str x))))
+    (pair? coll) (cons x coll)
+    else (error "conj: not a collection: " (pr-str coll))))
+
+(defn conj (coll & xs)
+  "Add element(s) to `coll` at its natural insertion point (Clojure-style):
+APPEND to a vector, PREPEND to a list (`nil` counts as an empty list), ADD to a
+set (a duplicate is a no-op), and `assoc` a `[k v]` pair — or merge a map — into
+a map. Returns a fresh collection; `coll` is untouched. e.g. (conj [1 2] 3) →
+[1 2 3]; (conj '(2 3) 1) → (1 2 3); (conj #{1} 2) → #{1 2};
+(conj {:a 1} [:b 2]) → {:a 1 :b 2}."
+  (fold conj-one coll xs))
+
+(defn disj (s & xs)
+  "A fresh set like `s` with each of `xs` removed (removing an absent element is a
+no-op). The set counterpart of `dissoc`, and `conj`'s inverse — both live here
+rather than in `std/set` so a set works with the collection protocol without an
+import (and so `(:use set)` can't shadow them)."
+  (fold %set-remove s xs))
+
+(defn remove-nth (coll i)
+  "A fresh collection like `coll` with the element at index `i` removed. Returns
+a vector for a vector and a list for a list. `i` must be in `[0, count)`."
+  (if (vector? coll)
+    (into (subvec coll 0 i) (subvec coll (inc i) (count coll)))
+    (append (take i coll) (drop (inc i) coll))))
+
+;; ---- more sequence operations -----------------------------------------------
+;; The eager counterparts of the `x*` transducers, plus the common Clojure-ish
+;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
+;; stack-safe on long inputs — see the sequence-library note above.
+
+(defseq remove
+  (pred)
+  "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`."
+  (if (pred item) acc (cons item acc)))
+
+(defseq keep
+  (f)
+  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `xkeep`)."
+  (let (y (f item)) (if (nil? y) acc (cons y acc))))
+
+;; distinct: keep the first occurrence of each item. A map carried alongside the
+;; result acts as the "seen" set, so membership is O(1)-ish, not the O(n²) a
+;; `member?`-per-item scan would cost. State is the 2-vector [seen result-rev].
+(defn- distinct-step
+  (state x)
+  ;; the "seen" map only ever stores `true`, so a single `map-get` (default
+  ;; `false`) distinguishes present from absent — no need for `contains?`'s
+  ;; two-sentinel probe (which exists to tell a stored `nil`/`false` from absence).
+  (if (map-get (nth state 0) x false)
+    state
+    [(map-assoc (nth state 0) x true) (cons x (nth state 1))]))
+(defn distinct (coll)
+  "The items of `coll` with duplicates removed, keeping the first occurrence of each (order-preserving)."
+  (reverse (nth (fold distinct-step [{} nil] coll) 1)))
+
+;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil`
+;; (so empty sub-lists and nils vanish); vectors and maps are leaf items. The
+;; outer walk is tail-recursive; the nested call recurses only as deep as the
+;; nesting (bounded), not the length.
+;; check-allow: deliberately non-tail — depth = the structure's nesting, not its element count.
+(check-allow :non-tail-recursion
+  (defn- flatten-acc
+    (coll acc)
+    (cond
+      (empty? coll) acc
+      (list? (first coll)) (flatten-acc (rest coll) (flatten-acc (first coll) acc))
+      else (flatten-acc (rest coll) (cons (first coll) acc)))))
+(defn flatten (coll)
+  "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves."
+  (reverse (flatten-acc coll nil)))
+
+(defn take-last (n coll)
+  "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0)."
+  (drop (- (count coll) n) coll))
+(defn drop-last (n coll)
+  "`coll` without its last `n` items (`()` if `n` >= its length)."
+  (take (- (count coll) n) coll))
+
+;; ---- records: named, optionally-typed maps (defrecord — ADR-130) ------------
+;; A record is a plain immutable map with a positional constructor and one
+;; accessor per field. `(defrecord point (x y))` defines:
+;;   (defn point   (x y) {:x x :y y})   ; constructor, named after the record
+;;   (defn point-x (p)   (get p :x))    ; accessor per field
+;;   (defn point-y (p)   (get p :y))
+;; The accessors are the point: `(point-x p)` names the field, and a typo
+;; `(point-witdh p)` is an undefined-function error the checker catches — where
+;; `(get p :witdh)` silently returns nil. Records ARE maps (no new Value or tag),
+;; so update with `assoc`/`merge` — but they are NOMINAL since ADR-177: the baked
+;; `:__id__` makes `(= (point 1 2) {:x 1 :y 2})` false and carries dispatch
+;; identity. No generated `point?` predicate; write one over `record-id` if needed.
+;;
+;; A field may carry a type: `(defrecord point ((x int) (y int)))`. When *every*
+;; field is typed, `sig`s are emitted too — the constructor's `(record …)` return
+;; type and each accessor's field type — so the advisory checker gets field-type
+;; and field-presence checking from the existing record-type machinery (ADR-115).
+
+;; A field spec is a bare `name` (untyped) or `(name type)` (typed).
+(defn- defrecord-fname (f) (if (pair? f) (first f) f))
+(defn- defrecord-ftype (f) (if (pair? f) (second f) nil))
+(defn- defrecord-acc-sym (rec fld) (symbol (str (name rec) "-" (name fld))))
+(defn- defrecord-derives
+  (opts)
+  "The vector following `:derives` in a `defrecord`'s trailing opts (the abilities to
+  derive), or nil. Each named ability must declare a `:derive-record` recipe (ADR-185)."
+  (cond
+    (empty? opts) nil
+    (= (first opts) :derives) (second opts)
+    else (defrecord-derives (rest opts))))
+(defn- defrecord-qualify
+  (nm)
+  "Qualify bare name `nm` (a string) against the current ns → a `:<ns>/nm` keyword; at
+root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
+bakes a record's `:__id__`) and `ability-id-kw` (an impl's bare id) so the two AGREE — a
+record built at root and an impl for it at root must land on the same dispatch id."
+  (let (ns (current-ns))
+    (if ns (keyword (str (name ns) "/" nm)) (keyword nm))))
+
+;; The `(sig …)` forms for an all-typed record: the constructor arrow, then one
+;; accessor arrow per field. Built as plain data — `sig` reads the un-expanded type.
+;; id-keyword → record name: the set of nominal ids that are GENUINE `defrecord`
+;; identities. Ground truth for BROOD_MONO's direct-constructor devirtualization
+;; (ADR-182) — a constructor call `(circle 2)` may be devirtualized only when its baked
+;; id (`:module/circle`) is registered here, so a same-named non-record fn is never
+;; mistaken for a record constructor. Always populated (cheap load-time metadata, like
+;; `*impls*`); read only under the flag.
+(def *record-ids* {})
+(defn record-register (id nm)
+  "Record that `id` (a `:module/name` keyword) is a `defrecord`'s nominal identity."
+  (%registry-update! '*record-ids* :assoc [id] nm)
+  nil)
+
+(defmacro defrecord (rec fields & opts)
+  "Define record `rec` with `fields` — a positional constructor `(rec …)` plus a
+`rec-field` accessor per field. A record is an immutable map that also carries a
+**nominal identity**: a reserved `:__id__` field holding a `:module/name` keyword baked
+in at definition, so `ability` dispatch tells it apart from a bare map and from other
+records (Elixir-struct semantics — a record is NOT `=` to a bare map with the same
+fields). `record?`/`record-id`/`fields` are the clean, id-free view.
+
+A field is a bare symbol or `(field type)`; the constructor result is inferred as a
+record SHAPE carrying the `:__id__` keyword literal, so a value's identity flows through
+the checker to dispatch sites (`(let (c (circle 2)) (area c))` is checkable). When every
+field is typed, per-accessor signatures are emitted too.
+
+A trailing `:derives [Ability …]` clause auto-generates an impl of each named ability
+(Elixir `@derive` / Rust `#[derive]`, ADR-185): each ability's `:derive-record` recipe is
+called with the field names at expansion, and the methods it returns are spliced into an
+`(impl Ability rec …)`. The ability must declare a recipe (else a clean expansion error),
+and it must be loaded before this `defrecord`.
+
+    (defmodule geometry)
+    (defrecord circle (r))          ; (circle 2) → {:__id__ :geometry/circle, :r 2}
+    (impl Shape circle (area [c] (* 3.14 (get c :r) (get c :r))))
+    (defrecord point (x y) :derives [Ord])   ; compare-to synthesized field-wise"
+  (let (fnames (map defrecord-fname fields)
+        fkws (map (fn (n) (keyword (name n))) fnames)
+        ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
+        ;; checker tracks via `Ty::keyword_lit`), captured at definition.
+        id (defrecord-qualify (name rec))
+        ;; ctor body: a MAP LITERAL (built here, at macro time) whose values are the field
+        ;; symbols, with the reserved `:__id__` carrying the id keyword. Emitting a real
+        ;; map value (not a `(hash-map …)` call) is what makes the checker infer the result
+        ;; as a record shape carrying the `:__id__` keyword literal.
+        body (zipmap (cons :__id__ fkws) (cons id fnames))
+        ctor `(defn ~rec (~@fnames) ~body)
+        accs (map (fn (f)
+                    (let (fnm (defrecord-fname f))
+                      `(defn ~(defrecord-acc-sym rec fnm) (r) (get r ~(keyword (name fnm))))))
+               fields)
+        ;; the record-shaped constructor sig (always — this is the dispatch-inference
+        ;; seam): each field keeps its declared type, else `any`.
+        arg-tys (map (fn (f) (or (defrecord-ftype f) 'any)) fields)
+        rec-ty (cons 'record
+                 (cons :__id__
+                   (cons id
+                     (mapcat (fn (f)
+                               (list (keyword (name (defrecord-fname f)))
+                                 (or (defrecord-ftype f) 'any)))
+                       fields))))
+        ctor-sig (list 'sig rec (append arg-tys (list '-> rec-ty)))
+        ;; per-accessor sigs only when every field is typed (else an accessor call on a
+        ;; bare map would false-warn), mirroring the pre-unification behaviour.
+        acc-sigs (if (every? pair? fields)
+                   (map (fn (f)
+                          (let (fnm (defrecord-fname f))
+                            (list 'sig
+                              (defrecord-acc-sym rec fnm)
+                              (list (list 'record (keyword (name fnm)) (defrecord-ftype f))
+                                '->
+                                (defrecord-ftype f)))))
+                     fields)
+                   nil)
+        ;; `:derives [A …]` → one `(derive-into 'A id 'fields (current-ns))` per ability. The
+        ;; recipe is run at LOAD (not expansion), because the checker expands this `defrecord`
+        ;; WITHOUT first evaluating the ability's `defability`, so the recipe isn't registered
+        ;; at expand time. `derive-into` registers the impls at load; the checker reads these
+        ;; forms statically (they mark the ability's ops as implemented for `id`).
+        derives (defrecord-derives opts)
+        derive-calls (if derives
+                       (map (fn (a)
+                              (list 'derive-into
+                                (list 'quote a)
+                                id
+                                (list 'quote fnames)
+                                (list 'current-ns)))
+                         derives)
+                       nil))
+    `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs ~@derive-calls (record-register ~id '~rec) nil)))
+
+(defn- repeat-acc (n x acc) (if (<= n 0) acc (repeat-acc (dec n) x (cons x acc))))
+(defn repeat (n x)
+  "A list of `x` repeated `n` times (empty if `n` <= 0)."
+  (repeat-acc n x nil))
+
+(defn- repeatedly-acc
+  (n f acc)
+  (if (<= n 0) (reverse acc) (repeatedly-acc (dec n) f (cons (f) acc))))
+(defn repeatedly (n f)
+  "A list of `n` successive calls to the zero-argument function `f` (in call order)."
+  (repeatedly-acc n f nil))
+
+;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
+;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
+;; running them for side effects (`(map require-one mods)`, `(map run-test ts)`)
+;; works as it always has. Fusion is **opt-in**, via `lmap`/`lfilter`/`lkeep`/
+;; `lremove` composed with `->>`. Each returns a lazy seq-view (`%seqview`): a
+;; non-materialising value carrying a transducer over a source. Chaining
+;; composes the transducers onto one view, so a `->>` pipeline folds/reduces in
+;; a **single pass with no intermediate lists**:
+;;
+;;   (->> xs (lmap sq) (lfilter even?) (reduce + 0))   ; one pass, no temp lists
+;;
+;; Consume a view with `fold`/`reduce`/`sum`/`count`/`into`/`join`/`seq`/`nth`/
+;; `first`/`rest`; `seq`/`into`/`str`/`=` materialise it to a concrete value. A
+;; view is heap-local: **`send` refuses to ship one** (a view references its
+;; source process's heap), so realise it first (`(seq v)`/`(into [] v)`) before
+;; crossing a process or the network. Footgun: like any lazy value, a view
+;; defers the work in its fns (and a `throw` therein) until realised — so don't
+;; build a view for side effects; use eager `map`/`doseq` for that.
+
+;; Composition — general right-to-left function composition; also the glue that
+;; fuses a view's stages.
+(defn- comp-compose (f g) (fn (x) (f (g x))))
+(defn comp (& fns)
+  "Right-to-left function composition. `((comp f g) x)` is `(f (g x))`; with no
+arguments, `identity`."
+  (cond
+    (empty? fns) identity
+    (empty? (rest fns)) (first fns)
+    else (fold comp-compose (first fns) (rest fns))))
+
+;; The rest of the combinator family. `comp` shipped alone for a long time, which
+;; left `(map (fn (x) (f a x)) xs)` as the only spelling of a partially-applied
+;; call — the gap a review found on 2026-07-26.
+(defn partial (f & bound)
+  "`f` with its leading arguments fixed: `((partial f a b) c)` is `(f a b c)`.
+The workhorse for handing a configured function to a higher-order op."
+  (fn (& later) (apply f (append bound later))))
+
+(defn complement (pred)
+  "A predicate that returns the logical negation of `pred`: `((complement odd?) 2)`
+is `true`. The named form of `(fn (& args) (not (apply pred args)))`."
+  (fn (& args) (not (apply pred args))))
+
+(defn constantly (x)
+  "A function of any arguments that always returns `x` — the placeholder callback
+for a higher-order op that wants a fixed answer."
+  (fn (& _ignored) x))
+
+;; Internal stateless transducer constructors — the fused stages behind the
+;; `l*` combinators. A transducer is `(xf rf) -> rf'`; composing them (`comp`)
+;; fuses a pipeline into one per-step reducing function. Named `%x*` because they
+;; are plumbing: the public surface is `lmap`/`lfilter`/`lkeep`/`lremove`, not
+;; raw transducers. Fixed-arity (no rest-list) so they keep the fast call path.
+(defn %xmap (f)
+  (fn (rf) (fn (acc x) (rf acc (f x)))))
+(defn %xfilter (pred)
+  (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
+(defn %xremove (pred)
+  (fn (rf) (fn (acc x) (if (pred x) acc (rf acc x)))))
+(defn %xkeep (f)
+  (fn (rf) (fn (acc x) (let (y (f x)) (if (nil? y) acc (rf acc y))))))
+
+;; ---- transducers, as public surface (ADR-161) -------------------------------
+;; The stage constructors above stayed private for a reason that expired: the `l*`
+;; combinators cover the built-in stages, but a user who wants a stage of their OWN
+;; (`take-while`-as-a-stage, a stateful de-duplicator, a windower) had no way to
+;; write one and no way to run it. The contract is small enough to publish:
+;;
+;;   A TRANSDUCER is a function `(rf) -> rf'` where a REDUCING FUNCTION `rf` is
+;;   `(acc x) -> acc`. It wraps `rf` and may call it zero, one, or many times per
+;;   input. Compose stages with `comp` — LEFT to RIGHT in data-flow order, the
+;;   reverse of ordinary function composition, because each stage wraps the *next*
+;;   one's reducer.
+;;
+;; `xmap`/`xfilter`/`xremove`/`xkeep` are the built-in stages (the same functions
+;; the `l*` combinators use), and `transduce` runs a stack over any collection.
+(defn xmap (f)
+  "The `map` stage as a transducer: `(f x)` for each input. Compose with `comp`, run
+with `transduce`, or reach for `lmap` when you just want a fusing pipeline."
+  (%xmap f))
+(defn xfilter (pred)
+  "The `filter` stage as a transducer: keep inputs where `(pred x)` is truthy."
+  (%xfilter pred))
+(defn xremove (pred)
+  "The `remove` stage as a transducer: drop inputs where `(pred x)` is truthy."
+  (%xremove pred))
+(defn xkeep (f)
+  "The `keep` stage as a transducer: `(f x)` for each input, dropping `nil` results."
+  (%xkeep f))
+
+(defn transduce (xform rf init coll)
+  "Reduce `coll` with `rf`/`init` through the transducer `xform` — one pass, no
+intermediate collections. `(transduce (comp (xfilter odd?) (xmap sq)) + 0 (range 10))`
+sums the squares of the odd numbers, allocating nothing in between.
+
+`xform` is any `(rf) -> rf'` function, so a stage of your own is a plain `fn`:
+
+  (defn xtake-while (pred)          ; stop-at-first-failure, as a stage
+    (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
+
+Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter p)
+(xmap f))` filters before mapping — because each stage wraps the next one's reducer.
+`lmap`/`lfilter`/… are the ergonomic front end over the same machinery; use
+`transduce` when the stage stack is computed, reused, or your own."
+  (fold (xform rf) init coll))
+
+(defn %seqview-wrap (coll xf)
+  "Wrap `coll` in a lazy seq-view applying transducer `xf`. If `coll` is already a
+view, compose `xf` onto its transducer (same source) so the stages fuse."
+  (if (seqview? coll)
+    (let (parts (%seqview-parts coll))
+      (%seqview (vector-ref parts 0) (comp (vector-ref parts 1) xf)))
+    (%seqview coll xf)))
+
+(defn lmap (f coll)
+  "Lazy, fusing `map`: a seq-view of `(f x)` for each `x` in `coll`. Composes with
+adjacent `l*` stages (thread them with `->>`) and folds/reduces in one pass with
+no intermediate lists. Realise with `seq`/`into`, or just consume it
+(`fold`/`reduce`/`count`/…). Use eager `map` when you want a concrete list or are
+iterating for side effects."
+  (%seqview-wrap coll (%xmap f)))
+
+(defn lfilter (pred coll)
+  "Lazy, fusing `filter` — see `lmap`."
+  (%seqview-wrap coll (%xfilter pred)))
+
+(defn lkeep (f coll)
+  "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `lmap`."
+  (%seqview-wrap coll (%xkeep f)))
+
+(defn lremove (pred coll)
+  "Lazy, fusing `remove` — see `lmap`."
+  (%seqview-wrap coll (%xremove pred)))
+
+;; ---- iteration combinators --------------------------------------------------
+;; Hide the hand-rolled counter/accumulator recursion behind names that read as
+;; intent (the way `defprocess` hides a receive loop). All ordinary Brood.
+
+(defn times (n f x)
+  "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`."
+  (if (<= n 0) x (times (dec n) f (f x))))
+
+(defn- iterate-times-acc
+  (f x n acc)
+  (if (< n 0) acc (iterate-times-acc f (f x) (dec n) (cons x acc))))
+(defn iterate-times (f x n)
+  "The list (x f(x) f²(x) … fⁿ(x)) — `n`+1 successive states of applying `f`."
+  (reverse (iterate-times-acc f x n nil)))
+
+;; One tail pass pairing each item with a running index — the old
+;; `(zip (range (count coll)) coll)` made three passes (count, build the range
+;; list, then zip). `seq` coerces a map to its `[k v]` pairs, as `zip` did.
+;; ---- comprehensions ---------------------------------------------------------
+;; `for` builds a list by walking one or more bindings, with `:when` guards —
+;; a macro over `mapcat`, so the map/filter/fold plumbing disappears from view.
+;;   (for (x xs) expr)               -> a list of expr for each x
+;;   (for (x xs :when p) expr)       -> … only where p holds
+;;   (for (x xs y ys) [x y])         -> nested (y varies fastest)
+;; Bindings may destructure: (for ([k v] (map-pairs m)) …). Build a map from the
+;; result with `(into {} (for …))`. Bindings are a list — code is lists, vectors
+;; are data (ADR-010); a vector is still accepted in binding position.
+
+;; Compile the binding forms (a list: alternating pattern/coll, plus :when pred)
+;; from the inside out, threading a single accumulator `acc` through. Each
+;; binding becomes a `fold` over its collection that conses the body onto `acc`;
+;; each :when an `if` that passes `acc` through unchanged when the guard fails;
+;; the body a single `(cons body acc)`. The whole thing builds the result in
+;; reverse with no intermediate per-element lists (the old `mapcat` lowering
+;; allocated a one-element `(list body)` per item and concatenated them) — so a
+;; final `reverse` restores order in one extra O(n) pass. `fold` is tail-
+;; recursive, so deep comprehensions don't grow the stack.
+;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
+(check-allow :non-tail-recursion
+  (defn- for-fold
+    (acc binds body)
+    (cond
+      (empty? binds) `(cons ~body ~acc)
+      (= (first binds) :when) `(if ~(second binds) ~(for-fold acc (rest (rest binds)) body) ~acc)
+      else
+        `(fold (fn (~acc ~(first binds)) ~(for-fold acc (rest (rest binds)) body))
+           ~acc ~(second binds)))))
+
+;; Validate that binding pairs are complete — each variable has a collection, and each
+;; :when has a guard expression. An odd-count suffix silently produces an empty result
+;; (the missing coll becomes nil), which is almost always a mistake.
+(defn- for-check-binds
+  (binds)
+  (cond
+    (empty? binds) nil
+    (%eq (first binds) :when)
+      (if (empty? (rest binds))
+        (error "for: :when at end of bindings has no guard expression")
+        (for-check-binds (rest (rest binds))))
+    (empty? (rest binds))
+      (error "for: binding '"
+        (pr-str (first binds))
+        "' has no collection — bindings must be paired as (var coll ...)")
+    else (for-check-binds (rest (rest binds)))))
+
+(defmacro for (binds & body)
+  "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure. Multiple body forms are evaluated in order and the LAST one is collected (like `let`/`when`/`doseq`) — `for` took exactly one body form until 2026-07-26, the only iteration form that did."
+  (do
+    (when (vector? binds)
+      (error "for: bindings must be a list, not a vector: write (for (x xs) expr)."
+        " Brood is lists-for-code, vectors-for-data (unlike Clojure) — a vector"
+        " *inside* a binding position is still destructuring: (for ([k v] pairs) k)."))
+    (for-check-binds binds)
+    (let (acc (gensym "acc"))
+      `(reverse (let (~acc nil)
+                  ~(for-fold acc
+                     (map identity binds)
+                     (if (empty? (rest body)) (first body) (cons 'do body))))))))
+
+;; (doseq (pat coll) body...) — run `body` for its side effects over each item,
+;; returning nil. Just `for` run for effect (the result list is discarded). The
+;; param is `bind`, not `binding` — the latter is the dynamic-variable form.
+(defmacro doseq (bind & body)
+  "Run `body` for its side effects over each item of the binding (like `for`, but discards the result and returns `nil`)."
+  `(do (for ~bind (do ~@body)) nil))
+
+;; (dotimes (i n) body...) — run `body` for `i` = 0, 1, …, n-1; returns nil. The
+;; lean iteration primitive: a plain tail-recursive walker, no result list built
+;; (unlike `doseq`, which routes through `for`/`mapcat`). For effects only.
+(defn- dotimes-loop (n f i) (when (< i n) (f i) (dotimes-loop n f (+ i 1))))
+(defmacro dotimes (bind & body)
+  "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`."
+  (if (not (and (pair? bind) (pair? (rest bind))))
+    (error "dotimes: bind must be (var n), got "
+      (pr-str bind)
+      ". Syntax: (dotimes (i n) body...)")
+    `(do (dotimes-loop ~(second bind) (fn (~(first bind)) ~@body) 0) nil)))
+
+;; (dolist (x xs) body...) — run `body` for each element of `xs`; returns nil.
+;; The list-only counterpart to `dotimes`: lean and tail-recursive, no discard
+;; list built. Use `doseq` when you need destructuring or `:when` filters; reach
+;; for `dolist` for the common "do this for each item" loop.
+(defn- dolist-loop (xs f) (when (not (nil? xs)) (f (first xs)) (dolist-loop (rest xs) f)))
+(defmacro dolist (bind & body)
+  "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`."
+  (if (not (and (pair? bind) (pair? (rest bind))))
+    (error "dolist: bind must be (var coll), got "
+      (pr-str bind)
+      ". Syntax: (dolist (x xs) body...)")
+    `(do (dolist-loop ~(second bind) (fn (~(first bind)) ~@body)) nil)))
+
+;; (bench label expr) — wall-clock timing, in milliseconds (the resolution of
+;; `now`). The gensyms keep `label`/`expr` from capturing `t0`/`r` if the caller
+;; happens to use those names.
+(defmacro bench (label expr)
+  "Evaluate `expr`, print `label: N ms`, and return `expr`'s value."
+  (let (t0 (gensym "t0") r (gensym "r"))
+    `(let (~t0 (now) ~r ~expr)
+       (println (str ~label ": " (- (now) ~t0) " ms"))
+       ~r)))
