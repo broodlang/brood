@@ -20,7 +20,7 @@ list/vector, map). Closures, refs, pids etc. can't be JSON-ified and surface
 as errors."
   (:use format)
   (:use project)
-  (:use explain))
+  (:use explain :exclude [error]))
 
 ;; ---- handlers --------------------------------------------------------------
 ;; Each handler is `(handler args-map) -> result-map`. Handlers `throw` on
@@ -453,7 +453,7 @@ gets the tail-recursion fix, not just the message."
   (let (code (get args :code))
     (when (not (string? code))
       (throw "error: :code must be a string (e.g. \"E0030\")"))
-    (error code)))
+    (explain/error code)))
 
 (defn find-pattern-tool (args)
   "`find-pattern` — the idiomatic Brood pattern for a task/intent (a keyword
