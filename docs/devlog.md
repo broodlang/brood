@@ -1973,3 +1973,60 @@ Bumped to 0.5.0 — this release is the compatibility boundary for the session's
 rollout: queue/push, version/compare, uuid/v4, log/info, multimap/assoc, stream/map, tcp/drain,
 sse/emit, …). Installed and used to migrate the local project ecosystem (bedit, hatch, chat, life,
 terminal, pong, s3, store, mylife, hive, …) to the new names — each `nest check`-clean and green.
+
+## 2026-08-19 — Green the tree after the ADR-236 sweep: fixture damage, a prelude-split guard, a pq bench
+
+Post-pull verification of the prefix rollout + prelude split. `make test` was **red**: 994 tests,
+1 failure — `brood-lsp workspace_symbols::tests::subsequence_matching`.
+
+**The bug: a rename sweep that rewrote data, not references.** `matches` is a generic
+case-insensitive subsequence test; it knows nothing about Brood names, and its test used
+`"format-source"` purely as *fixture data*. The `format-source`→`format/source` sweep rewrote those
+string literals to `"source"`, which silently made every positive assertion unsatisfiable
+(`matches("fs", "source")` — no `f`). Restored to `"format/source"` (a live, realistic symbol shape
+where all six assertions hold) with a comment marking the literals as fixture, not references. The
+doc example above it (`fl0` matches … via f…o…) was rewritten too, and had a pre-existing typo —
+`l` never appears in `format-source` — so it now reads `fso` … via f…s…o.
+
+**Same sweep, same class, elsewhere.** The regex also ran through comments, doc comments, and
+string literals, stripping the prefix off names in prose to leave bare fragments: `hash-string is
+djb2` → "string is djb2", `explain-error` → "error", `gen-call` → "call", `reload-on-change` →
+"on-change", `mcp-project-path` → "project-path", and a **user-facing error string** in
+`introspect.rs` reading "source did not return a string". Prose restored to the new *qualified*
+names (`hash/string`, `explain/error`, …), which is what the sweep should have produced there. It
+also stripped the `mcp` tag out of four tests' scratch-directory names, dropping the disambiguator
+that keeps their temp dirs distinct from other suites' — restored. (`*package-module-files*` →
+`*module-files*` in `startup_image.rs` was checked and is a *correct* rename, left alone.)
+
+**New guard: `crates/lisp/tests/prelude_manifest.rs`.** The split left the `concat!(include_str!…)`
+list in `lib.rs` hand-written and unguarded — order is load-bearing, so it can't be derived — and the
+omission mode is silent: add `std/prelude/foo.blsp`, forget the line, and the build stays green while
+the file's `defn`s simply don't exist. Two cases, asserted against the `PRELUDE` const rather than by
+grepping `lib.rs`: every `std/prelude/*.blsp`'s bytes appear in it, and its length is exactly the nine
+files' total (catches a stale/duplicate include the containment check can't see). Verified by
+sabotage — commenting out one `include_str!` fails both with the intended messages.
+
+**Benchmarks: a `pq` module.** `queue` split into `queue` + `pq`, and the new module shipped with no
+bench while its own docstring warns "O(n) insert / O(1) pop … swap to a heap if n gets large". Two
+rows make that falsifiable, since `sorted-insert` walks only until it finds a lower-priority entry —
+so cost is set by insertion ORDER, not n alone: `insert_descending_pop_all` (each insert stops at the
+head) and `insert_ascending` (each walks the whole list). Measured, net of the ~1.6 ms fixed setup:
+descending scales **10×** for 10× n (linear), ascending **~69×** (quadratic); they sit 1.9× apart at
+n=100 and **26×** apart at n=1000. If those rows ever track each other, the sorted list has been
+replaced or the walk broken. The rollout's own renamed rows (uuid/queue/multimap) re-run clean.
+
+**Also fixed: the `explain/error` shadow.** `explain-error`→`explain/error` put a *core prelude*
+name into a `:use`d module, so `nest check` warned at both `(:use explain)` sites and the tree lost
+CLAUDE.md's "zero warnings across std/ + tests/" invariant. This is exactly the case ADR-236's own
+rule keeps a prefix for ("a core MACRO, a HOF-value, or a pervasive accessor/primitive"), but the
+shadow is a property of `:use`, not of the name — `explain/error` qualified reads well and is worth
+keeping. So the `:use` was narrowed instead: `(:use explain :exclude [error])` at both sites, with
+the 7 real call sites qualified (6 in `explain_test`, 1 in `std/tool/mcp.blsp`'s `explain-error-tool`).
+`find-pattern` — the module's only other public name — stays bare. `nest check` is back to **zero
+warnings**, and bare `error` in those files is the core raise again.
+
+Counting sites needed care: `\(error\b` also matches `(error-shape`, which made `std/tool/mcp.blsp`
+look like it had 13 bare raises when it has exactly one.
+
+Tree green after, on top of 0.5.0: **996 tests, 996 passed, 3 skipped**; `nest check` **0 warnings**;
+`cargo fmt --all --check` and `nest format` both clean.
