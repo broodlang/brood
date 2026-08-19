@@ -497,7 +497,7 @@ pub(super) fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
         // `def`) is skipped. Workaround: prefix definer macros with `def`, the
         // Lisp convention anyway. (`require` skipping is likewise intentional: we
         // don't transitively reload other modules; the user watches each path
-        // explicitly with `on-change`.)
+        // explicitly with `reload/on-change`.)
         let head_is_def = match form {
             Value::Pair(p) => {
                 let (head, _) = heap.pair(p);
@@ -955,7 +955,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // the `%wasm-*` primitives (feature `wasm`; without it the primitives are
     // unbound and requiring this module errors clearly). Opt-in.
     embedded_module!("wasm", "std/wasm.blsp"),
-    // Teach-the-error + intent→idiom lookup (LLM-native errors): error
+    // Teach-the-error + intent→idiom lookup (LLM-native errors): explain/error
     // (a stable E-code → summary/causes/fix/example) and find-pattern (an
     // intent → the idiomatic Brood pattern). Curated Brood data; backs the
     // `nest mcp` tools of the same names. Opt-in.
@@ -971,7 +971,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("sse", "std/net/sse.blsp"),
     // The process framework, bundled in the default install (ADR-085 amended —
     // batteries-included, not externalized). `gen` is the gen_server-style
-    // server loop (`defprocess` / `spawn-server` / `!` / `call` / `stop`); the
+    // server loop (`defprocess` / `spawn-server` / `!` / `gen/call` / `stop`); the
     // core `log` module is a `gen` process. `supervisor` is OTP-style
     // supervision — independent of `gen`, both over the same kernel primitives.
     embedded_module!("gen", "std/proc/gen.blsp"),
@@ -1044,7 +1044,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // multimap-assoc, multimap-get, multimap-get-all, multimap-dissoc, …
     embedded_module!("multimap", "std/multimap.blsp"),
     // MD5/SHA-1/SHA-256/SHA-384/SHA-512 + HMAC, all Brood over the two `%digest`
-    // / `%hmac` prims (raw bytes); hex/string shaping via bytes->hex; string is djb2.
+    // / `%hmac` prims (raw bytes); hex/string shaping via bytes->hex; hash/string is djb2.
     embedded_module!("hash", "std/hash.blsp"),
     // gzip/zlib/raw-deflate compression
     // (gzip/gunzip, compress/uncompress, zip/unzip) over the six %gzip/%deflate prims.
