@@ -76,7 +76,7 @@
 (println "--- frequencies: 1M items with 10 distinct values ---")
 ;; range(1M) → mod 10 → list of 0..9 each 100k times
 (def freq-input (map (fn (i) (rem i 10)) (range 1000000)))
-(def freqs (enum/frequencies freq-input))
+(def freqs (seq/frequencies freq-input))
 (println "distinct values:" (count freqs))
 (println "freq of 0:" (get freqs 0))
 (println "freq of 9:" (get freqs 9))
