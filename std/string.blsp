@@ -68,6 +68,14 @@ Bare-in-the-prelude by contrast: the generic collection ops (`map`/`filter`/`cou
 inverse of the `string/to-codepoints` primitive."
   (apply str (map int->char cs)))
 
+(defn to-bytes (s)
+  "Encode string `s` as a bytes value — its UTF-8 bytes. Inverse of `string/from-bytes`."
+  (string->utf8-bytes s))
+
+(defn from-bytes (b)
+  "Decode a bytes value of UTF-8 bytes back to a string. Inverse of `string/to-bytes`."
+  (utf8-bytes->string b))
+
 ;; ---- join -------------------------------------------------------------------
 
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-

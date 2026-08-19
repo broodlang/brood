@@ -15663,3 +15663,88 @@ dist: dropped inbound message for unregistered name :echo (no process holds this
 itself on first occurrence instead of surfacing as a distant timeout, in user applications as much
 as in this repo's tests. Guarded by `a_dropped_send_to_an_unregistered_name_warns_once`
 (sabotage-verified: with the warning stubbed out, the test fails on the dedup assertion).
+
+## ADR-233 — Flat, single-segment module names for the `proc/*` and `net/*` families
+
+**Context.** The standard library carried two conventions for a directory of related
+modules. The toolchain `std/tool/*` used **bare, single-segment** module names — the file
+is `std/tool/test.blsp` but the module is just `test`, so a qualified call reads
+`test/run`; the `embedded_module!("test", "std/tool/test.blsp")` mapping decouples the name
+from the path. But `proc/*`, `net/*`, and `editor/*` mirrored the directory *into* the
+module name (`proc/gen`, `net/http`), so a qualified call carried two slashes:
+`proc/agent/start`, `net/http/get`. Module resolution (`eval::derive::module_to_require`)
+already takes the module as everything before the **last** slash, so the directory prefix
+in these names bought nothing the bare name didn't — it was directory-as-namespace where
+the directory is really just filing.
+
+**Decision.** `proc/*` and `net/*` adopt bare module names, matching `tool/*`. The files
+stay under `std/proc/` and `std/net/`; only the `defmodule` form and the `embedded_module!`
+key change:
+
+- `proc/gen → gen`, `proc/supervisor → supervisor`, `proc/agent → agent`
+- `net/http → http`, `net/sse → sse`, `net/tcp → tcp`, `net/reconnect → reconnect`
+
+A qualified call is now `gen/spawn-server`, `agent/start`, `supervisor/start-child`,
+`http/get`, `sse/events`, `tcp/connect` — **one slash, never two.**
+
+`editor/*` is the deliberate exception: it is a cohesive framework, not a filing bucket. Its
+~19 modules' names (`buffer`, `ui`, `pane`, `face`, `layers`, `ansi`) are intentionally
+generic and only make sense *scoped* by the `editor/` qualifier; bare, they would land-grab
+the most valuable top-level names, and `editor/ansi` would collide head-on with the existing
+top-level `std/ansi.blsp`. The rule is therefore **not** "one slash always" but "the prefix
+must earn its keep": a genuine namespace (editor) keeps it; a filing convenience (proc, net,
+tool) does not.
+
+**Consequence.** `reserved-package-name?` (ADR-070/166/220) is derived from the embedded
+module list, so it now reserves the **flat** names (`http`, `tcp`, `sse`, `reconnect`, `gen`,
+`agent`, `supervisor`) and no longer reserves `net`/`proc` as group prefixes — a package may
+now legitimately be named `net` or `proc`, but not `http`/`gen`/etc. `editor` remains a
+reserved group prefix. This is a breaking rename with no compatibility shim (greenfield;
+consistent with the 0.4.0 stdlib-namespacing compatibility boundary — ADR-230/231). Guarded
+by the updated reserved-name cases in `namespace_test.blsp` and the full proc/net test suites
+(`agent`/`gen`/`supervisor`/`http`/`sse`/`tcp`/`tls`), all green.
+
+## ADR-234 — Stdlib function placement: `path` is pure, `file` is I/O, and no module re-implements another's job
+
+**Context.** A review of every module's public exports (79 modules, ~1000 functions) surfaced
+a cluster of misplacements where two modules owned the same operation, split across two consumer
+bases so neither was obviously redundant:
+
+- **`file` vs `path`.** `path` is meant to be pure path-string manipulation and `file` filesystem
+  I/O, but each reached into the other. `file` carried pure ops `path-extension`/`path-stem`
+  (duplicating `path/extension`/`path/stem`), while `path` carried I/O predicates `exists?`/
+  `is-file?`/`is-dir?` that just delegated to `file/exists?`/`file/dir?` — and used a second naming
+  convention (`is-file?` vs `file/regular?`) for the same concept.
+- **`hash` vs `encoding`.** `hash/bytes->hex` re-implemented hex encoding (its own digit table +
+  per-byte loop) that `encoding/hex-encode-bytes` already owns in an optimized form, and exported
+  it as public API beside encoding's.
+- **`crypto` vs `string`.** `crypto/str->bytes`/`bytes->str` were general UTF-8 string↔bytes
+  codecs (thin aliases over the `string->utf8-bytes`/`utf8-bytes->string` kernel prims) parked in
+  the crypto module.
+- **`enum` module name.** The `enum` module held general sequence utilities (`chunk-by`, `dedupe`,
+  `group-by`, `zip-with`, `interpose`, `scan`, `frequencies`, …) — nothing to do with enumerated
+  types. A consumer would not look there.
+
+**Decision.**
+
+- `path` becomes pure (no filesystem access): delete `path/exists?`/`path/is-file?`/`path/is-dir?`.
+  Existence/type predicates are I/O and live only in `file` (`file/exists?`/`file/regular?`/
+  `file/dir?`). `file` loses the pure path-string ops `path-extension`/`path-stem`; those are
+  `path/extension`/`path/stem`.
+- `hash/bytes->hex` becomes a private one-line delegation to `encoding/hex-encode-bytes` — the
+  duplicate implementation and the duplicate public export both go away.
+- The UTF-8 codec moves to `string` as `string/to-bytes`/`string/from-bytes`; `crypto` no longer
+  defines it.
+- `enum` is renamed to **`seq`** (file `std/seq.blsp`, module `seq`), so qualified calls read
+  `seq/group-by`, `seq/zip-with`. The core `seq` *function* is unaffected — a module name is not a
+  value binding, so `(seq coll)` and the `seq/` qualifier never collide.
+
+Greenfield, so every rename updates all callers with no compatibility shim (ADR-006 / project
+convention). No overlap is created: `string/to-bytes`/`from-bytes` and the `seq/*` names collide
+with nothing; removing `path/exists?` drops one recorded overlap.
+
+**Consequence.** Each operation now has exactly one home, chosen by domain (pure-string → `path`,
+filesystem → `file`, hex → `encoding`, UTF-8 codec → `string`, sequence utils → `seq`). The
+`ns-known-overlaps` completeness test (ADR-233) confirmed the result introduced no new overlaps.
+This is a placement pass only; the separate question of *how clashes are surfaced* — the
+maintained overlap list itself — is addressed by the lazy-resolution mechanism in ADR-235.

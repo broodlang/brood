@@ -22,7 +22,7 @@ A stream is a PID: send `[:next (self)]`, receive `[:stream-val v]`,
 `:stream-done`, or `[:stream-err msg]`. Build pipelines from sources,
 transformers, and terminals — each transformer adds one green process.
 
-  ;; HTTP body line-by-line (with net/http):
+  ;; HTTP body line-by-line (with http):
   (let (body-stream (stream-from-socket sock))
     (stream-for-each println (stream-lines body-stream)))
 

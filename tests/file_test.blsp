@@ -3,7 +3,7 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(defmodule file-test (:use test) (:use file) (:use enum))
+(defmodule file-test (:use test) (:use file) (:use seq))
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-file-")
@@ -178,14 +178,10 @@
       (assert= (sort (walk-files d))
         (sort (list (path-join d "top.txt") (path-join (path-join d "sub") "deep.txt")))))))
 
-(describe "file: path helpers"
-  (test "path-extension"
-    (assert= (path-extension "a/b.txt") ".txt")
-    (assert= (path-extension "a/b") "")
-    (assert= (path-extension ".bashrc") ""))
-  (test "path-stem"
-    (assert= (path-stem "a/b.txt") "b")
-    (assert= (path-stem "a/b") "b"))
+;; `extension`/`stem` are pure path-string ops and live in `path` (covered by
+;; path_test); `file` no longer duplicates them (ADR-234). `path-absolute` below is
+;; the prelude's always-available path helper.
+(describe "file: prelude path-absolute helper"
   (test "path-absolute"
     ; already absolute → unchanged
     (assert= (path-absolute "/etc/hosts") "/etc/hosts")

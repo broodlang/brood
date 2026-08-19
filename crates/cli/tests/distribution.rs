@@ -755,7 +755,7 @@ fn remote_monitor_fires_noconnection_on_node_down() {
     );
 }
 
-/// `net/reconnect` keeps a peer link alive across restarts. Start A1, B
+/// `reconnect` keeps a peer link alive across restarts. Start A1, B
 /// watches it and sends a probe; kill A1; restart A2 on the same port/name;
 /// B's watcher reconnects and a second probe round-trips. Pure Brood policy
 /// on top of `connect` + `monitor-node`; no Rust changes — this test guards
@@ -790,7 +790,7 @@ fn ensure_link_reconnects_across_a_node_restart() {
     let client_src = format!(
         r#"
 (node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(net/reconnect/watch "a@127.0.0.1:{port_a}" {{:min-ms 200 :max-ms 400}})
+(reconnect/watch "a@127.0.0.1:{port_a}" {{:min-ms 200 :max-ms 400}})
 ;; Wait for the watcher's initial connect (it is asynchronous, unlike the old
 ;; ensure-link) before the first probe.
 (defn wait-link () (if (empty? (nodes)) (do (sleep 25) (wait-link)) nil))
@@ -1362,7 +1362,7 @@ fn remote_exit_kills_a_worker() {
 /// End-to-end **cross-node supervision** (ADR-067, the #1 payoff): a supervisor on
 /// node B supervises a worker on node A, and restarts it when it crashes — all
 /// over the distributed link. The supervisor (inlined here rather than using
-/// bundled `proc/supervisor`) does a roundtrip
+/// bundled `supervisor`) does a roundtrip
 /// to A's `:factory` to obtain the remote worker's pid (since `remote-spawn` is
 /// fire-and-forget), `monitor`s that remote pid, so the remote crash arrives as a
 /// `[:down …]` and triggers a restart that spins up a fresh worker.
@@ -1398,7 +1398,7 @@ fn supervisor_restarts_a_remote_child() {
 (connect "a@127.0.0.1:{port_a}")
 (def me (self))
 ;; this test inlines the equivalent userland one-for-one respawn over `monitor`
-;; (rather than pulling in bundled `proc/supervisor`) — the remote worker
+;; (rather than pulling in bundled `supervisor`) — the remote worker
 ;; crashes, its monitor fires `[:down …]`, and we start a fresh incarnation.
 (defn start-child ()
   (do (send {{:name :factory :node :a@127.0.0.1}} [:make (self) me])
@@ -1989,7 +1989,7 @@ fn cluster_mesh_simultaneous_joins_converge() {
     );
 }
 
-/// The dist self-healing slice (survey gap #5): `net/reconnect`'s watcher heals a
+/// The dist self-healing slice (survey gap #5): `reconnect`'s watcher heals a
 /// fallen link. A watches B; B exits (nodedown fires, subscriber notified); the
 /// harness restarts B on the same port; the watcher's backoff `connect` retries
 /// land, the subscriber gets `[:nodeup]`, and a `send` to B works again —
@@ -2039,14 +2039,14 @@ fn reconnect_watcher_heals_a_fallen_link() {
 "#
     );
 
-    // Node A: watch B via net/reconnect (fast backoff for the test), subscribe,
+    // Node A: watch B via reconnect (fast backoff for the test), subscribe,
     // then narrate the down → noconnection-send → up → message-flows sequence.
     let watcher = format!(
         r#"
 (node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (def spec "b@127.0.0.1:{port_b}")
-(net/reconnect/watch spec {{:min-ms 100 :max-ms 400}})
-(net/reconnect/subscribe spec)
+(reconnect/watch spec {{:min-ms 100 :max-ms 400}})
+(reconnect/subscribe spec)
 (receive
   ([:nodedown _] (println "NODEDOWN-OK"))
   (after 15000 (println "TIMEOUT-no-nodedown")))

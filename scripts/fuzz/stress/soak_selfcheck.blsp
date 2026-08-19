@@ -21,7 +21,7 @@
 ;;   * a closure with no captures and one with captures cross a send   (shared vs copied, ADR-194)
 ;;   * a global the shared closure calls is hot-reloaded               (RUNTIME churn + late binding)
 ;;   * a burst of spawns                                               (placement spill)
-(defmodule soak (:use proc/supervisor))
+(defmodule soak (:use supervisor))
 
 (def secs (let (e (getenv "SOAK_SECS")) (if e (string->number e) 3600)))
 (def backlog (let (e (getenv "SOAK_BACKLOG")) (if e (string->number e) 64)))

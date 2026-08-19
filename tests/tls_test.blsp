@@ -6,7 +6,7 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(defmodule tls-test (:use test) (:use net/tcp))
+(defmodule tls-test (:use test) (:use tcp))
 
 (defn- tls-serve-one
   (reply)

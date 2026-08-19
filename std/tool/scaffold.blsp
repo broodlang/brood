@@ -189,13 +189,13 @@ test discovery, lints, release, config)."
     "  (test \"step advances in open space\" (assert= (step 5 1 20) [6 1]))\n"
     "  (test \"render marks the right column\" (assert= (render 0 3) \"[*  ]\")))\n"))
 
-;; `gen`: a stateful process (gen_server-style) via the `proc/gen` framework.
+;; `gen`: a stateful process (gen_server-style) via the `gen` framework.
 ;; Genuine mutable state lives in a process's loop, not a variable (ADR-026):
 ;; async `cast` threads new state, synchronous `call` reads/updates it.
 (defn- project-gen-main-template
   (nm)
   (str "(defmodule main \""
-    nm " — a stateful process built with the proc/gen framework.\"\n" "  (:use proc/gen))\n" "\n"
+    nm " — a stateful process built with the gen framework.\"\n" "  (:use gen))\n" "\n"
     ";; A counter server. State `n` is the process's; messages drive it.\n" "(defprocess counter\n"
     "  (n)\n" "  ;; async: bump the count\n" "  (cast :inc (+ n 1))\n" "  ;; async: add m\n"
     "  (cast [:add m] (+ n m))\n" "  ;; sync: reply n, state unchanged\n" "  (call :value [n n]))\n"
@@ -205,9 +205,9 @@ test discovery, lints, release, config)."
 
 (defn- project-gen-test-template
   (nm)
-  (str ";; `(:use main)` brings `counter`; `(:use proc/gen)` the `!`/`gen-call` API;\n"
+  (str ";; `(:use main)` brings `counter`; `(:use gen)` the `!`/`gen-call` API;\n"
     ";; `(:use test)` the macros. :isolated — these spawn processes.\n"
-    "(defmodule main-test (:use main) (:use proc/gen) (:use test))\n" "\n" "(describe \"counter\"\n"
+    "(defmodule main-test (:use main) (:use gen) (:use test))\n" "\n" "(describe \"counter\"\n"
     "  :isolated\n" "  (test \"casts thread state; a call reads it\"\n"
     "    (let (c (spawn-server counter 0))\n" "      (! c :inc) (! c :inc) (! c [:add 10])\n"
     "      (assert= (gen-call c :value) 12))))\n"))
@@ -228,7 +228,7 @@ test discovery, lints, release, config)."
     "`*term-display*` for `(gui-display)` (a --features gui build) to run in a window.\"\n"
     "  ;; the app framework: display frontends + the `ui-run` loop\n" "  (:use editor/ui)\n"
     "  ;; the render-op constructors (clear / text / cursor / frame)\n" "  (:use editor/display)\n"
-    "  ;; the enum sequence helpers (enumerate)\n" "  (:use enum))\n" "\n" "(def *welcome*\n"
+    "  ;; the seq module's sequence helpers (enumerate)\n" "  (:use seq))\n" "\n" "(def *welcome*\n"
     "  (list \"hello, world\"\n" "        \"\"\n"
     "        \"a tiny editor — grow it from here.\"))\n" "\n" "(defn ed-init ()\n"
     "  \"The starting model: the welcome buffer, cursor at the top-left.\"\n"

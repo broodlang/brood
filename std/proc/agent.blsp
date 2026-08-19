@@ -4,14 +4,14 @@
 ;; Callers send it messages to read or transform that value; the agent serialises
 ;; all updates. Modelled after Elixir's Agent, built on Brood's spawn/send/receive.
 
-(defmodule proc/agent
+(defmodule agent
   "A process-backed state cell: read or transform a value via message-passing.
 
-    (def a (proc/agent/start (fn () 0)))
-    (proc/agent/update a inc)          ;; state becomes 1
-    (proc/agent/get    a identity)     ;; => 1
-    (proc/agent/cast   a (fn (n) (* n 10))) ;; fire-and-forget update
-    (proc/agent/stop   a)
+    (def a (agent/start (fn () 0)))
+    (agent/update a inc)          ;; state becomes 1
+    (agent/get    a identity)     ;; => 1
+    (agent/cast   a (fn (n) (* n 10))) ;; fire-and-forget update
+    (agent/stop   a)
 
 State is always passed through a function so callers never access the raw value
 directly, keeping access patterns explicit. `get-and-update` is the atomic

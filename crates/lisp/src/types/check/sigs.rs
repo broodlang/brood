@@ -273,9 +273,9 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     //   index-where   — tail-recursive helper; 1-ary predicate.
     //   last-index-of — &optional before param; infer_sig bails.
     put("index-of", Sig::new(vec![any, any], int));
-    // `enum/` since ADR-227 — keyed qualified for the same reason as `math/abs` above: a
+    // `seq/` since ADR-227 — keyed qualified for the same reason as `math/abs` above: a
     // bare key here would suppress the unbound lint on a name that no longer exists bare.
-    put("enum/index-where", Sig::new(vec![cb1, seq], int));
+    put("seq/index-where", Sig::new(vec![cb1, seq], int));
     put("last-index-of", Sig::new(vec![str_ty, str_ty], int));
     m
 });

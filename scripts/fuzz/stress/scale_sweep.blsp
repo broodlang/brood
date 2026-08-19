@@ -8,7 +8,7 @@
 ;;
 ;; TWO POINTS ARE NOT A MEASUREMENT — read this before believing a row.
 ;; A single invocation's two timings are NOT enough to call a shape. Readings for
-;; `proc/gen gen-call` on 2026-07-30, same binary (56c2501):
+;; `gen gen-call` on 2026-07-30, same binary (56c2501):
 ;;
 ;;   base N=2000 -> ratio 10.21, then 7.77 on a re-run   (flags SUPERLINEAR)
 ;;   base N=4000 -> ratio  2.93                          (reads linear)
@@ -26,8 +26,8 @@
 ;; A ratio near 16x that HOLDS or GROWS across three points and repeated runs is
 ;; a quadratic; anything smaller needs the floor before it is reportable.
 ;;
-;; Rows measured linear on 2026-07-30: proc/agent update, buffer insert,
-;; buffer forward-line. proc/gen gen-call is unresolved, per the above.
+;; Rows measured linear on 2026-07-30: agent update, buffer insert,
+;; buffer forward-line. gen gen-call is unresolved, per the above.
 ;;
 ;; 2026-08-04: `sexp motions` WAS a confirmed quadratic — three rising points, ASCII 5.68x
 ;; then 9.40x, one-non-ASCII 8.84x then 12.30x. Each motion's cost is `narrow`'s call to the
@@ -119,7 +119,7 @@
 ;; 303 ms -> 39 ms at 3200 lines in one chunk.
 ;;
 ;; Its row reads ~5-8x at small N and 1.82x from 3200->12800 — a ratio that FALLS as the
-;; base grows is warm-up, not a quadratic (the same signature that cleared `proc/gen
+;; base grows is warm-up, not a quadratic (the same signature that cleared `gen
 ;; gen-call`). 800 -> 12800 is 5 -> 71 ms, i.e. 14x for 16x of input.
 ;;
 ;; `format format-source` was cleared as LINEAR on 3.80x / 4.12x / 4.64x and that call was
@@ -132,14 +132,14 @@
 ;; falling one (warm-up) clears a row. Check the trend, not one triple.
 
 ;; `:only` on the two proc modules: they both export `stop` (an import clash the
-;; namespacing hardening now rejects outright), and `proc/agent` also shadows the prelude's
-;; `get`/`update`. `gen-calls` below already calls `proc/gen/stop` qualified.
+;; namespacing hardening now rejects outright), and `agent` also shadows the prelude's
+;; `get`/`update`. `gen-calls` below already calls `gen/stop` qualified.
 (defmodule scale-sweep
   ;; `sse--frames` is module-private (ADR-146); a stress harness measuring an internal is
   ;; exactly the `:use-internals` case, as `tests/sse_test.blsp` does.
-  (:use-internals net/sse)
-  (:use proc/agent :only [start update stop])
-  (:use proc/gen :only [defprocess spawn-server gen-call])
+  (:use-internals sse)
+  (:use agent :only [start update stop])
+  (:use gen :only [defprocess spawn-server gen-call])
   (:use editor/buffer)
   (:use sexp :only [point-forward]))
 
@@ -184,7 +184,7 @@
                (rem ratio 100)
                (if (> ratio 800) "   <-- SUPERLINEAR" "")))))
 
-;; ---- proc/agent: N sequential updates against one agent ---------------------
+;; ---- agent: N sequential updates against one agent ---------------------
 
 (defn loop-updates (pid k)
   (if (= k 0)
@@ -198,7 +198,7 @@
         _ (loop-updates pid k))
     (stop pid)))
 
-;; ---- proc/gen: N synchronous calls against one server -----------------------
+;; ---- gen: N synchronous calls against one server -----------------------
 
 (defprocess counter-server
   (state)
@@ -214,7 +214,7 @@
 (defn gen-calls (k)
   (let (pid (spawn-server counter-server 0)
         _ (loop-calls pid k))
-    (proc/gen/stop pid)))
+    (gen/stop pid)))
 
 ;; ---- editor/buffer: N inserts, then N line navigations ----------------------
 
@@ -269,7 +269,7 @@
 ;; single buffer rather than dripped.
 (defn sse-frames-1chunk (k)
   (let (blob (str utf8-lead (apply str (repeat k "event: tick\ndata: some payload here\n\n"))))
-    (count (first (net/sse/sse-frames blob)))))
+    (count (first (sse/sse-frames blob)))))
 
 ;; ---- string search: reverse, and a forward incremental scan -----------------
 
@@ -305,8 +305,8 @@
       0
       (range 0 k))))
 
-(row "proc/agent  update  " n agent-updates)
-(row "proc/gen    gen-call" n gen-calls)
+(row "agent  update  " n agent-updates)
+(row "gen    gen-call" n gen-calls)
 (row "buffer      insert  " n buffer-inserts)
 (row "buffer      fwd-line" n buffer-nav)
 (row "template    render  " n tmpl-render)

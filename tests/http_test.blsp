@@ -5,9 +5,9 @@
 
 (defmodule http-test
   (:use test)
-  (:use net/http)
-  (:use net/tcp)
-  (:use-internals net/http))
+  (:use http)
+  (:use tcp)
+  (:use-internals http))
 
 (describe "http: request parsing"
   (test "method, path, version, and lower-cased headers"
@@ -51,22 +51,22 @@
   ;; (`3.9`) could never be reached exactly and would park the reader on the
   ;; socket until the read timeout, and a negative one is meaningless — both → 0.
   (test "integer content-length is honoured"
-    (assert= (net/http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: 42\r\n") 42))
+    (assert= (http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: 42\r\n") 42))
   (test "fractional content-length → 0 (no declared body)"
-    (assert= (net/http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: 3.9\r\n") 0))
+    (assert= (http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: 3.9\r\n") 0))
   (test "negative content-length → 0"
-    (assert= (net/http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: -5\r\n") 0))
+    (assert= (http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: -5\r\n") 0))
   (test "non-numeric / missing content-length → 0"
-    (assert= (net/http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: abc\r\n") 0)
-    (assert= (net/http/http-declared-length "GET / HTTP/1.0\r\nHost: x\r\n") 0)))
+    (assert= (http/http-declared-length "POST / HTTP/1.0\r\nContent-Length: abc\r\n") 0)
+    (assert= (http/http-declared-length "GET / HTTP/1.0\r\nHost: x\r\n") 0)))
 
 (describe "http: client response size accounting"
   ;; The client-collect byte cap measures chunks by type — plaintext chunks are
   ;; `bytes`, TLS chunks are strings — so an endless server body can't OOM the
   ;; client (it is bounded by *http-max-response-bytes*).
   (test "chunk-size measures bytes and strings"
-    (assert= (net/http/http-chunk-size #b"\x01\x02\x03") 3)
-    (assert= (net/http/http-chunk-size "hello") 5))
+    (assert= (http/http-chunk-size #b"\x01\x02\x03") 3)
+    (assert= (http/http-chunk-size "hello") 5))
   (test "the response cap is a positive integer"
     (is (int? *http-max-response-bytes*))
     (is (> *http-max-response-bytes* 0))))
@@ -136,9 +136,9 @@
 
 (describe "http: responses are records with a Response impl"
   (test "the two stock kinds have distinct identities"
-    (assert= (record-id (ok "hi")) :net/http/response)
+    (assert= (record-id (ok "hi")) :http/response)
     (assert= (record-id (stream-response 200 {} (fn (sock) nil)))
-      :net/http/stream-response))
+      :http/stream-response))
   (test "streaming? is an identity check, not a key sniff"
     (is (streaming? (stream-response 200 {} (fn (sock) nil))))
     (refute (streaming? (ok "hi")))
@@ -156,7 +156,7 @@
       (assert= (get r :body) "body")))
   (test "a parsed client response is a response record"
     (let (r (parse-response "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhi"))
-      (assert= (record-id r) :net/http/response)
+      (assert= (record-id r) :http/response)
       (assert= (get r :status) 200)
       (assert= (body-text r) "hi")))
   (test "a third-party response type is dispatched by the same op"
@@ -169,15 +169,15 @@
 
 (describe "http: client url + response parsing"
   (test "parse-url splits scheme/host/port/path"
-    (let (u (net/http/parse-url "https://api.github.com/zen"))
+    (let (u (http/parse-url "https://api.github.com/zen"))
       (assert= (get u :scheme) "https")
       (assert= (get u :host) "api.github.com")
       (assert= (get u :port) 443)
       (assert= (get u :path) "/zen")))
   (test "parse-url defaults: http port 80, root path, explicit port"
-    (assert= (get (net/http/parse-url "http://example.com") :port) 80)
-    (assert= (get (net/http/parse-url "http://example.com") :path) "/")
-    (assert= (get (net/http/parse-url "http://h:8080/x") :port) 8080))
+    (assert= (get (http/parse-url "http://example.com") :port) 80)
+    (assert= (get (http/parse-url "http://example.com") :path) "/")
+    (assert= (get (http/parse-url "http://h:8080/x") :port) 8080))
   (test "parse-response reads the status line, headers, and body (a bytes value)"
     (let (r (parse-response "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhi there"))
       (assert= (get r :status) 200)
@@ -286,15 +286,15 @@
 ; added
 (describe "http: request building (http/request-headers)"
   (test "adds Host / User-Agent / Connection, and Content-Length when there's a body"
-    (let (h (net/http/request-headers {:host "localhost"} (string->utf8-bytes "abc") nil))
+    (let (h (http/request-headers {:host "localhost"} (string->utf8-bytes "abc") nil))
       (assert= (get h "Host") "localhost")
       (assert= (get h "User-Agent") "brood")
       (assert= (get h "Connection") "close")
       (assert= (get h "Content-Length") "3")))
   (test "no Content-Length for an empty body"
-    (refute (contains? (net/http/request-headers {:host "h"} #b"" nil) "Content-Length")))
+    (refute (contains? (http/request-headers {:host "h"} #b"" nil) "Content-Length")))
   (test "caller headers override the defaults and add new ones"
-    (let (h (net/http/request-headers {:host "h"} #b"" {"User-Agent" "bw" "X-Token" "k"}))
+    (let (h (http/request-headers {:host "h"} #b"" {"User-Agent" "bw" "X-Token" "k"}))
       ; overridden
       (assert= (get h "User-Agent") "bw")
       (assert= (get h "X-Token") "k"))))

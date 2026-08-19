@@ -29,7 +29,7 @@
 ;;   sup       - start-child, kill it, terminate-child (supervisor + spawn-link)
 ;;   reload    - eval a (def ...), i.e. RUNTIME-region churn + late binding
 
-(defmodule decay (:use proc/supervisor))
+(defmodule decay (:use supervisor))
 
 (def mode (let (e (getenv "MODE")) (if e e "alloc")))
 (def secs (let (e (getenv "SECS")) (if e (string->number e) 180)))

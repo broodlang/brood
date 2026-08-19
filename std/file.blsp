@@ -13,9 +13,9 @@
 (defmodule file
   "The file & filesystem library: whole-file and line read/write
 (`file/slurp`/`file/spit`/`read-lines`/`write-lines`/`file/spit-append`), predicates
-(`regular?`/`file/dir?`/`file/exists?`), directory listing (`list-files`/`list-dirs`/
-`walk-files`), and path helpers (`path-extension`/`path-stem`, complementing the
-prelude's `path-join`/`path-basename`/`parent-dir`). Pure Brood over the fs
+(`regular?`/`file/dir?`/`file/exists?`), and directory listing (`list-files`/`list-dirs`/
+`walk-files`). Pure path-string manipulation (extension, stem, basename, join) is the
+`path` module's job — `file` only touches the filesystem. Pure Brood over the fs
 primitives. The kernel also provides the always-available file primitives
 `file/slurp`/`file/spit`/`file/mkdir`/`file/exists?`/`file/dir?`/`file/ls`/`file/mtime`/`file/size`/
 `file/rm`/`file/rmdir`/`file/rename`/`file/cp`/`file/cwd`.")
@@ -82,24 +82,5 @@ primitives. The kernel also provides the always-available file primitives
       (file/ls dir))))
 (sig walk-files (string -> (list string)))
 
-;; --- path helpers (complement prelude path-join / path-basename / parent-dir)
-(defn- file-last-dot
-  (s i)
-  (cond
-    (< i 0) -1
-    (= (string/substring s i (+ i 1)) ".") i
-    else (file-last-dot s (dec i))))
-
-(defn path-extension (path)
-  "The extension of `path` including the leading dot (\"a/b.txt\" -> \".txt\"), or \"\" if there is none. A leading-dot name (\".bashrc\") has no extension."
-  (let (base (path-basename path)
-        i (file-last-dot base (dec (string/length base))))
-    (if (<= i 0) "" (string/substring base i (string/length base)))))
-(sig path-extension (string -> string))
-
-(defn path-stem (path)
-  "The basename of `path` with its extension removed (\"a/b.txt\" -> \"b\")."
-  (let (base (path-basename path)
-        ext (path-extension path))
-    (if (= ext "") base (string/substring base 0 (- (string/length base) (string/length ext))))))
-(sig path-stem (string -> string))
+;; Pure path-string helpers (extension, stem, basename, …) live in the `path`
+;; module — `path/extension`, `path/stem`. `file` is filesystem I/O only (ADR-234).
