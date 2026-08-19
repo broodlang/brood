@@ -21,6 +21,7 @@ ADRs / topic docs.
 |---|---|---|
 | KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
+| KI-47 | the `differential (tree-walker)` CI job went red on **every** run from the ADR-230/231 namespacing merge onward, always as the same three `adversarial_test.blsp` heap-allocation cases dying on `E0043`. Those cases were not the cause: the suite's **process-wide** allocation had reached **1.145 GB** against the **1 GiB** `TEST_DEFAULT_SOFT` backstop, and a threshold failure names whichever tests are running when the line is crossed | ✅ **fixed 2026-08-19** — backstop raised to 2 GiB soft / 3 GiB hard (`core/alloc.rs`), which is what it documents itself to be: a *host-survival* guard, not a working-set budget. ⚠ **Leaves an unresolved question**: the cap was sized against a ~240 MB suite peak and the suite now peaks ~1 GB (4.8×), so this restores a ~2× margin, not the intended 4× |
 | KI-46 | **deadline margin, not a failure yet.** KI-39 was a fixed cost sitting under a fixed deadline for weeks while reading as a random flake, so every case's CI margin against nextest's 120 s hard kill was audited from the 2026-08-17 logs. `nest::bin/nest mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` is now the worst at **87 s = 1.38× margin** — it invokes the MCP `check` tool, which is cwd-based, so it type-checks **this whole repository**, and the cost grows as the repo does | ✅ **fixed 2026-08-18, the real way** (87 s → **2.5 s**) — the three cheap fixes were all worse than the problem: `BROOD_NO_CHECK=1` guts what the case proves, a temp-dir `set_current_dir` is process-global and would race its siblings under plain `cargo test` (trading a slow test for a nondeterministic one), and a bigger nextest budget is what hid KI-39. So the real fix was done instead: `check-project-structured` gained an optional `from` root, and `mcp-check-tool` now passes **`*project-root*`** — the root the server already pins its write sandbox to and that every other project-scoped tool already read. `check` was the one tool taking its project from cwd. The three next-worst (`scaffold_quality`, 89/80/77 s) **were** fixed the same day by splitting one case per template |
 | KI-43 | `remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a **fixed 5 s sleep**, but the observer needs 5.9–9.2 s under load to boot + `require 'observer'` + connect — so the target died first, `connect` refused, stdout empty. Failed BOTH retries in a loaded `make test`, passed standalone: the signature that gets written off as noise | ✅ **fixed 2026-08-14** — waits for the observer's attach report instead of a stopwatch; **8/8 under saturating load**, and 3.5 s instead of ~11 s |
 | KI-42 | the `breakage/` suite had rotted to **9 of 23 files failing** and nobody knew, because it is outside `make test` and had no CI job — a pin-syntax change (`~ref`→`^ref`), a renamed `string-contains?`, an assertion predating exact rationals, and a TCP file whose every phase was dead | ✅ **fixed 2026-08-13** — all 23 files pass and gate, nothing skipped; CI job added so it cannot rot silently again |
@@ -65,7 +66,7 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open items, and no watch item — KI-36 was reproduced and fixed 2026-08-19.** KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**No open items, and no watch item — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day.** `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -2671,3 +2672,61 @@ a zero exit. The general lesson is the durable part: **Brood source generated fr
 string literals is invisible to `nest check` and to the in-language suite**, so every
 such snippet needs an execution test rather than a reading. Worth grepping for the
 others.
+
+---
+
+## KI-47 — the tree-walker suite crossed the 1 GiB memory backstop ✅ FIXED 2026-08-19
+
+**Not the three tests it named.** The `differential (tree-walker)` job failed on every run from the
+ADR-230/231 stdlib-namespacing merge onward, always reporting the same three `adversarial_test.blsp`
+cases (1 MB string / 30 000-element cons list / 10 000-entry CHAMP map) dying on a catchable `E0043`.
+They are simply the cases that happen to be running when the **suite's** process-wide total crosses
+the cap — a threshold failure blames whoever is holding the parcel.
+
+**Regression window, pinned:** green through run **32141480911**, red from **32221892676** — the
+first run after the namespacing merge. The mechanism is module count: the refactor split the stdlib
+into new `string` and `file` modules, and module loading costs memory super-linearly here (see the
+module-load-scaling note: RSS ≈ 45× source bytes).
+
+**Measured** — in-language suite, debug build, `BROOD_VM=0`:
+
+| | bytes | vs cap |
+|---|---|---|
+| local | 1 145 412 425 | 6.7% over |
+| CI (same job) | 1 149 317 883 | 7.0% over |
+| cap | 1 073 741 824 | — |
+
+The VM arm stays under and was never affected; the tree-walker allocates far more by design, so it
+crosses first. Runner-reported peak was 996.6 MB.
+
+**Fix:** `TEST_DEFAULT_SOFT` 1 → 2 GiB, `TEST_DEFAULT_HARD` 2 → 3 GiB. Justified by the cap's own
+documentation — a *"host-survival backstop, not a working-set budget"*, sized to *"never trip on
+legitimate parallel load"*. 1.145 GB is the working set; a real runaway, that same comment notes,
+*"heads to many GB"*. Verified: `brood_suite_passes` under `BROOD_VM=0` passes clean (963 s, exit 0),
+and CI run 32247618122 is green on all five jobs.
+
+**Tried and rejected, recorded so it is not re-attempted:** `hibernate` after each isolated test in
+`run-unit-fresh`. It shrinks only the *calling* process's slabs — a genuine **148×** on a
+51-iteration microbenchmark (25.3 MB → 171 KB retained, peak 30.4 MB → 6.9 MB) — while this cap
+counts process-wide allocation across every green process and the shared regions. Real effect, wrong
+scope. An earlier attempt at `gc-collect` was even further off: it rested on a stale comment in
+`std/tool/test.blsp` claiming the runner only collects at "the depth-1 eval safepoint", which
+**ADR-061 made false** — `eval/mod.rs` collects at *any* eval depth, so the collector was already
+running there.
+
+⚠ **Open question this fix deliberately does not answer.** The rationale it replaced claimed the
+suite *"peaks ~240 MB under collection"*. The measured peak is ~4.8× that, so the raise restores a
+~2× margin rather than the intended 4×. **Whether that growth is legitimate (the suite and the
+module count both grew) or a regression is unmeasured** — the namespacing merge is the commit that
+pushed it over the line, not necessarily the one that caused the growth. Do not read KI-47's closure
+as evidence the growth is fine. The tool for the next person: `BROOD_TRACE_PROMOTE=1` ranks what
+enters the append-only shared RUNTIME region, which the local collector cannot reclaim.
+
+**Two diagnostic traps this one set, both of which cost real time:**
+
+1. The failure list and the *slow-test* list sit next to each other in the runner's output. Reading
+   a slow-test line as a failure sent the first hours of triage at `parse-number-fxx`, which was
+   never failing.
+2. `nest test` (release) and `brood_suite_passes` (debug, via the Rust suite binary) are **different
+   harnesses with different allocation profiles**. The former passed 4652/4652 while the latter
+   failed. Reproduce CI with CI's harness, not the convenient one.
