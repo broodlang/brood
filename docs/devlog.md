@@ -1933,3 +1933,23 @@ of the prelude into a module would touch ~184 bare call sites and is a UX regres
 core" rule is about special forms/evaluator, which these aren't). `spy` is a bare debug
 convenience by design. So the prelude is left as-is; the split (A) stands, the shrink (B) has no
 clear win.
+
+## 2026-08-19 — Forced through the collision keeps: stats, fuzzy, tcp, sse (ADR-236)
+
+Revisited the "prefix earns its keep" modules and de-prefixed the ones that could be done
+safely, leaving only the genuinely-unforceable:
+- **stats** — stats-max/min → stats/max, stats/min; the four core min/max uses (calls and
+  `reduce` value-position) are `/`-escaped.
+- **fuzzy** — fuzzy-match/filter → fuzzy/match, fuzzy/filter; qualified-only, since a bare
+  `(:use fuzzy)` would shadow the `match` MACRO.
+- **tcp** — tcp/drain, tcp/read-n, tcp/read-until; guarded the kernel builtins (tcp-close,
+  tcp-send) and the :tcp-* message keywords (renaming those deadlocked the receive loop).
+- **sse** — sse/headers, sse/frame, sse/connect, and sse-send → **sse/emit** (not sse/send —
+  `send` is the core message primitive; naming a function `send` hung sse_test via `:use sse`).
+
+**Still kept (justified):** `http` — `get` is THE map accessor, used 25× inside http, and both
+`sse` and `http_test` `(:use http)`, so `http-get`→`get` would shadow it catastrophically;
+`project-apply` (`apply` core, ~12 internal uses); the `defrecord` `-field` accessors (CL idiom);
+and every module's private `defn- mod-*` helpers (never exported). The lesson across the whole
+rollout: drop the prefix, except where the bare name is a core MACRO, a HOF-value, or a pervasive
+accessor/primitive the module itself leans on — there the prefix is disambiguation, not noise.
