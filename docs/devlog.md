@@ -1650,3 +1650,26 @@ and the ecosystem's packages now declare `:brood ">= 0.4.0"` — a real gate tha
 clear message instead of a cryptic unbound-symbol cascade. This is the first version bump used to
 *mark* a break rather than just accrue features; the lesson is to bump on the break, not after it
 bites. (Greenfield still means we break freely — 0.4.0 is a signpost, not a stability promise.)
+
+
+## 2026-08-19 — The dependency resolver is now brood-version aware (ADR-209)
+
+The root-project `:brood` gate was only ever checked at setup on the *root* manifest — the resolver
+picked dependency versions with no idea what runtime any of them needed. So the newest release of a
+dep could require a brood the running one didn't have, and you'd learn that only as `unbound symbol`
+errors deep inside it, not as a resolution failure.
+
+Now `:brood` rides through the whole registry path. Publish sends it in the release metadata
+envelope; hive stores it in a new `releases.brood` column (idempotent `ADD COLUMN`, NULL =
+unconstrained) and serves it in the `/releases` resolution slice; and the resolver's pure provider
+**filters candidate releases to the ones the running brood satisfies** — so a version the runtime
+can't load is never selected. When a package's releases are *all* incompatible, a pre-solve pass
+raises a clear, brood-specific error ("no published release of X is compatible with the brood you
+are running (0.4.0) — X's releases require Brood >= 0.5.0 — upgrade brood, or depend on an older X")
+instead of the backtracker's opaque "no version satisfies". Backward compatible: a release with no
+stored `:brood` (everything published before this) reads as unconstrained, so existing resolution is
+unchanged — verified by resolving `store 0.2.2` off the live registry, which serves no `:brood`.
+
+Bootstrap note: hive *is* one of the packages, so the first publish of the migrated deps necessarily
+lands on the pre-feature registry (their `:brood` is sent but not stored); the resolver serves it for
+every release published once the upgraded hive is live.
