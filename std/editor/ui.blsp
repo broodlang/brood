@@ -141,7 +141,7 @@ fits everywhere. Pure Brood over the `term-*`/`gui-*` mechanism."
 
 (defn with-events (display)
   "Wrap `display` so its `:poll` first returns any queued `[:sse …]` / `[:sse-closed …]`
-mailbox message (from an `sse-connect` whose subscriber is this process), else polls
+mailbox message (from an `connect` whose subscriber is this process), else polls
 `display` as usual. So `ui-run` sees server-pushed events as loop *input* on BOTH the
 terminal (where the raw `:poll` reads only the keyboard) and the GUI — `update` folds
 an `[:sse ev]` in like any other input. The other display ops pass through unchanged.

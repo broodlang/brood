@@ -6,67 +6,67 @@
 
 (describe "sse — pure event-field parsing"
   (test "parses event / data / id, stripping one space after the colon"
-    (let (ev (sse/sse-parse-event "event: run_started\ndata: {\"id\":42}\nid: 7"))
+    (let (ev (sse/parse-event "event: run_started\ndata: {\"id\":42}\nid: 7"))
       (assert= (get ev :event) "run_started")
       (assert= (get ev :data) "{\"id\":42}")
       (assert= (get ev :id) "7")))
   (test "multiple data lines join with a newline"
-    (assert= (get (sse/sse-parse-event "data: a\ndata: b\ndata: c") :data) "a\nb\nc"))
+    (assert= (get (sse/parse-event "data: a\ndata: b\ndata: c") :data) "a\nb\nc"))
   (test "missing type defaults to \"message\"; missing data to \"\""
-    (assert= (get (sse/sse-parse-event "data: x") :event) "message")
-    (assert= (get (sse/sse-parse-event "event: ping") :data) ""))
+    (assert= (get (sse/parse-event "data: x") :event) "message")
+    (assert= (get (sse/parse-event "event: ping") :data) ""))
   (test "comment lines (:-prefixed) are ignored"
-    (assert= (get (sse/sse-parse-event ": keep-alive\ndata: y") :data) "y"))
+    (assert= (get (sse/parse-event ": keep-alive\ndata: y") :data) "y"))
   (test "a value with no leading space is kept verbatim"
-    (assert= (get (sse/sse-parse-event "data:tight") :data) "tight")))
+    (assert= (get (sse/parse-event "data:tight") :data) "tight")))
 
 (describe "sse — frame splitting + line endings"
   (test "frames splits complete blocks from a trailing remainder"
-    (let ([blocks rest] (sse/sse-frames "x: 1\n\ny: 2\n\nrest"))
+    (let ([blocks rest] (sse/frames "x: 1\n\ny: 2\n\nrest"))
       (assert= blocks (list "x: 1" "y: 2"))
       (assert= rest "rest")))
   (test "no complete frame yet → no blocks, all remainder"
-    (let ([blocks rest] (sse/sse-frames "partial data"))
+    (let ([blocks rest] (sse/frames "partial data"))
       (assert= blocks '())
       (assert= rest "partial data")))
   ;; The edges of the one-split extraction (2026-08-04): a buffer that ends exactly on a
   ;; blank line leaves an EMPTY remainder rather than dropping the last event, and an empty
-  ;; buffer splits to no pieces at all — the case the guard in `sse-frames` exists for.
+  ;; buffer splits to no pieces at all — the case the guard in `frames` exists for.
   (test "a buffer ending on a blank line has an empty remainder"
-    (let ([blocks rest] (sse/sse-frames "x: 1\n\ny: 2\n\n"))
+    (let ([blocks rest] (sse/frames "x: 1\n\ny: 2\n\n"))
       (assert= blocks (list "x: 1" "y: 2"))
       (assert= rest "")))
   (test "an empty buffer yields no blocks and an empty remainder"
-    (let ([blocks rest] (sse/sse-frames ""))
+    (let ([blocks rest] (sse/frames ""))
       (assert= blocks '())
       (assert= rest "")))
   (test "many events in ONE chunk all come out, in order"
     ;; The shape the `sse frames-1c` sweep row measures: one socket read holding k events.
     (let (blob (apply str (repeat 500 "data: tick\n\n"))
-          [blocks rest] (sse/sse-frames blob))
+          [blocks rest] (sse/frames blob))
       (assert= (count blocks) 500)
       (assert= (first blocks) "data: tick")
       (assert= rest "")))
   (test "normalise turns \\r\\n and \\r into \\n"
-    (assert= (sse/sse-normalize "a\r\nb\rc\nd") "a\nb\nc\nd"))
+    (assert= (sse/normalize "a\r\nb\rc\nd") "a\nb\nc\nd"))
   (test "status reads the numeric code from a response head"
-    (assert= (sse/sse-status "HTTP/1.1 200 OK\nContent-Type: text/event-stream") 200)
-    (assert= (sse/sse-status "HTTP/1.1 404 Not Found") 404)))
+    (assert= (sse/status "HTTP/1.1 200 OK\nContent-Type: text/event-stream") 200)
+    (assert= (sse/status "HTTP/1.1 404 Not Found") 404)))
 
 (describe "sse — server-side frame building"
   (test "a single-line payload becomes one data: line + the blank line"
-    (assert= (sse/sse-frame "hello") "data: hello\n\n"))
+    (assert= (sse/frame "hello") "data: hello\n\n"))
   (test "a multi-line payload prefixes every line with data:"
-    (assert= (sse/sse-frame "a\nb\nc") "data: a\ndata: b\ndata: c\n\n"))
+    (assert= (sse/frame "a\nb\nc") "data: a\ndata: b\ndata: c\n\n"))
   (test "an event type adds the leading event: line"
-    (assert= (sse/sse-frame "x" "tick") "event: tick\ndata: x\n\n"))
-  (test "sse-headers declares text/event-stream and disables caching"
-    (let (h (sse/sse-headers))
+    (assert= (sse/frame "x" "tick") "event: tick\ndata: x\n\n"))
+  (test "headers declares text/event-stream and disables caching"
+    (let (h (sse/headers))
       (assert= (get h "Content-Type") "text/event-stream")
       (assert= (get h "Cache-Control") "no-cache")))
-  (test "sse-frame is the inverse of sse-parse-event (round-trip)"
-    (let ([blocks _] (sse/sse-frames (sse/sse-frame "a\nb" "tick"))
-          ev (sse/sse-parse-event (first blocks)))
+  (test "frame is the inverse of parse-event (round-trip)"
+    (let ([blocks _] (sse/frames (sse/frame "a\nb" "tick"))
+          ev (sse/parse-event (first blocks)))
       (assert= (get ev :event) "tick")
       (assert= (get ev :data) "a\nb"))))
 
@@ -110,7 +110,7 @@
                                             (after 5000 nil))))
                    (after 5000 nil)))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (sse-connect (str "http://127.0.0.1:" port "/events") me)
+        (connect (str "http://127.0.0.1:" port "/events") me)
         (let (open (receive ([:sse-open s] s) (after *test-wait-ms* :timeout))
               e1 (receive ([:sse e] e) (after *test-wait-ms* :timeout))
               e2 (receive ([:sse e] e) (after *test-wait-ms* :timeout))

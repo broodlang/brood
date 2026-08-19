@@ -109,7 +109,7 @@
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
           (tcp-send c "GET /events HTTP/1.0\r\nHost: localhost\r\n\r\n")
-          (let (resp (utf8-bytes->string (tcp-drain c)))
+          (let (resp (utf8-bytes->string (drain c)))
             (tcp-close c)
             (is (includes? resp "text/event-stream"))
             (is (includes? resp "data: one"))
@@ -203,7 +203,7 @@
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
           (tcp-send c "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
-          (let (resp (utf8-bytes->string (tcp-drain c)))
+          (let (resp (utf8-bytes->string (drain c)))
             (tcp-close c)
             (is (includes? resp "200 OK"))
             (is (includes? resp "<h1>brood</h1>")))))))
@@ -226,7 +226,7 @@
         ;; the server is still alive and serves a normal request
         (let (c (tcp-connect "127.0.0.1" port))
           (tcp-send c "GET / HTTP/1.0\r\n\r\n")
-          (let (resp (utf8-bytes->string (tcp-drain c)))
+          (let (resp (utf8-bytes->string (drain c)))
             (tcp-close c)
             (is (includes? resp "200 OK"))))))))
 
@@ -252,7 +252,7 @@
             ["POST /echo HTTP/1.0\r\nHost: localhost\r\n"
               "Content-Length: 3\r\n\r\n"
               (bytes 255 128 65)])
-          (let (resp (utf8-bytes->string (tcp-drain c)))
+          (let (resp (utf8-bytes->string (drain c)))
             (tcp-close c)
             (is (includes? resp "200 OK"))
             ;; the body round-tripped as the exact bytes, not U+FFFD (65533)
@@ -377,7 +377,7 @@
           (tcp-send c "GET /drip HTT")
           (tcp-send c "P/1.0\r\nHost: x\r\n\r")
           (tcp-send c "\n")
-          (let (resp (utf8-bytes->string (tcp-drain c)))
+          (let (resp (utf8-bytes->string (drain c)))
             (tcp-close c)
             (is (includes? resp "200 OK"))
             (is (includes? resp "/drip")))))))
@@ -394,7 +394,7 @@
                                    (range 0 1750))))
           (tcp-send c ["GET / HTTP/1.0\r\n" junk])
           ;; the server gives up and closes without ever responding
-          (let (got (tcp-drain c))
+          (let (got (drain c))
             (tcp-close c)
             (assert= (byte-length got) 0)))))))
 
