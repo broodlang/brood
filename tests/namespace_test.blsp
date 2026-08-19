@@ -299,7 +299,6 @@
       (send w (mm-p2/make))
       (is (= (receive) {:t 'mm-p1/tag :n 7})))))
 
-
 ;; ---- lazy `(:use …)` clash resolution (ADR-235) -----------------------------
 ;; Namespacing means two modules MAY export the same short name. Importing both is fine;
 ;; the clash surfaces only when the shared name is actually USED bare, and the error then
@@ -307,11 +306,13 @@
 ;; self-report at the point of use, and stay silent when a caller only touches non-overlapping
 ;; names. (`sexp` and `telemetry` both export `forward` — the pair exercised here; before
 ;; ADR-235 this whole section pinned a hand-maintained list of every std overlap.)
-(defn- ns-loads? (src)
+(defn- ns-loads?
+  (src)
   "True if `src` loads without error — the clash, if any, never fired."
   (try (do (%load-string src) true) (catch e false)))
 
-(defn- ns-load-error (src)
+(defn- ns-load-error
+  (src)
   (try (do (%load-string src) "") (catch e (str (error-message e)))))
 
 (describe "namespaces: `(:use …)` clashes resolve lazily (ADR-235)"
@@ -347,8 +348,8 @@
   (test "reserved-package-name? is true for a baked-in module (flat and group prefixes)"
     (is (reserved-package-name? 'json))
     (is (reserved-package-name? "set"))
-    (is (reserved-package-name? 'http))  ; a flat net module (was net/http)
-    (is (reserved-package-name? 'gen))   ; a flat proc module (was proc/gen)
+    (is (reserved-package-name? 'http)) ; a flat net module (was net/http)
+    (is (reserved-package-name? 'gen)) ; a flat proc module (was proc/gen)
     (is (reserved-package-name? 'editor))) ; a group prefix — owns buffer, ui, …
   (test "reserved-package-name? is false for an ordinary package name"
     (is (not (reserved-package-name? 'myapp)))

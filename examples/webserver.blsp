@@ -13,15 +13,15 @@
 
 (defn home (req)
   (http/ok (str "<!doctype html><html><head><meta charset=utf-8><title>Brood</title>"
-                 "<style>body{font-family:system-ui,sans-serif;max-width:38em;margin:4em auto;line-height:1.5}"
-                 "code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}</style></head>"
-                 "<body>" "<h1>Hello from Brood &#128035;</h1>"
-                 "<p>This page is served by a web server written entirely in "
-                 "<strong>Brood Lisp</strong> &mdash; TCP sockets, HTTP parsing, and routing "
-                 "are all Brood over a thin socket kernel.</p>" "<p>Try these routes:</p>" "<ul>"
-                 "<li><a href=\"/hello\">/hello</a> &mdash; a plain-text greeting</li>"
-                 "<li><a href=\"/echo\">/echo</a> &mdash; echoes your request path &amp; headers</li>"
-                 "<li><a href=\"/nope\">/nope</a> &mdash; a 404</li>" "</ul>" "</body></html>")))
+             "<style>body{font-family:system-ui,sans-serif;max-width:38em;margin:4em auto;line-height:1.5}"
+             "code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}</style></head>" "<body>"
+             "<h1>Hello from Brood &#128035;</h1>"
+             "<p>This page is served by a web server written entirely in "
+             "<strong>Brood Lisp</strong> &mdash; TCP sockets, HTTP parsing, and routing "
+             "are all Brood over a thin socket kernel.</p>" "<p>Try these routes:</p>" "<ul>"
+             "<li><a href=\"/hello\">/hello</a> &mdash; a plain-text greeting</li>"
+             "<li><a href=\"/echo\">/echo</a> &mdash; echoes your request path &amp; headers</li>"
+             "<li><a href=\"/nope\">/nope</a> &mdash; a 404</li>" "</ul>" "</body></html>")))
 
 (defn hello (req)
   (http/text-response "hello, world"))
@@ -29,17 +29,17 @@
 ;; Show that the parsed request is just data.
 (defn echo (req)
   (http/text-response (str "you asked for: "
-                            (get req :path)
-                            "\n\n"
-                            "method: "
-                            (get req :method)
-                            "\n"
-                            "host:   "
-                            (get (get req :headers) "host" "(none)")
-                            "\n"
-                            "agent:  "
-                            (get (get req :headers) "user-agent" "(none)")
-                            "\n")))
+                        (get req :path)
+                        "\n\n"
+                        "method: "
+                        (get req :method)
+                        "\n"
+                        "host:   "
+                        (get (get req :headers) "host" "(none)")
+                        "\n"
+                        "agent:  "
+                        (get (get req :headers) "user-agent" "(none)")
+                        "\n")))
 
 ;; The application: a router (a closure capturing a map of handler closures),
 ;; bound at top level. `def` promotes it into the shared code region — sound now
