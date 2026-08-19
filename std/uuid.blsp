@@ -6,12 +6,12 @@
 (defmodule uuid
   "UUID generation: v3 (MD5), v4 (random), v5 (SHA-1), v7 (time-ordered).
 
-    (uuid/uuid-v4)                          ;; random
-    (uuid/uuid-v7)                          ;; time-ordered random (RFC 9562)
-    (uuid/uuid-v5 uuid/ns-dns \"example.com\") ;; deterministic from a name
-    (uuid/uuid-v3 uuid/ns-url \"https://x\")  ;; same, using MD5
-    (uuid/uuid? s)                          ;; => true/false
-    (uuid/uuid-nil)                         ;; => \"00000000-0000-0000-0000-000000000000\"
+    (uuid/v4)                          ;; random
+    (uuid/v7)                          ;; time-ordered random (RFC 9562)
+    (uuid/v5 uuid/ns-dns \"example.com\") ;; deterministic from a name
+    (uuid/v3 uuid/ns-url \"https://x\")  ;; same, using MD5
+    (uuid/valid? s)                          ;; => true/false
+    (uuid/nil-uuid)                         ;; => \"00000000-0000-0000-0000-000000000000\"
 
 v4 and v7 are random; v7 also embeds a ms timestamp prefix for chronological
 sort order. v3 and v5 are deterministic: same namespace + name → same UUID,
@@ -20,26 +20,26 @@ always — useful for content-based IDs and idempotent generation.")
 ; v3/v5 hash names over namespace+name (hash/md5-bytes, hash/sha1-bytes)
 ;; ---- hex helpers ------------------------------------------------------------
 
-(def- uuid-hex-digits "0123456789abcdef")
+(def- hex-digits "0123456789abcdef")
 
-(defn- uuid-int->hex
+(defn- int->hex
   (n)
   "Convert a non-negative integer to a lowercase hex string (no leading zeros)."
-  (if (= n 0) "0" (uuid-int->hex-loop n "")))
+  (if (= n 0) "0" (int->hex-loop n "")))
 
-(defn- uuid-int->hex-loop
+(defn- int->hex-loop
   (n acc)
   (if (= n 0)
     acc
-    (uuid-int->hex-loop (quot n 16)
-      (str (string/char-at uuid-hex-digits (rem n 16)) acc))))
+    (int->hex-loop (quot n 16)
+      (str (string/char-at hex-digits (rem n 16)) acc))))
 
-(defn- uuid-pad-hex
+(defn- pad-hex
   (s n)
   "Left-pad hex string `s` with zeros to exactly `n` characters."
   (if (>= (string/length s) n)
     (string/substring s (- (string/length s) n) (string/length s))
-    (uuid-pad-hex (str "0" s) n)))
+    (pad-hex (str "0" s) n)))
 
 ;; ---- UUID v4 ----------------------------------------------------------------
 ;;
@@ -47,9 +47,9 @@ always — useful for content-based IDs and idempotent generation.")
 ;;   position 12 (0-indexed in the hex string): must be '4' (version)
 ;;   position 16: must be '8', '9', 'a', or 'b' (RFC 4122 variant bit = 10xx)
 
-(def- uuid-variant-chars "89ab")
+(def- variant-chars "89ab")
 
-(defn- uuid-hex-nibble
+(defn- hex-nibble
   (c)
   "Parse a lowercase hex char into 0–15."
   (let (cp (char->int c))
@@ -57,23 +57,23 @@ always — useful for content-based IDs and idempotent generation.")
       (- cp 48)
       (+ (- cp 97) 10))))
 
-(defn- uuid-variant-char
+(defn- variant-char
   (raw-hex-char)
   "Map any hex char to one of 8/9/a/b for the RFC 4122 variant nibble."
-  (string/char-at uuid-variant-chars (rem (uuid-hex-nibble raw-hex-char) 4)))
+  (string/char-at variant-chars (rem (hex-nibble raw-hex-char) 4)))
 
-(defn uuid-v4 ()
+(defn v4 ()
   "Generate a random RFC 4122 version 4 UUID string."
   (let (raw (random-token 16)
         ;; raw is 32 lowercase hex chars; inject version (pos 12) and variant (pos 16)
         p0 (string/substring raw 0 8)
         p1 (string/substring raw 8 12)
         p2 (str "4" (string/substring raw 13 16))
-        p3 (str (uuid-variant-char (string/char-at raw 16)) (string/substring raw 17 20))
+        p3 (str (variant-char (string/char-at raw 16)) (string/substring raw 17 20))
         p4 (string/substring raw 20 32))
     (str p0 "-" p1 "-" p2 "-" p3 "-" p4)))
 
-(defn uuid-nil ()
+(defn nil-uuid ()
   "The nil UUID: all zeros."
   "00000000-0000-0000-0000-000000000000")
 
@@ -89,13 +89,13 @@ always — useful for content-based IDs and idempotent generation.")
 ;; Formatted as: XXXXXXXX-XXXX-7XXX-YXXX-XXXXXXXXXXXX
 ;;   where Y ∈ {8,9,a,b} (variant nibble).
 
-(defn uuid-v7 ()
+(defn v7 ()
   "Generate an RFC 9562 version 7 UUID. The first 48 bits encode the current
 Unix timestamp in milliseconds, giving chronological sort order. The rest is
 random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
   (let (ms (now)
         rand (random-token 10)
-        ts (uuid-pad-hex (uuid-int->hex ms) 12)
+        ts (pad-hex (int->hex ms) 12)
         ;; p0 (8 hex = bytes 0-3): timestamp high 32 bits
         ;; p1 (4 hex = bytes 4-5): timestamp low 16 bits
         ;; p2 (4 hex = bytes 6-7): "7" + 1 rand nibble + rand byte
@@ -104,44 +104,44 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
         p0 (string/substring ts 0 8)
         p1 (string/substring ts 8 12)
         p2 (str "7" (string/char-at rand 1) (string/substring rand 2 4))
-        p3 (str (uuid-variant-char (string/char-at rand 4)) (string/substring rand 5 8))
+        p3 (str (variant-char (string/char-at rand 4)) (string/substring rand 5 8))
         p4 (string/substring rand 8 20))
     (str p0 "-" p1 "-" p2 "-" p3 "-" p4)))
 
 ;; ---- validation -------------------------------------------------------------
 
-(defn- uuid-hex?
+(defn- hex?
   (c)
   (let (cp (char->int c))
     (or (and (>= cp 48) (<= cp 57))
       (and (>= cp 97) (<= cp 102))
       (and (>= cp 65) (<= cp 70)))))
 
-(defn- uuid-valid-segment?
+(defn- valid-segment?
   (s expected-len)
   (and (= (string/length s) expected-len)
-    (uuid-all-hex? s 0 expected-len)))
+    (all-hex? s 0 expected-len)))
 
-(defn- uuid-all-hex?
+(defn- all-hex?
   (s i n)
   (if (>= i n)
     true
-    (if (uuid-hex? (string/char-at s i))
-      (uuid-all-hex? s (+ i 1) n)
+    (if (hex? (string/char-at s i))
+      (all-hex? s (+ i 1) n)
       false)))
 
-(defn uuid? (s)
+(defn valid? (s)
   "True if `s` is a well-formed UUID string (8-4-4-4-12 hex, any case, with dashes)."
   (and (= (string/length s) 36)
     (= (string/char-at s 8) "-")
     (= (string/char-at s 13) "-")
     (= (string/char-at s 18) "-")
     (= (string/char-at s 23) "-")
-    (uuid-valid-segment? (string/substring s 0 8) 8)
-    (uuid-valid-segment? (string/substring s 9 13) 4)
-    (uuid-valid-segment? (string/substring s 14 18) 4)
-    (uuid-valid-segment? (string/substring s 19 23) 4)
-    (uuid-valid-segment? (string/substring s 24 36) 12)))
+    (valid-segment? (string/substring s 0 8) 8)
+    (valid-segment? (string/substring s 9 13) 4)
+    (valid-segment? (string/substring s 14 18) 4)
+    (valid-segment? (string/substring s 19 23) 4)
+    (valid-segment? (string/substring s 24 36) 12)))
 
 ;; ---- name-based UUIDs (v3 and v5) -------------------------------------------
 ;;
@@ -163,20 +163,20 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
 (def ns-oid "6ba7b812-9dad-11d1-80b4-00c04fd430c8")
 (def ns-x500 "6ba7b814-9dad-11d1-80b4-00c04fd430c8")
 
-(defn- uuid-str->bytes
+(defn- str->bytes
   (s)
   "Parse a UUID string (with dashes) into a list of 16 byte ints."
-  (uuid-parse-bytes (string/replace s "-" "") 0 nil))
+  (parse-bytes (string/replace s "-" "") 0 nil))
 
-(defn- uuid-parse-bytes
+(defn- parse-bytes
   (hex i acc)
   (if (>= i (string/length hex))
     (reverse acc)
-    (let (hi (uuid-hex-nibble (string/char-at hex i))
-          lo (uuid-hex-nibble (string/char-at hex (+ i 1))))
-      (uuid-parse-bytes hex (+ i 2) (cons (+ (* hi 16) lo) acc)))))
+    (let (hi (hex-nibble (string/char-at hex i))
+          lo (hex-nibble (string/char-at hex (+ i 1))))
+      (parse-bytes hex (+ i 2) (cons (+ (* hi 16) lo) acc)))))
 
-(defn- uuid-bytes->str
+(defn- bytes->str
   (bytes version-nibble)
   "Format 16 byte ints as a UUID string, setting version nibble and variant bits."
   (let (bv (into [] bytes)
@@ -188,8 +188,8 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
         hex (fold (fn (acc i)
                     (let (b (if (= i 6) b6 (if (= i 8) b8 (nth bv i))))
                       (str acc
-                        (string/char-at uuid-hex-digits (quot b 16))
-                        (string/char-at uuid-hex-digits (rem b 16)))))
+                        (string/char-at hex-digits (quot b 16))
+                        (string/char-at hex-digits (rem b 16)))))
               ""
               (range 16)))
     (str (string/substring hex 0 8)
@@ -202,26 +202,26 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
       "-"
       (string/substring hex 20 32))))
 
-(defn- uuid-name-based
+(defn- name-based
   (ns-uuid name hash-fn version)
   "Generic name-based UUID: hash(namespace_bytes || name_bytes), set version."
-  (let (ns-bytes (uuid-str->bytes ns-uuid)
+  (let (ns-bytes (str->bytes ns-uuid)
         name-bytes (seq (string->utf8-bytes name))
         input (append (into [] ns-bytes) (into [] name-bytes))
         digest-hex (hash-fn input)
         ;; Take first 16 bytes (32 hex chars) of the hash output
-        digest-16 (uuid-parse-bytes (string/substring digest-hex 0 32) 0 nil))
-    (uuid-bytes->str digest-16 version)))
+        digest-16 (parse-bytes (string/substring digest-hex 0 32) 0 nil))
+    (bytes->str digest-16 version)))
 
-(defn uuid-v3 (ns-uuid name)
+(defn v3 (ns-uuid name)
   "Generate a name-based UUID v3 (MD5). Given the same `ns-uuid` and `name`,
 always returns the same UUID. Use `uuid/ns-dns`, `uuid/ns-url`, `uuid/ns-oid`,
 or `uuid/ns-x500` as the namespace, or supply your own UUID string."
-  (uuid-name-based ns-uuid name hash/md5-bytes 3))
+  (name-based ns-uuid name hash/md5-bytes 3))
 
-(defn uuid-v5 (ns-uuid name)
+(defn v5 (ns-uuid name)
   "Generate a name-based UUID v5 (SHA-1). Given the same `ns-uuid` and `name`,
 always returns the same UUID. Prefer v5 over v3 (SHA-1 > MD5). Use
 `uuid/ns-dns`, `uuid/ns-url`, `uuid/ns-oid`, or `uuid/ns-x500` as the
 namespace, or supply your own UUID string."
-  (uuid-name-based ns-uuid name hash/sha1-bytes 5))
+  (name-based ns-uuid name hash/sha1-bytes 5))

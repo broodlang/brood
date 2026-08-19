@@ -195,7 +195,7 @@ mod uuid {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (uuid/uuid-v4))"
+                 (dotimes (i {n}) (uuid/v4))"
             ),
         );
     }
@@ -207,7 +207,7 @@ mod uuid {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (uuid/uuid-v7))"
+                 (dotimes (i {n}) (uuid/v7))"
             ),
         );
     }
@@ -219,7 +219,7 @@ mod uuid {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (uuid/uuid-v5 uuid/ns-dns \"example.com\"))"
+                 (dotimes (i {n}) (uuid/v5 uuid/ns-dns \"example.com\"))"
             ),
         );
     }
