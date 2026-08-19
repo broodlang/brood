@@ -15610,3 +15610,56 @@ prefixes in `io.rs`/`system.rs` (the prefix names the primitive, so a failing re
 `devlog-archive.md` are left as the record of what those primitives were called at the time.
 **Breaking for the published ecosystem** (as ADR-229/230): a published library calling a now-moved
 name is incompatible until republished.
+
+## ADR-232 — A message dropped for an unregistered name warns once; the drop itself stays silent Erlang semantics
+
+**Context.** `send` is fire-and-forget. A message addressed to a `{:name :node}` registered name
+that **no process holds** is discarded — in `dist::route` for a local target, and in
+`dist::deliver_inbound` for one arriving from a peer. Both sites returned "routed" so that
+`(process-flag :send-errors true)` stays quiet, because `:send-errors` is deliberately about the
+*link*, not the peer process: node reachability raises, process liveness does not. That mirrors
+Erlang, and it is right — a name may legitimately be gone.
+
+What was wrong was not the drop but the **silence**. The receiving node is the only party that
+knows the message died: the sender has already moved on and, `send` being asynchronous, cannot be
+told without making it synchronous. So the information existed at exactly one point in the system
+and was thrown away there.
+
+**The cost, measured in calendar time.** This is KI-36. A test node opened its dist listener
+(`node-start`) before registering the name its peer would immediately address, so the peer's
+message landed in this hole. The only symptom available anywhere was a 20 s deadline expiring with
+no information — and the entry's own deadline analysis then blamed the wrong branch entirely. It
+took **twelve days and three sightings**, the last of which only resolved because the output
+happened to be captured that time.
+
+**Decision.** The node that drops such a message **warns once per name** on stderr:
+
+```
+dist: dropped inbound message for unregistered name :echo (no process holds this name; …)
+```
+
+- **Semantics unchanged.** Still dropped, still no error, `:send-errors` untouched. Erlang parity
+  on behaviour is preserved exactly; only observability changes.
+- **Default-on, deliberately.** A flag-gated trace is worth nothing for this class, because nobody
+  arms a flag before the bug they have not diagnosed yet. That is not speculation — it is KI-39,
+  whose *retroactively added* self-reporting also failed to fire when the failure recurred. A
+  diagnostic that must be predicted is a diagnostic that is absent when it matters.
+- **Deduplicated per name**, so a hot loop addressing a dead service warns once rather than
+  flooding. The set is bounded by distinct names, not by traffic.
+- **Opt-out:** `BROOD_NO_DROP_WARN=1`, catalogued in `debug_flags.rs` under scheduler/messaging.
+
+**Rejected alternatives.**
+
+- **Extend `:send-errors` to cover name resolution.** Architecturally impossible without making
+  `send` synchronous — the sender has already fired, and only the receiver can discover the name
+  was missing. It would also break the link-vs-liveness distinction the flag exists to draw.
+- **Buffer messages for a not-yet-registered name.** Unbounded queuing, un-Erlang, and it trades a
+  loud bug for a memory risk.
+- **Enforce register-before-`node-start` mechanically.** Unenforceable — the runtime cannot know
+  what a program intends to register later. Documented as an invariant instead
+  (`docs/distribution.md`), which is OTP's own rule: the listener goes up last.
+
+**Consequence.** A whole class of distributed bug — *the sender assumed a name existed* — now names
+itself on first occurrence instead of surfacing as a distant timeout, in user applications as much
+as in this repo's tests. Guarded by `a_dropped_send_to_an_unregistered_name_warns_once`
+(sabotage-verified: with the warning stubbed out, the test fails on the dedup assertion).

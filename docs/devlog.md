@@ -1633,3 +1633,49 @@ the primitive, so they must track the rename — e.g. a failing read now reads `
 Living-doc references in `tooling.md`/`module-index.md`/`node-connect.md` updated too; the dated
 historical entries in `decisions.md` and `devlog-archive.md` are left as the record of what those
 primitives were called at the time. See ADR-231.
+
+## 2026-08-19 — KI-36 reproduced and fixed: the deadline analysis was aimed at the wrong branch
+
+A repeated-run gate before opening new work — three consecutive `make test` passes on the merged
+tree at `692af1c5` — came back **992/992, 992/992, 992/992 (1 flaky)**. The flaky row was
+`reconnect_watcher_heals_a_fallen_link`: **KI-36**, the repo's sole watch item, unreproduced since
+2026-08-07 across 25 idle runs and 14 loaded ones. Third sighting, and the first with its output
+captured, which is what settled it.
+
+**It was never the nodedown stall the entry predicted.** The captured branch was
+`TIMEOUT-no-pong`, and the cause is a race in the test's own round-2 script: B2 called
+`node-start` (opening its listener, so A's watcher could connect and fire `[:nodeup]`) *before*
+`register`ing `:echo`. A pings the registered name the instant it sees nodeup, with
+`send-errors` already restored to nil — so a ping arriving in that gap is **silently dropped**, and
+A waits out its 20 s pong deadline for a reply that was never queued. A longer deadline could not
+have fixed it, which is worth noting because that is the reflex this class of failure invites.
+
+**The old inference, and the flaw in it.** KI-36 argued that 22.6 s "can only be the nodedown
+deadline (15 s + startup), not the nodeup deadline, which would have taken at least 45 s." But
+reaching the *pong* branch never costs the 45 s nodeup deadline — nodeup fires promptly, since the
+harness restarts B2 ~400 ms after B1 exits. Setup (~2.6 s) + the 20 s pong deadline ≈ 22.6 s, which
+reproduces the original sighting's number exactly. The hunt was therefore aimed at a stall that did
+not exist, which is the most plausible reason two years' worth of clean re-runs proved nothing.
+**When a deadline analysis rules a branch out, check the time to *reach* the branch, not only the
+branch's own timeout.**
+
+**Fixed by ordering:** `register` now precedes `node-start`, so the name is live before any peer
+can reach the node. Verified in both directions rather than by re-running until green — a 3 s delay
+inserted between `node-start` and `register` fails **100%** with a byte-identical `TIMEOUT-no-pong`
+pre-fix, and **passes with that delay retained** post-fix; then 10/10 under six equal-priority CPU
+burners.
+
+**Scope checked, deliberately not widened.** The same register-after-`node-start` ordering appears
+at **16 sites** in `distribution.rs`, but only this one is exposed: everywhere else the peer is
+spawned *after* `wait_until_listening`, and a fresh `brood` boot (~150 ms–4 s) always outlasts B's
+spawn+register. This test is unique in having a peer already hot-looping a 100–400 ms backoff
+`connect`. The other 15 are left alone.
+
+**Two red herrings, and one of them was mine.** B2's `dist: incoming connection failed: failed to
+fill whole buffer` is benign — `wait_until_listening` opens a bare `TcpStream::connect` and drops it
+with no handshake bytes, so it appears on passing runs too. And KI-36's own recorded *method trap*
+fired again, on me: a first verification loop classified on "did the success line appear" and
+reported 8/12 failures, every one of which was 12 default-priority spinners starving a `nice -n 19`
+test's child boots — a priority inversion I had created. Re-run with the output captured and
+classified, the harsh condition yields only `wait_until_listening gave up` and **zero**
+`TIMEOUT-no-pong`. A failure you cannot name is not evidence, in either direction.

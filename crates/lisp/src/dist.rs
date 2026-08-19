@@ -748,13 +748,67 @@ pub(crate) enum Target {
 /// `(process-flag :send-errors true)` — so a caller can queue-and-retry instead
 /// of silently losing messages until the reconnect (the dist self-healing
 /// seam); every other caller ignores it.
+/// Warn, once per name, that a message addressed to a **registered name no process holds**
+/// was dropped.
+///
+/// The drop itself is correct and stays correct: Erlang semantics, and legitimate — the name
+/// may simply be gone, or never have existed. What this fixes is the **silence**. `send` is
+/// fire-and-forget, so the sender has already moved on and cannot be told; the receiving node
+/// is the only party that knows the message died, and until now it said nothing to anyone.
+///
+/// That silence is not hypothetical: it cost **KI-36** twelve days and three sightings. A test
+/// node opened its dist listener before registering the name its peer would immediately address,
+/// so the peer's message landed in this exact hole — and the only symptom available was a 20 s
+/// deadline expiring with no information anywhere. One line here would have named it instantly.
+///
+/// **Default-on, deliberately.** A flag-gated trace is worth nothing for this class, because
+/// nobody arms a flag before the bug they have not diagnosed yet — the lesson of KI-39, whose
+/// retroactive self-reporting also failed to fire. Silence it with `BROOD_NO_DROP_WARN=1`.
+///
+/// **Deduplicated per name**, so a hot loop addressing a dead service warns once rather than
+/// flooding: the set is bounded by the number of distinct names, not by traffic.
+fn warn_dropped_to_unregistered_name(name: Symbol, whence: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static QUIET: AtomicBool = AtomicBool::new(false);
+    static QUIET_INIT: std::sync::Once = std::sync::Once::new();
+    QUIET_INIT.call_once(|| {
+        QUIET.store(
+            std::env::var_os("BROOD_NO_DROP_WARN").is_some(),
+            Ordering::Relaxed,
+        );
+    });
+    if QUIET.load(Ordering::Relaxed) {
+        return;
+    }
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<Symbol>>> =
+        std::sync::Mutex::new(None);
+    let first = match SEEN.lock() {
+        Ok(mut g) => g.get_or_insert_with(Default::default).insert(name),
+        // A poisoned lock must not silence the diagnostic this exists to print.
+        Err(_) => true,
+    };
+    if first {
+        eprintln!(
+            "dist: dropped {whence} message for unregistered name :{} \
+             (no process holds this name; warns once per name, BROOD_NO_DROP_WARN=1 to silence)",
+            value::symbol_name(name)
+        );
+    }
+}
+
 pub(crate) fn route(node: Symbol, target: Target, msg: Message) -> bool {
     if is_local(node) {
         let id = match target {
             Target::Pid(id) => id,
             Target::Name(name) => match crate::core::sync::read(&NAMES).get(&name).copied() {
                 Some(id) => id,
-                None => return true,
+                None => {
+                    warn_dropped_to_unregistered_name(name, "local");
+                    // Still `true`: a route existed, the *name* did not. Returning false here
+                    // would surface this as `:noconnection` to a `send-errors` sender, which
+                    // is a different and wrong diagnosis — the node is fine.
+                    return true;
+                }
             },
         };
         process::deliver(id, msg);
@@ -1438,7 +1492,10 @@ fn deliver_inbound(target: Target, msg: Message) {
         Target::Pid(id) => id,
         Target::Name(name) => match crate::core::sync::read(&NAMES).get(&name).copied() {
             Some(id) => id,
-            None => return,
+            None => {
+                warn_dropped_to_unregistered_name(name, "inbound");
+                return;
+            }
         },
     };
     process::deliver(id, msg);
