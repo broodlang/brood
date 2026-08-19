@@ -63,7 +63,7 @@ attach). Drive the standalone app from the shell with `nest observe`."
   (:use editor/lineedit)
   ;; the reusable app framework — frontends + the `ui-run` loop
   (:use editor/ui)
-  (:use enum))
+  (:use seq))
 
 ; the parent→child forest ordering (shared with myedit's process list)
 ;; ---- faces (named, via the shared `face` registry) --------------------------

@@ -23,7 +23,7 @@
   (crypto/pbkdf2 password (encoding/base64-decode-bytes salt-b64) iterations 32))
 
 (defn scram-stored-key (salted-password)
-  (hash/sha256-raw (hash/hmac-sha256-raw salted-password (crypto/str->bytes "Client Key"))))
+  (hash/sha256-raw (hash/hmac-sha256-raw salted-password (string/to-bytes "Client Key"))))
 
 ;; RFC 7677 §3 fixtures.
 (def- scram-test-salt-b64 "W22ZaJ0SNY7soEsUEjb6gQ==")
@@ -42,7 +42,7 @@
   (test "ClientKey = HMAC(SaltedPassword, \"Client Key\")"
     (let (sp (scram-salted-password "pencil" scram-test-salt-b64 scram-test-iters))
       (assert= "a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b"
-        (encoding/hex-encode-bytes (hash/hmac-sha256-raw sp (crypto/str->bytes "Client Key"))))))
+        (encoding/hex-encode-bytes (hash/hmac-sha256-raw sp (string/to-bytes "Client Key"))))))
 
   (test "StoredKey = SHA256(ClientKey)"
     (let (sp (scram-salted-password "pencil" scram-test-salt-b64 scram-test-iters))
@@ -52,7 +52,7 @@
   (test "the chain is byte-faithful — every intermediate value is a bytes value"
     (let (sp (scram-salted-password "pencil" scram-test-salt-b64 scram-test-iters))
       (is (bytes? sp))
-      (is (bytes? (hash/hmac-sha256-raw sp (crypto/str->bytes "Client Key"))))
+      (is (bytes? (hash/hmac-sha256-raw sp (string/to-bytes "Client Key"))))
       (is (bytes? (scram-stored-key sp))))))
 
 ;; ---- across processes: the chain under concurrency --------------------------

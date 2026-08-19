@@ -1780,3 +1780,27 @@ module list — now reserves the *flat* names (`http`, `gen`, `agent`, …) inst
 remains reserved as the one surviving group prefix. Updated the assertions to the new reality
 (`http`/`gen` flat, `editor` group). Full proc/net suites green
 (`agent 12`, `gen 21`, `supervisor 22`, `http 44`, `sse 20`, `tcp 34`, `tls 4`, `namespace 51`).
+
+## 2026-08-19 — Stdlib placement review: path/file/hash/crypto homes + enum→seq (ADR-234)
+
+Reviewed every module's public exports (79 modules) for "is this in the module a consumer would
+look in?" Most cross-module name overlaps are legitimate (`path/join` vs `string/join` — same word,
+different domain; namespacing keeps them apart), but four real misplacements fell out and are fixed:
+
+- **`path` is now pure, `file` is now I/O.** Deleted `path/exists?`/`is-file?`/`is-dir?` (they did
+  filesystem I/O by delegating to `file`) and `file/path-extension`/`path-stem` (pure path-string
+  ops duplicating `path/extension`/`path/stem`). Each operation now has one home. `http` and the
+  tests repointed; `file/regular?`/`file/dir?`/`file/exists?` are the I/O predicates.
+- **`hash/bytes->hex` de-duplicated.** It re-implemented hex encoding that `encoding/hex-encode-bytes`
+  already owns; now a private one-line delegation, no longer a public export.
+- **UTF-8 codec moved `crypto` → `string`.** `crypto/str->bytes`/`bytes->str` were general string
+  ops; they are `string/to-bytes`/`string/from-bytes` now (~30 call sites updated across crypto,
+  tests; the round-trip test moved to strings_test).
+- **`enum` → `seq`.** The module held sequence utilities (chunk-by, group-by, zip-with, …), not
+  enum types. Renamed module + file (`std/seq.blsp`); the Rust checker's hardcoded `enum/dedupe`/
+  `enum/interpose`/`enum/index-where` sigs updated too. The core `seq` function is untouched — a
+  module qualifier is not a value binding.
+
+All affected suites green (path/file/http/hash/crypto/strings/scram/uuid/seq/namespace). The
+overlap completeness test (ADR-233) confirmed no new overlap slipped in. Next: ADR-235 makes the
+overlap *list itself* unnecessary by resolving `:use` clashes lazily at point-of-use.

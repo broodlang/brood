@@ -198,17 +198,6 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
   (not (string/starts-with? p "/")))
 (sig relative? (string -> bool))
 
-(defn exists? (p)
-  "True if `p` exists (file or directory)."
-  (file/exists? p))
-(sig exists? (string -> bool))
-
-(defn is-file? (p)
-  "True if `p` exists and is a regular file (not a directory)."
-  (and (file/exists? p) (not (file/dir? p))))
-(sig is-file? (string -> bool))
-
-(defn is-dir? (p)
-  "True if `p` exists and is a directory."
-  (file/dir? p))
-(sig is-dir? (string -> bool))
+;; Filesystem existence/type predicates are I/O and live in `file`
+;; (`file/exists?`, `file/regular?`, `file/dir?`). `path` stays pure — it only
+;; manipulates path strings and never touches the filesystem (ADR-234).

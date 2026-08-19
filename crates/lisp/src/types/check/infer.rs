@@ -657,8 +657,8 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "rest")
         || value::symbol_is(head, "but-last")
         || value::symbol_is(head, "distinct")
-        // `enum/` since ADR-227; `distinct` stayed in the core protocol.
-        || value::symbol_is(head, "enum/dedupe")
+        // `seq/` since ADR-227; `distinct` stayed in the core protocol.
+        || value::symbol_is(head, "seq/dedupe")
     {
         let coll = *items.get(1)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
@@ -784,10 +784,10 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let b = callback_ret(heap, f, &[a], ctx);
         return list_result(b);
     }
-    // `(enum/interpose sep coll)` — weave `sep` between `coll`'s elements; the result
+    // `(seq/interpose sep coll)` — weave `sep` between `coll`'s elements; the result
     // holds both, `nil | list<A | type(sep)>`. Both must be known, else flat.
-    // Keyed qualified: `enum/` since ADR-227.
-    if value::symbol_is(head, "enum/interpose") && items.len() == 3 {
+    // Keyed qualified: `seq/` since ADR-227.
+    if value::symbol_is(head, "seq/interpose") && items.len() == 3 {
         let sep_ty = expr_ty(heap, items[1], ctx);
         let a = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
         return match (sep_ty, a) {

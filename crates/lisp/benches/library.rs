@@ -120,7 +120,7 @@ mod maps {
     fn frequencies(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(do (count (enum/frequencies (map (fn (x) (rem x 7)) (range {n})))))"),
+            format!("(do (count (seq/frequencies (map (fn (x) (rem x 7)) (range {n})))))"),
         );
     }
 

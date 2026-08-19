@@ -13,45 +13,35 @@
   (test "generates different values each time"
     (is (not= (crypto/random-bytes 16) (crypto/random-bytes 16)))))
 
-(describe "crypto/str->bytes + bytes->str"
-  (test "str->bytes returns a bytes value"
-    (is (bytes? (crypto/str->bytes "hello"))))
-  (test "bytes->str round-trips a string"
-    (assert= "hello, brood!" (crypto/bytes->str (crypto/str->bytes "hello, brood!"))))
-  (test "empty string round-trips"
-    (assert= "" (crypto/bytes->str (crypto/str->bytes ""))))
-  (test "UTF-8 multi-byte character"
-    (assert= "café" (crypto/bytes->str (crypto/str->bytes "café")))))
-
 (describe "crypto/encrypt + decrypt"
   (test "round-trip: encrypt then decrypt returns original"
     (let (key (crypto/random-key)
           nonce (crypto/random-nonce)
-          plain (crypto/str->bytes "hello, brood!")
+          plain (string/to-bytes "hello, brood!")
           ct (crypto/encrypt key nonce plain)
           pt (crypto/decrypt key nonce ct))
       (assert= (into [] plain) (into [] pt))))
   (test "ciphertext is longer than plaintext (auth tag)"
     (let (key (crypto/random-key)
           nonce (crypto/random-nonce)
-          plain (crypto/str->bytes "test"))
+          plain (string/to-bytes "test"))
       (is (> (count (crypto/encrypt key nonce plain)) (count plain)))))
   (test "wrong key returns :error"
     (let (key1 (crypto/random-key)
           key2 (crypto/random-key)
           nonce (crypto/random-nonce)
-          ct (crypto/encrypt key1 nonce (crypto/str->bytes "data")))
+          ct (crypto/encrypt key1 nonce (string/to-bytes "data")))
       (assert= :error (crypto/decrypt key2 nonce ct))))
   (test "wrong nonce returns :error"
     (let (key (crypto/random-key)
           n1 (crypto/random-nonce)
           n2 (crypto/random-nonce)
-          ct (crypto/encrypt key n1 (crypto/str->bytes "data")))
+          ct (crypto/encrypt key n1 (string/to-bytes "data")))
       (assert= :error (crypto/decrypt key n2 ct))))
   (test "tampered ciphertext returns :error"
     (let (key (crypto/random-key)
           nonce (crypto/random-nonce)
-          ct (into [] (crypto/encrypt key nonce (crypto/str->bytes "data")))
+          ct (into [] (crypto/encrypt key nonce (string/to-bytes "data")))
           ;; flip a byte in the ciphertext
           bad (assoc ct 0 (bit-xor (nth ct 0) 255)))
       (assert= :error (crypto/decrypt key nonce bad)))))
@@ -134,29 +124,29 @@
       (assert= 32 (count (get kp :private)))))
   (test "a signature verifies under its own key"
     (let (kp (crypto/keypair)
-          msg (crypto/str->bytes "release checksum")
+          msg (string/to-bytes "release checksum")
           sig (crypto/sign (get kp :private) msg))
       (assert= 64 (count sig))
       (is (crypto/verify (get kp :public) msg sig))))
   (test "a tampered message does not verify"
     (let (kp (crypto/keypair)
-          sig (crypto/sign (get kp :private) (crypto/str->bytes "a")))
-      (is (not (crypto/verify (get kp :public) (crypto/str->bytes "b") sig)))))
+          sig (crypto/sign (get kp :private) (string/to-bytes "a")))
+      (is (not (crypto/verify (get kp :public) (string/to-bytes "b") sig)))))
   (test "a different key does not verify"
     (let (kp (crypto/keypair)
           other (crypto/keypair)
-          msg (crypto/str->bytes "a")
+          msg (string/to-bytes "a")
           sig (crypto/sign (get kp :private) msg))
       (is (not (crypto/verify (get other :public) msg sig)))))
   (test "a malformed signature is false, not an error"
     (let (kp (crypto/keypair))
-      (is (not (crypto/verify (get kp :public) (crypto/str->bytes "a") (crypto/str->bytes "short"))))))
+      (is (not (crypto/verify (get kp :public) (string/to-bytes "a") (string/to-bytes "short"))))))
   (test "across processes: a worker signs, the parent verifies (keys/sig survive a send)"
     ;; deep-copies the keypair + signature across per-process heaps — proves the bytes
     ;; round-trip to_message/from_message, the concurrency coverage every feature gets
     (let (me (self)
           kp (crypto/keypair)
-          msg (crypto/str->bytes "signed in a child"))
+          msg (string/to-bytes "signed in a child"))
       (spawn (send me [:signed (crypto/sign (get kp :private) msg)]))
       (receive
         ([:signed sig] (is (crypto/verify (get kp :public) msg sig)))))))

@@ -159,7 +159,7 @@
 ;; step, which is exactly what rotted. Found 2026-08-17: **13 stale entries**, including
 ;; `require` (removed by ADR-229, so `nest docs --all` and hive's hosted /reference were
 ;; still presenting it as a language function) and twelve private `-acc`/helper names
-;; (`dedupe-acc`, `pow-acc`, `index-where-from`, …) that moved into `enum`/`math` as
+;; (`dedupe-acc`, `pow-acc`, `index-where-from`, …) that moved into `seq`/`math` as
 ;; module internals when ADR-227 namespaced them, but stayed listed as public API.
 ;;
 ;; Nothing detected it because a catalogue entry has no callers: `nest docs --all` simply
