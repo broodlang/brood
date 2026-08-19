@@ -189,8 +189,8 @@ that should receive the events (typically the UI process — see `with-events`).
               (get u :path)
               " HTTP/1.1\r\n"
               (http/render-headers (http/request-headers u
-                                         ""
-                                         {"Accept" "text/event-stream" "Connection" "keep-alive"}))
+                                     ""
+                                     {"Accept" "text/event-stream" "Connection" "keep-alive"}))
               "\r\n"))
     (spawn (let (sock (tcp-connect (get u :host) (get u :port)))
              (tcp-send sock req)

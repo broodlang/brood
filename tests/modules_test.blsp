@@ -160,11 +160,13 @@
     (%load-string "(defmodule clpa) (defn thing (x) (list :a x))")
     (%load-string "(defmodule clpb) (defn thing (x) (list :b x))")
     ;; both :used, shared name NEVER referenced -> loads clean (no eager clash)
-    (is (try (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") true)
+    (is (try
+          (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") true)
           (catch e false)))
     ;; referencing the shared bare name -> use-site ambiguity error naming both candidates
     (let (msg (try
-                (do (%load-string "(defmodule clconsu (:use clpa) (:use clpb)) (defn f (x) (thing x))")
+                (do
+                  (%load-string "(defmodule clconsu (:use clpa) (:use clpb)) (defn f (x) (thing x))")
                   :no-error)
                 (catch e (error-message e))))
       (is (includes? (str msg) "ambiguous"))
