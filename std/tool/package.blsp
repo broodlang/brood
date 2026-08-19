@@ -188,11 +188,14 @@ land in a later slice."
   (root registry-reqs lock-index preferred)
   (let (base (registry-base-for nil)
         roots (map (fn (d) [(get d :name) (get d :version)]) registry-reqs)
-        prefetched (package-prefetch-registry base (map (fn (d) (get d :name)) registry-reqs))
-        provider (package-prefetched-provider prefetched))
-    (match (resolver/resolve roots provider preferred)
-      ([:error message] (error "package: could not resolve dependency versions — " message))
-      ([:ok solution] (package-fetch-registry-solution root solution lock-index base)))))
+        prefetched (package-prefetch-registry base (map (fn (d) (get d :name)) registry-reqs)))
+    ;; Brood-version gate BEFORE the solve, so a runtime mismatch reports as one (ADR-209)
+    ;; rather than as an opaque "no version satisfies" from deep in the backtracker.
+    (package-check-brood-compat prefetched)
+    (let (provider (package-prefetched-provider prefetched))
+      (match (resolver/resolve roots provider preferred)
+        ([:error message] (error "package: could not resolve dependency versions — " message))
+        ([:ok solution] (package-fetch-registry-solution root solution lock-index base))))))
 
 ;; Fetch + extract every package of a resolved `{name → version}` solution into entries.
 ;; `base` is nil on the lock-reuse path (each fetch is served from the `_deps/` cache, and
@@ -267,11 +270,45 @@ land in a later slice."
               (map (fn (release) (map first (get release :dependencies))) releases))))
 
 ;; A PURE provider over the prefetched map (no I/O), so the resolver's backtracking is free:
-;; `versions` reads the release list; `deps` finds the matching release's declared deps.
+;; Whether a release's `:brood` runtime constraint (ADR-209) is satisfied by the brood we
+;; are running. A nil/empty constraint is unconstrained — releases published before the
+;; registry served `:brood` carry none, so this stays backward-compatible.
+(defn- package-release-brood-ok?
+  (release)
+  (let (constraint (get release :brood))
+    (or (nil? constraint)
+      (= constraint "")
+      (version/version-satisfies? (brood-version) constraint))))
+
+;; Guard: raise a CLEAR, brood-specific error if any package in the closure has releases but
+;; NONE the running brood can satisfy. Without this the resolver reports an opaque "no version
+;; of X satisfies …" for what is really a runtime-version mismatch — the exact confusing
+;; failure the `:brood` constraint exists to prevent. A package with at least one compatible
+;; release is left to the solver, which (via the provider below) only ever sees the compatible
+;; ones. This makes the resolver care about the brood version, not just the root-project setup gate.
+(defn- package-check-brood-compat
+  (fetched)
+  (dolist (kv (map-pairs fetched))
+    (let (nm (first kv)
+          releases (second kv))
+      (when (and (not (empty? releases))
+              (empty? (filter package-release-brood-ok? releases)))
+        (let (needed (distinct (filter (fn (c) (and c (not (= c ""))))
+                                 (map (fn (r) (get r :brood)) releases))))
+          (error "package: no published release of " (name nm)
+            " is compatible with the brood you are running (" (brood-version) "). "
+            (name nm) "'s releases require Brood " (string/join " / " needed)
+            " — upgrade brood, or depend on an older " (name nm)
+            " that predates the requirement."))))))
+
+;; `versions` reads the release list — filtered to the brood-compatible releases, so the
+;; solver never selects a version the running runtime can't load; `deps` finds the matching
+;; release's declared deps.
 (defn- package-prefetched-provider
   (fetched)
   (resolver/make-provider (fn (nm)
-                            (map (fn (release) (get release :version)) (or (get fetched nm) nil)))
+                            (map (fn (release) (get release :version))
+                              (filter package-release-brood-ok? (or (get fetched nm) nil))))
     (fn (nm version)
       (let (release (find (fn (r) (= (get r :version) version)) (or (get fetched nm) nil)))
         (if (nil? release) nil (get release :dependencies))))))
@@ -798,6 +835,10 @@ as having no versions rather than raising mid-search); any other error raises."
   (match (registry-get-json (registry-releases-url base nm))
     ([:ok data] (map (fn (release)
                        {:version (get release :version)
+                        ;; the release's runtime-version constraint (ADR-209), nil/"" if the
+                        ;; release predates it or the registry doesn't serve it — treated as
+                        ;; unconstrained, so this stays backward-compatible with old releases.
+                        :brood (get release :brood)
                         :dependencies (map (fn (d) [(symbol (get d :name)) (get d :version)])
                                         (or (get release :dependencies) nil))})
                   (or (get data :releases) nil)))
@@ -1857,6 +1898,10 @@ the bytes live (ADR-211); pass nil for a hosted publish. When the release is sig
   (let (meta {:name *project-name*
               :version *project-version*
               :description (or *project-description* "")
+              ;; the runtime-version constraint this release needs (ADR-209): the registry
+              ;; stores it per release so the RESOLVER can exclude a release the running
+              ;; brood can't satisfy, instead of it only being caught at setup on the root.
+              :brood (or *project-brood* "")
               :dependencies (registry-publishable-deps)
               ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it
               ;; and can filter on its names, without knowing what any of them are
