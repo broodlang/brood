@@ -58,7 +58,7 @@
           (tcp-close ls)
           (assert= ev :closed))))))
 
-(describe "tcp: tcp-drain collects a request/response"
+(describe "tcp: drain collects a request/response"
   :isolated
   (test "drain concatenates chunks until the peer closes; returns bytes"
     (let (ls (tcp-listen "127.0.0.1" 0)
@@ -69,7 +69,7 @@
         (tcp-send s "hello, ")
         (tcp-send s "world")
         (tcp-close s)
-        (let (reply (tcp-drain c))
+        (let (reply (drain c))
           (tcp-close c)
           (tcp-close ls)
           (is (bytes? reply))
@@ -149,14 +149,14 @@
         ;; send path ignores mode (no Latin-1 byte-string rule anymore)
         (tcp-send c [(bytes 0 255 128) "é"])
         (tcp-close c)
-        (let (got (tcp-drain s))
+        (let (got (drain s))
           (tcp-close s)
           (tcp-close ls)
           (assert= got (bytes 0 255 128 195 169)))))))
 
-(describe "tcp: framed reads — tcp-read-until / tcp-read-n"
+(describe "tcp: framed reads — read-until / read-n"
   :isolated
-  (test "tcp-read-until returns the frame up to+including the delimiter, plus the remainder"
+  (test "read-until returns the frame up to+including the delimiter, plus the remainder"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -164,13 +164,13 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         (tcp-send c "line one\r\nline two\r\n\r\nbody bytes here")
-        (let (r (tcp-read-until s "\r\n\r\n"))
+        (let (r (read-until s "\r\n\r\n"))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (utf8-bytes->string (nth r 0)) "line one\r\nline two\r\n\r\n")
           (assert= (utf8-bytes->string (nth r 1)) "body bytes here")))))
-  (test "tcp-read-until spans chunk boundaries (delimiter split across sends)"
+  (test "read-until spans chunk boundaries (delimiter split across sends)"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -179,7 +179,7 @@
         (tcp-set-binary s true)
         (tcp-send c "abc\r")
         (tcp-send c "\n\r\nxyz")
-        (let (r (tcp-read-until s "\r\n\r\n"))
+        (let (r (read-until s "\r\n\r\n"))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
@@ -189,7 +189,7 @@
   ;; over as many chunks as it has bytes is the exact boundary case — one byte per
   ;; chunk means every straddle slot is in use. A `tail` off by one loses the match
   ;; and the read hangs to EOF instead of framing.
-  (test "tcp-read-until finds a delimiter delivered one byte per chunk"
+  (test "read-until finds a delimiter delivered one byte per chunk"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -200,20 +200,20 @@
         ;; reads, and this case is precisely about NOT being coalesced.
         (dolist (b (list "a" "b" "\r" "\n" "\r" "\n" "z"))
           (send (self) [:tcp s (bytes-concat b)]))
-        (let (r (tcp-read-until s "\r\n\r\n"))
+        (let (r (read-until s "\r\n\r\n"))
           (assert= (utf8-bytes->string (nth r 0)) "ab\r\n\r\n")
           ;; `rest` is only surplus from the chunk that COMPLETED the delimiter, and
           ;; here that chunk is the bare "\n" — so "z" is not surplus, it is still an
           ;; unreceived message. It must survive for the next framed read.
           (assert= (utf8-bytes->string (nth r 1)) "")
-          (let (r2 (tcp-read-n s 1))
+          (let (r2 (read-n s 1))
             (tcp-close c)
             (tcp-close s)
             (tcp-close ls)
             (assert= (utf8-bytes->string (nth r2 0)) "z"))))))
   ;; A near-miss that shares a prefix with the delimiter must not be reported: the
   ;; straddle window carries "\r\n\r" forward, so a following "x" has to reject.
-  (test "tcp-read-until does not match a partial delimiter carried across chunks"
+  (test "read-until does not match a partial delimiter carried across chunks"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -225,7 +225,7 @@
         ;; the straddle probe, never from a scan of the whole buffer).
         (dolist (b (list "h" "\r\n\r" "x" "\r\n" "\r\ntail"))
           (send (self) [:tcp s (bytes-concat b)]))
-        (let (r (tcp-read-until s "\r\n\r\n"))
+        (let (r (read-until s "\r\n\r\n"))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
@@ -234,7 +234,7 @@
   ;; The frame boundary is computed from a running byte total plus an offset into the
   ;; straddle probe, not from a scan of the whole buffer — so the cut must still land
   ;; correctly after many chunks have gone by.
-  (test "tcp-read-until cuts at the right offset after many chunks"
+  (test "read-until cuts at the right offset after many chunks"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -243,13 +243,13 @@
         (tcp-set-binary s true)
         (dotimes (i 200) (send (self) [:tcp s (bytes-concat "0123456789")]))
         (send (self) [:tcp s (bytes-concat "END\r\n\r\nrest")])
-        (let (r (tcp-read-until s "\r\n\r\n"))
+        (let (r (read-until s "\r\n\r\n"))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (byte-length (nth r 0)) (+ 2000 3 4))
           (assert= (utf8-bytes->string (nth r 1)) "rest")))))
-  (test "tcp-read-until returns [:closed acc] when the delimiter never arrives"
+  (test "read-until returns [:closed acc] when the delimiter never arrives"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -258,12 +258,12 @@
         (tcp-set-binary s true)
         (tcp-send c "no delimiter here")
         (tcp-close c)
-        (let (r (tcp-read-until s "\r\n\r\n"))
+        (let (r (read-until s "\r\n\r\n"))
           (tcp-close s)
           (tcp-close ls)
           (assert= (first r) :closed)
           (assert= (utf8-bytes->string (nth r 1)) "no delimiter here")))))
-  (test "tcp-read-n returns exactly n bytes and the surplus"
+  (test "read-n returns exactly n bytes and the surplus"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -271,13 +271,13 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         (tcp-send c "0123456789EXTRA")
-        (let (r (tcp-read-n s 10))
+        (let (r (read-n s 10))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (utf8-bytes->string (nth r 0)) "0123456789")
           (assert= (utf8-bytes->string (nth r 1)) "EXTRA")))))
-  (test "tcp-read-n accumulates across chunks"
+  (test "read-n accumulates across chunks"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -286,13 +286,13 @@
         (tcp-set-binary s true)
         (tcp-send c "aaa")
         (tcp-send c "bbbbb")
-        (let (r (tcp-read-n s 6))
+        (let (r (read-n s 6))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (utf8-bytes->string (nth r 0)) "aaabbb")
           (assert= (utf8-bytes->string (nth r 1)) "bb")))))
-  (test "tcp-read-n returns [:closed acc] on early EOF"
+  (test "read-n returns [:closed acc] on early EOF"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -301,7 +301,7 @@
         (tcp-set-binary s true)
         (tcp-send c "short")
         (tcp-close c)
-        (let (r (tcp-read-n s 100))
+        (let (r (read-n s 100))
           (tcp-close s)
           (tcp-close ls)
           (assert= (first r) :closed)
@@ -314,7 +314,7 @@
 ;; or accumulate without bound, which is why hatch could not adopt them.
 (describe "tcp: framed-read limits — :timeout-ms / :max-bytes"
   :isolated
-  (test "tcp-read-until returns [:timeout acc] when the peer goes silent"
+  (test "read-until returns [:timeout acc] when the peer goes silent"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -323,13 +323,13 @@
         (tcp-set-binary s true)
         ;; a partial head, then silence — the slow-loris hold
         (tcp-send c "GET / HTTP/1.1\r\n")
-        (let (r (tcp-read-until s "\r\n\r\n" {:timeout-ms 150}))
+        (let (r (read-until s "\r\n\r\n" {:timeout-ms 150}))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (first r) :timeout)
           (assert= (utf8-bytes->string (nth r 1)) "GET / HTTP/1.1\r\n")))))
-  (test "tcp-read-until returns [:too-large acc] when the delimiter never arrives"
+  (test "read-until returns [:too-large acc] when the delimiter never arrives"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -337,7 +337,7 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         (tcp-send c (string/repeat "x" 200))
-        (let (r (tcp-read-until s "\r\n\r\n" {:max-bytes 64 :timeout-ms 2000}))
+        (let (r (read-until s "\r\n\r\n" {:max-bytes 64 :timeout-ms 2000}))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
@@ -351,12 +351,12 @@
         (tcp-set-binary s true)
         ;; 6 bytes of head + 4 of delimiter = exactly 10
         (tcp-send c "abcdef\r\n\r\n")
-        (let (r (tcp-read-until s "\r\n\r\n" {:max-bytes 10 :timeout-ms 2000}))
+        (let (r (read-until s "\r\n\r\n" {:max-bytes 10 :timeout-ms 2000}))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (utf8-bytes->string (nth r 0)) "abcdef\r\n\r\n")))))
-  (test "tcp-read-until with limits set still returns a normal frame"
+  (test "read-until with limits set still returns a normal frame"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -364,13 +364,13 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         (tcp-send c "HEAD\r\n\r\nBODY")
-        (let (r (tcp-read-until s "\r\n\r\n" {:max-bytes 4096 :timeout-ms 2000}))
+        (let (r (read-until s "\r\n\r\n" {:max-bytes 4096 :timeout-ms 2000}))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (utf8-bytes->string (nth r 0)) "HEAD\r\n\r\n")
           (assert= (utf8-bytes->string (nth r 1)) "BODY")))))
-  (test "tcp-read-n refuses an over-cap declared length before reading anything"
+  (test "read-n refuses an over-cap declared length before reading anything"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -379,12 +379,12 @@
         (tcp-set-binary s true)
         ;; nothing is sent: the point is that the cap is decided from `n` alone,
         ;; so this returns immediately rather than blocking for bytes
-        (let (r (tcp-read-n s 1000000 {:max-bytes 1024}))
+        (let (r (read-n s 1000000 {:max-bytes 1024}))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (first r) :too-large)))))
-  (test "tcp-read-n returns [:timeout acc] when the body stalls mid-stream"
+  (test "read-n returns [:timeout acc] when the body stalls mid-stream"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -392,13 +392,13 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         (tcp-send c "abc")
-        (let (r (tcp-read-n s 100 {:timeout-ms 150}))
+        (let (r (read-n s 100 {:timeout-ms 150}))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (first r) :timeout)
           (assert= (utf8-bytes->string (nth r 1)) "abc")))))
-  (test "tcp-read-n with limits set still returns a normal body"
+  (test "read-n with limits set still returns a normal body"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -406,7 +406,7 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         (tcp-send c "0123456789EXTRA")
-        (let (r (tcp-read-n s 10 {:max-bytes 4096 :timeout-ms 2000}))
+        (let (r (read-n s 10 {:max-bytes 4096 :timeout-ms 2000}))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
@@ -440,7 +440,7 @@
         ;; every time and can never fire. Only the 300ms total deadline ends this.
         (spawn (drip-bytes c 100 40))
         (let (started (now)
-              r (tcp-read-until s "\r\n\r\n" {:timeout-ms 250 :deadline-ms 300})
+              r (read-until s "\r\n\r\n" {:timeout-ms 250 :deadline-ms 300})
               elapsed (- (now) started))
           (tcp-close c)
           (tcp-close s)
@@ -462,7 +462,7 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         (tcp-send c "GET / HTTP/1.1\r\n\r\nBODY")
-        (let (r (tcp-read-until s "\r\n\r\n" {:timeout-ms 2000 :deadline-ms 2000}))
+        (let (r (read-until s "\r\n\r\n" {:timeout-ms 2000 :deadline-ms 2000}))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
@@ -478,7 +478,7 @@
         ;; :deadline-ms 0 — the budget is gone before the first receive. The wait is
         ;; floored at 1ms, so this must return immediately, not block on `after 0`.
         (let (started (now)
-              r (tcp-read-until s "\r\n\r\n" {:deadline-ms 0})
+              r (read-until s "\r\n\r\n" {:deadline-ms 0})
               elapsed (- (now) started))
           (tcp-close c)
           (tcp-close s)
@@ -487,7 +487,7 @@
           ;; generous for a call that should return in ~1ms — it only has to prove we did not
           ;; block, and a wall-clock bound must survive a loaded machine
           (assert= (< elapsed 3000) true)))))
-  (test "tcp-read-n is bounded by the deadline too"
+  (test "read-n is bounded by the deadline too"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -497,13 +497,13 @@
         ;; a declared 100-byte body that drips in and never completes in time
         (spawn (drip-bytes c 100 40))
         (let (started (now)
-              r (tcp-read-n s 100 {:timeout-ms 250 :deadline-ms 300})
+              r (read-n s 100 {:timeout-ms 250 :deadline-ms 300})
               elapsed (- (now) started))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)
           (assert= (first r) :timeout)
-          ;; same bound, same reasoning as the tcp-read-until case above
+          ;; same bound, same reasoning as the read-until case above
           (assert= (< elapsed 3000) true))))))
 
 ;; `:seed` — the bytes a caller already holds. A protocol reading frame after frame off one
@@ -520,7 +520,7 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         ;; nothing is ever sent on the socket — the answer is entirely in the seed
-        (let (r (tcp-read-until s
+        (let (r (read-until s
                   "\r\n\r\n"
                   {:seed (string->utf8-bytes "GET / HTTP/1.1\r\n\r\nEXTRA") :timeout-ms 2000}))
           (tcp-close c)
@@ -538,7 +538,7 @@
         ;; the seed ends mid-terminator ("\r\n\r"); the socket delivers the final "\n".
         ;; This is the case a caller cannot handle by scanning the seed itself.
         (tcp-send c "\nBODY")
-        (let (r (tcp-read-until s
+        (let (r (read-until s
                   "\r\n\r\n"
                   {:seed (string->utf8-bytes "GET / HTTP/1.1\r\n\r") :timeout-ms 2000}))
           (tcp-close c)
@@ -554,7 +554,7 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         (tcp-send c "Host: x\r\n\r\nREST")
-        (let (r (tcp-read-until s
+        (let (r (read-until s
                   "\r\n\r\n"
                   {:seed (string->utf8-bytes "GET / HTTP/1.1\r\n") :timeout-ms 2000}))
           (tcp-close c)
@@ -569,7 +569,7 @@
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
-        (let (r (tcp-read-until s
+        (let (r (read-until s
                   "\r\n\r\n"
                   {:seed (string->utf8-bytes (string/repeat "x" 200))
                    :max-bytes 64
@@ -586,7 +586,7 @@
         (tcp-controlling-process s (self))
         (tcp-set-binary s true)
         (tcp-send c "LINE\r\n\r\nTAIL")
-        (let (r (tcp-read-until s "\r\n\r\n" {:seed #b"" :timeout-ms 2000}))
+        (let (r (read-until s "\r\n\r\n" {:seed #b"" :timeout-ms 2000}))
           (tcp-close c)
           (tcp-close s)
           (tcp-close ls)

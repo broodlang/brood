@@ -33,7 +33,7 @@
           port (first pc)
           cert (second pc))
       (let (s (tls-request "localhost" port "hello over tls" cert))
-        (let (resp (utf8-bytes->string (tcp-drain s)))
+        (let (resp (utf8-bytes->string (drain s)))
           (assert= resp "secret reply")))))
   (test "a binary-mode TLS response is byte-faithful bytes"
     (let (pc (tls-serve-one (bytes 0 255 128 65))
@@ -41,7 +41,7 @@
           cert (second pc))
       (let (s (tls-request "localhost" port "gimme bytes" cert))
         (tcp-set-binary s true)
-        (assert= (tcp-drain s) (bytes 0 255 128 65)))))
+        (assert= (drain s) (bytes 0 255 128 65)))))
   (test "an iolist request (with a bytes leaf) reaches the server byte-faithfully"
     (let (me (self))
       (spawn
@@ -77,7 +77,7 @@
                 (first port-cert)
                 ["HEAD " (bytes 1 254) " TAIL"]
                 (second port-cert)))
-        (let (resp (utf8-bytes->string (tcp-drain s)))
+        (let (resp (utf8-bytes->string (drain s)))
           ;; "HEAD " = 72 69 65 68 32, then 1 254, then " TAIL" = 32 84 65 73 76
           (assert= resp "[72 69 65 68 32 1 254 32 84 65 73 76]")))))
   (test "an untrusted cert is a clean [:tcp-error …], not a hang"
