@@ -1908,3 +1908,28 @@ instead of re-`include_str!`ing the removed file). Runtime behaviour, source pos
 the materialized `~/.cache/brood/prelude.blsp` LSP copy are unchanged. `nest format`
 normalized the split files (trailing blank at each boundary); boot + maps/strings/namespace
 suites green.
+
+## 2026-08-19 — Prefix rollout, long tail: io/task/reload/protocol/gen/hash/format/package/telemetry/explain (ADR-236)
+
+Finished the redundant-prefix cleanup across the remaining modules. Only PUBLIC functions were
+de-prefixed — private `defn- mod-*` helpers keep their prefix (never exported, so no user-visible
+`mod/mod-helper` doubling, and renaming ~400 of them across project/package would be pure churn).
+Clean renames (no core collision): io-write→io/write, task-latest→task/latest,
+reload-on-change→reload/on-change, protocol-ops→protocol/ops, gen-call→gen/call, hash-string→
+hash/string, all of format/package/telemetry's public surface, explain-error→explain/error. A
+boundary lookahead `(?![-\w?!])` protected prefixes-of-private-names (format-source vs
+format-source-glue).
+
+**"The prefix earns its keep" — modules deliberately NOT de-prefixed.** A de-prefixed name that
+shadows a core MACRO or a HOF-value breaks in ways call-site `/escape` can't catch (a macro in
+head position; `min`/`max`/`apply` passed as *values* to `reduce`/`apply`): fuzzy-match/filter
+(`match` is a macro), stats-max/min (`reduce min`), project-apply (`apply`). These keep their
+prefix, same call as the net modules (tcp/sse/http, whose prefix matches the kernel's bare
+`tcp-*` socket builtins). The prefix there is disambiguation, not noise.
+
+**Prelude shrink (B) assessed and declined.** Moving `random` (rand/rand-int/shuffle/sample) out
+of the prelude into a module would touch ~184 bare call sites and is a UX regression — bare
+`rand-int` is idiomatic and correct, and these are Brood defns, not core *semantics* (the "small
+core" rule is about special forms/evaluator, which these aren't). `spy` is a bare debug
+convenience by design. So the prelude is left as-is; the split (A) stands, the shrink (B) has no
+clear win.
