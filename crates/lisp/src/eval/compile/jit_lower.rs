@@ -113,6 +113,29 @@ static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// `roots[base]`**, and returns `0` (Done) or `1` (deopt — an operand wasn't an `Int`).
 /// The returned pointer is valid for the life of `jit` (its module owns the code).
 #[cfg(feature = "jit")]
+/// Report a lowering refusal that happens BEFORE `plan_general_lowering`'s profitability
+/// gate, under the same `BROOD_JIT_BAIL_TRACE=1` flag and the same `[jit-bail]` line shape
+/// as `jit_plan`'s `trace_bail`, so one grep covers both.
+///
+/// These four sites used to return `None` silently, and the caller stores `BAILED` — so an
+/// arm refused here was indistinguishable from one that was never hot. That cost real time
+/// on 2026-08-20: the `receive` matcher for a tagged tuple (`[:ping x]`, the shape every
+/// `gen`/supervisor protocol uses) is refused here, runs on the VM at 454 ns against 59 ns
+/// for the natively-lowered keyword matcher, and the trace named nine unrelated prelude arms
+/// and not this one. Absence of evidence read as absence of a refusal.
+#[cfg(feature = "jit")]
+fn trace_lower_bail(arm: &CompiledArm, reason: &'static str) -> Option<*const u8> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        let name = arm
+            .dbg_name
+            .map(crate::core::value::symbol_name_ref)
+            .unwrap_or("<closure>");
+        eprintln!("[jit-bail] arm={name} reason={reason}");
+    }
+    None
+}
+
 pub(crate) fn jit_lower_arm(
     jit: &mut crate::jit::CraneliftBackend,
     arm: &CompiledArm,
@@ -212,7 +235,7 @@ pub(crate) fn jit_lower_inlined_arm(
         // heap on this thread). Refuse → the upgrade BAILs and the small native keeps
         // running; the caller re-derives fresh only when its closure is recompiled.
         if arm.compile_epoch.load(std::sync::atomic::Ordering::Acquire) != leaf.epoch {
-            return None;
+            return trace_lower_bail(arm, "leaf-derivation-stale");
         }
         // The spliced body + chunk live on the resume arm, which `arm` owns and
         // `JIT_ARM_KEEPALIVE` retains for the process lifetime — so the `ConstVal`
@@ -446,7 +469,7 @@ fn jit_lower_arm_inner(
     // 0-local fn like `(defn k () 7)`) has `base == roots_len`, so `roots[base]` is out of
     // bounds. Such arms are trivial; bail and let the VM run them.
     if nslots == 0 {
-        return None;
+        return trace_lower_bail(arm, "zero-slot-arm");
     }
 
     // ---- Pre-bail on any out-of-subset instruction (so we never half-build) ----
@@ -458,7 +481,7 @@ fn jit_lower_arm_inner(
     // common `(- i 1)` / `(+ acc i)` loop body, so lowering them is what makes the JIT
     // fire on real compiled code.
     if !chunk_in_jit_subset(code) {
-        return None;
+        return trace_lower_bail(arm, "chunk-outside-jit-subset");
     }
 
     // ---- Body-weight gate for arms ending in a tail call (jit-tier2.md §6.2). ----
@@ -506,7 +529,7 @@ fn jit_lower_arm_inner(
             })
             .count();
         if work < TAIL_CALL_MIN_WORK {
-            return None;
+            return trace_lower_bail(arm, "tail-call-below-min-work");
         }
     }
 

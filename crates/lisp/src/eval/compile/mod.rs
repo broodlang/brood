@@ -2470,6 +2470,27 @@ fn hof_apply_native(
         // different fixes (never got hot / deopt-latched off / still compiling).
         if code == crate::jit::BAILED {
             crate::perf_bump!(hof_decline_bailed);
+            // Name the arm under BROOD_JIT_BAIL_TRACE. The counter says "some HOF arm is
+            // BAILED N times" and stops there — and the `receive` matcher for a tagged
+            // tuple turned out to be exactly such an arm on 2026-08-20, invisible in every
+            // other trace because it is refused somewhere that does not report.
+            {
+                static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                    static SEEN: std::sync::OnceLock<
+                        std::sync::Mutex<std::collections::HashSet<usize>>,
+                    > = std::sync::OnceLock::new();
+                    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(Default::default()));
+                    let key = Arc::as_ptr(arm) as usize;
+                    if seen.lock().map(|mut g| g.insert(key)).unwrap_or(false) {
+                        let name = arm
+                            .dbg_name
+                            .map(crate::core::value::symbol_name_ref)
+                            .unwrap_or("<closure>");
+                        eprintln!("[jit-bail] arm={name} reason=hof-arm-already-bailed");
+                    }
+                }
+            }
         } else if code == crate::jit::QUEUED {
             crate::perf_bump!(hof_decline_queued);
         } else {
