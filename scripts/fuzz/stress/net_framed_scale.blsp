@@ -24,8 +24,8 @@
 (def size (let (e (getenv "SIZE")) (if e (string->number e) 64)))
 
 (def sep "\r\n\r\n")
-(def filler (bytes-concat (string-repeat "x" size)))
-(def final (bytes-concat (list (string-repeat "y" size) sep "TRAILER")))
+(def filler (bytes-concat (string/repeat "x" size)))
+(def final (bytes-concat (list (string/repeat "y" size) sep "TRAILER")))
 
 ;; Queue the whole drip up front, then read: the reader never waits, so the number
 ;; measured is pure accumulate/scan cost, not scheduling.
@@ -38,7 +38,7 @@
   (do
     (drip sock chunks)
     (let (t0 (now-ns)
-          r (tcp-read-until sock sep)
+          r (read-until sock sep)
           us (quot (- (now-ns) t0) 1000))
       (do
         (if (not (= (utf8-bytes->string (nth r 1)) "TRAILER"))
@@ -49,14 +49,14 @@
           nil)
         us))))
 
-;; Control 1: `tcp-read-n` over the same drip. It was already O(total) (running byte
+;; Control 1: `tcp/read-n` over the same drip. It was already O(total) (running byte
 ;; count, one concat), so it is the reference for what the accumulate path costs when
 ;; nothing rescans.
 (defn bench-tcp-read-n (sock)
   (do
     (drip sock chunks)
     (let (t0 (now-ns)
-          r (tcp-read-n sock (* size (+ chunks 1)))
+          r (read-n sock (* size (+ chunks 1)))
           us (quot (- (now-ns) t0) 1000))
       us)))
 
@@ -88,5 +88,5 @@
              (quot (* us 1000) chunks))))
 
 (report "floor" (bench-floor :sock-floor))
-(report "tcp-read-n" (bench-tcp-read-n :sock-n))
-(report "tcp-read-until" (bench-tcp-read-until :sock-a))
+(report "tcp/read-n" (bench-tcp-read-n :sock-n))
+(report "tcp/read-until" (bench-tcp-read-until :sock-a))

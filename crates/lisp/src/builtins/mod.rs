@@ -336,7 +336,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int], float),
         bits_to_float,
     );
-    // pair / sequence — `empty?` is Brood (type dispatch over string-length /
+    // pair / sequence — `empty?` is Brood (type dispatch over string/length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
     // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
     // tail is built via `heap.list`), never a vector.
@@ -3310,7 +3310,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%set-has?", &["s", "x"], "Is x an element of set s? O(log n)."),
     ("%set-count", &["s"], "The number of elements in set s. O(1) — the CHAMP root tracks its size."),
     ("string/length", &["s"], "The number of characters in string s."),
-    ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length."),
+    ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string/length."),
     ("string/substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string/length s), so (string/substring s start) is \"from start to the end\"."),
     ("string/split", &["s", "sep"], "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters."),
     ("string/to-codepoints", &["s"], "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes))."),
@@ -3331,8 +3331,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ),
     ("string/to-graphemes", &["s"], "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string->codepoints; (apply str (string/to-graphemes s)) is s."),
     ("string/normalize", &["s", "form"], "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text."),
-    ("string/span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string-span-until."),
-    ("string/span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string/length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string-span."),
+    ("string/span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string/span-until."),
+    ("string/span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string/length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string/span."),
     ("string/upper", &["s"], "s upper-cased (Unicode-aware)."),
     ("string/lower", &["s"], "s lower-cased (Unicode-aware)."),
     ("char->int", &["s"], "Unicode codepoint of the first character of string s (identical to the byte value for ASCII)."),

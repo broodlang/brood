@@ -546,6 +546,57 @@ mod queue {
 }
 
 // ---------------------------------------------------------------------------
+// pq
+// ---------------------------------------------------------------------------
+// The min-priority queue split out of `queue` (ADR-236). Its own docstring warns
+// "O(n) insert / O(1) pop … swap to a heap if n gets large", and nothing measured
+// that, so the sizes here are chosen to make the claim falsifiable: `insert` walks
+// the sorted list only until it finds a LOWER-priority entry, so the cost is set by
+// insertion ORDER, not by n alone. Both rows do identical work at the API level and
+// should diverge — descending stays linear in n, ascending goes quadratic. If they
+// ever track each other, the sorted list has been replaced (or the walk broken).
+mod pq {
+    use super::*;
+
+    /// Insert `n` items in DESCENDING priority, then pop all, summing priorities.
+    /// Each insert is smaller than the current head, so it stops on the first
+    /// comparison — the O(1)-insert best case.
+    #[divan::bench(args = [100, 1_000])]
+    fn insert_descending_pop_all(bencher: divan::Bencher, n: usize) {
+        bench_prog(
+            bencher,
+            format!(
+                "\
+                 (defn fill (q k) \
+                   (if (= k 0) q \
+                     (fill (pq/insert q k k) (- k 1)))) \
+                 (defn drain (q acc) \
+                   (if (pq/empty? q) acc \
+                     (let (r (pq/pop q)) \
+                       (drain (second r) (+ acc (first r)))))) \
+                 (drain (fill (pq/new) {n}) 0)"
+            ),
+        );
+    }
+
+    /// Insert `n` items in ASCENDING priority — the O(n)-insert worst case, since
+    /// every new entry outranks the whole list and walks it. Quadratic overall.
+    #[divan::bench(args = [100, 1_000])]
+    fn insert_ascending(bencher: divan::Bencher, n: usize) {
+        bench_prog(
+            bencher,
+            format!(
+                "\
+                 (defn fill (q k) \
+                   (if (> k {n}) q \
+                     (fill (pq/insert q k k) (+ k 1)))) \
+                 (fill (pq/new) 1)"
+            ),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // multimap
 // ---------------------------------------------------------------------------
 mod multimap {

@@ -540,12 +540,12 @@ pub fn macroexpand_to_string(
 }
 
 /// Reformat a Brood source string by routing through `std/format.blsp`'s
-/// `(source SRC)`. Idempotent (`format(format(x)) == format(x)`).
+/// `(format/source SRC)`. Idempotent (`format(format(x)) == format(x)`).
 /// `src` is interpolated into a Brood string literal, so it can contain
 /// arbitrary whitespace including newlines — only `\` and `"` need escaping
 /// (the reader's string rule, [`read_string`]).
 ///
-/// `Err` covers both a parse error in `src` (which `source` surfaces
+/// `Err` covers both a parse error in `src` (which `format/source` surfaces
 /// through its CST) and a missing or malformed `std/format` module.
 ///
 /// [`read_string`]: crate::syntax::reader
@@ -555,7 +555,7 @@ pub fn format_source(interp: &mut Interp, src: &str) -> Result<String, String> {
     let code = format!("(format/source \"{escaped}\")");
     let result = match interp.eval_str(&code) {
         Ok(Value::Str(id)) => Ok(interp.heap.string(id).to_string()),
-        Ok(_) => Err("source did not return a string".to_string()),
+        Ok(_) => Err("format/source did not return a string".to_string()),
         Err(e) => Err(e.to_string()),
     };
     interp.heap.reset_local_to(cp);
