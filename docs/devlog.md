@@ -2046,3 +2046,64 @@ ADR-238 is the minimal slice of the deferred per-dep-`[:patch]` override that le
 closure (hatch, store-postgres, s3, transitive store) to git and build registry-independently — "hive
 never uses hive". (Route regression itself fixed in the hive repo: a mangled `:version-tarball` /
 `:version-docs` route string reverted to `:version/tarball` / `:version/docs`.)
+
+## 2026-08-20 — The rename-sweep gap, closed: a gate for `stress/` + `scripts/fuzz/stress/`
+
+Resuming after a crash, the tree was clean and six ADR-236 cleanup commits sat unpushed on top of
+0.5.0. `--ff-only` reported "up to date" because local was *ahead*, not level — and the reflog showed
+those commits had been rebased onto a newer `origin/main` **after** the devlog's green run, so the
+combined tree was unverified. It re-verified green (996/996, rustfmt, `nest check` 0 warnings,
+examples) and pushed.
+
+**CI then went red on `clippy + test`, and the gap in my own verification was the interesting part.**
+`make test` and `cargo build` do not compile `benches/`; only `cargo clippy --all-targets` does. The
+prelude split had left `parse_prelude` `include_str!`ing the monolithic `std/prelude.blsp`, which no
+longer exists. Fixed by pointing it at `brood::PRELUDE` (already `pub`) rather than a second
+hand-written copy of the nine-file list — the bench now measures the same bytes the runtime uses and
+inherits `prelude_manifest.rs`'s guarantee, so the next split cannot rot it.
+
+**Then the same rot, one directory over — and grep under-counted it.** `stress/` and
+`scripts/fuzz/stress/` are outside `make test`, `nest check`, the breakage suite and
+`check-examples`. Grepping for ADR-236's names found 3 broken files; **running them found 8**,
+because the earlier ADR-230 `string/*` wave had rotted them too:
+
+- `string-length`, `string-split`, `string-repeat`, `string-span`, `string-span-until` (5 files)
+- `format-source`, `gen-call`, `tcp-read-n`, `tcp-read-until` (3 files)
+- some **double-prefixed** (`stream/stream-to-list`, `sse/sse-frames`) — the sweep qualified a name
+  the module had also shortened
+
+Two judgment calls a blind `s///` gets wrong. **`string/repeat` must stay qualified**: the prelude's
+seq `repeat` takes its arguments in the OPPOSITE order, so a bare name would have silently computed
+the wrong thing instead of failing — the dangerous shape, working-but-wrong rather than unbound. And
+the first pass of my own regex renamed local helpers (`bench-tcp-read-until`) and printed row labels,
+stripping the disambiguator out of text a human reads — **exactly the damage the original sweep did
+to prose**, reproduced one step later by the person cleaning it up. Restored, with the labels
+qualified (`tcp/read-until`) instead.
+
+**A user-facing defect fell out of the hunt.** `(doc string/span)` ended "See also
+`string-span-until`" and `string/span-until` ended "The complement of `string-span`" — both naming
+symbols removed by ADR-230, so the cross-reference a reader types next is unbound. `display-width`
+called itself "the width-aware counterpart to `string-length`". A stale name in `doc` is a broken
+lookup, not untidy prose.
+
+**The durable fix: `scripts/check-stress.sh` + `make check-stress`, gating every PR.** Modelled
+directly on `check-examples.sh`, which exists for this same failure in `examples/`. It asserts **no
+`unbound symbol`** rather than exit 0 — these are soaks and storms that legitimately never finish
+under a gate, so their exit codes are environment noise while an unbound name never is — except
+`stress/*_test.blsp`, which are real tests, cheap, and held to actually passing (78 cases). All 28
+harnesses in **25 s**, so it runs on every PR: a rename goes red *before* it merges rather than one
+red build later. **Verified by sabotage in both branches** (reintroduce `format-source` in a
+harness, `string-length` in a test file → both FAIL, exit 1), and the annotate pipeline was tested
+against KI-39's own shape — `grep | while` under `-eo pipefail` with no match still reaches the end
+and prints nothing rather than killing the step.
+
+The CI job is renamed **`examples + stress still run`**, since a job labelled "examples still run"
+going red for a stress harness is the kind of misdirection that costs an hour.
+
+**Method note, three sightings in one session.** Every wrong turn came from a check that reported
+confidently and was not measuring what it claimed: `--ff-only` saying "up to date" about a branch
+that was ahead; `echo $?` after a pipe reporting `head`'s status instead of `rustfmt`'s (the exact
+trap 2026-08-19 recorded); a bare `nest check` at the repo root, which is not a `nest` project, exiting
+0 without the file-list form CI uses; and a `jq '.conclusion // "pending"'` filter that printed every
+in-flight job as concluded, because an unfinished job reports `""`, not `null`. Reproduce a gate with
+the gate's own invocation.
