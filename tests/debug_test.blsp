@@ -325,11 +325,11 @@
 ;; bounded-sink contract from `*spy-sink*`, and what every display sink should do.
 (defn bounded-sink (acc cap)
   (fn (e)
-    (let (n (or (table-get acc :n) 0))
+    (let (n (or (table/get acc :n) 0))
       (if (< n cap)
         (do
-          (table-put acc :n (inc n))
-          (table-put acc :entries (cons e (or (table-get acc :entries) '())))
+          (table/put acc :n (inc n))
+          (table/put acc :entries (cons e (or (table/get acc :entries) '())))
           (when (>= (inc n) cap) :spy-stop))
         :spy-stop))))
 
@@ -342,11 +342,11 @@
         (binding (*spy-sink* (bounded-sink acc 10))
           (tfn-countdown 5000)))
       (untrace-fn 'debug-test/tfn-countdown)
-      (assert= 10 (table-get acc :n))
+      (assert= 10 (table/get acc :n))
       ;; every kept entry is a :call — a stopped tracer delegates in tail position, so
       ;; there is no :return to emit (and for a tail call there never was one to see)
-      (assert= 10 (count (filter (fn (e) (= :call (:spy e))) (table-get acc :entries))))
-      (table-drop acc)))
+      (assert= 10 (count (filter (fn (e) (= :call (:spy e))) (table/get acc :entries))))
+      (table/drop acc)))
   (test "REGRESSION: a traced tail loop deeper than the VM's frame limit still returns"
     ;; The wrapper emits `:return` AFTER the call, so a traced self-call is no longer a
     ;; tail call and each level costs a frame: this loop used to die at ~1 048 576 with
@@ -359,8 +359,8 @@
         (binding (*spy-sink* (bounded-sink acc 50))
           (tfn-countdown 1200000)))
       (untrace-fn 'debug-test/tfn-countdown)
-      (assert= 50 (table-get acc :n))
-      (table-drop acc)))
+      (assert= 50 (table/get acc :n))
+      (table/drop acc)))
   (test "a sink that never stops still gets its :return entries (the default contract)"
     (let (me (self))
       (trace-fn 'debug-test/tfn-square)

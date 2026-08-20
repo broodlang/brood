@@ -75,18 +75,18 @@ Stable: among equal priorities, earlier inserts pop first (FIFO)."
 ;; The pq joins the collection protocol too: `Seqable` yields its values in priority order,
 ;; so `seq`/`count`/`map`/`fold`/`for`/`into`-from work on a pq. (No `Conjable`: inserting
 ;; needs a priority, which `conj`'s single element can't carry — use `pq/insert`.)
-(impl Seqable pq/pq (to-seq [q] (map second (get q :entries))))
+(impl Seqable pq/pq (->seq [q] (map second (get q :entries))))
 
-(defn to-list (q)
+(defn ->list (q)
   "All values in priority order (min first) as a list — the pq's `Seqable` view (`(seq q)`)."
   (seq q))
 
 (impl Display
   pq/pq
-  (to-str [q]
+  (->string [q]
     (if (empty? q)
       "#<pq empty>"
-      (str "#<pq " (size q) " min=" (to-str (peek-priority q)) ">"))))
+      (str "#<pq " (size q) " min=" (->string (peek-priority q)) ">"))))
 
 (impl Inspect
   pq/pq

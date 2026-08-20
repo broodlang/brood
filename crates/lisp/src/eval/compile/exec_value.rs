@@ -212,7 +212,7 @@ pub(crate) fn prim2_inline_exec(
             crate::perf_bump!(prim2_inline);
             Ok(Some(heap.alloc_pair(x, y)))
         }
-        // `vector-ref`: a dense O(1) slab read. Inline only the in-bounds
+        // `vector/ref`: a dense O(1) slab read. Inline only the in-bounds
         // `(Vector, Int)` case; non-vector / non-int / out-of-range defer
         // (`Ok(None)`) to the native, which owns the exact bounds + type errors.
         None if op == PrimOp::VectorRef => {
@@ -224,14 +224,14 @@ pub(crate) fn prim2_inline_exec(
             }
             Ok(None)
         }
-        // `table-has?` / 2-arg `table-get`: run the table op directly, skipping the
+        // `table/has?` / 2-arg `table/get`: run the table op directly, skipping the
         // whole native-call protocol. Same key guard as the natives (`check_key`), so a
         // closure/NaN key raises the identical error; a non-Table first operand defers
         // to the native for its exact type error. Errors (dropped table, bad key)
         // propagate — bit-identical to the dispatched native.
         None if op == PrimOp::TableHas => {
             if let ValueRef::Table(tid) = x.unpack() {
-                crate::core::table::check_key("table-has?", y)?;
+                crate::core::table::check_key("table/has?", y)?;
                 crate::perf_bump!(prim2_inline);
                 return Ok(Some(Value::boolean(crate::core::table::has(heap, tid, y)?)));
             }
@@ -239,7 +239,7 @@ pub(crate) fn prim2_inline_exec(
         }
         None if op == PrimOp::TableGet => {
             if let ValueRef::Table(tid) = x.unpack() {
-                crate::core::table::check_key("table-get", y)?;
+                crate::core::table::check_key("table/get", y)?;
                 crate::perf_bump!(prim2_inline);
                 return Ok(Some(crate::core::table::get(heap, tid, y, Value::Nil)?));
             }

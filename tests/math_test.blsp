@@ -94,7 +94,7 @@
   (test "pow requires an integer exponent (use sqrt for roots)" (assert-error (pow 2 0.5)))
   (test "pow and sqrt reject a non-number" (assert-error (sqrt "x")) (assert-error (pow :a 2))))
 
-;; Float math over the whole numeric tower. `floor`/`ceil`/`to-fixed` and every
+;; Float math over the whole numeric tower. `floor`/`ceil`/`->fixed` and every
 ;; transcendental used to accept only an int or a float, so they rejected a bignum, a
 ;; decimal AND a ratio — latent for the first two, but ADR-196 made `/` produce ratios
 ;; routinely, so `(sqrt (/ 200 3))` (an ordinary mean-then-sqrt) raised
@@ -103,7 +103,7 @@
 (describe "float math accepts the whole numeric tower"
   (test "a ratio coerces into the float functions"
     (assert= (sqrt 9/4) 1.5)
-    (assert= (to-fixed 7/2 2) "3.50")
+    (assert= (->fixed 7/2 2) "3.50")
     (assert= (ceil 7/2) 4)
     (assert= (round 7/2) 4))
   (test "a decimal and a bignum coerce too"
@@ -122,7 +122,7 @@
   (test "a non-number is still rejected"
     (assert-error (sqrt "x"))
     (assert-error (floor :a))
-    (assert-error (to-fixed nil 2))))
+    (assert-error (->fixed nil 2))))
 
 (describe "quot, even? and odd?"
   (test "quot is truncated integer division"

@@ -13,7 +13,7 @@ pub struct GlobalIcEntry {
 
 /// Number of impl `id → fn` associations one op's dispatch cache holds — a small
 /// **polymorphic** cache (ADR-172 §7). A single slot (monomorphic) thrashes on an op
-/// applied over mixed identities in one loop (`to-str`/`inspect` across a heterogeneous
+/// applied over mixed identities in one loop (`->string`/`inspect` across a heterogeneous
 /// collection, a comparator over several record types), re-resolving on every call; a
 /// handful of ways cover the common degree of polymorphism at a fixed, tiny cost.
 pub const DISPATCH_IC_WAYS: usize = 4;

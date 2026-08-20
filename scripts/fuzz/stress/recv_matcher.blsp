@@ -20,13 +20,13 @@
 ;;   intlit  [1 v]       yes (int)             NO — deopts ~1 per receive
 ;;
 ;; So it is **comparing a literal element** that excludes a matcher from the native fast
-;; frame — NOT the matcher's calls (`bind` calls `vector?` and `vector-length` and stays
-;; native), NOT the vector machinery (`bind` does two `vector-ref`s), and NOT anything
+;; frame — NOT the matcher's calls (`bind` calls `vector?` and `vector/size` and stays
+;; native), NOT the vector machinery (`bind` does two `vector/ref`s), and NOT anything
 ;; keyword-specific (an int literal deopts identically). Since the tagged tuple `[:tag …]`
 ;; is the dominant idiom, essentially every real `receive` is on the slow side of this.
 ;;
 ;;   vec — the idiomatic tuple pattern `[:go v]`. Its generated matcher calls `vector?` and
-;;         `vector-length`. Measured 2026-08-06: this arm lowers to native, then deopts on 16
+;;         `vector/size`. Measured 2026-08-06: this arm lowers to native, then deopts on 16
 ;;         consecutive activations, at which point `jit_deopt_feedback` marks it BAILED for
 ;;         the rest of the program (`DEOPT_BAIL_CONSECUTIVE`). Every later matcher call then
 ;;         runs on the `vm_apply` trampoline — `jit_link_done` 0, `vm_apply` ~1 per receive.
@@ -69,7 +69,7 @@
     acc
     (do
       (send (self) [:go i])
-      (receive (m (loop-any (%add i 1) (%add acc (vector-ref m 1))))))))
+      (receive (m (loop-any (%add i 1) (%add acc (vector/ref m 1))))))))
 
 ;; Bisect arms. Same message shape as `vec` throughout, so only the pattern varies.
 (defn loop-bind (i acc)

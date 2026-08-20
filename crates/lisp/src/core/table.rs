@@ -31,7 +31,7 @@
 //!
 //! ## Lifetime
 //!
-//! A table lives until `table-drop` or runtime exit (no owner-death GC in v1 — an
+//! A table lives until `table/drop` or runtime exit (no owner-death GC in v1 — an
 //! app-lifetime store created at startup is the model; owner/`heir` semantics are a
 //! deferred follow-on). Operating on a dropped/unknown handle is a clean error, never
 //! UB. Like the registry's store shells, a dropped table's dense slot region is
@@ -232,7 +232,7 @@ impl DenseSlots {
 /// flag load — no structural hash, no bucket probe, no mutex (the per-op lock
 /// round-trip and the old 16-byte-enum second cache line were most of `sieve`'s
 /// per-op cost). `dense_count` tracks non-EMPTY slots exactly (swap-based, so
-/// concurrent puts/deletes never drift) for `table-count`; `dense_max` is a
+/// concurrent puts/deletes never drift) for `table/size`; `dense_max` is a
 /// watermark (1 + highest index ever written) bounding migration/snapshot/drop
 /// scans so they never touch — and so never commit — the untouched tail.
 ///
@@ -273,7 +273,7 @@ struct Store {
     /// Latched once [`jit_dense_base`] hands this store's slot region to JIT'd
     /// code. Inline ops are a bare atomic on the key's slot — no watermark or
     /// count upkeep — so from that point `dense_count`/`dense_max` are lower
-    /// bounds only: `table-count` tallies by scan and migration/snapshot/drop
+    /// bounds only: `table/size` tallies by scan and migration/snapshot/drop
     /// scan the FULL region (reads of untouched pages skip without committing
     /// them). Set (SeqCst) *before* the pointer escapes, so any scan that could
     /// observe an inline write also observes the latch.
@@ -284,7 +284,7 @@ struct Store {
     /// The hashed representation (`Some` once migrated) — also the lock that
     /// serializes migration, snapshots, and every hashed op.
     hashed: Mutex<Option<StoreMap>>,
-    /// Tombstone for `table-drop`. The registry is append-only + lock-free, so a
+    /// Tombstone for `table/drop`. The registry is append-only + lock-free, so a
     /// dropped table is flagged in place rather than removed; `lookup` treats a
     /// tombstoned store as gone.
     dropped: AtomicBool,
@@ -359,7 +359,7 @@ impl Store {
 }
 
 /// The table registry is **lock-free**: an append-only `boxcar::Vec` indexed by
-/// `id - 1` (ids are handed out densely by `push` and never reused). A `table-put`/
+/// `id - 1` (ids are handed out densely by `push` and never reused). A `table/put`/
 /// `get`/`has?` resolves its store with a single lock-free `get` + a borrow — no
 /// registry mutex and no `Arc` clone per op, which is what makes a hot `Table` loop
 /// (`sieve`, the regex DFA memo, a process's state map) cheap. Entries are never
@@ -429,7 +429,7 @@ pub fn create() -> u64 {
     idx as u64 + 1
 }
 
-/// `(table-drop t)` — tombstone a table (the lock-free registry can't remove entries).
+/// `(table/drop t)` — tombstone a table (the lock-free registry can't remove entries).
 /// Idempotent; returns whether it was still live. Frees the hashed map and clears the
 /// touched dense slots to `EMPTY`; the slot region itself (like the store shell) is
 /// retained until process exit — the lock-free region has no exclusive owner to unmap.
@@ -466,7 +466,7 @@ pub fn drop_table(id: u64) -> bool {
     }
 }
 
-/// `(table-count t)` — number of entries. Once JIT'd code holds the dense slot
+/// `(table/size t)` — number of entries. Once JIT'd code holds the dense slot
 /// region (`jit_shared` — inline ops don't maintain the exact counter), the
 /// dense count is a full-region tally instead: O(region), still exact.
 pub fn count(id: u64) -> Result<i64, LispError> {
@@ -518,7 +518,7 @@ fn find_idx(heap: &mut Heap, bucket: &[(Message, Message)], key: Value) -> Optio
     })
 }
 
-/// `(table-put t k v)` — store a clone of `v` under a clone of `k`, overwriting any
+/// `(table/put t k v)` — store a clone of `v` under a clone of `k`, overwriting any
 /// existing entry for `k`. Returns the table handle (for threading).
 pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
     let store = lookup(id)?;
@@ -553,7 +553,7 @@ pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
     Ok(Value::table(id))
 }
 
-/// `(table-get t k [default])` — a fresh copy of the value under `k`, or `default`.
+/// `(table/get t k [default])` — a fresh copy of the value under `k`, or `default`.
 pub fn get(heap: &mut Heap, id: u64, key: Value, default: Value) -> LispResult {
     let store = lookup(id)?;
     if store.dense.load(Ordering::Acquire) {
@@ -585,7 +585,7 @@ pub fn get(heap: &mut Heap, id: u64, key: Value, default: Value) -> LispResult {
     Ok(found.map_or(default, |vm| from_message(heap, &vm)))
 }
 
-/// `(table-has? t k)` — whether `k` is present.
+/// `(table/has? t k)` — whether `k` is present.
 pub fn has(heap: &mut Heap, id: u64, key: Value) -> Result<bool, LispError> {
     let store = lookup(id)?;
     if store.dense.load(Ordering::Acquire) {
@@ -610,7 +610,7 @@ pub fn has(heap: &mut Heap, id: u64, key: Value) -> Result<bool, LispError> {
         .is_some_and(|bucket| find_idx(heap, bucket, key).is_some()))
 }
 
-/// `(table-delete t k)` — remove `k` if present. Returns the table handle.
+/// `(table/delete t k)` — remove `k` if present. Returns the table handle.
 pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
     let store = lookup(id)?;
     if store.dense.load(Ordering::Acquire) {
@@ -653,7 +653,7 @@ pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
     Ok(Value::table(id))
 }
 
-/// `(table-incr t k [delta])` — **atomically** add `delta` (default 1) to the integer
+/// `(table/incr t k [delta])` — **atomically** add `delta` (default 1) to the integer
 /// at `k` (treating an absent key as 0) and return the new value. On the dense path
 /// this is a lock-free CAS loop on the key's slot (concurrent increments never lose
 /// an update, and a racing migration can neither lose nor double-apply one — see the
@@ -673,12 +673,12 @@ pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
                     s if s & INT_TAG != 0 => ((s as i64) >> 3, false),
                     _ => {
                         return Err(LispError::type_err(
-                            "table-incr: the value at this key is not an integer",
+                            "table/incr: the value at this key is not an integer",
                         ))
                     }
                 };
                 let next = cur_int.checked_add(delta).ok_or_else(|| {
-                    LispError::runtime("table-incr: incrementing would exceed the ±2^63 range")
+                    LispError::runtime("table/incr: incrementing would exceed the ±2^63 range")
                 })?;
                 let Some(word) = slot_enc(Value::int(next)) else {
                     break; // leaves the 61-bit tagged range → migrate below
@@ -729,23 +729,23 @@ fn incr_hashed(
     let cur = match idx {
         Some(i) => match &bucket[i].1 {
             Message::Int(n) => *n,
-            // A bignum *is* an integer in Brood, but table-incr deliberately works only
+            // A bignum *is* an integer in Brood, but table/incr deliberately works only
             // in the i64 range (a counter primitive) — say so precisely.
             Message::BigInt(_) => {
                 return Err(LispError::type_err(
-                    "table-incr: the value at this key is an integer outside the ±2^63 range that table-incr supports",
+                    "table/incr: the value at this key is an integer outside the ±2^63 range that table/incr supports",
                 ))
             }
             _ => {
                 return Err(LispError::type_err(
-                    "table-incr: the value at this key is not an integer",
+                    "table/incr: the value at this key is not an integer",
                 ))
             }
         },
         None => 0,
     };
     let next = cur.checked_add(delta).ok_or_else(|| {
-        LispError::runtime("table-incr: incrementing would exceed the ±2^63 range")
+        LispError::runtime("table/incr: incrementing would exceed the ±2^63 range")
     })?;
     match idx {
         Some(i) => bucket[i].1 = Message::Int(next),
@@ -754,7 +754,7 @@ fn incr_hashed(
     Ok(Value::int(next))
 }
 
-/// `(table-snapshot t)` — a point-in-time copy of the whole table as an immutable
+/// `(table/snapshot t)` — a point-in-time copy of the whole table as an immutable
 /// Brood map. Because the entries are immutable clones, the returned map is
 /// unaffected by later mutation — the MVCC win over ETS's dirty reads. O(n) copy.
 /// Atomic per entry; on a **dense** table concurrent lock-free writes to *other*
@@ -809,7 +809,7 @@ fn snapshot_hashed(store: &Store) -> Vec<(Message, Message)> {
 /// Hand the dense slot region of table `id` to JIT'd code: `(slots_base,
 /// dense_flag)` raw pointers, or `None` when the table is missing/dropped/
 /// hashed. The region is a process-lifetime anonymous mapping that never moves
-/// (stable across GC, compaction, and even `table-drop` — see "Lifetime"), so
+/// (stable across GC, compaction, and even `table/drop` — see "Lifetime"), so
 /// baked pointers cannot dangle; every inline op re-checks the `dense` flag
 /// after its slot access and re-routes to the FFI path when it flipped
 /// (migration or drop) — the exact per-op protocol the Rust ops use. Latches

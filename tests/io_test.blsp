@@ -70,10 +70,10 @@
     (is (not (port? "a string")))
     (is (not (port? {:not :a-port}))))
   (test "a port record prints as itself, not as a field map"
-    (assert= (to-str (stdout-port)) "#<port stdout>")
-    (assert= (to-str (stderr-port)) "#<port stderr>")
-    (assert= (to-str (file-port "/tmp/x.log")) "#<port file /tmp/x.log>")
-    (is (includes? (to-str (process-port (self))) "#<port process ")))
+    (assert= (->string (stdout-port)) "#<port stdout>")
+    (assert= (->string (stderr-port)) "#<port stderr>")
+    (assert= (->string (file-port "/tmp/x.log")) "#<port file /tmp/x.log>")
+    (is (includes? (->string (process-port (self))) "#<port process ")))
   (test "a stdout port record still routes through the capture stack"
     (assert= (with-out-str (write (stdout-port) "captured")) "captured"))
   (test "port-fn adapts a record port to the bare fn *out* holds"

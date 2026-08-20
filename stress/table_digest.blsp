@@ -7,8 +7,8 @@
   (let (s1 (lcg s) c (rem s1 10) k (rem s1 4096) v (rem s1 100000))
     (do
       (cond
-        (< c 6) (table-put t k v)
-        (< c 8) (table-delete t k)
+        (< c 6) (table/put t k v)
+        (< c 8) (table/delete t k)
         else nil)
       s1)))
 (defn run (s n) (if (= n 0) s (run (one s) (- n 1))))
@@ -17,9 +17,9 @@
 (defn digest (k n cnt skv sk)
   (if (>= k n)
     [cnt skv sk]
-    (let (v (table-get t k :absent))
+    (let (v (table/get t k :absent))
       (if (= v :absent)
         (digest (+ k 1) n cnt skv sk)
         (digest (+ k 1) n (+ cnt 1) (+ skv (* k v)) (+ sk k))))))
 (let ([cnt skv sk] (digest 0 4096 0 0 0))
-  (println "digest" cnt skv sk (table-count t)))
+  (println "digest" cnt skv sk (table/size t)))

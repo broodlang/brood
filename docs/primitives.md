@@ -244,7 +244,7 @@ literal — no constructor call.
 | **Decimal** (exact base-10 for money — the `1.50M` literal) | `decimal` | 1 | Construct an exact arbitrary-precision base-10 decimal from x: a string ("1.50"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M. |
 |  | `decimal->string` | 1 | The canonical decimal string of decimal d (no M suffix). |
 |  | `decimal->float` | 1 | Decimal d as an (inexact) float. |
-|  | `to-fixed` | 2 | Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0. |
+|  | `->fixed` | 2 | Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0. |
 | **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `numerator` | 1 | The numerator of a ratio (`(numerator 3/4)` → 3), or an integer itself. |
 |  | `denominator` | 1 | The positive denominator of a ratio (`(denominator 3/4)` → 4), or 1 for an integer. |
 |  | `->decimal` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `rational` are prelude functions.) |

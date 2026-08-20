@@ -874,7 +874,7 @@ pub(super) fn vector_ref(
     Op::Handle(r0, r1, r2)
 }
 
-/// `table-has?` / 2-arg `table-get` via their runtime callbacks. Status protocol:
+/// `table/has?` / 2-arg `table/get` via their runtime callbacks. Status protocol:
 /// 0 = done (`out` holds the result), 1 = deopt (non-Table operand — the VM owns the
 /// exact type error), 2 = a real error is parked in `jit_pending_error` (dropped
 /// table / bad key) → exit via the arm's error block (outcome 3). The callbacks may

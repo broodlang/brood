@@ -47,9 +47,9 @@
     (is (buffer? (undo (insert (make-buffer "ab") "c"))))
     (is (buffer? (set-mark (make-buffer "ab")))))
   (test "a buffer displays as a short identification, never its text"
-    (assert= (to-str (make-buffer "hello world")) "#<buffer *scratch* 11 chars>")
-    (assert= (to-str (make-buffer "x" "notes")) "#<buffer notes 1 chars>")
-    (is (not (includes? (to-str (make-buffer "secret")) "secret"))))
+    (assert= (->string (make-buffer "hello world")) "#<buffer *scratch* 11 chars>")
+    (assert= (->string (make-buffer "x" "notes")) "#<buffer notes 1 chars>")
+    (is (not (includes? (->string (make-buffer "secret")) "secret"))))
   (test "inspect adds the debugging detail"
     (let (b (set-mark (goto-char (make-buffer "hello" "notes" "/tmp/n.txt") 3)))
       (assert= (inspect b) "#<buffer notes 5 chars point=3 mark=3 file=/tmp/n.txt>")))

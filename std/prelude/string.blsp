@@ -1,11 +1,8 @@
 ;; ---- symbol / keyword conversions -------------------------------------------
 ;; `symbol` and `keyword` (Rust) are lenient — they take string/symbol/keyword.
-;; These are the strict named conversions: each errors on the wrong input shape,
-;; matching the Scheme/Clojure tradition. Thin Brood wrappers, no new kernel.
-
-(defn symbol->string (s)
-  "The spelling of symbol `s` as a string. Errors if `s` isn't a symbol."
-  (if (symbol? s) (name s) (error "symbol->string: expected a symbol, got " (type-of s))))
+;; The symbol → string direction is the polymorphic `->string` (Display) op, or the
+;; kernel `name`/`str`; only the strict string → symbol wrapper below is a named
+;; conversion (it errors on the wrong input shape). Thin Brood wrapper, no new kernel.
 
 (defn string->symbol (s)
   "The symbol whose spelling is the string `s`. Errors if `s` isn't a string."
@@ -36,10 +33,6 @@ an absent feature is still **bound** and still raises when called, so `(bound?
 'gui-open)` answers yes on a runtime that cannot open a window. An app that wants
 to degrade rather than fail asks the build."
   (includes? (features) name))
-
-(defn number->string (n)
-  "The textual form of number `n` — the inverse of `string->number`."
-  (str n))
 
 (defn- index-of-seq-from
   (coll x i from)
@@ -144,7 +137,7 @@ incremental search rides on."
 (defmacro fmt (template)
   "Build a string from a template, splicing each `{expr}` hole's value between the literal text: `(fmt \"x={x} sum={(+ a b)}\")`. `{{`/`}}` are literal braces; braces nest inside a hole. Expands to a plain `(str …)`."
   (if (string? template)
-    (cons 'str (fmt-lit (string/to-list template) nil nil))
+    (cons 'str (fmt-lit (string/->list template) nil nil))
     (error "fmt: template must be a string literal, got " (pr-str template))))
 
 ;; ---- string formatting ------------------------------------------------------
@@ -154,7 +147,7 @@ incremental search rides on."
 ;;   %d    integer (any number; the type tag is a hint for the reader, not a
 ;;         converter — float in / float out, same as %s)
 ;;   %f    float with 6 fractional digits (matches the C/Java default)
-;;   %.Nf  float with N fractional digits, rounded — uses `to-fixed`
+;;   %.Nf  float with N fractional digits, rounded — uses `->fixed`
 ;;   %%    a literal `%`
 ;; Width / justification aren't built in — `pad-left` / `pad-right` cover those
 ;; explicitly. Hex/octal/etc. aren't here; add them on demand. Errors on an
@@ -186,7 +179,7 @@ incremental search rides on."
         (inc i)
         n
         (rest args)
-        (str acc (to-fixed (first args) 6)))
+        (str acc (->fixed (first args) 6)))
     (= (string/char-at fmt i) ".") (format-prec fmt (inc i) n args acc 0)
     else (error (str "format: unrecognized specifier '%" (string/char-at fmt i) "' at column " i))))
 
@@ -200,7 +193,7 @@ incremental search rides on."
         (inc i)
         n
         (rest args)
-        (str acc (to-fixed (first args) p)))
+        (str acc (->fixed (first args) p)))
     else
       (let (d (string->number (string/char-at fmt i)))
         (if (and (int? d) (>= d 0) (<= d 9))

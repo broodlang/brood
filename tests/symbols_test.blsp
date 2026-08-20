@@ -1,6 +1,7 @@
 ;; Symbol & keyword tools: `name` (existing kernel) plus the new constructors
 ;; `symbol` / `keyword` (Rust, lenient — string/symbol/keyword in) and the strict
-;; named conversions `symbol->string` / `string->symbol` (Brood, in prelude).
+;; string → symbol conversion `string->symbol` (Brood, in prelude). The reverse
+;; direction is the polymorphic `->string` (Display) op / `name`, not a wrapper.
 ;; Register-only — discovered and run by `nest test` (and `cargo test`, via
 ;; crates/lisp/tests/suite.rs).
 
@@ -37,11 +38,12 @@
   ;; tag distinguishes them.
   (test "shared interner" (assert= (name 'shared) (name :shared))))
 
-(describe "symbol->string (strict)"
-  (test "symbol input" (assert= (symbol->string 'foo) "foo"))
-  (test "rejects keyword" (assert-error (symbol->string :foo)))
-  (test "rejects string" (assert-error (symbol->string "foo")))
-  (test "rejects int" (assert-error (symbol->string 42))))
+(describe "symbol -> string via ->string / name"
+  ;; The symbol → string direction is the polymorphic `->string` (Display) op — no
+  ;; dedicated `symbol->string` wrapper. `name` gives the same spelling for a symbol.
+  (test "->string of a symbol" (assert= (->string 'foo) "foo"))
+  (test "name of a symbol" (assert= (name 'foo) "foo"))
+  (test "->string agrees with name" (assert= (->string 'bar) (name 'bar))))
 
 (describe "string->symbol (strict)"
   (test "string input" (assert= (string->symbol "foo") 'foo))

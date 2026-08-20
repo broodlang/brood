@@ -2002,7 +2002,7 @@ fn rebuild_list(heap: &mut Heap, original: Value, items: Vec<Value>) -> Value {
 ///
 /// ```text
 /// (do (def INNER (fn (P…) BODY'))                ; in-place table loop
-///     (def NAME  (fn (P…) (table-snapshot (INNER … (%table-from-map ACC) …)))))
+///     (def NAME  (fn (P…) (table/snapshot (INNER … (%table-from-map ACC) …)))))
 /// ```
 ///
 /// where `BODY'` swaps the self-recursion head `NAME→INNER` and every whitelisted
@@ -2080,8 +2080,8 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     // Snapshot the loop's result back to an immutable map **only when it is the table**.
     // The accumulator is what the linearity proof licenses rewriting in place, but the base
     // case is free to return something else entirely — `(map-count acc)`, `(map-get acc :a)`,
-    // or a plain constant — and an unconditional `table-snapshot` then failed on a value it
-    // was never given: `table-snapshot: expected table, got int (3)`. `linmap_linear` admits
+    // or a plain constant — and an unconditional `table/snapshot` then failed on a value it
+    // was never given: `table/snapshot: expected table, got int (3)`. `linmap_linear` admits
     // those returns deliberately (a whitelisted *read* of the accumulator, or a `Const`), so
     // the wrapper, not the proof, is what has to account for them.
     //
@@ -2091,7 +2091,7 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     let r_val = value::gensym("linmap-out");
     let type_of = heap.list(vec![value::sym("type-of"), r_val]);
     let is_table = heap.list(vec![value::sym("="), value::kw("table"), type_of]);
-    let snap_call = heap.list(vec![value::sym("table-snapshot"), r_val]);
+    let snap_call = heap.list(vec![value::sym("table/snapshot"), r_val]);
     let cond = heap.list(vec![value::sym(kw::IF), is_table, snap_call, r_val]);
     let bind = heap.list(vec![r_val, inner_call]);
     let snap = heap.list(vec![value::sym(kw::LET), bind, cond]);
@@ -2140,9 +2140,9 @@ fn linmap_rewrite_form(
             matches!(items.get(1).map(|v| v.unpack()), Some(ValueRef::Sym(s)) if s == acc);
         if second_is_acc {
             let update = if value::symbol_is(h, "map-int-add") {
-                Some("table-incr")
+                Some("table/incr")
             } else if value::symbol_is(h, "map-dissoc") {
-                Some("table-delete")
+                Some("table/delete")
             } else {
                 None
             };
@@ -2156,9 +2156,9 @@ fn linmap_rewrite_form(
                 return heap.list(vec![value::sym(kw::DO), mutate, items[1]]);
             }
             let read = if value::symbol_is(h, "map-get") {
-                Some("table-get")
+                Some("table/get")
             } else if value::symbol_is(h, "map-count") {
-                Some("table-count")
+                Some("table/size")
             } else {
                 None
             };
@@ -2180,7 +2180,7 @@ fn linmap_rewrite_form(
         }
         // `(quote …)` is inert DATA, never evaluated — rewriting inside it corrupts the
         // datum instead of the program. `(println '(map-get acc 1))` printed
-        // `(table-get acc 1)`. The probe cannot catch this: a quoted form compiles to a
+        // `(table/get acc 1)`. The probe cannot catch this: a quoted form compiles to a
         // single `Node::Const`, so the linearity analysis sees no `acc` use at all and
         // passes, while the source rewrite walks straight through the quote.
         if value::symbol_is(h, kw::QUOTE) {

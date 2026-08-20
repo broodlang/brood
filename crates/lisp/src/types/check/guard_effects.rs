@@ -35,10 +35,10 @@ const EFFECTFUL_IN_GUARD: &[&str] = &[
     "monitor",
     "demonitor",
     // Table mutation — the one identity-mutable structure
-    "table-put",
-    "table-incr",
-    "table-delete",
-    "table-drop",
+    "table/put",
+    "table/incr",
+    "table/delete",
+    "table/drop",
     // I/O
     "println",
     "print",

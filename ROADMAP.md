@@ -174,7 +174,7 @@ Shipped as ADRs:
   the ability system (`defability`/`impl`/`defrecord`, nominal dispatch), now **core
   in the prelude**. `defbehaviour` stays in `std/protocol.blsp`.
   - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first ability for
-    open-extension rendering: `Display`/`to-str` (Elixir's `String.Chars`), with a
+    open-extension rendering: `Display`/`->string` (Elixir's `String.Chars`), with a
     zero-cost prelude `*show*` hook so the screen printers let a record define how it
     prints. **Now core and always on** (slice 6 below): a record customizes printing
     with just `(impl Display …)` — no `(require 'show)`, no activation step.
@@ -346,7 +346,7 @@ What that review consciously left OPEN, with the reasoning:
   checker's `sig_of`, `defrecord`'s emitted sigs, `sig!`'s wrapping, and every `sig`
   in `std/`. Deferred with the reasoning in ADR-163, not dismissed. **[Brood]**
 - 🟡 **Re-host the seq protocol on abilities** (2026-07-29). The **read/iteration half
-  shipped**: a `Seqable` ability (op `to-seq`, default = a record's fields id-free) that
+  shipped**: a `Seqable` ability (op `->seq`, default = a record's fields id-free) that
   `seq` — and so `map`/`filter`/`fold`/`for`/`into`, plus `count`/`keys`/`vals` — consults
   for a RECORD, so a custom-collection record defines its own iteration and joins the
   protocol. Hybrid, à la `Display`: built-ins keep their native fast path (the `Seqable`

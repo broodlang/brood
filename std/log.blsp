@@ -97,9 +97,9 @@ backend's policy — a custom `LogBackend` should call this so it honours the sa
 
 (impl Display
   log/line-backend
-  (to-str [b]
+  (->string [b]
     (str "#<log-backend "
-      (to-str (get b :sink))
+      (->string (get b :sink))
       " min="
       (get b :min-level)
       (if (get b :filter) " filtered" "")

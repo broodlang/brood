@@ -23,11 +23,11 @@ A stream is a PID: send `[:next (self)]`, receive `[:stream-val v]`,
 transformers, and terminals — each transformer adds one green process.
 
   ;; HTTP body line-by-line (with http):
-  (let (body-stream (from-socket sock))
+  (let (body-stream (socket-> sock))
     (for-each println (lines body-stream)))
 
   ;; Lazy integer processing:
-  (to-list
+  (->list
     (take 5 (map (fn (n) (* n n)) (range 1 100))))
   ;; => [1 4 9 16 25]")
 
@@ -76,7 +76,7 @@ Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error.
     ([:next r] (send r :stream-done))
     (:stream-close nil)))
 
-(defn from-list (xs)
+(defn list-> (xs)
   "A stream over the items of list or vector `xs`. Evaluated eagerly once."
   (spawn (list-loop (seq xs))))
 
@@ -90,7 +90,7 @@ Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error.
                    (list-loop (rest xs)))))
     (:stream-close nil)))
 
-(defn from-fn (f init)
+(defn fn-> (f init)
   "A stream driven by generator `f`. Each call `(f state)` returns
 `[:yield v new-state]` to emit `v` and continue, or `:done` to end the stream."
   (spawn (fn-loop f init)))
@@ -108,11 +108,11 @@ Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error.
 
 (defn range (start stop)
   "A stream of integers from `start` (inclusive) to `stop` (exclusive)."
-  (from-fn (fn (i) (if (< i stop) [:yield i (+ i 1)] :done))
+  (fn-> (fn (i) (if (< i stop) [:yield i (+ i 1)] :done))
     start))
 
 ;; ---- TCP socket source ------------------------------------------------------
-;; from-socket creates a stream that owns a TCP socket and delivers
+;; socket-> creates a stream that owns a TCP socket and delivers
 ;; its inbound chunks on demand. The calling process must be the socket owner
 ;; at call time; ownership transfers to the stream process immediately.
 ;;
@@ -120,7 +120,7 @@ Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error.
 ;; to requesters on demand. Data that arrives before a request is buffered
 ;; in the process loop parameter (immutable accumulation).
 
-(defn from-socket (sock)
+(defn socket-> (sock)
   "A stream of string chunks from TCP socket `sock`. Transfers socket ownership
 to the stream process — the caller must not `receive` from `sock` afterwards.
 Call immediately after accept or connect, before any data has been read."
@@ -128,7 +128,7 @@ Call immediately after accept or connect, before any data has been read."
         s (spawn (sock-init sock me)))
     (receive
       ([:stream-socket-ready ^s] s)
-      ([:stream-err msg] (error "from-socket: " msg)))))
+      ([:stream-err msg] (error "socket->: " msg)))))
 
 (defn- sock-init
   (sock parent)
@@ -282,7 +282,7 @@ Call immediately after accept or connect, before any data has been read."
 (defn- err-loop
   (m)
   ;; Like done-loop: report the error once, then exit rather than parking forever.
-  ;; A consumer that sees [:stream-err …] stops (fold/-to-list raise), and a
+  ;; A consumer that sees [:stream-err …] stops (fold/-->list raise), and a
   ;; transformer forwards the error and exits — nothing re-polls, so exiting is safe.
   (receive
     ([:next r] (send r [:stream-err m]))
@@ -422,7 +422,7 @@ Raises on a stream error."
       (= (first item) :ok) (fold-loop f (f acc (second item)) s)
       else (error "fold: " (second item)))))
 
-(defn to-list (s)
+(defn ->list (s)
   "Collect all elements of `s` into a list."
   (reverse (collect-loop s nil)))
 
@@ -432,11 +432,11 @@ Raises on a stream error."
     (cond
       (= item :done) acc
       (= (first item) :ok) (collect-loop s (cons (second item) acc))
-      else (error "to-list: " (second item)))))
+      else (error "->list: " (second item)))))
 
-(defn to-vector (s)
+(defn ->vector (s)
   "Collect all elements of `s` into a vector."
-  (into [] (to-list s)))
+  (into [] (->list s)))
 
 (defn for-each (f s)
   "Apply `f` to each element of `s` for side effects. Returns nil."
@@ -467,6 +467,6 @@ then `:stream-eof` when done (or `[:stream-err msg]` + `:stream-eof` on error)."
              (send sink [:stream-err (second item)])
              (send sink :stream-eof)))))
 
-(defn to-socket (s sock)
+(defn ->socket (s sock)
   "Drain stream `s`, writing each chunk to `sock` with `tcp-send`. Returns nil."
   (for-each (fn (chunk) (tcp-send sock chunk)) s))

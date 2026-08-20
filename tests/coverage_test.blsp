@@ -102,12 +102,12 @@
     (let (hits (table))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-fixed hits)
       (assert= (coverage-test-fixed 2 3) 5)
-      (assert= (table-get hits "coverage-test/coverage-test-fixed") 1)))
+      (assert= (table/get hits "coverage-test/coverage-test-fixed") 1)))
   (test "an uncalled function records nothing"
     (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-fixed hits)
-      (assert= (table-get hits "coverage-test/coverage-test-fixed" 0) 0)))
+      (assert= (table/get hits "coverage-test/coverage-test-fixed" 0) 0)))
   (test "repeated calls accumulate"
     (def *reload-diagnostics* false)
     (let (hits (table))
@@ -115,7 +115,7 @@
       (coverage-test-fixed 1 1)
       (coverage-test-fixed 1 1)
       (coverage-test-fixed 1 1)
-      (assert= (table-get hits "coverage-test/coverage-test-fixed") 3))))
+      (assert= (table/get hits "coverage-test/coverage-test-fixed") 3))))
 
 ;; The shim is variadic BECAUSE `arglist` reports only one arm of a multi-arm
 ;; function — an arity-preserving shim built from it would silently break the

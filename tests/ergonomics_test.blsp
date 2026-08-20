@@ -100,9 +100,9 @@
 (describe "doto"
   (test "runs side-effecting forms and returns the original value"
     (let (t (table))
-      (assert= t (doto t (table-put :a 1) (table-put :b 2)))
-      (assert= 1 (table-get t :a))
-      (assert= 2 (table-get t :b)))))
+      (assert= t (doto t (table/put :a 1) (table/put :b 2)))
+      (assert= 1 (table/get t :a))
+      (assert= 2 (table/get t :b)))))
 
 (describe "tap / then"
   (test "then applies f and returns its result"
@@ -110,15 +110,15 @@
     (assert= 3 (then [1 2 3] count)))
   (test "tap runs f for effect and returns x unchanged"
     (let (t (table))
-      (assert= 42 (tap 42 (fn (v) (table-put t :seen v))))
-      (assert= 42 (table-get t :seen))))
+      (assert= 42 (tap 42 (fn (v) (table/put t :seen v))))
+      (assert= 42 (table/get t :seen))))
   (test "then threads an arbitrary call into a -> pipeline"
     (assert= 10 (-> 3 (then (fn (n) (* n n))) (then inc)))
     (assert= 900 (-> 100 (then (fn (n) (- 1000 n))))))
   (test "tap keeps the value flowing through a -> pipeline"
     (let (t (table))
-      (assert= 22 (-> 10 (then inc) (tap (fn (v) (table-put t :mid v))) (then (fn (v) (* v 2)))))
-      (assert= 11 (table-get t :mid))))
+      (assert= 22 (-> 10 (then inc) (tap (fn (v) (table/put t :mid v))) (then (fn (v) (* v 2)))))
+      (assert= 11 (table/get t :mid))))
   (test "across processes: tap/then compose in spawned workers"
     (let (me (self)
           _ (map (fn (k)
@@ -130,8 +130,8 @@
 (describe "run!"
   (test "applies a fn for effect and returns nil"
     (let (t (table))
-      (assert= nil (run! (fn (x) (table-put t x true)) [:a :b :c]))
-      (assert= true (table-get t :b)))))
+      (assert= nil (run! (fn (x) (table/put t x true)) [:a :b :c]))
+      (assert= true (table/get t :b)))))
 
 ;; ---- the combinator family (2026-07-26 review: `comp` had shipped alone) ----
 (describe "partial / complement / constantly"
@@ -243,8 +243,8 @@
   ;; (`doseq`/`dotimes`/`let`/`when` all take `body…`).
   (test "earlier forms run for effect, the last is collected"
     (let (t (table))
-      (assert= (list 1 2) (for (x [1 2]) (table-put t x true) x))
-      (assert= true (table-get t 1))))
+      (assert= (list 1 2) (for (x [1 2]) (table/put t x true) x))
+      (assert= true (table/get t 1))))
   (test "a single body form still behaves"
     (assert= (list 10 30) (for (x [1 2 3] :when (odd? x)) (* x 10)))))
 

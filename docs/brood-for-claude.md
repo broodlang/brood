@@ -217,7 +217,8 @@ your code will read like the standard library.
 ```
 foo?         ; predicate — returns a boolean (int? empty? starts-with?)
 *foo*         ; dynamic var or module-level config/state (defdyn *log-level*)
-foo->bar      ; conversion (number->string, vec->list)
+foo->bar      ; conversion (string->number, int->char); a module-rooted
+              ; conversion drops the source: string/->bytes, string/bytes->
 ```
 
 **Privacy is a def form, not a spelling** (ADR-146): `(defn- helper …)` and
@@ -396,16 +397,16 @@ Other things worth knowing:
 ### The abilities `std/` already ships (ADR-177)
 
 `impl` one of these for your own record and that library accepts your type — you don't
-edit the library. Beyond the core `Display` (`to-str`, what `println` shows) and `Inspect`
+edit the library. Beyond the core `Display` (`->string`, what `println` shows) and `Inspect`
 (`inspect`, the debug form):
 
 | `impl` this | to get |
 |---|---|
-| `JsonEncode` — `(to-json x)`, from `json` | `json/encode` handles your type (a record's wire shape; a pid/fn/datetime at all). **No `:default`** — an unimpl'd kind still errors loudly. |
+| `JsonEncode` — `(->json x)`, from `json` | `json/encode` handles your type (a record's wire shape; a pid/fn/datetime at all). **No `:default`** — an unimpl'd kind still errors loudly. |
 | `Port` — `(io-write p s)`, from `io` | your value is an output port (`with-out`, logger sinks). A bare 1-arg fn already is one. |
 | `LogBackend` — `(backend-emit b rec)`, from `log` | a backend that batches / emits JSON lines / samples. `backend-passes?` is the stock level+filter gate. |
 | `Response` — `(send-response r sock)`, from `http` | a response kind with its own wire behaviour, including who closes the socket. |
-| `Dependency` (**sealed**), from `package` · `Temporal` — `(to-iso x)` (**sealed**), from `datetime` | a new manifest dep kind / calendar type. Sealed ⇒ `nest check` demands every op. |
+| `Dependency` (**sealed**), from `package` · `Temporal` — `(->iso x)` (**sealed**), from `datetime` | a new manifest dep kind / calendar type. Sealed ⇒ `nest check` demands every op. |
 
 Also: `std/`'s value types are **records**, not plain maps — `buffer`, `queue`, `pq`,
 `multimap`, `datetime`/`date`/`time-of-day`, and the four dependency kinds. So
@@ -414,7 +415,7 @@ prints as itself (`#<buffer *scratch* 11 chars>`, `2026-07-29T…Z`) rather than
 internals, and **none of them is `=` to a map with the same fields** — build them with
 their constructors, and don't compare one against a map literal in a test. Where a library
 renders a *user* value to text (`template/render`, `csv-emit`, `url/query-encode`) it calls
-`to-str`, so your `Display` impl governs that output too.
+`->string`, so your `Display` impl governs that output too.
 
 ## Patterns (`let`, `fn`, `match`, `receive`)
 
@@ -929,15 +930,15 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **string**: `str` `pr-str` `string-length` `substring` `char-at`
   (returns a 1-char *string* — Brood has no char type) `index-of`
   `includes?` `string-split` `join` `replace` `trim` `triml` `trimr`
-  `blank?` `upper` `lower` `number->string` `string->number`
-  `string->list` `list->string` `starts-with?` `ends-with?`
+  `blank?` `upper` `lower` `str` `string->number`
+  `string/->list` `string/list->` `starts-with?` `ends-with?`
 - **unicode**: `string->graphemes` (extended grapheme clusters as a vector of
   strings — the unit a human calls "a character", and what a cursor must step by;
   `"e\u{301}"` is 2 codepoints but 1 cluster) · `string-normalize` (`(string-normalize
   s :nfc)`, also `:nfd` `:nfkc` `:nfkd` — `=` is byte-structural, so `"é"` written
   two ways compares unequal until you normalise) · `display-width` (terminal cells)
 - **string formatting**: `string-repeat` `pad-left` `pad-right`
-  `to-fixed` (number → string with fixed decimals, e.g. `(to-fixed 3.14159 2)`
+  `->fixed` (number → string with fixed decimals, e.g. `(->fixed 3.14159 2)`
   → `"3.14"` — `str` prints full f64 precision, so reach for this for output) ·
   `format` (small printf, e.g. `(format "x=%d y=%.2f" 42 3.14)` → `"x=42 y=3.14"`;
   specifiers `%s %d %f %.Nf %%`; width via `pad-left`/`pad-right`)
@@ -1001,7 +1002,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `print`/`println` **space-join** their args (Python-style, via `%render`) —
   distinct from `str`, which concatenates. A **record** defines how it prints on screen
   (Elixir's `String.Chars`) via the core, always-on `Display` ability: just
-  `(impl Display my/rec (to-str [r] …))` and the screen printers honor it — no import,
+  `(impl Display my/rec (->string [r] …))` and the screen printers honor it — no import,
   no activation step; built-ins unchanged (ADR-171/172).
   `print`/`println` **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the

@@ -94,11 +94,11 @@
     (is (multimap/empty? (multimap/new)))
     (is (not (multimap/empty? (multimap/assoc (multimap/new) :k 1)))))
   (test "it displays as a summary and inspects as its contents"
-    (assert= (to-str (multimap/new)) "#<multimap 0 keys, 0 pairs>")
+    (assert= (->string (multimap/new)) "#<multimap 0 keys, 0 pairs>")
     (let (mm (-> (multimap/new)
                (multimap/assoc :k 1)
                (multimap/assoc :k 2)))
-      (assert= (to-str mm) "#<multimap 1 keys, 2 pairs>")
+      (assert= (->string mm) "#<multimap 1 keys, 2 pairs>")
       (assert= (inspect mm) "#<multimap {:k (1 2)}>"))))
 
 ;; Cross-process: the record's identity survives the deep copy on `send`.

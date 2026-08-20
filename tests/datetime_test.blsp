@@ -91,28 +91,28 @@
 
 ;; ---- ISO 8601 formatting ----------------------------------------------------
 
-;; One op renders all three types — `to-iso` dispatches on the value instead of the
+;; One op renders all three types — `->iso` dispatches on the value instead of the
 ;; caller picking date->/time->/dt-> by knowing which shape it holds.
-(describe "to-iso on a date"
+(describe "->iso on a date"
   (test "basic date"
-    (assert= "2026-06-07" (datetime/to-iso (datetime/date 2026 6 7))))
+    (assert= "2026-06-07" (datetime/->iso (datetime/date 2026 6 7))))
   (test "zero-pads month and day"
-    (assert= "2000-01-05" (datetime/to-iso (datetime/date 2000 1 5))))
+    (assert= "2000-01-05" (datetime/->iso (datetime/date 2000 1 5))))
   (test "four-digit year zero-pad"
-    (assert= "0042-03-15" (datetime/to-iso (datetime/date 42 3 15)))))
+    (assert= "0042-03-15" (datetime/->iso (datetime/date 42 3 15)))))
 
-(describe "to-iso on a time-of-day"
+(describe "->iso on a time-of-day"
   (test "midnight"
-    (assert= "00:00:00.000" (datetime/to-iso (datetime/time-of-day 0 0 0 0))))
+    (assert= "00:00:00.000" (datetime/->iso (datetime/time-of-day 0 0 0 0))))
   (test "non-zero fields"
-    (assert= "10:30:05.750" (datetime/to-iso (datetime/time-of-day 10 30 5 750)))))
+    (assert= "10:30:05.750" (datetime/->iso (datetime/time-of-day 10 30 5 750)))))
 
-(describe "to-iso on a datetime"
+(describe "->iso on a datetime"
   (test "epoch"
-    (assert= "1970-01-01T00:00:00.000Z" (datetime/to-iso (datetime/epoch-ms->dt 0))))
+    (assert= "1970-01-01T00:00:00.000Z" (datetime/->iso (datetime/epoch-ms->dt 0))))
   (test "a real datetime"
     (assert= "2026-06-07T15:04:30.000Z"
-      (datetime/to-iso (datetime/datetime 2026 6 7 15 4 30 0)))))
+      (datetime/->iso (datetime/datetime 2026 6 7 15 4 30 0)))))
 
 ;; The three types are records, so they are distinct types rather than maps told apart by
 ;; their keys — and each prints as its ISO string.
@@ -133,9 +133,9 @@
   (test "a date and a datetime for the same day are different values"
     (is (not (= (datetime/date 2026 6 7) (datetime/datetime 2026 6 7 0 0 0 0)))))
   (test "each displays as its ISO 8601 form, not its field map"
-    (assert= (to-str (datetime/date 2026 6 7)) "2026-06-07")
-    (assert= (to-str (datetime/time-of-day 10 30 5 750)) "10:30:05.750")
-    (assert= (to-str (datetime/datetime 2026 6 7 15 4 30 0)) "2026-06-07T15:04:30.000Z"))
+    (assert= (->string (datetime/date 2026 6 7)) "2026-06-07")
+    (assert= (->string (datetime/time-of-day 10 30 5 750)) "10:30:05.750")
+    (assert= (->string (datetime/datetime 2026 6 7 15 4 30 0)) "2026-06-07T15:04:30.000Z"))
   (test "Temporal is sealed over exactly the three types"
     (assert= (sort (sealed-members 'Temporal))
       (sort (list :datetime/datetime :datetime/date :datetime/time-of-day))))
@@ -144,7 +144,7 @@
     (is (satisfies? 'Temporal (datetime/time-of-day 0 0 0 0)))
     (is (satisfies? 'Temporal (datetime/epoch-ms->dt 0))))
   (test "a value that is not temporal raises rather than rendering nonsense"
-    (assert-error (datetime/to-iso {:year 2026 :month 6 :day 7}))))
+    (assert-error (datetime/->iso {:year 2026 :month 6 :day 7}))))
 
 ;; ---- dt-format --------------------------------------------------------------
 

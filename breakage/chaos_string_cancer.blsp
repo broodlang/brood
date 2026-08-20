@@ -2,14 +2,14 @@
 ;;;
 ;;; Doubles a seed string 25 times → 33 554 432-character string (~32 MB).
 ;;; Then hammers it with: index-of, contains?, substring, char-at, split, join,
-;;; upper/lower, replace, pad-*, string/repeat, and string/to-list on a slice.
+;;; upper/lower, replace, pad-*, string/repeat, and string/->list on a slice.
 ;;;
 ;;; Targets:
 ;;;   - String allocation and copy (immutable model means every op is a fresh value)
 ;;;   - `index-of` on a 33 MB string (should be O(n) in the worst case)
 ;;;   - `string/split` producing millions of fragments
 ;;;   - `join` re-assembling a million fragments
-;;;   - `string/to-list` → `list->string` round-trip on a large slice
+;;;   - `string/->list` → `list->string` round-trip on a large slice
 
 (println "--- building the 32 MB string ---")
 
@@ -64,12 +64,12 @@
 (def rejoined (string/join "||" parts))
 (println "rejoined length:" (string/length rejoined))
 
-(println "--- string/to-list -> list->string on a 10k-char slice ---")
+(println "--- string/->list -> list->string on a 10k-char slice ---")
 (def slice-10k (string/substring leviathan 0 10000))
-(def chars (string/to-list slice-10k))
+(def chars (string/->list slice-10k))
 (println "char count:" (count chars))
 ;; Reverse the chars and rejoin
-(def reversed-str (string/from-list (reverse chars)))
+(def reversed-str (string/list-> (reverse chars)))
 (println "reversed first 8:" (string/substring reversed-str 0 8))
 ;; reversed "ab"×5000 should be "ba"×5000, so first char 'b'
 (println "reversed first char is b?" (= "b" (string/char-at reversed-str 0)))

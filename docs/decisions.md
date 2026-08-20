@@ -15935,3 +15935,54 @@ transitive registry dep by pinning that name directly to a source. Guarded by an
 name") — it resolves a git app whose git dep declares a registry sub-dep, and asserts resolution
 completes without touching the registry. A full per-dep-`[:patch]` override config remains deferred;
 this covers the case that motivated it.
+
+## ADR-239 — One conversion-naming convention: the arrow `->`, everywhere
+
+**Context.** Conversion functions had drifted into two conventions. Bare globals and
+module-internal helpers used the Scheme arrow `X->Y` (`symbol->string`, `int->bytes`,
+`dt->epoch-ms`, `vec->list`, dozens of them). A handful of collection/type modules used a
+`mod/to-Y` + `mod/from-Y` pair instead (`string/to-bytes`/`from-bytes`,
+`string/to-list`/`from-list`, `stream/to-list`/`to-vector`/`to-socket`, `pq/to-list`,
+`queue/to-list`), and the print/seq abilities named their ops `to-str` (`Display`) and
+`to-seq` (`Seqable`). Two Rust string primitives (`string/to-codepoints`,
+`string/to-graphemes`) were `to-` too. So the same idea — "convert an X" — was spelled
+three ways depending on where it lived.
+
+**Decision.** Standardize on the arrow `->` for **every** conversion, and read direction
+from the arrow's position relative to the *named* type; the other end is implicit (the
+enclosing module, or the polymorphic argument):
+
+- `->X` — result is X (`string/->bytes`, `string/->list`, `stream/->vector`, `pq/->list`).
+- `X->` — source is X, i.e. the module-rooted inverse (`string/bytes->`, `string/list->`,
+  `stream/socket->`, `queue/list->`). The trailing arrow is the deliberate symmetric mate of
+  the leading one, so a pair reads `string/->bytes` / `string/bytes->`.
+- Bare globals that bridge two foreign scalars keep the full `X->Y` (they have no home
+  module to root on): `string->number`, `string->symbol`, `int->char`, `char->int`.
+- The number-formatting primitive `to-fixed` is renamed **`->fixed`** too. It is a
+  *formatter* (`(->fixed x n)` → a fixed-decimal string), not a type conversion — but it
+  is `->`-prefixed for a single consistent prefix across every "render/convert to" name.
+
+Every ability op that *converts* is arrow-named: `Display` `to-str`→**`->string`**,
+`Seqable` `to-seq`→**`->seq`**, `Temporal` `to-iso`→**`->iso`**, `JsonEncode`
+`to-json`→**`->json`** — the polymorphic value→string / value→seq / value→ISO /
+value→JSON seams, all arrow-named like everything else. Non-conversion ops keep their
+verb names (`fetch`, `put`, `size`, `write`, `inspect` — `inspect` is a value→debug-string
+but, like Elixir's, is a named verb, not a `to-`/arrow conversion).
+
+**`symbol->string` and `number->string` are removed.** `number->string` was literally
+`(str n)`. `symbol->string` was `(name s)` plus a strict type-guard, and `(str 'foo)`
+already yields `"foo"`. The forward "value → its string" direction is exactly what the
+polymorphic **`->string`** (Display) op is for — per-type behaviour comes from `impl`,
+not a zoo of `T->string` wrappers — so both wrappers are redundant. Call sites use `str`
+(number) or `->string`/`name` (symbol). The **reverse** `string->symbol` is *kept*: it
+produces a symbol, is not a `->string`, and is just the strict face of the `symbol`
+builtin.
+
+**Consequences.** ~140 call sites updated across `std/`, `tests/`, and the Rust kernel
+(the two primitives' registration + the `->seq` intern in `builtins/sequences.rs`, plus
+the checker's curated sigs in `types/check/sigs.rs`). Greenfield, so no aliases were kept.
+The split this closes is the one flagged in the "no overlap is created" note under the
+earlier string/`seq` reorganizations — those had left `mod/to-`/`from-` in place; this
+finishes the job. Module-qualified *shadows* of prelude globals (`stream/map`,
+`multimap/get`, `string/repeat`) are untouched — those are intentional per-module
+vocabularies, not a naming inconsistency.

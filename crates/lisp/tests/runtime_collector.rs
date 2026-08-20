@@ -685,6 +685,14 @@ fn drain_report_wires_through_the_scheduler() {
         )
         .expect("redefine the gen-0 globals into gen 1");
     interp.heap.collect(&mut [], &mut []);
+    // Redefining f/worker moves *those* globals to gen 1, but the real reclaim cycle
+    // (`advance_runtime_multigen`) also runs `migrate_live_globals(old)` before arming the
+    // drain — the load-bearing "globals point into the current generation before anyone
+    // reports" step. Any *permanent* live runtime global still resident in gen 0 (e.g. the
+    // boot-defined `*features-loading*` load tracker, whose empty-map value is a gen-0
+    // runtime handle) is moved by migrate, not by the redefinition, so the test must run it
+    // too — otherwise which slot boot happens to leave that global in leaks into the result.
+    interp.heap.migrate_live_globals(0);
     assert!(
         !interp.heap.runtime_gen_referenced(0),
         "the root itself no longer references gen 0",

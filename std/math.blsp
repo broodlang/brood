@@ -83,7 +83,7 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 (defn- pow-acc (base exp acc) (if (= exp 0) acc (pow-acc base (- exp 1) (* acc base))))
 
 ;; (round-to x places) — round to a fixed number of decimal places, staying a
-;; number (for a fixed-width *string*, e.g. "3.10", use the `to-fixed` primitive).
+;; number (for a fixed-width *string*, e.g. "3.10", use the `->fixed` primitive).
 ;; Subject to the usual binary-float caveat: a "halfway" decimal like 1.255 isn't
 ;; exactly representable, so it may round the way its nearest f64 actually lies.
 (defn round-to (x places)
