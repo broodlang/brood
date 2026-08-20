@@ -179,7 +179,25 @@ pub(crate) fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) 
                 .unwrap_or_else(|e| e.into_inner())
                 .push(arm.clone());
         }
-        Ok(None) | Err(_) => arm.jit_code.store(crate::jit::BAILED, Release),
+        Ok(None) | Err(_) => {
+            trace_lower_declined(arm, false);
+            arm.jit_code.store(crate::jit::BAILED, Release)
+        }
+    }
+}
+
+/// Announce that a lowering attempt came back `Ok(None)`. Every refusal inside
+/// `jit_lower_arm` that travels out through a `?` on a helper bypasses the reasoned
+/// traces, so without this the only visible evidence is the arm silently being BAILED.
+#[cfg(feature = "jit")]
+fn trace_lower_declined(arm: &CompiledArm, inlined: bool) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        let name = arm
+            .dbg_name
+            .map(crate::core::value::symbol_name_ref)
+            .unwrap_or("<closure>");
+        eprintln!("[jit-bail] arm={name} reason=lowering-returned-none inlined={inlined}");
     }
 }
 
@@ -316,7 +334,10 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                             );
                         }
                     }
-                    Ok(None) => slot.store(crate::jit::BAILED, Release),
+                    Ok(None) => {
+                        trace_lower_declined(arm, inlined);
+                        slot.store(crate::jit::BAILED, Release)
+                    }
                     Err(_) => {
                         codegen_poisoned = true;
                         slot.store(crate::jit::BAILED, Release);

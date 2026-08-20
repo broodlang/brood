@@ -113,6 +113,51 @@ static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// `roots[base]`**, and returns `0` (Done) or `1` (deopt — an operand wasn't an `Int`).
 /// The returned pointer is valid for the life of `jit` (its module owns the code).
 #[cfg(feature = "jit")]
+/// Variant name of an `Inst`, for the refusal trace below. `Inst` has no `Debug`
+/// derive (it holds raw pointers and atomics), and the *identity* of the opcode is
+/// all the trace needs.
+#[cfg(feature = "jit")]
+pub(crate) fn inst_name(i: &Inst) -> &'static str {
+    match i {
+        Inst::Const(_) => "Const",
+        Inst::Local(_) => "Local",
+        Inst::Global(_) => "Global",
+        Inst::GlobalIc { .. } => "GlobalIc",
+        Inst::RecordLine(_) => "RecordLine",
+        Inst::RecordBranch { .. } => "RecordBranch",
+        Inst::Pop => "Pop",
+        Inst::SetLocal(_) => "SetLocal",
+        Inst::Jump(_) => "Jump",
+        Inst::JumpIfFalse(_) => "JumpIfFalse",
+        Inst::MakeVector { .. } => "MakeVector",
+        Inst::MakeMap { .. } => "MakeMap",
+        Inst::Prim1 { .. } => "Prim1",
+        Inst::Prim2 { .. } => "Prim2",
+        Inst::Prim3 { .. } => "Prim3",
+        Inst::Prim2SlotSlot { .. } => "Prim2SlotSlot",
+        Inst::Prim2SlotInt { .. } => "Prim2SlotInt",
+        Inst::Call { .. } => "Call",
+        Inst::SelfCall { .. } => "SelfCall",
+        Inst::MakeClosure { .. } => "MakeClosure",
+        Inst::TryCatch { .. } => "TryCatch",
+    }
+}
+
+/// Refusal from the per-instruction emit loop, naming the opcode that could not be
+/// lowered. Same flag and line shape as [`trace_lower_bail`].
+#[cfg(feature = "jit")]
+fn trace_lower_bail_inst(arm: &CompiledArm, inst: &'static str) -> Option<*const u8> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        let name = arm
+            .dbg_name
+            .map(crate::core::value::symbol_name_ref)
+            .unwrap_or("<closure>");
+        eprintln!("[jit-bail] arm={name} reason=emit-unsupported-inst:{inst}");
+    }
+    None
+}
+
 /// Report a lowering refusal that happens BEFORE `plan_general_lowering`'s profitability
 /// gate, under the same `BROOD_JIT_BAIL_TRACE=1` flag and the same `[jit-bail]` line shape
 /// as `jit_plan`'s `trace_bail`, so one grep covers both.
@@ -1757,7 +1802,13 @@ fn jit_lower_arm_inner(
                     )?;
                     break;
                 }
-                _ => return None,
+                other => {
+                    // The emit loop and `chunk_in_jit_subset` can disagree: the subset
+                    // rule admits an opcode class, then emit refuses a particular shape
+                    // of it. Before this, that disagreement was invisible — the arm just
+                    // came back BAILED with no reason anywhere.
+                    return trace_lower_bail_inst(arm, inst_name(other));
+                }
             }
             // Deopt-resume checkpoint (see `CompiledArm::ckpt_slot`): a non-tail
             // call just completed — journal the abstract operand stack (it contains
