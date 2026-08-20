@@ -198,6 +198,39 @@
                 idx (package/package-index-by-name entries))
             (assert= (sort (map (fn (e) (get e :name)) entries)) (list 'ansi 'greeter))
             (assert= (get (get idx 'ansi) :ref) "v2.0.0"))))))
+  ;; ADR-238: a direct git/path pin overrides a same-named *transitive registry*
+  ;; request. Verifiable fully offline — without the override, greeter's transitive
+  ;; `[ansi :version …]` would force a registry solve/download; with it, resolution
+  ;; never touches the registry. This is what lets the registry server itself pin its
+  ;; whole closure to git and build with zero registry contact.
+  (test "a direct :git pin overrides a transitive :registry dep of the same name (offline)"
+    (let (parent (pkg-fixture-root)
+          ansi (path-join parent "ansi")
+          greeter (path-join parent "greeter")
+          app (path-join parent "app"))
+      (pkg-write-project ansi "ansi" "ansi" "(defn bold (s) s)" "")
+      (let (ansi-url (pkg-git-init ansi))
+        (pkg-git-tag ansi "v1.0.0")
+        ;; greeter wants ansi from the REGISTRY (a version range, not a source pin).
+        (pkg-write-project greeter
+          "greeter"
+          "greeter"
+          "(defn g () 1)"
+          " :dependencies [[ansi :version \"1.0.0\"]]")
+        (let (greeter-url (pkg-git-init greeter))
+          (pkg-git-tag greeter "v1.0.0")
+          (pkg-write-project app "app" "main" "(defn main () 1)" "")
+          ;; app pins ansi to git directly → the direct pin wins over greeter's
+          ;; transitive registry request, so `resolve-deps` returns without ever
+          ;; consulting the registry (and ansi resolves as the git entry).
+          (let (entries (resolve-deps app
+                          (list (dep-git 'ansi ansi-url "v1.0.0" nil)
+                            (dep-git 'greeter greeter-url "v1.0.0" nil))
+                          nil)
+                idx (package/package-index-by-name entries))
+            (assert= (sort (map (fn (e) (get e :name)) entries)) (list 'ansi 'greeter))
+            (assert= (dep-kind (get idx 'ansi)) :git)
+            (assert= (get (get idx 'ansi) :ref) "v1.0.0"))))))
   (test "two transitive :git deps at different refs, with no direct pin, error loudly"
     (let (parent (pkg-fixture-root)
           ansi (path-join parent "ansi")
