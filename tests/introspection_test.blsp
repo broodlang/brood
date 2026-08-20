@@ -158,6 +158,26 @@
       (is (>= (get s :local-bytes) 0))
       (is (>= (get s :runtime-bytes) 0))
       (is (= (> (get s :local-cap) 0) (> (get s :local-bytes) 0)))))
+  (test "the local table does not keep its high-water capacity across collections"
+    ;; Guards the gc.rs hysteresis shrink. The minor-collection path `retain`s dead
+    ;; entries out of `form_pos` in place, and `HashMap` never shrinks itself, so
+    ;; without the shrink this table keeps its PEAK capacity for the process's life.
+    ;; Verified by sabotage against a pre-fix binary on the identical probe: capacity
+    ;; 20 017 / 660 KB there, 1 792 / 59 KB here — so this bound separates the two by
+    ;; an order of magnitude and is not a tight fit to one machine's rounding.
+    (let (churn (fn (n)
+                  (if (= n 0)
+                    nil
+                    (do
+                      (read-all "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))")
+                      (churn (- n 1)))))
+          _ (churn 4000)
+          _ (gc-collect)
+          s (pos-stats))
+      ;; the live set is tiny after the churn is dropped; capacity must have followed it
+      ;; down rather than staying at the high-water mark
+      (is (< (get s :local-cap) 8192))
+      (is (< (get s :local-bytes) 300000))))
   (test "recording a positioned form is reflected in the local table"
     ;; `read` stamps positions on LOCAL list forms, so reading source must not
     ;; DECREASE the recorded count. (Exact growth is not asserted: a collection may
