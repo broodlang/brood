@@ -84,7 +84,7 @@
         (= (first c) gb-upstream-gap) (gb-scan (rest lines) ran bad)
         else
           (let ([input want] c
-                got (string/to-graphemes input))
+                got (string/->graphemes input))
             (gb-scan (rest lines)
               (inc ran)
               (if (= got want) bad (cons [(pr-str input) want got] bad))))))))
@@ -340,16 +340,16 @@
     ;; "e" + COMBINING ACUTE is one grapheme, two code points. Spelled with escapes
     ;; on BOTH sides deliberately: a literal "é" in this file is the precomposed
     ;; U+00E9, which is a different string, and `=` would rightly reject it.
-    (assert= (string/to-graphemes "e\u{301}f") ["e\u{301}" "f"])
-    (assert= (count (string/to-codepoints "e\u{301}f")) 3)
+    (assert= (string/->graphemes "e\u{301}f") ["e\u{301}" "f"])
+    (assert= (count (string/->codepoints "e\u{301}f")) 3)
     ;; a regional-indicator pair is one flag, not two letters
-    (assert= (count (string/to-graphemes "\u{1F1FF}\u{1F1E6}")) 1)
+    (assert= (count (string/->graphemes "\u{1F1FF}\u{1F1E6}")) 1)
     ;; CRLF is one cluster — splitting it is the classic off-by-one
-    (assert= (count (string/to-graphemes "\r\n")) 1))
+    (assert= (count (string/->graphemes "\r\n")) 1))
 
   (test "graphemes reassemble to the original string"
     (dolist (s ["" "plain" "e\u{301}f" "\u{1F1FF}\u{1F1E6}x" "\r\n" "ne\u{301}e\u{301}"])
-      (assert= (apply str (string/to-graphemes s)) s)))
+      (assert= (apply str (string/->graphemes s)) s)))
 
   (test "normalization makes text that reads the same compare the same"
     ;; U+00E9 vs U+0065 U+0301 — different strings, same text
@@ -382,8 +382,8 @@
   ;; exclusion. See the comment on `gb-upstream-gap`.
   (test "the one upstream gap: U+2701 is missing from Extended_Pictographic"
     ;; UAX #29 GB11 says one cluster; the crate gives two.
-    (assert= (count (string/to-graphemes "\u{2701}\u{200D}\u{2701}")) 2)
+    (assert= (count (string/->graphemes "\u{2701}\u{200D}\u{2701}")) 2)
     ;; the rule itself is correct for every other pictographic
-    (assert= (count (string/to-graphemes "\u{270A}\u{200D}\u{270A}")) 1)
-    (assert= (count (string/to-graphemes "\u{1F468}\u{200D}\u{1F469}")) 1)
-    (assert= (count (string/to-graphemes "\u{2764}\u{200D}\u{1F525}")) 1)))
+    (assert= (count (string/->graphemes "\u{270A}\u{200D}\u{270A}")) 1)
+    (assert= (count (string/->graphemes "\u{1F468}\u{200D}\u{1F469}")) 1)
+    (assert= (count (string/->graphemes "\u{2764}\u{200D}\u{1F525}")) 1)))

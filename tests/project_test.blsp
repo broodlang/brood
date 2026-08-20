@@ -98,12 +98,12 @@
       (is (not (project/dep-path? git-dep)))
       (is (not (project/dep? {:name 'x :path "p"})))))
   (test "a dep displays as its manifest source — the nest tree line"
-    (assert= (to-str (project/dep-path 'shared "../shared")) "shared  (path \"../shared\")")
-    (assert= (to-str (project/dep-git 'p "https://x.git" "v1" nil)) "p  (git https://x.git @ v1)")
-    (assert= (to-str (project/dep-git 'p "https://x.git" nil "^1.2.0"))
+    (assert= (->string (project/dep-path 'shared "../shared")) "shared  (path \"../shared\")")
+    (assert= (->string (project/dep-git 'p "https://x.git" "v1" nil)) "p  (git https://x.git @ v1)")
+    (assert= (->string (project/dep-git 'p "https://x.git" nil "^1.2.0"))
       "p  (git https://x.git @ ^1.2.0)")
-    (assert= (to-str (project/dep-tarball 'q "https://x.tgz" "ab")) "q  (tarball https://x.tgz)")
-    (assert= (to-str (project/dep-registry 'r "1.2.0")) "r  (registry v1.2.0)"))
+    (assert= (->string (project/dep-tarball 'q "https://x.tgz" "ab")) "q  (tarball https://x.tgz)")
+    (assert= (->string (project/dep-registry 'r "1.2.0")) "r  (registry v1.2.0)"))
   (test "parse-deps maps over the whole vector"
     (assert= (project/project-parse-deps '[[a :path "../a"] [b :path "../b"]])
       (list (assoc (project/dep-path 'a "../a") :optional false)

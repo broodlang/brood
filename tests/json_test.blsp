@@ -163,8 +163,8 @@
 (defrecord usd (cents))
 (defrecord wrapped (inner))
 
-(impl JsonEncode json-test/usd (to-json [m] (str "$" (get m :cents))))
-(impl JsonEncode :pid (to-json [p] (str p)))
+(impl JsonEncode json-test/usd (->json [m] (str "$" (get m :cents))))
+(impl JsonEncode :pid (->json [p] (str p)))
 
 (describe "encoding records"
   (test "a record encodes as its fields, with the internal id omitted"
@@ -191,8 +191,8 @@
   (test "a kind with no impl still errors loudly"
     (assert-error (encode (fn (x) x))))
   (test "no :default is registered — nil means 'no rule', not 'the fallback'"
-    (is (nil? (impl-for '[JsonEncode to-json] :fn)))
-    (is (not (nil? (impl-for '[JsonEncode to-json] :json-test/usd))))))
+    (is (nil? (impl-for '[JsonEncode ->json] :fn)))
+    (is (not (nil? (impl-for '[JsonEncode ->json] :json-test/usd))))))
 
 ;; Cross-process: parse in spawned workers and fan the results back in — the parsed
 ;; maps/vectors are deep-copied across per-process heaps on `send`, proving they

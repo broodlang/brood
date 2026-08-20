@@ -41,7 +41,7 @@
 (defn- dt-numeric?
   (s)
   (and (> (string/length s) 0)
-    (let (cs (string/to-list s))
+    (let (cs (string/->list s))
       (and (nil? (first (remove (fn (c) (includes? "0123456789+-.eE" c)) cs)))
         ;; at least one digit — rules out a bare sign and dectest's `#` null
         (not (nil? (first (filter (fn (c) (includes? "0123456789" c)) cs))))))))
@@ -80,7 +80,7 @@
     (= op "add") (decimal->string (+ a b))
     (= op "subtract") (decimal->string (- a b))
     (= op "multiply") (decimal->string (* a b))
-    (= op "compare") (number->string (cond (< a b) -1 (= a b) 0 else 1))
+    (= op "compare") (str (cond (< a b) -1 (= a b) 0 else 1))
     (= op "minus") (decimal->string (* (decimal "-1") a))
     (= op "plus") (decimal->string a)
     (= op "abs") (decimal->string (abs a))

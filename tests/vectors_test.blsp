@@ -1,7 +1,7 @@
 ;; Vector indexing surface: the polymorphic `assoc`/`update` over a vector +
 ;; integer index, `remove-nth`, and the `subvec` slice — the editor-driven gap
 ;; (a buffer pool is a vector, so every edit is a single-index replace). Built on
-;; the kernel `vector-assoc`/`subvec` primitives. Register-only — discovered and
+;; the kernel `vector/assoc`/`subvec` primitives. Register-only — discovered and
 ;; run by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 ;;
 ;; The whole suite runs each test in its own green process, so these already

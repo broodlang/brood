@@ -161,4 +161,4 @@ bytes value (raw MAC, not hex)."
 Suitable for hash tables and sharding; NOT cryptographically secure."
   (fold (fn (h c) (bit-xor (* h 31) (char->int c)))
     5381
-    (string/to-list s)))
+    (string/->list s)))

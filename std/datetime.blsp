@@ -23,7 +23,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
     ;; Render n as a decimal string of at least `width` digits. Handles negative n.
     (if (< n 0)
       (str "-" (dt-zero-pad (- n) (- width 1)))
-      (let (s (number->string n)
+      (let (s (str n)
             pad (- width (string/length s)))
         (if (> pad 0) (str (string/repeat "0" pad) s) s)))))
 
@@ -154,15 +154,15 @@ milliseconds."
 ;;
 ;; ISO 8601 rendering is per-type — a date has no time part, a time-of-day no date — so
 ;; it was three functions (`date->iso8601` / `time->iso8601` / `dt->iso8601`) that callers
-;; had to choose between by knowing which shape they held. It is now ONE op, `to-iso`,
-;; dispatching on the value: `(to-iso x)` renders whichever of the three `x` is, and the
+;; had to choose between by knowing which shape they held. It is now ONE op, `->iso`,
+;; dispatching on the value: `(->iso x)` renders whichever of the three `x` is, and the
 ;; ability is `:sealed` so `nest check` flags a temporal type that forgets it.
 
 (defability Temporal
   "A calendar value that renders as ISO 8601."
   :sealed
   [datetime date time-of-day]
-  (to-iso [self] :-> string))
+  (->iso [self] :-> string))
 
 ;; The two halves, shared by the three impls (a datetime is date + \"T\" + time + \"Z\").
 (defn- dt-iso-date
@@ -183,18 +183,18 @@ milliseconds."
     "."
     (dt-zero-pad (get t :ms 0) 3)))
 
-(impl Temporal datetime/date (to-iso [d] (dt-iso-date d)))
-(impl Temporal datetime/time-of-day (to-iso [t] (dt-iso-time t)))
+(impl Temporal datetime/date (->iso [d] (dt-iso-date d)))
+(impl Temporal datetime/time-of-day (->iso [t] (dt-iso-time t)))
 (impl Temporal
   datetime/datetime
-  (to-iso [dt] (str (dt-iso-date dt) "T" (dt-iso-time dt) "Z")))
+  (->iso [dt] (str (dt-iso-date dt) "T" (dt-iso-time dt) "Z")))
 
 ;; A temporal value's display form is its ISO string — so `(println (utc-now))` shows
 ;; `2026-07-28T14:03:11.000Z`, not the field map. `str`/`pr-str` stay native (ADR-171),
 ;; so the data form is still available for debugging via `pr-str`.
-(impl Display datetime/datetime (to-str [dt] (to-iso dt)))
-(impl Display datetime/date (to-str [d] (to-iso d)))
-(impl Display datetime/time-of-day (to-str [t] (to-iso t)))
+(impl Display datetime/datetime (->string [dt] (->iso dt)))
+(impl Display datetime/date (->string [d] (->iso d)))
+(impl Display datetime/time-of-day (->string [t] (->iso t)))
 
 (defn- dt-fmt-code
   (dt code)

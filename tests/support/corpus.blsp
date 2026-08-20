@@ -62,7 +62,7 @@ reader, exactly as the Scheme harness's repeated `(read)` drops them."
 
 ;; ---- hex ---------------------------------------------------------------------
 ;; Several corpora (parse-number's bit patterns, the UCD code points, the crypto
-;; vectors) state their expectations in hex. `number->string` has no radix, so the
+;; vectors) state their expectations in hex. `str` has no radix, so the
 ;; decode lives here rather than being re-written in each runner.
 
 (def- corpus-hex-digits

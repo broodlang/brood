@@ -83,7 +83,7 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
 ;; error message) is never what was wanted. `inspect` adds point/mark for debugging.
 (impl Display
   editor/buffer/buffer
-  (to-str [b] (str "#<buffer " (get b :name) " " (rope-length (get b :rope)) " chars>")))
+  (->string [b] (str "#<buffer " (get b :name) " " (rope-length (get b :rope)) " chars>")))
 
 (impl Inspect
   editor/buffer/buffer
@@ -626,7 +626,7 @@ the diff only ever runs over the span that actually changed."
             o-mid tail)
           new)
       else
-        (let (ops (diff/diff-seq (string/to-list o-mid) (string/to-list n-mid))
+        (let (ops (diff/diff-seq (string/->list o-mid) (string/->list n-mid))
               r (fold (fn (acc op)
                         (let ([n out hunk] acc
                               [tag c] op)

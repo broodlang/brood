@@ -199,7 +199,7 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             guard,
             pos,
         } => {
-            // No fused variants (one member, `table-put` — the operand-stack form is
+            // No fused variants (one member, `table/put` — the operand-stack form is
             // already one inst); operands push in source order, the inst pops three.
             emit_node(a, code)?;
             emit_node(b, code)?;

@@ -18,7 +18,7 @@
 ;; Kernel seam: the low-level primitives are Rust builtins registered directly under
 ;; their `string/…` names — `string/length` `string/substring` `string/split`
 ;; `string/upper` `string/lower` `string/normalize` `string/span`/`span-until`
-;; `string/grapheme-*`/`substring-graphemes` `string/to-codepoints`/`to-graphemes`.
+;; `string/grapheme-*`/`substring-graphemes` `string/->codepoints`/`->graphemes`.
 ;; The functions below are pure Brood over those. Brood has no distinct char type, so
 ;; a "character" is a 1-char string; all indices are char-based, matching
 ;; `string/length`. The helpers are tail-recursive (stack-safe over long strings).
@@ -50,30 +50,30 @@ Bare-in-the-prelude by contrast: the generic collection ops (`map`/`filter`/`cou
   "The character (a 1-char string) at char index `i` of `s`."
   (string/substring s i (inc i)))
 
-(defn to-list (s)
+(defn ->list (s)
   "The characters of `s` as a list of 1-char strings."
   ;; One native O(n) `chars()` pass (via `string/split` on the empty separator). A
   ;; pure-Brood `(string/substring s i (inc i))` loop is O(n^2) — `substring` walks to char
-  ;; boundary `i` each call — which silently makes every `(into [] (string/to-list s))`
+  ;; boundary `i` each call — which silently makes every `(into [] (string/->list s))`
   ;; code-point vector O(n^2) to build (it defeated the json/base64 char-indexing
   ;; rewrites; see docs/devlog.md).
   (string/split s ""))
 
-(defn from-list (cs)
-  "Concatenate a list of strings (e.g. from `string/to-list`) into one string."
+(defn list-> (cs)
+  "Concatenate a list of strings (e.g. from `string/->list`) into one string."
   (apply str cs))
 
-(defn from-codepoints (cs)
+(defn codepoints-> (cs)
   "Build a string from a list (or vector) of Unicode codepoint integers — the
-inverse of the `string/to-codepoints` primitive."
+inverse of the `string/->codepoints` primitive."
   (apply str (map int->char cs)))
 
-(defn to-bytes (s)
-  "Encode string `s` as a bytes value — its UTF-8 bytes. Inverse of `string/from-bytes`."
+(defn ->bytes (s)
+  "Encode string `s` as a bytes value — its UTF-8 bytes. Inverse of `string/bytes->`."
   (string->utf8-bytes s))
 
-(defn from-bytes (b)
-  "Decode a bytes value of UTF-8 bytes back to a string. Inverse of `string/to-bytes`."
+(defn bytes-> (b)
+  "Decode a bytes value of UTF-8 bytes back to a string. Inverse of `string/->bytes`."
   (utf8-bytes->string b))
 
 ;; ---- join -------------------------------------------------------------------

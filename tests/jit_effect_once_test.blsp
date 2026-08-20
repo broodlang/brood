@@ -1,18 +1,18 @@
 ;;; Regression guard: a JIT deopt must never re-run an effect.
 ;;;
-;;; `table-put` is the only effect in the JIT's boxed subset (Brood data is immutable —
+;;; `table/put` is the only effect in the JIT's boxed subset (Brood data is immutable —
 ;;; ADR-026 — so a `Table` is the one thing a JIT'd arm can observably change). The deopt
 ;;; machinery keeps effects exactly-once by journaling a resume point, but three separate
 ;;; places assumed **effects only live in calls**, and each let a deopt re-run a put:
 ;;;
-;;;   1. `jit_ckpt_depth` allocated no journal at all for an arm with a `table-put` and no
+;;;   1. `jit_ckpt_depth` allocated no journal at all for an arm with a `table/put` and no
 ;;;      non-tail call — its doc called such an arm "effect-free by construction". A
 ;;;      200 000-iteration driver landed its counter on 402 047 (the VM re-run itself
 ;;;      re-enters `jit_tier`, so each deopting activation put three times).
 ;;;   2. The pure-self-recursion exemption matched on the head *symbol*, ignoring argc.
 ;;;      `defn_name` is shared by every arm of a multi-arity `defn`, so a 1-arg arm calling
 ;;;      its own 2-arg sibling was treated as calling back into itself.
-;;;   3. The leaf inliner spliced a `table-put`-bearing callee into a caller. The inlined
+;;;   3. The leaf inliner spliced a `table/put`-bearing callee into a caller. The inlined
 ;;;      engine cannot journal (`ckpt_active = inline.is_none()`, and `jit_ckpt_read`
 ;;;      refuses it outright), so its deopt resumes from ip 0 — sound only for an
 ;;;      effect-free body, which `leaf_body_qualifies` enforced by excluding *calls*.
@@ -30,7 +30,7 @@
 (def eo-t1 (table))
 (defn eo-bump1 (t k big)
   (do
-    (table-put t k (+ 1 (table-get t k)))
+    (table/put t k (+ 1 (table/get t k)))
     (* big big))) ; overflows i64 -> deopt, every call
 (defn eo-drive1 (t i big)
   (if (= i 0) nil (do (eo-bump1 t 0 big) (eo-drive1 t (- i 1) big))))
@@ -39,7 +39,7 @@
 (def eo-t2 (table))
 (defn eo-bump2 (t v)
   (do
-    (table-put t 0 (+ 1 (table-get t 0)))
+    (table/put t 0 (+ 1 (table/get t 0)))
     (nth v 9))) ; out of range -> deopt
 (defn eo-drive2 (t i v)
   (if (= i 0) nil (do (try (eo-bump2 t v) (catch e nil)) (eo-drive2 t (- i 1) v))))
@@ -48,7 +48,7 @@
 (def eo-t3 (table))
 (defn eo-leaf (t x)
   ; small, calls-free -> would be spliced
-  (do (table-put t 0 (+ 1 (table-get t 0))) x))
+  (do (table/put t 0 (+ 1 (table/get t 0))) x))
 (defn eo-caller (t big)
   (* (eo-leaf t 1) big big)) ; overflow after the splice -> deopt
 (defn eo-drive3 (t i big)
@@ -64,9 +64,9 @@
 ;; check-allow: deliberately non-tail — the deopt/effect-once shape under test.
 (check-allow :non-tail-recursion
   (defn eo-multi ((v) (do
-                        (table-put eo-u4 0 (+ 1 (table-get eo-u4 0)))
+                        (table/put eo-u4 0 (+ 1 (table/get eo-u4 0)))
                         (+ (eo-multi v 0) (nth v 0))))
-    ((v acc) (do (table-put eo-t4 0 (+ 1 (table-get eo-t4 0))) 1.5))))
+    ((v acc) (do (table/put eo-t4 0 (+ 1 (table/get eo-t4 0))) 1.5))))
 (defn eo-drive4 (i v)
   (if (= i 0) nil (do (eo-multi v) (eo-drive4 (- i 1) v))))
 
@@ -76,12 +76,12 @@
 ;; leaf-spliced layout carries its own checkpoint and a deopt resumes in the spliced chunk
 ;; (`ir::LeafInline::resume`), which is what makes keeping that call sound.
 ;;
-;; `eo-leaf5` splices (small, calls-free); `eo-eff5` cannot (a `table-put` is excluded, and
+;; `eo-leaf5` splices (small, calls-free); `eo-eff5` cannot (a `table/put` is excluded, and
 ;; it is a call besides), so it survives as the residual call. The overflow after it deopts
 ;; every activation, AFTER the effect has happened exactly once.
 (def eo-t5 (table))
 (defn eo-leaf5 (x) (+ x 1))
-(defn eo-eff5 (t) (do (table-put t 0 (+ 1 (table-get t 0))) 1))
+(defn eo-eff5 (t) (do (table/put t 0 (+ 1 (table/get t 0))) 1))
 (defn eo-caller5 (t big)
   (+ (+ (eo-leaf5 1) (eo-eff5 t)) (* big big)))
 (defn eo-drive5 (t i big last)
@@ -93,7 +93,7 @@
 ;; int (the overflow's value is discarded) so the loop stays in the JIT's subset.
 (def eo-t6 (table))
 (defn eo-leaf6 (x) (* x 2))
-(defn eo-eff6 (t) (do (table-put t 0 (+ 1 (table-get t 0))) 1))
+(defn eo-eff6 (t) (do (table/put t 0 (+ 1 (table/get t 0))) 1))
 ;; check-allow: deliberately non-tail — the discarded overflow is the deopt trigger.
 (check-allow :non-tail-recursion
   (defn eo-loop6 (t i acc big)
@@ -104,44 +104,44 @@
         (* big big)
         (eo-loop6 t (- i 1) (+ acc (eo-leaf6 i)) big)))))
 
-(describe "a JIT deopt never re-runs a table-put"
+(describe "a JIT deopt never re-runs a table/put"
   (test "effectful arm with no non-tail call"
-    (table-put eo-t1 0 0)
+    (table/put eo-t1 0 0)
     (eo-drive1 eo-t1 eo-n 4000000000)
-    (assert= eo-n (table-get eo-t1 0)))
+    (assert= eo-n (table/get eo-t1 0)))
 
   (test "effectful arm deopting on an out-of-range read"
-    (table-put eo-t2 0 0)
+    (table/put eo-t2 0 0)
     (eo-drive2 eo-t2 eo-n [1 2])
-    (assert= eo-n (table-get eo-t2 0)))
+    (assert= eo-n (table/get eo-t2 0)))
 
   (test "effect inside a leaf-inlined callee"
-    (table-put eo-t3 0 0)
+    (table/put eo-t3 0 0)
     (eo-drive3 eo-t3 eo-n 4000000000)
-    (assert= eo-n (table-get eo-t3 0)))
+    (assert= eo-n (table/get eo-t3 0)))
 
   (test "a multi-arity fn whose sibling arm holds the effect (KI-18)"
-    (table-put eo-t4 0 0)
-    (table-put eo-u4 0 0)
+    (table/put eo-t4 0 0)
+    (table/put eo-u4 0 0)
     (eo-drive4 eo-n [1 2])
     ;; BOTH arms must be entered exactly once per iteration: the caller's re-run
     ;; duplicated the sibling call, so each over-counted by the same 16.
-    (assert= eo-n (table-get eo-u4 0))
-    (assert= eo-n (table-get eo-t4 0)))
+    (assert= eo-n (table/get eo-u4 0))
+    (assert= eo-n (table/get eo-t4 0)))
 
   (test "effect in a residual call beside a spliced leaf (partial splicing)"
-    (table-put eo-t5 0 0)
+    (table/put eo-t5 0 0)
     (let (big 4000000000
           got (eo-drive5 eo-t5 eo-n big nil))
-      (assert= eo-n (table-get eo-t5 0))
+      (assert= eo-n (table/get eo-t5 0))
       ;; The resumed operand stack must still hold the spliced leaf's value and the
       ;; residual call's result: (+ (+ 2 1) big*big). A wrong journal depth or a wrong
       ;; resume ip shows up here as a wrong number rather than a wrong count.
       (assert= (+ 3 (* big big)) got)))
 
   (test "effect in a residual call inside a self-tail loop (partial splicing)"
-    (table-put eo-t6 0 0)
+    (table/put eo-t6 0 0)
     (let (got (eo-loop6 eo-t6 eo-n 0 4000000000))
-      (assert= eo-n (table-get eo-t6 0))
+      (assert= eo-n (table/get eo-t6 0))
       ;; sum of 2*i for i in 1..eo-n
       (assert= (* eo-n (+ eo-n 1)) got))))

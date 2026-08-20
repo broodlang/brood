@@ -26,17 +26,17 @@
     (assert= (string->number "3abc") nil)
     (assert= (string->number "") nil)
     (assert= (string->number " 5") nil))
-  (test "number->string is the inverse"
-    (assert= (number->string 42) "42")
-    (assert= (number->string 3.5) "3.5")
-    (assert= (string->number (number->string 99)) 99))
+  (test "str is string->number's inverse"
+    (assert= (str 42) "42")
+    (assert= (str 3.5) "3.5")
+    (assert= (string->number (str 99)) 99))
   (test "integers past i64 parse to bignums, not lossy floats"
     (assert= (string->number "98765432109876543210987654321")
       98765432109876543210987654321)
     (assert= (string->number "-98765432109876543210987654321")
       -98765432109876543210987654321)
     ;; the round-trip that used to silently round through f64
-    (assert= (string->number (number->string 98765432109876543210987654321))
+    (assert= (string->number (str 98765432109876543210987654321))
       98765432109876543210987654321)))
 
 (describe "characters & lists"
@@ -44,11 +44,11 @@
     (assert= (string/char-at "hello" 0) "h")
     (assert= (string/char-at "hello" 4) "o"))
   (test "string->list yields 1-char strings"
-    (assert= (string/to-list "abc") (list "a" "b" "c"))
-    (assert= (string/to-list "") nil))
+    (assert= (string/->list "abc") (list "a" "b" "c"))
+    (assert= (string/->list "") nil))
   (test "list->string reassembles"
-    (assert= (string/from-list (list "a" "b" "c")) "abc")
-    (assert= (string/from-list (string/to-list "round-trip")) "round-trip")))
+    (assert= (string/list-> (list "a" "b" "c")) "abc")
+    (assert= (string/list-> (string/->list "round-trip")) "round-trip")))
 
 (describe "substring"
   (test "three-arg form takes the range [start, end)"
@@ -94,7 +94,7 @@
     (assert= (string/grapheme-at gr-s 2) "👍")
     (assert= (string/grapheme-at gr-s 3) "b"))
   (test "grapheme-at agrees with string->graphemes at every index"
-    (let (v (string/to-graphemes gr-s))
+    (let (v (string/->graphemes gr-s))
       (assert= (map (fn (i) (string/grapheme-at gr-s i)) (range (string/grapheme-count gr-s)))
         (map (fn (i) (nth v i)) (range (count v))))))
   (test "out of range yields the default, never an error (like nth/get)"
@@ -251,7 +251,7 @@
   ;; string, not with the work. A byte offset escaping onto the non-ASCII path would split
   ;; a character, so this checks EVERY range against a char-level reference.
   (test "substring matches a char-level reference over every range"
-    (let (ref-sub (fn (s i j) (apply str (take (- j i) (drop i (string/to-list s)))))
+    (let (ref-sub (fn (s i j) (apply str (take (- j i) (drop i (string/->list s)))))
           chk (fn (s)
                 (let (n (string/length s))
                   (every? (fn (i)
@@ -376,25 +376,25 @@
     (assert= (string/length (string/pad-left "ab" 2)) 2)
     (assert= (string/length (string/pad-right "ab" 5)) 5)))
 
-(describe "to-fixed (fixed-decimal rendering)"
+(describe "->fixed (fixed-decimal rendering)"
   (test "renders exactly n decimal places"
-    (assert= (to-fixed 3.14159 2) "3.14")
-    (assert= (to-fixed 0.015873015873 4) "0.0159"))
+    (assert= (->fixed 3.14159 2) "3.14")
+    (assert= (->fixed 0.015873015873 4) "0.0159"))
   (test "pads short fractions with trailing zeros"
-    (assert= (to-fixed 1.5 3) "1.500")
-    (assert= (to-fixed 2 2) "2.00"))
+    (assert= (->fixed 1.5 3) "1.500")
+    (assert= (->fixed 2 2) "2.00"))
   (test "n = 0 gives an integer-looking string (no point)"
-    (assert= (to-fixed 3.7 0) "4")
-    (assert= (to-fixed 3.2 0) "3"))
-  (test "rejects a negative decimal count" (assert-error (to-fixed 1.0 -1)))
+    (assert= (->fixed 3.7 0) "4")
+    (assert= (->fixed 3.2 0) "3"))
+  (test "rejects a negative decimal count" (assert-error (->fixed 1.0 -1)))
   ;; A huge count would materialise a ~1 GB string (kernel audit #6); bounded.
   (test "rejects an absurd decimal count instead of allocating gigabytes"
-    (assert-error (to-fixed 1.0 1000000000)))
+    (assert-error (->fixed 1.0 1000000000)))
   ;; "1." + 1000 zeros
   (test "a generous-but-bounded count is still allowed"
-    (assert= (count (to-fixed 1.0 1000)) 1002))
+    (assert= (count (->fixed 1.0 1000)) 1002))
   (test "lines up in a fixed-width column via pad-left"
-    (assert= (string/pad-left (to-fixed 1.5 2) 7) "   1.50")))
+    (assert= (string/pad-left (->fixed 1.5 2) 7) "   1.50")))
 
 (describe "format (printf-style)"
   (test "a format string with no specifiers is returned unchanged"
@@ -436,7 +436,7 @@
 ;; across per-process heaps); the parent fans in and checks the strings survived
 ;; the round-trip intact. :isolated so it doesn't contend for the runner's
 ;; mailbox with the parallel suite.
-(defn str-pad-worker (parent i) (send parent [:p i (string/pad-left (number->string i) 4)]))
+(defn str-pad-worker (parent i) (send parent [:p i (string/pad-left (str i) 4)]))
 (defn str-spawn-padders (parent n)
   (when (> n 0) (spawn (str-pad-worker parent n)) (str-spawn-padders parent (- n 1))))
 (defn str-collect (got total acc)
@@ -469,25 +469,25 @@
 
 (describe "string->codepoints / codepoints->string"
   (test "ASCII codepoints"
-    (assert= (string/to-codepoints "ABC") [65 66 67]))
+    (assert= (string/->codepoints "ABC") [65 66 67]))
   (test "empty string"
-    (assert= (string/to-codepoints "") []))
+    (assert= (string/->codepoints "") []))
   (test "roundtrip via codepoints"
     (let (s "Hello, 世界")
-      (assert= s (string/from-codepoints (string/to-codepoints s)))))
+      (assert= s (string/codepoints-> (string/->codepoints s)))))
   (test "codepoints->string from a vector"
-    (assert= "ABC" (string/from-codepoints [65 66 67])))
+    (assert= "ABC" (string/codepoints-> [65 66 67])))
   (test "non-ASCII codepoint"
-    (assert= (string/to-codepoints "é") [233]))
+    (assert= (string/->codepoints "é") [233]))
   (test "astral codepoint (one code point, not surrogates)"
-    (assert= (string/to-codepoints "🙂") [128578]))
+    (assert= (string/->codepoints "🙂") [128578]))
   (test "across processes: codes vector survives send/receive"
     (let (me (self))
-      (spawn (send me [:codes (string/to-codepoints "héλ🙂")]))
+      (spawn (send me [:codes (string/->codepoints "héλ🙂")]))
       (receive
         ([:codes v] (do
                       (assert= v [104 233 955 128578])
-                      (assert= "héλ🙂" (string/from-codepoints v))))))))
+                      (assert= "héλ🙂" (string/codepoints-> v))))))))
 
 (describe "string-span / string-span-until (native char-class scanners)"
   ; at end → end
@@ -525,7 +525,7 @@
 ;; 1-, 2-, 3- and 4-byte chars in every stride position; 500 chars / 1000 bytes.
 (def- mb-unit "aé漢🙂x")
 (def- mb-text (apply str (repeat 100 mb-unit)))
-(def- mb-chars (into [] (string/to-list mb-text)))
+(def- mb-chars (into [] (string/->list mb-text)))
 ;; The other shape that matters: an ASCII run whose string is non-ASCII only at the end,
 ;; so a conversion inside the run cannot take either fast path.
 (def- mb-tail (str (apply str (repeat 400 "x")) "é"))
@@ -582,12 +582,12 @@
                                    (assert= s mb-unit)
                                    (assert= l 497)))))))
 
-(describe "string/to-bytes + string/from-bytes"
+(describe "string/->bytes + string/bytes->"
   (test "to-bytes returns a bytes value"
-    (is (bytes? (string/to-bytes "hello"))))
+    (is (bytes? (string/->bytes "hello"))))
   (test "from-bytes round-trips a string"
-    (assert= "hello, brood!" (string/from-bytes (string/to-bytes "hello, brood!"))))
+    (assert= "hello, brood!" (string/bytes-> (string/->bytes "hello, brood!"))))
   (test "empty string round-trips"
-    (assert= "" (string/from-bytes (string/to-bytes ""))))
+    (assert= "" (string/bytes-> (string/->bytes ""))))
   (test "UTF-8 multi-byte character"
-    (assert= "café" (string/from-bytes (string/to-bytes "café")))))
+    (assert= "café" (string/bytes-> (string/->bytes "café")))))

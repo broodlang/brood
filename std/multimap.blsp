@@ -100,7 +100,7 @@ If no values remain under `k`, the key is dropped."
 ;; needs a key, which `conj`'s single element can't carry — use `assoc`.)
 (impl Seqable
   multimap/multimap
-  (to-seq [mm]
+  (->seq [mm]
     (mapcat (fn (pair) (map (fn (v) [(first pair) v]) (reverse (second pair))))
       (map-pairs (/get mm :entries)))))
 
@@ -129,7 +129,7 @@ associations (its `Seqable` view)."
 ;; whole thing — the plain-map view, so a log line reads as data rather than a wrapper.
 (impl Display
   multimap/multimap
-  (to-str [mm]
+  (->string [mm]
     (str "#<multimap "
       (count (keys mm))
       " keys, "

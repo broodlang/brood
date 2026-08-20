@@ -1485,7 +1485,7 @@ sha256 pin still holds."
           entry (get index nm))
       ;; a dep's tree label is its DISPLAY form (`impl Display` per kind, in
       ;; std/tool/project.blsp beside the records), so this and `(println dep)` can't drift
-      (println (str prefix "- " (to-str d) (if dup " (already shown)" "")))
+      (println (str prefix "- " (->string d) (if dup " (already shown)" "")))
       (when (and entry (not dup) (not (empty? (get entry :deps))))
         (package-print-tree (get entry :deps) index (str prefix "  ") (cons nm seen))))))
 
@@ -1724,8 +1724,8 @@ sha256 pin still holds."
         (let (manifest (path-join root "project.blsp")
               edit (package-edit-manifest! root
                      (fn (src) (package-manifest-add src (dep-entry-node dep))))
-              original (vector-ref edit 0)
-              written (vector-ref edit 1))
+              original (vector/ref edit 0)
+              written (vector/ref edit 1))
           (let (outcome (try
                           (do
                             (package-load-manifest manifest)

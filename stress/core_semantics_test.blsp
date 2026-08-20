@@ -124,8 +124,8 @@
     (do
       (assert= (string->number "9223372036854775807") 9223372036854775807)
       (assert= (string->number "-3.5") -3.5)
-      (assert= (number->string 255) "255")
-      (assert= (string->number (number->string 0.1)) 0.1)
+      (assert= (str 255) "255")
+      (assert= (string->number (str 0.1)) 0.1)
       true)))
 
 ;; deep tail recursion — R7RS's classic "iterate to 1e6 in O(1) stack"

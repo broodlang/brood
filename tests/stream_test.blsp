@@ -16,35 +16,35 @@
 
 (describe "from-list"
   (test "empty list"
-    (assert= :done (stream/next (stream/from-list []))))
+    (assert= :done (stream/next (stream/list-> []))))
   (test "single element"
-    (let (s (stream/from-list [7]))
+    (let (s (stream/list-> [7]))
       (assert= [:ok 7] (stream/next s))
       (assert= :done (stream/next s))))
   (test "multiple elements in order"
-    (let (s (stream/from-list [1 2 3]))
+    (let (s (stream/list-> [1 2 3]))
       (assert= [:ok 1] (stream/next s))
       (assert= [:ok 2] (stream/next s))
       (assert= [:ok 3] (stream/next s))
       (assert= :done (stream/next s))))
   (test "works with a list"
     (assert= [1 2 3]
-      (stream/to-vector (stream/from-list '(1 2 3))))))
+      (stream/->vector (stream/list-> '(1 2 3))))))
 
 (describe "from-fn"
   (test "generator terminates"
-    (let (s (stream/from-fn (fn (n) (if (> n 3) :done [:yield n (+ n 1)]))
+    (let (s (stream/fn-> (fn (n) (if (> n 3) :done [:yield n (+ n 1)]))
               1))
-      (assert= [1 2 3] (stream/to-vector s))))
+      (assert= [1 2 3] (stream/->vector s))))
   (test "empty generator"
-    (let (s (stream/from-fn (fn (_) :done) nil))
+    (let (s (stream/fn-> (fn (_) :done) nil))
       (assert= :done (stream/next s)))))
 
 (describe "range"
   (test "basic range"
-    (assert= [0 1 2 3 4] (stream/to-vector (stream/range 0 5))))
+    (assert= [0 1 2 3 4] (stream/->vector (stream/range 0 5))))
   (test "range from non-zero start"
-    (assert= [3 4 5] (stream/to-vector (stream/range 3 6))))
+    (assert= [3 4 5] (stream/->vector (stream/range 3 6))))
   (test "empty range"
     (assert= :done (stream/next (stream/range 5 5))))
   (test "reversed range is empty"
@@ -54,17 +54,17 @@
 
 (describe "to-list"
   (test "collects in order"
-    (let (result (stream/to-list (stream/from-list [1 2 3])))
+    (let (result (stream/->list (stream/list-> [1 2 3])))
       (assert= (count result) 3)
       (assert= (nth result 0) 1)
       (assert= (nth result 1) 2)
       (assert= (nth result 2) 3)))
   (test "empty stream returns nil (empty list)"
-    (is (nil? (stream/to-list (stream/empty))))))
+    (is (nil? (stream/->list (stream/empty))))))
 
 (describe "to-vector"
   (test "returns a vector"
-    (let (v (stream/to-vector (stream/from-list [10 20])))
+    (let (v (stream/->vector (stream/list-> [10 20])))
       (is (vector? v))
       (assert= [10 20] v))))
 
@@ -77,7 +77,7 @@
 (describe "for-each"
   (test "side effects in order"
     (let (me (self))
-      (stream/for-each (fn (x) (send me x)) (stream/from-list [1 2 3]))
+      (stream/for-each (fn (x) (send me x)) (stream/list-> [1 2 3]))
       (assert= 1 (receive))
       (assert= 2 (receive))
       (assert= 3 (receive)))))
@@ -93,109 +93,109 @@
 (describe "map"
   (test "maps a function"
     (assert= [2 4 6]
-      (stream/to-vector (stream/map (fn (x) (* x 2))
-                          (stream/from-list [1 2 3])))))
+      (stream/->vector (stream/map (fn (x) (* x 2))
+                         (stream/list-> [1 2 3])))))
   (test "empty input"
     (assert= []
-      (stream/to-vector (stream/map inc (stream/empty)))))
+      (stream/->vector (stream/map inc (stream/empty)))))
   (test "chained maps"
     (assert= [3 5 7]
-      (stream/to-vector (stream/map inc
-                          (stream/map (fn (x) (* x 2))
-                            (stream/from-list [1 2 3])))))))
+      (stream/->vector (stream/map inc
+                         (stream/map (fn (x) (* x 2))
+                           (stream/list-> [1 2 3])))))))
 
 (describe "filter"
   (test "keeps matching elements"
     (assert= [2 4 6]
-      (stream/to-vector (stream/filter even? (stream/range 1 7)))))
+      (stream/->vector (stream/filter even? (stream/range 1 7)))))
   (test "nothing matches"
     (assert= []
-      (stream/to-vector (stream/filter (fn (_) false) (stream/range 0 5)))))
+      (stream/->vector (stream/filter (fn (_) false) (stream/range 0 5)))))
   (test "everything matches"
     (assert= [1 2 3]
-      (stream/to-vector (stream/filter (fn (_) true)
-                          (stream/from-list [1 2 3]))))))
+      (stream/->vector (stream/filter (fn (_) true)
+                         (stream/list-> [1 2 3]))))))
 
 (describe "take"
   (test "takes first n"
     (assert= [0 1 2]
-      (stream/to-vector (stream/take 3 (stream/range 0 100)))))
+      (stream/->vector (stream/take 3 (stream/range 0 100)))))
   (test "take more than available"
     (assert= [1 2 3]
-      (stream/to-vector (stream/take 10 (stream/from-list [1 2 3])))))
+      (stream/->vector (stream/take 10 (stream/list-> [1 2 3])))))
   (test "take 0"
     (assert= []
-      (stream/to-vector (stream/take 0 (stream/range 0 100))))))
+      (stream/->vector (stream/take 0 (stream/range 0 100))))))
 
 (describe "take-while"
   (test "stops at first non-matching"
     (assert= [0 1 2 3 4]
-      (stream/to-vector (stream/take-while (fn (n) (< n 5))
-                          (stream/range 0 20)))))
+      (stream/->vector (stream/take-while (fn (n) (< n 5))
+                         (stream/range 0 20)))))
   (test "empty result when predicate fails immediately"
     (assert= []
-      (stream/to-vector (stream/take-while (fn (_) false)
-                          (stream/from-list [1 2 3]))))))
+      (stream/->vector (stream/take-while (fn (_) false)
+                         (stream/list-> [1 2 3]))))))
 
 (describe "drop"
   (test "drops first n"
     (assert= [3 4 5]
-      (stream/to-vector (stream/drop 3 (stream/range 0 6)))))
+      (stream/->vector (stream/drop 3 (stream/range 0 6)))))
   (test "drop more than available"
     (assert= []
-      (stream/to-vector (stream/drop 10 (stream/from-list [1 2])))))
+      (stream/->vector (stream/drop 10 (stream/list-> [1 2])))))
   (test "drop 0"
     (assert= [1 2 3]
-      (stream/to-vector (stream/drop 0 (stream/from-list [1 2 3]))))))
+      (stream/->vector (stream/drop 0 (stream/list-> [1 2 3]))))))
 
 (describe "chunk"
   (test "even split"
     (assert= [[1 2] [3 4] [5 6]]
-      (stream/to-vector (stream/chunk 2 (stream/range 1 7)))))
+      (stream/->vector (stream/chunk 2 (stream/range 1 7)))))
   (test "last chunk is shorter"
     (assert= [[1 2] [3 4] [5]]
-      (stream/to-vector (stream/chunk 2 (stream/range 1 6)))))
+      (stream/->vector (stream/chunk 2 (stream/range 1 6)))))
   (test "chunk larger than stream"
     (assert= [[1 2 3]]
-      (stream/to-vector (stream/chunk 10 (stream/from-list [1 2 3])))))
+      (stream/->vector (stream/chunk 10 (stream/list-> [1 2 3])))))
   (test "empty stream"
     (assert= []
-      (stream/to-vector (stream/chunk 3 (stream/empty))))))
+      (stream/->vector (stream/chunk 3 (stream/empty))))))
 
 (describe "concat"
   (test "sequences two streams"
     (assert= [1 2 3 4 5 6]
-      (stream/to-vector (stream/concat (stream/from-list [1 2 3])
-                          (stream/from-list [4 5 6])))))
+      (stream/->vector (stream/concat (stream/list-> [1 2 3])
+                         (stream/list-> [4 5 6])))))
   (test "first empty"
     (assert= [4 5 6]
-      (stream/to-vector (stream/concat (stream/empty)
-                          (stream/from-list [4 5 6])))))
+      (stream/->vector (stream/concat (stream/empty)
+                         (stream/list-> [4 5 6])))))
   (test "second empty"
     (assert= [1 2 3]
-      (stream/to-vector (stream/concat (stream/from-list [1 2 3])
-                          (stream/empty)))))
+      (stream/->vector (stream/concat (stream/list-> [1 2 3])
+                         (stream/empty)))))
   (test "both empty"
     (assert= []
-      (stream/to-vector (stream/concat (stream/empty) (stream/empty))))))
+      (stream/->vector (stream/concat (stream/empty) (stream/empty))))))
 
 (describe "lines"
   (test "LF-terminated lines"
     (assert= ["a" "b" "c"]
-      (stream/to-vector (stream/lines (stream/from-list ["a\nb\nc\n"])))))
+      (stream/->vector (stream/lines (stream/list-> ["a\nb\nc\n"])))))
   (test "CRLF-terminated lines"
     (assert= ["a" "b" "c"]
-      (stream/to-vector (stream/lines (stream/from-list ["a\r\nb\r\nc\r\n"])))))
+      (stream/->vector (stream/lines (stream/list-> ["a\r\nb\r\nc\r\n"])))))
   (test "split across chunks"
     (assert= ["hello" "world"]
-      (stream/to-vector (stream/lines (stream/from-list ["hel"
-                                                          "lo\n" "wor" "ld"])))))
+      (stream/->vector (stream/lines (stream/list-> ["hel"
+                                                      "lo\n" "wor" "ld"])))))
   (test "trailing fragment without newline becomes last line"
     (assert= ["foo" "bar"]
-      (stream/to-vector (stream/lines (stream/from-list ["foo\nbar"])))))
+      (stream/->vector (stream/lines (stream/list-> ["foo\nbar"])))))
   (test "empty stream"
     (assert= []
-      (stream/to-vector (stream/lines (stream/empty)))))
+      (stream/->vector (stream/lines (stream/empty)))))
 
   ;; `lines` splits each chunk once and queues the complete lines, rather than
   ;; re-`substring`ing the rest of the buffer per line (which was O(lines x buffer) inside
@@ -204,37 +204,37 @@
   (test "CR and LF split across a chunk boundary still strip together"
     ;; The \r ends one chunk and the \n begins the next — the pair must not survive.
     (assert= ["a" "b"]
-      (stream/to-vector (stream/lines (stream/from-list ["a\r" "\nb\r\n"])))))
+      (stream/->vector (stream/lines (stream/list-> ["a\r" "\nb\r\n"])))))
   (test "empty lines are preserved"
     (assert= ["a" "" "b"]
-      (stream/to-vector (stream/lines (stream/from-list ["a\n\nb\n"]))))
+      (stream/->vector (stream/lines (stream/list-> ["a\n\nb\n"]))))
     (assert= ["" ""]
-      (stream/to-vector (stream/lines (stream/from-list ["\r\n\r\n"])))))
+      (stream/->vector (stream/lines (stream/list-> ["\r\n\r\n"])))))
   (test "a chunk that is exactly a newline"
     (assert= ["a" "" "b"]
-      (stream/to-vector (stream/lines (stream/from-list ["a\n" "\n" "b"])))))
+      (stream/->vector (stream/lines (stream/list-> ["a\n" "\n" "b"])))))
   (test "a bare CR inside a line is kept — only one before the LF is stripped"
     (assert= ["a\rb"]
-      (stream/to-vector (stream/lines (stream/from-list ["a\rb\n"])))))
+      (stream/->vector (stream/lines (stream/list-> ["a\rb\n"])))))
   (test "many lines in ONE chunk come out in order and complete"
     ;; The case the rewrite optimises: all lines are split out of a single chunk and then
     ;; handed over one pull at a time, so an error in the queue would reorder or drop.
     (let (want (into [] (map (fn (i) (str "line" i)) (range 500)))
           blob (apply str (map (fn (i) (str "line" i "\n")) (range 500))))
       (assert= want
-        (stream/to-vector (stream/lines (stream/from-list [blob]))))))
+        (stream/->vector (stream/lines (stream/list-> [blob]))))))
   (test "take stops mid-chunk, leaving queued lines undelivered"
     ;; Closing while lines are still queued must not hang or leak the producer.
     (assert= ["a" "b"]
-      (stream/to-vector (stream/take 2
-                          (stream/lines (stream/from-list ["a\nb\nc\nd\n"])))))))
+      (stream/->vector (stream/take 2
+                         (stream/lines (stream/list-> ["a\nb\nc\nd\n"])))))))
 
 ;; ---- pipe -------------------------------------------------------------------
 
 (describe "pipe"
   (test "sends :stream-data then :stream-eof"
     (let (me (self))
-      (spawn (stream/pipe (stream/from-list [1 2 3]) me))
+      (spawn (stream/pipe (stream/list-> [1 2 3]) me))
       (assert= [:stream-data 1] (receive))
       (assert= [:stream-data 2] (receive))
       (assert= [:stream-data 3] (receive))
@@ -256,7 +256,7 @@
       ;; Accept the connection; extract the client socket from the message.
       (let (client (receive ([:tcp-accept ^ls c] c)))
         ;; Wrap the accepted socket in a stream and collect it.
-        (let (s (stream/from-socket client)
+        (let (s (stream/socket-> client)
               data (stream/fold str "" s))
           (tcp-close ls)
           (assert= data "hello world"))))))
@@ -288,10 +288,10 @@
         (k)
         (when (> k 0)
           ;; each of these ends in an exhausted-producer state that used to leak:
-          (stream/to-vector (stream/drop 10 (stream/from-list [1 2]))) ; drop past end
-          (stream/to-list (stream/empty)) ; empty
-          (stream/to-vector (stream/map inc (stream/singleton 7))) ; singleton
-          (stream/to-vector (stream/chunk 3 (stream/from-list [1 2]))) ; partial chunk
+          (stream/->vector (stream/drop 10 (stream/list-> [1 2]))) ; drop past end
+          (stream/->list (stream/empty)) ; empty
+          (stream/->vector (stream/map inc (stream/singleton 7))) ; singleton
+          (stream/->vector (stream/chunk 3 (stream/list-> [1 2]))) ; partial chunk
           (stream-test-consume-batch (- k 1))))
       (stream-test-consume-batch 150)
       (sleep 80)

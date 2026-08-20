@@ -109,7 +109,7 @@ pub(super) fn realize_seqviews(
 }
 
 /// If `v` is a RECORD (a `Value::Map` carrying `:__id__`), return its `Seqable` view — the
-/// list its `to-seq` ability op yields (its fields id-free by default, or a custom
+/// list its `->seq` ability op yields (its fields id-free by default, or a custom
 /// collection's own sequence). Lets `first`/`rest`/`empty?` treat a record AS its sequence
 /// (ADR-172 §7). Only reached on the builtin fallback: `first`/`rest` are `PrimOp1`s the JIT
 /// inlines for lists, so the hot `fold--loop` never calls these. Returns `None` for a
@@ -127,8 +127,8 @@ pub(super) fn record_seq(heap: &mut Heap, v: Value) -> Result<Option<Value>, Lis
     }
     let genv = heap.global();
     let callee = heap
-        .env_get(genv, crate::core::value::intern("to-seq"))
-        .ok_or_else(|| LispError::runtime("to-seq: the Seqable protocol is unavailable"))?;
+        .env_get(genv, crate::core::value::intern("->seq"))
+        .ok_or_else(|| LispError::runtime("->seq: the Seqable protocol is unavailable"))?;
     Ok(Some(crate::eval::compile::apply_value(
         heap,
         callee,
@@ -701,18 +701,18 @@ pub(super) fn vector(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 pub(super) fn vector_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
-    let n = expect_int(heap, "vector-ref", arg(args, 1))?;
+    let n = expect_int(heap, "vector/ref", arg(args, 1))?;
     match v {
         Value::Vector(id) if n >= 0 && (n as usize) < heap.vector(id).len() => {
             Ok(heap.vector(id)[n as usize])
         }
         Value::Vector(id) => Err(LispError::runtime(format!(
-            "vector-ref: index {} out of range [0, {})",
+            "vector/ref: index {} out of range [0, {})",
             n,
             heap.vector(id).len()
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)),
-        _ => Err(LispError::wrong_type(heap, "vector-ref", "vector", v)),
+        _ => Err(LispError::wrong_type(heap, "vector/ref", "vector", v)),
     }
 }
 
@@ -720,18 +720,18 @@ pub(super) fn vector_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     let v = arg(args, 0);
     match v {
         Value::Vector(id) => Ok(Value::int(heap.vector(id).len() as i64)),
-        _ => Err(LispError::wrong_type(heap, "vector-length", "vector", v)),
+        _ => Err(LispError::wrong_type(heap, "vector/size", "vector", v)),
     }
 }
 
-/// `(vector-assoc v i x)` — a fresh vector like `v` with index `i` set to `x`.
+/// `(vector/assoc v i x)` — a fresh vector like `v` with index `i` set to `x`.
 /// The vector counterpart of `map-assoc`; O(n) copy (vectors are flat), one
 /// allocation, no cons churn. `i` must be in `[0, len)` (append-at-end is a
 /// deferred power feature, ADR-011). No GC safepoint runs inside a builtin, so
 /// the cloned handles stay valid across `alloc_vector`.
 pub(super) fn vector_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
-    let i = expect_int(heap, "vector-assoc", arg(args, 1))?;
+    let i = expect_int(heap, "vector/assoc", arg(args, 1))?;
     let x = arg(args, 2);
     match v {
         Value::Vector(id) if i >= 0 && (i as usize) < heap.vector(id).len() => {
@@ -740,12 +740,12 @@ pub(super) fn vector_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             Ok(heap.alloc_vector(items))
         }
         Value::Vector(id) => Err(LispError::runtime(format!(
-            "vector-assoc: index {} out of range [0, {})",
+            "vector/assoc: index {} out of range [0, {})",
             i,
             heap.vector(id).len()
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)),
-        _ => Err(LispError::wrong_type(heap, "vector-assoc", "vector", v)),
+        _ => Err(LispError::wrong_type(heap, "vector/assoc", "vector", v)),
     }
 }
 
@@ -1513,11 +1513,11 @@ pub(super) fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(heap.list_from_slice(&out))
 }
 
-/// `(string/to-codepoints s)` — the characters of `s` as a **vector of integer Unicode
+/// `(string/->codepoints s)` — the characters of `s` as a **vector of integer Unicode
 /// codepoints**, one O(n) pass. The random-access text-scanning primitive:
 /// parsers (std/regex, std/json, std/encoding) index code points with O(1)
 /// `nth` and compare them as ints. Building the same vector in Brood —
-/// `(apply vector (map char->int (string/to-list s)))` — costs a 1-char string
+/// `(apply vector (map char->int (string/->list s)))` — costs a 1-char string
 /// allocation per char plus a closure call per char, and measured ~40 % of the
 /// whole regex benchmark. Like `string-split`/`string-span`, this is text-access
 /// *mechanism*; the parsers themselves stay in Brood.
@@ -1525,14 +1525,14 @@ pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) ->
     // Borrowed: the codepoints are ints, so nothing is allocated while the borrow is
     // live — one copy of the string saved per call, on the parsers' hot path.
     let codes: Vec<Value> = {
-        let s = expect_string_ref(heap, "string/to-codepoints", arg(args, 0))?;
+        let s = expect_string_ref(heap, "string/->codepoints", arg(args, 0))?;
         s.chars().map(|c| Value::int(c as i64)).collect()
     };
     Ok(heap.alloc_vector(codes))
 }
 
-/// `(string/to-graphemes s)` — the **extended grapheme clusters** of `s` as a vector
-/// of strings, one O(n) pass. The sibling of `string->codepoints`, and the unit a
+/// `(string/->graphemes s)` — the **extended grapheme clusters** of `s` as a vector
+/// of strings, one O(n) pass. The sibling of `string/->codepoints`, and the unit a
 /// human means by "character": `"é"` written as `e` + U+0301 is two code points but
 /// one grapheme, and a flag emoji is four code points and one grapheme. Cursor
 /// motion, column arithmetic and truncation in `std/editor/*` all want this unit —
@@ -1541,7 +1541,7 @@ pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) ->
 /// express. `display-width` already segments the same way internally.
 pub(super) fn string_to_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_segmentation::UnicodeSegmentation;
-    let s = expect_string(heap, "string/to-graphemes", arg(args, 0))?;
+    let s = expect_string(heap, "string/->graphemes", arg(args, 0))?;
     // `true` = *extended* grapheme clusters (UAX #29's recommended default, and
     // what the renderer and `display-width` use).
     let parts: Vec<String> = s.graphemes(true).map(|g| g.to_string()).collect();
@@ -1563,7 +1563,7 @@ pub(super) fn grapheme_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 /// of `s` as a string, or `default`/`nil` when `i` is out of range (never an error,
 /// matching `nth`/`get`).
 ///
-/// Why this is a primitive and not `(nth (string/to-graphemes s) i)`: the docs require
+/// Why this is a primitive and not `(nth (string/->graphemes s) i)`: the docs require
 /// a cursor to step by *cluster*, so that spelling was the only correct way to read
 /// one character — and it builds a vector of every cluster in the string on **every
 /// keystroke**. This walks to `i` and stops, allocating one string. The editor's
@@ -1649,30 +1649,30 @@ pub(super) fn string_normalize(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     Ok(heap.alloc_string(&out))
 }
 
-/// `(to-fixed x n)` — x rendered with exactly `n` digits after the decimal point
+/// `(->fixed x n)` — x rendered with exactly `n` digits after the decimal point
 /// (rounded). The one float→text op the language can't bootstrap: `str`/`pr-str`
 /// print the shortest round-tripping form (full f64 precision, e.g.
 /// `0.015873015873015872`), which is wrong for tabular/console output. An int `x`
-/// is promoted, so `(to-fixed 3 2)` is `"3.00"`. `n` must be non-negative.
+/// is promoted, so `(->fixed 3 2)` is `"3.00"`. `n` must be non-negative.
 pub(super) fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let x = num_to_f64(heap, "to-fixed", arg(args, 0))?;
-    let n = expect_int(heap, "to-fixed", arg(args, 1))?;
+    let x = num_to_f64(heap, "->fixed", arg(args, 0))?;
+    let n = expect_int(heap, "->fixed", arg(args, 1))?;
     if n < 0 {
         return Err(LispError::runtime(format!(
-            "to-fixed: decimal places must be non-negative, got {}",
+            "->fixed: decimal places must be non-negative, got {}",
             n
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
     }
     // Bound the width: `format!("{:.*}", n, x)` materialises an `n`-digit string,
-    // so an unbounded `n` (e.g. `(to-fixed 1.0 1000000000)`) allocates ~1 GB on the
+    // so an unbounded `n` (e.g. `(->fixed 1.0 1000000000)`) allocates ~1 GB on the
     // Rust side, bypassing the GC/soft-memory cap. An f64 carries ~17 significant
     // digits; past that the tail is just zeros, so 1000 is far beyond any real use
     // while keeping the worst-case alloc to ~1 KB.
     const MAX_DECIMALS: i64 = 1000;
     if n > MAX_DECIMALS {
         return Err(LispError::runtime(format!(
-            "to-fixed: decimal places {n} too large (max {MAX_DECIMALS}); an f64 has \
+            "->fixed: decimal places {n} too large (max {MAX_DECIMALS}); an f64 has \
              ~17 significant digits, so a larger count only pads zeros"
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));

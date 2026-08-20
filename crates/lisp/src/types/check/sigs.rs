@@ -210,13 +210,10 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
         put(n, Sig::new(vec![cb1.clone(), seq], bool_ty));
     }
     // String operations: branchy or `apply`-based bodies; infer_sig bails.
-    //   symbol->string — branches on (symbol? s), returns (name s) which is string.
-    //                    Domain is `symbol` so (symbol->string "x") is catchable.
     //   join           — complex if/apply body; always returns a string.
     //   capitalize     — if-branches, both arms produce strings.
     //   string-split   — accumulator recursion; returns a list of strings
     //                    (unrefined list — list<string> would warn on (first …) = nil).
-    put("symbol->string", Sig::new(vec![sym_ty], str_ty));
     put("string/join", Sig::new(vec![any, seq], str_ty));
     put("string/capitalize", Sig::new(vec![str_ty], str_ty));
     put("string/split", Sig::new(vec![str_ty, str_ty], Ty::LIST));
@@ -226,9 +223,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
         put(n, Sig::variadic(any, bool_ty));
     }
     // String conversions: branchy bodies or `apply` — infer_sig bails.
-    //   number->string — (str n): `str` has any domain; curate tighter (num → str).
     //   string->symbol — if-guard over (string? s).
-    put("number->string", Sig::new(vec![num], str_ty));
     put("string->symbol", Sig::new(vec![str_ty], sym_ty));
     // String predicates: nested calls or let+branch bodies.
     //   starts-with?/ends-with? — let + and + branch.
@@ -262,10 +257,10 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     //   string->list        — (string/split s "").
     //   list->string        — (apply str cs).
     //   codepoints->string  — (apply str (map int->char cs)).
-    // (string/to-codepoints is a primitive now — its sig rides on the NativeFn.)
-    put("string/to-list", Sig::new(vec![str_ty], Ty::LIST));
-    put("string/from-list", Sig::new(vec![seq], str_ty));
-    put("string/from-codepoints", Sig::new(vec![seq], str_ty));
+    // (string/->codepoints is a primitive now — its sig rides on the NativeFn.)
+    put("string/->list", Sig::new(vec![str_ty], Ty::LIST));
+    put("string/list->", Sig::new(vec![seq], str_ty));
+    put("string/codepoints->", Sig::new(vec![seq], str_ty));
     // format: variadic with a required string template arg and a string result.
     put("format", Sig::with_rest(vec![str_ty], any, str_ty));
     // Search → int: all have branchy/recursive/optional-param bodies.

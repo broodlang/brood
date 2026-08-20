@@ -84,7 +84,6 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(+ 1 (any? int? (list 1 2)))", "+"),    // any? → bool
     ("(+ 1 (every? int? (list 1 2)))", "+"),  // every? → bool
     // ---- expanded curated sigs: string converters ----
-    (r#"(+ 1 (symbol->string 'foo))"#, "+"),  // symbol->string → string
     (r#"(+ 1 (string/join ", " (list "a" "b")))"#, "+"), // join → string
     (r#"(+ 1 (string/capitalize "hello"))"#, "+"), // capitalize → string
     // ---- op names must be unique within a module (ADR-172) ----
@@ -150,10 +149,10 @@ const SHOULD_NOT_WARN: &[&str] = &[
     // ---- guard-narrowing soundness (the fixed false positives) ----
     // `and` short-circuit: a falsy `(and (vector? m) …)` doesn't prove m isn't a
     // vector → the else-branch must NOT narrow m.
-    "(fn (m) (if (and (vector? m) (%eq (vector-length m) 2)) (vector-ref m 0) (vector-ref m 0)))",
+    "(fn (m) (if (and (vector? m) (%eq (vector/size m) 2)) (vector/ref m 0) (vector/ref m 0)))",
     // `%eq`: `m ≠ \"x\"` doesn't prove m isn't a string → else-branch not narrowed.
     r#"(fn (m) (if (%eq m "x") :yes (string/length m)))"#,
-    // match: a list value against a vector pattern lowers to a guarded vector-ref
+    // match: a list value against a vector pattern lowers to a guarded vector/ref
     // that must stay quiet (the scrutinee narrows to a vector inside the guard).
     "(match (list 1 2) ([a b] :vec) (_ :not-vec))",
     // ---- correct occurrence typing (then-branch narrowing is sound) ----
@@ -162,7 +161,6 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(if (number? 42) :yes :no)",             // number? used as a predicate (bool is fine)
     "(if (empty? (list)) :yes :no)",          // empty? as predicate
     r#"(if (contains? {:a 1} :a) :yes :no)"#, // contains? as predicate
-    r#"(string/length (symbol->string 'foo))"#, // symbol→string→length is fine
     r#"(string/length (string/join ", " (list "a")))"#, // join→string→length fine
     // ---- type-variable sigs: correct uses stay silent ----
     "(sig identity (?A -> ?A)) (defn identity (x) x) (+ 1 (identity 42))",
