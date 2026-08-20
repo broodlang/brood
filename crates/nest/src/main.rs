@@ -330,6 +330,18 @@ enum Cmd {
 
     /// Add a dependency to project.blsp and re-lock (ADR-037).
     ///
+    /// Identifier-aware whole-token rename across the project's .blsp sources.
+    ///
+    /// `nest rename OLD NEW` rewrites every whole Brood identifier `OLD` to `NEW`
+    /// (a plain sed corrupts substrings — `map/get` inside `multimap/get`). Skips
+    /// `.git` and vendored `_deps`. For an ecosystem-wide rename, run it per repo.
+    Rename {
+        /// The identifier to rename.
+        old: String,
+        /// Its replacement.
+        new: String,
+    },
+
     /// `nest add NAME :path PATH` (`:git` lands in a later slice). NAME is the
     /// local require-name. The manifest is rewritten preserving its comments.
     Add {
@@ -762,6 +774,10 @@ fn run_main(cli: Cli) {
             require_project("tree", None);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/tree)"))
         }
+        Cmd::Rename { old, new } => run(
+            &mut interp,
+            &format!("(codemod/rename (list (list {old:?} {new:?})))"),
+        ),
         Cmd::Add { name, spec } => {
             require_project("add", None);
             cmd_add(&mut interp, &name, &spec)
