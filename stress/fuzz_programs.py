@@ -132,13 +132,13 @@ class Gen:
                 "(_ 0)))")
             helpers.append((m, 1))
         # a string helper: digest of the decimal rendering — exercises str /
-        # string-length across tiers
+        # string/length across tiers
         if r.random() < 0.3:
             sname = self.name("s")
             lines.append(
                 "(defn " + sname + " (x) "
                 '(let (t (str x "-" (* x 3))) '
-                "(+ (string-length t) (bit-and x 7))))")
+                "(+ (string/length t) (bit-and x 7))))")
             helpers.append((sname, 1))
         # a MAP helper: build a CHAMP map by folding assoc, then dissoc/get/merge/
         # count/keys — exercises persistent-map construction + traversal through
@@ -244,8 +244,8 @@ class Gen:
         f, arity = r.choice([(n, a) for (n, a) in helpers if not n.startswith("g")])
         args = " ".join(["i"] * arity)
         key_mod = r.choice([8, 64, 512, 4095])
-        body_bits = [f"(table-put t (rem i {key_mod}) ({f} {args}))",
-                     f"(table-incr t {r.randint(0, 7)} 1)"]
+        body_bits = [f"(table/put t (rem i {key_mod}) ({f} {args}))",
+                     f"(table/incr t {r.randint(0, 7)} 1)"]
         r.shuffle(body_bits)
         n_iters = r.choice([3000, 5000, 9000])
         lines.append(
@@ -276,8 +276,8 @@ class Gen:
                 lines.append(
                     "(defn worker (w j n s)\n"
                     "  (if (>= j n) (send me [:done s])\n"
-                    "    (do (table-incr t 999983 1)\n"
-                    "      (table-put t (+ 100000 (* w " + str(span) + ") (rem j " + str(span) + ")) (bit-and (" + pf + " " + pargs + ") 268435455))\n"
+                    "    (do (table/incr t 999983 1)\n"
+                    "      (table/put t (+ 100000 (* w " + str(span) + ") (rem j " + str(span) + ")) (bit-and (" + pf + " " + pargs + ") 268435455))\n"
                     "      (worker w (+ j 1) n (bit-and (+ s (" + pf + " " + pargs + ")) 268435455)))))")
                 lines.append(
                     "(defn fan (w) (if (= w " + str(nworkers) + ") nil (do (spawn (worker w 0 " + str(per) + " 0)) (fan (+ w 1)))))")
@@ -286,11 +286,11 @@ class Gen:
                 lines.append(
                     "(defn dig2 (k n s)\n"
                     "  (if (>= k n) s\n"
-                    "    (dig2 (+ k 1) n (bit-xor s (* (- k 99999) (table-get t k 0))))))")
+                    "    (dig2 (+ k 1) n (bit-xor s (* (- k 99999) (table/get t k 0))))))")
                 lines.append("(fan 0)")
                 lines.append("(def conc (fan-in 0 0))")
                 lines.append(
-                    f'(println "conc" conc (table-get t 999983 0) '
+                    f'(println "conc" conc (table/get t 999983 0) '
                     f"(dig2 100000 {100000 + nworkers * span} 0))")
             else:
                 # PROCESS TREE: a parent spawns `nodes` node-workers; each node
@@ -408,7 +408,7 @@ class Gen:
             lines.append(f"(def {hv} ({hn} {{}} 0 {r.choice([2000, 5000, 9000])}))")
             lines.append(f'(println "{hn}" ({dn} {hv} 0 0) (map-count {hv}))')
         # a SIDE-EFFECT + call-result-DESTRUCTURE loop — the deopt-rerun bug's
-        # shape: a `table-incr` effect before a non-tail call whose vector result
+        # shape: a `table/incr` effect before a non-tail call whose vector result
         # is destructured (which deopts). Exercises the JIT deopt/effect-ordering
         # machinery (the checkpoint that makes an effect execute exactly once); a
         # jit-vs-tree diff here would be a duplicated/lost effect.
@@ -420,18 +420,18 @@ class Gen:
             lines.append(
                 f"(defn {sp} (s i n acc)\n"
                 f"  (if (>= i n) acc\n"
-                f"    (do (table-incr t {key} 1)\n"
+                f"    (do (table/incr t {key} 1)\n"
                 f"      (let ([s2 tag] ({mk} s))\n"
                 f"        ({sp} s2 (+ i 1) n (bit-xor acc (bit-and s2 268435455)))))))")
             sv = sp + "-r"
             lines.append(f'(def {sv} ({sp} 1337 0 {r.choice([5000, 15000])} 0))')
-            lines.append(f'(println "{sp}" {sv} (table-get t {key} 0))')
+            lines.append(f'(println "{sp}" {sv} (table/get t {key} 0))')
         # digest: accumulator + table contents
         lines.append(
             "(defn dig (k n s)\n"
             "  (if (>= k n) s\n"
-            "    (dig (+ k 1) n (bit-xor s (* (+ k 1) (table-get t k 0))))))")
-        lines.append(f'(println "digest" acc (dig 0 {key_mod} 0) (table-count t))')
+            "    (dig (+ k 1) n (bit-xor s (* (+ k 1) (table/get t k 0))))))")
+        lines.append(f'(println "digest" acc (dig 0 {key_mod} 0) (table/size t))')
         return "\n".join(lines) + "\n"
 
 def check_soundness(path):
