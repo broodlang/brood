@@ -2251,3 +2251,81 @@ cycle (`advance_runtime_multigen`) runs between aging and draining, so a *perman
 gen 0" assertion depending on which slot boot's allocation ordering happened to leave it in. The
 test now runs `migrate_live_globals(0)` before the assert, matching the documented
 `age → migrate → drain` ordering — robust to any permanent live global, no runtime change.
+
+## 2026-08-20 — Refreshing the perf standing: the menu was being ordered off a superseded table
+
+Asked what was next on performance. The answer turned out not to need new measurement — it needed
+**reconciling two documents that disagree**, one of which nobody was consulting.
+
+`docs/runtime-frontier.md` is the option book (the *menu*); the benchmark repo's `FRONTIER.md`
+states the *position*. The menu's "current standing" is **2026-07-30**; `FRONTIER.md` was
+refreshed **2026-08-18**, after ADR-195, ADR-215, ADR-224/KI-40 and the lazy `FastLink` mirror all
+landed. They disagree in ways that change the ordering:
+
+| metric | menu (07-30) | position (08-18) |
+|---|---|---|
+| `spawn-live` | 2.42 s, 3.4× BEAM | **1.76 s, 2.5× BEAM** |
+| live process | ~5.9 KB | ~5.5 KB |
+| IC tables | 664 B → ~500 B | **896 B** — the older attribution was *"low by ~3×"* |
+
+The IC number is the one that matters: at 896 B they are the **largest single attributed item on a
+live process, bigger than the whole `Box<Process>`**, and `FRONTIER.md` makes the green-process
+floor lever 1 "by elimination". My own measurement earlier the same day (~420–600 B by hibernate
+differencing) was on a *bare parked* shell and understates the live case — worth recording as a
+reminder that this quantity is workload-dependent and the shape must be quoted with the number.
+
+**M2b corrected in two specific ways**, both verified in the source rather than argued:
+`callee_bases` is process-specific by construction (`vm_call_ic_put` assigns it from
+`vm_arm_block`, which takes `base = t.len()` — activation-order dependent), and the `arm` field
+became a **process-local `ArmHandle`** in ADR-224/KI-40 on 2026-08-13, *after* the M2b entry was
+written, precisely so the per-call clone avoids a shared refcount (3.19× on `pfib`). So the entry's
+"the semantics of sharing are settled — only the read protocol is open" no longer holds: sharing
+whole entries is blocked, and would need the entry split into shared-identity and process-local
+halves, adding indirection to the hottest interpreted call path. `FRONTIER.md` independently names
+the cheaper routes — **shrink `CallIcEntry`, or share entries for frozen callees only** — which is
+where this should go.
+
+**The banner is the actual fix.** The menu now says, at the top, that its table is superseded and
+which document to read instead. Ordering work off that stale table is how three separate targets
+were picked wrongly on this one day (KI-47's module-count mechanism, the position tables, and the
+heap image that already shipped as ADR-218). Two stale MEMORY.md index lines were corrected the
+same way — one claiming startup "needs a heap image", one claiming ~14× BEAM message latency where
+the position says 2.7–3.3×.
+
+**The recurring failure has a name now: a number that was true when written, re-quoted as a fact
+about today.** Five instances in one session. The cheap defence is a dated pointer to the
+authoritative source, which is what went in.
+
+## 2026-08-20 — The "no default features" CI gate has never worked (and my own break proved it)
+
+Adding `(pos-stats)` earlier today, I anchored an insertion on `pub(super) fn gc_stats(…)` — and
+that function had a `#[cfg(feature = "dev-tools")]` attribute directly above it. The insertion
+landed **between the attribute and the function**, so the attribute attached to `pos_stats` and
+`gc_stats` was left ungated, calling the still-gated `gc_stats_map`. A lean build stopped
+compiling. My mistake, and a reminder that an anchor immediately below an attribute is not a safe
+place to insert.
+
+**What matters more is that CI could not see it.** The `Check (no default features)` step ran
+`cargo check --workspace --no-default-features`, and `crates/nest` depends on `brood` *without*
+`default-features = false`. Cargo unifies features across a workspace build, so `dev-tools` came
+back on for the shared `brood` lib and the check passed. Measured at the broken commit:
+
+| command | result |
+|---|---|
+| `cargo check --workspace --no-default-features` (what CI ran) | **exit 0** |
+| `cargo check -p brood --no-default-features` (the real thing) | **exit 101** |
+
+So the break reached a developer's `make install` instead of CI. That step exists *specifically*
+to keep the `#[cfg(feature = …)]` seams honest — it was added on 2026-07-19 after ungated
+`crate::jit` refs broke the same configuration silently — which means **the guard has never
+actually worked, in the only two cases it was there for.**
+
+Fixed to `cargo check -p brood --no-default-features`, with the reasoning in the step's comment so
+nobody "helpfully" restores `--workspace`. Verified by sabotage rather than by watching it pass:
+re-removing the gating leaves the old command at exit 0 and takes the new one to exit 101.
+
+The general shape, and the third instance today: **a gate that cannot fail is indistinguishable
+from a gate that passes.** `check-stress` was added this morning for the same reason (two rename
+waves rotted eight files with nothing watching), and the fuzz generators turned out to be emitting
+programs that died on unbound symbols — reporting a checker false positive instead of comparing
+engines, which also looked like working. Prefer proving a new gate red before trusting it green.
