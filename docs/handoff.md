@@ -45,10 +45,15 @@ collector cannot reclaim, and is the tool to start with.
   `.config/nextest.toml` claims 10.5 s post-KI-39. Both drive `fib 30` / 96 subprocess spawns; the
   KI-39-shaped fix is to cut the per-unit cost, not the budget. **Any reduction must be proven to
   still tier** (`BROOD_JIT_DUMP_IR=1`), or a slow-but-real test becomes a fast-but-hollow one.
-- **The rename-sweep gap.** `breakage/`, `stress/` and `scripts/fuzz/stress/` are outside every test
-  runner, so each rename wave rots them and CI finds out one red build later. Three times in one day.
-  Including them in whatever sweep a rename commit runs over `std/`/`tests/` would make renames land
-  atomically.
+- ~~**The rename-sweep gap.**~~ **Closed 2026-08-20.** `stress/` and `scripts/fuzz/stress/` now gate
+  on every PR via `make check-stress` (`scripts/check-stress.sh`, modelled on `check-examples.sh`);
+  `breakage/` already had its own CI job. Before the gate existed it found **8** dead files — two
+  rename waves deep, and grep had found only 3 of them, because `stress/` had also rotted under
+  ADR-230's `string/*` wave. 25 s for all 28 harnesses; verified by sabotage in both branches.
+  `benches/` turned out to be gated too, but only by `cargo clippy --all-targets` — which is how the
+  `parse_prelude` bench was caught still naming the pre-split `std/prelude.blsp`, one red build after
+  the split. **If you run a rename sweep, `make check-stress` and `make check-examples` are now part
+  of proving it landed atomically.**
 
 ⚠ **Method warning, and the day's real lesson.** Six separate checks produced confident, plausible,
 wrong output, and **none of them errored**: `rustfmt --check` piped to `/dev/null` (it writes its

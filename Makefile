@@ -90,7 +90,7 @@ define install_binaries
 endef
 
 .DEFAULT_GOAL := help
-.PHONY: help build release perf-brood test test-light test-both breakagetests ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
+.PHONY: help build release perf-brood test test-light test-both breakagetests check-examples check-stress ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -180,6 +180,18 @@ check-examples: ## Run every `examples/` program and fail on an unbound symbol �
 	# legitimately cannot finish here (servers run until killed, `node_client` wants a peer,
 	# `font-zoom` wants --features gui) — but an unbound name is never environment noise.
 	@./scripts/check-examples.sh
+
+check-stress: ## Run every `stress/` + `scripts/fuzz/stress/` harness and fail on an unbound symbol — the gate the stress dirs never had
+	# Same rot, same counter, one directory over. `stress/` and `scripts/fuzz/stress/` sit
+	# outside `make test`, `nest check`, the breakage suite AND `check-examples`, so nothing
+	# ever loaded them — and on 2026-08-20 EIGHT files could not load, rotted by two separate
+	# rename waves (ADR-230's `string/*` and ADR-236's prefix rollout), some double-prefixed.
+	# Grepping for the newer wave's names found three of them; RUNNING them found eight.
+	#
+	# Like `check-examples`, it asserts NO `unbound symbol` rather than exit 0 — these are
+	# soaks and storms that legitimately never finish under a gate — except for
+	# `stress/*_test.blsp`, which are real tests, cheap (78 cases), and held to passing.
+	@./scripts/check-stress.sh
 
 breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwire armed) — try to break the JIT/VM/memory. NOT part of `make test`.
 	# These are deliberately abusive tests that live OUTSIDE tests/ (so neither
