@@ -258,22 +258,42 @@ pub(super) fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::core::alloc::peak_bytes() as i64))
 }
 
-/// `(gc-stats)` — a snapshot map of this process's garbage-collection activity
-/// (Tier-1 observability; `docs/memory-review.md` §7). Per-process: it reports
-/// the *calling* process's own LOCAL heap, never another's. Keys:
-/// `:collections` (collections run since start — the automatic Stage-B
-/// safepoint copies), `:copied` (cumulative LOCAL
-/// objects relocated by those collections), `:reclaimed` (cumulative LOCAL
-/// objects dropped), `:live` (LOCAL objects live right now), `:live-bytes` (a
-/// cheap byte estimate of the LOCAL slabs — see `mem-bytes` for the process-wide
-/// figure), and `:threshold` (the live count that triggers the next collection —
-/// the slow/stable dial). Plus two figures for the *shared* RUNTIME code region
-/// (the same for every process, not per-process): `:runtime-closures` (its total
-/// promoted-closure count — grows with hot-reload churn, compacted back by the
-/// safepoint, ADR-091) and `:runtime-threshold` (the count that triggers the next
-/// auto-compaction). The live/reclaimable split is the expensive walk reported by
-/// `(runtime-collect)`, so it's not included here.
+/// `(ic-stats)` — live sizes of this process's four inline-cache tables, the
+/// largest single attributed item in the green-process floor (`FRONTIER.md` lever 1
+/// puts them at 896 B/process, bigger than the whole `Box<Process>`). Each of
+/// `:calls` (`vm_call_ics`), `:links` (`vm_fast_links`), `:globals` (`vm_global_ics`)
+/// and `:blocks` (`arm_ic_blocks`) reports `[len capacity bytes]`, with bytes from
+/// live CAPACITY x the real element size — a `Vec` grown past its contents holds that
+/// memory whatever its length says. `:call-entry-bytes` is `size_of::<Option<CallIcEntry>>()`,
+/// the figure a shrink of that struct would move. Per-process; size it at the PARKED
+/// state, not at teardown (a teardown slot count read 3.5x too high — see the
+/// 2026-08-18 note in `docs/runtime-frontier.md`).
 #[cfg(feature = "dev-tools")]
+pub(super) fn ic_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (t, entry) = heap.ic_table_stats();
+    fn triple(heap: &mut Heap, (l, c, b): (usize, usize, usize)) -> Value {
+        heap.alloc_vector(vec![
+            Value::int(l as i64),
+            Value::int(c as i64),
+            Value::int(b as i64),
+        ])
+    }
+    let calls = triple(heap, t[0]);
+    let links = triple(heap, t[1]);
+    let globals = triple(heap, t[2]);
+    let blocks = triple(heap, t[3]);
+    let total: usize = t.iter().map(|x| x.2).sum();
+    let pairs = vec![
+        (value::kw("calls"), calls),
+        (value::kw("links"), links),
+        (value::kw("globals"), globals),
+        (value::kw("blocks"), blocks),
+        (value::kw("call-entry-bytes"), Value::int(entry as i64)),
+        (value::kw("total-bytes"), Value::int(total as i64)),
+    ];
+    Ok(heap.map_from_pairs(pairs))
+}
+
 /// `(pos-stats)` — entry counts of the two source-position side tables:
 /// `:local-forms` (this process's LOCAL `form_pos`) and `:runtime-forms` (the
 /// runtime-shared `positions`). Measurement surface for the position-table cost,
@@ -294,6 +314,21 @@ pub(super) fn pos_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.map_from_pairs(pairs))
 }
 
+/// `(gc-stats)` — a snapshot map of this process's garbage-collection activity
+/// (Tier-1 observability; `docs/memory-review.md` §7). Per-process: it reports
+/// the *calling* process's own LOCAL heap, never another's. Keys:
+/// `:collections` (collections run since start — the automatic Stage-B
+/// safepoint copies), `:copied` (cumulative LOCAL
+/// objects relocated by those collections), `:reclaimed` (cumulative LOCAL
+/// objects dropped), `:live` (LOCAL objects live right now), `:live-bytes` (a
+/// cheap byte estimate of the LOCAL slabs — see `mem-bytes` for the process-wide
+/// figure), and `:threshold` (the live count that triggers the next collection —
+/// the slow/stable dial). Plus two figures for the *shared* RUNTIME code region
+/// (the same for every process, not per-process): `:runtime-closures` (its total
+/// promoted-closure count — grows with hot-reload churn, compacted back by the
+/// safepoint, ADR-091) and `:runtime-threshold` (the count that triggers the next
+/// auto-compaction). The live/reclaimable split is the expensive walk reported by
+/// `(runtime-collect)`, so it's not included here.
 #[cfg(feature = "dev-tools")]
 pub(super) fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(gc_stats_map(heap))

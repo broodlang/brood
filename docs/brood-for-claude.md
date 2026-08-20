@@ -553,7 +553,7 @@ intermediate collections (one pass, no throwaway lists). Thread them with `->>`:
 `lmap`/`lfilter`/`lkeep`/`lremove` each return a lazy **seq-view** — a
 non-materialising value carrying the transform over a source. Chaining composes
 the transforms onto one view, so the whole pipeline folds/reduces in a single
-pass. Consume with `fold`/`reduce`/`sum`/`count`/`into`/`join`/`seq`; `seq`/
+pass. Consume with `fold`/`reduce`/`sum`/`count`/`into`/`string/join`/`seq`; `seq`/
 `into`/`str`/`=` realise it. Two things to know: a view is **lazy** (it defers
 its fns until realised — don't build one for side effects; use eager `map`), and
 a view is **heap-local** (`send` refuses to ship one — realise it with `seq`/
@@ -927,21 +927,28 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **iteration** (macros, for effect — there is no `while`/`for`-loop): `for`
   (list comprehension, with `:when`), `doseq` (destructuring/`:when`),
   `dotimes` `(i n)`, `dolist` `(x coll)`. All return `nil` except `for`.
-- **string**: `str` `pr-str` `string-length` `substring` `char-at`
-  (returns a 1-char *string* — Brood has no char type) `index-of`
-  `includes?` `string-split` `join` `replace` `trim` `triml` `trimr`
-  `blank?` `upper` `lower` `str` `string->number`
-  `string/->list` `string/list->` `starts-with?` `ends-with?`
-- **unicode**: `string->graphemes` (extended grapheme clusters as a vector of
+- **string**: the string surface lives in the `string` module (ADR-230), so these are
+  **`string/`-qualified** unless listed as bare below: `string/length`
+  `string/substring` `string/char-at` (returns a 1-char *string* — Brood has no char
+  type) `string/split` `string/join` `string/replace` `string/trim` `string/triml`
+  `string/trimr` `string/blank?` `string/upper` `string/lower`
+  `string/starts-with?` `string/ends-with?` `string/->list` `string/list->`
+  `string/->bytes` `string/bytes->`.
+  **Bare (core, not in the module):** `str` `pr-str` `index-of` `includes?`
+  `string->number` `->string` (the polymorphic Display op) `name`.
+  There is no `symbol->string`/`number->string` — use `str`, `->string` or `name`
+  (ADR-239 removed both as redundant).
+- **unicode**: `string/->graphemes` (extended grapheme clusters as a vector of
   strings — the unit a human calls "a character", and what a cursor must step by;
-  `"e\u{301}"` is 2 codepoints but 1 cluster) · `string-normalize` (`(string-normalize
-  s :nfc)`, also `:nfd` `:nfkc` `:nfkd` — `=` is byte-structural, so `"é"` written
-  two ways compares unequal until you normalise) · `display-width` (terminal cells)
-- **string formatting**: `string-repeat` `pad-left` `pad-right`
+  `"e\u{301}"` is 2 codepoints but 1 cluster) · `string/->codepoints` ·
+  `string/normalize` (`(string/normalize s :nfc)`, also `:nfd` `:nfkc` `:nfkd` — `=` is
+  byte-structural, so `"é"` written two ways compares unequal until you normalise) ·
+  `display-width` (terminal cells, bare)
+- **string formatting**: `string/repeat` `string/pad-left` `string/pad-right`
   `->fixed` (number → string with fixed decimals, e.g. `(->fixed 3.14159 2)`
   → `"3.14"` — `str` prints full f64 precision, so reach for this for output) ·
   `format` (small printf, e.g. `(format "x=%d y=%.2f" 42 3.14)` → `"x=42 y=3.14"`;
-  specifiers `%s %d %f %.Nf %%`; width via `pad-left`/`pad-right`)
+  specifiers `%s %d %f %.Nf %%`; width via `string/pad-left`/`string/pad-right`)
 - **map**: `assoc` `dissoc` `get` `keys` `vals` `contains?` `into` `map-pairs`
   (a map's `[k v]` pairs) `seq` (universal list-view — coerces a map to its
   `[k v]` pairs; lists, vectors, strings, nil pass through). **Maps are seqable**:

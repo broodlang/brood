@@ -74,8 +74,17 @@ jobs:
       # CLAUDE.md documents `--no-default-features` as supported). It broke silently
       # once (ungated `crate::jit` refs, found 2026-07-19); this check keeps every
       # `#[cfg(feature = "jit")]` seam honest without a second full test run.
+      # NOTE the `-p brood`, not `--workspace`. `--workspace --no-default-features`
+      # CANNOT see a lean-build break: `crates/nest` depends on `brood` WITHOUT
+      # `default-features = false`, so Cargo's feature unification turns `dev-tools`
+      # (and friends) back on for the shared `brood` build and the check passes.
+      # Demonstrated 2026-08-20 — an ungated `gc_stats` calling a dev-tools-gated
+      # `gc_stats_map` gave `--workspace` exit 0 and `-p brood` exit 101, and the break
+      # reached a developer's `make install` instead of CI. That is the second time this
+      # configuration broke silently (the first, ungated `crate::jit` refs on 2026-07-19,
+      # is what this step was added for — so the guard has never actually worked).
       - name: Check (no default features)
-        run: cargo check --workspace --no-default-features
+        run: cargo check -p brood --no-default-features
 
       # The `--workspace` check above UNIFIES features across members, so a member
       # that pulls `brood/dev-tools` (a brood default) re-enables it for the whole

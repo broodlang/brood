@@ -45,7 +45,7 @@ def program(seed):
 (def s "{body}")
 (def needle "{needle}")
 (def cps (into [] (string->list s)))
-(def n (string-length s))
+(def n (string/length s))
 
 (defn bad (what a b) (println "BAD" what "got" (pr-str a) "want" (pr-str b)))
 (defn chk (what a b) (if (= a b) 0 (do (bad what a b) 1)))
@@ -60,8 +60,8 @@ def program(seed):
         (+ acc (chk "substring" (substring s i j) (ref-sub i j))
            (chk "char-at" (char-at s i) (nth cps i)))))))
 
-;; string-length agrees with the code-point count, and the whole string round-trips
-(def errs0 (+ (chk "string-length" n (count cps))
+;; string/length agrees with the code-point count, and the whole string round-trips
+(def errs0 (+ (chk "string/length" n (count cps))
               (chk "roundtrip" s (apply str cps))
               (chk "substring-all" (substring s 0 n) s)))
 
@@ -71,8 +71,8 @@ def program(seed):
     (if (< j 0)
       acc
       (chk-scan (+ j 1)
-        (+ acc (chk "index-of-at" (substring s j (min n (+ j (string-length needle))))
-                 (if (<= (+ j (string-length needle)) n) needle
+        (+ acc (chk "index-of-at" (substring s j (min n (+ j (string/length needle))))
+                 (if (<= (+ j (string/length needle)) n) needle
                    (substring s j n)))
            (if (>= j from) 0 (do (bad "index-of-order" j from) 1)))))))
 
@@ -81,17 +81,17 @@ def program(seed):
   (let (last (last-index-of s needle))
     (if (< last 0)
       (chk "no-needle" (index-of s needle 0) -1)
-      (+ (chk "last-index-of-at" (substring s last (min n (+ last (string-length needle))))
-           (if (<= (+ last (string-length needle)) n) needle (substring s last n)))
+      (+ (chk "last-index-of-at" (substring s last (min n (+ last (string/length needle))))
+           (if (<= (+ last (string/length needle)) n) needle (substring s last n)))
          (chk "nothing-after-last" (index-of s needle (+ last 1)) -1)))))
 
-;; string-span: `e` is just PAST the maximal run of set members from `i`, so every char in
+;; string/span: `e` is just PAST the maximal run of set members from `i`, so every char in
 ;; [i, e) is in the set and the char AT `e` (if any) is not.
 (defn all-in-set (set i e)
   (if (>= i e) true (if (includes? set (char-at s i)) (all-in-set set (+ i 1) e) false)))
 (def errs3
   (let (set " \\n" i (min (max 0 (quot n 2)) (max 0 (- n 1)))
-        e (string-span s i set))
+        e (string/span s i set))
     (if (= n 0) 0
       (+ (if (and (>= e i) (<= e n)) 0 (do (bad "span-range" e n) 1))
          (if (all-in-set set i e) 0 (do (bad "span-run-not-all-in-set" i e) 1))
@@ -102,7 +102,7 @@ def program(seed):
 ;; before `pos`, at a line start, and is a bracket — or 0 when there is no form start.
 (def src (apply str (repeat {src_lines} "(defn f (a) (str \\"x\\" a))\\n")))
 (defn chk-form (pos acc)
-  (if (>= pos (string-length src))
+  (if (>= pos (string/length src))
     acc
     (let (b (scan-form-start src pos))
       (chk-form (+ pos 3)
