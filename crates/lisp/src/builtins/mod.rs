@@ -1695,6 +1695,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     #[cfg(feature = "dev-tools")]
     def(
         heap,
+        "ic-stats",
+        Arity::exact(0),
+        Sig::nullary(map_ty),
+        ic_stats,
+    );
+    #[cfg(feature = "dev-tools")]
+    def(
+        heap,
         "pos-stats",
         Arity::exact(0),
         Sig::nullary(map_ty),
@@ -3421,6 +3429,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("mem-peak", &[], "High-water mark of allocated bytes since process start."),
     ("mem-limit", &[], "Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT."),
     ("mem-soft-limit", &[], "Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint."),
+    ("ic-stats", &[], "A snapshot map of this process's four inline-cache tables — the largest single attributed item in the green-process floor (896 B/process, bigger than the whole Box<Process>). :calls, :links, :globals and :blocks each give [len capacity bytes], with bytes from live CAPACITY x the real element size, so a Vec grown past its contents reports the memory it actually holds. :call-entry-bytes is the size of one CallIcEntry slot — the figure a shrink of that struct would move — and :total-bytes their sum. Size these at the PARKED state, not at teardown: a teardown slot count read 3.5x too high (docs/runtime-frontier.md, 2026-08-18)."),
     ("pos-stats", &[], "A snapshot map of the two source-position side tables: :local-forms/:local-cap/:local-bytes for this process's LOCAL `form_pos`, and :runtime-forms/:runtime-cap/:runtime-bytes for the runtime-shared `positions`. Bytes are derived from live CAPACITY, not entry count, so a table holding its high-water capacity after a collection reports the memory it actually occupies. The measurement surface for what positions cost: on the 38-module stdlib they are ~7% of load memory and ~6.5% of load time (2026-08-20), well under the 18%/24% a synthetic 1000-line-module corpus suggested on 2026-08-06."),
     ("gc-stats", &[], "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the timing tier) for the caller's own LOCAL heap; :runtime-closures and :runtime-threshold for the *shared* RUNTIME code region (its promoted-closure count + next auto-compact trigger — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (runtime-collect) for the RUNTIME live/reclaimable split."),
     ("vm-stats-reset", &[], "Zero the VM work-attribution counters, returning :enabled (false without --features perf-stats). The counters are process-global and cumulative FROM PROCESS START, so a snapshot after a short program also counts the runtime's own boot — which is macro-expansion-heavy and defers to the tree-walker (measured: the same program read an 84% defer rate cold-cache and 0.8% warm). Zero first when measuring a region; `(perf/measure thunk)` packages that."),
@@ -3762,6 +3771,7 @@ mod primitive_docs_tests {
                         | "gc-stats"
                         | "gc-trace"
                         | "pos-stats"
+                        | "ic-stats"
                         | "runtime-collect"
                         | "vm-stats"
                         | "vm-stats-reset"

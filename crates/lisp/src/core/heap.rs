@@ -2928,6 +2928,37 @@ impl Heap {
     /// The cold loader/checker state, if this process has ever needed it. `None` is the
     /// normal case for a worker and means "empty" for every reader.
     #[inline]
+    /// Live sizes of the four per-process inline-cache tables, for costing the
+    /// green-process floor (`FRONTIER.md` lever 1 puts the IC tables at 896 B/process,
+    /// the largest single attributed item). Returns, per table, `(len, capacity, bytes)`
+    /// with bytes derived from live CAPACITY and the real element size, so a `Vec` grown
+    /// past its contents reports the memory it actually holds. Read by `(ic-stats)`.
+    pub(crate) fn ic_table_stats(&self) -> ([(usize, usize, usize); 4], usize) {
+        use std::mem::size_of;
+        let calls = self.vm_call_ics.borrow();
+        let links = self.vm_fast_links.borrow();
+        let globals = self.vm_global_ics.borrow();
+        let blocks = self.arm_ic_blocks.borrow();
+        let call_sz = size_of::<Option<crate::core::heap::vm_cache::CallIcEntry>>();
+        let link_sz = size_of::<crate::core::heap::vm_cache::FastLink>();
+        let gl_sz = size_of::<Option<crate::core::heap::vm_cache::GlobalIcEntry>>();
+        // hashbrown: one flat (K,V) slot array plus a control byte each.
+        let blk_sz = size_of::<(u64, (u32, u32))>() + 1;
+        (
+            [
+                (calls.len(), calls.capacity(), calls.capacity() * call_sz),
+                (links.len(), links.capacity(), links.capacity() * link_sz),
+                (
+                    globals.len(),
+                    globals.capacity(),
+                    globals.capacity() * gl_sz,
+                ),
+                (blocks.len(), blocks.capacity(), blocks.capacity() * blk_sz),
+            ],
+            call_sz,
+        )
+    }
+
     /// Entry counts of the two source-position side tables — the LOCAL
     /// [`Heap::form_pos`] map and the shared RUNTIME [`RuntimeCode::positions`] map.
     /// Measurement surface for the position-table cost (they were 169 MB of a 933 MB
