@@ -101,15 +101,15 @@
 (describe "strings: char-indexed, unicode-aware"
   (test "length and indexing count CHARS, not bytes"
     (do
-      (assert= (string-length "hé€") 3)
+      (assert= (string/length "hé€") 3)
       (assert= (string/char-at "hé€" 1) "é")
       (assert= (string/char-at "hé€" 2) "€")
       (assert= (string/substring "hé€xyz" 1 4) "é€x")
       true))
   (test "split/join round-trip"
     (do
-      (assert= (string/join "," (string-split "a,b,,c" ",")) "a,b,,c")
-      (assert= (string-split "aXbXc" "X") (list "a" "b" "c"))
+      (assert= (string/join "," (string/split "a,b,,c" ",")) "a,b,,c")
+      (assert= (string/split "aXbXc" "X") (list "a" "b" "c"))
       true))
   (test "case, trim, predicates"
     (do

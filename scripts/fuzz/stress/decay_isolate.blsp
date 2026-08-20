@@ -41,8 +41,8 @@
     (if (< i 0)
       0
       (let (chunk (string/substring txt (+ i 6) (+ i 32))
-            d0 (string-span-until chunk 0 "0123456789")
-            d1 (string-span chunk d0 "0123456789"))
+            d0 (string/span-until chunk 0 "0123456789")
+            d1 (string/span chunk d0 "0123456789"))
         (if (>= d0 d1) 0 (string->number (string/substring chunk d0 d1)))))))
 
 ;; ---- the units of work -------------------------------------------------------
