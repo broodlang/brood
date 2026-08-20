@@ -65,12 +65,11 @@ If the change renames names consumers use, apply the same rename everywhere with
 (`map/get` sits inside `multimap/get`):
 
 ```
-# one rename, across a repo:
-blsp-rename 'to-str' '->string' ../hatch
-
-# many at once, from a mapping file of "OLD NEW" lines:
-blsp-rename -f rename.txt ../hatch ../bedit ../pong …
+cd ../hatch && nest rename to-str ->string       # one rename, across this repo's sources
 ```
+
+`nest rename` is pure Brood (`std/tool/codemod.blsp`) — it rewrites whole identifiers
+only, so `map/get` never corrupts `multimap/get`. Run it per repo (or via `ws exec`).
 
 Then drive every repo at once with the **workspace runner** (auto-discovers the sibling
 Brood repos):
@@ -139,6 +138,6 @@ The changelog page (`/changelog`) renders from the `CHANGELOG.md` baked into the
 
 1. `brood`: implement (name constants for primitives) · bump version · changelog · ADR/devlog · `nest check` · lean gate · commit + push.
 2. `make install` the new toolchain.
-3. `blsp-rename` the siblings · `ws check` · `ws commit` · `ws push`.
+3. `nest rename` the siblings · `ws check` · `ws commit` · `ws push`.
 4. `release-package` each changed registry package in dep order · update + re-lock consumers.
 5. `hive`: bump dep `:ref`s + `nest fetch` · `bin/deploy`.
