@@ -2,10 +2,10 @@
 //! follow-on): a project-relative, `..`-free path that resolves OUT of the tree
 //! through a symlinked directory is rejected, not just the lexical
 //! absolute/`~`/`..` cases. Enforced by `canonicalize` (real-path resolution)
-//! in `project-path`.
+//! in `mcp/project-path`.
 //!
 //! Unix-only (creates a symlink). Top-level `eval_str` may reference the
-//! `project-path` private — the live-hacking hatch (ADR-146).
+//! `mcp/project-path` private — the live-hacking hatch (ADR-146).
 
 #![cfg(unix)]
 
@@ -16,7 +16,7 @@ fn tempdir(tag: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let p = std::env::temp_dir().join(format!("brood-{tag}-{}-{n}", std::process::id()));
+    let p = std::env::temp_dir().join(format!("brood-mcp-{tag}-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&p).unwrap();
     p
 }

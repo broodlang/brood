@@ -4,7 +4,7 @@ use std::io::Cursor;
 #[test]
 fn staleness_guard_fires_once_when_binary_is_newer_than_start() {
     // Binary present, mtime (now) > started (epoch) → stale: fires once, latches.
-    let tmp = std::env::temp_dir().join(format!("nest-stale-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("nest-mcp-stale-{}", std::process::id()));
     std::fs::write(&tmp, b"x").unwrap();
     let mut g = StalenessGuard {
         started: std::time::UNIX_EPOCH,
@@ -16,7 +16,7 @@ fn staleness_guard_fires_once_when_binary_is_newer_than_start() {
     let _ = std::fs::remove_file(&tmp);
 
     // Binary older than the start time → not stale.
-    let tmp2 = std::env::temp_dir().join(format!("nest-fresh-{}", std::process::id()));
+    let tmp2 = std::env::temp_dir().join(format!("nest-mcp-fresh-{}", std::process::id()));
     std::fs::write(&tmp2, b"x").unwrap();
     let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
     let mut g2 = StalenessGuard {
@@ -294,11 +294,11 @@ fn tools_list_returns_the_baked_std_catalogue() {
 #[test]
 fn tools_list_projects_a_brood_defined_catalogue() {
     let mut interp = Interp::new();
-    // Pre-define an `tools` catalogue inline; mark `'mcp` as already
+    // Pre-define an `mcp/tools` catalogue inline; mark `'mcp` as already
     // provided so the dispatcher's `(require-one 'mcp)` doesn't load the baked
     // `std/tool/mcp.blsp` and clobber our test catalogue. This is exactly the
     // override path a project's own `mcp.blsp` will use (step 5): provide
-    // the feature themselves, then bind their own `tools`.
+    // the feature themselves, then bind their own `mcp/tools`.
     interp
         .eval_str(
             r#"
@@ -843,7 +843,7 @@ fn std_check_tool_returns_structured_diagnostics_for_the_served_project() {
     // `check-project-structured` all still run, over a project whose size this test
     // controls instead of one it inherits from wherever it happens to be run.
     let tmp = std::env::temp_dir().join(format!(
-        "nest-check-{}-{}",
+        "nest-mcp-check-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -986,7 +986,7 @@ fn std_process_info_tool_looks_up_by_id() {
 fn interp_with_project_root(tag: &str) -> (Interp, std::path::PathBuf) {
     let mut interp = Interp::new();
     let _ = invoke_tool(&mut interp, "eval", json!({ "source": "1" }));
-    let root = std::env::temp_dir().join(format!("brood-{tag}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("brood-mcp-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     interp
         .eval_str(&format!(
@@ -1391,7 +1391,7 @@ fn without_a_progress_token_no_notifications_are_sent() {
                 notif("exit", json!(null)),
             ],
         );
-        // The handler still succeeds — progress is a no-op returning
+        // The handler still succeeds — mcp/progress is a no-op returning
         // false (the eval tool wraps it as {:value "false"}).
         let text = resp[0]["result"]["content"][0]["text"].as_str().unwrap();
         let body: Json = serde_json::from_str(text).unwrap();
