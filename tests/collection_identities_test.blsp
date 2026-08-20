@@ -101,7 +101,7 @@
     (apply str acc)
     (mb-build (lcg s) (- n 1) (cons (nth mb-alphabet (rem s 7)) acc))))
 (def- mb-text (mb-build 8675309 600 nil))
-(def- mb-cps (into [] (string/to-list mb-text)))
+(def- mb-cps (into [] (string/->list mb-text)))
 (def- mb-len (string/length mb-text))
 
 (defn- mb-laws

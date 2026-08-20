@@ -460,8 +460,8 @@ clean error; the checker treats a derived record as implementing every op of the
 it satisfies call-site and `:sealed` checks.
 
 **Single dispatch — and its multiple-dispatch sibling.** An *ability* op dispatches on the
-**first argument only** (Rust-trait / Clojure-protocol style). For a unary op (`to-str`,
-`to-seq`) that is all there is to it. An op that *combines two values* — arithmetic and
+**first argument only** (Rust-trait / Clojure-protocol style). For a unary op (`->string`,
+`->seq`) that is all there is to it. An op that *combines two values* — arithmetic and
 ordering — needs to see **both** operand types, which single dispatch cannot express
 symmetrically (`(+ money 5)` could dispatch on `money`, but `(+ 5 money)` cannot). So those
 live in the **`defmulti` multiple-dispatch seam**, not in an ability: `Num`
@@ -563,7 +563,7 @@ checker and LSP read.
 The id is held in a reserved `:__id__` field, reachable by direct `(get r :__id__)`,
 but the record's **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`
 — and `map`/`filter`/`fold`/`for`/`into`, which coerce through `seq` — see only the
-fields, so `(count (circle 2))` is `1`. This is the `Seqable` ability (op `to-seq`,
+fields, so `(count (circle 2))` is `1`. This is the `Seqable` ability (op `->seq`,
 default = the fields); a custom-collection record overrides it to define its own
 iteration. `(fields r)` gives the id-free map explicitly; nothing else should read
 `:__id__` directly (the stable seam a future hidden slot would swap behind).
@@ -663,7 +663,7 @@ ability when third-party or later code must be able to add a case.
 #### The display protocol: customizing how a record prints
 
 The `Display` ability — Elixir's `String.Chars` for Brood (ADR-171/172) — is **core
-and always on**. Its op **`(to-str x)`** turns a value into its display string; the
+and always on**. Its op **`(->string x)`** turns a value into its display string; the
 `:default` impl is the native `str`. The **screen printers** (`print` / `println` /
 `eprint` / `eprintln`) route a *record* through its `Display` impl out of the box — no
 import, no activation step. Built-ins are unchanged and pay no dispatch cost.
@@ -672,14 +672,14 @@ import, no activation step. Built-ins are unchanged and pay no dispatch cost.
 (defmodule money)             ; no (:use ability), no (:use show) — both are core
 (defrecord usd (cents))
 (impl Display usd
-  (to-str [m] (str "$" (to-fixed (/ (get m :cents) 100.0) 2))))
+  (->string [m] (str "$" (->fixed (/ (get m :cents) 100.0) 2))))
 
 (println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
-(to-str (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
+(->string (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
 ```
 
 Scope is the screen printers; `str` / `pr-str` / `fmt` stay on the native renderer
-(reach for `(to-str x)` explicitly there). It rides on the prelude's `*show*`
+(reach for `(->string x)` explicitly there). It rides on the prelude's `*show*`
 dynamic var, so `(binding (*show* nil) …)` disables it for a scope. Default record
 printing keeps its `:__id__` — that is intended (records print unlike bare maps); the
 protocol is the per-record *override*, not a change to the default.
@@ -725,12 +725,12 @@ type with no change to it.
 
 | Ability | Op | Module | Sealed? | What impl'ing it buys |
 |---|---|---|---|---|
-| `JsonEncode` | `(to-json x)` | `json` | open | `json-encode` accepts your type — a record picks its wire shape, and a kind JSON has no rule for (a pid, a datetime) stops erroring. No `:default`. |
+| `JsonEncode` | `(->json x)` | `json` | open | `json-encode` accepts your type — a record picks its wire shape, and a kind JSON has no rule for (a pid, a datetime) stops erroring. No `:default`. |
 | `Port` | `(io-write port s)` | `io` | open | Your value is an output port: `io-write`, `with-out`/`with-err`, and every logger backend take it. A bare 1-arg fn is a port via the `:fn` impl. |
 | `LogBackend` | `(backend-emit b record)` | `log` | open | A backend that does something other than "format one line and write it" — batching, JSON lines, sampling. Reuse `backend-passes?` for the standard level/filter gate. |
 | `Response` | `(send-response r sock)` | `http` | open | A response kind with its own wire behaviour (sendfile, chunked, a 101 upgrade), including whether it closes the socket. |
 | `Dependency` | `dep-kind`, `dep-resolve`, `dep-check-compatible`, `dep-lock-vec`, `dep-entry-node` | `package` | **sealed** | A new manifest dependency kind. Sealed, so `nest check` reports any op you forget. |
-| `Temporal` | `(to-iso x)` | `datetime` | **sealed** | ISO 8601 rendering for a calendar value. |
+| `Temporal` | `(->iso x)` | `datetime` | **sealed** | ISO 8601 rendering for a calendar value. |
 
 Sealed vs open is a per-ability judgement: `Dependency` and `Temporal` cover genuinely
 closed sets and want exhaustiveness checking; the rest exist so a type the module has
@@ -741,7 +741,7 @@ their shape — `buffer`, `queue`, `pq`, `multimap`, `datetime`/`date`/`time-of-
 four dependency kinds. Each has an identity-based predicate (`buffer?`, `queue?`, …) that a
 look-alike map can't satisfy, and a `Display` impl, so it prints as itself rather than as
 its internals. Where a library renders a *user-supplied* value into text —
-`template/render`, `csv-emit`, `url/query-encode` — it goes through `to-str`, so your
+`template/render`, `csv-emit`, `url/query-encode` — it goes through `->string`, so your
 record's `Display` impl decides how it appears there too.
 
 #### Polymorphism: multiple dispatch (`defmulti`)
@@ -2211,7 +2211,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 - `floor`/`ceil`/`round` return an **int** (an int passes through unchanged);
   `round` rounds half away from zero. `round-to` keeps a fixed number of
   decimal *places* but stays a **number** (`(round-to 3.14159 2)` → `3.14`); for
-  a fixed-width *string* like `"3.10"`, use `to-fixed` (under Strings). `pow` requires an **integer exponent**
+  a fixed-width *string* like `"3.10"`, use `->fixed` (under Strings). `pow` requires an **integer exponent**
   (use `sqrt` for roots): an int base with a non-negative exponent stays an int
   (overflow raises, like `*`); a negative exponent gives the reciprocal, which is
   **exact** for an exact base (`(pow 2 -1)` → `1/2`, and `(pow 2 -2000)` is exactly
@@ -2482,37 +2482,37 @@ The function combinators build the callbacks those ops take:
 Every operation whose **subject is a string** lives in the `string` module
 (ADR-230): call it qualified, or `(:use string)` to refer them bare.
 
-`string/length`  `string/substring`  `string/char-at`  `string/to-list`
-`string/from-list`  `string/to-codepoints`  `string/from-codepoints`
+`string/length`  `string/substring`  `string/char-at`  `string/->list`
+`string/list->`  `string/->codepoints`  `string/codepoints->`
 `string/upper`  `string/lower`  `string/capitalize`  `string/join`
 `string/split`  `string/replace`  `string/trim`  `string/triml`  `string/trimr`
 `string/blank?`  `string/starts-with?`  `string/ends-with?`  `string/repeat`
-`string/pad-left`  `string/pad-right`  `string/to-graphemes`
+`string/pad-left`  `string/pad-right`  `string/->graphemes`
 `string/grapheme-count`  `string/grapheme-at`  `string/substring-graphemes`
 `string/normalize`  `string/fill`
 
 Bare in the prelude — these operate on *any* collection or bridge a string to
 another type, so they are **not** string-library ops:
-`str`  `pr-str`  `index-of`  `includes?`  `string->number`  `number->string`
-`string->symbol`  `symbol->string`  `to-fixed`  `format`  `fmt`  `display-width`
+`str`  `pr-str`  `index-of`  `includes?`  `string->number`
+`string->symbol`  `->fixed`  `format`  `fmt`  `display-width`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
 - There is **no distinct character type** (deferred): a "character" is just a
-  1-char string, so `(string/char-at s i)` and the elements of `(string/to-list s)` are
+  1-char string, so `(string/char-at s i)` and the elements of `(string/->list s)` are
   strings. All indices are **char-based**, matching `string/length` (so they are
   correct for multi-byte UTF-8, not byte offsets).
 - `string/substring`, `string/char-at`, `string/length` are the char-indexed accessors;
-  `string/to-list` / `string/from-list` bridge to and from a list of chars.
-- `string/to-codepoints` gives the chars as a **vector of integer codepoints** in
+  `string/->list` / `string/list->` bridge to and from a list of chars.
+- `string/->codepoints` gives the chars as a **vector of integer codepoints** in
   one O(n) native pass — the random-access form text parsers index with `nth`
   and compare as ints (`std/regex`/`std/json`/`std/encoding` all scan it);
-  `string/from-codepoints` is its inverse.
+  `string/codepoints->` is its inverse.
 - **A code point is not a character — a grapheme cluster is.**
-  `string/to-graphemes` gives the extended grapheme clusters (UAX #29) as a vector of
+  `string/->graphemes` gives the extended grapheme clusters (UAX #29) as a vector of
   strings: `"e"` + U+0301 is *two* code points but *one* cluster, and a flag emoji is
   four code points and one cluster. This is the unit to step a cursor by; stepping by
-  code point splits a cluster and corrupts the text. `(apply str (string/to-graphemes
+  code point splits a cluster and corrupts the text. `(apply str (string/->graphemes
   s))` is `s`. `display-width` counts terminal cells over the same clusters (a CJK
   char or emoji is 2, a combining mark 0).
 - **The cluster-indexed accessors** are `string/grapheme-count`, `(string/grapheme-at s i
@@ -2522,7 +2522,7 @@ another type, so they are **not** string-library ops:
   `(string/substring s 1 2)` can slice a cluster in half (leaving a bare `e` and an orphan
   combining mark) where `(string/substring-graphemes s 1 2)` keeps it whole. Out-of-range
   reads yield the default and ranges clamp, exactly like `nth`/`take`. They exist so
-  the correct spelling is also the fast one: `(nth (string/to-graphemes s) i)` was the
+  the correct spelling is also the fast one: `(nth (string/->graphemes s) i)` was the
   only way to read one cluster, and it materialised every cluster in the string on
   every keystroke (ADR-159).
 - **`=` is byte-structural, so text that reads identically can compare unequal**:
@@ -2535,8 +2535,8 @@ another type, so they are **not** string-library ops:
 - `string/upper` / `string/lower` case-fold (Unicode-aware: `(string/upper "ß")` → `"SS"`).
 - `string->number` is a **strict** parse — int if it is one, else float, else
   `nil`; it rejects partial input (`(string->number "3abc")` → `nil`) and
-  surrounding whitespace (`string/trim` first if needed). `number->string` is its inverse
-  (just `str` on a number).
+  surrounding whitespace (`string/trim` first if needed). `str` is its inverse
+  (the textual form of a number).
 - `index-of` returns the first char index of a substring or `-1`;
   `includes?` is the boolean form. `string/join` puts a separator between strings;
   `string/split` is its inverse (an empty separator splits into characters).
@@ -2544,16 +2544,16 @@ another type, so they are **not** string-library ops:
 - `string/trim` / `string/triml` / `string/trimr` strip whitespace (both ends / left / right);
   `string/blank?` is true for an empty or all-whitespace string.
 - `string/repeat` concatenates n copies; `string/pad-left` / `string/pad-right` justify a
-  string into a fixed-width field with spaces (never truncating). `to-fixed`
-  renders a number with a fixed decimal count (`(to-fixed 3.14159 2)` → `"3.14"`)
+  string into a fixed-width field with spaces (never truncating). `->fixed`
+  renders a number with a fixed decimal count (`(->fixed 3.14159 2)` → `"3.14"`)
   — the float→text op `str`/`pr-str` can't do, since they print the shortest
-  round-tripping form. Together they handle tabular/console output. `to-fixed` is
+  round-tripping form. Together they handle tabular/console output. `->fixed` is
   a Rust primitive (Rust's float formatter); the rest are Brood.
 - `format` is a small `printf`-style wrapper: `(format "x = %d, y = %.2f" 42 3.14)`
   → `"x = 42, y = 3.14"`. Specifiers: `%s` (any, via `str`), `%d` (number),
-  `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `to-fixed`), `%%` (literal
+  `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `->fixed`), `%%` (literal
   `%`). Width/justification isn't built in (compose with `string/pad-left`/`string/pad-right`).
-- `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(to-fixed y 2)}")`
+- `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(->fixed y 2)}")`
   splices each `{expr}` hole's value between the literal text, lowering to a plain
   `(str …)` — zero runtime cost, so it is just a terser `str`. `{{`/`}}` are literal
   braces; braces nest inside a hole (`(fmt "m={ {:a 1} }")`). Prefer it over
@@ -2571,8 +2571,8 @@ another type, so they are **not** string-library ops:
 ```
 
 Only `string/upper`/`string/lower` (Unicode tables), `string->number` (strict parse-or-nil),
-`to-fixed` (float formatting), and the O(n) char-access mechanisms
-(`string/split`, `string/to-codepoints`, `string-span`/`string-span-until`,
+`->fixed` (float formatting), and the O(n) char-access mechanisms
+(`string/split`, `string/->codepoints`, `string-span`/`string-span-until`,
 `%str-index-of` — one native pass each, where the pure-Brood equivalent is a
 per-character loop) are Rust primitives; the rest of the library is Brood over
 `string/substring`/`str` (`std/prelude.blsp`) — the "write the language in the

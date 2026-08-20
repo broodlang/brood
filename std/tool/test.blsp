@@ -125,7 +125,7 @@ docs/testing.md for the full guide.")
 (defn fail-loc (form)
   (let (p (form-pos form))
     ; [line col] vector, or nil
-    (if p (list (current-file) (vector-ref p 0) (vector-ref p 1)) nil)))
+    (if p (list (current-file) (vector/ref p 0) (vector/ref p 1)) nil)))
 
 ;; A failing assertion THROWS a tagged failure record rather than mutating shared
 ;; state — Brood data is immutable (no accumulator to push onto). The tag is a
@@ -702,7 +702,7 @@ the test rather than hanging the run."
   (s)
   (let (h (fold (fn (acc c) (bit-and (* (bit-xor acc c) 16777619) test-fnv-mask))
             2166136261
-            (string/to-codepoints s)))
+            (string/->codepoints s)))
     (bit-and (bit-xor h (bit-shift-right h 15)) test-fnv-mask)))
 
 ;; Keep only the tests belonging to shard `index` of `count` (0-based) — the

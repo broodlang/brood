@@ -354,7 +354,7 @@ per run. See §3e for the inline approach.
 ### 3c. `strings` / `pipeline` — **lazy sequence combinators** — *shipped (pipeline)*
 
 `strings` (~19×) and `pipeline` (the eager part) materialize a full cons list per stage
-(`(map number->string (range n))`) which the copying GC then relocates — `strings` is also
+(`(map str (range n))`) which the copying GC then relocates — `strings` is also
 the memory outlier (~180 MB). The lever is a **lazy/streaming, fusing pipeline** so a
 chain folds instead of building intermediate lists.
 
@@ -377,8 +377,8 @@ them is internal — `%x*` — not public surface). Measured `pipeline` (n = 1e6
 **`strings` — partly fused, residual deferred (measured 2026-07-09).** `join` over a
 view realises the *fused* view to a single strings list (`(seq view)`), then the native
 `%string-join` walks it. This already **beats eager** because the stages fuse — no
-per-stage intermediate list: measured n = 1e6, `(join "," (lmap number->string (range n)))`
-≈ 0.51 s vs eager `(join "," (map number->string (range n)))` ≈ 0.81 s (~1.6×); the
+per-stage intermediate list: measured n = 1e6, `(join "," (lmap str (range n)))`
+≈ 0.51 s vs eager `(join "," (map str (range n)))` ≈ 0.81 s (~1.6×); the
 two-stage `->>` view ≈ 0.37 s vs eager ≈ 0.61 s. The *only* residue is the final strings
 list (the transformed elements, which the Brood transform closures must produce anyway) plus
 its list→Vec pass. Eliminating that would need a **string-builder reducer folding straight

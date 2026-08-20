@@ -67,16 +67,16 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
 ;; below are thin aliases over the protocol, not a parallel API.
 (impl Seqable
   queue/queue
-  (to-seq [q]
+  (->seq [q]
     (if (= (get q :size) 0) nil (append (get q :front) (reverse (get q :back))))))
 (impl Conjable queue/queue (-conj [q v] (push q v)))
 
-(defn to-list (q)
+(defn ->list (q)
   "All elements in FIFO order as a list — the queue's `Seqable` view. `(seq q)` /
 `(into [] q)` / `(map f q)` / `(fold f init q)` / `(for (x q) …)` all work directly."
   (seq q))
 
-(defn from-list (xs)
+(defn list-> (xs)
   "Build a queue from a list or vector, front → back — i.e. `(into (queue/new) xs)`."
   (into (new) xs))
 
@@ -84,11 +84,11 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
 ;; (size + the element that pops next), `Inspect` the full FIFO contents.
 (impl Display
   queue/queue
-  (to-str [q]
+  (->string [q]
     (if (empty? q)
       "#<queue empty>"
-      (str "#<queue " (get q :size) " front=" (to-str (peek q)) ">"))))
+      (str "#<queue " (get q :size) " front=" (->string (peek q)) ">"))))
 
 (impl Inspect
   queue/queue
-  (inspect [q] (str "#<queue " (pr-str (to-list q)) ">")))
+  (inspect [q] (str "#<queue " (pr-str (->list q)) ">")))

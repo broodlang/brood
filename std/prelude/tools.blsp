@@ -1685,11 +1685,11 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; ── Display / Inspect: the print protocol (always on) ──────────────────────────
 (defability Display
   "A value's human display string — what `print`/`println` show for it."
-  (to-str [self] :-> string))
+  (->string [self] :-> string))
 
 ;; Every built-in kind, and every record without a custom impl, lands here: the
 ;; native `str` — i.e. exactly what printing produced before this module loaded.
-(impl Display :default (to-str [x] (str x)))
+(impl Display :default (->string [x] (str x)))
 
 ;; `Inspect` — the DEBUG form (Elixir's `Inspect`, Haskell's `Show`), the companion
 ;; to `Display`. `(inspect x)` is what you want in a log line or a REPL: unambiguous,
@@ -1714,13 +1714,13 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; `for`/`into`, plus `count`/`keys`/`vals`) consults for a RECORD. The default is the
 ;; record's fields (id-free) as `[k v]` pairs, so a record iterates, counts, and keys as
 ;; its fields and never leaks the internal `:__id__`; a custom-collection record overrides
-;; `to-seq` to define its own iteration. Built-ins never reach here — `seq` takes their
+;; `->seq` to define its own iteration. Built-ins never reach here — `seq` takes their
 ;; native path — so this is purely the record extension point (à la `Display`), at zero
 ;; cost to built-ins.
 (defability Seqable
   "A value's sequence view — the list that `seq`/`map`/`fold`/`for`/`into` iterate."
-  (to-seq [self] :-> any))
-(impl Seqable :default (to-seq [x] (map-pairs (fields x))))
+  (->seq [self] :-> any))
+(impl Seqable :default (->seq [x] (map-pairs (fields x))))
 
 ;; Conjable — adding an element: the seam `conj`/`into` consult for a RECORD. The default
 ;; is the map behaviour (a record is a map: assoc a `[k v]` pair, or merge a map), so a
@@ -1772,13 +1772,13 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through
-;; `to-str` (a `defrecord` value is the sole thing that can carry a custom impl); every
+;; `->string` (a `defrecord` value is the sole thing that can carry a custom impl); every
 ;; other value passes through untouched so the built-in renderer stays on the fast path
 ;; — no `identity-of`/`impl-for` lookup per printed int or string. Disable for a scope
 ;; with `(binding (*show* nil) …)`.
 (defn- show-print-hook
   (x)
-  (if (record? x) (to-str x) x))
+  (if (record? x) (->string x) x))
 
 ;; Wire the screen printers to honor `Display` for records, by default (ADR-172 §8).
 ;; `(binding (*show* nil) …)` disables it for a scope.

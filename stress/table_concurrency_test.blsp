@@ -10,12 +10,12 @@
 (defn hammer (t me lo hi)
   (if (>= lo hi)
     (send me :done)
-    (do (table-put t lo (* lo 3)) (hammer t me (+ lo 1) hi))))
+    (do (table/put t lo (* lo 3)) (hammer t me (+ lo 1) hi))))
 
 (defn verify-range (t lo hi bad)
   (if (>= lo hi)
     bad
-    (verify-range t (+ lo 1) hi (if (= (table-get t lo) (* lo 3)) bad (+ bad 1)))))
+    (verify-range t (+ lo 1) hi (if (= (table/get t lo) (* lo 3)) bad (+ bad 1)))))
 
 (describe "table stress: concurrent hammer across a migration"
   (test "8 writers x 25k puts + mid-run migration lose nothing"
@@ -23,18 +23,18 @@
       (do
         (fold (fn (_ k) (spawn (hammer t me (* k 25000) (* (+ k 1) 25000)))) nil (range 8))
         (sleep 2)
-        (table-put t "force-migration" :now)
+        (table/put t "force-migration" :now)
         (assert= (await-n 8) :ok)
         (assert= (verify-range t 0 200000 0) 0)
-        (assert= (table-count t) 200001)
-        (table-drop t)
+        (assert= (table/size t) 200001)
+        (table/drop t)
         true))))
 
 ;; Concurrent incr exactness across a migration (the CAS + ambiguous-case protocol).
 (defn bump (t me k n)
   (if (= n 0)
     (send me :done)
-    (do (table-incr t k 1) (bump t me k (- n 1)))))
+    (do (table/incr t k 1) (bump t me k (- n 1)))))
 
 (describe "table stress: concurrent incr exactness"
   (test "8 processes x 20k incrs on one key across a migration = 160000"
@@ -42,17 +42,17 @@
       (do
         (fold (fn (_ k) (spawn (bump t me 7 20000))) nil (range 8))
         (sleep 1)
-        (table-put t "migrate" :x)
+        (table/put t "migrate" :x)
         (assert= (await-n 8) :ok)
-        (assert= (table-get t 7) 160000)
-        (table-drop t)
+        (assert= (table/get t 7) 160000)
+        (table/drop t)
         true))))
 
 ;; Drop racing readers/writers: ops error cleanly or succeed — never corrupt/crash.
 (defn poke (t me n oks errs)
   (if (= n 0)
     (send me [:done oks errs])
-    (let (r (try (do (table-put t (rem n 100) n) :ok) (catch e :err)))
+    (let (r (try (do (table/put t (rem n 100) n) :ok) (catch e :err)))
       (poke t me (- n 1) (if (= r :ok) (+ oks 1) oks) (if (= r :err) (+ errs 1) errs)))))
 
 (defn await-pairs (n oks errs)
@@ -68,14 +68,14 @@
       (do
         (fold (fn (_ k) (spawn (poke t me 30000 0 0))) nil (range 4))
         (sleep 3)
-        (table-drop t)
+        (table/drop t)
         (let ([oks errs] (await-pairs 4 0 0))
           ;; whether ops land before or after the drop is a race — the sound
           ;; invariants are conservation (nothing vanishes or crashes) and that
           ;; the dropped table stays unusable.
           (do
             (assert= (+ oks errs) 120000)
-            (assert= (try (do (table-get t 1) :alive) (catch e :dropped)) :dropped)
+            (assert= (try (do (table/get t 1) :alive) (catch e :dropped)) :dropped)
             true))))))
 
 ;; Snapshot/count consistency while writers run: per-entry atomicity only, but the
@@ -84,7 +84,7 @@
 (defn snap-loop (t n)
   (if (= n 0)
     :ok
-    (let (s (table-snapshot t))
+    (let (s (table/snapshot t))
       (do
         (fold (fn (_ [k v]) (assert= v (* k 3))) nil (seq s))
         (snap-loop t (- n 1))))))
@@ -96,5 +96,5 @@
         (fold (fn (_ k) (spawn (hammer t me (* k 10000) (* (+ k 1) 10000)))) nil (range 4))
         (snap-loop t 50)
         (assert= (await-n 4) :ok)
-        (table-drop t)
+        (table/drop t)
         true))))

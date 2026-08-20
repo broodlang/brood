@@ -2186,6 +2186,70 @@ This is the same failure as KI-47's "module count" mechanism earlier today — a
 re-quoted without re-measurement. Both were killed by measuring the actual workload. Note that the
 first version of this session's own handoff entry re-quoted the 18%/24% figures as the recommended
 next target; it has been corrected.
+## 2026-08-20 — One conversion-naming convention: arrow `->` everywhere (ADR-239)
+
+Unified conversion-function naming. The tree had three spellings for "convert an X":
+the Scheme arrow `X->Y` (most functions), a `mod/to-Y`+`mod/from-Y` pair in a few
+collection/type modules, and the ability ops `to-str` (`Display`) / `to-seq` (`Seqable`).
+Standardized on the arrow: `->X` = result is X (`string/->bytes`, `stream/->vector`,
+`pq/->list`), `X->` = source is X (`string/bytes->`, `queue/list->`) — the trailing arrow
+is the symmetric mate, so a pair reads `string/->bytes`/`string/bytes->`. Two Rust string
+primitives came along (`string/->codepoints`, `string/->graphemes`), and every *converting*
+ability op became arrow-named: `Display` `->string`, `Seqable` `->seq`, `Temporal` `->iso`,
+`JsonEncode` `->json` (the `->seq` op name is interned in `builtins/sequences.rs`, updated
+there too). Non-conversion ops (`fetch`/`put`/`size`/`inspect`) keep their verb names. The
+number-formatting primitive `to-fixed` → `->fixed` came along too — a formatter, not a
+type conversion, renamed for a single consistent `->` prefix (kernel registration in
+`builtins/`, ~20 call sites).
+
+**Removed `symbol->string` and `number->string`.** `number->string` *was* `(str n)`;
+`symbol->string` was `(name s)` + a strict guard, and `(str 'foo)` already gives `"foo"`.
+The forward value→string direction is what the polymorphic `->string` (Display) op is for —
+per-type behaviour via `impl`, not a family of `T->string` wrappers — so both were pure
+redundancy. Call sites moved to `str` / `->string` / `name`. `string->symbol` stays (it
+makes a symbol, not a string — the strict face of `symbol`). Curated checker sigs for the
+two removed functions dropped from `types/check/sigs.rs`; the three `string/…list`/
+`codepoints` sig keys renamed to match.
+
+Mechanical but wide: ~140 sites across `std/`, `tests/`, the two benches, and the kernel.
+Greenfield — no aliases. The module-qualified *shadows* of prelude globals (`stream/map`,
+`multimap/get`, `string/repeat`) were deliberately left alone: intentional per-module
+vocabularies, not a naming clash. Docs updated (`language.md`, `brood-for-claude.md`,
+`types.md`, `ROADMAP.md`, `compute-frontier.md`); historical logs/ADRs/archives left as
+written.
+
+## 2026-08-20 — Kernel `-`→`/` for vector/table primitives; map kept dash (module clash)
+
+Continued the naming unification into the kernel primitive families, converting the
+dash-named `vector-*`/`table-*` builtins to a slash namespace and the "count/length" word
+to **size**: `vector-length`→`vector/size`, `vector-ref`→`vector/ref`, `vector-assoc`→
+`vector/assoc`; `table-count`→`table/size`, `table-get`→`table/get`, `table-put`→`table/put`,
+`table-has?`→`table/has?`, `table-delete`→`table/delete`, `table-incr`→`table/incr`,
+`table-drop`→`table/drop`, `table-snapshot`→`table/snapshot`. The names are string-coupled
+across the compiler (PrimOp tables in `ir.rs`, the linmap map→table lowering in
+`inline.rs`/`macros.rs`), the JIT (`jit/rt.rs`), the interpreter (`exec_chunk`/`exec_value`),
+the checker, and error messages — all renamed in lockstep so the map→table optimizer keeps
+firing (verified: `map-*` op → `table/*` op pairs stay consistent, `jit_effect_once` +
+`linmap_soundness` green).
+
+**The `map-*` family was left on dash** (`map-get`, `map-count`, `map-assoc`, `map-dissoc`,
+`map-pairs`, `map-int-add`). `map` is *also* a module (`std/map.blsp`), so `map/get`/`map/assoc`/
+`map/dissoc` would be swept in by `(:use map)` (which refers every live `map/`-prefixed global,
+`system.rs` `%refer`) as bare `get`/`assoc`/`dissoc` — shadowing, and *semantically overriding*,
+the polymorphic prelude ops for every `(:use map)` consumer (seq, editor/ui, editor/buffer). The
+polymorphic `count` already covers map counting, so nothing is lost. `vector`/`table` are not
+modules, so they have no such clash. (The dash names collide only with the `multimap/*` module
+whose names *contain* them; the boundary-safe rename protects those — but note the naive reverse
+`sed` does **not**: `map/get` is a substring of `multimap/get`, which a plain `s|map/get|map-get|`
+corrupts. Fixed and guarded by `multimap_test`.)
+
+Also fixed a latent gap in `runtime_collector`'s `drain_report_wires_through_the_scheduler`:
+it drove `age → collect → assert` but skipped the `migrate_live_globals` step the real reclaim
+cycle (`advance_runtime_multigen`) runs between aging and draining, so a *permanent* live global
+(the boot `*features-loading*` tracker, an empty-map gen-0 handle) leaked into the "root clean of
+gen 0" assertion depending on which slot boot's allocation ordering happened to leave it in. The
+test now runs `migrate_live_globals(0)` before the assert, matching the documented
+`age → migrate → drain` ordering — robust to any permanent live global, no runtime change.
 
 ## 2026-08-20 — Refreshing the perf standing: the menu was being ordered off a superseded table
 

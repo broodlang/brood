@@ -151,9 +151,9 @@
 ;; ---- query values render through Display ------------------------------------
 
 (defrecord usd (cents))
-(impl Display url-test/usd (to-str [m] (str "$" (get m :cents))))
+(impl Display url-test/usd (->string [m] (str "$" (get m :cents))))
 
-(describe "query-encode renders values with to-str"
+(describe "query-encode renders values with ->string"
   (test "a record value encodes as its display string, not its field map"
     (assert= (url/query-encode {"amount" (usd 1050)}) "amount=%241050")
     (is (not (includes? (url/query-encode {"a" (usd 1)}) "__id__"))))

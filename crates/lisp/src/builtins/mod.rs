@@ -337,7 +337,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         bits_to_float,
     );
     // pair / sequence — `empty?` is Brood (type dispatch over string/length /
-    // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
+    // vector/size / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
     // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
     // tail is built via `heap.list`), never a vector.
     def(
@@ -506,21 +506,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "vector-ref",
+        "vector/ref",
         Arity::exact(2),
         Sig::new(vec![vec_ty, int], any),
         vector_ref,
     );
     def(
         heap,
-        "vector-length",
+        "vector/size",
         Arity::exact(1),
         Sig::new(vec![vec_ty], int),
         vector_length,
     );
     def(
         heap,
-        "vector-assoc",
+        "vector/assoc",
         Arity::exact(3),
         Sig::new(vec![vec_ty, int, any], vec_ty),
         vector_assoc,
@@ -764,7 +764,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // call per char. One O(n) pass to the vector the text parsers index.
     def(
         heap,
-        "string/to-codepoints",
+        "string/->codepoints",
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(int)),
         string_to_codepoints,
@@ -775,7 +775,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // reads the same compare the same under Brood's byte-structural `=`.
     def(
         heap,
-        "string/to-graphemes",
+        "string/->graphemes",
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(string)),
         string_to_graphemes,
@@ -954,12 +954,12 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![decimal_ty], float),
         numeric::prim_decimal_to_float,
     );
-    // `to-fixed` renders a number with a fixed count of decimals — the one
+    // `->fixed` renders a number with a fixed count of decimals — the one
     // float→text op `str`/`pr-str` can't express (they print shortest round-trip
     // form, i.e. full f64 precision). `round-to` (a *number*) is Brood over floor.
     def(
         heap,
-        "to-fixed",
+        "->fixed",
         Arity::exact(2),
         Sig::new(vec![num, int], string),
         to_fixed,
@@ -1249,56 +1249,56 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "table-put",
+        "table/put",
         Arity::exact(3),
         Sig::new(vec![table_ty, any, any], table_ty),
         table_put,
     );
     def(
         heap,
-        "table-get",
+        "table/get",
         Arity::range(2, 3),
         Sig::new(vec![table_ty, any], any),
         table_get,
     );
     def(
         heap,
-        "table-has?",
+        "table/has?",
         Arity::exact(2),
         Sig::new(vec![table_ty, any], bool_ty),
         table_has,
     );
     def(
         heap,
-        "table-delete",
+        "table/delete",
         Arity::exact(2),
         Sig::new(vec![table_ty, any], table_ty),
         table_delete,
     );
     def(
         heap,
-        "table-incr",
+        "table/incr",
         Arity::range(2, 3),
         Sig::new(vec![table_ty, any], int),
         table_incr,
     );
     def(
         heap,
-        "table-count",
+        "table/size",
         Arity::exact(1),
         Sig::new(vec![table_ty], int),
         table_count,
     );
     def(
         heap,
-        "table-snapshot",
+        "table/snapshot",
         Arity::exact(1),
         Sig::new(vec![table_ty], map_ty),
         table_snapshot,
     );
     def(
         heap,
-        "table-drop",
+        "table/drop",
         Arity::exact(1),
         Sig::new(vec![table_ty], bool_ty),
         table_drop,
@@ -3300,9 +3300,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("empty?", &["coll"], "True if coll is empty (nil, an empty string/vector/map, or a seq-view that realises to nothing)."),
     ("range?", &["x"], "True if x is a lazy range (as produced by range). Ranges fold/reduce/sum/count without materialising; other ops treat them as the list they stand for."),
     ("vector", &["&", "items"], "A vector of the given items."),
-    ("vector-ref", &["v", "i"], "The element at index i of vector v."),
-    ("vector-length", &["v"], "The number of elements in vector v."),
-    ("vector-assoc", &["v", "i", "x"], "A fresh vector like v with index i (in [0, len)) set to x."),
+    ("vector/ref", &["v", "i"], "The element at index i of vector v."),
+    ("vector/size", &["v"], "The number of elements in vector v."),
+    ("vector/assoc", &["v", "i", "x"], "A fresh vector like v with index i (in [0, len)) set to x."),
     ("subvec", &["v", "start", "end"], "A fresh vector of v's elements in [start, end); end defaults to the length."),
     ("compare", &["a", "b"], "Structural total-order comparison: -1 if a sorts before b, 0 if equal, 1 if after. Numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by a stable tag rank. The binary form of `sort`'s order — `sort-by` and custom comparators build on it."),
     ("hash-map", &["&", "kvs"], "A map from alternating key/value arguments (last wins on duplicate keys)."),
@@ -3321,7 +3321,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string/length."),
     ("string/substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string/length s), so (string/substring s start) is \"from start to the end\"."),
     ("string/split", &["s", "sep"], "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters."),
-    ("string/to-codepoints", &["s"], "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes))."),
+    ("string/->codepoints", &["s"], "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes))."),
     (
         "string/grapheme-count",
         &["s"],
@@ -3337,7 +3337,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
         &["s", "start", "end"],
         "The half-open grapheme-cluster range [start, end) of s (end optional = to the end), clamped to the ends. The grapheme-indexed substring — plain substring is codepoint-indexed and can slice a cluster in half.",
     ),
-    ("string/to-graphemes", &["s"], "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string->codepoints; (apply str (string/to-graphemes s)) is s."),
+    ("string/->graphemes", &["s"], "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string/->codepoints; (apply str (string/->graphemes s)) is s."),
     ("string/normalize", &["s", "form"], "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text."),
     ("string/span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string/span-until."),
     ("string/span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string/length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string/span."),
@@ -3347,8 +3347,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("int->char", &["n"], "A 1-char string for Unicode codepoint n. Errors on an invalid codepoint."),
     ("string->utf8-bytes", &["s"], "The UTF-8 encoding of s as a bytes value."),
     ("utf8-bytes->string", &["bytes"], "Decode UTF-8 bytes (a bytes value, vector, or list of ints 0–255) into a string. Errors on invalid UTF-8."),
-    ("to-fixed", &["x", "n"], "Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0."),
-    ("string->number", &["s"], "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike read-string). The inverse of number->string."),
+    ("->fixed", &["x", "n"], "Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0."),
+    ("string->number", &["s"], "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike read-string). The inverse of str."),
     ("decimal", &["x"], "Construct an exact arbitrary-precision base-10 decimal from x: a string (\"1.50\"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M."),
     ("decimal->string", &["d"], "The canonical decimal string of decimal d (no M suffix)."),
     ("decimal->float", &["d"], "Decimal d as an (inexact) float."),
@@ -3389,15 +3389,15 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("proc-send", &["p", "data"], "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever the child's mode (ADR-141). Returns nil; throws if p is unknown/closed."),
     ("proc-set-binary", &["p", "on"], "Switch subprocess p's INBOUND decode between text mode (default) and binary mode (mirrors tcp-set-binary; outbound proc-send is unaffected, ADR-141). In binary mode inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` value (not a string) — for a child speaking a binary protocol over stdio. Returns nil; throws if p is unknown/closed."),
     ("proc-close", &["p"], "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner."),
-    ("table", &[], "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table-put/table-delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle."),
-    ("table-put", &["t", "k", "v"], "Store v under key k in table t, overwriting any existing entry. Keys use the same structural equality as map keys. Returns t (for threading). Both k and v are deep-copied into the store."),
-    ("table-get", &["t", "k", "default"], "A fresh copy of the value stored under k in table t, or default (nil if omitted) when absent."),
-    ("table-has?", &["t", "k"], "True if table t has an entry for key k."),
-    ("table-delete", &["t", "k"], "Remove key k from table t if present. Returns t."),
-    ("table-incr", &["t", "k", "delta"], "Atomically add delta (default 1) to the integer at key k in table t, treating an absent key as 0, and return the new value. The read-modify-write is atomic under the table lock, so concurrent increments never lose an update — use this for counters. Errors if the existing value is not an integer."),
-    ("table-count", &["t"], "The number of entries in table t."),
-    ("table-snapshot", &["t"], "A consistent point-in-time copy of the whole table t as an immutable map. Atomic; the returned map is unaffected by later mutation of t. Use map ops (keys/vals/get/reduce) on it. O(n)."),
-    ("table-drop", &["t"], "Remove table t from the registry, freeing its store. Idempotent; returns true if it existed. Other handles to t then error on use."),
+    ("table", &[], "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table/put/table/delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle."),
+    ("table/put", &["t", "k", "v"], "Store v under key k in table t, overwriting any existing entry. Keys use the same structural equality as map keys. Returns t (for threading). Both k and v are deep-copied into the store."),
+    ("table/get", &["t", "k", "default"], "A fresh copy of the value stored under k in table t, or default (nil if omitted) when absent."),
+    ("table/has?", &["t", "k"], "True if table t has an entry for key k."),
+    ("table/delete", &["t", "k"], "Remove key k from table t if present. Returns t."),
+    ("table/incr", &["t", "k", "delta"], "Atomically add delta (default 1) to the integer at key k in table t, treating an absent key as 0, and return the new value. The read-modify-write is atomic under the table lock, so concurrent increments never lose an update — use this for counters. Errors if the existing value is not an integer."),
+    ("table/size", &["t"], "The number of entries in table t."),
+    ("table/snapshot", &["t"], "A consistent point-in-time copy of the whole table t as an immutable map. Atomic; the returned map is unaffected by later mutation of t. Use map ops (keys/vals/get/reduce) on it. O(n)."),
+    ("table/drop", &["t"], "Remove table t from the registry, freeing its store. Idempotent; returns true if it existed. Other handles to t then error on use."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
     ("check-file", &["path", "&optional required-mods"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file. `required-mods` is the file's transitive require-closure (module-name strings) — the KI-17 reachability set that flags a qualified `mod/name` whose module the file never requires; omit it (single-file / editor) to disable that lint."),

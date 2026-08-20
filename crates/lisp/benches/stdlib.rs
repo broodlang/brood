@@ -694,7 +694,7 @@ mod enum_extras {
         bench_prog(
             bencher,
             format!(
-                "(def xs (map number->string (range {n}))) \
+                "(def xs (map str (range {n}))) \
                  (do (min-by string-length xs) (max-by string-length xs))"
             ),
         );

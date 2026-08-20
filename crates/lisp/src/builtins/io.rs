@@ -496,20 +496,20 @@ pub(super) fn table_new(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 }
 
 pub(super) fn table_put(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_table(heap, "table-put", arg(args, 0))?;
-    crate::core::table::check_key("table-put", arg(args, 1))?;
+    let id = expect_table(heap, "table/put", arg(args, 0))?;
+    crate::core::table::check_key("table/put", arg(args, 1))?;
     crate::core::table::put(heap, id, arg(args, 1), arg(args, 2))
 }
 
 pub(super) fn table_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_table(heap, "table-get", arg(args, 0))?;
-    crate::core::table::check_key("table-get", arg(args, 1))?;
+    let id = expect_table(heap, "table/get", arg(args, 0))?;
+    crate::core::table::check_key("table/get", arg(args, 1))?;
     crate::core::table::get(heap, id, arg(args, 1), arg(args, 2))
 }
 
 pub(super) fn table_has(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_table(heap, "table-has?", arg(args, 0))?;
-    crate::core::table::check_key("table-has?", arg(args, 1))?;
+    let id = expect_table(heap, "table/has?", arg(args, 0))?;
+    crate::core::table::check_key("table/has?", arg(args, 1))?;
     Ok(Value::boolean(crate::core::table::has(
         heap,
         id,
@@ -518,33 +518,33 @@ pub(super) fn table_has(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 }
 
 pub(super) fn table_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_table(heap, "table-delete", arg(args, 0))?;
-    crate::core::table::check_key("table-delete", arg(args, 1))?;
+    let id = expect_table(heap, "table/delete", arg(args, 0))?;
+    crate::core::table::check_key("table/delete", arg(args, 1))?;
     crate::core::table::delete(heap, id, arg(args, 1))
 }
 
 pub(super) fn table_incr(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_table(heap, "table-incr", arg(args, 0))?;
-    crate::core::table::check_key("table-incr", arg(args, 1))?;
+    let id = expect_table(heap, "table/incr", arg(args, 0))?;
+    crate::core::table::check_key("table/incr", arg(args, 1))?;
     let delta = match arg(args, 2) {
-        Value::Nil => 1, // (table-incr t k) defaults the delta to 1
-        v => expect_int(heap, "table-incr", v)?,
+        Value::Nil => 1, // (table/incr t k) defaults the delta to 1
+        v => expect_int(heap, "table/incr", v)?,
     };
     crate::core::table::incr(heap, id, arg(args, 1), delta)
 }
 
 pub(super) fn table_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_table(heap, "table-count", arg(args, 0))?;
+    let id = expect_table(heap, "table/size", arg(args, 0))?;
     Ok(Value::int(crate::core::table::count(id)?))
 }
 
 pub(super) fn table_snapshot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_table(heap, "table-snapshot", arg(args, 0))?;
+    let id = expect_table(heap, "table/snapshot", arg(args, 0))?;
     crate::core::table::snapshot(heap, id)
 }
 
 pub(super) fn table_drop(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_table(heap, "table-drop", arg(args, 0))?;
+    let id = expect_table(heap, "table/drop", arg(args, 0))?;
     Ok(Value::boolean(crate::core::table::drop_table(id)))
 }
 
@@ -912,7 +912,7 @@ pub(super) fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 }
 
 /// `(string->number s)` — parse `s` as an integer if it is one, else as a float,
-/// else `nil`. The inverse of `number->string`. A robust parse-or-nil can't be
+/// else `nil`. The inverse of `str`. A robust parse-or-nil can't be
 /// expressed over `read-string` (which would read `"3abc"` as `3` and stop), so
 /// the strict parse is a primitive. Surrounding whitespace is not accepted —
 /// `trim` first if the input may carry any.
@@ -924,7 +924,7 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     } else if let Ok(n) = s.parse::<num_bigint::BigInt>() {
         // An integer too big for i64 is a bignum — mirroring the reader's
         // over-range literal path — NOT a lossy f64 (which silently rounded
-        // `(number->string big)` away from round-tripping, kernel audit).
+        // `(str big)` away from round-tripping, kernel audit).
         // Reaching here means the i64 parse failed, so `n` is out of range
         // and `alloc_bigint`'s no-demotion invariant holds.
         Ok(heap.alloc_bigint(n))

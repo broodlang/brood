@@ -11,7 +11,7 @@
 
 (describe "ratio: literals + reduction"
   (test "the 1/2 literal reads, prints, and round-trips"
-    (assert= (to-str 1/2) "1/2")
+    (assert= (->string 1/2) "1/2")
     (assert= (pr-str 1/2) "1/2")
     (is (ratio? 1/2))
     (is (= 1/2 (read-string "1/2"))))

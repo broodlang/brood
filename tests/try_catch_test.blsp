@@ -103,7 +103,7 @@
     (is (try (read-string "(1 2") false (catch _ true))))
 
   (test "index out of bounds is catchable"
-    (is (try (vector-ref [1 2 3] 99) false (catch _ true)))))
+    (is (try (vector/ref [1 2 3] 99) false (catch _ true)))))
 
 ;; ── 4. Error map structure ───────────────────────────────────────────────────
 
@@ -318,7 +318,7 @@
     (assert-error (/ 1 0))
     (assert-error (throw :boom))
     (assert-error (+ 1 "x"))
-    (assert-error (vector-ref [] 0)))
+    (assert-error (vector/ref [] 0)))
 
   (test "multiple assert-error in one test"
     (assert-error (first 5))

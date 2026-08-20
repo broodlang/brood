@@ -28,20 +28,20 @@
       (assert= :x (queue/peek q))
       (assert= :x (queue/peek q))
       (assert= 1 (queue/size q))))
-  (test "queue/to-list preserves order"
+  (test "queue/->list preserves order"
     (let (q (-> (queue/new)
               (queue/push :a)
               (queue/push :b)
               (queue/push :c)))
-      (assert= [:a :b :c] (into [] (queue/to-list q)))))
-  (test "queue/from-list"
-    (let (q (queue/from-list [10 20 30]))
+      (assert= [:a :b :c] (into [] (queue/->list q)))))
+  (test "queue/list->"
+    (let (q (queue/list-> [10 20 30]))
       (assert= 10 (queue/peek q))
       (assert= 3 (queue/size q))))
   ;; a queue is a first-class collection — the generic ops work on it directly
   ;; (Seqable + Conjable, ADR-172 §7), not just the bespoke `queue-*` functions.
   (test "generic collection ops work on a queue"
-    (let (q (queue/from-list [1 2 3 4]))
+    (let (q (queue/list-> [1 2 3 4]))
       (assert= [1 2 3 4] (into [] q)) ; Seqable
       (assert= 4 (count q))
       (assert= (list 10 20 30 40) (map (fn (n) (* n 10)) q))
@@ -82,12 +82,12 @@
         (assert= :med (first r2))
         (assert= :low (first r3))
         (is (pq/empty? (second r3))))))
-  (test "pq/to-list in priority order"
+  (test "pq/->list in priority order"
     (let (pq (-> (pq/new)
                (pq/insert 5 :e)
                (pq/insert 1 :a)
                (pq/insert 3 :c)))
-      (assert= [:a :c :e] (into [] (pq/to-list pq)))))
+      (assert= [:a :c :e] (into [] (pq/->list pq)))))
   (test "equal priorities"
     (let (pq (-> (pq/new)
                (pq/insert 1 :x)
@@ -98,7 +98,7 @@
                (pq/insert 1 :a)
                (pq/insert 1 :b)
                (pq/insert 1 :c)))
-      (assert= [:a :b :c] (into [] (pq/to-list pq))))))
+      (assert= [:a :b :c] (into [] (pq/->list pq))))))
 
 ;; Both structures are records, so each has a nominal identity rather than being "a map
 ;; with the right keys" / "a list of pairs". That is what `queue?`/`pq?` test, what keeps
@@ -124,14 +124,14 @@
     (is (if (pq/new) true false))
     (is (pq/empty? (pq/new))))
   (test "a queue displays as a summary and inspects as its contents"
-    (assert= (to-str (queue/new)) "#<queue empty>")
-    (let (q (queue/from-list (list 1 2 3)))
-      (assert= (to-str q) "#<queue 3 front=1>")
+    (assert= (->string (queue/new)) "#<queue empty>")
+    (let (q (queue/list-> (list 1 2 3)))
+      (assert= (->string q) "#<queue 3 front=1>")
       (assert= (inspect q) "#<queue (1 2 3)>")))
   (test "a pq displays as a summary and inspects as its entries"
-    (assert= (to-str (pq/new)) "#<pq empty>")
+    (assert= (->string (pq/new)) "#<pq empty>")
     (let (pq (-> (pq/new) (pq/insert 2 :b) (pq/insert 1 :a)))
-      (assert= (to-str pq) "#<pq 2 min=1>")
+      (assert= (->string pq) "#<pq 2 min=1>")
       (assert= (inspect pq) "#<pq ([1 :a] [2 :b])>"))))
 
 ;; Cross-process: a record deep-copies on `send` and keeps its `:__id__`, so a queue
@@ -141,7 +141,7 @@
   (test "queues built in workers arrive as queues and pop in order"
     (let (me (self))
       (doseq (i (range 4))
-        (spawn (send me [:q (queue/from-list (list i (+ i 10)))])))
+        (spawn (send me [:q (queue/list-> (list i (+ i 10)))])))
       (let (results (map (fn (_) (receive ([:q q] q) (after *test-wait-ms* :timeout)))
                       (range 4)))
         (is (every? queue? results))
@@ -153,4 +153,4 @@
       (spawn (send me [:pq pq]))
       (let (back (receive ([:pq p] p) (after *test-wait-ms* :timeout)))
         (is (pq? back))
-        (assert= (into [] (pq/to-list back)) [:a :c])))))
+        (assert= (into [] (pq/->list back)) [:a :c])))))

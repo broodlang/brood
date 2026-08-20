@@ -79,7 +79,7 @@ mod strings {
     fn join(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(string/length (string/join \", \" (map number->string (range {n}))))"),
+            format!("(string/length (string/join \", \" (map str (range {n}))))"),
         );
     }
 
@@ -89,9 +89,7 @@ mod strings {
     fn split(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!(
-                "(count (string/split (string/join \",\" (map number->string (range {n}))) \",\"))"
-            ),
+            format!("(count (string/split (string/join \",\" (map str (range {n}))) \",\"))"),
         );
     }
 }

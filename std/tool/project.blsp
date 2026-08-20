@@ -197,17 +197,17 @@ the `nest new` scaffolder."
 ;; tree agree. Registered here (the type owner) rather than in the package manager.
 (impl Display
   project/dep-path
-  (to-str [d] (str (get d :name) "  (path \"" (get d :path) "\")")))
+  (->string [d] (str (get d :name) "  (path \"" (get d :path) "\")")))
 (impl Display
   project/dep-git
-  (to-str [d]
+  (->string [d]
     (str (get d :name) "  (git " (get d :url) " @ " (or (get d :ref) (get d :version)) ")")))
 (impl Display
   project/dep-tarball
-  (to-str [d] (str (get d :name) "  (tarball " (get d :url) ")")))
+  (->string [d] (str (get d :name) "  (tarball " (get d :url) ")")))
 (impl Display
   project/dep-registry
-  (to-str [d] (str (get d :name) "  (registry v" (get d :version) ")")))
+  (->string [d] (str (get d :name) "  (registry v" (get d :version) ")")))
 
 (def- *project-dep-ids*
   (list :project/dep-path :project/dep-git :project/dep-tarball :project/dep-registry))
@@ -222,10 +222,10 @@ than being fetched into `_deps/<name>/`."
   (and (record? x) (= (record-id x) :project/dep-path)))
 
 ;; The elements of vector `v` from index `start` onward, as a list (tail-recursive).
-(defn- project-vec-drop (v start) (project-vec-drop-acc v start (dec (vector-length v)) nil))
+(defn- project-vec-drop (v start) (project-vec-drop-acc v start (dec (vector/size v)) nil))
 (defn- project-vec-drop-acc
   (v start i acc)
-  (if (< i start) acc (project-vec-drop-acc v start (dec i) (cons (vector-ref v i) acc))))
+  (if (< i start) acc (project-vec-drop-acc v start (dec i) (cons (vector/ref v i) acc))))
 
 ;; The keys of a flat plist (every other element from the head).
 ;; check-allow: deliberately non-tail — depth = the manifest plist's key count.
@@ -246,7 +246,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-git-dep
   (name entry)
-  (let (url (vector-ref entry 2)
+  (let (url (vector/ref entry 2)
         opts (project-vec-drop entry 3)
         ref (plist-get opts :ref)
         version (plist-get opts :version))
@@ -268,7 +268,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-path-dep
   (name entry)
-  (let (path (vector-ref entry 2)
+  (let (path (vector/ref entry 2)
         opts (project-vec-drop entry 3))
     (when (not (string? path))
       (error "project: :path dependency " name " path must be a string, got " path))
@@ -277,7 +277,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-registry-dep
   (name entry)
-  (let (version (vector-ref entry 2)
+  (let (version (vector/ref entry 2)
         opts (project-vec-drop entry 3))
     (when (not (string? version))
       (error "project: registry dependency " name " version must be a string, got " version))
@@ -286,7 +286,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-tarball-dep
   (name entry)
-  (let (url (vector-ref entry 2)
+  (let (url (vector/ref entry 2)
         opts (project-vec-drop entry 3)
         sha (plist-get opts :sha256))
     (when (not (string? url))
@@ -303,9 +303,9 @@ than being fetched into `_deps/<name>/`."
 (defn project-parse-dep (entry)
   (when (not (vector? entry))
     (error "project: each :dependencies entry must be a vector, got " entry))
-  (when (< (vector-length entry) 3) (error "project: dependency entry is too short: " entry))
-  (let (name (vector-ref entry 0)
-        kind (vector-ref entry 1)
+  (when (< (vector/size entry) 3) (error "project: dependency entry is too short: " entry))
+  (let (name (vector/ref entry 0)
+        kind (vector/ref entry 1)
         opts (project-vec-drop entry 3))
     (when (not (symbol? name)) (error "project: dependency name must be a symbol, got " name))
     (let (base (cond
@@ -1728,8 +1728,8 @@ resolve in the advisory checker. Returns the project root."
 ;; CST node accessors (see the `parse-source` doc in builtins.rs): a node is
 ;; `[kind v]` — for a leaf `v` is the raw source text, for a container
 ;; (`[:list …]`, `[:root …]`) `v` is the vector of child nodes.
-(defn- project-node-kind (n) (vector-ref n 0))
-(defn- project-node-val (n) (vector-ref n 1))
+(defn- project-node-kind (n) (vector/ref n 0))
+(defn- project-node-val (n) (vector/ref n 1))
 
 ;; Top-level heads that bind a global (each expands to `def`). `defmodule` is
 ;; excluded — it registers a module feature, not a clashing value binding.

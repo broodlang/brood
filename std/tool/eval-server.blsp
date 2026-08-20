@@ -201,14 +201,14 @@ path — the per-request evaluator process dies — but worth knowing when embed
         acc (when traced (table))
         sink (when traced
                (fn (e)
-                 (let (n (or (table-get acc :n) 0))
+                 (let (n (or (table/get acc :n) 0))
                    (if (< n *spy-entry-cap*)
                      (do
-                       (table-put acc :n (inc n))
-                       (table-put acc
+                       (table/put acc :n (inc n))
+                       (table/put acc
                          :entries
                          (cons (eval-server-spy-entry e)
-                           (or (table-get acc :entries) '())))
+                           (or (table/get acc :entries) '())))
                        ;; the entry that FILLS the budget already answers stop: nothing
                        ;; after it would be kept, so nothing after it should be paid for
                        (when (>= (inc n) *spy-entry-cap*) :spy-stop))
@@ -230,7 +230,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
     (if traced
       (do
         (debug/untrace-all)
-        (assoc r2 :spy (reverse (or (table-get acc :entries) '()))))
+        (assoc r2 :spy (reverse (or (table/get acc :entries) '()))))
       r2)))
 
 ;; ---- per-request timeout: eval in a child process, kill on deadline ----------

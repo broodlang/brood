@@ -51,7 +51,7 @@ the `nest mcp` tools of the same names.")
             :fix "Usually nothing — the result widens automatically. If you need a fixed width, mask with `bit-and`."
             :example "(* 9223372036854775807 2)   ; => a big integer, no error"}
    "E0042" {:summary "Index out of range — a sequence access past its bounds."
-            :causes "`(vector-ref v i)` / `(nth …)` / `(string/substring …)` / `(byte-at …)` with `i` ≥ length or negative."
+            :causes "`(vector/ref v i)` / `(nth …)` / `(string/substring …)` / `(byte-at …)` with `i` ≥ length or negative."
             :fix "Bounds-check first, or use the total form: `(nth v i default)` returns the default instead of raising."
             :example "(nth v i nil)   ; nil instead of an error past the end"}
    "E0043" {:summary "Soft memory limit crossed (ADR-043) — allocation exceeded the configured cap."
