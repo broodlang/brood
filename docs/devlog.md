@@ -2146,3 +2146,43 @@ against the old implementation (111/111 after a rebuild). And the first suite-me
 before that rebuild, so it had to be discarded. Separately: a single memory sample is not a
 measurement here either — the two debug runs differ by 4.3%, which is small, but a lone 726.7 would
 have been reported as a sharper drop than the data supports.
+
+## 2026-08-20 — The source-position tables are not the memory target: 7.1%, not 18% (a negative result)
+
+Picked as the next perf item on the strength of the 2026-08-06 module-load breakdown, which put the
+two source-position side tables at **169 MB of a 933 MB load (18%) and 24% of load time** — the
+largest single *attributable* item, with a dual memory+time payoff feeding the startup goal. Measured
+on real code, both halves collapse.
+
+**New measurement surface: `(pos-stats)`** (dev-tools only, beside `gc-stats`). It reports entry
+count, capacity **and bytes** for the LOCAL `form_pos` and the runtime-shared `positions`, with bytes
+derived from live *capacity* rather than entry count — hashbrown lays `(K,V)` slots out flat with one
+control byte each, so `capacity * (size_of::<(K,V)>() + 1)` is the memory actually held. Deriving
+from `len()` would have hidden the one real defect below.
+
+**Memory, 38-module stdlib:** RUNTIME 14 012 entries / 14 336 cap / 473 KB; LOCAL 8 000 entries /
+25 156 cap / 830 KB. **1.29 MB of an 18.23 MB load = 7.1%**, against the 18% implied. The gap is the
+corpus: 2026-08-06 measured 1000-line *generated* modules at 1.15M entries, whose form density is
+nothing like real source.
+
+**Time:** an ablation build (`set_form_pos` returning early, the flag cached in a `OnceLock` so a
+per-form `var_os` could not inflate *both* arms) loads the stdlib in **137 ms vs 146.5 ms** — a
+**6.5% ceiling**, not 24%, against a **0.7%** base-vs-base noise floor measured first. And 6.5% is
+the ceiling for deleting positions outright, which is not on the table: diagnostics,
+`source-location` and the LSP all read them. A real optimisation buys a fraction of that. The
+ablation switch was removed after measuring; it was never for merge.
+
+**One real defect, deliberately not fixed.** The LOCAL `form_pos` holds its **high-water capacity**
+for the process's life: the minor-collection path in `gc.rs` `retain`s in place and `HashMap` never
+shrinks, so 8 000 live entries sat in 25 156 slots. But that `retain` is itself a deliberate time
+fix — its comment records that taking and rebuilding the map was O(all positions recorded so far)
+per minor rather than O(nursery) — so shrinking partly undoes a known win, and with safe hysteresis
+(shrink at >3x, to 2x) it recovers only ~219 KB, about **1%** of load memory. Recorded in the
+handoff rather than shipped.
+
+**The lesson is the one this session keeps re-learning.** A documented number measured on a synthetic
+corpus does not transfer to real code, and it had stood unchallenged as the obvious next optimisation.
+This is the same failure as KI-47's "module count" mechanism earlier today — a plausible figure
+re-quoted without re-measurement. Both were killed by measuring the actual workload. Note that the
+first version of this session's own handoff entry re-quoted the 18%/24% figures as the recommended
+next target; it has been corrected.

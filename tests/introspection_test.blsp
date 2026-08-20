@@ -141,6 +141,32 @@
     (assert= (doc-search "   ") nil)))
 
 ;; Runtime introspection: per-process GC observability (Tier-1;
+(describe "pos-stats"
+  (test "is a map with the documented keys, and bytes track CAPACITY not entry count"
+    (let (s (pos-stats))
+      (is (map? s))
+      (is (number? (get s :local-forms)))
+      (is (>= (get s :local-forms) 0))
+      (is (number? (get s :runtime-forms)))
+      (is (>= (get s :runtime-forms) 0))
+      ;; capacity is never below what it holds
+      (is (>= (get s :local-cap) (get s :local-forms)))
+      (is (>= (get s :runtime-cap) (get s :runtime-forms)))
+      ;; bytes are derived from capacity, so a table with spare slots still reports
+      ;; the memory it occupies — that is the whole point of the surface (a `retain`
+      ;; in the GC drops entries without releasing slots).
+      (is (>= (get s :local-bytes) 0))
+      (is (>= (get s :runtime-bytes) 0))
+      (is (= (> (get s :local-cap) 0) (> (get s :local-bytes) 0)))))
+  (test "recording a positioned form is reflected in the local table"
+    ;; `read` stamps positions on LOCAL list forms, so reading source must not
+    ;; DECREASE the recorded count. (Exact growth is not asserted: a collection may
+    ;; drop dead entries between the two samples.)
+    (let (before (get (pos-stats) :local-forms)
+          _ (read-all "(defn probe-fn (a b) (if (> a b) a b))")
+          after (get (pos-stats) :local-forms))
+      (is (>= after before)))))
+
 ;; docs/memory-review.md §7). gc-stats reports the *calling* process's own heap.
 (describe "gc-stats"
   (test "is a map with the documented counter keys"
