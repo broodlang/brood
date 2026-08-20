@@ -28,13 +28,41 @@ fixed this day.
 - Plus the rot: **108 stale names** across `breakage/`/`stress/`/`scripts/fuzz/stress/` (three
   separate rename waves) and **34 files** across the two format gates.
 
-⚠ **The one thing this session deliberately did NOT resolve — start here.** The memory backstop was
-sized against a **~240 MB** suite peak; the suite now peaks **~1 GB**. KI-47's raise restores a ~2×
-margin instead of the intended 4×, and **whether that 4.8× growth is legitimate or a regression is
-unmeasured**. The namespacing merge is the commit that pushed it over the line, not necessarily the
-one that caused the growth. Do not read KI-47's closure as evidence the growth is fine.
-`BROOD_TRACE_PROMOTE=1` ranks what enters the append-only shared RUNTIME region, which the local
-collector cannot reclaim, and is the tool to start with.
+✅ **The previous session's flagged "start here" is ANSWERED (2026-08-20): the memory growth is
+legitimate, not a regression.** KI-47 blamed module count; that is measured wrong. At constant source,
+120× the module count costs **1.65×** peak (~60 KB/module), so all 89 stdlib modules account for
+~5.5 MB against the +905 MB in question — and the 2026-08-06 entry it leaned on found the *quadratic*
+was in **time** (`*features*`, fixed by ADR-216), with memory explicitly **not** per-module. The
+namespacing merge is not the cause either: `098a3316` (pre-ADR-230) vs HEAD on the identical harness
+is **+4.4% on the VM arm and −11% on the tree-walker** — HEAD is *cheaper* on the arm that went red.
+The "4.8×" compared a 2026-05-30 figure against a 2026-08-19 one across a different engine
+(tree-walker = **1.38×** the VM, measured) and a different build (debug vs release); those confounds
+cover it. And it has receded: the same debug/`BROOD_VM=0` harness now peaks **726.7 / 757.9 MB**
+(two samples) against KI-47's **996.6 MB**, back under the *original* 1 GiB cap. **Keep 2 GiB soft /
+3 GiB hard** — ~2.6× margin now; 1 GiB would leave ~1.2×. Full working in KI-47.
+
+**The position tables were then measured on REAL code and are NOT the target that breakdown implied
+— written up below so nobody re-picks them.** The 2026-08-06 figures (169 MB of 933 MB = 18% of
+memory, 24% of load time) come from a synthetic corpus of 1000-line generated modules at 1.15M
+entries, whose form density is nothing like real source. On the 38-module stdlib, measured with the
+new `(pos-stats)` surface: the two tables are **1.29 MB of an 18.23 MB load — 7.1%** — and an
+ablation build that records no positions at all loads in **137 ms vs 146.5 ms, i.e. a 6.5% ceiling
+against a 0.7% base-vs-base noise floor**. Since positions cannot actually be removed (diagnostics,
+`source-location`, the LSP), any real optimisation buys a fraction of 6.5%. **Do not start here.**
+
+One genuine but small defect was found and deliberately left: the LOCAL `form_pos` keeps its
+**high-water capacity** for the process's life — `gc.rs`'s minor-collection path `retain`s in place,
+and `HashMap` never shrinks, so 8 000 live entries sat in 25 156 slots. Shrinking is *not* obviously
+right: that `retain` is itself a deliberate time fix (the comment there records that rebuilding the
+map was O(all positions recorded so far) per minor), and safe hysteresis recovers only ~219 KB, ~1%
+of load memory. Recorded, not fixed.
+
+**So the memory thread is closed at both ends** — no regression (KI-47) and no worthwhile reduction
+in the position tables. The remaining named options are unchanged: **M2 shared IC tables** (the
+option book's #5, 664 B/proc + a warm start, highest value and highest risk) and the **startup heap
+image** (the 18.5 s vs Elixir's 2.26 s target; a real project, and the devlog warns the
+cheap-sounding AOT version makes memory *worse*). The AST itself — 220 MB of that same 933 MB, the
+largest single item — is the thing the image project would actually address.
 
 **Also open, smaller:**
 
@@ -45,10 +73,15 @@ collector cannot reclaim, and is the tool to start with.
   `.config/nextest.toml` claims 10.5 s post-KI-39. Both drive `fib 30` / 96 subprocess spawns; the
   KI-39-shaped fix is to cut the per-unit cost, not the budget. **Any reduction must be proven to
   still tier** (`BROOD_JIT_DUMP_IR=1`), or a slow-but-real test becomes a fast-but-hollow one.
-- **The rename-sweep gap.** `breakage/`, `stress/` and `scripts/fuzz/stress/` are outside every test
-  runner, so each rename wave rots them and CI finds out one red build later. Three times in one day.
-  Including them in whatever sweep a rename commit runs over `std/`/`tests/` would make renames land
-  atomically.
+- ~~**The rename-sweep gap.**~~ **Closed 2026-08-20.** `stress/` and `scripts/fuzz/stress/` now gate
+  on every PR via `make check-stress` (`scripts/check-stress.sh`, modelled on `check-examples.sh`);
+  `breakage/` already had its own CI job. Before the gate existed it found **8** dead files — two
+  rename waves deep, and grep had found only 3 of them, because `stress/` had also rotted under
+  ADR-230's `string/*` wave. 25 s for all 28 harnesses; verified by sabotage in both branches.
+  `benches/` turned out to be gated too, but only by `cargo clippy --all-targets` — which is how the
+  `parse_prelude` bench was caught still naming the pre-split `std/prelude.blsp`, one red build after
+  the split. **If you run a rename sweep, `make check-stress` and `make check-examples` are now part
+  of proving it landed atomically.**
 
 ⚠ **Method warning, and the day's real lesson.** Six separate checks produced confident, plausible,
 wrong output, and **none of them errored**: `rustfmt --check` piped to `/dev/null` (it writes its
