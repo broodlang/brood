@@ -213,10 +213,7 @@
         (pkg-git-tag ansi "v1.0.0")
         ;; greeter wants ansi from the REGISTRY (a version range, not a source pin).
         (pkg-write-project greeter
-          "greeter"
-          "greeter"
-          "(defn g () 1)"
-          " :dependencies [[ansi :version \"1.0.0\"]]")
+          "greeter" "greeter" "(defn g () 1)" " :dependencies [[ansi :version \"1.0.0\"]]")
         (let (greeter-url (pkg-git-init greeter))
           (pkg-git-tag greeter "v1.0.0")
           (pkg-write-project app "app" "main" "(defn main () 1)" "")
@@ -471,7 +468,7 @@
 (defn mock-registry-handler-external (cfg nm version checksum wrapped-bytes)
   (fn (req)
     (let (path (get req :path)
-          src (str (table-get cfg :base "") "/ext/" nm ".tar.gz"))
+          src (str (table/get cfg :base "") "/ext/" nm ".tar.gz"))
       (cond
         (= path (str "/ext/" nm ".tar.gz"))
           (http/response 200 {"Content-Type" "application/gzip"} wrapped-bytes)
@@ -533,10 +530,10 @@
           (is (file/exists? (path-join extracted "project.blsp"))))
         ;; lock row: [greeter :registry "1.0.0" :sha256 <sha> :deps …]
         (let (row (dep-lock-vec e))
-          (assert= (vector-ref row 1) :registry)
-          (assert= (vector-ref row 2) "1.0.0")
-          (assert= (vector-ref row 3) :sha256)
-          (assert= (vector-ref row 4) checksum)))))
+          (assert= (vector/ref row 1) :registry)
+          (assert= (vector/ref row 2) "1.0.0")
+          (assert= (vector/ref row 3) :sha256)
+          (assert= (vector/ref row 4) checksum)))))
   (test "a release pointing at an external tarball URL is fetched, sha-verified, strip-1 extracted"
     ;; the registry serves ONLY metadata (with :source_url); the bytes live at an external HTTP
     ;; URL (a second path on the same loopback) — proving hive need not hold the tarball
@@ -546,7 +543,7 @@
           cfg (table)
           base (mock-registry-start (mock-registry-handler-external cfg
                                       "extdep" "1.0.0" checksum wrapped-bytes)))
-      (table-put cfg :base base)
+      (table/put cfg :base base)
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (let (e (package/package-resolve-registry app-dir (dep-registry 'extdep "1.0.0") nil base))
         (assert= (dep-kind e) :registry)
@@ -564,7 +561,7 @@
           cfg (table)
           base (mock-registry-start (mock-registry-handler-external cfg
                                       "extbad" "1.0.0" "deadbeef" wrapped-bytes)))
-      (table-put cfg :base base)
+      (table/put cfg :base base)
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (is (includes? (try
                        (package/package-resolve-registry app-dir
@@ -838,8 +835,8 @@
           (is (file/dir? (path-join (path-join app-dir "_deps") "bar")))
           ;; the lock rows carry the CONCRETE resolved versions
           (let (foo-row (dep-lock-vec (get by-name 'foo)))
-            (assert= :registry (vector-ref foo-row 1))
-            (assert= "1.5.0" (vector-ref foo-row 2)))))))
+            (assert= :registry (vector/ref foo-row 1))
+            (assert= "1.5.0" (vector/ref foo-row 2)))))))
 
   (test "a fully-covering lock reuses the solution network-free (the fast path)"
     (let (parent (pkg-fixture-root)
@@ -1077,12 +1074,12 @@
         (write-lockfile app-dir entries)
         (let (locked (read-lockfile app-dir))
           (is (vector? locked))
-          (assert= (vector-length locked) 1)
+          (assert= (vector/size locked) 1)
           ;; entry vector: [greeter :path "../greeter" :sha256 H :deps []]
-          (let (row (vector-ref locked 0))
-            (assert= (vector-ref row 0) 'greeter)
-            (assert= (vector-ref row 1) :path)
-            (assert= (vector-ref row 2) "../greeter"))))))
+          (let (row (vector/ref locked 0))
+            (assert= (vector/ref row 0) 'greeter)
+            (assert= (vector/ref row 1) :path)
+            (assert= (vector/ref row 2) "../greeter"))))))
   ;; The lock is a CANONICAL artifact: resolution order isn't stable across runs, so the
   ;; serialized content must not depend on it — otherwise every `nest fetch` rewrites the
   ;; committed file with the same deps in a new order (the churn this sort fixes).
@@ -1105,8 +1102,8 @@
         ;; …and the canonical order is by name (alpha before beta)
         (write-lockfile app-dir (reverse entries))
         (let (locked (read-lockfile app-dir))
-          (assert= (vector-ref (vector-ref locked 0) 0) 'alpha)
-          (assert= (vector-ref (vector-ref locked 1) 0) 'beta)))))
+          (assert= (vector/ref (vector/ref locked 0) 0) 'alpha)
+          (assert= (vector/ref (vector/ref locked 1) 0) 'beta)))))
   (test "read-lockfile is nil when there is no lock file"
     (assert= (read-lockfile (pkg-fixture-root)) nil)))
 
@@ -1269,10 +1266,10 @@
 ;; scaffolded project. Here we cover their pure, cwd-free helpers.
 (describe "package: tree helpers"
   (test "a path dep displays as its tree label"
-    (assert= (to-str (dep-path 'shared "../shared"))
+    (assert= (->string (dep-path 'shared "../shared"))
       "shared  (path \"../shared\")"))
   (test "a git dep displays as its tree label"
-    (assert= (to-str (dep-git 'p "https://x.git" "v1" nil))
+    (assert= (->string (dep-git 'p "https://x.git" "v1" nil))
       "p  (git https://x.git @ v1)"))
   (test "index-by-name keys resolved entries by their name"
     (let (idx (package/package-index-by-name (list (assoc (dep-path 'a "../a") :deps nil)

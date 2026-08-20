@@ -84,11 +84,11 @@
     ;; `(def *out* …)` rebinds the ROOT binding even from inside a module, because a
     ;; dynamic name is ambient by declaration (ADR-151).
     (let (sink (table))
-      (def *out* (fn (s) (table-put sink :last s)))
+      (def *out* (fn (s) (table/put sink :last s)))
       (print "redirected")
       ; restore BEFORE asserting
       (def *out* %write-out)
-      (assert= "redirected" (table-get sink :last))))
+      (assert= "redirected" (table/get sink :last))))
   (test "the scoped form is unaffected"
     (assert= "scoped" (with-out-str (print "scoped")))))
 

@@ -8,7 +8,7 @@
 ;;;   - Tag-checking when the same slot holds int then float then int
 ;;;   - Float overflow to infinity (Brood should not panic)
 ;;;   - Float underflow to subnormal / zero
-;;;   - `to-fixed` / `format` on extreme values
+;;;   - `->fixed` / `format` on extreme values
 ;;;   - Arithmetic chains where intermediate values are float then int
 ;;;   - `round` / `floor` / `ceil` / `abs` on edge-case values
 ;;;   - Division that crosses the exact/inexact boundary mid-stream
@@ -128,9 +128,9 @@
   (println "floor(f-nan):" (try (floor f-nan) (catch e (str "raises: " (error-message e)))))
   (println "abs(f-nan):" (try (math/abs f-nan) (catch e (str "raises: " (error-message e))))))
 
-(println "--- to-fixed / format on extreme values ---")
-(println "to-fixed(1.23456789e15, 2):" (to-fixed 1.23456789e15 2))
-(println "to-fixed(f-min, 400):" (to-fixed f-min 400))
+(println "--- ->fixed / format on extreme values ---")
+(println "->fixed(1.23456789e15, 2):" (->fixed 1.23456789e15 2))
+(println "->fixed(f-min, 400):" (->fixed f-min 400))
 (when f-inf
   (println "format %.2f of f-inf:"
     (try (format "%.2f" f-inf) (catch e (str "raises: " (error-message e))))))

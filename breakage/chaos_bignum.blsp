@@ -7,7 +7,7 @@
 ;;; Targets:
 ;;;   - The i64 → BigInt deopt path in eval/JIT
 ;;;   - BigInt limb arithmetic (Karatsuba / long-mul) under allocation pressure
-;;;   - `number->string` on a several-hundred-KB number
+;;;   - `str` on a several-hundred-KB number
 ;;;   - `string->number` round-trip on the result
 ;;;   - `rem` / `quot` of a huge BigInt vs a small prime
 
@@ -18,7 +18,7 @@
 
 (println "--- growing the monster ---")
 (def monster (repeated-square 2 20))
-(def monster-str (number->string monster))
+(def monster-str (str monster))
 (println "digit count:" (string/length monster-str))
 
 ;; the string should start with 1 and end with 6 (2^any is always even, but
@@ -30,12 +30,12 @@
 ;; Add: result has same number of digits or one more
 (def monster+1 (+ monster 1))
 (println "monster+1 last digit:"
-  (string/char-at (number->string monster+1) (- (string/length (number->string monster+1)) 1)))
+  (string/char-at (str monster+1) (- (string/length (str monster+1)) 1)))
 
 ;; Multiply by a large prime: 2^(2^20) × 999_999_937
 (def mega-prime 999999937)
 (def big-product (* monster mega-prime))
-(println "big-product digit count:" (string/length (number->string big-product)))
+(println "big-product digit count:" (string/length (str big-product)))
 
 ;; Modular reduction: monster mod a small prime should be fast (single division)
 (def small-prime 999999893)
@@ -46,7 +46,7 @@
 (def divisor 123456789012345678)
 (def q (quot monster divisor))
 (def r (rem monster divisor))
-(println "quot digit count:" (string/length (number->string q)))
+(println "quot digit count:" (string/length (str q)))
 (println "remainder:" r)
 ;; Verify: q*divisor + r == monster
 (println "reconstruction ok?" (= (* q divisor) (- monster r)))
@@ -68,7 +68,7 @@
 ;; fac(1000) has ~2568 digits; stresses a different allocation pattern (many small muls)
 (defn fac (n acc) (if (= n 0) acc (fac (- n 1) (* acc n))))
 (def fac1000 (fac 1000 1))
-(println "1000! digit count:" (string/length (number->string fac1000)))
+(println "1000! digit count:" (string/length (str fac1000)))
 (println "1000! mod 1000000007:" (rem fac1000 1000000007))
 
 (println "--- DONE ---")

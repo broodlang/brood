@@ -41,7 +41,7 @@ compare what a human typed in a manifest, not to validate it (that is
 
 (defn- digit-run?
   (s)
-  (let (cps (string/to-codepoints s))
+  (let (cps (string/->codepoints s))
     (and (not (empty? cps))
       (not (any? (fn (cp) (or (< cp 48) (> cp 57))) cps)))))
 
@@ -154,7 +154,7 @@ everything (the \"no release yet\" placeholder a registry starts from)."
 (def *operators* ["~>" "<=" ">=" "<" ">" "=" "^"]) ; longest first: "<=" before "<"
 (defn- digit-start?
   (s)
-  (let (cps (string/to-codepoints s))
+  (let (cps (string/->codepoints s))
     (and (not (empty? cps)) (>= (first cps) 48) (<= (first cps) 57))))
 
 (defn- split-constraint
@@ -272,7 +272,7 @@ the same as `satisfies?` — compiling is where a bad constraint is caught."
         (= cp 124)
         (= cp 94)
         (= cp 126))) ; | ^ ~
-    (string/to-codepoints wanted)))
+    (string/->codepoints wanted)))
 
 (defn- compile-term
   (term constraint)

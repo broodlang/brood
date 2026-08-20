@@ -50,7 +50,7 @@ use crate::process::message::{from_message, to_message, to_message_image};
 ///
 /// v4 adds `KIND_TABLE`. The bump is required, not cosmetic: a v3 reader meeting a
 /// `KIND_TABLE` entry would fall through its `_ =>` arm and bind the global to the
-/// snapshot *map* instead of a table, so every `table-put` against it would then fail
+/// snapshot *map* instead of a table, so every `table/put` against it would then fail
 /// on a type error far from the cause.
 ///
 /// v5 records the `defdyn` dynamic-var marks (after the directory, in the region
@@ -470,7 +470,7 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
             // Rebuild the table the write side snapshotted: a fresh store in THIS
             // runtime's registry, refilled from the imaged pairs, so the global is bound
             // to a live table with the contents loading produced. `table::put` deep-clones
-            // in, exactly as a `table-put` from Brood would.
+            // in, exactly as a `table/put` from Brood would.
             KIND_TABLE => {
                 let tid = crate::core::table::create();
                 if let value::ValueRef::Map(mid) = v.unpack() {

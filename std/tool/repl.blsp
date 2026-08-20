@@ -585,30 +585,30 @@ reporting a real error. Never lets an error escape the loop."
 (defn- repl-interrupt-push
   ()
   "Register the calling process as the innermost interrupt owner."
-  (table-put *repl-interrupt-owners*
+  (table/put *repl-interrupt-owners*
     :stack
-    (cons (self) (or (table-get *repl-interrupt-owners* :stack) '()))))
+    (cons (self) (or (table/get *repl-interrupt-owners* :stack) '()))))
 
 (defn- repl-interrupt-pop
   ()
   "Deregister the calling process (must be the current head — strict nesting)."
-  (table-put *repl-interrupt-owners*
+  (table/put *repl-interrupt-owners*
     :stack
-    (rest (or (table-get *repl-interrupt-owners* :stack) '()))))
+    (rest (or (table/get *repl-interrupt-owners* :stack) '()))))
 
 (defn- repl-interrupt-owner?
   ()
   "Is the calling process the innermost live interrupt owner? Repairs the stack past
 dead heads (a runner that was killed instead of returning), so ownership can never be
 wedged on a corpse."
-  (let (stack (or (table-get *repl-interrupt-owners* :stack) '()))
+  (let (stack (or (table/get *repl-interrupt-owners* :stack) '()))
     (cond
       (empty? stack) true
       (= (first stack) (self)) true
       ;; a dead head can't poll — drop it and re-ask
       (nil? (process-info (first stack)))
         (do
-          (table-put *repl-interrupt-owners*
+          (table/put *repl-interrupt-owners*
             :stack
             (rest stack))
           (repl-interrupt-owner?))

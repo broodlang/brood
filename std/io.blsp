@@ -68,7 +68,7 @@ or your own type). The check a function taking a port can branch on instead of l
 (defrecord standard-port (label write))
 
 (impl Port io/standard-port (write [p s] ((get p :write) s)))
-(impl Display io/standard-port (to-str [p] (str "#<port " (get p :label) ">")))
+(impl Display io/standard-port (->string [p] (str "#<port " (get p :label) ">")))
 
 (defn stdout-port ()
   "The default stdout port: writes to real stdout, honouring `with-out-str`
@@ -89,12 +89,12 @@ count, or forward however it likes."
 (defrecord process-port (pid))
 
 (impl Port io/process-port (write [p s] (send (get p :pid) [:write s]) nil))
-(impl Display io/process-port (to-str [p] (str "#<port process " (get p :pid) ">")))
+(impl Display io/process-port (->string [p] (str "#<port process " (get p :pid) ">")))
 
 (defrecord file-port (path))
 
 (impl Port io/file-port (write [p s] (file/spit-append (get p :path) s) nil))
-(impl Display io/file-port (to-str [p] (str "#<port file " (get p :path) ">")))
+(impl Display io/file-port (->string [p] (str "#<port file " (get p :path) ">")))
 
 ;; ---- installing a port for a dynamic extent ---------------------------------
 

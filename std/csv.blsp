@@ -213,7 +213,7 @@ escaped quote inside a quoted field, and both `\\n` and `\\r\\n` line endings.
 An empty string returns an empty list."
   (if (= s "")
     nil
-    (let (v (into [] (string/to-list s)))
+    (let (v (into [] (string/->list s)))
       ; index a code-point vector: O(1) nth, O(n) scan
       (csv-parse-loop v 0 (count v) :field-start nil nil nil))))
 
@@ -256,10 +256,10 @@ maps from header→value strings. An empty or header-only CSV returns nil/empty.
 (defn- csv-emit-field
   (v)
   "Emit a single CSV field, quoting it if necessary. Interior quotes are doubled.
-A non-string cell is rendered with `to-str` (the `Display` protocol) first — so a number
+A non-string cell is rendered with `->string` (the `Display` protocol) first — so a number
 emits as its digits, and a record emits as the string its type defines rather than as its
-field map (or, as before `to-str`, a type error out of the quoting scan)."
-  (let (s (if (string? v) v (to-str v)))
+field map (or, as before `->string`, a type error out of the quoting scan)."
+  (let (s (if (string? v) v (->string v)))
     (if (csv-field-needs-quoting? s)
       (str "\"" (string/replace s "\"" "\"\"") "\"")
       s)))
@@ -278,7 +278,7 @@ field map (or, as before `to-str`, a type error out of the quoting scan)."
 
 (defn csv-emit (rows)
   "Serialize a list of rows (each a list or vector of cells) to a CSV string. A cell that
-is not a string is rendered with `to-str` (so a number, keyword, or record emits its
+is not a string is rendered with `->string` (so a number, keyword, or record emits its
 display form).
 Fields containing commas, quotes, or newlines are quoted; interior quotes are
 doubled. Rows are separated by `\\n`."

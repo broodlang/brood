@@ -1,7 +1,7 @@
 ;; tables round-trip any sendable value; gets are dynamic — no warnings on use.
 (def t (table))
-(table-put t 1 "str")
-(table-put t 2 [1 2])
-(println (string-length (table-get t 1)) (count (table-get t 2)))
-(table-incr t 9 5)
-(println (+ (table-get t 9) 1))
+(table/put t 1 "str")
+(table/put t 2 [1 2])
+(println (string-length (table/get t 1)) (count (table/get t 2)))
+(table/incr t 9 5)
+(println (+ (table/get t 9) 1))

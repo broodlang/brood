@@ -2,7 +2,7 @@
 (defn hold-across-gc (v) (do (churn 300) v))
 (defn send-rt (v)
   (let (me (self) w (spawn (send me [:back (receive (x x))]))) (send w v) (receive ([:back r] r))))
-(defn table-rt (v) (let (t (table)) (table-put t :k v) (table-get t :k)))
+(defn table-rt (v) (let (t (table)) (table/put t :k v) (table/get t :k)))
 ;; full lifecycle: hold across GC + send round-trip + table store/load, all = v
 (defn ck (nm v)
   (if (and (= v (hold-across-gc v)) (= v (send-rt v)) (= v (table-rt v)))

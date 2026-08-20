@@ -817,9 +817,9 @@ fn throw_and_catch() {
         run("(try (* 9223372036854775807 2) (catch e e))"),
         "18446744073709551614"
     );
-    // E0042 index out of range — vector-ref off the end.
+    // E0042 index out of range — vector/ref off the end.
     assert_eq!(
-        run("(try (vector-ref [1 2 3] 7) (catch e (get e :code)))"),
+        run("(try (vector/ref [1 2 3] 7) (catch e (get e :code)))"),
         "\"E0042\""
     );
     // Same code for `substring` (different surface, same family).

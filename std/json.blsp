@@ -347,7 +347,7 @@ a vector, string → string, number → int/float, true/false → bool, null →
 on malformed input or trailing content. Pure."
   (let (
         ; int code points: O(1) nth, one native pass
-        s (string/to-codepoints s)
+        s (string/->codepoints s)
         ; and pure-prim per-char tests
         n (count s)
         i (skip-ws s 0 n))
@@ -381,7 +381,7 @@ on malformed input or trailing content. Pure."
 char (< 0x20). The common case is a clean ASCII string, so this one O(n) codepoint
 scan lets `enc-escapes` skip ~27 whole-string `replace` passes (backslash/quote/
 the named escapes + every C0 control) that would each find nothing."
-  (any? (fn (c) (or (< c 32) (= c 34) (= c 92))) (string/to-codepoints s)))
+  (any? (fn (c) (or (< c 32) (= c 34) (= c 92))) (string/->codepoints s)))
 
 (defn- enc-escapes
   (s)
@@ -456,13 +456,13 @@ the named escapes + every C0 control) that would each find nothing."
   "How a value converts to a JSON-encodable Brood value (nil / bool / number / string /
   keyword / map / vector / list). The seam `encode` consults for a record with a
   custom wire shape, and for any kind JSON has no built-in rule for."
-  (to-json [self] :-> any))
+  (->json [self] :-> any))
 
 (defn- custom
   (v)
-  "`v`'s own `JsonEncode/to-json` impl, or nil when its identity has none. `JsonEncode`
+  "`v`'s own `JsonEncode/->json` impl, or nil when its identity has none. `JsonEncode`
 registers no `:default`, so nil here means \"no rule\" rather than \"the fallback\"."
-  (impl-for '[JsonEncode to-json] (identity-of v)))
+  (impl-for '[JsonEncode ->json] (identity-of v)))
 
 (defn- emit-record
   (v acc)
@@ -480,7 +480,7 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
     (nil? v) (cons "null" acc)
     (= v true) (cons "true" acc)
     (= v false) (cons "false" acc)
-    (number? v) (cons (number->string v) acc)
+    (number? v) (cons (str v) acc)
     (string? v) (cons (enc-string v) acc)
     (keyword? v) (cons (enc-string (name v)) acc)
     (symbol? v) (cons (enc-string (name v)) acc)

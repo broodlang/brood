@@ -14,9 +14,9 @@ cryptographically secure random bytes.
     (def nonce (crypto/random-bytes 12))
 
     ;; encrypt/decrypt
-    (def ct (crypto/encrypt key nonce (string/to-bytes \"hello\")))
+    (def ct (crypto/encrypt key nonce (string/->bytes \"hello\")))
     (def pt (crypto/decrypt key nonce ct))
-    (string/from-bytes pt)   ;; => \"hello\"
+    (string/bytes-> pt)   ;; => \"hello\"
 
     ;; derive a key from a password + salt
     (def salt   (crypto/random-bytes 16))
@@ -42,7 +42,7 @@ cryptographically secure random bytes.
 ;; ---- byte/string conversion -------------------------------------------------
 
 ;; UTF-8 string<->bytes conversion is a general string op and lives in `string`
-;; (`string/to-bytes` / `string/from-bytes`), not here (ADR-234).
+;; (`string/->bytes` / `string/bytes->`), not here (ADR-234).
 
 ;; ---- ChaCha20-Poly1305 AEAD -------------------------------------------------
 ;;
@@ -69,12 +69,12 @@ or tampered ciphertext). Inputs may be bytes values or vectors/lists of ints."
 
 (defn encrypt-str (key nonce s)
   "Encrypt the UTF-8 bytes of string `s`. Returns a ciphertext bytes value."
-  (encrypt key nonce (string/to-bytes s)))
+  (encrypt key nonce (string/->bytes s)))
 
 (defn decrypt-str (key nonce ciphertext-bytes)
   "Decrypt to a string. Returns the decoded string, or `:error` on failure."
   (let (pt (decrypt key nonce ciphertext-bytes))
-    (if (= pt :error) :error (string/from-bytes pt))))
+    (if (= pt :error) :error (string/bytes-> pt))))
 
 ;; ---- PBKDF2-HMAC-SHA256 key derivation --------------------------------------
 ;;
@@ -86,7 +86,7 @@ or tampered ciphertext). Inputs may be bytes values or vectors/lists of ints."
   (x)
   "Coerce `x` to bytes: a string → its UTF-8 bytes value; bytes / a byte
 vector/list → itself. Lets the raw-byte crypto primitives accept either shape."
-  (if (string? x) (string/to-bytes x) x))
+  (if (string? x) (string/->bytes x) x))
 
 (defn pbkdf2 (password salt iterations key-len)
   "Derive a `key-len`-byte key from `password` and `salt` (each a string or a
@@ -120,7 +120,7 @@ Returns true if `a` and `b` are identical, false otherwise."
 (defn keypair ()
   "A fresh ed25519 keypair as `{:public <bytes> :private <bytes>}` — `:public` the 32-byte
 verifying key (safe to publish), `:private` the 32-byte signing seed (keep secret)."
-  (let (kp (%ed25519-keygen)) {:public (vector-ref kp 0) :private (vector-ref kp 1)}))
+  (let (kp (%ed25519-keygen)) {:public (vector/ref kp 0) :private (vector/ref kp 1)}))
 
 (defn sign (private message)
   "The 64-byte ed25519 signature of `message` (bytes) under the 32-byte `private` seed."

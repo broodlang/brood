@@ -65,7 +65,7 @@
 ;; ---- substituted values render through Display ------------------------------
 
 (defrecord usd (cents))
-(impl Display template-test/usd (to-str [m] (str "$" (get m :cents))))
+(impl Display template-test/usd (->string [m] (str "$" (get m :cents))))
 
 (describe "render uses Display for substituted values"
   (test "a record substitutes as its display string, not its field map"

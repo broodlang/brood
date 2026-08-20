@@ -216,7 +216,7 @@ fn bignum_step_churn_via_mcp_does_not_corrupt_heap() {
                                            c3 (bit-and s2 c2) s2b (bit-xor s2 c2) s3b (bit-or s3 c3))
                                        [s0b s1b s2b s3b]))
                              [0 0 0 0] ns)
-                    s0 (vector-ref planes 0) s1 (vector-ref planes 1) s2 (vector-ref planes 2) s3 (vector-ref planes 3))
+                    s0 (vector/ref planes 0) s1 (vector/ref planes 1) s2 (vector/ref planes 2) s3 (vector/ref planes 3))
                 (bit-and (bit-and s1 (bit-and (bit-xor s2 board) (bit-xor s3 board))) (bit-or s0 b)))))"#;
     // each call builds the wide masks as LOCAL lets, captured by the closures
     // passed to `ms` and `reduce` (exactly the prototype that crashed).

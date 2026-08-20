@@ -22,7 +22,7 @@
 ;; symbol). Deliberately tiny — a real one would use a CLDR table.
 (defn- money-render
   (m locale)
-  (let (n (to-fixed (get m :amount) 2)
+  (let (n (->fixed (get m :amount) 2)
         symbol (money-symbol (get m :currency)))
     (case locale
       :de (str (string/replace n "." ",") " " symbol)
@@ -39,7 +39,7 @@
 ;; stays 1-arg; the locale flows through the dynamic var, not an extra parameter.
 (impl Display
   show-localize-test/money
-  (to-str [m] (localize m *locale*)))
+  (->string [m] (localize m *locale*)))
 
 ;; `Inspect` — the debug form is locale-independent and self-describing.
 (impl Inspect
@@ -50,10 +50,10 @@
 
 (describe "locale-aware Display via *locale*"
   (test "the ambient default locale (:en)"
-    (assert= (to-str (money 10.5 :usd)) "$10.50")
+    (assert= (->string (money 10.5 :usd)) "$10.50")
     (assert= (with-out-str (println (money 10.5 :usd))) "$10.50\n"))
   (test "(binding (*locale* :de) …) switches the rendering, print included"
-    (assert= (binding (*locale* :de) (to-str (money 10.5 :eur))) "10,50 €")
+    (assert= (binding (*locale* :de) (->string (money 10.5 :eur))) "10,50 €")
     (assert= (with-out-str (binding (*locale* :de) (println (money 10.5 :eur))))
       "10,50 €\n"))
   (test "the explicit Localize op takes the locale as data (no dynamic var)"
@@ -65,7 +65,7 @@
     (assert= (inspect (money 10.5 :usd)) "#money<10.5 usd>")
     ;; inspect ignores *locale*; display honors it
     (assert= (binding (*locale* :de) (inspect (money 10.5 :usd))) "#money<10.5 usd>")
-    (assert= (binding (*locale* :de) (to-str (money 10.5 :usd))) "10,50 $")))
+    (assert= (binding (*locale* :de) (->string (money 10.5 :usd))) "10,50 $")))
 
 ;; Cross-process: *locale* is dynamic (process-local), and a record deep-copies on
 ;; send. A worker renders under its OWN bound locale; the parent under its own.
@@ -74,8 +74,8 @@
   :isolated
   (test "a worker binds its own locale; the parent keeps :en"
     (let (me (self))
-      (spawn (send me [:r (binding (*locale* :de) (to-str (money 20 :eur)))]))
+      (spawn (send me [:r (binding (*locale* :de) (->string (money 20 :eur)))]))
       (let (worker-rendered (receive ([:r s] s)))
         ; worker used :de
         (assert= worker-rendered "20,00 €")
-        (assert= (to-str (money 20 :eur)) "€20.00")))))
+        (assert= (->string (money 20 :eur)) "€20.00")))))

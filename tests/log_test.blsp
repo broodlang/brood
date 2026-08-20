@@ -179,10 +179,10 @@
       (assert= (get b :min-level) :debug)
       (is (nil? (get b :filter)))))
   (test "a backend prints as itself, naming its sink"
-    (assert= (to-str (stdout-backend)) "#<log-backend #<port stdout> min=:debug>")
-    (assert= (to-str (backend (stderr-port) {:min-level :warn}))
+    (assert= (->string (stdout-backend)) "#<log-backend #<port stdout> min=:debug>")
+    (assert= (->string (backend (stderr-port) {:min-level :warn}))
       "#<log-backend #<port stderr> min=:warn>")
-    (is (includes? (to-str (backend (stdout-port) {:filter (fn (r) true)})) "filtered")))
+    (is (includes? (->string (backend (stdout-port) {:filter (fn (r) true)})) "filtered")))
   (test "file-backend writes through a file-port"
     (assert= (record-id (get (file-backend "/tmp/brood-log-test.log") :sink)) :io/file-port))
   (test "satisfies? reports whether a value can serve as a backend"

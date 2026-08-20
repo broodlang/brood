@@ -259,7 +259,7 @@
 
 (defn stream-lines-1chunk (k)
   (let (blob (str utf8-lead (apply str (repeat k "some log line of moderate length here\n"))))
-    (count (stream/to-list (stream/lines (stream/from-list (list blob)))))))
+    (count (stream/->list (stream/lines (stream/list-> (list blob)))))))
 
 ;; ---- SSE frame extraction from one accumulated chunk ------------------------
 

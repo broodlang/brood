@@ -62,10 +62,10 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
 (defn- resolver-tick
   (ctx)
   (let (steps (get ctx :steps)
-        n (+ 1 (table-get steps :n 0)))
-    (table-put steps :n n)
+        n (+ 1 (table/get steps :n 0)))
+    (table/put steps :n n)
     (when (and (= 0 (rem n 256))
-            (> (- (now) (table-get steps :start 0)) *resolver-time-budget-ms*))
+            (> (- (now) (table/get steps :start 0)) *resolver-time-budget-ms*))
       (resolver-budget-exceeded (str "did not finish within " *resolver-time-budget-ms* " ms")))
     (when (> n *resolver-max-steps*)
       (resolver-budget-exceeded (str "exceeded " *resolver-max-steps* " search steps")))))
@@ -108,12 +108,12 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
 (defn- pg-universe-fetch
   (ctx pkg)
   (let (cache (get ctx :universes)
-        hit (table-get cache pkg :miss))
+        hit (table/get cache pkg :miss))
     (if (= hit :miss)
       (let (versions (append (sort (fn (a b) (> (version/compare a b) 0))
                                (or (provider-versions (get ctx :provider) pkg) nil))
                        (list pg-none)))
-        (table-put cache pkg versions)
+        (table/put cache pkg versions)
         versions)
       hit)))
 
@@ -433,7 +433,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
              :preferred (or preferred {})
              :universes (table)
              :steps (table)})
-    (table-put (get ctx :steps) :start (now))
+    (table/put (get ctx :steps) :start (now))
     (try
       (let (root-ics (pg-root-ics ctx roots)
             ;; Seed the virtual root as a level-0 decision, then propagate from it: every
@@ -458,7 +458,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
           [:error (get e :message)]
           (throw e))))))
 
-(defn- pg-cleanup (ctx) (table-drop (get ctx :universes)) (table-drop (get ctx :steps)))
+(defn- pg-cleanup (ctx) (table/drop (get ctx :universes)) (table/drop (get ctx :steps)))
 
 ;; The PubGrub main loop. `ics` is the growing incompatibility set; `state` the partial
 ;; solution; `known` the packages discovered so far (to decide over). Propagate from the

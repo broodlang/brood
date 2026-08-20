@@ -219,33 +219,33 @@
       (let (idx (%image-index p "fp-table")) (si-load-all p idx))
       (assert= :table (type-of si-tab))
       ;; writable, not a frozen snapshot masquerading as one
-      (table-put si-tab :k 7)
-      (assert= 7 (table-get si-tab :k))))
+      (table/put si-tab :k 7)
+      (assert= 7 (table/get si-tab :k))))
 
   (test "a table's load-time CONTENTS survive the round-trip"
     (def si-tab2 (table))
-    (table-put si-tab2 :a 1)
-    (table-put si-tab2 "b" [2 3])
+    (table/put si-tab2 :a 1)
+    (table/put si-tab2 "b" [2 3])
     (let (p (img-tmp "table2"))
       (%image-write p [["" ['startup-image-test/si-tab2]]] "fp-table2")
       (def si-tab2 :clobbered)
       (let (idx (%image-index p "fp-table2")) (si-load-all p idx))
-      (assert= 1 (table-get si-tab2 :a))
-      (assert= [2 3] (table-get si-tab2 "b"))
-      (assert= 2 (table-count si-tab2))))
+      (assert= 1 (table/get si-tab2 :a))
+      (assert= [2 3] (table/get si-tab2 "b"))
+      (assert= 2 (table/size si-tab2))))
 
   (test "the restored table is a FRESH store — writing it does not touch the original"
     (def si-tab3 (table))
-    (table-put si-tab3 :n 1)
+    (table/put si-tab3 :n 1)
     (let (original si-tab3
           p (img-tmp "table3"))
       (%image-write p [["" ['startup-image-test/si-tab3]]] "fp-table3")
       (def si-tab3 :clobbered)
       (let (idx (%image-index p "fp-table3")) (si-load-all p idx))
-      (table-put si-tab3 :n 99)
+      (table/put si-tab3 :n 99)
       ;; the pre-image handle still reads its own store
-      (assert= 1 (table-get original :n))
-      (assert= 99 (table-get si-tab3 :n))))
+      (assert= 1 (table/get original :n))
+      (assert= 99 (table/get si-tab3 :n))))
 
   (test "two globals aliasing ONE table are refused, not silently split"
     (def si-alias-a (table))
