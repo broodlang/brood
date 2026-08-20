@@ -77,6 +77,16 @@ jobs:
       - name: Check (no default features)
         run: cargo check --workspace --no-default-features
 
+      # The `--workspace` check above UNIFIES features across members, so a member
+      # that pulls `brood/dev-tools` (a brood default) re-enables it for the whole
+      # invocation — which is how an ungated fn calling a `#[cfg(dev-tools)]` helper
+      # (`gc_stats` → `gc_stats_map`, 2026-08-20) sailed through it and only broke at
+      # `make install` / the hive Docker build. Isolate the LEAN runtime feature set
+      # the way `make release-brood` does (`-p cli`, not `--workspace`) so that class
+      # of dev-tools-gating slip fails here instead of at deploy time.
+      - name: Check (lean runtime — isolated -p cli, matches release-brood)
+        run: cargo check -p cli --no-default-features --features brood/jit
+
       # Same as `make test`: nextest process-isolates each case (a green-process
       # stack overflow can SIGSEGV, so isolation keeps one bad case from taking the
       # whole run down) and the grammar tests need the vendored tree-sitter parsers.

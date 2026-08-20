@@ -789,7 +789,7 @@ pub(crate) fn vm_run_bc(
                                 // a back edge, where the journal was just reset to 0 and
                                 // `jit_ckpt_read` returns `None` — so this is a no-op there, and
                                 // the ip-0 entry is kept exactly as before. But if a preempt ever
-                                // lands *after* a completed call or a `table/put`, re-running from
+                                // lands *after* a completed call or a `table-put`, re-running from
                                 // ip 0 would repeat that effect, and the journal is precisely the
                                 // record of what must not be redone. Honouring it costs nothing
                                 // and removes a whole class of "is preemption safe here?".

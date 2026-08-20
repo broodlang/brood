@@ -1195,7 +1195,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                         });
                     }
                 }
-                // 3-arg inlinable primitive (`table/put`): same guard discipline as the
+                // 3-arg inlinable primitive (`table-put`): same guard discipline as the
                 // 2-arg prims; only a direct-native head qualifies (no wrapper to follow).
                 if items.len() == 4 && scope.lookup(h).is_none() {
                     if let Some(op3) = resolve_prim3(heap, h) {
@@ -2634,7 +2634,7 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
 }
 
 /// Resolve a 3-arg call head to an inlinable [`PrimOp3`]. Only a **direct** native
-/// binding qualifies (its one member, `table/put`, has no prelude wrapper to follow).
+/// binding qualifies (its one member, `table-put`, has no prelude wrapper to follow).
 /// Read against the live global env — a redefined head simply doesn't match.
 fn resolve_prim3(heap: &Heap, h: Symbol) -> Option<PrimOp3> {
     match heap.env_get(heap.global(), h)?.unpack() {

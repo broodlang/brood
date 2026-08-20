@@ -93,10 +93,10 @@
       (repl/register-repl-command {:names '("rt-echo")
                                    :usage ",rt-echo <x>"
                                    :summary "test"
-                                   :handler (fn (rest) (table/put box :arg rest))})
+                                   :handler (fn (rest) (table-put box :arg rest))})
       (is (not (nil? (repl/repl-command-for "rt-echo"))))
       (repl/repl-run-meta ",rt-echo hello world")
-      (assert= (table/get box :arg) "hello world")))
+      (assert= (table-get box :arg) "hello world")))
 
   (test "re-registering a name replaces rather than duplicates"
     (repl/register-repl-command {:names '("rt-dup")

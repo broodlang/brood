@@ -893,7 +893,7 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         // wants its content should return `(rope->string r)` explicitly. A socket
         // is a live OS resource — likewise no JSON shape.
         // A table is a live shared resource — no JSON shape; a tool that wants its
-        // contents should return `(table/snapshot t)` (a map) explicitly.
+        // contents should return `(table-snapshot t)` (a map) explicitly.
         // A lazy seq-view has no JSON shape until realised, and this read-only
         // projection has no evaluator to run its transducer — a tool that wants
         // its items should realise it first (e.g. `(vec (map …))`).

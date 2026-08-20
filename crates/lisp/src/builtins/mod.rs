@@ -337,7 +337,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         bits_to_float,
     );
     // pair / sequence — `empty?` is Brood (type dispatch over string/length /
-    // vector/size / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
+    // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
     // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
     // tail is built via `heap.list`), never a vector.
     def(
@@ -506,21 +506,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "vector/ref",
+        "vector-ref",
         Arity::exact(2),
         Sig::new(vec![vec_ty, int], any),
         vector_ref,
     );
     def(
         heap,
-        "vector/size",
+        "vector-length",
         Arity::exact(1),
         Sig::new(vec![vec_ty], int),
         vector_length,
     );
     def(
         heap,
-        "vector/assoc",
+        "vector-assoc",
         Arity::exact(3),
         Sig::new(vec![vec_ty, int, any], vec_ty),
         vector_assoc,
@@ -1249,56 +1249,56 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "table/put",
+        "table-put",
         Arity::exact(3),
         Sig::new(vec![table_ty, any, any], table_ty),
         table_put,
     );
     def(
         heap,
-        "table/get",
+        "table-get",
         Arity::range(2, 3),
         Sig::new(vec![table_ty, any], any),
         table_get,
     );
     def(
         heap,
-        "table/has?",
+        "table-has?",
         Arity::exact(2),
         Sig::new(vec![table_ty, any], bool_ty),
         table_has,
     );
     def(
         heap,
-        "table/delete",
+        "table-delete",
         Arity::exact(2),
         Sig::new(vec![table_ty, any], table_ty),
         table_delete,
     );
     def(
         heap,
-        "table/incr",
+        "table-incr",
         Arity::range(2, 3),
         Sig::new(vec![table_ty, any], int),
         table_incr,
     );
     def(
         heap,
-        "table/size",
+        "table-count",
         Arity::exact(1),
         Sig::new(vec![table_ty], int),
         table_count,
     );
     def(
         heap,
-        "table/snapshot",
+        "table-snapshot",
         Arity::exact(1),
         Sig::new(vec![table_ty], map_ty),
         table_snapshot,
     );
     def(
         heap,
-        "table/drop",
+        "table-drop",
         Arity::exact(1),
         Sig::new(vec![table_ty], bool_ty),
         table_drop,
@@ -3300,9 +3300,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("empty?", &["coll"], "True if coll is empty (nil, an empty string/vector/map, or a seq-view that realises to nothing)."),
     ("range?", &["x"], "True if x is a lazy range (as produced by range). Ranges fold/reduce/sum/count without materialising; other ops treat them as the list they stand for."),
     ("vector", &["&", "items"], "A vector of the given items."),
-    ("vector/ref", &["v", "i"], "The element at index i of vector v."),
-    ("vector/size", &["v"], "The number of elements in vector v."),
-    ("vector/assoc", &["v", "i", "x"], "A fresh vector like v with index i (in [0, len)) set to x."),
+    ("vector-ref", &["v", "i"], "The element at index i of vector v."),
+    ("vector-length", &["v"], "The number of elements in vector v."),
+    ("vector-assoc", &["v", "i", "x"], "A fresh vector like v with index i (in [0, len)) set to x."),
     ("subvec", &["v", "start", "end"], "A fresh vector of v's elements in [start, end); end defaults to the length."),
     ("compare", &["a", "b"], "Structural total-order comparison: -1 if a sorts before b, 0 if equal, 1 if after. Numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by a stable tag rank. The binary form of `sort`'s order — `sort-by` and custom comparators build on it."),
     ("hash-map", &["&", "kvs"], "A map from alternating key/value arguments (last wins on duplicate keys)."),
@@ -3389,15 +3389,15 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("proc-send", &["p", "data"], "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever the child's mode (ADR-141). Returns nil; throws if p is unknown/closed."),
     ("proc-set-binary", &["p", "on"], "Switch subprocess p's INBOUND decode between text mode (default) and binary mode (mirrors tcp-set-binary; outbound proc-send is unaffected, ADR-141). In binary mode inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` value (not a string) — for a child speaking a binary protocol over stdio. Returns nil; throws if p is unknown/closed."),
     ("proc-close", &["p"], "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner."),
-    ("table", &[], "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table/put/table/delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle."),
-    ("table/put", &["t", "k", "v"], "Store v under key k in table t, overwriting any existing entry. Keys use the same structural equality as map keys. Returns t (for threading). Both k and v are deep-copied into the store."),
-    ("table/get", &["t", "k", "default"], "A fresh copy of the value stored under k in table t, or default (nil if omitted) when absent."),
-    ("table/has?", &["t", "k"], "True if table t has an entry for key k."),
-    ("table/delete", &["t", "k"], "Remove key k from table t if present. Returns t."),
-    ("table/incr", &["t", "k", "delta"], "Atomically add delta (default 1) to the integer at key k in table t, treating an absent key as 0, and return the new value. The read-modify-write is atomic under the table lock, so concurrent increments never lose an update — use this for counters. Errors if the existing value is not an integer."),
-    ("table/size", &["t"], "The number of entries in table t."),
-    ("table/snapshot", &["t"], "A consistent point-in-time copy of the whole table t as an immutable map. Atomic; the returned map is unaffected by later mutation of t. Use map ops (keys/vals/get/reduce) on it. O(n)."),
-    ("table/drop", &["t"], "Remove table t from the registry, freeing its store. Idempotent; returns true if it existed. Other handles to t then error on use."),
+    ("table", &[], "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table-put/table-delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle."),
+    ("table-put", &["t", "k", "v"], "Store v under key k in table t, overwriting any existing entry. Keys use the same structural equality as map keys. Returns t (for threading). Both k and v are deep-copied into the store."),
+    ("table-get", &["t", "k", "default"], "A fresh copy of the value stored under k in table t, or default (nil if omitted) when absent."),
+    ("table-has?", &["t", "k"], "True if table t has an entry for key k."),
+    ("table-delete", &["t", "k"], "Remove key k from table t if present. Returns t."),
+    ("table-incr", &["t", "k", "delta"], "Atomically add delta (default 1) to the integer at key k in table t, treating an absent key as 0, and return the new value. The read-modify-write is atomic under the table lock, so concurrent increments never lose an update — use this for counters. Errors if the existing value is not an integer."),
+    ("table-count", &["t"], "The number of entries in table t."),
+    ("table-snapshot", &["t"], "A consistent point-in-time copy of the whole table t as an immutable map. Atomic; the returned map is unaffected by later mutation of t. Use map ops (keys/vals/get/reduce) on it. O(n)."),
+    ("table-drop", &["t"], "Remove table t from the registry, freeing its store. Idempotent; returns true if it existed. Other handles to t then error on use."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
     ("check-file", &["path", "&optional required-mods"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file. `required-mods` is the file's transitive require-closure (module-name strings) — the KI-17 reachability set that flags a qualified `mod/name` whose module the file never requires; omit it (single-file / editor) to disable that lint."),

@@ -679,14 +679,14 @@
    "symbol?" :predicates
    "system-monitor" :meta
    "table" :processes
-   "table/size" :maps
-   "table/delete" :processes
-   "table/drop" :maps
-   "table/get" :processes
-   "table/has?" :processes
-   "table/incr" :maps
-   "table/put" :processes
-   "table/snapshot" :maps
+   "table-count" :maps
+   "table-delete" :processes
+   "table-drop" :maps
+   "table-get" :processes
+   "table-has?" :processes
+   "table-incr" :maps
+   "table-put" :processes
+   "table-snapshot" :maps
    "table?" :predicates
    "take" :collections
    "take-acc" :collections
@@ -747,9 +747,9 @@
    "vals" :maps
    "vec" :convert
    "vector" :collections
-   "vector/assoc" :collections
-   "vector/size" :collections
-   "vector/ref" :collections
+   "vector-assoc" :collections
+   "vector-length" :collections
+   "vector-ref" :collections
    "vector?" :predicates
    "vm-stats" :meta
    "when" :control

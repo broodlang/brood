@@ -701,18 +701,18 @@ pub(super) fn vector(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 pub(super) fn vector_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
-    let n = expect_int(heap, "vector/ref", arg(args, 1))?;
+    let n = expect_int(heap, "vector-ref", arg(args, 1))?;
     match v {
         Value::Vector(id) if n >= 0 && (n as usize) < heap.vector(id).len() => {
             Ok(heap.vector(id)[n as usize])
         }
         Value::Vector(id) => Err(LispError::runtime(format!(
-            "vector/ref: index {} out of range [0, {})",
+            "vector-ref: index {} out of range [0, {})",
             n,
             heap.vector(id).len()
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)),
-        _ => Err(LispError::wrong_type(heap, "vector/ref", "vector", v)),
+        _ => Err(LispError::wrong_type(heap, "vector-ref", "vector", v)),
     }
 }
 
@@ -720,18 +720,18 @@ pub(super) fn vector_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     let v = arg(args, 0);
     match v {
         Value::Vector(id) => Ok(Value::int(heap.vector(id).len() as i64)),
-        _ => Err(LispError::wrong_type(heap, "vector/size", "vector", v)),
+        _ => Err(LispError::wrong_type(heap, "vector-length", "vector", v)),
     }
 }
 
-/// `(vector/assoc v i x)` — a fresh vector like `v` with index `i` set to `x`.
+/// `(vector-assoc v i x)` — a fresh vector like `v` with index `i` set to `x`.
 /// The vector counterpart of `map-assoc`; O(n) copy (vectors are flat), one
 /// allocation, no cons churn. `i` must be in `[0, len)` (append-at-end is a
 /// deferred power feature, ADR-011). No GC safepoint runs inside a builtin, so
 /// the cloned handles stay valid across `alloc_vector`.
 pub(super) fn vector_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
-    let i = expect_int(heap, "vector/assoc", arg(args, 1))?;
+    let i = expect_int(heap, "vector-assoc", arg(args, 1))?;
     let x = arg(args, 2);
     match v {
         Value::Vector(id) if i >= 0 && (i as usize) < heap.vector(id).len() => {
@@ -740,12 +740,12 @@ pub(super) fn vector_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             Ok(heap.alloc_vector(items))
         }
         Value::Vector(id) => Err(LispError::runtime(format!(
-            "vector/assoc: index {} out of range [0, {})",
+            "vector-assoc: index {} out of range [0, {})",
             i,
             heap.vector(id).len()
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)),
-        _ => Err(LispError::wrong_type(heap, "vector/assoc", "vector", v)),
+        _ => Err(LispError::wrong_type(heap, "vector-assoc", "vector", v)),
     }
 }
 

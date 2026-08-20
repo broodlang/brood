@@ -149,10 +149,10 @@ const SHOULD_NOT_WARN: &[&str] = &[
     // ---- guard-narrowing soundness (the fixed false positives) ----
     // `and` short-circuit: a falsy `(and (vector? m) …)` doesn't prove m isn't a
     // vector → the else-branch must NOT narrow m.
-    "(fn (m) (if (and (vector? m) (%eq (vector/size m) 2)) (vector/ref m 0) (vector/ref m 0)))",
+    "(fn (m) (if (and (vector? m) (%eq (vector-length m) 2)) (vector-ref m 0) (vector-ref m 0)))",
     // `%eq`: `m ≠ \"x\"` doesn't prove m isn't a string → else-branch not narrowed.
     r#"(fn (m) (if (%eq m "x") :yes (string/length m)))"#,
-    // match: a list value against a vector pattern lowers to a guarded vector/ref
+    // match: a list value against a vector pattern lowers to a guarded vector-ref
     // that must stay quiet (the scrutinee narrows to a vector inside the guard).
     "(match (list 1 2) ([a b] :vec) (_ :not-vec))",
     // ---- correct occurrence typing (then-branch narrowing is sound) ----

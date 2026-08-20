@@ -78,11 +78,11 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
        (try
          (do
            (binding (*err* (fn (s)
-                             (table/put ~sink :text (str (table/get ~sink :text "") s))
+                             (table-put ~sink :text (str (table-get ~sink :text "") s))
                              nil))
              ~@body)
-           (table/get ~sink :text ""))
-         (catch e (do (table/drop ~sink) (throw e)))))))
+           (table-get ~sink :text ""))
+         (catch e (do (table-drop ~sink) (throw e)))))))
 
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
@@ -144,7 +144,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread-build v clauses thread-last-step))))
 
 (defmacro doto (x & forms)
-  "Evaluate `x` once, run each `form` with it spliced in as the *first* argument (for side effects), then return `x`: `(doto (table) (table/put :a 1) (table/put :b 2))`."
+  "Evaluate `x` once, run each `form` with it spliced in as the *first* argument (for side effects), then return `x`: `(doto (table) (table-put :a 1) (table-put :b 2))`."
   (let (v (gensym "v"))
     `(let (~v ~x)
        ~@(map (fn (form) (thread-first-step v form)) forms)
