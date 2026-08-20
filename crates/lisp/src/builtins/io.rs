@@ -294,6 +294,7 @@ pub(super) fn pos_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.map_from_pairs(pairs))
 }
 
+#[cfg(feature = "dev-tools")]
 pub(super) fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(gc_stats_map(heap))
 }
