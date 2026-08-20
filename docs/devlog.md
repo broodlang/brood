@@ -2107,3 +2107,42 @@ trap 2026-08-19 recorded); a bare `nest check` at the repo root, which is not a 
 0 without the file-list form CI uses; and a `jq '.conclusion // "pending"'` filter that printed every
 in-flight job as concluded, because an unfinished job reports `""`, not `null`. Reproduce a gate with
 the gate's own invocation.
+
+## 2026-08-20 — KI-47's memory question, answered: legitimate growth, and the mechanism was wrong
+
+The handoff's flagged "start here" was whether the suite's 240 MB → 1.145 GB (4.8×) was legitimate
+or a regression. It is legitimate — and more usefully, **the comparison that produced the 4.8× was
+measuring three different things**, and the mechanism KI-47 named is refuted.
+
+**Module count is not the driver.** KI-47 blamed the stdlib split ("module loading costs memory
+super-linearly here", citing RSS ≈ 45× source bytes). But 45× source bytes is linear in *source*, and
+splitting a file into more modules barely changes source bytes. Tested directly, total source pinned
+at ~40 KB while module count went 1 → 12 → 48 → 120: peak 11.23 → 12.59 → 15.13 → 18.59 MB. **120×
+the modules costs 1.65×** — a marginal ~60 KB per module, so all 89 stdlib modules carry ~5.5 MB
+against the +905 MB needing explanation. The 2026-08-06 module-load entry had been misread: its
+quadratic was in **time** (`*features*`'s `member?` walk, fixed by ADR-216) and it explicitly found
+memory *not* per-module ("10 big functions vs 100 small ones at equal line count costs the same or
+more").
+
+**The namespacing merge is not the cause.** `098a3316` (pre-ADR-230) built in a worktree and run
+through the identical harness: **+4.4% on the VM arm, −11% on the tree-walker**. HEAD is *cheaper*
+on the arm that actually went red. The merge crossed a threshold; it did not create the load — which
+is what KI-47 itself suspected and could not check.
+
+**Where the 4.8× came from.** The ~240 MB baseline is from 2026-05-30, the 1.145 GB from 2026-08-19:
+different engine (tree-walker measured at **1.38×** the VM on the same suite and build), different
+build (debug vs release), and three months of suite growth. Those compound past the multiplier with
+no regression left to find.
+
+**And it receded.** The same harness KI-47 used (debug, `BROOD_VM=0`, `brood_suite_passes`) now peaks
+**726.7 and 757.9 MB** across two samples, against its 996.6 MB — −24% to −27%, back under the
+*original* 1 GiB cap. The 2 GiB/3 GiB values stay anyway: ~2.6× margin at today's peak versus ~1.2×
+if reverted. The number was right; the rationale was wrong, and `alloc.rs`'s comment now says so.
+
+**Method notes.** Two traps hit in the space of an hour, both this repo's documented ones. A test
+from the ADR-238 merge "failed" for me until the version banner gave it away — `brood 0.5.0
+(25477eb4)`, a **stale binary**, and `std/` is embedded at build time, so the new test was running
+against the old implementation (111/111 after a rebuild). And the first suite-memory number was taken
+before that rebuild, so it had to be discarded. Separately: a single memory sample is not a
+measurement here either — the two debug runs differ by 4.3%, which is small, but a lone 726.7 would
+have been reported as a sharper drop than the data supports.

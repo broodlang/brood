@@ -28,13 +28,24 @@ fixed this day.
 - Plus the rot: **108 stale names** across `breakage/`/`stress/`/`scripts/fuzz/stress/` (three
   separate rename waves) and **34 files** across the two format gates.
 
-⚠ **The one thing this session deliberately did NOT resolve — start here.** The memory backstop was
-sized against a **~240 MB** suite peak; the suite now peaks **~1 GB**. KI-47's raise restores a ~2×
-margin instead of the intended 4×, and **whether that 4.8× growth is legitimate or a regression is
-unmeasured**. The namespacing merge is the commit that pushed it over the line, not necessarily the
-one that caused the growth. Do not read KI-47's closure as evidence the growth is fine.
-`BROOD_TRACE_PROMOTE=1` ranks what enters the append-only shared RUNTIME region, which the local
-collector cannot reclaim, and is the tool to start with.
+✅ **The previous session's flagged "start here" is ANSWERED (2026-08-20): the memory growth is
+legitimate, not a regression.** KI-47 blamed module count; that is measured wrong. At constant source,
+120× the module count costs **1.65×** peak (~60 KB/module), so all 89 stdlib modules account for
+~5.5 MB against the +905 MB in question — and the 2026-08-06 entry it leaned on found the *quadratic*
+was in **time** (`*features*`, fixed by ADR-216), with memory explicitly **not** per-module. The
+namespacing merge is not the cause either: `098a3316` (pre-ADR-230) vs HEAD on the identical harness
+is **+4.4% on the VM arm and −11% on the tree-walker** — HEAD is *cheaper* on the arm that went red.
+The "4.8×" compared a 2026-05-30 figure against a 2026-08-19 one across a different engine
+(tree-walker = **1.38×** the VM, measured) and a different build (debug vs release); those confounds
+cover it. And it has receded: the same debug/`BROOD_VM=0` harness now peaks **726.7 / 757.9 MB**
+(two samples) against KI-47's **996.6 MB**, back under the *original* 1 GiB cap. **Keep 2 GiB soft /
+3 GiB hard** — ~2.6× margin now; 1 GiB would leave ~1.2×. Full working in KI-47.
+
+**If you want an actual memory *reduction* next** (this closes as no-bug, so nothing is forced), the
+2026-08-06 breakdown is still the map: at 1000 modules / 933 MB, AST pairs were 220 MB, the two
+source-position side tables 169 MB (**and 24% of load time**), closure metadata 24 MB, ~55%
+unattributed to any named structure — which wants an allocation profiler before anyone promises a
+target.
 
 **Also open, smaller:**
 
