@@ -2294,3 +2294,37 @@ the position says 2.7–3.3×.
 **The recurring failure has a name now: a number that was true when written, re-quoted as a fact
 about today.** Five instances in one session. The cheap defence is a dated pointer to the
 authoritative source, which is what went in.
+
+## 2026-08-20 — The "no default features" CI gate has never worked (and my own break proved it)
+
+Adding `(pos-stats)` earlier today, I anchored an insertion on `pub(super) fn gc_stats(…)` — and
+that function had a `#[cfg(feature = "dev-tools")]` attribute directly above it. The insertion
+landed **between the attribute and the function**, so the attribute attached to `pos_stats` and
+`gc_stats` was left ungated, calling the still-gated `gc_stats_map`. A lean build stopped
+compiling. My mistake, and a reminder that an anchor immediately below an attribute is not a safe
+place to insert.
+
+**What matters more is that CI could not see it.** The `Check (no default features)` step ran
+`cargo check --workspace --no-default-features`, and `crates/nest` depends on `brood` *without*
+`default-features = false`. Cargo unifies features across a workspace build, so `dev-tools` came
+back on for the shared `brood` lib and the check passed. Measured at the broken commit:
+
+| command | result |
+|---|---|
+| `cargo check --workspace --no-default-features` (what CI ran) | **exit 0** |
+| `cargo check -p brood --no-default-features` (the real thing) | **exit 101** |
+
+So the break reached a developer's `make install` instead of CI. That step exists *specifically*
+to keep the `#[cfg(feature = …)]` seams honest — it was added on 2026-07-19 after ungated
+`crate::jit` refs broke the same configuration silently — which means **the guard has never
+actually worked, in the only two cases it was there for.**
+
+Fixed to `cargo check -p brood --no-default-features`, with the reasoning in the step's comment so
+nobody "helpfully" restores `--workspace`. Verified by sabotage rather than by watching it pass:
+re-removing the gating leaves the old command at exit 0 and takes the new one to exit 101.
+
+The general shape, and the third instance today: **a gate that cannot fail is indistinguishable
+from a gate that passes.** `check-stress` was added this morning for the same reason (two rename
+waves rotted eight files with nothing watching), and the fuzz generators turned out to be emitting
+programs that died on unbound symbols — reporting a checker false positive instead of comparing
+engines, which also looked like working. Prefer proving a new gate red before trusting it green.
