@@ -4,6 +4,30 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.6.0 — 2026-08-20
+
+**One conversion-naming convention: the arrow `->` (ADR-239).** Every conversion is
+now spelled with the Scheme arrow. The polymorphic ability ops are `->string`
+(`Display`), `->seq` (`Seqable`), `->iso` (`Temporal`), `->json` (`JsonEncode`);
+module conversions are `string/->bytes` / `string/bytes->`, `string/->list` /
+`string/list->`, `stream/->vector`, `pq/->list`, `queue/->list`, and friends; the
+number formatter is `->fixed`. The redundant `number->string` (it was `str`) and
+`symbol->string` are removed; `string->symbol` stays.
+
+**Kernel primitives stay flat (dash) names.** A `/` in a name is *module-member*
+syntax throughout the module system — `(:use mod)` refers a module's names by prefix,
+the project loader `require`s a module per image section, and the image is sectioned by
+splitting names on `/`. A kernel primitive is a flat global, not a member of a module,
+so a `/`-named primitive whose prefix is not a real module (`map/get`, `vector/ref`,
+`table/put`) breaks all three. `string/length` is fine only because `string` **is** a
+module. So `map-*`, `vector-*`, and `table-*` keep their dash names; slash primitive
+names are reserved for a real module-backed namespace. A guard test now enforces this
+so a future violation fails at CI, not at deploy.
+
+This is a **breaking** release for code using the removed/renamed conversion names —
+`nest check` flags every one. A `blsp-rename` codemod (`scripts/ecosystem/`) applies the
+rename with proper identifier boundaries.
+
 ## v0.3.11 — 2026-08-13
 
 **`:seed` on `tcp-read-until`** — bytes the caller already holds, treated as if they had just

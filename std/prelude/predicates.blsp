@@ -32,7 +32,7 @@
 ;; linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed the
 ;; private table from the accumulator's input map; never surfaced to user code.
 (defn %table-from-map (m)
-  (reduce (fn (t kv) (table/put t (first kv) (second kv))) (table) (map-pairs m)))
+  (reduce (fn (t kv) (table-put t (first kv) (second kv))) (table) (map-pairs m)))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
   "True if `x` is callable (a closure or a primitive)."
@@ -130,7 +130,7 @@ and a set its elements, as everywhere else `seq` applies."
 (defn- count-acc (coll n) (if (empty? coll) n (count-acc (rest coll) (%add n 1))))
 (defn count (coll)
   "The number of items in `coll` (a list, vector, string, or map)."
-  ;; `vector?`/`map?` short-circuit to the O(1) `vector/size`/`map-count`
+  ;; `vector?`/`map?` short-circuit to the O(1) `vector-length`/`map-count`
   ;; kernels (both were O(n) — a fold walk / a `map-pairs` allocation); lists
   ;; and nil go through a dedicated tail loop, not a per-element counting closure.
   (cond
@@ -139,7 +139,7 @@ and a set its elements, as everywhere else `seq` applies."
     ;; the source once, no list materialised.
     (seqview? coll) (fold (fn (n _) (%add n 1)) 0 coll)
     (string? coll) (string/length coll)
-    (vector? coll) (vector/size coll)
+    (vector? coll) (vector-length coll)
     (bytes? coll) (byte-length coll)
     ;; a record counts as its `Seqable` view (its fields, id-free, by default) — not the
     ;; raw map, which would include the internal `:__id__`. `map-get` distinguishes it.
@@ -183,20 +183,20 @@ and a set its elements, as everywhere else `seq` applies."
 
 (defn nth "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range."
   ;; The fixed 2-arity arm is the hot path (`(nth v i)`): it is VM-eligible
-  ;; (exact arity), so its body compiles to bytecode and the inner `vector/ref`
+  ;; (exact arity), so its body compiles to bytecode and the inner `vector-ref`
   ;; inlines to a slab read — whereas the variadic-only definition deferred the
   ;; whole thing to the tree-walker. The `& default` arm keeps the explicit-default
   ;; behaviour for the rarer 3-arg call.
   ((coll i) (cond
               (not (int? i)) (nth-bad-index coll i)
-              (vector? coll) (if (and (>= i 0) (< i (vector/size coll))) (vector/ref coll i) nil)
+              (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
               (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) nil)
               else (nth-seq-or-fail coll i nil)))
   ((coll i & default) (cond
                         (not (int? i)) (nth-bad-index coll i)
                         (vector? coll)
-                          (if (and (>= i 0) (< i (vector/size coll)))
-                            (vector/ref coll i)
+                          (if (and (>= i 0) (< i (vector-length coll)))
+                            (vector-ref coll i)
                             (first default))
                         (bytes? coll)
                           (if (and (>= i 0) (< i (byte-length coll)))

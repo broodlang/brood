@@ -533,7 +533,7 @@ Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter
 view, compose `xf` onto its transducer (same source) so the stages fuse."
   (if (seqview? coll)
     (let (parts (%seqview-parts coll))
-      (%seqview (vector/ref parts 0) (comp (vector/ref parts 1) xf)))
+      (%seqview (vector-ref parts 0) (comp (vector-ref parts 1) xf)))
     (%seqview coll xf)))
 
 (defn lmap (f coll)

@@ -1,5 +1,5 @@
 //! Primitive-op arm bodies for `jit_lower_arm_inner`'s emit loop — `Prim1`,
-//! `MakeVector`, `Prim3` (table/put), and the fused `Prim2`/`Prim2SlotSlot`/
+//! `MakeVector`, `Prim3` (table-put), and the fused `Prim2`/`Prim2SlotSlot`/
 //! `Prim2SlotInt` arithmetic/list/table/vector primitives. Extracted from the emit
 //! loop as part of the `jit_lower_arm_inner` decomposition; jit-only. None of these
 //! arms is a terminator, so each returns `Some(())` (fall through) or `None` to bail
@@ -361,7 +361,7 @@ pub(super) fn emit_make_vector(
     Some(())
 }
 
-/// `Inst::Prim3 { op: TablePut, .. }` — `(table/put t k v)`. A hoisted dense table does
+/// `Inst::Prim3 { op: TablePut, .. }` — `(table-put t k v)`. A hoisted dense table does
 /// one atomic xchg on the key's slot (every guard failure routes to the FFI, never a
 /// deopt); otherwise the FFI callback runs. Status 0 → the table handle rides back, 1 →
 /// deopt (non-Table operand), 2 → parked error → the error block.
@@ -376,7 +376,7 @@ pub(super) fn emit_prim3_table_put(
     let heap = funcs.heap;
     let out_slot = funcs.out_slot;
     let error = funcs.error;
-    // `(table/put t k v)`: operands pushed in source order — value on top.
+    // `(table-put t k v)`: operands pushed in source order — value on top.
     let val = stack.pop()?;
     let key = stack.pop()?;
     let tbl = stack.pop()?;
@@ -527,7 +527,7 @@ pub(super) fn emit_prim3_table_put(
 }
 
 /// `Inst::Prim2` — a binary primitive over two operand-stack values. Dispatches by op:
-/// `cons`/`table/has?`/`table/get`/`vector/ref` (with hoisted-table / hoisted-vec inline
+/// `cons`/`table-has?`/`table-get`/`vector-ref` (with hoisted-table / hoisted-vec inline
 /// fast paths), runtime-dispatched `=`, float arith/compare, and integer arith/compare.
 /// `map` reorders operands into `(x, y)`. Returns `None` to bail (unlowerable op).
 #[allow(clippy::too_many_arguments)]
@@ -557,7 +557,7 @@ pub(super) fn emit_prim2(
         );
         stack.push(h);
     } else if matches!(op, PrimOp::TableHas | PrimOp::TableGet) {
-        // `(table/has? t k)` / 2-arg `(table/get t k)`. `map[0]` picks which SOURCE is
+        // `(table-has? t k)` / 2-arg `(table-get t k)`. `map[0]` picks which SOURCE is
         // the table (a swapped wrapper reorders), exactly like the VM's `[sa, sb][map[0]]`.
         let (tbl_op, key_op) = if map[0] == 0 {
             (aa_op, bb_op)
@@ -624,7 +624,7 @@ pub(super) fn emit_prim2(
                 b.ins()
                     .icmp_imm(IntCC::NotEqual, sv, crate::core::table::SLOT_EMPTY as i64);
             b.ins().jump(merge, &[BlockArg::Value(present)]);
-            // FFI fallback: the exact `table/has?`; its `Value::Bool` result reduces to
+            // FFI fallback: the exact `table-has?`; its `Value::Bool` result reduces to
             // the same i8.
             b.switch_to_block(ffi);
             let h = table_prim(b, funcs.thas, [w0, w1, w2], kw, frame, funcs);
@@ -651,7 +651,7 @@ pub(super) fn emit_prim2(
             stack.push(h);
         }
     } else if matches!(op, PrimOp::VectorRef) {
-        // `(vector/ref v i)` / inlined `(nth v i)`: map is `[0,1]`, so source 0 (`aa`)
+        // `(vector-ref v i)` / inlined `(nth v i)`: map is `[0,1]`, so source 0 (`aa`)
         // is the vector, source 1 (`bb`) the index.
         if let Op::HoistedVec { ptr, len, .. } = aa_op {
             // Hoisted invariant global vector: inline `ptr + idx*STRIDE` (no slab-lookup
@@ -751,7 +751,7 @@ pub(super) fn emit_prim2_slot_slot(
         );
         stack.push(h);
     } else if matches!(op, PrimOp::TableHas | PrimOp::TableGet) {
-        // `(table/has?/table/get slot_a slot_b)`. `map[0]` picks which slot is the table
+        // `(table-has?/table-get slot_a slot_b)`. `map[0]` picks which slot is the table
         // (mirrors the VM's `[sa, sb][map[0]]`).
         let s0 = read_words(b, Op::Slot(slot_a), frame);
         let s1 = read_words(b, Op::Slot(slot_b), frame);
@@ -851,9 +851,9 @@ pub(super) fn emit_prim2_slot_int(
         let h = inline_vec_ref(b, vec, int_b, frame, funcs);
         stack.push(h);
     } else if matches!(op, PrimOp::TableHas | PrimOp::TableGet) {
-        // `(table/has?/table/get slot <int-const>)` — a constant int fused into the
-        // instruction. `map[0]` says which side is the table: 0 → the slot (`(table/has?
-        // t 5)`), 1 → the const (a swapped `(table/has? 5 x)` fusion — nonsense at
+        // `(table-has?/table-get slot <int-const>)` — a constant int fused into the
+        // instruction. `map[0]` says which side is the table: 0 → the slot (`(table-has?
+        // t 5)`), 1 → the const (a swapped `(table-has? 5 x)` fusion — nonsense at
         // runtime; the callback returns status 1 and the VM raises the exact type error).
         let slot_w = read_words(b, Op::Slot(slot_a), frame);
         let kt = b.ins().iconst(types::I64, TAG_INT as i64);

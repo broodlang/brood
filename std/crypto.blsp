@@ -120,7 +120,7 @@ Returns true if `a` and `b` are identical, false otherwise."
 (defn keypair ()
   "A fresh ed25519 keypair as `{:public <bytes> :private <bytes>}` — `:public` the 32-byte
 verifying key (safe to publish), `:private` the 32-byte signing seed (keep secret)."
-  (let (kp (%ed25519-keygen)) {:public (vector/ref kp 0) :private (vector/ref kp 1)}))
+  (let (kp (%ed25519-keygen)) {:public (vector-ref kp 0) :private (vector-ref kp 1)}))
 
 (defn sign (private message)
   "The 64-byte ed25519 signature of `message` (bytes) under the 32-byte `private` seed."

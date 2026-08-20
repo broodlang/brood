@@ -614,9 +614,9 @@ fn flags_literal_misuse_of_primitives() {
     assert!(warnings("(%add 1 \"x\")")
         .iter()
         .any(|w| w.contains("%add")));
-    assert!(warnings("(vector/ref [1 2] :k)")
+    assert!(warnings("(vector-ref [1 2] :k)")
         .iter()
-        .any(|w| w.contains("vector/ref")));
+        .any(|w| w.contains("vector-ref")));
 }
 
 #[test]
@@ -638,9 +638,9 @@ fn propagates_primitive_result_types() {
 
 #[test]
 fn an_any_result_is_not_a_false_positive() {
-    // vector/ref's result type is `any` (unknown), so feeding it to
+    // vector-ref's result type is `any` (unknown), so feeding it to
     // string-length (wants string) must NOT warn — `any` overlaps `string`.
-    assert!(warnings("(string/length (vector/ref [1] 0))").is_empty());
+    assert!(warnings("(string/length (vector-ref [1] 0))").is_empty());
 }
 
 #[test]
@@ -1610,14 +1610,14 @@ fn guard_purity_flags_an_effect_in_a_match_when_guard() {
     let src = "
 (defn f (n counter)
   (match n
-    (x :when (do (table/put counter :seen 1) (> x 0)) :pos)
+    (x :when (do (table-put counter :seen 1) (> x 0)) :pos)
     (_ :neg)))
 ";
     let w = file_warnings(src);
     assert!(
         w.iter()
-            .any(|s| s.contains("table/put") && s.contains(":when` guard")),
-        "expected an effectful-guard warning naming table/put, got {w:?}"
+            .any(|s| s.contains("table-put") && s.contains(":when` guard")),
+        "expected an effectful-guard warning naming table-put, got {w:?}"
     );
 }
 
@@ -1626,14 +1626,14 @@ fn guard_purity_flags_an_effect_in_a_receive_when_guard() {
     let src = "
 (defn worker (counter)
   (receive
-    (n :when (< (table/incr counter :seen) 100) n)
+    (n :when (< (table-incr counter :seen) 100) n)
     (_ :skip)))
 ";
     let w = file_warnings(src);
     assert!(
         w.iter()
-            .any(|s| s.contains("table/incr") && s.contains("guard")),
-        "expected an effectful-guard warning naming table/incr, got {w:?}"
+            .any(|s| s.contains("table-incr") && s.contains("guard")),
+        "expected an effectful-guard warning naming table-incr, got {w:?}"
     );
 }
 
@@ -1935,9 +1935,9 @@ fn covers_the_other_signed_primitives() {
     assert!(warnings("(mod 7 3)").is_empty());
     assert!(warnings("(mod 7 \"x\")").iter().any(|w| w.contains("mod")));
     assert!(warnings("(rem :a 3)").iter().any(|w| w.contains("rem")));
-    assert!(warnings("(vector/size 5)")
+    assert!(warnings("(vector-length 5)")
         .iter()
-        .any(|w| w.contains("vector/size")));
+        .any(|w| w.contains("vector-length")));
     assert!(warnings("(string/substring \"hi\" \"a\" 1)")
         .iter()
         .any(|w| w.contains("string/substring") && w.contains("argument 2")));
@@ -1956,7 +1956,7 @@ fn reports_each_bad_argument() {
 #[test]
 fn nested_misuse_is_found() {
     // A wrong call buried inside an argument is still reported.
-    let w = warnings("(vector/size (cons (first 5) 2))");
+    let w = warnings("(vector-length (cons (first 5) 2))");
     assert!(w.iter().any(|s| s.contains("first")));
 }
 
@@ -2107,11 +2107,11 @@ fn same_file_reassigned_global_return_stays_dynamic() {
     // the result would false-flag. Guards Pass 2.8 against the earmuffed / reassigned-global
     // imprecision.
     let w = file_warnings(
-        "(defmodule t)\n(def *g* nil)\n(defn getg () (when (nil? *g*) (def *g* (table))) *g*)\n(defn u () (table/get (getg) :k))",
+        "(defmodule t)\n(def *g* nil)\n(defn getg () (when (nil? *g*) (def *g* (table))) *g*)\n(defn u () (table-get (getg) :k))",
     );
     assert!(
         !w.iter()
-            .any(|s| s.contains("table/get") && s.contains("argument")),
+            .any(|s| s.contains("table-get") && s.contains("argument")),
         "a reassigned global's return must stay dynamic (no false positive): {w:?}"
     );
 }
@@ -4165,13 +4165,13 @@ fn and_guard_narrows_in_the_then_branch() {
 #[test]
 fn matching_a_list_against_a_vector_pattern_is_not_flagged() {
     // The match compiler lowers a vector pattern to
-    // `(if (and (vector? m) (= (vector/size m) 2)) (… (vector/ref m i) …) …)`.
-    // With `(list 1 2)` now typed `list<int>`, the guarded `vector/ref` must
+    // `(if (and (vector? m) (= (vector-length m) 2)) (… (vector-ref m i) …) …)`.
+    // With `(list 1 2)` now typed `list<int>`, the guarded `vector-ref` must
     // not be flagged — the `and` guard narrows `m` to a vector (→ never here).
     let w = warnings_expanded("(match (list 1 2) ([a b] :vec) (_ :not-vec))");
     assert!(
         w.iter()
-            .all(|s| !s.contains("vector/ref") && !s.contains("vector/size")),
+            .all(|s| !s.contains("vector-ref") && !s.contains("vector-length")),
         "a list matched against a vector pattern must not warn: {w:?}"
     );
 }
@@ -4182,11 +4182,11 @@ fn and_guard_does_not_narrow_the_else_branch() {
     // *later* conjunct may have failed. So the else-branch must keep `m`'s
     // full type; flagging a vector op there would be a false positive.
     let w = warnings_expanded(
-        "(fn (m) (if (and (vector? m) (%eq (vector/size m) 2)) \
-                         (vector/ref m 0) (vector/ref m 0)))",
+        "(fn (m) (if (and (vector? m) (%eq (vector-length m) 2)) \
+                         (vector-ref m 0) (vector-ref m 0)))",
     );
     assert!(
-        w.iter().all(|s| !s.contains("vector/ref")),
+        w.iter().all(|s| !s.contains("vector-ref")),
         "the else-branch of an `and` guard must not be narrowed: {w:?}"
     );
     // The then-branch still narrows (sanity: the guard didn't go silent).
