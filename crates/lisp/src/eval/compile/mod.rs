@@ -2487,7 +2487,19 @@ fn hof_apply_native(
                             .dbg_name
                             .map(crate::core::value::symbol_name_ref)
                             .unwrap_or("<closure>");
-                        eprintln!("[jit-bail] arm={name} reason=hof-arm-already-bailed");
+                        let ops: Vec<&str> = arm
+                            .chunk
+                            .as_ref()
+                            .map(|c| c.code.as_slice())
+                            .unwrap_or(&[])
+                            .iter()
+                            .map(crate::eval::compile::jit_lower::inst_name)
+                            .collect();
+                        eprintln!(
+                            "[jit-bail] arm={name} reason=hof-arm-already-bailed nslots={} ops=[{}]",
+                            arm.nslots,
+                            ops.join(" ")
+                        );
                     }
                 }
             }
