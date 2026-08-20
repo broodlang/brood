@@ -933,6 +933,12 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // `nest new` scaffolding (templates + new-project), split out of `project` so
     // the analysis half stays lean. `(:use project)` for *config-git-init*. Opt-in.
     embedded_module!("scaffold", "std/tool/scaffold.blsp"),
+    // Identifier-aware whole-token rewrites over a project's .blsp sources — drives
+    // `nest rename` for an ecosystem-wide rename that a plain sed would corrupt. Opt-in.
+    embedded_module!("codemod", "std/tool/codemod.blsp"),
+    // Fan a check/commit/push across every sibling Brood repo in the workspace — drives
+    // `nest ws`, over `%os-cmd`/`run-process`. Opt-in, never in the prelude.
+    embedded_module!("workspace", "std/tool/workspace.blsp"),
     // The package manager (ADR-037): resolves the manifest's :dependencies into a
     // lock file + load-path entries. Required lazily by `project-setup` only when a
     // project actually declares deps. Opt-in, never in the prelude.

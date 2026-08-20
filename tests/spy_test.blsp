@@ -13,7 +13,7 @@
   (let (out (table))
     (binding (*spy-sink* (fn (entry)
                            (when (= (:spy entry) :node)
-                             (table/put out (pr-str (:form entry)) (:value entry)))))
+                             (table-put out (pr-str (:form entry)) (:value entry)))))
       (thunk))
     out))
 
@@ -33,36 +33,36 @@
 (describe "spy — the trace as data"
   (test "each call node's value is captured, keyed by its source form"
     (let (nodes (traced-nodes (fn () (spy (+ (* 2 3) (- 10 1))))))
-      (assert= 6 (table/get nodes "(* 2 3)"))
-      (assert= 9 (table/get nodes "(- 10 1)"))
-      (assert= 15 (table/get nodes "(+ (* 2 3) (- 10 1))"))))
+      (assert= 6 (table-get nodes "(* 2 3)"))
+      (assert= 9 (table-get nodes "(- 10 1)"))
+      (assert= 15 (table-get nodes "(+ (* 2 3) (- 10 1))"))))
   (test "pipeline stages are traced (the general walker subsumes the pipe case)"
     (let (nodes (traced-nodes (fn () (spy (->> [1 2 3] (map inc) (reduce + 0))))))
-      (assert= (list 2 3 4) (table/get nodes "(map inc [1 2 3])"))
-      (assert= 9 (table/get nodes "(reduce + 0 (map inc [1 2 3]))")))))
+      (assert= (list 2 3 4) (table-get nodes "(map inc [1 2 3])"))
+      (assert= 9 (table-get nodes "(reduce + 0 (map inc [1 2 3]))")))))
 
 (describe "spy — laziness is preserved"
   ; untaken branch absent
   (test "an untaken if branch never traces (and never runs)"
     (let (nodes (traced-nodes (fn () (spy (if (> 1 2) (add5 100) (add5 1))))))
       ; taken branch traced
-      (assert= 6 (table/get nodes "(add5 1)"))
-      (assert= nil (table/get nodes "(add5 100)"))))
+      (assert= 6 (table-get nodes "(add5 1)"))
+      (assert= nil (table-get nodes "(add5 100)"))))
   (test "a short-circuited `and` tail never traces"
     (let (nodes (traced-nodes (fn () (spy (and (> 1 2) (add5 100))))))
-      (assert= nil (table/get nodes "(add5 100)"))))
+      (assert= nil (table-get nodes "(add5 100)"))))
   (test "a `let` traces its binding RHS and body"
     (let (nodes (traced-nodes (fn () (spy (let (x (+ 1 2) y (* 3 4)) (+ x y))))))
-      (assert= 3 (table/get nodes "(+ 1 2)"))
-      (assert= 12 (table/get nodes "(* 3 4)"))
-      (assert= 15 (table/get nodes "(+ x y)")))))
+      (assert= 3 (table-get nodes "(+ 1 2)"))
+      (assert= 12 (table-get nodes "(* 3 4)"))
+      (assert= 15 (table-get nodes "(+ x y)")))))
 
 (describe "spy — opaque positions"
   (test "an fn body is not traced, but the enclosing call result is"
     (let (nodes (traced-nodes (fn () (spy (map (fn (n) (* n n)) [1 2 3])))))
       ; fn body opaque
-      (assert= nil (table/get nodes "(* n n)"))
-      (assert= (list 1 4 9) (table/get nodes "(map (fn (n) (* n n)) [1 2 3])"))))
+      (assert= nil (table-get nodes "(* n n)"))
+      (assert= (list 1 4 9) (table-get nodes "(map (fn (n) (* n n)) [1 2 3])"))))
   (test "quoted data is left untouched"
     (assert= (list 'a 'b) (silent (fn () (spy (quote (a b))))))))
 

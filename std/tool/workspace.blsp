@@ -1,0 +1,75 @@
+;; workspace — drive every Brood repo in the workspace with one command.
+;;
+;; Drives `nest ws`. The Brood ecosystem is many sibling git repos (brood, hatch, hive,
+;; bedit, pong, …); an ecosystem-wide change means the same check → commit → push in each.
+;; This runs that fan-out, in Brood over `%os-cmd` / `run-process`. It discovers the sibling
+;; repos of the current directory: any sibling with a `.git` dir AND a `project.blsp`, plus
+;; `brood` itself. Nothing here force-pushes, resets, stashes, or checks out.
+(defmodule workspace
+  (:use file))
+
+(defn- brood-repos ()
+  (filter (fn (dir)
+            (and (file/dir? (str dir "/.git"))
+              (or (= dir "../brood") (file/exists? (str dir "/project.blsp")))))
+    (map (fn (n) (str "../" n)) (file/ls ".."))))
+
+(defn- repo-name (dir) (last (string/split dir "/")))
+
+(defn- git-out (dir git-args)
+  "Trimmed stdout of `git -C dir <git-args…>`."
+  (string/trim (get (%os-cmd "git" (cons "-C" (cons dir git-args))) :stdout)))
+
+(defn- git-run (dir git-args)
+  "Run `git -C dir <git-args…>` inheriting stdio; returns the exit code."
+  (run-process "git" (cons "-C" (cons dir git-args))))
+
+(defn- dirty-count (dir)
+  (count (filter (fn (l) (not (string/blank? l)))
+           (string/split (git-out dir (list "status" "--short")) "\n"))))
+
+(defn- ahead-count (dir)
+  (let (a (git-out dir (list "rev-list" "--count" "@{u}..HEAD")))
+    (if (string/blank? a) "0" a)))
+
+(defn list-repos ()
+  (for (dir (brood-repos)) (println (repo-name dir))))
+
+(defn status ()
+  (for (dir (brood-repos))
+    (let (d (dirty-count dir) a (ahead-count dir))
+      (when (or (> d 0) (not (= a "0")))
+        (println (repo-name dir) "  uncommitted=" d " unpushed=" a)))))
+
+(defn check ()
+  (for (dir (brood-repos))
+    (when (file/exists? (str dir "/project.blsp"))
+      (println "=== " (repo-name dir) " ===")
+      ;; `nest check` reads the project in its own dir, so run it there (via the shell's cd).
+      (when (not (= 0 (run-process "sh" (list "-c" (str "cd " dir " && nest check")))))
+        (println "  CHECK FAILED: " (repo-name dir))))))
+
+(defn commit (message)
+  (for (dir (brood-repos))
+    (when (> (dirty-count dir) 0)
+      (git-run dir (list "add" "-A"))
+      (when (= 0 (git-run dir (list "commit" "-q" "-m" message)))
+        (println "committed: " (repo-name dir))))))
+
+(defn push ()
+  (for (dir (brood-repos))
+    (when (not (= (ahead-count dir) "0"))
+      (when (= 0 (git-run dir (list "push")))
+        (println "pushed: " (repo-name dir))))))
+
+(defn run (action message)
+  "Dispatch for `nest ws <action> [message]`."
+  (cond
+    (= action "list") (list-repos)
+    (= action "status") (status)
+    (= action "check") (check)
+    (= action "commit") (if (nil? message)
+                          (println "nest ws commit needs a message")
+                          (commit message))
+    (= action "push") (push)
+    else (println "nest ws: unknown action '" action "' (list|status|check|commit|push)")))

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/lisp", "crates/cli", "crates/nest", "crates/lsp", "crates/playground"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["Wilhelm Kirschbaum"]

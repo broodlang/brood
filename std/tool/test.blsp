@@ -125,7 +125,7 @@ docs/testing.md for the full guide.")
 (defn fail-loc (form)
   (let (p (form-pos form))
     ; [line col] vector, or nil
-    (if p (list (current-file) (vector/ref p 0) (vector/ref p 1)) nil)))
+    (if p (list (current-file) (vector-ref p 0) (vector-ref p 1)) nil)))
 
 ;; A failing assertion THROWS a tagged failure record rather than mutating shared
 ;; state — Brood data is immutable (no accumulator to push onto). The tag is a

@@ -1,0 +1,70 @@
+;; codemod — identifier-aware whole-token rewrites over a project's Brood sources.
+;;
+;; Drives `nest rename`. A plain text replace corrupts substrings (`map/get` sits inside
+;; `multimap/get`, `map-pairs` inside `assoc-map-pairs`); this rewrites only whole Brood
+;; identifiers, using the Brood identifier character set for the word boundary, so those are
+;; never touched. Pure Brood over `file/slurp` / `file/spit` / `file/walk-files`.
+(defmodule codemod
+  (:use file))
+
+;; The Brood identifier boundary set — letters, digits, and the symbol chars a name may
+;; contain, but NOT ":" or "/" (so `name:` and `mod/name` boundaries match), while letters
+;; and `-` protect a longer identifier (`multimap-`, `assoc-map-pairs`).
+(def- *ident*
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_?!*<>=+.%&~^-")
+
+(defn- ident-at? (text pos)
+  (and (>= pos 0)
+    (< pos (string/length text))
+    (includes? *ident* (string/char-at text pos))))
+
+(defn- boundary? (text pos) (not (ident-at? text pos)))
+
+(defn- tr-loop (text old new olen from parts)
+  (let (i (index-of text old from))
+    (if (< i 0)
+      (cons (string/substring text from (string/length text)) parts)
+      (if (and (boundary? text (dec i)) (boundary? text (+ i olen)))
+        (tr-loop text old new olen (+ i olen)
+          (cons new (cons (string/substring text from i) parts)))
+        (tr-loop text old new olen (inc i)
+          (cons (string/substring text from (inc i)) parts))))))
+
+(defn token-replace (text old new)
+  "`text` with every whole-token `old` replaced by `new` (substrings left alone)."
+  (apply str (reverse (tr-loop text old new (string/length old) 0 nil))))
+
+(defn- apply-pairs (text pairs)
+  (fold (fn (t p) (token-replace t (first p) (second p))) text pairs))
+
+(defn- rewrite-file (pairs f)
+  "Rewrite `f` in place if any pair changes it; returns f when changed, else nil."
+  (let (before (file/slurp f)
+        after (apply-pairs before pairs))
+    (if (= before after)
+      nil
+      (do (file/spit f after) f))))
+
+(defn- project-blsp ()
+  "Every .blsp file under the current directory, skipping .git and vendored _deps."
+  (filter (fn (f)
+            (and (string/ends-with? f ".blsp")
+              (not (includes? f "/.git/"))
+              (not (includes? f "/_deps/"))))
+    (walk-files ".")))
+
+(defn rename (pairs)
+  "Apply `[[old new] …]` token renames across the project's own .blsp sources. Prints each
+  changed file and returns the count."
+  (let (changed (filter (fn (f) (not (nil? f)))
+                  (map (fn (f) (rewrite-file pairs f)) (project-blsp))))
+    (for (f changed) (println "  changed: " f))
+    (println (count changed) " file(s) changed")
+    (count changed)))
+
+(defn rename-from-file (path)
+  "Load `[old new]` pairs from a file of `OLD NEW` lines and apply them (see `rename`)."
+  (rename
+    (filter (fn (p) (= (count p) 2))
+      (map (fn (l) (string/split (string/trim l) " "))
+        (filter (fn (l) (not (string/blank? l))) (string/split (file/slurp path) "\n"))))))

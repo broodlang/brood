@@ -332,7 +332,7 @@ pub(crate) fn exec_chunk(
                     if let ValueRef::Table(tid) = sa.unpack() {
                         // Same key guard as the native — a closure/NaN key raises the
                         // identical error; a non-Table first operand defers below.
-                        crate::core::table::check_key("table/put", sb)
+                        crate::core::table::check_key("table-put", sb)
                             .map_err(|e| tag_pos(e, *pos))?;
                         crate::perf_bump!(prim2_inline);
                         done = Some(

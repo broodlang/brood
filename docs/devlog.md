@@ -2218,30 +2218,31 @@ vocabularies, not a naming clash. Docs updated (`language.md`, `brood-for-claude
 `types.md`, `ROADMAP.md`, `compute-frontier.md`); historical logs/ADRs/archives left as
 written.
 
-## 2026-08-20 — Kernel `-`→`/` for vector/table primitives; map kept dash (module clash)
+## 2026-08-20 — Kernel primitives stay flat (dash); a `/` is module-member syntax only
 
-Continued the naming unification into the kernel primitive families, converting the
-dash-named `vector-*`/`table-*` builtins to a slash namespace and the "count/length" word
-to **size**: `vector-length`→`vector/size`, `vector-ref`→`vector/ref`, `vector-assoc`→
-`vector/assoc`; `table-count`→`table/size`, `table-get`→`table/get`, `table-put`→`table/put`,
-`table-has?`→`table/has?`, `table-delete`→`table/delete`, `table-incr`→`table/incr`,
-`table-drop`→`table/drop`, `table-snapshot`→`table/snapshot`. The names are string-coupled
-across the compiler (PrimOp tables in `ir.rs`, the linmap map→table lowering in
-`inline.rs`/`macros.rs`), the JIT (`jit/rt.rs`), the interpreter (`exec_chunk`/`exec_value`),
-the checker, and error messages — all renamed in lockstep so the map→table optimizer keeps
-firing (verified: `map-*` op → `table/*` op pairs stay consistent, `jit_effect_once` +
-`linmap_soundness` green).
+Tried to move the kernel primitive families to a slash namespace (`vector-ref` →
+`vector/ref`, `table-put` → `table/put`, and a first attempt at `map/get`), and **reverted
+all of it** — the idea fights the module system, in the same way each time:
 
-**The `map-*` family was left on dash** (`map-get`, `map-count`, `map-assoc`, `map-dissoc`,
-`map-pairs`, `map-int-add`). `map` is *also* a module (`std/map.blsp`), so `map/get`/`map/assoc`/
-`map/dissoc` would be swept in by `(:use map)` (which refers every live `map/`-prefixed global,
-`system.rs` `%refer`) as bare `get`/`assoc`/`dissoc` — shadowing, and *semantically overriding*,
-the polymorphic prelude ops for every `(:use map)` consumer (seq, editor/ui, editor/buffer). The
-polymorphic `count` already covers map counting, so nothing is lost. `vector`/`table` are not
-modules, so they have no such clash. (The dash names collide only with the `multimap/*` module
-whose names *contain* them; the boundary-safe rename protects those — but note the naive reverse
-`sed` does **not**: `map/get` is a substring of `multimap/get`, which a plain `s|map/get|map-get|`
-corrupts. Fixed and guarded by `multimap_test`.)
+**A `/` in a name means "module/member" throughout the toolchain**, in three places that a
+kernel primitive is not a member of any module trips over:
+1. `(:use mod)` refers a module's names *by prefix* (`system.rs` `%refer` enumerates every
+   live `mod/…` global) — so `map/get`/`map/assoc`/`map/dissoc` get swept in and shadow the
+   polymorphic prelude `get`/`assoc`/`dissoc` for every `(:use map)` consumer.
+2. The project loader materialises a project by `require`-ing **every image section**, and
+   sections are keyed by splitting names on `/` (`project-image-section-of`) — so a
+   `vector/ref` reference makes a phantom `vector` section, and `nest test` dies on
+   `require: cannot find module 'vector'` for *every* project that touches a vector.
+3. Qualified-name rooting (ADR-070) treats `mod/name` as a reference into module `mod`.
+
+`string/length` is the sole `/`-named primitive family and is fine **only because `string`
+is a real module** (require-one succeeds, `(:use string)` refers its real names). So the
+invariant: **kernel primitives are flat (dash) names; a `/` in a primitive name is allowed
+only when the prefix is a real module-backed namespace.** `map`/`vector`/`table` are not
+modules → dash. Enforced by `tests/primitive_naming.rs` so the next `foo/bar` primitive
+fails at CI, not three deploys later. (Naming lesson for the reverse `sed`: `map/get` is a
+substring of `multimap/get`; use the identifier-aware `scripts/ecosystem/blsp-rename`, not a
+plain `s///`.)
 
 Also fixed a latent gap in `runtime_collector`'s `drain_report_wires_through_the_scheduler`:
 it drove `age → collect → assert` but skipped the `migrate_live_globals` step the real reclaim
