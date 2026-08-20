@@ -103,7 +103,14 @@ land in a later slice."
 (defn resolve-deps (root deps lock)
   "Resolve `deps` (dep records from the manifest) and everything they transitively pull in, into a flat list of resolved entries — each its dep record with `:resolved-path`/`:sha256`/`:deps` (and `:commit`/`:version`) assoc'd on, so it keeps the dep's identity and dispatches through the same `Dependency` impls. `lock` is the prior project.lock.blsp :dependencies (or nil). `:path`/`:git`/`:tarball` deps resolve to their exact source (a matching lock entry reuses the pinned commit/sha, network-free); `:registry` deps carry a version RANGE resolved to a concrete version by the backtracking resolver (ADR-209) — a fully-covering lock reuses the prior solution network-free, so pass nil (or drop names via `nest update`) to force a re-solve."
   (let (lock-index (package-lock-index lock)
-        walked (package-resolve-loop root deps {} nil lock-index (map :name deps) nil)
+        ;; Direct git/path/tarball pins override a same-named *transitive* registry
+        ;; request (ADR-238): a root that pins a dep to an exact source wins over any
+        ;; deeper `:version` request for that name, so the registry is never consulted
+        ;; for it. This lets an app (e.g. the registry server itself) pin its whole
+        ;; closure to git and build with zero registry contact. Empty in the common
+        ;; all-registry case, where resolution is unchanged.
+        direct-non-registry (map :name (filter (fn (dep) (not (package-registry-dep? dep))) deps))
+        walked (package-resolve-loop root deps {} nil lock-index (map :name deps) direct-non-registry nil)
         non-registry (first walked)
         registry-reqs (second walked)
         registry-entries (package-resolve-registry-closure root registry-reqs lock-index lock))
@@ -112,7 +119,7 @@ land in a later slice."
 ;; Returns `[non-registry-entries registry-reqs]`: the resolved path/git/tarball entries
 ;; in resolution order, and the (unresolved) registry dep records to hand to the solver.
 (defn- package-resolve-loop
-  (root queue resolved order lock-index direct registry-reqs)
+  (root queue resolved order lock-index direct direct-non-registry registry-reqs)
   (cond
     (empty? queue) [(map (fn (nm) (get resolved nm)) (reverse order)) registry-reqs]
     ;; A registry dep is collected, not resolved here — its version is a range the
@@ -120,6 +127,11 @@ land in a later slice."
     ;; would mean fetching a version nobody has chosen yet. (The `dep-kind` ability op
     ;; is reached through a `defn` so this forward reference resolves — an ability op
     ;; used bare before its `defability` does not pre-scan, a `defn` does.)
+    ;;
+    ;; UNLESS the root pins this name to an exact source (`direct-non-registry`): a
+    ;; direct git/path/tarball dep overrides a deeper `:version` request for the same
+    ;; name (ADR-238), so we drop the registry request entirely rather than collect it.
+    ;; The direct dep resolves this name through phase 1; the registry is never asked.
     (package-registry-dep? (first queue))
       (package-resolve-loop root
         (rest queue)
@@ -127,7 +139,10 @@ land in a later slice."
         order
         lock-index
         direct
-        (cons (first queue) registry-reqs))
+        direct-non-registry
+        (if (includes? direct-non-registry (get (first queue) :name))
+          registry-reqs
+          (cons (first queue) registry-reqs)))
     (contains? resolved (get (first queue) :name))
       (do
         ;; A name already resolved: if it's a direct dep, the root's pin wins and we
@@ -145,6 +160,7 @@ land in a later slice."
           order
           lock-index
           direct
+          direct-non-registry
           registry-reqs))
     else
       (let (dep (first queue)
@@ -156,6 +172,7 @@ land in a later slice."
           (cons nm order)
           lock-index
           direct
+          direct-non-registry
           registry-reqs))))
 
 ;; --- phase 2: solve the registry closure (ADR-209) --------------------------------

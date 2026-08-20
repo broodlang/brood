@@ -1973,3 +1973,19 @@ Bumped to 0.5.0 — this release is the compatibility boundary for the session's
 rollout: queue/push, version/compare, uuid/v4, log/info, multimap/assoc, stream/map, tcp/drain,
 sse/emit, …). Installed and used to migrate the local project ecosystem (bedit, hatch, chat, life,
 terminal, pong, s3, store, mylife, hive, …) to the new names — each `nest check`-clean and green.
+
+## 2026-08-20 — A direct git/path pin overrides a transitive registry dep (ADR-238)
+
+Extended the resolver's "root pin wins" rule across sources: a **direct** `:git`/`:path`/`:tarball`
+dependency now suppresses a same-named **transitive registry** request, so the registry is never
+consulted for that name (`resolve-deps` threads the direct-non-registry name set through
+`package-resolve-loop`; the registry-collection branch drops an overridden name). Common all-registry
+resolution is unchanged (empty override set). Guarded by an offline test in `package_test.blsp`
+(git app → git dep declaring a registry sub-dep → resolves with zero registry contact); package_test
+111/111, project_test 109/109. Motivation: a **bootstrap deadlock** — `hive` (the registry server)
+resolved its own build deps *from the registry it serves*, so when hive's tarball route regressed and
+404'd every package (including hive's own deps), hive could no longer be deployed to fix the outage.
+ADR-238 is the minimal slice of the deferred per-dep-`[:patch]` override that lets hive pin its whole
+closure (hatch, store-postgres, s3, transitive store) to git and build registry-independently — "hive
+never uses hive". (Route regression itself fixed in the hive repo: a mangled `:version-tarball` /
+`:version-docs` route string reverted to `:version/tarball` / `:version/docs`.)

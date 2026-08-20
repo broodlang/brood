@@ -15886,3 +15886,52 @@ around; the single `/name` escape is confined to the one case (a library redefin
 where it is irreducible, and a future lint keeps it honest. Most of this is already implemented
 (the three `reserved-package-name?` seams, the `/name` escape); this ADR is the consolidation and
 the going-live commitment. The `nest check` redundant-escape lint is the one open follow-up.
+
+## ADR-238 — A direct git/path pin overrides a same-named transitive registry dependency
+
+**Context.** A dependency's *source* (`:path` / `:git` / `:tarball` / `:version`-registry) is
+part of its identity, and the resolver already honours a "root pin wins" rule *within* a source:
+when a package and one of its transitive deps both name a git dependency, the root's direct pin
+wins and the transitive re-request is ignored (see `package-resolve-loop`). But that rule did
+**not** cross sources. A transitive *registry* request (`[store :version "0.2.5"]` declared inside
+a library like `hatch`) is collected into the registry solver's work-list *before* the
+"already-resolved" check runs, so a direct git/path pin of the **same name** could not suppress
+it — the resolver would still solve and download that name from the registry.
+
+This surfaced as a **bootstrap deadlock**. `hive` (the registry server) resolved its own build-time
+dependencies *from the registry it serves* ("hive using hive"). When hive's tarball-download route
+regressed (a mangled route string, fixed separately), every package tarball 404'd — including
+hive's own deps — so hive could no longer be deployed to fix the outage: the deploy needed the
+registry that the deploy was meant to repair. Pinning hive's deps to git (independent
+infrastructure, the way the Dockerfile already pins `brood`) is the right structural fix — *a
+system must not depend on the thing it serves to deploy itself* — but it was defeated by the
+transitive `store` dep declared as a registry dep *inside* `hatch`/`store-postgres`, which no
+amount of top-level git-pinning could redirect. nest's general per-dep override (`[:patch]`-style)
+was deferred (see the deferred-features list), leaving no seam for this.
+
+**Decision.** Extend "root pin wins" **across sources**: a **direct** `:path`/`:git`/`:tarball`
+dependency overrides any **transitive registry** request for the same name. Concretely,
+`resolve-deps` computes the set of direct non-registry dep names and threads it through
+`package-resolve-loop`; in the registry-collection branch, a request whose name is in that set is
+**dropped** rather than collected, so the registry is never consulted for it. The name is resolved
+entirely by the direct pin's own phase-1 resolution (and that dep's *own* transitive deps flow
+through the normal walk). The common all-registry case computes an empty override set and resolves
+exactly as before — no behavioural change, no new network.
+
+The override is **direct-only** (a transitive non-registry dep does *not* override a transitive
+registry one — that stays the existing loud "conflicting dependency" path) and **silent** (matching
+the existing within-source root-pin-wins rule). Version compatibility between the pinned source and
+the overridden range is the pinner's responsibility, exactly as with Cargo's `[patch]`; we do not
+re-check it. This is the minimal, principled slice of the deferred per-dep-override feature —
+enough to let any application (the registry server first among them) pin its whole closure to git
+and build with **zero registry contact**, without a general override-config surface.
+
+**Consequence.** "hive never uses hive": hive's manifest pins its full dependency closure
+(`hatch`, `store-postgres`, `s3`, and the transitive `store`) to git commits, and its build resolves
+them from GitHub with no registry round-trip — so a registry outage can never again block the deploy
+that fixes it. The rule is general, not hive-specific: any consumer can override a library's
+transitive registry dep by pinning that name directly to a source. Guarded by an offline test in
+`tests/package_test.blsp` ("a direct :git pin overrides a transitive :registry dep of the same
+name") — it resolves a git app whose git dep declares a registry sub-dep, and asserts resolution
+completes without touching the registry. A full per-dep-`[:patch]` override config remains deferred;
+this covers the case that motivated it.
