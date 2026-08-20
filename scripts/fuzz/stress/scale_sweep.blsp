@@ -8,7 +8,7 @@
 ;;
 ;; TWO POINTS ARE NOT A MEASUREMENT — read this before believing a row.
 ;; A single invocation's two timings are NOT enough to call a shape. Readings for
-;; `gen gen-call` on 2026-07-30, same binary (56c2501):
+;; `gen gen/call` on 2026-07-30, same binary (56c2501):
 ;;
 ;;   base N=2000 -> ratio 10.21, then 7.77 on a re-run   (flags SUPERLINEAR)
 ;;   base N=4000 -> ratio  2.93                          (reads linear)
@@ -27,7 +27,7 @@
 ;; a quadratic; anything smaller needs the floor before it is reportable.
 ;;
 ;; Rows measured linear on 2026-07-30: agent update, buffer insert,
-;; buffer forward-line. gen gen-call is unresolved, per the above.
+;; buffer forward-line. gen gen/call is unresolved, per the above.
 ;;
 ;; 2026-08-04: `sexp motions` WAS a confirmed quadratic — three rising points, ASCII 5.68x
 ;; then 9.40x, one-non-ASCII 8.84x then 12.30x. Each motion's cost is `narrow`'s call to the
@@ -120,9 +120,9 @@
 ;;
 ;; Its row reads ~5-8x at small N and 1.82x from 3200->12800 — a ratio that FALLS as the
 ;; base grows is warm-up, not a quadratic (the same signature that cleared `gen
-;; gen-call`). 800 -> 12800 is 5 -> 71 ms, i.e. 14x for 16x of input.
+;; gen/call`). 800 -> 12800 is 5 -> 71 ms, i.e. 14x for 16x of input.
 ;;
-;; `format format-source` was cleared as LINEAR on 3.80x / 4.12x / 4.64x and that call was
+;; `format format/source` was cleared as LINEAR on 3.80x / 4.12x / 4.64x and that call was
 ;; WRONG — a cautionary row. Those ratios creep UP, and pushing the base further gave 4.46
 ;; then 6.40, with 12 800 forms taking 3.6 s: `format-cst-root--walk` really was recopying
 ;; the whole output per top-level form, exactly as its `(str acc …)` shape suggested. The
@@ -139,7 +139,7 @@
   ;; exactly the `:use-internals` case, as `tests/sse_test.blsp` does.
   (:use-internals sse)
   (:use agent :only [start update stop])
-  (:use gen :only [defprocess spawn-server gen-call])
+  (:use gen :only [defprocess spawn-server call])
   (:use editor/buffer)
   (:use sexp :only [point-forward]))
 
@@ -208,7 +208,7 @@
   (if (= k 0)
     nil
     (do
-      (gen-call pid :bump)
+      (call pid :bump)
       (loop-calls pid (- k 1)))))
 
 (defn gen-calls (k)
@@ -246,7 +246,7 @@
 
 (defn src-of (k)
   (str utf8-src-lead (apply str (repeat k "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))\n\n"))))
-(defn fmt-source (k) (format/format-source (src-of k)))
+(defn fmt-source (k) (format/source (src-of k)))
 
 ;; ---- ansi: strip escapes from colourised subprocess output ------------------
 
@@ -259,7 +259,7 @@
 
 (defn stream-lines-1chunk (k)
   (let (blob (str utf8-lead (apply str (repeat k "some log line of moderate length here\n"))))
-    (count (stream/stream-to-list (stream/stream-lines (stream/stream-from-list (list blob)))))))
+    (count (stream/to-list (stream/lines (stream/from-list (list blob)))))))
 
 ;; ---- SSE frame extraction from one accumulated chunk ------------------------
 
@@ -269,7 +269,7 @@
 ;; single buffer rather than dripped.
 (defn sse-frames-1chunk (k)
   (let (blob (str utf8-lead (apply str (repeat k "event: tick\ndata: some payload here\n\n"))))
-    (count (first (sse/sse-frames blob)))))
+    (count (first (sse/frames blob)))))
 
 ;; ---- string search: reverse, and a forward incremental scan -----------------
 
@@ -306,7 +306,7 @@
       (range 0 k))))
 
 (row "agent  update  " n agent-updates)
-(row "gen    gen-call" n gen-calls)
+(row "gen    gen/call" n gen-calls)
 (row "buffer      insert  " n buffer-inserts)
 (row "buffer      fwd-line" n buffer-nav)
 (row "template    render  " n tmpl-render)

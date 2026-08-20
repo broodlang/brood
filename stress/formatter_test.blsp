@@ -2,14 +2,14 @@
 ;; battery. The contract (std/format.blsp): idempotent on every well-formed
 ;; input. This suite adds the stronger property the unit tests don't sweep:
 ;; **semantic preservation** — formatting must never change the PARSED FORMS
-;; (`read-all src` ≡ `read-all (format-source src)`), verified across every
+;; (`read-all src` ≡ `read-all (source src)`), verified across every
 ;; .blsp in std/ and tests/ plus hand-built corner cases.
 
 (defmodule formatter-stress-test (:use test) (:use format))
 
 (defn check-file! (path)
   (let (src (file/slurp path)
-        fmt (format-source src))
+        fmt (source src))
     (do
       ;; semantic preservation: same forms before and after. Compared via
       ;; pr-str, not `=`: a `nan` LITERAL in the source (float_roundtrip_test,
@@ -18,7 +18,7 @@
       ;; canonically and still exposes any real change.
       (assert= (pr-str (read-all fmt)) (pr-str (read-all src)))
       ;; idempotency: a second pass changes nothing
-      (assert= (format-source fmt) fmt)
+      (assert= (source fmt) fmt)
       true)))
 
 (defn blsp-files (dir)
@@ -41,8 +41,8 @@
 
 (defn check-src! (src)
   (do
-    (assert= (pr-str (read-all (format-source src))) (pr-str (read-all src)))
-    (assert= (format-source (format-source src)) (format-source src))
+    (assert= (pr-str (read-all (source src))) (pr-str (read-all src)))
+    (assert= (source (source src)) (source src))
     true))
 
 (describe "formatter: tricky syntax corpus"
