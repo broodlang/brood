@@ -273,10 +273,10 @@ pub unsafe extern "C" fn brood_rt_cdr(
     };
 }
 
-/// `vector/ref` / `nth` of a dense vector by an `Int` index, writing the element to
+/// `vector-ref` / `nth` of a dense vector by an `Int` index, writing the element to
 /// `*out` and returning `0`; returns `1` (deopt to the VM) for a non-vector receiver, a
 /// non-`Int` index, or an out-of-range index — the VM then applies the exact semantics
-/// (`vector/ref`'s bounds error, or `nth`'s `default`). Reads the slab only; never
+/// (`vector-ref`'s bounds error, or `nth`'s `default`). Reads the slab only; never
 /// allocates, so it is not a safepoint (a `Handle` produced here is consumed before any
 /// collection).
 ///
@@ -307,7 +307,7 @@ pub unsafe extern "C" fn brood_rt_vector_ref(
     0
 }
 
-/// `(table/has? t k)` from JIT'd code (the `PrimOp::TableHas` lowering). Returns
+/// `(table-has? t k)` from JIT'd code (the `PrimOp::TableHas` lowering). Returns
 /// 0 = done (`*out` holds the boolean), 1 = deopt (first operand isn't a Table —
 /// the VM owns the exact type error), 2 = a real error was parked in
 /// `jit_pending_error` (dropped table / invalid key) — the arm exits via its
@@ -332,7 +332,7 @@ pub unsafe extern "C" fn brood_rt_table_has(
         return 1;
     };
     let key = words_to_val(k0, k1, k2);
-    if let Err(e) = crate::core::table::check_key("table/has?", key) {
+    if let Err(e) = crate::core::table::check_key("table-has?", key) {
         h.jit_pending_error = Some(e);
         return 2;
     }
@@ -348,7 +348,7 @@ pub unsafe extern "C" fn brood_rt_table_has(
     }
 }
 
-/// 2-arg `(table/get t k)` from JIT'd code (the `PrimOp::TableGet` lowering) — nil
+/// 2-arg `(table-get t k)` from JIT'd code (the `PrimOp::TableGet` lowering) — nil
 /// default. Same status protocol as [`brood_rt_table_has`]. The returned value is a
 /// fresh reconstruction in the caller's heap; reconstruction may allocate (a compound
 /// stored value) but **never collects** (`alloc_slot!` is a plain push; collection
@@ -374,7 +374,7 @@ pub unsafe extern "C" fn brood_rt_table_get2(
         return 1;
     };
     let key = words_to_val(k0, k1, k2);
-    if let Err(e) = crate::core::table::check_key("table/get", key) {
+    if let Err(e) = crate::core::table::check_key("table-get", key) {
         h.jit_pending_error = Some(e);
         return 2;
     }
@@ -390,7 +390,7 @@ pub unsafe extern "C" fn brood_rt_table_get2(
     }
 }
 
-/// `(table/put t k v)` from JIT'd code (the `PrimOp3::TablePut` lowering). Same
+/// `(table-put t k v)` from JIT'd code (the `PrimOp3::TablePut` lowering). Same
 /// status protocol as [`brood_rt_table_has`]; on success `*out` holds the table
 /// handle (put returns the table, for threading). Storing deep-clones the key and
 /// value out of the GC heap (`to_message`) — allocation-free on the dense int path
@@ -418,7 +418,7 @@ pub unsafe extern "C" fn brood_rt_table_put(
         return 1;
     };
     let key = words_to_val(k0, k1, k2);
-    if let Err(e) = crate::core::table::check_key("table/put", key) {
+    if let Err(e) = crate::core::table::check_key("table-put", key) {
         h.jit_pending_error = Some(e);
         return 2;
     }

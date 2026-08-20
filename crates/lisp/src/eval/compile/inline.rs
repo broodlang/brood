@@ -133,20 +133,20 @@ pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Optio
 /// Whitelisted map READ ops (return a value — safe in any position) → Table op.
 pub(crate) fn linmap_read_op(sym: Symbol) -> Option<&'static str> {
     match value::symbol_name_opt(sym)? {
-        "map-get" => Some("table/get"),
-        "map-count" => Some("table/size"),
+        "map-get" => Some("table-get"),
+        "map-count" => Some("table-count"),
         _ => None,
     }
 }
 
 /// Whitelisted map UPDATE ops (return the new map — must be consumed at a sink) → Table op.
 /// Only ops that provably store serializable values (integers, removals) are whitelisted;
-/// `map-assoc` stores arbitrary `Value`s including ropes, which `table/put`/`table/snapshot`
+/// `map-assoc` stores arbitrary `Value`s including ropes, which `table-put`/`table-snapshot`
 /// cannot serialize — so it is excluded until the Table can hold non-serializable values.
 pub(crate) fn linmap_update_op(sym: Symbol) -> Option<&'static str> {
     match value::symbol_name_opt(sym)? {
-        "map-int-add" => Some("table/incr"),
-        "map-dissoc" => Some("table/delete"),
+        "map-int-add" => Some("table-incr"),
+        "map-dissoc" => Some("table-delete"),
         _ => None,
     }
 }
@@ -809,7 +809,7 @@ pub(crate) fn icall_enabled() -> bool {
 /// ≥1 qualifying call. The *spill reserve* for the inlined chunk is added by the caller's
 /// re-derivation; this returns the slot count only.
 /// True if `node` (or any descendant) does **heap work** — builds a vector/map literal
-/// (`[..]`/`{..}`), `cons`es, or reads a structure (`nth`/`vector/ref`, `first`/`rest`).
+/// (`[..]`/`{..}`), `cons`es, or reads a structure (`nth`/`vector-ref`, `first`/`rest`).
 /// Such recursive arms must NOT be inlined. **Measured (devlog 2026-06-17):** inlining
 /// bintree's `make` (which builds `[l r]` per node) regresses bintree **~15×**
 /// (0.45s → 6.4s) and inlining its `nth`-walking `check` ~5.6× — the bigger inlined arm +
@@ -821,7 +821,7 @@ pub(crate) fn node_touches_heap(node: &Node) -> bool {
     match node {
         // Allocating literals: `[..]` (bintree's `make`), `{..}`.
         Node::Vector(_) | Node::Map(_) => true,
-        // `cons` and `nth`/`vector/ref`; the table ops reconstruct/store values.
+        // `cons` and `nth`/`vector-ref`; the table ops reconstruct/store values.
         Node::Prim2 {
             op: PrimOp::VectorRef | PrimOp::Cons | PrimOp::TableHas | PrimOp::TableGet,
             ..
@@ -961,16 +961,16 @@ pub(crate) const LEAF_INLINE_MAX_BLOCKS: usize = 8;
 /// Does `body` qualify as a spliceable **leaf**? No calls of any kind (so no tail
 /// flags to demote and no recursion), no closure creation, no `try` (its handler
 /// protocol is frame-relative), no global reads (their IC sites belong to the callee's
-/// arm), **no `table/put`** (see below), no RUNTIME-handle consts (the stored derivation
+/// arm), **no `table-put`** (see below), no RUNTIME-handle consts (the stored derivation
 /// is never rewritten by `runtime_collect` — epoch gating makes that safe, but excluding
 /// them keeps the stored bits inert), and small. Prims, locals, consts, `if`/`do`/`let`,
 /// vector/map literals are all fine.
 ///
-/// `table/put` is excluded because the inlined engine **cannot journal**: its lowering
+/// `table-put` is excluded because the inlined engine **cannot journal**: its lowering
 /// runs with `ckpt_active = inline.is_none()`, and `jit_ckpt_read` refuses the inlined
 /// engine outright, so a deopt from spliced code resumes from ip 0. That is only sound
 /// while the spliced body is effect-free — which the old list assumed by ruling out
-/// calls, on the premise that calls are where effects live. `table/put` is an effect
+/// calls, on the premise that calls are where effects live. `table-put` is an effect
 /// that is *not* a call, so splicing one let a deopt re-run it: a 200 000-iteration
 /// driver landed its counter on 200 762 even after the caller's own journal was fixed,
 /// and `BROOD_NO_LEAF_INLINE=1` was exactly 200 000.
@@ -1256,7 +1256,7 @@ pub(crate) fn leaf_inline_probe(
     };
     let (mut spliced, mut chunk, mut next_base, n) = splice(locals_max)?;
     // Does anything in the spliced chunk have an effect a from-ip-0 re-run would
-    // repeat? A completed non-tail call and a `table/put` are the two (the callee
+    // repeat? A completed non-tail call and a `table-put` are the two (the callee
     // bodies contribute neither — `leaf_body_qualifies` rejects both — so these are
     // the caller's own).
     let needs_journal = |chunk: &Chunk| {

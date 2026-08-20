@@ -2,7 +2,7 @@
 ;; The matcher is written in Brood, not Rust: a pattern->code compiler (a macro
 ;; plus expand-time helper `defn`s, exactly like the threading macros compute at
 ;; expansion time) that emits nested `if`/`let` over existing primitives —
-;; `pair?`, `first`, `rest`, `nil?`, `vector?`, `vector/ref`, `vector/size`,
+;; `pair?`, `first`, `rest`, `nil?`, `vector?`, `vector-ref`, `vector-length`,
 ;; and `%eq` (the kernel equality op, used by convention over `=` so a local
 ;; binding named `=` can't hijack a generated match). No new special form (the
 ;; `try`/`catch` precedent: a macro over primitives). One compiler serves `match`
@@ -79,9 +79,9 @@
 (defn match-member? (x xs)
   (cond (empty? xs) false (= x (first xs)) true else (match-member? x (rest xs))))
 
-(defn match-vec->list (v) (match-vec-collect v (dec (vector/size v)) nil))
+(defn match-vec->list (v) (match-vec-collect v (dec (vector-length v)) nil))
 (defn match-vec-collect (v i acc)
-  (if (< i 0) acc (match-vec-collect v (dec i) (cons (vector/ref v i) acc))))
+  (if (< i 0) acc (match-vec-collect v (dec i) (cons (vector-ref v i) acc))))
 
 ;; The variables a pattern binds. Threaded as `bound` through the compiler so a
 ;; variable that recurs becomes an equality check (non-linear patterns).
@@ -274,11 +274,11 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
       (error (str "match: unknown bytes segment spec "
                (pr-str (second seg))
                " (expected :u8/:i8/:u16[-be/-le]/…/:i64[-be/-le])"))
-      (let (w (vector/ref spec 0)
+      (let (w (vector-ref spec 0)
             reader (cond
-                     (and (vector/ref spec 1) (vector/ref spec 2)) 'bytes-int-le
-                     (vector/ref spec 1) 'bytes-int
-                     (vector/ref spec 2) 'bytes-uint-le
+                     (and (vector-ref spec 1) (vector-ref spec 2)) 'bytes-int-le
+                     (vector-ref spec 1) 'bytes-int
+                     (vector-ref spec 2) 'bytes-uint-le
                      else 'bytes-uint)
             noff (gensym "off"))
         (cond
@@ -462,7 +462,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
   (let (elems (match-vec->list pat) n (count elems))
     (when (match-member? '& elems)
       (error "match: '&' (rest) is not allowed in a vector pattern — vectors are fixed-length"))
-    `(if (and (vector? ~target) (%eq (vector/size ~target) ~n))
+    `(if (and (vector? ~target) (%eq (vector-length ~target) ~n))
        ~(match-compile-velems elems target 0 bound success fail)
        ~fail)))
 
@@ -480,7 +480,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
                     success
                     fail)
             this (match-compile p el bound inner fail))
-        `(let (~el (vector/ref ~target ~i)) ~this)))))
+        `(let (~el (vector-ref ~target ~i)) ~this)))))
 
 ;; associative (map) pattern: {:keys [a b] :or {a default}} — a map literal in
 ;; pattern position destructures a map. Each symbol in :keys binds to the value at

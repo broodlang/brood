@@ -32,7 +32,7 @@
 ;;
 ;; Hits live in a `Value::Table` (ADR-107) — the one sanctioned mutable structure,
 ;; and exactly the right one here: tests run across many green processes with
-;; separate heaps, and a table is shared by identity with atomic `table/incr`, so
+;; separate heaps, and a table is shared by identity with atomic `table-incr`, so
 ;; concurrent hits from parallel tests can't lose an update.
 
 (defmodule coverage
@@ -75,9 +75,9 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (fold (fn (acc sym)
           (let (location (source-location sym))
             (if (and (not (nil? location))
-                  (coverage-under? (vector/ref location 0) source-dirs)
+                  (coverage-under? (vector-ref location 0) source-dirs)
                   (= (type-of (eval sym)) :fn))
-              (cons {:name sym :file (vector/ref location 0) :line (vector/ref location 1)} acc)
+              (cons {:name sym :file (vector-ref location 0) :line (vector-ref location 1)} acc)
               acc)))
     nil
     (global-names)))
@@ -95,7 +95,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
             sym
             (list 'quote
               (fn (& args)
-                (table/incr hits (name sym) 1)
+                (table-incr hits (name sym) 1)
                 (apply original args)))))))
 
 (defn coverage-begin! (source-dirs)
@@ -104,7 +104,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   ;; a runtime-wide registry, not the process heap, so dropping the reference is
   ;; NOT enough to free it — a long-lived image (`nest mcp`) instrumenting more
   ;; than once would otherwise strand one store per run.
-  (when (not (nil? *coverage-hits*)) (table/drop *coverage-hits*))
+  (when (not (nil? *coverage-hits*)) (table-drop *coverage-hits*))
   (let (targets (coverage-targets source-dirs)
         hits (table))
     (def *coverage-hits* hits)
@@ -115,13 +115,13 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; --- reporting ----------------------------------------------------------------
 
 ;; One record per instrumented function: its name, file, line, and hit count.
-;; Reads the table ONCE via `table/snapshot` (atomic, O(n)) rather than probing
+;; Reads the table ONCE via `table-snapshot` (atomic, O(n)) rather than probing
 ;; per function, so the report can't tear across a still-running process.
 (defn coverage-results ()
   "The current run's coverage as a list of `{:name :file :line :hits}`, hits being the number of times the function was entered (0 = never). nil when no run was instrumented."
   (if (nil? *coverage-hits*)
     nil
-    (let (snapshot (table/snapshot *coverage-hits*))
+    (let (snapshot (table-snapshot *coverage-hits*))
       (map (fn (target)
              (assoc target :hits (or (get snapshot (name (get target :name))) 0)))
         *coverage-targets*))))
@@ -241,7 +241,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (entries)
   (fold (fn (index entry)
           (assoc index
-            (vector/ref entry 0) (fold (fn (lines l) (assoc lines l true)) {} (vector/ref entry 1))))
+            (vector-ref entry 0) (fold (fn (lines l) (assoc lines l true)) {} (vector-ref entry 1))))
     {}
     (or entries nil)))
 
@@ -254,7 +254,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; instrumented. Values stay lists: they arrive sorted and are only iterated.
 (defn- coverage-instrumented-index
   ()
-  (fold (fn (index entry) (assoc index (vector/ref entry 0) (vector/ref entry 1)))
+  (fold (fn (index entry) (assoc index (vector-ref entry 0) (vector-ref entry 1)))
     {}
     (or (coverage-safely (fn () (%coverage-instrumented))) nil)))
 
@@ -358,9 +358,9 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (edges)
   "Fold a file's `[line col taken]` edge list into `{[line col] -> {:t bool :f bool}}`."
   (fold (fn (m edge)
-          (let (key [(vector/ref edge 0) (vector/ref edge 1)]
+          (let (key [(vector-ref edge 0) (vector-ref edge 1)]
                 cur (get m key {:t false :f false}))
-            (assoc m key (if (vector/ref edge 2) (assoc cur :t true) (assoc cur :f true)))))
+            (assoc m key (if (vector-ref edge 2) (assoc cur :t true) (assoc cur :f true)))))
     {}
     edges))
 
@@ -368,14 +368,14 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   ()
   "`file -> {[line col] -> {:t :f}}` — which edges of each branch ran."
   (fold (fn (index entry)
-          (assoc index (vector/ref entry 0) (coverage-branch-edges (vector/ref entry 1))))
+          (assoc index (vector-ref entry 0) (coverage-branch-edges (vector-ref entry 1))))
     {}
     (or (coverage-safely (fn () (%coverage-branches))) nil)))
 
 (defn- coverage-branch-sites-index
   ()
   "`file -> ([line col] …)` — every instrumented branch point (the denominator)."
-  (fold (fn (index entry) (assoc index (vector/ref entry 0) (vector/ref entry 1)))
+  (fold (fn (index entry) (assoc index (vector-ref entry 0) (vector-ref entry 1)))
     {}
     (or (coverage-safely (fn () (%coverage-branch-instrumented))) nil)))
 

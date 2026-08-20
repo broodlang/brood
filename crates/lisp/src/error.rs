@@ -243,7 +243,7 @@ pub mod error_codes {
     /// Integer overflow on the checked numeric ops (`%add`/`%sub`/`%mul`/
     /// `rem`).
     pub const INT_OVERFLOW: &str = "E0041";
-    /// `vector/ref` / `substring` / similar with an out-of-range index.
+    /// `vector-ref` / `substring` / similar with an out-of-range index.
     pub const INDEX_OUT_OF_RANGE: &str = "E0042";
     /// Evaluation used more stack than the [`stack_budget`] guard allows
     /// (runaway *non-tail* recursion). Raised at the top of `eval` — which

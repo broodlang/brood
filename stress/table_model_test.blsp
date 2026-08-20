@@ -9,7 +9,7 @@
 ;; vector keys (forces dense->hashed migration MID-SEQUENCE), values at the
 ;; 61-bit tagged-int edges (+-2^60), nil/true/false (the EMPTY-vs-stored-nil
 ;; distinction), strings and nested vectors (unencodable -> migration).
-;; Includes non-idempotent table/incr — exercising the JIT deopt-resume
+;; Includes non-idempotent table-incr — exercising the JIT deopt-resume
 ;; checkpoints alongside the table itself.
 
 (defmodule table-model-stress-test (:use test))
@@ -63,28 +63,28 @@
       ;; put
       (< c 5)
         (let (s2 (lcg s1) k (gen-key s2) s3 (lcg s2) v (gen-val s3))
-          (do (table/put t k v) [s3 (assoc m k v)]))
+          (do (table-put t k v) [s3 (assoc m k v)]))
       ;; delete
       (< c 7) (let (s2 (lcg s1) k (gen-key s2))
-                (do (table/delete t k) [s2 (dissoc m k)]))
+                (do (table-delete t k) [s2 (dissoc m k)]))
       ;; incr on a dedicated int-count key space — non-idempotent, exercising the
       ;; deopt-resume checkpoints (tests/jit_deopt_effects_test.blsp is the
       ;; focused regression for the duplication bug this once caught)
       (< c 9)
         (let (s2 (lcg s1) k (rem s2 32) cur (get m k :zero))
           (if (int? cur)
-            (do (table/incr t k 1) [s2 (assoc m k (+ cur 1))])
+            (do (table-incr t k 1) [s2 (assoc m k (+ cur 1))])
             (if (= cur :zero)
-              (do (table/incr t k 1) [s2 (assoc m k 1)])
-              ;; model says non-int lives there: table/incr must throw, state unchanged
+              (do (table-incr t k 1) [s2 (assoc m k 1)])
+              ;; model says non-int lives there: table-incr must throw, state unchanged
               (do
-                (assert= (try (do (table/incr t k 1) :no-throw) (catch e :threw)) :threw)
+                (assert= (try (do (table-incr t k 1) :no-throw) (catch e :threw)) :threw)
                 [s2 m]))))
       ;; get with sentinel default — must equal the model exactly
       else
         (let (s2 (lcg s1) k (gen-key s2))
           (do
-            (assert= (table/get t k :absent) (get m k :absent))
+            (assert= (table-get t k :absent) (get m k :absent))
             [s2 m])))))
 
 (defn run-ops (t s m n)
@@ -96,15 +96,15 @@
 ;; Full agreement check: count, snapshot as a map, spot gets over the model keys.
 (defn agree! (t m)
   (do
-    (assert= (table/size t) (count m))
-    (assert= (table/snapshot t) m)
-    (fold (fn (_ k) (assert= (table/get t k :absent) (get m k :absent)))
+    (assert= (table-count t) (count m))
+    (assert= (table-snapshot t) m)
+    (fold (fn (_ k) (assert= (table-get t k :absent) (get m k :absent)))
       nil
       (keys m))))
 
 (defn one-seed (seed ops)
   (let (t (table) m (run-ops t seed {} ops))
-    (do (agree! t m) (table/drop t) true)))
+    (do (agree! t m) (table-drop t) true)))
 
 (describe "table stress: differential model"
   (test "seed 1" (is (one-seed 1 4000)))
@@ -117,34 +117,34 @@
     (let (t (table))
       (do
         ;; puts across the whole dense shape incl. nil/false values
-        (fold (fn (_ i) (table/put t i (if (= (rem i 3) 0) nil (if (= (rem i 3) 1) false (* i 7)))))
+        (fold (fn (_ i) (table-put t i (if (= (rem i 3) 0) nil (if (= (rem i 3) 1) false (* i 7)))))
           nil
           (range 5000))
-        (assert= (table/size t) 5000)
+        (assert= (table-count t) 5000)
         ; stored nil, NOT absent
-        (assert= (table/get t 0 :absent) nil)
-        (assert= (table/has? t 0) true)
-        (assert= (table/get t 1 :absent) false)
-        (assert= (table/get t 2 :absent) 14)
-        (fold (fn (_ i) (table/delete t i)) nil (range 2500))
-        (assert= (table/size t) 2500)
-        (assert= (table/has? t 100) false)
-        (table/drop t)
+        (assert= (table-get t 0 :absent) nil)
+        (assert= (table-has? t 0) true)
+        (assert= (table-get t 1 :absent) false)
+        (assert= (table-get t 2 :absent) 14)
+        (fold (fn (_ i) (table-delete t i)) nil (range 2500))
+        (assert= (table-count t) 2500)
+        (assert= (table-has? t 100) false)
+        (table-drop t)
         true)))
   (test "boundary keys and values round-trip"
     (let (t (table))
       (do
-        (table/put t 8388607 :last-dense)
-        (table/put t 8388608 :first-hashed)
-        (table/put t 0 1152921504606846975)
-        (table/put t 1 (- 0 1152921504606846976))
+        (table-put t 8388607 :last-dense)
+        (table-put t 8388608 :first-hashed)
+        (table-put t 0 1152921504606846975)
+        (table-put t 1 (- 0 1152921504606846976))
         ; migrates (62-bit)
-        (table/put t 2 1152921504606846976)
-        (assert= (table/get t 8388607) :last-dense)
-        (assert= (table/get t 8388608) :first-hashed)
-        (assert= (table/get t 0) 1152921504606846975)
-        (assert= (table/get t 1) (- 0 1152921504606846976))
-        (assert= (table/get t 2) 1152921504606846976)
-        (assert= (table/size t) 5)
-        (table/drop t)
+        (table-put t 2 1152921504606846976)
+        (assert= (table-get t 8388607) :last-dense)
+        (assert= (table-get t 8388608) :first-hashed)
+        (assert= (table-get t 0) 1152921504606846975)
+        (assert= (table-get t 1) (- 0 1152921504606846976))
+        (assert= (table-get t 2) 1152921504606846976)
+        (assert= (table-count t) 5)
+        (table-drop t)
         true))))

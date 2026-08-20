@@ -139,7 +139,7 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
 /// agree wherever control merges.
 ///
 /// **Pure-self-recursion exemption** (`self_name`): an arm whose every `Call` —
-/// tail or not — targets *itself*, with no mutating inline prim (`table/put`)
+/// tail or not — targets *itself*, with no mutating inline prim (`table-put`)
 /// and no `try`/`catch`, is effect-free by induction: a deopt's from-ip-0
 /// re-run re-executes only completed *self*-calls, which run this same pure
 /// arm (a redefinition mid-run bumps the epoch and invalidates the arm before
@@ -148,7 +148,7 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
 /// *instructions* (two self-calls per node × 819k nodes; invisible in
 /// wall-clock noise, plain in `perf stat -e instructions` and matching the
 /// `BROOD_NO_DEOPT_RESUME=1` lever). Anything else — a call to another fn or
-/// a native (where all effects live), a computed callee, `table/put`, a catch
+/// a native (where all effects live), a computed callee, `table-put`, a catch
 /// frame — keeps the exactly-once checkpoint machinery.
 pub(super) fn jit_ckpt_depth(
     code: &[Inst],
@@ -164,7 +164,7 @@ pub(super) fn jit_ckpt_depth(
             // (each arm gets the same `defn_name`). So a head match alone does not mean
             // "calls back into this same, provably effect-free arm" — a 1-arg arm calling
             // `(f v 0)` dispatches to the 2-arg arm, which may do anything, including a
-            // `table/put`. Require the argc to select THIS arm, and `self_arity` is
+            // `table-put`. Require the argc to select THIS arm, and `self_arity` is
             // `None` for an arm with optionals or a rest param (where argc → arm is not
             // 1:1), which declines the exemption rather than guessing.
             Inst::Call { head, argc, .. } => *head == Some(me) && Some(*argc) == self_arity,
@@ -220,10 +220,10 @@ pub(super) fn jit_ckpt_depth(
             Inst::Pop | Inst::SetLocal(_) => d >= 1 && merge(&mut depth, &mut work, ip + 1, d - 1),
             Inst::Prim1 { .. } => d >= 1 && merge(&mut depth, &mut work, ip + 1, d),
             Inst::Prim2 { .. } => d >= 2 && merge(&mut depth, &mut work, ip + 1, d - 1),
-            // `table/put` is the one *effect* in the boxed subset. It must be a
+            // `table-put` is the one *effect* in the boxed subset. It must be a
             // checkpoint site for the same reason a completed call is: a deopt after it
             // otherwise re-runs the arm from ip 0 on the VM and puts a second time. It
-            // is not hypothetical — before this, an arm with a `table/put` and **no**
+            // is not hypothetical — before this, an arm with a `table-put` and **no**
             // non-tail call got no journal at all (the accumulator stayed `None`), and a
             // 200 000-iteration driver landed a counter on 402 047. (Worse, the VM
             // re-run re-enters `jit_tier`, so each deopting activation put *three*
@@ -338,7 +338,7 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
             in_subset_op(op)
         }
-        // `table/put` — lowered as one runtime-callback call (brood_rt_table_put).
+        // `table-put` — lowered as one runtime-callback call (brood_rt_table_put).
         Inst::Prim3 {
             op: PrimOp3::TablePut,
             ..
@@ -474,7 +474,7 @@ pub(super) mod codegen {
         inv
     }
 
-    /// Free **global** symbols read as the *vector* operand of a `(nth …)` / `vector/ref`
+    /// Free **global** symbols read as the *vector* operand of a `(nth …)` / `vector-ref`
     /// (`Node::Prim2 { op: VectorRef, a: Global/GlobalIc }`). A global is loop-invariant
     /// within a no-call arm (only another process's `def` can change it, caught by the
     /// back-edge epoch guard), so its element base can be hoisted out of the loop exactly
@@ -554,7 +554,7 @@ pub(super) mod codegen {
     /// entry-hoisted slab base pointer (`local.pairs`/`local.vectors` are `Vec`s — a push can
     /// reallocate), so an arm containing one must not hoist those bases.
     ///
-    /// This is the *correctness* predicate. `table/get`/`table/has?` are in it because they take
+    /// This is the *correctness* predicate. `table-get`/`table-has?` are in it because they take
     /// a hashed branch for out-of-shape keys and call `from_message`, which does `alloc_pair` /
     /// `alloc_vector` per element — an arm mixing `first`/`rest` with a table read hoisted a pair
     /// base at entry and kept using it across a reallocation, a use-after-free that survived only
@@ -574,7 +574,7 @@ pub(super) mod codegen {
                     PrimOp::Cons | PrimOp::TableGet | PrimOp::TableHas | PrimOp::VectorRef
                 )
             }
-            Inst::Prim3 { .. } => true, // table/put: the store deep-copies key and value
+            Inst::Prim3 { .. } => true, // table-put: the store deep-copies key and value
             Inst::MakeVector(_) | Inst::MakeMap(_) | Inst::MakeClosure { .. } => true,
             _ => false,
         }

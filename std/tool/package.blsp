@@ -1724,8 +1724,8 @@ sha256 pin still holds."
         (let (manifest (path-join root "project.blsp")
               edit (package-edit-manifest! root
                      (fn (src) (package-manifest-add src (dep-entry-node dep))))
-              original (vector/ref edit 0)
-              written (vector/ref edit 1))
+              original (vector-ref edit 0)
+              written (vector-ref edit 1))
           (let (outcome (try
                           (do
                             (package-load-manifest manifest)

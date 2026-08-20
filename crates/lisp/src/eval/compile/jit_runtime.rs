@@ -1483,10 +1483,10 @@ pub(crate) fn jit_frame_shape_matches(arm: &CompiledArm, frame_nslots: usize) ->
 
 /// Deopt-resume checkpoint (see `CompiledArm::ckpt_slot`): decode the live frame's
 /// journal — `Some((resume_arm, resume_ip, operand_depth))` when a completed non-tail
-/// call (or `table/put`) checkpointed this activation, meaning the VM must resume THERE
+/// call (or `table-put`) checkpointed this activation, meaning the VM must resume THERE
 /// (the side effects before it already happened, exactly once). `None` ⇒ resume from ip 0,
 /// which is then effect-free by construction (everything the boxed subset executes
-/// besides calls and `table/put` is pure or idempotent).
+/// besides calls and `table-put` is pure or idempotent).
 ///
 /// **`resume_arm` is the arm whose chunk the journal's ip indexes**, which is not always
 /// the arm that was called. A journal is written by whichever engine ran the frame, and

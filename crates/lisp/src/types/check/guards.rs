@@ -248,11 +248,11 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
     // `(and …)` surface is already this shape); the `or` expansion
     // `(if g g _)` is deliberately *not* matched (a truthy `or` implies nothing
     // about its first operand). This is what lets the `match` compiler's
-    // `(if (and (vector? m) (= (vector/size m) 2)) …)` narrow `m` to a vector,
-    // so the guarded `vector/ref m i` isn't flagged against a list/other scrutinee.
+    // `(if (and (vector? m) (= (vector-length m) 2)) …)` narrow `m` to a vector,
+    // so the guarded `vector-ref m i` isn't flagged against a list/other scrutinee.
     // **`then_only`:** a falsy `and` may have failed on a later conjunct, so the
     // else-branch must NOT be narrowed to `¬E` (that was a real false positive —
-    // an else-branch `(vector/ref m i)` on a value that *is* a longer vector).
+    // an else-branch `(vector-ref m i)` on a value that *is* a longer vector).
     if head_name == kw::LET && items.len() == 3 {
         if let Some(g) = and_first_conjunct_guard(heap, items[1], items[2], ctx) {
             return Some(g);

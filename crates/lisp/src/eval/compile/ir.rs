@@ -30,10 +30,10 @@ pub enum PrimOp {
     // allocates, so it's handled in the exec arm (which has the heap) rather
     // than `prim_apply`; it accepts any operands, so it never defers on shape.
     Cons,
-    // `vector/ref` (perf): a dense-array O(1) indexed read. Like `Cons` it needs
+    // `vector-ref` (perf): a dense-array O(1) indexed read. Like `Cons` it needs
     // the heap (a slab index), so it's handled in the exec arm; the `(Vector, Int)`
     // in-bounds case runs inline, and every other shape — non-vector, non-int, or
-    // out-of-range — defers to the native `vector/ref` so its bounds error and
+    // out-of-range — defers to the native `vector-ref` so its bounds error and
     // type errors stay bit-identical. This is the per-element cost of `matmul` and
     // (through the prelude `nth`) any indexed vector walk. The JIT lowers it now
     // (`jit_plan::chunk_in_jit_subset` admits it, and an inline vector read is one of
@@ -53,7 +53,7 @@ pub enum PrimOp {
     BitAnd,
     BitOr,
     BitXor,
-    // `table/has?` / 2-arg `table/get` (perf): the Table workhorses (`sieve`'s marks,
+    // `table-has?` / 2-arg `table-get` (perf): the Table workhorses (`sieve`'s marks,
     // the regex DFA memo, counters). Like `Cons`/`VectorRef` they need the heap, so
     // they're handled in the exec arm; a non-Table first operand defers to the native
     // so type errors stay bit-identical. Removing the per-op native Call is what lets
@@ -64,7 +64,7 @@ pub enum PrimOp {
 }
 
 /// A 3-ary inlinable primitive — the `PrimOp` family's arity-3 sibling. One member
-/// today: `table/put` (the write half of the Table workhorses — `sieve`'s 2.5M marks).
+/// today: `table-put` (the write half of the Table workhorses — `sieve`'s 2.5M marks).
 /// Same discipline as `PrimOp`: the op needs the heap so it runs in the exec arm; a
 /// non-Table first operand (or a redefined head, via the epoch guard) defers to the
 /// dispatched native so errors stay bit-identical; the JIT lowers it as one runtime
@@ -78,7 +78,7 @@ pub enum PrimOp3 {
 impl PrimOp3 {
     pub(super) fn from_native_name(name: &str) -> Option<PrimOp3> {
         match name {
-            "table/put" => Some(PrimOp3::TablePut),
+            "table-put" => Some(PrimOp3::TablePut),
             _ => None,
         }
     }
@@ -139,14 +139,14 @@ impl PrimOp {
             "%div" => PrimOp::Div,
             "%quot" => PrimOp::Quot,
             "cons" => PrimOp::Cons,
-            "vector/ref" => PrimOp::VectorRef,
+            "vector-ref" => PrimOp::VectorRef,
             "max" => PrimOp::Max,
             "min" => PrimOp::Min,
             "bit-and" => PrimOp::BitAnd,
             "bit-or" => PrimOp::BitOr,
             "bit-xor" => PrimOp::BitXor,
-            "table/has?" => PrimOp::TableHas,
-            "table/get" => PrimOp::TableGet,
+            "table-has?" => PrimOp::TableHas,
+            "table-get" => PrimOp::TableGet,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,
             _ => return None,
         })
@@ -422,7 +422,7 @@ pub enum Node {
         pos: Option<Pos>,
         broot: bool,
     },
-    /// An inlined 3-ary primitive (`table/put`): args in source order; no arg-map
+    /// An inlined 3-ary primitive (`table-put`): args in source order; no arg-map
     /// (its one member is a direct native — no wrapper reordering to normalise).
     /// Same guard discipline as [`Node::Prim2`].
     Prim3 {
@@ -1101,7 +1101,7 @@ pub enum Inst {
         guard: AtomicU64,
         pos: Option<Pos>,
     },
-    /// Inlined 3-ary primitive (`table/put`): replace the top three operands with
+    /// Inlined 3-ary primitive (`table-put`): replace the top three operands with
     /// the result, or fall back to a general call on `head`. Mirrors `Node::Prim3`.
     Prim3 {
         op: PrimOp3,
