@@ -110,7 +110,14 @@ land in a later slice."
         ;; closure to git and build with zero registry contact. Empty in the common
         ;; all-registry case, where resolution is unchanged.
         direct-non-registry (map :name (filter (fn (dep) (not (package-registry-dep? dep))) deps))
-        walked (package-resolve-loop root deps {} nil lock-index (map :name deps) direct-non-registry nil)
+        walked (package-resolve-loop root
+                 deps
+                 {}
+                 nil
+                 lock-index
+                 (map :name deps)
+                 direct-non-registry
+                 nil)
         non-registry (first walked)
         registry-reqs (second walked)
         registry-entries (package-resolve-registry-closure root registry-reqs lock-index lock))

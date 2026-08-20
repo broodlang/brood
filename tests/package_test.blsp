@@ -213,10 +213,7 @@
         (pkg-git-tag ansi "v1.0.0")
         ;; greeter wants ansi from the REGISTRY (a version range, not a source pin).
         (pkg-write-project greeter
-          "greeter"
-          "greeter"
-          "(defn g () 1)"
-          " :dependencies [[ansi :version \"1.0.0\"]]")
+          "greeter" "greeter" "(defn g () 1)" " :dependencies [[ansi :version \"1.0.0\"]]")
         (let (greeter-url (pkg-git-init greeter))
           (pkg-git-tag greeter "v1.0.0")
           (pkg-write-project app "app" "main" "(defn main () 1)" "")
