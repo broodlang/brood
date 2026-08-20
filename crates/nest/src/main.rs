@@ -379,6 +379,23 @@ enum Cmd {
         /// its checksum; downloaders re-verify it.
         #[arg(long)]
         source_url: Option<String>,
+
+        /// Bump the project's own :version by this level ("patch"/"minor"/"major"),
+        /// commit the bump, then publish. Only the project's version moves, never a
+        /// dependency pin.
+        #[arg(long)]
+        bump: Option<String>,
+    },
+
+    /// Drive every sibling Brood repo in the workspace at once.
+    ///
+    /// `nest ws <action>`: list | status | check | commit "MESSAGE" | push. Discovers the
+    /// sibling repos of the current directory (a `.git` + `project.blsp`, plus `brood`).
+    Ws {
+        /// list | status | check | commit | push.
+        action: String,
+        /// The commit message (for `nest ws commit`).
+        message: Option<String>,
     },
 
     /// Search the package registry for a term (name or description).
@@ -787,9 +804,33 @@ fn run_main(cli: Cli) {
             let call = brood::introspect::call_form("package/remove-dep", &[&name]);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
         }
-        Cmd::Publish { index, source_url } => {
+        Cmd::Publish {
+            index,
+            source_url,
+            bump,
+        } => {
             require_project("publish", None);
-            cmd_publish(&mut interp, index.as_deref(), source_url.as_deref())
+            cmd_publish(
+                &mut interp,
+                index.as_deref(),
+                source_url.as_deref(),
+                bump.as_deref(),
+            )
+        }
+        // A workspace command, not a project one — it drives the SIBLING repos, so no
+        // `require_project`. The action/message reach the Brood `workspace/run`.
+        Cmd::Ws { action, message } => {
+            let msg = match message {
+                Some(m) => format!("\"{}\"", brood::introspect::escape_brood_string(&m)),
+                None => "nil".to_string(),
+            };
+            run(
+                &mut interp,
+                &format!(
+                    "(workspace/run \"{}\" {msg})",
+                    brood::introspect::escape_brood_string(&action)
+                ),
+            )
         }
         // `nest key gen` is a user-level operation (a signing key in the config dir), not a
         // project one — no `require_project`.
@@ -1429,11 +1470,23 @@ const PACKAGE_BOOTSTRAP: &str = "(project/load-config) (require-one 'package)";
 /// `nest publish [BASE-URL] [--source-url URL]` — publish this project's release to
 /// the hosted registry over HTTP. Loads the user config first so a `:registry` override
 /// applies.
-fn cmd_publish(interp: &mut Interp, index: Option<&str>, source_url: Option<&str>) {
+fn cmd_publish(
+    interp: &mut Interp,
+    index: Option<&str>,
+    source_url: Option<&str>,
+    bump: Option<&str>,
+) {
     // `package/publish` takes a PLIST (`:index` / `:source-url`), so the call is built
     // here rather than with `call_form` (which quotes every argument as a string and so
-    // cannot emit a keyword) — the same shape as `cmd_search`.
-    let mut call = String::from("(package/publish");
+    // cannot emit a keyword) — the same shape as `cmd_search`. `--bump` routes through
+    // `package/release`, which bumps the project's own version + commits it, then publishes.
+    let mut call = match bump {
+        Some(level) => format!(
+            "(package/release \"{}\"",
+            brood::introspect::escape_brood_string(level)
+        ),
+        None => String::from("(package/publish"),
+    };
     for (key, value) in [(":index", index), (":source-url", source_url)] {
         if let Some(v) = value {
             call.push_str(&format!(

@@ -2035,3 +2035,37 @@ published is refused. Backs `nest publish`."
         (println (str "package: published "
                    *project-name* " " *project-version* "."))
       else (error "package: publish failed (HTTP " status "): " (registry-error-text resp)))))
+
+(defn- semver-bump (cur level)
+  (let (p (map string->number (string/split cur "."))
+        ma (nth p 0) mi (nth p 1) pa (nth p 2))
+    (cond
+      (= level "major") (str (inc ma) ".0.0")
+      (= level "minor") (str ma "." (inc mi) ".0")
+      else (str ma "." mi "." (inc pa)))))
+
+(defn bump-version (level)
+  "Bump the project's OWN :version in project.blsp — the FIRST :version, which precedes the
+  :dependencies, so a dependency pin is never touched (the bug a hand-rolled sed once hit).
+  `level` is \"patch\" (default), \"minor\", or \"major\". Returns the new version string."
+  (let (text (file/slurp "project.blsp")
+        marker ":version \""
+        start (index-of text marker))
+    (when (< start 0) (error "package: no :version in project.blsp"))
+    (let (vstart (+ start (string/length marker))
+          vend (index-of text "\"" vstart)
+          cur (string/substring text vstart vend)
+          new (semver-bump cur (or level "patch")))
+      (file/spit "project.blsp"
+        (str (string/substring text 0 vstart) new
+          (string/substring text vend (string/length text))))
+      new)))
+
+(defn release (level & opts)
+  "`nest publish --bump LEVEL`: bump the project's own version, commit the bump, then publish.
+  The safe replacement for a hand-rolled bump-and-publish (which once bumped a dep pin)."
+  (let (new (bump-version level))
+    (run-process "git" (list "add" "project.blsp"))
+    (run-process "git" (list "commit" "-q" "-m" (str "release: v" new)))
+    (println "package: bumped to v" new)
+    (apply publish opts)))

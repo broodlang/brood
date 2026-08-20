@@ -17,8 +17,8 @@ broodlang/
   bedit/ pong/ …    apps that consume the language
 ```
 
-The tools below live in `brood/scripts/ecosystem/` (put it on your `PATH`) and
-`hive/bin/`.
+The tools are all Brood: the `nest` subcommands `nest rename`, `nest ws`, and
+`nest publish --bump`, plus `hive/bin/deploy.blsp`.
 
 ---
 
@@ -69,19 +69,19 @@ cd ../hatch && nest rename to-str ->string       # one rename, across this repo'
 ```
 
 `nest rename` is pure Brood (`std/tool/codemod.blsp`) — it rewrites whole identifiers
-only, so `map/get` never corrupts `multimap/get`. Run it per repo (or via `ws exec`).
+only, so `map/get` never corrupts `multimap/get`. Run it per repo.
 
 Then drive every repo at once with the **workspace runner** (auto-discovers the sibling
 Brood repos):
 
 ```
-ws status                 # who is dirty / unpushed
-ws check                  # nest check each project (needs the NEW brood/nest installed)
-ws commit "chore: adopt <change> (brood vX.Y.Z)"
-ws push
+nest ws status                 # who is dirty / unpushed
+nest ws check                  # nest check each project (needs the NEW brood/nest installed)
+nest ws commit "chore: adopt <change> (brood vX.Y.Z)"
+nest ws push
 ```
 
-Install the new toolchain first so `ws check` checks against it:
+Install the new toolchain first so `nest ws check` checks against it:
 
 ```
 cd brood && make install          # builds + installs brood + nest (lean runtime + dev-tools)
@@ -97,13 +97,13 @@ Some siblings are **published registry packages** (`hatch`, `store`, `store-post
 anything that depends on it), with the safe release helper:
 
 ```
-release-package ../store            # if it changed
-release-package ../hatch            # depends on store
-release-package ../store-postgres   # depends on store
-release-package ../s3
+cd ../store && nest publish --bump patch            # if it changed
+cd ../hatch && nest publish --bump patch            # depends on store
+cd ../store-postgres && nest publish --bump patch   # depends on store
+cd ../s3 && nest publish --bump patch
 ```
 
-`release-package` bumps only the project's **own** `:version` (never a dependency pin —
+`nest publish --bump` bumps only the project's **own** `:version` (never a dependency pin —
 the mistake that once shipped a `store 0.2.6` dep that did not exist), commits, pushes,
 and `nest publish`es. Releases are immutable, so a version already published is refused —
 bump again if needed.
@@ -118,11 +118,10 @@ Then update any consumer that pins a bumped package (`:version` / `:ref`) and re
 `hive` is the registry **server**, deployed to fly.io (app `brood`, `brood.fly.dev`). Its
 Docker image builds brood from a pinned `BROOD_REF`, so it must be moved to the brood
 commit that carries the change — otherwise the new hive code builds on old brood and
-breaks. The deploy script does the bump + deploy + health check:
+breaks. The deploy script (pure Brood over `run-process`) does the bump + deploy + health check:
 
 ```
-cd hive && bin/deploy            # pins BROOD_REF to ../brood HEAD, fly deploy, checks /health
-# or pin an explicit commit:  bin/deploy <brood-sha>
+cd hive && brood bin/deploy.blsp     # pins BROOD_REF to ../brood HEAD, fly deploy, checks /health
 ```
 
 hive pins its own deps (`hatch`, `store-postgres`, …) by **git commit**, not registry
@@ -138,6 +137,6 @@ The changelog page (`/changelog`) renders from the `CHANGELOG.md` baked into the
 
 1. `brood`: implement (name constants for primitives) · bump version · changelog · ADR/devlog · `nest check` · lean gate · commit + push.
 2. `make install` the new toolchain.
-3. `nest rename` the siblings · `ws check` · `ws commit` · `ws push`.
-4. `release-package` each changed registry package in dep order · update + re-lock consumers.
-5. `hive`: bump dep `:ref`s + `nest fetch` · `bin/deploy`.
+3. `nest rename` the siblings · `nest ws check` · `nest ws commit` · `nest ws push`.
+4. `nest publish --bump` each changed registry package in dep order · update + re-lock consumers.
+5. `hive`: bump dep `:ref`s + `nest fetch` · `brood bin/deploy.blsp`.
