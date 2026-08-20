@@ -274,6 +274,26 @@ pub(super) fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// auto-compaction). The live/reclaimable split is the expensive walk reported by
 /// `(runtime-collect)`, so it's not included here.
 #[cfg(feature = "dev-tools")]
+/// `(pos-stats)` — entry counts of the two source-position side tables:
+/// `:local-forms` (this process's LOCAL `form_pos`) and `:runtime-forms` (the
+/// runtime-shared `positions`). Measurement surface for the position-table cost,
+/// which the 2026-08-06 module-load breakdown put at 169 MB of a 933 MB load and
+/// 24% of load time. Per-process for the LOCAL half, runtime-wide for the other.
+#[cfg(feature = "dev-tools")]
+pub(super) fn pos_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (local, local_cap, runtime, rt_cap) = heap.pos_table_stats();
+    let (local_bytes, rt_bytes) = heap.pos_table_bytes();
+    let pairs = vec![
+        (value::kw("local-forms"), Value::int(local as i64)),
+        (value::kw("local-cap"), Value::int(local_cap as i64)),
+        (value::kw("local-bytes"), Value::int(local_bytes as i64)),
+        (value::kw("runtime-forms"), Value::int(runtime as i64)),
+        (value::kw("runtime-cap"), Value::int(rt_cap as i64)),
+        (value::kw("runtime-bytes"), Value::int(rt_bytes as i64)),
+    ];
+    Ok(heap.map_from_pairs(pairs))
+}
+
 pub(super) fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(gc_stats_map(heap))
 }

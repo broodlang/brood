@@ -41,11 +41,28 @@ cover it. And it has receded: the same debug/`BROOD_VM=0` harness now peaks **72
 (two samples) against KI-47's **996.6 MB**, back under the *original* 1 GiB cap. **Keep 2 GiB soft /
 3 GiB hard** — ~2.6× margin now; 1 GiB would leave ~1.2×. Full working in KI-47.
 
-**If you want an actual memory *reduction* next** (this closes as no-bug, so nothing is forced), the
-2026-08-06 breakdown is still the map: at 1000 modules / 933 MB, AST pairs were 220 MB, the two
-source-position side tables 169 MB (**and 24% of load time**), closure metadata 24 MB, ~55%
-unattributed to any named structure — which wants an allocation profiler before anyone promises a
-target.
+**The position tables were then measured on REAL code and are NOT the target that breakdown implied
+— written up below so nobody re-picks them.** The 2026-08-06 figures (169 MB of 933 MB = 18% of
+memory, 24% of load time) come from a synthetic corpus of 1000-line generated modules at 1.15M
+entries, whose form density is nothing like real source. On the 38-module stdlib, measured with the
+new `(pos-stats)` surface: the two tables are **1.29 MB of an 18.23 MB load — 7.1%** — and an
+ablation build that records no positions at all loads in **137 ms vs 146.5 ms, i.e. a 6.5% ceiling
+against a 0.7% base-vs-base noise floor**. Since positions cannot actually be removed (diagnostics,
+`source-location`, the LSP), any real optimisation buys a fraction of 6.5%. **Do not start here.**
+
+One genuine but small defect was found and deliberately left: the LOCAL `form_pos` keeps its
+**high-water capacity** for the process's life — `gc.rs`'s minor-collection path `retain`s in place,
+and `HashMap` never shrinks, so 8 000 live entries sat in 25 156 slots. Shrinking is *not* obviously
+right: that `retain` is itself a deliberate time fix (the comment there records that rebuilding the
+map was O(all positions recorded so far) per minor), and safe hysteresis recovers only ~219 KB, ~1%
+of load memory. Recorded, not fixed.
+
+**So the memory thread is closed at both ends** — no regression (KI-47) and no worthwhile reduction
+in the position tables. The remaining named options are unchanged: **M2 shared IC tables** (the
+option book's #5, 664 B/proc + a warm start, highest value and highest risk) and the **startup heap
+image** (the 18.5 s vs Elixir's 2.26 s target; a real project, and the devlog warns the
+cheap-sounding AOT version makes memory *worse*). The AST itself — 220 MB of that same 933 MB, the
+largest single item — is the thing the image project would actually address.
 
 **Also open, smaller:**
 
