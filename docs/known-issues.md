@@ -2714,6 +2714,47 @@ scope. An earlier attempt at `gc-collect` was even further off: it rested on a s
 **ADR-061 made false** — `eval/mod.rs` collects at *any* eval depth, so the collector was already
 running there.
 
+### ✅ The open question below is ANSWERED (2026-08-20): legitimate growth, not a regression
+
+**KI-47's stated mechanism is wrong, and the 4.8× was an apples-to-oranges comparison.**
+
+**Module count is not the driver.** The entry blamed the stdlib split ("module loading costs memory
+super-linearly here"). Tested directly — total source held constant at ~40 KB, module count varied
+1 → 12 → 48 → 120 — peak went 11.23 → 12.59 → 15.13 → 18.59 MB: **120× the modules costs 1.65×**, a
+marginal ~60 KB per module. All 89 stdlib modules therefore carry ~5.5 MB of per-module fixed cost,
+against the +905 MB that needed explaining. The 2026-08-06 module-load entry was misread: its
+*quadratic* was in **time** (the `*features*` `member?` walk, fixed by ADR-216), and it explicitly
+found memory **not** to be per-module ("10 big functions vs 100 small ones at equal line count costs
+the same or more"). `RSS ≈ 45× source bytes` is linear in *source*, and splitting a file into more
+modules barely changes source bytes.
+
+**The namespacing merge did not cause it.** `098a3316` (the commit before ADR-230) built in a
+worktree and run through the identical harness, release, both arms:
+
+| arm | pre-merge (098a3316) | HEAD (305d85d4) | change |
+|---|---|---|---|
+| VM | 424.6 MB | 443.1 MB | +4.4% |
+| tree-walker | 685.6 MB | 612.7 MB | **−11%** |
+
+On the tree-walker — *the arm that actually went red* — HEAD uses **less** memory than before the
+merge. The merge was the commit that crossed the threshold, exactly as this entry suspected, and
+none of the growth is attributable to it.
+
+**Where the 4.8× actually came from: three confounds, not growth.** The ~240 MB baseline dates from
+**2026-05-30** (`4e801546`); the 1145 MB from 2026-08-19. Different *engine* (measured today: the
+tree-walker costs **1.38×** the VM on the same suite and build), different *build* (debug vs
+release), and three months of suite growth in between. Compounded, they cover the multiplier without
+a regression.
+
+**And it has since receded.** Same harness this entry used — debug, `BROOD_VM=0`, `brood_suite_passes`
+— measured at HEAD, two samples: **726.7 MB and 757.9 MB** runner peak (mean ~742 MB, 4.3% spread)
+against this entry's **996.6 MB** on 2026-08-19. That is **−24% to −27%**, i.e. back under the
+*original* 1 GiB soft cap.
+
+**Recommendation: keep 2 GiB soft / 3 GiB hard.** At ~742 MB the current margin is ~2.6×, near the 4×
+the original sizing intended; reverting to 1 GiB would leave ~1.2× and re-trip on the next growth.
+The number was right — only its *rationale* was wrong, and that is what this note corrects.
+
 ⚠ **Open question this fix deliberately does not answer.** The rationale it replaced claimed the
 suite *"peaks ~240 MB under collection"*. The measured peak is ~4.8× that, so the raise restores a
 ~2× margin rather than the intended 4×. **Whether that growth is legitimate (the suite and the

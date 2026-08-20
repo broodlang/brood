@@ -234,8 +234,11 @@ jobs:
   # It gates on `unbound symbol` diagnostics, not exit codes — servers run until killed,
   # `node_client` wants a peer and `font-zoom` wants `--features gui`, so their exit codes are
   # environment noise, while an unbound name never is. Cheap (~1 min), so it runs on PRs too.
+  # Both directories that no other gate covers: `examples/` and the stress harnesses.
+  # Named for what it asserts — code outside the test runners still loads — so a red run
+  # here is not read as "the examples broke" when it was a stress harness.
   examples:
-    name: examples still run
+    name: examples + stress still run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -249,6 +252,28 @@ jobs:
       - name: Check the examples
         shell: bash
         run: make check-examples 2>&1 | tee examples.log
+
+      # Same gate, one directory over: `stress/` and `scripts/fuzz/stress/` are outside
+      # `make test`, `nest check`, the breakage suite and `check-examples`, so two rename
+      # waves rotted eight of their files with nothing to notice (2026-08-20). ~25 s for all
+      # 28 harnesses, so it gates every PR — which is the point: a rename should go red
+      # BEFORE it merges, not one red build later. `if: always()` so an examples failure
+      # doesn't hide a stress failure; the job still fails if either does.
+      - name: Check the stress harnesses
+        if: always()
+        shell: bash
+        run: make check-stress 2>&1 | tee stress.log
+
+      - name: Annotate the failing stress harnesses (on failure)
+        if: failure()
+        shell: bash
+        run: |
+          if [ ! -f stress.log ]; then
+            echo "::error::stress: no log — the step failed before running"
+            exit 0
+          fi
+          grep -hoE '^  FAIL +.*' stress.log | sort -u | head -25 \
+            | while IFS= read -r line; do echo "::error::stress:$line"; done || true
 
       - name: Annotate the failing examples (on failure)
         if: failure()

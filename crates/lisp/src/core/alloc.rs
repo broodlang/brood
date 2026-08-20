@@ -148,12 +148,19 @@ pub const TEST_DEFAULT_HARD: usize = 3 * 1024 * 1024 * 1024; // 3 GiB
 /// one "heads to many GB"); it is the working set. Hence the raise rather than a hunt for
 /// 7%, which a growing suite would re-cross anyway.
 ///
-/// ⚠ **The claim above that the suite "peaks ~240 MB under collection" is stale, and the
-/// gap is worth someone's attention.** The measured peak is now ~4.8× that figure, so this
-/// raise restores roughly a 2× margin, not the 4× that sizing intended. Whether that growth
-/// is legitimate (the suite and the module count both grew) or a regression is *unmeasured*
-/// — the namespace refactor is only the commit that pushed it over the line, not necessarily
-/// the commit that caused the growth. Do not read this raise as evidence the growth is fine.
+/// ✅ **Answered 2026-08-20: the growth is legitimate, and the ~240 MB comparison was
+/// apples-to-oranges.** That figure dates from 2026-05-30 and was measured on a different
+/// engine and build from the 1.145 GB above — the tree-walker costs 1.38× the VM on the same
+/// suite (measured), debug costs more than release, and three months of suite growth sit in
+/// between. The mechanism KI-47 named — module count — is refuted: with total source held
+/// constant, 120× the module count costs 1.65× peak (~60 KB/module), so all 89 stdlib modules
+/// account for ~5.5 MB of the ~905 MB in question. Nor did the namespace refactor cause it:
+/// pre-merge (098a3316) vs HEAD on an identical harness is +4.4% on the VM arm and **−11% on
+/// the tree-walker**, the very arm that went red. The peak has since receded to 726.7/757.9 MB
+/// on this exact harness (two samples, vs 996.6 MB on 2026-08-19) — under the *original* 1 GiB
+/// cap. **Keep these values anyway**: ~2.6× margin at today's peak, near the 4× intended, where
+/// 1 GiB would leave ~1.2× and re-trip. The number was right; only the rationale was wrong.
+/// Full working in `docs/known-issues.md` § KI-47.
 /// Tried and rejected first: `hibernate` per isolated test in `run-unit-fresh`. It shrinks
 /// only the *calling* process's slabs (148× on a microbenchmark) while this cap counts
 /// process-wide allocation across every green process and the shared regions, so it did not

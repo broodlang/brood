@@ -2928,6 +2928,33 @@ impl Heap {
     /// The cold loader/checker state, if this process has ever needed it. `None` is the
     /// normal case for a worker and means "empty" for every reader.
     #[inline]
+    /// Entry counts of the two source-position side tables — the LOCAL
+    /// [`Heap::form_pos`] map and the shared RUNTIME [`RuntimeCode::positions`] map.
+    /// Measurement surface for the position-table cost (they were 169 MB of a 933 MB
+    /// 1000-module load, and 24% of load time, on 2026-08-06); read by `(pos-stats)`.
+    pub(crate) fn pos_table_stats(&self) -> (usize, usize, usize, usize) {
+        let (local, local_cap) = self
+            .cold()
+            .map_or((0, 0), |c| (c.form_pos.len(), c.form_pos.capacity()));
+        let rt = self
+            .runtime
+            .positions
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        (local, local_cap, rt.len(), rt.capacity())
+    }
+
+    /// Bytes the two position tables' *own* storage occupies, derived from live
+    /// capacity rather than guessed: hashbrown lays out `(K, V)` slots in one flat
+    /// array with a control byte each, so a table costs `capacity * (size_of::<(K,V)>() + 1)`.
+    /// Excludes the `Arc<str>` filenames the values point at (shared, counted once).
+    pub(crate) fn pos_table_bytes(&self) -> (usize, usize) {
+        let (_, local_cap, _, rt_cap) = self.pos_table_stats();
+        let local_slot = std::mem::size_of::<(u64, (crate::error::Pos, Option<Arc<str>>))>() + 1;
+        let rt_slot = std::mem::size_of::<(usize, (crate::error::Pos, Option<Arc<str>>))>() + 1;
+        (local_cap * local_slot, rt_cap * rt_slot)
+    }
+
     fn cold(&self) -> Option<&ColdHeap> {
         self.cold.as_deref()
     }

@@ -2047,6 +2047,145 @@ closure (hatch, store-postgres, s3, transitive store) to git and build registry-
 never uses hive". (Route regression itself fixed in the hive repo: a mangled `:version-tarball` /
 `:version-docs` route string reverted to `:version/tarball` / `:version/docs`.)
 
+## 2026-08-20 — The rename-sweep gap, closed: a gate for `stress/` + `scripts/fuzz/stress/`
+
+Resuming after a crash, the tree was clean and six ADR-236 cleanup commits sat unpushed on top of
+0.5.0. `--ff-only` reported "up to date" because local was *ahead*, not level — and the reflog showed
+those commits had been rebased onto a newer `origin/main` **after** the devlog's green run, so the
+combined tree was unverified. It re-verified green (996/996, rustfmt, `nest check` 0 warnings,
+examples) and pushed.
+
+**CI then went red on `clippy + test`, and the gap in my own verification was the interesting part.**
+`make test` and `cargo build` do not compile `benches/`; only `cargo clippy --all-targets` does. The
+prelude split had left `parse_prelude` `include_str!`ing the monolithic `std/prelude.blsp`, which no
+longer exists. Fixed by pointing it at `brood::PRELUDE` (already `pub`) rather than a second
+hand-written copy of the nine-file list — the bench now measures the same bytes the runtime uses and
+inherits `prelude_manifest.rs`'s guarantee, so the next split cannot rot it.
+
+**Then the same rot, one directory over — and grep under-counted it.** `stress/` and
+`scripts/fuzz/stress/` are outside `make test`, `nest check`, the breakage suite and
+`check-examples`. Grepping for ADR-236's names found 3 broken files; **running them found 8**,
+because the earlier ADR-230 `string/*` wave had rotted them too:
+
+- `string-length`, `string-split`, `string-repeat`, `string-span`, `string-span-until` (5 files)
+- `format-source`, `gen-call`, `tcp-read-n`, `tcp-read-until` (3 files)
+- some **double-prefixed** (`stream/stream-to-list`, `sse/sse-frames`) — the sweep qualified a name
+  the module had also shortened
+
+Two judgment calls a blind `s///` gets wrong. **`string/repeat` must stay qualified**: the prelude's
+seq `repeat` takes its arguments in the OPPOSITE order, so a bare name would have silently computed
+the wrong thing instead of failing — the dangerous shape, working-but-wrong rather than unbound. And
+the first pass of my own regex renamed local helpers (`bench-tcp-read-until`) and printed row labels,
+stripping the disambiguator out of text a human reads — **exactly the damage the original sweep did
+to prose**, reproduced one step later by the person cleaning it up. Restored, with the labels
+qualified (`tcp/read-until`) instead.
+
+**A user-facing defect fell out of the hunt.** `(doc string/span)` ended "See also
+`string-span-until`" and `string/span-until` ended "The complement of `string-span`" — both naming
+symbols removed by ADR-230, so the cross-reference a reader types next is unbound. `display-width`
+called itself "the width-aware counterpart to `string-length`". A stale name in `doc` is a broken
+lookup, not untidy prose.
+
+**The durable fix: `scripts/check-stress.sh` + `make check-stress`, gating every PR.** Modelled
+directly on `check-examples.sh`, which exists for this same failure in `examples/`. It asserts **no
+`unbound symbol`** rather than exit 0 — these are soaks and storms that legitimately never finish
+under a gate, so their exit codes are environment noise while an unbound name never is — except
+`stress/*_test.blsp`, which are real tests, cheap, and held to actually passing (78 cases). All 28
+harnesses in **25 s**, so it runs on every PR: a rename goes red *before* it merges rather than one
+red build later. **Verified by sabotage in both branches** (reintroduce `format-source` in a
+harness, `string-length` in a test file → both FAIL, exit 1), and the annotate pipeline was tested
+against KI-39's own shape — `grep | while` under `-eo pipefail` with no match still reaches the end
+and prints nothing rather than killing the step.
+
+The CI job is renamed **`examples + stress still run`**, since a job labelled "examples still run"
+going red for a stress harness is the kind of misdirection that costs an hour.
+
+**Method note, three sightings in one session.** Every wrong turn came from a check that reported
+confidently and was not measuring what it claimed: `--ff-only` saying "up to date" about a branch
+that was ahead; `echo $?` after a pipe reporting `head`'s status instead of `rustfmt`'s (the exact
+trap 2026-08-19 recorded); a bare `nest check` at the repo root, which is not a `nest` project, exiting
+0 without the file-list form CI uses; and a `jq '.conclusion // "pending"'` filter that printed every
+in-flight job as concluded, because an unfinished job reports `""`, not `null`. Reproduce a gate with
+the gate's own invocation.
+
+## 2026-08-20 — KI-47's memory question, answered: legitimate growth, and the mechanism was wrong
+
+The handoff's flagged "start here" was whether the suite's 240 MB → 1.145 GB (4.8×) was legitimate
+or a regression. It is legitimate — and more usefully, **the comparison that produced the 4.8× was
+measuring three different things**, and the mechanism KI-47 named is refuted.
+
+**Module count is not the driver.** KI-47 blamed the stdlib split ("module loading costs memory
+super-linearly here", citing RSS ≈ 45× source bytes). But 45× source bytes is linear in *source*, and
+splitting a file into more modules barely changes source bytes. Tested directly, total source pinned
+at ~40 KB while module count went 1 → 12 → 48 → 120: peak 11.23 → 12.59 → 15.13 → 18.59 MB. **120×
+the modules costs 1.65×** — a marginal ~60 KB per module, so all 89 stdlib modules carry ~5.5 MB
+against the +905 MB needing explanation. The 2026-08-06 module-load entry had been misread: its
+quadratic was in **time** (`*features*`'s `member?` walk, fixed by ADR-216) and it explicitly found
+memory *not* per-module ("10 big functions vs 100 small ones at equal line count costs the same or
+more").
+
+**The namespacing merge is not the cause.** `098a3316` (pre-ADR-230) built in a worktree and run
+through the identical harness: **+4.4% on the VM arm, −11% on the tree-walker**. HEAD is *cheaper*
+on the arm that actually went red. The merge crossed a threshold; it did not create the load — which
+is what KI-47 itself suspected and could not check.
+
+**Where the 4.8× came from.** The ~240 MB baseline is from 2026-05-30, the 1.145 GB from 2026-08-19:
+different engine (tree-walker measured at **1.38×** the VM on the same suite and build), different
+build (debug vs release), and three months of suite growth. Those compound past the multiplier with
+no regression left to find.
+
+**And it receded.** The same harness KI-47 used (debug, `BROOD_VM=0`, `brood_suite_passes`) now peaks
+**726.7 and 757.9 MB** across two samples, against its 996.6 MB — −24% to −27%, back under the
+*original* 1 GiB cap. The 2 GiB/3 GiB values stay anyway: ~2.6× margin at today's peak versus ~1.2×
+if reverted. The number was right; the rationale was wrong, and `alloc.rs`'s comment now says so.
+
+**Method notes.** Two traps hit in the space of an hour, both this repo's documented ones. A test
+from the ADR-238 merge "failed" for me until the version banner gave it away — `brood 0.5.0
+(25477eb4)`, a **stale binary**, and `std/` is embedded at build time, so the new test was running
+against the old implementation (111/111 after a rebuild). And the first suite-memory number was taken
+before that rebuild, so it had to be discarded. Separately: a single memory sample is not a
+measurement here either — the two debug runs differ by 4.3%, which is small, but a lone 726.7 would
+have been reported as a sharper drop than the data supports.
+
+## 2026-08-20 — The source-position tables are not the memory target: 7.1%, not 18% (a negative result)
+
+Picked as the next perf item on the strength of the 2026-08-06 module-load breakdown, which put the
+two source-position side tables at **169 MB of a 933 MB load (18%) and 24% of load time** — the
+largest single *attributable* item, with a dual memory+time payoff feeding the startup goal. Measured
+on real code, both halves collapse.
+
+**New measurement surface: `(pos-stats)`** (dev-tools only, beside `gc-stats`). It reports entry
+count, capacity **and bytes** for the LOCAL `form_pos` and the runtime-shared `positions`, with bytes
+derived from live *capacity* rather than entry count — hashbrown lays `(K,V)` slots out flat with one
+control byte each, so `capacity * (size_of::<(K,V)>() + 1)` is the memory actually held. Deriving
+from `len()` would have hidden the one real defect below.
+
+**Memory, 38-module stdlib:** RUNTIME 14 012 entries / 14 336 cap / 473 KB; LOCAL 8 000 entries /
+25 156 cap / 830 KB. **1.29 MB of an 18.23 MB load = 7.1%**, against the 18% implied. The gap is the
+corpus: 2026-08-06 measured 1000-line *generated* modules at 1.15M entries, whose form density is
+nothing like real source.
+
+**Time:** an ablation build (`set_form_pos` returning early, the flag cached in a `OnceLock` so a
+per-form `var_os` could not inflate *both* arms) loads the stdlib in **137 ms vs 146.5 ms** — a
+**6.5% ceiling**, not 24%, against a **0.7%** base-vs-base noise floor measured first. And 6.5% is
+the ceiling for deleting positions outright, which is not on the table: diagnostics,
+`source-location` and the LSP all read them. A real optimisation buys a fraction of that. The
+ablation switch was removed after measuring; it was never for merge.
+
+**One real defect, deliberately not fixed.** The LOCAL `form_pos` holds its **high-water capacity**
+for the process's life: the minor-collection path in `gc.rs` `retain`s in place and `HashMap` never
+shrinks, so 8 000 live entries sat in 25 156 slots. But that `retain` is itself a deliberate time
+fix — its comment records that taking and rebuilding the map was O(all positions recorded so far)
+per minor rather than O(nursery) — so shrinking partly undoes a known win, and with safe hysteresis
+(shrink at >3x, to 2x) it recovers only ~219 KB, about **1%** of load memory. Recorded in the
+handoff rather than shipped.
+
+**The lesson is the one this session keeps re-learning.** A documented number measured on a synthetic
+corpus does not transfer to real code, and it had stood unchallenged as the obvious next optimisation.
+This is the same failure as KI-47's "module count" mechanism earlier today — a plausible figure
+re-quoted without re-measurement. Both were killed by measuring the actual workload. Note that the
+first version of this session's own handoff entry re-quoted the 18%/24% figures as the recommended
+next target; it has been corrected.
 ## 2026-08-20 — One conversion-naming convention: arrow `->` everywhere (ADR-239)
 
 Unified conversion-function naming. The tree had three spellings for "convert an X":
