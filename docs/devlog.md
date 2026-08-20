@@ -2186,3 +2186,47 @@ This is the same failure as KI-47's "module count" mechanism earlier today — a
 re-quoted without re-measurement. Both were killed by measuring the actual workload. Note that the
 first version of this session's own handoff entry re-quoted the 18%/24% figures as the recommended
 next target; it has been corrected.
+
+## 2026-08-20 — Refreshing the perf standing: the menu was being ordered off a superseded table
+
+Asked what was next on performance. The answer turned out not to need new measurement — it needed
+**reconciling two documents that disagree**, one of which nobody was consulting.
+
+`docs/runtime-frontier.md` is the option book (the *menu*); the benchmark repo's `FRONTIER.md`
+states the *position*. The menu's "current standing" is **2026-07-30**; `FRONTIER.md` was
+refreshed **2026-08-18**, after ADR-195, ADR-215, ADR-224/KI-40 and the lazy `FastLink` mirror all
+landed. They disagree in ways that change the ordering:
+
+| metric | menu (07-30) | position (08-18) |
+|---|---|---|
+| `spawn-live` | 2.42 s, 3.4× BEAM | **1.76 s, 2.5× BEAM** |
+| live process | ~5.9 KB | ~5.5 KB |
+| IC tables | 664 B → ~500 B | **896 B** — the older attribution was *"low by ~3×"* |
+
+The IC number is the one that matters: at 896 B they are the **largest single attributed item on a
+live process, bigger than the whole `Box<Process>`**, and `FRONTIER.md` makes the green-process
+floor lever 1 "by elimination". My own measurement earlier the same day (~420–600 B by hibernate
+differencing) was on a *bare parked* shell and understates the live case — worth recording as a
+reminder that this quantity is workload-dependent and the shape must be quoted with the number.
+
+**M2b corrected in two specific ways**, both verified in the source rather than argued:
+`callee_bases` is process-specific by construction (`vm_call_ic_put` assigns it from
+`vm_arm_block`, which takes `base = t.len()` — activation-order dependent), and the `arm` field
+became a **process-local `ArmHandle`** in ADR-224/KI-40 on 2026-08-13, *after* the M2b entry was
+written, precisely so the per-call clone avoids a shared refcount (3.19× on `pfib`). So the entry's
+"the semantics of sharing are settled — only the read protocol is open" no longer holds: sharing
+whole entries is blocked, and would need the entry split into shared-identity and process-local
+halves, adding indirection to the hottest interpreted call path. `FRONTIER.md` independently names
+the cheaper routes — **shrink `CallIcEntry`, or share entries for frozen callees only** — which is
+where this should go.
+
+**The banner is the actual fix.** The menu now says, at the top, that its table is superseded and
+which document to read instead. Ordering work off that stale table is how three separate targets
+were picked wrongly on this one day (KI-47's module-count mechanism, the position tables, and the
+heap image that already shipped as ADR-218). Two stale MEMORY.md index lines were corrected the
+same way — one claiming startup "needs a heap image", one claiming ~14× BEAM message latency where
+the position says 2.7–3.3×.
+
+**The recurring failure has a name now: a number that was true when written, re-quoted as a fact
+about today.** Five instances in one session. The cheap defence is a dated pointer to the
+authoritative source, which is what went in.

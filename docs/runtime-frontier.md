@@ -7,6 +7,15 @@ we have, how Erlang/Go/Pony solve the same problems, and every option with its e
 win, cost, and risk, ordered for execution. Tick items off here as they land; move
 anything measured-and-rejected to the dead-ends list at the bottom.
 
+> ⚠ **The standing table below is 2026-07-30 and is SUPERSEDED. The live position is the
+> benchmark repo's `FRONTIER.md` (refreshed 2026-08-18) — consult it first; this file is the
+> *menu*, not the position.** Reconciled 2026-08-20, and they disagree in ways that change the
+> ordering: `spawn-live` is **1.76 s / 2.5× BEAM** (not 2.42 s / 3.4×), a live process **~5.5 KB**
+> (not 5.9), and the **IC tables 896 B** — which `FRONTIER.md` records as *"low by ~3×"* in the
+> older attribution, making them the **largest single attributed item, bigger than the whole
+> `Box<Process>`**. Ordering this menu off the stale table is how three separate wrong targets got
+> picked on 2026-08-20; see that day's devlog.
+
 Current standing (**refreshed 2026-07-30** from the published run; the rest measured that
 week):
 
@@ -600,6 +609,22 @@ What this changes:
   read path, not a lock — which is the original difficulty, undiminished. What genuinely
   improved is only that the fat table has no raw-pointer hazard, so its read path can be a
   normal atomic protocol rather than a stable-address block allocator.
+
+  ⚠ **CORRECTED 2026-08-20 — "only the read protocol is open" is stale in TWO ways, both
+  verified in the source.** (1) `callee_bases` is **process-specific by construction**:
+  `vm_call_ic_put` assigns `entry.callee_bases = self.vm_arm_block(arm)` at install, and
+  `vm_arm_block` takes `base = t.len()` — i.e. it depends on the order *this* process activated
+  arms ("a shared arm gets one block per process", its own doc). The process-independence the
+  entry cites is enforced only over `callee` (movable check) and `env` (LOCAL check); it does not
+  cover this field. (2) The `arm` field became **process-local after this entry was written**:
+  ADR-224/KI-40 (2026-08-13) interposed a process-local `ArmHandle` precisely so the per-call
+  clone does not land on a shared refcount — worth **3.19×** on `pfib`. Sharing entries verbatim
+  would either re-share that `Arc` (re-entering the regression ADR-224 fixed) or need per-process
+  re-wrapping. So sharing whole entries is blocked; it would require **splitting** the entry into
+  a shared identity half and a process-local half, adding an indirection to the hottest
+  interpreted call path. **`FRONTIER.md`'s lever 1 names the cheaper routes instead — shrink
+  `CallIcEntry`, or share entries for FROZEN callees only (a sealed binding resolves
+  process-independently). Prefer those.**
 
   **Settle M2b before M3 — they overlap.** Cost it fresh before starting: worth ~500 B/process
   (measured, see the allocation profile above) (≈77 MB at 300k) plus a warm start,
