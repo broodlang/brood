@@ -76,9 +76,16 @@ fn interp_new() -> Interp {
 
 /// Parsing only — read the whole prelude into `Value`s, no evaluation. A
 /// representative chunk of real Brood source for the reader.
+///
+/// Uses the `PRELUDE` const rather than `include_str!`ing the source itself:
+/// the prelude is nine concatenated files whose order is load-bearing, and a
+/// bench with its own copy of that list silently rots the next time the split
+/// changes (which is exactly how this bench broke — it still named the
+/// pre-split `std/prelude.blsp`, and only clippy's `--all-targets` compiles
+/// benches, so nothing else noticed).
 #[divan::bench]
 fn parse_prelude(bencher: divan::Bencher) {
-    let src = include_str!("../../../std/prelude.blsp");
+    let src = brood::PRELUDE;
     bencher
         .with_inputs(Interp::new)
         .bench_refs(|interp| reader::read_all(&mut interp.heap, src).unwrap());
