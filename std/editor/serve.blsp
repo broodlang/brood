@@ -235,7 +235,7 @@ always restored on exit."
 ;; ---- client side (a GUI / any-display frontend) ------------------------------
 ;; The terminal client (above) reads input from the TTY (`term/poll`) and frames from
 ;; its mailbox — two separate streams, so it drains frames then polls the terminal. A
-;; GUI frontend is different: `gui-open` delivers window input to the *same mailbox* the
+;; GUI frontend is different: `gui/open` delivers window input to the *same mailbox* the
 ;; daemon pushes frames to (ADR-058), so both arrive interleaved. Hence a single unified
 ;; `receive` loop here, rather than the drain-then-poll split — and the client uses the
 ;; display's `:draw`/`:size`/`:enter`/`:leave`, but NOT its `:poll` (input is read off the

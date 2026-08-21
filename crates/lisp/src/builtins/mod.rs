@@ -1059,70 +1059,70 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // Points, marks, regions, search, the buffer process itself: all Brood above.
     def(
         heap,
-        "string->rope",
+        "%string->rope",
         Arity::exact(1),
         Sig::new(vec![string], rope),
         string_to_rope,
     );
     def(
         heap,
-        "rope->string",
+        "%rope->string",
         Arity::exact(1),
         Sig::new(vec![rope], string),
         rope_to_string,
     );
     def(
         heap,
-        "rope-length",
+        "%rope-length",
         Arity::exact(1),
         Sig::new(vec![rope], int),
         rope_length,
     );
     def(
         heap,
-        "rope-line-count",
+        "%rope-line-count",
         Arity::exact(1),
         Sig::new(vec![rope], int),
         rope_line_count,
     );
     def(
         heap,
-        "rope-insert",
+        "%rope-insert",
         Arity::exact(3),
         Sig::new(vec![rope, int, string], rope),
         rope_insert,
     );
     def(
         heap,
-        "rope-delete",
+        "%rope-delete",
         Arity::exact(3),
         Sig::new(vec![rope, int, int], rope),
         rope_delete,
     );
     def(
         heap,
-        "rope-slice",
+        "%rope-slice",
         Arity::exact(3),
         Sig::new(vec![rope, int, int], string),
         rope_slice,
     );
     def(
         heap,
-        "rope-line",
+        "%rope-line",
         Arity::exact(2),
         Sig::new(vec![rope, int], string),
         rope_line,
     );
     def(
         heap,
-        "rope-char->line",
+        "%rope-char->line",
         Arity::exact(2),
         Sig::new(vec![rope, int], int),
         rope_char_to_line,
     );
     def(
         heap,
-        "rope-line->char",
+        "%rope-line->char",
         Arity::exact(2),
         Sig::new(vec![rope, int], int),
         rope_line_to_char,
@@ -1136,70 +1136,70 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // valid across this runtime's processes, never sent across nodes.
     def(
         heap,
-        "tcp-connect",
+        "%tcp-connect",
         Arity::exact(2),
         Sig::new(vec![string, int], socket_ty),
         tcp_connect,
     );
     def(
         heap,
-        "tcp-listen",
+        "%tcp-listen",
         Arity::exact(2),
         Sig::new(vec![string, int], socket_ty),
         tcp_listen,
     );
     def(
         heap,
-        "tls-request",
+        "%tls-request",
         Arity::range(3, 4),
         Sig::variadic(any, socket_ty),
         tls_request,
     );
     def(
         heap,
-        "tls-listen",
+        "%tls-listen",
         Arity::exact(4),
         Sig::new(vec![string, int, string, string], socket_ty),
         tls_listen,
     );
     def(
         heap,
-        "tls-self-signed",
+        "%tls-self-signed",
         Arity::exact(1),
         Sig::new(vec![string], list_ty),
         tls_self_signed,
     );
     def(
         heap,
-        "tcp-send",
+        "%tcp-send",
         Arity::exact(2),
         Sig::new(vec![socket_ty, iolist], nil_ty),
         tcp_send,
     );
     def(
         heap,
-        "tcp-set-binary",
+        "%tcp-set-binary",
         Arity::exact(2),
         Sig::new(vec![socket_ty, bool_ty], nil_ty),
         tcp_set_binary,
     );
     def(
         heap,
-        "tcp-set-idle-timeout",
+        "%tcp-set-idle-timeout",
         Arity::exact(2),
         Sig::new(vec![socket_ty, int], nil_ty),
         tcp_set_idle_timeout,
     );
     def(
         heap,
-        "tcp-controlling-process",
+        "%tcp-controlling-process",
         Arity::exact(2),
         Sig::new(vec![socket_ty, pid_ty], nil_ty),
         tcp_controlling_process,
     );
     def(
         heap,
-        "tcp-close",
+        "%tcp-close",
         Arity::exact(1),
         Sig::new(vec![socket_ty], nil_ty),
         tcp_close,
@@ -1305,7 +1305,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "tcp-local-port",
+        "%tcp-local-port",
         Arity::exact(1),
         Sig::new(vec![socket_ty], int.union(nil_ty)),
         tcp_local_port,
@@ -1385,7 +1385,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // std/tool/observer.blsp's `gui-display` wraps an id as a display map. See gui.rs.
     def(
         heap,
-        "gui-open",
+        "%gui-open",
         Arity::range(0, 4),
         // Every optional arg is also nil-able in place (`(gui-open title nil nil
         // opts)` opens at the default size), so the params say so — the runtime
@@ -1410,91 +1410,91 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "gui-close",
+        "%gui-close",
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
         gui_close,
     );
     def(
         heap,
-        "gui-title!",
+        "%gui-title!",
         Arity::exact(2),
         Sig::new(vec![int, string], nil_ty),
         gui_title,
     );
     def(
         heap,
-        "gui-icon!",
+        "%gui-icon!",
         Arity::exact(4),
         Sig::new(vec![int, vec_ty, int, int], nil_ty),
         gui_icon,
     );
     def(
         heap,
-        "gui-focus",
+        "%gui-focus",
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
         gui_focus,
     );
     def(
         heap,
-        "gui-grab-cursor",
+        "%gui-grab-cursor",
         Arity::exact(2),
         Sig::new(vec![int, bool_ty], nil_ty),
         gui_grab_cursor,
     );
     def(
         heap,
-        "gui-fullscreen!",
+        "%gui-fullscreen!",
         Arity::exact(2),
         Sig::new(vec![int, bool_ty], nil_ty),
         gui_fullscreen,
     );
     def(
         heap,
-        "gui-maximize!",
+        "%gui-maximize!",
         Arity::exact(2),
         Sig::new(vec![int, bool_ty], nil_ty),
         gui_maximize,
     );
     def(
         heap,
-        "gui-minimize!",
+        "%gui-minimize!",
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
         gui_minimize,
     );
     def(
         heap,
-        "gui-drag-move",
+        "%gui-drag-move",
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
         gui_drag_move,
     );
     def(
         heap,
-        "gui-drag-resize",
+        "%gui-drag-resize",
         Arity::exact(2),
         Sig::new(vec![int, kw], nil_ty),
         gui_drag_resize,
     );
     def(
         heap,
-        "gui-size",
+        "%gui-size",
         Arity::exact(1),
         Sig::new(vec![int], vec_ty),
         gui_size,
     );
     def(
         heap,
-        "gui-held-key",
+        "%gui-held-key",
         Arity::exact(1),
         Sig::new(vec![int], string.union(kw).union(nil_ty)),
         gui_held_key,
     );
     def(
         heap,
-        "gui-draw",
+        "%gui-draw",
         Arity::exact(2),
         Sig::new(vec![int, vec_ty], nil_ty),
         gui_draw,
@@ -1504,7 +1504,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // per-section, within the fixed cell grid. (gui feature; error without it.)
     def(
         heap,
-        "gui-font!",
+        "%gui-font!",
         // (gui-font! spec) or (gui-font! id spec): arg 0 is a window id (int) or the
         // spec map; the optional arg 1 is the spec map when an id leads.
         Arity::range(1, 2),
@@ -1513,7 +1513,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "gui-font-register",
+        "%gui-font-register",
         Arity::exact(2),
         Sig::new(vec![kw, map_ty], kw),
         gui_font_register,
@@ -1522,7 +1522,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // grid on every edge, so a GUI app's text breathes instead of sitting flush.
     def(
         heap,
-        "gui-inset!",
+        "%gui-inset!",
         Arity::exact(1),
         Sig::new(vec![Ty::of_tags(&[Tag::Int, Tag::Float])], nil_ty),
         gui_inset,
@@ -1531,7 +1531,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // so a GUI app's padding matches its theme instead of the hardcoded default.
     def(
         heap,
-        "gui-bg!",
+        "%gui-bg!",
         Arity::exact(1),
         Sig::new(
             vec![Ty::of_tags(&[
@@ -3372,27 +3372,27 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%log2",  &["x"], "The base-2 logarithm of x. x must be positive; raises otherwise."),
     ("%log10", &["x"], "The base-10 logarithm of x. x must be positive; raises otherwise."),
     ("%f64-sqrt", &["x"], "The IEEE 754 square root of x (f64::sqrt). x must be non-negative; raises otherwise. Handles subnormals and ±0 correctly. Any number coerces to f64 first — int, float, bignum, decimal or ratio."),
-    ("string->rope", &["s"], "A rope (editor buffer text) holding the characters of string s."),
-    ("rope->string", &["r"], "The full text of rope r as a string."),
-    ("rope-length", &["r"], "The number of characters in rope r."),
-    ("rope-line-count", &["r"], "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line)."),
-    ("rope-insert", &["r", "idx", "s"], "A fresh rope with string s inserted at character index idx."),
-    ("rope-delete", &["r", "start", "end"], "A fresh rope with characters [start, end) removed."),
-    ("rope-slice", &["r", "start", "end"], "The text of characters [start, end) of rope r, as a string."),
-    ("rope-line", &["r", "n"], "The text of line n (0-based) of rope r, including any trailing newline."),
-    ("rope-char->line", &["r", "idx"], "The 0-based line index containing character idx."),
-    ("rope-line->char", &["r", "n"], "The character index where line n (0-based) begins."),
-    ("tcp-connect", &["host", "port"], "Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure."),
-    ("tcp-listen", &["host", "port"], "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket."),
-    ("tls-request", &["host", "port", "request", "ca-pem"], "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). request is any iolist (a string, bytes, or nested tree — ADR-141); the socket honors tcp-set-binary for the response. Optional ca-pem (a PEM certificate) replaces the Mozilla roots as the trust anchor — for private CAs and tls-self-signed dev servers. Returns a socket id; pair with tcp-drain. Low-level — prefer http-get."),
-    ("tls-listen", &["host", "port", "cert-pem", "key-pem"], "Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like tcp-listen, connections arrive as [:tcp-accept lsock client]; each accepted socket transparently decrypts inbound to [:tcp …] and encrypts tcp-send, so code above the transport is unchanged. Returns a socket."),
-    ("tls-self-signed", &["host"], "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it)."),
-    ("tcp-send", &["sock", "data"], "Write data to sock (blocking). data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139). A string leaf is always sent as its UTF-8 bytes, whatever the socket's mode (ADR-141); raw bytes go out as bytes values. Returns nil; throws on error."),
-    ("tcp-set-binary", &["sock", "on"], "Switch sock's INBOUND decode between text mode (default) and binary mode; outbound tcp-send is unaffected (ADR-141). In binary mode inbound [:tcp sock data] delivers data as a byte-faithful `bytes` value (not a string) — for length-prefixed / control-byte protocols like WebSocket framing or a database wire protocol. Text mode delivers a UTF-8 string. Returns nil; throws if sock is gone or a listener."),
-    ("tcp-set-idle-timeout", &["sock", "ms"], "Arm (or, with ms 0, disarm) an idle timeout on an established stream: the reactor drops the connection if no bytes move in EITHER direction for ms milliseconds, delivering [:tcp-closed] (or [:tcp-error] for a one-shot TLS client). Off by default — arm it on a connection accepting untrusted input as slow-loris protection the reactor applies even if the app forgets to close; leave it off for a legitimately long-idle stream (SSE, long-poll). Returns nil; throws if sock is gone or a listener."),
-    ("tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
-    ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
-    ("tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
+    ("%string->rope", &["s"], "A rope (editor buffer text) holding the characters of string s."),
+    ("%rope->string", &["r"], "The full text of rope r as a string."),
+    ("%rope-length", &["r"], "The number of characters in rope r."),
+    ("%rope-line-count", &["r"], "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line)."),
+    ("%rope-insert", &["r", "idx", "s"], "A fresh rope with string s inserted at character index idx."),
+    ("%rope-delete", &["r", "start", "end"], "A fresh rope with characters [start, end) removed."),
+    ("%rope-slice", &["r", "start", "end"], "The text of characters [start, end) of rope r, as a string."),
+    ("%rope-line", &["r", "n"], "The text of line n (0-based) of rope r, including any trailing newline."),
+    ("%rope-char->line", &["r", "idx"], "The 0-based line index containing character idx."),
+    ("%rope-line->char", &["r", "n"], "The character index where line n (0-based) begins."),
+    ("%tcp-connect", &["host", "port"], "Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure."),
+    ("%tcp-listen", &["host", "port"], "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket."),
+    ("%tls-request", &["host", "port", "request", "ca-pem"], "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). request is any iolist (a string, bytes, or nested tree — ADR-141); the socket honors tcp-set-binary for the response. Optional ca-pem (a PEM certificate) replaces the Mozilla roots as the trust anchor — for private CAs and tls-self-signed dev servers. Returns a socket id; pair with tcp-drain. Low-level — prefer http-get."),
+    ("%tls-listen", &["host", "port", "cert-pem", "key-pem"], "Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like tcp-listen, connections arrive as [:tcp-accept lsock client]; each accepted socket transparently decrypts inbound to [:tcp …] and encrypts tcp-send, so code above the transport is unchanged. Returns a socket."),
+    ("%tls-self-signed", &["host"], "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it)."),
+    ("%tcp-send", &["sock", "data"], "Write data to sock (blocking). data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139). A string leaf is always sent as its UTF-8 bytes, whatever the socket's mode (ADR-141); raw bytes go out as bytes values. Returns nil; throws on error."),
+    ("%tcp-set-binary", &["sock", "on"], "Switch sock's INBOUND decode between text mode (default) and binary mode; outbound tcp-send is unaffected (ADR-141). In binary mode inbound [:tcp sock data] delivers data as a byte-faithful `bytes` value (not a string) — for length-prefixed / control-byte protocols like WebSocket framing or a database wire protocol. Text mode delivers a UTF-8 string. Returns nil; throws if sock is gone or a listener."),
+    ("%tcp-set-idle-timeout", &["sock", "ms"], "Arm (or, with ms 0, disarm) an idle timeout on an established stream: the reactor drops the connection if no bytes move in EITHER direction for ms milliseconds, delivering [:tcp-closed] (or [:tcp-error] for a one-shot TLS client). Off by default — arm it on a connection accepting untrusted input as slow-loris protection the reactor applies even if the app forgets to close; leave it off for a legitimately long-idle stream (SSE, long-poll). Returns nil; throws if sock is gone or a listener."),
+    ("%tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
+    ("%tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
+    ("%tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
     ("proc-spawn", &["prog", "args", "opts"], "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be spawned."),
     ("proc-send", &["p", "data"], "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever the child's mode (ADR-141). Returns nil; throws if p is unknown/closed."),
     ("proc-set-binary", &["p", "on"], "Switch subprocess p's INBOUND decode between text mode (default) and binary mode (mirrors tcp-set-binary; outbound proc-send is unaffected, ADR-141). In binary mode inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` value (not a string) — for a child speaking a binary protocol over stdio. Returns nil; throws if p is unknown/closed."),
@@ -3566,25 +3566,25 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%term-size", &[], "The terminal size as [cols rows] in character cells."),
     ("%term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col mods] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order, [] when none — so Ctrl+wheel etc. are bindable), or nil on timeout. Always pass a finite ms."),
     ("%term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:rect row col w h face], [:cursor row col] / [:cursor row col style]. A face is a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey, the terminal's named colour) or an explicit [r g b] vector / \"#rrggbb\" hex string (a true-colour cell). [:rect …] fills a w×h cell block with the face's background (a solid panel). The optional cursor `style` is :block (default), :bar, or :underline — the steady caret shape. The in-process frontend for the display protocol; returns nil."),
-    ("gui-open", &["title?", "width?", "height?", "opts?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Optional `opts` map, the attributes fixed when the window is built: `{:decorations false}` opens a **borderless** window — no OS title bar or frame — for an app that draws its own chrome (a browser's tab strip and toolbar) and would otherwise sit under a redundant second title; `{:app-id \"my-app\"}` sets the desktop application id (Wayland `app_id`, X11 `WM_CLASS`), which the desktop matches against the installed `my-app.desktop` entry to give the window its real icon and name in the dash / alt-tab — without one it is unidentifiable and draws the desktop's generic fallback icon (on Wayland a client cannot supply icon pixels at all, so this, not gui-icon!, is how a window gets an icon there). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable; a `:press` carries a trailing 7th element, its click-chain count `[… mods n]` — 1 single, 2 double, 3 triple, … for repeated presses of the same button in the same cell within the double-click window, so double-click-to-select-word and triple-click-to-select-line are bindable; the terminal reports 1), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
-    ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
-    ("gui-title!", &["id", "text"], "Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil."),
-    ("gui-icon!", &["id", "rgba", "w", "h"], "Set window id's taskbar / title-bar icon from raw RGBA pixels: rgba is a vector of w*h*4 byte ints (0-255), row-major, 4 per pixel (red, green, blue, alpha). Needs --features gui; a silent no-op if the GUI thread never started, id isn't a live window, or the data length isn't w*h*4. Where the OS shows it depends on the platform (X11/Windows use it directly; Wayland prefers a .desktop file). Returns nil."),
-    ("gui-focus", &["id"], "Raise window id to the front and give it OS keyboard focus, un-minimising it first. Lets an app surface an already-open (singleton) window instead of opening a duplicate — e.g. `(observe)` focuses its existing window rather than spawning a second. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
-    ("gui-grab-cursor", &["id", "on"], "Confine the pointer to window id while `on` is truthy, release it otherwise — for mouse-look that shouldn't let the cursor slip out of the window and click another app. Uses the platform's `Confined` grab (cursor stays inside but keeps moving, so an absolute position-based look maps edge-to-edge), falling back to `Locked` where that's all the platform offers. Off by default; an app opts in. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
-    ("gui-fullscreen!", &["id", "on"], "Make window id borderless-fullscreen while `on` is truthy (covering the whole monitor it's on, NO title bar / decorations — distraction-free), or restore it to a normal window otherwise. For a big-but-normal window that keeps its title bar, use gui-maximize! instead. The fullscreen/restore triggers a resize, so the consumer gets the usual [:resize cols rows] message and re-renders at the new size. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
-    ("gui-maximize!", &["id", "on"], "Maximise window id while `on` is truthy (fill the screen's work area, KEEPING the title bar / decorations), or restore it to its previous size otherwise — e.g. an editor's init file opening big without going true-fullscreen. The maximise/restore triggers a resize, so the consumer gets the usual [:resize cols rows] message and re-renders at the new size. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
-    ("gui-minimize!", &["id"], "Iconify window `id`. The counterpart of gui-maximize! for an app that draws its own window controls, which a borderless window (gui-open with {:decorations false}) must."),
-    ("gui-drag-move", &["id"], "Hand window `id` to the window manager for an interactive move, for the rest of the currently-held press. What a borderless window needs to stay movable: with no OS title bar there is nothing to grab, so the app nominates a region of its own chrome (a browser's tab strip) and calls this when a press lands there. A platform that declines the gesture is a no-op, not an error."),
-    ("gui-drag-resize", &["id", "dir"], "Hand window `id` to the window manager for an interactive resize from `dir` — :north :south :east :west :north-east :north-west :south-east :south-west. The window-frame counterpart of gui-drag-move, for a borderless window that draws its own edges. A platform that declines the gesture is a no-op, not an error."),
-    ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
+    ("%gui-open", &["title?", "width?", "height?", "opts?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Optional `opts` map, the attributes fixed when the window is built: `{:decorations false}` opens a **borderless** window — no OS title bar or frame — for an app that draws its own chrome (a browser's tab strip and toolbar) and would otherwise sit under a redundant second title; `{:app-id \"my-app\"}` sets the desktop application id (Wayland `app_id`, X11 `WM_CLASS`), which the desktop matches against the installed `my-app.desktop` entry to give the window its real icon and name in the dash / alt-tab — without one it is unidentifiable and draws the desktop's generic fallback icon (on Wayland a client cannot supply icon pixels at all, so this, not gui-icon!, is how a window gets an icon there). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable; a `:press` carries a trailing 7th element, its click-chain count `[… mods n]` — 1 single, 2 double, 3 triple, … for repeated presses of the same button in the same cell within the double-click window, so double-click-to-select-word and triple-click-to-select-line are bindable; the terminal reports 1), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
+    ("%gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
+    ("%gui-title!", &["id", "text"], "Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil."),
+    ("%gui-icon!", &["id", "rgba", "w", "h"], "Set window id's taskbar / title-bar icon from raw RGBA pixels: rgba is a vector of w*h*4 byte ints (0-255), row-major, 4 per pixel (red, green, blue, alpha). Needs --features gui; a silent no-op if the GUI thread never started, id isn't a live window, or the data length isn't w*h*4. Where the OS shows it depends on the platform (X11/Windows use it directly; Wayland prefers a .desktop file). Returns nil."),
+    ("%gui-focus", &["id"], "Raise window id to the front and give it OS keyboard focus, un-minimising it first. Lets an app surface an already-open (singleton) window instead of opening a duplicate — e.g. `(observe)` focuses its existing window rather than spawning a second. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
+    ("%gui-grab-cursor", &["id", "on"], "Confine the pointer to window id while `on` is truthy, release it otherwise — for mouse-look that shouldn't let the cursor slip out of the window and click another app. Uses the platform's `Confined` grab (cursor stays inside but keeps moving, so an absolute position-based look maps edge-to-edge), falling back to `Locked` where that's all the platform offers. Off by default; an app opts in. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
+    ("%gui-fullscreen!", &["id", "on"], "Make window id borderless-fullscreen while `on` is truthy (covering the whole monitor it's on, NO title bar / decorations — distraction-free), or restore it to a normal window otherwise. For a big-but-normal window that keeps its title bar, use gui-maximize! instead. The fullscreen/restore triggers a resize, so the consumer gets the usual [:resize cols rows] message and re-renders at the new size. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
+    ("%gui-maximize!", &["id", "on"], "Maximise window id while `on` is truthy (fill the screen's work area, KEEPING the title bar / decorations), or restore it to its previous size otherwise — e.g. an editor's init file opening big without going true-fullscreen. The maximise/restore triggers a resize, so the consumer gets the usual [:resize cols rows] message and re-renders at the new size. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
+    ("%gui-minimize!", &["id"], "Iconify window `id`. The counterpart of gui-maximize! for an app that draws its own window controls, which a borderless window (gui-open with {:decorations false}) must."),
+    ("%gui-drag-move", &["id"], "Hand window `id` to the window manager for an interactive move, for the rest of the currently-held press. What a borderless window needs to stay movable: with no OS title bar there is nothing to grab, so the app nominates a region of its own chrome (a browser's tab strip) and calls this when a press lands there. A platform that declines the gesture is a no-op, not an error."),
+    ("%gui-drag-resize", &["id", "dir"], "Hand window `id` to the window manager for an interactive resize from `dir` — :north :south :east :west :north-east :north-west :south-east :south-west. The window-frame counterpart of gui-drag-move, for a borderless window that draws its own edges. A platform that declines the gesture is a no-op, not an error."),
+    ("%gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
     ("audio-beep", &["freq-hz", "ms", "vol"], "Play a short tone of freq-hz for ms milliseconds, optionally at peak amplitude vol (0..1, default ~0.18 — pass a small vol for quiet/ambient sounds). Fire-and-forget — it never blocks the caller, and overlapping beeps mix — so a game can blip from its frame loop. Synthesised on a dedicated audio thread (needs --features audio). A graceful no-op without the feature, when there's no audio device, or when muted via BROOD_AUDIO=0 or BROOD_GUI_HEADLESS. Returns nil."),
-    ("gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
-    ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it)."),
-    ("gui-font!", &["id?", "spec"], "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; (gui-font! id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."),
-    ("gui-inset!", &["px"], "Set the window content inset to px logical pixels: a blank margin before the cell grid on every window edge, so a GUI app's text breathes instead of sitting flush against the frame. Applies to every open window and the default for ones opened later; the grid loses 2*px per axis (fewer cells) and re-renders. The inset is shared by the renderer and mouse hit-testing, so clicks stay aligned. Needs --features gui. Returns nil."),
-    ("gui-bg!", &["color"], "Set the window background colour: the fill for :clear, the per-frame pre-clear, and — being outside every cell — the gui-inset! margin and the cell-grid snap remainder. So a GUI app's padding matches its own theme background instead of the hardcoded default. color is a keyword named colour, an [r g b] vector (0..255 per channel), or a \"#rrggbb\"/\"#rgb\" hex string; nil restores the default. Applies to every open window and the default for ones opened later (a pure repaint — no grid change). Needs --features gui. Returns nil."),
-    ("gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
+    ("%gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
+    ("%gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it)."),
+    ("%gui-font!", &["id?", "spec"], "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; (gui-font! id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."),
+    ("%gui-inset!", &["px"], "Set the window content inset to px logical pixels: a blank margin before the cell grid on every window edge, so a GUI app's text breathes instead of sitting flush against the frame. Applies to every open window and the default for ones opened later; the grid loses 2*px per axis (fewer cells) and re-renders. The inset is shared by the renderer and mouse hit-testing, so clicks stay aligned. Needs --features gui. Returns nil."),
+    ("%gui-bg!", &["color"], "Set the window background colour: the fill for :clear, the per-frame pre-clear, and — being outside every cell — the gui-inset! margin and the cell-grid snap remainder. So a GUI app's padding matches its own theme background instead of the hardcoded default. color is a keyword named colour, an [r g b] vector (0..255 per channel), or a \"#rrggbb\"/\"#rgb\" hex string; nil restores the default. Applies to every open window and the default for ones opened later (a pure repaint — no grid change). Needs --features gui. Returns nil."),
+    ("%gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
     ("%term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
     ("%term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
     ("%term-emit", &["ops"], "Paint inline, relative-motion render ops (for an in-place editor that must not take over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down n], [:col n], [:clear-eol], [:clear-below], [:clear-screen]. A face is a map like {:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."),

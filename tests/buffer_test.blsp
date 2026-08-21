@@ -38,7 +38,7 @@
   ;; map carrying a real rope under `:rope` (the old structural test accepted exactly
   ;; that), and a buffer is never `=` to a look-alike map.
   (test "buffer? is an identity check, not a shape check"
-    (refute (buffer? {:rope (string->rope "hello") :point 0 :mark nil}))
+    (refute (buffer? {:rope (text/from-string "hello") :point 0 :mark nil}))
     (assert= (record-id (make-buffer "x")) :editor/buffer/buffer)
     (is (record? (make-buffer "x"))))
   (test "the identity survives every op that threads the buffer"
@@ -389,7 +389,7 @@
           ; lines 0–1
           b (-> (make-buffer "a\nb\nc") (goto-char 0) set-mark (goto-char 3))
           out (map-region-lines b
-                (fn (bb l) (insert (goto-char bb (rope-line->char (buffer-rope bb) l)) "> "))))
+                (fn (bb l) (insert (goto-char bb (text/line->char (buffer-rope bb) l)) "> "))))
       (assert= (buffer-text out) "> a\n> b\nc"))))
 
 (describe "buffer mark ring"
@@ -924,7 +924,7 @@
 ;; keep the hunks that touch the region and drop the rest.
 
 (defn uir-sel (b lo hi) (assoc (goto-char b lo) :mark hi))
-(defn uir-line-start (b line) (rope-line->char (buffer-rope b) line))
+(defn uir-line-start (b line) (text/line->char (buffer-rope b) line))
 
 (describe "undo-in-region"
   ;; two edits on two different lines, most recent last

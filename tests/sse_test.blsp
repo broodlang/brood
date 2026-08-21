@@ -93,20 +93,20 @@
     (let (me (self))
       ;; a tiny server: accept, read the request, stream the head + two frames, close.
       (spawn (do
-               (let (ls (tcp-listen "127.0.0.1" 0))
-                 (send me [:port (tcp-local-port ls)])
+               (let (ls (tcp/listen "127.0.0.1" 0))
+                 (send me [:port (tcp/local-port ls)])
                  (receive
                    ([:tcp-accept ^ls c] (do
-                                          (tcp-controlling-process c (self))
+                                          (tcp/controlling-process c (self))
                                           (receive
                                             ([:tcp ^c _] (do
-                                                           (tcp-send c
+                                                           (tcp/send c
                                                              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-                                                           (tcp-send c
+                                                           (tcp/send c
                                                              "event: hello\r\ndata: world\r\n\r\n")
-                                                           (tcp-send c
+                                                           (tcp/send c
                                                              "data: {\"n\":1}\r\n\r\n")
-                                                           (tcp-close c)))
+                                                           (tcp/close c)))
                                             (after 5000 nil))))
                    (after 5000 nil)))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))

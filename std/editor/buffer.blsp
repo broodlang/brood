@@ -16,7 +16,7 @@
 ;;
 ;; Char indices are 0-based, like the rope primitives. `point` is a char index in
 ;; [0, length]; `mark` is a char index or nil. Lines are 0-based; a line's text
-;; (`buffer-line-at`) includes its trailing newline, matching `rope-line`.
+;; (`buffer-line-at`) includes its trailing newline, matching `text/line`.
 
 (defmodule editor/buffer
   "An immutable text buffer for building editors, written in Brood over the rope
@@ -53,7 +53,7 @@ never the buffer itself. Drive it with `buffer-edit` / `buffer-query`."
   (buf line)
   "The column at the end of `line` — its length excluding any trailing newline.
 Where `end-of-line` lands and the rightmost column point can hold on that line."
-  (let (lt (rope-line (get buf :rope) line))
+  (let (lt (text/line (get buf :rope) line))
     (if (string/ends-with? lt "\n") (dec (string/length lt)) (string/length lt))))
 
 ;; ---- construction -----------------------------------------------------------
@@ -72,7 +72,7 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
 (defn make-buffer (text &optional (name "*scratch*") (file nil))
   "A fresh buffer holding `text`, with point at 0, no mark, and an empty undo history.
 `name` is a label (default `\"*scratch*\"`); `file` is the backing path or nil."
-  (buffer (string->rope text) 0 nil name file () ()))
+  (buffer (text/from-string text) 0 nil name file () ()))
 
 (defn buffer? (x)
   "True if `x` is a buffer value — by record identity, not by shape."
@@ -83,7 +83,7 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
 ;; error message) is never what was wanted. `inspect` adds point/mark for debugging.
 (impl Display
   editor/buffer/buffer
-  (->string [b] (str "#<buffer " (get b :name) " " (rope-length (get b :rope)) " chars>")))
+  (->string [b] (str "#<buffer " (get b :name) " " (text/length (get b :rope)) " chars>")))
 
 (impl Inspect
   editor/buffer/buffer
@@ -91,7 +91,7 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
     (str "#<buffer "
       (get b :name)
       " "
-      (rope-length (get b :rope))
+      (text/length (get b :rope))
       " chars"
       " point="
       (get b :point)
@@ -121,7 +121,7 @@ unsaved buffer rather than erroring."
 ;; ---- reads ------------------------------------------------------------------
 
 (defn buffer-rope (buf) "The buffer's underlying rope (process-local)." (get buf :rope))
-(defn buffer-text (buf) "The buffer's full text as a string." (rope->string (get buf :rope)))
+(defn buffer-text (buf) "The buffer's full text as a string." (text/->string (get buf :rope)))
 (defn buffer-point (buf) "The cursor position (a char index)." (get buf :point))
 (defn buffer-mark (buf) "The mark (a char index), or nil if unset." (get buf :mark))
 (defn buffer-name (buf) "The buffer's name." (get buf :name))
@@ -131,33 +131,33 @@ unsaved buffer rather than erroring."
 `delete-backward-char`, `delete-region`, `replace-region`) refuse to change it.
 Unset/false on a fresh buffer (`make-buffer` builds freely)."
   (= (get buf :read-only) true))
-(defn buffer-length (buf) "The number of characters in the buffer." (rope-length (get buf :rope)))
+(defn buffer-length (buf) "The number of characters in the buffer." (text/length (get buf :rope)))
 (defn buffer-line-count (buf)
   "The number of lines in the buffer."
-  (rope-line-count (get buf :rope)))
+  (text/line-count (get buf :rope)))
 
 (defn buffer-line-at (buf line)
-  "The text of `line` (0-based), including its trailing newline (like `rope-line`)."
-  (rope-line (get buf :rope) line))
+  "The text of `line` (0-based), including its trailing newline (like `text/line`)."
+  (text/line (get buf :rope) line))
 
 (defn buffer-current-line (buf)
   "The 0-based line index that point is on."
-  (rope-char->line (get buf :rope) (get buf :point)))
+  (text/char->line (get buf :rope) (get buf :point)))
 
 (defn buffer-column (buf)
   "The 0-based column of point — characters from the start of its line."
   (let (rope (get buf :rope))
-    (- (get buf :point) (rope-line->char rope (rope-char->line rope (get buf :point))))))
+    (- (get buf :point) (text/line->char rope (text/char->line rope (get buf :point))))))
 
 (defn buffer-char-after (buf)
   "The single-character string just after point, or nil at end of buffer."
   (let (p (get buf :point))
-    (if (< p (buffer-length buf)) (rope-slice (get buf :rope) p (inc p)) nil)))
+    (if (< p (buffer-length buf)) (text/slice (get buf :rope) p (inc p)) nil)))
 
 (defn buffer-char-before (buf)
   "The single-character string just before point, or nil at start of buffer."
   (let (p (get buf :point))
-    (if (> p 0) (rope-slice (get buf :rope) (dec p) p) nil)))
+    (if (> p 0) (text/slice (get buf :rope) (dec p) p) nil)))
 
 (defn buffer-region-bounds (buf)
   "The region's char bounds as `[lo hi]` (lo ≤ hi, point and mark in either order),
@@ -171,7 +171,7 @@ or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
   (let (b (buffer-region-bounds buf))
     (if (nil? b)
       nil
-      (let ([lo hi] b) (rope-slice (get buf :rope) lo hi)))))
+      (let ([lo hi] b) (text/slice (get buf :rope) lo hi)))))
 
 ;; ---- movement (returns a fresh buffer with point moved) ---------------------
 
@@ -190,13 +190,13 @@ or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
 (defn beginning-of-line (buf)
   "Point moved to the first character of its current line."
   (let (rope (get buf :rope))
-    (goto-char buf (rope-line->char rope (rope-char->line rope (get buf :point))))))
+    (goto-char buf (text/line->char rope (text/char->line rope (get buf :point))))))
 
 (defn end-of-line (buf)
   "Point moved to the end of its current line (before the trailing newline)."
   (let (rope (get buf :rope)
-        line (rope-char->line rope (get buf :point)))
-    (goto-char buf (+ (rope-line->char rope line) (buffer-line-end-col buf line)))))
+        line (text/char->line rope (get buf :point)))
+    (goto-char buf (+ (text/line->char rope line) (buffer-line-end-col buf line)))))
 
 (defn forward-line (buf &optional (n 1))
   "Point moved `n` lines forward (negative = backward), keeping the column where
@@ -204,9 +204,9 @@ the target line is long enough. Clamps to the buffer's line range."
   (let (rope (get buf :rope)
         col (buffer-column buf)
         target (buffer-clamp 0
-                 (dec (rope-line-count rope))
-                 (+ (rope-char->line rope (get buf :point)) n))
-        line-start (rope-line->char rope target))
+                 (dec (text/line-count rope))
+                 (+ (text/char->line rope (get buf :point)) n))
+        line-start (text/line->char rope target))
     (goto-char buf (+ line-start (min col (buffer-line-end-col buf target))))))
 
 (defn backward-line (buf &optional (n 1))
@@ -301,24 +301,24 @@ blankness differs from `want-blank?`; stops at the buffer edge."
   "Point moved to the start of the next blank line after the current paragraph (end of
 buffer if none) — Emacs `forward-paragraph` (M-})."
   (let (rope (get buf :rope)
-        n (rope-line-count rope)
-        line (rope-char->line rope (get buf :point))
+        n (text/line-count rope)
+        line (text/char->line rope (get buf :point))
         ; skip leading blank lines
         afterblank (buffer-scan-lines buf line n 1 true)
         boundary (buffer-scan-lines buf afterblank n 1 false))
     ; skip the paragraph
-    (goto-char buf (if (>= boundary n) (buffer-length buf) (rope-line->char rope boundary)))))
+    (goto-char buf (if (>= boundary n) (buffer-length buf) (text/line->char rope boundary)))))
 
 (defn backward-paragraph (buf)
   "Point moved to the start of the current/previous paragraph (start of buffer if none)
 — Emacs `backward-paragraph` (M-{)."
   (let (rope (get buf :rope)
-        n (rope-line-count rope)
-        line (rope-char->line rope (get buf :point))
+        n (text/line-count rope)
+        line (text/char->line rope (get buf :point))
         ;; step back over blank lines directly above, then over the paragraph's lines.
         afterblank (buffer-scan-lines buf (dec line) n -1 true)
         start (buffer-scan-lines buf afterblank n -1 false))
-    (goto-char buf (rope-line->char rope (max 0 (if (< start 0) 0 (inc start)))))))
+    (goto-char buf (text/line->char rope (max 0 (if (< start 0) 0 (inc start)))))))
 
 ;; ---- sentence motion (M-a / M-e) --------------------------------------------
 ;; A sentence ends at `.`/`?`/`!`, any closing quotes/brackets, then whitespace or the
@@ -657,7 +657,7 @@ the diff only ever runs over the span that actually changed."
       ;; one off. Skipping it is what makes repeated calls walk backwards.
       (get (first snaps) :region-undo) (undo-region-candidate buf lo hi (rest snaps) (dec depth))
       else
-        (let (old (rope->string (get (first snaps) :rope))
+        (let (old (text/->string (get (first snaps) :rope))
               undone (undo-region-restore old text lo hi))
           (if (= undone text)
             (undo-region-candidate buf lo hi (rest snaps) (dec depth))
@@ -691,15 +691,15 @@ whole thing back."
           ;; Point is clamped; the MARK is kept so the region stays live for a repeat.
           (let ([undone tail] found
                 pushed (buffer-push-undo buf)
-                rope (string->rope undone))
+                rope (text/from-string undone))
             (assoc pushed
               :rope rope
               ;; the consumed change is dropped from history and OUR pre-state sits on
               ;; top, so a plain `undo` still takes this step back while another region
               ;; undo continues backwards through the same lines.
               :undo (cons (assoc (first (get pushed :undo)) :region-undo true) tail)
-              :point (min (get buf :point) (rope-length rope))
-              :mark (min (get buf :mark) (rope-length rope)))))))))
+              :point (min (get buf :point) (text/length rope))
+              :mark (min (get buf :mark) (text/length rope)))))))))
 
 (defn undo (buf)
   "A standalone single undo: begin a fresh run and take one step. The editor's repeat
@@ -883,7 +883,7 @@ insertion point shift with the text. Throws if `buf` is read-only."
           _ (buffer-barf-if-protected-insert buf p)
           buf (buffer-push-undo buf))
       (buffer-adjust-spans (buffer-adjust-markers (assoc buf
-                                                    :rope (rope-insert (get buf :rope) p s)
+                                                    :rope (text/insert (get buf :rope) p s)
                                                     :point (+ p (string/length s))
                                                     :mark nil)
                              :insert
@@ -904,7 +904,7 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
       (let (_ (buffer-barf-if-protected-delete buf p end)
             buf (buffer-push-undo buf))
         (buffer-adjust-spans (buffer-adjust-markers (assoc buf
-                                                      :rope (rope-delete (get buf :rope) p end)
+                                                      :rope (text/delete (get buf :rope) p end)
                                                       :mark nil)
                                :delete p end)
           :delete p end)))))
@@ -920,7 +920,7 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
       (let (_ (buffer-barf-if-protected-delete buf start p)
             buf (buffer-push-undo buf))
         (buffer-adjust-spans (buffer-adjust-markers (assoc buf
-                                                      :rope (rope-delete (get buf :rope) start p)
+                                                      :rope (text/delete (get buf :rope) start p)
                                                       :point start
                                                       :mark nil)
                                :delete start p)
@@ -941,7 +941,7 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
           (let (_ (buffer-barf-if-protected-delete buf lo hi)
                 buf (buffer-push-undo buf))
             (buffer-adjust-spans (buffer-adjust-markers (assoc buf
-                                                          :rope (rope-delete (get buf :rope) lo hi)
+                                                          :rope (text/delete (get buf :rope) lo hi)
                                                           :point lo
                                                           :mark nil)
                                    :delete lo hi)
@@ -1029,7 +1029,7 @@ line's start does **not** pull that trailing line in (Emacs's line-wise conventi
       (let ([lo hi] rb
             sl (buffer-current-line (goto-char buf lo))
             elraw (buffer-current-line (goto-char buf hi))
-            hicol (- hi (rope-line->char (buffer-rope buf) elraw)))
+            hicol (- hi (text/line->char (buffer-rope buf) elraw)))
         [sl (if (and (> elraw sl) (= hicol 0)) (dec elraw) elraw)]))))
 
 (defn- buffer-horizontal-space?

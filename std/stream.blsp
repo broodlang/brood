@@ -132,7 +132,7 @@ Call immediately after accept or connect, before any data has been read."
 
 (defn- sock-init
   (sock parent)
-  (tcp-controlling-process sock (self))
+  (tcp/controlling-process sock (self))
   (send parent [:stream-socket-ready (self)])
   (sock-loop sock nil ""))
 
@@ -166,7 +166,7 @@ Call immediately after accept or connect, before any data has been read."
                                  (sock-loop sock nil ""))
                  else (sock-loop sock r "")))
     ;; Graceful cancel
-    (:stream-close (tcp-close sock))))
+    (:stream-close (tcp/close sock))))
 
 (defn- sock-eof-loop
   (remaining)
@@ -468,5 +468,5 @@ then `:stream-eof` when done (or `[:stream-err msg]` + `:stream-eof` on error)."
              (send sink :stream-eof)))))
 
 (defn ->socket (s sock)
-  "Drain stream `s`, writing each chunk to `sock` with `tcp-send`. Returns nil."
-  (for-each (fn (chunk) (tcp-send sock chunk)) s))
+  "Drain stream `s`, writing each chunk to `sock` with `tcp/send`. Returns nil."
+  (for-each (fn (chunk) (tcp/send sock chunk)) s))

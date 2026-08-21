@@ -1138,6 +1138,14 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // The terminal seam (ADR-046): policy over the `%term-*` primitives, so raw-mode /
     // input polling / paint live under `term/*` rather than the bare language core.
     embedded_module!("term", "std/term.blsp"),
+    // Native window seam (ADR-046/080): policy over the `%gui-*` primitives → `gui/*`.
+    embedded_module!("gui", "std/gui.blsp"),
+    // The rope text-engine seam: policy over the `%rope-*` primitives → `text/*`.
+    embedded_module!("text", "std/text.blsp"),
+    // Seeded PRNG (xorshift32): public face of the prelude's `%rand-*` mechanism → `rand/*`.
+    embedded_module!("rand", "std/rand.blsp"),
+    // TLS sockets: policy over the `%tls-*` primitives → `tls/*`.
+    embedded_module!("tls", "std/net/tls.blsp"),
     // Sets as a library over maps (ADR-062): a set is a map of `element → true`,
     // so membership/elements/size reuse `contains?`/`keys`/`count`; the module
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.

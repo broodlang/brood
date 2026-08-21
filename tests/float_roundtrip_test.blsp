@@ -21,10 +21,10 @@
 (defn rt-fuzz (i seed bad)
   (if (= i 0)
     bad
-    (let (r (rand-float seed)
+    (let (r (rand/float seed)
           m (first r)
           s (second r)
-          r2 (rand-int s 40)
+          r2 (rand/int s 40)
           e (- (first r2) 20)
           s2 (second r2)
           f (* m (pow 10.0 e)))

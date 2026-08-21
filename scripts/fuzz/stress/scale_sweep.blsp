@@ -42,7 +42,7 @@
 ;; 12800 forms 18570 -> 6146 ms (3.0x). Linearity confirmed on FOUR rising bases
 ;; (4.04 / 3.99 / 3.85 / 3.94), which is the non-rising trend this header demands.
 ;; NOTE the buffer-command path (`sexp/forward` on a buffer) still pays O(n) per motion in
-;; `(buffer-text buf)` = `rope->string`, a fresh string the table can never hit; this row
+;; `(buffer-text buf)` = `text/->string`, a fresh string the table can never hit; this row
 ;; measures the shape that holds ONE text value, which is the tooling/LSP shape.
 ;; Measure the SEQUENCE — one motion looks fine at any buffer size.
 ;;

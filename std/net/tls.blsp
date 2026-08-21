@@ -1,0 +1,27 @@
+;; std/net/tls.blsp — TLS sockets: policy over the %tls-* primitives.
+;;
+;; Thin Brood wrappers over the kernel's `%tls-*` syscalls, so callers use
+;; `tls/request` etc. rather than a `%`-prefixed primitive. A TLS socket behaves
+;; like a `tcp` socket once established — inbound arrives as `[:tcp …]` messages
+;; and `tcp/send` writes outbound (transparently encrypted); only the handshake
+;; and certificate handling differ.
+
+(defmodule tls
+  "TLS sockets over the kernel's `%tls-*` primitives. `request` makes a one-shot
+HTTPS request; `listen` binds a TLS server socket from a PEM certificate chain +
+key; `self-signed` mints a dev certificate for zero-config TLS. Established
+sockets are ordinary `tcp` sockets — inbound `[:tcp …]` messages, `tcp/send`
+outbound — so code above the transport is unchanged. Policy is Brood; only the
+crypto/syscalls are Rust.")
+
+(defn request (host port request &optional ca-pem)
+  "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as `[:tcp sock data]` … `[:tcp-closed sock]` messages (or `[:tcp-error sock msg]`). request is any iolist (a string, bytes, or nested tree — ADR-141); the socket honors `tcp/set-binary` for the response. Optional ca-pem (a PEM certificate) replaces the Mozilla roots as the trust anchor — for private CAs and `tls/self-signed` dev servers. Returns a socket id; pair with `tcp/drain`. Low-level — prefer `http/get`."
+  (%tls-request host port request ca-pem))
+
+(defn listen (host port cert-pem key-pem)
+  "Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like `tcp/listen`, connections arrive as `[:tcp-accept lsock client]`; each accepted socket transparently decrypts inbound to `[:tcp …]` and encrypts `tcp/send`, so code above the transport is unchanged. Returns a socket."
+  (%tls-listen host port cert-pem key-pem))
+
+(defn self-signed (host)
+  "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns `[cert-pem key-pem]` — pass them to `tls/listen`. Not for production (clients reject a self-signed cert unless told to trust it)."
+  (%tls-self-signed host))

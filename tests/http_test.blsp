@@ -6,7 +6,7 @@
 (defmodule http-test
   (:use test)
   (:use http)
-  (:use tcp)
+  (:use tcp :exclude [send connect listen])
   (:use-internals http))
 
 (describe "http: request parsing"
@@ -97,20 +97,20 @@
       ;; then closes — so a draining client sees both before EOF (deterministic).
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls
                    (fn (req)
                      (stream-response 200
                        {"Content-Type" "text/event-stream"}
                        (fn (sock)
-                         (tcp-send sock "data: one\n\n")
-                         (tcp-send sock "data: two\n\n")
-                         (tcp-close sock))))))))
+                         (tcp/send sock "data: one\n\n")
+                         (tcp/send sock "data: two\n\n")
+                         (tcp/close sock))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (c (tcp-connect "127.0.0.1" port))
-          (tcp-send c "GET /events HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        (let (c (tcp/connect "127.0.0.1" port))
+          (tcp/send c "GET /events HTTP/1.0\r\nHost: localhost\r\n\r\n")
           (let (resp (utf8-bytes->string (drain c)))
-            (tcp-close c)
+            (tcp/close c)
             (is (includes? resp "text/event-stream"))
             (is (includes? resp "data: one"))
             (is (includes? resp "data: two"))
@@ -198,13 +198,13 @@
       ;; macro wrapping its expr in a thunk — pass the (do …), not a (fn () …).
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls (router {"/" (fn (req) (ok "<h1>brood</h1>"))})))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (c (tcp-connect "127.0.0.1" port))
-          (tcp-send c "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        (let (c (tcp/connect "127.0.0.1" port))
+          (tcp/send c "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
           (let (resp (utf8-bytes->string (drain c)))
-            (tcp-close c)
+            (tcp/close c)
             (is (includes? resp "200 OK"))
             (is (includes? resp "<h1>brood</h1>")))))))
   (test "a truncated request head (no blank line, peer drops) doesn't kill the server"
@@ -215,19 +215,19 @@
     (let (me (self))
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls (fn (req) (ok "ok"))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         ;; a partial head, then close — the worker must not crash
-        (let (bad (tcp-connect "127.0.0.1" port))
-          (tcp-send bad "GET / HTTP/1.0\r\nHost: x")
-          (tcp-close bad))
+        (let (bad (tcp/connect "127.0.0.1" port))
+          (tcp/send bad "GET / HTTP/1.0\r\nHost: x")
+          (tcp/close bad))
         (sleep 200)
         ;; the server is still alive and serves a normal request
-        (let (c (tcp-connect "127.0.0.1" port))
-          (tcp-send c "GET / HTTP/1.0\r\n\r\n")
+        (let (c (tcp/connect "127.0.0.1" port))
+          (tcp/send c "GET / HTTP/1.0\r\n\r\n")
           (let (resp (utf8-bytes->string (drain c)))
-            (tcp-close c)
+            (tcp/close c)
             (is (includes? resp "200 OK"))))))))
 
 (describe "http: a binary request body survives byte-faithfully"
@@ -239,21 +239,21 @@
       (spawn
         (do
           (let (ls (listen 0))
-            (send me [:port (tcp-local-port ls)])
+            (send me [:port (tcp/local-port ls)])
             ;; echo the body's bytes back as text so the client can verify
             (serve-loop ls
               (fn (req)
                 (text-response (pr-str (into [] (bytes->list (get req :body))))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (c (tcp-connect "127.0.0.1" port))
+        (let (c (tcp/connect "127.0.0.1" port))
           ;; raw body bytes 0xFF 0x80 0x41 ride as a `bytes` leaf in the request
           ;; iolist — no mode games; sends are mode-independent (ADR-141)
-          (tcp-send c
+          (tcp/send c
             ["POST /echo HTTP/1.0\r\nHost: localhost\r\n"
               "Content-Length: 3\r\n\r\n"
               (bytes 255 128 65)])
           (let (resp (utf8-bytes->string (drain c)))
-            (tcp-close c)
+            (tcp/close c)
             (is (includes? resp "200 OK"))
             ;; the body round-tripped as the exact bytes, not U+FFFD (65533)
             (is (includes? resp "[255 128 65]"))))))))
@@ -265,7 +265,7 @@
       ;; confirm it got *its own* response and not another connection's.
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls (fn (req) (text-response (get req :path)))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout))
             n 4)
@@ -304,7 +304,7 @@
       ;; a handler that echoes back the request's method | body | a custom header
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls
                    (fn (req)
                      (ok (str (get req :method)
@@ -323,7 +323,7 @@
     (let (me (self))
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls (fn (req) (text-response (str "got " (get req :path))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (fetch (str "http://127.0.0.1:" port "/zen")))
@@ -332,14 +332,14 @@
 
 (describe "http: https end-to-end (a TLS serve-loop + get with :ca)"
   ;; The std server needs NOTHING for TLS: serve-loop accepts on whatever
-  ;; listener it is given, and a tls-listen socket delivers the identical
+  ;; listener it is given, and a tls/listen socket delivers the identical
   ;; [:tcp-accept …] / [:tcp …] shapes with transparent en/decryption (ADR-143).
   (test "the std server serves over TLS; get fetches with a private trust anchor"
     (let (me (self))
       (spawn (do
-               (let (ck (tls-self-signed "localhost")
-                     ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
-                 (send me [:ready (tcp-local-port ls) (first ck)])
+               (let (ck (tls/self-signed "localhost")
+                     ls (tls/listen "127.0.0.1" 0 (first ck) (second ck)))
+                 (send me [:ready (tcp/local-port ls) (first ck)])
                  (serve-loop ls (router {"/" (fn (req) (ok "<h1>secure brood</h1>"))})))))
       (let (pc (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout)))
         (let (resp (fetch (str "https://localhost:" (first pc) "/")
@@ -349,9 +349,9 @@
   (test "a binary body is byte-faithful over https too"
     (let (me (self))
       (spawn (do
-               (let (ck (tls-self-signed "localhost")
-                     ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
-                 (send me [:ready (tcp-local-port ls) (first ck)])
+               (let (ck (tls/self-signed "localhost")
+                     ls (tls/listen "127.0.0.1" 0 (first ck) (second ck)))
+                 (send me [:ready (tcp/local-port ls) (first ck)])
                  (serve-loop ls
                    (fn (req)
                      (response 200
@@ -368,34 +368,34 @@
     (let (me (self))
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls (fn (req) (text-response (get req :path)))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (c (tcp-connect "127.0.0.1" port))
+        (let (c (tcp/connect "127.0.0.1" port))
           ;; three sends; the blank-line terminator straddles the 2nd/3rd chunk,
           ;; exercising the scan-from backup of (marker-length - 1) bytes
-          (tcp-send c "GET /drip HTT")
-          (tcp-send c "P/1.0\r\nHost: x\r\n\r")
-          (tcp-send c "\n")
+          (tcp/send c "GET /drip HTT")
+          (tcp/send c "P/1.0\r\nHost: x\r\n\r")
+          (tcp/send c "\n")
           (let (resp (utf8-bytes->string (drain c)))
-            (tcp-close c)
+            (tcp/close c)
             (is (includes? resp "200 OK"))
             (is (includes? resp "/drip")))))))
   (test "a head over *http-max-head-bytes* with no terminator is dropped, not buffered"
     (let (me (self))
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls (fn (req) (text-response "never"))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (c (tcp-connect "127.0.0.1" port)
+        (let (c (tcp/connect "127.0.0.1" port)
               ;; 70 KiB of header-ish bytes, never a blank line
               junk (bytes-concat (map (fn (_) "X-Junk: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n")
                                    (range 0 1750))))
-          (tcp-send c ["GET / HTTP/1.0\r\n" junk])
+          (tcp/send c ["GET / HTTP/1.0\r\n" junk])
           ;; the server gives up and closes without ever responding
           (let (got (drain c))
-            (tcp-close c)
+            (tcp/close c)
             (assert= (byte-length got) 0)))))))
 
 (describe "http: a binary RESPONSE body survives byte-faithfully (client side)"
@@ -406,7 +406,7 @@
     (let (me (self))
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls
                    (fn (req)
                      (response 200
@@ -421,7 +421,7 @@
     (let (me (self))
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls (fn (req) (text-response "héllo ☃"))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (fetch (str "http://127.0.0.1:" port "/")))
@@ -434,7 +434,7 @@
     (let (me (self))
       (spawn (do
                (let (ls (listen 0))
-                 (send me [:port (tcp-local-port ls)])
+                 (send me [:port (tcp/local-port ls)])
                  (serve-loop ls
                    (fn (req)
                      (text-response (pr-str (into [] (bytes->list (get req :body))))))))))

@@ -124,7 +124,7 @@ connection's whole life) so the framing is byte-faithful: chunks arrive as
 `bytes` values, `Content-Length` counts bytes, and a binary body round-trips
 exactly. There is no mode flip-back — outbound writes are mode-independent
 (ADR-141), so the response path needs nothing."
-  (tcp-set-binary sock true)
+  (tcp/set-binary sock true)
   (http-read-raw sock))
 
 ;; ---- parsing ----------------------------------------------------------------
@@ -225,8 +225,8 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
 (impl Response
   http/response
   (send-response [resp sock]
-    (tcp-send sock (render-response resp))
-    (tcp-close sock)
+    (tcp/send sock (render-response resp))
+    (tcp/close sock)
     nil))
 
 (defn ok (body)
@@ -249,7 +249,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
 
 (defn render-response (resp)
   "Render a response map into the HTTP/1.0 wire **iolist** (ADR-139) — hand it to
-`tcp-send`; `(bytes-concat …)` materialises it for inspection. Adds Connection:
+`tcp/send`; `(bytes-concat …)` materialises it for inspection. Adds Connection:
 close and Content-Length as the body's **byte** count (UTF-8 bytes for a string
 body — `string-length` counts codepoints and understated the length of any
 non-ASCII body, truncating it at spec-honoring clients). The `:body` may be any
@@ -296,7 +296,7 @@ whose body is written incrementally over the socket afterwards (see
 (impl Response
   http/stream-response
   (send-response [resp sock]
-    (tcp-send sock (render-head (/get resp :status 200) (or (/get resp :headers) {})))
+    (tcp/send sock (render-head (/get resp :status 200) (or (/get resp :headers) {})))
     ((/get resp :stream) sock)
     nil))
 
@@ -341,7 +341,7 @@ rather than closed after a body. An identity check on the record, not a key snif
 ;; ---- the server -------------------------------------------------------------
 (defn listen (port)
   "A listening socket on 127.0.0.1:`port` (port 0 = OS-assigned), owned by the calling process — which must be the one that runs `serve-loop` on it."
-  (tcp-listen "127.0.0.1" port))
+  (tcp/listen "127.0.0.1" port))
 
 (defn serve-loop (ls handler)
   "Accept connections on `ls` and serve each in its **own** process, forever.
@@ -351,7 +351,7 @@ runs `handler`, then loop immediately — so a slow request never blocks the acc
 loop or other connections. Shipping the `handler` closure to the worker is sound
 (closure-capturing-closure round-trips `closure_to_message`); the freshly-accepted
 socket is registered *passive* (no reader until the worker calls
-`tcp-controlling-process`), so no inbound bytes are lost in the handoff."
+`tcp/controlling-process`), so no inbound bytes are lost in the handoff."
   (receive
     ([:tcp-accept ^ls c] (spawn (http-serve-conn c handler))
       (serve-loop ls handler))))
@@ -365,17 +365,17 @@ socket is registered *passive* (no reader until the worker calls
   ;; and hands the socket to its `:stream` fn, which closes when done).
   ;;
   ;; Set binary mode BEFORE taking ownership, and for the connection's whole
-  ;; life: `tcp-controlling-process` is what starts the reader, and the reader
+  ;; life: `tcp/controlling-process` is what starts the reader, and the reader
   ;; decodes each chunk by the current flag — setting binary after the handoff
   ;; left a window where a first chunk was decoded as lossy text (the old http
   ;; binary-body flake). An accepted socket is passive until the handoff, so
   ;; nothing is read before this; and outbound writes are mode-independent
   ;; (ADR-141), so binary-for-life costs the response path nothing.
-  (tcp-set-binary c true)
-  (tcp-controlling-process c (self))
+  (tcp/set-binary c true)
+  (tcp/controlling-process c (self))
   (let (raw (read-request c))
     (if (nil? raw)
-      (tcp-close c)
+      (tcp/close c)
       ;; One dispatch: each response type knows how it reaches the socket, including
       ;; whether it closes it (a `stream-response` must not — its `:stream` fn owns it).
       (send-response (handler (parse-request raw)) c))))
@@ -385,13 +385,13 @@ socket is registered *passive* (no reader until the worker calls
   (serve-loop (listen port) handler))
 
 ;; ---- HTTP client -----------------------------------------------------------
-;; `get` works over both `http://` (plaintext, via tcp-connect) and
-;; `https://` (TLS, via tls-request). Either transport delivers the response as
+;; `get` works over both `http://` (plaintext, via tcp/connect) and
+;; `https://` (TLS, via tls/request). Either transport delivers the response as
 ;; `[:tcp sock data]` … `[:tcp-closed sock]` messages to this process, so the
 ;; collection + parsing is shared. Both transports run in binary mode, so
 ;; chunks are byte-faithful `bytes` values and a binary body (an image, an
-;; archive) round-trips exactly over http:// and https:// alike (`tls-request`
-;; takes an iolist and honors `tcp-set-binary` since ADR-143).
+;; archive) round-trips exactly over http:// and https:// alike (`tls/request`
+;; takes an iolist and honors `tcp/set-binary` since ADR-143).
 
 (defn parse-url (url)
   "Parse `url` into {:scheme :host :port :path} with HTTP defaults applied: scheme
@@ -451,7 +451,7 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
     ([:tcp ^sock d] (let (have2 (+ have (http-chunk-size d)))
                       (if (> have2 *http-max-response-bytes*)
                         (do
-                          (tcp-close sock)
+                          (tcp/close sock)
                           [:error "http: response exceeded *http-max-response-bytes*"])
                         (http-collect sock (cons d acc) have2))))
     ([:tcp-closed ^sock] [:ok (bytes-concat (reverse acc))])
@@ -478,7 +478,7 @@ yields `{:status 0 :error msg :headers {} :body #b\"\"}`. Adds Host / User-Agent
 Connection: close, and (with a body) Content-Length as the body's byte count —
 each overridable via `:headers`. Over `https://`, `opts` may also carry `:ca` —
 a PEM certificate replacing the Mozilla roots as the trust anchor (private CAs,
-`tls-self-signed` dev servers). Must run in a process (it `receive`s the
+`tls/self-signed` dev servers). Must run in a process (it `receive`s the
 response); the root process counts."
   (let (u (parse-url url)
         body (or (/get opts :body) "")
@@ -498,15 +498,15 @@ response); the root process counts."
         ;; cannot respond before it has our request, so every response chunk
         ;; arrives as byte-faithful `bytes`.
         sock (if (= (/get u :scheme) "https")
-               (let (s (tls-request (/get u :host)
+               (let (s (tls/request (/get u :host)
                          (/get u :port)
                          [head body-bytes]
                          (/get opts :ca)))
-                 (tcp-set-binary s true)
+                 (tcp/set-binary s true)
                  s)
-               (let (s (tcp-connect (/get u :host) (/get u :port)))
-                 (tcp-set-binary s true)
-                 (tcp-send s [head body-bytes])
+               (let (s (tcp/connect (/get u :host) (/get u :port)))
+                 (tcp/set-binary s true)
+                 (tcp/send s [head body-bytes])
                  s)))
     (let (result (http-collect sock nil 0))
       ;; Always close our side. The success path's peer-close already reclaimed
@@ -514,7 +514,7 @@ response); the root process counts."
       ;; path did NOT: without this, a server that accepts then stalls leaks one
       ;; fd + reactor/registry entry per request for the caller's whole life — an
       ;; fd-exhaustion DoS for any process that fetches untrusted URLs in a loop.
-      (tcp-close sock)
+      (tcp/close sock)
       (if (= (first result) :error)
         {:status 0 :error (second result) :headers {} :body #b""}
         (parse-response (second result))))))
@@ -528,7 +528,7 @@ a transport failure). Must run in a process."
 
 (defn post (url body &optional (opts {}))
   "POST `body` (a string, `bytes` value, or iolist — over https too, since
-`tls-request` takes an iolist) to `url` —
+`tls/request` takes an iolist) to `url` —
 `request` with method \"POST\". Set the content type yourself via `opts`
 `:headers`, e.g. `{:headers {\"Content-Type\" \"application/json\"}}`. Returns the
 response map (`:body` is `bytes`; see `body-text`)."

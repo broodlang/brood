@@ -590,10 +590,10 @@ pub(super) fn socket_port(who: &str, p: i64) -> Result<u16, LispError> {
 }
 
 pub(super) fn tcp_connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let host = expect_string(heap, "tcp-connect", arg(args, 0))?;
+    let host = expect_string(heap, "%tcp-connect", arg(args, 0))?;
     let port = socket_port(
-        "tcp-connect",
-        expect_int(heap, "tcp-connect", arg(args, 1))?,
+        "%tcp-connect",
+        expect_int(heap, "%tcp-connect", arg(args, 1))?,
     )?;
     let owner = crate::process::self_pid();
     match crate::net::connect(&host, port, owner) {
@@ -606,8 +606,8 @@ pub(super) fn tcp_connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 }
 
 pub(super) fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let host = expect_string(heap, "tcp-listen", arg(args, 0))?;
-    let port = socket_port("tcp-listen", expect_int(heap, "tcp-listen", arg(args, 1))?)?;
+    let host = expect_string(heap, "%tcp-listen", arg(args, 0))?;
+    let port = socket_port("%tcp-listen", expect_int(heap, "%tcp-listen", arg(args, 1))?)?;
     let owner = crate::process::self_pid();
     match crate::net::listen(&host, port, owner) {
         Ok(id) => Ok(Value::socket(id)),
@@ -619,10 +619,10 @@ pub(super) fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 }
 
 pub(super) fn tls_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let host = expect_string(heap, "tls-listen", arg(args, 0))?;
-    let port = socket_port("tls-listen", expect_int(heap, "tls-listen", arg(args, 1))?)?;
-    let cert = expect_string(heap, "tls-listen", arg(args, 2))?;
-    let key = expect_string(heap, "tls-listen", arg(args, 3))?;
+    let host = expect_string(heap, "%tls-listen", arg(args, 0))?;
+    let port = socket_port("%tls-listen", expect_int(heap, "%tls-listen", arg(args, 1))?)?;
+    let cert = expect_string(heap, "%tls-listen", arg(args, 2))?;
+    let key = expect_string(heap, "%tls-listen", arg(args, 3))?;
     let owner = crate::process::self_pid();
     match crate::net::tls_listen(&host, port, &cert, &key, owner) {
         Ok(id) => Ok(Value::socket(id)),
@@ -634,7 +634,7 @@ pub(super) fn tls_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 }
 
 pub(super) fn tls_self_signed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let host = expect_string(heap, "tls-self-signed", arg(args, 0))?.to_string();
+    let host = expect_string(heap, "%tls-self-signed", arg(args, 0))?.to_string();
     match crate::net::tls_self_signed(vec![host]) {
         Ok((cert, key)) => {
             let c = heap.alloc_string(&cert);
@@ -646,20 +646,20 @@ pub(super) fn tls_self_signed(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 }
 
 pub(super) fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let host = expect_string(heap, "tls-request", arg(args, 0))?.to_string();
+    let host = expect_string(heap, "%tls-request", arg(args, 0))?.to_string();
     let port = socket_port(
-        "tls-request",
-        expect_int(heap, "tls-request", arg(args, 1))?,
+        "%tls-request",
+        expect_int(heap, "%tls-request", arg(args, 1))?,
     )?;
     // The request is any iolist (ADR-141/143) — a string, bytes, or a nested
     // tree — flattened once here, so binary https request bodies work.
     let mut request = Vec::new();
-    flatten_iolist(heap, "tls-request", arg(args, 2), &mut request)?;
+    flatten_iolist(heap, "%tls-request", arg(args, 2), &mut request)?;
     // Optional 4th arg: a PEM trust anchor replacing the Mozilla roots for
     // this request (private CAs, tls-self-signed dev servers).
     let ca = match args.get(3) {
         Some(v) if !matches!(v, Value::Nil) => {
-            Some(expect_string(heap, "tls-request", *v)?.to_string())
+            Some(expect_string(heap, "%tls-request", *v)?.to_string())
         }
         _ => None,
     };
@@ -736,14 +736,14 @@ fn send_payload(heap: &Heap, who: &str, v: Value) -> Result<Vec<u8>, LispError> 
 }
 
 pub(super) fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_socket(heap, "tcp-send", arg(args, 0))?;
-    let out = send_payload(heap, "tcp-send", arg(args, 1))?;
+    let id = expect_socket(heap, "%tcp-send", arg(args, 0))?;
+    let out = send_payload(heap, "%tcp-send", arg(args, 1))?;
     crate::net::send(id, &out).map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
     Ok(Value::nil())
 }
 
 pub(super) fn tcp_set_binary(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_socket(heap, "tcp-set-binary", arg(args, 0))?;
+    let id = expect_socket(heap, "%tcp-set-binary", arg(args, 0))?;
     let on = !matches!(arg(args, 1), Value::Nil | Value::Bool(false));
     crate::net::set_binary(id, on)
         .map_err(|e| LispError::runtime(format!("tcp-set-binary: {}", e)))?;
@@ -751,8 +751,8 @@ pub(super) fn tcp_set_binary(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 }
 
 pub(super) fn tcp_set_idle_timeout(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_socket(heap, "tcp-set-idle-timeout", arg(args, 0))?;
-    let ms = expect_int(heap, "tcp-set-idle-timeout", arg(args, 1))?;
+    let id = expect_socket(heap, "%tcp-set-idle-timeout", arg(args, 0))?;
+    let ms = expect_int(heap, "%tcp-set-idle-timeout", arg(args, 1))?;
     if ms < 0 {
         return Err(LispError::runtime(
             "tcp-set-idle-timeout: ms must be >= 0 (0 disarms)",
@@ -764,13 +764,13 @@ pub(super) fn tcp_set_idle_timeout(args: &[Value], _: EnvId, heap: &mut Heap) ->
 }
 
 pub(super) fn tcp_controlling_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_socket(heap, "tcp-controlling-process", arg(args, 0))?;
+    let id = expect_socket(heap, "%tcp-controlling-process", arg(args, 0))?;
     let pid = match arg(args, 1) {
         Value::Pid { id, .. } => id,
         other => {
             return Err(LispError::wrong_type(
                 heap,
-                "tcp-controlling-process",
+                "%tcp-controlling-process",
                 "pid",
                 other,
             ))
@@ -782,13 +782,13 @@ pub(super) fn tcp_controlling_process(args: &[Value], _: EnvId, heap: &mut Heap)
 }
 
 pub(super) fn tcp_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_socket(heap, "tcp-close", arg(args, 0))?;
+    let id = expect_socket(heap, "%tcp-close", arg(args, 0))?;
     crate::net::close(id);
     Ok(Value::nil())
 }
 
 pub(super) fn tcp_local_port(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_socket(heap, "tcp-local-port", arg(args, 0))?;
+    let id = expect_socket(heap, "%tcp-local-port", arg(args, 0))?;
     Ok(crate::net::local_port(id)
         .map(|p| Value::int(p as i64))
         .unwrap_or(Value::nil()))
