@@ -2,8 +2,8 @@
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - Policy, not mechanism (ADR-006/048): the editor is a Brood loop over the
-;;    thin inline `term-*` seam (`term-raw-enter`/`term-raw-leave`/`term-emit`/
-;;    `term-poll`/`term-size`) plus the pure `std/editor/highlight.blsp`. The Rust side
+;;    thin inline `term-*` seam (`term/raw-enter`/`term/raw-leave`/`term/emit`/
+;;    `term/poll`/`term/size`) plus the pure `std/editor/highlight.blsp`. The Rust side
 ;;    only toggles raw mode and paints relative ops; everything an editor *does*
 ;;    — keymap, kill-ring, history, completion, layout — lives here, redefinable.
 ;;  - Pure core + thin IO (the `observe-frame` discipline): `lineedit-handle`
@@ -780,7 +780,7 @@ matched pair reversed, or a lone unmatched bracket in the error face."
   ()
   "The terminal width in columns, with a sane fallback when the terminal reports no
 size (e.g. a pty with no winsize), so layout never collapses to a 1-column window."
-  (let ([c r] (term-size)) (if (< c 1) 80 c)))
+  (let ([c r] (term/size)) (if (< c 1) 80 c)))
 
 (defn lineedit-display-prompt (state)
   "The prompt to show for `state`: the `(reverse-i-search)\`query':` prompt while
@@ -851,7 +851,7 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
         tail (if (= nbelow 0)
                (list [:col cursor-col])
                (append below (list [:up nbelow] [:col cursor-col]))))
-    (term-emit (into [] (append head tail)))
+    (term/emit (into [] (append head tail)))
     (assoc st :last-row 0)))
 
 ;; check-allow: deliberately non-tail — depth = lines of the input being edited.
@@ -916,7 +916,7 @@ tested in isolation."
   "Repaint a multi-line form (emit `lineedit-multi-ops`), and record the cursor row in
 `:last-row` so the next render moves back up to the block top before clearing."
   (do
-    (term-emit (into [] (lineedit-multi-ops st)))
+    (term/emit (into [] (lineedit-multi-ops st)))
     (let ([cur-row _] (lineedit-cursor-rc (get st :text) (get st :point)))
       (assoc st :last-row cur-row))))
 
@@ -943,7 +943,7 @@ lines; moves up over any leftover render block first."
         base (string/length prefix)
         full (str prefix text)
         lines (string/split text "\n"))
-    (term-emit (into []
+    (term/emit (into []
                  (append (if (> prev-row 0) (list [:up prev-row]) '())
                    (list [:cr] [:clear-below])
                    (lineedit-multi-line-ops lines 0 0 base full '() prompt cont)
@@ -957,7 +957,7 @@ lines; moves up over any leftover render block first."
 once. Stops as soon as the read is `:done`."
   (if (get state :done)
     state
-    (let (k (term-poll 0))
+    (let (k (term/poll 0))
       (if (nil? k) state (lineedit-drain (lineedit-handle state k))))))
 
 (defn- lineedit-finish
@@ -976,7 +976,7 @@ map for `repl-read-eval` — `{:line <str|nil> :eof :cancel}`."
   (state)
   "Block for the next key (re-polling on idle without redrawing), then handle +
 drain it and either finish or loop with the new state."
-  (let (k (term-poll 250))
+  (let (k (term/poll 250))
     (if (nil? k)
       (lineedit-await state)
       (let (next (lineedit-drain (lineedit-handle state k)))
@@ -992,7 +992,7 @@ updated `:last-row` so the next repaint finds the block top), then wait for inpu
 Tail-recursive via `--await`."
   (let (s1 (lineedit-reflow state)
         st (if (get s1 :clear)
-             (do (term-emit [[:clear-screen]]) (assoc s1 :clear nil :last-row 0))
+             (do (term/emit [[:clear-screen]]) (assoc s1 :clear nil :last-row 0))
              s1)
         st2 (lineedit-render st))
     (lineedit-await st2)))
@@ -1007,9 +1007,9 @@ multi-line editing: `:cont-prompt` for continuation lines and `:complete?` (a
 multi-line form is edited + repainted in place (bracket matches light up across lines).
 The terminal is restored even if rendering raises (the caller must be on a TTY)."
   (do
-    (term-raw-enter)
+    (term/raw-enter)
     (let (result (try
                    (lineedit-loop (lineedit-init prompt prefix history opts))
-                   (catch e (do (term-raw-leave) (throw e)))))
-      (term-raw-leave)
+                   (catch e (do (term/raw-leave) (throw e)))))
+      (term/raw-leave)
       result)))

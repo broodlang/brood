@@ -122,7 +122,7 @@ pub(super) fn term_size(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// would pin a worker (native blocking can't be preempted) — hence finite.
 pub(super) fn term_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use crossterm::event::{poll, read, Event, KeyEventKind};
-    let ms = expect_int(heap, "term-poll", arg(args, 0))?.max(0) as u64;
+    let ms = expect_int(heap, "%term-poll", arg(args, 0))?.max(0) as u64;
     if poll(std::time::Duration::from_millis(ms)).map_err(term_err)? {
         match read().map_err(term_err)? {
             // Ignore key *release* events (reported on some platforms with the
@@ -325,7 +325,7 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
     use crossterm::terminal::{Clear, ClearType};
 
-    let parsed = frame_ops(heap, arg(args, 0), "term-draw", "vector (a frame)")?;
+    let parsed = frame_ops(heap, arg(args, 0), "%term-draw", "vector (a frame)")?;
     let clear_t = value::intern("clear");
     let text_t = value::intern("text");
     let cursor_t = value::intern("cursor");
@@ -341,10 +341,10 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         } else if tag == rect_t {
             // [:rect row col w h face] — fill the block by printing `w` spaces in the
             // face on each of the `h` rows, so the face `:bg` (or `:reverse`) shows.
-            let row = expect_int(heap, "term-draw", arg(&parts, 1))?;
-            let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
-            let w = expect_int(heap, "term-draw", arg(&parts, 3))?.max(0) as usize;
-            let h = expect_int(heap, "term-draw", arg(&parts, 4))?;
+            let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
+            let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
+            let w = expect_int(heap, "%term-draw", arg(&parts, 3))?.max(0) as usize;
+            let h = expect_int(heap, "%term-draw", arg(&parts, 4))?;
             let face = parts.get(5).copied().unwrap_or(Value::nil());
             let fill = " ".repeat(w);
             for i in 0..h.max(0) {
@@ -362,8 +362,8 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         } else if tag == cursor_t {
             use crate::gui::CursorStyle;
             use crossterm::cursor::SetCursorStyle;
-            let row = expect_int(heap, "term-draw", arg(&parts, 1))?;
-            let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
+            let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
+            let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
             crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row))).map_err(term_err)?;
             // honour the optional style keyword so the caret shape matches the GUI
             match cursor_style_from(parts.get(3).copied().unwrap_or(Value::nil())) {
@@ -378,9 +378,9 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
                 }
             }
         } else if tag == text_t {
-            let row = expect_int(heap, "term-draw", arg(&parts, 1))?;
-            let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
-            let s = expect_string(heap, "term-draw", arg(&parts, 3))?;
+            let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
+            let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
+            let s = expect_string(heap, "%term-draw", arg(&parts, 3))?;
             crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row))).map_err(term_err)?;
             apply_face(
                 &mut out,
@@ -392,7 +392,7 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         } else if tag == scroll_region_t {
             // terminal can't do sub-pixel offsets; flatten by prepending inner ops to the queue.
             let inner_val = arg(&parts, 2);
-            if let Ok(inner_parsed) = frame_ops(heap, inner_val, "term-draw", "scroll-region ops") {
+            if let Ok(inner_parsed) = frame_ops(heap, inner_val, "%term-draw", "scroll-region ops") {
                 for item in inner_parsed.into_iter().rev() {
                     queue.push_front(item);
                 }
@@ -450,7 +450,7 @@ pub(super) fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
     use crossterm::terminal::{Clear, ClearType};
 
-    let parsed = frame_ops(heap, arg(args, 0), "term-emit", "vector (ops)")?;
+    let parsed = frame_ops(heap, arg(args, 0), "%term-emit", "vector (ops)")?;
     let print_t = value::intern("print");
     let cr_t = value::intern("cr");
     let nl_t = value::intern("nl");
@@ -463,7 +463,7 @@ pub(super) fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     let mut out: Vec<u8> = Vec::new();
     for (tag, parts) in parsed {
         if tag == print_t {
-            let s = expect_string(heap, "term-emit", arg(&parts, 1))?;
+            let s = expect_string(heap, "%term-emit", arg(&parts, 1))?;
             apply_face(
                 &mut out,
                 heap,
@@ -476,17 +476,17 @@ pub(super) fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         } else if tag == nl_t {
             crossterm::queue!(out, Print("\r\n")).map_err(term_err)?;
         } else if tag == up_t {
-            let n = expect_int(heap, "term-emit", arg(&parts, 1))?;
+            let n = expect_int(heap, "%term-emit", arg(&parts, 1))?;
             if n > 0 {
                 crossterm::queue!(out, MoveUp(clamp_u16(n))).map_err(term_err)?;
             }
         } else if tag == down_t {
-            let n = expect_int(heap, "term-emit", arg(&parts, 1))?;
+            let n = expect_int(heap, "%term-emit", arg(&parts, 1))?;
             if n > 0 {
                 crossterm::queue!(out, MoveDown(clamp_u16(n))).map_err(term_err)?;
             }
         } else if tag == col_t {
-            let n = expect_int(heap, "term-emit", arg(&parts, 1))?;
+            let n = expect_int(heap, "%term-emit", arg(&parts, 1))?;
             crossterm::queue!(out, MoveToColumn(clamp_u16(n))).map_err(term_err)?;
         } else if tag == clear_eol_t {
             crossterm::queue!(out, Clear(ClearType::UntilNewLine)).map_err(term_err)?;

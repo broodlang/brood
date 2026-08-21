@@ -168,7 +168,7 @@ the session process died (`[:down …]` from the monitor) — the last covers a 
 that died *without* a clean `[:bye]` (e.g. a throwing `make-model`, which runs before
 `ui-run` can install its `:leave`), so the client never hangs waiting on a dead session."
   (receive
-    ([:frame f] (do (term-draw f) (attach-drain peer)))
+    ([:frame f] (do (term/draw f) (attach-drain peer)))
     ([:bye] :closed)
     ([:nodedown ^peer] :closed)
     ([:down _ _ _] :closed)
@@ -181,7 +181,7 @@ and ship each key to the daemon's `session`. Tail-recursive (O(1) stack). Ends w
 the daemon says `[:bye]` or the link drops."
   (if (= (attach-drain peer) :closed)
     nil
-    (let (k (term-poll 30))
+    (let (k (term/poll 30))
       (if (nil? k)
         (attach-loop peer session)
         (do (send session [:key k]) (attach-loop peer session))))))
@@ -208,7 +208,7 @@ speaks to an old daemon."
   (peer &optional opts)
   "Report our terminal size, ask `peer`'s session manager to attach us, and run the
 client loop once the daemon replies with our session pid."
-  (let ([cols rows] (term-size)
+  (let ([cols rows] (term/size)
         session (attach-handshake peer cols rows opts))
     (when session (do (monitor session) (attach-loop peer session)))))
 
@@ -227,13 +227,13 @@ always restored on exit."
     (let (peer (connect spec))
       ; raises a clean error on failure, terminal untouched
       (monitor-node peer)
-      (term-enter)
+      (term/enter)
       (try
-        (do (attach-session peer opts) (term-leave))
-        (catch e (do (term-leave) (throw e)))))))
+        (do (attach-session peer opts) (term/leave))
+        (catch e (do (term/leave) (throw e)))))))
 
 ;; ---- client side (a GUI / any-display frontend) ------------------------------
-;; The terminal client (above) reads input from the TTY (`term-poll`) and frames from
+;; The terminal client (above) reads input from the TTY (`term/poll`) and frames from
 ;; its mailbox — two separate streams, so it drains frames then polls the terminal. A
 ;; GUI frontend is different: `gui-open` delivers window input to the *same mailbox* the
 ;; daemon pushes frames to (ADR-058), so both arrive interleaved. Hence a single unified
