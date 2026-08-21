@@ -11,12 +11,12 @@
 ;; and exits. The shared ~/.config/brood/cookie authenticates the link
 ;; automatically (auto-generated on first use); no secret to pass.
 
-(node-start :client)
+(node/start :client)
 
 ;; The server might not be up yet — retry connect a few times (100ms apart).
 (defn connect-retry (tries)
   (try
-    (connect "server")
+    (node/connect "server")
     (catch e
       (if (> tries 0)
         (do (sleep 100) (connect-retry (- tries 1)))

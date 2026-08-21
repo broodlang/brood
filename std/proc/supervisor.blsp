@@ -119,7 +119,7 @@ address the child by a stable name even though its pid changes across restarts."
         pid (start))
     (when (not (pid? pid))
       (error "supervisor: a child :start thunk must return a pid (got "
-        pid ") — it should end in (spawn …) / (remote-spawn …) / (start …)"))
+        pid ") — it should end in (spawn …) / (node/spawn …) / (start …)"))
     ; local or remote (ADR-067) — `link` routes by node
     (link pid)
     (when (get spec :name) (register (get spec :name) pid))

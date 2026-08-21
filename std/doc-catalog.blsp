@@ -137,7 +137,6 @@
    "cond-thread-build" :control
    "conj" :collections
    "conj-one" :collections
-   "connect" :processes
    "cons" :collections
    "constantly" :functions
    "contains?" :predicates
@@ -188,12 +187,10 @@
    "file/rmdir" :filesystem
    "file/rm" :filesystem
    "demonitor" :processes
-   "demonitor-node" :processes
    "denominator" :math
    "deprecation-warning" :meta
    "derive-into" :meta
    "file/dir?" :filesystem
-   "disconnect" :processes
    "disj" :sets
    "display-width" :strings
    "dissoc" :maps
@@ -401,28 +398,12 @@
    "mod" :math
    "module-doc" :meta
    "monitor" :processes
-   "monitor-node" :processes
    "multi-resolve" :meta
    "name" :strings
    "nan?" :predicates
    "nil?" :predicates
    "no-impl" :meta
    "no-method" :meta
-   "node-addr-host" :processes
-   "node-also-listen" :processes
-   "node-at" :processes
-   "node-chomp" :processes
-   "node-config-dir" :processes
-   "node-cookie" :processes
-   "node-cookie-path" :processes
-   "node-last-colon" :processes
-   "node-name" :processes
-   "node-name-part" :processes
-   "node-qualify" :processes
-   "node-runtime-dir" :processes
-   "node-socket-path" :processes
-   "node-start" :processes
-   "nodes" :processes
    "not" :predicates
    "not=" :math
    "now" :system
@@ -526,9 +507,6 @@
    "registry-swap!" :meta
    "reload-defs" :meta
    "rem" :math
-   "remote-spawn" :processes
-   "remote-spawn-server" :processes
-   "remote-spawn-sync" :processes
    "remove" :collections
    "remove-nth" :collections
    "file/rename" :filesystem
@@ -608,7 +586,6 @@
    "spy-walk-if" :meta
    "spy-walk-let" :meta
    "spy-walk-seq" :meta
-   "start-remote-spawn" :processes
    "string/starts-with?" :predicates
    "stdin-tty?" :system
    "stdout-tty?" :system

@@ -2,7 +2,7 @@
 ;;
 ;; Heartbeats detect a dead node link (2 s ping / 6 s down) but nothing
 ;; reconnects: `send` to a disconnected node drops (or raises, with
-;; `(process-flag :send-errors true)`), and recovery is a manual `(connect …)`.
+;; `(process-flag :send-errors true)`), and recovery is a manual `(node/connect …)`.
 ;; This module is that recovery, as pure Brood policy over the existing
 ;; primitives (`connect` / `monitor-node` / `nodes`):
 ;;
@@ -11,7 +11,7 @@
 ;;
 ;; One watcher process per spec (named + idempotent — a second `watch` of the
 ;; same spec returns the existing watcher). The watcher connects, arms
-;; `monitor-node`, and on `[:nodedown]` retries `(connect spec)` with
+;; `monitor-node`, and on `[:nodedown]` retries `(node/connect spec)` with
 ;; exponential backoff (`:min-ms` 500 doubling to `:max-ms` 30000) until the
 ;; peer is back — then re-arms the monitor and tells every subscriber
 ;; `[:nodeup name]`. A sender that must not lose messages across the gap pairs
@@ -20,7 +20,7 @@
 
 (defmodule reconnect
   "Supervised node auto-reconnect (dist self-healing): `watch` keeps the link to
-a peer node alive with exponential-backoff `(connect …)` retries; `subscribe`
+a peer node alive with exponential-backoff `(node/connect …)` retries; `subscribe`
 delivers `[:nodeup name]` / `[:nodedown name]` to your mailbox; `unwatch` stops.
 Pure Brood policy over connect/monitor-node/nodes. Pair with
 `(process-flag :send-errors true)` for queue-and-retry senders.")
@@ -39,7 +39,7 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
   "Connected state: wait for the link to fall (or control messages)."
   (receive
     ([:nodedown ^peer]
-      (if (includes? (nodes) peer)
+      (if (includes? (node/list) peer)
         ;; stale/duplicate down (e.g. arming while already down delivers one
         ;; immediately) — still linked, ignore
         (reconnect-up spec peer opts subs)
@@ -54,12 +54,12 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
 
 (defn- reconnect-down
   (spec peer opts subs delay)
-  "Disconnected state: retry `(connect spec)` on an exponential-backoff timer,
+  "Disconnected state: retry `(node/connect spec)` on an exponential-backoff timer,
 still answering control messages between attempts."
-  (let (up (try (connect spec) (catch _ nil)))
+  (let (up (try (node/connect spec) (catch _ nil)))
     (if up
       (do
-        (monitor-node up)
+        (node/monitor up)
         (reconnect-notify subs [:nodeup up])
         (reconnect-up spec up opts subs))
       (receive
@@ -78,10 +78,10 @@ still answering control messages between attempts."
 (defn- reconnect-boot
   (spec opts)
   "Watcher body: connect (or start retrying immediately) and run the state loop."
-  (let (up (try (connect spec) (catch _ nil)))
+  (let (up (try (node/connect spec) (catch _ nil)))
     (if up
       (do
-        (monitor-node up)
+        (node/monitor up)
         (reconnect-up spec up opts nil))
       (reconnect-down spec nil opts nil (get opts :min-ms 500)))))
 
