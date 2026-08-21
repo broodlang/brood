@@ -681,7 +681,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
           nil
           (project-abs-paths root *project-source-paths*))))
 
-(defn- project-image-fingerprint (root)
+(defn- project-image-fingerprint
+  (root)
   (project-fingerprint-of (project-source-files root)))
 
 ;; Split from `project-image-fingerprint` so a caller that already has the file list
@@ -822,7 +823,8 @@ were loaded. Returns the entry count."
 ;; section (registries + declared sigs — small, and needed before anything else) and hands
 ;; `require` the directory for everything else, so each module materialises on first use.
 ;; Returns the section count, or nil for a miss (absent, stale, corrupt).
-(defn- project-install-image (root fp)
+(defn- project-install-image
+  (root fp)
   (let (path (project-image-path root)
         idx (%image-index path fp))
     (cond

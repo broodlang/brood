@@ -19,7 +19,8 @@ Empty sequences raise unless documented otherwise.
     (when (= n 0) (error "stats/mean: empty sequence"))
     (/ (* 1.0 (sum xs)) n)))
 
-(defn- sum-of-squares (xs m)
+(defn- sum-of-squares
+  (xs m)
   (fold (fn (acc x) (+ acc (* (- x m) (- x m)))) 0 xs))
 
 (defn variance (xs)
