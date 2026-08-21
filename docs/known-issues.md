@@ -21,6 +21,7 @@ ADRs / topic docs.
 |---|---|---|
 | KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
+| KI-49 | the tagged-tuple `receive` matcher type-deopts 16x through the HOF native fast-frame and is latched onto the interpreter for the process — 454 ns vs 59 ns for the keyword matcher, and the whole `pingpong`/`ring`/`supervisor` gap to Elixir | ⚠️ **OPEN — root-caused and localised, not fixed.** Deopts all land at `resume_ip=7`, immediately after the `Call` to `vector-length`. Specific to the HOF fast-frame: a plain hot loop calling `vector-length` does not thrash |
 | KI-48 | JIT tail dispatch read past the roots stack — `root_at(9)` on a len-8 stack, twice on 2026-08-20, from `jit_dispatch_tail`; an audit then found a **second live instance** in `dispatch.rs` and a **false safety argument** in `vm_cache.rs` | ✅ **root-caused, both instances fixed, and the anti-pattern gated 2026-08-21** — the dispatcher re-derived the frame size from `active_nslots()` (the KI-26/ADR-210 anti-pattern), which the background inline swap can change mid-flight; **measured live on 123 arms**, `fold` at nslots=13 vs inline_nslots=25 (a 12-slot overshoot). Now passed the size the trampoline built the frame to. Original crash never reproduced on demand, so the causal link is strong but not proven |
 | KI-47 | the `differential (tree-walker)` CI job went red on **every** run from the ADR-230/231 namespacing merge onward, always as the same three `adversarial_test.blsp` heap-allocation cases dying on `E0043`. Those cases were not the cause: the suite's **process-wide** allocation had reached **1.145 GB** against the **1 GiB** `TEST_DEFAULT_SOFT` backstop, and a threshold failure names whichever tests are running when the line is crossed | ✅ **fixed 2026-08-19** — backstop raised to 2 GiB soft / 3 GiB hard (`core/alloc.rs`), which is what it documents itself to be: a *host-survival* guard, not a working-set budget. ⚠ **Leaves an unresolved question**: the cap was sized against a ~240 MB suite peak and the suite now peaks ~1 GB (4.8×), so this restores a ~2× margin, not the intended 4× |
 | KI-46 | **deadline margin, not a failure yet.** KI-39 was a fixed cost sitting under a fixed deadline for weeks while reading as a random flake, so every case's CI margin against nextest's 120 s hard kill was audited from the 2026-08-17 logs. `nest::bin/nest mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` is now the worst at **87 s = 1.38× margin** — it invokes the MCP `check` tool, which is cwd-based, so it type-checks **this whole repository**, and the cost grows as the repo does | ✅ **fixed 2026-08-18, the real way** (87 s → **2.5 s**) — the three cheap fixes were all worse than the problem: `BROOD_NO_CHECK=1` guts what the case proves, a temp-dir `set_current_dir` is process-global and would race its siblings under plain `cargo test` (trading a slow test for a nondeterministic one), and a bigger nextest budget is what hid KI-39. So the real fix was done instead: `check-project-structured` gained an optional `from` root, and `mcp-check-tool` now passes **`*project-root*`** — the root the server already pins its write sandbox to and that every other project-scoped tool already read. `check` was the one tool taking its project from cwd. The three next-worst (`scaffold_quality`, 89/80/77 s) **were** fixed the same day by splitting one case per template |
@@ -67,7 +68,7 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open items.** KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**One OPEN item: KI-49** (the tagged-tuple receive matcher latched onto the interpreter — root-caused and localised, not fixed). KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -2675,6 +2676,57 @@ such snippet needs an execution test rather than a reading. Worth grepping for t
 others.
 
 ---
+
+## KI-49 — the tagged-tuple `receive` matcher is latched onto the interpreter (open)
+
+**Status:** ⚠️ **open (2026-08-21) — root-caused and localised; not fixed.**
+
+**What it costs.** `pingpong` is Brood **211 ms** vs Elixir **58 ms** (3.7x); `ring` 2.9x;
+`supervisor` 3.3x. Those three rows are exactly the ones whose protocols are **tagged
+tuples**, and this is why.
+
+    receive pattern     ns_match_run   hof_native_deopt   ends up
+    `:ping`                  59 ns            0           native, stays native
+    `[:ping x]`             454 ns           16           BAILED, VM for the process life
+
+The matcher **is** JIT'd. It then type-deopts on its first 16 native activations and the
+sixteen-deopt rule latches it to `BAILED` permanently. Same shape as **KI-44**'s `nbody`
+bug — "silent interpretation, no error, no failing test" — now its second confirmed
+instance, which suggests the deopt-latch deserves a standing check rather than being
+rediscovered each time.
+
+**Where it deopts.** All 16 land on the same instruction:
+
+    [jit-deopt] arm=<closure> resume_ip=7 op=Const (journalled)   x16
+
+    ip: 0 Local  1 Call(vector?)  2 SetLocal  3 Local  4 JumpIfFalse
+        5 Local  6 Call(vector-length)  7 Const  8 Prim2  …
+
+i.e. immediately after the `Call` to `vector-length`, at the length comparison.
+
+**It is the HOF fast-frame path, not `vector-length`.** A control — a hot self-tail loop
+doing `(= (vector-length v) 2)` — does **not** deopt at all. The matcher runs through
+`hof_apply_native`'s fast-frame protocol, which is the difference.
+
+**Ruled out, by measurement rather than argument:**
+
+- *a lowering refusal* — with every `BAILED` route traced, the arm is refused by none of them
+- *shared-code adoption across mismatched profiles* — `BROOD_NO_SHARED_ARMS=1` still thrashes
+- *inline-cache adoption / the inline swap* — traced, never fires for this arm
+- *`codegen_poisoned`* — traced, never fires
+- *"it never lowers"* — it does: `arm: 29 (<closure>) ckpt_slot: 6`
+
+**A measurement trap worth keeping.** The thrash is **timing-sensitive**: with
+`BROOD_JIT_DUMP_IR=1` the background compiler is slow enough that at N=20000 the arm never
+compiles, so it neither dumps nor thrashes and the bug looks absent. It needs N=300000 to
+show up *with* the dump on. A green run under the dump flag proves nothing here.
+
+**Next step.** Read the deopt guard at ip 7-8 in the arm's CLIF (dumped at N=300000) and
+determine why the fast-frame protocol invalidates it where the ordinary call path does not.
+Worth ~390 ns of a 2144 ns round trip — `pingpong` roughly 211 ms -> 175 ms — which is
+real but does not reach parity on its own: the bare-atom path is already 739 ns against
+Elixir's ~290 ns per message, so `receive` + `deliver` (61% of even the cheapest path) is
+the structural remainder.
 
 ## KI-48 — JIT tail dispatch read past the roots stack (open)
 
