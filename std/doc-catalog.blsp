@@ -49,7 +49,6 @@
    "ability-owner-ns" :meta
    "ability-qualify-op" :meta
    "ability-requires" :meta
-   "acos" :math
    "add-load-path!" :meta
    "and" :control
    "any?" :predicates
@@ -64,13 +63,10 @@
    "apropos" :meta
    "arglist" :meta
    "as->" :control
-   "asin" :math
    "assoc" :maps
    "assoc-in" :maps
    "assoc-map-pairs" :maps
    "assoc-vec-pairs" :maps
-   "atan" :math
-   "atan2" :math
    "audio-beep" :system
    "bench" :meta
    "binding" :meta
@@ -148,7 +144,6 @@
    "contract-check-args" :meta
    "contract-check-rest" :meta
    "file/cp" :filesystem
-   "cos" :math
    "count" :collections
    "count-acc" :collections
    "current-file" :meta
@@ -229,7 +224,6 @@
    "every?" :predicates
    "exe-path" :system
    "exit" :processes
-   "exp" :math
    "feature?" :predicates
    "features" :meta
    "fields" :maps
@@ -338,10 +332,7 @@
    "list?" :predicates
    "lkeep" :collections
    "lmap" :collections
-   "ln" :math
    "load" :meta
-   "log10" :math
-   "log2" :math
    "string/lower" :strings
    "lremove" :collections
    "macroexpand" :meta
@@ -614,7 +605,6 @@
    "sig" :meta
    "sig!" :meta
    "sig-pos" :meta
-   "sin" :math
    "sleep" :processes
    "file/slurp" :filesystem
    "file/slurp-bytes" :filesystem
@@ -692,7 +682,6 @@
    "take-last" :collections
    "take-while" :collections
    "take-while-acc" :collections
-   "tan" :math
    "tcp-close" :system
    "tcp-connect" :system
    "tcp-controlling-process" :system
