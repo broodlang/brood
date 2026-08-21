@@ -13,7 +13,7 @@
 ;;                               closing its SEND side is a half-close — the write
 ;;                               side stays usable (a server can still reply). So
 ;;                               `[:tcp-closed]` does not free the socket; call
-;;                               `(tcp-close sock)` when you're done with it. A
+;;                               `(tcp/close sock)` when you're done with it. A
 ;;                               per-connection handler process that exits frees
 ;;                               its sockets automatically (owner-death reclaim),
 ;;                               so the serve-loop pattern needs no explicit close;
@@ -22,8 +22,8 @@
 ;;   [:tcp-accept lsock client]  a new connection on a listener (client is wired
 ;;                               to the same owner, so its [:tcp …] arrive here too)
 ;;
-;; Outbound is `(tcp-send sock iolist)` (writes it all; string leaves are always
-;; UTF-8, raw bytes ride as `bytes` values — ADR-141); `(tcp-close sock)` shuts a
+;; Outbound is `(tcp/send sock iolist)` (writes it all; string leaves are always
+;; UTF-8, raw bytes ride as `bytes` values — ADR-141); `(tcp/close sock)` shuts a
 ;; stream or stops a listener. A socket handle is valid across this runtime's
 ;; processes but is never sent across nodes.
 
@@ -39,6 +39,44 @@ untrusted peer — `:timeout-ms` (idle), `:max-bytes`, and `:deadline-ms` (total
 so a server can answer 408 / 413 instead of holding a process open, accumulating
 without limit, or being drip-fed indefinitely. Policy is Brood; only the syscalls
 are Rust.")
+
+;; ---- raw socket primitives ----------------------------------------------
+;; Thin Brood wrappers over the kernel's `%tcp-*` syscalls, so callers use
+;; `tcp/connect` etc. rather than reaching for a `%`-prefixed primitive. Policy
+;; lives above these (the framed-read combinators below); these just name the
+;; mechanism.
+
+(defn connect (host port)
+  "Connect to host:port; inbound data is delivered to the calling process as `[:tcp sock data]` / `[:tcp-closed sock]` messages. Returns a socket. Throws on failure."
+  (%tcp-connect host port))
+
+(defn listen (host port)
+  "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as `[:tcp-accept lsock client]` messages to the calling process. Returns a socket."
+  (%tcp-listen host port))
+
+(defn send (sock data)
+  "Write data to sock (blocking). data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139). A string leaf is always sent as its UTF-8 bytes, whatever the socket's mode (ADR-141); raw bytes go out as bytes values. Returns nil; throws on error."
+  (%tcp-send sock data))
+
+(defn close (sock)
+  "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."
+  (%tcp-close sock))
+
+(defn controlling-process (sock pid)
+  "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."
+  (%tcp-controlling-process sock pid))
+
+(defn local-port (sock)
+  "The local port sock is bound to, or nil."
+  (%tcp-local-port sock))
+
+(defn set-binary (sock on)
+  "Switch sock's INBOUND decode between text mode (default) and binary mode; outbound `tcp/send` is unaffected (ADR-141). In binary mode inbound `[:tcp sock data]` delivers data as a byte-faithful `bytes` value (not a string) — for length-prefixed / control-byte protocols like WebSocket framing or a database wire protocol. Text mode delivers a UTF-8 string. Returns nil; throws if sock is gone or a listener."
+  (%tcp-set-binary sock on))
+
+(defn set-idle-timeout (sock ms)
+  "Arm (or, with ms 0, disarm) an idle timeout on an established stream: the reactor drops the connection if no bytes move in EITHER direction for ms milliseconds, delivering `[:tcp-closed]` (or `[:tcp-error]` for a one-shot TLS client). Off by default — arm it on a connection accepting untrusted input as slow-loris protection the reactor applies even if the app forgets to close; leave it off for a legitimately long-idle stream (SSE, long-poll). Returns nil; throws if sock is gone or a listener."
+  (%tcp-set-idle-timeout sock ms))
 
 (defn socket? (x) "True if `x` is a TCP socket." (%eq (type-of x) :socket))
 

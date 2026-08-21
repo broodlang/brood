@@ -1,0 +1,44 @@
+;; std/text.blsp — the rope text-engine seam. Thin policy over the %rope-* primitives, so
+;; editor code reaches the rope (efficient large-text editing: O(log n) insert/delete/slice,
+;; cheap line access) as text/insert, text/slice, … rather than the bare language core.
+(defmodule text)
+
+(defn insert (r idx s)
+  "A fresh rope with string s inserted at character index idx."
+  (%rope-insert r idx s))
+
+(defn delete (r start end)
+  "A fresh rope with characters [start, end) removed."
+  (%rope-delete r start end))
+
+(defn slice (r start end)
+  "The text of characters [start, end) of rope r, as a string."
+  (%rope-slice r start end))
+
+(defn length (r)
+  "The number of characters in rope r."
+  (%rope-length r))
+
+(defn line (r n)
+  "The text of line n (0-based) of rope r, including any trailing newline."
+  (%rope-line r n))
+
+(defn line-count (r)
+  "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line)."
+  (%rope-line-count r))
+
+(defn char->line (r idx)
+  "The 0-based line index containing character idx."
+  (%rope-char->line r idx))
+
+(defn line->char (r n)
+  "The character index where line n (0-based) begins."
+  (%rope-line->char r n))
+
+(defn ->string (r)
+  "The full text of rope r as a string."
+  (%rope->string r))
+
+(defn from-string (s)
+  "A rope (editor buffer text) holding the characters of string s."
+  (%string->rope s))

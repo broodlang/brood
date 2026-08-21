@@ -246,19 +246,19 @@
   :isolated
   (test "loopback: write chunks to a socket, read them back as a stream"
     (let (_me (self)
-          ls (tcp-listen "127.0.0.1" 0)
-          port (tcp-local-port ls))
+          ls (tcp/listen "127.0.0.1" 0)
+          port (tcp/local-port ls))
       ;; Writer spawns, connects, sends two chunks, closes.
-      (spawn (let (c (tcp-connect "127.0.0.1" port))
-               (tcp-send c "hello ")
-               (tcp-send c "world")
-               (tcp-close c)))
+      (spawn (let (c (tcp/connect "127.0.0.1" port))
+               (tcp/send c "hello ")
+               (tcp/send c "world")
+               (tcp/close c)))
       ;; Accept the connection; extract the client socket from the message.
       (let (client (receive ([:tcp-accept ^ls c] c)))
         ;; Wrap the accepted socket in a stream and collect it.
         (let (s (stream/socket-> client)
               data (stream/fold str "" s))
-          (tcp-close ls)
+          (tcp/close ls)
           (assert= data "hello world"))))))
 
 ;; ---- no producer-process leak on exhaustion (KI-33) ---------------------------

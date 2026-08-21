@@ -1755,38 +1755,38 @@ pub(super) fn rope_oob(who: &str, what: &str, got: i64, max: usize) -> LispError
 
 /// `(string->rope s)` — a rope holding the text of string `s`.
 pub(super) fn string_to_rope(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "string->rope", arg(args, 0))?;
+    let s = expect_string(heap, "%string->rope", arg(args, 0))?;
     Ok(heap.alloc_rope(ropey::Rope::from_str(&s)))
 }
 
 /// `(rope->string r)` — the full text of rope `r` as a string.
 pub(super) fn rope_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "rope->string", arg(args, 0))?;
+    let r = expect_rope_ref(heap, "%rope->string", arg(args, 0))?;
     Ok(heap.alloc_string(&r.to_string()))
 }
 
 /// `(rope-length r)` — the number of characters in `r`.
 pub(super) fn rope_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "rope-length", arg(args, 0))?;
+    let r = expect_rope_ref(heap, "%rope-length", arg(args, 0))?;
     Ok(Value::int(r.len_chars() as i64))
 }
 
 /// `(rope-line-count r)` — the number of lines in `r` (ropey counts a trailing
 /// newline as ending a line, so `"a\n"` is 2 lines and `""` is 1).
 pub(super) fn rope_line_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "rope-line-count", arg(args, 0))?;
+    let r = expect_rope_ref(heap, "%rope-line-count", arg(args, 0))?;
     Ok(Value::int(r.len_lines() as i64))
 }
 
 /// `(rope-insert r idx s)` — a fresh rope with string `s` inserted at character
 /// index `idx` (0..=length).
 pub(super) fn rope_insert(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let mut r = expect_rope(heap, "rope-insert", arg(args, 0))?;
-    let idx = expect_int(heap, "rope-insert", arg(args, 1))?;
-    let s = expect_string(heap, "rope-insert", arg(args, 2))?;
+    let mut r = expect_rope(heap, "%rope-insert", arg(args, 0))?;
+    let idx = expect_int(heap, "%rope-insert", arg(args, 1))?;
+    let s = expect_string(heap, "%rope-insert", arg(args, 2))?;
     let len = r.len_chars();
     if idx < 0 || idx as usize > len {
-        return Err(rope_oob("rope-insert", "index", idx, len));
+        return Err(rope_oob("%rope-insert", "index", idx, len));
     }
     r.insert(idx as usize, &s);
     Ok(heap.alloc_rope(r))
@@ -1795,12 +1795,12 @@ pub(super) fn rope_insert(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// `(rope-delete r start end)` — a fresh rope with characters `[start, end)`
 /// removed.
 pub(super) fn rope_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let mut r = expect_rope(heap, "rope-delete", arg(args, 0))?;
-    let start = expect_int(heap, "rope-delete", arg(args, 1))?;
-    let end = expect_int(heap, "rope-delete", arg(args, 2))?;
+    let mut r = expect_rope(heap, "%rope-delete", arg(args, 0))?;
+    let start = expect_int(heap, "%rope-delete", arg(args, 1))?;
+    let end = expect_int(heap, "%rope-delete", arg(args, 2))?;
     let len = r.len_chars();
     if start < 0 || end < start || end as usize > len {
-        return Err(rope_oob("rope-delete", "range end", end, len));
+        return Err(rope_oob("%rope-delete", "range end", end, len));
     }
     r.remove(start as usize..end as usize);
     Ok(heap.alloc_rope(r))
@@ -1808,12 +1808,12 @@ pub(super) fn rope_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 
 /// `(rope-slice r start end)` — the text of characters `[start, end)` as a string.
 pub(super) fn rope_slice(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "rope-slice", arg(args, 0))?;
-    let start = expect_int(heap, "rope-slice", arg(args, 1))?;
-    let end = expect_int(heap, "rope-slice", arg(args, 2))?;
+    let r = expect_rope_ref(heap, "%rope-slice", arg(args, 0))?;
+    let start = expect_int(heap, "%rope-slice", arg(args, 1))?;
+    let end = expect_int(heap, "%rope-slice", arg(args, 2))?;
     let len = r.len_chars();
     if start < 0 || end < start || end as usize > len {
-        return Err(rope_oob("rope-slice", "range end", end, len));
+        return Err(rope_oob("%rope-slice", "range end", end, len));
     }
     let s = r.slice(start as usize..end as usize).to_string();
     Ok(heap.alloc_string(&s))
@@ -1822,11 +1822,11 @@ pub(super) fn rope_slice(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// `(rope-line r n)` — the text of line `n` (0-based), including its trailing
 /// newline if present. The viewport-rendering primitive.
 pub(super) fn rope_line(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "rope-line", arg(args, 0))?;
-    let n = expect_int(heap, "rope-line", arg(args, 1))?;
+    let r = expect_rope_ref(heap, "%rope-line", arg(args, 0))?;
+    let n = expect_int(heap, "%rope-line", arg(args, 1))?;
     let lines = r.len_lines();
     if n < 0 || n as usize >= lines {
-        return Err(rope_oob("rope-line", "line", n, lines.saturating_sub(1)));
+        return Err(rope_oob("%rope-line", "line", n, lines.saturating_sub(1)));
     }
     let s = r.line(n as usize).to_string();
     Ok(heap.alloc_string(&s))
@@ -1834,22 +1834,22 @@ pub(super) fn rope_line(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 
 /// `(rope-char->line r idx)` — the 0-based line index containing character `idx`.
 pub(super) fn rope_char_to_line(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "rope-char->line", arg(args, 0))?;
-    let idx = expect_int(heap, "rope-char->line", arg(args, 1))?;
+    let r = expect_rope_ref(heap, "%rope-char->line", arg(args, 0))?;
+    let idx = expect_int(heap, "%rope-char->line", arg(args, 1))?;
     let len = r.len_chars();
     if idx < 0 || idx as usize > len {
-        return Err(rope_oob("rope-char->line", "index", idx, len));
+        return Err(rope_oob("%rope-char->line", "index", idx, len));
     }
     Ok(Value::int(r.char_to_line(idx as usize) as i64))
 }
 
 /// `(rope-line->char r n)` — the character index where line `n` (0-based) begins.
 pub(super) fn rope_line_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "rope-line->char", arg(args, 0))?;
-    let n = expect_int(heap, "rope-line->char", arg(args, 1))?;
+    let r = expect_rope_ref(heap, "%rope-line->char", arg(args, 0))?;
+    let n = expect_int(heap, "%rope-line->char", arg(args, 1))?;
     let lines = r.len_lines();
     if n < 0 || n as usize > lines {
-        return Err(rope_oob("rope-line->char", "line", n, lines));
+        return Err(rope_oob("%rope-line->char", "line", n, lines));
     }
     Ok(Value::int(r.line_to_char(n as usize) as i64))
 }

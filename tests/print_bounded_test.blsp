@@ -59,7 +59,7 @@
 
 (describe "pr-str-bounded — what it does NOT touch"
   (test "a rope prints as its summary handle, already bounded by the kernel"
-    (is (includes? (pr-str-bounded (string->rope (long-string 5000))) "#<rope")))
+    (is (includes? (pr-str-bounded (text/from-string (long-string 5000))) "#<rope")))
   (test "an improper pair degrades to faithful printing instead of losing the bound"
     ;; pr-safely's job: one odd subtree must not take the whole value's bound with it
     (assert= (pr-str (cons 1 2)) (pr-str-bounded (cons 1 2)))))

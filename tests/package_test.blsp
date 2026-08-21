@@ -427,7 +427,7 @@
   (let (me (self))
     (spawn (do
              (let (ls (http/listen 0))
-               (send me [:reg-port (tcp-local-port ls)])
+               (send me [:reg-port (tcp/local-port ls)])
                (http/serve-loop ls handler))))
     (let (port (receive ([:reg-port p] p) (after *test-wait-ms* :timeout)))
       (str "http://127.0.0.1:" port))))

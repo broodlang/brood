@@ -382,12 +382,12 @@
 
 (defn rt-g-version-set (seed)
   ;; 1..3 versions (a prefix of the pool, so they stay ordered)
-  (let ([k s1] (rand-int seed 3)) [(take (+ k 1) rt-g-versions) s1]))
+  (let ([k s1] (rand/int seed 3)) [(take (+ k 1) rt-g-versions) s1]))
 
 (defn rt-g-deps (seed pkg others acc)
   (if (empty? others)
     [acc seed]
-    (let ([include s1] (rand-int seed 2))
+    (let ([include s1] (rand/int seed 2))
       (if (= include 1)
         (let ([c s2] (sample s1 rt-g-constraints))
           (rt-g-deps s2 pkg (rest others) (cons [(first others) c] acc)))
@@ -412,7 +412,7 @@
 (defn rt-g-roots (seed packages acc)
   (if (empty? packages)
     [acc seed]
-    (let ([include s1] (rand-int seed 2))
+    (let ([include s1] (rand/int seed 2))
       (if (= include 1)
         (let ([c s2] (sample s1 rt-g-constraints))
           (rt-g-roots s2 (rest packages) (cons [(first packages) c] acc)))

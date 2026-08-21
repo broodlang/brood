@@ -30,6 +30,6 @@
             (ck "vector" [1 2 3])
             (ck "nested-vec" [[1 2] [3 [4 5]] 6])
             (ck "map" {:a 1 :b [2 3] :c {:d 4 :e "x"}})
-            (ck-hold "rope" (string->rope "rope content\nline two"))
+            (ck-hold "rope" (text/from-string "rope content\nline two"))
             (ck-closure)))
   (println "TOTAL-BAD:" bad))

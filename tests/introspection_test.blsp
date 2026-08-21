@@ -4,6 +4,11 @@
 
 (defmodule introspection-test (:use test))
 
+;; Load the subsystem modules whose members the discovery tests below look up
+;; (apropos / all-globals / doc-search / bound? see a name only once its module is loaded).
+;; Referencing the function *values* auto-requires the module without calling them.
+(def- _load-subsystems (list rand/int rand/float term/raw-enter gui/open node/connect))
+
 (describe "docstrings"
   (test "a leading string is a docstring when more body follows"
     (defn squared (x) "Return x times itself." (* x x))
@@ -96,8 +101,8 @@
   ; 'map' has no "rand" in it
   (test "apropos finds globals by name substring"
     (let (hits (apropos "rand"))
-      (is (includes? hits 'rand-int))
-      (is (includes? hits 'rand-float))
+      (is (includes? hits 'rand/int))
+      (is (includes? hits 'rand/float))
       (refute (includes? hits 'map))))
   (test "apropos accepts a string, symbol, or keyword pattern"
     (assert= (apropos "shuffle") (apropos 'shuffle))
@@ -114,7 +119,7 @@
     (let (g (global-names))
       (is (> (count g) 100))
       (is (includes? g 'map))
-      (is (includes? g 'rand-int))
+      (is (includes? g 'rand/int))
       (assert= g (global-names))))
   (test "doc-search finds globals whose docstring mentions a word"
     (let (names (map first (doc-search "uniformly random")))
@@ -130,10 +135,10 @@
   ;; docstring need hold the whole phrase) — the §3.3 fix. Each of these
   ;; returned nil under the old whole-query substring matcher.
   (test "doc-search ranks by multi-term overlap, not whole-phrase containment"
-    (is (includes? (map first (doc-search "remote node distributed")) 'connect))
-    (is (includes? (map first (doc-search "remote node distributed")) 'node-start))
-    (is (includes? (map first (doc-search "node up down notification")) 'monitor-node))
-    (is (includes? (map first (doc-search "raw mode single keypress")) 'term-raw-enter)))
+    (is (includes? (map first (doc-search "remote node distributed")) 'node/connect))
+    (is (includes? (map first (doc-search "remote node distributed")) 'node/start))
+    (is (includes? (map first (doc-search "node up down notification")) 'node/monitor))
+    (is (includes? (map first (doc-search "raw mode single keypress")) 'term/raw-enter)))
   (test "doc-search is case-insensitive"
     (assert= (map first (doc-search "XORSHIFT")) (map first (doc-search "xorshift"))))
   (test "doc-search of a blank query is empty"
@@ -268,5 +273,5 @@
 
   ;; The whole reason this exists.
   (test "a bound builtin does not imply a working feature"
-    (is (bound? 'gui-open))
+    (is (bound? 'gui/open))
     (is (or (feature? :gui) (not (feature? :gui))))))

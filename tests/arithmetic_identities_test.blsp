@@ -16,7 +16,7 @@
 
 ;; a wide-range int: -1e6..1e6, occasionally cubed into bignum territory, with
 ;; the type/overflow edges mixed in so promotion boundaries get exercised.
-(defn rand-int (s)
+(defn lcg-int (s)
   (let (x (- (rem s 2000001) 1000000))
     (cond
       (= (rem s 11) 0) (* x x x)
@@ -65,9 +65,9 @@
 (defn check-ints (s n)
   (if (= n 0)
     true
-    (let (a (rand-int (lcg s))
-          b (rand-int (lcg (lcg s)))
-          c (rand-int (lcg (lcg (lcg s)))))
+    (let (a (lcg-int (lcg s))
+          b (lcg-int (lcg (lcg s)))
+          c (lcg-int (lcg (lcg (lcg s)))))
       (if (int-laws a b c)
         (check-ints (lcg (lcg (lcg (lcg s)))) (- n 1))
         false))))
@@ -75,8 +75,8 @@
 (defn check-floats (s n)
   (if (= n 0)
     true
-    (let (a (/ (rand-int (lcg s)) 7.0)
-          b (/ (rand-int (lcg (lcg s))) 13.0))
+    (let (a (/ (lcg-int (lcg s)) 7.0)
+          b (/ (lcg-int (lcg (lcg s))) 13.0))
       (if (float-laws a b)
         (check-floats (lcg (lcg s)) (- n 1))
         false))))
