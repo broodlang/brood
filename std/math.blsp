@@ -109,3 +109,20 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 (defn clamp (x lo hi)
   "Constrain `x` to the closed range [`lo`, `hi`]: `lo` if `x` is below it, `hi` if above, else `x`."
   (max lo (min hi x)))
+
+;; ---- transcendental functions -----------------------------------------------
+;; Thin policy over the `%`-prefixed f64 primitives (mechanism), so they live in the
+;; `math` namespace (`math/sin`) rather than cluttering the bare language core.
+(defn sin (x) "The sine of `x` (radians). Returns a float." (%sin x))
+(defn cos (x) "The cosine of `x` (radians). Returns a float." (%cos x))
+(defn tan (x) "The tangent of `x` (radians). Returns a float." (%tan x))
+(defn asin (x) "The arcsine of `x` in radians. `x` must be in [-1, 1]; raises otherwise." (%asin x))
+(defn acos (x) "The arccosine of `x` in radians. `x` must be in [-1, 1]; raises otherwise." (%acos x))
+(defn atan (x) "The arctangent of `x` in radians (result in [-π/2, π/2])." (%atan x))
+(defn atan2 (y x)
+  "The angle in radians of the vector (`x`, `y`) from the positive x-axis, in (-π, π]. Handles x=0."
+  (%atan2 y x))
+(defn exp (x) "e raised to the power `x`. Returns a float." (%exp x))
+(defn ln (x) "The natural logarithm of `x`. `x` must be positive; raises otherwise." (%ln x))
+(defn log2 (x) "The base-2 logarithm of `x`. `x` must be positive; raises otherwise." (%log2 x))
+(defn log10 (x) "The base-10 logarithm of `x`. `x` must be positive; raises otherwise." (%log10 x))
