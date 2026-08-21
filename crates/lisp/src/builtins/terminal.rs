@@ -392,7 +392,8 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         } else if tag == scroll_region_t {
             // terminal can't do sub-pixel offsets; flatten by prepending inner ops to the queue.
             let inner_val = arg(&parts, 2);
-            if let Ok(inner_parsed) = frame_ops(heap, inner_val, "%term-draw", "scroll-region ops") {
+            if let Ok(inner_parsed) = frame_ops(heap, inner_val, "%term-draw", "scroll-region ops")
+            {
                 for item in inner_parsed.into_iter().rev() {
                     queue.push_front(item);
                 }
