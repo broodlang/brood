@@ -1399,12 +1399,50 @@ pub(crate) fn jit_dispatch_tail(
     base: usize,
     arm: &CompiledArm,
     env: EnvRoot,
+    // The size this frame was actually BUILT to, captured by the trampoline at native entry.
+    // **Must be passed, never re-derived here** (KI-48). It used to be
+    // `base + arm.active_nslots()`, which re-reads `inline_installed` — the KI-26 / ADR-210
+    // anti-pattern. The background inline upgrade can flip that flag between the native
+    // entering (small frame) and this callback running, after which the staged
+    // `[callee, args…]` is written at one offset and read at another: measured live on 123
+    // arms, `fold` among them at nslots=13 vs inline_nslots=25, i.e. a 12-slot overshoot
+    // straight past the staged area and off the roots stack. The caller already captures the
+    // size once for exactly this reason ("the two must agree on the same frame boundary"),
+    // and the deopt-resume helpers are already told it rather than re-deriving; this path was
+    // the one that was not.
+    frame_nslots: usize,
 ) -> Result<ChunkExit, LispError> {
-    // Two-stage tiering: a tail call is staged by the native code ABOVE its own frame top,
-    // which is `active_nslots` (the inlined upgrade runs with the bigger frame). Use the
-    // active size so the staged `[callee, args…]` is read at the right offset.
-    let top = base + arm.active_nslots();
+    // A tail call is staged by the native code ABOVE its own frame top.
+    let top = base + frame_nslots;
     let n = heap.roots_len();
+    // KI-48 tripwire. `top` is derived from `active_nslots()`, which re-reads
+    // `inline_installed` — the KI-26 / ADR-210 anti-pattern — while the frame this native
+    // actually built was sized by whichever body was installed when it was ENTERED. If the
+    // background inline upgrade lands in that window, the two disagree and `top` points past
+    // the staged `[callee, args…]` region, which is how KI-48 was captured: `root_at(9)` on
+    // a len-8 stack.
+    //
+    // Two reasons this is checked rather than left to `root_at`'s own bounds check. The
+    // subtraction below underflows first on exactly this input (`top >= n` ⇒ wrapped `argc`),
+    // so the OOB panic is the *lucky* ordering — the other one loops `root_at(top + 1 + k)`
+    // over a huge count. And `root_at`'s panic names neither the arm nor the frame sizes, so
+    // the original report could say only "index 9, len 8" and nothing about why.
+    if top >= n {
+        let name = arm
+            .dbg_name
+            .map(crate::core::value::symbol_name_ref)
+            .unwrap_or("<closure>");
+        panic!(
+            "KI-48: jit_dispatch_tail staged-area desync — arm={name} base={base} \
+             frame_nslots={frame_nslots} (nslots={} inline_nslots={} inline_installed={}) \
+             top={top} roots_len={n}; the frame was built for a different body than the \
+             caller reported",
+            arm.nslots,
+            arm.inline_nslots,
+            arm.inline_installed
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+    }
     let argc = n - top - 1;
     let callee = heap.root_at(top);
     // Verify the staged tail-call args too (BROOD_JIT_VERIFY / _FN) — the tail path is

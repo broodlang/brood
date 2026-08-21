@@ -8,7 +8,8 @@
 (defmodule workspace
   (:use file))
 
-(defn- brood-repos ()
+(defn- brood-repos
+  ()
   (filter (fn (dir)
             (and (file/dir? (str dir "/.git"))
               (or (= dir "../brood") (file/exists? (str dir "/project.blsp")))))
@@ -16,19 +17,23 @@
 
 (defn- repo-name (dir) (last (string/split dir "/")))
 
-(defn- git-out (dir git-args)
+(defn- git-out
+  (dir git-args)
   "Trimmed stdout of `git -C dir <git-args…>`."
   (string/trim (get (%os-cmd "git" (cons "-C" (cons dir git-args))) :stdout)))
 
-(defn- git-run (dir git-args)
+(defn- git-run
+  (dir git-args)
   "Run `git -C dir <git-args…>` inheriting stdio; returns the exit code."
   (run-process "git" (cons "-C" (cons dir git-args))))
 
-(defn- dirty-count (dir)
+(defn- dirty-count
+  (dir)
   (count (filter (fn (l) (not (string/blank? l)))
            (string/split (git-out dir (list "status" "--short")) "\n"))))
 
-(defn- ahead-count (dir)
+(defn- ahead-count
+  (dir)
   (let (a (git-out dir (list "rev-list" "--count" "@{u}..HEAD")))
     (if (string/blank? a) "0" a)))
 
@@ -68,8 +73,9 @@
     (= action "list") (list-repos)
     (= action "status") (status)
     (= action "check") (check)
-    (= action "commit") (if (nil? message)
-                          (println "nest ws commit needs a message")
-                          (commit message))
+    (= action "commit")
+      (if (nil? message)
+        (println "nest ws commit needs a message")
+        (commit message))
     (= action "push") (push)
     else (println "nest ws: unknown action '" action "' (list|status|check|commit|push)")))
