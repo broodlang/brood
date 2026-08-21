@@ -1962,7 +1962,7 @@ fn print_dynamic_values(kind: &str, prefix: &str) {
     let mut interp = Interp::new();
     let code = format!(
         "(require-one 'complete) {}",
-        brood::introspect::call_form("complete/complete-print", &[kind, prefix])
+        brood::introspect::call_form("complete/print-candidates", &[kind, prefix])
     );
     let _ = interp.eval_str(&code);
 }
