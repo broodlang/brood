@@ -146,6 +146,16 @@ pub(crate) fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) 
                 && ptr != crate::jit::QUEUED
                 && ActiveBackend::may_adopt_shared_code(arm)
             {
+                {
+                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                        let name = arm
+                            .dbg_name
+                            .map(crate::core::value::symbol_name_ref)
+                            .unwrap_or("<closure>");
+                        eprintln!("[jit-ir] arm={name} adopted-shared-code-compile-now nslots={} (not lowered here, emits no IR dump)", arm.nslots);
+                    }
+                }
                 arm.compile_epoch.store(epoch, Release);
                 arm.jit_code.store(ptr, Release);
                 arm.shared_published
@@ -1760,9 +1770,21 @@ pub(crate) fn jit_deopt_feedback(arm: &CompiledArm) {
                 .dbg_name
                 .map(crate::core::value::symbol_name_ref)
                 .unwrap_or("<closure>");
+            let ops: Vec<&str> = arm
+                .chunk
+                .as_ref()
+                .map(|c| c.code.as_slice())
+                .unwrap_or(&[])
+                .iter()
+                .map(crate::eval::compile::jit_plan::codegen::inst_opcode_name)
+                .collect();
             eprintln!(
-                "[jit-bail] arm={name} reason=deopt-thrash-latched nslots={} deopts={d}",
-                arm.nslots
+                "[jit-bail] arm={name} reason=deopt-thrash-latched nslots={} deopts={d} \
+                 inline_installed={} ops=[{}]",
+                arm.nslots,
+                arm.inline_installed
+                    .load(std::sync::atomic::Ordering::Acquire),
+                ops.join(" ")
             );
         }
         arm.jit_code.store(crate::jit::BAILED, Release);
@@ -1837,6 +1859,25 @@ pub(crate) fn jit_tier(
                     && ptr != crate::jit::QUEUED
                 {
                     arm.compile_epoch.store(epoch, Release);
+                    // Trace the ADOPT path: this arm installs a peer's compiled pointer
+                    // WITHOUT lowering, so it never reaches the `BROOD_JIT_DUMP_IR` dump.
+                    // That is why an arm can hold native code, deopt out of it, and still be
+                    // absent from every IR dump — which is exactly the state the tagged-tuple
+                    // receive matcher was found in.
+                    {
+                        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                            let name = arm
+                                .dbg_name
+                                .map(crate::core::value::symbol_name_ref)
+                                .unwrap_or("<closure>");
+                            eprintln!(
+                                "[jit-ir] arm={name} adopted-shared-code nslots={} (not lowered \
+                                 here, so it emits no IR dump)",
+                                arm.nslots
+                            );
+                        }
+                    }
                     arm.jit_code.store(ptr, Release);
                     arm.shared_published.store(true, Relaxed); // already in the cache
                     code = ptr;
@@ -1974,6 +2015,18 @@ pub(crate) fn jit_tier(
                         && ptr != crate::jit::BAILED
                         && ptr != crate::jit::QUEUED
                     {
+                        {
+                            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                            if *ON
+                                .get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
+                            {
+                                let name = arm
+                                    .dbg_name
+                                    .map(crate::core::value::symbol_name_ref)
+                                    .unwrap_or("<closure>");
+                                eprintln!("[jit-ir] arm={name} adopted-inline-code-from-cache nslots={} (not lowered here, emits no IR dump)", arm.nslots);
+                            }
+                        }
                         arm.inline_code.store(ptr, Release);
                         return None; // next entry swaps it in
                     }
@@ -2015,6 +2068,19 @@ pub(crate) fn jit_tier(
             // `compile_epoch` at the current epoch (the arm's inlined operators were just
             // re-validated at compile time) and invalidate only this process's fast-links to
             // this callee, which then re-probe and pick up `inline_code` + `inline_nslots`.
+            {
+                static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                    let name = arm
+                        .dbg_name
+                        .map(crate::core::value::symbol_name_ref)
+                        .unwrap_or("<closure>");
+                    eprintln!(
+                        "[jit-ir] arm={name} inline-swap-installed nslots={} inline_nslots={}",
+                        arm.nslots, arm.inline_nslots
+                    );
+                }
+            }
             arm.inline_installed.store(true, Release); // BEFORE jit_code — see comment above
             arm.jit_code.store(ic, Release);
             if let Some(sym) = arm.inline_name {

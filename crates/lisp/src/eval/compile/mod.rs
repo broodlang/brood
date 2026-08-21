@@ -2570,6 +2570,41 @@ fn hof_apply_native(
     // watched shape (nqueens' reduce closure).
     if outcome == 1 {
         crate::perf_bump!(hof_native_deopt);
+        // KI-48 follow-on: name WHERE the native bailed. The deopt journal at the arm's
+        // checkpoint slot packs the resume position as `ip = p >> 16`, so this maps a deopt
+        // back to the bytecode instruction that produced it — the difference between "this
+        // arm thrashes" and "this arm thrashes at instruction N, a Call to `vector-length`".
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+            let name = arm
+                .dbg_name
+                .map(crate::core::value::symbol_name_ref)
+                .unwrap_or("<closure>");
+            let slot = arm.ckpt_slot;
+            let journal = if slot != u32::MAX {
+                match heap.root_at(base + slot as usize) {
+                    Value::Int(p) if p > 0 => Some(p),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            match journal {
+                Some(p) => {
+                    let ip = (p >> 16) as usize;
+                    let op = arm
+                        .chunk
+                        .as_ref()
+                        .and_then(|c| c.code.get(ip))
+                        .map(crate::eval::compile::jit_plan::codegen::inst_opcode_name)
+                        .unwrap_or("<out-of-range>");
+                    eprintln!("[jit-deopt] arm={name} resume_ip={ip} op={op} (journalled)");
+                }
+                None => eprintln!(
+                    "[jit-deopt] arm={name} no journal — re-runs from ip 0 (ckpt_slot={slot})"
+                ),
+            }
+        }
     }
     if arm.deopt_watch {
         use std::sync::atomic::Ordering::Relaxed;
