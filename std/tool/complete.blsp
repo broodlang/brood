@@ -134,7 +134,7 @@ suggestions\", never to an error on the user's command line."
     path))
 
 ;; --- files --------------------------------------------------------------------
-(defn complete-test-files ()
+(defn test-files ()
   "Project-relative paths of every `*_test.blsp` under the project's test paths. Empty outside a project."
   (let (root (complete-root))
     (if (nil? root)
@@ -146,7 +146,7 @@ suggestions\", never to an error on the user's command line."
                                  (complete-manifest-dirs root :test-paths ["tests"])))))
         nil))))
 
-(defn complete-blsp-files ()
+(defn blsp-files ()
   "Project-relative paths of every `.blsp` under the project's source AND test paths — the candidates for `nest check` / `nest run` / `nest format`."
   (let (root (complete-root))
     (if (nil? root)
@@ -249,9 +249,9 @@ suggestions\", never to an error on the user's command line."
       true
       (string/split name ""))))
 
-(defn complete-tags ()
+(defn tags ()
   "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why."
-  (let (files (complete-test-files)
+  (let (files (test-files)
         root (complete-root))
     (if (or (nil? files) (nil? root))
       nil
@@ -267,12 +267,12 @@ suggestions\", never to an error on the user's command line."
                       nil files)))))))
 
 ;; --- selectors ----------------------------------------------------------------
-(defn complete-selectors ()
+(defn selectors ()
   "Candidates for `--only` / `--exclude` / `--include`: every declared tag, plus the `test:` and `describe:` pseudo-selector prefixes."
-  (append (complete-tags) (list "test:" "describe:")))
+  (append (tags) (list "test:" "describe:")))
 
 ;; --- dependencies -------------------------------------------------------------
-(defn complete-dep-names ()
+(defn dep-names ()
   "The names of the dependencies this project declares — the candidates for `nest remove` and `nest update`. Read straight from the manifest as data, so it works even when the deps are not fetched."
   (let (root (complete-root))
     (if (nil? root)
@@ -299,7 +299,7 @@ suggestions\", never to an error on the user's command line."
         nil))))
 
 ;; --- modules ------------------------------------------------------------------
-(defn complete-modules ()
+(defn modules ()
   "Candidates for `nest doc MODULE`: every baked-in std module plus this project's own source modules (by file basename, which is how `require` names them)."
   (let (root (complete-root))
     (sort (keys (fold (fn (seen m) (assoc seen m true))
@@ -320,7 +320,7 @@ suggestions\", never to an error on the user's command line."
                                                    ["src"])))))
                         nil))))))))
 
-(defn complete-project-modules ()
+(defn project-modules ()
   "Just THIS project's own source modules (by file basename, which is how `require` names them) — the candidates for `nest run --main`, where a std module would never be a valid entry point."
   (let (root (complete-root))
     (if (nil? root)
@@ -335,7 +335,7 @@ suggestions\", never to an error on the user's command line."
 
 ;; The scaffolder owns the template list, so read it from there rather than
 ;; restating it — a new template becomes completable with no change here.
-(defn complete-templates ()
+(defn templates ()
   "The `nest new --template` names, from the scaffolder's own list."
   ;; `*project-templates*` is a `scaffold` ambient, so `scaffold` must be loaded for
   ;; it to be bound — but only HERE, on the one completion that needs it. Naming an
@@ -361,23 +361,23 @@ suggestions\", never to an error on the user's command line."
 ;; --- dispatch -----------------------------------------------------------------
 ;; One entry point so `nest` needs only a single eval per completion request, and
 ;; an unknown kind is "no suggestions" rather than an error.
-(defn complete-for (kind)
+(defn for-kind (kind)
   "Candidates for a completion `kind` (a string, from `nest complete`): \"selector\", \"tag\", \"test-file\", \"blsp-file\", \"dep\", or \"module\". Any other kind yields nil, so a new flag that forgets to add a kind degrades to filename completion instead of failing."
   (cond
-    (= kind "selector") (complete-selectors)
-    (= kind "tag") (complete-tags)
-    (= kind "test-file") (complete-test-files)
-    (= kind "blsp-file") (complete-blsp-files)
-    (= kind "dep") (complete-dep-names)
-    (= kind "module") (complete-modules)
-    (= kind "project-module") (complete-project-modules)
-    (= kind "template") (complete-templates)
+    (= kind "selector") (selectors)
+    (= kind "tag") (tags)
+    (= kind "test-file") (test-files)
+    (= kind "blsp-file") (blsp-files)
+    (= kind "dep") (dep-names)
+    (= kind "module") (modules)
+    (= kind "project-module") (project-modules)
+    (= kind "template") (templates)
     else nil))
 
-(defn complete-print (kind prefix)
+(defn print-candidates (kind prefix)
   "Print one candidate per line for `kind`, keeping only those starting with `prefix` — the form `nest complete` consumes. Prints nothing (and never raises) when there is nothing to suggest, so the shell falls back to filename completion."
   (fold (fn (_ c) (println c))
     nil
     (filter (fn (c) (or (= prefix "") (string/starts-with? c prefix)))
-      (or (complete-safely (fn () (complete-for kind))) nil)))
+      (or (complete-safely (fn () (for-kind kind))) nil)))
   :ok)
