@@ -33,10 +33,6 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
   "True if the queue has no elements."
   (= (get q :size) 0))
 
-(defn size (q)
-  "Number of elements in the queue."
-  (get q :size))
-
 (defn- balance
   (front back size)
   "Rebalance: if front is nil, reverse back to front."

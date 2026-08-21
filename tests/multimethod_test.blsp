@@ -39,7 +39,7 @@
       (assert= (get e :kind) :no-method)
       (assert= (get e :multi) 'mm-combine)
       (assert= (get e :key) [:float :keyword])
-      (is (member? [:int :int] (get e :have)))
+      (is (includes? (get e :have) [:int :int]))
       (is (includes? (error-message e) "no method")))))
 
 ;; ---- across processes: methods live in the shared code region; a spawned process resolves

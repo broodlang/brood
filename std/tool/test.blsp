@@ -255,7 +255,7 @@ docs/testing.md for the full guide.")
 (defn- form-contains-test?
   (form)
   (and (pair? form)
-    (or (member? (first form) (list 'test 'deftest 'describe))
+    (or (includes? (list 'test 'deftest 'describe) (first form))
       (any? form-contains-test? (rest form)))))
 
 ;; Does a describe body carry any tests? Checked SYNTACTICALLY at expansion (the
@@ -1067,7 +1067,7 @@ the test rather than hanging the run."
 ;; test FAILS instead of wedging the collector. Returns the full result list.
 (defn collect-timeout (workers reported acc)
   (fold (fn (a w)
-          (if (member? (first w) reported)
+          (if (includes? reported (first w))
             a
             (do
               (exit (first w) :kill)
@@ -1128,7 +1128,7 @@ the test rather than hanging the run."
             ;; Ignore a result from a pid that isn't one of THIS batch's workers, or
             ;; one already counted — a late message from a timed-out/killed worker of a
             ;; prior step must not corrupt this step's `pending` count.
-            (if (or (member? pid reported)
+            (if (or (includes? reported pid)
                   (nil? (unit-of-pid pid workers)))
               (collect-loop pending workers reported acc deadline)
               (collect-loop (- pending 1)
@@ -1142,7 +1142,7 @@ the test rather than hanging the run."
           (let (pid (third msg)
                 unit (unit-of-pid pid workers))
             (cond
-              (member? pid reported) (collect-loop pending
+              (includes? reported pid) (collect-loop pending
                                        workers reported acc deadline)
               (nil? unit) (collect-loop pending workers reported acc deadline)
               else

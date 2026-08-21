@@ -19,7 +19,7 @@
                  (multimap/assoc :color \"blue\")
                  (multimap/assoc :size  \"large\")))
       (multimap/get-all mm :color))   ;; => (\"red\" \"blue\")
-      (multimap/size mm)               ;; => 3
+      (count mm)               ;; => 3
 
 A multimap is a **record** wrapping a key→list map, so it is its own type rather than a
 map that happens to hold lists: `multimap?` is a real predicate, it is never `=` to a
@@ -104,11 +104,6 @@ If no values remain under `k`, the key is dropped."
     (mapcat (fn (pair) (map (fn (v) [(first pair) v]) (reverse (second pair))))
       (map-pairs (/get mm :entries)))))
 
-(defn size (mm)
-  "Total number of key-value pairs across all keys — i.e. `(count mm)` over its
-associations (its `Seqable` view)."
-  (count mm))
-
 (defn map-vals (mm f)
   "Return a multimap where each value list has been transformed by `(f key values-list)`."
   (multimap (fold (fn (m pair)
@@ -133,7 +128,7 @@ associations (its `Seqable` view)."
     (str "#<multimap "
       (count (keys mm))
       " keys, "
-      (size mm)
+      (count mm)
       " pairs>")))
 
 (impl Inspect

@@ -52,8 +52,8 @@
   (test "bound? wants a symbol" (assert-error (bound? 42)))
   (test "global-names includes prelude and user definitions"
     (defn another-name () nil)
-    (is (member? 'map (global-names)))
-    (is (member? 'introspection-test/another-name (global-names)))))
+    (is (includes? (global-names) 'map))
+    (is (includes? (global-names) 'introspection-test/another-name))))
 
 ;; source-location (ADR-031; docs/lsp.md §Cross-file): loading a file records
 ;; where each *top-level* def/defn/defmacro was defined, so tooling can answer

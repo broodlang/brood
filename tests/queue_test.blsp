@@ -4,9 +4,9 @@
   (test "new queue is empty"
     (is (queue/empty? (queue/new))))
   (test "size 0 when empty"
-    (assert= 0 (queue/size (queue/new))))
+    (assert= 0 (count (queue/new))))
   (test "push increases size"
-    (assert= 1 (queue/size (queue/push (queue/new) :a))))
+    (assert= 1 (count (queue/push (queue/new) :a))))
   (test "pop returns empty on empty queue"
     (assert= :empty (queue/pop (queue/new))))
   (test "peek returns empty on empty queue"
@@ -27,7 +27,7 @@
     (let (q (queue/push (queue/new) :x))
       (assert= :x (queue/peek q))
       (assert= :x (queue/peek q))
-      (assert= 1 (queue/size q))))
+      (assert= 1 (count q))))
   (test "queue/->list preserves order"
     (let (q (-> (queue/new)
               (queue/push :a)
@@ -37,7 +37,7 @@
   (test "queue/list->"
     (let (q (queue/list-> [10 20 30]))
       (assert= 10 (queue/peek q))
-      (assert= 3 (queue/size q))))
+      (assert= 3 (count q))))
   ;; a queue is a first-class collection — the generic ops work on it directly
   ;; (Seqable + Conjable, ADR-172 §7), not just the bespoke `queue-*` functions.
   (test "generic collection ops work on a queue"
@@ -64,7 +64,7 @@
   (test "new pq is empty"
     (is (pq/empty? (pq/new))))
   (test "size 0"
-    (assert= 0 (pq/size (pq/new))))
+    (assert= 0 (count (pq/new))))
   (test "pop empty returns :empty"
     (assert= :empty (pq/pop (pq/new))))
   (test "peek empty returns :empty"
@@ -92,7 +92,7 @@
     (let (pq (-> (pq/new)
                (pq/insert 1 :x)
                (pq/insert 1 :y)))
-      (assert= 2 (pq/size pq))))
+      (assert= 2 (count pq))))
   (test "equal priorities pop in insertion order (stable / FIFO)"
     (let (pq (-> (pq/new)
                (pq/insert 1 :a)
@@ -145,7 +145,7 @@
       (let (results (map (fn (_) (receive ([:q q] q) (after *test-wait-ms* :timeout)))
                       (range 4)))
         (is (every? queue? results))
-        (is (every? (fn (q) (= (queue/size q) 2)) results))
+        (is (every? (fn (q) (= (count q) 2)) results))
         (assert= (into [] (sort (map (fn (q) (queue/peek q)) results))) [0 1 2 3]))))
   (test "a pq survives a round trip and keeps its ordering"
     (let (me (self)

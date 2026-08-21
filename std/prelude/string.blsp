@@ -79,7 +79,7 @@ incremental search rides on."
 (defn includes? (coll x)
   "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), and maps (membership among values — use `contains?` for keys)."
   (cond
-    (map? coll) (member? x (vals coll))
+    (map? coll) (includes? (vals coll) x)
     else (>= (index-of coll x) 0)))
 
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-

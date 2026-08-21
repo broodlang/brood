@@ -31,10 +31,6 @@ falsy collection, so `(if pq …)` used to take the else branch on an empty queu
   "True if the priority queue has no elements."
   (/empty? (get q :entries)))
 
-(defn size (q)
-  "Number of elements in the priority queue."
-  (count (get q :entries)))
-
 (defn- sorted-insert
   (entries pri val)
   ;; Tail-recursive: accumulate the (reversed) higher-priority prefix and splice
@@ -86,7 +82,7 @@ Stable: among equal priorities, earlier inserts pop first (FIFO)."
   (->string [q]
     (if (empty? q)
       "#<pq empty>"
-      (str "#<pq " (size q) " min=" (->string (peek-priority q)) ">"))))
+      (str "#<pq " (count q) " min=" (->string (peek-priority q)) ">"))))
 
 (impl Inspect
   pq/pq
