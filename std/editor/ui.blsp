@@ -43,7 +43,7 @@ beat. The observer and the editor are both `ui-run` clients — see
 (defdyn *term-display*
   ;; the terminal (crossterm) frontend — always available, and single (one
   ;; terminal), so it's a fixed display map of the 0-arg `term-*` primitives.
-  {:enter term-enter :leave term-leave :size term-size :draw term-draw :poll term-poll})
+  {:enter term/enter :leave term/leave :size term/size :draw term/draw :poll term/poll})
 
 (defn- ui-coalesce-drag
   (msg)

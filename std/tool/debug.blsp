@@ -458,7 +458,7 @@ tree grow as a workload runs; drive resume from another session or a timer."
 ;; ---- interactive terminal attach (key-driven) -------------------------------
 ;; The driveable sibling of `watch`: same live view, but it reads the keyboard
 ;; (raw mode) so you resume parked processes without a timer. Pure IO shell over the
-;; same `report`; input via `term-poll` (nil on the 400ms timeout → just redraw).
+;; same `report`; input via `term/poll` (nil on the 400ms timeout → just redraw).
 (defn- debug-attach-render
   (dbg)
   ;; In raw mode `\n` moves down but NOT to column 0, so a `println` frame staircases.
@@ -474,7 +474,7 @@ tree grow as a workload runs; drive resume from another session or a timer."
 (defn- debug-attach-loop
   (dbg)
   (debug-attach-render dbg)
-  (let (key (term-poll 400))
+  (let (key (term/poll 400))
     (cond
       (or (= key "q") (= key :escape) (= key :ctrl-c)) :quit
       (= key "r") (do (resume-all dbg) (debug-attach-loop dbg))
@@ -482,11 +482,11 @@ tree grow as a workload runs; drive resume from another session or a timer."
 (defn attach (dbg)
   "Interactive terminal view of the debug session: refreshes ~2×/s and handles keys —
 `r` resumes every parked process, `q` (or Esc / Ctrl-C) quits. Needs a real terminal
-(enters raw mode); `watch` is the non-interactive read-only sibling. `term-leave`
+(enters raw mode); `watch` is the non-interactive read-only sibling. `term/leave`
 always runs, even on error, so the terminal is restored."
-  (term-enter)
+  (term/enter)
   (let (result (try (debug-attach-loop dbg) (catch _ :error)))
-    (term-leave)
+    (term/leave)
     result))
 
 ;; ---- single-step evaluation (spy + break fusion) ----------------------------

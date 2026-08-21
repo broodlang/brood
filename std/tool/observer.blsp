@@ -568,7 +568,7 @@ process is selected."
 ;; ---- mouse (a second input path: click to select, wheel to scroll) ----------
 ;;
 ;; A frontend may also yield a mouse event `[:mouse action button row col mods]`
-;; (terminal + GUI both do, via `term-poll`/`gui-poll`, with the same minimal
+;; (terminal + GUI both do, via `term/poll`/`gui-poll`, with the same minimal
 ;; vocabulary: `:press` / `:scroll-up` / `:scroll-down`; `mods` is a vector of held
 ;; modifier keywords like `[:ctrl]`, which the observer ignores). The observer acts on
 ;; two — left-press selects the clicked process row, the wheel scrolls the

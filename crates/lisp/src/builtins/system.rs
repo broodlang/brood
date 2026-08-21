@@ -1135,6 +1135,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.
     embedded_module!("editor/ansi", "std/editor/ansi.blsp"),
+    // The terminal seam (ADR-046): policy over the `%term-*` primitives, so raw-mode /
+    // input polling / paint live under `term/*` rather than the bare language core.
+    embedded_module!("term", "std/term.blsp"),
     // Sets as a library over maps (ADR-062): a set is a map of `element → true`,
     // so membership/elements/size reuse `contains?`/`keys`/`count`; the module
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.

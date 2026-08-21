@@ -691,14 +691,6 @@
    "tcp-set-binary" :system
    "tcp-set-idle-timeout" :system
    "temp-path" :filesystem
-   "term-draw" :system
-   "term-emit" :system
-   "term-enter" :system
-   "term-leave" :system
-   "term-poll" :system
-   "term-raw-enter" :system
-   "term-raw-leave" :system
-   "term-size" :system
    "third" :collections
    "thread-first-step" :control
    "thread-last-step" :control

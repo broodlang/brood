@@ -133,7 +133,7 @@
     (is (includes? (map first (doc-search "remote node distributed")) 'connect))
     (is (includes? (map first (doc-search "remote node distributed")) 'node-start))
     (is (includes? (map first (doc-search "node up down notification")) 'monitor-node))
-    (is (includes? (map first (doc-search "raw mode single keypress")) 'term-raw-enter)))
+    (is (includes? (map first (doc-search "raw mode single keypress")) 'term/raw-enter)))
   (test "doc-search is case-insensitive"
     (assert= (map first (doc-search "XORSHIFT")) (map first (doc-search "xorshift"))))
   (test "doc-search of a blank query is empty"
