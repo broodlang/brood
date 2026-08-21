@@ -5,7 +5,7 @@
 //! caller's inner loop (it's a block terminator) — these fns emit the terminator
 //! and return `Some(())`, or `None` to bail the whole arm to the VM.
 #![cfg(feature = "jit")]
-use super::emit::{as_block_arg, is_bool_op, store_op, Frame};
+use super::emit::{as_block_arg, param_repr, store_op, Frame, ParamRepr};
 use super::Op;
 use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL};
 use cranelift_codegen::ir::{condcodes::IntCC, types, Block, BlockArg, InstBuilder, MemFlagsData};
@@ -23,7 +23,7 @@ const STRIDE: i64 = std::mem::size_of::<crate::core::value::Value>() as i64;
 /// bool edge to a raw truthy int, depending on which edge lowered last. The caller
 /// routes a disagreeing edge to `deopt` instead — the VM runs that iteration with the
 /// real tagged value, bit-identical.
-pub(super) fn record_block_flags(slot: &mut Option<Vec<bool>>, flags: Vec<bool>) -> bool {
+pub(super) fn record_block_flags(slot: &mut Option<Vec<ParamRepr>>, flags: Vec<ParamRepr>) -> bool {
     match slot {
         None => {
             *slot = Some(flags);
@@ -45,7 +45,7 @@ pub(super) fn emit_jump(
     len: usize,
     done_block: Block,
     leader_block: &[Option<Block>],
-    bool_param: &mut [Option<Vec<bool>>],
+    bool_param: &mut [Option<Vec<ParamRepr>>],
     frame: Frame,
 ) -> Option<()> {
     let deopt = frame.deopt;
@@ -66,7 +66,7 @@ pub(super) fn emit_jump(
             b.ins().jump(deopt, &[BlockArg::Value(__dr)]);
         }
     } else {
-        let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(b, op, frame)).collect();
+        let flags: Vec<ParamRepr> = stack.iter().map(|&op| param_repr(b, op, frame)).collect();
         if record_block_flags(&mut bool_param[t], flags) {
             let args: Vec<BlockArg> = stack
                 .iter()
@@ -95,12 +95,12 @@ pub(super) fn emit_jump_if_false(
     t: usize,
     j: usize,
     leader_block: &[Option<Block>],
-    bool_param: &mut [Option<Vec<bool>>],
+    bool_param: &mut [Option<Vec<ParamRepr>>],
     frame: Frame,
 ) -> Option<()> {
     let deopt = frame.deopt;
     let cond = stack.pop()?;
-    let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(b, op, frame)).collect();
+    let flags: Vec<ParamRepr> = stack.iter().map(|&op| param_repr(b, op, frame)).collect();
     // A side whose typing disagrees with its join's recorded flags routes to `deopt`
     // (no args) instead — see `record_block_flags`.
     let t_ok = record_block_flags(&mut bool_param[t], flags.clone());
