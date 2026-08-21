@@ -82,7 +82,7 @@ leading instruction keyword (when the first word is one) plus quoted-string args
       else
         (let (we (dk-word-end line lead n)
               word (string/substring line lead we))
-          (if (member? (string/upper word) dk-instructions)
+          (if (includes? dk-instructions (string/upper word))
             (cons [(+ base lead) (+ base we) dk-face-instruction]
               (dk-strings line base we n '()))
             (dk-strings line base lead n '()))))))

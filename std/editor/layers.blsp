@@ -446,7 +446,7 @@ go with it (see `request-close`)."
 accumulate and de-duplicate, so two layers asking for the same companion is one request.
 Returns `ctx`, so a hook can thread it: `(fn (buf) (request-close buf \"*Workings*\"))`."
   (let (seen (close-requests ctx))
-    (if (member? name seen)
+    (if (includes? seen name)
       ctx
       (assoc ctx :close-requests (append seen (list name))))))
 
