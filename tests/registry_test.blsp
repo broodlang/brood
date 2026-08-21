@@ -107,7 +107,7 @@
                                 :usage "u"
                                 :summary "s"
                                 :handler (fn (_) nil)})))
-    (assert= 1 (count (filter (fn (c) (member? "rt-dup" (get c :names))) *repl-commands*)))
+    (assert= 1 (count (filter (fn (c) (includes? (get c :names) "rt-dup")) *repl-commands*)))
     ;; …while distinct names all survive.
     (reg-fan 64
       (fn (i)
@@ -117,7 +117,7 @@
                                 :handler (fn (_) nil)})))
     (assert= 64
       (count (filter (fn (i)
-                       (any? (fn (c) (member? (str "rt-c" i) (get c :names)))
+                       (any? (fn (c) (includes? (get c :names) (str "rt-c" i)))
                          *repl-commands*))
                (range 64)))))
 

@@ -144,7 +144,7 @@ looking identical to a round-trip that cleaned up after itself."
   ;; A top-level DEFINITION (as opposed to something that runs): the forms whose
   ;; whole job is to bind a name.
   (and (pair? form)
-    (member? (first form) ['def 'defn 'defmacro 'defdyn 'defrecord 'defability])))
+    (includes? ['def 'defn 'defmacro 'defdyn 'defrecord 'defability] (first form))))
 
 (defn- eval-server-eval-traced
   (src names)

@@ -28,7 +28,7 @@
   (test "returns a keyword"
     (is (keyword? (system/os-type))))
   (test "is one of the known platforms"
-    (is (member? (system/os-type) [:linux :macos :windows :unknown]))))
+    (is (includes? [:linux :macos :windows :unknown] (system/os-type)))))
 
 (describe "system/cmd"
   (test "echo returns stdout"

@@ -610,7 +610,6 @@ mailbox messages stay queued while waiting (selective receive)."
       ([:offload ^tok result] result)
       ([:offload-error ^tok e] (throw e)))))
 
-;; ---- a general membership test ----------------------------------------------
-(defn member? (x xs)
-  "True if `x` is equal to some item of list `xs`."
-  (cond (empty? xs) false (= x (first xs)) true else (member? x (rest xs))))
+;; Membership is `includes?` (value in a sequence, `(includes? coll x)`) and `contains?`
+;; (key in a map). The old `member?` — a reversed-args `(member? x xs)` duplicate of
+;; `includes?` for lists — was removed; its call sites swapped to `(includes? xs x)`.

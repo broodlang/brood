@@ -1313,7 +1313,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
               ;; or by a vector containing it (e.g. [pid :mark] — its selection anchor)
               nb (fold (fn (b k) (buffer-marker-delete b k))
                    buf
-                   (filter (fn (k) (or (= k pid) (and (vector? k) (member? pid k))))
+                   (filter (fn (k) (or (= k pid) (and (vector? k) (includes? k pid))))
                      (keys (buffer-markers buf)))))
           (if (= nb buf)
             ; no marker for it — just drop the subscriber

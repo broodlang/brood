@@ -789,8 +789,8 @@
       (receive (after 300 nil))
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "Z")))
       (let (zs (filter (fn (m) (= (nth m 2) "Z")) (drain-relayed ())))
-        (is (member? :a (map (fn (m) (nth m 0)) zs)))
-        (is (member? :b (map (fn (m) (nth m 0)) zs))))
+        (is (includes? (map (fn (m) (nth m 0)) zs) :a))
+        (is (includes? (map (fn (m) (nth m 0)) zs) :b)))
       (stop-buffer bp)))
 
   (test "an origin-tagged edit's push carries the origin (the echo-suppression seam)"

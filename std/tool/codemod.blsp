@@ -68,3 +68,82 @@
     (filter (fn (p) (= (count p) 2))
       (map (fn (l) (string/split (string/trim l) " "))
         (filter (fn (l) (not (string/blank? l))) (string/split (file/slurp path) "\n"))))))
+
+;; ---- 2-arg swap (for a reversed-args rename like member? -> includes?) --------
+;; `(old A B)` -> `(new B A)`, reading A and B as balanced s-expressions so nested
+;; forms swap intact. Only touches real 2-arg CALL forms (head followed by whitespace,
+;; exactly two args before the close); anything else is left byte-for-byte.
+
+(defn- ws? (c) (includes? " \t\n" c))
+(defn- opener? (c) (includes? "([{" c))
+(defn- closer? (c) (includes? ")]}" c))
+
+(defn- skip-ws (text i)
+  (if (and (< i (string/length text)) (ws? (string/char-at text i)))
+    (skip-ws text (inc i))
+    i))
+
+(defn- skip-str (text i)
+  ;; i just past the opening quote; returns index after the closing quote
+  (if (>= i (string/length text))
+    i
+    (let (c (string/char-at text i))
+      (cond (= c "\\") (skip-str text (+ i 2))
+            (= c "\"") (inc i)
+            else (skip-str text (inc i))))))
+
+(defn- scan-close (text i depth)
+  ;; i inside a bracketed form; returns index after the matching close at depth 0
+  (if (>= i (string/length text))
+    i
+    (let (c (string/char-at text i))
+      (cond (= c "\"") (scan-close text (skip-str text (inc i)) depth)
+            (opener? c) (scan-close text (inc i) (inc depth))
+            (closer? c) (if (= depth 1) (inc i) (scan-close text (inc i) (dec depth)))
+            else (scan-close text (inc i) depth)))))
+
+(defn- atom-end (text i)
+  (if (>= i (string/length text))
+    i
+    (let (c (string/char-at text i))
+      (if (or (ws? c) (opener? c) (closer? c) (= c "\"") (= c ";"))
+        i
+        (atom-end text (inc i))))))
+
+(defn- read-one (text i)
+  ;; i at the start of an s-expr (non-ws); returns its end index (exclusive)
+  (let (c (string/char-at text i))
+    (cond (opener? c) (scan-close text (inc i) 1)
+          (= c "\"") (skip-str text (inc i))
+          else (atom-end text i))))
+
+(defn- swap-loop (text old new from parts)
+  (let (needle (str "(" old)
+        i (index-of text needle from)
+        nlen (string/length needle)
+        len (string/length text))
+    (if (< i 0)
+      (cons (string/substring text from len) parts)
+      (let (after (+ i nlen))
+        (if (or (>= after len) (not (ws? (string/char-at text after))))
+          (swap-loop text old new (inc i) (cons (string/substring text from (inc i)) parts))
+          (let (a1s (skip-ws text after) a1e (read-one text a1s)
+                a2s (skip-ws text a1e) a2e (read-one text a2s)
+                closep (skip-ws text a2e))
+            (if (or (>= closep len) (not (= (string/char-at text closep) ")")))
+              (swap-loop text old new (inc i) (cons (string/substring text from (inc i)) parts))
+              (swap-loop text old new (inc closep)
+                (cons (str "(" new " " (string/substring text a2s a2e) " " (string/substring text a1s a1e) ")")
+                  (cons (string/substring text from i) parts))))))))))
+
+(defn swap2 (old new)
+  "Rewrite every 2-arg call `(old A B)` to `(new B A)` across the project's own .blsp
+  sources, reading A/B as balanced s-expressions. For a reversed-args rename."
+  (let (changed (filter (fn (f) (not (nil? f)))
+                  (map (fn (f)
+                         (let (before (file/slurp f)
+                               after (apply str (reverse (swap-loop before old new 0 nil))))
+                           (if (= before after) nil (do (file/spit f after) f))))
+                    (project-blsp))))
+    (for (f changed) (println "  swapped: " f))
+    (println (count changed) " file(s) changed")))

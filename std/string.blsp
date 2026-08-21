@@ -9,7 +9,7 @@
 ;; What lives here vs. bare in the prelude — the boundary rule (ADR-230):
 ;;   - `string/*`  = "the first argument is a string" (this module).
 ;;   - bare        = operations over ANY collection (`map`/`filter`/`reduce`/`count`/
-;;                   `contains?`/`member?`/`includes?`/`index-of`/`join`? no — `join`
+;;                   `contains?`/`includes?`/`index-of`/`join`? no — `join`
 ;;                   is string-flavoured, so it is here), plus the primitives
 ;;                   `str`/`string?`/`string` and the scalar bridges that merely
 ;;                   REINTERPRET a string as another type (`string->number`,
@@ -33,7 +33,7 @@ trimming, padding, case folding, search, split/join, and char-content conversion
 The low-level primitives (`string/length` `string/substring` `string/split`
 `string/upper` `string/lower` …) are Rust builtins; the rest is pure Brood over them.
 Bare-in-the-prelude by contrast: the generic collection ops (`map`/`filter`/`count`/
-`contains?`/`member?`/`includes?`/`index-of`) and the scalar bridges (`string->number`,
+`contains?`/`includes?`/`index-of`) and the scalar bridges (`string->number`,
 `string->symbol`) that reinterpret a string as another type.")
 
 ;; ---- case -------------------------------------------------------------------

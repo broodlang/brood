@@ -581,8 +581,8 @@
       (pm-shape-worker parent (pm-rect 2 3))
       (let (a (receive ([:s v] v))
             b (receive ([:s v] v)))
-        (is (member? [:circle 4] (list a b)))
-        (is (member? [:rect 6] (list a b)))))))
+        (is (includes? (list a b) [:circle 4]))
+        (is (includes? (list a b) [:rect 6]))))))
 
 ;; No (run-tests) call: register-only. The project test runner (`brood test`,
 ;; ADR-020) discovers this file and runs the whole suite once.
