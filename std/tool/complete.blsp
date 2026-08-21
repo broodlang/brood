@@ -52,14 +52,14 @@ suggestions\", never to an error on the user's command line."
 (defn- complete-safely (thunk) (try (thunk) (catch _ nil)))
 
 ;; --- the project's shape, read not loaded --------------------------------------
-;; Walk up from `dir` looking for project.blsp. `parent-dir` is its own fixed point
+;; Walk up from `dir` looking for project.blsp. `parent-directory` is its own fixed point
 ;; at "/" and ".", which terminates the walk.
 (defn- complete-find-root
   (dir)
   (cond
     (file/exists? (path-join dir "project.blsp")) dir
-    (= dir (parent-dir dir)) nil
-    else (complete-find-root (parent-dir dir))))
+    (= dir (parent-directory dir)) nil
+    else (complete-find-root (parent-directory dir))))
 
 (defn- complete-root () (complete-safely (fn () (complete-find-root (file/cwd)))))
 

@@ -20,10 +20,10 @@
 
 (describe "paths"
   (test "path-join" (assert= (path-join "a" "b") "a/b") (assert= (path-join "a/" "b") "a/b"))
-  (test "parent-dir"
-    (assert= (parent-dir "/a/b/c") "/a/b")
-    (assert= (parent-dir "/foo") "/")
-    (assert= (parent-dir "rel") ".")))
+  (test "parent-directory"
+    (assert= (parent-directory "/a/b/c") "/a/b")
+    (assert= (parent-directory "/foo") "/")
+    (assert= (parent-directory "rel") ".")))
 
 ;; Concurrent `provide` must not lose a feature (KI-22's class). `provide` is a
 ;; read-modify-write of one shared global (`(def *features* (assoc *features* key true))`

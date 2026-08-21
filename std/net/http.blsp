@@ -242,6 +242,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   (response 404 {"Content-Type" "text/plain; charset=utf-8"} "Not Found"))
 
 (defn render-headers (headers)
+  "Render a `headers` map to the `Key: Value\\r\\n` HTTP header block (one string)."
   ;; Render each header line, then one `(apply str …)` — the old `(str acc …)`
   ;; fold rebuilt the whole accumulator per header (O(headers²) in total bytes).
   (apply str (map (fn (kv) (str (first kv) ": " (second kv) "\r\n")) (map-pairs headers))))

@@ -3,7 +3,7 @@
 ;; A coherent Brood surface over the kernel's irreducible fs primitives —
 ;; `file/slurp`, `file/spit`, `file/exists?`, `file/dir?`, `file/ls`, `file/mkdir`,
 ;; `file/mtime`, `file/cwd` — plus the prelude's `path-join` / `path-basename` /
-;; `parent-dir`. Everything here is policy (ADR-006): whole-file and line I/O,
+;; `parent-directory`. Everything here is policy (ADR-006): whole-file and line I/O,
 ;; directory walking, and the path helpers the prelude doesn't already provide.
 ;; No new Rust.
 ;;
