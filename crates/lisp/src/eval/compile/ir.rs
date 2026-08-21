@@ -690,7 +690,7 @@ pub struct CompiledArm {
     /// small→inlined swap fired). **This is the per-engine frame-sizing key**: while
     /// false the active native is the small original arm (frame `nslots`); once true
     /// the active native is the inlined arm (frame `inline_nslots`). One-way false→true
-    /// within an epoch; reset on epoch invalidation. See `active_nslots`.
+    /// within an epoch; reset on epoch invalidation. See `frame_size_for_new_entry`.
     #[cfg(feature = "jit")]
     pub inline_installed: std::sync::atomic::AtomicBool,
     /// Leaf-callee inlining (default ON; `BROOD_NO_LEAF_INLINE=1` opts out): the body with

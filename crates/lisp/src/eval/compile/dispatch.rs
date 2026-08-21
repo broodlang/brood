@@ -366,7 +366,7 @@ pub(crate) fn dispatch(
                         Some(4) => {
                             crate::perf_bump!(jit_fast_tail4);
                             // Tail call staged by the JIT: [callee, arg0..argN] sit
-                            // above the frame at roots[base+active_nslots..].  These
+                            // above the frame at roots[base+nslots..] (see KI-48 below).  These
                             // were pushed *after* any GC that fired inside
                             // jit_dispatch_call's safepoint (line ~8890), so they hold
                             // current-epoch handles — unlike cur_argv which was captured

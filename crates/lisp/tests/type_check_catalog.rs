@@ -80,7 +80,7 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(+ 1 (empty? (list)))", "+"),           // empty? → bool
     ("(+ 1 (list? (list 1 2)))", "+"),        // list? → bool
     ("(+ 1 (contains? {:a 1} :a))", "+"),     // contains? → bool
-    ("(+ 1 (member? 1 (list 1 2)))", "+"),    // member? → bool
+    ("(+ 1 (includes? (list 1 2) 1))", "+"),    // includes? → bool
     ("(+ 1 (any? int? (list 1 2)))", "+"),    // any? → bool
     ("(+ 1 (every? int? (list 1 2)))", "+"),  // every? → bool
     // ---- expanded curated sigs: string converters ----
