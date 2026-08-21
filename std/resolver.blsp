@@ -315,7 +315,8 @@ all). NONE never matches — a version constraint is about a selected version."
 
 ;; fold-until: fold `f` over `items`, threading `acc`; `f` returns [:cont acc'] to continue
 ;; or [:done result] to stop early. Ends `[:ok acc changed]`-shaped for propagate's caller.
-(defn- fold-until (f acc items)
+(defn- fold-until
+  (f acc items)
   (cond
     (empty? items) [:ok (nth acc 0) (nth acc 1)]
     else

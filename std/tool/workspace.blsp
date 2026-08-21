@@ -37,16 +37,19 @@
   (let (a (git-out dir (list "rev-list" "--count" "@{u}..HEAD")))
     (if (string/blank? a) "0" a)))
 
-(defn- list-repos ()
+(defn- list-repos
+  ()
   (for (dir (brood-repos)) (println (repo-name dir))))
 
-(defn- status ()
+(defn- status
+  ()
   (for (dir (brood-repos))
     (let (d (dirty-count dir) a (ahead-count dir))
       (when (or (> d 0) (not (= a "0")))
         (println (repo-name dir) "  uncommitted=" d " unpushed=" a)))))
 
-(defn- check ()
+(defn- check
+  ()
   (for (dir (brood-repos))
     (when (file/exists? (str dir "/project.blsp"))
       (println "=== " (repo-name dir) " ===")
@@ -54,14 +57,16 @@
       (when (not (= 0 (run-process "sh" (list "-c" (str "cd " dir " && nest check")))))
         (println "  CHECK FAILED: " (repo-name dir))))))
 
-(defn- commit (message)
+(defn- commit
+  (message)
   (for (dir (brood-repos))
     (when (> (dirty-count dir) 0)
       (git-run dir (list "add" "-A"))
       (when (= 0 (git-run dir (list "commit" "-q" "-m" message)))
         (println "committed: " (repo-name dir))))))
 
-(defn- push ()
+(defn- push
+  ()
   (for (dir (brood-repos))
     (when (not (= (ahead-count dir) "0"))
       (when (= 0 (git-run dir (list "push")))
