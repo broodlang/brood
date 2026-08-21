@@ -117,7 +117,9 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 (defn cos (x) "The cosine of `x` (radians). Returns a float." (%cos x))
 (defn tan (x) "The tangent of `x` (radians). Returns a float." (%tan x))
 (defn asin (x) "The arcsine of `x` in radians. `x` must be in [-1, 1]; raises otherwise." (%asin x))
-(defn acos (x) "The arccosine of `x` in radians. `x` must be in [-1, 1]; raises otherwise." (%acos x))
+(defn acos (x)
+  "The arccosine of `x` in radians. `x` must be in [-1, 1]; raises otherwise."
+  (%acos x))
 (defn atan (x) "The arctangent of `x` in radians (result in [-π/2, π/2])." (%atan x))
 (defn atan2 (y x)
   "The angle in radians of the vector (`x`, `y`) from the positive x-axis, in (-π, π]. Handles x=0."

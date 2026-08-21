@@ -210,7 +210,8 @@ test discovery, lints, release, config)."
     ";; `(:use test)` the macros. :isolated — these spawn processes.\n"
     "(defmodule main-test (:use main) (:use gen) (:use test))\n" "\n" "(describe \"counter\"\n"
     "  :isolated\n" "  (test \"casts thread state; a call reads it\"\n"
-    "    (let (c (spawn-server counter 0))\n" "      (cast c :inc) (cast c :inc) (cast c [:add 10])\n"
+    "    (let (c (spawn-server counter 0))\n"
+    "      (cast c :inc) (cast c :inc) (cast c [:add 10])\n"
     "      (assert= (call c :value) 12))))\n"))
 
 ;; `editor`: a tiny text editor on the `ui` framework (std/editor/ui.blsp) — a `ui-run`

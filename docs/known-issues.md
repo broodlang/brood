@@ -2723,12 +2723,38 @@ against 0 / 16 by default). The arm's native code deopts **regardless of how it 
 - **not message-vector indexing**: a hot arm doing `(nth m 1)` on a *message-delivered* vector
   does not deopt, and neither does a hot loop doing `(= (vector-length v) 2)`
 
-**Why it stops here.** Both the built-in `BROOD_DEOPT_TRACE` and the journal decoder added
-this session report only the resume *checkpoint*, and the arm has several guards after ip 7
-(two `Prim2`, two `Prim2SlotInt`, a `MakeVector`). Distinguishing them needs **per-deopt-site
-reason codes**: each `brif … deopt` in the lowering targeting its own block that records a
-distinct id before jumping to the shared exit. That is the next step, and it is a real change
-to `jit_lower`, not a probe.
+### ROOT CAUSE (2026-08-21): a non-Int value carried across a block boundary
+
+Per-deopt-site reason codes were built to answer this (all 43 branches into the shared deopt
+block now pass a distinct id, recorded via `brood_rt_note_deopt`; the `as_int` guard also
+encodes the *observed* tag in the low byte). The verdict:
+
+    [jit-deopt] arm=<closure> resume_ip=7 op=Const reason#5386   x16
+
+`5386 = (21 << 8) | 10` — guard **21** is `as_int`'s `Op::Handle` case, and tag **10** is
+`TAG_VECTOR`.
+
+Guard 21 is reached from **`as_block_arg`**, which materialises an operand that crosses a
+block boundary. Cranelift block params here are declared `I64`, so *every* block-carried
+operand is forced through `as_int` — and a non-Int value deopts. A tagged-tuple matcher
+cannot avoid this: it tests `vector?`, then `vector-length`, then `nth` on the **same**
+message, so the vector crosses the `if`/`and` merges.
+
+Confirmed by discriminator: a tuple pattern that **binds nothing** (`[:ping]` against
+`[:ping]`) deopts identically, so it is not the bindings vector — it is the message itself.
+The deopt then re-runs on the VM, which is why results stay correct and only speed is wrong.
+
+**Two fixes are possible, and they are not the same fix.**
+
+1. *Cheap and honest:* teach the profitability gate to refuse an arm that would carry a
+   non-Int operand across a block boundary. It ends up on the VM either way, but without the
+   compile, the 16 deopts and the latch. **No faster — just stops the waste.**
+2. *The real one:* carry a boxed operand across block boundaries as its three words instead
+   of forcing `as_int`. This is what would actually make tagged-tuple matchers native, and it
+   is a genuine change to the block-argument protocol in `jit_lower`, not a tweak.
+
+The prize is unchanged and still bounded: ~390 ns of a 2144 ns round trip, `pingpong` roughly
+211 ms → 175 ms (3.7x → 3.0x vs Elixir). It does not reach parity on its own.
 
 **Ruled out, by measurement rather than argument:**
 
