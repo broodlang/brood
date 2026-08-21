@@ -96,7 +96,7 @@
       ;; A handler that hands the live socket to a stream-fn pushing two frames,
       ;; then closes — so a draining client sees both before EOF (deterministic).
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls
                    (fn (req)
@@ -197,7 +197,7 @@
       ;; the server owns its listener, so it runs in its own process. `spawn` is a
       ;; macro wrapping its expr in a thunk — pass the (do …), not a (fn () …).
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (router {"/" (fn (req) (ok "<h1>brood</h1>"))})))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
@@ -214,7 +214,7 @@
     ;; request is closed cleanly and the server keeps serving.
     (let (me (self))
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (ok "ok"))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
@@ -231,14 +231,14 @@
             (is (includes? resp "200 OK"))))))))
 
 (describe "http: a binary request body survives byte-faithfully"
-  ;; http-read-request reads in binary mode, so a POST body containing bytes that
+  ;; read-request reads in binary mode, so a POST body containing bytes that
   ;; aren't valid UTF-8 (0xFF 0x80) reaches the handler intact — the old text-mode
   ;; read replaced them with U+FFFD and miscounted Content-Length.
   (test "the handler sees the exact body bytes the client posted"
     (let (me (self))
       (spawn
         (do
-          (let (ls (http-listen 0))
+          (let (ls (listen 0))
             (send me [:port (tcp-local-port ls)])
             ;; echo the body's bytes back as text so the client can verify
             (serve-loop ls
@@ -264,7 +264,7 @@
       ;; A handler that echoes the request path, so each concurrent client can
       ;; confirm it got *its own* response and not another connection's.
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response (get req :path)))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout))
@@ -274,7 +274,7 @@
         (dotimes (i n)
           (spawn (do
                    (let (path (str "/" i)
-                         resp (http-get (str "http://127.0.0.1:" port path)))
+                         resp (fetch (str "http://127.0.0.1:" port path)))
                      (send me [:done (get resp :status) (body-text resp)])))))
         ;; Fan-in: every client reports a 200 whose body is its own requested path.
         (dotimes (_ n)
@@ -299,11 +299,11 @@
       (assert= (get h "User-Agent") "bw")
       (assert= (get h "X-Token") "k"))))
 (describe "http: end-to-end POST + headers over a loopback server"
-  (test "http-post round-trips the method, body, and a custom header"
+  (test "post round-trips the method, body, and a custom header"
     (let (me (self))
       ;; a handler that echoes back the request's method | body | a custom header
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls
                    (fn (req)
@@ -313,28 +313,28 @@
                            "|"
                            (get (get req :headers) "x-token"))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (resp (http-post (str "http://127.0.0.1:" port "/act")
+        (let (resp (post (str "http://127.0.0.1:" port "/act")
                      "{\"a\":1}"
                      {:headers {"X-Token" "secret" "Content-Type" "application/json"}}))
           (assert= (get resp :status) 200)
           ;; method echoed as POST, the JSON body intact, the custom header received
           (assert= (body-text resp) "POST|{\"a\":1}|secret")))))
-  (test "http-get still works through http-request (delegation intact)"
+  (test "get still works through request (delegation intact)"
     (let (me (self))
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response (str "got " (get req :path))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (resp (http-get (str "http://127.0.0.1:" port "/zen")))
+        (let (resp (fetch (str "http://127.0.0.1:" port "/zen")))
           (assert= (get resp :status) 200)
           (assert= (body-text resp) "got /zen"))))))
 
-(describe "http: https end-to-end (a TLS serve-loop + http-get with :ca)"
+(describe "http: https end-to-end (a TLS serve-loop + get with :ca)"
   ;; The std server needs NOTHING for TLS: serve-loop accepts on whatever
   ;; listener it is given, and a tls-listen socket delivers the identical
   ;; [:tcp-accept …] / [:tcp …] shapes with transparent en/decryption (ADR-143).
-  (test "the std server serves over TLS; http-get fetches with a private trust anchor"
+  (test "the std server serves over TLS; get fetches with a private trust anchor"
     (let (me (self))
       (spawn (do
                (let (ck (tls-self-signed "localhost")
@@ -342,7 +342,7 @@
                  (send me [:ready (tcp-local-port ls) (first ck)])
                  (serve-loop ls (router {"/" (fn (req) (ok "<h1>secure brood</h1>"))})))))
       (let (pc (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout)))
-        (let (resp (http-get (str "https://localhost:" (first pc) "/")
+        (let (resp (fetch (str "https://localhost:" (first pc) "/")
                      {:ca (second pc)}))
           (assert= (get resp :status) 200)
           (is (includes? (body-text resp) "secure brood"))))))
@@ -358,7 +358,7 @@
                        {"Content-Type" "application/octet-stream"}
                        (bytes 255 128 0 7)))))))
       (let (pc (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout)))
-        (let (resp (http-get (str "https://localhost:" (first pc) "/blob")
+        (let (resp (fetch (str "https://localhost:" (first pc) "/blob")
                      {:ca (second pc)}))
           (assert= (get resp :status) 200)
           (assert= (get resp :body) (bytes 255 128 0 7)))))))
@@ -367,7 +367,7 @@
   (test "a head dripped in chunks parses — including a \\r\\n\\r\\n split across chunks"
     (let (me (self))
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response (get req :path)))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
@@ -384,7 +384,7 @@
   (test "a head over *http-max-head-bytes* with no terminator is dropped, not buffered"
     (let (me (self))
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response "never"))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
@@ -402,10 +402,10 @@
   ;; The client reads in binary mode (ADR-141), so a response body that isn't
   ;; valid UTF-8 — an image, an archive — reaches the caller intact. Over the
   ;; old text-mode client this was impossible: 0xFF/0x80 became U+FFFD.
-  (test "http-get returns the exact bytes the handler served"
+  (test "get returns the exact bytes the handler served"
     (let (me (self))
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls
                    (fn (req)
@@ -413,32 +413,32 @@
                        {"Content-Type" "application/octet-stream"}
                        (bytes 255 128 65 0 7)))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (resp (http-get (str "http://127.0.0.1:" port "/blob")))
+        (let (resp (fetch (str "http://127.0.0.1:" port "/blob")))
           (assert= (get resp :status) 200)
           (assert= (get (get resp :headers) "content-length") "5")
           (assert= (get resp :body) (bytes 255 128 65 0 7))))))
   (test "a non-ASCII text body round-trips: byte count on the wire, text to the caller"
     (let (me (self))
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response "héllo ☃"))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (resp (http-get (str "http://127.0.0.1:" port "/")))
+        (let (resp (fetch (str "http://127.0.0.1:" port "/")))
           (assert= (get resp :status) 200)
           ;; 7 codepoints, 10 UTF-8 bytes — the :body carries the bytes,
           ;; body-text decodes them
           (assert= (count (get resp :body)) 10)
           (assert= (body-text resp) "héllo ☃")))))
-  (test "a bytes POST body reaches the handler intact through http-post"
+  (test "a bytes POST body reaches the handler intact through post"
     (let (me (self))
       (spawn (do
-               (let (ls (http-listen 0))
+               (let (ls (listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls
                    (fn (req)
                      (text-response (pr-str (into [] (bytes->list (get req :body))))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
-        (let (resp (http-post (str "http://127.0.0.1:" port "/up") (bytes 0 255 7)))
+        (let (resp (post (str "http://127.0.0.1:" port "/up") (bytes 0 255 7)))
           (assert= (get resp :status) 200)
           (assert= (body-text resp) "[0 255 7]"))))))

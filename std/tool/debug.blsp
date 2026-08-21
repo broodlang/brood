@@ -21,7 +21,7 @@ reconstructs a cross-process causal TREE, something `dbg` cannot do.
 
 Wire it up with `with-debugger`; trace with `spy` (its `*spy-sink*` is routed here),
 pause with `break`, and correlate with `span` (`span-spawn` is now just
-`(spawn (span …))` sugar). `debug-watch` gives a live terminal view."
+`(spawn (span …))` sugar). `watch` gives a live terminal view."
   (:use editor/ansi)
   (:use seq))
 
@@ -158,7 +158,7 @@ the traced node's `value`."
         (merge (or (get snap :scope) {}) (or (get snap :vals) {}))))))
 (defn eval-at (dbg n src)
   "Evaluate `src` (a Brood expression string) in the captured scope of the Nth parked
-process (1-based, as shown by `paused` / `debug-repl`). EVERY local in scope at the
+process (1-based, as shown by `paused` / `repl-session`). EVERY local in scope at the
 breakpoint is available (auto-captured via `%scope`), plus any values explicitly named at
 `break`: `(debug/eval-at d 1 \"(* n n)\")`."
   (let (locals (locals-of dbg n))
@@ -414,7 +414,7 @@ running shows `:value :running`."
   (dbg)
   "The session summary as a list of strings: parked processes (the break queue), the
 cross-process causal tree, and the hottest traced forms. Rendered by both the
-`println`-based `debug-report` (cooked mode) and the cursor-positioned `debug-attach`
+`println`-based `report` (cooked mode) and the cursor-positioned `attach`
 (raw mode, where `\\n` would not return to column 0)."
   (let (state (dbg-state dbg))
     (append (cons "── parked processes ──"
@@ -430,7 +430,7 @@ cross-process causal tree, and the hottest traced forms. Rendered by both the
       (cons "── hot traced forms ──"
         (map (fn (kv) (str "  " (second kv) "×  " (first kv)))
           (sort-by (fn (kv) (- (second kv))) (hits dbg)))))))
-(defn debug-report (dbg)
+(defn report (dbg)
   "Print a session summary: parked processes (the break queue), the cross-process
 causal tree, and the hottest traced forms by hit count. The one-call overview."
   (doseq (line (debug-report-lines dbg)) (println line)))
@@ -439,22 +439,22 @@ causal tree, and the hottest traced forms by hit count. The one-call overview."
 (defn- debug-watch-loop
   (dbg frames)
   (print (str (ansi-clear) (ansi-home)))
-  (println "── debug-watch  (Ctrl-C to exit) ──")
-  (debug-report dbg)
+  (println "── watch  (Ctrl-C to exit) ──")
+  (report dbg)
   (if (= frames 1)
     :done
     (do (sleep 500) (debug-watch-loop dbg (dec frames)))))
-(defn debug-watch (dbg & frames)
+(defn watch (dbg & frames)
   "Live, read-only terminal view of the debug session — clears the screen and
-reprints `debug-report` every 500ms. Runs until Ctrl-C, or for a fixed frame count
+reprints `report` every 500ms. Runs until Ctrl-C, or for a fixed frame count
 if one is given (used by tests). Watch the paused queue fill/drain and the causal
 tree grow as a workload runs; drive resume from another session or a timer."
   (debug-watch-loop dbg (if (empty? frames) -1 (first frames))))
 
 ;; ---- interactive terminal attach (key-driven) -------------------------------
-;; The driveable sibling of `debug-watch`: same live view, but it reads the keyboard
+;; The driveable sibling of `watch`: same live view, but it reads the keyboard
 ;; (raw mode) so you resume parked processes without a timer. Pure IO shell over the
-;; same `debug-report`; input via `term-poll` (nil on the 400ms timeout → just redraw).
+;; same `report`; input via `term-poll` (nil on the 400ms timeout → just redraw).
 (defn- debug-attach-render
   (dbg)
   ;; In raw mode `\n` moves down but NOT to column 0, so a `println` frame staircases.
@@ -464,7 +464,7 @@ tree grow as a workload runs; drive resume from another session or a timer."
                    (when (not (empty? lines))
                      (print (str (ansi-cursor row 1) (first lines)))
                      (place (rest lines) (inc row)))))
-    (place (cons "── debug-attach    [r] resume all parked    [q] quit ──"
+    (place (cons "── attach    [r] resume all parked    [q] quit ──"
              (debug-report-lines dbg))
       1)))
 (defn- debug-attach-loop
@@ -475,10 +475,10 @@ tree grow as a workload runs; drive resume from another session or a timer."
       (or (= key "q") (= key :escape) (= key :ctrl-c)) :quit
       (= key "r") (do (resume-all dbg) (debug-attach-loop dbg))
       else (debug-attach-loop dbg))))
-(defn debug-attach (dbg)
+(defn attach (dbg)
   "Interactive terminal view of the debug session: refreshes ~2×/s and handles keys —
 `r` resumes every parked process, `q` (or Esc / Ctrl-C) quits. Needs a real terminal
-(enters raw mode); `debug-watch` is the non-interactive read-only sibling. `term-leave`
+(enters raw mode); `watch` is the non-interactive read-only sibling. `term-leave`
 always runs, even on error, so the terminal is restored."
   (term-enter)
   (let (result (try (debug-attach-loop dbg) (catch _ :error)))
@@ -490,7 +490,7 @@ always runs, even on error, so the terminal is restored."
 ;; instead of just recording it, you step through an expression's evaluation node by
 ;; node. Because the value is emitted post-order, each pause shows a subexpression's
 ;; *result* — resume to advance to the next. Run under `with-debugger` and drive the
-;; steps from `debug-repl` / `debug-attach`.
+;; steps from `repl-session` / `attach`.
 (defn stepping-sink ()
   "A `*spy-sink*` that parks the process at each `spy` node (one breakpoint per
 subexpression). Non-node entries (`:enter`/`:exit`) pass through."
@@ -511,18 +511,18 @@ subexpression). Non-node entries (`:enter`/`:exit`) pass through."
 (defmacro step (expr)
   "Evaluate `expr` in single-step mode: each `spy`-traced subexpression parks at a
 breakpoint until resumed, so you step through evaluation one node at a time. Run it
-under `with-debugger`; advance the steps from `debug-repl` (`r`) or `debug-attach`."
+under `with-debugger`; advance the steps from `repl-session` (`r`) or `attach`."
   `(binding (*spy-sink* (stepping-sink)) (spy ~expr)))
 
 ;; ---- pry: drop into the REAL REPL at a debug point --------------------------
 ;; The `binding.pry` / `IEx.pry` move, done right: instead of a bespoke prompt, launch
-;; the actual `(repl-run)` — the fully-styled Brood REPL (syntax highlighting, history,
+;; the actual `(run)` — the fully-styled Brood REPL (syntax highlighting, history,
 ;; `,help` / `,doc`, Tab-complete). It reuses the whole REPL wholesale (zero duplication),
 ;; so it inherits every REPL improvement for free. Debugger control is ordinary eval:
 ;; `(debug/paused d)`, `(debug/resume-all d)`, `(debug/step …)`; Ctrl-D leaves and
 ;; continues. Runs in the process that OWNS the terminal (a script's main flow, or the
 ;; REPL) — a parked worker can't take stdin, so you pry from there and inspect the queue.
-;; The debugger `pry` is driving under `repl-run` — `,resume`/`,step` need to know WHICH
+;; The debugger `pry` is driving under `run` — `,resume`/`,step` need to know WHICH
 ;; debugger without you passing it each time, so `pry` binds it here for their handlers.
 (defdyn *debug-session* nil)
 
@@ -559,7 +559,7 @@ under `step`/`stepping-sink` it re-parks at the next node). Note when nothing is
 to inspect this debug session interactively. Prints the paused queue + causal tree first,
 then hands you the prompt. Drive the session with the `,resume` / `,step` meta-commands
 (or any expression — `(debug/paused d)`, `(debug/resume-all d)`, `(debug/step …)`).
-Ctrl-D leaves and continues. Reuses `repl-run` — so it's the real REPL, not a
+Ctrl-D leaves and continues. Reuses `run` — so it's the real REPL, not a
 re-implementation; it registers the `,resume`/`,step` commands via the REPL registry."
   (repl/register-repl-command {:names '("resume")
                                :usage ",resume [N]"
@@ -572,7 +572,7 @@ re-implementation; it registers the `,resume`/`,step` commands via the REPL regi
   (doseq (line (debug-report-lines dbg)) (println line))
   (println "── pry: the real REPL. `,resume` / `,step` to drive the session · Ctrl-D to continue ──")
   (binding (*debug-session* dbg *repl-prompt* "debug> ")
-    (repl/repl-run)))
+    (repl/run)))
 
 ;; ---- interactive debugger prompt (a REPL for the session) -------------------
 ;; A TYPING interface (cooked mode — no raw terminal, works even piped): prints the
@@ -601,7 +601,7 @@ re-implementation; it registers the `,resume`/`,step` commands via the REPL regi
   (if (and (int? n) (>= n 1) (<= n (count entries)))
     (do (resume dbg (first (nth entries (dec n)))) (str "resumed [" n "]"))
     (str "no parked process [" n "]")))
-(defn debug-repl (dbg)
+(defn repl-session (dbg)
   "An interactive debugger prompt — a REPL for `dbg`. Prints the numbered paused queue
 and the causal tree, then reads a line: `r` resume all, `r N` resume the Nth parked,
 Enter refresh, `q` quit, or any Brood expression to evaluate. Cooked mode, so it needs
@@ -617,7 +617,7 @@ no raw-terminal setup and works when piped."
         (let (line (string/trim raw) parts (string/split line " ") cmd (first parts))
           (cond
             (= line "q") :done
-            (or (= line "") (= line "p")) (debug-repl dbg)
+            (or (= line "") (= line "p")) (repl-session dbg)
             (= cmd "r")
               (do
                 (if (> (count parts) 1)
@@ -627,10 +627,10 @@ no raw-terminal setup and works when piped."
                   (do (resume-all dbg) (println "resumed all")))
                 ; let a resumed process reach its next break before redraw
                 (sleep 30)
-                (debug-repl dbg))
+                (repl-session dbg))
             else
               (do
                 (try
                   (println (str "=> " (pr-str-bounded (eval-string line))))
                   (catch e (println (str "! " (pr-str-bounded e)))))
-                (debug-repl dbg))))))))
+                (repl-session dbg))))))))

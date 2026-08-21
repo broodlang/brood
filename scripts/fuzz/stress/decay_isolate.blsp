@@ -51,7 +51,7 @@
            (letrec (loop (fn () (receive ([:ping from r] (do (send from [:reply r :pong]) (loop))))))
              (loop)))))
 (def sup
-  (start-supervisor [] {:strategy :one-for-one :max-restarts 100000000 :max-seconds maxsecs}))
+  (start [] {:strategy :one-for-one :max-restarts 100000000 :max-seconds maxsecs}))
 (defn crashy () (receive (:die (error "decay")) (:ok :ok)))
 (defn start-crashy () (spawn-link (crashy)))
 

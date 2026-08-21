@@ -113,7 +113,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
           ;; the chunk that completed the header); seed the chunk list with it.
           (http-read-to-length sock (list head) (byte-length head) (+ marker 4 clen)))))))
 
-(defn http-read-request (sock)
+(defn read-request (sock)
   "Read one HTTP request from `sock` (owned by the calling process): the head
 through the blank line, plus the body when `Content-Length` declares one. Returns
 the raw request as a `bytes` value, or nil if the peer closed without sending
@@ -159,14 +159,14 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   ;; worker until the read timeout, and a negative one is meaningless. (The read
   ;; timeout already bounds an honestly-shaped but lying huge length.)
   (let (lines (string/split head "\r\n")
-        v (get (http-parse-headers (rest lines)) "content-length"))
+        v (/get (http-parse-headers (rest lines)) "content-length"))
     (if (nil? v)
       0
       (let (n (string->number v))
         (if (and (int? n) (>= n 0)) n 0)))))
 
 (defn parse-request (raw)
-  "Parse a raw HTTP request (`bytes`, from `http-read-request`) into
+  "Parse a raw HTTP request (`bytes`, from `read-request`) into
   `{:method :path :version :headers :body}` (`:headers` keys lower-cased). The head
   is ASCII and decoded to strings; `:body` is a `bytes` value (raw — decode it with
   `utf8-bytes->string` for a text/form body). A string `raw` is accepted too (encoded to
@@ -256,15 +256,15 @@ non-ASCII body, truncating it at spec-honoring clients). The `:body` may be any
 iolist: a string, a `bytes` value (binary bodies — images, archives), or a
 nested tree of those; it is materialised once here so the length and the sent
 bytes can never disagree."
-  (let (status (get resp :status 200)
-        body-bytes (bytes-concat (or (get resp :body) ""))
-        headers (assoc (or (get resp :headers) {})
+  (let (status (/get resp :status 200)
+        body-bytes (bytes-concat (or (/get resp :body) ""))
+        headers (assoc (or (/get resp :headers) {})
                   "Content-Length" (str (count body-bytes))
                   "Connection" "close"))
     ["HTTP/1.0 "
       (str status)
       " "
-      (get *http-status-text* status "OK")
+      (/get *http-status-text* status "OK")
       "\r\n"
       (render-headers headers)
       "\r\n"
@@ -284,7 +284,7 @@ whose body is written incrementally over the socket afterwards (see
   ["HTTP/1.0 "
     (str status)
     " "
-    (get *http-status-text* status "OK")
+    (/get *http-status-text* status "OK")
     "\r\n"
     (render-headers headers)
     "\r\n"])
@@ -296,8 +296,8 @@ whose body is written incrementally over the socket afterwards (see
 (impl Response
   http/stream-response
   (send-response [resp sock]
-    (tcp-send sock (render-head (get resp :status 200) (or (get resp :headers) {})))
-    ((get resp :stream) sock)
+    (tcp-send sock (render-head (/get resp :status 200) (or (/get resp :headers) {})))
+    ((/get resp :stream) sock)
     nil))
 
 (defn streaming? (resp)
@@ -322,7 +322,7 @@ rather than closed after a body. An identity check on the record, not a key snif
 
 (defn mime-type (path)
   "A guessed Content-Type for `path` based on its extension."
-  (get *http-mime* (path/extension path) "application/octet-stream"))
+  (/get *http-mime* (path/extension path) "application/octet-stream"))
 
 (defn serve-file (path)
   "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is missing."
@@ -335,17 +335,17 @@ rather than closed after a body. An identity check on the record, not a key snif
   "A handler that dispatches on the request's `:path` through `routes` (a map of path string → handler). An unmatched path goes to `fallback` (a handler) or a 404."
   (let (miss (if (empty? fallback) (fn (req) (not-found)) (first fallback)))
     (fn (req)
-      (let (h (get routes (get req :path)))
+      (let (h (/get routes (/get req :path)))
         (if (nil? h) (miss req) (h req))))))
 
 ;; ---- the server -------------------------------------------------------------
-(defn http-listen (port)
+(defn listen (port)
   "A listening socket on 127.0.0.1:`port` (port 0 = OS-assigned), owned by the calling process — which must be the one that runs `serve-loop` on it."
   (tcp-listen "127.0.0.1" port))
 
 (defn serve-loop (ls handler)
   "Accept connections on `ls` and serve each in its **own** process, forever.
-Blocks. `ls` must be owned by this process (created here with `http-listen`). On
+Blocks. `ls` must be owned by this process (created here with `listen`). On
 each `[:tcp-accept …]`, `spawn` a worker that takes control of the connection and
 runs `handler`, then loop immediately — so a slow request never blocks the accept
 loop or other connections. Shipping the `handler` closure to the worker is sound
@@ -373,7 +373,7 @@ socket is registered *passive* (no reader until the worker calls
   ;; (ADR-141), so binary-for-life costs the response path nothing.
   (tcp-set-binary c true)
   (tcp-controlling-process c (self))
-  (let (raw (http-read-request c))
+  (let (raw (read-request c))
     (if (nil? raw)
       (tcp-close c)
       ;; One dispatch: each response type knows how it reaches the socket, including
@@ -382,10 +382,10 @@ socket is registered *passive* (no reader until the worker calls
 
 (defn serve (port handler)
   "Listen on 127.0.0.1:`port` and serve `handler` forever. **Blocks** (the accept loop runs in the calling process) — `(spawn (serve …))` to run it in the background. One handler process per connection (HTTP/1.0)."
-  (serve-loop (http-listen port) handler))
+  (serve-loop (listen port) handler))
 
 ;; ---- HTTP client -----------------------------------------------------------
-;; `http-get` works over both `http://` (plaintext, via tcp-connect) and
+;; `get` works over both `http://` (plaintext, via tcp-connect) and
 ;; `https://` (TLS, via tls-request). Either transport delivers the response as
 ;; `[:tcp sock data]` … `[:tcp-closed sock]` messages to this process, so the
 ;; collection + parsing is shared. Both transports run in binary mode, so
@@ -400,10 +400,10 @@ place — `url/parse-url` (the full parser); a scheme-less input is treated as a
 `http://` authority so a bare `host[:port]/path` still parses as a host."
   (let (with-scheme (if (>= (index-of url "://") 0) url (str "http://" url))
         u (url/parse-url with-scheme)
-        scheme (or (get u :scheme) "http")
-        path (let (p (get u :path)) (if (or (nil? p) (= p "")) "/" p))
-        port (or (get u :port) (if (= scheme "https") 443 80)))
-    {:scheme scheme :host (get u :host) :port port :path path :query (get u :query)}))
+        scheme (or (/get u :scheme) "http")
+        path (let (p (/get u :path)) (if (or (nil? p) (= p "")) "/" p))
+        port (or (/get u :port) (if (= scheme "https") 443 80)))
+    {:scheme scheme :host (/get u :host) :port port :path path :query (/get u :query)}))
 
 (defn parse-response (raw)
   "Parse a raw HTTP response (`bytes`, from the transport; a string is accepted
@@ -425,7 +425,7 @@ keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
   "The `:body` of a response (or parsed request) decoded as UTF-8 text. A string
 body passes through; nil decodes to \"\". For the common case where the caller
 knows the body is text — the map itself always carries byte-faithful `bytes`."
-  (let (b (get resp :body))
+  (let (b (/get resp :body))
     (cond
       (nil? b) ""
       (string? b) b
@@ -463,13 +463,13 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
 Content-Length (the body's **byte** count) when `body-bytes` is non-empty, with
 the caller's `extra` headers merged on top (so any of those can be overridden).
 `extra` is a name→value map (or nil)."
-  (let (base {"Host" (get u :host) "User-Agent" "brood" "Connection" "close"}
+  (let (base {"Host" (/get u :host) "User-Agent" "brood" "Connection" "close"}
         base2 (if (= (count body-bytes) 0)
                 base
                 (assoc base "Content-Length" (str (count body-bytes)))))
     (merge base2 (or extra {}))))
 
-(defn http-request (method url &optional (opts {}))
+(defn request (method url &optional (opts {}))
   "Make an HTTP/1.0 request: `method` (e.g. \"GET\"/\"POST\"), `url` (http or https),
 and `opts` `{:headers <name→value map> :body <string|bytes|iolist>}`. Always
 returns a response map `{:status :headers :body}` — `:body` is a byte-faithful
@@ -481,13 +481,13 @@ a PEM certificate replacing the Mozilla roots as the trust anchor (private CAs,
 `tls-self-signed` dev servers). Must run in a process (it `receive`s the
 response); the root process counts."
   (let (u (parse-url url)
-        body (or (get opts :body) "")
+        body (or (/get opts :body) "")
         body-bytes (bytes-concat body)
-        headers (request-headers u body-bytes (get opts :headers))
+        headers (request-headers u body-bytes (/get opts :headers))
         ;; The request target is path + ?query — a query-string GET (search APIs)
         ;; would otherwise drop everything after the `?`.
-        target (let (q (get u :query))
-                 (if (or (nil? q) (= q "")) (get u :path) (str (get u :path) "?" q)))
+        target (let (q (/get u :query))
+                 (if (or (nil? q) (= q "")) (/get u :path) (str (/get u :path) "?" q)))
         head (str method
                " "
                target
@@ -497,14 +497,14 @@ response); the root process counts."
         ;; Binary mode before the request goes out (both transports): the peer
         ;; cannot respond before it has our request, so every response chunk
         ;; arrives as byte-faithful `bytes`.
-        sock (if (= (get u :scheme) "https")
-               (let (s (tls-request (get u :host)
-                         (get u :port)
+        sock (if (= (/get u :scheme) "https")
+               (let (s (tls-request (/get u :host)
+                         (/get u :port)
                          [head body-bytes]
-                         (get opts :ca)))
+                         (/get opts :ca)))
                  (tcp-set-binary s true)
                  s)
-               (let (s (tcp-connect (get u :host) (get u :port)))
+               (let (s (tcp-connect (/get u :host) (/get u :port)))
                  (tcp-set-binary s true)
                  (tcp-send s [head body-bytes])
                  s)))
@@ -519,17 +519,17 @@ response); the root process counts."
         {:status 0 :error (second result) :headers {} :body #b""}
         (parse-response (second result))))))
 
-(defn http-get (url &optional (opts {}))
-  "GET `url` (http or https) — `http-request` with method \"GET\". `opts` may carry a
+(defn fetch (url &optional (opts {}))
+  "GET `url` (http or https) — `request` with method \"GET\". `opts` may carry a
 `:headers` map. Returns `{:status :headers :body}` with `:body` a byte-faithful
 `bytes` value — `(body-text resp)` decodes a text body (`:status 0` + `:error` on
 a transport failure). Must run in a process."
-  (http-request "GET" url opts))
+  (request "GET" url opts))
 
-(defn http-post (url body &optional (opts {}))
+(defn post (url body &optional (opts {}))
   "POST `body` (a string, `bytes` value, or iolist — over https too, since
 `tls-request` takes an iolist) to `url` —
-`http-request` with method \"POST\". Set the content type yourself via `opts`
+`request` with method \"POST\". Set the content type yourself via `opts`
 `:headers`, e.g. `{:headers {\"Content-Type\" \"application/json\"}}`. Returns the
 response map (`:body` is `bytes`; see `body-text`)."
-  (http-request "POST" url (assoc opts :body body)))
+  (request "POST" url (assoc opts :body body)))

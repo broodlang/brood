@@ -24,7 +24,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 ; column budget for the single-line attempt (the built-in default)
 
 ;; The effective column budget: a project's manifest `:width` (ambient
-;; `*project-width*`, set by `project-setup`) when present, else the built-in
+;; `*project-width*`, set by `setup`) when present, else the built-in
 ;; default. So `nest format` / the LSP / `nest mcp` all honour a project that pins,
 ;; say, `:width 80`, and a bare `brood`-run format uses the default.
 (defn width ()
@@ -155,7 +155,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 ; name
 
 ;; Project/plugin-contributed header rules, layered over the built-ins above.
-;; `project-setup` (re)sets this from the manifest's `:format-headers` plus any
+;; `setup` (re)sets this from the manifest's `:format-headers` plus any
 ;; `:format-plugins` deps, so `nest format`, the LSP, and `nest mcp` all honour a
 ;; framework's macro shapes (e.g. Hatch's `deflive`/`on`/`tick`). Empty when not in a
 ;; project or when no rules are declared. Entries here win over the built-ins.
@@ -1010,7 +1010,7 @@ retired the `comment-on-own-line?` distinction this used to need."
               (if (format-ignored-dir? entry) acc (append-two (format-collect-blsp p) acc))
             ;; Skip generated lock files (`project.lock.blsp`): they're machine-
             ;; written ("do not edit by hand") and re-serialized by `nest fetch` on
-            ;; every project-setup, so formatting them just fights the resolver.
+            ;; every setup, so formatting them just fights the resolver.
             (string/ends-with? entry ".lock.blsp") acc
             (string/ends-with? entry ".blsp") (cons p acc)
             else acc)))
@@ -1042,9 +1042,9 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; as `project/…`, even though `project` is where they are declared.
 (defn- format-roots
   (root)
-  (append (project/project-abs-paths root *project-source-paths*)
-    (project/project-abs-paths root *project-test-paths*)
-    (project/project-abs-paths root (or *project-format-paths* (list)))))
+  (append (project/abs-paths root *project-source-paths*)
+    (project/abs-paths root *project-test-paths*)
+    (project/abs-paths root (or *project-format-paths* (list)))))
 
 (defn- format-every-blsp
   (root)
@@ -1058,10 +1058,10 @@ retired the `comment-on-own-line?` distinction this used to need."
 
 (defn- format-require-root
   ()
-  (let (root (project/project-find-root (file/cwd)))
+  (let (root (project/find-root (file/cwd)))
     (when (nil? root)
       (error "format: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
-    (project/project-setup root)
+    (project/setup root)
     root))
 
 ;; Does `src` parse as a complete program? The CST the formatter walks is

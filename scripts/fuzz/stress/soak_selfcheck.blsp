@@ -67,7 +67,7 @@
 (defn burst (k) (if (= k 0) :ok (do (spawn :ok) (burst (- k 1)))))
 
 ;; --- the loop ----------------------------------------------------------------
-(def sup (start-supervisor [] {:strategy :one-for-one :max-restarts 100000000 :max-seconds 60}))
+(def sup (start [] {:strategy :one-for-one :max-restarts 100000000 :max-seconds 60}))
 (def t-start (now))
 (def deadline (+ t-start (* secs 1000)))
 

@@ -536,7 +536,7 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
 ;; snapshot undo already is. Emacs must maintain a change LOG to know which edits
 ;; touched your selection; we keep whole previous texts instead, and the change set
 ;; between two texts is exactly what a line diff computes. So selective undo needs no
-;; new undo representation at all: derive the changes on demand (`diff/diff-lines`),
+;; new undo representation at all: derive the changes on demand (`diff/lines`),
 ;; keep the ones that fall inside the region, and drop the rest.
 ;;
 ;; Reading a diff of OLD -> NEW as "what the user did":
@@ -626,7 +626,7 @@ the diff only ever runs over the span that actually changed."
             o-mid tail)
           new)
       else
-        (let (ops (diff/diff-seq (string/->list o-mid) (string/->list n-mid))
+        (let (ops (diff/seq (string/->list o-mid) (string/->list n-mid))
               r (fold (fn (acc op)
                         (let ([n out hunk] acc
                               [tag c] op)

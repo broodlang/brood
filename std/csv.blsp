@@ -6,13 +6,13 @@
 (defmodule csv
   "CSV parsing and emitting, written entirely in Brood (pure; opt-in).
 
-    (csv/csv-parse \"a,b\\n1,2\")
+    (csv/parse \"a,b\\n1,2\")
     ;; => ((\"a\" \"b\") (\"1\" \"2\"))
-    (csv/csv-parse-maps \"name,age\\nAlice,30\")
+    (csv/parse-maps \"name,age\\nAlice,30\")
     ;; => ({\"name\" \"Alice\" \"age\" \"30\"})
-    (csv/csv-emit '((\"a\" \"b\") (\"1\" \"2\")))
+    (csv/emit '((\"a\" \"b\") (\"1\" \"2\")))
     ;; => \"a,b\\n1,2\"
-    (csv/csv-emit-maps '({\"name\" \"Alice\" \"age\" \"30\"}) [\"name\" \"age\"])
+    (csv/emit-maps '({\"name\" \"Alice\" \"age\" \"30\"}) [\"name\" \"age\"])
     ;; => \"name,age\\nAlice,30\"
 
 Quoted fields may contain commas, newlines, and escaped quotes (\"\").
@@ -27,7 +27,7 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
 ;;   :quote-seen    — just saw a quote inside a quoted field (may be "" or end)
 ;;
 ;; Result: a list of rows; each row is a vector of strings.
-;; `s` is a CODE-POINT VECTOR (built once in `csv-parse` via `string->list`), so
+;; `s` is a CODE-POINT VECTOR (built once in `parse` via `string->list`), so
 ;; `csv-at` indexes with O(1) `nth` — `char-at` on a raw UTF-8 string is O(i), which
 ;; made the whole scan O(n^2). A field is a REVERSED LIST of chars, materialised once
 ;; via `csv-field` at each field boundary — `(str acc c)` per char was O(field^2).
@@ -206,7 +206,7 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
       ;; Should never happen — fall back to unquoted
       (csv-parse-loop s (+ i 1) n :unquoted (cons c field-acc) row-acc rows-acc))))
 
-(defn csv-parse (s)
+(defn parse (s)
   "Parse a CSV string → a list of rows, where each row is a vector of strings.
 Handles quoted fields (which may contain commas and newlines), `\"\"` as an
 escaped quote inside a quoted field, and both `\\n` and `\\r\\n` line endings.
@@ -217,7 +217,7 @@ An empty string returns an empty list."
       ; index a code-point vector: O(1) nth, O(n) scan
       (csv-parse-loop v 0 (count v) :field-start nil nil nil))))
 
-;; ---- csv-parse-maps ---------------------------------------------------------
+;; ---- parse-maps ---------------------------------------------------------
 
 (defn- csv-rows->maps
   (headers rows acc)
@@ -231,10 +231,10 @@ An empty string returns an empty list."
               (range (count headers))))
       (csv-rows->maps headers (rest rows) (cons m acc)))))
 
-(defn csv-parse-maps (s)
+(defn parse-maps (s)
   "Parse a CSV string where the first row is a header row. Returns a list of
 maps from header→value strings. An empty or header-only CSV returns nil/empty."
-  (let (rows (csv-parse s))
+  (let (rows (parse s))
     (if (or (nil? rows) (empty? rows))
       nil
       (let (headers (into [] (first rows))
@@ -276,7 +276,7 @@ field map (or, as before `->string`, a type error out of the quoting scan)."
     (string/join "\n" (reverse acc))
     (csv-emit-rows (rest rows) (cons (csv-emit-row (first rows)) acc))))
 
-(defn csv-emit (rows)
+(defn emit (rows)
   "Serialize a list of rows (each a list or vector of cells) to a CSV string. A cell that
 is not a string is rendered with `->string` (so a number, keyword, or record emits its
 display form).
@@ -286,16 +286,16 @@ doubled. Rows are separated by `\\n`."
     ""
     (csv-emit-rows (seq rows) nil)))
 
-;; ---- csv-emit-maps ----------------------------------------------------------
+;; ---- emit-maps ----------------------------------------------------------
 
 (defn- csv-map->row
   (m headers)
   "Extract values from map `m` in the order given by `headers`."
   (map (fn (h) (or (get m h) (get m (keyword h) ""))) headers))
 
-(defn csv-emit-maps (maps headers)
+(defn emit-maps (maps headers)
   "Serialize a list of maps to CSV, with the given `headers` list determining
 column order. The header row is written first. Missing keys produce empty fields."
   (let (header-row (into [] headers)
         data-rows (map (fn (m) (into [] (csv-map->row m headers))) maps))
-    (csv-emit (cons header-row (into [] data-rows)))))
+    (emit (cons header-row (into [] data-rows)))))
