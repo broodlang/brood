@@ -734,11 +734,29 @@ pub struct LeafInline {
 #[cfg(feature = "jit")]
 impl CompiledArm {
     /// The frame size the **currently installed** native version runs against —
-    /// the per-engine frame-sizing key for two-stage tiering. The VM always uses the
-    /// original `nslots` (it runs the original `chunk`); only a native entry consults
-    /// this. Small native → `nslots`; inlined native (post-swap) → `inline_nslots`.
+    /// the per-engine frame-sizing key for two-stage tiering. Small native → `nslots`;
+    /// inlined native (post-swap) → `inline_nslots`.
+    ///
+    /// # This read is RACY. Call it only to BUILD a frame, and capture the result.
+    ///
+    /// It loads `inline_installed`, which the background inline upgrade flips at any
+    /// moment. Calling it a second time — to interpret a frame that already exists — can
+    /// therefore return a different size than the frame was built to, and the staged
+    /// `[callee, args…]` region is then written at one offset and read at another.
+    ///
+    /// That is **KI-48**, and it was live on 123 arms (`fold`: `nslots` 13 vs
+    /// `inline_nslots` 25, a 12-slot overshoot) with two captured crashes. It is also
+    /// KI-26 / the two ADR-210 bugs — the same anti-pattern, three times now.
+    ///
+    /// The rule: whoever builds the frame captures this ONCE and **tells** every consumer
+    /// (`jit_dispatch_tail` takes `frame_nslots`; the deopt-resume helpers are passed it).
+    /// A consumer that re-derives it is a bug even when the sizes happen to agree today.
+    /// `crates/lisp/tests/frame_size_callsites.rs` pins the permitted callers so a new one
+    /// has to be justified rather than merely compile.
+    ///
+    /// Renamed from `active_nslots` on 2026-08-21 so the hazard is visible at the call site.
     #[inline]
-    pub fn active_nslots(&self) -> usize {
+    pub fn frame_size_for_new_entry(&self) -> usize {
         if self
             .inline_installed
             .load(std::sync::atomic::Ordering::Acquire)

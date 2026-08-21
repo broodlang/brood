@@ -21,7 +21,7 @@ ADRs / topic docs.
 |---|---|---|
 | KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
-| KI-48 | JIT tail dispatch read past the roots stack — `root_at(9)` on a len-8 stack, twice on 2026-08-20, from `jit_dispatch_tail` | ✅ **root cause found and fixed 2026-08-21** — the dispatcher re-derived the frame size from `active_nslots()` (the KI-26/ADR-210 anti-pattern), which the background inline swap can change mid-flight; **measured live on 123 arms**, `fold` at nslots=13 vs inline_nslots=25 (a 12-slot overshoot). Now passed the size the trampoline built the frame to. Original crash never reproduced on demand, so the causal link is strong but not proven |
+| KI-48 | JIT tail dispatch read past the roots stack — `root_at(9)` on a len-8 stack, twice on 2026-08-20, from `jit_dispatch_tail`; an audit then found a **second live instance** in `dispatch.rs` and a **false safety argument** in `vm_cache.rs` | ✅ **root-caused, both instances fixed, and the anti-pattern gated 2026-08-21** — the dispatcher re-derived the frame size from `active_nslots()` (the KI-26/ADR-210 anti-pattern), which the background inline swap can change mid-flight; **measured live on 123 arms**, `fold` at nslots=13 vs inline_nslots=25 (a 12-slot overshoot). Now passed the size the trampoline built the frame to. Original crash never reproduced on demand, so the causal link is strong but not proven |
 | KI-47 | the `differential (tree-walker)` CI job went red on **every** run from the ADR-230/231 namespacing merge onward, always as the same three `adversarial_test.blsp` heap-allocation cases dying on `E0043`. Those cases were not the cause: the suite's **process-wide** allocation had reached **1.145 GB** against the **1 GiB** `TEST_DEFAULT_SOFT` backstop, and a threshold failure names whichever tests are running when the line is crossed | ✅ **fixed 2026-08-19** — backstop raised to 2 GiB soft / 3 GiB hard (`core/alloc.rs`), which is what it documents itself to be: a *host-survival* guard, not a working-set budget. ⚠ **Leaves an unresolved question**: the cap was sized against a ~240 MB suite peak and the suite now peaks ~1 GB (4.8×), so this restores a ~2× margin, not the intended 4× |
 | KI-46 | **deadline margin, not a failure yet.** KI-39 was a fixed cost sitting under a fixed deadline for weeks while reading as a random flake, so every case's CI margin against nextest's 120 s hard kill was audited from the 2026-08-17 logs. `nest::bin/nest mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` is now the worst at **87 s = 1.38× margin** — it invokes the MCP `check` tool, which is cwd-based, so it type-checks **this whole repository**, and the cost grows as the repo does | ✅ **fixed 2026-08-18, the real way** (87 s → **2.5 s**) — the three cheap fixes were all worse than the problem: `BROOD_NO_CHECK=1` guts what the case proves, a temp-dir `set_current_dir` is process-global and would race its siblings under plain `cargo test` (trading a slow test for a nondeterministic one), and a bigger nextest budget is what hid KI-39. So the real fix was done instead: `check-project-structured` gained an optional `from` root, and `mcp-check-tool` now passes **`*project-root*`** — the root the server already pins its write sandbox to and that every other project-scoped tool already read. `check` was the one tool taking its project from cwd. The three next-worst (`scaffold_quality`, 89/80/77 s) **were** fixed the same day by splitting one case per template |
 | KI-43 | `remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a **fixed 5 s sleep**, but the observer needs 5.9–9.2 s under load to boot + `require 'observer'` + connect — so the target died first, `connect` refused, stdout empty. Failed BOTH retries in a loaded `make test`, passed standalone: the signature that gets written off as noise | ✅ **fixed 2026-08-14** — waits for the observer's attach report instead of a stopwatch; **8/8 under saturating load**, and 3.5 s instead of ~11 s |
@@ -2721,6 +2721,47 @@ tripwire did **not** fire: an overshoot that stays in bounds silently dispatches
 callee*. So the guard only catches the extreme case. It is kept as a backstop — it also
 prevents `argc = n - top - 1` from underflowing, which would otherwise turn a clean bounds
 panic into a wild `root_at(top + 1 + k)` loop — but passing the correct size is the repair.
+
+### The audit: a SECOND live instance, and a false invariant
+
+Fixing one call site does not fix a class, so every reader of the racy size was audited
+(2026-08-21). Four production call sites; two were builders doing it right, two were not:
+
+| site | verdict |
+|---|---|
+| `jit_runtime.rs` (native entry) | ✅ builds the frame, captures once — the model to copy |
+| `mod.rs` `hof_apply_native` | ✅ builds the HOF fast frame, captures once |
+| **`dispatch.rs` outcome-4 tail** | ❌ **same bug, and worse** — see below |
+| **`vm_cache.rs` FastLink memo** | ⚠️ **safety argument was factually false** |
+
+**`dispatch.rs` was the same defect with the noise removed.** Its outcome-4 path read the
+staged callee at `base + active_nslots()`, in a branch *already gated on
+`!inline_installed`*, over a frame `push_frame` always sizes to `arm.nslots`. Because it
+guards with `if n > frame_top` it never panics — it silently dispatches the **wrong callee**,
+which is exactly what a forced desync reproduced as a hang. Now `base + arm.nslots`.
+
+**`vm_cache.rs` claimed protection it does not have.** Its comment read "the small→inlined
+swap bumps the epoch, so a stale memo here is invalidated". `jit_tier`'s swap deliberately
+does **not** bump `global_epoch` (a bump cascaded under `pfib`); it stores the flags and calls
+`invalidate_fast_links_for(arm.inline_name)`. The memo is protected — by a different
+mechanism than the one written down. Comment corrected, and the asymmetry it exposes recorded:
+the `inline_installed.store(true)` is unconditional while the invalidation is
+`if let Some(sym) = arm.inline_name`, so the guarantee is held by construction elsewhere
+rather than enforced there.
+
+### The redesign: the anti-pattern now has to be justified
+
+This was the **third** appearance of one anti-pattern — KI-26 and two ADR-210 bugs before it —
+so the point fix is not the deliverable:
+
+* `active_nslots()` is renamed **`frame_size_for_new_entry()`**, so the contract is visible at
+  every call site rather than buried in a doc comment three files away, and its doc now states
+  the rule: only a frame BUILDER may read it, and it must capture and pass on the result.
+* `crates/lisp/tests/frame_size_callsites.rs` pins the permitted callers with a reason each.
+  A new call site now fails the suite with a message explaining that a consumer must be TOLD
+  the size. Sabotage-verified: reintroducing the read in `dispatch.rs` fails it by name.
+  Limits stated in the test — it is file-granular (a new bad call inside an allowlisted file
+  passes) and it cannot prove a caller correct, only force the question.
 
 ### No deterministic regression test exists
 

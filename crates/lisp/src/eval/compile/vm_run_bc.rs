@@ -688,7 +688,7 @@ pub(crate) fn vm_run_bc(
                         // The inlined native keeps operands in registers, so it leaves `roots`
                         // exactly at the frame top it was entered with (`cur_base+inline_nslots`).
                         // A Some(4) tail outcome stages callee+args ABOVE that top, read by
-                        // `jit_dispatch_tail` relative to `active_nslots` — don't disturb those.
+                        // `jit_dispatch_tail` relative to `frame_size_for_new_entry` — don't disturb those.
                         // A frame that will RESUME keeps its larger top: it continues in the
                         // layout that wrote the journal.
                         if inlined_active
@@ -778,7 +778,7 @@ pub(crate) fn vm_run_bc(
                             Some(4) => {
                                 // Pass the size this frame was BUILT to (KI-48): the
                                 // dispatcher must not re-derive it from
-                                // `active_nslots()`, which can change mid-flight.
+                                // `frame_size_for_new_entry()`, which can change mid-flight.
                                 jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env, frame_nslots)
                             }
                             // 1 (deopt) / 2 (preempt) / None (not hot / out of subset): run the

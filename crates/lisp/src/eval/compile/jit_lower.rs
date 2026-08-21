@@ -263,7 +263,7 @@ static JIT_INLINE_CHUNK_KEEPALIVE: std::sync::Mutex<Vec<(Box<Node>, Box<Chunk>)>
 /// the spliced body fresh from `arm.body` (the small original — the VM keeps it), compiles
 /// an ephemeral chunk, and lowers it against the larger `arm.inline_nslots` frame. Returns
 /// the inlined native pointer, or `None` if the spliced body falls out of the JIT subset.
-/// Per-engine frame sizing (`active_nslots`) keys on which version `jit_tier` installs.
+/// Per-engine frame sizing (`frame_size_for_new_entry`) keys on which version `jit_tier` installs.
 ///
 /// On success the spliced `Node` + `Chunk` are moved into [`JIT_INLINE_CHUNK_KEEPALIVE`]
 /// so the `ConstVal` addresses baked into the native code never dangle (see that static).
@@ -290,8 +290,8 @@ pub(crate) fn jit_lower_inlined_arm(
         // derivation keep a residual non-tail call.
         let r = &leaf.resume;
         // The lowering's frame size MUST be the size the frame is actually built to
-        // (`active_nslots()` → `inline_nslots`): the native stages a tail call above its
-        // own frame top and the dispatcher reads it at `base + active_nslots()`, so a
+        // (`frame_size_for_new_entry()` → `inline_nslots`): the native stages a tail call above its
+        // own frame top and the dispatcher reads it at `base + frame_size_for_new_entry()`, so a
         // disagreement writes and reads different offsets. `compile_arm` floors both to
         // the same value.
         debug_assert_eq!(
