@@ -1711,8 +1711,8 @@ sha256 pin still holds."
   (package-in-project
     (fn (root)
       (let (dep (project/parse-dep (apply vector
-                                             (cons (symbol nm)
-                                               (map package-spec-token spec)))))
+                                     (cons (symbol nm)
+                                       (map package-spec-token spec)))))
         (when (package-has-dep? *project-dependencies* (get dep :name))
           (error "package: " nm " is already a dependency"))
         ;; ATOMIC: the manifest edit has to happen before

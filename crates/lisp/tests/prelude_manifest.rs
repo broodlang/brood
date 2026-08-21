@@ -60,18 +60,39 @@ fn every_prelude_file_is_included_in_the_concat() {
     }
 }
 
-/// The complement: `PRELUDE` is the nine files and nothing more. Catches a stale
-/// `include_str!` of a file that has since been renamed away or absorbed, which the
-/// containment check above cannot see.
+/// Files OUTSIDE `std/prelude/` that are deliberately part of `PRELUDE`. Each one is a
+/// judgement that something is *core* rather than a library, so it is listed here by hand:
+/// adding one has to be a decision, not a drift.
+///
+/// `std/protocol.blsp` joined on 2026-08-21 — behaviour contracts (`defbehaviour`,
+/// `register-protocol`, `ops`, `*protocols*`) are core, so the prelude carries them.
+const EXTRA_PRELUDE_FILES: &[&str] = &["std/protocol.blsp"];
+
+/// The complement: `PRELUDE` is the split files plus [`EXTRA_PRELUDE_FILES`] and nothing
+/// more. Catches a stale `include_str!` of a file that has since been renamed away or
+/// absorbed, which the containment check above cannot see.
 #[test]
 fn prelude_const_is_exactly_the_split_files() {
-    let total: usize = prelude_files().iter().map(|(_, body)| body.len()).sum();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut total: usize = prelude_files().iter().map(|(_, body)| body.len()).sum();
+    for extra in EXTRA_PRELUDE_FILES {
+        let body = std::fs::read_to_string(root.join(extra)).unwrap_or_else(|e| {
+            panic!("EXTRA_PRELUDE_FILES names {extra}, which will not read: {e}")
+        });
+        assert!(
+            brood::PRELUDE.contains(body.as_str()),
+            "{extra} is listed in EXTRA_PRELUDE_FILES but is not in PRELUDE — either add its \
+             include_str! line to the concat! in lib.rs, or drop it from that list"
+        );
+        total += body.len();
+    }
     assert_eq!(
         brood::PRELUDE.len(),
         total,
-        "PRELUDE is {} bytes but std/prelude/*.blsp total {total} — the concat! list in \
-         lib.rs includes something twice, includes a file from outside std/prelude/, or \
-         is missing one",
+        "PRELUDE is {} bytes but std/prelude/*.blsp + EXTRA_PRELUDE_FILES total {total} — \
+         the concat! list in lib.rs includes something twice, includes a file listed in \
+         neither, or is missing one. A deliberate non-prelude/ addition goes in \
+         EXTRA_PRELUDE_FILES with a note saying why it is core.",
         brood::PRELUDE.len()
     );
 }

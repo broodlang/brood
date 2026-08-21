@@ -566,6 +566,15 @@ fn jit_lower_arm_inner(
     let rb_id = m
         .declare_function("brood_rt_roots_base", Linkage::Import, &rb_sig)
         .ok()?;
+    // brood_rt_note_deopt(heap, reason): records WHY the arm is deopting. The shared deopt
+    // block takes the id as a block param, so every guard can name itself (KI-49: a deopt
+    // reported only its resume checkpoint, and an arm can have many guards after that).
+    let mut nd_sig = m.make_signature();
+    nd_sig.params.push(AbiParam::new(ptr_ty));
+    nd_sig.params.push(AbiParam::new(types::I32));
+    let nd_id = m
+        .declare_function("brood_rt_note_deopt", Linkage::Import, &nd_sig)
+        .ok()?;
     // brood_rt_tick_n(heap, n) -> u8: the batched back-edge poll (burns n reductions).
     let mut tickn_sig = m.make_signature();
     tickn_sig.params.push(AbiParam::new(ptr_ty));
@@ -913,6 +922,7 @@ fn jit_lower_arm_inner(
     let natfl_ref = m.declare_func_in_func(natfl_id, b.func);
     let flbase_ref = m.declare_func_in_func(flbase_id, b.func);
     let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
+    let nd_ref = m.declare_func_in_func(nd_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let thas_ref = m.declare_func_in_func(thas_id, b.func);
     let tget_ref = m.declare_func_in_func(tget_id, b.func);
@@ -945,6 +955,8 @@ fn jit_lower_arm_inner(
         .collect();
     let entry = b.create_block();
     let deopt = b.create_block();
+    // KI-49: the shared deopt block carries a reason id, so each guard names itself.
+    b.append_block_param(deopt, types::I32);
     let preempt = b.create_block();
     // The error exit (outcome 3): a JIT'd call / global read raised an error (parked in
     // `JIT_PENDING_ERROR`). `vm_run_bc` takes it and propagates — unlike `deopt`, it does
@@ -1040,7 +1052,8 @@ fn jit_lower_arm_inner(
             heap,
             std::mem::offset_of!(crate::core::heap::Heap, jit_force_vm) as i32,
         );
-        b.ins().jump(deopt, &[]);
+        let __dr = b.ins().iconst(types::I32, 101);
+        b.ins().jump(deopt, &[BlockArg::Value(__dr)]);
         b.seal_block(bail);
         b.switch_to_block(cont);
     }
@@ -1195,7 +1208,9 @@ fn jit_lower_arm_inner(
             let ptr = b.inst_results(c)[0];
             // null ptr ⇒ slot isn't a vector ⇒ deopt (VM runs the arm; same result).
             let cont = b.create_block();
-            b.ins().brif(ptr, cont, &[], deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 102);
+            b.ins()
+                .brif(ptr, cont, &[], deopt, &[BlockArg::Value(__dr)]);
             b.switch_to_block(cont);
             let vlen = b
                 .ins()
@@ -1218,7 +1233,9 @@ fn jit_lower_arm_inner(
             let c = b.ins().call(globprobe_ref, &[heap, out_addr, symv]);
             let status = b.inst_results(c)[0];
             let okb = b.create_block();
-            b.ins().brif(status, deopt, &[], okb, &[]);
+            let __dr = b.ins().iconst(types::I32, 103);
+            b.ins()
+                .brif(status, deopt, &[BlockArg::Value(__dr)], okb, &[]);
             b.switch_to_block(okb);
             let w0 = b.ins().stack_load(types::I64, out_slot, 0);
             let w1 = b
@@ -1230,7 +1247,9 @@ fn jit_lower_arm_inner(
             let c = b.ins().call(vbase_ref, &[heap, w0, w1, w2, len_addr]);
             let ptr = b.inst_results(c)[0];
             let cont = b.create_block();
-            b.ins().brif(ptr, cont, &[], deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 104);
+            b.ins()
+                .brif(ptr, cont, &[], deopt, &[BlockArg::Value(__dr)]);
             b.switch_to_block(cont);
             let vlen = b
                 .ins()
@@ -1248,7 +1267,9 @@ fn jit_lower_arm_inner(
             let c = b.ins().call(globprobe_ref, &[heap, out_addr, symv]);
             let status = b.inst_results(c)[0];
             let okb = b.create_block();
-            b.ins().brif(status, deopt, &[], okb, &[]);
+            let __dr = b.ins().iconst(types::I32, 105);
+            b.ins()
+                .brif(status, deopt, &[BlockArg::Value(__dr)], okb, &[]);
             b.switch_to_block(okb);
             let w0 = b.ins().stack_load(types::I64, out_slot, 0);
             let w1 = b
@@ -1296,7 +1317,8 @@ fn jit_lower_arm_inner(
         };
         let ok = b.ins().icmp_imm(IntCC::Equal, tag, expected_tag);
         let cont = b.create_block();
-        b.ins().brif(ok, cont, &[], deopt, &[]);
+        let __dr = b.ins().iconst(types::I32, 106);
+        b.ins().brif(ok, cont, &[], deopt, &[BlockArg::Value(__dr)]);
         b.switch_to_block(cont);
         let bits = b.ins().load(
             types::I64,
@@ -1826,7 +1848,8 @@ fn jit_lower_arm_inner(
                     b.ins().jump(leader_block[j]?, &args);
                 } else {
                     // Type-mixed join (see `record_block_flags`): deopt to the VM.
-                    b.ins().jump(deopt, &[]);
+                    let __dr = b.ins().iconst(types::I32, 107);
+                    b.ins().jump(deopt, &[BlockArg::Value(__dr)]);
                 }
                 break;
             }
@@ -1840,6 +1863,8 @@ fn jit_lower_arm_inner(
     b.ins().return_(&[zero]);
     // Deopt: an operand wasn't an Int — return 1, the caller runs the arm on the VM.
     b.switch_to_block(deopt);
+    let deopt_reason = b.block_params(deopt)[0];
+    b.ins().call(nd_ref, &[heap, deopt_reason]);
     let one = b.ins().iconst(types::I64, 1);
     b.ins().return_(&[one]);
     // Preempt: the reduction budget was spent at a back-edge — return 2. The frame slots

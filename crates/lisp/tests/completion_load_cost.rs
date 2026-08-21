@@ -70,14 +70,14 @@ fn requiring_complete_does_not_load_the_scaffolder() {
         .eval_str("(require-one 'complete)")
         .expect("load std/tool/complete.blsp");
 
-    // `complete-templates` still needs `scaffold`, but pays for it with a
+    // `complete/templates` still needs `scaffold`, but pays for it with a
     // `require-one` INSIDE the function, so only `nest new --template` completion
     // does. Naming an export at top level instead would auto-require it here — and
     // `scaffold` uses `project`, so that one reference alone restores the whole cost.
     assert!(
         !bound(&mut interp, "scaffold/new-project"),
         "requiring `complete` loaded `scaffold` (and so `project` behind it) — keep the \
-         template list behind the call-time `require-one` in `complete-templates`."
+         template list behind the call-time `require-one` in `complete/templates`."
     );
 }
 
@@ -91,12 +91,12 @@ fn the_template_completion_still_works_through_the_call_time_require() {
         .eval_str("(require-one 'complete)")
         .expect("load std/tool/complete.blsp");
     let out = interp
-        .eval_str("(count (complete/complete-templates))")
-        .expect("complete-templates must not raise");
+        .eval_str("(count (complete/templates))")
+        .expect("complete/templates must not raise");
     let count: i64 = interp.print(out).parse().expect("a template count");
     assert!(
         count > 0,
-        "complete-templates returned {count} templates — the call-time \
+        "complete/templates returned {count} templates — the call-time \
          `(require-one 'scaffold)` no longer binds `*project-templates*`"
     );
 }

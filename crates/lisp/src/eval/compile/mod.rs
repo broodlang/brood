@@ -2598,10 +2598,14 @@ fn hof_apply_native(
                         .and_then(|c| c.code.get(ip))
                         .map(crate::eval::compile::jit_plan::codegen::inst_opcode_name)
                         .unwrap_or("<out-of-range>");
-                    eprintln!("[jit-deopt] arm={name} resume_ip={ip} op={op} (journalled)");
+                    eprintln!(
+                        "[jit-deopt] arm={name} resume_ip={ip} op={op} reason#{} (journalled)",
+                        heap.jit_deopt_reason()
+                    );
                 }
                 None => eprintln!(
-                    "[jit-deopt] arm={name} no journal — re-runs from ip 0 (ckpt_slot={slot})"
+                    "[jit-deopt] arm={name} no journal — re-runs from ip 0 (ckpt_slot={slot}) reason#{}",
+                    heap.jit_deopt_reason()
                 ),
             }
         }

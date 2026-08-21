@@ -88,6 +88,7 @@ impl CraneliftBackend {
         builder.symbol("brood_rt_global_probe", brood_rt_global_probe as *const u8);
         builder.symbol("brood_rt_global_ic", brood_rt_global_ic as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
+        builder.symbol("brood_rt_note_deopt", brood_rt_note_deopt as *const u8);
         builder.symbol(
             "brood_rt_fastlink_base",
             brood_rt_fastlink_base as *const u8,
