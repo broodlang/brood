@@ -286,7 +286,7 @@ mod datetime {
             format!(
                 "\
                  (def d (datetime/date 2026 1 1)) \
-                 (dotimes (i {n}) (datetime/dt-add d (datetime/days 30)))"
+                 (dotimes (i {n}) (datetime/add d (datetime/days 30)))"
             ),
         );
     }
@@ -299,7 +299,7 @@ mod datetime {
             format!(
                 "\
                  (def d (datetime/date 2026 6 8)) \
-                 (dotimes (i {n}) (datetime/dt-format d \"%Y-%m-%d\"))"
+                 (dotimes (i {n}) (datetime/format d \"%Y-%m-%d\"))"
             ),
         );
     }
@@ -312,7 +312,7 @@ mod datetime {
             format!(
                 "\
                  (def d (datetime/date 2026 6 8)) \
-                 (dotimes (i {n}) (datetime/epoch-ms->dt (datetime/dt->epoch-ms d)))"
+                 (dotimes (i {n}) (datetime/epoch-ms-> (datetime/->epoch-ms d)))"
             ),
         );
     }
@@ -338,13 +338,13 @@ mod csv {
     /// Parse a CSV string with `n` rows.
     #[divan::bench(args = [10, 100])]
     fn parse(bencher: divan::Bencher, n: usize) {
-        csv_prog(bencher, n, "(csv/csv-parse src)");
+        csv_prog(bencher, n, "(csv/parse src)");
     }
 
     /// Emit `n` rows as CSV (pre-parsed).
     #[divan::bench(args = [10, 100])]
     fn emit(bencher: divan::Bencher, n: usize) {
-        csv_prog(bencher, n, "(csv/csv-emit (csv/csv-parse src))");
+        csv_prog(bencher, n, "(csv/emit (csv/parse src))");
     }
 }
 
@@ -491,7 +491,7 @@ mod diff {
                 "\
                  (def a (range {n})) \
                  (def b (filter (fn (x) (not= (rem x 10) 0)) (range {n}))) \
-                 (diff/diff-seq a b)"
+                 (diff/seq a b)"
             ),
         );
     }
@@ -513,7 +513,7 @@ mod diff {
             bencher,
             format!(
                 "\
-                 (diff/diff-lines {orig:?} {changed:?})"
+                 (diff/lines {orig:?} {changed:?})"
             ),
         );
     }
