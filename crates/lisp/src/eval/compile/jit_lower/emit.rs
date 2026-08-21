@@ -136,7 +136,8 @@ pub(super) fn emit_arith(
 ) -> Option<cranelift_codegen::ir::Value> {
     let checked = |b: &mut FunctionBuilder, r: cranelift_codegen::ir::Value, ov| {
         let cont = b.create_block();
-        b.ins().brif(ov, deopt, &[], cont, &[]);
+        let __dr = b.ins().iconst(types::I32, 15);
+        b.ins().brif(ov, deopt, &[BlockArg::Value(__dr)], cont, &[]);
         b.switch_to_block(cont);
         r
     };
@@ -166,7 +167,8 @@ pub(super) fn emit_arith(
             let zero = b.ins().iconst(types::I64, 0);
             let div0 = b.ins().icmp(IntCC::Equal, y, zero);
             let c0 = b.create_block();
-            b.ins().brif(div0, deopt, &[], c0, &[]);
+            let __dr = b.ins().iconst(types::I32, 16);
+            b.ins().brif(div0, deopt, &[BlockArg::Value(__dr)], c0, &[]);
             b.switch_to_block(c0);
             // (x == i64::MIN) && (y == -1) — the one signed-division overflow.
             let min = b.ins().iconst(types::I64, i64::MIN);
@@ -175,7 +177,8 @@ pub(super) fn emit_arith(
             let y_m1 = b.ins().icmp(IntCC::Equal, y, neg1);
             let ov = b.ins().band(x_min, y_m1);
             let c1 = b.create_block();
-            b.ins().brif(ov, deopt, &[], c1, &[]);
+            let __dr = b.ins().iconst(types::I32, 17);
+            b.ins().brif(ov, deopt, &[BlockArg::Value(__dr)], c1, &[]);
             b.switch_to_block(c1);
             match op {
                 PrimOp::Rem => b.ins().srem(x, y),
@@ -185,7 +188,9 @@ pub(super) fn emit_arith(
                     let r = b.ins().srem(x, y);
                     let inexact = b.ins().icmp(IntCC::NotEqual, r, zero);
                     let c2 = b.create_block();
-                    b.ins().brif(inexact, deopt, &[], c2, &[]);
+                    let __dr = b.ins().iconst(types::I32, 18);
+                    b.ins()
+                        .brif(inexact, deopt, &[BlockArg::Value(__dr)], c2, &[]);
                     b.switch_to_block(c2);
                     b.ins().sdiv(x, y)
                 }
@@ -232,7 +237,9 @@ pub(super) fn emit_float_arith(
             let zero = b.ins().f64const(0.0);
             let is_zero = b.ins().fcmp(FloatCC::Equal, y, zero);
             let cont = b.create_block();
-            b.ins().brif(is_zero, deopt, &[], cont, &[]);
+            let __dr = b.ins().iconst(types::I32, 19);
+            b.ins()
+                .brif(is_zero, deopt, &[BlockArg::Value(__dr)], cont, &[]);
             b.switch_to_block(cont);
             Op::Float(b.ins().fdiv(x, y))
         }
@@ -279,7 +286,9 @@ pub(super) fn load_slot_int(
     let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
     let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
     let cont = b.create_block();
-    b.ins().brif(is_int, cont, &[], f.deopt, &[]);
+    let __dr = b.ins().iconst(types::I32, 20);
+    b.ins()
+        .brif(is_int, cont, &[], f.deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(cont);
     b.ins().load(
         types::I64,
@@ -460,7 +469,13 @@ pub(super) fn as_int(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
             let tagb = b.ins().band_imm(w0, 0xff);
             let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
             let cont = b.create_block();
-            b.ins().brif(is_int, cont, &[], f.deopt, &[]);
+            // KI-49: carry the OBSERVED tag in the low byte of the reason id, so the deopt
+            // says not just "a Handle wasn't an Int here" but which type actually arrived.
+            let __base = b.ins().iconst(types::I32, 21 << 8);
+            let __t32 = b.ins().ireduce(types::I32, tagb);
+            let __dr = b.ins().bor(__base, __t32);
+            b.ins()
+                .brif(is_int, cont, &[], f.deopt, &[BlockArg::Value(__dr)]);
             b.switch_to_block(cont);
             w1
         }
@@ -470,7 +485,9 @@ pub(super) fn as_int(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
             let tagb = b.ins().band_imm(w0, 0xff);
             let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
             let cont = b.create_block();
-            b.ins().brif(is_int, cont, &[], f.deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 22);
+            b.ins()
+                .brif(is_int, cont, &[], f.deopt, &[BlockArg::Value(__dr)]);
             b.switch_to_block(cont);
             w1
         }
@@ -478,7 +495,8 @@ pub(super) fn as_int(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
         // specialize) — deopt to the VM. Shouldn't arise once arith dispatches by
         // operand type, but kept sound. (Dead block after the unconditional jump.)
         Op::Float(_) => {
-            b.ins().jump(f.deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 23);
+            b.ins().jump(f.deopt, &[BlockArg::Value(__dr)]);
             let dead = b.create_block();
             b.switch_to_block(dead);
             b.ins().iconst(types::I64, 0)
@@ -559,7 +577,9 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
             let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
             let is_f = b.ins().icmp_imm(IntCC::Equal, tag, TAG_FLOAT as i64);
             let cont = b.create_block();
-            b.ins().brif(is_f, cont, &[], f.deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 24);
+            b.ins()
+                .brif(is_f, cont, &[], f.deopt, &[BlockArg::Value(__dr)]);
             b.switch_to_block(cont);
             let bits = b.ins().load(
                 types::I64,
@@ -578,12 +598,15 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
             let tagb = b.ins().band_imm(w0, 0xff);
             let is_f = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_FLOAT as i64);
             let cont = b.create_block();
-            b.ins().brif(is_f, cont, &[], f.deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 25);
+            b.ins()
+                .brif(is_f, cont, &[], f.deopt, &[BlockArg::Value(__dr)]);
             b.switch_to_block(cont);
             b.ins().bitcast(types::F64, MemFlagsData::new(), w1)
         }
         Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => {
-            b.ins().jump(f.deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 26);
+            b.ins().jump(f.deopt, &[BlockArg::Value(__dr)]);
             let dead = b.create_block();
             b.switch_to_block(dead);
             b.ins().f64const(0.0)
@@ -850,7 +873,9 @@ pub(super) fn vector_ref(
     );
     let status = b.inst_results(c)[0];
     let cont = b.create_block();
-    b.ins().brif(status, f.deopt, &[], cont, &[]);
+    let __dr = b.ins().iconst(types::I32, 27);
+    b.ins()
+        .brif(status, f.deopt, &[BlockArg::Value(__dr)], cont, &[]);
     b.switch_to_block(cont);
     let w0 = b.ins().stack_load(types::I64, fu.out_slot, 0);
     let w1 = b
@@ -901,7 +926,9 @@ pub(super) fn table_prim(
     b.ins().brif(status, slow, &[], cont, &[]);
     b.switch_to_block(slow);
     let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
-    b.ins().brif(is_err, fu.error, &[], f.deopt, &[]);
+    let __dr = b.ins().iconst(types::I32, 28);
+    b.ins()
+        .brif(is_err, fu.error, &[], f.deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(cont);
     let w0 = b.ins().stack_load(types::I64, fu.out_slot, 0);
     let w1 = b
@@ -953,7 +980,9 @@ pub(super) fn eq_dispatch(
     let b_in = b.ins().bor(b_sym, b_kw);
     let either = b.ins().bor(a_in, b_in);
     let kwb = b.create_block();
-    b.ins().brif(either, kwb, &[], f.deopt, &[]);
+    let __dr = b.ins().iconst(types::I32, 29);
+    b.ins()
+        .brif(either, kwb, &[], f.deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(kwb);
     let tags_eq = b.ins().icmp(IntCC::Equal, ta, tb);
     // A Sym/Keyword payload is a u32 — the HIGH half of the payload word is
@@ -993,13 +1022,17 @@ pub(super) fn inline_vec_ref(
     let tagb = b.ins().band_imm(w0, 0xff);
     let is_vec = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_VECTOR as i64);
     let c1 = b.create_block();
-    b.ins().brif(is_vec, c1, &[], deopt, &[]);
+    let __dr = b.ins().iconst(types::I32, 30);
+    b.ins()
+        .brif(is_vec, c1, &[], deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(c1);
     // Region: high 2 bits of the handle == 0 (LOCAL). Deopt for PRELUDE/RUNTIME.
     let high2 = b.ins().ushr_imm(w1, 62);
     let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0);
     let c2 = b.create_block();
-    b.ins().brif(is_local, c2, &[], deopt, &[]);
+    let __dr = b.ins().iconst(types::I32, 31);
+    b.ins()
+        .brif(is_local, c2, &[], deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(c2);
     // Age bit 61 (0=nursery, 1=old) selects which slab base to fetch. Fetch it per-read
     // so a prior safepoint that moved the slab can't leave it stale.
@@ -1053,7 +1086,9 @@ pub(super) fn inline_vec_ref(
     let idxc = b.ins().iconst(types::I64, idx);
     let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, idxc, lenw);
     let c4 = b.create_block();
-    b.ins().brif(in_bounds, c4, &[], deopt, &[]);
+    let __dr = b.ins().iconst(types::I32, 32);
+    b.ins()
+        .brif(in_bounds, c4, &[], deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(c4);
     // Element read: slot_ptr + JIT_ITEMS_OFF + idx*size_of::<Value>().
     let elem_off = VS::JIT_ITEMS_OFF as i64 + idx * STRIDE;
@@ -1088,7 +1123,9 @@ pub(super) fn inline_vec_ref(
     b.switch_to_block(heap_blk);
     let is_spill = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_SPILL_TAG);
     let spill_blk = b.create_block();
-    b.ins().brif(is_spill, spill_blk, &[], deopt, &[]);
+    let __dr = b.ins().iconst(types::I32, 33);
+    b.ins()
+        .brif(is_spill, spill_blk, &[], deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(spill_blk);
     let sptr = b.ins().load(
         types::I64,
@@ -1105,7 +1142,9 @@ pub(super) fn inline_vec_ref(
     let idxc2 = b.ins().iconst(types::I64, idx);
     let in_b = b.ins().icmp(IntCC::UnsignedLessThan, idxc2, slen);
     let sok = b.create_block();
-    b.ins().brif(in_b, sok, &[], deopt, &[]);
+    let __dr = b.ins().iconst(types::I32, 34);
+    b.ins()
+        .brif(in_b, sok, &[], deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(sok);
     let elem2 = b.ins().iadd_imm(sptr, idx * STRIDE);
     let s0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem2, 0);
@@ -1141,7 +1180,9 @@ pub(super) fn inline_vec_ref(
     );
     let hstatus = b.inst_results(hc)[0];
     let hok = b.create_block();
-    b.ins().brif(hstatus, deopt, &[], hok, &[]);
+    let __dr = b.ins().iconst(types::I32, 35);
+    b.ins()
+        .brif(hstatus, deopt, &[BlockArg::Value(__dr)], hok, &[]);
     b.switch_to_block(hok);
     let h0 = b.ins().stack_load(types::I64, out_slot, 0);
     let h1 = b

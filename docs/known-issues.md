@@ -21,7 +21,7 @@ ADRs / topic docs.
 |---|---|---|
 | KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
-| KI-49 | the tagged-tuple `receive` matcher type-deopts 16x through the HOF native fast-frame and is latched onto the interpreter for the process — 454 ns vs 59 ns for the keyword matcher, and the whole `pingpong`/`ring`/`supervisor` gap to Elixir | ⚠️ **OPEN — root-caused and localised, not fixed.** Deopts all land at `resume_ip=7`, immediately after the `Call` to `vector-length`. Specific to the HOF fast-frame: a plain hot loop calling `vector-length` does not thrash |
+| KI-49 | the tagged-tuple `receive` matcher type-deopts 16x and is latched onto the interpreter for the process — 454 ns vs 59 ns for the keyword matcher, and the whole `pingpong`/`ring`/`supervisor` gap to Elixir | ⚠️ **OPEN — root-caused and localised, not fixed.** Deopts all land at `resume_ip=7` (the checkpoint after the `Call` to `vector-length` — the guard is at or after it). NOT the HOF fast-frame: `BROOD_NO_HOF_JIT=1` still deopts 16x. Payload type and every optimizer opt-out are ruled out; next step is per-deopt-site reason codes |
 | KI-48 | JIT tail dispatch read past the roots stack — `root_at(9)` on a len-8 stack, twice on 2026-08-20, from `jit_dispatch_tail`; an audit then found a **second live instance** in `dispatch.rs` and a **false safety argument** in `vm_cache.rs` | ✅ **root-caused, both instances fixed, and the anti-pattern gated 2026-08-21** — the dispatcher re-derived the frame size from `active_nslots()` (the KI-26/ADR-210 anti-pattern), which the background inline swap can change mid-flight; **measured live on 123 arms**, `fold` at nslots=13 vs inline_nslots=25 (a 12-slot overshoot). Now passed the size the trampoline built the frame to. Original crash never reproduced on demand, so the causal link is strong but not proven |
 | KI-47 | the `differential (tree-walker)` CI job went red on **every** run from the ADR-230/231 namespacing merge onward, always as the same three `adversarial_test.blsp` heap-allocation cases dying on `E0043`. Those cases were not the cause: the suite's **process-wide** allocation had reached **1.145 GB** against the **1 GiB** `TEST_DEFAULT_SOFT` backstop, and a threshold failure names whichever tests are running when the line is crossed | ✅ **fixed 2026-08-19** — backstop raised to 2 GiB soft / 3 GiB hard (`core/alloc.rs`), which is what it documents itself to be: a *host-survival* guard, not a working-set budget. ⚠ **Leaves an unresolved question**: the cap was sized against a ~240 MB suite peak and the suite now peaks ~1 GB (4.8×), so this restores a ~2× margin, not the intended 4× |
 | KI-46 | **deadline margin, not a failure yet.** KI-39 was a fixed cost sitting under a fixed deadline for weeks while reading as a random flake, so every case's CI margin against nextest's 120 s hard kill was audited from the 2026-08-17 logs. `nest::bin/nest mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` is now the worst at **87 s = 1.38× margin** — it invokes the MCP `check` tool, which is cwd-based, so it type-checks **this whole repository**, and the cost grows as the repo does | ✅ **fixed 2026-08-18, the real way** (87 s → **2.5 s**) — the three cheap fixes were all worse than the problem: `BROOD_NO_CHECK=1` guts what the case proves, a temp-dir `set_current_dir` is process-global and would race its siblings under plain `cargo test` (trading a slow test for a nondeterministic one), and a bigger nextest budget is what hid KI-39. So the real fix was done instead: `check-project-structured` gained an optional `from` root, and `mcp-check-tool` now passes **`*project-root*`** — the root the server already pins its write sandbox to and that every other project-scoped tool already read. `check` was the one tool taking its project from cwd. The three next-worst (`scaffold_quality`, 89/80/77 s) **were** fixed the same day by splitting one case per template |
@@ -2704,9 +2704,57 @@ rediscovered each time.
 
 i.e. immediately after the `Call` to `vector-length`, at the length comparison.
 
-**It is the HOF fast-frame path, not `vector-length`.** A control — a hot self-tail loop
-doing `(= (vector-length v) 2)` — does **not** deopt at all. The matcher runs through
-`hof_apply_native`'s fast-frame protocol, which is the difference.
+⚠ **CORRECTION (same day).** An earlier version of this entry said the deopt was specific
+to the HOF native fast-frame. **That is wrong**, and the check that disproves it is one flag:
+with `BROOD_NO_HOF_JIT=1` — which disables that protocol entirely — the arm still deopts
+exactly 16 times, merely counted on the other path (`jit_deopt` 16 / `hof_native_deopt` 0,
+against 0 / 16 by default). The arm's native code deopts **regardless of how it is invoked**.
+
+**What IS established**, each by measurement:
+
+- exactly **16** deopts, then the sixteen-deopt rule latches `BAILED` for the process life
+- all resume at **ip 7** — the checkpoint written after the `Call` to `vector-length`, so the
+  failing guard is at or after ip 7, *not necessarily at it* (the journal records the last
+  checkpoint, not the deopt site — a distinction that cost an hour)
+- **payload type is irrelevant**: `1`, `:x`, `"s"` and `[9]` all thrash identically, so it is
+  structural to the pattern, not a value-type guess
+- **not an optimizer pass**: `BROOD_NO_INLINE`, `BROOD_NO_LEAF_INLINE`, `BROOD_NO_PARTIAL_LEAF`,
+  `BROOD_LINMAP=0` and `BROOD_NO_HOF_JIT` each still thrash
+- **not message-vector indexing**: a hot arm doing `(nth m 1)` on a *message-delivered* vector
+  does not deopt, and neither does a hot loop doing `(= (vector-length v) 2)`
+
+### ROOT CAUSE (2026-08-21): a non-Int value carried across a block boundary
+
+Per-deopt-site reason codes were built to answer this (all 43 branches into the shared deopt
+block now pass a distinct id, recorded via `brood_rt_note_deopt`; the `as_int` guard also
+encodes the *observed* tag in the low byte). The verdict:
+
+    [jit-deopt] arm=<closure> resume_ip=7 op=Const reason#5386   x16
+
+`5386 = (21 << 8) | 10` — guard **21** is `as_int`'s `Op::Handle` case, and tag **10** is
+`TAG_VECTOR`.
+
+Guard 21 is reached from **`as_block_arg`**, which materialises an operand that crosses a
+block boundary. Cranelift block params here are declared `I64`, so *every* block-carried
+operand is forced through `as_int` — and a non-Int value deopts. A tagged-tuple matcher
+cannot avoid this: it tests `vector?`, then `vector-length`, then `nth` on the **same**
+message, so the vector crosses the `if`/`and` merges.
+
+Confirmed by discriminator: a tuple pattern that **binds nothing** (`[:ping]` against
+`[:ping]`) deopts identically, so it is not the bindings vector — it is the message itself.
+The deopt then re-runs on the VM, which is why results stay correct and only speed is wrong.
+
+**Two fixes are possible, and they are not the same fix.**
+
+1. *Cheap and honest:* teach the profitability gate to refuse an arm that would carry a
+   non-Int operand across a block boundary. It ends up on the VM either way, but without the
+   compile, the 16 deopts and the latch. **No faster — just stops the waste.**
+2. *The real one:* carry a boxed operand across block boundaries as its three words instead
+   of forcing `as_int`. This is what would actually make tagged-tuple matchers native, and it
+   is a genuine change to the block-argument protocol in `jit_lower`, not a tweak.
+
+The prize is unchanged and still bounded: ~390 ns of a 2144 ns round trip, `pingpong` roughly
+211 ms → 175 ms (3.7x → 3.0x vs Elixir). It does not reach parity on its own.
 
 **Ruled out, by measurement rather than argument:**
 

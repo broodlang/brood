@@ -196,8 +196,8 @@
 
   (test "a traced request round-trips through the answer path"
     (let (r (answer {:id 42
-                                 :src "(defn evsrv-t-dbl (x) (* 2 x))\n(evsrv-t-dbl 21)"
-                                 :trace ["evsrv-t-dbl"]}))
+                     :src "(defn evsrv-t-dbl (x) (* 2 x))\n(evsrv-t-dbl 21)"
+                     :trace ["evsrv-t-dbl"]}))
       (assert= (get r :id) 42)
       (assert= (get r :value) "42")
       (is (>= (count (get r :spy)) 2)))))

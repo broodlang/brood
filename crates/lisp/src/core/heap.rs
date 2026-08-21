@@ -2639,6 +2639,8 @@ pub struct Heap {
     /// call site into a wrong hit. Per-process (`RefCell`, like `vm_cache`); a
     /// site is allocated at compile time ([`Heap::vm_site_alloc`]), so ids are
     /// only as dense as the code this process actually compiled.
+    /// See [`Heap::note_jit_deopt_reason`] — the JIT's last deopt reason id.
+    pub(crate) jit_deopt_reason: std::cell::Cell<u32>,
     vm_call_ics: RefCell<Vec<Option<CallIcEntry>>>,
     /// **IR-readable mirror** of the fast-link memo (Track B / Technique A): a flat,
     /// `#[repr(C)]` side table indexed by the same call-site id as [`Self::vm_call_ics`],
@@ -2959,6 +2961,21 @@ impl Heap {
         )
     }
 
+    /// Reason id recorded by the JIT at its most recent type-deopt, written by
+    /// `brood_rt_note_deopt` from the (cold) shared deopt block. `0` = none yet.
+    ///
+    /// Exists because a deopt previously told you only *where it resumed* — the last
+    /// checkpoint — and an arm can have a dozen guards after that point. KI-49 sat at
+    /// "one of five guards" for exactly this reason.
+    pub(crate) fn note_jit_deopt_reason(&self, reason: u32) {
+        self.jit_deopt_reason.set(reason);
+    }
+
+    /// The reason id from the most recent JIT type-deopt (see `note_jit_deopt_reason`).
+    pub(crate) fn jit_deopt_reason(&self) -> u32 {
+        self.jit_deopt_reason.get()
+    }
+
     /// Entry counts of the two source-position side tables — the LOCAL
     /// [`Heap::form_pos`] map and the shared RUNTIME [`RuntimeCode::positions`] map.
     /// Measurement surface for the position-table cost (they were 169 MB of a 933 MB
@@ -3059,6 +3076,7 @@ impl Heap {
             p1_dirty_tick: Cell::new(0),
             recv_mark: Cell::new((0, 0)),
             live_vm_arms: Vec::new(),
+            jit_deopt_reason: std::cell::Cell::new(0),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]
@@ -3137,6 +3155,7 @@ impl Heap {
             p1_dirty_tick: Cell::new(0),
             recv_mark: Cell::new((0, 0)),
             live_vm_arms: Vec::new(),
+            jit_deopt_reason: std::cell::Cell::new(0),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]

@@ -46,7 +46,7 @@ Redraws in place — each cell overwrites the last, so no clear and no flicker."
       ; move the cursor back up
       (println "generation" gen "— population" (count board) "\e[K")
       (print (render board w h)))
-    (! srv :step)
+    (cast srv :step)
     ; cast: advance to the next gen
     (sleep 70)))
 
