@@ -13,31 +13,43 @@
 (def- *ident*
   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_?!*<>=+.%&~^-")
 
-(defn- ident-at? (text pos)
+(defn- ident-at?
+  (text pos)
   (and (>= pos 0)
     (< pos (string/length text))
     (includes? *ident* (string/char-at text pos))))
 
 (defn- boundary? (text pos) (not (ident-at? text pos)))
 
-(defn- tr-loop (text old new olen from parts)
+(defn- tr-loop
+  (text old new olen from parts)
   (let (i (index-of text old from))
     (if (< i 0)
       (cons (string/substring text from (string/length text)) parts)
       (if (and (boundary? text (dec i)) (boundary? text (+ i olen)))
-        (tr-loop text old new olen (+ i olen)
+        (tr-loop text
+          old
+          new
+          olen
+          (+ i olen)
           (cons new (cons (string/substring text from i) parts)))
-        (tr-loop text old new olen (inc i)
+        (tr-loop text
+          old
+          new
+          olen
+          (inc i)
           (cons (string/substring text from (inc i)) parts))))))
 
 (defn token-replace (text old new)
   "`text` with every whole-token `old` replaced by `new` (substrings left alone)."
   (apply str (reverse (tr-loop text old new (string/length old) 0 nil))))
 
-(defn- apply-pairs (text pairs)
+(defn- apply-pairs
+  (text pairs)
   (fold (fn (t p) (token-replace t (first p) (second p))) text pairs))
 
-(defn- rewrite-file (pairs f)
+(defn- rewrite-file
+  (pairs f)
   "Rewrite `f` in place if any pair changes it; returns f when changed, else nil."
   (let (before (file/slurp f)
         after (apply-pairs before pairs))
@@ -45,7 +57,8 @@
       nil
       (do (file/spit f after) f))))
 
-(defn- project-blsp ()
+(defn- project-blsp
+  ()
   "Every .blsp file under the current directory, skipping .git and vendored _deps."
   (filter (fn (f)
             (and (string/ends-with? f ".blsp")
@@ -64,10 +77,9 @@
 
 (defn rename-from-file (path)
   "Load `[old new]` pairs from a file of `OLD NEW` lines and apply them (see `rename`)."
-  (rename
-    (filter (fn (p) (= (count p) 2))
-      (map (fn (l) (string/split (string/trim l) " "))
-        (filter (fn (l) (not (string/blank? l))) (string/split (file/slurp path) "\n"))))))
+  (rename (filter (fn (p) (= (count p) 2))
+            (map (fn (l) (string/split (string/trim l) " "))
+              (filter (fn (l) (not (string/blank? l))) (string/split (file/slurp path) "\n"))))))
 
 ;; ---- 2-arg swap (for a reversed-args rename like member? -> includes?) --------
 ;; `(old A B)` -> `(new B A)`, reading A and B as balanced s-expressions so nested

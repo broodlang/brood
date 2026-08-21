@@ -2036,9 +2036,12 @@ published is refused. Backs `nest publish`."
                    *project-name* " " *project-version* "."))
       else (error "package: publish failed (HTTP " status "): " (registry-error-text resp)))))
 
-(defn- semver-bump (cur level)
+(defn- semver-bump
+  (cur level)
   (let (p (map string->number (string/split cur "."))
-        ma (nth p 0) mi (nth p 1) pa (nth p 2))
+        ma (nth p 0)
+        mi (nth p 1)
+        pa (nth p 2))
     (cond
       (= level "major") (str (inc ma) ".0.0")
       (= level "minor") (str ma "." (inc mi) ".0")
@@ -2057,7 +2060,8 @@ published is refused. Backs `nest publish`."
           cur (string/substring text vstart vend)
           new (semver-bump cur (or level "patch")))
       (file/spit "project.blsp"
-        (str (string/substring text 0 vstart) new
+        (str (string/substring text 0 vstart)
+          new
           (string/substring text vend (string/length text))))
       new)))
 
