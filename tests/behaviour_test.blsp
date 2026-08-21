@@ -3,7 +3,7 @@
 ;; its own functions directly). The checker verifies a module whose header says
 ;; `(:implements B)` defines each op. Value polymorphism is `ability` (see
 ;; ability_test.blsp); `defprotocol`/`defimpl` were retired in favour of it.
-(defmodule behaviour-test (:use test) (:use protocol))
+(defmodule behaviour-test (:use test))
 
 (defbehaviour Renderable
   (render-it [model])

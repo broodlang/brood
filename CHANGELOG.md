@@ -34,6 +34,12 @@ Private, module-internal helpers keep their prefix (it is internal namespacing, 
 public stutter). `nest rename` (the identifier-aware codemod) drove the propagation across
 the ecosystem.
 
+**Behaviour contracts are core.** `std/protocol.blsp` moved into the prelude, so
+`defbehaviour`, `register-protocol`, `ops`, and the `*protocols*` registry are bare and
+always available — no `require`, no `(:use protocol)`. (The type checker already read
+`*protocols*` bare, so this only aligns the runtime with it.) `gen` stays a namespaced
+module for now.
+
 ## v0.7.0 — 2026-08-21
 
 **Standard-library consistency pass.** A full review of the prelude and standard
