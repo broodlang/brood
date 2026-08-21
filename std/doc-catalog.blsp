@@ -459,7 +459,6 @@
    "profile-stop" :meta
    "provide" :meta
    "quot" :math
-   "rand-step" :math
    "random-token" :system
    "range" :collections
    "range?" :predicates

@@ -1,5 +1,5 @@
 //! End-to-end serve/attach test (ADR-090): a daemon `brood` runtime serves a tiny
-//! `ui-run` app (`node-start` + `editor/serve/serve`), and a second runtime attaches
+//! `ui-run` app (`node/start` + `editor/serve/serve`), and a second runtime attaches
 //! over the (encrypted) node link, drives the app with keys, and watches the pushed
 //! frames change. Exercises the protocol path `nest attach` rides on, without a TTY
 //! — the client speaks the serve protocol (`[:attach …]` / `[:frame …]` / `[:key …]`
@@ -29,7 +29,7 @@ fn attach_drives_a_served_app_over_the_link() {
     // Daemon: serve a tiny counter app ("+" increments, "q" quits), then park.
     let daemon = format!(
         r#"
-(node-start :ed "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :ed "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn mk () {{:n 0}})
 (defn vw (m c r) [(editor/display/text 0 0 (str "n=" (get m :n)))])
 (defn up (m input c r)
@@ -48,9 +48,9 @@ fn attach_drives_a_served_app_over_the_link() {
     // port binds) doesn't lose the first request.
     let client = format!(
         r#"
-(node-start :cli "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(def peer (connect "ed@127.0.0.1:{port_a}"))
-(monitor-node peer)
+(node/start :cli "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(def peer (node/connect "ed@127.0.0.1:{port_a}"))
+(node/monitor peer)
 (defn frame-text (f) (nth (first f) 3))
 (defn try-attach (n)
   (if (<= n 0)
