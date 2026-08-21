@@ -126,7 +126,7 @@
   (test "a reserved opt is rejected so the manifest stays forward-compatible"
     (is (includes? (try
                      (project/parse-dep '[parser
-                                                   :git "https://x.git" :ref "v1" :branch "main"])
+                                           :git "https://x.git" :ref "v1" :branch "main"])
                      (catch e e))
           "reserved for a future version")))
   (test "an entry that is too short is rejected"
@@ -143,10 +143,10 @@
     (assert= (get (project/parse-dep '[a :git "u" :ref "r" :optional true]) :optional) true))
   (test ":dev-dependencies parse and tag :dev true, kept separate from :dependencies"
     (project/apply-config '(:name demo
-                              :dependencies
-                              [[core :git "u" :ref "r"]]
-                              :dev-dependencies
-                              [[testkit :path "../tk"]]))
+                             :dependencies
+                             [[core :git "u" :ref "r"]]
+                             :dev-dependencies
+                             [[testkit :path "../tk"]]))
     ; production deps stay in their own slot, untagged
     (assert= (map :name *project-dependencies*) (list 'core))
     (assert= (map :dev *project-dependencies*) (list nil))

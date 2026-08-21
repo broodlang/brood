@@ -58,7 +58,9 @@ pub(super) fn emit_prim1(
             let tagb = b.ins().band_imm(w0, 0xff);
             let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
             let cont = b.create_block();
-            b.ins().brif(is_pair, cont, &[], deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 4);
+            b.ins()
+                .brif(is_pair, cont, &[], deopt, &[BlockArg::Value(__dr)]);
             b.switch_to_block(cont);
             let h = if let Some((nursery_base, old_base)) = pair_bases {
                 // Inline LOCAL pair read. PairId layout (w1):
@@ -181,7 +183,9 @@ pub(super) fn emit_prim1(
             let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
             let is_nil_or_pair = b.ins().bor(is_nil, is_pair);
             let cont = b.create_block();
-            b.ins().brif(is_nil_or_pair, cont, &[], deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 5);
+            b.ins()
+                .brif(is_nil_or_pair, cont, &[], deopt, &[BlockArg::Value(__dr)]);
             b.switch_to_block(cont);
             // After the guard: is_nil is 1 for nil, 0 for pair — exactly the boolean
             // result we want.
@@ -197,14 +201,18 @@ pub(super) fn emit_prim1(
                     let zero = b.ins().f64const(0.0);
                     let pos = b.ins().fcmp(FloatCC::GreaterThan, v, zero);
                     let cont = b.create_block();
-                    b.ins().brif(pos, cont, &[], deopt, &[]);
+                    let __dr = b.ins().iconst(types::I32, 6);
+                    b.ins()
+                        .brif(pos, cont, &[], deopt, &[BlockArg::Value(__dr)]);
                     b.switch_to_block(cont);
                     stack.push(Op::Float(b.ins().sqrt(v)));
                 }
                 Op::Int(v) if b.func.dfg.value_type(v) == types::I64 => {
                     let pos = b.ins().icmp_imm(IntCC::SignedGreaterThan, v, 0);
                     let cont = b.create_block();
-                    b.ins().brif(pos, cont, &[], deopt, &[]);
+                    let __dr = b.ins().iconst(types::I32, 7);
+                    b.ins()
+                        .brif(pos, cont, &[], deopt, &[BlockArg::Value(__dr)]);
                     b.switch_to_block(cont);
                     let f = b.ins().fcvt_from_sint(types::F64, v);
                     stack.push(Op::Float(b.ins().sqrt(f)));
@@ -225,18 +233,24 @@ pub(super) fn emit_prim1(
                     let zero = b.ins().f64const(0.0);
                     let posf = b.ins().fcmp(FloatCC::GreaterThan, fv, zero);
                     let fok = b.create_block();
-                    b.ins().brif(posf, fok, &[], deopt, &[]);
+                    let __dr = b.ins().iconst(types::I32, 8);
+                    b.ins()
+                        .brif(posf, fok, &[], deopt, &[BlockArg::Value(__dr)]);
                     b.switch_to_block(fok);
                     let fr = b.ins().sqrt(fv);
                     b.ins().jump(done, &[BlockArg::Value(fr)]);
                     b.switch_to_block(not_f);
                     let is_i = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
                     let iblk = b.create_block();
-                    b.ins().brif(is_i, iblk, &[], deopt, &[]);
+                    let __dr = b.ins().iconst(types::I32, 9);
+                    b.ins()
+                        .brif(is_i, iblk, &[], deopt, &[BlockArg::Value(__dr)]);
                     b.switch_to_block(iblk);
                     let posi = b.ins().icmp_imm(IntCC::SignedGreaterThan, w1, 0);
                     let iok = b.create_block();
-                    b.ins().brif(posi, iok, &[], deopt, &[]);
+                    let __dr = b.ins().iconst(types::I32, 10);
+                    b.ins()
+                        .brif(posi, iok, &[], deopt, &[BlockArg::Value(__dr)]);
                     b.switch_to_block(iok);
                     let fi = b.ins().fcvt_from_sint(types::F64, w1);
                     let ir = b.ins().sqrt(fi);
@@ -492,7 +506,9 @@ pub(super) fn emit_prim3_table_put(
         b.ins().brif(status, slow, &[], merge, &[]);
         b.switch_to_block(slow);
         let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
-        b.ins().brif(is_err, error, &[], deopt, &[]);
+        let __dr = b.ins().iconst(types::I32, 11);
+        b.ins()
+            .brif(is_err, error, &[], deopt, &[BlockArg::Value(__dr)]);
         b.switch_to_block(merge);
         stack.push(Op::Handle(w0, w1, w2));
     } else {
@@ -512,7 +528,9 @@ pub(super) fn emit_prim3_table_put(
         b.ins().brif(status, slow, &[], cont, &[]);
         b.switch_to_block(slow);
         let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
-        b.ins().brif(is_err, error, &[], deopt, &[]);
+        let __dr = b.ins().iconst(types::I32, 12);
+        b.ins()
+            .brif(is_err, error, &[], deopt, &[BlockArg::Value(__dr)]);
         b.switch_to_block(cont);
         let w0 = b.ins().stack_load(types::I64, out_slot, 0);
         let w1 = b
@@ -660,7 +678,9 @@ pub(super) fn emit_prim2(
             let idx = as_int(b, bb_op, frame);
             let oob = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
             let cont = b.create_block();
-            b.ins().brif(oob, deopt, &[], cont, &[]);
+            let __dr = b.ins().iconst(types::I32, 13);
+            b.ins()
+                .brif(oob, deopt, &[BlockArg::Value(__dr)], cont, &[]);
             b.switch_to_block(cont);
             let off = b.ins().imul_imm(idx, STRIDE);
             let elem = b.ins().iadd(ptr, off);
@@ -773,7 +793,9 @@ pub(super) fn emit_prim2_slot_slot(
             let idx = load_slot_int(b, slot_b as i64, frame);
             let oob = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, vlen);
             let cont = b.create_block();
-            b.ins().brif(oob, deopt, &[], cont, &[]);
+            let __dr = b.ins().iconst(types::I32, 14);
+            b.ins()
+                .brif(oob, deopt, &[BlockArg::Value(__dr)], cont, &[]);
             b.switch_to_block(cont);
             let off = b.ins().imul_imm(idx, STRIDE);
             let elem = b.ins().iadd(ptr, off);

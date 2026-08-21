@@ -928,6 +928,21 @@ pub unsafe extern "C" fn brood_rt_call_slow(
     }
 }
 
+/// Record *why* the JIT is about to deopt. Called from the shared deopt block with a
+/// distinct id per guard, so a deopt can name the check that failed instead of only the
+/// checkpoint it resumes at.
+///
+/// This exists because KI-49 stalled precisely here: an arm deopting 16 times reported
+/// `resume_ip=7` every time, and ip 7 is the last *checkpoint* — the arm had five candidate
+/// guards after it. Cold path (a deopt is already a VM re-run), so the store is free.
+///
+/// # Safety
+/// `heap` must be a live `*mut Heap` from the JIT calling convention.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_note_deopt(heap: *mut Heap, reason: u32) {
+    (*heap).note_jit_deopt_reason(reason);
+}
+
 /// Base pointer + length of the IR-readable [`FastLink`] mirror (Track B / Technique A).
 /// The JIT loads this at a call site, bounds-checks `site < *out_len`, then reads the
 /// slot's `(epoch, code, nslots, env)` with raw loads — replacing the IC probe +

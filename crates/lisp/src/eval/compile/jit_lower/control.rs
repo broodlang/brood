@@ -62,7 +62,8 @@ pub(super) fn emit_jump(
             // never executes, and if the unreachability assumption were ever wrong it
             // safely falls back to the VM rather than mis-returning. (This dead jump is
             // why e.g. `collatz`'s `steps` arm wouldn't lower.)
-            b.ins().jump(deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 1);
+            b.ins().jump(deopt, &[BlockArg::Value(__dr)]);
         }
     } else {
         let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(b, op, frame)).collect();
@@ -75,7 +76,8 @@ pub(super) fn emit_jump(
         } else {
             // Type-mixed join (see `record_block_flags`): this edge's scalar typing
             // disagrees with the block's — deopt to the VM.
-            b.ins().jump(deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 2);
+            b.ins().jump(deopt, &[BlockArg::Value(__dr)]);
         }
     }
     Some(())
@@ -173,7 +175,8 @@ pub(super) fn emit_jump_if_false(
         // collapsed because its width-check `<=` 0 read as truthy). Deopt to the VM,
         // which has the real tagged value and branches correctly.
         Op::Int(_) => {
-            b.ins().jump(deopt, &[]);
+            let __dr = b.ins().iconst(types::I32, 3);
+            b.ins().jump(deopt, &[BlockArg::Value(__dr)]);
         }
         // `Op::Float`/`Op::HoistedVec`: unambiguously truthy (a float / a vector is
         // never a boolean), so branch to the truthy edge directly.
