@@ -306,7 +306,7 @@
   (test ":have lists the ids that ARE implemented"
     (let (arg "s"
           e (try (narrow arg) (catch e e)))
-      (is (member? :int (get e :have))))))
+      (is (includes? (get e :have) :int)))))
 
 ;; ---- polymorphic dispatch cache (ADR-172 §7): more ids than cache ways ----
 ;; A monomorphic cache would re-resolve (still correct) but a leak/aliasing bug would show
@@ -358,7 +358,7 @@
       (let (kinds (abt-collect 0 (count xs) nil))
         (assert= (count kinds) 6)
         ;; order is nondeterministic — assert every expected impl was reached
-        (is (every? (fn (k) (member? k kinds))
+        (is (every? (fn (k) (includes? kinds k))
               (list :int :string :kw :float :bool :vec))))))
   (test "a variadic op runs in a spawned worker"
     (let (parent (self))

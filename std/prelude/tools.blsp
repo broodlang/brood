@@ -173,7 +173,7 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ; names (strings) of features already loaded, as a SET-SHAPED map name -> true.
 ; A map, not a list, because `require-one` asks "already loaded?" on every single
 ; require: over a list that is a linear scan, so loading N modules is O(N²) —
-; measured at 10 000 modules, 137 s of a 217 s load was this one `member?`
+; measured at 10 000 modules, 137 s of a 217 s load was this one `includes?` scan
 ; (ADR-216). `(keys *features*)` when you want the names as a sequence.
 (def *load-path* (list "."))
 ; directories searched for <name>.blsp
@@ -240,7 +240,7 @@ Returns the directory. Pass `{}` to stop consulting an image."
   *load-path*)
 (defn add-load-path! (& dirs)
   "Prepend `dirs` to the module search path (skipping any already present); returns the new path."
-  (set-load-path! (append (remove (fn (d) (member? d *load-path*)) dirs) *load-path*)))
+  (set-load-path! (append (remove (fn (d) (includes? *load-path* d)) dirs) *load-path*)))
 
 ;; Package-rooted namespaces (ADR-070): a *dependency* `foo` providing a module `b`
 ;; is loaded as the rooted global namespace `foo/b`, so two deps can both provide a
@@ -350,7 +350,7 @@ would name a registry that does not exist."
 (defn deprecation-warning (key message)
   "Print `message` to stderr once per `key` (deduplicated); returns nil. The
 deprecation primitive — emit it from a macro's expansion to flag a deprecated use."
-  (unless (member? key *deprecation-seen*)
+  (unless (includes? *deprecation-seen* key)
     (%registry-update! '*deprecation-seen* :cons-new nil key)
     (eprintln "deprecation: " message))
   nil)
@@ -591,11 +591,11 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
         parent (if ns (name ns) *require-parent*))
     (when (and parent
             (not (= parent key))
-            (not (member? key (or (get *require-edges* parent) nil))))
+            (not (includes? (or (get *require-edges* parent) nil) key)))
       (swap-registry! *require-edges*
         (fn (m)
           (let (cur (or (get m parent) nil))
-            (if (member? key cur) m (assoc m parent (cons key cur)))))))))
+            (if (includes? cur key) m (assoc m parent (cons key cur)))))))))
 
 ;; The short module name of a rooted bundle key: `store/repo` -> `repo`, `sp/wire/bytes` ->
 ;; `wire/bytes` (everything after the FIRST `/`, i.e. the package prefix).
@@ -608,7 +608,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 ;; the rooted `pkg/mod` binding to stay distinct; a uniquely-named module does not.
 (defn- bundle-short-collides?
   (short)
-  (> (count (filter (fn (pkg) (member? short (get *package-modules-of* pkg)))
+  (> (count (filter (fn (pkg) (includes? (get *package-modules-of* pkg) short))
               (map first (map-pairs *package-modules-of*))))
     1))
 
@@ -640,7 +640,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 ;; rooted request finds no owner here and simply loads its own embedded source.
 (defn- bundle-resolve-bare
   (key)
-  (let (owner (find (fn (pkg) (member? (symbol key) (get *package-modules-of* pkg)))
+  (let (owner (find (fn (pkg) (includes? (get *package-modules-of* pkg) (symbol key)))
                 (map first (map-pairs *package-modules-of*))))
     (if owner (str owner "/" key) nil)))
 
@@ -1098,7 +1098,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   any `&`) and whether it takes a `&`-rest — read from `(arglist f)`."
   (let (params (arglist f)
         fixed (count (take-while (fn (s) (not (= s '&))) params)))
-    [fixed (member? '& params)]))
+    [fixed (includes? params '&)]))
 
 (defn- register-impl-check-arity
   (aname op f)
@@ -1111,7 +1111,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         op-args (if op-spec (second op-spec) nil))
     ; Skip a variadic OP spec — it declares no single arity to pin against (matches the
     ; checker). Only a fixed op spec is arity-checked.
-    (when (and op-spec (not (member? '& op-args)))
+    (when (and op-spec (not (includes? op-args '&)))
       (let (op-arity (count op-args)
             shape (impl-fn-arity f)
             fixed (nth shape 0)
@@ -1177,7 +1177,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   (aname key)
   "Whether `[aname key]` names one of the language's own fallback impls — the `:default` of an
   ability the runtime dispatches on itself."
-  (and (= key :default) (member? aname *substrate-abilities*)))
+  (and (= key :default) (includes? *substrate-abilities* aname)))
 
 (defn unregister-impl (aname op key)
   "Remove `key`'s impl of `aname`'s `op` — the inverse of `register-impl`. Returns true when
@@ -1311,7 +1311,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   arg vector) emits `(apply impl self a … rest)`, because `&` is a binding marker, not a
   call-position argument — a direct `(impl self & rest)` would pass the symbol `&` as an
   argument (an unbound-symbol error at every call)."
-  (if (member? '& arg-syms)
+  (if (includes? arg-syms '&)
     (let (fixed (take-while (fn (s) (not (= s '&))) arg-syms)
           rest-sym (second (drop-while (fn (s) (not (= s '&))) arg-syms)))
       (append (list 'apply impl-sym) (append fixed (list rest-sym))))
@@ -1615,7 +1615,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
     (defmulti render)"
   (let (algebra (if (empty? opts) nil (first opts)))
     ; STRICT: an unknown algebra keyword is a clear declaration error — fail at expansion.
-    (when (and algebra (not (member? algebra (list :commutative :antisymmetric))))
+    (when (and algebra (not (includes? (list :commutative :antisymmetric) algebra)))
       (error "defmulti "
         mname ": unknown algebra " algebra " (expected :commutative, :antisymmetric, or none)"))
     (list 'do

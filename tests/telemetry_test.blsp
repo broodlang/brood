@@ -137,8 +137,8 @@
           (assert= got [:evt {:n 1} {}])
           ; listener still the same, alive process
           (is alive)
-          (is (member? :good ids))
-          (is (not (member? :bad ids)))))))
+          (is (includes? ids :good))
+          (is (not (includes? ids :bad)))))))
 
   ; and WE (the emitter) are still running
   (test "a handler that HARD-KILLS the listener never crashes the emitter"

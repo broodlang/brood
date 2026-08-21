@@ -42,9 +42,9 @@
       (assert= (count (remove (fn (i) (contains? *features* (mt-conc-feature i))) (range n))) 0))))
 
 ;; :serial — these mutate the shared *features* global, so run them one-at-a-time.
-(describe "modules: member? / provide / require"
+(describe "modules: includes? / provide / require"
   :serial
-  (test "member?" (is (member? 2 (list 1 2 3))) (refute (member? 9 (list 1 2 3))))
+  (test "includes?" (is (includes? (list 1 2 3) 2)) (refute (includes? (list 1 2 3) 9)))
   (test "provide records a feature idempotently"
     (provide 'demo-feature)
     (is (contains? *features* "demo-feature"))

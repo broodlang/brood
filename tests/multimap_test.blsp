@@ -56,7 +56,7 @@
                (multimap/assoc :x 1)
                (multimap/assoc :x 2)
                (multimap/assoc :y 3)))
-      (assert= 3 (multimap/size mm))))
+      (assert= 3 (count mm))))
   (test "multimap-values returns all values"
     (let (mm (-> (multimap/new)
                (multimap/assoc :a "x")
@@ -87,7 +87,7 @@
   (test "the identity never leaks into keys, size, or the map view"
     (let (mm (multimap/assoc (multimap/new) :k 1))
       (assert= (into [] (multimap/keys mm)) [:k])
-      (assert= (multimap/size mm) 1)
+      (assert= (count mm) 1)
       (is (not (includes? (into [] (multimap/keys mm)) :__id__)))
       (is (not (contains? (multimap/->map mm) :__id__)))))
   (test "an empty multimap is empty by its own count, not the wrapper's"
@@ -109,5 +109,5 @@
       (spawn (send me [:mm (multimap/assoc-all (multimap/new) :k [1 2 3])]))
       (let (back (receive ([:mm m] m) (after *test-wait-ms* :timeout)))
         (is (multimap? back))
-        (assert= (multimap/size back) 3)
+        (assert= (count back) 3)
         (assert= (into [] (multimap/get-all back :k)) [1 2 3])))))

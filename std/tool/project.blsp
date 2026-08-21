@@ -586,7 +586,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; With `:skip-loaded`, any module already on `*features*` is skipped (the check
 ;; pre-flight, which runs *after* the image is loaded and must not re-evaluate it).
 (defn project-load-sources (root & opts)
-  (let (skip-all? (member? :skip-loaded opts)
+  (let (skip-all? (includes? opts :skip-loaded)
         before *features*)
     (fold
       (fn (_ dir)
@@ -732,7 +732,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 (defn- project-image-registry-names
   (seen)
   (remove (fn (n)
-            (or (member? n *project-image-registry-exclusions*)
+            (or (includes? *project-image-registry-exclusions* n)
               (and (not (contains? seen n))
                 (let (mod (project-image-section-of n))
                   (and mod (contains? *module-files* mod))))))
@@ -1428,7 +1428,7 @@ resolve in the advisory checker. Returns the project root."
       (cond
         (= (first msg) :chunk)
           (let (pid (second msg) entry (project-pfold-entry pid workers))
-            (if (or (member? pid reported) (nil? entry))
+            (if (or (includes? reported pid) (nil? entry))
               (project-pfold-collect pending
                 workers reported acc combine on-death)
               (project-pfold-collect (- pending 1)
@@ -1439,7 +1439,7 @@ resolve in the advisory checker. Returns the project root."
                 on-death)))
         (= (first msg) :down)
           (let (pid (third msg) entry (project-pfold-entry pid workers))
-            (if (or (member? pid reported) (nil? entry))
+            (if (or (includes? reported pid) (nil? entry))
               (project-pfold-collect pending
                 workers reported acc combine on-death)
               (project-pfold-collect (- pending 1)
@@ -2350,7 +2350,7 @@ business."
   (let (f (project-failed-file root))
     (when (not (nil? f))
       (let (previous (or (get (project-read-failed-record root) :failed) (list))
-            kept (filter (fn (l) (not (member? l (or ran (list))))) previous)
+            kept (filter (fn (l) (not (includes? (or ran (list)) l))) previous)
             merged (append kept (or failed (list))))
         (try (file/spit f (pr-str {:failed merged})) (catch _ nil))))))
 

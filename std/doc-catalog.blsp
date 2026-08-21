@@ -419,7 +419,6 @@
    "mem-limit" :meta
    "mem-peak" :meta
    "mem-soft-limit" :meta
-   "member?" :predicates
    "merge" :maps
    "merge-acc" :collections
    "merge-runs" :collections

@@ -174,7 +174,7 @@ behind a long-lived loop has changed since it started."
   (dir known &optional on-reload)
   (let (current (reload-collect-blsp dir))
     (dolist (p current)
-      (unless (member? p known)
+      (unless (includes? known p)
         (println "[reload] +" p)
         (try
           (do

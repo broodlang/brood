@@ -340,6 +340,11 @@ enum Cmd {
         old: String,
         /// Its replacement.
         new: String,
+        /// Treat this as a reversed-args rename: rewrite every 2-arg call
+        /// `(OLD a b)` to `(NEW b a)`, reading the args as balanced s-expressions
+        /// (e.g. `member?` → `includes?`). Without it, a plain token rename.
+        #[arg(long)]
+        swap: bool,
     },
 
     /// `nest add NAME :path PATH` (`:git` lands in a later slice). NAME is the
@@ -791,9 +796,13 @@ fn run_main(cli: Cli) {
             require_project("tree", None);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/tree)"))
         }
-        Cmd::Rename { old, new } => run(
+        Cmd::Rename { old, new, swap } => run(
             &mut interp,
-            &format!("(codemod/rename (list (list {old:?} {new:?})))"),
+            &if swap {
+                format!("(codemod/swap2 {old:?} {new:?})")
+            } else {
+                format!("(codemod/rename (list (list {old:?} {new:?})))")
+            },
         ),
         Cmd::Add { name, spec } => {
             require_project("add", None);

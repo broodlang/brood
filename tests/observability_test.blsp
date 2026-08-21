@@ -52,8 +52,7 @@
           (is (list? (get e :stack)))
           (is (> (get e :count) 0)))
         ;; the hot fn shows up somewhere in the histogram (module-qualified)
-        (is (member? "observability-test/obs-churn"
-              (mapcat (fn (e) (get e :stack)) prof)))))
+        (is (includes? (mapcat (fn (e) (get e :stack)) prof) "observability-test/obs-churn"))))
     ;; a second stop with nothing armed is an empty histogram, not an error
     (assert= 0 (count (profile-stop)))
     ;; restart works after a stop

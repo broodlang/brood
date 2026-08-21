@@ -58,7 +58,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 ;; Names present in `after` but not `before` — the bindings a module introduced
 ;; between two (global-names) snapshots. global-names is sorted, so this is too.
-(defn- docs-added (before after) (filter (fn (s) (not (member? s before))) after))
+(defn- docs-added (before after) (filter (fn (s) (not (includes? before s))) after))
 
 ;; --- rendering ---------------------------------------------------------------
 

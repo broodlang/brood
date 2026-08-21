@@ -39,7 +39,7 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
   "Connected state: wait for the link to fall (or control messages)."
   (receive
     ([:nodedown ^peer]
-      (if (member? peer (nodes))
+      (if (includes? (nodes) peer)
         ;; stale/duplicate down (e.g. arming while already down delivers one
         ;; immediately) — still linked, ignore
         (reconnect-up spec peer opts subs)
