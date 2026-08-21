@@ -398,7 +398,7 @@
 ;; The `,resume` / `,step` REPL meta-command handlers (driven by `pry` through the REPL
 ;; command registry). They read the debugger from the `*debug-session*` dynamic that
 ;; `pry` binds, so the tests bind it the same way and call the handlers directly —
-;; `pry` itself needs a TTY (`repl-run`), which a test can't provide.
+;; `pry` itself needs a TTY (`run`), which a test can't provide.
 (describe "debugger — ,resume / ,step meta-command handlers"
   :isolated
 

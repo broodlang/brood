@@ -98,7 +98,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
                 (table-incr hits (name sym) 1)
                 (apply original args)))))))
 
-(defn coverage-begin! (source-dirs)
+(defn begin! (source-dirs)
   "Instrument every function this project defines under `source-dirs` and return the hit table. Call once, AFTER the project's sources are loaded and before the suite runs. Sets `*coverage-hits*` / `*coverage-targets*` for the reporter."
   ;; Release a previous run's table before replacing the handle. A table lives in
   ;; a runtime-wide registry, not the process heap, so dropping the reference is
@@ -117,7 +117,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; One record per instrumented function: its name, file, line, and hit count.
 ;; Reads the table ONCE via `table-snapshot` (atomic, O(n)) rather than probing
 ;; per function, so the report can't tear across a still-running process.
-(defn coverage-results ()
+(defn results ()
   "The current run's coverage as a list of `{:name :file :line :hits}`, hits being the number of times the function was entered (0 = never). nil when no run was instrumented."
   (if (nil? *coverage-hits*)
     nil
@@ -158,9 +158,9 @@ suite, then reports which functions were never entered. Backs `nest test --cover
       (if (> (string/length path) cut) (string/substring path cut (string/length path)) path))
     path))
 
-(defn coverage-report (root)
+(defn report (root)
   "Print the coverage report: a per-file table, then the uncovered function names, then a total line. Returns the total percentage (an int 0–100)."
-  (let (results (coverage-results))
+  (let (results (results))
     (if (nil? results)
       (do
         (println "")
@@ -220,7 +220,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;;   * The DENOMINATOR comes from the SAME place, not from the source text. Every
 ;;     `RecordLine` the compiler emits is registered as it is emitted, and
 ;;     `%coverage-instrumented` reads that back. Arms compile on first CALL, though, so
-;;     `coverage-line-begin!` must force every project function to compile before the
+;;     `line-begin!` must force every project function to compile before the
 ;;     suite runs — otherwise a function nothing calls is missing from the denominator
 ;;     as well as the numerator, and the ratio flatters itself.
 ;;
@@ -258,7 +258,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
     {}
     (or (coverage-safely (fn () (%coverage-instrumented))) nil)))
 
-(defn coverage-line-begin! (source-dirs)
+(defn line-begin! (source-dirs)
   "Force every project function under `source-dirs` to compile, so the lines of a function the suite never calls still count as measurable. Call once, after the sources are loaded and BEFORE the suite runs. Returns how many bodies compiled."
   ;; Arms compile on first CALL, so without this pass an uncalled function is missing
   ;; from the denominator as well as the numerator and the ratio flatters itself: the
@@ -270,7 +270,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
     0
     (or (coverage-targets source-dirs) nil)))
 
-(defn coverage-line-results (source-dirs)
+(defn line-results (source-dirs)
   "Per-file line coverage as a list of `{:file :total :covered :missing}`, `missing` being the instrumented lines that never ran. Only files under `source-dirs` are measured, so std and the prelude — which the recorder also sees — can't dilute the number; files with nothing instrumented are omitted rather than counted as 0%."
   ;; `project` is required lazily here rather than in the header: `project` itself
   ;; requires `coverage` (for `nest test --cover`), so a top-level require would be
@@ -280,7 +280,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
         instrumented (coverage-instrumented-index)
         files (or (coverage-safely (fn ()
                                      (fold (fn (acc dir)
-                                             (append acc (project/project-collect-sources dir)))
+                                             (append acc (project/collect-sources dir)))
                                        nil source-dirs)))
                 nil))
     (filter (fn (result) (> (get result :total) 0))
@@ -294,9 +294,9 @@ suite, then reports which functions were never entered. Backs `nest test --cover
                 :missing missing}))
         files))))
 
-(defn coverage-line-report (root source-dirs)
+(defn line-report (root source-dirs)
   "Print the line-coverage report — a per-file percentage, then each file's uncovered lines — and return the total percentage (an int 0-100)."
-  (let (results (coverage-line-results source-dirs)
+  (let (results (line-results source-dirs)
         total (fold (fn (n r) (+ n (get r :total))) 0 results)
         covered (fold (fn (n r) (+ n (get r :covered))) 0 results))
     (if (empty? results)
@@ -390,7 +390,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
       (get e :f) :else
       else :none)))
 
-(defn coverage-branch-results (source-dirs)
+(defn branch-results (source-dirs)
   "Per-file branch coverage as a list of `{:file :total :covered :partial :missing}`:
 `covered` = branches with both edges taken, `partial` = the `[line col state]` triples
 with exactly one edge taken, `missing` = the `[line col]` points never reached. Only
@@ -399,7 +399,7 @@ files under `source-dirs` are measured; files with no branches are omitted."
         sites-by-file (coverage-branch-sites-index)
         files (or (coverage-safely (fn ()
                                      (fold (fn (acc dir)
-                                             (append acc (project/project-collect-sources dir)))
+                                             (append acc (project/collect-sources dir)))
                                        nil source-dirs)))
                 nil))
     (filter (fn (result) (> (get result :total) 0))
@@ -450,11 +450,11 @@ files under `source-dirs` are measured; files with no branches are omitted."
         nil
         (take 24 partial)))))
 
-(defn coverage-branch-report (root source-dirs)
+(defn branch-report (root source-dirs)
   "Print the branch-coverage report — a per-file percentage of fully-covered branches
 (both edges taken), then each file's half-covered branches — and return the total
 percentage (an int 0-100)."
-  (let (results (coverage-branch-results source-dirs)
+  (let (results (branch-results source-dirs)
         total (fold (fn (n r) (+ n (get r :total))) 0 results)
         covered (fold (fn (n r) (+ n (get r :covered))) 0 results))
     (if (empty? results)

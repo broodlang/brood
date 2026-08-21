@@ -30,7 +30,7 @@
 
 (defmodule eval-server
   "A line-protocol eval server for a dedicated runtime, plus the pure codec its
-client shares. Run `(eval-server-run)` as the child's whole program; it prints
+client shares. Run `(run)` as the child's whole program; it prints
 `{:ready true}` and then answers one `pr-str`ed request map per stdin line —
 `{:id 7 :src \"(+ 1 2)\" :timeout-ms 2000}` — with one reply line:
 `{:id 7 :ok true :value \"3\" :output \"\" :ms 0}` (or `:ok false` with `:error`,
@@ -254,7 +254,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
     ([:down _ _ _] (eval-server-flush-stale))
     (after 0 nil)))
 
-(defn eval-server-answer (req)
+(defn answer (req)
   "The reply map for request map `req` (`:id` `:src`, optional `:timeout-ms` and
 `:trace`), evaluating in a spawned green process: the eval's own result on
 completion, `{:id id :ok false :timeout true}` after the deadline (the evaluator
@@ -303,13 +303,13 @@ process died without answering."
       ; nil = EOF: the parent closed stdin — done
       (let (req (evsrv-decode-request line))
         (when req
-          (println (evsrv-encode-reply (eval-server-answer req)))))
+          (println (evsrv-encode-reply (answer req)))))
       (eval-server-loop))))
 
-(defn eval-server-run ()
+(defn run ()
   "Run the eval server: print the `{:ready true}` banner, then answer one request
 per stdin line until EOF. This is the child's whole program — a client spawns
 `nest run <script>` where the script references `eval-server/…`
-`(eval-server-run)`, and drives it over stdin/stdout."
+`(run)`, and drives it over stdin/stdout."
   (println (evsrv-encode-reply {:ready true}))
   (eval-server-loop))

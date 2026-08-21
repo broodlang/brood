@@ -12,7 +12,7 @@
 ;; the one with the most room to be wrong.
 ;;
 ;; The two sides disagree only on key spelling: `parse` maps a JSON object to a
-;; Brood map with *keyword* keys (idiomatic Brood), while `csv-parse-maps` keys rows
+;; Brood map with *keyword* keys (idiomatic Brood), while `parse-maps` keys rows
 ;; by their header *strings*. `csv-stringify-keys` reconciles that, and nothing else
 ;; is normalised — the field values are compared exactly.
 
@@ -43,7 +43,7 @@
       (error "conformance-csv: no json expectation for " stem)
       (into [] (map csv-stringify-keys (json/parse (file/slurp p)))))))
 
-(defn- csv-actual (path) (into [] (csv/csv-parse-maps (file/slurp path))))
+(defn- csv-actual (path) (into [] (csv/parse-maps (file/slurp path))))
 
 ;; [checked mismatches], mismatches as [stem expected actual].
 (defn- csv-scan
@@ -80,34 +80,34 @@
   :tags
   [:conformance]
 
-  ;; `csv-parse` yields a LIST of row vectors (rows stream, fields are indexed), so
+  ;; `parse` yields a LIST of row vectors (rows stream, fields are indexed), so
   ;; the expectations are lists of vectors, not vectors of vectors.
   (test "a quoted field may contain the delimiter"
-    (assert= (csv/csv-parse "a,b\n1,\"x,y\"\n") (list ["a" "b"] ["1" "x,y"])))
+    (assert= (csv/parse "a,b\n1,\"x,y\"\n") (list ["a" "b"] ["1" "x,y"])))
 
   (test "a doubled quote inside a quoted field is one literal quote"
-    (assert= (csv/csv-parse "a\n\"he said \"\"hi\"\"\"\n") (list ["a"] ["he said \"hi\""])))
+    (assert= (csv/parse "a\n\"he said \"\"hi\"\"\"\n") (list ["a"] ["he said \"hi\""])))
 
   (test "a quoted field may contain a raw newline"
-    (assert= (csv/csv-parse "a,b\n1,\"line1\nline2\"\n")
+    (assert= (csv/parse "a,b\n1,\"line1\nline2\"\n")
       (list ["a" "b"] ["1" "line1\nline2"])))
 
   (test "CRLF line endings are handled, and CR is not left in the field"
-    (assert= (csv/csv-parse "a,b\r\n1,2\r\n") (list ["a" "b"] ["1" "2"])))
+    (assert= (csv/parse "a,b\r\n1,2\r\n") (list ["a" "b"] ["1" "2"])))
 
   ;; Regression for the bug csv-spectrum's `newlines_crlf` caught (2026-07-25): a
   ;; CRLF *inside quotes* is content, not a line ending (RFC 4180 §2.6). The parser
   ;; swallowed the CR in the :quoted state, so every embedded CRLF silently became an
   ;; LF and a multi-line quoted cell did not round-trip.
   (test "a CRLF inside a quoted field is data, not a line ending"
-    (assert= (csv/csv-parse "a,b\r\n1,\"Once upon \r\na time\"\r\n")
+    (assert= (csv/parse "a,b\r\n1,\"Once upon \r\na time\"\r\n")
       (list ["a" "b"] ["1" "Once upon \r\na time"]))
     ;; and it survives emit -> parse
     (let (rows (list ["a"] ["x\r\ny"]))
-      (assert= (csv/csv-parse (csv/csv-emit rows)) rows)))
+      (assert= (csv/parse (csv/emit rows)) rows)))
 
   (test "empty fields are preserved, including trailing ones"
-    (assert= (csv/csv-parse "a,b,c\n1,,\n") (list ["a" "b" "c"] ["1" "" ""])))
+    (assert= (csv/parse "a,b,c\n1,,\n") (list ["a" "b" "c"] ["1" "" ""])))
 
   (test "round-trip: emit then parse is identity on the rows"
     (dolist (rows [(list ["a" "b"] ["1" "2"])
@@ -115,4 +115,4 @@
                     (list ["a"] ["he said \"hi\""])
                     (list ["a"] ["line1\nline2"])
                     (list ["a" "b"] ["" ""])])
-      (assert= (csv/csv-parse (csv/csv-emit rows)) rows))))
+      (assert= (csv/parse (csv/emit rows)) rows))))
