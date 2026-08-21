@@ -566,6 +566,9 @@ pub const PRELUDE: &str = concat!(
     include_str!("../../../std/prelude/seq.blsp"),
     include_str!("../../../std/prelude/string.blsp"),
     include_str!("../../../std/prelude/tools.blsp"),
+    // Behaviour contracts are CORE (defbehaviour / register-protocol / ops / *protocols*).
+    // After tools.blsp, which defines the `swap-registry!` macro protocol uses.
+    include_str!("../../../std/protocol.blsp"),
 );
 
 /// Materialize the embedded prelude to a stable, read-only-ish cache file and

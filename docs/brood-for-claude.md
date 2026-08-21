@@ -388,9 +388,10 @@ Other things worth knowing:
 - `(satisfies? 'Shape x)` to branch instead of letting a missing op raise.
 - **Register at load time.** Top-level `impl` forms are safe; two *processes* calling
   `impl` concurrently can lose an update (it is a `def` under the hood).
-- `defbehaviour` (`(:use protocol)`) is the *other* seam — a contract a **module**
-  satisfies by defining plain functions, claimed with `(:implements Name)` in the
-  header. No value dispatch. Use it when the implementor is a namespace, not a value.
+- `defbehaviour` is the *other* seam — a contract a **module** satisfies by defining
+  plain functions, claimed with `(:implements Name)` in the header. It is core (bare,
+  no `require`/`:use`). No value dispatch. Use it when the implementor is a namespace,
+  not a value.
 - **`defprotocol`/`defimpl` no longer exist** (retired, ADR-168). If you were about to
   write one, write an ability.
 
