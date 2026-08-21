@@ -197,7 +197,19 @@ fn trace_lower_declined(arm: &CompiledArm, inlined: bool) {
             .dbg_name
             .map(crate::core::value::symbol_name_ref)
             .unwrap_or("<closure>");
-        eprintln!("[jit-bail] arm={name} reason=lowering-returned-none inlined={inlined}");
+        let ops: Vec<&str> = arm
+            .chunk
+            .as_ref()
+            .map(|c| c.code.as_slice())
+            .unwrap_or(&[])
+            .iter()
+            .map(crate::eval::compile::jit_plan::codegen::inst_opcode_name)
+            .collect();
+        eprintln!(
+            "[jit-bail] arm={name} reason=lowering-returned-none inlined={inlined} nslots={} ops=[{}]",
+            arm.nslots,
+            ops.join(" ")
+        );
     }
 }
 
@@ -258,6 +270,19 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                     }
                 }
                 if codegen_poisoned {
+                    // The last untraced BAILED route. A single codegen PANIC latches
+                    // `codegen_poisoned` and every arm queued after it is bailed here with no
+                    // attempt — so one bad lowering silently disables the JIT for everything
+                    // that follows, and the only visible symptom is code mysteriously running
+                    // on the VM. Announce it (once) rather than leaving it to be deduced.
+                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                        let name = arm
+                            .dbg_name
+                            .map(crate::core::value::symbol_name_ref)
+                            .unwrap_or("<closure>");
+                        eprintln!("[jit-bail] arm={name} reason=codegen-poisoned-earlier");
+                    }
                     slot.store(crate::jit::BAILED, Release);
                     return;
                 }
@@ -339,6 +364,24 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                         slot.store(crate::jit::BAILED, Release)
                     }
                     Err(_) => {
+                        // The panic that poisons the compiler for the rest of the process.
+                        // `catch_unwind` swallows it, so without this the FIRST domino is
+                        // invisible and only its consequences are seen.
+                        {
+                            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                            if *ON
+                                .get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
+                            {
+                                let name = arm
+                                    .dbg_name
+                                    .map(crate::core::value::symbol_name_ref)
+                                    .unwrap_or("<closure>");
+                                eprintln!(
+                                    "[jit-bail] arm={name} reason=CODEGEN-PANICKED (poisons \
+                                     the compiler; every later arm bails untried)"
+                                );
+                            }
+                        }
                         codegen_poisoned = true;
                         slot.store(crate::jit::BAILED, Release);
                     }
@@ -1170,7 +1213,7 @@ pub(crate) fn jit_dispatch_call(
                 // (inlined upgrade → `inline_nslots`; small → `nslots`). Capture once and reuse
                 // for both frame extension and the outcome-4 staged_start calculation — the two
                 // must agree on the same frame boundary.
-                let frame_nslots = arm.active_nslots();
+                let frame_nslots = arm.frame_size_for_new_entry();
                 heap.extend_roots_to_nil(stage_base + frame_nslots);
                 let base = stage_base;
                 // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
@@ -1401,7 +1444,7 @@ pub(crate) fn jit_dispatch_tail(
     env: EnvRoot,
     // The size this frame was actually BUILT to, captured by the trampoline at native entry.
     // **Must be passed, never re-derived here** (KI-48). It used to be
-    // `base + arm.active_nslots()`, which re-reads `inline_installed` — the KI-26 / ADR-210
+    // `base + arm.frame_size_for_new_entry()`, which re-reads `inline_installed` — the KI-26 / ADR-210
     // anti-pattern. The background inline upgrade can flip that flag between the native
     // entering (small frame) and this callback running, after which the staged
     // `[callee, args…]` is written at one offset and read at another: measured live on 123
@@ -1415,7 +1458,7 @@ pub(crate) fn jit_dispatch_tail(
     // A tail call is staged by the native code ABOVE its own frame top.
     let top = base + frame_nslots;
     let n = heap.roots_len();
-    // KI-48 tripwire. `top` is derived from `active_nslots()`, which re-reads
+    // KI-48 tripwire. `top` is derived from `frame_size_for_new_entry()`, which re-reads
     // `inline_installed` — the KI-26 / ADR-210 anti-pattern — while the frame this native
     // actually built was sized by whichever body was installed when it was ENTERED. If the
     // background inline upgrade lands in that window, the two disagree and `top` points past
@@ -1521,8 +1564,8 @@ pub(crate) fn jit_dispatch_tail(
 /// arm than the one whose native actually ran, and reading a foreign arm's `ckpt_slot` out of
 /// this frame yields a garbage resume ip (or an out-of-bounds root read).
 ///
-/// **Deliberately flag-free** (KI-26). The obvious spelling is `arm.active_nslots() ==
-/// frame_nslots`, but `active_nslots()` re-reads `inline_installed` — the anti-pattern behind
+/// **Deliberately flag-free** (KI-26). The obvious spelling is `arm.frame_size_for_new_entry() ==
+/// frame_nslots`, but `frame_size_for_new_entry()` re-reads `inline_installed` — the anti-pattern behind
 /// two ADR-210 bugs — and the inline swap in [`jit_tier`] deliberately does *not* bump the
 /// global epoch (a bump cascaded under `pfib`; see the comment at the swap) and invalidates
 /// only the installing process's fast links. A `share_key` arm is shared across processes, so
@@ -1531,7 +1574,7 @@ pub(crate) fn jit_dispatch_tail(
 /// ip 0 — repeating whatever effect the native had already journaled.
 ///
 /// Testing both of the arm's possible frame sizes is a strict superset of the flag form
-/// (`active_nslots()` returns exactly one of them), so this only ever *admits* more resumes —
+/// (`frame_size_for_new_entry()` returns exactly one of them), so this only ever *admits* more resumes —
 /// and resuming is the effect-preserving direction. Every admitted resume is still validated
 /// by [`jit_ckpt_resume`], which requires a positive journal and reads only in-bounds slots.
 /// A genuinely foreign arm still fails, which is the out-of-bounds protection this exists for.
@@ -1707,6 +1750,21 @@ pub(crate) fn jit_deopt_feedback(arm: &CompiledArm) {
     const DEOPT_BAIL_CONSECUTIVE: u32 = 16;
     let d = arm.jit_deopts.fetch_add(1, Relaxed) + 1;
     if d >= DEOPT_BAIL_CONSECUTIVE {
+        // Deopt thrash: the arm went native, fell out 16 times in a row, and is now latched
+        // onto the VM. Traced because the *consequence* (permanently interpreted code) is far
+        // more visible than the cause, and `BROOD_DEOPT_TRACE` needs `perf-stats` while this
+        // does not.
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+            let name = arm
+                .dbg_name
+                .map(crate::core::value::symbol_name_ref)
+                .unwrap_or("<closure>");
+            eprintln!(
+                "[jit-bail] arm={name} reason=deopt-thrash-latched nslots={} deopts={d}",
+                arm.nslots
+            );
+        }
         arm.jit_code.store(crate::jit::BAILED, Release);
     }
 }
@@ -1801,6 +1859,19 @@ pub(crate) fn jit_tier(
         // and elect a single enqueuer via CAS (others see QUEUED and run the VM). A full
         // queue → back off: reset to untried so a later hot call re-attempts.
         if !chunk_ops_all_native(heap, arm) {
+            // The last untraced BAILED route, and a sticky one: an arm is refused here
+            // because some operator its chunk calls is not a native primitive, and it then
+            // stays on the VM. Silent until now, which is why a `receive` matcher for a
+            // tagged tuple could sit permanently on the interpreter with no diagnostic
+            // pointing at the reason.
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                let name = arm
+                    .dbg_name
+                    .map(crate::core::value::symbol_name_ref)
+                    .unwrap_or("<closure>");
+                eprintln!("[jit-bail] arm={name} reason=chunk-ops-not-all-native");
+            }
             arm.jit_code.store(crate::jit::BAILED, Release);
             return None;
         }
@@ -1878,7 +1949,7 @@ pub(crate) fn jit_tier(
     //      into `jit_code`, bump the global epoch (so every fast-linked call site re-validates
     //      and picks up the inlined code WITH its larger `inline_nslots` frame — the per-engine
     //      sizing key), set `inline_installed`, and run the VM this one activation. The next
-    //      entry sizes the frame to `active_nslots()` (= `inline_nslots`) and runs the inlined
+    //      entry sizes the frame to `frame_size_for_new_entry()` (= `inline_nslots`) and runs the inlined
     //      native. One VM activation on the transition — negligible.
     // i64-eligible arms skip the two-stage inline upgrade entirely: their small native IS the
     // unboxed-i64 register worker (`jit_lower_i64_arm`), which already recurses to full depth in
@@ -1927,7 +1998,7 @@ pub(crate) fn jit_tier(
             // The inlined upgrade is ready — swap it in. Store `inline_installed` BEFORE
             // `jit_code` so that any reader which Acquire-loads `jit_code = inline_code` is
             // guaranteed (by the Release-Acquire chain) to also see `inline_installed = true`
-            // and therefore call `active_nslots()` → `inline_nslots`. The reversed order
+            // and therefore call `frame_size_for_new_entry()` → `inline_nslots`. The reversed order
             // (jit_code before inline_installed) created a race: a reader could observe the
             // inline code pointer but still see `inline_installed = false`, sizing the callee
             // frame to the small `nslots` — the inline code would then raw-read beyond the
@@ -1959,7 +2030,7 @@ pub(crate) fn jit_tier(
                 heap.jit_inline_publish(key, ic, arm.compile_epoch.load(Acquire));
             }
             // Run the VM this activation; the next entry sizes the frame to inline_nslots
-            // (the call site reads `active_nslots()`) and runs the inlined native.
+            // (the call site reads `frame_size_for_new_entry()`) and runs the inlined native.
             return None;
         }
         // `ic == BAILED`: the inlined body fell out of subset — leave the small native

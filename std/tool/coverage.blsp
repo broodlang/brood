@@ -146,7 +146,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; (alphabetical) file order so the report is diffable between runs.
 (defn- coverage-by-file
   (results)
-  (let (files (sort (fold (fn (acc r) (if (includes? acc (get r :file)) acc (cons (get r :file) acc)))
+  (let (files (sort (fold (fn (acc r)
+                            (if (includes? acc (get r :file)) acc (cons (get r :file) acc)))
                       nil results)))
     (map (fn (f) [f (filter (fn (r) (= (get r :file) f)) results)]) files)))
 

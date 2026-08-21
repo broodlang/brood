@@ -33,8 +33,12 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 ;; sender's context per message). So `break`/`span` just work and nest under the
 ;; parent with no explicit hand-off. Zero cost + fully compiled out when unused
 ;; (`#[cfg(dev-tools)]` slot + primitives). Both accessors are nil-safe.
-(defn tc-debugger () "The debugger pid in the current process's trace context, or nil." (get (%trace-context) :debugger))
-(defn tc-span () "The current span id in this process's trace context, or nil." (get (%trace-context) :span))
+(defn tc-debugger ()
+  "The debugger pid in the current process's trace context, or nil."
+  (get (%trace-context) :debugger))
+(defn tc-span ()
+  "The current span id in this process's trace context, or nil."
+  (get (%trace-context) :span))
 
 ;; Scope a trace context around `thunk`, restoring the previous one even on error —
 ;; the slot isn't a dynamic, so this is the manual `binding` equivalent for it.

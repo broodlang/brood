@@ -1559,7 +1559,7 @@ fn ki26_frame_shape_check_is_independent_of_inline_installed() {
 
     // Either of the arm's own frame sizes is resumable, in BOTH flag states. This is the
     // property the flag form lacked: with the frame built to the small 6 and the flag flipped
-    // to true by another process's inline swap, `active_nslots()` returns 9, the old guard
+    // to true by another process's inline swap, `frame_size_for_new_entry()` returns 9, the old guard
     // declined, and the caller's fallthrough re-ran the arm from ip 0 — repeating whatever
     // effect the native had already journaled.
     for installed in [false, true] {
@@ -1576,9 +1576,9 @@ fn ki26_frame_shape_check_is_independent_of_inline_installed() {
         // is the bug: assert the divergence explicitly so nobody "simplifies" it back.
         if installed {
             assert_ne!(
-                arm.active_nslots(),
+                arm.frame_size_for_new_entry(),
                 6,
-                "with the flag set, active_nslots() no longer matches a small frame — the \
+                "with the flag set, frame_size_for_new_entry() no longer matches a small frame — the \
                  flag form would decline a resumable frame here"
             );
         }
@@ -1611,7 +1611,7 @@ fn ki26_shape_check_admits_everything_the_flag_form_did() {
         for installed in [false, true] {
             arm.inline_installed.store(installed, Release);
             for frame in 0..40usize {
-                if arm.active_nslots() == frame {
+                if arm.frame_size_for_new_entry() == frame {
                     assert!(
                         jit_frame_shape_matches(&arm, frame),
                         "flag form accepted frame {frame} for ({n},{inl}) \

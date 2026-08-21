@@ -2287,7 +2287,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 `list`  `vector`  `vec`  `conj`  `disj`  `into`  `seq`
 `append`  `reverse`  `reverse-onto`  `nth`  `count`  `empty?`
 `range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
-`member?`  `any?`  `every?`  `find`  `index-of`  `zip`
+`includes?`  `any?`  `every?`  `find`  `index-of`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
 `distinct`  `flatten`  `repeat`  `repeatedly`
 
@@ -2898,7 +2898,7 @@ redefined.
 (arglist add)          ;=> (a b & more)        ; mirrors the source surface
 (bound? 'add)          ;=> true   (quote the name; bound? takes a symbol)
 (bound? 'no-such)      ;=> false
-(member? 'map (global-names))  ;=> true        ; every global, for completion
+(includes? (global-names) 'map)  ;=> true      ; every global, for completion
 ```
 
 **`bound?` is about names, not capabilities** — and for optional build features the
