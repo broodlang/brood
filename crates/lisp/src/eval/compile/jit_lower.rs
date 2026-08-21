@@ -113,36 +113,6 @@ static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// `roots[base]`**, and returns `0` (Done) or `1` (deopt — an operand wasn't an `Int`).
 /// The returned pointer is valid for the life of `jit` (its module owns the code).
 #[cfg(feature = "jit")]
-/// Variant name of an `Inst`, for the refusal trace below. `Inst` has no `Debug`
-/// derive (it holds raw pointers and atomics), and the *identity* of the opcode is
-/// all the trace needs.
-#[cfg(feature = "jit")]
-pub(crate) fn inst_name(i: &Inst) -> &'static str {
-    match i {
-        Inst::Const(_) => "Const",
-        Inst::Local(_) => "Local",
-        Inst::Global(_) => "Global",
-        Inst::GlobalIc { .. } => "GlobalIc",
-        Inst::RecordLine(_) => "RecordLine",
-        Inst::RecordBranch { .. } => "RecordBranch",
-        Inst::Pop => "Pop",
-        Inst::SetLocal(_) => "SetLocal",
-        Inst::Jump(_) => "Jump",
-        Inst::JumpIfFalse(_) => "JumpIfFalse",
-        Inst::MakeVector { .. } => "MakeVector",
-        Inst::MakeMap { .. } => "MakeMap",
-        Inst::Prim1 { .. } => "Prim1",
-        Inst::Prim2 { .. } => "Prim2",
-        Inst::Prim3 { .. } => "Prim3",
-        Inst::Prim2SlotSlot { .. } => "Prim2SlotSlot",
-        Inst::Prim2SlotInt { .. } => "Prim2SlotInt",
-        Inst::Call { .. } => "Call",
-        Inst::SelfCall { .. } => "SelfCall",
-        Inst::MakeClosure { .. } => "MakeClosure",
-        Inst::TryCatch { .. } => "TryCatch",
-    }
-}
-
 /// Refusal from the per-instruction emit loop, naming the opcode that could not be
 /// lowered. Same flag and line shape as [`trace_lower_bail`].
 #[cfg(feature = "jit")]
@@ -1807,7 +1777,10 @@ fn jit_lower_arm_inner(
                     // rule admits an opcode class, then emit refuses a particular shape
                     // of it. Before this, that disagreement was invisible — the arm just
                     // came back BAILED with no reason anywhere.
-                    return trace_lower_bail_inst(arm, inst_name(other));
+                    return trace_lower_bail_inst(
+                        arm,
+                        crate::eval::compile::jit_plan::codegen::inst_opcode_name(other),
+                    );
                 }
             }
             // Deopt-resume checkpoint (see `CompiledArm::ckpt_slot`): a non-tail

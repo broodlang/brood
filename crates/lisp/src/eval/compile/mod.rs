@@ -2493,7 +2493,7 @@ fn hof_apply_native(
                             .map(|c| c.code.as_slice())
                             .unwrap_or(&[])
                             .iter()
-                            .map(crate::eval::compile::jit_lower::inst_name)
+                            .map(crate::eval::compile::jit_plan::codegen::inst_opcode_name)
                             .collect();
                         eprintln!(
                             "[jit-bail] arm={name} reason=hof-arm-already-bailed nslots={} ops=[{}]",

@@ -197,7 +197,19 @@ fn trace_lower_declined(arm: &CompiledArm, inlined: bool) {
             .dbg_name
             .map(crate::core::value::symbol_name_ref)
             .unwrap_or("<closure>");
-        eprintln!("[jit-bail] arm={name} reason=lowering-returned-none inlined={inlined}");
+        let ops: Vec<&str> = arm
+            .chunk
+            .as_ref()
+            .map(|c| c.code.as_slice())
+            .unwrap_or(&[])
+            .iter()
+            .map(crate::eval::compile::jit_plan::codegen::inst_opcode_name)
+            .collect();
+        eprintln!(
+            "[jit-bail] arm={name} reason=lowering-returned-none inlined={inlined} nslots={} ops=[{}]",
+            arm.nslots,
+            ops.join(" ")
+        );
     }
 }
 
@@ -258,6 +270,19 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                     }
                 }
                 if codegen_poisoned {
+                    // The last untraced BAILED route. A single codegen PANIC latches
+                    // `codegen_poisoned` and every arm queued after it is bailed here with no
+                    // attempt — so one bad lowering silently disables the JIT for everything
+                    // that follows, and the only visible symptom is code mysteriously running
+                    // on the VM. Announce it (once) rather than leaving it to be deduced.
+                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                        let name = arm
+                            .dbg_name
+                            .map(crate::core::value::symbol_name_ref)
+                            .unwrap_or("<closure>");
+                        eprintln!("[jit-bail] arm={name} reason=codegen-poisoned-earlier");
+                    }
                     slot.store(crate::jit::BAILED, Release);
                     return;
                 }
@@ -339,6 +364,24 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                         slot.store(crate::jit::BAILED, Release)
                     }
                     Err(_) => {
+                        // The panic that poisons the compiler for the rest of the process.
+                        // `catch_unwind` swallows it, so without this the FIRST domino is
+                        // invisible and only its consequences are seen.
+                        {
+                            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                            if *ON
+                                .get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
+                            {
+                                let name = arm
+                                    .dbg_name
+                                    .map(crate::core::value::symbol_name_ref)
+                                    .unwrap_or("<closure>");
+                                eprintln!(
+                                    "[jit-bail] arm={name} reason=CODEGEN-PANICKED (poisons \
+                                     the compiler; every later arm bails untried)"
+                                );
+                            }
+                        }
                         codegen_poisoned = true;
                         slot.store(crate::jit::BAILED, Release);
                     }
@@ -1707,6 +1750,21 @@ pub(crate) fn jit_deopt_feedback(arm: &CompiledArm) {
     const DEOPT_BAIL_CONSECUTIVE: u32 = 16;
     let d = arm.jit_deopts.fetch_add(1, Relaxed) + 1;
     if d >= DEOPT_BAIL_CONSECUTIVE {
+        // Deopt thrash: the arm went native, fell out 16 times in a row, and is now latched
+        // onto the VM. Traced because the *consequence* (permanently interpreted code) is far
+        // more visible than the cause, and `BROOD_DEOPT_TRACE` needs `perf-stats` while this
+        // does not.
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+            let name = arm
+                .dbg_name
+                .map(crate::core::value::symbol_name_ref)
+                .unwrap_or("<closure>");
+            eprintln!(
+                "[jit-bail] arm={name} reason=deopt-thrash-latched nslots={} deopts={d}",
+                arm.nslots
+            );
+        }
         arm.jit_code.store(crate::jit::BAILED, Release);
     }
 }
@@ -1801,6 +1859,19 @@ pub(crate) fn jit_tier(
         // and elect a single enqueuer via CAS (others see QUEUED and run the VM). A full
         // queue → back off: reset to untried so a later hot call re-attempts.
         if !chunk_ops_all_native(heap, arm) {
+            // The last untraced BAILED route, and a sticky one: an arm is refused here
+            // because some operator its chunk calls is not a native primitive, and it then
+            // stays on the VM. Silent until now, which is why a `receive` matcher for a
+            // tagged tuple could sit permanently on the interpreter with no diagnostic
+            // pointing at the reason.
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                let name = arm
+                    .dbg_name
+                    .map(crate::core::value::symbol_name_ref)
+                    .unwrap_or("<closure>");
+                eprintln!("[jit-bail] arm={name} reason=chunk-ops-not-all-native");
+            }
             arm.jit_code.store(crate::jit::BAILED, Release);
             return None;
         }
