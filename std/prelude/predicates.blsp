@@ -23,7 +23,7 @@
 (defn ref? (x) "True if `x` is a `(ref)` token (a unique reference)." (%eq (type-of x) :ref))
 (defn pid? (x) "True if `x` is a process id (from `self`/`spawn`)." (%eq (type-of x) :pid))
 (defn rope? (x)
-  "True if `x` is a rope (editor buffer text from `string->rope`)."
+  "True if `x` is a rope (editor buffer text from `text/from-string`)."
   (%eq (type-of x) :rope))
 (defn table? (x)
   "True if `x` is an in-memory table (from `(table)`) — Brood's shared mutable ETS store."

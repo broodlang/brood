@@ -10,7 +10,7 @@
 ;;    symbol after a `(` is a call/special-form), not by resolving what a name
 ;;    binds to. Cheap, robust on incomplete input, and written in Brood (ADR-006).
 ;;  - The faces are `display.blsp`-style maps (`{:fg :cyan}` …) so they feed
-;;    straight into a `[:print str face]` op for `term-emit`. They're registered as
+;;    straight into a `[:print str face]` op for `term/emit`. They're registered as
 ;;    `:syntax/*` faces in the shared registry (`std/editor/face.blsp`) and resolved
 ;;    live per span, so an app restyles the whole highlighter by redefining one face
 ;;    — see the faces section below.

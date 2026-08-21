@@ -2,7 +2,7 @@
 ;;
 ;; The shared input seam for interactive Brood UIs (the line editor, the process
 ;; observer, the coming text editor). A KEYMAP is a map `key → command`, where a
-;; key is what `term-poll` returns (a 1-char string, or a keyword like `:up` /
+;; key is what `term/poll` returns (a 1-char string, or a keyword like `:up` /
 ;; `:ctrl-a`) and a command is either:
 ;;   - a **command symbol** — a global `(fn (state key) -> state)`, resolved *by
 ;;     symbol at dispatch time* so redefining the command (or rebinding the key)
@@ -21,7 +21,7 @@
 
 (defmodule editor/keymap
   "A rebindable key→command dispatcher for interactive UIs. A *keymap* maps a key
-(a `term-poll` value) to either a command **symbol** — a global `(fn (state key) ->
+(a `term/poll` value) to either a command **symbol** — a global `(fn (state key) ->
 state)` — or a nested **keymap** (a prefix, for chords like `C-x C-e`). Bindings
 resolve by symbol at dispatch time, so rebinding a key or redefining its command
 hot-swaps behaviour.

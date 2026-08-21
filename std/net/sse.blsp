@@ -6,7 +6,7 @@
 ;;    own module (reusing `http`'s URL + header helpers for the handshake) and its
 ;;    own **process**: `connect` spawns a reader that streams `[:tcp …]` chunks
 ;;    and `send`s each parsed event to a subscriber's mailbox — the same
-;;    deliver-to-a-mailbox shape as `gui-open` input (ADR-058) and the observer's
+;;    deliver-to-a-mailbox shape as `gui/open` input (ADR-058) and the observer's
 ;;    remote agent.
 ;;  - **Pure frame parsing** (the `observe-frame` discipline): the wire grammar
 ;;    (`event:`/`data:`/`id:` field lines, blank-line frame boundaries, comment
@@ -112,7 +112,7 @@ the type to `\"message\"` and the data to `\"\"` (the SSE spec's defaults). Pure
 ;; ---- server-side framing (the inverse of the parser above) ------------------
 ;; Pair with `http`'s streaming seam: a handler returns `(stream-response 200
 ;; (headers) (fn (sock) … (emit sock data) …))`, and these turn payloads
-;; into wire frames. Pure string building over `tcp-send` — the kernel adds nothing.
+;; into wire frames. Pure string building over `tcp/send` — the kernel adds nothing.
 
 (defn headers ()
   "Headers for an event stream: `text/event-stream`, no caching, keep-alive. Pass as
@@ -129,8 +129,8 @@ The exact inverse of `parse-event`."
 
 (defn emit (sock data &optional (event nil))
   "Push one SSE event (`data`, with an optional `event` type) down `sock` — the live
-socket a `stream-response` handler was handed. Just `(tcp-send sock (frame …))`."
-  (tcp-send sock (frame data event)))
+socket a `stream-response` handler was handed. Just `(tcp/send sock (frame …))`."
+  (tcp/send sock (frame data event)))
 
 ;; ---- the reader process (IO) ------------------------------------------------
 
@@ -140,7 +140,7 @@ socket a `stream-response` handler was handed. Just `(tcp-send sock (frame …))
 `subscriber` — then wait for the next chunk and recurse. Notifies the subscriber
 with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
   (if (> (string/length buf) *max-buffer-bytes*)
-    (do (tcp-close sock) (send subscriber [:sse-closed :buffer-overflow]))
+    (do (tcp/close sock) (send subscriber [:sse-closed :buffer-overflow]))
     (let ([blocks rest] (frames buf))
       (doseq (b blocks)
         (when (not (= b ""))
@@ -160,7 +160,7 @@ leftover bytes to `stream`. A non-200 status closes the connection."
                       (cond
                         (> (string/length buf2) *max-buffer-bytes*)
                           (do
-                            (tcp-close sock)
+                            (tcp/close sock)
                             (send subscriber
                               [:sse-closed :buffer-overflow]))
                         (< i 0) (read-head sock subscriber buf2)
@@ -172,7 +172,7 @@ leftover bytes to `stream`. A non-200 status closes the connection."
                                 (send subscriber [:sse-open status])
                                 (stream sock subscriber body))
                               (do
-                                (tcp-close sock)
+                                (tcp/close sock)
                                 (send subscriber [:sse-closed (str "http " status)])))))))
     ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
     ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))))
@@ -192,6 +192,6 @@ that should receive the events (typically the UI process — see `with-events`).
                                      ""
                                      {"Accept" "text/event-stream" "Connection" "keep-alive"}))
               "\r\n"))
-    (spawn (let (sock (tcp-connect (get u :host) (get u :port)))
-             (tcp-send sock req)
+    (spawn (let (sock (tcp/connect (get u :host) (get u :port)))
+             (tcp/send sock req)
              (read-head sock subscriber "")))))

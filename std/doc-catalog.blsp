@@ -137,7 +137,6 @@
    "cond-thread-build" :control
    "conj" :collections
    "conj-one" :collections
-   "connect" :processes
    "cons" :collections
    "constantly" :functions
    "contains?" :predicates
@@ -188,12 +187,10 @@
    "file/rmdir" :filesystem
    "file/rm" :filesystem
    "demonitor" :processes
-   "demonitor-node" :processes
    "denominator" :math
    "deprecation-warning" :meta
    "derive-into" :meta
    "file/dir?" :filesystem
-   "disconnect" :processes
    "disj" :sets
    "display-width" :strings
    "dissoc" :maps
@@ -268,24 +265,6 @@
    "global-names" :meta
    "string/grapheme-at" :strings
    "string/grapheme-count" :strings
-   "gui-bg!" :system
-   "gui-close" :system
-   "gui-drag-move" :system
-   "gui-drag-resize" :system
-   "gui-draw" :system
-   "gui-focus" :system
-   "gui-font!" :system
-   "gui-font-register" :system
-   "gui-fullscreen!" :system
-   "gui-grab-cursor" :system
-   "gui-held-key" :system
-   "gui-icon!" :system
-   "gui-inset!" :system
-   "gui-maximize!" :system
-   "gui-minimize!" :system
-   "gui-open" :system
-   "gui-size" :system
-   "gui-title!" :system
    "has-at-least?" :predicates
    "hash-map" :maps
    "hibernate" :processes
@@ -419,28 +398,12 @@
    "mod" :math
    "module-doc" :meta
    "monitor" :processes
-   "monitor-node" :processes
    "multi-resolve" :meta
    "name" :strings
    "nan?" :predicates
    "nil?" :predicates
    "no-impl" :meta
    "no-method" :meta
-   "node-addr-host" :processes
-   "node-also-listen" :processes
-   "node-at" :processes
-   "node-chomp" :processes
-   "node-config-dir" :processes
-   "node-cookie" :processes
-   "node-cookie-path" :processes
-   "node-last-colon" :processes
-   "node-name" :processes
-   "node-name-part" :processes
-   "node-qualify" :processes
-   "node-runtime-dir" :processes
-   "node-socket-path" :processes
-   "node-start" :processes
-   "nodes" :processes
    "not" :predicates
    "not=" :math
    "now" :system
@@ -496,9 +459,6 @@
    "profile-stop" :meta
    "provide" :meta
    "quot" :math
-   "rand-float" :math
-   "rand-int" :math
-   "rand-seed" :math
    "rand-step" :math
    "random-token" :system
    "range" :collections
@@ -547,9 +507,6 @@
    "registry-swap!" :meta
    "reload-defs" :meta
    "rem" :math
-   "remote-spawn" :processes
-   "remote-spawn-server" :processes
-   "remote-spawn-sync" :processes
    "remove" :collections
    "remove-nth" :collections
    "file/rename" :filesystem
@@ -567,16 +524,6 @@
    "reverse" :collections
    "reverse-acc" :collections
    "reverse-onto" :collections
-   "rng" :math
-   "rope->string" :strings
-   "rope-char->line" :strings
-   "rope-delete" :strings
-   "rope-insert" :strings
-   "rope-length" :strings
-   "rope-line" :strings
-   "rope-line->char" :strings
-   "rope-line-count" :strings
-   "rope-slice" :strings
    "rope?" :predicates
    "run!" :control
    "run-process" :system
@@ -639,7 +586,6 @@
    "spy-walk-if" :meta
    "spy-walk-let" :meta
    "spy-walk-seq" :meta
-   "start-remote-spawn" :processes
    "string/starts-with?" :predicates
    "stdin-tty?" :system
    "stdout-tty?" :system
@@ -649,7 +595,6 @@
    "string/->graphemes" :strings
    "string/->list" :strings
    "string->number" :convert
-   "string->rope" :strings
    "string->symbol" :strings
    "string->utf8-bytes" :bytes
    "string/length" :strings
@@ -682,31 +627,12 @@
    "take-last" :collections
    "take-while" :collections
    "take-while-acc" :collections
-   "tcp-close" :system
-   "tcp-connect" :system
-   "tcp-controlling-process" :system
-   "tcp-listen" :system
-   "tcp-local-port" :system
-   "tcp-send" :system
-   "tcp-set-binary" :system
-   "tcp-set-idle-timeout" :system
    "temp-path" :filesystem
-   "term-draw" :system
-   "term-emit" :system
-   "term-enter" :system
-   "term-leave" :system
-   "term-poll" :system
-   "term-raw-enter" :system
-   "term-raw-leave" :system
-   "term-size" :system
    "third" :collections
    "thread-first-step" :control
    "thread-last-step" :control
    "throw" :errors
    "times" :collections
-   "tls-listen" :system
-   "tls-request" :system
-   "tls-self-signed" :system
    "->fixed" :strings
    "->seq" :meta
    "->string" :meta

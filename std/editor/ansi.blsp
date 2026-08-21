@@ -6,7 +6,7 @@ automata, roguelikes, progress lines).
 
 This is deliberately *not* the structured display protocol: when you want a
 render-op vocabulary, a frame buffer, or an in-place editor, use `std/display`
-(`term-draw` / `term-emit`) instead. Every name here is a **zero-arg function you
+(`term/draw` / `term/emit`) instead. Every name here is a **zero-arg function you
 call** — it *returns* the escape string, it is not the string itself. Print the
 call, never the bare symbol: `(print (ansi-clear))`, not `(print ansi-clear)`
 (which prints `#<fn ansi-clear>` and emits no escape).

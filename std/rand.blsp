@@ -1,0 +1,29 @@
+;; std/rand.blsp — a seeded PRNG (xorshift32), the public face of the prelude's
+;; `%rand-seed`/`%rand-step` mechanism. Deterministic and purely functional: every draw
+;; returns `[value next-seed]`, so randomness threads through code without hidden state.
+;; Kept in the `rand` namespace rather than the bare language core (`rand/int`, `rand/float`).
+;; (`sample`/`shuffle` — random *collection* ops — stay in the prelude with the sequence
+;; functions, on the same `%rand-*` mechanism.)
+(defmodule rand)
+
+(defn seed (n)
+  "Normalize integer `n` into a valid nonzero 32-bit PRNG seed (xorshift32 cannot start from 0)."
+  (%rand-seed n))
+
+(defn rng (seed)
+  "Step the PRNG: returns `[value next-seed]`, where `value` is a pseudo-random non-negative
+32-bit integer and `next-seed` feeds the next call. `seed` is any integer (normalized via `rand/seed`)."
+  (let (s (%rand-step (%rand-seed seed)))
+    [s s]))
+
+(defn int (seed n)
+  "Returns `[i next-seed]` with `i` a pseudo-random integer in `[0, n)`. `n` must be positive."
+  (if (<= n 0)
+    (error "rand/int: bound must be positive: " n)
+    (let (s (%rand-step (%rand-seed seed)))
+      [(rem s n) s])))
+
+(defn float (seed)
+  "Returns `[f next-seed]` with `f` a pseudo-random float in `[0.0, 1.0)`."
+  (let (s (%rand-step (%rand-seed seed)))
+    [(/ s 4294967296.0) s]))

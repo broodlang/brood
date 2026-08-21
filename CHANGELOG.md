@@ -53,6 +53,29 @@ Mechanism/policy split as usual: the raw f64 kernels are now `%`-prefixed primit
 (`%sin`, `%ln`, …) and the `math` module wraps them, so they document under `math` in
 the reference rather than cluttering the core.
 
+**Subsystem primitives moved out of the bare core into namespaces.** The same
+mechanism/policy split (raw primitive → `%`-prefixed, a Brood module wraps it) was applied
+to five subsystems, so the language core keeps only fundamental operations:
+- **terminal** → `term/*` (`term/enter`, `term/poll`, `term/draw`, …)
+- **windows** → `gui/*` (`gui/open`, `gui/draw`, `gui/title!`, …)
+- **rope text-engine** → `text/*` (`text/insert`, `text/slice`, `text/line`, `text/from-string`, …)
+- **PRNG** → `rand/*` (`rand/int`, `rand/float`, `rand/rng`, `rand/seed`); the `%rand-*`
+  mechanism stays internal because the sequence ops `sample`/`shuffle` build on it
+- **sockets** → `tcp/*` and `tls/*` (`tcp/connect`, `tcp/send`, `tls/request`, …)
+
+Bitwise (`bit-and`/`bit-or`/…) stays bare — it is a fundamental integer operation, not a
+subsystem.
+
+**Distribution moved into a `node/` module.** `connect`, `disconnect`, `nodes`,
+`node-start`, `node-cookie`, `monitor-node`, `remote-spawn`, … were bare core primitives —
+they are now `node/connect`, `node/disconnect`, `node/list`, `node/start`, `node/cookie`,
+`node/monitor`, `node/spawn`, `node/spawn-sync`, `node/name`, `node/also-listen`,
+`node/serve-spawns`. The raw kernel primitives are `%`-prefixed (`%nodes`, `%disconnect`,
+`%node-name`, …) and `std/node.blsp` wraps them. Freeing bare `connect` means a `(:use tcp)`
+no longer needs to exclude it — only the kernel `send` remains genuinely core (so a socket
+send is `tcp/send`, qualified). The core `send`/`spawn`/`receive`/`monitor`/`link`/`self`
+process primitives stay bare.
+
 ## v0.7.0 — 2026-08-21
 
 **Standard-library consistency pass.** A full review of the prelude and standard

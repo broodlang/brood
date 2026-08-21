@@ -1,12 +1,12 @@
-;; TLS sockets (tls-listen / tls-request / tls-self-signed) over the net
+;; TLS sockets (tls/listen / tls/request / tls/self-signed) over the net
 ;; reactor (ADR-143). Real loopback handshakes: the server runs on a
-;; tls-self-signed cert and the client trusts it via tls-request's ca-pem
+;; tls/self-signed cert and the client trusts it via tls/request's ca-pem
 ;; argument (the private-CA trust anchor) — the first in-tree end-to-end TLS
 ;; coverage; before ca-pem the client could only talk to Mozilla-rooted hosts.
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(defmodule tls-test (:use test) (:use tcp))
+(defmodule tls-test (:use test) (:use tcp :exclude [send]))
 
 (defn- tls-serve-one
   (reply)
@@ -14,16 +14,16 @@
 `reply`, close. Returns [port cert] to the caller."
   (let (me (self))
     (spawn (do
-             (let (ck (tls-self-signed "localhost")
+             (let (ck (tls/self-signed "localhost")
                    cert (first ck)
                    key (second ck)
-                   ls (tls-listen "127.0.0.1" 0 cert key))
-               (send me [:ready (tcp-local-port ls) cert])
+                   ls (tls/listen "127.0.0.1" 0 cert key))
+               (send me [:ready (tcp/local-port ls) cert])
                (let (c (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
-                 (tcp-controlling-process c (self))
+                 (tcp/controlling-process c (self))
                  (receive ([:tcp ^c _] nil) (after 10000 nil))
-                 (tcp-send c reply)
-                 (tcp-close c)))))
+                 (tcp/send c reply)
+                 (tcp/close c)))))
     (receive ([:ready port cert] [port cert]) (after *test-wait-ms* :timeout))))
 
 (describe "tls: loopback round trip (self-signed + ca-pem trust)"
@@ -32,27 +32,27 @@
     (let (pc (tls-serve-one "secret reply")
           port (first pc)
           cert (second pc))
-      (let (s (tls-request "localhost" port "hello over tls" cert))
+      (let (s (tls/request "localhost" port "hello over tls" cert))
         (let (resp (utf8-bytes->string (drain s)))
           (assert= resp "secret reply")))))
   (test "a binary-mode TLS response is byte-faithful bytes"
     (let (pc (tls-serve-one (bytes 0 255 128 65))
           port (first pc)
           cert (second pc))
-      (let (s (tls-request "localhost" port "gimme bytes" cert))
-        (tcp-set-binary s true)
+      (let (s (tls/request "localhost" port "gimme bytes" cert))
+        (tcp/set-binary s true)
         (assert= (drain s) (bytes 0 255 128 65)))))
   (test "an iolist request (with a bytes leaf) reaches the server byte-faithfully"
     (let (me (self))
       (spawn
         (do
-          (let (ck (tls-self-signed "localhost")
-                ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
-            (send me [:ready (tcp-local-port ls) (first ck)])
+          (let (ck (tls/self-signed "localhost")
+                ls (tls/listen "127.0.0.1" 0 (first ck) (second ck)))
+            (send me [:ready (tcp/local-port ls) (first ck)])
             (let (c (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
-              ;; Binary mode BEFORE handing over control, not after. `tcp-controlling-process`
+              ;; Binary mode BEFORE handing over control, not after. `tcp/controlling-process`
               ;; starts messages flowing to this process, so a request already in flight can
-              ;; be delivered in the window before `tcp-set-binary` lands — as a *string*,
+              ;; be delivered in the window before `tcp/set-binary` lands — as a *string*,
               ;; and `bytes->list` below then kills this process, leaving the client to drain
               ;; nothing (`resp` = ""). A fast box wins that race; a 2-core one loses it about
               ;; 1 run in 3 (measured 2026-08-11 under `taskset -c 0,1`), which is what made
@@ -63,17 +63,17 @@
               ;; server does the same thing for the same reason, and its comment names the
               ;; prior occurrence — "setting binary after the handoff left a window where a
               ;; first chunk was decoded as lossy text (the old http binary-body flake)"
-              ;; (`std/net/http.blsp`). A sweep of every `tcp-controlling-process` /
-              ;; `tcp-set-binary` pair found this file as the only remaining outlier;
+              ;; (`std/net/http.blsp`). A sweep of every `tcp/controlling-process` /
+              ;; `tcp/set-binary` pair found this file as the only remaining outlier;
               ;; `tests/tcp_test.blsp`'s ~17 pairs are safe because there the client sends
               ;; only AFTER the server has configured the socket, so nothing is in flight.
-              (tcp-set-binary c true)
-              (tcp-controlling-process c (self))
+              (tcp/set-binary c true)
+              (tcp/controlling-process c (self))
               (let (got (receive ([:tcp ^c d] d) (after *test-wait-ms* :timeout)))
-                (tcp-send c (pr-str (into [] (bytes->list got))))
-                (tcp-close c))))))
+                (tcp/send c (pr-str (into [] (bytes->list got))))
+                (tcp/close c))))))
       (let (port-cert (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout))
-            s (tls-request "localhost"
+            s (tls/request "localhost"
                 (first port-cert)
                 ["HEAD " (bytes 1 254) " TAIL"]
                 (second port-cert)))
@@ -84,7 +84,7 @@
     (let (pc (tls-serve-one "unreachable")
           port (first pc))
       ;; no ca-pem → the self-signed cert is rejected against the Mozilla roots
-      (let (s (tls-request "localhost" port "x"))
+      (let (s (tls/request "localhost" port "x"))
         (let (out (receive
                     ([:tcp-error ^s msg] [:error msg])
                     ([:tcp-closed ^s] :closed)

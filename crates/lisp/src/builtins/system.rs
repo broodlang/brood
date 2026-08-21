@@ -1135,6 +1135,20 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.
     embedded_module!("editor/ansi", "std/editor/ansi.blsp"),
+    // The terminal seam (ADR-046): policy over the `%term-*` primitives, so raw-mode /
+    // input polling / paint live under `term/*` rather than the bare language core.
+    embedded_module!("term", "std/term.blsp"),
+    // Native window seam (ADR-046/080): policy over the `%gui-*` primitives → `gui/*`.
+    embedded_module!("gui", "std/gui.blsp"),
+    // The rope text-engine seam: policy over the `%rope-*` primitives → `text/*`.
+    embedded_module!("text", "std/text.blsp"),
+    // Seeded PRNG (xorshift32): public face of the prelude's `%rand-*` mechanism → `rand/*`.
+    embedded_module!("rand", "std/rand.blsp"),
+    // Distributed nodes (ADR-033/068/073/074): policy over the `%node-*`/`%nodes`/`%disconnect`/
+    // `%monitor-node` primitives → `node/*` (node/connect, node/start, node/spawn, …).
+    embedded_module!("node", "std/node.blsp"),
+    // TLS sockets: policy over the `%tls-*` primitives → `tls/*`.
+    embedded_module!("tls", "std/net/tls.blsp"),
     // Sets as a library over maps (ADR-062): a set is a map of `element → true`,
     // so membership/elements/size reuse `contains?`/`keys`/`count`; the module
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.
@@ -1920,7 +1934,7 @@ pub(super) fn whereis_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// `(monitor-node name)` — the calling process is sent `[:nodedown name]` when a
 /// link to `name` goes down (heartbeat timeout or clean close). Returns the name.
 pub(super) fn monitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let name = expect_node_name(heap, "monitor-node", arg(args, 0))?;
+    let name = expect_node_name(heap, "%monitor-node", arg(args, 0))?;
     crate::dist::monitor_node(name, crate::process::self_pid());
     Ok(Value::keyword(name))
 }
@@ -1928,7 +1942,7 @@ pub(super) fn monitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// `(demonitor-node name)` — cancel the calling process's node monitor for `name`.
 /// A no-op if no monitor is registered. Returns `nil`.
 pub(super) fn demonitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let name = expect_node_name(heap, "demonitor-node", arg(args, 0))?;
+    let name = expect_node_name(heap, "%demonitor-node", arg(args, 0))?;
     crate::dist::demonitor_node(name, crate::process::self_pid());
     Ok(Value::nil())
 }
@@ -1936,7 +1950,7 @@ pub(super) fn demonitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 /// `(disconnect name)` — drop the link to peer `name` now (Erlang's
 /// `disconnect_node`). Returns `true` if a link existed, `false` otherwise.
 pub(super) fn disconnect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let name = expect_node_name(heap, "disconnect", arg(args, 0))?;
+    let name = expect_node_name(heap, "%disconnect", arg(args, 0))?;
     Ok(Value::boolean(crate::dist::disconnect(name)))
 }
 

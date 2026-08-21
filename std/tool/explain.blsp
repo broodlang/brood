@@ -77,7 +77,7 @@ the `nest mcp` tools of the same names.")
    "E0060" {:summary "Distribution-layer failure — a node/connect/send operation failed."
             :causes "A wrong `name@host`; the peer not listening; a cookie mismatch; a dropped link (E0060 noconnection when `:send-errors` is on)."
             :fix "Confirm both nodes ran `node-start` with the SAME cookie and reachable addresses; `std/net/reconnect` auto-heals a dropped link."
-            :example "(node-start :app (node-cookie))"}
+            :example "(node/start :app (node/cookie))"}
    "E0070" {:summary "Message too deeply nested to send — the deep-copy would overflow."
             :causes "A value nested past `MAX_MESSAGE_DEPTH` (a ~256-deep structure) handed to `send`."
             :fix "Flatten or restructure the value before sending; deeply-nested data is usually a design smell across a process boundary."

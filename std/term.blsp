@@ -1,0 +1,59 @@
+;; std/term.blsp — the terminal seam (ADR-046 display protocol).
+;;
+;; Thin policy over the `%term-*` primitives (mechanism): raw-mode + alternate-screen
+;; control, input polling, and the two paint frontends (full-screen `draw`, inline
+;; `emit`). Kept in the `term` namespace rather than the bare language core — an editor
+;; or REPL reaches these as `term/enter`, `term/poll`, `term/draw`, …
+(defmodule term)
+
+(defn enter ()
+  "Enter raw mode + the alternate screen, hide the cursor, and enable mouse capture,
+taking over the terminal for a full-screen UI (so click/scroll reach `term/poll`). Pair
+with `term/leave`."
+  (%term-enter))
+
+(defn leave ()
+  "Restore the terminal: show the cursor, disable mouse capture, leave the alternate
+screen, disable raw mode. The normal-path teardown for `term/enter`."
+  (%term-leave))
+
+(defn size ()
+  "The terminal size as [cols rows] in character cells."
+  (%term-size))
+
+(defn poll (ms)
+  "Wait up to `ms` milliseconds for an input event; return a key (a 1-char string for
+printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace
+:tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt
+combos like :alt-f), a mouse event as a vector [:mouse action button row col mods]
+(action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button
+held, reported once per cell crossed; button: :left :right :middle or nil for scroll;
+row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order,
+[] when none), or nil on timeout. Always pass a finite `ms`."
+  (%term-poll ms))
+
+(defn draw (frame)
+  "Paint a `frame` — a vector of render ops: [:clear], [:text row col str], [:text row col
+str face], [:rect row col w h face], [:cursor row col] / [:cursor row col style]. A face is
+a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey) or an
+explicit [r g b] vector / \"#rrggbb\" hex string. [:rect …] fills a w×h cell block with the
+face's background. The optional cursor `style` is :block (default), :bar, or :underline. The
+in-process frontend for the display protocol; returns nil."
+  (%term-draw frame))
+
+(defn raw-enter ()
+  "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved.
+The seam for an inline line editor (the REPL); use `term/enter` instead for a full-screen
+TUI. Pair with `term/raw-leave`."
+  (%term-raw-enter))
+
+(defn raw-leave ()
+  "Leave raw mode (the teardown for `term/raw-enter`). Idempotent with the panic-path restore."
+  (%term-raw-leave))
+
+(defn emit (ops)
+  "Paint inline, relative-motion render `ops` (for an in-place editor that must not take
+over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down n],
+[:col n], [:clear-eol], [:clear-below], [:clear-screen]. A face is a map like
+{:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."
+  (%term-emit ops))

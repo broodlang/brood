@@ -30,7 +30,7 @@
 
 Reach for this instead of `bound?` when a capability is optional: a builtin from
 an absent feature is still **bound** and still raises when called, so `(bound?
-'gui-open)` answers yes on a runtime that cannot open a window. An app that wants
+'gui/open)` answers yes on a runtime that cannot open a window. An app that wants
 to degrade rather than fail asks the build."
   (includes? (features) name))
 
@@ -267,7 +267,7 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 ;; Brood has no global mutable state, so randomness is *threaded*: every step
 ;; takes a seed and returns `[value next-seed]`. Pass `next-seed` to the next
 ;; call; thread the seed through your loop state exactly like any other value.
-;; Seed a fresh stream from any integer (e.g. `(now)`) via `rand-seed`.
+;; Seed a fresh stream from any integer (e.g. `(now)`) via `%rand-seed`.
 ;;
 ;; The generator is Marsaglia's xorshift32 — fast and good enough for
 ;; simulations, sampling, shuffling, jitter, and ids; NOT for cryptography. Each
@@ -276,12 +276,12 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 
 ; 2^32 - 1
 (def *rand-mask* 4294967295)
-(defn rand-seed (n)
+(defn %rand-seed (n)
   "Normalize integer `n` into a valid nonzero 32-bit PRNG seed (xorshift32 cannot start from 0)."
   (let (m (bit-and n *rand-mask*))
     (if (= m 0) 2463534242 m)))
 
-(defn- rand-step
+(defn- %rand-step
   (state)
   ;; One xorshift32 transition over a nonzero 32-bit `state`.
   (let (x (bit-and (bit-xor state (bit-shift-left state 13)) *rand-mask*)
@@ -289,22 +289,9 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
         x (bit-and (bit-xor x (bit-shift-left x 5)) *rand-mask*))
     x))
 
-(defn rng (seed)
-  "Step the PRNG: returns `[value next-seed]`, where `value` is a pseudo-random non-negative 32-bit integer and `next-seed` feeds the next call. `seed` is any integer (normalized via `rand-seed`)."
-  (let (s (rand-step (rand-seed seed)))
-    [s s]))
-
-(defn rand-int (seed n)
-  "Returns `[i next-seed]` with `i` a pseudo-random integer in `[0, n)`. `n` must be positive."
-  (if (<= n 0)
-    (error "rand-int: bound must be positive: " n)
-    (let (s (rand-step (rand-seed seed)))
-      [(rem s n) s])))
-
-(defn rand-float (seed)
-  "Returns `[f next-seed]` with `f` a pseudo-random float in `[0.0, 1.0)`."
-  (let (s (rand-step (rand-seed seed)))
-    [(/ s 4294967296.0) s]))
+;; The seeded PRNG public API (rand/rng / rand/int / rand/float / rand/seed) lives in the
+;; `rand` module (std/rand.blsp); the `%rand-seed`/`%rand-step` mechanism above stays here
+;; because the sequence ops `sample`/`shuffle` (below) build on it.
 
 (defn sample (seed coll)
   "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."
@@ -312,14 +299,14 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
         n (count items))
     (if (= n 0)
       (error "sample: cannot sample from an empty collection")
-      (let (s (rand-step (rand-seed seed)))
+      (let (s (%rand-step (%rand-seed seed)))
         [(nth items (rem s n)) s]))))
 
 (defn- shuffle-acc
   (state remaining acc)
   (if (= (count remaining) 0)
     [acc state]
-    (let (s (rand-step state)
+    (let (s (%rand-step state)
           i (rem s (count remaining)))
       (shuffle-acc s
         (append (take i remaining) (drop (inc i) remaining))
@@ -327,7 +314,7 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 
 (defn shuffle (seed coll)
   "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
-  (shuffle-acc (rand-seed seed) (into [] coll) nil))
+  (shuffle-acc (%rand-seed seed) (into [] coll) nil))
 
 ;; ---- bounded printing -------------------------------------------------------
 ;; `pr-str` is *faithful*: whatever it returns reads back as the same value, so it
