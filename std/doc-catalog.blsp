@@ -470,7 +470,7 @@
    "string/pad-left" :strings
    "string/pad-right" :strings
    "pair?" :predicates
-   "parent-dir" :filesystem
+   "parent-directory" :filesystem
    "parse-source" :meta
    "parse-source-positioned" :meta
    "partial" :functions

@@ -10,7 +10,7 @@ test discovery, lints, release, config)."
 ;; --- scaffolding a new project (`nest new <name>`) ---------------------------
 ;; True if the 1-char string `ch` occurs in `s` (a short scan — Brood has no char
 ;; index yet, and project names/paths are short).
-(defn str-contains? (s ch)
+(defn- str-contains? (s ch)
   (cond
     (= (string/length s) 0) false
     (= (string/substring s 0 1) ch) true

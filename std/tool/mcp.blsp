@@ -179,7 +179,7 @@ through nest mcp, never the raw filesystem."
       (throw "write: :content must be a string"))
     (try
       (let (abs (project-path rel)
-            _dir (file/mkdir (parent-dir abs))
+            _dir (file/mkdir (parent-directory abs))
             _w (file/spit abs content))
         (write-result rel abs))
       (catch e

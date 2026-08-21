@@ -4,6 +4,30 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.7.0 — 2026-08-21
+
+**Standard-library consistency pass.** A full review of the prelude and standard
+library settled three naming inconsistencies and closed the public-API
+documentation gap.
+
+**One empty-collection constructor: `empty`.** The eager collections now agree with
+`stream` — `pq/empty`, `queue/empty`, and `multimap/empty` replace the old `new`
+(they were always nullary "make the empty X" builders, so the name now matches both
+the `empty?` predicate and their own docstrings). `stream/empty` is unchanged.
+
+**Conversion/word names unabbreviated.** `crypto/encrypt-str` / `crypto/decrypt-str`
+become `crypto/encrypt-string` / `crypto/decrypt-string` (the string-oriented twins of
+the `bytes` `crypto/encrypt` / `crypto/decrypt`), and the bootstrap path helper
+`parent-dir` becomes `parent-directory`.
+
+**Public surface is now fully documented; internals are private.** Every public
+function in `std/` carries a docstring (previously ~64 did not — the `sexp` command
+layer, the `format` CST API, the `project`/`test`/`debug` tooling, and more). The 53
+functions that were only ever implementation helpers of `format`, the test runner,
+`project`, `workspace`, `resolver`, `stats`, and `scaffold` are now `defn-` (private),
+so they no longer leak into each module's API. A reader-based audit confirms zero
+undocumented public functions remain across the standard library.
+
 ## v0.6.0 — 2026-08-20
 
 **One conversion-naming convention: the arrow `->` (ADR-239).** Every conversion is

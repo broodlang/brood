@@ -46,19 +46,19 @@
           bad (assoc ct 0 (bit-xor (nth ct 0) 255)))
       (assert= :error (crypto/decrypt key nonce bad)))))
 
-(describe "crypto/encrypt-str + decrypt-str"
+(describe "crypto/encrypt-string + decrypt-string"
   (test "round-trip with strings"
     (let (key (crypto/random-key) nonce (crypto/random-nonce))
       (assert= "hello world"
-        (crypto/decrypt-str key
+        (crypto/decrypt-string key
           nonce
-          (crypto/encrypt-str key nonce "hello world")))))
+          (crypto/encrypt-string key nonce "hello world")))))
   (test "wrong key returns :error"
     (let (k1 (crypto/random-key)
           k2 (crypto/random-key)
           nonce (crypto/random-nonce)
-          ct (crypto/encrypt-str k1 nonce "secret"))
-      (assert= :error (crypto/decrypt-str k2 nonce ct)))))
+          ct (crypto/encrypt-string k1 nonce "secret"))
+      (assert= :error (crypto/decrypt-string k2 nonce ct)))))
 
 (describe "crypto/pbkdf2"
   (test "returns a bytes value of correct length"

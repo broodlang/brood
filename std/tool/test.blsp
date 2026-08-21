@@ -83,7 +83,7 @@ docs/testing.md for the full guide.")
 (def *collected* nil)
 ; (name thunk) pairs gathered for the current describe
 
-(defn add-unit! (mode group tests) (def *units* (cons (list mode group tests) *units*)))
+(defn- add-unit! (mode group tests) (def *units* (cons (list mode group tests) *units*)))
 
 ;; Empty the registry. A `describe`/`test` form REGISTERS by consing onto
 ;; `*units*`; in a fresh process that starts at nil, so a one-shot `nest test`
@@ -122,7 +122,7 @@ docs/testing.md for the full guide.")
 ;; still carries its position — `current-file` / `form-pos` are Rust primitives
 ;; (docs/tooling.md). Each failing assertion is thus self-locating, which is what
 ;; lets the reporter emit a clickable `FILE:LINE:COL:` anchor per failure.
-(defn fail-loc (form)
+(defn- fail-loc (form)
   (let (p (form-pos form))
     ; [line col] vector, or nil
     (if p (list (current-file) (vector-ref p 0) (vector-ref p 1)) nil)))
@@ -217,6 +217,7 @@ docs/testing.md for the full guide.")
 ;; A test registers itself: collected into the enclosing describe if there is
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
 (defn register-test! (name thunk isolated? meta)
+  "Register one test. Inside a `describe` it is collected into that group's `*collected*` (carrying its `:isolated` flag in the meta); otherwise it is emitted immediately as its own standalone unit — `:isolated` if flagged, else `:parallel`."
   (if *collecting*
     ;; Inside a `describe`, a test-level `:isolated` used to be DROPPED here — the group's
     ;; mode decided and the marker did nothing, silently. That is worse than not supporting
@@ -234,7 +235,7 @@ docs/testing.md for the full guide.")
 ;; Turn a finished describe's collected tests into units according to its mode:
 ;; default spreads them across one :parallel unit each; :serial/:isolated keep
 ;; them together in a single unit.
-(defn emit-describe! (mode group tests group-tags group-skip)
+(defn- emit-describe! (mode group tests group-tags group-skip)
   (let (tagged (map (fn (t) (test-mark-skip (test-add-tags t group-tags) group-skip)) tests)
         ;; A test marked `:isolated` on its own gets its own isolated unit even in a
         ;; parallel group — that is what the marker says, and honouring it per test avoids
@@ -455,10 +456,12 @@ the test rather than hanging the run."
 
 ;; --- small text/list helpers for the trace and slow-test output --------------
 (defn opt? (flag opts)
+  "True if the boolean flag `flag` is present anywhere in the `run-tests` option list `opts` (e.g. `:trace`)."
   ; is flag present in the run-tests args?
   (cond (empty? opts) false (= flag (first opts)) true else (opt? flag (rest opts))))
 
 (defn opt-val (key opts default)
+  "The value following `key` in the `run-tests` option list `opts` (e.g. `5000` for `:timeout 5000`), or `default` when `key` is absent."
   ; the value following `key` in the run-tests args (e.g. `:timeout 5000`), or default.
   (cond
     (empty? opts) default
@@ -473,7 +476,7 @@ the test rather than hanging the run."
 
 ;; Insertion sort of [name ms] pairs, slowest first. O(n²), but there are only
 ;; ever a handful of tests, so simplicity wins.
-(defn insert-by-ms (x sorted)
+(defn- insert-by-ms (x sorted)
   ;; Tail-recursive: accumulate the (reversed) smaller-ms prefix and splice `x`
   ;; once, so ordering a large suite by duration can't overflow the stack.
   (letrec (go (fn (acc xs)
@@ -482,10 +485,10 @@ the test rather than hanging the run."
                   (>= (second x) (second (first xs))) (reverse-onto acc (cons x xs))
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil sorted)))
-(defn sort-by-ms (xs) (fold (fn (acc x) (insert-by-ms x acc)) nil xs))
+(defn- sort-by-ms (xs) (fold (fn (acc x) (insert-by-ms x acc)) nil xs))
 
 ;; A "N.N MB" formatter for the memory line (`quot` is the prelude's).
-(defn mb-str (bytes)
+(defn- mb-str (bytes)
   (let (tenths (quot (+ (* bytes 10) 524288) 1048576)
         ; round to nearest 0.1 MB
         whole (quot tenths 10)
@@ -496,21 +499,22 @@ the test rather than hanging the run."
 ;; A result is (group name fails ms): `fails` is the list of failure records for
 ;; that test (empty = passed). A failure record is (loc detail-lines); `loc` is
 ;; (file line col) or nil, captured per-assertion (see `fail-loc`).
-(defn r-group (r) (first r))
-(defn r-name (r) (second r))
-(defn r-fails (r) (third r))
-(defn r-ms (r) (nth r 3))
-(defn r-failed? (r) (not (empty? (r-fails r))))
+(defn r-group (r) "The group (describe) name of a result tuple `(group name fails ms …)`, or \"\" when ungrouped." (first r))
+(defn r-name (r) "The test name of a result tuple `(group name fails ms …)`." (second r))
+(defn r-fails (r) "The list of failure records for a result — empty means the test passed. Each record is `(loc detail-lines)`." (third r))
+(defn- r-ms (r) (nth r 3))
+(defn r-failed? (r) "True if the result has at least one failed assertion (a non-empty `r-fails`)." (not (empty? (r-fails r))))
 ;; Read defensively: results synthesised elsewhere (a dead or timed-out worker) are
 ;; 4-element tuples, and those are never skips.
-(defn r-skipped? (r) (and (> (count r) 4) (= (nth r 4) true)))
+(defn r-skipped? (r) "True if the result is a skipped test — its 5th field is `true`. Read defensively: a 4-element result (a dead or timed-out worker) is never a skip." (and (> (count r) 4) (= (nth r 4) true)))
 ;; Where the test was declared, as `file:line`, or "" when the position wasn't
 ;; recorded (a body whose first form is a bare literal carries no position).
-(defn r-where (r) (if (> (count r) 5) (or (nth r 5) "") ""))
+(defn r-where (r) "Where the test was declared, as `file:line` (the result's 6th field), or \"\" when no position was recorded." (if (> (count r) 5) (or (nth r 5) "") ""))
 (defn label (group name)
+  "Join a group and test name into one display label — `\"group › name\"`, or just `name` when `group` is \"\" (ungrouped)."
   ; "group › name", or just name if ungrouped
   (if (= group "") (str name) (str group " › " name)))
-(defn full-name (r) (label (r-group r) (r-name r)))
+(defn- full-name (r) (label (r-group r) (r-name r)))
 
 ;; --- test selection (--only / --exclude / --include / FILE:LINE / shards) -----
 ;; A *filter spec* is a map; nil means "run everything" (the default, and the only
@@ -792,6 +796,7 @@ the test rather than hanging the run."
 (defdyn *test-report-sink* nil)
 
 (defn trace-result (r)
+  "Report one finished result `r` through the per-test seams, then return `r` unchanged. Feeds it to any installed `*test-report-sink*` (the machine-readable seam) and, under `*test-trace*`, prints the coloured `--trace` line (glyph, label, timing, location, failure count). Runs in the worker process."
   (when *test-report-sink* (*test-report-sink* r))
   (when *test-trace*
     (println (str (trace-glyph r)
@@ -870,6 +875,7 @@ the test rather than hanging the run."
 ;; Suppressed under `:trace`, which already prints a line per test: the two together
 ;; would just be noise.
 (defn progress-mark (results)
+  "Print one live-progress character per result in `results` — a green `.` for a pass, red `F` for a failure, orange `○` for a skip — flushed as they arrive. Suppressed under `*test-trace*` (which already prints a line per test) and under a machine `*test-formatter*` (whose output must stay parseable)."
   ;; Suppressed under `:trace` (which prints a line per test) and under a machine
   ;; `--formatter` (whose output must stay parseable — no stray dots).
   (unless (or *test-trace* *test-formatter*)
@@ -884,6 +890,7 @@ the test rather than hanging the run."
 ;; returns its own failure list (it catches its first failing assertion), sharing
 ;; no mutable state — so running these concurrently is safe.
 (defn run-test (group t)
+  "Run one `(name thunk meta)` test `t` in group `group` and return its result tuple `(group name fails ms false where)`. A `:skip`-marked test is not run — it yields a skipped result instead. The thunk carries its own failures, so this is safe to run concurrently. Reports the result via `trace-result`."
   (if (test-skip? t)
     (trace-result (test-skipped-result group t))
     (let (start (now)
@@ -894,7 +901,7 @@ the test rather than hanging the run."
 ;; Like run-test, but evaluate the body with a private copy of the global
 ;; bindings (`%isolate`): an :isolated test's `def`s are rolled back when it
 ;; finishes, so they can't leak to any other test. Used only in the isolated phase.
-(defn run-test-fresh (group t)
+(defn- run-test-fresh (group t)
   (if (test-skip? t)
     (trace-result (test-skipped-result group t))
     (let (start (now)
@@ -905,7 +912,7 @@ the test rather than hanging the run."
 ;; Run every test in a unit, in order, returning the list of results. This is
 ;; what a worker does (for a :parallel/:serial unit) and what the runner does
 ;; directly for an :isolated unit.
-(defn run-unit (unit) (let (group (second unit)) (map (fn (t) (run-test group t)) (third unit))))
+(defn run-unit (unit) "Run every test in `unit` (a `(mode group tests)` tuple) in order via `run-test`, returning the list of their results. What a worker evaluates for a `:parallel`/`:serial` unit, and what the runner does directly for an `:isolated` one." (let (group (second unit)) (map (fn (t) (run-test group t)) (third unit))))
 
 ;; --- the two phases ----------------------------------------------------------
 ;; Parallel phase: spawn one worker per non-isolated unit (each worker captures
@@ -913,6 +920,7 @@ the test rather than hanging the run."
 ;; Output is emitted once at the end (a single structured report), so there is no
 ;; per-test progress to print here.
 (defn spawn-units (units me)
+  "Spawn one monitored worker process per unit in `units` — each runs its unit and sends `(:unit-result pid results)` back to `me` — and return an assoc list of `(pid unit)` so the collector can correlate results. `monitor` lets a worker that dies before reporting become a failure rather than a hang."
   ;; Spawn one MONITORED worker per unit and return an assoc list of
   ;; `(pid unit)`. Each worker tags its message with its own pid (`(self)`),
   ;; which equals the pid `spawn` returns — so the collector can correlate a
@@ -1035,7 +1043,7 @@ the test rather than hanging the run."
 
 ;; The unit a monitored worker `pid` was spawned for, or nil if `pid` isn't one
 ;; of ours (e.g. a stale `[:down …]` from a previous run still in the mailbox).
-(defn unit-of-pid (pid workers)
+(defn- unit-of-pid (pid workers)
   (cond
     (empty? workers) nil
     (= (first (first workers)) pid) (second (first workers))
@@ -1045,7 +1053,7 @@ the test rather than hanging the run."
 ;; test in its unit, carrying the exit reason — so a crashed/raced worker fails
 ;; fast as a visible failure instead of hanging the collector. A result tuple is
 ;; `(group name fails ms)`; a failure record is `(loc detail-lines)` with loc nil.
-(defn dead-unit-results (unit reason)
+(defn- dead-unit-results (unit reason)
   (map (fn (t)
          (list (second unit)
            (first t)
@@ -1065,7 +1073,7 @@ the test rather than hanging the run."
 ;; presumed hung. Hard-kill each — `(exit pid :kill)` stops even a tight non-receive
 ;; loop (ADR-063) — and synthesize a timeout failure for each of its tests, so a hung
 ;; test FAILS instead of wedging the collector. Returns the full result list.
-(defn collect-timeout (workers reported acc)
+(defn- collect-timeout (workers reported acc)
   (fold (fn (a w)
           (if (includes? reported (first w))
             a
@@ -1076,7 +1084,7 @@ the test rather than hanging the run."
 
 ;; A timeout failure per test in a hung unit — same shape as `dead-unit-results`:
 ;; `(group name fails ms)`, `fails` = `((loc detail-lines))`.
-(defn timeout-unit-results (unit)
+(defn- timeout-unit-results (unit)
   (map (fn (t)
          (list (second unit)
            (first t)
@@ -1104,6 +1112,7 @@ the test rather than hanging the run."
     workers))
 
 (defn collect-units (workers acc)
+  "Collect the results of one batch of spawned `workers` (a list of `(pid unit)`), accumulating onto `acc`. Waits for each worker's `:unit-result` (or its monitor `:down`) under a fresh per-batch deadline, hard-killing and failing any straggler that overruns. A `:slow`/`:conformance`-tagged batch runs under the raised `*test-slow-timeout-ms*` budget."
   ;; Fixed wall deadline for this batch — recomputed per collect, so each isolated
   ;; unit / parallel chunk gets its own full budget. A `:slow`-tagged unit raises the
   ;; budget for its batch (see `*test-slow-timeout-ms*`); rebinding the var rather
@@ -1113,7 +1122,7 @@ the test rather than hanging the run."
       (collect-loop (count workers) workers nil acc (+ (now) *test-timeout-ms*)))
     (collect-loop (count workers) workers nil acc (+ (now) *test-timeout-ms*))))
 
-(defn collect-loop (pending workers reported acc deadline)
+(defn- collect-loop (pending workers reported acc deadline)
   (if (= pending 0)
     acc
     ;; `(m m)` takes the next message; `(after …)` fires when the budget is spent.
@@ -1158,7 +1167,7 @@ the test rather than hanging the run."
 ;; Run a whole unit with each test under `%isolate` (global-def rollback). This
 ;; is what an isolated unit's *own* worker process evaluates.
 ; -> results
-(defn run-unit-fresh (unit)
+(defn- run-unit-fresh (unit)
   (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (third unit))))
 ;; ─── The test runner ────────────────────────────────────────────────────────
 ;; The runner is one long-lived process gathering every step's results. Its
@@ -1219,7 +1228,7 @@ the test rather than hanging the run."
   (results)
   (and (> *test-max-failures* 0) (>= (count-failed results) *test-max-failures*)))
 
-(defn run-driver (steps parent acc)
+(defn- run-driver (steps parent acc)
   (if (or (empty? steps) (test-max-failures-hit? acc))
     (send parent [:all-results acc])
     (let (results (run-step (first steps)))
@@ -1228,7 +1237,7 @@ the test rather than hanging the run."
 
 ;; Spawn the driver and block until it reports every unit's results. Monitors it
 ;; so a driver crash surfaces as an error instead of hanging the suite.
-(defn drain-runner (iso par)
+(defn- drain-runner (iso par)
   (let (me (self)
         d (spawn (run-driver (run-steps iso par) me nil))
         mref (monitor d))
@@ -1247,7 +1256,7 @@ the test rather than hanging the run."
 
 ;; Split the currently-registered units into (iso par) and drain them — the shared
 ;; body of `run-tests` and `run-tests-scoped`.
-(defn drain-current ()
+(defn- drain-current ()
   (let (units (test-select-units (reverse *units*) *test-filter*)
         par (filter (fn (u) (not= (first u) :isolated)) units)
         iso (filter (fn (u) (= (first u) :isolated)) units))
@@ -1276,7 +1285,7 @@ the test rather than hanging the run."
 ;; file, which line, what was wrong) buried inside a printed map. Now the file becomes
 ;; one clearly-located failure, the other files still run, and the run still exits
 ;; non-zero.
-(defn drain-one-file (loader)
+(defn- drain-one-file (loader)
   (reset-units!)
   (let (outcome (try (do (loader) :%loaded) (catch e (list :%load-failed e))))
     (if (= outcome :%loaded)
@@ -1303,7 +1312,7 @@ the test rather than hanging the run."
       false
       (if (and (not (= shown "")) (not (nil? line))) (str shown ":" line) ""))))
 
-(defn drain-files-scoped (loaders)
+(defn- drain-files-scoped (loaders)
   ;; Accumulate each file's result LIST with `cons` (O(1)) into a reverse-order list of
   ;; lists, then flatten once — O(total results). (A naive `(append acc file-results)`
   ;; per file is O(files²): it recopies the growing accumulator every file, which made a
@@ -1386,14 +1395,15 @@ the test rather than hanging the run."
 
 ;; --- reporting ---------------------------------------------------------------
 ;; A failure record is (loc detail-lines): loc is (file line col) or nil.
-(defn fail-loc-of (rec) (first rec))
-(defn fail-lines-of (rec) (second rec))
+(defn- fail-loc-of (rec) (first rec))
+(defn- fail-lines-of (rec) (second rec))
 
 ;; The anchor line for a failed assertion. With a location it's the GNU
 ;; `FILE:LINE:COL: message` form that compilation-mode / flymake parse and make
 ;; clickable; without one, just the message. The labeled fields print indented
 ;; under it. See docs/tooling.md.
 (defn fail-anchor (r rec)
+  "The anchor line for one failure record `rec` of result `r`: the bold `file:line:col` location (from `fail-where`), then `test failed: ` and the test's full `group › name`. The clickable header a reporter prints above the failure's indented fields."
   (let (where (fail-where r rec))
     (str (if (= where "") "" (str (test-bold where) ": "))
       (test-red "test failed: ")
@@ -1410,6 +1420,7 @@ the test rather than hanging the run."
 ;; only `test failed: group › name` with nothing to jump to; it now falls back to the
 ;; test's own declaration site, which the result carries.
 (defn fail-where (r rec)
+  "Where a failure occurred, as `file:line:col` relative to the working directory. Uses the failure record `rec`'s own captured position when it has one; otherwise falls back to result `r`'s declaration site (`r-where`), and \"\" only when neither is known."
   (let (loc (fail-loc-of rec))
     (cond
       loc (str (test-relative-path (first loc)) ":" (second loc) ":" (third loc))
@@ -1421,7 +1432,7 @@ the test rather than hanging the run."
 ;; Print every failure of a result: a blank line, the anchor, then its fields
 ;; indented. The leading blank separates consecutive failures, which otherwise run
 ;; together into a wall that is hard to scan.
-(defn print-failure (indent r)
+(defn- print-failure (indent r)
   (fold (fn (_ rec)
           (println "")
           (println (fail-anchor r rec))
@@ -1441,11 +1452,11 @@ the test rather than hanging the run."
 
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
-(defn report-failures (results)
+(defn- report-failures (results)
   (let (failed (filter r-failed? results))
     (unless (empty? failed) (fold (fn (_ r) (print-failure "    " r)) nil failed))))
 
-(defn report-slow (results n)
+(defn- report-slow (results n)
   (println "")
   (println (str "Slowest " n " tests:"))
   (let (timings (map (fn (r) [(full-name r) (r-ms r)]) results))
@@ -1458,7 +1469,7 @@ the test rather than hanging the run."
       (take n (sort-by-ms timings)))))
 
 ;; "1.3s" from milliseconds — one decimal, rounded to nearest 0.1s.
-(defn secs-str (ms)
+(defn- secs-str (ms)
   (let (tenths (quot (+ ms 50) 100)) (str (quot tenths 10) "." (rem tenths 10) "s")))
 
 ;; Always-on slow-test surfacing: list every test slower than `over` ms (slowest
@@ -1466,7 +1477,7 @@ the test rather than hanging the run."
 ;; `report-slow` (the opt-in `:slow` top-5), this fires automatically. Prints
 ;; nothing when every test is under the threshold — the common, fast case stays
 ;; quiet.
-(defn report-slow-over (results over)
+(defn- report-slow-over (results over)
   (let (slow (filter (fn (p) (> (second p) over))
                (map (fn (r) [(full-name r) (r-ms r)]) results)))
     (unless (empty? slow)
@@ -1478,12 +1489,14 @@ the test rather than hanging the run."
         (sort-by-ms slow)))))
 
 (defn count-failed (results)
+  "Count the results in `results` that have at least one failed assertion (a failing test, not the total number of failed assertions)."
   ; tests with at least one failed assertion
   (fold (fn (acc r) (if (r-failed? r) (+ acc 1) acc)) 0 results))
 (defn count-skipped (results)
+  "Count the results in `results` that were skipped — registered with `:skip` but never run."
   ; tests that registered but were never run (`:skip`)
   (fold (fn (acc r) (if (r-skipped? r) (+ acc 1) acc)) 0 results))
-(defn count-failures (results)
+(defn- count-failures (results)
   ; total failed assertions across tests
   (fold (fn (acc r) (+ acc (count (r-fails r)))) 0 results))
 

@@ -28,6 +28,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 ;; default. So `nest format` / the LSP / `nest mcp` all honour a project that pins,
 ;; say, `:width 80`, and a bare `brood`-run format uses the default.
 (defn width ()
+  "The effective column budget: the project's `:width` when set, else the built-in default."
   (or *project-width* *width*))
 
 ;; ---- CST node accessors -----------------------------------------------------
@@ -37,22 +38,30 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 ;; payload is a vector of children (including trivia, so blank-line + comment
 ;; intent is recoverable). See the `parse-source` doc in builtins.rs.
 
-(defn node-kind (n) (vector-ref n 0))
-(defn node-text (n) (vector-ref n 1))
+(defn node-kind (n)
+  "The kind keyword of CST node `n` (`:list`, `:symbol`, `:whitespace`, …)."
+  (vector-ref n 0))
+(defn node-text (n)
+  "The raw source text of leaf node `n` (so it re-emits byte-for-byte)."
+  (vector-ref n 1))
 ; leaf
-(defn node-form (n) (vector-ref n 1))
+(defn- node-form (n) (vector-ref n 1))
 ; wrapper (quote/quasi/unquote/splice)
-(defn node-children (n) (vector-ref n 1))
+(defn node-children (n)
+  "The child-node vector of container node `n` (includes trivia)."
+  (vector-ref n 1))
 ; container (a vector)
 
-(defn whitespace? (n) (= (node-kind n) :whitespace))
-(defn comment? (n) (= (node-kind n) :comment))
-(defn trivia? (n) (or (whitespace? n) (comment? n)))
+(defn- whitespace? (n) (= (node-kind n) :whitespace))
+(defn- comment? (n) (= (node-kind n) :comment))
+(defn trivia? (n)
+  "True if node `n` is trivia — whitespace or a comment."
+  (or (whitespace? n) (comment? n)))
 
-(defn container? (n)
+(defn- container? (n)
   (let (k (node-kind n)) (or (= k :list) (= k :vector) (= k :map) (= k :set) (= k :root))))
 
-(defn wrapper? (n)
+(defn- wrapper? (n)
   (let (k (node-kind n))
     (or (= k :quote) (= k :quasi) (= k :unquote) (= k :splice) (= k :pin))))
 
@@ -75,7 +84,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 ;; `(apply str (repeat n s))` is a single O(total length) pass. The runtime shares
 ;; one global table, so this local copy clobbered the prelude's for the whole image
 ;; once `format` was required. Use the prelude's.)
-(defn indent-of (n) (string/repeat " " n))
+(defn- indent-of (n) (string/repeat " " n))
 
 ;; The whitespace inside a comment node is `";; foo\n"` — the trailing newline
 ;; is part of the node. We strip it before emitting so glue logic owns the
@@ -195,12 +204,15 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 ;; reader now only needs this list touched.
 (def *verbatim-kinds*
   #{:symbol :keyword :int :float :ratio :decimal :bool :nil :error})
-(defn verbatim-kind? (k) (contains? *verbatim-kinds* k))
+(defn verbatim-kind? (k)
+  "True if node kind `k` re-emits as exactly its own source text (a leaf literal)."
+  (contains? *verbatim-kinds* k))
 
 ;; Single-line emit: returns the string, or nil if the node cannot legally
 ;; appear on one line (it contains a comment, or a string with a literal
 ;; newline). Recursive — a list inlines only if every child does.
 (defn single-line (n)
+  "Render node `n` on one line, or nil if it can't legally be single-line (it contains a comment, or a string with a literal newline). Recursive — a list inlines only if every child does."
   (let (k (node-kind n))
     (cond
       (= k :whitespace) " "
@@ -240,7 +252,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       (nil? forms) (str open close)
       else (single-line-seq-build forms open close))))
 
-(defn any-comment? (kids)
+(defn- any-comment? (kids)
   ;; Direct-child comment? (Sub-list comments are caught recursively when their
   ;; parent calls single-line on them.)
   (any-comment-at kids 0 (vector-length kids)))
@@ -253,12 +265,13 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   (let (parts (map single-line forms))
     (if (any-nil? parts) nil (str open (string/join " " parts) close))))
 
-(defn any-nil? (xs) (cond (nil? xs) false (nil? (first xs)) true else (any-nil? (rest xs))))
+(defn- any-nil? (xs) (cond (nil? xs) false (nil? (first xs)) true else (any-nil? (rest xs))))
 
 ;; ---- multi-line emit --------------------------------------------------------
 ;; `render n indent` produces the canonical text for node n, possibly multi-line.
 ;; The result never ends with a newline (callers own the gluing).
 (defn render (n indent)
+  "Render node `n` at column `indent` as canonical text, breaking across lines when it exceeds the width budget. The result never ends with a newline (callers own the gluing)."
   (let (k (node-kind n))
     (cond
       (or (verbatim-kind? k) (= k :str)) (node-text n)
@@ -324,7 +337,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 ;; fixed point: a form that renders multi-line is recognised as broken on every
 ;; subsequent pass. Idempotent: a fully single-line form has no inner newline at
 ;; any depth and answers false.
-(defn had-author-newlines? (n)
+(defn- had-author-newlines? (n)
   (let (k (node-kind n))
     (cond
       (or (= k :list) (= k :vector) (= k :map) (= k :set))
@@ -447,7 +460,7 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; right after `(`, or a comment following another comment (each comment node
 ;; carries its own trailing newline, so the separating whitespace is just
 ;; indentation with no newline of its own).
-(defn comment-on-own-line? (kids i)
+(defn- comment-on-own-line? (kids i)
   (cond
     (< i 0) true
     (and (whitespace? (vector-ref kids i)) (includes? (node-text (vector-ref kids i)) "\n")) true
@@ -465,12 +478,12 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; and the first argument (second structural form). Such a comment would be
 ;; dropped by the generic-call head-ride (which jumps from the head straight to
 ;; the first body form), so the caller breaks instead of riding when it's true.
-(defn comment-before-first-arg? (kids)
+(defn- comment-before-first-arg? (kids)
   (let (head-i (kids-index-of-form kids 0) n (vector-length kids))
     (and (< head-i n) (comment-before-next-form? kids (inc head-i) n))))
 ;; Scanning forward from `i`, is the next non-whitespace node a comment (rather
 ;; than a structural form)? Stops at the first form (false) or first comment (true).
-(defn comment-before-next-form? (kids i n)
+(defn- comment-before-next-form? (kids i n)
   (cond
     (= i n) false
     (whitespace? (vector-ref kids i)) (comment-before-next-form? kids (inc i) n)
@@ -546,7 +559,7 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; the opening `(`). Comments are preserved — a same-line trailing comment is
 ;; hoisted onto its own line *above* its pair, an own-line comment sits on its own
 ;; line at the pair indent (the walker pairs name+value but never *across* a comment).
-(defn render-pair-list (n indent)
+(defn- render-pair-list (n indent)
   ;; Skip the flat `single-line` when already broken — same perf fix as `render-seq`.
   (let (keep-broken (had-author-newlines? n)
         one (if keep-broken nil (single-line n)))
@@ -753,7 +766,7 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; as the form in the source. Each render site **hoists** such a comment onto its
 ;; own line *above* the form (a trailing comment never stays after the code on the
 ;; same line). Returns the index of that comment, or nil if there is none.
-(defn trailing-comment-at (kids start n) (trailing-comment-at-scan kids start n))
+(defn- trailing-comment-at (kids start n) (trailing-comment-at-scan kids start n))
 (defn- trailing-comment-at-scan
   (kids i n)
   (cond
@@ -767,7 +780,7 @@ retired the `comment-on-own-line?` distinction this used to need."
 
 ;; True if any structural body arg (from start-idx) is itself a container — then
 ;; fill is the wrong layout (containers read best one per line, CL `:linear`).
-(defn body-has-container? (kids start-idx)
+(defn- body-has-container? (kids start-idx)
   (body-has-container?-at kids start-idx (vector-length kids)))
 (defn- body-has-container?-at
   (kids i n)
@@ -886,6 +899,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   (let (root (parse-source src)) (cst-root (node-children root))))
 
 (defn cst-root (kids)
+  "Render the root's child nodes `kids` — the top-level forms — into the formatted source string, with exactly one trailing newline."
   ;; The walk accumulates the top-level blocks as a REVERSED chunk list, joined once here.
   ;; It used to accumulate the output string itself — `(str acc "\n" block)` per top-level
   ;; form — which recopies everything emitted so far, i.e. O(forms × file). That reads as
