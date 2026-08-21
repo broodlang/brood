@@ -850,7 +850,7 @@ A single runtime has one set of processes, so one self-window is what you want �
 pass a **distinct `key`** for a SEPARATE window when you genuinely want a different
 *kind* of view side by side (a second pane, or — later — a remote source): different
 keys coexist, each unique. Needs a `--features gui` runtime (`./configure --with-gui
-&& make install`); without it the spawned process dies when `gui-open` errors.
+&& make install`); without it the spawned process dies when `gui/open` errors.
 
     (observe)         ; => pid; opens the self window
     (observe)         ; => the SAME pid; no second window
@@ -859,7 +859,7 @@ keys coexist, each unique. Needs a `--features gui` runtime (`./configure --with
 For a modal terminal observer instead, call `(observe-attach *term-display*)`."
   ;; The window process registers under the per-key name. If one is already alive,
   ;; don't re-spawn (the named `spawn` would no-op anyway, ADR-039) — instead send it
-  ;; `:focus`, which `ui-run` turns into `gui-focus` on its window, surfacing it to
+  ;; `:focus`, which `ui-run` turns into `gui/focus` on its window, surfacing it to
   ;; the front. Otherwise spawn fresh; `(gui-display)` (opening the window) runs only
   ;; in that branch. `send` to a just-died pid is a harmless no-op (race-safe).
   (let (nm (observe-window-key key)

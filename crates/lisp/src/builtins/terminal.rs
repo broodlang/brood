@@ -718,13 +718,13 @@ pub(super) fn gui_window_id(heap: &Heap, who: &str, v: Value) -> Result<u64, Lis
 pub(super) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let title = match arg(args, 0) {
         Value::Nil => None,
-        v => Some(expect_string(heap, "gui-open", v)?),
+        v => Some(expect_string(heap, "%gui-open", v)?),
     };
     let size = match arg(args, 1) {
         Value::Nil => None,
         w => Some((
-            expect_int(heap, "gui-open", w)? as f64,
-            expect_int(heap, "gui-open", arg(args, 2))? as f64,
+            expect_int(heap, "%gui-open", w)? as f64,
+            expect_int(heap, "%gui-open", arg(args, 2))? as f64,
         )),
     };
     // 4th arg: an opts map of build-time window attributes.
@@ -749,7 +749,7 @@ pub(super) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     let app_id = match opts.and_then(|id| heap.map_get(id, value::kw("app-id"))) {
         Some(Value::Nil) | None => None,
         Some(v) => {
-            let name = expect_string(heap, "gui-open", v)?;
+            let name = expect_string(heap, "%gui-open", v)?;
             if name.is_empty() {
                 return Err(LispError::runtime(
                     "gui-open: :app-id must not be empty — it names the .desktop entry \
@@ -790,15 +790,15 @@ pub(super) fn audio_beep(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 
 /// `(gui-close id)` — close window `id` (the teardown for `gui-open`; idempotent).
 pub(super) fn gui_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-close", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-close", arg(args, 0))?;
     crate::gui::close(id).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
 
 /// `(gui-title! id text)` — set window `id`'s OS title-bar text at runtime.
 pub(super) fn gui_title(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-title!", arg(args, 0))?;
-    let title = expect_string(heap, "gui-title!", arg(args, 1))?;
+    let id = gui_window_id(heap, "%gui-title!", arg(args, 0))?;
+    let title = expect_string(heap, "%gui-title!", arg(args, 1))?;
     crate::gui::title(id, title).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
@@ -806,9 +806,9 @@ pub(super) fn gui_title(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// `(gui-icon! id rgba w h)` — set window `id`'s taskbar/title-bar icon from raw RGBA
 /// pixels (a vector of `w*h*4` byte ints, row-major).
 pub(super) fn gui_icon(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-icon!", arg(args, 0))?;
-    let w = expect_int(heap, "gui-icon!", arg(args, 2))? as u32;
-    let h = expect_int(heap, "gui-icon!", arg(args, 3))? as u32;
+    let id = gui_window_id(heap, "%gui-icon!", arg(args, 0))?;
+    let w = expect_int(heap, "%gui-icon!", arg(args, 2))? as u32;
+    let h = expect_int(heap, "%gui-icon!", arg(args, 3))? as u32;
     let rgba: Vec<u8> = match arg(args, 1) {
         Value::Vector(vid) => heap
             .vector(vid)
@@ -832,7 +832,7 @@ pub(super) fn gui_icon(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 /// it). Lets an app surface an already-open singleton window instead of opening a
 /// duplicate. Errors only if `id` isn't a live window.
 pub(super) fn gui_focus(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-focus", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-focus", arg(args, 0))?;
     crate::gui::focus(id).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
@@ -840,7 +840,7 @@ pub(super) fn gui_focus(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// `(gui-grab-cursor id on)` — confine the pointer to window `id` while `on` is
 /// truthy, release it otherwise.
 pub(super) fn gui_grab_cursor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-grab-cursor", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-grab-cursor", arg(args, 0))?;
     let on = crate::eval::truthy(arg(args, 1));
     crate::gui::grab(id, on).map_err(LispError::runtime)?;
     Ok(Value::nil())
@@ -849,7 +849,7 @@ pub(super) fn gui_grab_cursor(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 /// `(gui-fullscreen! id on)` — make window `id` borderless-fullscreen (`on` truthy)
 /// or restore it to a normal window.
 pub(super) fn gui_fullscreen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-fullscreen!", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-fullscreen!", arg(args, 0))?;
     let on = crate::eval::truthy(arg(args, 1));
     crate::gui::fullscreen(id, on).map_err(LispError::runtime)?;
     Ok(Value::nil())
@@ -859,7 +859,7 @@ pub(super) fn gui_fullscreen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 /// for an app that draws its own window controls, which a borderless window
 /// (`gui-open` with `{:decorations false}`) must.
 pub(super) fn gui_minimize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-minimize!", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-minimize!", arg(args, 0))?;
     crate::gui::minimize(id).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
@@ -871,7 +871,7 @@ pub(super) fn gui_minimize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// there is nothing to grab, so the app nominates a region of its own chrome (a
 /// browser's tab strip) and calls this when a press lands there.
 pub(super) fn gui_drag_move(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-drag-move", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-drag-move", arg(args, 0))?;
     crate::gui::drag_move(id).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
@@ -881,10 +881,10 @@ pub(super) fn gui_drag_move(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 /// `:north-west` `:south-east` `:south-west`. The window-frame counterpart of
 /// `gui-drag-move`, for a borderless window that draws its own edges.
 pub(super) fn gui_drag_resize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-drag-resize", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-drag-resize", arg(args, 0))?;
     let dir = match arg(args, 1) {
         Value::Keyword(sym) => value::symbol_name(sym),
-        v => expect_string(heap, "gui-drag-resize", v)?,
+        v => expect_string(heap, "%gui-drag-resize", v)?,
     };
     crate::gui::drag_resize(id, &dir).map_err(LispError::runtime)?;
     Ok(Value::nil())
@@ -893,7 +893,7 @@ pub(super) fn gui_drag_resize(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 /// `(gui-maximize! id on)` — maximise window `id` (`on` truthy) or restore it,
 /// keeping the title bar / decorations (unlike fullscreen).
 pub(super) fn gui_maximize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-maximize!", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-maximize!", arg(args, 0))?;
     let on = crate::eval::truthy(arg(args, 1));
     crate::gui::maximize(id, on).map_err(LispError::runtime)?;
     Ok(Value::nil())
@@ -902,7 +902,7 @@ pub(super) fn gui_maximize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// `(gui-size id)` — window `id`'s size as `[cols rows]` (character cells), same
 /// shape as `term-size`.
 pub(super) fn gui_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-size", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-size", arg(args, 0))?;
     let (cols, rows) = crate::gui::size(id).map_err(LispError::runtime)?;
     Ok(heap.alloc_vector(vec![Value::int(cols as i64), Value::int(rows as i64)]))
 }
@@ -927,7 +927,7 @@ pub(super) fn gui_key_to_value(heap: &mut Heap, k: crate::gui::Key) -> Value {
 /// consumer-paced key repeat polls to stop the instant the key is up — making a
 /// missed key-up unable to cause runaway repeat (ADR-086).
 pub(super) fn gui_held_key(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = gui_window_id(heap, "gui-held-key", arg(args, 0))?;
+    let id = gui_window_id(heap, "%gui-held-key", arg(args, 0))?;
     match crate::gui::held_key(id).map_err(LispError::runtime)? {
         Some(k) => Ok(gui_key_to_value(heap, k)),
         None => Ok(Value::nil()),
@@ -992,10 +992,10 @@ fn parse_gui_ops(
         if tag == tags.clear_t {
             ops.push(crate::gui::Op::Clear);
         } else if tag == tags.cursor_t {
-            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+            let Ok(row_i) = expect_int(heap, "%gui-draw", arg(&parts, 1)) else {
                 continue;
             };
-            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+            let Ok(col_i) = expect_int(heap, "%gui-draw", arg(&parts, 2)) else {
                 continue;
             };
             let style = cursor_style_from(parts.get(3).copied().unwrap_or(Value::nil()));
@@ -1005,16 +1005,16 @@ fn parse_gui_ops(
                 style,
             });
         } else if tag == tags.rect_t {
-            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+            let Ok(row_i) = expect_int(heap, "%gui-draw", arg(&parts, 1)) else {
                 continue;
             };
-            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+            let Ok(col_i) = expect_int(heap, "%gui-draw", arg(&parts, 2)) else {
                 continue;
             };
-            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else {
+            let Ok(w_i) = expect_int(heap, "%gui-draw", arg(&parts, 3)) else {
                 continue;
             };
-            let Ok(h_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else {
+            let Ok(h_i) = expect_int(heap, "%gui-draw", arg(&parts, 4)) else {
                 continue;
             };
             let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::nil()));
@@ -1054,13 +1054,13 @@ fn parse_gui_ops(
                 radius,
             });
         } else if tag == tags.text_t {
-            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+            let Ok(row_i) = expect_int(heap, "%gui-draw", arg(&parts, 1)) else {
                 continue;
             };
-            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+            let Ok(col_i) = expect_int(heap, "%gui-draw", arg(&parts, 2)) else {
                 continue;
             };
-            let Ok(s) = expect_string(heap, "gui-draw", arg(&parts, 3)) else {
+            let Ok(s) = expect_string(heap, "%gui-draw", arg(&parts, 3)) else {
                 continue;
             };
             let face = gui_face(heap, parts.get(4).copied().unwrap_or(Value::nil()));
@@ -1071,16 +1071,16 @@ fn parse_gui_ops(
                 face,
             });
         } else if tag == tags.cursor_zone_t {
-            let Ok(x_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+            let Ok(x_i) = expect_int(heap, "%gui-draw", arg(&parts, 1)) else {
                 continue;
             };
-            let Ok(y_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+            let Ok(y_i) = expect_int(heap, "%gui-draw", arg(&parts, 2)) else {
                 continue;
             };
-            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else {
+            let Ok(w_i) = expect_int(heap, "%gui-draw", arg(&parts, 3)) else {
                 continue;
             };
-            let Ok(h_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else {
+            let Ok(h_i) = expect_int(heap, "%gui-draw", arg(&parts, 4)) else {
                 continue;
             };
             let shape = match parts.get(5) {
@@ -1105,10 +1105,10 @@ fn parse_gui_ops(
                 });
             }
         } else if tag == tags.vspans_t {
-            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+            let Ok(row0_i) = expect_int(heap, "%gui-draw", arg(&parts, 1)) else {
                 continue;
             };
-            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+            let Ok(col0_i) = expect_int(heap, "%gui-draw", arg(&parts, 2)) else {
                 continue;
             };
             let col_vals: Vec<Value> = match arg(&parts, 3) {
@@ -1128,7 +1128,7 @@ fn parse_gui_ops(
                         _ => continue,
                     };
                     if s.len() >= 2 {
-                        let Ok(h) = expect_int(heap, "gui-draw", s[0]) else {
+                        let Ok(h) = expect_int(heap, "%gui-draw", s[0]) else {
                             continue;
                         };
                         segs.push((clamp_u16(h), span_color(heap, s[1])));
@@ -1142,16 +1142,16 @@ fn parse_gui_ops(
                 cols,
             });
         } else if tag == tags.cells_t {
-            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+            let Ok(row0_i) = expect_int(heap, "%gui-draw", arg(&parts, 1)) else {
                 continue;
             };
-            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+            let Ok(col0_i) = expect_int(heap, "%gui-draw", arg(&parts, 2)) else {
                 continue;
             };
-            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else {
+            let Ok(w_i) = expect_int(heap, "%gui-draw", arg(&parts, 3)) else {
                 continue;
             };
-            let Ok(asp_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else {
+            let Ok(asp_i) = expect_int(heap, "%gui-draw", arg(&parts, 4)) else {
                 continue;
             };
             let bytes = match arg(&parts, 5) {
@@ -1159,7 +1159,7 @@ fn parse_gui_ops(
                     Some(blob) => blob.as_bytes().to_vec(),
                     None => heap.string(id).as_bytes().to_vec(),
                 },
-                v => match expect_bigint(heap, "gui-draw", v) {
+                v => match expect_bigint(heap, "%gui-draw", v) {
                     Ok(b) => b.magnitude().to_bytes_le(),
                     Err(_) => continue,
                 },
@@ -1174,16 +1174,16 @@ fn parse_gui_ops(
                 color,
             });
         } else if tag == tags.cells_rgb_t {
-            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+            let Ok(row0_i) = expect_int(heap, "%gui-draw", arg(&parts, 1)) else {
                 continue;
             };
-            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+            let Ok(col0_i) = expect_int(heap, "%gui-draw", arg(&parts, 2)) else {
                 continue;
             };
-            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else {
+            let Ok(w_i) = expect_int(heap, "%gui-draw", arg(&parts, 3)) else {
                 continue;
             };
-            let Ok(asp_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else {
+            let Ok(asp_i) = expect_int(heap, "%gui-draw", arg(&parts, 4)) else {
                 continue;
             };
             let bytes = match arg(&parts, 5) {
@@ -1191,7 +1191,7 @@ fn parse_gui_ops(
                     Some(blob) => blob.as_bytes().to_vec(),
                     None => heap.string(id).as_bytes().to_vec(),
                 },
-                v => match expect_bigint(heap, "gui-draw", v) {
+                v => match expect_bigint(heap, "%gui-draw", v) {
                     Ok(b) => b.magnitude().to_bytes_le(),
                     Err(_) => continue,
                 },
@@ -1227,7 +1227,7 @@ fn parse_gui_ops(
             // cell_h pixels. Self-resetting block; ops outside are unaffected. ADR-114.
             let dy_frac = num(arg(&parts, 1));
             let inner_val = arg(&parts, 2);
-            if let Ok(inner_parsed) = frame_ops(heap, inner_val, "gui-draw", "scroll-region ops") {
+            if let Ok(inner_parsed) = frame_ops(heap, inner_val, "%gui-draw", "scroll-region ops") {
                 let inner_ops = parse_gui_ops(heap, inner_parsed, tags);
                 ops.push(crate::gui::Op::ScrollRegion {
                     dy_frac,
@@ -1240,8 +1240,8 @@ fn parse_gui_ops(
 }
 
 pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let win = gui_window_id(heap, "gui-draw", arg(args, 0))?;
-    let parsed = frame_ops(heap, arg(args, 1), "gui-draw", "vector (a frame)")?;
+    let win = gui_window_id(heap, "%gui-draw", arg(args, 0))?;
+    let parsed = frame_ops(heap, arg(args, 1), "%gui-draw", "vector (a frame)")?;
     let tags = GuiOpTags::new();
     let ops = parse_gui_ops(heap, parsed, &tags);
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;
@@ -1291,7 +1291,7 @@ pub(super) fn gui_font(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     // (gui-font! spec) → global default; (gui-font! id spec) → just window `id`.
     let (win, spec) = if args.len() >= 2 {
         (
-            Some(gui_window_id(heap, "gui-font!", arg(args, 0))?),
+            Some(gui_window_id(heap, "%gui-font!", arg(args, 0))?),
             arg(args, 1),
         )
     } else {
@@ -1300,7 +1300,7 @@ pub(super) fn gui_font(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     let Value::Map(m) = spec else {
         return Err(LispError::wrong_type(
             heap,
-            "gui-font!",
+            "%gui-font!",
             "map (a font spec)",
             spec,
         ));
@@ -1324,7 +1324,7 @@ pub(super) fn gui_inset(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         other => {
             return Err(LispError::wrong_type(
                 heap,
-                "gui-inset!",
+                "%gui-inset!",
                 "a number (pixels)",
                 other,
             ))
@@ -1346,7 +1346,7 @@ pub(super) fn gui_bg(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         other => Some(face_rgb(heap, other).ok_or_else(|| {
             LispError::wrong_type(
                 heap,
-                "gui-bg!",
+                "%gui-bg!",
                 "a colour (keyword, [r g b] vector, or \"#rrggbb\" string) or nil",
                 other,
             )
@@ -1368,7 +1368,7 @@ pub(super) fn gui_font_register(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
         other => {
             return Err(LispError::wrong_type(
                 heap,
-                "gui-font-register",
+                "%gui-font-register",
                 "keyword",
                 other,
             ))
@@ -1377,7 +1377,7 @@ pub(super) fn gui_font_register(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     let Value::Map(id) = arg(args, 1) else {
         return Err(LispError::wrong_type(
             heap,
-            "gui-font-register",
+            "%gui-font-register",
             "map (style → path)",
             arg(args, 1),
         ));
@@ -1386,7 +1386,7 @@ pub(super) fn gui_font_register(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     let path = |key: &str| -> Result<Option<String>, LispError> {
         match heap.map_get(id, value::kw(key)) {
             None | Some(Value::Nil) => Ok(None),
-            Some(v) => Ok(Some(expect_string(heap, "gui-font-register", v)?)),
+            Some(v) => Ok(Some(expect_string(heap, "%gui-font-register", v)?)),
         }
     };
     let read = |p: &str| -> Result<Vec<u8>, LispError> {

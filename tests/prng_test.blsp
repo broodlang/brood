@@ -10,48 +10,48 @@
 (defn prng-draws (seed n acc)
   (if (= n 0)
     (reverse acc)
-    (let ([v s] (rng seed))
+    (let ([v s] (rand/rng seed))
       (prng-draws s (dec n) (cons v acc)))))
 
 (describe "rng — the seeded step"
   (test "same seed yields the same value (deterministic, pure)"
-    (let ([va _] (rng 42) [vb _] (rng 42))
+    (let ([va _] (rand/rng 42) [vb _] (rand/rng 42))
       (assert= va vb)))
   (test "the same seed yields the same stream"
     (assert= (prng-draws 7 20 nil) (prng-draws 7 20 nil)))
   (test "different seeds diverge"
     (refute (= (prng-draws 1 10 nil) (prng-draws 2 10 nil))))
   (test "values are non-negative 32-bit ints"
-    (let ([v _] (rng 12345))
+    (let ([v _] (rand/rng 12345))
       (is (and (>= v 0) (< v 4294967296)))
       (assert= (type-of v) :int)))
   (test "threading next-seed advances the stream"
-    (let ([v1 s1] (rng 99) [v2 _] (rng s1))
+    (let ([v1 s1] (rand/rng 99) [v2 _] (rand/rng s1))
       (refute (= v1 v2)))))
 
 ; 2^32 -> 0 -> default seed
-(describe "rand-seed — seed normalization"
+(describe "rand/seed — seed normalization"
   (test "a zero seed maps to a nonzero state (xorshift32 cannot start at 0)"
-    (refute (= (rand-seed 0) 0)))
+    (refute (= (rand/seed 0) 0)))
   (test "normalization keeps the low 32 bits"
-    (assert= (rand-seed 5) 5)
-    (assert= (rand-seed 4294967296) 2463534242)))
-(describe "rand-int / rand-float — ranged draws"
-  (test "rand-int stays in [0, n) across many draws"
+    (assert= (rand/seed 5) 5)
+    (assert= (rand/seed 4294967296) 2463534242)))
+(describe "rand/int / rand/float — ranged draws"
+  (test "rand/int stays in [0, n) across many draws"
     (defn ri-loop (seed n ok)
       (if (= n 0)
         ok
-        (let ([i s] (rand-int seed 6))
+        (let ([i s] (rand/int seed 6))
           (ri-loop s (dec n) (and ok (>= i 0) (< i 6))))))
     (is (ri-loop 1 2000 true)))
-  (test "rand-int bound must be positive"
-    (assert-error (rand-int 1 0))
-    (assert-error (rand-int 1 -3)))
-  (test "rand-float stays in [0.0, 1.0)"
+  (test "rand/int bound must be positive"
+    (assert-error (rand/int 1 0))
+    (assert-error (rand/int 1 -3)))
+  (test "rand/float stays in [0.0, 1.0)"
     (defn rf-loop (seed n ok)
       (if (= n 0)
         ok
-        (let ([f s] (rand-float seed))
+        (let ([f s] (rand/float seed))
           (rf-loop s (dec n) (and ok (>= f 0.0) (< f 1.0))))))
     (is (rf-loop 3 2000 true))))
 
@@ -74,7 +74,7 @@
 
 (describe "property-based testing (check-property)"
   (test "a true property over random ints passes"
-    (check-property 200 (fn (s) (rand-int s 1000)) (fn (x) (and (>= x 0) (< x 1000)))))
+    (check-property 200 (fn (s) (rand/int s 1000)) (fn (x) (and (>= x 0) (< x 1000)))))
   (test "shuffle preserves length, checked over many random orders"
     (check-property 50 (fn (s) (shuffle s [1 2 3 4 5])) (fn (sh) (= (count sh) 5))))
   (test "sample always returns a member, over many draws"
@@ -84,7 +84,7 @@
     (is (test/test-failure? (try
                               (do
                                 (test/check-property-loop 100
-                                  (fn (s) (rand-int s 10))
+                                  (fn (s) (rand/int s 10))
                                   (fn (x) (< x 5))
                                   nil
                                   1

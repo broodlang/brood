@@ -7,7 +7,7 @@
 ;;    "section" by redefining ONE face, not by hunting inline `{:fg …}` literals
 ;;    through a renderer. The counterpart to `keymap` (key→command) and `display`
 ;;    (render-ops): this is "name → style".
-;;  - A FACE is the same attribute map `display.blsp`/`term/draw`/`gui-draw` already
+;;  - A FACE is the same attribute map `display.blsp`/`term/draw`/`gui/draw` already
 ;;    consume (`{:fg :red :bold true …}`), so `(face :ui/header)` drops straight into
 ;;    a `[:text row col s <face>]` op with no frontend change. `face` is the only
 ;;    resolution step — call sites never touch `*faces*` directly.
@@ -32,14 +32,14 @@
 ;;   :bold :reverse — flags, both frontends
 ;;   :underline :italic — flags (terminal + GUI)
 ;;   :family        — GUI only: a font-family keyword (`:mono` is the bundled
-;;                    default; others registered via `gui-font-register`)
-;;   :height        — GUI only: a hint, honored by the whole-window `gui-font!` knob
+;;                    default; others registered via `gui/font-register`)
+;;   :height        — GUI only: a hint, honored by the whole-window `gui/font!` knob
 ;;   :scale         — GUI only: a positive integer (default 1, capped at 16). The
 ;;                    op's text is drawn `:scale`× larger, occupying a scale×scale
 ;;                    block of cells anchored at its (row, col) — the per-section /
 ;;                    per-pane / per-buffer font knob (ADR-079). Distinct from
 ;;                    `:height` (which only re-sizes the whole window via
-;;                    `gui-font!`); the terminal frontend ignores it (renders 1×).
+;;                    `gui/font!`); the terminal frontend ignores it (renders 1×).
 ;;   :inherit       — a face NAME this face is layered over (local keys win)
 
 (defmodule editor/face
@@ -53,7 +53,7 @@ site.
     (text 0 0 \"hi\" (face :ui/header))   ; resolve a face into a render op
     (face-set :ui/header {:fg :cyan})    ; restyle everywhere, live
 
-A *face* is the same attribute map `term/draw`/`gui-draw` consume (`{:fg :red :bold
+A *face* is the same attribute map `term/draw`/`gui/draw` consume (`{:fg :red :bold
 true …}`); `face` resolves a name (following an `:inherit` chain) to that map, or
 nil (the default face) for an unknown name. The registry is a shared global, so a
 theme change is visible to a running UI on its next frame (late binding).")
