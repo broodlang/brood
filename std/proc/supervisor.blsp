@@ -18,7 +18,7 @@
 ;;    mistaken for a fresh crash (Erlang `receive` keeps non-matching msgs queued).
 ;;  - Teardown cascades into nested supervisors two ways: (1) a *crash* propagates
 ;;    down links automatically (a child supervisor traps, recognises its parent's
-;;    `[:EXIT]`, and shuts its own subtree down); (2) a *graceful* `stop-supervisor`
+;;    `[:EXIT]`, and shuts its own subtree down); (2) a *graceful* `stop`
 ;;    sends `[:$stop]` to a child marked `:shutdown :infinity`, which tears its own
 ;;    children down first. Mark every supervisor child `:shutdown :infinity`.
 
@@ -60,7 +60,7 @@ and roughly 9× more expensive per child. That is the right trade to make when a
 genuinely needs per-instance state; it is only worth avoiding when you are starting
 thousands of otherwise-identical children.
 
-Shutdown policy (how the supervisor *terminates* a child — on `stop-supervisor`, a
+Shutdown policy (how the supervisor *terminates* a child — on `stop`, a
 group restart, or intensity shutdown): `:brutal-kill` (default) hard-kills it;
 `:infinity` sends `[:$stop]` and waits for a clean exit; an integer waits that many
 ms before falling back to a hard kill. **Mark a supervisor child `:shutdown
@@ -68,12 +68,12 @@ ms before falling back to a hard kill. **Mark a supervisor child `:shutdown
 the grandchildren. (A supervisor *crash* tears the subtree down regardless, via
 link propagation — but a deliberate hard kill is untrappable, hence `:infinity`.)
 
-    (def sup (start-supervisor
+    (def sup (start
                [{:id :a :start (fn () (spawn-link (worker-a)))}
                 {:id :b :start (fn () (spawn-link (worker-b))) :restart :transient}]
                {:strategy :one-for-all :max-restarts 3 :max-seconds 5}))
     (which-children sup)   ; => list of {:id :pid :restart}
-    (stop-supervisor sup)  ; stop supervising AND terminate the children
+    (stop sup)  ; stop supervising AND terminate the children
 
 Children can also be managed at runtime (Elixir's DynamicSupervisor / OTP's
 start_child·terminate_child·restart_child·count_children) — a supervisor started
@@ -119,7 +119,7 @@ address the child by a stable name even though its pid changes across restarts."
         pid (start))
     (when (not (pid? pid))
       (error "supervisor: a child :start thunk must return a pid (got "
-        pid ") — it should end in (spawn …) / (remote-spawn …) / (start-supervisor …)"))
+        pid ") — it should end in (spawn …) / (remote-spawn …) / (start …)"))
     ; local or remote (ADR-067) — `link` routes by node
     (link pid)
     (when (get spec :name) (register (get spec :name) pid))
@@ -469,7 +469,7 @@ request, like OTP's `restart_child`). Reply the new pid, or `:not-found`."
   "Runs inside the freshly spawned supervisor process: trap exits (so child deaths
 arrive as `[:EXIT]` messages rather than killing us), start and link every child,
 build the initial state, and enter the loop. `parent` is the pid that called
-`start-supervisor` — if it's a supervisor it linked us in its own `start-child`, so
+`start` — if it's a supervisor it linked us in its own `start-child`, so
 its death reaches us as `[:EXIT parent …]` and we shut our subtree down."
   (trap-exit true)
   (let (started (supervisor-start-each children 0 ()))
@@ -500,13 +500,13 @@ preserves that order on reverse)."
   (s)
   (or (= s :one-for-one) (= s :one-for-all) (= s :rest-for-one)))
 
-(defn start-supervisor (children & opts)
+(defn start (children & opts)
   "Spawn a supervisor for `children` (a sequence of child specs); return its pid.
 `opts` is an optional map:
   - `:strategy` — `:one-for-one` (default) | `:one-for-all` | `:rest-for-one`
   - `:max-restarts` (default 3) / `:max-seconds` (default 5) — intensity window
   - `:name` — register the *supervisor itself* under this keyword via an
-    idempotent named spawn, so a hot-reloaded file that re-runs `start-supervisor`
+    idempotent named spawn, so a hot-reloaded file that re-runs `start`
     returns the **existing** supervisor instead of spawning a second one
     (reload-stable; ADR-013/042). Distinct from a child spec's `:name`.
 
@@ -522,7 +522,7 @@ another, the parent links it, so the parent's death tears this sub-tree down too
         name (get opts :name))
     (cond
       (not (supervisor-known-strategy? strategy))
-        (error "start-supervisor: unknown :strategy "
+        (error "start: unknown :strategy "
           strategy " (expected :one-for-one, :one-for-all, or :rest-for-one)")
       name (spawn name (supervisor-init children opts parent))
       ; named & idempotent
@@ -548,7 +548,7 @@ summaries. Synchronous (blocks for the reply)."
 
 (defn start-child (sup spec)
   "Start a new child under a running supervisor `sup` from child `spec` (the same
-map shape `start-supervisor` takes) — the dynamic-supervisor entry point. The
+map shape `start` takes) — the dynamic-supervisor entry point. The
 child is linked and supervised like any static child. Returns its pid. Synchronous."
   (let (r (ref))
     (send sup [:start-child spec (self) r])
@@ -569,7 +569,7 @@ Returns the new pid, or `:not-found`. Synchronous."
     (send sup [:restart-child key (self) r])
     (receive ([:reply ^r v] v))))
 
-(defn stop-supervisor (sup)
+(defn stop (sup)
   "Stop the supervisor `sup`: it leaves its receive loop and terminates each of its
 children (per their `:shutdown`), so nothing is left orphaned. Fire-and-forget —
 returns nil immediately; the teardown happens in the supervisor process."

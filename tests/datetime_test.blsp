@@ -35,59 +35,59 @@
     (assert= 29 (datetime/days-in-month 2024 2))
     (assert= 29 (datetime/days-in-month 2000 2))))
 
-;; ---- epoch-ms->dt round-trip ------------------------------------------------
+;; ---- epoch-ms-> round-trip ------------------------------------------------
 
-(describe "epoch-ms->dt"
+(describe "epoch-ms->"
   (test "Unix epoch itself"
-    (let (dt (datetime/epoch-ms->dt 0))
-      (assert= 1970 (datetime/dt-year dt))
-      (assert= 1 (datetime/dt-month dt))
-      (assert= 1 (datetime/dt-day dt))
-      (assert= 0 (datetime/dt-hour dt))
-      (assert= 0 (datetime/dt-minute dt))
-      (assert= 0 (datetime/dt-second dt))
-      (assert= 0 (datetime/dt-ms dt))))
+    (let (dt (datetime/epoch-ms-> 0))
+      (assert= 1970 (datetime/year dt))
+      (assert= 1 (datetime/month dt))
+      (assert= 1 (datetime/day dt))
+      (assert= 0 (datetime/hour dt))
+      (assert= 0 (datetime/minute dt))
+      (assert= 0 (datetime/second dt))
+      (assert= 0 (datetime/ms dt))))
   (test "a known date — 2013-01-23T00:00:00Z"
     ; 15728 days * 86400 * 1000
-    (let (dt (datetime/epoch-ms->dt 1358899200000))
-      (assert= 2013 (datetime/dt-year dt))
-      (assert= 1 (datetime/dt-month dt))
-      (assert= 23 (datetime/dt-day dt))
-      (assert= 0 (datetime/dt-hour dt))))
+    (let (dt (datetime/epoch-ms-> 1358899200000))
+      (assert= 2013 (datetime/year dt))
+      (assert= 1 (datetime/month dt))
+      (assert= 23 (datetime/day dt))
+      (assert= 0 (datetime/hour dt))))
   (test "sub-second component"
-    (let (dt (datetime/epoch-ms->dt 1358899200750))
-      (assert= 750 (datetime/dt-ms dt))))
+    (let (dt (datetime/epoch-ms-> 1358899200750))
+      (assert= 750 (datetime/ms dt))))
   (test "one ms before epoch → 1969-12-31T23:59:59.999Z"
-    (let (dt (datetime/epoch-ms->dt -1))
-      (assert= 1969 (datetime/dt-year dt))
-      (assert= 12 (datetime/dt-month dt))
-      (assert= 31 (datetime/dt-day dt))
-      (assert= 23 (datetime/dt-hour dt))
-      (assert= 59 (datetime/dt-minute dt))
-      (assert= 59 (datetime/dt-second dt))
-      (assert= 999 (datetime/dt-ms dt))))
+    (let (dt (datetime/epoch-ms-> -1))
+      (assert= 1969 (datetime/year dt))
+      (assert= 12 (datetime/month dt))
+      (assert= 31 (datetime/day dt))
+      (assert= 23 (datetime/hour dt))
+      (assert= 59 (datetime/minute dt))
+      (assert= 59 (datetime/second dt))
+      (assert= 999 (datetime/ms dt))))
   (test "one full day before epoch → 1969-12-31T00:00:00Z"
-    (let (dt (datetime/epoch-ms->dt -86400000))
-      (assert= 1969 (datetime/dt-year dt))
-      (assert= 12 (datetime/dt-month dt))
-      (assert= 31 (datetime/dt-day dt))
-      (assert= 0 (datetime/dt-hour dt))
-      (assert= 0 (datetime/dt-second dt)))))
+    (let (dt (datetime/epoch-ms-> -86400000))
+      (assert= 1969 (datetime/year dt))
+      (assert= 12 (datetime/month dt))
+      (assert= 31 (datetime/day dt))
+      (assert= 0 (datetime/hour dt))
+      (assert= 0 (datetime/second dt)))))
 
-;; ---- dt->epoch-ms -----------------------------------------------------------
+;; ---- ->epoch-ms -----------------------------------------------------------
 
-(describe "dt->epoch-ms"
+(describe "->epoch-ms"
   (test "Unix epoch"
-    (assert= 0 (datetime/dt->epoch-ms (datetime/datetime 1970 1 1 0 0 0 0))))
+    (assert= 0 (datetime/->epoch-ms (datetime/datetime 1970 1 1 0 0 0 0))))
   (test "known date"
     (assert= 1358899200000
-      (datetime/dt->epoch-ms (datetime/datetime 2013 1 23 0 0 0 0))))
-  (test "round-trip through epoch-ms->dt"
+      (datetime/->epoch-ms (datetime/datetime 2013 1 23 0 0 0 0))))
+  (test "round-trip through epoch-ms->"
     (let (ms 1700000000123)
-      (assert= ms (datetime/dt->epoch-ms (datetime/epoch-ms->dt ms)))))
+      (assert= ms (datetime/->epoch-ms (datetime/epoch-ms-> ms)))))
   (test "round-trip negative epoch"
     (let (ms -86400500)
-      (assert= ms (datetime/dt->epoch-ms (datetime/epoch-ms->dt ms))))))
+      (assert= ms (datetime/->epoch-ms (datetime/epoch-ms-> ms))))))
 
 ;; ---- ISO 8601 formatting ----------------------------------------------------
 
@@ -109,7 +109,7 @@
 
 (describe "->iso on a datetime"
   (test "epoch"
-    (assert= "1970-01-01T00:00:00.000Z" (datetime/->iso (datetime/epoch-ms->dt 0))))
+    (assert= "1970-01-01T00:00:00.000Z" (datetime/->iso (datetime/epoch-ms-> 0))))
   (test "a real datetime"
     (assert= "2026-06-07T15:04:30.000Z"
       (datetime/->iso (datetime/datetime 2026 6 7 15 4 30 0)))))
@@ -142,23 +142,23 @@
   (test "every sealed member satisfies the ability"
     (is (satisfies? 'Temporal (datetime/date 2026 6 7)))
     (is (satisfies? 'Temporal (datetime/time-of-day 0 0 0 0)))
-    (is (satisfies? 'Temporal (datetime/epoch-ms->dt 0))))
+    (is (satisfies? 'Temporal (datetime/epoch-ms-> 0))))
   (test "a value that is not temporal raises rather than rendering nonsense"
     (assert-error (datetime/->iso {:year 2026 :month 6 :day 7}))))
 
-;; ---- dt-format --------------------------------------------------------------
+;; ---- format --------------------------------------------------------------
 
-(describe "dt-format"
+(describe "format"
   (test "ISO 8601 manual"
     (let (dt (datetime/datetime 2026 6 7 9 5 3 42))
       (assert= "2026-06-07 09:05:03"
-        (datetime/dt-format dt "%Y-%m-%d %H:%M:%S"))))
+        (datetime/format dt "%Y-%m-%d %H:%M:%S"))))
   (test "literal percent"
     (let (dt (datetime/datetime 2026 1 1 0 0 0 0))
-      (assert= "100%" (datetime/dt-format dt "100%%"))))
+      (assert= "100%" (datetime/format dt "100%%"))))
   (test "ms field"
     (let (dt (datetime/datetime 2026 1 1 0 0 0 7))
-      (assert= "007" (datetime/dt-format dt "%f")))))
+      (assert= "007" (datetime/format dt "%f")))))
 
 ;; ---- parsing ----------------------------------------------------------------
 
@@ -206,44 +206,44 @@
   (test "hours" (assert= 3600000 (datetime/hours 1)))
   (test "days" (assert= 86400000 (datetime/days 1))))
 
-(describe "dt-add / dt-diff"
+(describe "add / diff"
   (test "add one day"
     (let (d1 (datetime/datetime 2026 6 7 0 0 0 0)
-          d2 (datetime/dt-add d1 (datetime/days 1)))
-      (assert= 2026 (datetime/dt-year d2))
-      (assert= 6 (datetime/dt-month d2))
-      (assert= 8 (datetime/dt-day d2))))
+          d2 (datetime/add d1 (datetime/days 1)))
+      (assert= 2026 (datetime/year d2))
+      (assert= 6 (datetime/month d2))
+      (assert= 8 (datetime/day d2))))
   (test "add across month boundary"
     (let (d1 (datetime/datetime 2026 1 31 0 0 0 0)
-          d2 (datetime/dt-add d1 (datetime/days 1)))
-      (assert= 2 (datetime/dt-month d2))
-      (assert= 1 (datetime/dt-day d2))))
+          d2 (datetime/add d1 (datetime/days 1)))
+      (assert= 2 (datetime/month d2))
+      (assert= 1 (datetime/day d2))))
   (test "add across year boundary"
     (let (d1 (datetime/datetime 2025 12 31 23 59 59 999)
-          d2 (datetime/dt-add d1 1))
-      (assert= 2026 (datetime/dt-year d2))
-      (assert= 1 (datetime/dt-month d2))
-      (assert= 1 (datetime/dt-day d2))
-      (assert= 0 (datetime/dt-ms d2))))
-  (test "dt-diff positive"
+          d2 (datetime/add d1 1))
+      (assert= 2026 (datetime/year d2))
+      (assert= 1 (datetime/month d2))
+      (assert= 1 (datetime/day d2))
+      (assert= 0 (datetime/ms d2))))
+  (test "diff positive"
     (let (d1 (datetime/datetime 2026 6 8 0 0 0 0)
           d2 (datetime/datetime 2026 6 7 0 0 0 0))
-      (assert= (datetime/days 1) (datetime/dt-diff d1 d2))))
-  (test "dt-diff negative"
+      (assert= (datetime/days 1) (datetime/diff d1 d2))))
+  (test "diff negative"
     (let (d1 (datetime/datetime 2026 6 7 0 0 0 0)
           d2 (datetime/datetime 2026 6 8 0 0 0 0))
-      (assert= (- (datetime/days 1)) (datetime/dt-diff d1 d2)))))
+      (assert= (- (datetime/days 1)) (datetime/diff d1 d2)))))
 
 ;; ---- comparison -------------------------------------------------------------
 
 (describe "dt comparison"
   (let (a (datetime/datetime 2026 6 7 0 0 0 0)
         b (datetime/datetime 2026 6 8 0 0 0 0))
-    (test "dt<" (is (datetime/dt< a b)) (refute (datetime/dt< b a)))
-    (test "dt>" (is (datetime/dt> b a)) (refute (datetime/dt> a b)))
-    (test "dt=" (is (datetime/dt= a a)) (refute (datetime/dt= a b)))
-    (test "dt<=" (is (datetime/dt<= a a)) (is (datetime/dt<= a b)))
-    (test "dt>=" (is (datetime/dt>= b b)) (is (datetime/dt>= b a)))))
+    (test "before?" (is (datetime/before? a b)) (refute (datetime/before? b a)))
+    (test "after?" (is (datetime/after? b a)) (refute (datetime/after? a b)))
+    (test "same?" (is (datetime/same? a a)) (refute (datetime/same? a b)))
+    (test "not-after?" (is (datetime/not-after? a a)) (is (datetime/not-after? a b)))
+    (test "not-before?" (is (datetime/not-before? b b)) (is (datetime/not-before? b a)))))
 
 ;; ---- day-of-week ------------------------------------------------------------
 
@@ -269,17 +269,17 @@
 
 ;; ---- decomposition / date+time ----------------------------------------------
 
-(describe "dt->date / dt->time / date+time"
+(describe "->date / ->time / date+time"
   (test "round-trip through date+time"
     (let (dt (datetime/datetime 2026 6 7 10 30 5 123)
-          d (datetime/dt->date dt)
-          t (datetime/dt->time dt))
+          d (datetime/->date dt)
+          t (datetime/->time dt))
       (assert= dt (datetime/date+time d t))))
-  (test "dt->date strips time fields"
-    (let (d (datetime/dt->date (datetime/datetime 2026 6 7 10 30 5 123)))
+  (test "->date strips time fields"
+    (let (d (datetime/->date (datetime/datetime 2026 6 7 10 30 5 123)))
       (assert= (datetime/date 2026 6 7) d)
       (is (datetime/date? d))))
-  (test "dt->time strips date fields"
-    (let (t (datetime/dt->time (datetime/datetime 2026 6 7 10 30 5 123)))
+  (test "->time strips date fields"
+    (let (t (datetime/->time (datetime/datetime 2026 6 7 10 30 5 123)))
       (assert= (datetime/time-of-day 10 30 5 123) t)
       (is (datetime/time-of-day? t)))))

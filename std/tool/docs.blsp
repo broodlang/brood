@@ -152,13 +152,13 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; load-path, and document each source file in turn.
 (defn document-project ()
   "The Markdown documentation for the whole project (every source file under it), found from the cwd. Errors if not in a project."
-  ; project/project-find-root / --collect-sources / project-setup
-  (let (root (project/project-find-root (file/cwd)))
+  ; project/find-root / --collect-sources / setup
+  (let (root (project/find-root (file/cwd)))
     (when (nil? root)
       (error "doc: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
-    (project-setup root)
-    (let (dirs (project/project-abs-paths root *project-source-paths*)
-          files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
+    (setup root)
+    (let (dirs (project/abs-paths root *project-source-paths*)
+          files (fold (fn (acc d) (append acc (project/collect-sources d))) nil dirs))
       ;; One join over the whole project, not a per-file recopy of everything emitted
       ;; so far — this is the outermost of the three, so it was O(total-docs²).
       (apply str (map (fn (f) (str (document-file f) "\n")) files)))))
@@ -189,7 +189,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; --- structured doc model (`nest docs` — HTML site via `docsite`) ------------
 
 ;; The bare (unqualified) name of a symbol: the last "/"-separated segment, e.g.
-;; `http/get` -> `get`. Bare-named operators like `/` have an empty last segment,
+;; `http/fetch` -> `get`. Bare-named operators like `/` have an empty last segment,
 ;; so those keep their whole name.
 (defn- docs-bare
   (sym)
@@ -273,12 +273,12 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn model-project ()
   "The whole-project doc model — `{:name :version :modules […]}` — found from the cwd,
   documenting every source file under it. Errors if not in a Brood project."
-  (let (root (project/project-find-root (file/cwd)))
+  (let (root (project/find-root (file/cwd)))
     (when (nil? root)
       (error "docs: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
-    (project-setup root)
-    (let (dirs (project/project-abs-paths root *project-source-paths*)
-          files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
+    (setup root)
+    (let (dirs (project/abs-paths root *project-source-paths*)
+          files (fold (fn (acc d) (append acc (project/collect-sources d))) nil dirs))
       {:name *project-name*
        :version *project-version*
        :guides (collect-guides root)
@@ -565,11 +565,11 @@ module's namespace-rooted globals (ADR-070) back to it."
   it equals `result`, so documentation examples can't drift from behaviour. Loads the
   project's sources, prints a line per example, and returns the failure count (0 = all
   passed). The policy behind `nest doctest`."
-  (let (root (project/project-find-root (file/cwd)))
+  (let (root (project/find-root (file/cwd)))
     (when (nil? root)
       (error "doctest: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
-    (project-setup root)
-    (project/project-load-sources-cached root)
+    (setup root)
+    (project/load-sources-cached root)
     (doctest-report (collect-doctests (str *project-name* "/")))))
 
 (defn generate-docs (& args)

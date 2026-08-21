@@ -408,10 +408,10 @@
             (assert= (dep-kind e2) :tarball)
             (assert= (get e2 :sha256) sha))))))
   (test ":tarball deps parse; a missing :sha256 is rejected"
-    (assert= (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz" :sha256 "abc"]])
+    (assert= (project/parse-deps [['foo :tarball "https://x/foo.tar.gz" :sha256 "abc"]])
       (list (assoc (dep-tarball 'foo "https://x/foo.tar.gz" "abc") :optional false)))
     (is (includes? (try
-                     (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz"]])
+                     (project/parse-deps [['foo :tarball "https://x/foo.tar.gz"]])
                      (catch e (error-message e)))
           "sha256"))))
 
@@ -426,7 +426,7 @@
 (defn mock-registry-start (handler)
   (let (me (self))
     (spawn (do
-             (let (ls (http/http-listen 0))
+             (let (ls (http/listen 0))
                (send me [:reg-port (tcp-local-port ls)])
                (http/serve-loop ls handler))))
     (let (port (receive ([:reg-port p] p) (after *test-wait-ms* :timeout)))
@@ -704,7 +704,7 @@
         (assert= (get (first out) :name) "foo")
         (assert= (get (first out) :version) "1.2.0"))))
   (test ":version deps parse into a registry dep map"
-    (assert= (project/project-parse-deps [['foo :version "1.2.0"]])
+    (assert= (project/parse-deps [['foo :version "1.2.0"]])
       (list (assoc (dep-registry 'foo "1.2.0") :optional false))))
   (test "an external publish's metadata envelope carries :source_url; a hosted one omits it"
     (binding (*project-name* "foo"
@@ -950,8 +950,8 @@
                      (project/project-parse-enhances {'bedit 0.3})
                      (catch e (error-message e)))
           "must be a string")))
-  (test "a real manifest carries it through project-apply"
-    ;; NOT wrapped in `binding`: `project-apply` `def`s the dynvar's global ROOT (that is
+  (test "a real manifest carries it through apply"
+    ;; NOT wrapped in `binding`: `apply` `def`s the dynvar's global ROOT (that is
     ;; how a manifest configures the image), and a `binding` in front of it would shadow
     ;; the write with the bound value — masking exactly what this checks. So save and
     ;; restore the root instead, the way a manifest-reading tool would leave it.
@@ -961,10 +961,10 @@
       (file/spit (path-join root "project.blsp")
         (str "(project :name \"bedit-zig\" :version \"0.1.0\""
           " :enhances {bedit \">= 0.1\"})\n"))
-      ;; `rest`: the `project` MACRO passes only the opts plist to `project-apply`, so
+      ;; `rest`: the `project` MACRO passes only the opts plist to `apply`, so
       ;; handing it the whole `(project …)` form would shift every key by one and find
       ;; nothing — the same mistake as reading a manifest with `plist-get` on the form.
-      (project/project-apply (rest (read-string (file/slurp (path-join root "project.blsp")))))
+      (project/apply-config (rest (read-string (file/slurp (path-join root "project.blsp")))))
       (assert= ">= 0.1" (get *project-enhances* 'bedit))
       (def *project-enhances* saved)))
   (test "the publish envelope carries it with STRING keys (JSON has no symbols)"
@@ -1137,7 +1137,7 @@
                 (dep-entry-node (dep-path 'greeter "../greeter"))))
       (is (includes? out "a keeper comment"))
       (let (form (read-string out))
-        (assert= (project/project-parse-deps (plist-get (rest form) :dependencies))
+        (assert= (project/parse-deps (plist-get (rest form) :dependencies))
           (list (assoc (dep-path 'greeter "../greeter") :optional false))))))
   (test "add appends to an existing :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
@@ -1145,7 +1145,7 @@
                 (dep-entry-node (dep-path 'b "../b"))))
       (let (form (read-string out))
         (assert= (map (fn (d) (get d :name))
-                   (project/project-parse-deps (plist-get (rest form) :dependencies)))
+                   (project/parse-deps (plist-get (rest form) :dependencies)))
           (list 'a 'b)))))
   (test "remove drops the named dep, keeps the rest and comments"
     (let (src "(project :name \"app\"\n  :dependencies [[a :path \"../a\"] [b :path \"../b\"]])\n;; keep me\n"
@@ -1153,12 +1153,12 @@
       (is (includes? out "keep me"))
       (let (form (read-string out))
         (assert= (map (fn (d) (get d :name))
-                   (project/project-parse-deps (plist-get (rest form) :dependencies)))
+                   (project/parse-deps (plist-get (rest form) :dependencies)))
           (list 'b)))))
   (test "remove of the only dep leaves an empty :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
           out (package/package-manifest-remove src 'a))
-      (assert= (project/project-parse-deps (plist-get (rest (read-string out)) :dependencies)) nil))))
+      (assert= (project/parse-deps (plist-get (rest (read-string out)) :dependencies)) nil))))
 
 ;; ---- the Dependency ability -------------------------------------------------
 ;; Every per-kind behaviour (resolve / lock row / manifest entry / compatibility) is an
@@ -1333,8 +1333,8 @@
       (pkg-write-project alpha-dir "alpha" "parser" "(defn tag () \"A\")" "")
       (pkg-write-project beta-dir "beta" "parser" "(defn tag () \"B\")" "")
       ;; Declare `:source-paths` explicitly. `bundle-collect` reads the ambient
-      ;; `*project-source-paths*` (via `project-apply`, which only sets it when the manifest
-      ;; names it — unlike `project-setup`); a real `nest release` is a fresh process where
+      ;; `*project-source-paths*` (via `apply`, which only sets it when the manifest
+      ;; names it — unlike `setup`); a real `nest release` is a fresh process where
       ;; it is the default `["src"]`, but this test shares an image with the rest of the
       ;; suite, so pin it here rather than inherit whatever a prior test left behind.
       (pkg-write-project app-dir

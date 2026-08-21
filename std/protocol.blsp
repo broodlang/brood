@@ -1,17 +1,18 @@
-(defmodule protocol
-  "Behaviour contracts — the module-satisfies-a-contract seam.
-
-  `defbehaviour` declares the ops a *module* must define to satisfy a named contract.
-  There is no value dispatch: a module satisfies a behaviour by defining functions and
-  calls its own functions directly. It records the ops in `*protocols*` so the advisory
-  checker can verify that a module whose header says `(:implements bname)` defines each
-  one at the right arity (`types/check/protocol.rs`).
-
-  This module used to also carry `defprotocol`/`defimpl` — open generic functions
-  dispatching on `type-of`. Those were RETIRED in favour of `std/ability.blsp`, which
-  unifies value polymorphism and drivers-as-values with nominal dispatch. Behaviours stay
-  here because a module-as-implementor contract — a namespace with no dispatch value, e.g.
-  a live view the router calls by name — is genuinely different from value dispatch.")
+;; Behaviour contracts — the module-satisfies-a-contract seam. CORE: this is part of
+;; the language (loaded in the prelude), so `defbehaviour` and the registry are available
+;; without a `require` or a `protocol/` prefix.
+;;
+;; `defbehaviour` declares the ops a *module* must define to satisfy a named contract.
+;; There is no value dispatch: a module satisfies a behaviour by defining functions and
+;; calls its own functions directly. It records the ops in `*protocols*` so the advisory
+;; checker can verify that a module whose header says `(:implements bname)` defines each
+;; one at the right arity (`types/check/protocol.rs`).
+;;
+;; This seam used to also carry `defprotocol`/`defimpl` — open generic functions
+;; dispatching on `type-of`. Those were RETIRED in favour of `std/ability.blsp`, which
+;; unifies value polymorphism and drivers-as-values with nominal dispatch. Behaviours stay
+;; because a module-as-implementor contract — a namespace with no dispatch value, e.g. a
+;; live view the router calls by name — is genuinely different from value dispatch.
 
 ; ---- the behaviour/interface registry (read by the checker + LSP) ------------
 
@@ -20,7 +21,7 @@
 
 (defn register-protocol (pname specs)
   "Record interface `pname`'s declared op specs (raw forms) for the checker / LSP."
-  (swap-registry! protocol/*protocols* (fn (m) (assoc m pname specs)))
+  (swap-registry! *protocols* (fn (m) (assoc m pname specs)))
   nil)
 
 (defn ops (pname)
@@ -41,4 +42,4 @@
       (render [model])
       (handle-event [name params model]))"
   (let (ops (filter (fn (s) (pair? s)) specs))
-    (list 'protocol/register-protocol (list 'quote bname) (list 'quote ops))))
+    (list 'register-protocol (list 'quote bname) (list 'quote ops))))

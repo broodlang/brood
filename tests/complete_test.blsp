@@ -91,40 +91,40 @@
   (test "the list is sorted"
     (assert= (builtin-modules) (sort (builtin-modules))))
   (test "modules include the baked-in set"
-    (is (fold (fn (found m) (or found (= m "json"))) false (complete/complete-modules)))))
+    (is (fold (fn (found m) (or found (= m "json"))) false (complete/modules)))))
 
 (describe "complete: dispatch by kind"
   (test "an unknown kind yields nothing rather than raising"
-    (assert= (complete/complete-for "no-such-kind") nil))
-  (test "a nil kind yields nothing" (assert= (complete/complete-for nil) nil))
+    (assert= (complete/for-kind "no-such-kind") nil))
+  (test "a nil kind yields nothing" (assert= (complete/for-kind nil) nil))
   (test "the module kind resolves"
-    (is (> (count (complete/complete-for "module")) 0)))
+    (is (> (count (complete/for-kind "module")) 0)))
   (test "selectors always include the pseudo-prefixes even with no tags"
-    ;; `complete-selectors` appends them unconditionally, so a project with no
+    ;; `selectors` appends them unconditionally, so a project with no
     ;; tagged tests still gets the useful `test:` / `describe:` hints.
-    (let (selectors (complete/complete-selectors))
+    (let (selectors (complete/selectors))
       (and (is (includes? selectors "test:")) (is (includes? selectors "describe:"))))))
 
 (describe "complete: template + project-module kinds"
   (test "the template list is non-empty and comes from the scaffolder"
-    (is (includes? (complete/complete-templates) "default")))
+    (is (includes? (complete/templates) "default")))
   (test "every scaffolder template is offered"
     ;; Compared against the scaffolder's own list rather than a restated one, so a
     ;; new template is completable with no change here. Reached via `eval` because
     ;; `*project-templates*` is an ambient (earmuffed) global from `scaffold`,
-    ;; which `complete` auto-loads (its `complete-templates` names a `scaffold`
+    ;; which `complete` auto-loads (its `templates` names a `scaffold`
     ;; export); read via `eval` since the static checker cannot see the binding.
-    (assert= (count (complete/complete-templates)) (count (eval '*project-templates*))))
+    (assert= (count (complete/templates)) (count (eval '*project-templates*))))
   (test "the template kind dispatches"
-    (is (includes? (complete/complete-for "template") "gen")))
+    (is (includes? (complete/for-kind "template") "gen")))
   (test "the project-module kind dispatches without raising"
     ;; This repo declares no :source-paths, so there is nothing to offer — the
     ;; contract is that it returns a list (possibly empty), never an error.
-    (let (got (complete/complete-for "project-module")) (is (or (nil? got) (pair? got)))))
+    (let (got (complete/for-kind "project-module")) (is (or (nil? got) (pair? got)))))
   (test "project modules exclude std modules"
-    ;; `complete-modules` includes baked-in std; `complete-project-modules` must not,
+    ;; `modules` includes baked-in std; `project-modules` must not,
     ;; since a std module can never be a `--main` entry point.
-    (refute (includes? (or (complete/complete-project-modules) (list)) "json"))))
+    (refute (includes? (or (complete/project-modules) (list)) "json"))))
 
 ;; Textual scanning has one obvious failure mode, and this module's own tests are
 ;; the worst case for it: a `:tags [...]` written *inside a string literal* is not a

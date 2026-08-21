@@ -148,14 +148,14 @@ fn run(cli: Cli) {
         return;
     }
 
-    // The REPL is now Brood (`std/tool/repl.blsp`): bootstrap into `(repl/repl-run)`. On a
+    // The REPL is now Brood (`std/tool/repl.blsp`): bootstrap into `(repl/run)`. On a
     // TTY it raw-mode edits (std/editor/lineedit.blsp); piped input keeps `read-line`.
     // The guard restores the terminal on a panic unwind (the Brood `term-raw-leave`
     // is the normal teardown); scope it so it drops before any error report + exit
     // (`process::exit` skips Drop). Restore is idempotent.
     let result = {
         let _guard = RawTermGuard;
-        interp.eval_str("(repl/repl-run)")
+        interp.eval_str("(repl/run)")
     };
     if let Err(e) = result {
         report_error(&e);

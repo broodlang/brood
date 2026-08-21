@@ -68,27 +68,27 @@
   ;; the package manager dispatches the `Dependency` ability on it instead of reading a
   ;; `:kind` field. A record is never `=` to a bare map, so these compare constructors.
   (test "a :git entry normalises to a dep-git record"
-    (assert= (project/project-parse-dep '[parser :git "https://example.com/p.git" :ref "v1.2.0"])
+    (assert= (project/parse-dep '[parser :git "https://example.com/p.git" :ref "v1.2.0"])
       (assoc (project/dep-git 'parser "https://example.com/p.git" "v1.2.0" nil) :optional false)))
   (test "a :git entry may track a :version range instead of a :ref"
-    (assert= (project/project-parse-dep '[parser :git "https://example.com/p.git" :version "^1.2.0"])
+    (assert= (project/parse-dep '[parser :git "https://example.com/p.git" :version "^1.2.0"])
       (assoc (project/dep-git 'parser "https://example.com/p.git" nil "^1.2.0") :optional false)))
   (test "a :git entry giving both :ref and :version is rejected"
     (is (includes? (try
-                     (project/project-parse-dep '[p :git "u" :ref "v1" :version "^1"])
+                     (project/parse-dep '[p :git "u" :ref "v1" :version "^1"])
                      (catch e e))
           "cannot give both")))
   (test "a :git entry giving neither :ref nor :version is rejected"
-    (is (includes? (try (project/project-parse-dep '[p :git "u"]) (catch e e))
+    (is (includes? (try (project/parse-dep '[p :git "u"]) (catch e e))
           "needs a :ref")))
   (test "a :path entry normalises to a dep-path record"
-    (assert= (project/project-parse-dep '[shared :path "../shared"])
+    (assert= (project/parse-dep '[shared :path "../shared"])
       (assoc (project/dep-path 'shared "../shared") :optional false)))
   (test "each kind gets its own identity, and dep? recognises them all"
-    (let (git-dep (project/project-parse-dep '[a :git "u" :ref "r"])
-          path-dep (project/project-parse-dep '[b :path "p"])
-          tarball-dep (project/project-parse-dep '[c :tarball "u" :sha256 "abc"])
-          registry-dep (project/project-parse-dep '[d :version "1.0.0"]))
+    (let (git-dep (project/parse-dep '[a :git "u" :ref "r"])
+          path-dep (project/parse-dep '[b :path "p"])
+          tarball-dep (project/parse-dep '[c :tarball "u" :sha256 "abc"])
+          registry-dep (project/parse-dep '[d :version "1.0.0"]))
       (assert= (record-id git-dep) :project/dep-git)
       (assert= (record-id path-dep) :project/dep-path)
       (assert= (record-id tarball-dep) :project/dep-tarball)
@@ -105,44 +105,44 @@
     (assert= (->string (project/dep-tarball 'q "https://x.tgz" "ab")) "q  (tarball https://x.tgz)")
     (assert= (->string (project/dep-registry 'r "1.2.0")) "r  (registry v1.2.0)"))
   (test "parse-deps maps over the whole vector"
-    (assert= (project/project-parse-deps '[[a :path "../a"] [b :path "../b"]])
+    (assert= (project/parse-deps '[[a :path "../a"] [b :path "../b"]])
       (list (assoc (project/dep-path 'a "../a") :optional false)
         (assoc (project/dep-path 'b "../b") :optional false))))
   (test "nil dependencies parse to nil"
-    (assert= (project/project-parse-deps nil) nil))
+    (assert= (project/parse-deps nil) nil))
   (test "a non-vector :dependencies value is rejected"
-    (is (includes? (try (project/project-parse-deps '(a b)) (catch e e)) "must be a vector")))
+    (is (includes? (try (project/parse-deps '(a b)) (catch e e)) "must be a vector")))
   (test "a non-symbol dep name is rejected"
-    (is (includes? (try (project/project-parse-dep '["parser" :path "../p"]) (catch e e))
+    (is (includes? (try (project/parse-dep '["parser" :path "../p"]) (catch e e))
           "must be a symbol")))
   (test "an unknown source kind is rejected"
-    (is (includes? (try (project/project-parse-dep '[parser :svn "../p"]) (catch e e))
+    (is (includes? (try (project/parse-dep '[parser :svn "../p"]) (catch e e))
           "must be :git, :path, :tarball, or :version")))
   (test "a :git dep without a :ref is rejected"
     (is (includes? (try
-                     (project/project-parse-dep '[parser :git "https://x.git"])
+                     (project/parse-dep '[parser :git "https://x.git"])
                      (catch e e))
           "needs a :ref")))
   (test "a reserved opt is rejected so the manifest stays forward-compatible"
     (is (includes? (try
-                     (project/project-parse-dep '[parser
+                     (project/parse-dep '[parser
                                                    :git "https://x.git" :ref "v1" :branch "main"])
                      (catch e e))
           "reserved for a future version")))
   (test "an entry that is too short is rejected"
-    (is (includes? (try (project/project-parse-dep '[parser :path]) (catch e e))
+    (is (includes? (try (project/parse-dep '[parser :path]) (catch e e))
           "too short"))))
 
-;; `:isolated` — `project-apply` clobbers the ambient `*project-*` globals; roll them back.
+;; `:isolated` — `apply` clobbers the ambient `*project-*` globals; roll them back.
 (describe "project: :optional deps and :dev-dependencies (ADR-172)"
   :isolated
   (test ":optional defaults to false"
-    (assert= (get (project/project-parse-dep '[a :path "../a"]) :optional) false))
+    (assert= (get (project/parse-dep '[a :path "../a"]) :optional) false))
   (test ":optional true is recorded on any dep kind"
-    (assert= (get (project/project-parse-dep '[a :path "../a" :optional true]) :optional) true)
-    (assert= (get (project/project-parse-dep '[a :git "u" :ref "r" :optional true]) :optional) true))
+    (assert= (get (project/parse-dep '[a :path "../a" :optional true]) :optional) true)
+    (assert= (get (project/parse-dep '[a :git "u" :ref "r" :optional true]) :optional) true))
   (test ":dev-dependencies parse and tag :dev true, kept separate from :dependencies"
-    (project/project-apply '(:name demo
+    (project/apply-config '(:name demo
                               :dependencies
                               [[core :git "u" :ref "r"]]
                               :dev-dependencies
@@ -154,7 +154,7 @@
     (assert= (map :name *project-dev-dependencies*) (list 'testkit))
     (assert= (map :dev *project-dev-dependencies*) (list true)))
   (test "no :dev-dependencies parses to an empty dev-dep list"
-    (project/project-apply '(:name demo :dependencies [[core :path "../c"]]))
+    (project/apply-config '(:name demo :dependencies [[core :path "../c"]]))
     (assert= *project-dev-dependencies* nil)))
 
 ;; `:isolated` runs against a rolled-back private copy of the globals (ADR-017),
@@ -378,8 +378,8 @@
 ;; `:use`s to register every command into a registry; the walker force-reloading
 ;; interactive.blsp after commands.blsp ran wiped that registry (and warned).
 ;; `:isolated` — these tests mutate process-global project state (the module
-;; load-path via `project-setup`, `*features*`, and the fixture load counters like
-;; `zzz/*zzz-loads*`). Run concurrently they race other tests' `project-setup` (a peer
+;; load-path via `setup`, `*features*`, and the fixture load counters like
+;; `zzz/*zzz-loads*`). Run concurrently they race other tests' `setup` (a peer
 ;; clobbers the load-path between this unit's setup and its walk → "cannot find
 ;; module 'zzz'"). Isolation runs them alone against a rolled-back private copy of
 ;; the globals, so the walk sees its own freshly-`spit` project. (KI-2 class.)
@@ -421,8 +421,8 @@
         (file/spit (path-join src "zzz.blsp")
           "(defmodule zzz)\n(def *zzz-loads* (inc *zzz-loads*))\n")
         (def zzz/*zzz-loads* 0)
-        (project/project-setup root)
-        (project/project-load-sources root)
+        (project/setup root)
+        (project/load-sources root)
         (assert= zzz/*zzz-loads* 1))))
   (test ":skip-loaded skips an already-provided module; a later walk reloads it"
     (let (root (temp-dir "brood-skip-"))
@@ -431,16 +431,16 @@
       (let (f (path-join (path-join root "src") "skipfix.blsp"))
         (file/spit f "(defmodule skipfix)\n(def *skip-load-count* (inc *skip-load-count*))\n")
         (def skipfix/*skip-load-count* 0)
-        (project/project-setup root)
+        (project/setup root)
         ; first walk: loads → 1
-        (project/project-load-sources root)
+        (project/load-sources root)
         (assert= skipfix/*skip-load-count* 1)
         (is (contains? *features* "skipfix"))
         ; pre-flight: provided → skip → 1
-        (project/project-load-sources root :skip-loaded)
+        (project/load-sources root :skip-loaded)
         (assert= skipfix/*skip-load-count* 1)
         ; later walk: reloads edits → 2
-        (project/project-load-sources root)
+        (project/load-sources root)
         (assert= skipfix/*skip-load-count* 2)))))
 
 ;; ── Co-located tests (ADR-225) ──────────────────────────────────────────────
@@ -449,7 +449,7 @@
 ;; discovers them by their FORMS (not a `_test.blsp` filename under `tests/`); the
 ;; release bundle strips them so tests never ship. These pin detection, discovery,
 ;; stripping, and the empty-describe warning.
-;; `:isolated` — these call `project-setup`/`bundle-collect`, which rebind SHARED
+;; `:isolated` — these call `setup`/`bundle-collect`, which rebind SHARED
 ;; project globals (`*module-files*`, `*project-source-paths*`, rooting). A
 ;; private copy of the globals per test keeps that mutation from racing other project
 ;; tests (notably the ADR-223 concurrent-require case) under the parallel runner.
@@ -475,7 +475,7 @@
         (file/spit (path-join src "lib.blsp")
           "(defmodule lib (:use test))\n(defn g () 1)\n(deftest gt (assert= 1 (g)))\n")
         (file/spit (path-join src "plain.blsp") "(defmodule plain)\n(defn h () 2)\n")
-        (project/project-setup root)
+        (project/setup root)
         (let (files (project/project-colocated-test-files root))
           (is (any? (fn (f) (includes? f "lib.blsp")) files))
           (is (not (any? (fn (f) (includes? f "plain.blsp")) files)))))))
@@ -763,7 +763,7 @@
 ;; Phase 1 let a file declare more than one `(defmodule …)`; Phase 2 makes a co-located
 ;; SECONDARY module reachable across files by its own name. The whole mechanism is one
 ;; generalization — the file→module scan (`package/module-files`) now emits EVERY
-;; declared module, so `project-setup` registers `pkg/secondary → file` and the existing
+;; declared module, so `setup` registers `pkg/secondary → file` and the existing
 ;; `*module-files*` require branch loads it. Named (ADR-070 rooted) projects only.
 ;; These blocks mutate the process-global registries, so they run `:isolated` and each uses
 ;; a unique project/module name to avoid cross-test registry contamination.
@@ -787,14 +787,14 @@
         ;; every declared module maps back to the one file that declares it
         (is (every? (fn (p) (string/ends-with? (second p) "shapes.blsp")) pairs)))))
 
-  (test "project-setup registers a co-located secondary module, rooted"
+  (test "setup registers a co-located secondary module, rooted"
     (let (root (temp-dir "brood-coloc-"))
       (file/mkdir root)
       (file/mkdir (path-join root "src"))
       (file/spit (path-join root "project.blsp") "(project :name \"pkga\" :source-paths [\"src\"])")
       (file/spit (path-join (path-join root "src") "shapes.blsp")
         "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
-      (project/project-setup root)
+      (project/setup root)
       (is (contains? *module-files* "pkga/shapes-internal"))
       (is (includes? (get *package-modules-of* "pkga") 'shapes-internal))))
 
@@ -807,7 +807,7 @@
       (file/spit (path-join root "project.blsp") "(project :name \"pkgb\" :source-paths [\"src\"])")
       (file/spit (path-join (path-join root "src") "shapes.blsp")
         "(defmodule shapes) (defn area () 7) (defmodule shapes-internal) (defn secret () 42)")
-      (project/project-setup root)
+      (project/setup root)
       (require-one 'pkgb/shapes-internal)
       (assert= (pkgb/shapes-internal/secret) 42)
       ;; loading the file co-provided the sibling region
@@ -823,8 +823,8 @@
           "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
         (file/spit (path-join src "consumer.blsp")
           "(defmodule consumer (:use shapes-internal)) (defn call-secret () (secret))")
-        (project/project-setup root)
-        (project/project-load-sources root)
+        (project/setup root)
+        (project/load-sources root)
         (assert= (pkgc/consumer/call-secret) 42))))
 
   (test "two files declaring the same module name collide loudly (secondary included)"
@@ -837,7 +837,7 @@
       (let (src (path-join root "src"))
         (file/spit (path-join src "a.blsp") "(defmodule aye) (defmodule dup)")
         (file/spit (path-join src "b.blsp") "(defmodule bee) (defmodule dup)")
-        (project/project-setup root)
+        (project/setup root)
         (let (msg (try
                     (do (package/package-guard-collisions root nil) :no-error)
                     (catch e (error-message e))))
@@ -852,7 +852,7 @@
         (str "(defmodule twomod) (defn area () 1)"
           " (defmodule twomod-internal)" " (def *loads* (inc *loads*)) (defn secret () 42)"))
       (def pkge/twomod-internal/*loads* 0)
-      (project/project-setup root)
+      (project/setup root)
       (let (me (self) n 8)
         (map (fn (_) (spawn (fn () (do (require-one 'pkge/twomod-internal) (send me :done)))))
           (range n))

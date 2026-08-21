@@ -10017,7 +10017,10 @@ proven in a real application (hatch's JSON `Encode` protocol replaced a closed
 promoted.
 
 **Decision — promote it verbatim into `std/protocol.blsp`** (embedded, opt-in via
-`(require 'protocol)` / `(:use protocol)`; never in the prelude). It is ~110 lines
+`(require 'protocol)` / `(:use protocol)`; never in the prelude). *(Superseded in 0.8.0:
+behaviour contracts are now **core** — `std/protocol.blsp` is loaded in the prelude, so
+`defbehaviour` / `register-protocol` / `ops` / `*protocols*` are bare and always available,
+no `require`/`:use`. `defprotocol`/`defimpl` value dispatch stays retired.)* It is ~110 lines
 of Brood over two registry globals: `*protocols*` (name → declared op specs, the
 data the checker/LSP read) and `*impls*` (`[protocol op type-key]` → fn, the
 dispatch table). `defprotocol` defines one generic `defn` per op that calls

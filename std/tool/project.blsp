@@ -58,13 +58,13 @@ the `nest new` scaffolder."
   package of its function (ADR-172). `trace` is the `:trace` on a caught kernel-error map.
   Frames whose function is root/std/unrecorded get `:package nil`."
   (map (fn (frame) (assoc frame :package (ns-package (get frame :fn)))) trace))
-;; Only ever set inside `project-setup` (from the manifest) and read by
+;; Only ever set inside `setup` (from the manifest) and read by
 ;; `package` when it publishes — so they must be declared ambient here, like the
 ;; slots above: ambient is a `defdyn` declaration now, not an earmuff spelling.
 (defdyn *project-description* nil)
 (defdyn *project-repository* nil)
 ;; `:brood` — the runtime-version constraint this project needs (a `std/version` string,
-;; e.g. `">= 0.2"`, `"^0.1"`). Checked at `project-setup` against `(brood-version)`; an
+;; e.g. `">= 0.2"`, `"^0.1"`). Checked at `setup` against `(brood-version)`; an
 ;; unmet constraint is a hard, clear error (ADR-209), the way `mix.exs`'s `elixir:`
 ;; requirement refuses an incompatible Elixir. Absent = runs on any runtime.
 (defdyn *project-brood* nil)
@@ -96,7 +96,7 @@ the `nest new` scaffolder."
 (defdyn *project-main-override* nil)
 ; (module fn) or nil — a `nest run --main` override that wins over the manifest.
 ; A separate slot (not `*project-main*`) because the manifest is re-applied
-; inside `run-project` (via `project-setup`), which would otherwise clobber an
+; inside `run-project` (via `setup`), which would otherwise clobber an
 ; override set before the run.
 (defdyn *project-dependencies* nil)
 ; list of dep records from the manifest's :dependencies (ADR-037)
@@ -301,7 +301,7 @@ than being fetched into `_deps/<name>/`."
     (dep-tarball name url sha)))
 
 ;; Normalise one `[name kind spec & opts]` entry into the dep record for its kind.
-(defn project-parse-dep (entry)
+(defn parse-dep (entry)
   "Parse one `:dependencies` vector entry `[name kind & opts]` into a normalised dep record, dispatching on `kind` (`:git`/`:path`/`:tarball`/`:version`) and recording the `:optional` flag (ADR-172)."
   (when (not (vector? entry))
     (error "project: each :dependencies entry must be a vector, got " entry))
@@ -328,11 +328,11 @@ than being fetched into `_deps/<name>/`."
 
 ;; Parse the manifest's :dependencies value into a list of dep records.
 ;; Omitted/nil => empty list.
-(defn project-parse-deps (deps)
+(defn parse-deps (deps)
   "Parse the manifest's `:dependencies` vector into a list of dep records; an omitted/nil value yields the empty list."
   (cond
     (nil? deps) nil
-    (vector? deps) (map project-parse-dep deps)
+    (vector? deps) (map parse-dep deps)
     else (error "project: :dependencies must be a vector of dep entries, got " deps)))
 
 ;; The (project ...) manifest form: records identity, and overrides the
@@ -340,14 +340,14 @@ than being fetched into `_deps/<name>/`."
 ;; when given. Missing keys keep their defaults. Called when a project.blsp is loaded.
 ;;
 ;; It is a macro that treats its arguments as **literal data** (it quotes them and
-;; hands them to `project-apply`), so a manifest writes bare symbols — dep names
+;; hands them to `apply`), so a manifest writes bare symbols — dep names
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
   "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
-  ;; quasiquote (not `(list 'project-apply …)`) so α qualifies `project-apply`
-  ;; to `project/project-apply` at this macro's definition (ADR-065 §7).
-  `(project-apply (quote ~opts)))
+  ;; quasiquote (not `(list 'apply …)`) so α qualifies `apply`
+  ;; to `project/apply-config` at this macro's definition (ADR-065 §7).
+  `(apply-config (quote ~opts)))
 
 ;; `:source-paths` / `:test-paths` must be a vector (or list) of strings — they are
 ;; handed straight to `map`/`path-join`. A bare string (`:source-paths "src"`, an
@@ -436,7 +436,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
         {}
         (map-pairs value))))
 
-(defn project-apply (opts)
+(defn apply-config (opts)
   "Apply a parsed manifest `opts` (a plist) by `def`ing the `*project-*` globals — name, version, description, paths, `:main` entry, dependencies and formatter settings; returns the project name."
   (def *project-name* (plist-get opts :name))
   (def *project-version* (plist-get opts :version))
@@ -459,13 +459,13 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (when tst (def *project-test-paths* (project-check-paths :test-paths tst)))
     (when fmt (def *project-format-paths* (project-check-paths :format-paths fmt)))
     (when m (def *project-main* (project-parse-main m))))
-  (def *project-dependencies* (project-parse-deps (plist-get opts :dependencies)))
+  (def *project-dependencies* (parse-deps (plist-get opts :dependencies)))
   ;; `:dev-dependencies` (ADR-172) — parsed exactly like `:dependencies`, each tagged
   ;; `:dev true` so the resolver can include them for dev/test and a release bundle can
   ;; drop them. Kept in their own slot, never mixed into *project-dependencies*.
   (def *project-dev-dependencies*
     (map (fn (d) (assoc d :dev true))
-      (project-parse-deps (plist-get opts :dev-dependencies))))
+      (parse-deps (plist-get opts :dev-dependencies))))
   (def *project-format-headers* (plist-get opts :format-headers))
   (def *project-format-plugins* (plist-get opts :format-plugins))
   (def *project-width* (plist-get opts :width))
@@ -474,14 +474,14 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; --- finding the project + discovering tests ---------------------------------
 ;; Walk up from `dir` toward the filesystem root, looking for project.blsp.
 ;; parent-directory is its own fixed point at "/" and ".", which terminates the walk.
-(defn project-find-root (dir)
+(defn find-root (dir)
   "Walk up from `dir` toward the filesystem root, returning the first directory that contains a `project.blsp`, or nil if none is found."
   (cond
     (file/exists? (path-join dir "project.blsp")) dir
     (= dir (parent-directory dir)) nil
-    else (project-find-root (parent-directory dir))))
+    else (find-root (parent-directory dir))))
 
-(defn project-abs-paths (root rels)
+(defn abs-paths (root rels)
   "Resolve each relative path in `rels` against `root`, returning the list of absolute paths."
   (map (fn (r) (path-join root r)) rels))
 
@@ -505,7 +505,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     nil))
 
 ;; Recursively collect every .blsp under `dir` (the project's source files).
-(defn project-collect-sources (dir)
+(defn collect-sources (dir)
   "Recursively collect every `.blsp` file under `dir` (the project's source files); nil when `dir` is not a directory."
   (if (file/dir? dir)
     ;; Same O(files²)→O(files) fix as `project-collect-tests`: `cons` files, `append-two`
@@ -513,7 +513,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (fold (fn (acc entry)
             (let (p (path-join dir entry))
               (cond
-                (file/dir? p) (append-two (project-collect-sources p) acc)
+                (file/dir? p) (append-two (collect-sources p) acc)
                 (string/ends-with? entry ".blsp") (cons p acc)
                 else acc)))
       nil
@@ -540,9 +540,9 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 (defn- project-colocated-test-files
   (root)
   (filter project-file-has-tests?
-    (fold (fn (acc d) (append acc (project-collect-sources d)))
+    (fold (fn (acc d) (append acc (collect-sources d)))
       nil
-      (project-abs-paths root *project-source-paths*))))
+      (abs-paths root *project-source-paths*))))
 
 ;; The feature a source file provides — the name of its top-level `(defmodule NAME …)`
 ;; as a string, or nil when it declares none. Parses the file read-only (never
@@ -593,7 +593,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; edits (the hot-reload contract; the file watcher in std/reload uses `reload-defs`).
 ;; With `:skip-loaded`, any module already on `*features*` is skipped (the check
 ;; pre-flight, which runs *after* the image is loaded and must not re-evaluate it).
-(defn project-load-sources (root & opts)
+(defn load-sources (root & opts)
   "Load every source file under `root`'s source paths, attributing each file's load-time requires to the root section (KI-37). `:skip-loaded` skips files whose feature is already loaded."
   (let (skip-all? (includes? opts :skip-loaded)
         before *features*)
@@ -612,9 +612,9 @@ manifest is read, naming the key, not later inside whoever consumes the map."
               (binding (*require-parent* "")
                 (load f))))
           nil
-          (project-collect-sources dir)))
+          (collect-sources dir)))
       nil
-      (project-abs-paths root *project-source-paths*))))
+      (abs-paths root *project-source-paths*))))
 
 ;; ═══ Startup image (ADR-218) ═══════════════════════════════════════════════
 ;; Loading a big project from source costs ~1.1 ms per FILE, almost all of it
@@ -665,7 +665,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     ;; image can serve directly.
     '*module-files* '*package-modules-of*])
 
-(defn project-image-path (root)
+(defn image-path (root)
   "Where `root`'s startup image lives."
   (path-join root *project-image-file*))
 
@@ -675,15 +675,15 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; for a tree that has changed, which is the only direction that matters.
 ;; Every source file under the project's source paths, sorted so the fingerprint is
 ;; stable across directory-listing order.
-(defn project-source-files (root)
+(defn source-files (root)
   "Every `.blsp` file under `root`'s source paths, sorted so the fingerprint is stable across directory-listing order."
-  (sort (fold (fn (acc dir) (append-two (project-collect-sources dir) acc))
+  (sort (fold (fn (acc dir) (append-two (collect-sources dir) acc))
           nil
-          (project-abs-paths root *project-source-paths*))))
+          (abs-paths root *project-source-paths*))))
 
 (defn- project-image-fingerprint
   (root)
-  (project-fingerprint-of (project-source-files root)))
+  (project-fingerprint-of (source-files root)))
 
 ;; Split from `project-image-fingerprint` so a caller that already has the file list
 ;; (the loader, which wants to report the count) does not walk and stat the tree twice.
@@ -696,7 +696,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; DEPENDENCY files count too, because their bindings are in the image (ADR-070/218): a
   ;; dep lives outside `:source-paths` — in `_deps/`, or anywhere at all for a `:path` dep —
   ;; so the source-tree walk alone cannot see one change, and an imaged start would go on
-  ;; serving the old code. They come from `*module-files*`, which `project-setup`
+  ;; serving the old code. They come from `*module-files*`, which `setup`
   ;; populates before any fingerprint is taken, on the cold and warm paths alike.
   (str (build-id)
     "\n"
@@ -809,13 +809,13 @@ manifest is read, naming the key, not later inside whoever consumes the map."
             (or (= k "") (not (contains? *module-files* k))))
           (keys grouped))))))
 
-(defn project-write-image (root before)
+(defn write-image (root before)
   "Snapshot the bindings this project load produced into `root`'s image, grouped into
 per-module sections. `before` is the `(global-names)` list captured *before* the sources
 were loaded. Returns the entry count."
-  (let (dir (parent-directory (project-image-path root)))
+  (let (dir (parent-directory (image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
-    (%image-write (project-image-path root)
+    (%image-write (image-path root)
       (project-image-sections before)
       (project-image-fingerprint root))))
 
@@ -825,7 +825,7 @@ were loaded. Returns the entry count."
 ;; Returns the section count, or nil for a miss (absent, stale, corrupt).
 (defn- project-install-image
   (root fp)
-  (let (path (project-image-path root)
+  (let (path (image-path root)
         idx (%image-index path fp))
     (cond
       (nil? idx) nil
@@ -847,7 +847,7 @@ were loaded. Returns the entry count."
               (fold (fn (_ d) (require-one d)) nil (or (get *require-edges* "") nil))))
           (count idx)))))
 
-(defn project-materialize-all ()
+(defn materialize-all ()
   "Materialise every module the installed image holds — for tools that genuinely need the
 whole project in the heap (`nest test`, `nest check`, the LSP). `nest run` deliberately does
 NOT call this: it requires its entry point and lets the rest stay on disk."
@@ -861,7 +861,7 @@ NOT call this: it requires its entry point and lets the rest stay on disk."
 ;; process and carries no instrumentation, and the report would silently come back
 ;; empty. An instrumented run therefore always loads from source. Silent wrong output
 ;; is exactly the failure mode worth a special case.
-(defn project-image-usable? ()
+(defn image-usable? ()
   "Whether a cached startup image may be used — false under `BROOD_COVERAGE`, whose instrumentation an image cannot represent."
   (nil? (getenv "BROOD_COVERAGE")))
 
@@ -872,7 +872,7 @@ NOT call this: it requires its entry point and lets the rest stay on disk."
     (str ms "ms")
     (str (quot ms 1000) "." (quot (mod ms 1000) 100) "s")))
 
-(defn project-setup-lazy-image (root)
+(defn setup-lazy-image (root)
   "Install `root`'s startup image WITHOUT materialising its modules, so `require` pulls each
 one in on first use (ADR-218). Returns the section count, or nil when there is no current
 image — in which case the caller must fall back to a source load.
@@ -880,7 +880,7 @@ image — in which case the caller must fall back to a source load.
 This is what makes `nest run` pay only for the modules its entry point actually reaches: on
 a 16 300-module project an entry touching twenty of them materialises twenty, not 16 300."
   (cond
-    (not (project-image-usable?)) nil
+    (not (image-usable?)) nil
     else (project-install-image root (project-image-fingerprint root))))
 
 ;; CONTRACT for tools that instrument the live image (trace-fn/break-fn, ADR-184, or
@@ -890,7 +890,7 @@ a 16 300-module project an entry touching twenty of them materialises twenty, no
 ;; (and only the first: a warm run hits the image and skips the reload). The image
 ;; itself is always clean (the snapshot is taken right after this reload), so this is a
 ;; wipe, never a leak. See ADR-218 §"Runtime instrumentation must follow the build".
-(defn project-load-sources-cached (root & opts)
+(defn load-sources-cached (root & opts)
   "Load the project the fast way: from its startup image when that is current,
 otherwise from source — and in that case write the image, so the NEXT run is fast.
 This is what `nest run` / `nest test` / `nest check` use, which is why none of them
@@ -902,18 +902,18 @@ hit — a cold load of a large project takes tens of seconds, and silence there 
 indistinguishable from a hang. stderr, not stdout, so `nest run`'s output stays the
 program's and the LSP's protocol channel stays clean."
   (let (t-a (now-ns)
-        files (project-source-files root)
+        files (source-files root)
         t-b (now-ns)
         fp (project-fingerprint-of files)
         t-c (now-ns)
         hit (cond
-              (project-image-usable?)
+              (image-usable?)
                 (let (n (project-install-image root fp))
                   (cond
                     (nil? n) nil
                     ;; Everything, because this entry point is for the tools that need the
-                    ;; whole project. `nest run` uses `project-setup-lazy-image` instead.
-                    else (do (project-materialize-all) n)))
+                    ;; whole project. `nest run` uses `setup-lazy-image` instead.
+                    else (do (materialize-all) n)))
               else nil)
         t-d (now-ns)
         _ (when (getenv "BROOD_IMAGE_TRACE")
@@ -932,7 +932,7 @@ program's and the LSP's protocol channel stays clean."
               _ (eprintln (str "Building " name " (" n " file" (if (= n 1) "" "s") ")"))
               t0 (now-ns)
               before (global-names)
-              _ (apply project-load-sources (cons root opts))
+              _ (/apply load-sources (cons root opts))
               t-load (quot (- (now-ns) t0) 1000000)
               ;; A project whose globals are not all portable — a `table` global is the
               ;; documented mutable-state idiom, and a table is deliberately local to its
@@ -940,9 +940,9 @@ program's and the LSP's protocol channel stays clean."
               ;; always right), but swallowing it meant such a project silently loaded cold
               ;; forever with no way to find out why. Say so, once, and carry on.
               wrote (cond
-                      (project-image-usable?)
+                      (image-usable?)
                         (try
-                          (project-write-image root before)
+                          (write-image root before)
                           (catch e
                             ;; No once-per-key guard needed: this is the cold path, which
                             ;; already prints Building/Built exactly once per build.
@@ -1098,7 +1098,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
                        (get e :message))
                      (str ": " e))))))
     (cond
-      (and (pair? form) (= (first form) 'project)) (project-apply (rest form))
+      (and (pair? form) (= (first form) 'project)) (apply-config (rest form))
       (nil? form) (error "project: " manifest-path " is empty — it must hold one (project …) form")
       else
         (error "project: "
@@ -1124,10 +1124,10 @@ rules merged in declaration order, then this project's own `:format-headers` on 
         (brood-version)
         " — upgrade brood, or relax the :brood constraint in project.blsp"))))
 
-(defn project-setup (root)
+(defn setup (root)
   "Initialise the project rooted at `root`: reset the path conventions, apply its `project.blsp` manifest, refuse an incompatible runtime, put its sources and dependencies on the load path, and enable package rooting; returns `root`."
   (def *project-root* root)
-  ;; Restore the path conventions BEFORE applying the manifest. `project-apply`
+  ;; Restore the path conventions BEFORE applying the manifest. `apply`
   ;; only assigns these when the manifest names them, so without the reset a root
   ;; with no manifest — or one that omits :source-paths — silently inherits the
   ;; paths of whichever project was set up before it. That is wrong in any
@@ -1139,11 +1139,11 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; Reset `*project-name*` too, for the same reason (a manifest without `:name`, or none
   ;; at all, must NOT inherit a prior setup's name). This matters more since package-rooting
   ;; (ADR-070): a leaked name would make `project-root-project-rooting` wrongly root a
-  ;; nameless project's modules under the previous project's prefix. `project-apply` re-sets
+  ;; nameless project's modules under the previous project's prefix. `apply` re-sets
   ;; it when the manifest names it.
   (def *project-name* nil)
   ;; Reset the runtime-version gate too: a manifest with no `:brood` must not inherit a
-  ;; prior setup's constraint in a long-lived tooling image (`project-apply` re-sets it,
+  ;; prior setup's constraint in a long-lived tooling image (`apply` re-sets it,
   ;; but only when a manifest is applied — a bare/manifest-less setup skips that).
   (def *project-brood* nil)
   ;; Read the manifest as *data* and apply it — rather than `load`ing it, which
@@ -1153,7 +1153,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
     (when (file/exists? mf) (project-apply-manifest mf)))
   ;; Refuse an incompatible runtime BEFORE doing any project work (ADR-209).
   (project-check-brood-version)
-  (set-load-path! (append (project-abs-paths root *project-source-paths*) *load-path*))
+  (set-load-path! (append (abs-paths root *project-source-paths*) *load-path*))
   (project-ensure-deps-on-path root)
   ;; Root-project rooting (ADR-070, Elixir-uniform model): the project's OWN modules
   ;; root under its `:name` — `(defmodule buffer)` in project `myeditor` becomes the
@@ -1182,8 +1182,8 @@ rules merged in declaration order, then this project's own `:format-headers` on 
       ;; — the manifest is read as data. Normalise to a string so the registry keys
       ;; (and `require-force-package`'s string-keyed lookup of them) always agree.
       (let (pkg (name *project-name*)
-            dirs (project-abs-paths root *project-source-paths*)
-            module-files (apply append (map package/module-files dirs))
+            dirs (abs-paths root *project-source-paths*)
+            module-files (/apply append (map package/module-files dirs))
             short-modules (map first module-files))
         (register-package-modules! pkg short-modules)
         (map (fn (mf)
@@ -1194,7 +1194,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
         (%set-package-context (symbol pkg) short-modules)
         nil))
     ;; Nameless project (a bare run, or a manifest with no :name): clear any ambient
-    ;; context a *prior* project-setup left in a long-lived tooling image, so this
+    ;; context a *prior* setup left in a long-lived tooling image, so this
     ;; project's short modules don't get wrongly rooted under the previous name.
     (%set-package-context nil nil)))
 
@@ -1209,10 +1209,10 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   "Bootstrap a project image for tooling (LSP / MCP): load the project's sources
 plus the test + format frameworks, so cross-module names and framework macros
 resolve in the advisory checker. Returns the project root."
-  (project-setup root)
+  (setup root)
   ;; Image-backed (ADR-218): a tooling image starts from the artifact when the tree
   ;; is unchanged, and writes one when it isn't — no separate build step, ever.
-  (project-load-sources-cached root)
+  (load-sources-cached root)
   root)
 
 ;; If the manifest declared :dependencies, resolve them (writing/refreshing
@@ -1232,7 +1232,7 @@ resolve in the advisory checker. Returns the project root."
   (require-one 'package)
   (when *project-name*
     (package/record-ns-packages (map (fn (d) (list *project-name* d))
-                                  (project-abs-paths root *project-source-paths*))))
+                                  (abs-paths root *project-source-paths*))))
   ;; Dev/test setup sees BOTH the production deps and the `:dev-dependencies` (ADR-172):
   ;; a `nest test`/`nest run` in a dev image resolves and load-paths them all, exactly
   ;; like Cargo's dev-dependencies being available for tests locally. The release bundle
@@ -1247,9 +1247,9 @@ resolve in the advisory checker. Returns the project root."
 ;; The set the advisory type-checker walks for `(check-project)`.
 (defn- project-all-files
   (root)
-  (let (src-dirs (project-abs-paths root *project-source-paths*)
-        test-dirs (project-abs-paths root *project-test-paths*))
-    (append (fold (fn (a d) (append a (project-collect-sources d))) nil src-dirs)
+  (let (src-dirs (abs-paths root *project-source-paths*)
+        test-dirs (abs-paths root *project-test-paths*))
+    (append (fold (fn (a d) (append a (collect-sources d))) nil src-dirs)
       (fold (fn (a d) (append a (project-collect-tests d))) nil test-dirs))))
 
 ;; ── KI-17 reachability: each file's transitive require-closure ────────────────
@@ -1686,8 +1686,8 @@ resolve in the advisory checker. Returns the project root."
 ;; an image with nothing loaded, so this still loads every source.
 (defn- project-ensure-loaded
   (root)
-  (project-setup root)
-  (project-load-sources-cached root :skip-loaded))
+  (setup root)
+  (load-sources-cached root :skip-loaded))
 
 ;; Structured analogue of `check-project` — returns a flat list of
 ;; `{:file :line :col :message}` maps instead of printing GNU lines + a
@@ -1703,7 +1703,7 @@ resolve in the advisory checker. Returns the project root."
   ;; were all worse — a `set_current_dir` races sibling tests in the same binary under
   ;; plain `cargo test`, and raising the budget is what hid KI-39 for weeks. A caller
   ;; that names its root needs neither.
-  (let (root (project-find-root (or from (file/cwd))))
+  (let (root (find-root (or from (file/cwd))))
     (when (nil? root)
       (error "check-project-structured: not in a Brood project (no project.blsp found from "
         (or from (file/cwd))
@@ -1808,11 +1808,11 @@ resolve in the advisory checker. Returns the project root."
       (keep project-def-entry nodes))))
 
 ;; The project's source files (no tests) — the set the flat-namespace rule binds.
-(defn- project-source-files
+(defn- source-files
   (root)
-  (fold (fn (acc d) (append acc (project-collect-sources d)))
+  (fold (fn (acc d) (append acc (collect-sources d)))
     nil
-    (project-abs-paths root *project-source-paths*)))
+    (abs-paths root *project-source-paths*)))
 
 ;; Warning strings for a *qualified* global key (`ns/name`, per
 ;; `project-file-def-names`) defined across more than one source file. Under
@@ -2183,7 +2183,7 @@ resolve in the advisory checker. Returns the project root."
 
 (defn check-project ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
-  (let (root (project-find-root (file/cwd)))
+  (let (root (find-root (file/cwd)))
     (when (nil? root)
       (error "check-project: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project-ensure-loaded root)
@@ -2191,7 +2191,7 @@ resolve in the advisory checker. Returns the project root."
           ;; Phase 1 (unused-private + duplicate-defs): native parallel scan every
           ;; run — cheaper than any disk cache (see `project-gather-extracts`).
           extracts (project-gather-extracts files)
-          source-set (fold (fn (m p) (map-assoc m p true)) {} (project-source-files root)))
+          source-set (fold (fn (m p) (map-assoc m p true)) {} (source-files root)))
       (project-check-duplicate-defs extracts source-set)
       (project-check-unused-private extracts)
       ;; Phase 2 (per-file type-check): the EXPENSIVE pass — disk-cached per file
@@ -2210,7 +2210,7 @@ resolve in the advisory checker. Returns the project root."
 ;; against the prelude alone — the standalone-file behaviour.
 (defn check-files (paths)
   "Advisory type-check the listed files with the project image loaded first (so cross-module/namespace imports resolve), printing GNU `FILE:LINE:COL:` warnings to stderr and returning the total count. The entry behind `nest check FILE…`; shares its loader and per-file walk with `check-project`. Outside a project, checks against the prelude alone."
-  (let (root (project-find-root (file/cwd)))
+  (let (root (find-root (file/cwd)))
     (when root (project-ensure-loaded root))
     (project-check-files paths root)))
 
@@ -2221,13 +2221,13 @@ resolve in the advisory checker. Returns the project root."
 ;; `nest test` keeps using `check-project` (full coverage; `test` is loaded).
 (defn check-project-sources ()
   "Like `check-project`, but checks only the project's source paths (skips `tests/`, whose files reference test-framework macros). Used by `nest run`'s pre-flight."
-  (let (root (project-find-root (file/cwd)))
+  (let (root (find-root (file/cwd)))
     (when (nil? root)
       (error "check-project-sources: not in a Brood project (no project.blsp found from "
         (file/cwd)
         ")"))
     (project-ensure-loaded root)
-    (let (srcs (project-source-files root)
+    (let (srcs (source-files root)
           extracts (project-gather-extracts srcs)
           source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
       (project-check-duplicate-defs extracts source-set)
@@ -2275,7 +2275,7 @@ and the pre-flight would 'check' the manifest and warn on it."
 ;;
 ;; Why this is not `(keys *features*)`, which it replaced. On a WARM start the loaded
 ;; features really are the entry's closure and reading them off is exact. On a COLD start
-;; `project-load-sources-cached` has just loaded every module to build the startup image,
+;; `load-sources-cached` has just loaded every module to build the startup image,
 ;; so `*features*` is the whole project — and the pre-flight silently checked all of it
 ;; (~3.7 ms/file, uncached: ~50 s of an 85 s cold run on 16 302 modules). The closure has
 ;; to be DERIVED from the requires graph, or the same command checks a different file set
@@ -2307,13 +2307,13 @@ and the pre-flight would 'check' the manifest and warn on it."
 about to run actually reaches, walked from module `entry` through the require graph.
 Returns the warning count. A module the program never reaches is `nest check`/`nest test`'s
 business."
-  (let (root (project-find-root (file/cwd)))
+  (let (root (find-root (file/cwd)))
     (when (nil? root)
       (error "check-project-run-closure: not in a Brood project (no project.blsp found from "
         (file/cwd)
         ")"))
     (let ([want reach] (project-entry-closure entry
-                         (project-abs-paths root *project-source-paths*))
+                         (abs-paths root *project-source-paths*))
           extracts (project-gather-extracts want)
           source-set (fold (fn (m p) (map-assoc m p true)) {} want)
           ;; `reach` is one closure for the whole set rather than one per file: every file
@@ -2483,17 +2483,17 @@ as unchanged (only when some were)."
 
 (defn run-project-tests (& opts)
   "Discover, load (register-only), and run the project's whole test suite once, from the cwd. `opts` pass through to `run-tests` (e.g. `:slow`). Runs an advisory `check-project` pre-flight. Errors if not in a project or if any test fails. Backs `nest test`."
-  (let (root (project-find-root (file/cwd)))
+  (let (root (find-root (file/cwd)))
     (when (nil? root)
       (error "run-project-tests: not in a Brood project (no project.blsp found from "
         (file/cwd)
         ")"))
-    (project-setup root)
-    (project-load-sources-cached root)
+    (setup root)
+    (load-sources-cached root)
     ; the project's own src/, so tests use it directly
     (test/reset-units!)
     ; drop any stale registrations from a prior run (long-lived image / hot reload)
-    (let (dirs (project-abs-paths root *project-test-paths*)
+    (let (dirs (abs-paths root *project-test-paths*)
           ;; The corpus is `tests/**/*_test.blsp` PLUS any source file carrying co-located
           ;; `deftest`/`describe` forms (ADR-225) — a test found by its forms, wherever it
           ;; lives, not by a `_test.blsp` filename under `tests/`.
@@ -2560,15 +2560,15 @@ as unchanged (only when some were)."
 
 (defn- project-coverage-lines-begin!
   (root)
-  (coverage/coverage-line-begin! (project-abs-paths root *project-source-paths*)))
+  (coverage/line-begin! (abs-paths root *project-source-paths*)))
 
 (defn- project-coverage-lines-finish!
   (root)
-  (coverage/coverage-line-report root (project-abs-paths root *project-source-paths*)))
+  (coverage/line-report root (abs-paths root *project-source-paths*)))
 
 (defn- project-coverage-branches-finish!
   (root)
-  (coverage/coverage-branch-report root (project-abs-paths root *project-source-paths*)))
+  (coverage/branch-report root (abs-paths root *project-source-paths*)))
 
 ;; --- coverage wiring (nest test --cover) --------------------------------------
 ;; `coverage` is required lazily, like `package`: a run without `--cover` never
@@ -2576,11 +2576,11 @@ as unchanged (only when some were)."
 ;; std/tool/coverage.blsp).
 (defn- project-coverage-begin!
   (root)
-  (coverage/coverage-begin! (project-abs-paths root *project-source-paths*)))
+  (coverage/begin! (abs-paths root *project-source-paths*)))
 
 (defn- project-coverage-finish!
   (root)
-  (coverage/coverage-report root))
+  (coverage/report root))
 
 ;; Enforce `--cover-min N`: a coverage floor is only useful if it can fail the
 ;; build, so falling short raises (non-zero exit) exactly like a failing test.
@@ -2613,15 +2613,15 @@ as unchanged (only when some were)."
 
 (defn run-loaded-tests (& opts)
   "Run the ALREADY-REGISTERED suite — the `nest test FILE…` path, where the CLI has loaded the named files itself. Inside a project this resolves `:failed` against the project's record, updates that record afterwards, and honours `:cover`, so the flags mean the same thing as on a whole-project run; outside a project it is just `run-tests` (with a warning if coverage was asked for, since there are no project sources to instrument)."
-  (let (root (project-find-root (file/cwd)))
+  (let (root (find-root (file/cwd)))
     (if (nil? root)
       (do
         (when (test/opt? :cover opts)
           (eprintln "warning: --cover needs a project (no project.blsp found) — running without coverage"))
-        (apply test/run-tests opts))
+        (/apply test/run-tests opts))
       (let (_ (when (test/opt? :cover opts) (project-coverage-begin! root))
             resolved (project-resolve-test-opts root opts)
-            outcome (try (apply test/run-tests resolved) (catch e (list :%suite-raised e))))
+            outcome (try (/apply test/run-tests resolved) (catch e (list :%suite-raised e))))
         (project-write-failed! root *test-last-ran* *test-last-failed*)
         (let (percent (project-coverage-report! root opts))
           (if (and (pair? outcome) (= (first outcome) :%suite-raised))
@@ -2635,8 +2635,8 @@ as unchanged (only when some were)."
   (if (getenv "BROOD_TEST_NO_SCOPE")
     (do
       (fold (fn (_ f) (load f)) nil files)
-      (apply test/run-tests opts))
-    (apply test/run-tests-scoped (map (fn (f) (fn () (load f))) files) opts)))
+      (/apply test/run-tests opts))
+    (/apply test/run-tests-scoped (map (fn (f) (fn () (load f))) files) opts)))
 
 ;; Structured analogue of `run-project-tests` — same bootstrap (discovery,
 ;; load, type-check pre-flight) but `(run-tests-structured)` at the end, so
@@ -2645,17 +2645,17 @@ as unchanged (only when some were)."
 ;; tool (step 1c-b).
 (defn run-project-tests-structured (& opts)
   "Like `run-project-tests`, but returns the structured result `{:total :passed :failed :ms :results [...]}` instead of printing and raising on failure. Backs the `nest mcp` `run-tests` tool."
-  (let (root (project-find-root (file/cwd)))
+  (let (root (find-root (file/cwd)))
     (when (nil? root)
       (error "run-project-tests-structured: not in a Brood project (no project.blsp found from "
         (file/cwd)
         ")"))
-    (project-setup root)
-    (project-load-sources-cached root)
+    (setup root)
+    (load-sources-cached root)
     (test/reset-units!)
     ; drop any stale registrations so a re-run in a long-lived `nest mcp` image
     ; (each `load` re-registers, ADR-013) counts each test once, not N times
-    (let (dirs (project-abs-paths root *project-test-paths*)
+    (let (dirs (abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project-collect-tests d))) nil dirs))
       ;; Per-file scoped run (see `run-project-tests`) — matters most here: `nest mcp`
       ;; is a long-lived hot-reload image, so a load-all-then-run would accumulate every
@@ -2663,8 +2663,8 @@ as unchanged (only when some were)."
       (if (getenv "BROOD_TEST_NO_SCOPE")
         (do
           (fold (fn (_ f) (load f)) nil files)
-          (apply test/run-tests-structured opts))
-        (apply test/run-tests-scoped-structured (map (fn (f) (fn () (load f))) files) opts)))))
+          (/apply test/run-tests-structured opts))
+        (/apply test/run-tests-scoped-structured (map (fn (f) (fn () (load f))) files) opts)))))
 
 ;; (run-project args) — find the project from the cwd, set it up (which may
 ;; override *project-main* via the manifest), `require` the entry module, and
@@ -2674,14 +2674,14 @@ as unchanged (only when some were)."
 ;; no project here, or if the entry fn isn't defined or callable.
 (defn run-project (args)
   "Run the project's entry point (default module `main`, fn `main`; overridable via the manifest's `:main`), passing `args` (a list of CLI string arguments). Runs an advisory sources-only pre-flight. Errors if not in a project or the entry fn is missing/uncallable. Backs `nest run`."
-  (let (root (project-find-root (file/cwd)))
+  (let (root (find-root (file/cwd)))
     (when (nil? root)
       (error "run-project: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
-    (project-setup root)
+    (setup root)
     ;; A `--main` override (set via `set-project-main`) wins over the manifest's
-    ;; `:main`, which `project-setup` just re-applied into `*project-main*`.
+    ;; `:main`, which `setup` just re-applied into `*project-main*`.
     (let (entry (or *project-main-override* *project-main*)
-          ;; Root the entry module under the project (ADR-070): `project-setup` above
+          ;; Root the entry module under the project (ADR-070): `setup` above
           ;; set the ambient package context, so `main` → `myeditor/main`. A bare-file
           ;; entry (no `(defmodule …)`, so not a registered module) is left unrooted.
           modname (%root-module-name (first entry))
@@ -2692,8 +2692,8 @@ as unchanged (only when some were)."
       ;; project stays on disk. An entry point touching twenty of 16 300 modules
       ;; materialises twenty. With no current image, fall through to the ordinary source
       ;; load — which builds one, so the next run is fast.
-      (when (nil? (project-setup-lazy-image root))
-        (project-load-sources-cached root))
+      (when (nil? (setup-lazy-image root))
+        (load-sources-cached root))
       (require-one modname)
       ;; A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
       ;; module file with no `defmodule` header defines it bare. Prefer the
@@ -2717,7 +2717,7 @@ as unchanged (only when some were)."
           (let (f (eval target))
             (unless (fn? f)
               (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))
-            (apply f args)))))))
+            (/apply f args)))))))
 
 ;; --- single-binary release (ADR-038) -----------------------------------------
 ;; `nest release` appends a project's source to a copy of the `brood` binary;
@@ -2804,15 +2804,15 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
   (require-one 'package)
   (let (manifest (file/slurp (path-join root "project.blsp")))
     ;; Apply the manifest as DATA (not `load`) to learn its source paths + deps,
-    ;; mirroring `project-setup`. We don't load any source here — just read it.
+    ;; mirroring `setup`. We don't load any source here — just read it.
     (let (form (read-first manifest))
-      (when (and (pair? form) (= (first form) 'project)) (project-apply (rest form))))
+      (when (and (pair? form) (= (first form) 'project)) (apply-config (rest form))))
     ;; Project source dirs first, then resolved dependency dirs (so a project
     ;; module wins a stem clash with a dep — matches `*load-path*` ordering).
     ;; `*project-dependencies*` only — never `*project-dev-dependencies*` (ADR-172): a
     ;; `:dev-dependencies` is test/dev-only, so it is deliberately excluded from the
     ;; shipped bundle. (This is the payoff of keeping dev-deps in their own slot.)
-    (let (src-dirs (project-abs-paths root *project-source-paths*)
+    (let (src-dirs (abs-paths root *project-source-paths*)
           ;; `ensure-deps` resolves the deps AND, via `package-register-rooting`, writes each
           ;; dep module's ROOTED name → path into `*module-files*` — the exact map the
           ;; dep-embedding below reads. Returns the dep source dirs (used only to attribute
@@ -2832,13 +2832,13 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                                                   (strip-test-forms (file/slurp f)))
                                             a))
                                     acc
-                                    (project-collect-sources d)))
+                                    (collect-sources d)))
                             nil src-dirs)
             ;; DEPENDENCY modules are embedded by their ROOTED name (`foo/parser`) so two deps
             ;; each providing a `parser` coexist in one flat bundle — dev/release parity for
             ;; package-rooting (ADR-070). The rooted-name → path entries are what `ensure-deps`
             ;; just wrote into `*module-files*`; take those whose file lives under a
-            ;; bundled dep dir (so this is independent of any earlier `project-setup` that may
+            ;; bundled dep dir (so this is independent of any earlier `setup` that may
             ;; also have registered the root project's own rooted modules there). `run-bundle`
             ;; rebuilds the matching `*package-modules-of*` at boot and loads each under context.
             dep-pairs (fold (fn (acc kv)
@@ -2873,14 +2873,14 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; Re-emit the bundle manifest with `:bundled-packages` (every rooted dependency package,
 ;; transitive included) added, so `run-bundle` roots all of them — not just the direct deps
 ;; `:dependencies` names. Serialised as DATA: the embedded manifest is only ever read back with
-;; `read-first` + `project-apply`, so dropping comments/formatting is fine.
+;; `read-first` + `apply`, so dropping comments/formatting is fine.
 (defn- bundle-augment-manifest
   (manifest dep-packages)
   (let (form (read-first manifest))
     (if (and (pair? form) (= (first form) 'project))
       (pr-str (cons 'project
                 (append (rest form)
-                  (list :bundled-packages (apply vector dep-packages)))))
+                  (list :bundled-packages (/apply vector dep-packages)))))
       manifest)))
 
 ;; True if `path` (an absolute .blsp file) lives under one of `dep-dirs` (the bundled
@@ -2908,7 +2908,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; parity), so its embedded dependency modules — keyed `pkg/mod` — load under their package
 ;; context. A dependency contributes every embedded module key prefixed by its `:name`; the
 ;; short names (the part after `pkg/`) are that package's intra-package set — the same map
-;; `register-package-modules!` builds from disk deps at `project-setup`. Deps are known from
+;; `register-package-modules!` builds from disk deps at `setup`. Deps are known from
 ;; the embedded manifest (`*project-dependencies*`, already applied); their paths are gone,
 ;; but the bundle needs only the names. The root project's own modules stay unrooted (they
 ;; are not registered here), so they load at ROOT, matching how `bundle-collect` embedded them.
@@ -2945,7 +2945,7 @@ string arguments). The `brood` binary calls this when it detects it is a `nest
 release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (default module `main`, fn `main`). Errors if the entry fn is missing/uncallable."
   (let (form (read-first (%bundle-manifest)))
-    (when (and (pair? form) (= (first form) 'project)) (project-apply (rest form))))
+    (when (and (pair? form) (= (first form) 'project)) (apply-config (rest form))))
   ;; Rebuild the package-rooting context for the embedded DEPENDENCY modules (ADR-070
   ;; dev/release parity): each is embedded under its rooted key `pkg/mod`, and must load
   ;; under `pkg`'s context so its `(defmodule mod)` roots and its intra-package `(:use …)`
@@ -2967,7 +2967,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
         (let (f (eval target))
           (unless (fn? f)
             (error "run-bundle: entry '" fname "' is not callable (" (type-of f) ")"))
-          (apply f args))))))
+          (/apply f args))))))
 
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
@@ -3023,5 +3023,5 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     ;; compiled in the `project` namespace), so the apply resolves.
     (let (form (read-first (file/slurp p)))
       (when (and (pair? form) (= (first form) 'config))
-        (apply config (rest form)))))
+        (/apply config (rest form)))))
   nil)

@@ -978,7 +978,7 @@ test discovery, lints, release, config)."
   ;; `nest update-tooling` runs `require-project` first, so the CLI never reaches here
   ;; without a project — but guard directly too, so a bare `(scaffold/update-tooling)`
   ;; at the REPL errors clearly instead of writing into the cwd.
-  (let (root (or (project-find-root (file/cwd))
+  (let (root (or (find-root (file/cwd))
                (error "update-tooling: no project.blsp in the current directory or any parent"))
         docs-dir (path-join root "docs")
         skill-dir (path-join root ".claude/skills/writing-brood"))

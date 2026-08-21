@@ -684,15 +684,16 @@ dynamic var, so `(binding (*show* nil) …)` disables it for a scope. Default re
 printing keeps its `:__id__` — that is intended (records print unlike bare maps); the
 protocol is the per-record *override*, not a change to the default.
 
-#### `defbehaviour`: the module-as-implementor contract (`:use protocol`)
+#### `defbehaviour`: the module-as-implementor contract
 
 An ability dispatches on a **value**. When the unit that implements a contract is a
 *module* — a live view the router calls by name, say — there is no value to
-dispatch on, and that is `defbehaviour`'s job (`std/protocol.blsp`):
+dispatch on, and that is `defbehaviour`'s job. It is **core** (`std/protocol.blsp` is
+loaded in the prelude), so `defbehaviour` is available bare — no `require`, no `:use`:
 
 ```clojure
 ;; where the contract is declared
-(defmodule views (:use protocol))
+(defmodule views)
 (defbehaviour LiveModule
   (mount [params])
   (render [model])

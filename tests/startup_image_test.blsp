@@ -155,7 +155,7 @@
   ;; Found by `nest::coverage_lines` failing, not by reasoning, which is why it is pinned.
   (test "an instrumented run declines the image"
     (is (nil? (getenv "BROOD_COVERAGE")))
-    (is (project/project-image-usable?))))
+    (is (project/image-usable?))))
 
 ;; Values a cross-process MESSAGE cannot carry — a builtin (a Rust primitive with no data
 ;; form) and a raw-bytes literal — can still be IMAGED, because the image restores bindings in
