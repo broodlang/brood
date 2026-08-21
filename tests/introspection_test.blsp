@@ -4,6 +4,11 @@
 
 (defmodule introspection-test (:use test))
 
+;; Load the subsystem modules whose members the discovery tests below look up
+;; (apropos / all-globals / doc-search / bound? see a name only once its module is loaded).
+;; Referencing the function *values* auto-requires the module without calling them.
+(def- _load-subsystems (list rand/int rand/float term/raw-enter gui/open))
+
 (describe "docstrings"
   (test "a leading string is a docstring when more body follows"
     (defn squared (x) "Return x times itself." (* x x))
