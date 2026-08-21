@@ -268,6 +268,15 @@ jobs:
       - name: Build brood + nest
         run: cargo build --release -p cli -p nest
 
+      # `.blsp` formatting has NO CI gate — only rustfmt does, and it covers Rust. The
+      # pre-push hook runs `nest format --check`, so a break is caught on ONE developer's
+      # machine and nowhere else: four separate commits landed unformatted .blsp between
+      # 2026-08-20 and 2026-08-21 (ADR-238's two files; codemod/package/workspace; four more;
+      # then codemod/gen again), each green in CI and each blocking the next person's push.
+      # This job already builds `nest`, so the gate costs one command.
+      - name: Check .blsp formatting (nest format)
+        run: ./target/release/nest format --check
+
       - name: Check the examples
         shell: bash
         run: make check-examples 2>&1 | tee examples.log

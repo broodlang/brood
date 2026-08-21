@@ -515,7 +515,7 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
 **All previously-deferred items shipped (ADR-011).**
 
 - ✅ **Expanded curated sigs** — shipped: predicate group (`number?`/`empty?`/`list?`/
-  `contains?`/`member?`/`any?`/`every?` → `bool`) and string-converter group
+  `contains?`/`includes?`/`any?`/`every?` → `bool`) and string-converter group
   (`string/join`/`string/capitalize`/`string/split` → `string`/`list`).
   Catches `(+ 1 (number? x))`, `(+ 1 (join …))`, etc.
 - ✅ **Rest/variadic in `(sig …)` annotations** — shipped: `(sig f (int & number -> int))`

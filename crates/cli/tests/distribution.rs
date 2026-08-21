@@ -1062,7 +1062,7 @@ fn cluster_mesh_connects_peers_transitively() {
 (connect "b@127.0.0.1:{port_b}")
 (defn wait-sees (n)
   (cond
-    (member? :c@127.0.0.1 (nodes)) (println (str "A-SEES-C nodes=" (nodes)))
+    (includes? (nodes) :c@127.0.0.1) (println (str "A-SEES-C nodes=" (nodes)))
     (<= n 0)                       (println (str "A-MISSED-C nodes=" (nodes)))
     else                           (do (sleep 100) (wait-sees (- n 1)))))
 (wait-sees 150)
@@ -1801,7 +1801,7 @@ fn cluster_mesh_late_joiner_reaches_all_hub_peers() {
         "(node-start :a \"127.0.0.1:{port_a}\" \"secret-test-cookie-16+\")\n\
          (connect \"b@127.0.0.1:{port_b}\")\n\
          (defn wait-all (n)\n\
-            (cond (and (member? :c@127.0.0.1 (nodes)) (member? :d@127.0.0.1 (nodes)))\n\
+            (cond (and (includes? (nodes) :c@127.0.0.1) (includes? (nodes) :d@127.0.0.1))\n\
                     (println (str \"A-SEES-ALL nodes=\" (nodes)))\n\
                   (<= n 0) (println (str \"A-MISSED nodes=\" (nodes)))\n\
                   else (do (sleep 100) (wait-all (- n 1)))))\n\

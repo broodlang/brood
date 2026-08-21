@@ -58,10 +58,12 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
   "True if node `n` is trivia — whitespace or a comment."
   (or (whitespace? n) (comment? n)))
 
-(defn- container? (n)
+(defn- container?
+  (n)
   (let (k (node-kind n)) (or (= k :list) (= k :vector) (= k :map) (= k :set) (= k :root))))
 
-(defn- wrapper? (n)
+(defn- wrapper?
+  (n)
   (let (k (node-kind n))
     (or (= k :quote) (= k :quasi) (= k :unquote) (= k :splice) (= k :pin))))
 
@@ -252,7 +254,8 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       (nil? forms) (str open close)
       else (single-line-seq-build forms open close))))
 
-(defn- any-comment? (kids)
+(defn- any-comment?
+  (kids)
   ;; Direct-child comment? (Sub-list comments are caught recursively when their
   ;; parent calls single-line on them.)
   (any-comment-at kids 0 (vector-length kids)))
@@ -337,7 +340,8 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 ;; fixed point: a form that renders multi-line is recognised as broken on every
 ;; subsequent pass. Idempotent: a fully single-line form has no inner newline at
 ;; any depth and answers false.
-(defn- had-author-newlines? (n)
+(defn- had-author-newlines?
+  (n)
   (let (k (node-kind n))
     (cond
       (or (= k :list) (= k :vector) (= k :map) (= k :set))
@@ -460,7 +464,8 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; right after `(`, or a comment following another comment (each comment node
 ;; carries its own trailing newline, so the separating whitespace is just
 ;; indentation with no newline of its own).
-(defn- comment-on-own-line? (kids i)
+(defn- comment-on-own-line?
+  (kids i)
   (cond
     (< i 0) true
     (and (whitespace? (vector-ref kids i)) (includes? (node-text (vector-ref kids i)) "\n")) true
@@ -478,12 +483,14 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; and the first argument (second structural form). Such a comment would be
 ;; dropped by the generic-call head-ride (which jumps from the head straight to
 ;; the first body form), so the caller breaks instead of riding when it's true.
-(defn- comment-before-first-arg? (kids)
+(defn- comment-before-first-arg?
+  (kids)
   (let (head-i (kids-index-of-form kids 0) n (vector-length kids))
     (and (< head-i n) (comment-before-next-form? kids (inc head-i) n))))
 ;; Scanning forward from `i`, is the next non-whitespace node a comment (rather
 ;; than a structural form)? Stops at the first form (false) or first comment (true).
-(defn- comment-before-next-form? (kids i n)
+(defn- comment-before-next-form?
+  (kids i n)
   (cond
     (= i n) false
     (whitespace? (vector-ref kids i)) (comment-before-next-form? kids (inc i) n)
@@ -559,7 +566,8 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; the opening `(`). Comments are preserved — a same-line trailing comment is
 ;; hoisted onto its own line *above* its pair, an own-line comment sits on its own
 ;; line at the pair indent (the walker pairs name+value but never *across* a comment).
-(defn- render-pair-list (n indent)
+(defn- render-pair-list
+  (n indent)
   ;; Skip the flat `single-line` when already broken — same perf fix as `render-seq`.
   (let (keep-broken (had-author-newlines? n)
         one (if keep-broken nil (single-line n)))
@@ -780,7 +788,8 @@ retired the `comment-on-own-line?` distinction this used to need."
 
 ;; True if any structural body arg (from start-idx) is itself a container — then
 ;; fill is the wrong layout (containers read best one per line, CL `:linear`).
-(defn- body-has-container? (kids start-idx)
+(defn- body-has-container?
+  (kids start-idx)
   (body-has-container?-at kids start-idx (vector-length kids)))
 (defn- body-has-container?-at
   (kids i n)

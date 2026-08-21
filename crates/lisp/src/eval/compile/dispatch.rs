@@ -366,13 +366,22 @@ pub(crate) fn dispatch(
                         Some(4) => {
                             crate::perf_bump!(jit_fast_tail4);
                             // Tail call staged by the JIT: [callee, arg0..argN] sit
-                            // above the frame at roots[base+active_nslots..].  These
+                            // above the frame at roots[base+nslots..] (see KI-48 below).  These
                             // were pushed *after* any GC that fired inside
                             // jit_dispatch_call's safepoint (line ~8890), so they hold
                             // current-epoch handles — unlike cur_argv which was captured
                             // before jit_tier ran and may be stale.  Follow the staged
                             // call directly instead of re-running this arm on the VM.
-                            let frame_top = base + arm.active_nslots();
+                            // KI-48: the frame here is `push_frame`'s, which ALWAYS sizes to
+                            // `arm.nslots`, and this branch is gated on `!inline_installed`
+                            // besides. Re-reading `frame_size_for_new_entry()` (as this did) asks the flag
+                            // again — and the background inline swap can flip it in between,
+                            // after which `frame_top` names a different offset than the one the
+                            // staged `[callee, args…]` were written at. Unlike the sibling in
+                            // `jit_dispatch_tail`, the `n > frame_top` guard below means this
+                            // does not panic; it silently dispatches the WRONG callee, which is
+                            // the failure mode a forced desync reproduced as a hang.
+                            let frame_top = base + arm.nslots;
                             let n = heap.roots_len();
                             let callee_env2 = heap.read_root_env(env_root);
                             if n > frame_top {
