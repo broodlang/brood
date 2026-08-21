@@ -969,77 +969,77 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // over `floor`/`rem`/`*` at the precision level scripts actually need.
     def(
         heap,
-        "sin",
+        "%sin",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_sin,
     );
     def(
         heap,
-        "cos",
+        "%cos",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_cos,
     );
     def(
         heap,
-        "tan",
+        "%tan",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_tan,
     );
     def(
         heap,
-        "asin",
+        "%asin",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_asin,
     );
     def(
         heap,
-        "acos",
+        "%acos",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_acos,
     );
     def(
         heap,
-        "atan",
+        "%atan",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_atan,
     );
     def(
         heap,
-        "atan2",
+        "%atan2",
         Arity::exact(2),
         Sig::new(vec![num, num], float),
         math_atan2,
     );
     def(
         heap,
-        "exp",
+        "%exp",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_exp,
     );
     def(
         heap,
-        "ln",
+        "%ln",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_ln,
     );
     def(
         heap,
-        "log2",
+        "%log2",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_log2,
     );
     def(
         heap,
-        "log10",
+        "%log10",
         Arity::exact(1),
         Sig::new(vec![num], float),
         math_log10,
@@ -3360,17 +3360,17 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("decimal", &["x"], "Construct an exact arbitrary-precision base-10 decimal from x: a string (\"1.50\"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M."),
     ("decimal->string", &["d"], "The canonical decimal string of decimal d (no M suffix)."),
     ("decimal->float", &["d"], "Decimal d as an (inexact) float."),
-    ("sin",   &["x"], "The sine of x (radians). Returns a float."),
-    ("cos",   &["x"], "The cosine of x (radians). Returns a float."),
-    ("tan",   &["x"], "The tangent of x (radians). Returns a float."),
-    ("asin",  &["x"], "The arcsine of x in radians. x must be in [-1, 1]; raises otherwise."),
-    ("acos",  &["x"], "The arccosine of x in radians. x must be in [-1, 1]; raises otherwise."),
-    ("atan",  &["x"], "The arctangent of x in radians (result in [-π/2, π/2])."),
-    ("atan2", &["y", "x"], "The angle in radians of the vector (x, y) from the positive x-axis, in (-π, π]. Handles x=0."),
-    ("exp",   &["x"], "e raised to the power x. Returns a float."),
-    ("ln",    &["x"], "The natural logarithm of x. x must be positive; raises otherwise."),
-    ("log2",  &["x"], "The base-2 logarithm of x. x must be positive; raises otherwise."),
-    ("log10", &["x"], "The base-10 logarithm of x. x must be positive; raises otherwise."),
+    ("%sin",   &["x"], "The sine of x (radians). Returns a float."),
+    ("%cos",   &["x"], "The cosine of x (radians). Returns a float."),
+    ("%tan",   &["x"], "The tangent of x (radians). Returns a float."),
+    ("%asin",  &["x"], "The arcsine of x in radians. x must be in [-1, 1]; raises otherwise."),
+    ("%acos",  &["x"], "The arccosine of x in radians. x must be in [-1, 1]; raises otherwise."),
+    ("%atan",  &["x"], "The arctangent of x in radians (result in [-π/2, π/2])."),
+    ("%atan2", &["y", "x"], "The angle in radians of the vector (x, y) from the positive x-axis, in (-π, π]. Handles x=0."),
+    ("%exp",   &["x"], "e raised to the power x. Returns a float."),
+    ("%ln",    &["x"], "The natural logarithm of x. x must be positive; raises otherwise."),
+    ("%log2",  &["x"], "The base-2 logarithm of x. x must be positive; raises otherwise."),
+    ("%log10", &["x"], "The base-10 logarithm of x. x must be positive; raises otherwise."),
     ("%f64-sqrt", &["x"], "The IEEE 754 square root of x (f64::sqrt). x must be non-negative; raises otherwise. Handles subnormals and ±0 correctly. Any number coerces to f64 first — int, float, bignum, decimal or ratio."),
     ("string->rope", &["s"], "A rope (editor buffer text) holding the characters of string s."),
     ("rope->string", &["r"], "The full text of rope r as a string."),

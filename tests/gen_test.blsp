@@ -18,10 +18,10 @@
   ; reply old, set new
 
   (test "a cast threads new state; call reads it synchronously"
-    (let (c (spawn-server counter 0)) (! c :inc) (! c [:add 10]) (assert= (call c :value) 11)))
+    (let (c (spawn-server counter 0)) (cast c :inc) (cast c [:add 10]) (assert= (call c :value) 11)))
 
   (test "a no-op cast leaves state unchanged"
-    (let (c (spawn-server counter 5)) (! c :ping) (assert= (call c :value) 5)))
+    (let (c (spawn-server counter 5)) (cast c :ping) (assert= (call c :value) 5)))
 
   (test "a call can both reply and update state"
     (let (c (spawn-server counter 7))
@@ -32,9 +32,9 @@
 
   (test "casts are ordered, and a later call observes all of them"
     (let (c (spawn-server counter 0))
-      (! c :inc)
-      (! c :inc)
-      (! c :inc)
+      (cast c :inc)
+      (cast c :inc)
+      (cast c :inc)
       (assert= (call c :value) 3))))
 
 (describe "gen: sleep"
@@ -70,13 +70,13 @@
 
   (test "query replies the body and leaves state unchanged"
     (let (s (spawn-server kv {}))
-      (! s [:put :a 1])
-      (! s [:put :b 2])
+      (cast s [:put :a 1])
+      (cast s [:put :b 2])
       (assert= (call s [:get :a]) 1)
       (assert= (call s [:get :b]) 2)
       (assert= (call s :size) 2)
       ;; another cast confirms state survived the queries
-      (! s [:put :c 3])
+      (cast s [:put :c 3])
       (assert= (call s :size) 3)))
 
   (test "(stop pid) ends the receive loop cleanly"
@@ -85,7 +85,7 @@
     ;; from outside without `monitor`, so we just confirm stop returns nil and
     ;; the surrounding test completes (i.e. the process doesn't deadlock).
     (let (s (spawn-server kv {}))
-      (! s [:put :a 1])
+      (cast s [:put :a 1])
       (assert= (call s :size) 1)
       (assert= (stop s) nil))))
 
@@ -119,7 +119,7 @@
 
   (test "an info clause receives the [:down …] of a monitored process"
     (let (s (spawn-server inbox nil) w (spawn-server inbox nil))
-      (! s [:watch w])
+      (cast s [:watch w])
       ; s monitors w
       (sleep 20)
       ; let the :watch cast arm the monitor first
@@ -141,8 +141,8 @@
     (let (s (spawn-server doubler 10))
       ; init: 10*2 = 20
       (assert= (call s :value) 20)
-      (! s :inc)
-      (! s :inc)
+      (cast s :inc)
+      (cast s :inc)
       (assert= (call s :value) 22))))
 ; 20+1+1, not re-doubled
 

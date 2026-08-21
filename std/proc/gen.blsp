@@ -41,15 +41,16 @@ cleanup; its value is ignored). Every server also accepts an implicit
       (terminate reason (println \"down: \" reason)))    ; cleanup on (stop)
 
     (def c (spawn-server counter 0))
-    (! c :inc)                            ; cast
+    (cast c :inc)                            ; cast
     (call c :value)                   ; => 1  (synchronous, 5 s timeout)
     (call c :double)                  ; => 2
     (stop c)                              ; graceful shutdown")
 
 ;; ---- client side ------------------------------------------------------------
 
-(defn ! (pid payload)
-  "Send `payload` to a server process as a cast (fire-and-forget). Erlang's `Pid ! Msg`."
+(defn cast (pid payload)
+  "Send `payload` to a server process as a cast — fire-and-forget, the asynchronous
+counterpart to `call` (no reply, the caller never blocks)."
   (send pid [:$cast payload]))
 
 (defn call (pid payload)
