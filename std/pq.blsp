@@ -7,7 +7,7 @@
 (defmodule pq
   "Purely functional min-priority queue (min priority pops first).
 
-    (let (q (-> (pq/new)
+    (let (q (-> (pq/empty)
                 (pq/insert 3 :low)
                 (pq/insert 1 :high)
                 (pq/insert 2 :med)))
@@ -23,7 +23,7 @@ falsy collection, so `(if pq …)` used to take the else branch on an empty queu
 
 ;; The bare `pq?` type predicate lives in the prelude alongside `set?`/`map?` (ADR-236).
 
-(defn new ()
+(defn empty ()
   "An empty min-priority queue."
   (pq nil))
 

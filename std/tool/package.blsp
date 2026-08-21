@@ -1221,6 +1221,8 @@ sha256 pin still holds."
 ;; its own source dirs with it to root the root project's modules, a legitimate
 ;; cross-module use.
 (defn module-files (src-dir)
+  "List `[module-name file]` pairs for every module defined under `src-dir`, or
+  nil if `src-dir` is not a directory."
   (if (not (file/dir? src-dir))
     nil
     (apply append

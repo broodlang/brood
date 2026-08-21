@@ -14,7 +14,7 @@
 (defmodule multimap
   "Multi-valued map: one key may have multiple associated values.
 
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                  (multimap/assoc :color \"red\")
                  (multimap/assoc :color \"blue\")
                  (multimap/assoc :size  \"large\")))
@@ -30,7 +30,7 @@ look-alike map, and it prints as `#<multimap …>` (`->map` is the plain-map vie
 
 ;; The bare `multimap?` type predicate lives in the prelude alongside `set?`/`map?` (ADR-236).
 
-(defn new ()
+(defn empty ()
   "An empty multimap."
   (multimap {}))
 

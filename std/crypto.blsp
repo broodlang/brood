@@ -67,11 +67,11 @@ byte vector on success, or `:error` if authentication fails (wrong key/nonce
 or tampered ciphertext). Inputs may be bytes values or vectors/lists of ints."
   (%chacha20-decrypt key nonce ciphertext-bytes))
 
-(defn encrypt-str (key nonce s)
+(defn encrypt-string (key nonce s)
   "Encrypt the UTF-8 bytes of string `s`. Returns a ciphertext bytes value."
   (encrypt key nonce (string/->bytes s)))
 
-(defn decrypt-str (key nonce ciphertext-bytes)
+(defn decrypt-string (key nonce ciphertext-bytes)
   "Decrypt to a string. Returns the decoded string, or `:error` on failure."
   (let (pt (decrypt key nonce ciphertext-bytes))
     (if (= pt :error) :error (string/bytes-> pt))))

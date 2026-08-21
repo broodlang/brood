@@ -207,7 +207,7 @@ incremental search rides on."
 ;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough
 ;; to live in core; the module system and the project tooling build on them.
 
-;; The bootstrap `path-*` subset (path-join/path-basename/path-absolute/parent-dir):
+;; The bootstrap `path-*` subset (path-join/path-basename/path-absolute/parent-directory):
 ;; the minimal path ops tooling needs *before* any module can be required. The full
 ;; path library is `std/path.blsp` (`path/dirname`/`normalize`/`relative-to`/…) — a
 ;; deliberate layer on top, with its own (slightly different) contracts. Not a dup.
@@ -220,7 +220,7 @@ incremental search rides on."
 
 ;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
 ;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.
-(defn parent-dir (path)
+(defn parent-directory (path)
   "The directory containing `path` (\"/a/b/c\" -> \"/a/b\", \"/foo\" -> \"/\", \"rel\" -> \".\")."
   (let (i (path-last-slash path (dec (string/length path))))
     (cond (< i 0) "." (= i 0) "/" else (string/substring path 0 i))))

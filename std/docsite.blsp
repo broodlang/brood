@@ -92,8 +92,9 @@
 ;; ---- anchors ----------------------------------------------------------------
 
 (defn- slug (raw) (string/replace (string/replace (str raw) "/" "-") " " "-"))
-(defn module-anchor (module-name) (str "m-" (slug module-name)))
+(defn module-anchor (module-name) "The HTML anchor id for `module-name`'s section (`m-<slug>`)." (str "m-" (slug module-name)))
 (defn def-anchor (module-name definition-name)
+  "The HTML anchor id for a definition within a module (`d-<module>-<name>`)."
   (str "d-" (slug module-name) "-" (slug definition-name)))
 
 ;; ---- one definition ---------------------------------------------------------

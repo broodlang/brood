@@ -6,7 +6,7 @@
 (defmodule queue
   "Purely functional FIFO queue.
 
-    (let (q (-> (queue/new)
+    (let (q (-> (queue/empty)
                 (queue/push 1)
                 (queue/push 2)
                 (queue/push 3)))
@@ -25,7 +25,7 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
 
 ;; The bare `queue?` type predicate lives in the prelude alongside `set?`/`map?` (ADR-236).
 
-(defn new ()
+(defn empty ()
   "An empty FIFO queue."
   (queue nil nil 0))
 
@@ -73,8 +73,8 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
   (seq q))
 
 (defn list-> (xs)
-  "Build a queue from a list or vector, front → back — i.e. `(into (queue/new) xs)`."
-  (into (new) xs))
+  "Build a queue from a list or vector, front → back — i.e. `(into (queue/empty) xs)`."
+  (into (empty) xs))
 
 ;; A queue shows its shape, not its two-list representation: `Display` is the O(1) summary
 ;; (size + the element that pops next), `Inspect` the full FIFO contents.
