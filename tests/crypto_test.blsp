@@ -107,15 +107,15 @@
     (is (not= (crypto/pbkdf2 "pw" [0 255 0] 100 32)
           (crypto/pbkdf2 "pw" [0 255 1] 100 32)))))
 
-(describe "crypto/secure=?"
+(describe "crypto/constant-time-equal?"
   (test "equal byte vectors"
-    (is (crypto/secure=? [1 2 3] [1 2 3])))
+    (is (crypto/constant-time-equal? [1 2 3] [1 2 3])))
   (test "different byte vectors"
-    (is (not (crypto/secure=? [1 2 3] [1 2 4]))))
+    (is (not (crypto/constant-time-equal? [1 2 3] [1 2 4]))))
   (test "different lengths"
-    (is (not (crypto/secure=? [1 2] [1 2 3]))))
+    (is (not (crypto/constant-time-equal? [1 2] [1 2 3]))))
   (test "empty vectors are equal"
-    (is (crypto/secure=? [] []))))
+    (is (crypto/constant-time-equal? [] []))))
 
 (describe "crypto ed25519 signatures"
   (test "a keypair is a 32-byte public + 32-byte private"
