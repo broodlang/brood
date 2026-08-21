@@ -1,7 +1,7 @@
 //! End-to-end distributed-node test: two real `brood` runtimes (separate OS
 //! processes) connect over loopback TCP and message each other.
 //!
-//! Proves the full slice-1 path: node naming + cookie handshake (`node-start` /
+//! Proves the full slice-1 path: node naming + cookie handshake (`node/start` /
 //! `connect`), bootstrapping a peer by registered name (`{:name :node}`), and —
 //! the payoff — addressing the **remote pid** the peer replies with directly,
 //! location-transparently. Symbols/pids cross the wire by name and re-intern on
@@ -27,7 +27,7 @@ fn two_nodes_connect_and_message() {
     // sends it `[:hi from]` or `[:ping from]`. Loops forever (the harness kills it).
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (register :echo (self))
 (defn serve ()
   (receive
@@ -42,8 +42,8 @@ fn two_nodes_connect_and_message() {
     // remote pid it replies with *directly* (location transparency).
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
 (def remote (receive ([:pong p] p) (after 30000 (throw "no reply by name"))))
 (unless (pid? remote) (throw "reply was not a pid"))
@@ -76,7 +76,7 @@ fn two_nodes_connect_and_message() {
 
 /// A **clean** peer exit (process returns → OS closes the socket) fires
 /// `[:nodedown]` on the survivor **promptly** — via the reader's socket-EOF path,
-/// not the ~6s heartbeat timeout — and drops the peer from `(nodes)`.
+/// not the ~6s heartbeat timeout — and drops the peer from `(node/list)`.
 ///
 /// Regression guard for a misdiagnosed report ("clean disconnects are not detected
 /// until heartbeat timeout"): in fact the kernel has detected clean close since
@@ -96,13 +96,13 @@ fn clean_peer_exit_fires_nodedown_promptly() {
     // Node B: come up, **wait until A has actually linked in** (not a blind timer —
     // under load A's startup can outlast any fixed sleep, which would close B's
     // listener before A connects and flake with ECONNREFUSED), give A a beat to
-    // finish `monitor-node`, then *return* — a clean exit that closes the socket
+    // finish `node/monitor`, then *return* — a clean exit that closes the socket
     // (the `/quit` path, not a `kill`). Same `wait-link` coordination the
-    // `disconnect` test below uses.
+    // `node/disconnect` test below uses.
     let quitter = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(defn wait-link () (if (empty? (nodes)) (do (sleep 25) (wait-link)) (first (nodes))))
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(defn wait-link () (if (empty? (node/list)) (do (sleep 25) (wait-link)) (first (node/list))))
 (wait-link)
 (sleep 200)
 "#
@@ -110,18 +110,18 @@ fn clean_peer_exit_fires_nodedown_promptly() {
 
     // Node A: connect, monitor B by the authoritative name `connect` returns, then
     // wait for `[:nodedown]`. B exits ~1.5s in; nodedown must arrive well under the
-    // 5s cap (which is itself under the 6s heartbeat) — and `(nodes)` must prune.
+    // 5s cap (which is itself under the 6s heartbeat) — and `(node/list)` must prune.
     let watcher = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(def peer (connect "b@127.0.0.1:{port_b}"))
-(monitor-node peer)
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(def peer (node/connect "b@127.0.0.1:{port_b}"))
+(node/monitor peer)
 (receive
   ([:nodedown p]
-    (if (empty? (nodes))
+    (if (empty? (node/list))
       (println "NODEDOWN-OK " p)
-      (println "NODEDOWN-BUT-NODES-NOT-PRUNED " (nodes))))
-  (after 5000 (println "TIMEOUT-no-nodedown " (nodes))))
+      (println "NODEDOWN-BUT-NODES-NOT-PRUNED " (node/list))))
+  (after 5000 (println "TIMEOUT-no-nodedown " (node/list))))
 "#
     );
 
@@ -132,7 +132,7 @@ fn clean_peer_exit_fires_nodedown_promptly() {
     let out = a.wait_with_output().expect("watcher finished");
     let _ = b.kill(); // already exited cleanly; reap defensively
                       // B's own output on the failure path: A exiting early (rather than on its 5 s guard) means
-                      // `connect` or `node-start` failed, and whether B was healthy is then the first question.
+                      // `connect` or `node/start` failed, and whether B was healthy is then the first question.
     let b_err = b
         .wait_with_output()
         .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
@@ -143,15 +143,15 @@ fn clean_peer_exit_fires_nodedown_promptly() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success() && stdout.contains("NODEDOWN-OK"),
-        "expected prompt nodedown + pruned (nodes) on a clean peer exit.\n\
+        "expected prompt nodedown + pruned (node/list) on a clean peer exit.\n\
          --- A stdout ---\n{stdout}\n--- A stderr ---\n{stderr}\n--- B stderr ---\n{b_err}"
     );
 }
 
-/// `(disconnect name)` tears the link down *deliberately* while **both** nodes
+/// `(node/disconnect name)` tears the link down *deliberately* while **both** nodes
 /// stay up — the capability a clean process-exit can't provide (a server dropping
 /// one client, or a node leaving a cluster). The dialer disconnects; it sees
-/// `[:nodedown]` + a pruned `(nodes)` synchronously, and the *acceptor* — still
+/// `[:nodedown]` + a pruned `(node/list)` synchronously, and the *acceptor* — still
 /// running, blocked in `receive` — sees its own `[:nodedown]` via socket EOF.
 /// Erlang's `disconnect_node/1`. (connect-test had to hand-roll an app-level
 /// `[:bye]` for want of this.)
@@ -166,33 +166,33 @@ fn disconnect_drops_a_peer_link_while_both_nodes_stay_up() {
 
     // Node B: come up and *stay* up — monitor whoever links in, then block in
     // `receive` awaiting its `[:nodedown]`. It never exits on its own; only A's
-    // `disconnect` ends the link, so reaching the `B-NODEDOWN` clause proves the
+    // `node/disconnect` ends the link, so reaching the `B-NODEDOWN` clause proves the
     // socket was closed deliberately (not by B exiting).
     let server = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(defn wait-link () (if (empty? (nodes)) (do (sleep 50) (wait-link)) (first (nodes))))
-(monitor-node (wait-link))
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(defn wait-link () (if (empty? (node/list)) (do (sleep 50) (wait-link)) (first (node/list))))
+(node/monitor (wait-link))
 (receive
-  ([:nodedown p] (println "B-NODEDOWN " p " " (nodes)))
-  (after 5000 (println "B-TIMEOUT " (nodes))))
+  ([:nodedown p] (println "B-NODEDOWN " p " " (node/list)))
+  (after 5000 (println "B-TIMEOUT " (node/list))))
 "#
     );
 
     // Node A: connect, monitor B, give B a moment to notice + monitor us back,
-    // then `disconnect`. Assert the return value, the local nodedown, the pruned
+    // then `node/disconnect`. Assert the return value, the local nodedown, the pruned
     // list, and that disconnecting an unknown node is a no-op returning false.
     let client = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(def peer (connect "b@127.0.0.1:{port_b}"))
-(monitor-node peer)
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(def peer (node/connect "b@127.0.0.1:{port_b}"))
+(node/monitor peer)
 (sleep 400)
-(if (disconnect peer) (println "RETURNED-TRUE") (println "RETURNED-FALSE"))
+(if (node/disconnect peer) (println "RETURNED-TRUE") (println "RETURNED-FALSE"))
 (receive
-  ([:nodedown p] (if (empty? (nodes)) (println "A-NODEDOWN-OK " p) (println "A-NODES-NOT-PRUNED " (nodes))))
-  (after 5000 (println "A-TIMEOUT " (nodes))))
-(if (disconnect :ghost@nowhere) (println "GHOST-TRUE") (println "GHOST-FALSE"))
+  ([:nodedown p] (if (empty? (node/list)) (println "A-NODEDOWN-OK " p) (println "A-NODES-NOT-PRUNED " (node/list))))
+  (after 5000 (println "A-TIMEOUT " (node/list))))
+(if (node/disconnect :ghost@nowhere) (println "GHOST-TRUE") (println "GHOST-FALSE"))
 "#
     );
 
@@ -238,7 +238,7 @@ fn wait_until_socket(path: &std::path::Path) {
 /// Two local nodes connect **by name** over a Unix-domain socket — no port, no
 /// explicit cookie. Proves the name-addressed transport + the auto-generated
 /// shared cookie file end-to-end (ADR-068): both children share one sandboxed
-/// `$HOME`, so `(node-cookie)` mints the secret once and the second reads it back.
+/// `$HOME`, so `(node/cookie)` mints the secret once and the second reads it back.
 #[test]
 fn two_unix_nodes_connect_by_name_and_message() {
     let home = std::env::temp_dir().join(format!("brood-unix-{}", std::process::id()));
@@ -252,7 +252,7 @@ fn two_unix_nodes_connect_by_name_and_message() {
     ];
 
     let server = r#"
-(node-start :ua)
+(node/start :ua)
 (register :echo (self))
 (defn serve ()
   (receive
@@ -261,9 +261,9 @@ fn two_unix_nodes_connect_by_name_and_message() {
 (serve)
 "#;
     let client = r#"
-(node-start :ub)
+(node/start :ub)
 ;; connect returns the peer's authoritative name@host (ADR-073) — address by it.
-(def peer (connect "ua"))
+(def peer (node/connect "ua"))
 (send {:name :echo :node peer} [:hi (self)])
 (def remote (receive ([:pong p] p) (after 30000 (throw "no reply by name"))))
 (unless (pid? remote) (throw "reply was not a pid"))
@@ -314,15 +314,15 @@ fn wrong_cookie_rejected_over_unix() {
     ];
 
     let server = r#"
-(node-start :uc)
+(node/start :uc)
 (register :echo (self))
 (defn serve () (receive (_ (serve))))
 (serve)
 "#;
     // A wrong cookie → handshake MAC mismatch → connect raises → we print REJECTED.
     let client = r#"
-(node-start :ud)
-(try (do (connect "uc") (println "UNEXPECTED-CONNECT"))
+(node/start :ud)
+(try (do (node/connect "uc") (println "UNEXPECTED-CONNECT"))
      (catch _ (println "REJECTED")))
 "#;
 
@@ -353,7 +353,7 @@ fn cookie_file_autogen_and_reuse() {
         ("HOME", home.to_str().unwrap()),
         ("XDG_CONFIG_HOME", cfg.to_str().unwrap()),
     ];
-    let prog = "(println (node-cookie))";
+    let prog = "(println (node/cookie))";
 
     let first = spawn_brood_env(&home, "c1.blsp", prog, &env)
         .wait_with_output()
@@ -400,7 +400,7 @@ fn lambda_ships_across_nodes_and_runs() {
     // Worker on A: receive `[:run f x reply]`, apply `(f x)`, send the result back.
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (register :worker (self))
 (defn serve ()
   (receive
@@ -413,8 +413,8 @@ fn lambda_ships_across_nodes_and_runs() {
     // Client on B: build a closure capturing `n`, ship it, expect (* 14 3) = 42.
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (let (n 3)
   (send {{:name :worker :node :a@127.0.0.1}} [:run (fn (x) (* x n)) 14 (self)]))
 (receive
@@ -465,7 +465,7 @@ fn source_positions_survive_a_cross_node_send() {
 
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (register :probe (self))
 (defn serve ()
   (receive
@@ -483,8 +483,8 @@ fn source_positions_survive_a_cross_node_send() {
     // header take us through line 6, the `(send …)` line is 7.
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (let (me (self))
   ;; The next line is line 7 in this file — the quoted literal whose position
   ;; must survive across the wire and reach the receiver's `form-pos`.
@@ -522,7 +522,7 @@ fn source_positions_survive_a_cross_node_send() {
     );
 }
 
-/// `(remote-spawn node expr)` ships a thunk to a peer, where a `:remote-spawn`
+/// `(node/spawn node expr)` ships a thunk to a peer, where a `:remote-spawn`
 /// server (lazily started on first call) `(spawn)`s it locally. End-to-end:
 /// the client triggers a remote spawn that captures the client's pid, the
 /// spawned process runs on A, sends the client a `[:hello-from-a]` message,
@@ -540,8 +540,8 @@ fn remote_spawn_runs_a_thunk_on_a_peer() {
     // Server: enable remote-spawn here (the receiver opts in), then park.
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(start-remote-spawn)
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/serve-spawns)
 ;; Park forever; the harness kills us.
 (receive (after 10000 nil))
 "#
@@ -550,10 +550,10 @@ fn remote_spawn_runs_a_thunk_on_a_peer() {
     // Client: captures its own pid, asks A to spawn a thunk that messages back.
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (let (me (self))
-  (remote-spawn :a@127.0.0.1 (send me [:hello-from-a (node-name)])))
+  (node/spawn :a@127.0.0.1 (send me [:hello-from-a (node/name)])))
 (receive
   ([:hello-from-a from] (if (= from :a@127.0.0.1)
                           (println "REMOTE-SPAWN-OK")
@@ -604,7 +604,7 @@ fn cross_node_pid_monitor_fires_down() {
     // pass to `monitor` — monitors take a pid, not a name.
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker (parent)
   (do (send parent [:my-pid (self)])
       (receive (:stop nil) (_ nil))))
@@ -618,8 +618,8 @@ fn cross_node_pid_monitor_fires_down() {
     );
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (send {{:name :work-bootstrap :node :a@127.0.0.1}} [:hello (self)])
 (def remote-pid (receive ([:my-pid p] p) (after 30000 (throw "no pid reply"))))
 (def m (monitor remote-pid))
@@ -673,7 +673,7 @@ fn remote_monitor_fires_noconnection_on_node_down() {
     // the "node down" trigger.
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker (parent)
   (do (send parent [:my-pid (self)])
       (receive (after 60000 nil))))
@@ -688,8 +688,8 @@ fn remote_monitor_fires_noconnection_on_node_down() {
     // Client: get the remote pid, monitor it, kill A, expect :noconnection.
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (send {{:name :work-bootstrap :node :a@127.0.0.1}} [:hello (self)])
 (def remote-pid (receive ([:my-pid p] p) (after 30000 (throw "no pid reply"))))
 (def m (monitor remote-pid))
@@ -758,7 +758,7 @@ fn remote_monitor_fires_noconnection_on_node_down() {
 /// `reconnect` keeps a peer link alive across restarts. Start A1, B
 /// watches it and sends a probe; kill A1; restart A2 on the same port/name;
 /// B's watcher reconnects and a second probe round-trips. Pure Brood policy
-/// on top of `connect` + `monitor-node`; no Rust changes — this test guards
+/// on top of `connect` + `node/monitor`; no Rust changes — this test guards
 /// the policy code in `std/net/reconnect.blsp` (which superseded the
 /// prelude's `ensure-link`, 2026-07-18).
 #[test]
@@ -774,7 +774,7 @@ fn ensure_link_reconnects_across_a_node_restart() {
     // same node" coming back up after a crash, from the link's point of view.
     let server_src = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (register :probe (self))
 (defn serve ()
   (receive
@@ -789,11 +789,11 @@ fn ensure_link_reconnects_across_a_node_restart() {
     // a second time — `ensure-link` will reconnect under us).
     let client_src = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (reconnect/watch "a@127.0.0.1:{port_a}" {{:min-ms 200 :max-ms 400}})
 ;; Wait for the watcher's initial connect (it is asynchronous, unlike the old
 ;; ensure-link) before the first probe.
-(defn wait-link () (if (empty? (nodes)) (do (sleep 25) (wait-link)) nil))
+(defn wait-link () (if (empty? (node/list)) (do (sleep 25) (wait-link)) nil))
 (wait-link)
 ;; First probe — proves the initial link came up.
 (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
@@ -888,7 +888,7 @@ fn non_brood_peer_is_rejected_at_magic_prefix() {
     let port_a = free_port();
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (receive (after 5000 nil))
 "#
     );
@@ -931,7 +931,7 @@ fn mismatched_cookie_is_rejected() {
 
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "right-cookie-test-16+")
+(node/start :a "127.0.0.1:{port_a}" "right-cookie-test-16+")
 (register :echo (self))
 (defn serve () (receive ([:hi from] (do (send from [:pong (self)]) (serve))) (_ (serve))))
 (serve)
@@ -940,8 +940,8 @@ fn mismatched_cookie_is_rejected() {
     // Wrong cookie → the handshake fails, so `connect` errors and no link forms.
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "wrong-cookie-test-16+")
-(println (try (do (connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECTED")
+(node/start :b "127.0.0.1:{port_b}" "wrong-cookie-test-16+")
+(println (try (do (node/connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECTED")
               (catch e "REJECTED-AS-EXPECTED")))
 "#
     );
@@ -970,7 +970,7 @@ fn mismatched_cookie_is_rejected() {
 fn echo_server_src(port: u16) -> String {
     format!(
         r#"
-(node-start :a "127.0.0.1:{port}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port}" "secret-test-cookie-16+")
 (register :echo (self))
 (defn serve ()
   (receive
@@ -994,12 +994,12 @@ fn duplicate_connect_is_deduplicated() {
 
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
-(connect "a@127.0.0.1:{port_a}")          ; second connect — should reuse, not add
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
+(node/connect "a@127.0.0.1:{port_a}")          ; second connect — should reuse, not add
 (send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
 (receive ([:welcome] :ok) (after 30000 (throw "no welcome")))
-(println (str "NODES=" (nodes)))           ; expect exactly (:a@127.0.0.1)
+(println (str "NODES=" (node/list)))           ; expect exactly (:a@127.0.0.1)
 (send {{:name :echo :node :a@127.0.0.1}} [:bye (self)])
 "#
     );
@@ -1038,7 +1038,7 @@ fn cluster_mesh_connects_peers_transitively() {
     // needs no application code to relay peers.
     let hub = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (defn idle () (do (sleep 1000) (idle)))
 (idle)
 "#
@@ -1047,23 +1047,23 @@ fn cluster_mesh_connects_peers_transitively() {
     // C: connect only to the hub, then idle (and stay reachable for A's mesh dial).
     let spoke_c = format!(
         r#"
-(node-start :c "127.0.0.1:{port_c}" "secret-test-cookie-16+")
-(connect "b@127.0.0.1:{port_b}")
+(node/start :c "127.0.0.1:{port_c}" "secret-test-cookie-16+")
+(node/connect "b@127.0.0.1:{port_b}")
 (defn idle () (do (sleep 1000) (idle)))
 (idle)
 "#
     );
 
-    // A: connect only to the hub, then wait to *see* C appear in (nodes) — proof
+    // A: connect only to the hub, then wait to *see* C appear in (node/list) — proof
     // the mesh dialed C without A ever naming it. Poll up to ~15s.
     let spoke_a = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(connect "b@127.0.0.1:{port_b}")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/connect "b@127.0.0.1:{port_b}")
 (defn wait-sees (n)
   (cond
-    (includes? (nodes) :c@127.0.0.1) (println (str "A-SEES-C nodes=" (nodes)))
-    (<= n 0)                       (println (str "A-MISSED-C nodes=" (nodes)))
+    (includes? (node/list) :c@127.0.0.1) (println (str "A-SEES-C nodes=" (node/list)))
+    (<= n 0)                       (println (str "A-MISSED-C nodes=" (node/list)))
     else                           (do (sleep 100) (wait-sees (- n 1)))))
 (wait-sees 150)
 "#
@@ -1104,15 +1104,15 @@ fn no_mesh_env_keeps_links_point_to_point() {
 
     let hub = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (defn idle () (do (sleep 1000) (idle)))
 (idle)
 "#
     );
     let spoke_c = format!(
         r#"
-(node-start :c "127.0.0.1:{port_c}" "secret-test-cookie-16+")
-(connect "b@127.0.0.1:{port_b}")
+(node/start :c "127.0.0.1:{port_c}" "secret-test-cookie-16+")
+(node/connect "b@127.0.0.1:{port_b}")
 (defn idle () (do (sleep 1000) (idle)))
 (idle)
 "#
@@ -1121,10 +1121,10 @@ fn no_mesh_env_keeps_links_point_to_point() {
     // reports its node list. C must be absent.
     let spoke_a = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(connect "b@127.0.0.1:{port_b}")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/connect "b@127.0.0.1:{port_b}")
 (sleep 2000)
-(println (str "A-NODES=" (nodes)))
+(println (str "A-NODES=" (node/list)))
 "#
     );
 
@@ -1162,8 +1162,8 @@ fn connect_to_self_refused() {
 
     let src = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(println (try (do (connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECTED")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(println (try (do (node/connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECTED")
               (catch e "REFUSED-AS-EXPECTED")))
 "#
     );
@@ -1178,7 +1178,7 @@ fn connect_to_self_refused() {
     );
 }
 
-/// `(monitor-node :ghost)` for a node we've never linked to fires `[:nodedown]`
+/// `(node/monitor :ghost)` for a node we've never linked to fires `[:nodedown]`
 /// immediately (Erlang `monitor_node` semantics).
 #[test]
 fn monitor_unconnected_node_fires_immediately() {
@@ -1189,8 +1189,8 @@ fn monitor_unconnected_node_fires_immediately() {
 
     let src = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(monitor-node :ghost)
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/monitor :ghost)
 (receive ([:nodedown :ghost] (println "IMMEDIATE-NODEDOWN"))
          (after 5000 (throw "monitor-node did not fire immediately")))
 "#
@@ -1207,7 +1207,7 @@ fn monitor_unconnected_node_fires_immediately() {
     );
 }
 
-/// `(monitor-node :a)` delivers `[:nodedown :a]` when the link to `:a` drops. The
+/// `(node/monitor :a)` delivers `[:nodedown :a]` when the link to `:a` drops. The
 /// client establishes the link (proven by a `:welcome` round-trip, after which the
 /// monitor is registered), asks `:a` to exit, and must then receive the nodedown.
 #[test]
@@ -1220,9 +1220,9 @@ fn node_down_is_detected() {
 
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
-(monitor-node :a)
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
+(node/monitor :a)
 (send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
 (receive ([:welcome] :ok) (after 30000 (throw "no welcome")))   ; link + monitor are up
 (send {{:name :echo :node :a@127.0.0.1}} [:bye (self)])                  ; make :a exit
@@ -1265,7 +1265,7 @@ fn remote_link_death_delivers_exit_to_a_trapping_peer() {
     // node up so the link `Frame::Exit` is delivered over a live connection.
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker-loop ()
   (receive
     ([:whoami from] (do (send from [:iam (self)]) (worker-loop)))
@@ -1278,8 +1278,8 @@ fn remote_link_death_delivers_exit_to_a_trapping_peer() {
     // B: obtain the worker's remote pid, link it (trapping), make it crash, expect [:EXIT].
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (trap-exit true)
 (send {{:name :worker :node :a@127.0.0.1}} [:whoami (self)])
 (def w (receive ([:iam p] p) (after 30000 (throw "no whoami"))))
@@ -1321,7 +1321,7 @@ fn remote_exit_kills_a_worker() {
 
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker-loop ()
   (receive
     ([:whoami from] (do (send from [:iam (self)]) (worker-loop)))
@@ -1332,8 +1332,8 @@ fn remote_exit_kills_a_worker() {
     );
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (send {{:name :worker :node :a@127.0.0.1}} [:whoami (self)])
 (def w (receive ([:iam p] p) (after 30000 (throw "no whoami"))))
 (def m (monitor w))
@@ -1363,7 +1363,7 @@ fn remote_exit_kills_a_worker() {
 /// node B supervises a worker on node A, and restarts it when it crashes — all
 /// over the distributed link. The supervisor (inlined here rather than using
 /// bundled `supervisor`) does a roundtrip
-/// to A's `:factory` to obtain the remote worker's pid (since `remote-spawn` is
+/// to A's `:factory` to obtain the remote worker's pid (since `node/spawn` is
 /// fire-and-forget), `monitor`s that remote pid, so the remote crash arrives as a
 /// `[:down …]` and triggers a restart that spins up a fresh worker.
 #[test]
@@ -1378,7 +1378,7 @@ fn supervisor_restarts_a_remote_child() {
     // worker announces `[:up (self)]` to the observer it's given, then crashes on :die.
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (defn worker-loop (obs)
   (do (send obs [:up (self)])
       (receive (:die (error "boom")) (_ (worker-loop obs)))))
@@ -1394,8 +1394,8 @@ fn supervisor_restarts_a_remote_child() {
     // returns it; the supervisor links it. Crash it; expect a fresh incarnation.
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (def me (self))
 ;; this test inlines the equivalent userland one-for-one respawn over `monitor`
 ;; (rather than pulling in bundled `supervisor`) — the remote worker
@@ -1438,8 +1438,8 @@ fn node_name_is_qualified_with_host() {
     let dir = std::env::temp_dir().join(format!("brood-dist-qual-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let prog = r#"
-(node-start :a "127.0.0.1:0")
-(println (str "NODE=" (node-name)))
+(node/start :a "127.0.0.1:0")
+(println (str "NODE=" (node/name)))
 (println (str "SELF=" (self)))
 "#;
     let out = spawn_brood(&dir, "qual.blsp", prog)
@@ -1457,7 +1457,7 @@ fn node_name_is_qualified_with_host() {
     );
 }
 
-/// `(remote-spawn-sync node expr)` (ADR-067 residual) runs `expr` on a peer and
+/// `(node/spawn-sync node expr)` (ADR-067 residual) runs `expr` on a peer and
 /// **returns the child's pid** — a remote pid carrying the peer's `name@host`.
 /// Proves the request/reply roundtrip and that the returned pid is usable
 /// (the child messages back through a captured local).
@@ -1471,17 +1471,17 @@ fn remote_spawn_sync_returns_a_usable_remote_pid() {
 
     let server = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(start-remote-spawn)
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/serve-spawns)
 (receive (:never :x))
 "#
     );
     let client = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
 (let (me (self))
-  (def child (remote-spawn-sync :a@127.0.0.1 (send me [:ran (self) (* 6 7)]))))
+  (def child (node/spawn-sync :a@127.0.0.1 (send me [:ran (self) (* 6 7)]))))
 (unless (pid? child) (throw "remote-spawn-sync did not return a pid"))
 (receive
   ([:ran on val] (if (= val 42)
@@ -1528,8 +1528,8 @@ fn dual_listen_serves_tcp_and_unix_at_once() {
     // Explicit `:ed@127.0.0.1` so the TCP dial host matches the node's identity.
     let server = format!(
         r#"
-(node-start :ed@127.0.0.1 "127.0.0.1:{port}")
-(node-also-listen)                       ; + the local Unix socket "ed"
+(node/start :ed@127.0.0.1 "127.0.0.1:{port}")
+(node/also-listen)                       ; + the local Unix socket "ed"
 (register :echo (self))
 (defn serve () (receive ([:hi from] (do (send from [:pong (self)]) (serve))) (_ (serve))))
 (serve)
@@ -1537,10 +1537,10 @@ fn dual_listen_serves_tcp_and_unix_at_once() {
     );
     let client = format!(
         r#"
-(node-start :cli)
+(node/start :cli)
 (defn tc (f n) (try (f) (catch e (if (> n 0) (do (sleep 100) (tc f (- n 1))) (throw e)))))
-(def via-tcp  (tc (fn () (connect "ed@127.0.0.1:{port}")) 50))
-(def via-unix (tc (fn () (connect "ed")) 50))
+(def via-tcp  (tc (fn () (node/connect "ed@127.0.0.1:{port}")) 50))
+(def via-unix (tc (fn () (node/connect "ed")) 50))
 (unless (= via-tcp via-unix) (throw (str "transports gave different nodes: " via-tcp " vs " via-unix)))
 (send {{:name :echo :node via-tcp}}  [:hi (self)])
 (receive ([:pong _] :ok) (after 30000 (throw "no pong over tcp")))
@@ -1565,9 +1565,9 @@ fn dual_listen_serves_tcp_and_unix_at_once() {
     );
 }
 
-/// `(monitor-node name)` is **persistent**: after a peer dies (first
+/// `(node/monitor name)` is **persistent**: after a peer dies (first
 /// `[:nodedown]`), reconnects, and dies again, the *same* monitor — registered
-/// once — fires a second `[:nodedown]` without needing a second `monitor-node`
+/// once — fires a second `[:nodedown]` without needing a second `node/monitor`
 /// call. This exercises the "always register, then check liveness" path in
 /// `monitor_node` rather than the old "skip registration when peer is down" path.
 #[test]
@@ -1580,7 +1580,7 @@ fn monitor_node_fires_on_every_reconnect_cycle() {
 
     let server_src = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (register :probe (self))
 (defn serve ()
   (receive
@@ -1593,12 +1593,12 @@ fn monitor_node_fires_on_every_reconnect_cycle() {
     // B registers ONE monitor, proves the link is up, then waits for a nodedown
     // (harness kills A1). It then reconnects to A2 and signals "RECONNECTED".
     // The harness kills A2; B must receive a second nodedown from the original
-    // single monitor registration — no second `monitor-node` call needed.
+    // single monitor registration — no second `node/monitor` call needed.
     let client_src = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(connect "a@127.0.0.1:{port_a}")
-(monitor-node :a)   ; register once — must survive across reconnect cycles
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
+(node/monitor :a)   ; register once — must survive across reconnect cycles
 (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
 (receive ([:pong] :ok) (after 10000 (throw "no first pong")))
 (println "ARMED")
@@ -1608,7 +1608,7 @@ fn monitor_node_fires_on_every_reconnect_cycle() {
 ; Reconnect to A2 (harness restarted A on the same port). Retry until it's up.
 (defn retry-connect (n)
   (when (= n 0) (throw "reconnect to A2 failed after retries"))
-  (try (connect "a@127.0.0.1:{port_a}")
+  (try (node/connect "a@127.0.0.1:{port_a}")
     (catch _ (do (sleep 100) (retry-connect (- n 1))))))
 (retry-connect 60)
 (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
@@ -1699,7 +1699,7 @@ fn monitor_node_fires_on_every_reconnect_cycle() {
     );
 }
 
-/// `(demonitor-node name)` cancels a node monitor: after calling it, the process
+/// `(node/demonitor name)` cancels a node monitor: after calling it, the process
 /// must NOT receive `[:nodedown name]` when the peer subsequently goes down.
 #[test]
 fn demonitor_node_stops_future_deliveries() {
@@ -1714,10 +1714,10 @@ fn demonitor_node_stops_future_deliveries() {
     // the harness terminate B cleanly without having to kill it.
     let client_src = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(def peer (connect "a@127.0.0.1:{port_a}"))
-(monitor-node peer)
-(demonitor-node peer)
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(def peer (node/connect "a@127.0.0.1:{port_a}"))
+(node/monitor peer)
+(node/demonitor peer)
 (println "DEMONITORED")
 ; Give the harness time to kill A, then wait for a nodedown that must NOT arrive.
 (receive
@@ -1784,13 +1784,13 @@ fn cluster_mesh_late_joiner_reaches_all_hub_peers() {
     let (port_a, port_b, port_c, port_d) = (free_port(), free_port(), free_port(), free_port());
 
     let hub = format!(
-        "(node-start :b \"127.0.0.1:{port_b}\" \"secret-test-cookie-16+\")\n\
+        "(node/start :b \"127.0.0.1:{port_b}\" \"secret-test-cookie-16+\")\n\
          (defn idle () (do (sleep 1000) (idle))) (idle)\n"
     );
     let mk_spoke = |name: &str, port: u16| {
         format!(
-            "(node-start :{name} \"127.0.0.1:{port}\" \"secret-test-cookie-16+\")\n\
-             (connect \"b@127.0.0.1:{port_b}\")\n\
+            "(node/start :{name} \"127.0.0.1:{port}\" \"secret-test-cookie-16+\")\n\
+             (node/connect \"b@127.0.0.1:{port_b}\")\n\
              (defn idle () (do (sleep 1000) (idle))) (idle)\n"
         )
     };
@@ -1798,12 +1798,12 @@ fn cluster_mesh_late_joiner_reaches_all_hub_peers() {
     let spoke_d = mk_spoke("d", port_d);
     // A connects to B only, then must see BOTH C and D appear without ever naming them.
     let spoke_a = format!(
-        "(node-start :a \"127.0.0.1:{port_a}\" \"secret-test-cookie-16+\")\n\
-         (connect \"b@127.0.0.1:{port_b}\")\n\
+        "(node/start :a \"127.0.0.1:{port_a}\" \"secret-test-cookie-16+\")\n\
+         (node/connect \"b@127.0.0.1:{port_b}\")\n\
          (defn wait-all (n)\n\
-            (cond (and (includes? (nodes) :c@127.0.0.1) (includes? (nodes) :d@127.0.0.1))\n\
-                    (println (str \"A-SEES-ALL nodes=\" (nodes)))\n\
-                  (<= n 0) (println (str \"A-MISSED nodes=\" (nodes)))\n\
+            (cond (and (includes? (node/list) :c@127.0.0.1) (includes? (node/list) :d@127.0.0.1))\n\
+                    (println (str \"A-SEES-ALL nodes=\" (node/list)))\n\
+                  (<= n 0) (println (str \"A-MISSED nodes=\" (node/list)))\n\
                   else (do (sleep 100) (wait-all (- n 1)))))\n\
          (wait-all 200)\n"
     );
@@ -1834,7 +1834,7 @@ fn cluster_mesh_late_joiner_reaches_all_hub_peers() {
 /// Full-mesh convergence from a CHAIN: a->b, b->c, c->d (each node names only its
 /// predecessor). The gossip must close the mesh transitively so EVERY node ends up
 /// connected to the other three. Each node writes "FULL" to its own result file
-/// once `(count (nodes))` reaches 3; the harness asserts all four converged.
+/// once `(count (node/list))` reaches 3; the harness asserts all four converged.
 #[test]
 fn cluster_mesh_converges_to_full_mesh_from_a_chain() {
     let _g = port_lock();
@@ -1849,14 +1849,14 @@ fn cluster_mesh_converges_to_full_mesh_from_a_chain() {
         let connect = if peer_port == 0 {
             String::new()
         } else {
-            format!("(connect \"x@127.0.0.1:{peer_port}\")\n")
+            format!("(node/connect \"x@127.0.0.1:{peer_port}\")\n")
         };
         format!(
-            "(node-start :{name} \"127.0.0.1:{port}\" \"secret-test-cookie-16+\")\n\
+            "(node/start :{name} \"127.0.0.1:{port}\" \"secret-test-cookie-16+\")\n\
              {connect}\
              (defn watch (n)\n\
-                (cond (= 3 (count (nodes))) (file/spit \"{r}\" \"FULL\")\n\
-                      (<= n 0) (file/spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
+                (cond (= 3 (count (node/list))) (file/spit \"{r}\" \"FULL\")\n\
+                      (<= n 0) (file/spit \"{r}\" (str \"PARTIAL \" (count (node/list))))\n\
                       else (do (sleep 100) (watch (- n 1)))))\n\
              (watch 250)\n\
              (defn idle () (do (sleep 1000) (idle))) (idle)\n",
@@ -1923,10 +1923,10 @@ fn cluster_mesh_simultaneous_joins_converge() {
 
     // hub first: just listens + watches for the full mesh (4 peers).
     let hub_src = format!(
-        "(node-start :h \"127.0.0.1:{hub_port}\" \"secret-test-cookie-16+\")\n\
+        "(node/start :h \"127.0.0.1:{hub_port}\" \"secret-test-cookie-16+\")\n\
          (defn watch (n)\n\
-            (cond (= 4 (count (nodes))) (file/spit \"{r}\" \"FULL\")\n\
-                  (<= n 0) (file/spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
+            (cond (= 4 (count (node/list))) (file/spit \"{r}\" \"FULL\")\n\
+                  (<= n 0) (file/spit \"{r}\" (str \"PARTIAL \" (count (node/list))))\n\
                   else (do (sleep 100) (watch (- n 1)))))\n\
          (watch 250)\n\
          (defn idle () (do (sleep 1000) (idle))) (idle)\n",
@@ -1939,11 +1939,11 @@ fn cluster_mesh_simultaneous_joins_converge() {
     for (i, &p) in spoke_ports.iter().enumerate() {
         let name = format!("s{i}");
         let src = format!(
-            "(node-start :{name} \"127.0.0.1:{p}\" \"secret-test-cookie-16+\")\n\
-             (connect \"x@127.0.0.1:{hub_port}\")\n\
+            "(node/start :{name} \"127.0.0.1:{p}\" \"secret-test-cookie-16+\")\n\
+             (node/connect \"x@127.0.0.1:{hub_port}\")\n\
              (defn watch (n)\n\
-                (cond (= 4 (count (nodes))) (file/spit \"{r}\" \"FULL\")\n\
-                      (<= n 0) (file/spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
+                (cond (= 4 (count (node/list))) (file/spit \"{r}\" \"FULL\")\n\
+                      (<= n 0) (file/spit \"{r}\" (str \"PARTIAL \" (count (node/list))))\n\
                       else (do (sleep 100) (watch (- n 1)))))\n\
              (watch 250)\n\
              (defn idle () (do (sleep 1000) (idle))) (idle)\n",
@@ -2009,8 +2009,8 @@ fn reconnect_watcher_heals_a_fallen_link() {
     // (closes the listener → A sees [:nodedown]).
     let b_round1 = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(defn wait-link () (if (empty? (nodes)) (do (sleep 25) (wait-link)) (first (nodes))))
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(defn wait-link () (if (empty? (node/list)) (do (sleep 25) (wait-link)) (first (node/list))))
 (wait-link)
 (sleep 300)
 "#
@@ -2019,14 +2019,14 @@ fn reconnect_watcher_heals_a_fallen_link() {
     // Node B, round 2: same identity + port; echo one ping so A can prove the
     // healed link routes messages.
     //
-    // ORDERING IS LOAD-BEARING (KI-36): `register` must precede `node-start`. A pings
+    // ORDERING IS LOAD-BEARING (KI-36): `register` must precede `node/start`. A pings
     // `{:name :echo}` the instant it sees `[:nodeup]`, and by then it has already set
     // `send-errors` back to nil — so a ping that arrives before the name exists is
     // *silently dropped*, and A then waits out its 20 s pong deadline for a reply that was
     // never queued. Opening the listener first means the peer can reach this node during
     // the spawn+register gap, which is exactly the window that widens under suite load.
     // Registering first closes it: the name is live before anyone can connect. Verified by
-    // sabotage — a 3 s delay between `node-start` and `register` fails 100% of the time
+    // sabotage — a 3 s delay between `node/start` and `register` fails 100% of the time
     // with `TIMEOUT-no-pong`, and passes with this ordering even with that delay retained.
     // Do not "simplify" this back into node-start-first order; a longer deadline cannot fix
     // a dropped message.
@@ -2034,7 +2034,7 @@ fn reconnect_watcher_heals_a_fallen_link() {
         r#"
 (let (echoer (spawn (receive ([:ping from] (send from [:pong])))))
   (register :echo echoer)
-  (node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+  (node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
   (sleep 30000))
 "#
     );
@@ -2043,7 +2043,7 @@ fn reconnect_watcher_heals_a_fallen_link() {
     // then narrate the down → noconnection-send → up → message-flows sequence.
     let watcher = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (def spec "b@127.0.0.1:{port_b}")
 (reconnect/watch spec {{:min-ms 100 :max-ms 400}})
 (reconnect/subscribe spec)
@@ -2176,7 +2176,7 @@ fn a_dropped_send_to_an_unregistered_name_warns_once() {
     // B registers NOTHING, so every inbound named send lands in the hole under test.
     let b_src = format!(
         r#"
-(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (sleep 6000)
 "#
     );
@@ -2184,14 +2184,14 @@ fn a_dropped_send_to_an_unregistered_name_warns_once() {
     // (the second drop site, inside `route`).
     let a_src = format!(
         r#"
-(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(def peer (connect "b@127.0.0.1:{port_b}"))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(def peer (node/connect "b@127.0.0.1:{port_b}"))
 (send {{:name :ghost :node peer}} [:x])
 (send {{:name :ghost :node peer}} [:x])
 ;; Address the LOCAL node by its authoritative `name@host` (ADR-073) — a bare `:a` is
 ;; not this node's name, so it would take the unknown-*node* path instead of the
 ;; unregistered-*name* path this half of the test is about.
-(send {{:name :localghost :node (node-name)}} [:x])
+(send {{:name :localghost :node (node/name)}} [:x])
 (sleep 1200)
 (println "A-DONE")
 "#
