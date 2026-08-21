@@ -1143,7 +1143,7 @@ the test rather than hanging the run."
                 unit (unit-of-pid pid workers))
             (cond
               (includes? reported pid) (collect-loop pending
-                                       workers reported acc deadline)
+                                         workers reported acc deadline)
               (nil? unit) (collect-loop pending workers reported acc deadline)
               else
                 (collect-loop (- pending 1)
