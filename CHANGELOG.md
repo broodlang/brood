@@ -45,6 +45,14 @@ glyph read oddly; the new name states the actual security property). And the gen
 a cast envelope (raw asynchronous send is the kernel's bare `send`). `gen` stays a
 namespaced module.
 
+**Transcendental math moved into the `math/` namespace.** `sin`, `cos`, `tan`, `asin`,
+`acos`, `atan`, `atan2`, `exp`, `ln`, `log2`, `log10` are no longer bare — they're
+`math/sin`, `math/acos`, … The bare language core keeps only fundamental arithmetic
+(`+ - * / < = >`, `inc`, `dec`, `min`, `max`, `mod`, `rem`, `quot`, `floor`, bitwise).
+Mechanism/policy split as usual: the raw f64 kernels are now `%`-prefixed primitives
+(`%sin`, `%ln`, …) and the `math` module wraps them, so they document under `math` in
+the reference rather than cluttering the core.
+
 ## v0.7.0 — 2026-08-21
 
 **Standard-library consistency pass.** A full review of the prelude and standard
