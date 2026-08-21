@@ -11,7 +11,7 @@ use super::*;
 /// the block at `ip` (`None` = unreachable). All subset stack values are 64-bit; a
 /// comparison `I8` is consumed by the `JumpIfFalse` in its own block, so it never
 /// crosses a boundary. Returns `(is_leader, depth)`, both length `len + 1`.
-pub(super) fn block_analysis(code: &[Inst], len: usize) -> (Vec<bool>, Vec<Option<i32>>) {
+pub(crate) fn block_analysis(code: &[Inst], len: usize) -> (Vec<bool>, Vec<Option<i32>>) {
     // ---- Block leaders: ip 0, every jump target, the inst after a jump, the `len`
     // "done" block. ----
     let mut is_leader = vec![false; len + 1];

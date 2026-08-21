@@ -26,7 +26,7 @@ pub(crate) use i64::{arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep};
 // Pure pre-lowering analysis (block leaders / operand depth / …) for
 // `jit_lower_arm_inner` — the first extracted step of decomposing that function.
 #[cfg(feature = "jit")]
-mod prepass;
+pub(crate) mod prepass;
 
 // CLIF emit helpers extracted from `jit_lower_arm_inner`'s closures (the next step
 // of that function's decomposition). They take `b: &mut FunctionBuilder` + the
@@ -477,7 +477,12 @@ fn jit_lower_arm_inner(
     } else {
         nslots
     };
+    // KI-49: the reserve is [call-result spills | block-argument spills]. The block-arg
+    // half is indexed by operand-stack POSITION (so predecessors agree), so it gets its own
+    // base rather than sharing `spill_next`'s monotonic counter.
+    let blockarg_spill_len = crate::eval::compile::jit_plan::max_leader_depth_pub(code);
     let spill_base = frame_top_for_spills - reserve;
+    let blockarg_spill_base = spill_base + reserve.saturating_sub(blockarg_spill_len);
     let mut spill_next = 0usize;
     // Return-via-roots writes/reads the result at `roots[base]` (slot 0), and the VM hooks
     // read it back the same way — both require slot 0 to exist. A 0-slot arm (a 0-arg,
@@ -997,6 +1002,8 @@ fn jit_lower_arm_inner(
         slot_float: &slot_float,
         slot_bool: &slot_bool,
         slot_int_profile: &slot_int_profile,
+        blockarg_spill_base,
+        blockarg_spill_len,
         slot_f64_cache: &slot_f64_cache,
     };
     // A scratch `Value`-sized stack slot the handle / call / global ops write their result
@@ -1440,9 +1447,10 @@ fn jit_lower_arm_inner(
     let read_words = |b: &mut FunctionBuilder, op: Op| -> [cranelift_codegen::ir::Value; 3] {
         emit::read_words(b, op, frame)
     };
-    let as_block_arg = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
-        emit::as_block_arg(b, op, frame)
-    };
+    let as_block_arg =
+        |b: &mut FunctionBuilder, op: Op, idx: usize| -> cranelift_codegen::ir::Value {
+            emit::as_block_arg(b, op, idx, frame)
+        };
     // Integer-vs-float dispatch for a binary op: an operand is float if it's an
     // `Op::Float`, or a `Slot` the profile/tracking marks float. (`Op::Int`/`Handle` are
     // integer/non-number.)
@@ -1850,12 +1858,14 @@ fn jit_lower_arm_inner(
             if is_leader[j] {
                 let flags: Vec<emit::ParamRepr> = stack
                     .iter()
-                    .map(|&op| emit::param_repr(&b, op, frame))
+                    .enumerate()
+                    .map(|(i, &op)| emit::param_repr(&b, op, i, frame))
                     .collect();
                 if record_block_flags(&mut bool_param[j], flags) {
                     let args: Vec<BlockArg> = stack
                         .iter()
-                        .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
+                        .enumerate()
+                        .map(|(i, &op)| BlockArg::Value(as_block_arg(&mut b, op, i)))
                         .collect();
                     b.ins().jump(leader_block[j]?, &args);
                 } else {

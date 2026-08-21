@@ -121,7 +121,50 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
             )
         })
         .count();
-    producers.saturating_sub(1)
+    // KI-49: block-argument spills. An operand crossing a block boundary that is NOT a
+    // profiled `Int` is carried as `ParamRepr::Slot(k)` rather than being forced through
+    // `as_int` (which tag-checks Int and deopts otherwise — the whole KI-49 bug). An
+    // `Op::Handle` has no slot to name, so it is spilled to one here first.
+    //
+    // The slot must be derived from the operand's STACK POSITION, not from `spill_next`'s
+    // monotonic counter: every predecessor of a block has to name the same slot or
+    // `record_block_flags` rejects the edge. So reserve one slot per operand-stack entry
+    // that can be live at a leader — `max_leader_depth`.
+    //
+    // This reserve is unavoidably profile-independent (it runs at arm construction, before
+    // any type profile exists), so it lands on every lowerable arm. That is the shape whose
+    // cost is already on record — blanket-reserving regressed `spawn` ~1.9x — which is why
+    // it stays behind the `chunk_in_jit_subset` gate above and why the change was measured
+    // (spawn / fib / collatz / pingpong) rather than reasoned about.
+    producers.saturating_sub(1) + max_leader_depth(code)
+}
+
+/// The deepest operand stack at any block leader — an upper bound on how many operands
+/// can cross a block boundary at once, and so on the block-argument spill slots
+/// [`jit_spill_reserve`] must provide. Uses the same `block_analysis` the lowering does,
+/// so the two cannot disagree about where leaders are.
+#[cfg(feature = "jit")]
+pub(crate) fn max_leader_depth_pub(code: &[Inst]) -> usize {
+    max_leader_depth(code)
+}
+
+/// `0` without a backend: `jit_lower` (and its `prepass`) do not exist in that build, and
+/// the reserve's contract is that a `--without-jit` build's frames are unchanged.
+#[cfg(not(feature = "jit"))]
+fn max_leader_depth(_code: &[Inst]) -> usize {
+    0
+}
+
+#[cfg(feature = "jit")]
+fn max_leader_depth(code: &[Inst]) -> usize {
+    let len = code.len();
+    let (_, depth) = crate::eval::compile::jit_lower::prepass::block_analysis(code, len);
+    depth
+        .iter()
+        .filter_map(|d| *d)
+        .filter(|d| *d > 0)
+        .max()
+        .unwrap_or(0) as usize
 }
 /// Deopt-resume checkpointing (the fix for the deopt-rerun side-effect bug,
 /// devlog 2026-07-16): the abstract operand-stack depth **after each non-tail

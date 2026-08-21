@@ -66,11 +66,16 @@ pub(super) fn emit_jump(
             b.ins().jump(deopt, &[BlockArg::Value(__dr)]);
         }
     } else {
-        let flags: Vec<ParamRepr> = stack.iter().map(|&op| param_repr(b, op, frame)).collect();
+        let flags: Vec<ParamRepr> = stack
+            .iter()
+            .enumerate()
+            .map(|(i, &op)| param_repr(b, op, i, frame))
+            .collect();
         if record_block_flags(&mut bool_param[t], flags) {
             let args: Vec<BlockArg> = stack
                 .iter()
-                .map(|&op| BlockArg::Value(as_block_arg(b, op, frame)))
+                .enumerate()
+                .map(|(i, &op)| BlockArg::Value(as_block_arg(b, op, i, frame)))
                 .collect();
             b.ins().jump(leader_block[t]?, &args);
         } else {
@@ -100,7 +105,11 @@ pub(super) fn emit_jump_if_false(
 ) -> Option<()> {
     let deopt = frame.deopt;
     let cond = stack.pop()?;
-    let flags: Vec<ParamRepr> = stack.iter().map(|&op| param_repr(b, op, frame)).collect();
+    let flags: Vec<ParamRepr> = stack
+        .iter()
+        .enumerate()
+        .map(|(i, &op)| param_repr(b, op, i, frame))
+        .collect();
     // A side whose typing disagrees with its join's recorded flags routes to `deopt`
     // (no args) instead — see `record_block_flags`.
     let t_ok = record_block_flags(&mut bool_param[t], flags.clone());
@@ -109,7 +118,8 @@ pub(super) fn emit_jump_if_false(
     let fall = if f_ok { leader_block[j + 1]? } else { deopt }; // truthy → fall-through
     let args: Vec<BlockArg> = stack
         .iter()
-        .map(|&op| BlockArg::Value(as_block_arg(b, op, frame)))
+        .enumerate()
+        .map(|(i, &op)| BlockArg::Value(as_block_arg(b, op, i, frame)))
         .collect();
     let targs: Vec<BlockArg> = if t_ok { args.clone() } else { Vec::new() };
     let fargs: Vec<BlockArg> = if f_ok { args } else { Vec::new() };
