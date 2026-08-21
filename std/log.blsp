@@ -193,13 +193,13 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
 (defn add-backend (b)
   "Add backend `b` to the running logger (a cast). Returns nil."
   (let (pid (logger))
-    (when pid (! pid [:add-backend b])))
+    (when pid (cast pid [:add-backend b])))
   nil)
 
 (defn set-level (level)
   "Set the running logger's global minimum severity (a cast). Returns nil."
   (let (pid (logger))
-    (when pid (! pid [:set-level level])))
+    (when pid (cast pid [:set-level level])))
   nil)
 
 ;; ---- the log call -----------------------------------------------------------
@@ -217,7 +217,7 @@ line falls back to stderr so a log is never lost. Returns nil."
         rec (log-record level msg m)
         pid (logger))
     (if pid
-      (! pid [:log rec])
+      (cast pid [:log rec])
       (eprint (log-default-format rec))))
   nil)
 

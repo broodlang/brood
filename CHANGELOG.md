@@ -37,8 +37,13 @@ the ecosystem.
 **Behaviour contracts are core.** `std/protocol.blsp` moved into the prelude, so
 `defbehaviour`, `register-protocol`, `ops`, and the `*protocols*` registry are bare and
 always available — no `require`, no `(:use protocol)`. (The type checker already read
-`*protocols*` bare, so this only aligns the runtime with it.) `gen` stays a namespaced
-module for now.
+`*protocols*` bare, so this only aligns the runtime with it.)
+
+**Two more name fixes.** `crypto/secure=?` → `crypto/constant-time-equal?` (the `=?`
+glyph read oddly; the new name states the actual security property). And the gen cast
+`!` → `gen/cast` — it was an operator glyph that looked like raw send but actually wraps
+a cast envelope (raw asynchronous send is the kernel's bare `send`). `gen` stays a
+namespaced module.
 
 ## v0.7.0 — 2026-08-21
 
