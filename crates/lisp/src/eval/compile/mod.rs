@@ -1874,7 +1874,7 @@ fn compile_arm(
                                 // is built, so `resume.nslots` is the value the frame is
                                 // actually sized to (`arm.inline_nslots`, floored below).
                                 // The lowering reads the frame size off the resume arm and
-                                // stages a tail call above `active_nslots()`; if the two
+                                // stages a tail call above `frame_size_for_new_entry()`; if the two
                                 // disagreed, the staged area would be written at one offset
                                 // and read at another.
                                 let leaf_nslots = d.nslots.max(nslots_total);
@@ -2523,7 +2523,7 @@ fn hof_apply_native(
         crate::perf_bump!(hof_decline_epoch);
         return None;
     }
-    let nslots = arm.active_nslots();
+    let nslots = arm.frame_size_for_new_entry();
     // Diagnostic label for the debug staged-stale report / BROOD_JIT_VERIFY (the arm's defining
     // name if known, else leave the caller's — cosmetic only).
     let dbg_sym = arm.dbg_name.unwrap_or(heap.jit_dbg_fn);

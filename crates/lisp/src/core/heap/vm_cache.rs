@@ -659,10 +659,22 @@ impl Heap {
             return None;
         }
         // Two-stage tiering: the frame the *installed* native runs against — the inlined
-        // upgrade (post-swap) needs the larger `inline_nslots`. The small→inlined swap
-        // bumps the epoch, so a stale memo here (with the small `nslots`) is invalidated
-        // and re-validated through the IC miss path, picking up the new active size.
-        let active_ns = arm.active_nslots();
+        // upgrade (post-swap) needs the larger `inline_nslots`.
+        //
+        // ⚠ This comment used to say "the small→inlined swap bumps the epoch, so a stale memo
+        // here is invalidated". **That is false** and was corrected 2026-08-21 (KI-48 audit):
+        // `jit_tier`'s swap deliberately does NOT bump `global_epoch` — a bump cascaded under
+        // `pfib` — it stores `inline_installed`/`jit_code` and then calls
+        // `invalidate_fast_links_for(arm.inline_name)`. So what protects a memo written here
+        // is that TARGETED invalidation, not an epoch bump.
+        //
+        // Note the asymmetry that leaves: the `inline_installed.store(true)` is unconditional
+        // while the invalidation is `if let Some(sym) = arm.inline_name`. An arm that became
+        // inline-installed without a name would leave this slot holding the small `nslots`
+        // against the larger installed frame. Not known to be reachable (the swap needs
+        // `inline_code`, which is only built for a qualifying named arm) — but it is an
+        // invariant held by construction elsewhere rather than enforced here.
+        let active_ns = arm.frame_size_for_new_entry();
         // Fully validated + installed at this epoch — publish into the one flat table that
         // both this probe's hot path (above) and JIT'd code (an epoch-guarded raw load)
         // read. One representation, one write.
