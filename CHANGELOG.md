@@ -4,6 +4,36 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.8.0 — 2026-08-21
+
+**Module-name stutter and abbreviations removed from public APIs.** A qualified call
+should read `csv/parse`, not `csv/csv-parse` — the module name already namespaces it.
+Every public function that repeated its module name (or abbreviated it) was de-stuttered:
+
+- `csv/csv-parse` → `csv/parse` (+ `emit`, `parse-maps`, `emit-maps`)
+- `diff/diff-lines` → `diff/lines` (+ `patch`, `summary`, `unified`, `seq`)
+- `http/http-*` → `http/read-request`, `http/listen`, `http/request`, `http/post`; the
+  GET convenience is `http/fetch` (a public `get` would shadow core `get` in `:use`rs)
+- `debug/debug-*` → `debug/attach`, `debug/report`, `debug/watch`, `debug/repl-session`
+- `coverage/coverage-*` → `coverage/report`, `coverage/results`, `coverage/begin!`, …
+- `eval-server/eval-server-*` → `eval-server/answer`, `eval-server/run`; `repl/repl-run` → `repl/run`
+- `supervisor/start-supervisor` / `stop-supervisor` → `supervisor/start` / `supervisor/stop`
+- `complete/complete-*` → `complete/modules`, `complete/tags`, … (`complete/for-kind`,
+  `complete/print-candidates` where a bare `for`/`print` would clash)
+- `project/project-*` (public) → `project/find-root`, `project/setup`, `project/parse-deps`,
+  … (`project/apply-config`, since a public `apply` would shadow core `apply` in `:use`rs)
+
+**`datetime` loses the `dt` abbreviation.** Accessors and operations are spelled out:
+`datetime/year`, `datetime/month`, `datetime/add`, `datetime/diff`, `datetime/format`,
+the conversions `datetime/->epoch-ms` / `datetime/epoch-ms->` / `datetime/->date` /
+`datetime/->time`, and the comparisons as word predicates —
+`datetime/before?`, `datetime/after?`, `datetime/same?`, `datetime/not-after?`,
+`datetime/not-before?` (bare `<`/`=` would shadow the core operators inside the module).
+
+Private, module-internal helpers keep their prefix (it is internal namespacing, not
+public stutter). `nest rename` (the identifier-aware codemod) drove the propagation across
+the ecosystem.
+
 ## v0.7.0 — 2026-08-21
 
 **Standard-library consistency pass.** A full review of the prelude and standard
