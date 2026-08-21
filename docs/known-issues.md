@@ -21,6 +21,7 @@ ADRs / topic docs.
 |---|---|---|
 | KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
+| KI-48 | JIT tail dispatch read past the roots stack — `root_at(9)` on a len-8 stack, twice on 2026-08-20, from `jit_dispatch_tail` | ✅ **root cause found and fixed 2026-08-21** — the dispatcher re-derived the frame size from `active_nslots()` (the KI-26/ADR-210 anti-pattern), which the background inline swap can change mid-flight; **measured live on 123 arms**, `fold` at nslots=13 vs inline_nslots=25 (a 12-slot overshoot). Now passed the size the trampoline built the frame to. Original crash never reproduced on demand, so the causal link is strong but not proven |
 | KI-47 | the `differential (tree-walker)` CI job went red on **every** run from the ADR-230/231 namespacing merge onward, always as the same three `adversarial_test.blsp` heap-allocation cases dying on `E0043`. Those cases were not the cause: the suite's **process-wide** allocation had reached **1.145 GB** against the **1 GiB** `TEST_DEFAULT_SOFT` backstop, and a threshold failure names whichever tests are running when the line is crossed | ✅ **fixed 2026-08-19** — backstop raised to 2 GiB soft / 3 GiB hard (`core/alloc.rs`), which is what it documents itself to be: a *host-survival* guard, not a working-set budget. ⚠ **Leaves an unresolved question**: the cap was sized against a ~240 MB suite peak and the suite now peaks ~1 GB (4.8×), so this restores a ~2× margin, not the intended 4× |
 | KI-46 | **deadline margin, not a failure yet.** KI-39 was a fixed cost sitting under a fixed deadline for weeks while reading as a random flake, so every case's CI margin against nextest's 120 s hard kill was audited from the 2026-08-17 logs. `nest::bin/nest mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` is now the worst at **87 s = 1.38× margin** — it invokes the MCP `check` tool, which is cwd-based, so it type-checks **this whole repository**, and the cost grows as the repo does | ✅ **fixed 2026-08-18, the real way** (87 s → **2.5 s**) — the three cheap fixes were all worse than the problem: `BROOD_NO_CHECK=1` guts what the case proves, a temp-dir `set_current_dir` is process-global and would race its siblings under plain `cargo test` (trading a slow test for a nondeterministic one), and a bigger nextest budget is what hid KI-39. So the real fix was done instead: `check-project-structured` gained an optional `from` root, and `mcp-check-tool` now passes **`*project-root*`** — the root the server already pins its write sandbox to and that every other project-scoped tool already read. `check` was the one tool taking its project from cwd. The three next-worst (`scaffold_quality`, 89/80/77 s) **were** fixed the same day by splitting one case per template |
 | KI-43 | `remote_attach_reads_snapshot_then_sees_disconnect` killed the target after a **fixed 5 s sleep**, but the observer needs 5.9–9.2 s under load to boot + `require 'observer'` + connect — so the target died first, `connect` refused, stdout empty. Failed BOTH retries in a loaded `make test`, passed standalone: the signature that gets written off as noise | ✅ **fixed 2026-08-14** — waits for the observer's attach report instead of a stopwatch; **8/8 under saturating load**, and 3.5 s instead of ~11 s |
@@ -66,7 +67,7 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open items, and no watch item — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day.** `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**No open items.** KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -2674,6 +2675,117 @@ such snippet needs an execution test rather than a reading. Worth grepping for t
 others.
 
 ---
+
+## KI-48 — JIT tail dispatch read past the roots stack (open)
+
+**Status:** ✅ **root cause found and fixed 2026-08-21.** Two crashes, 4 s apart, captured in
+`.brood_crash_dump` on 2026-08-20; never reproduced on demand, so the causal link to the fix
+below is strong (right fault shape, right function, right stack) but **not proven**.
+
+### The bug
+
+`jit_dispatch_tail` computed where the native staged its `[callee, args…]` as:
+
+```rust
+let top = base + arm.active_nslots();
+```
+
+`active_nslots()` re-reads `inline_installed` — which the deopt code *in this same file*
+already calls "the anti-pattern behind two ADR-210 bugs" (KI-26). The background inline
+upgrade can flip that flag **between** the native entering (built to the small frame) and
+this callback running, after which the staged area is written at one offset and read at
+another.
+
+**The hazard was live, not theoretical.** Instrumenting the path found **123 arms** reaching
+tail dispatch whose two frame sizes differ, `fold` among them:
+
+```
+[ki48] tail-dispatch arm=fold nslots=13 inline_nslots=25 delta=+12
+```
+
+A mid-flight flip there sends `top` twelve slots past the staged area and off the roots
+stack — precisely `root_at(9)` on a len-8 stack.
+
+### The fix
+
+The rule was already written down and obeyed everywhere else: the caller captures the size
+once ("the two must agree on the same frame boundary") and, in `vm_run_bc`'s own words, "the
+deopt-resume helpers must be **told** it rather than re-deriving it". This path was the one
+that was not. `jit_dispatch_tail` now takes `frame_nslots` from the trampoline that built the
+frame.
+
+### What sabotage showed, and why the guard is not the fix
+
+Forcing a desync (+8 slots at the call site) made the program **hang**, and the `top >= n`
+tripwire did **not** fire: an overshoot that stays in bounds silently dispatches the *wrong
+callee*. So the guard only catches the extreme case. It is kept as a backstop — it also
+prevents `argc = n - top - 1` from underflowing, which would otherwise turn a clean bounds
+panic into a wild `root_at(top + 1 + k)` loop — but passing the correct size is the repair.
+
+### No deterministic regression test exists
+
+`tests/jit_tail_frame_test.blsp` covers the path (hot mutual tail recursion through the
+computed dispatcher, concurrent so swaps land while peers are mid-dispatch) but **does not
+guard the fix** — verified by sabotage: reverting to `active_nslots()` leaves it green,
+because the fault needs the swap inside a few-instruction window and nothing forces that. It
+is labelled as coverage in its own header so a green run is not misread as proof. Forcing the
+desync artificially produced a **hang**, not an error, so there is no clean failure to assert
+on. A real guard would have to drive the flip mid-dispatch; not attempted.
+
+(Method note: a first sabotage attempt silently no-op'd because `cargo fmt` had reformatted
+the call site and the patch carried no assertion. It "passed" while testing nothing — the
+same shape as the gates repaired the day before. Assert that a sabotage actually landed.)
+
+### (original entry follows)
+
+
+```
+panicked at crates/lisp/src/core/heap/gc.rs:1543:19:
+index out of bounds: the len is 8 but the index is 9
+  brood::eval::compile::jit_runtime::jit_dispatch_tail
+  brood::eval::compile::vm_run_bc::vm_run_bc
+  brood::process::scheduler::pool::run_one
+```
+
+`gc.rs:1543` is `root_at(i) -> self.roots[i]`. The read comes from `jit_dispatch_tail`:
+
+```rust
+let n = heap.roots_len();
+let argc = n - top - 1;
+let callee = heap.root_at(top);   // panicked here: top = 9, n = 8
+```
+
+So JIT'd native code entered tail dispatch with an operand-stack `top` **beyond the roots
+stack**: either a stale `top` baked at lowering time, or the roots stack shrank between the
+native code staging its args and the callback running (a collection, a frame restore, or a
+deopt resume that rewound `roots`).
+
+⚠ **`argc = n - top - 1` underflows on exactly this input.** With `top >= n` that is a
+usize wrap, so the panic above is the *lucky* outcome — `root_at` happened to be evaluated
+and bounds-checked. A build where the subtraction is reached first takes a huge `argc` and
+loops `root_at(top + 1 + k)` over it. Worth a defensive check regardless of the root cause.
+
+**What is known.** Both entries are 2026-08-20 11:10:13 and 11:10:17 UTC, on a scheduler
+worker. **Not** caused by that session's changes: the region was last touched by an unrelated
+refactor and the session's only `gc.rs` edit (the `form_pos` capacity shrink) is elsewhere in
+the file and does not touch `roots`.
+
+**Not reproduced:** the message-shape probes, `pingpong` x3 and `supervisor` x2 all ran clean
+afterwards, and the full suite has passed 996/996 repeatedly since.
+
+**How it was found, and the reason it is worth chasing beyond the crash itself.** It surfaced
+while investigating why a tagged-tuple `receive` matcher is permanently `BAILED` (it runs on
+the VM at 454 ns where the keyword matcher runs natively at 59 ns — the `pingpong`/`ring`/
+`supervisor` latency gap). With every lowering refusal now traced (`BROOD_JIT_BAIL_TRACE`,
+commits 5ab3c122 + 60c0958b), that arm is refused by *none* of them — which leaves
+`codegen_poisoned`, i.e. a swallowed codegen panic marking every later arm BAILED with no
+attempt and no trace. The bailed matcher's frame is **nslots=8** and the bad index is **9**.
+That is suggestive, not established — but if the two are the same fault, fixing it also
+recovers the latency row.
+
+**Next step.** Reproduce with the tripwires armed (`RUSTFLAGS="-C debug-assertions=on"`,
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`) on spawn+tagged-tuple workloads; and add the
+`top < n` guard so the underflow cannot turn a bounds panic into a wild loop.
 
 ## KI-47 — the tree-walker suite crossed the 1 GiB memory backstop ✅ FIXED 2026-08-19
 
