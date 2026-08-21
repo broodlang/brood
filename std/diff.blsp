@@ -8,13 +8,13 @@
 (defmodule diff
   "LCS-based diff: compute the shortest edit script between two sequences.
 
-    (diff/diff-lines \"hello\\nworld\" \"hello\\nearth\")
+    (diff/lines \"hello\\nworld\" \"hello\\nearth\")
     ;; => ([:keep \"hello\"] [:delete \"world\"] [:insert \"earth\"])
 
-    (diff/diff-seq [1 2 3 4] [1 3 4 5])
+    (diff/seq [1 2 3 4] [1 3 4 5])
     ;; => ([:keep 1] [:delete 2] [:keep 3] [:keep 4] [:insert 5])
 
-    (diff/diff-summary ops)
+    (diff/summary ops)
     ;; => {:keeps 2 :deletes 1 :inserts 1}")
 
 ;; ---- LCS table --------------------------------------------------------------
@@ -79,11 +79,11 @@
 
 ;; ---- public API -------------------------------------------------------------
 
-(defn diff-seq (a b)
+(defn seq (a b)
   "Diff two sequences (lists or vectors) by value equality. Returns a list of
 `[:keep v]`, `[:delete v]`, and `[:insert v]` operations that transform `a` into `b`."
-  (let (av (into [] (seq a))
-        bv (into [] (seq b))
+  (let (av (into [] (/seq a))
+        bv (into [] (/seq b))
         m (count av)
         n (count bv))
     (cond
@@ -92,14 +92,14 @@
       else (let (table (diff-build-table av bv m n))
              (diff-backtrack table av bv m n nil)))))
 
-(defn diff-lines (a b)
+(defn lines (a b)
   "Diff two strings line-by-line. `a` and `b` are split on `\\n` first.
 Returns a list of `[:keep line]`, `[:delete line]`, `[:insert line]` ops."
-  (diff-seq (string/split a "\n") (string/split b "\n")))
+  (seq (string/split a "\n") (string/split b "\n")))
 
 ;; ---- utilities --------------------------------------------------------------
 
-(defn diff-summary (ops)
+(defn summary (ops)
   "Count `[:keep]`, `[:delete]`, and `[:insert]` operations in a diff result.
 Returns `{:keeps n :deletes n :inserts n}`."
   (fold (fn (acc op)
@@ -111,13 +111,13 @@ Returns `{:keeps n :deletes n :inserts n}`."
     {:keeps 0 :deletes 0 :inserts 0}
     ops))
 
-(defn diff-patch (a ops)
+(defn patch (a ops)
   "Apply diff `ops` to sequence `a`, producing sequence `b`. `a` is provided
 only for verification (`:delete` and `:keep` ops are expected to match `a` in
 order); the output is built from `:keep` and `:insert` ops."
   (map second (filter (fn (op) (not= (first op) :delete)) ops)))
 
-(defn diff-unified (ops context-lines)
+(defn unified (ops context-lines)
   "Format `ops` as a unified-diff-like list of strings, showing `context-lines`
 of context around each change. Returns a list of strings (one per line of output),
 each prefixed with ` ` (keep), `-` (delete), or `+` (insert)."

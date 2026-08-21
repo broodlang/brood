@@ -49,7 +49,7 @@
                  "(%registry-update! '*chaos-loads* :cons-new nil (self))")))
         (range files))
       (eval (list 'def '*chaos-loads* nil))
-      (project-setup root)
+      (setup root)
       ;; Race `nreq` concurrent requires of each secondary in turn — every requirer of one
       ;; key claims against the same marker, so at most one may load its file.
       (map (fn (k)

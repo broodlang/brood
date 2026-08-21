@@ -1,7 +1,7 @@
 ;; std/sse.blsp — Server-Sent Events (text/event-stream): a client + server framing.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
-;;  - SSE is **not** request→response like `http-request`: it's a long-lived `GET`
+;;  - SSE is **not** request→response like `request`: it's a long-lived `GET`
 ;;    that the server holds open and *pushes* frames down forever. So it gets its
 ;;    own module (reusing `http`'s URL + header helpers for the handshake) and its
 ;;    own **process**: `connect` spawns a reader that streams `[:tcp …]` chunks

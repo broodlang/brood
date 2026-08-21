@@ -10,7 +10,7 @@
 ;; to a path-dep's tree are live. `:git` deps (the _deps/ cache + clone) land in
 ;; Slice 2 and error cleanly here.
 ;;
-;; Manifest parsing (`project/project-parse-deps`) lives in std/tool/project.blsp — the manifest
+;; Manifest parsing (`project/parse-deps`) lives in std/tool/project.blsp — the manifest
 ;; owner — and we reuse it both for the root manifest and for each dep's own.
 
 (defmodule package
@@ -79,7 +79,7 @@ land in a later slice."
     nil
     (let (form (read-first (file/slurp manifest-path)))
       (if (and (pair? form) (= (first form) 'project))
-        (project/project-parse-deps (plist-get (rest form) :dependencies))
+        (project/parse-deps (plist-get (rest form) :dependencies))
         nil))))
 
 ;; --- resolution --------------------------------------------------------------
@@ -724,7 +724,7 @@ land in a later slice."
 
 (defn- package-http-fetch
   (url redirects-left)
-  (let (resp (http/http-get url)
+  (let (resp (http/fetch url)
         status (get resp :status))
     (cond
       (and (>= status 200) (< status 300)) (get resp :body)
@@ -840,7 +840,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
   "GET `url` and parse its JSON body. Returns `[:ok data]` on 2xx, `[:error status
   message]` on an error status (with the server's `:error` text when present), or
   `[:error 0 message]` on a transport failure."
-  (let (resp (http/http-get url)
+  (let (resp (http/fetch url)
         status (get resp :status))
     (cond
       (= status 0) [:error 0 (str "cannot reach the registry at " url ": " (get resp :error))]
@@ -952,7 +952,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
 ;; The hive-hosted tarball bytes for a release (root-level layout), erroring on a non-2xx.
 (defn- registry-download-hosted
   (base nm version)
-  (let (resp (http/http-get (registry-tarball-url base nm version))
+  (let (resp (http/fetch (registry-tarball-url base nm version))
         status (get resp :status))
     (when (not (and (>= status 200) (< status 300)))
       (error "package: downloading " nm " " version " failed (HTTP " status ")"))
@@ -1238,7 +1238,7 @@ sha256 pin still holds."
 (defn- package-collision-sources
   (root entries)
   (map (fn (d) (list "your project" d))
-    (project/project-abs-paths root *project-source-paths*)))
+    (project/abs-paths root *project-source-paths*)))
 
 ;; `main` is a project's ENTRY POINT, not part of its library surface: `nest run` only
 ;; ever uses the ROOT project's `:main`, and nothing `require`s a dependency's. So two
@@ -1382,7 +1382,7 @@ sha256 pin still holds."
     entries))
 
 (defn ensure-deps (root deps)
-  "Resolve `deps`, refresh the lock file, and return the list of source dirs to add to *load-path* (one per resolved dep). Called from `project-setup`; a no-op when there are no deps."
+  "Resolve `deps`, refresh the lock file, and return the list of source dirs to add to *load-path* (one per resolved dep). Called from `setup`; a no-op when there are no deps."
   (if (empty? deps)
     nil
     (let (entries (resolve-deps root deps (read-lockfile root)))
@@ -1406,20 +1406,20 @@ sha256 pin still holds."
 ;; Read the project manifest as *data* and apply it (populating the `*project-*`
 ;; globals, incl. *project-dependencies*), rather than `(load)`-ing it as code:
 ;; the manifest's `(project …)` declaration lives in the `project` namespace now
-;; (ADR-065), so loading it bare wouldn't resolve. Mirrors `project/project-setup`'s
+;; (ADR-065), so loading it bare wouldn't resolve. Mirrors `project/setup`'s
 ;; own manifest read.
 (defn- package-load-manifest
   (path)
   (when (file/exists? path)
     (let (form (read-first (file/slurp path)))
       (when (and (pair? form) (= (first form) 'project))
-        (project/project-apply (rest form))))))
+        (project/apply-config (rest form))))))
 
 ;; Locate the project root, load its manifest (so *project-dependencies* is set),
 ;; and hand the root to `body-fn`. Shared preamble for the verbs below.
 (defn- package-in-project
   (body-fn)
-  (let (root (project/project-find-root (file/cwd)))
+  (let (root (project/find-root (file/cwd)))
     (when (nil? root) (error "package: not inside a Brood project (no project.blsp found)"))
     (package-load-manifest (path-join root "project.blsp"))
     (body-fn root)))
@@ -1710,7 +1710,7 @@ sha256 pin still holds."
       " is not a usable dependency name — it must be a plain symbol written verbatim into project.blsp (no spaces, quotes, brackets, parens, and not a number)"))
   (package-in-project
     (fn (root)
-      (let (dep (project/project-parse-dep (apply vector
+      (let (dep (project/parse-dep (apply vector
                                              (cons (symbol nm)
                                                (map package-spec-token spec)))))
         (when (package-has-dep? *project-dependencies* (get dep :name))
@@ -2025,7 +2025,7 @@ published is refused. Backs `nest publish`."
 
 (defn- registry-post-publish
   (base token body meta-header)
-  (let (resp (http/http-post (str base "/api/v1/publish")
+  (let (resp (http/post (str base "/api/v1/publish")
                body
                {:headers {"Content-Type" "application/gzip"
                           "X-Brood-Publish" meta-header

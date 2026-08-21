@@ -68,41 +68,41 @@
   (test "a huge value elides instead of flooding the reply"
     (is (includes? (get (eval-capturing "(range 10000)") :value) "…"))))
 
-;; ---- eval-server-answer: the timed path ----------------------------------------
+;; ---- answer: the timed path ----------------------------------------
 
-(describe "eval-server-answer"
+(describe "answer"
   (test "a normal request answers with its own id"
-    (let (r (eval-server-answer {:id 9 :src "(+ 20 22)"}))
+    (let (r (answer {:id 9 :src "(+ 20 22)"}))
       (assert= (get r :id) 9)
       (assert= (get r :ok) true)
       (assert= (get r :value) "42")))
 
   (test "session defs persist across requests"
-    (eval-server-answer {:id 1 :src "(defn evsrv-test-triple-x9 (n) (* 3 n))"})
-    (assert= (get (eval-server-answer {:id 2 :src "(evsrv-test-triple-x9 14)"}) :value)
+    (answer {:id 1 :src "(defn evsrv-test-triple-x9 (n) (* 3 n))"})
+    (assert= (get (answer {:id 2 :src "(evsrv-test-triple-x9 14)"}) :value)
       "42"))
 
   (test "a runaway eval times out, is killed, and the session survives"
-    (let (r (eval-server-answer {:id 5 :src "(letrec (go (fn () (go))) (go))" :timeout-ms 60}))
+    (let (r (answer {:id 5 :src "(letrec (go (fn () (go))) (go))" :timeout-ms 60}))
       (assert= (get r :ok) false)
       (assert= (get r :timeout) true)
       (assert= (get r :id) 5))
     ;; the image is intact: the very next request evaluates normally
-    (assert= (get (eval-server-answer {:id 6 :src "(+ 1 1)"}) :value) "2"))
+    (assert= (get (answer {:id 6 :src "(+ 1 1)"}) :value) "2"))
 
   (test "an evaluated error is a reply, never a raise"
-    (let (r (eval-server-answer {:id 8 :src "(error \"deliberate\")"}))
+    (let (r (answer {:id 8 :src "(error \"deliberate\")"}))
       (assert= (get r :ok) false)
       (is (includes? (get r :error) "deliberate")))))
 
 ;; ---- review fixes: mailbox hygiene, malformed timeouts, output bound, :trace ---
 
-(describe "eval-server-answer mailbox hygiene"
+(describe "answer mailbox hygiene"
   (test "successful requests leave NO dead letters (the demonitor DOWN drain)"
     ;; demonitor is best-effort in this runtime: the child's :normal DOWN is
     ;; usually queued before we demonitor. Without the drain + down-flush each
     ;; request leaks one — 10 requests, then assert the mailbox is EMPTY.
-    (dotimes (i 10) (eval-server-answer {:id i :src "(+ 1 1)"}))
+    (dotimes (i 10) (answer {:id i :src "(+ 1 1)"}))
     (eval-server/eval-server-flush-stale) ; belt: what a next request would do
     (assert= (get (process-info (self)) :mailbox) 0)))
 
@@ -112,7 +112,7 @@
   (test "a non-vector :trace fails decode"
     (assert= (evsrv-decode-request "{:id 1 :src \"1\" :trace \"fac\"}") nil))
   (test "the answer path clamps a garbage timeout that slipped past decode"
-    (let (r (eval-server-answer {:id 3 :src "(+ 1 2)" :timeout-ms "abc"}))
+    (let (r (answer {:id 3 :src "(+ 1 2)" :timeout-ms "abc"}))
       (assert= (get r :ok) true)
       (assert= (get r :value) "3"))))
 
@@ -195,7 +195,7 @@
       (assert= (get r :spy) ())))
 
   (test "a traced request round-trips through the answer path"
-    (let (r (eval-server-answer {:id 42
+    (let (r (answer {:id 42
                                  :src "(defn evsrv-t-dbl (x) (* 2 x))\n(evsrv-t-dbl 21)"
                                  :trace ["evsrv-t-dbl"]}))
       (assert= (get r :id) 42)

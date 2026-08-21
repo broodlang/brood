@@ -66,11 +66,11 @@ error inside the user expression surfaces here as the `:error` branch."
 (defn- shadows-for
   (file)
   (try
-    (let (root (project/project-find-root (file/cwd)))
+    (let (root (project/find-root (file/cwd)))
       (if (nil? root)
         nil
         (let (defined (project-file-def-names file)
-              srcs (project-source-files root)
+              srcs (source-files root)
               extracts (project-gather-extracts srcs)
               source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
           (filter (fn (w) (any? (fn (nm) (includes? w (str "'" nm "'"))) defined))
@@ -756,7 +756,7 @@ Brood pattern, `std/tool/explain.blsp`)."
 ;; are no-ops). Failures in the project mcp.blsp surface as load errors during
 ;; `nest mcp` startup, which is exactly when the agent's `.mcp.json` would
 ;; have wired it up — the right time for a hard error.
-(let (root (project/project-find-root (file/cwd)))
+(let (root (project/find-root (file/cwd)))
   (when root
     (let (project-mcp (path-join root "mcp.blsp"))
       (when (file/exists? project-mcp)

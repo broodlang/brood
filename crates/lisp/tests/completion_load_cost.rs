@@ -50,9 +50,9 @@ fn requiring_complete_does_not_load_the_project_module() {
     // `complete-safely` net, and `nest remove <TAB>` quietly offered nothing.
     for name in [
         "project/plist-get",
-        "project/project-find-root",
-        "project/project-collect-sources",
-        "project/project-parse-deps",
+        "project/find-root",
+        "project/collect-sources",
+        "project/parse-deps",
     ] {
         assert!(
             !bound(&mut interp, name),

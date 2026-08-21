@@ -3,7 +3,7 @@
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - The REPL is policy, not mechanism: it's a loop over `read-line` (the one
 ;;    irreducible I/O primitive), `eval-string`, and `pr-str`. The Rust binaries
-;;    (`brood` with no args, `nest repl`) only bootstrap into `(repl-run)`; the
+;;    (`brood` with no args, `nest repl`) only bootstrap into `(run)`; the
 ;;    loop itself — prompts, multi-line reads, error formatting — lives here so
 ;;    it can be redefined at runtime like everything else (the project's reason
 ;;    for existing). Replaces the old Rust `crates/repl`.
@@ -11,7 +11,7 @@
 ;;    forever in O(1) stack. Memory is bounded by **Stage B's automatic copying
 ;;    GC** (ADR-055): the loop is a depth-1 spawned-process body, so each command's
 ;;    transients are reclaimed at the eval safepoint between iterations, keeping
-;;    only the loop fn + its args live. `repl-run` runs the loop in a spawned
+;;    only the loop fn + its args live. `run` runs the loop in a spawned
 ;;    process and `monitor`s it to await EOF. (Pre-ADR-055 this used an explicit
 ;;    `(hibernate)` arena flip; automatic GC made that redundant — see ADR-048.)
 ;;  - Multi-line input is driven by the reader, not a hand-rolled scanner: an
@@ -36,11 +36,11 @@
 
 ; highlight-spans — colourised result output
 (defmodule repl
-  "The Brood read-eval-print loop. `(repl-run)` reads forms from stdin (handling
+  "The Brood read-eval-print loop. `(run)` reads forms from stdin (handling
 multi-line input), evaluates each in the running image, and prints the result —
 until end of input (Ctrl-D).
 
-    (repl-run)
+    (run)
 
 Driven from the shell by `brood` (no arguments) and `nest repl`. Interactively:
 `*1` `*2` `*3` hold the last three results and `*e` the last error; `,help` lists
@@ -54,7 +54,7 @@ Startup files `~/.broodrc.blsp` (or `$BROOD_RC`) then `./.broodrc.blsp` load onc
 per runtime — the place for `lineedit-bind`, `(def *lineedit-candidates* …)`,
 `(def *repl-interruptible* false)`, and other customisations.
 
-Nestable: `pry` (std/tool/debug.blsp) calls `(repl-run)` mid-session. The prompts
+Nestable: `pry` (std/tool/debug.blsp) calls `(run)` mid-session. The prompts
 are the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 `binding` around the call to customise."
   (:use editor/lineedit)
@@ -538,7 +538,7 @@ reporting a real error. Never lets an error escape the loop."
 ;; Off-switch: `(def *repl-interruptible* false)` in `.broodrc.blsp` reverts to the
 ;; inline eval path with the default SIGINT disposition (Ctrl-C kills the runtime, as
 ;; before) — the rc runs before the handler would be installed, so the `and` in
-;; `repl-run` short-circuits. A redefinable global, not an env knob, like every other
+;; `run` short-circuits. A redefinable global, not an env knob, like every other
 ;; REPL policy here. (Setting it false *at the prompt* also reroutes to inline eval,
 ;; but the handler is already installed by then, so Ctrl-C during a long eval becomes
 ;; inert rather than fatal — prefer the rc.)
@@ -556,7 +556,7 @@ reporting a real error. Never lets an error escape the loop."
 ;;    behaviour and exits 130. Escalation, not a dead end.
 
 ;; The user-facing knob AND the armed state, one global. It defaults true ("arm if you
-;; can"); `repl-run` then resolves it to the real armed state by AND-ing in the things
+;; can"); `run` then resolves it to the real armed state by AND-ing in the things
 ;; the user can't control — an interactive session, a platform with signals — AFTER the
 ;; rc files load, so `(def *repl-interruptible* false)` in `.broodrc.blsp` sticks (the
 ;; `and` short-circuits and the handler is never installed). By the first prompt it is
@@ -569,7 +569,7 @@ reporting a real error. Never lets an error escape the loop."
 (def *repl-interrupt-poll-ms* 40)
 
 ;; NESTED sessions and interrupt ownership. `pry` (std/tool/debug.blsp) launches
-;; `repl-run` *inside* an outer REPL's evaluation — so two loops are alive at once, and
+;; `run` *inside* an outer REPL's evaluation — so two loops are alive at once, and
 ;; both would poll the one read-and-clear interrupt flag every 40ms. Whoever polled
 ;; first would consume the Ctrl-C: if the OUTER loop won, it would hard-kill its child
 ;; — which is the entire pry session — when the user only meant to stop one expression
@@ -657,7 +657,7 @@ with it — the shared runner behind evaluation AND the evaluating meta-commands
 
 (defn- repl-eval
   (src)
-  "Evaluate + print `src`, interruptibly when this session armed it (`repl-run` on a
+  "Evaluate + print `src`, interruptibly when this session armed it (`run` on a
 TTY), else inline. The seam the loop calls."
   (if *repl-interruptible*
     (repl-call-interruptible (fn () (repl-eval-print src)))
@@ -830,7 +830,7 @@ from your home directory doesn't load the same file twice."
     (filter (fn (p) (not (nil? p)))
       (if (= user local) (list user) (list user local)))))
 
-;; Loaded ONCE per runtime, not once per `repl-run`: `pry` launches a nested `repl-run`
+;; Loaded ONCE per runtime, not once per `run`: `pry` launches a nested `run`
 ;; mid-session, and re-running the user's rc there would re-execute its side effects
 ;; and silently re-apply defs over the live session's state.
 (def- *repl-rc-loaded* false)
@@ -838,7 +838,7 @@ from your home directory doesn't load the same file twice."
 (defn- repl-load-rc
   ()
   "Load each existing startup file, reporting (but surviving) a failure in one — once
-per runtime (a nested `repl-run`, e.g. `pry`, must not re-run the rc mid-session).
+per runtime (a nested `run`, e.g. `pry`, must not re-run the rc mid-session).
 Runs before the banner so anything an rc prints reads as part of startup, and before
 the loop spawns so its `def`s are in place for the first prompt."
   (when (not *repl-rc-loaded*)
@@ -856,7 +856,7 @@ the loop spawns so its `def`s are in place for the first prompt."
       nil
       (repl-rc-paths))))
 
-;; Which `repl-run` invocation owns the installed SIGINT handler — nil when none is
+;; Which `run` invocation owns the installed SIGINT handler — nil when none is
 ;; installed. Only the invocation that *installed* it restores the default disposition
 ;; on exit: a nested session (pry under the REPL) must leave the outer session's
 ;; handler alone, while a transient session (pry under a *script*) must restore the
@@ -871,7 +871,7 @@ the loop spawns so its `def`s are in place for the first prompt."
 ;; plain `def` (not a `defdyn`) so it reaches the spawned loop across `spawn`.
 (def *repl-start-ns* nil)
 
-(defn repl-run ()
+(defn run ()
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and
 stdout are both a TTY it edits interactively (`std/editor/lineedit.blsp`) with the banner +
 prompts; redirected stdin keeps the plain `read-line` path (prompt echoed only when
@@ -895,7 +895,7 @@ by the outermost invocation only."
         armed (and *repl-interruptible* interactive (%install-interrupt-handler))
         _set (def *repl-interruptible* armed)
         ;; The first armed invocation owns the handler (a unique token compared at
-        ;; exit); a nested repl-run sees a non-nil owner and leaves restoration to it.
+        ;; exit); a nested run sees a non-nil owner and leaves restoration to it.
         token (ref)
         owner (and armed (nil? *repl-sigint-owner*))
         _own (when owner (def- *repl-sigint-owner* token))
@@ -926,6 +926,6 @@ by the outermost invocation only."
     (when (and owner (= *repl-sigint-owner* token))
       (%restore-interrupt-handler)
       (def- *repl-sigint-owner* nil)
-      ;; back to the "arm if you can" intent, so a later repl-run re-resolves afresh
+      ;; back to the "arm if you can" intent, so a later run re-resolves afresh
       (def *repl-interruptible* true))
     nil))

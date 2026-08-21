@@ -54,7 +54,7 @@
   (test "a nil root leaves the path alone"
     (assert= (coverage/coverage-relative "/p/src/a.blsp" nil) "/p/src/a.blsp")))
 
-;; A result record as `coverage-results` produces it.
+;; A result record as `results` produces it.
 (defn- coverage-test-result
   (name file line hits)
   {:name name :file file :line line :hits hits})
@@ -161,11 +161,11 @@
 (describe "coverage: begin! with nothing to instrument"
   :isolated
   (test "a source dir with no project functions yields no targets"
-    (coverage/coverage-begin! (list "/nonexistent-coverage-dir"))
-    (assert= (coverage/coverage-results) nil))
+    (coverage/begin! (list "/nonexistent-coverage-dir"))
+    (assert= (coverage/results) nil))
   (test "reporting an empty run is 100%, not a failure"
-    (coverage/coverage-begin! (list "/nonexistent-coverage-dir"))
-    (assert= (coverage/coverage-report "/nonexistent-coverage-dir") 100)))
+    (coverage/begin! (list "/nonexistent-coverage-dir"))
+    (assert= (coverage/report "/nonexistent-coverage-dir") 100)))
 
 ;; ── the LINE tier (ADR-148 tier 2) ───────────────────────────────────────────
 ;;
@@ -189,9 +189,9 @@
     (is (list? (%coverage-instrumented))))
   (test "an unarmed run measures nothing rather than claiming full coverage"
     ;; The distinction that matters: 0 files measured, NOT 0% of some invented total.
-    (assert= (coverage/coverage-line-results (list "/nonexistent-coverage-dir")) nil))
+    (assert= (coverage/line-results (list "/nonexistent-coverage-dir")) nil))
   (test "reporting an unmeasured run is 100%, so it can't fail a --cover-min gate"
-    (assert= (coverage/coverage-line-report "/nonexistent-coverage-dir"
+    (assert= (coverage/line-report "/nonexistent-coverage-dir"
                (list "/nonexistent-coverage-dir"))
       100)))
 
@@ -231,7 +231,7 @@
     ;; `+` has no Brood body to compile — false, not a crash.
     (refute (%coverage-precompile %add)))
   (test "the begin! pass over a dir with no project functions compiles nothing"
-    (assert= (coverage/coverage-line-begin! (list "/nonexistent-coverage-dir")) 0)))
+    (assert= (coverage/line-begin! (list "/nonexistent-coverage-dir")) 0)))
 
 ;; Branch coverage (ADR-148 tier 2): the pure helpers behind coverage-branch-report.
 ;; The end-to-end instrumentation is exercised by `nest test --cover-branches`; these

@@ -88,7 +88,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 
 ;; ---- epoch conversion -------------------------------------------------------
 
-(defn epoch-ms->dt (ms)
+(defn epoch-ms-> (ms)
   "Convert Unix epoch milliseconds to a UTC datetime."
   (let (total-s (dt-fdiv ms 1000)
         ms-part (- ms (* total-s 1000))
@@ -100,7 +100,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
         ymd (dt-days->ymd days))
     (datetime (get ymd :year) (get ymd :month) (get ymd :day) hour minute second ms-part)))
 
-(defn dt->epoch-ms (dt)
+(defn ->epoch-ms (dt)
   "Convert a UTC datetime (or date — its time is taken as midnight) to Unix epoch
 milliseconds."
   (let (days (dt-ymd->days (get dt :year) (get dt :month) (get dt :day))
@@ -114,29 +114,29 @@ milliseconds."
 
 (defn utc-now ()
   "The current UTC datetime."
-  (epoch-ms->dt (now)))
+  (epoch-ms-> (now)))
 
 (defn today ()
   "The current UTC date."
-  (dt->date (utc-now)))
+  (->date (utc-now)))
 
 ;; ---- accessors --------------------------------------------------------------
 
-(defn dt-year (dt) "The :year field." (get dt :year))
-(defn dt-month (dt) "The :month field (1–12)." (get dt :month))
-(defn dt-day (dt) "The :day field (1–31)." (get dt :day))
-(defn dt-hour (dt) "The :hour field (0–23)." (get dt :hour 0))
-(defn dt-minute (dt) "The :minute field (0–59)." (get dt :minute 0))
-(defn dt-second (dt) "The :second field (0–59)." (get dt :second 0))
-(defn dt-ms (dt) "The :ms field (0–999)." (get dt :ms 0))
+(defn year (dt) "The :year field." (get dt :year))
+(defn month (dt) "The :month field (1–12)." (get dt :month))
+(defn day (dt) "The :day field (1–31)." (get dt :day))
+(defn hour (dt) "The :hour field (0–23)." (get dt :hour 0))
+(defn minute (dt) "The :minute field (0–59)." (get dt :minute 0))
+(defn second (dt) "The :second field (0–59)." (get dt :second 0))
+(defn ms (dt) "The :ms field (0–999)." (get dt :ms 0))
 
 ;; ---- decomposition ----------------------------------------------------------
 
-(defn dt->date (dt)
+(defn ->date (dt)
   "Extract the date portion of a datetime."
   (date (get dt :year) (get dt :month) (get dt :day)))
 
-(defn dt->time (dt)
+(defn ->time (dt)
   "Extract the time-of-day portion of a datetime."
   (time-of-day (get dt :hour 0) (get dt :minute 0) (get dt :second 0) (get dt :ms 0)))
 
@@ -199,13 +199,13 @@ milliseconds."
 (defn- dt-fmt-code
   (dt code)
   (cond
-    (= code "Y") (dt-zero-pad (dt-year dt) 4)
-    (= code "m") (dt-zero-pad (dt-month dt) 2)
-    (= code "d") (dt-zero-pad (dt-day dt) 2)
-    (= code "H") (dt-zero-pad (dt-hour dt) 2)
-    (= code "M") (dt-zero-pad (dt-minute dt) 2)
-    (= code "S") (dt-zero-pad (dt-second dt) 2)
-    (= code "f") (dt-zero-pad (dt-ms dt) 3)
+    (= code "Y") (dt-zero-pad (year dt) 4)
+    (= code "m") (dt-zero-pad (month dt) 2)
+    (= code "d") (dt-zero-pad (day dt) 2)
+    (= code "H") (dt-zero-pad (hour dt) 2)
+    (= code "M") (dt-zero-pad (minute dt) 2)
+    (= code "S") (dt-zero-pad (second dt) 2)
+    (= code "f") (dt-zero-pad (ms dt) 3)
     (= code "%") "%"
     else (str "%" code)))
 
@@ -222,7 +222,7 @@ milliseconds."
           (str acc (dt-fmt-code dt (string/char-at fmt (+ i 1)))))
         (dt-fmt-loop dt fmt (+ i 1) n (str acc c))))))
 
-(defn dt-format (dt fmt)
+(defn format (dt fmt)
   "Format `dt` with %-codes: %Y year, %m month (01-12), %d day (01-31),
 %H hour (00-23), %M minute (00-59), %S second (00-59), %f ms (000-999), %% literal %."
   (dt-fmt-loop dt fmt 0 (string/length fmt) ""))
@@ -291,21 +291,21 @@ milliseconds."
 
 ;; ---- arithmetic -------------------------------------------------------------
 
-(defn dt-add (dt ms)
+(defn add (dt ms)
   "Add `ms` milliseconds to `dt`, returning a new datetime."
-  (epoch-ms->dt (+ (dt->epoch-ms dt) ms)))
+  (epoch-ms-> (+ (->epoch-ms dt) ms)))
 
-(defn dt-diff (dt1 dt2)
+(defn diff (dt1 dt2)
   "Milliseconds from `dt2` to `dt1` (positive when `dt1` is later)."
-  (- (dt->epoch-ms dt1) (dt->epoch-ms dt2)))
+  (- (->epoch-ms dt1) (->epoch-ms dt2)))
 
 ;; ---- comparison -------------------------------------------------------------
 
-(defn dt< (a b) "True if `a` is before `b`." (< (dt->epoch-ms a) (dt->epoch-ms b)))
-(defn dt<= (a b) "True if `a` is at or before `b`." (<= (dt->epoch-ms a) (dt->epoch-ms b)))
-(defn dt> (a b) "True if `a` is after `b`." (> (dt->epoch-ms a) (dt->epoch-ms b)))
-(defn dt>= (a b) "True if `a` is at or after `b`." (>= (dt->epoch-ms a) (dt->epoch-ms b)))
-(defn dt= (a b) "True if `a` and `b` are the same instant." (= (dt->epoch-ms a) (dt->epoch-ms b)))
+(defn before? (a b) "True if `a` is before `b`." (< (->epoch-ms a) (->epoch-ms b)))
+(defn not-after? (a b) "True if `a` is at or before `b`." (<= (->epoch-ms a) (->epoch-ms b)))
+(defn after? (a b) "True if `a` is after `b`." (> (->epoch-ms a) (->epoch-ms b)))
+(defn not-before? (a b) "True if `a` is at or after `b`." (>= (->epoch-ms a) (->epoch-ms b)))
+(defn same? (a b) "True if `a` and `b` are the same instant." (= (->epoch-ms a) (->epoch-ms b)))
 
 ;; ---- calendar ---------------------------------------------------------------
 
