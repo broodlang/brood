@@ -34,7 +34,7 @@ mod prepass;
 #[cfg(feature = "jit")]
 mod emit;
 #[cfg(feature = "jit")]
-use emit::{is_bool_op, store_int};
+use emit::store_int;
 
 // Control-flow arm bodies (`Jump` / `JumpIfFalse`) + the block-param edge-typing
 // helper, extracted from the emit loop (the per-`Inst` arm-body decomposition step).
@@ -982,6 +982,12 @@ fn jit_lower_arm_inner(
     b.def_var(rb_var, b.inst_results(call)[0]);
     // The frame-access context the extracted slot helpers (`emit::load_slot_int` etc.)
     // read; all fields are `Copy`, so it threads by value.
+    // KI-49: which slots the tier-time profile saw an `Int` in. A profiled-Int slot keeps
+    // the unboxed i64 block-arg carry (`fib`/`collatz`); every other slot crosses a block
+    // boundary as `ParamRepr::Slot`, so it is never forced through `as_int`.
+    let slot_int_profile: Vec<bool> = (0..nslots)
+        .map(|i| slot_tags.get(i).copied() == Some(TAG_INT))
+        .collect();
     let frame = emit::Frame {
         rb_var,
         base,
@@ -990,6 +996,7 @@ fn jit_lower_arm_inner(
         carry_vars: &carry_vars,
         slot_float: &slot_float,
         slot_bool: &slot_bool,
+        slot_int_profile: &slot_int_profile,
         slot_f64_cache: &slot_f64_cache,
     };
     // A scratch `Value`-sized stack slot the handle / call / global ops write their result
@@ -1500,7 +1507,7 @@ fn jit_lower_arm_inner(
     // translated (forward edges, in ip order) — so the flags are set by the time the target
     // is reached. A back-edge target with params would see no flags and default to `Int`;
     // self-tail back-edges target the param-less leader 0, so this doesn't arise in practice.
-    let mut bool_param: Vec<Option<Vec<bool>>> = vec![None; len + 1];
+    let mut bool_param: Vec<Option<Vec<emit::ParamRepr>>> = vec![None; len + 1];
     // Edge typing at joins is handled by `control::record_block_flags` (imported).
 
     // Translate each leader block in ip order.
@@ -1514,14 +1521,16 @@ fn jit_lower_arm_inner(
             .iter()
             .enumerate()
             .map(|(i, &v)| {
-                let is_bool = bool_param[ip]
+                match bool_param[ip]
                     .as_ref()
                     .and_then(|f| f.get(i).copied())
-                    .unwrap_or(false);
-                if is_bool {
-                    Op::Bool(v)
-                } else {
-                    Op::Int(v)
+                    .unwrap_or(emit::ParamRepr::Int)
+                {
+                    emit::ParamRepr::Bool => Op::Bool(v),
+                    // KI-49: the value was never materialised into the arg word — it lives
+                    // in frame slot `k`, which every predecessor agreed on.
+                    emit::ParamRepr::Slot(k) => Op::Slot(k),
+                    emit::ParamRepr::Int => Op::Int(v),
                 }
             })
             .collect();
@@ -1839,7 +1848,10 @@ fn jit_lower_arm_inner(
                 break;
             }
             if is_leader[j] {
-                let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op, frame)).collect();
+                let flags: Vec<emit::ParamRepr> = stack
+                    .iter()
+                    .map(|&op| emit::param_repr(&b, op, frame))
+                    .collect();
                 if record_block_flags(&mut bool_param[j], flags) {
                     let args: Vec<BlockArg> = stack
                         .iter()
