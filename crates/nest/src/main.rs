@@ -1105,8 +1105,8 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     // Single-file path: mirror brood --test, but pre-load project image when
     // we're inside a project so cross-module names resolve.
     let bootstrap = if in_project() {
-        "(project/load-config) (let (root (project/project-find-root (file/cwd))) \
-            (when root (project/project-setup root) (project/project-load-sources root))) \
+        "(project/load-config) (let (root (project/find-root (file/cwd))) \
+            (when root (project/setup root) (project/load-sources root))) \
             (require-one 'test)"
     } else {
         "(require-one 'test)"
@@ -1374,8 +1374,8 @@ fn cmd_run(
         format!("(project/load-config) {}", main_override)
     } else if in_project() {
         "(project/load-config) \
-         (let (root (project/project-find-root (file/cwd))) \
-           (when root (project/project-setup root))) "
+         (let (root (project/find-root (file/cwd))) \
+           (when root (project/setup root))) "
             .to_string()
     } else {
         String::new()
@@ -1594,7 +1594,7 @@ fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
 /// file so the project's modules are immediately callable from the prompt.
 /// Outside a project, fall through to the plain language REPL (same UX as
 /// `brood`). The REPL itself is Brood (`std/tool/repl.blsp`, ADR-048) — one
-/// implementation both binaries bootstrap into via `(repl/repl-run)`.
+/// implementation both binaries bootstrap into via `(repl/run)`.
 fn cmd_repl(interp: &mut Interp) {
     if in_project() {
         // After loading the project's sources, tell the REPL to start in the project's
@@ -1607,10 +1607,10 @@ fn cmd_repl(interp: &mut Interp) {
         run(
             interp,
             "(project/load-config) \
-             (let (root (project/project-find-root (file/cwd))) \
+             (let (root (project/find-root (file/cwd))) \
                (when root \
-                 (project/project-setup root) \
-                 (project/project-load-sources root) \
+                 (project/setup root) \
+                 (project/load-sources root) \
                  (def repl/*repl-start-ns* (first *project-main*))))",
         );
         eprintln!(
@@ -1626,7 +1626,7 @@ fn cmd_repl(interp: &mut Interp) {
     // (restoring) before any error report + exit (`process::exit` skips Drop).
     let result = {
         let _guard = RawTermGuard;
-        interp.eval_str("(repl/repl-run)")
+        interp.eval_str("(repl/run)")
     };
     if let Err(e) = result {
         report_error(&e);
@@ -1641,7 +1641,7 @@ fn cmd_mcp(interp: &mut Interp) {
     // test/format frameworks — so the two servers can't drift on its contents.
     let bootstrap = r#"
         (project/load-config)
-        (let (root (project/project-find-root (file/cwd)))
+        (let (root (project/find-root (file/cwd)))
           (when (nil? root)
             (error "nest mcp: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
           (project/setup-tooling-image root))
@@ -1744,7 +1744,7 @@ fn cmd_release(
     //    reported + exit by `run_for_value`.
     let collected = run_for_value(
         interp,
-        "(let (root (project/project-find-root (file/cwd))) \
+        "(let (root (project/find-root (file/cwd))) \
          (project/bundle-collect root))",
     );
     let items = match interp.heap.seq_items(collected) {
