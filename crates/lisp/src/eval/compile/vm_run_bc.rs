@@ -775,7 +775,12 @@ pub(crate) fn vm_run_bc(
                                 .expect("JIT error outcome without a parked error")),
                             // A JIT'd tail call: dispatch the staged callee+args → reuse the
                             // frame (`Tail`) or a finished native callee (`Done`).
-                            Some(4) => jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env),
+                            Some(4) => {
+                                // Pass the size this frame was BUILT to (KI-48): the
+                                // dispatcher must not re-derive it from
+                                // `active_nslots()`, which can change mid-flight.
+                                jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env, frame_nslots)
+                            }
                             // 1 (deopt) / 2 (preempt) / None (not hot / out of subset): run the
                             // arm on the VM with the frame intact (`cur_ip` is still 0).
                             _ => {

@@ -1,0 +1,44 @@
+;; KI-48 — the JIT tail dispatcher must read the staged `[callee, args…]` at the frame size
+;; the frame was actually BUILT to, not one it re-derives from `active_nslots()`.
+;;
+;; `active_nslots()` reads `inline_installed`, which the background inline upgrade flips
+;; asynchronously. Re-reading it inside `jit_dispatch_tail` meant the staged area could be
+;; written at one offset and read at another once the swap landed mid-flight — measured live
+;; on 123 arms (`fold`: nslots 13 vs inline_nslots 25, a 12-slot overshoot), and matching a
+;; captured crash of `root_at(9)` on a len-8 roots stack.
+;;
+;; ⚠ **This is PATH COVERAGE, not a regression guard — verified by sabotage that it is not.**
+;; Reverting the fix (passing `active_nslots()` again) leaves these tests passing, because the
+;; fault needs the inline swap to land inside a window of a few instructions and nothing here
+;; forces that. It exercises the dispatcher hard — mutual tail recursion sends every step
+;; through the computed tail path, hot enough to tier and to earn the deferred inlined
+;; upgrade, across concurrent processes so swaps do land while peers are mid-dispatch — so it
+;; would catch a *deterministic* breakage of this path. It would not have caught KI-48.
+;;
+;; A deterministic guard would need to force the flip mid-dispatch; not attempted. Recorded
+;; so nobody reads a green run here as proof the invariant holds. When the desync WAS forced
+;; artificially the program hung rather than erroring, so there is no clean failure to assert
+;; on either — a wrong answer or a timeout is the only signal.
+(defmodule jit-tail-frame-test (:use test))
+
+(defn ev-step (k acc) (if (= k 0) acc (od-step (- k 1) (+ acc 1))))
+(defn od-step (k acc) (if (= k 0) acc (ev-step (- k 1) (+ acc 2))))
+
+(describe "jit tail dispatch reads the staged area at the built frame size (KI-48)"
+  (test "mutual tail recursion returns the exact accumulator when hot"
+    ;; 30k steps is well past the tier threshold, so the arms are native and the deferred
+    ;; inlined upgrade has had time to install. Each pair of steps adds 1 then 2.
+    (let (n 30000
+          got (ev-step n 0))
+      ;; n steps alternate ev->od->ev…; starting at ev, half add 1 and half add 2.
+      (is (= got (+ (* (quot n 2) 3) (if (= (rem n 2) 0) 0 1))))))
+
+  (test "concurrent hot tail recursion agrees across processes"
+    ;; Peers tier and swap while others are mid-tail-dispatch — the window the bug needed.
+    (let (me (self)
+          n 20000
+          expect (+ (* (quot n 2) 3) (if (= (rem n 2) 0) 0 1))
+          _ (map (fn (_) (spawn (fn () (send me [:r (ev-step n 0)])))) (range 8))
+          got (map (fn (_) (receive ([:r v] v))) (range 8)))
+      (is (= (count got) 8))
+      (is (every? (fn (v) (= v expect)) got)))))
