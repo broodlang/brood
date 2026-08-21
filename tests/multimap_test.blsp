@@ -2,18 +2,18 @@
 
 (describe "multimap basics"
   (test "new multimap is empty"
-    (is (multimap/empty? (multimap/new))))
+    (is (multimap/empty? (multimap/empty))))
   (test "multimap-assoc adds a value"
-    (let (mm (multimap/assoc (multimap/new) :k "v"))
+    (let (mm (multimap/assoc (multimap/empty) :k "v"))
       (assert= '("v") (multimap/get mm :k))))
   (test "multiple values for same key"
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :k "a")
                (multimap/assoc :k "b")
                (multimap/assoc :k "c")))
       (assert= 3 (count (multimap/get mm :k)))))
   (test "multimap-get-all returns insertion order"
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :k "first")
                (multimap/assoc :k "second")
                (multimap/assoc :k "third")))
@@ -22,54 +22,54 @@
         (assert= "second" (nth vs 1))
         (assert= "third" (nth vs 2)))))
   (test "missing key returns nil"
-    (is (nil? (multimap/get (multimap/new) :missing))))
+    (is (nil? (multimap/get (multimap/empty) :missing))))
   (test "multimap-contains?"
-    (let (mm (multimap/assoc (multimap/new) :x 1))
+    (let (mm (multimap/assoc (multimap/empty) :x 1))
       (is (multimap/contains? mm :x))
       (is (not (multimap/contains? mm :y)))))
   (test "multimap-dissoc removes all values for key"
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :k "a")
                (multimap/assoc :k "b")
                (multimap/dissoc :k)))
       (is (nil? (multimap/get mm :k)))))
   (test "multimap-remove-value removes first occurrence"
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :k "a")
                (multimap/assoc :k "b")
                (multimap/remove-value :k "b")))
       (assert= '("a") (multimap/get mm :k))))
   (test "multimap-remove-value drops key when empty"
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :k "only")
                (multimap/remove-value :k "only")))
       (is (not (multimap/contains? mm :k))))))
 
 (describe "multimap aggregates"
   (test "multimap-keys"
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :a 1)
                (multimap/assoc :b 2)))
       (assert= 2 (count (multimap/keys mm)))))
   (test "multimap-size counts all pairs"
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :x 1)
                (multimap/assoc :x 2)
                (multimap/assoc :y 3)))
       (assert= 3 (count mm))))
   (test "multimap-values returns all values"
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :a "x")
                (multimap/assoc :b "y")))
       (assert= 2 (count (multimap/values mm)))))
   (test "multimap->map returns map of lists"
-    (let (mm (-> (multimap/new)
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :k "a")
                (multimap/assoc :k "b"))
           m (multimap/->map mm))
       (assert= ["a" "b"] (into [] (get m :k)))))
   (test "multimap-assoc-all"
-    (let (mm (multimap/assoc-all (multimap/new) :k [1 2 3]))
+    (let (mm (multimap/assoc-all (multimap/empty) :k [1 2 3]))
       (assert= 3 (count (multimap/get mm :k))))))
 
 ;; A multimap is a record wrapping the inner key→list map — so its identity can't leak
@@ -77,25 +77,25 @@
 ;; reserved `:__id__` key through both).
 (describe "multimap is a record with its own identity"
   (test "multimap? is true only for the real thing"
-    (is (multimap? (multimap/new)))
-    (is (multimap? (multimap/assoc (multimap/new) :k 1)))
+    (is (multimap? (multimap/empty)))
+    (is (multimap? (multimap/assoc (multimap/empty) :k 1)))
     (is (not (multimap? {:k (list 1)})))
     (is (not (multimap? nil))))
   (test "it carries its record id and is never = to a look-alike map"
-    (assert= (record-id (multimap/new)) :multimap/multimap)
-    (is (not (= (multimap/new) {}))))
+    (assert= (record-id (multimap/empty)) :multimap/multimap)
+    (is (not (= (multimap/empty) {}))))
   (test "the identity never leaks into keys, size, or the map view"
-    (let (mm (multimap/assoc (multimap/new) :k 1))
+    (let (mm (multimap/assoc (multimap/empty) :k 1))
       (assert= (into [] (multimap/keys mm)) [:k])
       (assert= (count mm) 1)
       (is (not (includes? (into [] (multimap/keys mm)) :__id__)))
       (is (not (contains? (multimap/->map mm) :__id__)))))
   (test "an empty multimap is empty by its own count, not the wrapper's"
-    (is (multimap/empty? (multimap/new)))
-    (is (not (multimap/empty? (multimap/assoc (multimap/new) :k 1)))))
+    (is (multimap/empty? (multimap/empty)))
+    (is (not (multimap/empty? (multimap/assoc (multimap/empty) :k 1)))))
   (test "it displays as a summary and inspects as its contents"
-    (assert= (->string (multimap/new)) "#<multimap 0 keys, 0 pairs>")
-    (let (mm (-> (multimap/new)
+    (assert= (->string (multimap/empty)) "#<multimap 0 keys, 0 pairs>")
+    (let (mm (-> (multimap/empty)
                (multimap/assoc :k 1)
                (multimap/assoc :k 2)))
       (assert= (->string mm) "#<multimap 1 keys, 2 pairs>")
@@ -106,7 +106,7 @@
   :isolated
   (test "a multimap built in a worker arrives as a multimap"
     (let (me (self))
-      (spawn (send me [:mm (multimap/assoc-all (multimap/new) :k [1 2 3])]))
+      (spawn (send me [:mm (multimap/assoc-all (multimap/empty) :k [1 2 3])]))
       (let (back (receive ([:mm m] m) (after *test-wait-ms* :timeout)))
         (is (multimap? back))
         (assert= (count back) 3)

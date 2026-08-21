@@ -2,17 +2,17 @@
 
 (describe "FIFO queue"
   (test "new queue is empty"
-    (is (queue/empty? (queue/new))))
+    (is (queue/empty? (queue/empty))))
   (test "size 0 when empty"
-    (assert= 0 (count (queue/new))))
+    (assert= 0 (count (queue/empty))))
   (test "push increases size"
-    (assert= 1 (count (queue/push (queue/new) :a))))
+    (assert= 1 (count (queue/push (queue/empty) :a))))
   (test "pop returns empty on empty queue"
-    (assert= :empty (queue/pop (queue/new))))
+    (assert= :empty (queue/pop (queue/empty))))
   (test "peek returns empty on empty queue"
-    (assert= :empty (queue/peek (queue/new))))
+    (assert= :empty (queue/peek (queue/empty))))
   (test "FIFO order preserved"
-    (let (q (-> (queue/new)
+    (let (q (-> (queue/empty)
               (queue/push 1)
               (queue/push 2)
               (queue/push 3)))
@@ -24,12 +24,12 @@
         (assert= 3 (first r3))
         (is (queue/empty? (second r3))))))
   (test "peek does not remove"
-    (let (q (queue/push (queue/new) :x))
+    (let (q (queue/push (queue/empty) :x))
       (assert= :x (queue/peek q))
       (assert= :x (queue/peek q))
       (assert= 1 (count q))))
   (test "queue/->list preserves order"
-    (let (q (-> (queue/new)
+    (let (q (-> (queue/empty)
               (queue/push :a)
               (queue/push :b)
               (queue/push :c)))
@@ -49,7 +49,7 @@
       (assert= (list 2 4) (filter even? q))
       (assert= [1 2 3 4 5] (into [] (conj q 5))))) ; Conjable
   (test "interleaved push/pop"
-    (let (q0 (queue/new)
+    (let (q0 (queue/empty)
           q1 (queue/push q0 :a)
           q2 (queue/push q1 :b)
           r1 (queue/pop q2)
@@ -62,15 +62,15 @@
 
 (describe "min-priority queue"
   (test "new pq is empty"
-    (is (pq/empty? (pq/new))))
+    (is (pq/empty? (pq/empty))))
   (test "size 0"
-    (assert= 0 (count (pq/new))))
+    (assert= 0 (count (pq/empty))))
   (test "pop empty returns :empty"
-    (assert= :empty (pq/pop (pq/new))))
+    (assert= :empty (pq/pop (pq/empty))))
   (test "peek empty returns :empty"
-    (assert= :empty (pq/peek (pq/new))))
+    (assert= :empty (pq/peek (pq/empty))))
   (test "min priority comes out first"
-    (let (pq (-> (pq/new)
+    (let (pq (-> (pq/empty)
                (pq/insert 3 :low)
                (pq/insert 1 :high)
                (pq/insert 2 :med)))
@@ -83,18 +83,18 @@
         (assert= :low (first r3))
         (is (pq/empty? (second r3))))))
   (test "pq/->list in priority order"
-    (let (pq (-> (pq/new)
+    (let (pq (-> (pq/empty)
                (pq/insert 5 :e)
                (pq/insert 1 :a)
                (pq/insert 3 :c)))
       (assert= [:a :c :e] (into [] (pq/->list pq)))))
   (test "equal priorities"
-    (let (pq (-> (pq/new)
+    (let (pq (-> (pq/empty)
                (pq/insert 1 :x)
                (pq/insert 1 :y)))
       (assert= 2 (count pq))))
   (test "equal priorities pop in insertion order (stable / FIFO)"
-    (let (pq (-> (pq/new)
+    (let (pq (-> (pq/empty)
                (pq/insert 1 :a)
                (pq/insert 1 :b)
                (pq/insert 1 :c)))
@@ -105,32 +105,32 @@
 ;; either from comparing `=` to a look-alike, and what carries their print form.
 (describe "queue and pq are records with their own identity"
   (test "queue? / pq? are true only for the real thing"
-    (is (queue? (queue/new)))
-    (is (queue? (queue/push (queue/new) 1)))
-    (is (not (queue? (pq/new))))
-    (is (pq? (pq/new)))
-    (is (pq? (pq/insert (pq/new) 1 :a)))
-    (is (not (pq? (queue/new)))))
+    (is (queue? (queue/empty)))
+    (is (queue? (queue/push (queue/empty) 1)))
+    (is (not (queue? (pq/empty))))
+    (is (pq? (pq/empty)))
+    (is (pq? (pq/insert (pq/empty) 1 :a)))
+    (is (not (pq? (queue/empty)))))
   (test "neither is a plain collection in disguise"
     (is (not (queue? {:front nil :back nil :size 0})))
     (is (not (pq? (list [1 :a]))))
-    (is (not (= (queue/new) {:front nil :back nil :size 0}))))
+    (is (not (= (queue/empty) {:front nil :back nil :size 0}))))
   (test "each carries its record id"
-    (assert= (record-id (queue/new)) :queue/queue)
-    (assert= (record-id (pq/new)) :pq/pq))
+    (assert= (record-id (queue/empty)) :queue/queue)
+    (assert= (record-id (pq/empty)) :pq/pq))
   ;; An EMPTY pq used to be `nil` (a bare list), and `()` is the one falsy collection in
   ;; Brood — so `(if pq …)` took the else branch on an empty queue. A record is truthy.
   (test "an empty pq is truthy, unlike the bare list it used to be"
-    (is (if (pq/new) true false))
-    (is (pq/empty? (pq/new))))
+    (is (if (pq/empty) true false))
+    (is (pq/empty? (pq/empty))))
   (test "a queue displays as a summary and inspects as its contents"
-    (assert= (->string (queue/new)) "#<queue empty>")
+    (assert= (->string (queue/empty)) "#<queue empty>")
     (let (q (queue/list-> (list 1 2 3)))
       (assert= (->string q) "#<queue 3 front=1>")
       (assert= (inspect q) "#<queue (1 2 3)>")))
   (test "a pq displays as a summary and inspects as its entries"
-    (assert= (->string (pq/new)) "#<pq empty>")
-    (let (pq (-> (pq/new) (pq/insert 2 :b) (pq/insert 1 :a)))
+    (assert= (->string (pq/empty)) "#<pq empty>")
+    (let (pq (-> (pq/empty) (pq/insert 2 :b) (pq/insert 1 :a)))
       (assert= (->string pq) "#<pq 2 min=1>")
       (assert= (inspect pq) "#<pq ([1 :a] [2 :b])>"))))
 
@@ -149,7 +149,7 @@
         (assert= (into [] (sort (map (fn (q) (queue/peek q)) results))) [0 1 2 3]))))
   (test "a pq survives a round trip and keeps its ordering"
     (let (me (self)
-          pq (-> (pq/new) (pq/insert 3 :c) (pq/insert 1 :a)))
+          pq (-> (pq/empty) (pq/insert 3 :c) (pq/insert 1 :a)))
       (spawn (send me [:pq pq]))
       (let (back (receive ([:pq p] p) (after *test-wait-ms* :timeout)))
         (is (pq? back))

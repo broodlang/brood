@@ -124,6 +124,7 @@ the `nest new` scaffolder."
 
 ;; (plist-get '(:a 1 :b 2) :b) => 2 — the value after key k in a flat kv list, or nil.
 (defn plist-get (kvs k)
+  "Read the value paired with key `k` from a flat property-list `kvs` (`k1 v1 k2 v2 …`); nil if `k` is absent."
   (cond (empty? kvs) nil (= (first kvs) k) (second kvs) else (plist-get (rest (rest kvs)) k)))
 
 ;; Normalise the manifest's `:main` value into a `(module fn)` pair of symbols.
@@ -301,6 +302,7 @@ than being fetched into `_deps/<name>/`."
 
 ;; Normalise one `[name kind spec & opts]` entry into the dep record for its kind.
 (defn project-parse-dep (entry)
+  "Parse one `:dependencies` vector entry `[name kind & opts]` into a normalised dep record, dispatching on `kind` (`:git`/`:path`/`:tarball`/`:version`) and recording the `:optional` flag (ADR-172)."
   (when (not (vector? entry))
     (error "project: each :dependencies entry must be a vector, got " entry))
   (when (< (vector-length entry) 3) (error "project: dependency entry is too short: " entry))
@@ -327,6 +329,7 @@ than being fetched into `_deps/<name>/`."
 ;; Parse the manifest's :dependencies value into a list of dep records.
 ;; Omitted/nil => empty list.
 (defn project-parse-deps (deps)
+  "Parse the manifest's `:dependencies` vector into a list of dep records; an omitted/nil value yields the empty list."
   (cond
     (nil? deps) nil
     (vector? deps) (map project-parse-dep deps)
@@ -434,6 +437,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
         (map-pairs value))))
 
 (defn project-apply (opts)
+  "Apply a parsed manifest `opts` (a plist) by `def`ing the `*project-*` globals — name, version, description, paths, `:main` entry, dependencies and formatter settings; returns the project name."
   (def *project-name* (plist-get opts :name))
   (def *project-version* (plist-get opts :version))
   ;; Package-registry metadata (ADR-147): human summary + the git URL this package
@@ -469,14 +473,17 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 
 ;; --- finding the project + discovering tests ---------------------------------
 ;; Walk up from `dir` toward the filesystem root, looking for project.blsp.
-;; parent-dir is its own fixed point at "/" and ".", which terminates the walk.
+;; parent-directory is its own fixed point at "/" and ".", which terminates the walk.
 (defn project-find-root (dir)
+  "Walk up from `dir` toward the filesystem root, returning the first directory that contains a `project.blsp`, or nil if none is found."
   (cond
     (file/exists? (path-join dir "project.blsp")) dir
-    (= dir (parent-dir dir)) nil
-    else (project-find-root (parent-dir dir))))
+    (= dir (parent-directory dir)) nil
+    else (project-find-root (parent-directory dir))))
 
-(defn project-abs-paths (root rels) (map (fn (r) (path-join root r)) rels))
+(defn project-abs-paths (root rels)
+  "Resolve each relative path in `rels` against `root`, returning the list of absolute paths."
+  (map (fn (r) (path-join root r)) rels))
 
 ;; Recursively collect every <name>_test.blsp path under `dir` (skipping nothing
 ;; else). Returns a list of full paths; nil if `dir` isn't a directory.
@@ -499,6 +506,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 
 ;; Recursively collect every .blsp under `dir` (the project's source files).
 (defn project-collect-sources (dir)
+  "Recursively collect every `.blsp` file under `dir` (the project's source files); nil when `dir` is not a directory."
   (if (file/dir? dir)
     ;; Same O(files²)→O(files) fix as `project-collect-tests`: `cons` files, `append-two`
     ;; subdir lists (copies the small list, shares `acc`) instead of `(append acc …)`.
@@ -586,6 +594,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; With `:skip-loaded`, any module already on `*features*` is skipped (the check
 ;; pre-flight, which runs *after* the image is loaded and must not re-evaluate it).
 (defn project-load-sources (root & opts)
+  "Load every source file under `root`'s source paths, attributing each file's load-time requires to the root section (KI-37). `:skip-loaded` skips files whose feature is already loaded."
   (let (skip-all? (includes? opts :skip-loaded)
         before *features*)
     (fold
@@ -667,11 +676,12 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; Every source file under the project's source paths, sorted so the fingerprint is
 ;; stable across directory-listing order.
 (defn project-source-files (root)
+  "Every `.blsp` file under `root`'s source paths, sorted so the fingerprint is stable across directory-listing order."
   (sort (fold (fn (acc dir) (append-two (project-collect-sources dir) acc))
           nil
           (project-abs-paths root *project-source-paths*))))
 
-(defn project-image-fingerprint (root)
+(defn- project-image-fingerprint (root)
   (project-fingerprint-of (project-source-files root)))
 
 ;; Split from `project-image-fingerprint` so a caller that already has the file list
@@ -802,7 +812,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   "Snapshot the bindings this project load produced into `root`'s image, grouped into
 per-module sections. `before` is the `(global-names)` list captured *before* the sources
 were loaded. Returns the entry count."
-  (let (dir (parent-dir (project-image-path root)))
+  (let (dir (parent-directory (project-image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
     (%image-write (project-image-path root)
       (project-image-sections before)
@@ -812,7 +822,7 @@ were loaded. Returns the entry count."
 ;; section (registries + declared sigs — small, and needed before anything else) and hands
 ;; `require` the directory for everything else, so each module materialises on first use.
 ;; Returns the section count, or nil for a miss (absent, stale, corrupt).
-(defn project-install-image (root fp)
+(defn- project-install-image (root fp)
   (let (path (project-image-path root)
         idx (%image-index path fp))
     (cond
@@ -850,6 +860,7 @@ NOT call this: it requires its entry point and lets the rest stay on disk."
 ;; empty. An instrumented run therefore always loads from source. Silent wrong output
 ;; is exactly the failure mode worth a special case.
 (defn project-image-usable? ()
+  "Whether a cached startup image may be used — false under `BROOD_COVERAGE`, whose instrumentation an image cannot represent."
   (nil? (getenv "BROOD_COVERAGE")))
 
 ;; Milliseconds as "12.3s" / "845ms" — build output should read at a glance.
@@ -1112,6 +1123,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
         " — upgrade brood, or relax the :brood constraint in project.blsp"))))
 
 (defn project-setup (root)
+  "Initialise the project rooted at `root`: reset the path conventions, apply its `project.blsp` manifest, refuse an incompatible runtime, put its sources and dependencies on the load path, and enable package rooting; returns `root`."
   (def *project-root* root)
   ;; Restore the path conventions BEFORE applying the manifest. `project-apply`
   ;; only assigns these when the manifest names them, so without the reset a root

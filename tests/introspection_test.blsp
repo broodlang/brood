@@ -249,12 +249,12 @@
       (is (or (nil? p) (and (string? p) (string/starts-with? p "/"))))))
 
   (test "and it points at something that exists — the sibling lookup depends on that"
-    ;; the point of the primitive: `(path-join (parent-dir (exe-path)) "nest")` has to be a
+    ;; the point of the primitive: `(path-join (parent-directory (exe-path)) "nest")` has to be a
     ;; real place to look
     (let (p (exe-path))
       (when (string? p)
         (is (file/exists? p))
-        (is (file/dir? (parent-dir p))))))
+        (is (file/dir? (parent-directory p))))))
 
   (test "it is stable within a process"
     (assert= (exe-path) (exe-path))))

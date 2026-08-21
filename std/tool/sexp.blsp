@@ -419,34 +419,70 @@ single undo unit), leaving point at `new-point`; `buf` unchanged when `result` i
     (let ([t p] result)
       (goto-char (replace-region buf 0 (buffer-length buf) t) p))))
 
-(defn forward (buf key) (goto-char buf (point-forward (buffer-text buf) (get buf :point))))
-(defn backward (buf key) (goto-char buf (point-backward (buffer-text buf) (get buf :point))))
-(defn up (buf key) (goto-char buf (point-up (buffer-text buf) (get buf :point))))
-(defn down (buf key) (goto-char buf (point-down (buffer-text buf) (get buf :point))))
+(defn forward (buf key)
+  "Move point over the next sexp (Emacs `forward-sexp`); buffer command."
+  (goto-char buf (point-forward (buffer-text buf) (get buf :point))))
+(defn backward (buf key)
+  "Move point back over the previous sexp (Emacs `backward-sexp`); buffer command."
+  (goto-char buf (point-backward (buffer-text buf) (get buf :point))))
+(defn up (buf key)
+  "Move point out of the enclosing list, before its open delimiter (Emacs
+`backward-up-list`); buffer command."
+  (goto-char buf (point-up (buffer-text buf) (get buf :point))))
+(defn down (buf key)
+  "Move point into the next list, just past its open delimiter (Emacs `down-list`);
+buffer command."
+  (goto-char buf (point-down (buffer-text buf) (get buf :point))))
 (defn list-forward (buf key)
+  "Move point over the next LIST, stepping past atoms (Emacs `forward-list`); buffer
+command."
   (goto-char buf (point-list-forward (buffer-text buf) (get buf :point))))
 (defn list-backward (buf key)
+  "Move point back over the previous LIST, stepping past atoms (Emacs `backward-list`);
+buffer command."
   (goto-char buf (point-list-backward (buffer-text buf) (get buf :point))))
 (defn up-forward (buf key)
+  "Move point out of the enclosing list, past its close delimiter (Emacs `up-list`);
+buffer command."
   (goto-char buf (point-up-forward (buffer-text buf) (get buf :point))))
 (defn beginning-of-defun (buf key)
+  "Move point to the start of the enclosing top-level form (Emacs `beginning-of-defun`);
+buffer command."
   (goto-char buf (point-defun-start (buffer-text buf) (get buf :point))))
 (defn end-of-defun (buf key)
+  "Move point to the end of the enclosing top-level form (Emacs `end-of-defun`); buffer
+command."
   (goto-char buf (point-defun-end (buffer-text buf) (get buf :point))))
 
 (defn slurp-forward (buf key)
+  "Grow the enclosing list to swallow the sibling form after it (paredit
+`forward-slurp-sexp`); buffer command, no-op when there's none."
   (sexp-apply-edit buf (point-slurp-forward (buffer-text buf) (get buf :point))))
 (defn barf-forward (buf key)
+  "Shrink the enclosing list, expelling its last form (paredit `forward-barf-sexp`);
+buffer command, no-op when it's empty."
   (sexp-apply-edit buf (point-barf-forward (buffer-text buf) (get buf :point))))
 (defn slurp-backward (buf key)
+  "Grow the enclosing list to swallow the sibling form before it (paredit
+`backward-slurp-sexp`); buffer command, no-op when there's none."
   (sexp-apply-edit buf (point-slurp-backward (buffer-text buf) (get buf :point))))
 (defn barf-backward (buf key)
+  "Shrink the enclosing list, expelling its first form (paredit `backward-barf-sexp`);
+buffer command, no-op when it's empty."
   (sexp-apply-edit buf (point-barf-backward (buffer-text buf) (get buf :point))))
 (defn raise (buf key)
+  "Replace the enclosing list with the form point is on, deleting its siblings (paredit
+`raise-sexp`); buffer command, no-op at top level."
   (sexp-apply-edit buf (point-raise (buffer-text buf) (get buf :point))))
 (defn splice (buf key)
+  "Remove the enclosing list's delimiters, splicing its contents up a level (paredit
+`splice-sexp`); buffer command, no-op at top level."
   (sexp-apply-edit buf (point-splice (buffer-text buf) (get buf :point))))
 (defn wrap-round (buf key)
+  "Wrap the form at or after point in a fresh `( … )` (paredit `wrap-round`); buffer
+command, no-op when there's no following form."
   (sexp-apply-edit buf (point-wrap-round (buffer-text buf) (get buf :point))))
 (defn transpose (buf key)
+  "Swap the sexps before and after point (Emacs `transpose-sexps`); buffer command,
+no-op without a form on each side."
   (sexp-apply-edit buf (point-transpose (buffer-text buf) (get buf :point))))

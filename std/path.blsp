@@ -2,7 +2,7 @@
 ;;
 ;; This is the full path API (dirname/extension/stem/normalize/relative-to/…).
 ;; It is NOT a duplicate of the prelude's bootstrap `path-*` subset (path-join,
-;; path-basename, path-absolute, parent-dir): those load before any module and
+;; path-basename, path-absolute, parent-directory): those load before any module and
 ;; have different contracts (e.g. `path/basename` strips a trailing slash,
 ;; `path-basename` doesn't; `path/join` is variadic + absolute-reset, `path-join`
 ;; is 2-arg). Deliberate layering — a full library over a minimal boot subset.
