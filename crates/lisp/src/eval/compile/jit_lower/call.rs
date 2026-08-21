@@ -10,6 +10,7 @@ use super::Op;
 use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT};
 use crate::core::value::Symbol;
 use crate::eval::compile::inline::icall_enabled;
+use cranelift_codegen::ir::BlockArg;
 use cranelift_codegen::ir::{
     condcodes::IntCC, types, Block, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value,
 };
@@ -538,7 +539,9 @@ pub(super) fn emit_self_call(
         let now_ep = b.ins().load(types::I64, MemFlagsData::trusted(), ep_ptr, 0);
         let changed = b.ins().icmp(IntCC::NotEqual, now_ep, entry_ep);
         let ck = b.create_block();
-        b.ins().brif(changed, deopt, &[], ck, &[]);
+        let __dr = b.ins().iconst(types::I32, 36);
+        b.ins()
+            .brif(changed, deopt, &[BlockArg::Value(__dr)], ck, &[]);
         b.switch_to_block(ck);
     }
     let batch = b.ins().iconst(types::I64, TICK_BATCH);
