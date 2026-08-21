@@ -366,13 +366,13 @@ the observer's testable core; `observe-loop` feeds it live data."
 (defn- observe-node-info
   ()
   "This runtime's node stats as a map, for the observer's header panel."
-  {:name (node-name)
+  {:name (node/name)
    :workers (worker-threads)
    :peak (peak-threads)
    :spawned (spawn-count)
    :mem (mem-bytes)
    :mem-peak (mem-peak)
-   :peers (nodes)})
+   :peers (node/list)})
 
 (defn- observe-sort
   (procs key)
@@ -899,11 +899,11 @@ requester's pid (which routes over the link). Ignores anything else."
 (defn observe-serve ()
   "Make THIS runtime observable from a peer: spawn an agent and register it as
 `:observe`, so a remote `observe-connect` can request process snapshots. The
-program must already be a node — call `(node-start name addr cookie)` first.
+program must already be a node — call `(node/start name addr cookie)` first.
 Returns the agent's pid. Opt-in, like Erlang's `-name`: a program isn't observable
 unless it opens itself up."
-  (if (= (node-name) :nonode)
-    (error "observe-serve: call (node-start name addr cookie) first")
+  (if (= (node/name) :nonode)
+    (error "observe-serve: call (node/start name addr cookie) first")
     (let (agent (spawn (observe-agent-loop)))
       (register :observe agent)
       agent)))
@@ -958,17 +958,17 @@ link rather than throwing."
 (defn observe-connect (spec &optional cookie)
   "Attach the observer to a peer runtime named in `spec` (\"name@host:port\") over
 the node link, authenticating with `cookie` (both sides share it). `cookie`
-defaults to `(node-cookie)` — the shared `~/.config/brood/cookie` — so a matching
-local setup needs no explicit secret. The target must have called `(node-start …)`
+defaults to `(node/cookie)` — the shared `~/.config/brood/cookie` — so a matching
+local setup needs no explicit secret. The target must have called `(node/start …)`
 + `(observe-serve)`. Connects *before* taking the terminal, so a refused /
 wrong-cookie / bad-spec error surfaces cleanly and exits without a wrecked screen.
 Then runs the standard observer loop against a remote source; a dropped link
 freezes on the last snapshot with a DISCONNECTED banner until you quit."
   (do
-    (node-start (observe-gen-node-name) "127.0.0.1:0" (or cookie (node-cookie)))
-    (let (peer (connect spec))
+    (node/start (observe-gen-node-name) "127.0.0.1:0" (or cookie (node/cookie)))
+    (let (peer (node/connect spec))
       ; raises a clean error on failure (caught by the caller)
-      (monitor-node peer)
+      (node/monitor peer)
       ;; `ui-run` enters the display — and we only reach here after `connect`
       ;; succeeded, so a bad spec/cookie never wrecks the screen.
       (ui-run {:sel-id nil

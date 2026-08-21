@@ -336,7 +336,7 @@ stream. One system monitor exists at a time — a second call replaces the first
 ;; ---- distribution liveness (node up/down) → the telemetry stream ------------
 ;; The kernel has no `[:nodeup]` event — `monitor-node` fires only `[:nodedown]`,
 ;; and reconnect synthesizes `[:nodeup]` per spec — so a general watcher can't be
-;; purely event-driven. `watch-nodes` polls `(nodes)` and diffs consecutive peer
+;; purely event-driven. `watch-nodes` polls `(node/list)` and diffs consecutive peer
 ;; sets, re-emitting each change through the SAME `[:runtime kind]` seam as
 ;; `watch-runtime`: `[:runtime :nodeup]` / `[:runtime :nodedown]` with `{:node name}`
 ;; metadata. Polling (coarse, second-scale) suits node liveness — rare operational
@@ -358,12 +358,12 @@ stream. One system monitor exists at a time — a second call replaces the first
 
 (defn- telemetry-nodes-loop
   (known interval)
-  "Poll `(nodes)` every `interval` ms, emit a `[:runtime :nodeup]`/`[:runtime
+  "Poll `(node/list)` every `interval` ms, emit a `[:runtime :nodeup]`/`[:runtime
 :nodedown]` telemetry event per added/removed peer, and recur; stop on `:stop`."
   (receive
     (:stop nil)
     (after interval
-      (let (current (or (nodes) (list)))
+      (let (current (or (node/list) (list)))
         (dolist (n (telemetry-absent current known))
           (emit [:runtime :nodeup] {} {:node n}))
         (dolist (n (telemetry-absent known current))
@@ -372,13 +372,13 @@ stream. One system monitor exists at a time — a second call replaces the first
 
 (defn watch-nodes (&optional interval-ms)
   "Watch cluster membership and re-emit changes as telemetry: a peer appearing in
-`(nodes)` emits `[:runtime :nodeup]` `{:node name}`, one disappearing emits
+`(node/list)` emits `[:runtime :nodeup]` `{:node name}`, one disappearing emits
 `[:runtime :nodedown]` — folding distribution liveness into the same attach stream
 as `watch-runtime`. `interval-ms` is the poll period (default 1000). Returns the
 watcher pid; `stop-watch-nodes` (or killing it) ends it. The peers already connected
 at start are the baseline (no spurious `:nodeup` for them)."
   (let (interval (or interval-ms 1000))
-    (spawn (telemetry-nodes-loop (or (nodes) (list)) interval))))
+    (spawn (telemetry-nodes-loop (or (node/list) (list)) interval))))
 
 (defn stop-watch-nodes (watcher)
   "Stop a `watch-nodes` watcher. Returns nil."
@@ -481,11 +481,11 @@ detach it. `subs` tracks the attached ids so a `:stop` cleans them all up."
 (defn serve ()
   "Make THIS runtime's telemetry stream subscribable from a peer node: spawn an agent and
 register it `:telemetry-remote`, so a remote `subscribe-remote` can stream a chosen event's
-emits over the node link. Requires `(node-start name addr cookie)` first — opt-in, like
+emits over the node link. Requires `(node/start name addr cookie)` first — opt-in, like
 `observe-serve` (a program isn't observable unless it opens itself up). Returns the agent
 pid; `stop-serve` (or killing it) tears down every remote subscription."
-  (if (= (node-name) :nonode)
-    (error "serve: call (node-start name addr cookie) first")
+  (if (= (node/name) :nonode)
+    (error "serve: call (node/start name addr cookie) first")
     (let (agent (spawn (telemetry-serve-loop nil)))
       (register :telemetry-remote agent)
       agent)))

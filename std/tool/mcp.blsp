@@ -343,14 +343,14 @@ the current live-process count, current/peak memory, and connected
 peers. Returns `{:node :workers :peak-threads :spawned :process-count
 :mem-bytes :mem-peak :peers}`. The \"is the runtime healthy / busy?\"
 overview, complementing per-process `processes`."
-  {:node (node-name)
+  {:node (node/name)
    :workers (worker-threads)
    :peak-threads (peak-threads)
    :spawned (spawn-count)
    :process-count (count (or (list-processes) []))
    :mem-bytes (mem-bytes)
    :mem-peak (mem-peak)
-   :peers (or (nodes) [])})
+   :peers (or (node/list) [])})
 
 (defn vitals-tool (args)
   "`vitals` — the unified runtime snapshot (`telemetry/runtime-snapshot`): GC, scheduler,

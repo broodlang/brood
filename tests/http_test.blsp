@@ -6,7 +6,7 @@
 (defmodule http-test
   (:use test)
   (:use http)
-  (:use tcp :exclude [send connect listen])
+  (:use tcp :exclude [send listen])
   (:use-internals http))
 
 (describe "http: request parsing"

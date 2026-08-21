@@ -8,9 +8,9 @@
 ;; to anyone who pings it. The shared ~/.config/brood/cookie authenticates links
 ;; automatically. It runs forever — stop it with Ctrl-C when you're done.
 
-(node-start :server)
+(node/start :server)
 (register :echo (self))
-(println "[server] node " (node-name) " up (local socket), :echo registered")
+(println "[server] node " (node/name) " up (local socket), :echo registered")
 (println "[server] waiting for messages — start the client now, Ctrl-C to quit")
 
 (defn serve ()

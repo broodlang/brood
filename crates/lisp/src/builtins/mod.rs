@@ -3209,15 +3209,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // `node-name` is the keyword `:nonode` until `node-start` sets it to a symbol.
     def(
         heap,
-        "node-name",
+        "%node-name",
         Arity::exact(0),
         Sig::nullary(sym.union(kw)),
         node_name,
     );
-    def(heap, "nodes", Arity::exact(0), Sig::nullary(list_ty), nodes);
+    def(heap, "%nodes", Arity::exact(0), Sig::nullary(list_ty), nodes);
     def(
         heap,
-        "monitor-node",
+        "%monitor-node",
         Arity::exact(1),
         // A node name may be a symbol OR a keyword — `node-name`/`connect` return
         // the authoritative `:name@host` as a keyword, so monitoring it must not
@@ -3227,14 +3227,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "demonitor-node",
+        "%demonitor-node",
         Arity::exact(1),
         Sig::new(vec![sym.union(kw)], nil_ty),
         demonitor_node,
     );
     def(
         heap,
-        "disconnect",
+        "%disconnect",
         Arity::exact(1),
         // Same name domain as `monitor-node`: the authoritative `:name@host`
         // keyword `connect`/`nodes` hand back (or a symbol).
@@ -3606,10 +3606,10 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("steal-count", &[], "How many fresh processes the scheduler work-stole across worker threads since program start; 0 means placement-at-spawn kept the pool even."),
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
     ("whereis", &["name"], "The local pid registered under `name`, or nil. Strictly local — does not query other nodes."),
-    ("node-name", &[], "This runtime's node name (:nonode until node-start)."),
-    ("nodes", &[], "A list of currently connected peer node names."),
-    ("monitor-node", &["name"], "Get [:nodedown name] when the link to node `name` goes down (heartbeat timeout or close)."),
-    ("disconnect", &["name"], "Tear down the link to peer node `name` now, without exiting this process (Erlang's disconnect_node) — fires [:nodedown name] on both sides and prunes `name` from (nodes). Returns true if a link existed, false otherwise. Use it to leave a node/cluster cleanly while staying alive."),
+    ("%node-name", &[], "This runtime's node name (:nonode until node-start)."),
+    ("%nodes", &[], "A list of currently connected peer node names."),
+    ("%monitor-node", &["name"], "Get [:nodedown name] when the link to node `name` goes down (heartbeat timeout or close)."),
+    ("%disconnect", &["name"], "Tear down the link to peer node `name` now, without exiting this process (Erlang's disconnect_node) — fires [:nodedown name] on both sides and prunes `name` from (nodes). Returns true if a link existed, false otherwise. Use it to leave a node/cluster cleanly while staying alive."),
     // ---- raw bytes (builtins/bytes.rs) ----
     ("bytes", &["&", "byte-ints"], "Build a bytes value from byte integers 0–255: (bytes 1 2 3), or (bytes [1 2 3]) / (bytes (list …)) taking a single vector/list as the sequence. An existing bytes value passes through unchanged."),
     ("byte-length", &["b"], "The number of bytes in b. O(1)."),
@@ -3624,7 +3624,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     // ---- namespace / sequence-view / distribution ----
     ("current-ns", &[], "The current compilation namespace as a symbol, or nil at the root namespace (top level)."),
     ("seqview?", &["x"], "True if x is a lazy sequence view — the reducible produced by range/map/filter/… before it is realized (into/count/…)."),
-    ("demonitor-node", &["name"], "Cancel this process's node monitor for node `name` (undo monitor-node); a no-op if none is registered. Returns nil."),
+    ("%demonitor-node", &["name"], "Cancel this process's node monitor for node `name` (undo monitor-node); a no-op if none is registered. Returns nil."),
 ];
 
 /// The `(params, doc)` for a primitive `name`, or `(&[], "")` if undocumented.

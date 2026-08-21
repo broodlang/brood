@@ -215,7 +215,7 @@ client loop once the daemon replies with our session pid."
 (defn attach (spec &optional cookie opts)
   "Attach this terminal to a `ui-run` app served by the peer named in `spec`
 (\"name\" over a local Unix socket, or \"name@host:port\" over TCP) — the
-`emacsclient` to a daemon's `serve`. `cookie` defaults to `(node-cookie)` (the shared
+`emacsclient` to a daemon's `serve`. `cookie` defaults to `(node/cookie)` (the shared
 `~/.config/brood/cookie`); `opts` is an optional identity map (e.g. `{:name \"alice\"}`)
 the daemon hands the session as a `[:client-opts …]` event. Connects *before* taking
 the terminal, so a refused / wrong-cookie / bad-spec error surfaces cleanly without
@@ -223,10 +223,10 @@ wrecking the screen; then enters raw mode, paints the frames the daemon pushes, 
 ships back every key until the app quits (`[:bye]`) or the link drops. The terminal is
 always restored on exit."
   (do
-    (node-start (attach-gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
-    (let (peer (connect spec))
+    (node/start (attach-gen-name) "127.0.0.1:0" (or cookie (node/cookie)))
+    (let (peer (node/connect spec))
       ; raises a clean error on failure, terminal untouched
-      (monitor-node peer)
+      (node/monitor peer)
       (term/enter)
       (try
         (do (attach-session peer opts) (term/leave))
@@ -265,12 +265,12 @@ frames it pushes to `display` and ships back its input, until the app quits or t
 drops. Because window input and daemon frames share this process's mailbox, one receive
 loop (`attach-display-loop`) serves both. Connects *before* entering the display, so a
 refused / wrong-cookie / bad-spec error surfaces without stranding a window; the display
-is always torn down (`:leave`) on exit. `cookie` defaults to `(node-cookie)`; `opts` is
+is always torn down (`:leave`) on exit. `cookie` defaults to `(node/cookie)`; `opts` is
 the optional identity map (see `attach`)."
   (do
-    (node-start (attach-gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
-    (let (peer (connect spec))
-      (monitor-node peer)
+    (node/start (attach-gen-name) "127.0.0.1:0" (or cookie (node/cookie)))
+    (let (peer (node/connect spec))
+      (node/monitor peer)
       ((get display :enter))
       (try
         (let ([cols rows] ((get display :size))

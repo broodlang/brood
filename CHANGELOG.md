@@ -64,8 +64,17 @@ to five subsystems, so the language core keeps only fundamental operations:
 - **sockets** → `tcp/*` and `tls/*` (`tcp/connect`, `tcp/send`, `tls/request`, …)
 
 Bitwise (`bit-and`/`bit-or`/…) stays bare — it is a fundamental integer operation, not a
-subsystem. As with `http/get`, the socket wrappers keep the generic names `send`/`connect`/
-`listen` qualified only (a `(:use tcp)` must `:exclude` them to keep the kernel `send`).
+subsystem.
+
+**Distribution moved into a `node/` module.** `connect`, `disconnect`, `nodes`,
+`node-start`, `node-cookie`, `monitor-node`, `remote-spawn`, … were bare core primitives —
+they are now `node/connect`, `node/disconnect`, `node/list`, `node/start`, `node/cookie`,
+`node/monitor`, `node/spawn`, `node/spawn-sync`, `node/name`, `node/also-listen`,
+`node/serve-spawns`. The raw kernel primitives are `%`-prefixed (`%nodes`, `%disconnect`,
+`%node-name`, …) and `std/node.blsp` wraps them. Freeing bare `connect` means a `(:use tcp)`
+no longer needs to exclude it — only the kernel `send` remains genuinely core (so a socket
+send is `tcp/send`, qualified). The core `send`/`spawn`/`receive`/`monitor`/`link`/`self`
+process primitives stay bare.
 
 ## v0.7.0 — 2026-08-21
 
