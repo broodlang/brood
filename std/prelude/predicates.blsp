@@ -113,7 +113,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
 and a set its elements, as everywhere else `seq` applies."
   (into [] coll))
 
-(defn append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
+(defn- append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
 
 ;; Prepend every element of `lst` onto `acc` (so `acc` collects all elements in
 ;; reverse); `append` folds this over the lists, then reverses once. Argument order
@@ -147,7 +147,7 @@ and a set its elements, as everywhere else `seq` applies."
     (set? coll) (%set-count coll)
     else (count-acc coll 0)))
 
-(defn nth-list (coll i d)
+(defn- nth-list (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (nth-list (rest coll) (- i 1) d)))
 
 ;; A non-integer index is a type error that must name `nth`. Before this it fell
