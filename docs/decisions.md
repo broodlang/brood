@@ -15989,3 +15989,65 @@ earlier string/`seq` reorganizations — those had left `mod/to-`/`from-` in pla
 finishes the job. Module-qualified *shadows* of prelude globals (`stream/map`,
 `multimap/get`, `string/repeat`) are untouched — those are intentional per-module
 vocabularies, not a naming inconsistency.
+
+## ADR-240 — A primitive's name has one definition site; renames are compiler-enforced
+
+**Context.** Renaming a primitive was the single most error-prone operation in this repo,
+and the failure mode was always the same: the *name* is a bare string literal, copy-pasted
+into sites that agree only by string equality, so a rename that misses one fails **silently
+at a user's call site** rather than at build. Three instances in one session:
+
+- `now-ns` — the registration (`def(heap, "now-ns", …)`) and its `PRIMITIVE_DOCS` entry
+  (`("%now-ns", …)`) were two parallel arrays keyed by string. A `%`-prefixing pass caught the
+  doc and missed the single-line registration. Result: `%now-ns` unbound at boot.
+- `%table-snapshot` / `%table-incr` — the registration moved, but the linmap rewrite in
+  `eval/macros.rs` still *emitted* `value::sym("table-snapshot")` as a call head, and
+  `compile/ir.rs` still matched the old name for its PrimOp fast path. The rewrite produced
+  calls to a name nothing binds.
+- `table/new` in the prelude — `with-err-str`'s macro body and `%table-from-map` reached for
+  the `table/` *module wrapper*, which is not loaded in the boot image or at an arbitrary
+  user call site. `(temp-path …)` shipped broken the same way, via `rand/token`.
+
+The common root is that nothing tied the copies together, so *absence* of an edit was
+invisible. A drift-guard test existed for the docs array and did not fire — it compared the
+two arrays but ran only under `cargo test`, and the mismatch it was built to catch is exactly
+the one that shipped.
+
+**Decision.** Remove the ability to desync, in three layers:
+
+1. **One registration per primitive.** `PRIMITIVE_DOCS` is deleted; `def()` takes
+   `name, arity, sig, params, doc, func` in one call, so a primitive's name, arity, signature,
+   arg list and docstring are one expression. There is no second array to fall out of step
+   with, and the drift-guard test is deleted with it — the invariant is now structural.
+2. **One constant per cross-file name.** A primitive named in more than one Rust file gets a
+   `pub const` in `core/keywords.rs` (the existing `EQ_PRIM`/`TRY_PRIM` convention), and every
+   site references the constant. The table ops now flow from `kw::TABLE_*` through all five
+   sites — registration, `ir.rs` PrimOp match, `inline.rs` linmap ops, `macros.rs` emitted
+   heads, `check/guard_effects.rs`. Renaming is a one-line edit that the compiler then
+   enforces everywhere; a missed site is a build error, not a runtime unbound.
+3. **A build-time prelude-hygiene lint.** Prelude code — including anything a prelude macro
+   expands into — must reach for the `%`-primitive, never a `mod/name` module wrapper, since
+   the wrapper is not loaded at boot or at an arbitrary call site. The lint walks the boot
+   image's CST and flags any qualified symbol that is neither a registered primitive (many
+   kernel primitives are *themselves* slash-named: `file/slurp`, `string/split`) nor in a
+   small force-loaded allow-list. Symbols are the only leaf it inspects, so a docstring or
+   comment naming a module is not a false positive.
+
+**The caller side: renames go through the CST, not through text.** `codemod`'s
+`token-replace` is boundary-aware but context-*blind* — it rewrites the name wherever the
+characters appear, including in docstrings, `;` comments, `(quote …)` data, and on the
+module's own `defn` head. That is what corrupted prose ("the offload pool" →
+"the proc/offload pool") and clobbered the prelude's own `offload` definition. `nest rename`
+now defaults to `codemod/cst-rename`, which reassembles each file from `parse-source`'s
+lossless CST and rewrites only `:symbol` leaves, with `--refs-only` / `--defs-only` /
+`--in-quote` for the def-vs-reference distinction and `--text` as the opt-in escape hatch to
+the old behaviour. Losslessness is verified by round-tripping all 320 in-repo `.blsp` files
+through a no-op rename and requiring byte-identical output.
+
+**Consequences.** A primitive rename is now: edit the constant (or the single registration),
+build, fix what the compiler flags. The classes of bug above cannot recur silently — the
+first two become build errors, the third a failing lint. The cost is one indirection for
+cross-file names, and the discipline that a *new* CST wrapper kind must be added to
+`codemod`'s sigil table — which raises a loud error rather than silently dropping source
+text, the failure that `~@` (kind `:splice`, not the guessed `:unquote-splice`) produced
+across 24 files before the round-trip check caught it.

@@ -330,11 +330,13 @@ enum Cmd {
 
     /// Add a dependency to project.blsp and re-lock (ADR-037).
     ///
-    /// Identifier-aware whole-token rename across the project's .blsp sources.
+    /// Context-aware rename across the project's .blsp sources.
     ///
-    /// `nest rename OLD NEW` rewrites every whole Brood identifier `OLD` to `NEW`
-    /// (a plain sed corrupts substrings — `map/get` inside `multimap/get`). Skips
-    /// `.git` and vendored `_deps`. For an ecosystem-wide rename, run it per repo.
+    /// `nest rename OLD NEW` parses each file into its lossless CST and rewrites only
+    /// *symbol tokens* — so a docstring or `;` comment mentioning the name, and symbols
+    /// inside `(quote …)`/`'…` data, are left byte-for-byte alone. An unmatched file
+    /// comes back byte-identical. Skips `.git` and vendored `_deps`; for an
+    /// ecosystem-wide rename, run it per repo.
     Rename {
         /// The identifier to rename.
         old: String,
@@ -345,6 +347,22 @@ enum Cmd {
         /// (e.g. `member?` → `includes?`). Without it, a plain token rename.
         #[arg(long)]
         swap: bool,
+        /// Rename only *references*, leaving the `defn`/`def` head alone — for
+        /// renaming the callers of a function whose own definition stays put.
+        #[arg(long, conflicts_with_all = ["defs_only", "swap"])]
+        refs_only: bool,
+        /// Rename only the definition head, leaving every reference alone.
+        #[arg(long, conflicts_with_all = ["refs_only", "swap"])]
+        defs_only: bool,
+        /// Also rewrite symbols inside `(quote …)` / `'…` data (off by default —
+        /// a quoted symbol is inert data, e.g. a name in a registry table).
+        #[arg(long, conflicts_with = "swap")]
+        in_quote: bool,
+        /// Fall back to the old CONTEXT-BLIND whole-token text replace, which also
+        /// rewrites inside docstrings, comments and quoted data. For a rename that
+        /// genuinely must touch prose; prefer the default everywhere else.
+        #[arg(long, conflicts_with_all = ["refs_only", "defs_only", "in_quote"])]
+        text: bool,
     },
 
     /// `nest add NAME :path PATH` (`:git` lands in a later slice). NAME is the
@@ -796,12 +814,31 @@ fn run_main(cli: Cli) {
             require_project("tree", None);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/tree)"))
         }
-        Cmd::Rename { old, new, swap } => run(
+        Cmd::Rename {
+            old,
+            new,
+            swap,
+            refs_only,
+            defs_only,
+            in_quote,
+            text,
+        } => run(
             &mut interp,
             &if swap {
                 format!("(codemod/swap2 {old:?} {new:?})")
-            } else {
+            } else if text {
                 format!("(codemod/rename (list (list {old:?} {new:?})))")
+            } else {
+                let mode = if refs_only {
+                    ":refs-only"
+                } else if defs_only {
+                    ":defs-only"
+                } else if in_quote {
+                    ":in-quote"
+                } else {
+                    ":all"
+                };
+                format!("(codemod/cst-rename {old:?} {new:?} {mode})")
             },
         ),
         Cmd::Add { name, spec } => {

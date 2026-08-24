@@ -606,3 +606,128 @@ fn prelude_source_path() -> Option<String> {
     }
     Some(path.to_string_lossy().into_owned())
 }
+
+#[cfg(test)]
+mod prelude_hygiene {
+    //! Boot-image hygiene: the prelude is frozen at boot and its macros expand into
+    //! arbitrary user contexts where a namespaced module (`table/`, `os/`, `proc/`, …)
+    //! is NOT loaded; its function bodies likewise run before any module loads. So
+    //! prelude *code* must reach for the `%`-primitive, never the module wrapper — a
+    //! `table/new` leaking into a macro expansion is unbound at a user's call site, not
+    //! at build (this cost real time: `with-err-str` and `%table-from-map` both shipped
+    //! a `table/new` the boot image could not resolve). This lint catches it at build.
+    use super::*;
+    use crate::core::value::{self, ValueRef};
+
+    // Modules the prelude force-loads before use (so a qualified reference resolves at
+    // boot). `string` is `(require-one 'string)`-ed in tools.blsp. Add a module here only
+    // when the prelude genuinely loads it up front.
+    //
+    // Note this is only consulted for names that are NOT registered primitives: a good
+    // many kernel primitives are themselves *named* with a slash (`file/slurp`,
+    // `string/split`), and those are always bound with no module load at all.
+    const ALLOWED_MODULES: &[&str] = &["string"];
+
+    /// Every name `builtins::register` binds — the always-available set, slash-named
+    /// primitives included.
+    fn registered_primitives() -> std::collections::HashSet<String> {
+        let mut heap = Heap::new();
+        let root = heap.new_env(None);
+        crate::builtins::register(&mut heap, root);
+        heap.env_chain_names(root)
+            .into_iter()
+            .map(value::symbol_name)
+            .collect()
+    }
+
+    /// Collect every qualified `mod/name` symbol reachable in `v` as executable code.
+    /// Skips `(quote …)` subtrees (inert data, not emitted code) but walks quasiquote —
+    /// a `` `(… table/new …) `` template IS the code a macro emits. String docstrings are
+    /// `Str` atoms and comments are reader trivia, so both are excluded for free.
+    fn collect_qualified(heap: &Heap, v: Value, out: &mut Vec<String>) {
+        match v.unpack() {
+            ValueRef::Sym(s) => {
+                let name = value::symbol_name(s);
+                if let Some(slash) = name.find('/') {
+                    // empty module = root-qualified `/name` or the `/` (division) op — skip.
+                    if slash > 0 {
+                        out.push(name);
+                    }
+                }
+            }
+            ValueRef::Pair(p) => {
+                let (car, cdr) = heap.pair(p);
+                if let ValueRef::Sym(s) = car.unpack() {
+                    if value::symbol_name(s) == "quote" {
+                        return;
+                    }
+                }
+                collect_qualified(heap, car, out);
+                collect_qualified(heap, cdr, out);
+            }
+            ValueRef::Vector(id) => {
+                for item in heap.vector(id).to_vec() {
+                    collect_qualified(heap, item, out);
+                }
+            }
+            ValueRef::Map(id) => {
+                for (k, val) in heap.map_entries(id) {
+                    collect_qualified(heap, k, out);
+                    collect_qualified(heap, val, out);
+                }
+            }
+            ValueRef::Set(id) => {
+                for e in heap.set_elems(id) {
+                    collect_qualified(heap, e, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn prelude_code_references_no_unloaded_module_wrapper() {
+        const FILES: &[(&str, &str)] = &[
+            ("core.blsp", include_str!("../../../std/prelude/core.blsp")),
+            ("predicates.blsp", include_str!("../../../std/prelude/predicates.blsp")),
+            ("map.blsp", include_str!("../../../std/prelude/map.blsp")),
+            ("control.blsp", include_str!("../../../std/prelude/control.blsp")),
+            ("match.blsp", include_str!("../../../std/prelude/match.blsp")),
+            ("process.blsp", include_str!("../../../std/prelude/process.blsp")),
+            ("seq.blsp", include_str!("../../../std/prelude/seq.blsp")),
+            ("string.blsp", include_str!("../../../std/prelude/string.blsp")),
+            ("tools.blsp", include_str!("../../../std/prelude/tools.blsp")),
+            ("protocol.blsp", include_str!("../../../std/protocol.blsp")),
+            ("gen.blsp", include_str!("../../../std/proc/gen.blsp")),
+        ];
+        let primitives = registered_primitives();
+        let mut heap = Heap::new();
+        let mut violations: Vec<String> = Vec::new();
+        for (fname, src) in FILES {
+            let forms = syntax::reader::read_all(&mut heap, src)
+                .unwrap_or_else(|e| panic!("read {fname}: {e:?}"));
+            for form in forms {
+                let mut found = Vec::new();
+                collect_qualified(&heap, form, &mut found);
+                for q in found {
+                    // A slash-named kernel primitive (`file/slurp`) is always bound.
+                    if primitives.contains(&q) {
+                        continue;
+                    }
+                    let module = &q[..q.find('/').unwrap()];
+                    if !ALLOWED_MODULES.contains(&module) {
+                        violations.push(format!("{fname}: {q}"));
+                    }
+                }
+            }
+        }
+        violations.sort();
+        violations.dedup();
+        assert!(
+            violations.is_empty(),
+            "prelude code references a module wrapper that is not loaded at boot — use the \
+             `%`-primitive instead (or add the module to ALLOWED_MODULES if it is force-loaded):\n  {}",
+            violations.join("\n  ")
+        );
+    }
+}

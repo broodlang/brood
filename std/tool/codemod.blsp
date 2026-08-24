@@ -81,6 +81,159 @@
             (map (fn (l) (string/split (string/trim l) " "))
               (filter (fn (l) (not (string/blank? l))) (string/split (file/slurp path) "\n"))))))
 
+;; ---- CST-backed rename (context-aware) ---------------------------------------
+;; `token-replace` above is boundary-aware but CONTEXT-blind: it rewrites a name
+;; wherever the characters appear — inside a docstring, inside a `;` comment, inside
+;; `(quote …)` data, and on a module's own `defn` head. That is how a rename wave
+;; corrupts prose ("the offload pool" -> "the proc/offload pool") and clobbers the very
+;; definition it should leave alone.
+;;
+;; `parse-source` gives a LOSSLESS CST whose leaves are typed — `:symbol` / `:str` /
+;; `:comment` / `:whitespace` — and concatenating every leaf's raw text reproduces the
+;; file byte-for-byte. So renaming only `:symbol` leaves is exact by construction: a
+;; docstring is a `:str`, a comment is a `:comment`, and neither can be touched.
+;;
+;; On top of that the walk tracks two things a flat replace cannot know:
+;;   - DEFINITION heads — the name in `(defn NAME …)` / `(def NAME …)` / `(defmacro …)`
+;;     etc. `:refs-only` leaves them alone (renaming callers of a function whose own
+;;     definition stays put — the `sse/connect` case), `:defs-only` renames just them.
+;;   - QUOTED data — inside `(quote …)` / `'…`, a symbol is inert data, not a call. It is
+;;     skipped unless `:in-quote` is passed (a `'name` in a registry table often DOES
+;;     need renaming, so it is opt-in rather than never).
+
+(def- *def-heads*
+  ["defn" "defn-" "def" "def-" "defmacro" "defdyn" "defrecord" "defability" "defmodule"
+   "defprocess" "defbehaviour" "defalias"])
+
+;; Node shapes `parse-source` produces (all vectors):
+;;   leaf       [:symbol "foo"] [:str "\"…\""] [:comment "; …\n"] [:whitespace " "] [:int "1"]
+;;   container  [:list [kid …]] [:vector […]] [:map […]] [:set […]] [:root […]]
+;;   wrapper    [:quote NODE] [:quasi NODE] [:unquote NODE] — payload is ONE node
+(def- *container-kinds* [:root :list :vector :map :set])
+;; Reader-macro wrappers: kind -> the sigil the reader consumed (the CST keeps the kind,
+;; not the text, so it must be re-emitted). A wrapper NOT listed here still round-trips —
+;; `rename-node` falls back to emitting its subtree — but its sigil would be lost, so
+;; `wrapper-sigil` returning nil for a payload-wrapping node is treated as a hard error
+;; rather than a silent drop. That is exactly how `~@` (kind `:splice`, which an earlier
+;; guess called `:unquote-splice`) silently deleted itself from 24 stdlib files.
+(def- *wrapper-sigils*
+  {:quote "'" :quasi "`" :unquote "~" :splice "~@" :pin "^"})
+
+(defn- node-kind (node) (first node))
+(defn- node-payload (node) (second node))
+
+(defn- rename-kids
+  (kids old new mode in-quote?)
+  "Rewrite a vector of sibling CST nodes; returns the rewritten text."
+  ;; A definition head is the SECOND significant (non-whitespace, non-comment) item of a
+  ;; form whose first significant item is a def-head symbol.
+  (let (significant (filter (fn (k) (not (includes? [:whitespace :comment] (node-kind k))))
+                      kids)
+        head (if (empty? significant) nil (first significant))
+        head-name (if (and head (= (node-kind head) :symbol)) (node-payload head) nil)
+        def-form? (and head-name (includes? *def-heads* head-name))
+        ;; `(quote x)` in list form quotes its arguments, as the `'x` wrapper does.
+        quote-form? (= head-name "quote")
+        ;; Index (within `kids`, not `significant`) of the definition's NAME node — the
+        ;; 2nd significant item of a def form. Positional, since CST nodes are plain
+        ;; immutable vectors with no identity to compare.
+        name-index (if (and def-form? (> (count significant) 1))
+                     (nth (significant-indices kids) 1)
+                     nil)
+        quoted-kids? (or in-quote? quote-form?))
+    (apply str
+      (map (fn (i)
+             (rename-node (nth kids i) old new mode quoted-kids? (= i name-index)))
+        (range 0 (count kids))))))
+
+(defn- significant-indices
+  (kids)
+  "The indices in `kids` of the nodes that are neither whitespace nor comments."
+  (filter (fn (i) (not (includes? [:whitespace :comment] (node-kind (nth kids i)))))
+    (range 0 (count kids))))
+
+(defn- rename-node
+  (node old new mode in-quote? is-def-name?)
+  "Rewrite one CST node, returning its (possibly rewritten) source text."
+  (let (kind (node-kind node)
+        payload (node-payload node))
+    (cond
+      ;; A symbol leaf is the ONLY thing this rewrites — strings, comments, whitespace
+      ;; and every other leaf pass through byte-for-byte, which is what makes a
+      ;; docstring mentioning the name safe.
+      (= kind :symbol)
+        (if (and (= payload old)
+              (or (not in-quote?) (= mode :in-quote))
+              (cond
+                (= mode :defs-only) is-def-name?
+                (= mode :refs-only) (not is-def-name?)
+                else true))
+          new
+          payload)
+      ;; A container's delimiters are not leaves — the CST records them in the kind, so
+      ;; they have to be re-emitted around the rewritten kids to stay lossless.
+      (includes? *container-kinds* kind)
+        (str (open-delim kind) (rename-kids payload old new mode in-quote?) (close-delim kind))
+      ;; Any other LEAF (string, comment, whitespace, number, keyword…): unchanged.
+      ;; Checked before the wrapper case, since a leaf's payload is a string.
+      (string? payload) payload
+      ;; A wrapper holds ONE node. `'x`/`` `x `` quote their subtree; `~x`/`~@x` unquote
+      ;; back into live code, so they leave quoted context.
+      else
+        (let (sigil (get *wrapper-sigils* kind))
+          (if (nil? sigil)
+            (error "codemod: unknown CST node kind " (pr-str kind)
+              " — add it to *wrapper-sigils* (or *container-kinds*); emitting it blind"
+              " would silently drop source text")
+            (str sigil
+              (rename-node payload old new mode
+                (cond
+                  (includes? [:unquote :splice] kind) false
+                  (includes? [:quote :quasi] kind) true
+                  else in-quote?)
+                false)))))))
+
+(defn- open-delim
+  (kind)
+  (cond
+    (= kind :list) "("
+    (= kind :vector) "["
+    (= kind :map) "{"
+    (= kind :set) "#{"
+    else ""))
+
+(defn- close-delim
+  (kind)
+  (cond
+    (= kind :list) ")"
+    (= kind :vector) "]"
+    (includes? [:map :set] kind) "}"
+    else ""))
+
+(defn cst-rename-text
+  (text old new &optional mode)
+  "`text` with the symbol `old` renamed to `new`, rewriting ONLY symbol tokens — never
+a docstring, a `;` comment, or any other leaf. `mode` is `:all` (default — every symbol
+reference and definition outside quoted data), `:refs-only` (leave the `defn`/`def` head
+alone — for renaming callers when the definition stays), `:defs-only` (only the
+definition head), or `:in-quote` (also rewrite symbols inside `(quote …)`/`'…` data).
+Lossless: an unmatched file comes back byte-identical."
+  (rename-kids (node-payload (parse-source text)) old new (or mode :all) false))
+
+(defn cst-rename
+  (old new &optional mode)
+  "Apply `cst-rename-text` across the project's own .blsp sources — the context-aware
+counterpart to `rename`. Prints each changed file and returns the count."
+  (let (changed (filter (fn (f) (not (nil? f)))
+                  (map (fn (f)
+                         (let (before (file/slurp f)
+                               after (cst-rename-text before old new mode))
+                           (if (= before after) nil (do (file/spit f after) f))))
+                    (project-blsp))))
+    (for (f changed) (println "  changed: " f))
+    (println (count changed) " file(s) changed")
+    (count changed)))
+
 ;; ---- 2-arg swap (for a reversed-args rename like member? -> includes?) --------
 ;; `(old A B)` -> `(new B A)`, reading A and B as balanced s-expressions so nested
 ;; forms swap intact. Only touches real 2-arg CALL forms (head followed by whitespace,
