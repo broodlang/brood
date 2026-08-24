@@ -160,7 +160,6 @@
    "disj" :sets
    "display-width" :strings
    "dissoc" :maps
-   "dissoc-in" :maps
    "distinct-step" :collections
    "doc" :meta
    "doc-search" :meta
@@ -219,7 +218,6 @@
    "string/grapheme-at" :strings
    "string/grapheme-count" :strings
    "has-at-least?" :predicates
-   "hash-map" :maps
    "identity" :functions
    "if-let" :control
    "image-thumb" :system
@@ -338,7 +336,6 @@
    "record-register" :maps
    "record?" :predicates
    "reduce" :collections
-   "reduce-kv" :maps
    "ref" :processes
    "ref?" :predicates
    "register" :processes
@@ -464,8 +461,10 @@
    "with-split-else" :control
    "zero?" :predicates
    "zip-acc" :collections
+      "hash-map" :maps
+   "dissoc-in" :maps
    "zipmap" :maps
-   ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
+;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
    "but-last" :collections
    "drop-while" :collections
    "mapcat" :collections

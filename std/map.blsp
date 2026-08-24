@@ -26,7 +26,7 @@ access, or call qualified (`map/update-vals`).")
   (fold (fn (acc m)
           (if (nil? m)
             acc
-            (reduce-kv (fn (a k v) (assoc a k (if (contains? a k) (f (get a k) v) v))) acc m)))
+            (map/reduce-kv (fn (a k v) (assoc a k (if (contains? a k) (f (get a k) v) v))) acc m)))
     {}
     maps))
 
@@ -52,3 +52,9 @@ access, or call qualified (`map/update-vals`).")
                   (if (= v2 :%select-miss-b) nil [k v2]))
                 [k v])))
       ks)))
+
+
+
+(defn reduce-kv (f init m)
+  "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
+  (fold (fn (acc p) (f acc (first p) (second p))) init (map-pairs m)))
