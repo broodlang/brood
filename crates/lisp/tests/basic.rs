@@ -530,12 +530,12 @@ fn native_arity_is_enforced_centrally() {
 fn check_builtin_flags_provable_misuse() {
     // The advisory checker, end to end through the language. Provable primitive
     // misuse yields a warning; correct or not-statically-known code yields none.
-    assert!(run("(check '(first 5))").contains("first: argument 1 expects"));
-    assert!(run("(check '(string/length :k))").contains("string/length"));
-    assert_eq!(run("(check '(first (list 1 2)))"), "nil"); // arg type unknown → no warning
-    assert_eq!(run("(check '(+ 1 2))"), "nil"); // closure, not a primitive
-                                                // It is advisory — it never raises, even on the misuse it reports.
-    assert_eq!(run("(do (check '(first 5)) :ok)"), ":ok");
+    assert!(run("(reflect/check '(first 5))").contains("first: argument 1 expects"));
+    assert!(run("(reflect/check '(string/length :k))").contains("string/length"));
+    assert_eq!(run("(reflect/check '(first (list 1 2)))"), "nil"); // arg type unknown → no warning
+    assert_eq!(run("(reflect/check '(+ 1 2))"), "nil"); // closure, not a primitive
+                                                        // It is advisory — it never raises, even on the misuse it reports.
+    assert_eq!(run("(do (reflect/check '(first 5)) :ok)"), ":ok");
 }
 
 #[test]
@@ -819,7 +819,7 @@ fn throw_and_catch() {
     );
     // E0042 index out of range — vector-ref off the end.
     assert_eq!(
-        run("(try (vector-ref [1 2 3] 7) (catch e (get e :code)))"),
+        run("(try (seq/vector-ref [1 2 3] 7) (catch e (get e :code)))"),
         "\"E0042\""
     );
     // Same code for `substring` (different surface, same family).
@@ -921,8 +921,8 @@ fn foreign_constructs_hint_at_the_brood_way() {
     // and the arg (`x`) are unbound, and the bytecode VM's call-head elision resolves
     // the head *after* the args, so the runtime error reports `x`, not `set!`. The
     // checker reports the head, matching `swap!` below.
-    assert!(run("(check '(set! x 1))").contains("immutable"));
-    assert!(run("(check '(swap! a 1))").contains("atoms"));
+    assert!(run("(reflect/check '(set! x 1))").contains("immutable"));
+    assert!(run("(reflect/check '(swap! a 1))").contains("atoms"));
     // A name Brood *does* provide (`first`) gets no foreign hint — it simply runs.
     assert_eq!(run("(try (first (list 1)) (catch e e))"), "1");
 }
@@ -1870,9 +1870,9 @@ fn defseq_ops_run_correctly() {
         run("(mapcat (fn (x) (list x x)) (range 3))"),
         "(0 0 1 1 2 2)"
     );
-    assert_eq!(run("(remove math/even? (range 6))"), "(1 3 5)");
+    assert_eq!(run("(seq/remove math/even? (range 6))"), "(1 3 5)");
     assert_eq!(
-        run("(keep (fn (x) (if (math/even? x) (* x 10) nil)) (range 6))"),
+        run("(seq/keep (fn (x) (if (math/even? x) (* x 10) nil)) (range 6))"),
         "(0 20 40)"
     );
 }

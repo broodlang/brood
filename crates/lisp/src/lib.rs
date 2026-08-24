@@ -689,14 +689,32 @@ mod prelude_hygiene {
     fn prelude_code_references_no_unloaded_module_wrapper() {
         const FILES: &[(&str, &str)] = &[
             ("core.blsp", include_str!("../../../std/prelude/core.blsp")),
-            ("predicates.blsp", include_str!("../../../std/prelude/predicates.blsp")),
+            (
+                "predicates.blsp",
+                include_str!("../../../std/prelude/predicates.blsp"),
+            ),
             ("map.blsp", include_str!("../../../std/prelude/map.blsp")),
-            ("control.blsp", include_str!("../../../std/prelude/control.blsp")),
-            ("match.blsp", include_str!("../../../std/prelude/match.blsp")),
-            ("process.blsp", include_str!("../../../std/prelude/process.blsp")),
+            (
+                "control.blsp",
+                include_str!("../../../std/prelude/control.blsp"),
+            ),
+            (
+                "match.blsp",
+                include_str!("../../../std/prelude/match.blsp"),
+            ),
+            (
+                "process.blsp",
+                include_str!("../../../std/prelude/process.blsp"),
+            ),
             ("seq.blsp", include_str!("../../../std/prelude/seq.blsp")),
-            ("string.blsp", include_str!("../../../std/prelude/string.blsp")),
-            ("tools.blsp", include_str!("../../../std/prelude/tools.blsp")),
+            (
+                "string.blsp",
+                include_str!("../../../std/prelude/string.blsp"),
+            ),
+            (
+                "tools.blsp",
+                include_str!("../../../std/prelude/tools.blsp"),
+            ),
             ("protocol.blsp", include_str!("../../../std/protocol.blsp")),
             ("gen.blsp", include_str!("../../../std/proc/gen.blsp")),
         ];

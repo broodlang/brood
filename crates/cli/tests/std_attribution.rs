@@ -59,7 +59,7 @@ fn instrumented_lines() -> (BTreeMap<String, Vec<u32>>, TempFile) {
          (fold (fn (_ s)\n\
                  (when (= (type-of (eval s)) :fn) (%coverage-precompile (eval s))))\n\
            nil (global-names))\n\
-         (fold (fn (_ e) (println (str \"ATTR \" (vector-ref e 0) \" \" (vector-ref e 1)))) \
+         (fold (fn (_ e) (println (str \"ATTR \" (seq/vector-ref e 0) \" \" (seq/vector-ref e 1)))) \
          nil (%coverage-instrumented))\n",
     )
     .unwrap();

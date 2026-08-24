@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-55 | **closure-shipping across nodes broke for every namespaced std name.** Auto-require runs on the node that *compiles* a form, never on the node that *receives* an already-compiled closure — so a shipped closure whose body calls `reflect/form-pos`, `seq/…`, `dev/…` raises `unbound symbol` on the receiver. Before the v0.9.0/v0.10.0 namespacing these were bare prelude names and always bound, so closure-shipping "just worked" | ⚠️ **open — behaviour regression, workaround known.** The receiving node must load the module itself (`(require-one 'reflect)`). Found 2026-08-24 while repairing `source_positions_survive_a_cross_node_send`; a deserialize-path auto-require hook is the real fix |
 | KI-54 | **`main` was already red**: making the gen_server framework core-and-**bare** in the prelude (`7cb796f0`) seized ten generic global names — including `call`, `cast` and `stop` — into the *reserved* set, breaking `basic::spawned_process_picks_up_redefinition` (`(def call …)` is now refused); the same move dropped `gen` out of `(builtin-modules)`, failing `namespace_test`, and bundled `gen.blsp` without declaring it, failing `prelude_manifest` | ✅ **both fixed 2026-08-24** — `PRELUDE_MODULES` restores the reservation (with a bundle-checked honesty test); the `basic.rs` helper renamed `call` → `ask`. ⚠ **the name seizure itself is left as-is** — it follows from ADR-166 and the deliberate "bare" decision, but see the note below |
 | KI-50 | **the JIT leaf inliner silently miscompiled the most idiomatic loop in the language.** `(defn sum-down (n acc) (if (<= n 0) acc (sum-down (dec n) (+ acc n))))` returned **6251217600 instead of 20000100000** for `(sum-down 200000 0)` on the default build, and at 400000 raised `type error: -: expected number, got nil` blaming `dec`. `std/repeat` is this exact shape, so `(count (repeat 200000 :a))` gave **28033** | ✅ **fixed 2026-08-24** — a leaf-spliced frame was read as the *small* layout, so the small body's journal slot (a live loop counter in the spliced layout) was decoded as a deopt journal. Guard `tests/jit_leaf_frame_layout_test.blsp`, sabotage-verified |
 | KI-51 | `macroexpand-1` held a heap handle across an auto-`require` that loads a module (arbitrary eval → GC), then dereferenced it — **use-after-GC on a user-reachable path**: an epoch-tripwire abort in debug, silent heap corruption in release (a 5-element list reported an arity of 31309) | ✅ **fixed 2026-08-24** — roots `form`/`env` across the require and re-derives the tail |
@@ -91,7 +92,9 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**No other open items.** KI-49 (the tagged-tuple receive matcher latched onto the interpreter) was root-caused and **fixed 2026-08-21** — `pingpong` −12.9%. KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**One open item: KI-55** (a shipped closure cannot call a namespaced std name on the receiving
+node — a consequence of the v0.9.0/v0.10.0 namespacing, with a known workaround). Otherwise
+KI-49 (the tagged-tuple receive matcher latched onto the interpreter) was root-caused and **fixed 2026-08-21** — `pingpong` −12.9%. KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -165,6 +168,39 @@ activation, and no `std` suite tests a large input. It is invisible below ~10⁵
 loop that calls the same function eleven times at increasing sizes stays correct throughout — so
 repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-55 — a shipped closure cannot call a namespaced std name on the receiving node ⚠️ OPEN
+
+**Status:** ⚠️ open. Not a regression *this* review introduced — a consequence of the
+v0.9.0/v0.10.0 namespacing waves — but found by it, and it will bite any distribution user.
+
+**What.** Auto-require (ADR-227/229) fires when a form is **compiled**. A closure shipped to
+another node arrives *already compiled*, so nothing on the receiver triggers the require, and any
+namespaced global in its body is unbound there:
+
+```
+unbound symbol: reflect/form-pos
+```
+
+Before the namespacing these were bare prelude names, bound on every node by construction, so
+closure-shipping worked without anyone having to think about it. The refactor silently moved that
+guarantee: `seq/`, `dev/`, `reflect/`, `os/`, `table/`, `proc/` are all module globals now.
+
+**Workaround.** The receiving node loads the module itself — `(require-one 'reflect)` in the
+program it starts with. That is what `source_positions_survive_a_cross_node_send`
+(`crates/cli/tests/distribution.rs:466`) now does, with a comment saying why.
+
+**The real fix** is an auto-require hook on the deserialize path: when a closure lands, resolve
+the module prefixes its body references before binding it. Until then this is a documented sharp
+edge, and it is worth a note in the distribution docs — the failure surfaces on the *receiver*,
+far from the code that wrote the closure.
+
+**Related, found the same way:** bare **`require` is not a bound name** — the callable is
+`require-one` (`git log -S"defmacro require"` finds no definition in any commit). Several places
+in `CLAUDE.md` and the ADR-065 note describe writing `(require 'test)`; that guidance does not
+work against this tree.
 
 ---
 

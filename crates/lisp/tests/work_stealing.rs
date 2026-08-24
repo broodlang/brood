@@ -14,7 +14,7 @@
 //!     This is the standing guard (the same shape as concurrency_race.rs, now
 //!     over the steal path) and must hold on *every* burst.
 //!
-//!   * **The steal path is live** — `(steal-count)` becomes > 0. Whether a *given*
+//!   * **The steal path is live** — `(dev/steal-count)` becomes > 0. Whether a *given*
 //!     burst steals is timing-dependent (it needs one worker to empty its queue
 //!     while a peer still has fresh backlog), so we don't assert it from one
 //!     burst: we keep bursting until a steal is observed, bounded. A two-worker
@@ -61,7 +61,7 @@ fn idle_worker_steals_fresh_backlog_under_load() {
         (defn drive (tries k)
           (let (total (do (fan k) (drain k 0)))
             (if (= total (* k n))
-                (if (> (steal-count) 0)
+                (if (> (dev/steal-count) 0)
                     :stole
                     (if (= tries 0) :never-stole (drive (- tries 1) k)))
                 [:corrupt total (* k n)])))
