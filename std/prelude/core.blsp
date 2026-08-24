@@ -177,7 +177,8 @@
   "The items of `coll` in reverse order, as a list."
   (reverse-acc (seq coll) nil))
 
-(defn- reverse-onto (coll tail)
+(defn- reverse-onto
+  (coll tail)
   "The items of `coll` reversed, prepended onto `tail`. `(reverse-onto xs ys)` is
 `(append (reverse xs) ys)` — but it walks `xs` **once**, so it is the spelling to
 reach for when a tail-recursive loop has accumulated a reversed prefix and wants to
@@ -316,7 +317,8 @@ splice it back in front of the remainder."
 ;; binding, and re-def every reload — the bug this fixes). Computed at LOAD time, where
 ;; `current-ns` is the module being loaded; a bare/root context (no current-ns) or an
 ;; already-qualified name passes through, matching `def`.
-(defn- defonce-qualified-name (sym)
+(defn- defonce-qualified-name
+  (sym)
   (let (ns (current-ns))
     (if (or (nil? ns) (includes? (str sym) "/"))
       sym

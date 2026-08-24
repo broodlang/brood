@@ -72,7 +72,9 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
   "A map from each `(f x)` to the list of items of `coll` that produced it, each list in original order."
   ;; Prepend per group (O(1)) then reverse every group's list once at the end.
   ;; Direct kernel `map-assoc`/`map-get` — the accumulator is always a map.
-  (map/update-vals (fold (fn (m x) (let (k (f x)) (map-assoc m k (cons x (map-get m k nil))))) {} coll)
+  (map/update-vals (fold (fn (m x) (let (k (f x)) (map-assoc m k (cons x (map-get m k nil)))))
+                     {}
+                     coll)
     reverse))
 
 (defn- interpose-acc
@@ -204,7 +206,6 @@ Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter
 `transduce` when the stage stack is computed, reused, or your own."
   (fold (xform rf) init coll))
 
-
 (defn filterv (pred coll)
   "A VECTOR of the items of `coll` for which `(pred x)` is truthy — `filter`
 when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
@@ -223,13 +224,9 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
   "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves."
   (reverse (flatten-acc coll nil)))
 
-
 (defn split-at (n coll)
   "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`."
   (split-at-acc n coll nil))
-
-
-
 
 (defn take-last (n coll)
   "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0)."
@@ -239,13 +236,11 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
   "`coll` without its last `n` items (`()` if `n` >= its length)."
   (take (- (count coll) n) coll))
 
-
 (defn third (coll) "The third item of `coll`." (first (rest (rest coll))))
 
 (defn times (n f x)
   "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`."
   (if (<= n 0) x (seq/times (dec n) f (f x))))
-
 
 (defn repeatedly (n f)
   "A list of `n` successive calls to the zero-argument function `f` (in call order)."
@@ -300,14 +295,12 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
         [out state] (shuffle-at slots (- n 1) (%rand-seed seed)))
     [(shuffle-drain out (- n 1) nil) state]))
 
-
 (defn remove-nth (coll i)
   "A fresh collection like `coll` with the element at index `i` removed. Returns
 a vector for a vector and a list for a list. `i` must be in `[0, count)`."
   (if (vector? coll)
     (into (seq/subvec coll 0 i) (seq/subvec coll (inc i) (count coll)))
     (append (take i coll) (drop (inc i) coll))))
-
 
 (%defseq remove
   (pred)

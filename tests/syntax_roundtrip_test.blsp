@@ -49,10 +49,9 @@
     ;; Each evaluation must mint its own.
     (let (a `#{x# 1}
           b `#{x# 1})
-      (is (not (= a b)))               ; a fresh gensym per evaluation
+      (is (not (= a b))) ; a fresh gensym per evaluation
       (assert= 2 (count a))
-      (is (not (contains? a 'x#))))))  ; and not the literal symbol `x#`
-
+      (is (not (contains? a 'x#)))))) ; and not the literal symbol `x#`
 (describe "printer — a symbol whose first character is a reader dispatch char"
   (test "^ leads a pin form, so a symbol named ^foo must print bar-quoted"
     ;; `^` and `#` are *dispatch* characters at form start while correctly not
@@ -91,8 +90,9 @@
 
   (test "one level past the cap is a clean reader error, not a crash"
     (assert= :parse-error
-      (try (do (read-string (nest-str 257 "1")) :read-ok)
-           (catch e :parse-error))))
+      (try
+        (do (read-string (nest-str 257 "1")) :read-ok)
+        (catch e :parse-error))))
 
   (test "a value deeper than the reader can parse prints UNreadably, not as a fake symbol"
     ;; The cap itself is right — printing a 100k-deep value must not overflow the
@@ -135,8 +135,9 @@
     ;; must not have fired its side effects first. (Its own global name — tests
     ;; run concurrently in separate processes over one shared global table.)
     (assert= :error
-      (try (eval '(def map (do (def def-rhs-must-not-run 1) 2)))
-           (catch e :error)))
+      (try
+        (eval '(def map (do (def def-rhs-must-not-run 1) 2)))
+        (catch e :error)))
     (is (not (bound? 'def-rhs-must-not-run))))
 
   (test "an ordinary def still evaluates its value"

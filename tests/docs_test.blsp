@@ -191,15 +191,16 @@
 ;; never saw them. This asserts the drawer stays empty.
 (describe "doc catalogue: every public core name has a category"
   (test "nothing falls through to :other"
-    (let (uncatalogued
-           (filter (fn (s)
-                     (let (nm (name s) i (index-of nm "/"))
-                       (and (not (and i (> i 0)))         ; not a module function
-                         (not (includes? nm "--"))
-                         (not (string/starts-with? nm "%")) ; not a kernel primitive
-                         (not (private? s))                 ; not an internal helper
-                         (or (fn? (eval s)) (= (type-of (eval s)) :macro))
-                         (= (doc-catalog/category-of nm) :other))))
-             (global-names)))
+    (let (uncatalogued (filter
+                         (fn (s)
+                           (let (nm (name s) i (index-of nm "/"))
+                             (and (not (and i (> i 0)))
+                               ; not a module function
+                               (not (includes? nm "--"))
+                               (not (string/starts-with? nm "%")) ; not a kernel primitive
+                               (not (private? s)) ; not an internal helper
+                               (or (fn? (eval s)) (= (type-of (eval s)) :macro))
+                               (= (doc-catalog/category-of nm) :other))))
+                         (global-names)))
       ;; Names, not a count — a failure should say WHICH name needs a category.
       (assert= (sort (map name uncatalogued)) (list)))))

@@ -87,7 +87,8 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
 ;; (->> x (f a) (g b)) =>  (g b (f a x))   ; thread as LAST argument
-(defn- thread-first-step (acc form)
+(defn- thread-first-step
+  (acc form)
   (if (pair? form) (cons (first form) (cons acc (rest form))) (list form acc)))
 (defmacro -> (x & forms)
   "Thread `x` through the forms as each one's *first* argument: `(-> x (f a) (g b))` is `(g (f x a) b)`."

@@ -136,7 +136,6 @@ tick against a dead process forever."
                         (after interval (do (send target payload) (tick))))))
         (tick)))))
 
-
 ;; Node-link auto-reconnect moved to `std/net/reconnect` (2026-07-18):
 ;; `(reconnect/watch "name@host:port")` — the reference loads the module —
 ;; exponential backoff, [:nodeup]/[:nodedown] subscriber events, idempotent

@@ -273,7 +273,6 @@ Call immediately after accept or connect, before any data has been read."
                      ([:stream-err m] (send r [:stream-err m]))))))
     (:stream-close (close up))))
 
-
 (defn- take-while-loop
   (pred up)
   (receive

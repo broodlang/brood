@@ -56,10 +56,11 @@
     (do
       (table/put box :done true)
       ;; Eat the three oldest queued messages out from under the scan.
-      (table/put box :ate
+      (table/put box
+        :ate
         [(receive ([:junk n] n) (after 500 :none))
-         (receive ([:junk n] n) (after 500 :none))
-         (receive ([:junk n] n) (after 500 :none))])
+          (receive ([:junk n] n) (after 500 :none))
+          (receive ([:junk n] n) (after 500 :none))])
       (let (r (ref))
         ;; Minted HERE, so every message already queued predates it: this is the ref
         ;; whose receive-mark the perturbed queue has to survive. It must also be the
