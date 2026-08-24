@@ -74,6 +74,15 @@
   "Define a MODULE-PRIVATE global `name` (ADR-146) — like `def`, but the name is not exported outside its module."
   `(do (def ~name ~value) (%mark-private '~name)))
 
+;; The bootstrap append helpers above are defined before `def-` exists (they are plain
+;; `(def name (fn …))` because `defn` itself is not available that early), so they are
+;; marked private here instead — the same `%mark-private` fact `def-` records, just stated
+;; once the macro layer is up. Without this they were published as core vocabulary: three
+;; internal list builders nobody can meaningfully call.
+(%mark-private 'append-empty?)
+(%mark-private 'append-rev)
+(%mark-private 'append-2)
+
 ;; ---- logic ----
 (defn not (x)
   "Logical negation: `nil`/`false` become `true`, everything else `false`."
@@ -307,7 +316,7 @@ splice it back in front of the remainder."
 ;; binding, and re-def every reload — the bug this fixes). Computed at LOAD time, where
 ;; `current-ns` is the module being loaded; a bare/root context (no current-ns) or an
 ;; already-qualified name passes through, matching `def`.
-(defn defonce-qualified-name (sym)
+(defn- defonce-qualified-name (sym)
   (let (ns (current-ns))
     (if (or (nil? ns) (includes? (str sym) "/"))
       sym

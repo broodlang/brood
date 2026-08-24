@@ -105,7 +105,7 @@
     else nil))
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-seq-vars (pats)
+  (defn- match-seq-vars (pats)
     (cond
       (empty? pats) nil
       (= (first pats) '&) (match-seq-vars (rest pats))
@@ -228,7 +228,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ; literal → binds nothing
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-bytes-vars (segs)
+  (defn- match-bytes-vars (segs)
     (cond
       (empty? segs) nil
       (= (first segs) '&) (match-bytes-vars (rest segs))
@@ -382,7 +382,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; list pattern: split off an optional `& rest` tail, then bind element-wise.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-split (pats)
+  (defn- match-split (pats)
     (cond
       (empty? pats) [nil nil false]
       (= (first pats) '&)
@@ -422,7 +422,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; constraint, as everywhere else). `(and whole {:keys [a]})` is the `:as` idiom.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-compile-and (pats target bound success fail)
+  (defn- match-compile-and (pats target bound success fail)
     (if (empty? pats)
       success
       (match-compile (first pats)
@@ -437,7 +437,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-compile-seq (pats rest-pat has-rest target bound success fail)
+  (defn- match-compile-seq (pats rest-pat has-rest target bound success fail)
     (if (empty? pats)
       (if has-rest
         (match-compile rest-pat target bound success fail)
@@ -468,7 +468,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-compile-velems (pats target i bound success fail)
+  (defn- match-compile-velems (pats target i bound success fail)
     (if (empty? pats)
       success
       (let (p (first pats)
@@ -549,7 +549,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; literal (`{[1 2] p}` looks up the vector `[1 2]`), never an expression to evaluate.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-compile-map-entries (entries target bound success fail)
+  (defn- match-compile-map-entries (entries target bound success fail)
     (if (empty? entries)
       success
       (let (kv (first entries)
@@ -573,7 +573,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; its :or default (evaluated only then) if one is given, else nil.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-map-binds (keys ors target success)
+  (defn- match-map-binds (keys ors target success)
     (if (empty? keys)
       success
       (let (k (first keys)
@@ -646,7 +646,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; so quoted user data can never contain it and vectors need no descent).
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-count-sym (form s)
+  (defn- match-count-sym (form s)
     (cond
       (= form s) 1
       (pair? form) (+ (match-count-sym (first form) s) (match-count-sym (rest form) s))
@@ -656,7 +656,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; duplication is bounded — one use, or a small `code`).
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-splice-fail (form k code)
+  (defn- match-splice-fail (form k code)
     (cond
       (and (pair? form) (= (first form) k) (nil? (rest form))) code
       (pair? form)
@@ -668,7 +668,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; an early-exit size probe (big trees aren't walked past the budget).
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-size-budget (form budget)
+  (defn- match-size-budget (form budget)
     (cond
       (< budget 0) -1
       (pair? form) (match-size-budget (rest form) (match-size-budget (first form) (- budget 1)))
@@ -701,7 +701,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; tail position of the generated if/let, so a `match` in tail position is TCO-safe.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-build-from (clauses target fail)
+  (defn- match-build-from (clauses target fail)
     (if (empty? clauses)
       fail
       (let (clause (first clauses)
