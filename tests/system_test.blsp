@@ -65,8 +65,8 @@
   (test "is an absolute path"
     (is (string/starts-with? (file/cwd) "/"))))
 
-(describe "hostname"
+(describe "os/hostname"
   (test "returns a string"
-    (is (string? (hostname))))
+    (is (string? (os/hostname))))
   (test "is non-empty"
-    (is (> (string/length (hostname)) 0))))
+    (is (> (string/length (os/hostname)) 0))))

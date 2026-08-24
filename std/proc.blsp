@@ -1,0 +1,98 @@
+;; std/proc.blsp — the non-mainstream process surface: green-process introspection/control
+;; plus OS subprocesses. Policy over the %-prefixed primitives, so it lives under proc/*
+;; rather than the bare core. (The mainstream actor model — spawn/send/receive/self/link/
+;; monitor/register — stays bare in the prelude.)
+(defmodule proc)
+
+(defn info (pid)
+  "A snapshot map of a live local process:
+{:id :pid :node :name :status :mailbox :monitored-by :parent :memory :collections
+:reductions} (:pid the process's pid value, for acting on it with exit/send/monitor;
+:status is :running or :waiting; :name nil if unregistered; :parent the spawner's id,
+nil for the root; :memory the LOCAL heap bytes and :collections the cumulative GC count,
+both as of the process's last receive; :reductions the cumulative reduction count — the
+scheduling unit, updated every quantum; exact for spawned processes, coarse for the
+root). nil for a remote/dead pid. The process-introspection snapshot the observer reads;
+see std/tool/observer.blsp."
+  (%process-info pid))
+
+(defn flag (flag &optional value)
+  "Read or set a per-process runtime flag on the current process; returns the previous
+(or, with no value, current) setting. Flags: :max-heap — this process's heap limit in
+bytes (positive int sets, nil clears, absent reads). Checked after each GC against the
+live footprint; exceeding it raises a catchable E0045 error in this process only —
+uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the
+whole runtime). Set it first thing in a spawned fn to cap that process:
+(spawn (fn () (proc/flag :max-heap 8000000) (work))). :send-errors — when truthy, a
+(send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection
+error instead of silently dropping the message (process liveness stays silent either
+way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect
+reconnector."
+  (%process-flag flag value))
+
+(defn list ()
+  "Every currently-live pid on this runtime (one per registered mailbox). Order is
+unspecified — sort if you need stability. For agents/tools enumerating spawned
+processes."
+  (%list-processes))
+
+(defn mailbox-size (pid)
+  "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is
+not a live local process. See std/tool/observer.blsp."
+  (%mailbox-size pid))
+
+(defn hibernate ()
+  "Tell the runtime this process is about to idle for a long time: collect, shrink its
+heap slabs and root vectors, and drop its inline caches and compiled-body cache. Returns
+the bytes of slab capacity released. There is no continuation argument — a Brood process
+resumes from its receive. Use it in a process that will wait a long while (a pooled
+connection, an idle session actor) — it trades a one-off cache rebuild on the next call
+for a substantially smaller idle footprint. Do NOT use it in a request loop: dropping the
+caches per park costs message-heavy code 12-26%, which is exactly why this is an explicit
+call and not automatic."
+  (%hibernate))
+
+;; `offload` stays a BARE prelude wrapper (core dirty-native concurrency, used
+;; during `nest fetch` before any module loads) — see std/prelude/process.blsp.
+
+(defn spawn (prog args &optional opts)
+  "Spawn prog (a string) with args (a list/vector of strings) as a persistent child
+process with piped stdio. This spawns an OS-level child process — distinct from the
+kernel green-process `spawn` (the actor primitive); it returns a subprocess handle, not a
+pid. An optional opts map tunes the child: :cwd (a string) sets its working directory,
+:env (a map of string->string) adds environment variables on top of the inherited
+environment. Its stdout/stderr arrive at the calling process as [:proc handle data] /
+[:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the
+exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be
+spawned."
+  (%proc-spawn prog args opts))
+
+(defn send (p data)
+  "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a
+string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those,
+flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever
+the child's mode (ADR-141). Returns nil; throws if p is unknown/closed."
+  (%proc-send p data))
+
+(defn close (p)
+  "Terminate subprocess p: kill it if still running and close its stdin. Idempotent;
+returns nil. The final [:proc-closed handle code] still arrives at the owner."
+  (%proc-close p))
+
+(defn set-binary (p on)
+  "Switch subprocess p's INBOUND decode between text mode (default) and binary mode
+(mirrors tcp-set-binary; outbound proc/send is unaffected, ADR-141). In binary mode
+inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` value (not a
+string) — for a child speaking a binary protocol over stdio. Returns nil; throws if p is
+unknown/closed."
+  (%proc-set-binary p on))
+
+;; ---- timers ----------------------------------------------------------------
+;; send-after / send-interval stay bare in the prelude (mainstream); cancelling one
+;; is the less-common op, so it lives here.
+(defn cancel-timer (timer)
+  "Cancel a `send-after`/`send-interval` timer by its handle. Idempotent (a fired or
+already-cancelled timer is a dead process; the exit is a no-op). Returns nil. Cancellation
+races an in-flight fire — a message already sent stays sent."
+  (exit timer :kill)
+  nil)

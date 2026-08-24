@@ -1610,14 +1610,14 @@ fn guard_purity_flags_an_effect_in_a_match_when_guard() {
     let src = "
 (defn f (n counter)
   (match n
-    (x :when (do (table-put counter :seen 1) (> x 0)) :pos)
+    (x :when (do (%table-put counter :seen 1) (> x 0)) :pos)
     (_ :neg)))
 ";
     let w = file_warnings(src);
     assert!(
         w.iter()
-            .any(|s| s.contains("table-put") && s.contains(":when` guard")),
-        "expected an effectful-guard warning naming table-put, got {w:?}"
+            .any(|s| s.contains("%table-put") && s.contains(":when` guard")),
+        "expected an effectful-guard warning naming %table-put, got {w:?}"
     );
 }
 
@@ -1626,14 +1626,14 @@ fn guard_purity_flags_an_effect_in_a_receive_when_guard() {
     let src = "
 (defn worker (counter)
   (receive
-    (n :when (< (table-incr counter :seen) 100) n)
+    (n :when (< (%table-incr counter :seen) 100) n)
     (_ :skip)))
 ";
     let w = file_warnings(src);
     assert!(
         w.iter()
-            .any(|s| s.contains("table-incr") && s.contains("guard")),
-        "expected an effectful-guard warning naming table-incr, got {w:?}"
+            .any(|s| s.contains("%table-incr") && s.contains("guard")),
+        "expected an effectful-guard warning naming %table-incr, got {w:?}"
     );
 }
 
@@ -2107,11 +2107,11 @@ fn same_file_reassigned_global_return_stays_dynamic() {
     // the result would false-flag. Guards Pass 2.8 against the earmuffed / reassigned-global
     // imprecision.
     let w = file_warnings(
-        "(defmodule t)\n(def *g* nil)\n(defn getg () (when (nil? *g*) (def *g* (table))) *g*)\n(defn u () (table-get (getg) :k))",
+        "(defmodule t)\n(def *g* nil)\n(defn getg () (when (nil? *g*) (def *g* (%table))) *g*)\n(defn u () (%table-get (getg) :k))",
     );
     assert!(
         !w.iter()
-            .any(|s| s.contains("table-get") && s.contains("argument")),
+            .any(|s| s.contains("%table-get") && s.contains("argument")),
         "a reassigned global's return must stay dynamic (no false positive): {w:?}"
     );
 }

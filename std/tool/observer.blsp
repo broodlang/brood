@@ -5,11 +5,11 @@
 ;;    Erlang-observer-style view of this runtime — node stats up top, a navigable
 ;;    table of live processes (id · name · status · mailbox · memory · monitors)
 ;;    below. Proves the protocol + key loop end-to-end and needs no rope/buffer.
-;;  - Per-process data comes from `(process-info pid)` (ADR-051): a kernel snapshot
+;;  - Per-process data comes from `(proc/info pid)` (ADR-051): a kernel snapshot
 ;;    map. Fields the kernel doesn't track yet (`:memory`, `:parent`) simply render
 ;;    as absent, so the observer grows richer as the kernel does, with no rework.
 ;;  - PURE core / thin IO loop. `observe-frame` turns plain data (a node-stats map
-;;    + a list of process-info maps + which row is selected) into a render frame,
+;;    + a list of proc/info maps + which row is selected) into a render frame,
 ;;    with no IO — so it is unit-testable without a terminal. `observe-loop` /
 ;;    `observe-run` are the only parts that touch `term-*` and the live runtime.
 ;;  - Interactivity with no mutation: the UI state (selection, sort key, freeze) is
@@ -19,12 +19,12 @@
 ;;    dies). The loop runs in the calling process, polling with a finite timeout,
 ;;    so it blocks only that thread — never a scheduler worker.
 ;;  - Pluggable **data source** (the seam that scales to remote attach): the loop
-;;    takes a 0-arg `source` fn returning `process-info` maps. `observe-attach`
+;;    takes a 0-arg `source` fn returning `proc/info` maps. `observe-attach`
 ;;    passes `observe-local-source` (this runtime's own processes — the inline
 ;;    case). Remote attach (next) passes a source that requests a peer node's
 ;;    snapshot over the dist link; the loop and `observe-frame` are unchanged.
 ;;  - Opt-in (`require`), never in the prelude; pure Brood over `display` + the
-;;    `process-info` / `list-processes` / node-stat primitives.
+;;    `proc/info` / `proc/list` / node-stat primitives.
 
 ;; Entry points:
 ;;   (observe-attach)        — observe THIS runtime's own processes (inline; a
@@ -40,7 +40,7 @@
 (defmodule observer
   "An interactive process observer — showing this runtime's node stats and a
 navigable table of live processes (id, name, status, mailbox backlog, memory,
-monitors), built on the display seam (M3, ADR-046) over `process-info`. Renders to
+monitors), built on the display seam (M3, ADR-046) over `proc/info`. Renders to
 a GUI window (`(observe)`) or the terminal (`(observe-attach *term-display*)`).
 
     (observe)          ; open the observer in a native window (needs --features gui)
@@ -140,7 +140,7 @@ stands out at a glance (cumulative only tells you lifetime work). `mem` and
 
 (defn- observe-proc-cells
   (p)
-  "The table line for one `process-info` map `p`. In tree view the map carries a
+  "The table line for one `proc/info` map `p`. In tree view the map carries a
 `:depth`, which indents the NAME (clipped to its column so the rest stay aligned)."
   (let (depth (or (get p :depth) 0)
         nm (observe-opt (get p :name) name)
@@ -169,7 +169,7 @@ the colours live in one place (`:observer/*`)."
 
 (defn- observe-detail
   (p nprocs cap sel)
-  "The detail line for the selected process-info map `p`. Absent fields
+  "The detail line for the selected proc/info map `p`. Absent fields
 (`:name`/`:memory`/`:parent`) are omitted rather than shown as a placeholder."
   (str "  pid "
     (get p :id)
@@ -293,7 +293,7 @@ e.g. `  kill pid 7 (worker)? y/n`. The name is shown when the process has one."
 (defn observe-frame (node procs sel cols rows paused sort link ui)
   "Pure: build a render frame (a vector of display ops) for a `cols`×`rows`
 terminal — a two-line node panel (from `node`, with the `link` status), a column
-header, the `procs` list (each a `process-info` map) windowed to fit with row `sel`
+header, the `procs` list (each a `proc/info` map) windowed to fit with row `sel`
 selected/highlighted, a detail line, and a footer. `ui` (a map, or nil) carries the
 command-line overlay: when `(:mode ui)` is `:command` the footer becomes the
 minibuffer (the `:edit` line-editor state's prompt+text, with the cursor placed),
@@ -376,7 +376,7 @@ the observer's testable core; `observe-loop` feeds it live data."
 
 (defn- observe-sort
   (procs key)
-  "Sort the process-info list by `key`: `:id` ascending (stable spawn order),
+  "Sort the proc/info list by `key`: `:id` ascending (stable spawn order),
 `:mailbox` / `:memory` / `:reds` descending (busiest/biggest first; `:reds` is
 the live reductions/second rate, so the *currently* busiest process floats up)."
   (cond
@@ -412,7 +412,7 @@ anything else is `observe-sort` (id / mailbox / memory)."
 
 (defn- observe-reds-rate
   (prev-reds prev-at reds at)
-  "Reductions/second between two `process-info` samples, or nil when it can't be
+  "Reductions/second between two `proc/info` samples, or nil when it can't be
 computed — no prior sample for this id (`prev-reds`/`prev-at` nil), missing
 counters, or no time elapsed (`at <= prev-at`). `prev-at`/`at` are wall-clock ms.
 Clamps a negative delta (a recycled id) to 0. Pure."
@@ -450,23 +450,23 @@ before ordering."
 
 (defn- observe-local-source
   ()
-  "The inline data **source**: a `process-info` map for every live process in
+  "The inline data **source**: a `proc/info` map for every live process in
 *this* runtime (dropping any pid that died mid-scan), unsorted. A source is just a
-0-arg fn returning process-info maps — the remote-attach source (future) has the
+0-arg fn returning proc/info maps — the remote-attach source (future) has the
 same shape (it requests a peer's snapshot over the node link), so `observe-loop`
 is source-agnostic: inline and remote are one loop with a swapped thunk."
-  (filter (fn (p) (not (nil? p))) (map process-info (list-processes))))
+  (filter (fn (p) (not (nil? p))) (map proc/info (proc/list))))
 
 (defn- observe-local-snapshot
   ()
-  "A full snapshot of THIS runtime — `{:node <node-info> :procs <process-info list>
+  "A full snapshot of THIS runtime — `{:node <node-info> :procs <proc/info list>
 :at <ms>}` (`:at` the producing runtime's wall clock, so the reductions/second
 rate is computed against a consistent clock for both inline and remote sources)
 — the inline data **source**, and the payload the remote agent (`observe-serve`)
 ships back. A source is a 0-arg fn returning such a snapshot (or, for a stalled /
 dropped remote link, a status keyword `:timeout` / `:down`); `observe-loop` is
 source-agnostic, so inline and remote are one loop with a swapped source."
-  {:node (observe-node-info) :procs (observe-local-source) :at (now)})
+  {:node (observe-node-info) :procs (observe-local-source) :at (os/now)})
 
 (defn- observe-apply-result
   (state result)
@@ -872,7 +872,7 @@ For a modal terminal observer instead, call `(observe-attach *term-display*)`."
 ;;
 ;; The observer is the SAME loop with a different source: instead of reading this
 ;; runtime's processes, it requests a snapshot from a peer's `:observe` agent over
-;; the dist node link. `process-info` maps are send-able, so the agent ships
+;; the dist node link. `proc/info` maps are send-able, so the agent ships
 ;; `(observe-local-snapshot)` verbatim — no kernel changes, no new wire format.
 
 ; ms to wait for a remote snapshot before :stale
@@ -912,7 +912,7 @@ unless it opens itself up."
   ()
   "A unique transient node name for an observer instance, so two observers attached
 to one target don't collide on node identity."
-  (keyword (str "observer-" (now))))
+  (keyword (str "observer-" (os/now))))
 
 (defn- observe-drain-replies
   ()

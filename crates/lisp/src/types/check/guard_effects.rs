@@ -14,6 +14,7 @@
 //! pre-expansion (like `match`), since expansion lowers it into an ordinary `if`-test.
 
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
 use crate::error::Pos;
 
@@ -35,10 +36,10 @@ const EFFECTFUL_IN_GUARD: &[&str] = &[
     "monitor",
     "demonitor",
     // Table mutation — the one identity-mutable structure
-    "table-put",
-    "table-incr",
-    "table-delete",
-    "table-drop",
+    kw::TABLE_PUT,
+    kw::TABLE_INCR,
+    kw::TABLE_DELETE,
+    kw::TABLE_DROP,
     // I/O
     "println",
     "print",

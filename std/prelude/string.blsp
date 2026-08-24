@@ -231,7 +231,7 @@ incremental search rides on."
 
 (defn temp-path (prefix)
   "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
-`file/spit` a file there or `file/mkdir` a directory. The name comes from `random-token`, so
+`file/spit` a file there or `file/mkdir` a directory. The name comes from the OS CSPRNG, so
 it is unique across processes and across runs, and cannot be guessed ahead of time.
 
 Reach for this instead of writing a program-specific constant like
@@ -239,7 +239,9 @@ Reach for this instead of writing a program-specific constant like
 copies of the program fight over one file, and anyone on the machine can create that
 path first — as a symlink to something you own — so the `file/spit` overwrites their choice
 of file with your privileges. Neither is possible with a name they cannot predict."
-  (path-join "/tmp" (str prefix (random-token 16))))
+  ;; `%random-token`, not the `rand/token` wrapper: this is prelude code, so it must
+  ;; not depend on a module the caller may never have required.
+  (path-join "/tmp" (str prefix (%random-token 16))))
 
 (defn path-basename (path)
   "The final component of `path` (\"/a/b/c\" -> \"c\", \"/foo\" -> \"foo\",
@@ -258,16 +260,16 @@ onto `base` (default the current directory, `(file/cwd)`). The empty string is r
 is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segments."
   (cond
     (or (= path "") (string/starts-with? path "/")) path
-    (= path "~") (or (getenv "HOME") path)
+    (= path "~") (or (%getenv "HOME") path)
     (string/starts-with? path "~/")
-      (str (or (getenv "HOME") "~") (string/substring path 1 (string/length path)))
+      (str (or (%getenv "HOME") "~") (string/substring path 1 (string/length path)))
     else (path-join (or base (file/cwd)) path)))
 
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
 ;; Brood has no global mutable state, so randomness is *threaded*: every step
 ;; takes a seed and returns `[value next-seed]`. Pass `next-seed` to the next
 ;; call; thread the seed through your loop state exactly like any other value.
-;; Seed a fresh stream from any integer (e.g. `(now)`) via `%rand-seed`.
+;; Seed a fresh stream from any integer (e.g. `(%now)`) via `%rand-seed`.
 ;;
 ;; The generator is Marsaglia's xorshift32 — fast and good enough for
 ;; simulations, sampling, shuffling, jitter, and ids; NOT for cryptography. Each

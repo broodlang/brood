@@ -439,9 +439,9 @@
         ;; 40ms between bytes against a 250ms idle timeout: the idle timer is re-armed
         ;; every time and can never fire. Only the 300ms total deadline ends this.
         (spawn (drip-bytes c 100 40))
-        (let (started (now)
+        (let (started (os/now)
               r (read-until s "\r\n\r\n" {:timeout-ms 250 :deadline-ms 300})
-              elapsed (- (now) started))
+              elapsed (- (os/now) started))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
@@ -477,9 +477,9 @@
         (tcp/set-binary s true)
         ;; :deadline-ms 0 — the budget is gone before the first receive. The wait is
         ;; floored at 1ms, so this must return immediately, not block on `after 0`.
-        (let (started (now)
+        (let (started (os/now)
               r (read-until s "\r\n\r\n" {:deadline-ms 0})
-              elapsed (- (now) started))
+              elapsed (- (os/now) started))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
@@ -496,9 +496,9 @@
         (tcp/set-binary s true)
         ;; a declared 100-byte body that drips in and never completes in time
         (spawn (drip-bytes c 100 40))
-        (let (started (now)
+        (let (started (os/now)
               r (read-n s 100 {:timeout-ms 250 :deadline-ms 300})
-              elapsed (- (now) started))
+              elapsed (- (os/now) started))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)

@@ -206,7 +206,7 @@
     (is (= (try (bytes-concat [999]) (catch e :rejected)) :rejected))
     (is (= (try (bytes-concat [:kw]) (catch e :rejected)) :rejected)))
   (test "spit/slurp round-trips an iolist tree; spit-append appends one"
-    (let (path (str "/tmp/brood-iolist-" (random-token 8) ".txt"))
+    (let (path (str "/tmp/brood-iolist-" (rand/token 8) ".txt"))
       (file/spit path ["a" ["b" nil "c"] (bytes 100) 101])
       (is (= (file/slurp path) "abcde"))
       (file/spit-append path [":" (bytes 120 121)])

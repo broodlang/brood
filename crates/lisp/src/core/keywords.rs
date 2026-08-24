@@ -56,6 +56,28 @@ pub const CATCH: &str = "catch";
 pub const THROW: &str = "throw";
 pub const TRY_PRIM: &str = "%try";
 pub const EQ_PRIM: &str = "%eq";
+// Table (ETS) primitive names. Shared across five sites — the `def` registration
+// (builtins/mod.rs), the IR PrimOp fast-path (compile/ir.rs), the linmap rewrite's
+// emitted call heads (compile/inline.rs, eval/macros.rs), and the checker's effect
+// list (types/check/guard_effects.rs) — so renaming one is a single edit the compiler
+// then enforces at every site. A bare string here once desynced silently (a rename hit
+// the registration but not the linmap emitter → `%table-snapshot` unbound at runtime).
+pub const TABLE_NEW: &str = "%table";
+pub const TABLE_PUT: &str = "%table-put";
+pub const TABLE_GET: &str = "%table-get";
+pub const TABLE_HAS: &str = "%table-has?";
+pub const TABLE_DELETE: &str = "%table-delete";
+pub const TABLE_INCR: &str = "%table-incr";
+pub const TABLE_COUNT: &str = "%table-count";
+pub const TABLE_SNAPSHOT: &str = "%table-snapshot";
+pub const TABLE_DROP: &str = "%table-drop";
+// The immutable-map ops the linmap rewrite recognizes on the SOURCE side (compile/inline.rs
+// + eval/macros.rs) and rewrites into the Table ops above. Shared so a map-op rename stays
+// in step with the rewrite that pattern-matches it.
+pub const MAP_GET: &str = "map-get";
+pub const MAP_COUNT: &str = "map-count";
+pub const MAP_INT_ADD: &str = "map-int-add";
+pub const MAP_DISSOC: &str = "map-dissoc";
 /// `(%scope)` / `(%locals)` — the debugger locals intrinsic (ADR-174 path B). The VM
 /// compiles a call to either into a map of every in-scope local `{name → value}` read
 /// straight from the compile-time lexical-scope table; the tree-walker falls back to the

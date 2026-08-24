@@ -27,3 +27,8 @@
   "Returns `[f next-seed]` with `f` a pseudo-random float in `[0.0, 1.0)`."
   (let (s (%rand-step (%rand-seed seed)))
     [(/ s 4294967296.0) s]))
+
+;; Not part of the deterministic seeded PRNG above — a one-shot draw from the OS CSPRNG.
+(defn token (n)
+  "`n` cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2·n-char string."
+  (%random-token n))

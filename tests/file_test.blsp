@@ -9,7 +9,7 @@
 (purge-stale-temp "brood-file-")
 (purge-stale-temp "brood-file-swap-")
 
-;; A fresh, created /tmp dir per call. `temp-dir` names it with `random-token`
+;; A fresh, created /tmp dir per call. `temp-dir` names it with `rand/token`
 ;; (unique across processes *and* runs) — a bare gensym name recurs across runs,
 ;; and a killed run's leftovers then poison the next (list-files sees extras,
 ;; spit-append appends to stale content). See std/test.blsp.
@@ -141,8 +141,8 @@
     (let (p (path-join (ftmp) "scale.txt")
           mk (fn (n) (map (fn (i) (str "line " i " with a little payload")) (range n)))
           ms (fn (n)
-               (let (ls (mk n) t0 (now-ns))
-                 (do (write-lines p ls) (quot (- (now-ns) t0) 1000000))))
+               (let (ls (mk n) t0 (os/now-ns))
+                 (do (write-lines p ls) (quot (- (os/now-ns) t0) 1000000))))
           small (ms 2000)
           big (ms 16000))
       ;; quadratic would be ~64x small (measured 37 -> 1888 before the fix)
@@ -192,8 +192,8 @@
     ; default base is (file/cwd)
     (assert= (path-absolute "rel") (path-join (file/cwd) "rel"))
     ; ~ expands against $HOME
-    (assert= (path-absolute "~/x") (str (getenv "HOME") "/x"))
-    (assert= (path-absolute "~") (getenv "HOME"))))
+    (assert= (path-absolute "~/x") (str (os/getenv "HOME") "/x"))
+    (assert= (path-absolute "~") (os/getenv "HOME"))))
 
 ;; `%file-swap` — atomic compare-and-swap of a file's whole contents, serialised
 ;; across processes by an exclusive lock. The mechanism behind a safe

@@ -104,7 +104,7 @@
     ;; request leaks one — 10 requests, then assert the mailbox is EMPTY.
     (dotimes (i 10) (answer {:id i :src "(+ 1 1)"}))
     (eval-server/eval-server-flush-stale) ; belt: what a next request would do
-    (assert= (get (process-info (self)) :mailbox) 0)))
+    (assert= (get (proc/info (self)) :mailbox) 0)))
 
 (describe "malformed requests cannot kill the server"
   (test "a non-int :timeout-ms fails decode (one bad line = one skipped line)"

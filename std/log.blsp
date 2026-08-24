@@ -206,7 +206,7 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
 (defn- log-record
   (level msg meta)
   "Build a log record map, stamping `:ts` (now, ms) and `:from` (the caller's pid)."
-  {:level level :msg msg :meta meta :ts (now) :from (self)})
+  {:level level :msg msg :meta meta :ts (os/now) :from (self)})
 
 (defn log (level msg & meta)
   "Log `msg` at `level` (`:debug`/`:info`/`:warn`/`:error`) to the running logger,

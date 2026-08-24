@@ -1144,6 +1144,14 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("text", "std/text.blsp"),
     // Seeded PRNG (xorshift32): public face of the prelude's `%rand-*` mechanism → `rand/*`.
     embedded_module!("rand", "std/rand.blsp"),
+    // OS & environment surface → `os/*` (getenv, run-process, now, …).
+    embedded_module!("os", "std/os.blsp"),
+    // Sound output → `audio/*`.
+    embedded_module!("audio", "std/audio.blsp"),
+    // Shared mutable ETS-style store → `table/*` (`table?` stays a bare core predicate).
+    embedded_module!("table", "std/table.blsp"),
+    // Non-mainstream process surface (introspection/control + OS subprocesses) → `proc/*`.
+    embedded_module!("proc", "std/proc.blsp"),
     // Distributed nodes (ADR-033/068/073/074): policy over the `%node-*`/`%nodes`/`%disconnect`/
     // `%monitor-node` primitives → `node/*` (node/connect, node/start, node/spawn, …).
     embedded_module!("node", "std/node.blsp"),

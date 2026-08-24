@@ -292,7 +292,7 @@ from the reversed `:back` when it empties. Tail-recursive."
 `over?` is true if the count now exceeds `:max-restarts` (the crash loop won't
 settle) and `window` is the updated intensity window."
   (let (window-ms (* 1000 (get state :max-seconds))
-        w (supervisor-window-add (get state :restarts) (now) window-ms))
+        w (supervisor-window-add (get state :restarts) (os/now) window-ms))
     [(> (get w :count) (get state :max-restarts)) w]))
 
 ;; ---- the supervisor process -------------------------------------------------

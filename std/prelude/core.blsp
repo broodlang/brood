@@ -352,8 +352,8 @@ for variadic tails."
   ;; in a bare file's per-file ctx. Then keep the existing semantics: a runtime
   ;; no-op, or a `sig!` runtime contract under BROOD_CONTRACTS=1.
   `(do
-     ~(if (= (getenv "BROOD_CONTRACTS") "1") nil `(%register-sig '~name '~type))
-     ~(if (= (getenv "BROOD_CONTRACTS") "1")
+     ~(if (= (%getenv "BROOD_CONTRACTS") "1") nil `(%register-sig '~name '~type))
+     ~(if (= (%getenv "BROOD_CONTRACTS") "1")
         ;; Contracts mode turns this *declaration* into an *action*: `sig!` rebinds
         ;; `name` to a checking wrapper, so the definition must already exist. A
         ;; `sig` written above its `defn` — the natural place, since a signature is

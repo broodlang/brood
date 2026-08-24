@@ -601,7 +601,7 @@ land in a later slice."
   (target url ref commit sha)
   (file/spit (package-pkg-meta-path target)
     (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
-      (pr-str (list 'brood-pkg :git url :ref ref :commit commit :sha256 sha :fetched-at (now)))
+      (pr-str (list 'brood-pkg :git url :ref ref :commit commit :sha256 sha :fetched-at (os/now)))
       "\n")))
 
 ;; --- git-tag semver ranges (ADR-209) ----------------------------------------
@@ -762,7 +762,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
   (target url sha)
   (file/spit (package-pkg-meta-path target)
     (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
-      (pr-str (list 'brood-pkg :tarball url :sha256 sha :fetched-at (now)))
+      (pr-str (list 'brood-pkg :tarball url :sha256 sha :fetched-at (os/now)))
       "\n")))
 
 (defn- package-resolve-tarball
@@ -817,7 +817,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 (defn- registry-token
   ()
   "The publish auth token: `$HIVE_TOKEN`, else the `:registry-token` config."
-  (let (env (getenv "HIVE_TOKEN"))
+  (let (env (os/getenv "HIVE_TOKEN"))
     (if (or (nil? env) (= env "")) *config-registry-token* env)))
 
 (defn- registry-release-url
@@ -1075,7 +1075,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
                 :registry-url
                 base
                 :fetched-at
-                (now)))
+                (os/now)))
       "\n")))
 
 ;; ---- runtime package install (the user-package model, Emacs `elpa`) ---------
@@ -1823,7 +1823,7 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
               (str *project-name* "-" *project-version* ".tar.gz")))
     (file/mkdir (package-deps-dir root))
     (when (file/exists? out) (file/rm out))
-    (let (code (run-process "tar"
+    (let (code (os/run-process "tar"
                  (list "-czf"
                    out "-C" root "--exclude=./_deps" "--exclude=./_build" "--exclude=./.git"
                    "--exclude=./tests" "--exclude=./project.lock.blsp" "--exclude=*.tar.gz" ".")))
@@ -1864,8 +1864,8 @@ ordinary library, which the server stores as \"nothing\"."
 
 (defn- package-config-dir
   ()
-  (let (xdg (getenv "XDG_CONFIG_HOME"))
-    (path-join (if (nil? xdg) (path-join (getenv "HOME") ".config") xdg) "brood")))
+  (let (xdg (os/getenv "XDG_CONFIG_HOME"))
+    (path-join (if (nil? xdg) (path-join (os/getenv "HOME") ".config") xdg) "brood")))
 
 (defn- package-signing-key-path () (path-join (package-config-dir) "signing-key.blsp"))
 
@@ -2071,7 +2071,7 @@ published is refused. Backs `nest publish`."
   "`nest publish --bump LEVEL`: bump the project's own version, commit the bump, then publish.
   The safe replacement for a hand-rolled bump-and-publish (which once bumped a dep pin)."
   (let (new (bump-version level))
-    (run-process "git" (list "add" "project.blsp"))
-    (run-process "git" (list "commit" "-q" "-m" (str "release: v" new)))
+    (os/run-process "git" (list "add" "project.blsp"))
+    (os/run-process "git" (list "commit" "-q" "-m" (str "release: v" new)))
     (println "package: bumped to v" new)
     (apply publish opts)))

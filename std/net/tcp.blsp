@@ -145,7 +145,7 @@ are Rust.")
 ;; Added 2026-08-13 after hatch — the consumer these combinators were built for —
 ;; found it could not adopt them without it: all four of its read loops enforce an
 ;; idle timeout AND a total deadline (its own hand-rolled `(min idle (- deadline
-;; (now)))` per receive), so switching to `read-until` would have dropped the
+;; (os/now)))` per receive), so switching to `read-until` would have dropped the
 ;; drip defense. A single call cannot express it from the outside: the idle timer
 ;; resets per chunk INSIDE the call, so no `:timeout-ms` value survives a dripper,
 ;; and splitting the read across several calls would miss a delimiter straddling
@@ -166,7 +166,7 @@ are Rust.")
 (defn- read-limits
   (opts)
   (let (d (get opts :deadline-ms))
-    [(get opts :timeout-ms) (get opts :max-bytes) (if d (+ (now) d) nil)]))
+    [(get opts :timeout-ms) (get opts :max-bytes) (if d (+ (os/now) d) nil)]))
 
 ;; ---- :seed — bytes the caller already holds -------------------------------
 ;; A protocol that reads frame after frame off one stream ends each read holding the surplus
@@ -192,9 +192,9 @@ are Rust.")
 (defn- read-wait
   (ms end)
   (cond
-    (and ms end) (min ms (max 1 (- end (now))))
+    (and ms end) (min ms (max 1 (- end (os/now))))
     ms ms
-    end (max 1 (- end (now)))
+    end (max 1 (- end (os/now)))
     else nil))
 
 (defn read-until (sock sep &optional (opts {}))

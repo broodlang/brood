@@ -1,0 +1,40 @@
+;; std/table.blsp — the shared, identity-mutable key→value store (Brood's one mutable value,
+;; ADR-107). Policy over the %-prefixed primitives, so it lives under table/* rather than the
+;; bare core. Note: the type predicate `table?` stays a bare core predicate (like map?/vector?).
+(defmodule table)
+
+(defn new ()
+  "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table/put/table/delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle."
+  (%table))
+
+(defn put (t k v)
+  "Store v under key k in table t, overwriting any existing entry. Keys use the same structural equality as map keys. Returns t (for threading). Both k and v are deep-copied into the store."
+  (%table-put t k v))
+
+(defn get (t k &optional default)
+  "A fresh copy of the value stored under k in table t, or default (nil if omitted) when absent."
+  (%table-get t k default))
+
+(defn has? (t k)
+  "True if table t has an entry for key k."
+  (%table-has? t k))
+
+(defn delete (t k)
+  "Remove key k from table t if present. Returns t."
+  (%table-delete t k))
+
+(defn incr (t k &optional delta)
+  "Atomically add delta (default 1) to the integer at key k in table t, treating an absent key as 0, and return the new value. The read-modify-write is atomic under the table lock, so concurrent increments never lose an update — use this for counters. Errors if the existing value is not an integer."
+  (if delta (%table-incr t k delta) (%table-incr t k)))
+
+(defn count (t)
+  "The number of entries in table t."
+  (%table-count t))
+
+(defn snapshot (t)
+  "A consistent point-in-time copy of the whole table t as an immutable map. Atomic; the returned map is unaffected by later mutation of t. Use map ops (keys/vals/get/reduce) on it. O(n)."
+  (%table-snapshot t))
+
+(defn drop (t)
+  "Remove table t from the registry, freeing its store. Idempotent; returns true if it existed. Other handles to t then error on use."
+  (%table-drop t))

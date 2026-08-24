@@ -520,7 +520,7 @@ test discovery, lints, release, config)."
     "      ([:task-error ^h _msg] (errors/error-response 500))\n"
     "      ([:task-timeout ^h] (errors/error-response 504)))))\n" "\n" "(defn port ()\n"
     "  \"Serve on $HATCH_PORT if set and numeric, else 5000.\"\n"
-    "  (or (string->number (or (getenv \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
+    "  (or (string->number (or (os/getenv \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
     "  \"Start the HTTP listener on `(port)`.\"\n"
     "  (server/start (port) adapter (live/live-dispatcher) {}))\n"))
 
@@ -593,7 +593,7 @@ test discovery, lints, release, config)."
   (str "(defmodule web/routes \"HTTP routes — session + CSRF protected.\"\n"
     "  (:use web/router)\n" "  (:alias web/session)\n" "  (:alias web/csrf))\n" "\n"
     "; Set $SECRET_KEY_BASE in production. Never ship this dev fallback.\n" "(def session-secret\n"
-    "  (or (getenv \"SECRET_KEY_BASE\") \"dev-only-insecure-secret-change-me\"))\n" "\n"
+    "  (or (os/getenv \"SECRET_KEY_BASE\") \"dev-only-insecure-secret-change-me\"))\n" "\n"
     "(defrouter app-router\n" "  (get \"/\" web/views/home/index)\n"
     "  (through [(session/fetch-session session-secret) session/fetch-flash csrf/protect-from-forgery]\n"
     "    (get \"/messages\" web/views/messages/index)\n"
@@ -722,7 +722,7 @@ test discovery, lints, release, config)."
     "      ([:task-error ^h _msg] (error-json 500 \"internal server error\"))\n"
     "      ([:task-timeout ^h] (error-json 504 \"request timed out\")))))\n" "\n" "(defn port ()\n"
     "  \"Serve on $HATCH_PORT if set and numeric, else 5000.\"\n"
-    "  (or (string->number (or (getenv \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
+    "  (or (string->number (or (os/getenv \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
     "  \"Start the HTTP listener on `(port)` — no ws-handler, so no live layer.\"\n"
     "  (server/start (port) adapter))\n"))
 
@@ -963,7 +963,7 @@ test discovery, lints, release, config)."
         (println (str "  " nm "/.claude/skills/writing-brood/SKILL.md"))
         (dolist (f code-files) (println (str "  " f))))
       (when *config-git-init*
-        (if (= 0 (run-process "git" (list "init" "-q" nm)))
+        (if (= 0 (os/run-process "git" (list "init" "-q" nm)))
           (println "  initialized a git repository")
           (println "  (git init failed)")))
       (scaffold-print-next-steps tmpl nm in-place)
