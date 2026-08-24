@@ -224,7 +224,7 @@ pub(super) fn stdin_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 
 // ---------- time ----------
 
-/// `(now)` — wall-clock milliseconds since the Unix epoch, as an integer.
+/// `(%now)` — wall-clock milliseconds since the Unix epoch, as an integer.
 /// Subtract two readings to measure elapsed time (see `std/tool/test.blsp`).
 pub(super) fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     let ms = web_time::SystemTime::now()
@@ -248,17 +248,17 @@ pub(super) fn now_ns(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 
 // ---------- memory ----------
 
-/// `(mem-bytes)` — bytes currently allocated across the whole process.
+/// `(%)` — bytes currently allocated across the whole process.
 pub(super) fn mem_bytes(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::core::alloc::live_bytes() as i64))
 }
 
-/// `(mem-peak)` — high-water mark of allocated bytes since the process started.
+/// `(%)` — high-water mark of allocated bytes since the process started.
 pub(super) fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::core::alloc::peak_bytes() as i64))
 }
 
-/// `(ic-stats)` — live sizes of this process's four inline-cache tables, the
+/// `(%)` — live sizes of this process's four inline-cache tables, the
 /// largest single attributed item in the green-process floor (`FRONTIER.md` lever 1
 /// puts them at 896 B/process, bigger than the whole `Box<Process>`). Each of
 /// `:calls` (`vm_call_ics`), `:links` (`vm_fast_links`), `:globals` (`vm_global_ics`)
@@ -294,7 +294,7 @@ pub(super) fn ic_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.map_from_pairs(pairs))
 }
 
-/// `(pos-stats)` — entry counts of the two source-position side tables:
+/// `(%)` — entry counts of the two source-position side tables:
 /// `:local-forms` (this process's LOCAL `form_pos`) and `:runtime-forms` (the
 /// runtime-shared `positions`). Measurement surface for the position-table cost,
 /// which the 2026-08-06 module-load breakdown put at 169 MB of a 933 MB load and
@@ -314,7 +314,7 @@ pub(super) fn pos_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.map_from_pairs(pairs))
 }
 
-/// `(gc-stats)` — a snapshot map of this process's garbage-collection activity
+/// `(%)` — a snapshot map of this process's garbage-collection activity
 /// (Tier-1 observability; `docs/memory-review.md` §7). Per-process: it reports
 /// the *calling* process's own LOCAL heap, never another's. Keys:
 /// `:collections` (collections run since start — the automatic Stage-B
@@ -328,13 +328,13 @@ pub(super) fn pos_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// promoted-closure count — grows with hot-reload churn, compacted back by the
 /// safepoint, ADR-091) and `:runtime-threshold` (the count that triggers the next
 /// auto-compaction). The live/reclaimable split is the expensive walk reported by
-/// `(runtime-collect)`, so it's not included here.
+/// `(dev/runtime-collect)`, so it's not included here.
 #[cfg(feature = "dev-tools")]
 pub(super) fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(gc_stats_map(heap))
 }
 
-/// Build the `(gc-stats)` snapshot map of the calling process's GC activity.
+/// Build the `(%)` snapshot map of the calling process's GC activity.
 /// Shared by `gc-stats` and `gc-collect` (which reports the same shape *after*
 /// forcing a collection, so the delta is visible).
 #[cfg(feature = "dev-tools")]
@@ -377,7 +377,7 @@ pub(super) fn gc_stats_map(heap: &mut Heap) -> Value {
         // (cheap — a slab length); it grows with hot-reload churn and the eval
         // safepoint compacts it back toward `:runtime-threshold` (single-process
         // today, ADR-091). The live/reclaimable split is the expensive walk reported
-        // by `(runtime-collect)`'s `{:before :after :reclaimed}`, kept out of here.
+        // by `(dev/runtime-collect)`'s `{:before :after :reclaimed}`, kept out of here.
         (
             value::kw("runtime-closures"),
             Value::int(heap.runtime_closure_count() as i64),
@@ -398,7 +398,7 @@ pub(super) fn gc_stats_map(heap: &mut Heap) -> Value {
     heap.map_from_pairs(pairs)
 }
 
-/// `(vm-stats)` — a snapshot map of the VM work-attribution counters (the
+/// `(%)` — a snapshot map of the VM work-attribution counters (the
 /// `perf-stats` feature; see `docs/benchmarking.md`). `:enabled` is `false` when
 /// the binary was built without `--features perf-stats` (every other key absent —
 /// the counters compiled to nothing). With the feature on: `:enabled true` plus a
@@ -425,7 +425,7 @@ pub(super) fn vm_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.map_from_pairs(pairs))
 }
 
-/// `(vm-stats-reset)` — zero the work-attribution counters, returning `:enabled`.
+/// `(%)` — zero the work-attribution counters, returning `:enabled`.
 ///
 /// The counters are **process-global and cumulative from process start**, so a snapshot
 /// taken after a short program includes the runtime's own boot work — and boot is
@@ -435,7 +435,7 @@ pub(super) fn vm_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// whole process must zero first; `(perf/measure thunk)` in `std/tool/perf.blsp` is that,
 /// packaged.
 ///
-/// A no-op returning `:enabled false` without `--features perf-stats`, like `(vm-stats)`.
+/// A no-op returning `:enabled false` without `--features perf-stats`, like `(%)`.
 #[cfg(feature = "dev-tools")]
 pub(super) fn vm_stats_reset(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     crate::perf::reset();
@@ -443,7 +443,7 @@ pub(super) fn vm_stats_reset(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(heap.map_from_pairs(vec![(value::kw("enabled"), Value::boolean(enabled))]))
 }
 
-/// `(runtime-collect)` — compact the shared RUNTIME code region now (reclaim
+/// `(dev/runtime-collect)` — compact the shared RUNTIME code region now (reclaim
 /// superseded hot-reload versions), returning `{:before :after :reclaimed :ran}`.
 /// `:ran` is false (and nothing changes) when the runtime is shared with another
 /// live process — see [`Heap::runtime_collect`]'s safety gate. Rarely needed: the
@@ -467,8 +467,8 @@ pub(super) fn runtime_collect(_: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(heap.map_from_pairs(pairs))
 }
 
-/// `(gc-collect)` — force a collection of this process's LOCAL heap *now*,
-/// returning the post-collection `(gc-stats)` map so the effect is visible.
+/// `(%)` — force a collection of this process's LOCAL heap *now*,
+/// returning the post-collection `(%)` map so the effect is visible.
 /// An observability/test aid, **not** a load-bearing trigger: automatic
 /// collection at the eval safepoint keeps memory bounded with no help from the
 /// program (the removed `(hibernate)` was the load-bearing manual trigger — this
@@ -482,12 +482,12 @@ pub(super) fn gc_collect(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(gc_stats_map(heap))
 }
 
-/// `(gc-trace)` / `(gc-trace on?)` — query or set per-collection GC trace
+/// `(%)` / `(gc-trace on?)` — query or set per-collection GC trace
 /// logging for the calling process. With no argument, returns the current state;
 /// with one, sets it (truthy = on) and returns the new state. When on, each
 /// minor/major collection prints a one-line summary to stderr. Per-process and
 /// defaulted from the `BROOD_GC_TRACE` env var (which traces the whole run,
-/// including the root process before any `(gc-trace)` call).
+/// including the root process before any `(%)` call).
 #[cfg(feature = "dev-tools")]
 pub(super) fn gc_trace(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let Some(&v) = args.first() {
@@ -496,12 +496,12 @@ pub(super) fn gc_trace(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(Value::boolean(heap.gc_trace()))
 }
 
-/// `(mem-limit)` — the hard memory ceiling in bytes (0 = unlimited). ADR-043.
+/// `(%)` — the hard memory ceiling in bytes (0 = unlimited). ADR-043.
 pub(super) fn mem_limit(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::core::alloc::hard_limit() as i64))
 }
 
-/// `(mem-soft-limit)` — the soft memory ceiling in bytes (0 = unlimited). ADR-043.
+/// `(%)` — the soft memory ceiling in bytes (0 = unlimited). ADR-043.
 pub(super) fn mem_soft_limit(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::core::alloc::soft_limit() as i64))
 }
@@ -886,7 +886,7 @@ pub(super) fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     }
 }
 
-/// `(process-info pid)` — a snapshot map of a **live local** process, or `nil`
+/// `(%process-info pid)` — a snapshot map of a **live local** process, or `nil`
 /// for a remote/dead pid (a non-pid is a type error). The fields are all
 /// kernel-internal, so the map is assembled here from the registry / scheduler /
 /// name / monitor tables (ADR-051):
@@ -983,7 +983,7 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
 // manipulation and all policy live in Brood (`std/prelude.blsp`, `std/tool/project.blsp`).
 
 /// `(file/cwd)` — the process's current working directory as a string.
-/// `(exe-path)` — the absolute path of the RUNNING executable, or nil when the platform
+/// `(%exe-path)` — the absolute path of the RUNNING executable, or nil when the platform
 /// won't say (a sandbox with no `/proc/self/exe`-equivalent). Nil rather than an error: a
 /// program asking where it lives is asking opportunistically, and the answer is allowed to
 /// be "cannot tell".
@@ -1016,7 +1016,7 @@ pub(super) fn file_exists(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(Value::boolean(std::path::Path::new(&path).exists()))
 }
 
-/// `(canonicalize path)` — the real absolute path of `path` with **symlinks and
+/// `(%canonicalize path)` — the real absolute path of `path` with **symlinks and
 /// `.`/`..` fully resolved**. Works for a not-yet-existing target: the longest
 /// existing prefix is `fs::canonicalize`d (which resolves every symlink in it,
 /// the POSIX-correct way — a `..` after a symlink resolves against the symlink's

@@ -83,7 +83,7 @@ When `face-of` gives a node a face, colour the WHOLE node and stop; else descend
 tree-sitter language keyword `lang` (`:ruby`/`:elixir`), with `face-of` a node→face
 function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 `(text)` service closing over its `lang` and table."
-  (ts-spans (tree-sitter-parse text lang) face-of))
+  (ts-spans (%tree-sitter-parse text lang) face-of))
 
 ;; ---- structural navigation --------------------------------------------------
 ;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp
@@ -102,7 +102,7 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 (defn- ts-enclosing
   (node point)
   "The deepest container node strictly containing `point`; `node` if none."
-  (let (hit (find (fn (k)
+  (let (hit (seq/find (fn (k)
                     (and (ts-container? k)
                       (< (get k :start) point)
                       (< point (get k :end))))
@@ -116,14 +116,14 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 (defn point-forward (text lang point)
   "End of the next named node at or after `point` within the enclosing node;
 unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
-  (let (root (tree-sitter-parse text lang)
+  (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point)
-        nxt (find (fn (f) (>= (get f :start) point)) (ts-named-kids enc)))
+        nxt (seq/find (fn (f) (>= (get f :start) point)) (ts-named-kids enc)))
     (if (nil? nxt) point (get nxt :end))))
 
 (defn point-backward (text lang point)
   "Start of the previous named node ending at or before `point` (`backward-sexp`)."
-  (let (root (tree-sitter-parse text lang)
+  (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point)
         prev (last (filter (fn (f) (<= (get f :end) point)) (ts-named-kids enc))))
     (if (nil? prev) point (get prev :start))))
@@ -131,16 +131,16 @@ unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
 (defn point-list-forward (text lang point)
   "End of the next child CONTAINER at or after `point` — leaf nodes are stepped over, not
 stopped at (Emacs `forward-list`); unchanged if none."
-  (let (root (tree-sitter-parse text lang)
+  (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point)
-        nxt (find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
+        nxt (seq/find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
               (ts-named-kids enc)))
     (if (nil? nxt) point (get nxt :end))))
 
 (defn point-list-backward (text lang point)
   "Start of the previous child CONTAINER ending at or before `point` — leaves stepped over
 (Emacs `backward-list`); unchanged if none."
-  (let (root (tree-sitter-parse text lang)
+  (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point)
         prev (last (filter (fn (f) (and (ts-container? f) (<= (get f :end) point)))
                      (ts-named-kids enc))))
@@ -148,23 +148,23 @@ stopped at (Emacs `forward-list`); unchanged if none."
 
 (defn point-up (text lang point)
   "Start of the enclosing node (`backward-up-list`); unchanged at top level."
-  (let (root (tree-sitter-parse text lang)
+  (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point))
     (if (ts-root? enc root) point (get enc :start))))
 
 (defn point-up-forward (text lang point)
   "End of the enclosing node — the forward counterpart of `point-up` (Emacs `up-list`);
 unchanged at top level."
-  (let (root (tree-sitter-parse text lang)
+  (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point))
     (if (ts-root? enc root) point (get enc :end))))
 
 (defn point-down (text lang point)
   "Start of the next child container at or after `point` (`down-list`); unchanged
 if none."
-  (let (root (tree-sitter-parse text lang)
+  (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point)
-        lst (find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
+        lst (seq/find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
               (ts-named-kids enc)))
     (if (nil? lst) point (get lst :start))))
 
@@ -174,7 +174,7 @@ if none."
     (node point)
     "The containers strictly enclosing `point` below `node`, outermost first — each a
   container that contains the next. `()` at the leaf."
-    (let (hit (find (fn (k)
+    (let (hit (seq/find (fn (k)
                       (and (ts-container? k)
                         (< (get k :start) point)
                         (< point (get k :end))))
@@ -208,7 +208,7 @@ where `def`/`defmodule`/… are calls, not distinct node kinds)."
   "The `edge` (`:start` / `:end`) of the enclosing **definition**: the deepest `def` /
 `class` / `module` / … containing `point`, falling back to the top-level form, then `point`.
 The shared body of `point-defun-start` / `point-defun-end`."
-  (let (root (tree-sitter-parse text lang)
+  (let (root (%tree-sitter-parse text lang)
         chain (ts-chain-rest root point)
         defuns (filter (fn (n) (ts-defun? text n)) chain))
     (cond

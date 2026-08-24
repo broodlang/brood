@@ -7,16 +7,16 @@
 ;; contest — every registration MUST survive.
 ;;
 ;; N processes each register an impl for their OWN distinct ability, then we check all N
-;; are present. `register-impl` reads `*impls*`, assocs, and `def`s the whole map back —
+;; are present. `%register-impl` reads `*impls*`, assocs, and `def`s the whole map back —
 ;; if that read-modify-write is not atomic, concurrent registrations clobber each other
 ;; and some abilities end up with no impl at all.
 ;;
 ;;   N=200 brood ki22.blsp
 
-(def n (let (e (getenv "N")) (if e (string->number e) 200)))
+(def n (let (e (os/getenv "N")) (if e (string->number e) 200)))
 
 ;; one ability per index, declared UP FRONT and single-threaded, so the only concurrent
-;; operation under test is register-impl itself
+;; operation under test is %register-impl itself
 (defn decl (i)
   (if (>= i n)
     :ok
@@ -30,7 +30,7 @@
 ;; each worker registers its own impl, concurrently
 (defn worker (i parent)
   (do
-    (register-impl (symbol (str "A" i)) (symbol (str "op" i)) :int (fn (x) i) nil)
+    (%register-impl (symbol (str "A" i)) (symbol (str "op" i)) :int (fn (x) i) nil)
     (send parent [:done i])))
 
 ;; NB `(self)` must be evaluated in the PARENT and captured — a `spawn` body runs in the
@@ -47,7 +47,7 @@
   (if (>= i n)
     acc
     (missing (+ i 1)
-      (if (nil? (impl-for [(symbol (str "A" i)) (symbol (str "op" i))] :int)) (cons i acc) acc))))
+      (if (nil? (%impl-for [(symbol (str "A" i)) (symbol (str "op" i))] :int)) (cons i acc) acc))))
 
 (let (lost (missing 0 nil))
   (println (str "registered="

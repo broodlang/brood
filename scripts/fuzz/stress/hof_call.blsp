@@ -20,7 +20,7 @@
 ;; Every loop is tail-recursive (O(1) stack) and returns a value that depends on every
 ;; iteration, so nothing can be folded away.
 
-(def N (let (e (getenv "N")) (if e (string->number e) 3000000)))
+(def N (let (e (os/getenv "N")) (if e (string->number e) 3000000)))
 
 (defn ns-per (f k)
   (let (t0 (now-ns) _ (f))
@@ -85,7 +85,7 @@
   (let (t0 (now-ns) v (f) ns (quot (- (now-ns) t0) N))
     (println (str label " " ns " ns/call   (cold, single pass, acc=" v ")"))))
 
-(println (str "N=" N " jit=" (if (nil? (getenv "BROOD_NO_JIT")) "on" "off")))
+(println (str "N=" N " jit=" (if (nil? (os/getenv "BROOD_NO_JIT")) "on" "off")))
 (row "inline    (no call)     " (fn () (loop-inline N 0)))
 (row "global    leaf step     " (fn () (loop-global N 0)))
 (row "computed  leaf step     " (fn () (loop-computed step N 0)))

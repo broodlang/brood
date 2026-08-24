@@ -42,7 +42,7 @@
   (s)
   (and (> (string/length s) 0)
     (let (cs (string/->list s))
-      (and (nil? (first (remove (fn (c) (includes? "0123456789+-.eE" c)) cs)))
+      (and (nil? (first (seq/remove (fn (c) (includes? "0123456789+-.eE" c)) cs)))
         ;; at least one digit — rules out a bare sign and dectest's `#` null
         (not (nil? (first (filter (fn (c) (includes? "0123456789" c)) cs))))))))
 
@@ -67,7 +67,7 @@
   (line)
   (let (s (string/replace line "\t" " ")
         i (index-of s "--"))
-    (remove string/blank? (string/split (if (< i 0) s (string/substring s 0 i)) " "))))
+    (seq/remove string/blank? (string/split (if (< i 0) s (string/substring s 0 i)) " "))))
 
 ;; The computed result as a canonical decimal string, or nil when the case does not
 ;; apply to Brood's decimal. `compare` answers -1/0/1, so it renders as an int.
@@ -100,7 +100,7 @@
       nil
       (let (id (nth words 0)
             op (string/lower (nth words 1))
-            args (map dt-unquote (subvec (into [] words) 2 arrow))
+            args (map dt-unquote (seq/subvec (into [] words) 2 arrow))
             want (dt-unquote (nth words (inc arrow)))
             conditions (- n (+ arrow 2))
             unary (get dt-ops-unary op)
@@ -112,8 +112,8 @@
               (and binary (not (= (count args) 2)))
               (not (dt-numeric? want))
               (not (dt-in-range? want))
-              (first (remove dt-numeric? args))
-              (first (remove dt-in-range? args)))
+              (first (seq/remove dt-numeric? args))
+              (first (seq/remove dt-in-range? args)))
           nil
           (let (a (decimal (first args))
                 b (if binary (decimal (nth args 1)) nil)

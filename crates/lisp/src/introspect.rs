@@ -359,7 +359,7 @@ pub fn source_location(interp: &mut Interp, name: &str) -> Option<SourceLoc> {
     // evaluating. (See `resolve_in_source` for the full rationale.)
     value::intern_existing(name)?;
     let cp = interp.heap.checkpoint();
-    let out = match interp.eval_str(&format!("(source-location '{name})")) {
+    let out = match interp.eval_str(&format!("(%source-location '{name})")) {
         Ok(v) => parse_source_location(&interp.heap, v),
         Err(_) => None,
     };

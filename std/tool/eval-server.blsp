@@ -116,12 +116,12 @@ lines (see the module preamble on stray output)."
 before it and are still running when it returned.
 
 Deliberately not a spawn *count*: a child that finishes before the evaluation does
-is already gone from `list-processes`, so snapshots cannot see it, and guessing
+is already gone from `proc/list`, so snapshots cannot see it, and guessing
 would be worse than saying nothing. What survives is the half worth showing anyway
 — concurrency is the one part of an evaluation with no return value to look at, so
 `(spawn (receive …))` that parks forever reads as `1 still running` instead of
 looking identical to a round-trip that cleaned up after itself."
-  (let (after (list-processes))
+  (let (after (proc/list))
     {:alive (count (filter (fn (p) (not (includes? before p))) after))}))
 
 (defn- eval-server-spy-entry
@@ -195,20 +195,20 @@ In-image caveat for long-lived callers: evaluated source that calls
 `(%capture-begin)` without a matching take strands OUR buffer on the calling
 process's capture stack (later prints are swallowed). Irrelevant on the server
 path — the per-request evaluator process dies — but worth knowing when embedding."
-  (let (t0 (now)
-        pids-before (list-processes)
+  (let (t0 (os/now)
+        pids-before (proc/list)
         traced (and trace-names (not (empty? trace-names)))
-        acc (when traced (table))
+        acc (when traced (table/new))
         sink (when traced
                (fn (e)
-                 (let (n (or (table-get acc :n) 0))
+                 (let (n (or (table/get acc :n) 0))
                    (if (< n *spy-entry-cap*)
                      (do
-                       (table-put acc :n (inc n))
-                       (table-put acc
+                       (table/put acc :n (inc n))
+                       (table/put acc
                          :entries
                          (cons (eval-server-spy-entry e)
-                           (or (table-get acc :entries) '())))
+                           (or (table/get acc :entries) '())))
                        ;; the entry that FILLS the budget already answers stop: nothing
                        ;; after it would be kept, so nothing after it should be paid for
                        (when (>= (inc n) *spy-entry-cap*) :spy-stop))
@@ -225,12 +225,12 @@ path — the per-request evaluator process dies — but worth knowing when embed
         out (eval-server-bound-output (or (%capture-take) ""))
         r2 (assoc r
              :output out
-             :ms (- (now) t0)
+             :ms (- (os/now) t0)
              :procs (eval-server-process-report pids-before)))
     (if traced
       (do
         (debug/untrace-all)
-        (assoc r2 :spy (reverse (or (table-get acc :entries) '()))))
+        (assoc r2 :spy (reverse (or (table/get acc :entries) '()))))
       r2)))
 
 ;; ---- per-request timeout: eval in a child process, kill on deadline ----------

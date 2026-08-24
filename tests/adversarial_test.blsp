@@ -342,7 +342,7 @@
     ;; with :line nil, which the editor could only place by guessing (it guessed line 1
     ;; and accused an unrelated function four lines above)
     (let (ws (filter (fn (w) (includes? (:message w) "non-tail"))
-               (check-string-structured NON-TAIL)))
+               (reflect/check-string-structured NON-TAIL)))
       (is (not (empty? ws)))
       (dolist (w ws)
         (is (not (nil? (:line w)))))
@@ -353,10 +353,10 @@
     ;; the lowering repeats the body across dispatch paths, so a single non-tail
     ;; self-call was walked and reported three times
     (let (ws (filter (fn (w) (includes? (:message w) "non-tail"))
-               (check-string-structured NON-TAIL)))
+               (reflect/check-string-structured NON-TAIL)))
       (assert= (count ws) 1)))
 
   (test "a tail-recursive function is still not flagged"
     (let (ws (filter (fn (w) (includes? (:message w) "non-tail"))
-               (check-string-structured "(defn cd ((0) :ok) ((n) (cd (- n 1))))\n(cd 3)")))
+               (reflect/check-string-structured "(defn cd ((0) :ok) ((n) (cd (- n 1))))\n(cd 3)")))
       (is (empty? ws)))))

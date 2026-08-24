@@ -84,7 +84,7 @@
       (agent/update a inc)
       (assert= 1 (agent/get a identity))
       (sleep 30)
-      (assert= 0 (mailbox-size a))
+      (assert= 0 (proc/mailbox-size a))
       (agent/stop a))))
 
 (describe "agent: a dead agent raises instead of hanging forever"

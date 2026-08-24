@@ -17,7 +17,7 @@
 ;; Register-only — discovered and run by `nest test`.
 (defmodule scheduler-distribution-test (:use test))
 
-(defn workers () (get (sched-stats) :workers))
+(defn workers () (get (dev/sched-stats) :workers))
 
 ;; A fan-out big enough that a single worker draining it alone would be obvious,
 ;; but small enough to stay fast in the suite. Each child does real (if brief) work
@@ -50,27 +50,27 @@
       (fan me 0)
       (drain 0)
       (if (> w 1)
-        (assert= (> (get (sched-stats) :peak-threads) 1) true)
+        (assert= (> (get (dev/sched-stats) :peak-threads) 1) true)
         ;; single-worker pool: nothing to distribute to, so only the invariant holds
-        (assert= (>= (get (sched-stats) :peak-threads) 1) true))))
+        (assert= (>= (get (dev/sched-stats) :peak-threads) 1) true))))
 
   (test "the steal path fires when there is a pool to steal across"
     ;; Complements `work_stealing.rs` (which pins a 2-worker pool in its own test
     ;; binary): here we assert it on the *default* pool the suite actually runs with,
     ;; so a regression that only shows at nproc workers is still caught.
-    (let (me (self) w (workers) before (get (sched-stats) :steals))
+    (let (me (self) w (workers) before (get (dev/sched-stats) :steals))
       (fan me 0)
       (drain 0)
       (if (> w 1)
-        (assert= (> (get (sched-stats) :steals) before) true)
+        (assert= (> (get (dev/sched-stats) :steals) before) true)
         ;; a one-worker pool has no peer to steal from — the counter must not move
-        (assert= (get (sched-stats) :steals) before))))
+        (assert= (get (dev/sched-stats) :steals) before))))
 
   (test "spawn/exit accounting balances over a fan-out"
     ;; Every spawned process must also be accounted as exited once the fan drains —
     ;; a leak here is how a registry or lifecycle bug shows up first.
-    (let (me (self) s0 (get (sched-stats) :spawned))
+    (let (me (self) s0 (get (dev/sched-stats) :spawned))
       (fan me 0)
       (drain 0)
-      (let (spawned (- (get (sched-stats) :spawned) s0))
+      (let (spawned (- (get (dev/sched-stats) :spawned) s0))
         (assert= (>= spawned fan-size) true)))))

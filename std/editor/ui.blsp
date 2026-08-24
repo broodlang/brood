@@ -191,10 +191,10 @@ synthesized back-compat timer below and any app that hasn't moved to named timer
 
 (defn- ui-now
   (model)
-  "The current wall-clock in ms — `(now)`, unless the model carries a `:now-fn` (a
+  "The current wall-clock in ms — `(os/now)`, unless the model carries a `:now-fn` (a
 0-arg fn), which the loop calls instead. The injection seam tests use to drive timers
 off a scripted clock deterministically, with no real sleeping."
-  ((or (get model :now-fn) now)))
+  ((or (get model :now-fn) os/now)))
 
 (defn- ui-timer-ms
   (spec)
@@ -533,7 +533,7 @@ also accepts the legacy map vtable `{:active? :owns? :handle :exit}` unchanged).
 (defn overlay-active (overlays model)
   "The first overlay in `overlays` open for `model` (`overlay-active?`; list order =
 precedence), or nil. An overlay is an `Overlay` record or the legacy map vtable."
-  (find (fn (o) (overlay-active? o model)) overlays))
+  (seq/find (fn (o) (overlay-active? o model)) overlays))
 
 (defn overlay-route (overlays model input fallback)
   "Fold `input` into the first active overlay in `overlays`, or `(fallback model input)`

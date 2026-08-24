@@ -19,11 +19,11 @@
     (is (string/ends-with? "x" ""))))
 
 (describe "paths"
-  (test "path-join" (assert= (path-join "a" "b") "a/b") (assert= (path-join "a/" "b") "a/b"))
+  (test "path-join" (assert= (path/join "a" "b") "a/b") (assert= (path/join "a/" "b") "a/b"))
   (test "parent-directory"
-    (assert= (parent-directory "/a/b/c") "/a/b")
-    (assert= (parent-directory "/foo") "/")
-    (assert= (parent-directory "rel") ".")))
+    (assert= (path/dirname "/a/b/c") "/a/b")
+    (assert= (path/dirname "/foo") "/")
+    (assert= (path/dirname "rel") ".")))
 
 ;; Concurrent `provide` must not lose a feature (KI-22's class). `provide` is a
 ;; read-modify-write of one shared global (`(def *features* (assoc *features* key true))`
@@ -39,7 +39,7 @@
   (test "no feature is lost when many processes provide at once"
     (let (n 120)
       (concurrently n (fn (i) (provide (symbol (mt-conc-feature i)))))
-      (assert= (count (remove (fn (i) (contains? *features* (mt-conc-feature i))) (range n))) 0))))
+      (assert= (count (seq/remove (fn (i) (contains? *features* (mt-conc-feature i))) (range n))) 0))))
 
 ;; :serial — these mutate the shared *features* global, so run them one-at-a-time.
 (describe "modules: includes? / provide / require"

@@ -6,8 +6,8 @@
 ;; What does one hot reload cost, in a workload that is also churning processes/messages?
 ;; FIXED iteration count (not duration), reloads interleaved at a chosen rate, RSS at the end.
 ;; Run it repeatedly and compare medians — a single sample of this is noise.
-(def iters (let (e (getenv "ITERS")) (if e (string->number e) 40000)))
-(def every (let (e (getenv "EVERY")) (if e (string->number e) 0))) ; 0 = never reload
+(def iters (let (e (os/getenv "ITERS")) (if e (string->number e) 40000)))
+(def every (let (e (os/getenv "EVERY")) (if e (string->number e) 0))) ; 0 = never reload
 (def g 2)
 (defn rss-kb ()
   (let (txt (file/slurp "/proc/self/status") i (index-of txt "VmRSS:"))
@@ -30,10 +30,10 @@
       (when (and (> every 0) (= 0 (mod i every)))
         (eval (list 'def 'g (+ 2 (mod i 3)))))
       (churn (+ i 1) acc))))
-(gc-collect)
+(dev/gc-collect)
 (def r0 (rss-kb))
 (churn 0 0)
-(gc-collect)
+(dev/gc-collect)
 (sleep 300)
 (println (str "iters="
            iters

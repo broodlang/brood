@@ -21,7 +21,7 @@
 
 (defn register-protocol (pname specs)
   "Record interface `pname`'s declared op specs (raw forms) for the checker / LSP."
-  (swap-registry! *protocols* (fn (m) (assoc m pname specs)))
+  (%swap-registry! *protocols* (fn (m) (assoc m pname specs)))
   nil)
 
 (defn ops (pname)

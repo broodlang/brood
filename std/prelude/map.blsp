@@ -102,7 +102,7 @@ a wrong-typed one."
   (if (empty? kvs) m (assoc-map-pairs (map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
 (defn- assoc-vec-pairs
   (v kvs)
-  (if (empty? kvs) v (assoc-vec-pairs (vector-assoc v (first kvs) (second kvs)) (rest (rest kvs)))))
+  (if (empty? kvs) v (assoc-vec-pairs (%vector-assoc v (first kvs) (second kvs)) (rest (rest kvs)))))
 (defn assoc "A fresh collection like `coll` with each `key value` pair added or updated.
 For a map, keys are added or replaced; for a vector, integer indices in
 `[0, count)` are replaced (an out-of-range index is an error — appending is via
@@ -110,7 +110,7 @@ For a map, keys are added or replaced; for a vector, integer indices in
   ;; The single-pair `(assoc coll k v)` arm is the hot case (it's what `update`,
   ;; tallies, and most call sites use): exact arity → VM-eligible, and it skips the
   ;; `& kvs` rest-list + the multi-pair loop, going straight to the kernel op.
-  ((coll k v) (if (vector? coll) (vector-assoc coll k v) (map-assoc coll k v)))
+  ((coll k v) (if (vector? coll) (%vector-assoc coll k v) (map-assoc coll k v)))
   ((coll & kvs) (if (vector? coll) (assoc-vec-pairs coll kvs) (assoc-map-pairs coll kvs))))
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.

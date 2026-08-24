@@ -270,14 +270,14 @@
 ;; so the parallel suite's own processes don't perturb the measurement (verified: the
 ;; counter reports 5 for 5 deliberately-parked children).
 
-(defn- stream-test-my-id () (get (process-info (self)) :id))
+(defn- stream-test-my-id () (get (proc/info (self)) :id))
 
 (defn- stream-test-parked-children
   (me)
   (count (filter (fn (p)
-                   (and (= me (get (process-info p) :parent))
-                     (= :waiting (get (process-info p) :status))))
-           (list-processes))))
+                   (and (= me (get (proc/info p) :parent))
+                     (= :waiting (get (proc/info p) :status))))
+           (proc/list))))
 
 (describe "streams do not leak producer processes"
   :isolated
@@ -327,10 +327,10 @@
       (assert= :err (first (stream/next p 40)))))
 
   (test "the monitor leaves no [:down] behind in the caller's mailbox"
-    (let (before (mailbox-size (self))
+    (let (before (proc/mailbox-size (self))
           s (stream/singleton 1))
       (stream/next s)
       (stream/next s)
       (stream/next s)
       (sleep 30)
-      (assert= before (mailbox-size (self))))))
+      (assert= before (proc/mailbox-size (self))))))

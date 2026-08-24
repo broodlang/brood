@@ -51,7 +51,7 @@ carrying half-open character `:start`/`:end` positions. The kernel's
 the structure queries below navigate the result directly. (This replaced an
 in-Brood `annotate` walk that re-derived positions by summing leaf lengths: O(n)
 interpreted and the bottleneck in structural navigation.)"
-  (parse-source-positioned text))
+  (reflect/parse-source-positioned text))
 
 ;; ---- structure queries ------------------------------------------------------
 
@@ -59,7 +59,7 @@ interpreted and the bottleneck in structural navigation.)"
   "The deepest container node strictly containing `point` (descending into
 list/vector/map children); the root if none. Reader-macro wrappers are navigated
 as a unit — descending through them is a deferred refinement."
-  (let (hit (find (fn (k)
+  (let (hit (seq/find (fn (k)
                     (and (container-kind? (get k :kind))
                       (< (get k :start) point)
                       (< point (get k :end))))
@@ -107,11 +107,11 @@ cost of ~three forms, not the whole buffer."
         ;; ONE lexical pass for both offsets. The pair used to be two `scan-form-start`
         ;; calls, and the second re-walked the prefix the first had already covered — the
         ;; dominant cost of every structural motion, paid twice (2026-08-04).
-        [base start] (scan-form-start-2 text (min p (max 0 (dec n))))
+        [base start] (reflect/scan-form-start-2 text (min p (max 0 (dec n))))
         ;; The window END was an interpreted `sexp-scan` char-at loop over the ~3-form
         ;; window — ~85% of every structural motion. `scan-form-end` is the same lexical
         ;; scan (strings/comments skipped, bracket depth tracked) in one native byte pass.
-        end (scan-form-end text base 3))
+        end (reflect/scan-form-end text base 3))
     [base (string/substring text base end)]))
 
 ;; ---- pure navigation: (text point) -> point ---------------------------------
@@ -132,7 +132,7 @@ enclosing list; `point` when there is none. The shared body of the forward motio
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
-        nxt (find (fn (f) (and (>= (get f :start) rp) (keep? f))) (forms-of enc)))
+        nxt (seq/find (fn (f) (and (>= (get f :start) rp) (keep? f))) (forms-of enc)))
     (if (nil? nxt) point (+ base (get nxt :end)))))
 
 (defn- sexp-sibling-backward
@@ -184,7 +184,7 @@ none."
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
-        lst (find (fn (f) (and (sexp-list? f) (>= (get f :start) rp))) (forms-of enc)))
+        lst (seq/find (fn (f) (and (sexp-list? f) (>= (get f :start) rp))) (forms-of enc)))
     (if (nil? lst) point (+ base (get lst :start) 1))))
 
 (defn- sexp-defun-edge
@@ -193,7 +193,7 @@ none."
 `point` isn't within one. The shared body of `point-defun-start` / `point-defun-end`."
   (let ([base sub] (narrow text point)
         rp (- point base)
-        top (find (fn (f) (and (<= (get f :start) rp) (<= rp (get f :end))))
+        top (seq/find (fn (f) (and (<= (get f :start) rp) (<= rp (get f :end))))
               (forms-of (tree sub))))
     (if (nil? top) point (+ base (get top edge)))))
 
@@ -234,7 +234,7 @@ delimiter past that form (Emacs/paredit `forward-slurp-sexp`)."
       (let ([tr enc] ctx
             ee (get enc :end)
             parent (enclosing tr (get enc :start))
-            nxt (find (fn (f) (>= (get f :start) ee)) (forms-of parent)))
+            nxt (seq/find (fn (f) (>= (get f :start) ee)) (forms-of parent)))
         (if (nil? nxt)
           nil
           (let (ne (get nxt :end))
@@ -313,7 +313,7 @@ form's siblings (paredit `raise-sexp`)."
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
-            cur (find (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
+            cur (seq/find (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
                   (forms-of enc)))
         (if (nil? cur)
           nil
@@ -346,7 +346,7 @@ form's siblings (paredit `raise-sexp`)."
 new open (paredit `wrap-round`)."
   (let (tr (tree text)
         enc (enclosing tr point)
-        nxt (find (fn (f) (>= (get f :end) point)) (forms-of enc)))
+        nxt (seq/find (fn (f) (>= (get f :end) point)) (forms-of enc)))
     (if (nil? nxt)
       nil
       (let (ns (get nxt :start) ne (get nxt :end))
@@ -366,8 +366,8 @@ chord mid-symbol swaps it with its predecessor, as it does in Emacs. Only the sp
 at `next.end` (the whitespace between the two forms is preserved in place)."
   (let (enc (enclosing (tree text) point)
         sibs (forms-of enc)
-        inside (find (fn (f) (and (< (get f :start) point) (< point (get f :end)))) sibs)
-        next (if (nil? inside) (find (fn (f) (>= (get f :start) point)) sibs) inside)
+        inside (seq/find (fn (f) (and (< (get f :start) point) (< point (get f :end)))) sibs)
+        next (if (nil? inside) (seq/find (fn (f) (>= (get f :start) point)) sibs) inside)
         prev (if (nil? next)
                nil
                (last (filter (fn (f) (<= (get f :end) (get next :start))) sibs))))

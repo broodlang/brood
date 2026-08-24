@@ -99,23 +99,23 @@
   :isolated
   (test "a wrapped function records a hit and still returns correctly"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-fixed hits)
       (assert= (coverage-test-fixed 2 3) 5)
-      (assert= (table-get hits "coverage-test/coverage-test-fixed") 1)))
+      (assert= (table/get hits "coverage-test/coverage-test-fixed") 1)))
   (test "an uncalled function records nothing"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-fixed hits)
-      (assert= (table-get hits "coverage-test/coverage-test-fixed" 0) 0)))
+      (assert= (table/get hits "coverage-test/coverage-test-fixed" 0) 0)))
   (test "repeated calls accumulate"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-fixed hits)
       (coverage-test-fixed 1 1)
       (coverage-test-fixed 1 1)
       (coverage-test-fixed 1 1)
-      (assert= (table-get hits "coverage-test/coverage-test-fixed") 3))))
+      (assert= (table/get hits "coverage-test/coverage-test-fixed") 3))))
 
 ;; The shim is variadic BECAUSE `arglist` reports only one arm of a multi-arm
 ;; function — an arity-preserving shim built from it would silently break the
@@ -124,37 +124,37 @@
   :isolated
   (test "a variadic function still receives its rest args"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-variadic hits)
       (assert= (coverage-test-variadic 1 2 3) (list 1 (list 2 3)))))
   (test "a variadic function called with no rest args still works"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-variadic hits)
       (assert= (coverage-test-variadic 1) (list 1 nil))))
   (test "an &optional function works with the optional supplied"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-optional hits)
       (assert= (coverage-test-optional 1 2) (list 1 2))))
   (test "an &optional function works with the optional omitted"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-optional hits)
       (assert= (coverage-test-optional 1) (list 1 nil))))
   (test "a MULTI-ARM function still dispatches on 1 arg when wrapped"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-multi hits)
       (assert= (coverage-test-multi 7) (list :one 7))))
   (test "a MULTI-ARM function still dispatches on 2 args when wrapped"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-multi hits)
       (assert= (coverage-test-multi 7 8) (list :two 7 8))))
   (test "a self-recursive function still computes correctly when wrapped"
     (def *reload-diagnostics* false)
-    (let (hits (table))
+    (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-recursive hits)
       (assert= (coverage-test-recursive 4 0) 10))))
 

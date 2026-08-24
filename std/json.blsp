@@ -81,7 +81,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 (defn- json-slice
   (s i end)
   "The code points [i, end) of `s`, joined back into a string."
-  (apply str (map int->char (subvec s i end))))
+  (apply str (map int->char (seq/subvec s i end))))
 
 (defn- ws? (c) (or (= c 32) (= c 9) (= c 10) (= c 13)))
 
@@ -473,7 +473,7 @@ the named escapes + every C0 control) that would each find nothing."
   (v)
   "`v`'s own `JsonEncode/->json` impl, or nil when its identity has none. `JsonEncode`
 registers no `:default`, so nil here means \"no rule\" rather than \"the fallback\"."
-  (impl-for '[JsonEncode ->json] (identity-of v)))
+  (%impl-for '[JsonEncode ->json] (%identity-of v)))
 
 (defn- emit-record
   (v acc)

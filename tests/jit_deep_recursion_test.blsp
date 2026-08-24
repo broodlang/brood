@@ -31,7 +31,7 @@
 ;; Read from the ENVIRONMENT at the point of use, not from a global the wrapper defines
 ;; first: the wrapper's `def` would run before this file loads (the mistake the UCD knob's
 ;; comment records).
-(def- jdr-of (max 1 (or (string->number (or (getenv "BROOD_JDR_OF") "")) 1)))
+(def- jdr-of (max 1 (or (string->number (or (os/getenv "BROOD_JDR_OF") "")) 1)))
 
 (defn- jdr-parse
   (path)
@@ -97,7 +97,7 @@
       (assert= (jdr-in-spawn p) :rejected)))
   (test "the whole n_ corpus scans in a spawned process after warming"
     ;; The scan the suite actually runs: 188 documents, warm parent then spawned child.
-    (let (all (filter (fn (f) (= (string/substring (path-basename f) 0 1) "n"))
+    (let (all (filter (fn (f) (= (string/substring (path/basename f) 0 1) "n"))
                 (corpus-files "json"))
           ;; Discovery is asserted in full regardless of the knob; only the re-scan is
           ;; sampled. `index mod n` so the slice spreads across the corpus (and so keeps

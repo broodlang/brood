@@ -3,7 +3,7 @@
 ;;; the `{:name :node}` address readers. Each case here pins a failure the
 ;;; runtime used to have:
 ;;;
-;;;   - `scan-source-extract` recursed down a list's CDR, so a flat list of
+;;;   - `reflect/scan-source-extract` recursed down a list's CDR, so a flat list of
 ;;;     ~100k symbols overflowed the native stack and SIGABRTed the whole
 ;;;     process (uncatchable — a stack overflow is not a panic, so there was no
 ;;;     `.brood_crash_dump` either). One generated `.blsp` file killed the whole
@@ -21,10 +21,10 @@
 (defmodule system-robustness-test (:use test))
 
 ;;
-;; --- scan-source-extract: list LENGTH is not nesting depth --------------------
+;; --- reflect/scan-source-extract: list LENGTH is not nesting depth --------------------
 ;;
 
-(describe "scan-source-extract: a long flat list does not blow the native stack"
+(describe "reflect/scan-source-extract: a long flat list does not blow the native stack"
 
   (test "a 150k-element flat list scans and counts every occurrence"
     ;; The reader's MAX_DEPTH (256) bounds how deeply forms NEST; nothing bounds
@@ -33,7 +33,7 @@
     ;; a release build (60k passed), so a regression aborts this test's process
     ;; rather than quietly passing.
     (let (src (str "(" (string/repeat "a " 150000) ")")
-          extract (scan-source-extract src)
+          extract (reflect/scan-source-extract src)
           counts (nth extract 0))
       (is (= 150000 (get counts "a")))))
 
@@ -41,7 +41,7 @@
     ;; The same spine, reached through a vector and a map value, so the worklist
     ;; is exercised across all three container kinds rather than at the root.
     (let (src (str "(def big {:xs [" (string/repeat "b " 60000) "]})")
-          extract (scan-source-extract src)
+          extract (reflect/scan-source-extract src)
           counts (nth extract 0))
       (is (= 60000 (get counts "b")))
       (is (= 1 (get counts "def")))))
@@ -49,7 +49,7 @@
   (test "the extract's other fields still work on a large file"
     (let (src (str "(defmodule m)\n(defn- helper () 1)\n(defn pub () "
                    "(list " (string/repeat "helper " 20000) "))")
-          extract (scan-source-extract src)
+          extract (reflect/scan-source-extract src)
           counts (nth extract 0)
           privs (nth extract 1))
       (is (= 20001 (get counts "helper")))
@@ -68,38 +68,38 @@
     ;; through the thunk it spawns a bystander, which then outlives the reap and
     ;; records that it did. Under the old "every new pid" reap the bystander was
     ;; killed at the isolate's return and never wrote.
-    (let (t (table))
+    (let (t (table/new))
       (spawn (fn ()
                (sleep 100)
-               (spawn (fn () (sleep 400) (table-put t :bystander-ran true)))
+               (spawn (fn () (sleep 400) (table/put t :bystander-ran true)))
                (sleep 900)))
       (sleep 40)
       (%isolate (fn () (sleep 300) :done))
       (sleep 500)
-      (is (= true (table-get t :bystander-ran)))))
+      (is (= true (table/get t :bystander-ran)))))
 
   (test "a process the thunk spawned directly IS reaped"
     ;; The reap has to keep working: an orphan still running the thunk's code
     ;; would look up a global the thunk `def`'d and die with a bogus
     ;; `unbound symbol` once the bindings are rolled back.
-    (let (t (table))
+    (let (t (table/new))
       (%isolate (fn ()
-                  (spawn (fn () (sleep 400) (table-put t :orphan-ran true)))
+                  (spawn (fn () (sleep 400) (table/put t :orphan-ran true)))
                   (sleep 100)
                   :done))
       (sleep 600)
-      (is (nil? (table-get t :orphan-ran)))))
+      (is (nil? (table/get t :orphan-ran)))))
 
   (test "a grandchild of the thunk IS reaped while its parent is still alive"
-    (let (t (table))
+    (let (t (table/new))
       (%isolate (fn ()
                   (spawn (fn ()
-                           (spawn (fn () (sleep 400) (table-put t :grand-ran true)))
+                           (spawn (fn () (sleep 400) (table/put t :grand-ran true)))
                            (sleep 400)))
                   (sleep 100)
                   :done))
       (sleep 600)
-      (is (nil? (table-get t :grand-ran)))))
+      (is (nil? (table/get t :grand-ran)))))
 
   (test "the isolate still rolls its own global bindings back"
     (%isolate (fn () (eval '(def isolate-scratch-global 41))))

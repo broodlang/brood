@@ -324,7 +324,7 @@
 (describe "prelude: sleep"
 
   (test "sleep waits roughly the requested time"
-    (let (t (now)) (sleep 30) (is (>= (- (now) t) 25))))
+    (let (t (os/now)) (sleep 30) (is (>= (- (os/now) t) 25))))
 
   (test "sleep does not consume a queued message"
     (send (self) :marker)
@@ -347,7 +347,7 @@
   (p)
   ;; Spin until p is parked in a `receive`, so a send to it takes the L1 (Local) path —
   ;; the path the bug lived on. Reduction preemption breaks the spin so p gets to run.
-  (if (= :waiting (get (process-info p) :status)) :ok (wait-parked p)))
+  (if (= :waiting (get (proc/info p) :status)) :ok (wait-parked p)))
 
 (describe "selective receive: a skipped local message keeps its value"
   :isolated

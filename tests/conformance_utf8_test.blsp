@@ -29,7 +29,7 @@
 (defn- u8-accepted (hexes) (filter u8-decodes? hexes))
 
 ;; Every sequence in `hexes` must decode; returns the offenders.
-(defn- u8-rejected (hexes) (remove u8-decodes? hexes))
+(defn- u8-rejected (hexes) (seq/remove u8-decodes? hexes))
 
 (defn- u8-file () (first (corpus-files "utf8")))
 

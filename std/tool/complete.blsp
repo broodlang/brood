@@ -57,9 +57,9 @@ suggestions\", never to an error on the user's command line."
 (defn- complete-find-root
   (dir)
   (cond
-    (file/exists? (path-join dir "project.blsp")) dir
-    (= dir (parent-directory dir)) nil
-    else (complete-find-root (parent-directory dir))))
+    (file/exists? (path/join dir "project.blsp")) dir
+    (= dir (path/dirname dir)) nil
+    else (complete-find-root (path/dirname dir))))
 
 (defn- complete-root () (complete-safely (fn () (complete-find-root (file/cwd)))))
 
@@ -74,7 +74,7 @@ suggestions\", never to an error on the user's command line."
   (dir suffix)
   (if (file/dir? dir)
     (fold (fn (acc entry)
-            (let (p (path-join dir entry))
+            (let (p (path/join dir entry))
               (cond
                 (file/dir? p) (append-two (complete-under p suffix) acc)
                 (string/ends-with? entry suffix) (cons p acc)
@@ -103,7 +103,7 @@ suggestions\", never to an error on the user's command line."
 (defn- complete-manifest
   (root)
   (complete-safely (fn ()
-                     (let (form (read-first (file/slurp (path-join root "project.blsp"))))
+                     (let (form (read-first (file/slurp (path/join root "project.blsp"))))
                        (if (and (pair? form) (= (first form) 'project)) form nil)))))
 
 ;; The directories the manifest declares under `key`, as absolute paths, falling back
@@ -120,7 +120,7 @@ suggestions\", never to an error on the user's command line."
         rels (if (or (nil? declared) (not (or (vector? declared) (pair? declared))))
                default
                declared))
-    (map (fn (r) (path-join root r)) rels)))
+    (map (fn (r) (path/join root r)) rels)))
 
 ;; Strip `root/` from an absolute path so completions read as the relative paths a
 ;; user actually types.
@@ -260,7 +260,7 @@ suggestions\", never to an error on the user's command line."
                     (fold (fn (acc rel)
                             (append acc
                               (or (complete-safely (fn ()
-                                                     (complete-tags-in (file/slurp (path-join root
+                                                     (complete-tags-in (file/slurp (path/join root
                                                                                      rel))
                                                        nil 0)))
                                 nil)))
@@ -310,7 +310,7 @@ suggestions\", never to an error on the user's command line."
                       nil
                       (or (complete-safely (fn ()
                                              (map (fn (p)
-                                                    (complete-strip-extension (path-basename p)))
+                                                    (complete-strip-extension (path/basename p)))
                                                (fold (fn (acc dir)
                                                        (append acc
                                                          (complete-under dir ".blsp")))
@@ -326,7 +326,7 @@ suggestions\", never to an error on the user's command line."
     (if (nil? root)
       nil
       (sort (or (complete-safely (fn ()
-                                   (map (fn (p) (complete-strip-extension (path-basename p)))
+                                   (map (fn (p) (complete-strip-extension (path/basename p)))
                                      (fold (fn (acc dir)
                                              (append acc (complete-under dir ".blsp")))
                                        nil

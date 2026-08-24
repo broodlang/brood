@@ -176,13 +176,13 @@ so redefining the layer hot-swaps it), like a keymap command."
 (defn- layers-find
   (ctx name)
   "The first active layer reference named `name`, or nil."
-  (find (fn (l) (= name (layers-name-of l))) (layers-list ctx)))
+  (seq/find (fn (l) (= name (layers-name-of l))) (layers-list ctx)))
 
 (defn layer-collect (ctx facet)
   "The `facet` value of every active layer that defines it, highest-precedence
 first (head of `:layers`); layers lacking the facet are dropped. The one generic
 resolver — keymaps and hooks are just facets over it."
-  (remove nil?
+  (seq/remove nil?
     (map (fn (l) (get (layers-resolve l) facet)) (layers-list ctx))))
 
 (defn active-layers (ctx)
@@ -200,7 +200,7 @@ primitive — `activate-layer` is the hook-firing version."
 
 (defn remove-layer (ctx name)
   "Remove every active layer whose `:name` is `name`."
-  (assoc ctx :layers (remove (fn (l) (= name (layers-name-of l))) (layers-list ctx))))
+  (assoc ctx :layers (seq/remove (fn (l) (= name (layers-name-of l))) (layers-list ctx))))
 
 (defn layer-active? (ctx name)
   "True if an active layer is named `name`."
@@ -316,20 +316,20 @@ every buffer). **Idempotent** — registering the same ref again is a no-op, so 
 module that registers at load is safe to (re)load."
   ;; The membership test is INSIDE the transform, so two processes registering the same
   ;; ref cannot both see it absent and both append (the KI-23 shape).
-  (swap-registry! editor/layers/*system-layers*
+  (%swap-registry! editor/layers/*system-layers*
     (fn (l) (if (any? (fn (r) (= r ref)) l) l (append l (list ref))))))
 
 (defn register-type-layers (type refs)
   "Bind buffer `type` to `refs` (a list of layer references, head = highest
 precedence). Rebinds the registry, so it hot-swaps on the next buffer of that type.
 To add a single layer to a type, `assoc` onto its existing `(layers-for-type type)`."
-  (swap-registry! editor/layers/*type-layers* (fn (m) (assoc m type refs))))
+  (%swap-registry! editor/layers/*type-layers* (fn (m) (assoc m type refs))))
 
 (defn register-file-type (spec type)
   "Map filenames to `type`: `spec` is a suffix string (matched with `ends-with?`)
 or a predicate `(fn (filename) -> bool)`. Prepended, so the most-recently-registered
 rule wins — a project can override a default."
-  (swap-registry! editor/layers/*auto-type-by-file* (fn (l) (cons {:match spec :type type} l))))
+  (%swap-registry! editor/layers/*auto-type-by-file* (fn (l) (cons {:match spec :type type} l))))
 
 (defn layers-for-type (type)
   "The layer refs bound to `type`, or () if none."

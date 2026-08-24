@@ -1,4 +1,4 @@
-;; Timers — `send-after` / `send-interval` / `cancel-timer` (Erlang parity,
+;; Timers — `send-after` / `send-interval` / `proc/cancel-timer` (Erlang parity,
 ;; ROADMAP "OTP near-term"). Pure Brood policy: each timer is a green process
 ;; parked on the scheduler's timer wheel; the handle is its pid.
 ;;
@@ -24,19 +24,19 @@
   (test "the handle is a pid"
     (let (t (send-after 1000 (self) :x))
       (is (pid? t))
-      (cancel-timer t)))
+      (proc/cancel-timer t)))
 
-  (test "cancel-timer stops a pending fire"
+  (test "proc/cancel-timer stops a pending fire"
     (let (me (self) t (send-after 100 me :cancelled-fire))
-      (cancel-timer t)
+      (proc/cancel-timer t)
       (assert= :quiet (receive (:cancelled-fire :FIRED) (after 300 :quiet)))))
 
-  (test "cancel-timer is idempotent and safe on a fired timer"
+  (test "proc/cancel-timer is idempotent and safe on a fired timer"
     (let (me (self) t (send-after 10 me :fired))
       (assert= :fired (receive (:fired :fired) (after *test-wait-ms* :timeout)))
       ; already dead — no-op
-      (cancel-timer t)
-      (cancel-timer t))))
+      (proc/cancel-timer t)
+      (proc/cancel-timer t))))
 (describe "send-interval"
   (test "ticks repeatedly until cancelled"
     (let (me (self) t (send-interval 20 me :beat))
@@ -44,7 +44,7 @@
       (assert= :beat (receive (:beat :beat) (after *test-wait-ms* :timeout)))
       (assert= :beat (receive (:beat :beat) (after *test-wait-ms* :timeout)))
       (assert= :beat (receive (:beat :beat) (after *test-wait-ms* :timeout)))
-      (cancel-timer t)
+      (proc/cancel-timer t)
       ;; drain any in-flight beat, then confirm silence
       (sleep 60)
       (letrec (drain (fn () (receive (:beat (drain)) (after 0 nil)))) (drain))

@@ -223,10 +223,10 @@ than being fetched into `_deps/<name>/`."
   (and (record? x) (= (record-id x) :project/dep-path)))
 
 ;; The elements of vector `v` from index `start` onward, as a list (tail-recursive).
-(defn- project-vec-drop (v start) (project-vec-drop-acc v start (dec (vector-length v)) nil))
+(defn- project-vec-drop (v start) (project-vec-drop-acc v start (dec (seq/vector-length v)) nil))
 (defn- project-vec-drop-acc
   (v start i acc)
-  (if (< i start) acc (project-vec-drop-acc v start (dec i) (cons (vector-ref v i) acc))))
+  (if (< i start) acc (project-vec-drop-acc v start (dec i) (cons (seq/vector-ref v i) acc))))
 
 ;; The keys of a flat plist (every other element from the head).
 ;; check-allow: deliberately non-tail — depth = the manifest plist's key count.
@@ -247,7 +247,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-git-dep
   (name entry)
-  (let (url (vector-ref entry 2)
+  (let (url (seq/vector-ref entry 2)
         opts (project-vec-drop entry 3)
         ref (plist-get opts :ref)
         version (plist-get opts :version))
@@ -269,7 +269,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-path-dep
   (name entry)
-  (let (path (vector-ref entry 2)
+  (let (path (seq/vector-ref entry 2)
         opts (project-vec-drop entry 3))
     (when (not (string? path))
       (error "project: :path dependency " name " path must be a string, got " path))
@@ -278,7 +278,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-registry-dep
   (name entry)
-  (let (version (vector-ref entry 2)
+  (let (version (seq/vector-ref entry 2)
         opts (project-vec-drop entry 3))
     (when (not (string? version))
       (error "project: registry dependency " name " version must be a string, got " version))
@@ -287,7 +287,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-tarball-dep
   (name entry)
-  (let (url (vector-ref entry 2)
+  (let (url (seq/vector-ref entry 2)
         opts (project-vec-drop entry 3)
         sha (plist-get opts :sha256))
     (when (not (string? url))
@@ -305,9 +305,9 @@ than being fetched into `_deps/<name>/`."
   "Parse one `:dependencies` vector entry `[name kind & opts]` into a normalised dep record, dispatching on `kind` (`:git`/`:path`/`:tarball`/`:version`) and recording the `:optional` flag (ADR-172)."
   (when (not (vector? entry))
     (error "project: each :dependencies entry must be a vector, got " entry))
-  (when (< (vector-length entry) 3) (error "project: dependency entry is too short: " entry))
-  (let (name (vector-ref entry 0)
-        kind (vector-ref entry 1)
+  (when (< (seq/vector-length entry) 3) (error "project: dependency entry is too short: " entry))
+  (let (name (seq/vector-ref entry 0)
+        kind (seq/vector-ref entry 1)
         opts (project-vec-drop entry 3))
     (when (not (symbol? name)) (error "project: dependency name must be a symbol, got " name))
     (let (base (cond
@@ -477,13 +477,13 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 (defn find-root (dir)
   "Walk up from `dir` toward the filesystem root, returning the first directory that contains a `project.blsp`, or nil if none is found."
   (cond
-    (file/exists? (path-join dir "project.blsp")) dir
-    (= dir (parent-directory dir)) nil
-    else (find-root (parent-directory dir))))
+    (file/exists? (path/join dir "project.blsp")) dir
+    (= dir (path/dirname dir)) nil
+    else (find-root (path/dirname dir))))
 
 (defn abs-paths (root rels)
   "Resolve each relative path in `rels` against `root`, returning the list of absolute paths."
-  (map (fn (r) (path-join root r)) rels))
+  (map (fn (r) (path/join root r)) rels))
 
 ;; Recursively collect every <name>_test.blsp path under `dir` (skipping nothing
 ;; else). Returns a list of full paths; nil if `dir` isn't a directory.
@@ -495,7 +495,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; reversed (prepend), which is fine: the file list feeds order-independent per-file work.
   (if (file/dir? dir)
     (fold (fn (acc entry)
-            (let (p (path-join dir entry))
+            (let (p (path/join dir entry))
               (cond
                 (file/dir? p) (append-two (project-collect-tests p) acc)
                 (string/ends-with? entry "_test.blsp") (cons p acc)
@@ -511,7 +511,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     ;; Same O(files²)→O(files) fix as `project-collect-tests`: `cons` files, `append-two`
     ;; subdir lists (copies the small list, shares `acc`) instead of `(append acc …)`.
     (fold (fn (acc entry)
-            (let (p (path-join dir entry))
+            (let (p (path/join dir entry))
               (cond
                 (file/dir? p) (append-two (collect-sources p) acc)
                 (string/ends-with? entry ".blsp") (cons p acc)
@@ -667,7 +667,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 
 (defn image-path (root)
   "Where `root`'s startup image lives."
-  (path-join root *project-image-file*))
+  (path/join root *project-image-file*))
 
 ;; The staleness key: every source file's path + size + mtime, plus the running
 ;; binary's build id. Any edit, add or delete changes it, as does a new `brood`.
@@ -713,8 +713,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; `distinct`: a dep file declaring more than one module (ADR-223) now has one
   ;; `*module-files*` entry per module, all pointing at the same path — the
   ;; fingerprint wants each file once, not once per module it declares.
-  (sort (distinct (map second
-                    (remove (fn (kv) (not (project-image-dep-module? (first kv))))
+  (sort (seq/distinct (map second
+                    (seq/remove (fn (kv) (not (project-image-dep-module? (first kv))))
                       (seq *module-files*))))))
 
 ;; `before` as a SET. As a list, `member?` is a linear scan run once per global — ~4000 x
@@ -729,7 +729,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; The globals the load CREATED: everything bound now that was not bound before it ran.
 (defn- project-image-fresh-names
   (seen)
-  (remove (fn (n) (contains? seen n)) (global-names)))
+  (seq/remove (fn (n) (contains? seen n)) (global-names)))
 
 ;; The registries the load MUTATED — derived from the funnel, minus the exclusions above,
 ;; minus any that ride their OWN materialised section (writing them here too would double
@@ -742,7 +742,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; imaged start (register-type-layers runs at that module's load, which materialising skips).
 (defn- project-image-registry-names
   (seen)
-  (remove (fn (n)
+  (seq/remove (fn (n)
             (or (includes? *project-image-registry-exclusions* n)
               (and (not (contains? seen n))
                 (let (mod (project-image-section-of n))
@@ -795,7 +795,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
                (or (get grouped "") nil)))
     (cons ["" root]
       (map (fn (k) [k (get grouped k)])
-        (remove
+        (seq/remove
           (fn (k)
             ;; A non-root section is materialised from the image only for the project's
             ;; own modules and its dependencies — both live in `*module-files*`
@@ -813,7 +813,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   "Snapshot the bindings this project load produced into `root`'s image, grouped into
 per-module sections. `before` is the `(global-names)` list captured *before* the sources
 were loaded. Returns the entry count."
-  (let (dir (parent-directory (image-path root)))
+  (let (dir (path/dirname (image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
     (%image-write (image-path root)
       (project-image-sections before)
@@ -863,7 +863,7 @@ NOT call this: it requires its entry point and lets the rest stay on disk."
 ;; is exactly the failure mode worth a special case.
 (defn image-usable? ()
   "Whether a cached startup image may be used — false under `BROOD_COVERAGE`, whose instrumentation an image cannot represent."
-  (nil? (getenv "BROOD_COVERAGE")))
+  (nil? (os/getenv "BROOD_COVERAGE")))
 
 ;; Milliseconds as "12.3s" / "845ms" — build output should read at a glance.
 (defn- project-ms-str
@@ -901,11 +901,11 @@ Reports the build on stderr when it actually builds, and says nothing on an imag
 hit — a cold load of a large project takes tens of seconds, and silence there is
 indistinguishable from a hang. stderr, not stdout, so `nest run`'s output stays the
 program's and the LSP's protocol channel stays clean."
-  (let (t-a (now-ns)
+  (let (t-a (os/now-ns)
         files (source-files root)
-        t-b (now-ns)
+        t-b (os/now-ns)
         fp (project-fingerprint-of files)
-        t-c (now-ns)
+        t-c (os/now-ns)
         hit (cond
               (image-usable?)
                 (let (n (project-install-image root fp))
@@ -915,8 +915,8 @@ program's and the LSP's protocol channel stays clean."
                     ;; whole project. `nest run` uses `setup-lazy-image` instead.
                     else (do (materialize-all) n)))
               else nil)
-        t-d (now-ns)
-        _ (when (getenv "BROOD_IMAGE_TRACE")
+        t-d (os/now-ns)
+        _ (when (os/getenv "BROOD_IMAGE_TRACE")
             (eprintln (str "[loader] collect "
                         (quot (- t-b t-a) 1000000)
                         " ms, fingerprint "
@@ -927,13 +927,13 @@ program's and the LSP's protocol channel stays clean."
     (cond
       hit hit
       else
-        (let (name (or *project-name* (path-basename root))
+        (let (name (or *project-name* (path/basename root))
               n (count files)
               _ (eprintln (str "Building " name " (" n " file" (if (= n 1) "" "s") ")"))
-              t0 (now-ns)
+              t0 (os/now-ns)
               before (global-names)
               _ (/apply load-sources (cons root opts))
-              t-load (quot (- (now-ns) t0) 1000000)
+              t-load (quot (- (os/now-ns) t0) 1000000)
               ;; A project whose globals are not all portable — a `table` global is the
               ;; documented mutable-state idiom, and a table is deliberately local to its
               ;; runtime — simply cannot be imaged. That is correct (loading from source is
@@ -954,7 +954,7 @@ program's and the LSP's protocol channel stays clean."
                                           (get e :message)))
                               nil)))
                       else nil)
-              t-all (quot (- (now-ns) t0) 1000000))
+              t-all (quot (- (os/now-ns) t0) 1000000))
           (eprintln (str "Built "
                       name
                       " in "
@@ -984,8 +984,8 @@ A `:path` dep loads in place, so its manifest sits at its `:path`; a `:git` /
           (cond
             (not (nil? acc)) acc
             (not (= (get d :name) dep-name)) acc
-            (dep-path? d) (path-join (path-join root (get d :path)) "project.blsp")
-            else (path-join (path-join (path-join root "_deps") (name dep-name)) "project.blsp")))
+            (dep-path? d) (path/join (path/join root (get d :path)) "project.blsp")
+            else (path/join (path/join (path/join root "_deps") (name dep-name)) "project.blsp")))
     nil *project-dependencies*))
 
 (defn- project-manifest-format-headers
@@ -1027,7 +1027,7 @@ empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not 
     (if (not (file/exists? dir))
       []
       (vec (filter (fn (dep-name)
-                     (let (enhances (manifest-enhances (path-join (path-join dir dep-name)
+                     (let (enhances (manifest-enhances (path/join (path/join dir dep-name)
                                                          "project.blsp")))
                        (and (get enhances app-symbol)
                          (version/satisfies-all? host enhances))))
@@ -1037,7 +1037,7 @@ empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not 
   "The names of packages installed under `root/_deps` that enhance `app` at a satisfied
 `app-version` — `enhancers-in` over a project's dependency dir. The runtime sibling of the
 registry's `?enhances=` query (`nest search --enhances`)."
-  (enhancers-in (path-join root "_deps") app app-version))
+  (enhancers-in (path/join root "_deps") app app-version))
 
 (defn- project-plugin-format-headers
   (root plugin-name)
@@ -1149,7 +1149,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; Read the manifest as *data* and apply it — rather than `load`ing it, which
   ;; would need the `(project …)` macro bound bare in the (root) manifest file
   ;; (it now lives in this namespace). Manifests stay written `(project …)`.
-  (let (mf (path-join root "project.blsp"))
+  (let (mf (path/join root "project.blsp"))
     (when (file/exists? mf) (project-apply-manifest mf)))
   ;; Refuse an incompatible runtime BEFORE doing any project work (ADR-209).
   (project-check-brood-version)
@@ -1185,9 +1185,9 @@ rules merged in declaration order, then this project's own `:format-headers` on 
             dirs (abs-paths root *project-source-paths*)
             module-files (/apply append (map package/module-files dirs))
             short-modules (map first module-files))
-        (register-package-modules! pkg short-modules)
+        (%register-package-modules! pkg short-modules)
         (map (fn (mf)
-               (register-package-module! (str pkg "/" (name (first mf))) (second mf)))
+               (%register-package-module! (str pkg "/" (name (first mf))) (second mf)))
           module-files)
         ;; Ambient: not restored — the project's default context for the whole run. A dep
         ;; load nests its own context over this and restores back to it.
@@ -1377,7 +1377,7 @@ resolve in the advisory checker. Returns the project root."
 ;; until the first spawn, so warm the pool and poll briefly for the threads to spin.
 (defn- project-await-pool
   (tries)
-  (let (n (worker-threads))
+  (let (n (dev/worker-threads))
     (if (or (> n 0) (<= tries 0))
       (max 1 n)
       (do (sleep 1) (project-await-pool (dec tries))))))
@@ -1448,11 +1448,11 @@ resolve in the advisory checker. Returns the project root."
               (project-pfold-collect (- pending 1)
                 workers
                 (cons pid reported)
-                (combine acc (third msg))
+                (combine acc (seq/third msg))
                 combine
                 on-death)))
         (= (first msg) :down)
-          (let (pid (third msg) entry (project-pfold-entry pid workers))
+          (let (pid (seq/third msg) entry (project-pfold-entry pid workers))
             (if (or (includes? reported pid) (nil? entry))
               (project-pfold-collect pending
                 workers reported acc combine on-death)
@@ -1560,7 +1560,7 @@ resolve in the advisory checker. Returns the project root."
   (chunk)
   (fold (fn (k pair)
           (let ([f cl] pair)
-            (fold project-tally-warning k (check-file f cl))))
+            (fold project-tally-warning k (reflect/check-file f cl))))
     0 chunk))
 
 ;; The same pass for the case where every file shares ONE reachability set, which is what
@@ -1576,7 +1576,7 @@ resolve in the advisory checker. Returns the project root."
 (defn- project-check-chunk-shared
   (chunk)
   (let (cl (first chunk))
-    (fold (fn (k f) (fold project-tally-warning k (check-file f cl)))
+    (fold (fn (k f) (fold project-tally-warning k (reflect/check-file f cl)))
       0
       (rest chunk))))
 
@@ -1634,7 +1634,7 @@ resolve in the advisory checker. Returns the project root."
                     ;; this file's mtime moving, so it must invalidate the cache too.
                     (if (and c
                           (= (nth c 0) (file/mtime p))
-                          (= (check-deps-fp (nth c 2)) (nth c 3))
+                          (= (reflect/check-deps-fp (nth c 2)) (nth c 3))
                           (= (nth c 4 nil) cl))
                       ; unchanged file + deps + closure → reuse
                       [(map-assoc reuse p c) recheck]
@@ -1660,7 +1660,7 @@ resolve in the advisory checker. Returns the project root."
 
 (defn- project-check-files
   (files root)
-  (if (= (getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/getenv "BROOD_NO_CHECK") "1")
     0
     ;; Build the KI-17 reachability closures from the WHOLE project (every file's
     ;; header), not just `files` — a `nest check FILE` still needs the full graph to
@@ -1709,7 +1709,7 @@ resolve in the advisory checker. Returns the project root."
         (or from (file/cwd))
         ")"))
     (project-ensure-loaded root)
-    (if (= (getenv "BROOD_NO_CHECK") "1")
+    (if (= (os/getenv "BROOD_NO_CHECK") "1")
       nil
       ;; `append-two` (copy the small per-file diagnostic list, share `acc`) not
       ;; `(append acc …)` (recopies the growing accumulator each file → O(files²)).
@@ -1726,9 +1726,9 @@ resolve in the advisory checker. Returns the project root."
   (if (nil? files)
     acc
     (let (f (first files)
-          diags (check-file-structured f (map-get closures f nil))
+          diags (reflect/check-file-structured f (map-get closures f nil))
           done2 (inc done))
-      (%mcp-progress done2 total (str "checked " (path-basename f)))
+      (%mcp-progress done2 total (str "checked " (path/basename f)))
       (project-check-fold (rest files) closures total done2 (append-two diags acc)))))
 
 ;; --- duplicate-global detection (flat namespace, ADR-019) --------------------
@@ -1742,8 +1742,8 @@ resolve in the advisory checker. Returns the project root."
 ;; CST node accessors (see the `parse-source` doc in builtins.rs): a node is
 ;; `[kind v]` — for a leaf `v` is the raw source text, for a container
 ;; (`[:list …]`, `[:root …]`) `v` is the vector of child nodes.
-(defn- project-node-kind (n) (vector-ref n 0))
-(defn- project-node-val (n) (vector-ref n 1))
+(defn- project-node-kind (n) (seq/vector-ref n 0))
+(defn- project-node-val (n) (seq/vector-ref n 1))
 
 ;; Top-level heads that bind a global (each expands to `def`). `defmodule` is
 ;; excluded — it registers a module feature, not a clashing value binding.
@@ -1802,10 +1802,10 @@ resolve in the advisory checker. Returns the project root."
 (defn- project-file-def-names
   (path)
   (let (nodes (filter (fn (c) (= (project-node-kind c) :list))
-                (project-node-val (parse-source (file/slurp path))))
-        ns (first (keep project-module-name nodes)))
+                (project-node-val (reflect/parse-source (file/slurp path))))
+        ns (first (seq/keep project-module-name nodes)))
     (map (fn (entry) (project-qualify ns (first entry) (second entry)))
-      (keep project-def-entry nodes))))
+      (seq/keep project-def-entry nodes))))
 
 ;; The project's source files (no tests) — the set the flat-namespace rule binds.
 (defn- source-files
@@ -1834,9 +1834,9 @@ resolve in the advisory checker. Returns the project root."
                             acc)))
                   {}
                   extracts))
-    (keep (fn (entry)
+    (seq/keep (fn (entry)
             (let ([nm paths] entry
-                  where (sort (distinct paths)))
+                  where (sort (seq/distinct paths)))
               (when (> (count where) 1)
                 (str "warning: global '"
                   nm
@@ -1852,7 +1852,7 @@ resolve in the advisory checker. Returns the project root."
 ;; type-check pre-flight. Shared by `check-project` / `check-project-sources`.
 (defn- project-check-duplicate-defs
   (extracts source-set)
-  (if (= (getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/getenv "BROOD_NO_CHECK") "1")
     0
     (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project-duplicate-def-warnings extracts source-set))))
 
@@ -1867,9 +1867,9 @@ resolve in the advisory checker. Returns the project root."
                           (project-file-def-names path)))
                   {}
                   files))
-    (keep (fn (entry)
+    (seq/keep (fn (entry)
             (let ([nm paths] entry
-                  where (sort (distinct paths)))
+                  where (sort (seq/distinct paths)))
               (when (> (count where) 1)
                 (str "warning: global '"
                   nm
@@ -1942,7 +1942,7 @@ resolve in the advisory checker. Returns the project root."
 ;; check path (only the native `scan-source-extract` runs), kept for documentation.
 (defn- project-scan-file-entry
   (path)
-  (scan-source-extract (file/slurp path)))
+  (reflect/scan-source-extract (file/slurp path)))
 
 ;; The `:scan-entries` op (runs in a worker): return `[path [mtime counts privs
 ;; def-names]]` for each file in `chunk` — the cache entry. mtime is read BEFORE the
@@ -1970,7 +1970,7 @@ resolve in the advisory checker. Returns the project root."
   (map (fn (pair)
          (let ([p cl] pair
                mt (file/mtime p)
-               r (check-file-deps p cl))
+               r (reflect/check-file-deps p cl))
            [p [mt (nth r 0) (nth r 1) (nth r 2) cl]]))
     chunk))
 
@@ -1989,7 +1989,7 @@ resolve in the advisory checker. Returns the project root."
 ; v2: check-result entries gained a 5th field, the KI-17 require-closure (ADR-189).
 (def *check-cache-version* "v2")
 (defn- project-cache-stamp () (str (build-id) "|" *check-cache-version*))
-(defn- project-cache-off? () (= (getenv "BROOD_NO_CHECK_CACHE") "1"))
+(defn- project-cache-off? () (= (os/getenv "BROOD_NO_CHECK_CACHE") "1"))
 
 ;; The cache directory for `root` (created if absent), or nil if no cache base is
 ;; available: `$XDG_CACHE_HOME` (or `~/.cache`) `/brood/check/<sha256 of root>`.
@@ -2011,14 +2011,14 @@ resolve in the advisory checker. Returns the project root."
 (def *project-cache-pruned* false)
 
 (defn- project-cache-prune
-  (base keep)
+  (base seq/keep)
   (when (not *project-cache-pruned*)
     (def *project-cache-pruned* true)
     (try
-      (let (cutoff (- (now) *project-cache-max-age-ms*))
+      (let (cutoff (- (os/now) *project-cache-max-age-ms*))
         (fold (fn (_ entry)
-                (let (p (path-join base entry))
-                  (when (and (not (= p keep))
+                (let (p (path/join base entry))
+                  (when (and (not (= p seq/keep))
                           (file/dir? p)
                           (< (or (file/mtime p) 0) cutoff))
                     (try (file/rmdir p) (catch _ nil)))))
@@ -2028,15 +2028,15 @@ resolve in the advisory checker. Returns the project root."
 
 (defn- project-cache-dir
   (root)
-  (let (xdg (getenv "XDG_CACHE_HOME")
-        home (getenv "HOME")
+  (let (xdg (os/getenv "XDG_CACHE_HOME")
+        home (os/getenv "HOME")
         base (cond
                (and xdg (not (= xdg ""))) xdg
-               (and home (not (= home ""))) (path-join home ".cache")
+               (and home (not (= home ""))) (path/join home ".cache")
                else nil))
     (when base
-      (let (checks (path-join (path-join base "brood") "check")
-            dir (path-join checks (hash/sha256 root)))
+      (let (checks (path/join (path/join base "brood") "check")
+            dir (path/join checks (hash/sha256 root)))
         (file/mkdir dir)
         (project-cache-prune checks dir)
         dir))))
@@ -2046,7 +2046,7 @@ resolve in the advisory checker. Returns the project root."
 ;; separate files keyed by the same paths.
 (defn- project-cache-file
   (root name)
-  (let (dir (project-cache-dir root)) (when dir (path-join dir (str name ".blsp")))))
+  (let (dir (project-cache-dir root)) (when dir (path/join dir (str name ".blsp")))))
 
 ;; The cached `{path -> entry}` map for manifest `name`, or `{}` if the cache is off
 ;; / missing / stamp-mismatched / unreadable (any failure falls back to a cold
@@ -2126,7 +2126,7 @@ resolve in the advisory checker. Returns the project root."
 ;; / per-file), noted as future work (ADR-119). Tunable via `BROOD_CHECK_CACHE_MAX`.
 (defn- project-cache-max-files
   ()
-  (let (e (getenv "BROOD_CHECK_CACHE_MAX"))
+  (let (e (os/getenv "BROOD_CHECK_CACHE_MAX"))
     (if (and e (not (= e ""))) (or (string->number e) 50000) 50000)))
 
 ;; Return `{path -> [mtime counts privs def-names]}` for `files` by scanning them
@@ -2162,7 +2162,7 @@ resolve in the advisory checker. Returns the project root."
     ;; the accumulator tail → O(total); a plain `(append acc …)` would be O(files²).
     (fold (fn (acc kv)
             (let ([path entry] kv)
-              (append-two (keep (fn (pd)
+              (append-two (seq/keep (fn (pd)
                                   (let ([bare qual] pd
                                         used (or (>= (map-get counts bare 0) 2)
                                                (and (not (= qual bare))
@@ -2177,7 +2177,7 @@ resolve in the advisory checker. Returns the project root."
 ;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.
 (defn- project-check-unused-private
   (extracts)
-  (if (= (getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/getenv "BROOD_NO_CHECK") "1")
     0
     (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project-unused-private-warnings extracts))))
 
@@ -2344,7 +2344,7 @@ business."
 ;; only the still-broken ones remain.
 (defn- project-failed-file
   (root)
-  (let (dir (project-cache-dir root)) (if (nil? dir) nil (path-join dir "last-failed.blsp"))))
+  (let (dir (project-cache-dir root)) (if (nil? dir) nil (path/join dir "last-failed.blsp"))))
 
 ;; Stored as a `{:failed (label …)}` record rather than a bare list, because an
 ;; empty list IS nil in a Lisp — a bare list can't distinguish "never run" from
@@ -2378,7 +2378,7 @@ business."
 ;; module in the closure has no file to track and can't change under a --stale run.
 (defn- project-stale-file
   (root)
-  (let (dir (project-cache-dir root)) (if (nil? dir) nil (path-join dir "last-run-mtimes.blsp"))))
+  (let (dir (project-cache-dir root)) (if (nil? dir) nil (path/join dir "last-run-mtimes.blsp"))))
 
 (defn- project-read-stale-record
   (root)
@@ -2402,7 +2402,7 @@ business."
   (test-file closures module->file)
   "Every project file `test-file` transitively depends on (mapping its reachable module
 names back to files), including itself. Modules with no project file (std/prelude) drop."
-  (conj (into #{} (keep (fn (m) (get module->file m)) (or (get closures test-file) [])))
+  (conj (into #{} (seq/keep (fn (m) (get module->file m)) (or (get closures test-file) [])))
     test-file))
 
 (defn- project-file-max-mtime
@@ -2632,7 +2632,7 @@ as unchanged (only when some were)."
 ;; load-all-then-run-all path under `BROOD_TEST_NO_SCOPE`.
 (defn- project-run-suite
   (files opts)
-  (if (getenv "BROOD_TEST_NO_SCOPE")
+  (if (os/getenv "BROOD_TEST_NO_SCOPE")
     (do
       (fold (fn (_ f) (load f)) nil files)
       (/apply test/run-tests opts))
@@ -2660,7 +2660,7 @@ as unchanged (only when some were)."
       ;; Per-file scoped run (see `run-project-tests`) — matters most here: `nest mcp`
       ;; is a long-lived hot-reload image, so a load-all-then-run would accumulate every
       ;; file's promoted code on EVERY run-tests call. `BROOD_TEST_NO_SCOPE` reverts.
-      (if (getenv "BROOD_TEST_NO_SCOPE")
+      (if (os/getenv "BROOD_TEST_NO_SCOPE")
         (do
           (fold (fn (_ f) (load f)) nil files)
           (/apply test/run-tests-structured opts))
@@ -2782,7 +2782,7 @@ as unchanged (only when some were)."
   (let (prefix (if (string/ends-with? dir "/") dir (str dir "/"))
         rel (if (string/starts-with? path prefix)
               (string/substring path (string/length prefix) (string/length path))
-              (path-basename path)))
+              (path/basename path)))
     (if (string/ends-with? rel ".blsp")
       (string/substring rel 0 (- (string/length rel) 5))
       rel)))
@@ -2802,7 +2802,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
   ;; auto-require via the bare qualified ref below would load it mid-cycle, leaving
   ;; `package/ensure-deps` unbound during `nest release` (not exercised by nest check/suite).
   (require-one 'package)
-  (let (manifest (file/slurp (path-join root "project.blsp")))
+  (let (manifest (file/slurp (path/join root "project.blsp")))
     ;; Apply the manifest as DATA (not `load`) to learn its source paths + deps,
     ;; mirroring `setup`. We don't load any source here — just read it.
     (let (form (read-first manifest))
@@ -2855,7 +2855,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
             ;; modules are in `project-pairs`, so they never leak in here as a bogus package.
             ;; Baked into the manifest as `:bundled-packages` so `run-bundle` roots every one,
             ;; fixing the transitive-dep case the old direct-deps-only rooting missed.
-            dep-packages (distinct (map (fn (p) (bundle-key-package (first p))) dep-pairs)))
+            dep-packages (seq/distinct (map (fn (p) (bundle-key-package (first p))) dep-pairs)))
         ;; With deps rooted, a same-named module in two deps no longer clashes. This guard now
         ;; only catches a genuine bundle-key collision — two of your own source files declaring
         ;; the same module, or a root-project module keyed identically to a dep's rooted name —
@@ -2908,7 +2908,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; parity), so its embedded dependency modules — keyed `pkg/mod` — load under their package
 ;; context. A dependency contributes every embedded module key prefixed by its `:name`; the
 ;; short names (the part after `pkg/`) are that package's intra-package set — the same map
-;; `register-package-modules!` builds from disk deps at `setup`. Deps are known from
+;; `%register-package-modules!` builds from disk deps at `setup`. Deps are known from
 ;; the embedded manifest (`*project-dependencies*`, already applied); their paths are gone,
 ;; but the bundle needs only the names. The root project's own modules stay unrooted (they
 ;; are not registered here), so they load at ROOT, matching how `bundle-collect` embedded them.
@@ -2930,7 +2930,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                                     acc)
                                   acc))
                           nil keys))
-             (when shorts (register-package-modules! pkg shorts))))
+             (when shorts (%register-package-modules! pkg shorts))))
       dep-names)
     nil))
 
@@ -2972,7 +2972,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
 ;; It's auto-created with documented defaults on first tool use, then loaded by
-;; the `nest` subcommands. Rust mechanism: getenv (locate it) + run-process.
+;; the `nest` subcommands. Rust mechanism: os/getenv (locate it) + os/run-process.
 (defdyn *config-git-init* false)
 ; nest new: run `git init` in the new project?
 
@@ -2994,9 +2994,9 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (defn- config-base-dir
   ()
   ; $XDG_CONFIG_HOME, else ~/.config
-  (let (xdg (getenv "XDG_CONFIG_HOME")) (if (nil? xdg) (path-join (getenv "HOME") ".config") xdg)))
-(defn- config-dir () (path-join (config-base-dir) "brood"))
-(defn- config-path () (path-join (config-dir) "config.blsp"))
+  (let (xdg (os/getenv "XDG_CONFIG_HOME")) (if (nil? xdg) (path/join (os/getenv "HOME") ".config") xdg)))
+(defn- config-dir () (path/join (config-base-dir) "brood"))
+(defn- config-path () (path/join (config-dir) "config.blsp"))
 
 (def *config-default-source*
   (str ";; Brood user config — tooling preferences (the sibling of project.blsp).\n"

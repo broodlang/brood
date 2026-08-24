@@ -30,7 +30,7 @@
     (with-out-str
       (let (dir (temp-dir "brood-reload-"))
         (file/mkdir dir)
-        (let (f (path-join dir "w.blsp"))
+        (let (f (path/join dir "w.blsp"))
           (file/spit f "(def rwt-val 1)\n")
           (load f)
           (on-change f (fn (p) (println "[reload-watch-test] on-reload fired" p)))
@@ -52,7 +52,7 @@
     (with-out-str
       (let (dir (temp-dir "brood-reload-"))
         (file/mkdir dir)
-        (let (f (path-join dir "w2.blsp"))
+        (let (f (path/join dir "w2.blsp"))
           (file/spit f "(def rwt-val2 1)\n")
           (load f)
           ;; A callback that always throws — the def must still take effect

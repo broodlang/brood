@@ -13,8 +13,8 @@
 
 ;; 2^(2^20) ≈ 10^315000 — about 315 000 decimal digits, 16384 u64 limbs.
 ;; Each squaring doubles limbs; 20 squarings from 2 → wall-clock seconds, not hours.
-(defn repeated-square (n times)
-  (if (= times 0) n (repeated-square (* n n) (- times 1))))
+(defn repeated-square (n seq/times)
+  (if (= seq/times 0) n (repeated-square (* n n) (- seq/times 1))))
 
 (println "--- growing the monster ---")
 (def monster (repeated-square 2 20))

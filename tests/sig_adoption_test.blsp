@@ -15,7 +15,7 @@
 ;; we assert on a *static* diagnostic without failing this file's own compile pass.
 (defn warns-of (src)
   "The advisory warning messages for `src`, as a list of strings."
-  (map (fn (w) (get w :message)) (check-string-structured src)))
+  (map (fn (w) (get w :message)) (reflect/check-string-structured src)))
 
 (defn warns-about? (src needle)
   "Does checking `src` produce a warning containing `needle`?"
@@ -91,7 +91,7 @@
 ;; Every misplaced `(sig …)` line in `lines` (empty when the invariant holds).
 (defn- sig-misplaced
   (lines)
-  (keep (fn (pair) (let ([a b] pair) (when (sig-above-def? a b) a)))
+  (seq/keep (fn (pair) (let ([a b] pair) (when (sig-above-def? a b) a)))
     (zip lines (rest lines))))
 
 ;; ---- occurrence typing: inferred params check callers, zero annotations (ADR-190) ----

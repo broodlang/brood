@@ -67,11 +67,11 @@
 (defn sl-subject (x) (* x x))
 ;; Sends the parent its own view of the site, to prove a spawned process sees the
 ;; same shared def-site table (it lives in the runtime code region, like globals).
-(defn sl-worker (parent) (send parent (source-location 'introspection-test/sl-subject)))
+(defn sl-worker (parent) (send parent (reflect/source-location 'introspection-test/sl-subject)))
 
 (describe "source-location (cross-file def sites)"
   (test "records a top-level defn's site in this file"
-    (let (loc (source-location 'introspection-test/sl-subject))
+    (let (loc (reflect/source-location 'introspection-test/sl-subject))
       (refute (nil? loc))
       (is (vector? loc))
       (assert= (count loc) 3)
@@ -84,14 +84,14 @@
     ;; Prelude defns have a recorded site (the unpacked stdlib copy).
     ;; What stays `nil`: a Rust builtin (no .blsp source) or an unknown
     ;; name.
-    (let (loc (source-location 'map))
+    (let (loc (reflect/source-location 'map))
       (is (vector? loc))
       (is (string? (first loc))))
-    (assert= (source-location 'no-such-name-xyz) nil))
+    (assert= (reflect/source-location 'no-such-name-xyz) nil))
   (test "the site is visible from a spawned process (shared runtime code)"
     (let (me (self) _w (spawn (sl-worker me)))
       ;; the worker's copied-across value equals the parent's own lookup
-      (assert= (receive) (source-location 'introspection-test/sl-subject)))))
+      (assert= (receive) (reflect/source-location 'introspection-test/sl-subject)))))
 
 ;; Discovery over the flat namespace (std/prelude.blsp): apropos matches names,
 ;; doc-search matches docstrings, all-globals lists everything. Built on the
@@ -123,8 +123,8 @@
       (assert= g (global-names))))
   (test "doc-search finds globals whose docstring mentions a word"
     (let (names (map first (doc-search "uniformly random")))
-      (is (includes? names 'shuffle))
-      (is (includes? names 'sample))))
+      (is (includes? names 'seq/shuffle))
+      (is (includes? names 'seq/sample))))
   (test "doc-search returns [name doc] pairs with real docstrings"
     (let (hits (doc-search "xorshift"))
       (refute (empty? hits))
@@ -148,7 +148,7 @@
 ;; Runtime introspection: per-process GC observability (Tier-1;
 (describe "pos-stats"
   (test "is a map with the documented keys, and bytes track CAPACITY not entry count"
-    (let (s (pos-stats))
+    (let (s (dev/pos-stats))
       (is (map? s))
       (is (number? (get s :local-forms)))
       (is (>= (get s :local-forms) 0))
@@ -177,8 +177,8 @@
                       (read-all "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))")
                       (churn (- n 1)))))
           _ (churn 4000)
-          _ (gc-collect)
-          s (pos-stats))
+          _ (dev/gc-collect)
+          s (dev/pos-stats))
       ;; the live set is tiny after the churn is dropped; capacity must have followed it
       ;; down rather than staying at the high-water mark
       (is (< (get s :local-cap) 8192))
@@ -187,15 +187,15 @@
     ;; `read` stamps positions on LOCAL list forms, so reading source must not
     ;; DECREASE the recorded count. (Exact growth is not asserted: a collection may
     ;; drop dead entries between the two samples.)
-    (let (before (get (pos-stats) :local-forms)
+    (let (before (get (dev/pos-stats) :local-forms)
           _ (read-all "(defn probe-fn (a b) (if (> a b) a b))")
-          after (get (pos-stats) :local-forms))
+          after (get (dev/pos-stats) :local-forms))
       (is (>= after before)))))
 
 ;; docs/memory-review.md §7). gc-stats reports the *calling* process's own heap.
 (describe "gc-stats"
   (test "is a map with the documented counter keys"
-    (let (s (gc-stats))
+    (let (s (dev/gc-stats))
       (is (map? s))
       ;; cumulative counters since process start — non-negative integers
       (is (number? (get s :collections)))
@@ -210,9 +210,9 @@
       (is (> (get s :threshold) 0))))
   (test "live count rises after allocating retained data"
     ;; allocate a chunk we keep referenced — :live must reflect it
-    (let (before (get (gc-stats) :live)
+    (let (before (get (dev/gc-stats) :live)
           kept (range 500)
-          after (get (gc-stats) :live))
+          after (get (dev/gc-stats) :live))
       (is (> (count kept) 0))
       (is (>= after before)))))
 
@@ -220,15 +220,15 @@
 ;; `lookup` share — a thin builtin over the checker's `signature_string`).
 (describe "type-signature"
   (test "returns the checker's arrow signature for a builtin"
-    (let (sig (type-signature 'count))
+    (let (sig (reflect/type-signature 'count))
       (is (string? sig))
       (is (includes? sig "-> int"))))
   (test "accepts a string name too, same as the symbol"
-    (assert= (type-signature "inc") (type-signature 'inc)))
+    (assert= (reflect/type-signature "inc") (reflect/type-signature 'inc)))
   (test "an interned-but-unbound name has no signature"
-    (assert= (type-signature 'no-such-global-xyz) nil))
+    (assert= (reflect/type-signature 'no-such-global-xyz) nil))
   (test "a never-interned string name is nil, not an error"
-    (assert= (type-signature "definitely-not-a-real-global-42") nil)))
+    (assert= (reflect/type-signature "definitely-not-a-real-global-42") nil)))
 
 ;; `features` / `feature?` — asking the BUILD what it can do.
 ;;
@@ -246,23 +246,23 @@
 
   (test "the list is stable within a build" (assert= (features) (features))))
 
-(describe "exe-path — where this binary lives"
+(describe "os/exe-path — where this binary lives"
   (test "it answers an absolute path, or nil when the platform won't say"
     ;; nil is a legitimate answer (a sandbox with no /proc/self/exe), so accept either —
     ;; what must NOT happen is a raise, since callers ask opportunistically
-    (let (p (exe-path))
+    (let (p (os/exe-path))
       (is (or (nil? p) (and (string? p) (string/starts-with? p "/"))))))
 
   (test "and it points at something that exists — the sibling lookup depends on that"
-    ;; the point of the primitive: `(path-join (parent-directory (exe-path)) "nest")` has to be a
+    ;; the point of the primitive: `(path-join (parent-directory (os/exe-path)) "nest")` has to be a
     ;; real place to look
-    (let (p (exe-path))
+    (let (p (os/exe-path))
       (when (string? p)
         (is (file/exists? p))
-        (is (file/dir? (parent-directory p))))))
+        (is (file/dir? (path/dirname p))))))
 
   (test "it is stable within a process"
-    (assert= (exe-path) (exe-path))))
+    (assert= (os/exe-path) (os/exe-path))))
 
 (describe "feature?"
   (test "true for a feature this build has" (is (feature? :jit)))

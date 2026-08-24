@@ -125,7 +125,7 @@ its monitor fire and closes cleanly. Tail-recursive."
                                                         cols rows opts make-model view update)))
                                          (monitor s)
                                          (serve-manager make-model view update (cons s ss))))
-      ([:down _ p _] (serve-manager make-model view update (remove (fn (x) (= x p)) ss)))
+      ([:down _ p _] (serve-manager make-model view update (seq/remove (fn (x) (= x p)) ss)))
       ([:shutdown from r] (do
                             (doseq (s ss) (exit s :kill))
                             (send from [:reply r (count ss)])))
@@ -158,7 +158,7 @@ Opt-in, like Erlang's `-name`: a runtime serves nothing unless it calls `serve`.
 (defn- attach-gen-name
   ()
   "A unique transient node name for a client, so two clients on one box don't collide."
-  (keyword (str "attach-" (now))))
+  (keyword (str "attach-" (os/now))))
 
 (defn- attach-drain
   (peer)
@@ -331,7 +331,7 @@ close (`[:bye]`). Tail-recursive; one hub per shared session."
     ([:add pid] (do
                   (when frame (send pid [:frame frame]))
                   (shared-hub (cons pid clients) frame size)))
-    ([:remove pid] (shared-hub (remove (fn (p) (= p pid)) clients) frame size))
+    ([:remove pid] (shared-hub (seq/remove (fn (p) (= p pid)) clients) frame size))
     ([:frame f] (do (doseq (p clients) (send p [:frame f])) (shared-hub clients f size)))
     ([:size reply] (do
                      (send reply [:hub-size (first size) (second size)])

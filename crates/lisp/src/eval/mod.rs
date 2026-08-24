@@ -356,7 +356,7 @@ fn eval_tail_loop(
         if let Some(used) = crate::core::alloc::soft_limit_hit() {
             return Err(memory_limit_error(used).or_form_pos(heap, expr));
         }
-        // Per-process heap limit (`(process-flag :max-heap n)`): the sticky flag a
+        // Per-process heap limit (`(proc/flag :max-heap n)`): the sticky flag a
         // collection armed raises here, killing (catchably) just this process.
         if let Some(live) = heap.take_proc_limit_hit() {
             let limit = heap.proc_mem_limit().unwrap_or(0);
@@ -1728,7 +1728,7 @@ pub(crate) fn native_stack_error(remaining: usize) -> LispError {
 
 /// "memory limit exceeded …" — the ADR-043 soft-memory backstop.
 /// "process heap limit exceeded …" — this process's live heap stayed over its
-/// own `(process-flag :max-heap n)` cap after a collection. Catchable; uncaught
+/// own `(proc/flag :max-heap n)` cap after a collection. Catchable; uncaught
 /// it kills just this process (the BEAM `max_heap_size` behaviour).
 pub(crate) fn proc_memory_limit_error(live: usize, limit: usize) -> LispError {
     LispError::runtime(format!(
@@ -1737,7 +1737,7 @@ pub(crate) fn proc_memory_limit_error(live: usize, limit: usize) -> LispError {
     ))
     .with_code(crate::error::error_codes::PROC_MEMORY_LIMIT)
     .with_hint(
-        "raise or clear the limit with (process-flag :max-heap n), \
+        "raise or clear the limit with (proc/flag :max-heap n), \
          or hold less live data (stream instead of accumulating)",
     )
 }

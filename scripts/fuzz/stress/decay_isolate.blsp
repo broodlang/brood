@@ -31,10 +31,10 @@
 
 (defmodule decay (:use supervisor))
 
-(def mode (let (e (getenv "MODE")) (if e e "alloc")))
-(def secs (let (e (getenv "SECS")) (if e (string->number e) 180)))
-(def window (let (e (getenv "WINDOW")) (if e (string->number e) 20000)))
-(def maxsecs (let (e (getenv "MAXSECS")) (if e (string->number e) 60)))
+(def mode (let (e (os/getenv "MODE")) (if e e "alloc")))
+(def secs (let (e (os/getenv "SECS")) (if e (string->number e) 180)))
+(def window (let (e (os/getenv "WINDOW")) (if e (string->number e) 20000)))
+(def maxsecs (let (e (os/getenv "MAXSECS")) (if e (string->number e) 60)))
 
 (defn rss-kb ()
   (let (txt (file/slurp "/proc/self/status") i (index-of txt "VmRSS:"))
@@ -105,12 +105,12 @@
     else (error (str "unknown MODE: " mode))))
 
 ;; ---- the loop ----------------------------------------------------------------
-(def t-start (now))
+(def t-start (os/now))
 (def deadline (+ t-start (* secs 1000)))
 
 (defn report (w n t0)
-  (let (dt (max 1 (- (now) t0))
-        g (gc-stats))
+  (let (dt (max 1 (- (os/now) t0))
+        g (dev/gc-stats))
     (println (str "w="
                w
                " ops="
@@ -120,9 +120,9 @@
                " rss_kb="
                (rss-kb)
                " sup_heap="
-               (let (i (process-info sup)) (if i (get i :memory) -1))
+               (let (i (proc/info sup)) (if i (get i :memory) -1))
                " sup_mailbox="
-               (let (i (process-info sup)) (if i (get i :mailbox) -1))
+               (let (i (proc/info sup)) (if i (get i :mailbox) -1))
                " rt_closures="
                (get g :runtime-closures)
                " my_live_bytes="
@@ -134,11 +134,11 @@
     (if (= 0 (mod (+ n 1) window))
       (do
         (report w window wstart)
-        (if (> (now) deadline)
+        (if (> (os/now) deadline)
           (println (str "done mode=" mode " total_ops=" (+ n 1) " rss_kb=" (rss-kb)))
-          (run (+ n 1) (+ w 1) (now))))
+          (run (+ n 1) (+ w 1) (os/now))))
       (run (+ n 1) w wstart))))
 
 (trap-exit true)
 (println (str "mode=" mode " window=" window " secs=" secs))
-(run 0 0 (now))
+(run 0 0 (os/now))

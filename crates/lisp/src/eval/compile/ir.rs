@@ -78,7 +78,7 @@ pub enum PrimOp3 {
 impl PrimOp3 {
     pub(super) fn from_native_name(name: &str) -> Option<PrimOp3> {
         match name {
-            "table-put" => Some(PrimOp3::TablePut),
+            _ if name == kw::TABLE_PUT => Some(PrimOp3::TablePut),
             _ => None,
         }
     }
@@ -145,8 +145,8 @@ impl PrimOp {
             "bit-and" => PrimOp::BitAnd,
             "bit-or" => PrimOp::BitOr,
             "bit-xor" => PrimOp::BitXor,
-            "table-has?" => PrimOp::TableHas,
-            "table-get" => PrimOp::TableGet,
+            _ if name == kw::TABLE_HAS => PrimOp::TableHas,
+            _ if name == kw::TABLE_GET => PrimOp::TableGet,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,
             _ => return None,
         })

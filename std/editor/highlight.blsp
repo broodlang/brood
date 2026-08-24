@@ -186,7 +186,7 @@ strings, numbers, keywords, and head-position symbols (special forms vs calls).
 Whitespace and plain variable references carry no span (the default colour). The
 per-character scan is the native `scan-tokens`; this only assigns faces over the token
 stream (O(tokens)), so it stays fast enough for per-frame fontification."
-  (hl-spans (scan-tokens src) false '()))
+  (hl-spans (reflect/scan-tokens src) false '()))
 
 ;; ---- windowed highlighting (fontify just a viewport) ------------------------
 ;; A large buffer is too costly to lex whole every frame. The editor instead lexes
@@ -217,7 +217,7 @@ multi-line docstring is correctly skipped. The awareness needs a forward lexical
 the top (a backward scan can't know string state), which is O(pos) — run natively
 (`scan-form-start`, the ADR-093 scanner family), because interpreted it stalled eldoc /
 fontify-restart multi-second on every idle beat in a large file."
-  (scan-form-start src pos))
+  (reflect/scan-form-start src pos))
 
 ;; ---- the shared span -> runs tiler ------------------------------------------
 ;; `face-at` / `ranges-face` / `fontify-runs` are the renderer-agnostic core: a

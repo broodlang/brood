@@ -8,7 +8,7 @@
 //! Installed as `#[global_allocator]` in `lib.rs`, so it covers *every* Rust
 //! allocation in the process (the interpreter included), not just Brood values.
 //! For "how much memory did this run use," that whole-process number is the one
-//! you want. The `(mem-bytes)` / `(mem-peak)` primitives in `builtins.rs` read
+//! you want. The `(%)` / `(%)` primitives in `builtins.rs` read
 //! these counters. The wrapper itself is std-only; its backend is **mimalloc**
 //! (see [`BACKEND`]) — allocation throughput is load-bearing for a long-running,
 //! immutable, path-copying runtime, so it's the one allocator dependency we take

@@ -4,6 +4,111 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.10.0 — 2026-08-24
+
+**BREAKING — the core reference went from 613 names to 337 (ADR-242).** Two thirds of that
+was noise or misplacement, not deletion:
+
+- **191 private helpers were being published.** The core reference page reads the live
+  image, and a prelude `defn-` still binds a root global — so the match compiler's 40
+  `match-*` functions, the `receive-*`/`spy-*`/`defmodule-*` helpers and the `x`/`l`
+  transducers all appeared as core API. They never were.
+- **`dev/`** — runtime diagnostics: `dev/mem-bytes`, `dev/gc-collect`, `dev/gc-stats`,
+  `dev/vm-stats`, `dev/sched-stats`, `dev/profile-start`, `dev/bench`, … (20 names)
+- **`reflect/`** — source tooling: `reflect/check-file`, `reflect/parse-source`,
+  `reflect/scan-tokens`, `reflect/source-location`, `reflect/type-signature`, … (18 names)
+- **`%`-prefixed** — the ability/multimethod registry the `defability`/`impl`/`defmulti`
+  expansions emit (`register-impl`, `impl-for`, `identity-of`, …; 26 names)
+
+Interactive introspection stays bare on purpose — `doc`, `arglist`, `bound?`, `apropos`,
+`doc-search`, `macroexpand`, `special-forms` are what you type at a REPL. So does
+`check-allow`, a source pragma, and `system-monitor`, which arms the production event
+stream `telemetry/watch-runtime` re-emits.
+
+**The reference has no "Other" section any more.** Uncatalogued names fell into a junk
+drawer 41 entries deep that was hiding real vocabulary: `stop`, `cast`, `call`,
+`spawn-server` and `defprocess` (uncategorised only because `gen` became core) and the
+`tap`/`then` pipeline helpers. Every public core name now has a category, enforced by a
+test.
+
+**Fixed:** `remote-spawn`, `remote-spawn-sync` and `bench` were still registered as
+highlighter keywords after moving to `node/`/`dev/`, so editors highlighted three unbound
+names as core syntax.
+
+## v0.9.0 — 2026-08-24
+
+**BREAKING — the bare core is smaller: five subsystems moved into namespaces.** Each is a
+Brood module over a `%`-prefixed primitive, so the language core stays close to what a
+basic algorithm actually reaches for and stops colliding with your own names:
+
+- `os/` — `getenv`, `hostname`, `run-process`, `exe-path`, `canonicalize`,
+  `stdin-tty?`, `stdout-tty?`, `now`, `now-ns`
+- `table/` — `new` (was the bare `table` constructor), `get`, `put`, `delete`, `has?`,
+  `count`, `drop`, `incr`, `snapshot`
+- `proc/` — `info`/`flag` (were `process-info`/`process-flag`), `list`, `mailbox-size`,
+  `hibernate`, `cancel-timer`, and the OS-subprocess API `spawn`/`send`/`close`/`set-binary`
+- `audio/beep`, `rand/token`
+
+`table?` stays a bare predicate, `send-after`/`send-interval` stay bare (only the timer
+*cancel* moved), and `offload` stays bare — it is core dirty-native concurrency, used
+during `nest fetch` before any module loads.
+
+**BREAKING — `supervisor/stop` is gone; use `stop`.** A supervisor is an ordinary server
+process and answers the same `[:$stop]` message the core `stop` sends, so the wrapper was
+a verbatim duplicate whose only effect was to shadow `stop` for `(:use supervisor)`.
+`(stop sup)` tears it down exactly as before, children first. If a module of yours defines
+its own `stop`, reach the core one as `/stop`.
+
+**Library names and core names (ADR-241).** A library export may shadow a core name only
+when the module is meant to be used *qualified*. `wasm/call`, `version/compare`,
+`log/error` and `package/update` keep their names on that basis; duplicates were deleted
+and bare-use modules renamed.
+
+**Fixed: `nest run` was broken for every invocation** with `unbound symbol: getenv` — the
+pre-run check is built as a Brood snippet inside a Rust string, which no checker reads.
+Ten sibling sites were repaired with it, plus 13 stress scripts under `scripts/fuzz/`.
+`scripts/stale-names.sh` now finds this class after a rename.
+
+**`supervisor/stop` is gone — use `stop`.** A supervisor is an ordinary server process and
+answers the same `[:$stop]` message the core `stop` sends, so the wrapper was a verbatim
+duplicate whose only effect was to shadow `stop` for anyone writing `(:use supervisor)`.
+`(stop sup)` tears it down exactly as before, children first. If a module of yours defines
+its own `stop`, reach the core one as `/stop`.
+
+**Library names and core names (ADR-241).** A library export may shadow a core name only
+when the module is meant to be used *qualified*. `wasm/call`, `version/compare`,
+`log/error` and `package/update` keep their names on that basis; duplicates were deleted
+and bare-use modules renamed.
+
+
+**`nest rename` is context-aware.** It now parses each file into its lossless CST and
+rewrites only *symbol tokens*, so a docstring or `;` comment mentioning the name, and
+symbols inside `(quote …)` / `'…` data, are left byte-for-byte alone — a text-level rename
+corrupts all three (it rewrote comment prose like "the offload pool" and clobbered the very
+`defn` head it should have left alone). New flags:
+
+- `--refs-only` — rename callers, leave the `defn`/`def` head alone
+- `--defs-only` — rename only the definition head
+- `--in-quote` — also rewrite symbols inside quoted data (off by default: a quoted symbol
+  is inert data, e.g. a name in a registry table)
+- `--text` — the old context-blind whole-token replace, for a rename that must touch prose
+
+Verified lossless by round-tripping every in-repo `.blsp` file (320) through a no-op rename
+and requiring byte-identical output. `codemod/cst-rename` / `codemod/cst-rename-text` are
+the in-language entry points.
+
+**Fixed: `(temp-path …)` raised `unbound: rand/token`** unless the caller had required the
+`rand` module. It is prelude code, so it now uses the `%random-token` primitive directly.
+Found by a new build-time lint that rejects any prelude reference to a module wrapper that
+is not loaded at boot.
+
+**Internal (ADR-240): a primitive's name has one definition site.** The `PRIMITIVE_DOCS`
+array is merged into the `def()` registrations (name, arity, signature, arg list and
+docstring in one expression), and a primitive named in more than one Rust file now flows
+from a single `kw::` constant. Renaming a primitive is a one-line edit the compiler then
+enforces at every site, instead of a string-literal hunt whose misses surface as runtime
+`unbound` errors.
+
 ## v0.8.0 — 2026-08-21
 
 **Module-name stutter and abbreviations removed from public APIs.** A qualified call

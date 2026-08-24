@@ -23,9 +23,9 @@
 ;;   * a burst of spawns                                               (placement spill)
 (defmodule soak (:use supervisor))
 
-(def secs (let (e (getenv "SOAK_SECS")) (if e (string->number e) 3600)))
-(def backlog (let (e (getenv "SOAK_BACKLOG")) (if e (string->number e) 64)))
-(def report-every (let (e (getenv "SOAK_REPORT")) (if e (string->number e) 30000)))
+(def secs (let (e (os/getenv "SOAK_SECS")) (if e (string->number e) 3600)))
+(def backlog (let (e (os/getenv "SOAK_BACKLOG")) (if e (string->number e) 64)))
+(def report-every (let (e (os/getenv "SOAK_REPORT")) (if e (string->number e) 30000)))
 
 (def reload-target 2)
 (defn shared-thunk () (* reload-target 21)) ; no captures -> shared handle
@@ -68,7 +68,7 @@
 
 ;; --- the loop ----------------------------------------------------------------
 (def sup (start [] {:strategy :one-for-one :max-restarts 100000000 :max-seconds 60}))
-(def t-start (now))
+(def t-start (os/now))
 (def deadline (+ t-start (* secs 1000)))
 
 (defn fail (what n)
@@ -98,7 +98,7 @@
     ;; heartbeat
     (when (= 0 (mod n report-every))
       (println (str "t="
-                 (quot (- (now) t-start) 1000)
+                 (quot (- (os/now) t-start) 1000)
                  "s iter="
                  n
                  " reloads="
@@ -107,7 +107,7 @@
                  (rss-kb)
                  " children="
                  (count-children sup))))
-    (if (> (now) deadline)
+    (if (> (os/now) deadline)
       ;; `gc-stats` is a dev-tools builtin and is ABSENT from the lean runtime — which is
       ;; exactly the build you soak (`make install INSTALL_FEATURES='$(RUN_FEATURES)'`, what
       ;; the benchmarks and `nest release` use). Reaching for it unguarded made the harness
@@ -119,9 +119,9 @@
                  (rss-kb)
                  (if (bound? 'gc-stats)
                    (str " rt-closures="
-                     (get (gc-stats) :runtime-closures)
+                     (get (dev/gc-stats) :runtime-closures)
                      " rt-threshold="
-                     (get (gc-stats) :runtime-threshold))
+                     (get (dev/gc-stats) :runtime-threshold))
                    " (rt-closures unavailable: lean build, no gc-stats)")))
       (loop-once (+ n 1) (if (= 0 (mod n 97)) (+ reloads 1) reloads)))))
 

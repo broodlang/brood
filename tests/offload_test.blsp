@@ -15,7 +15,7 @@
       (is (bytes? pooled))
       (assert= pooled direct)))
   (test "file IO through the pool: file/spit, file/slurp-bytes, cleanup"
-    (let (path (str "/tmp/brood-offload-" (now-ns) ".bin")
+    (let (path (str "/tmp/brood-offload-" (os/now-ns) ".bin")
           payload (bytes 0 255 128 65 7))
       (offload file/spit-bytes path payload)
       (let (back (offload file/slurp-bytes path))
@@ -29,7 +29,7 @@
              (catch e :caught))
           :caught)))
   (test "a native outside the allow list is refused"
-    (is (= (try (%offload bytes-concat [[]]) (catch e :refused)) :refused)))
+    (is (= (try (%offload bytes/concat [[]]) (catch e :refused)) :refused)))
   (test "a Brood closure is not a native — wrong type"
     (is (= (try (%offload includes? [(list 1) 1]) (catch e :not-native)) :not-native))))
 

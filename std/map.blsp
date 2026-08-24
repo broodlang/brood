@@ -45,7 +45,7 @@ access, or call qualified (`map/update-vals`).")
   ;; first sentinel do we disambiguate present-vs-absent with a second sentinel,
   ;; so a key stored with `nil`/`false` is still kept (contains?'s guarantee).
   (into {}
-    (keep (fn (k)
+    (seq/keep (fn (k)
             (let (v (map-get m k :%select-miss-a))
               (if (= v :%select-miss-a)
                 (let (v2 (map-get m k :%select-miss-b))

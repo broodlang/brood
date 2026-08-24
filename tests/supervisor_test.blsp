@@ -413,7 +413,7 @@
   {:id :flaky
    :restart :permanent
    :start (fn ()
-            (if (<= (table-incr t :starts) ok-times)
+            (if (<= (table/incr t :starts) ok-times)
               (spawn-link (parked))
               (error "flaky: cannot start")))})
 
@@ -424,7 +424,7 @@
     ;; The child starts fine, then crashes; every restart attempt raises. The
     ;; supervisor must absorb those, count each against :max-restarts, and finally
     ;; die of its OWN intensity limit — not of the child's throw escaping the loop.
-    (let (t (table)
+    (let (t (table/new)
           sup (start (list (flaky-spec t 1)) {:max-restarts 2 :max-seconds 5})
           m (monitor sup)
           kid (get (first (which-children sup)) :pid))
@@ -434,20 +434,20 @@
         (is (includes? (pr-str reason) "restart intensity exceeded"))
         ;; and NOT the raw throw escaping the receive loop
         (is (not (includes? (pr-str reason) "flaky: cannot start"))))
-      (table-drop t)))
+      (table/drop t)))
 
   (test "start-child replies [:error …] instead of killing the supervisor"
     ;; The caller must get a reply either way — the old code threw out of the loop,
     ;; which killed the supervisor AND left the caller blocked on a reply that
     ;; could never come.
-    (let (t (table)
+    (let (t (table/new)
           sup (start (list)))
       (let (r (start-child sup (flaky-spec t 0)))
         (is (= (first r) :error)))
       ;; the supervisor is still alive and still answering
       (assert= 0 (count-children sup))
       (stop sup)
-      (table-drop t))))
+      (table/drop t))))
 
 ;; ---- the synchronous client API is monitored + deadlined --------------------
 (describe "supervisor: a client call against a dead supervisor raises, never hangs"

@@ -1,0 +1,14 @@
+;; std/audio.blsp — sound output. Policy over the `%audio-beep` primitive, so it lives under
+;; audio/* rather than the bare core.
+(defmodule audio)
+
+;; `& more`, not `&optional vol`: the primitive branches on how many args it RECEIVED
+;; (`args.len() >= 3`), so forwarding an absent `vol` as an explicit nil makes it try to
+;; read nil as a number instead of taking its default.
+(defn beep (freq-hz ms & more)
+  "Play a short tone of `freq-hz` for `ms` milliseconds, optionally at peak amplitude `vol`
+(0..1, default ~0.18 — pass a small `vol` for quiet/ambient sounds). Fire-and-forget: it
+never blocks the caller and overlapping beeps mix, so a game can blip from its frame loop.
+Synthesised on a dedicated audio thread (needs --features audio). A graceful no-op without the
+feature, with no audio device, or when muted via BROOD_AUDIO=0 / BROOD_GUI_HEADLESS. Returns nil."
+  (if (empty? more) (%audio-beep freq-hz ms) (%audio-beep freq-hz ms (first more))))

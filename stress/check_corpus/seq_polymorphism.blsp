@@ -2,4 +2,4 @@
 (println (map inc (list 1 2)) (map inc [1 2]) (map inc (range 3)))
 (println (fold + 0 [1 2 3]) (count {:a 1}) (first (keys {:a 1})))
 (println (filter int? [1 "a" 2 nil 3.5]))
-(println (sort-by count ["ccc" "a" "bb"]))
+(println (seq/sort-by count ["ccc" "a" "bb"]))

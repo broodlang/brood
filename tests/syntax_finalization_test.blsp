@@ -97,7 +97,7 @@
     ;; binding; the second load silently changed the first module's reads.
     (let (dir (temp-dir "brood-ambient-"))
       (file/mkdir dir)
-      (let (fa (path-join dir "sfa.blsp") fb (path-join dir "sfb.blsp"))
+      (let (fa (path/join dir "sfa.blsp") fb (path/join dir "sfb.blsp"))
         (file/spit fa "(defmodule sfa)\n(def *sf-width* 10)\n(defn w () *sf-width*)\n")
         (file/spit fb "(defmodule sfb)\n(def *sf-width* 999)\n(defn w () *sf-width*)\n")
         (load fa)
@@ -111,7 +111,7 @@
   (test "a defdyn name IS ambient: one root binding any module can set"
     (let (dir (temp-dir "brood-ambient2-"))
       (file/mkdir dir)
-      (let (f (path-join dir "sfc.blsp"))
+      (let (f (path/join dir "sfc.blsp"))
         (defdyn *sf-knob* 1)
         (file/spit f
           "(defmodule sfc)\n(defn read-knob () *sf-knob*)\n(defn bump () (def *sf-knob* 42))\n")

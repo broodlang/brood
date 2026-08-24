@@ -25,7 +25,7 @@
   (test "gc-stats surfaces the shared RUNTIME region (closure count + auto-compact threshold)"
     (do
       (rc-churn 'rc-f-stats 0 200)
-      (let (s (gc-stats))
+      (let (s (dev/gc-stats))
         ;; the shared figures are plain ints, same for every process
         (is (int? (get s :runtime-closures)))
         (is (int? (get s :runtime-threshold)))
@@ -45,7 +45,7 @@
           parked (spawn (do (send me [:ready]) (receive (_ :never)))))
       (assert= (receive ([:ready] :ready) (after 2000 :no-ready)) :ready)
       (rc-churn 'rc-f-gate 0 200)
-      (let (r (runtime-collect))
+      (let (r (dev/runtime-collect))
         (is (= (get r :ran) false))
         (assert= (get r :before) (get r :after))
         (assert= (get r :reclaimed) 0)

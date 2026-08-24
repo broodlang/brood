@@ -167,7 +167,7 @@ everything (the \"no release yet\" placeholder a registry starts from)."
   ;; as 0, so the comparison was against garbage and the caller was told, confidently,
   ;; "not satisfied". An operator with no meaning has to say so.
   (let (c (string/trim constraint)
-        op (find (fn (o) (string/starts-with? c o)) *operators*))
+        op (seq/find (fn (o) (string/starts-with? c o)) *operators*))
     (cond
       (not (nil? op)) [op (string/trim (string/substring c (string/length op) (string/length c)))]
       (digit-start? c) ["=" c]
@@ -246,10 +246,10 @@ the same as `satisfies?` — compiling is where a bad constraint is caught."
   (if (or (nil? constraint) (= (string/trim constraint) ""))
     nil
     (let (terms (map (fn (term) (compile-term term constraint))
-                  (keep (fn (t) (let (tt (string/trim t)) (when (not (= tt "")) tt)))
+                  (seq/keep (fn (t) (let (tt (string/trim t)) (when (not (= tt "")) tt)))
                     (string/split constraint ","))))
       {:terms terms
-       :pre-cores (keep (fn (t) (get t :pre-core)) terms)})))
+       :pre-cores (seq/keep (fn (t) (get t :pre-core)) terms)})))
 
 ;; A version part must not contain whitespace or a constraint operator. Both mean a SECOND
 ;; term that the comma split did not separate — `">=1.0.0 <2.0.0"` (npm/cargo), `"^1 || ^2"`
@@ -377,7 +377,7 @@ The shape a plugin manifest's `:enhances` map is checked with:
   "The `constraints` entries `versions` does NOT satisfy, as a list of
 `[name constraint have]` (`have` is nil when absent) — what an application shows
 the user when it declines a plugin, instead of a bare false."
-  (keep (fn (kv)
+  (seq/keep (fn (kv)
           (let ([nm constraint] kv
                 have (get versions nm))
             (when (or (nil? have) (not (satisfies? have constraint)))

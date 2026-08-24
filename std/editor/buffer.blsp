@@ -577,7 +577,7 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
 
 (defn- undo-hunk-chars
   (hunk tag)
-  (apply str (keep (fn (op) (let ([t c] op) (when (= t tag) c))) hunk)))
+  (apply str (seq/keep (fn (op) (let ([t c] op) (when (= t tag) c))) hunk)))
 
 (defn- undo-flush-chunk
   (hunk n lo hi out)
@@ -764,7 +764,7 @@ read-only contract lives in the model (no consumer has to remember to check). Re
 else edits normally even while these are set. Orthogonal to the whole-buffer `read-only?`
 flag, which still refuses the buffer entire."
   (let (len (buffer-length buf))
-    (keep (fn (s)
+    (seq/keep (fn (s)
             (let ([lo hi] s
                   l (buffer-clamp 0 len lo)
                   h (buffer-clamp 0 len hi))
@@ -780,7 +780,7 @@ first, then stamp — like `set-read-only`, construction never checks the spans.
 (defn- span-covers?
   (spans pos)
   ;; is the CHAR at `pos` inside a protected span
-  (find (fn (s) (let ([lo hi] s) (and (>= pos lo) (< pos hi)))) spans))
+  (seq/find (fn (s) (let ([lo hi] s) (and (>= pos lo) (< pos hi)))) spans))
 
 (defn position-read-only? (buf pos)
   "True when the char at `pos` falls inside a protected span (or the whole buffer is
@@ -796,14 +796,14 @@ generated text."
   ;; to grow into there). NOT refused at the junction of two *different* spans — that is a
   ;; zero-width editable region (an emptied box), and typing must be able to refill it — nor at
   ;; an ordinary protected/editable boundary, where the insert joins the editable side.
-  (or (find (fn (s) (let ([lo hi] s) (and (< lo p) (< p hi)))) spans)
+  (or (seq/find (fn (s) (let ([lo hi] s) (and (< lo p) (< p hi)))) spans)
     (and (= p 0) (span-covers? spans 0))
     (and (= p len) (span-covers? spans (dec len)))))
 
 (defn- span-blocks-delete?
   (spans lo hi)
   ;; a delete of `[lo hi)` is refused when it overlaps any protected span at all
-  (find (fn (s) (let ([slo shi] s) (and (< slo hi) (> shi lo)))) spans))
+  (seq/find (fn (s) (let ([slo shi] s) (and (< slo hi) (> shi lo)))) spans))
 
 (defn- buffer-barf-if-protected-insert
   (buf p)
@@ -1062,14 +1062,14 @@ the original text out of it before touching anything."
         p (buffer-point buf))
     [(buffer-ws-run-start txt p) (buffer-ws-run-end txt p (string/length txt))]))
 
-(defn collapse-whitespace (buf keep)
+(defn collapse-whitespace (buf seq/keep)
   "The run of spaces/tabs SURROUNDING point replaced by `keep` — `\" \"` for Emacs's
 `just-one-space` (M-SPC), `\"\"` for `delete-horizontal-space` (M-\\), and the squeeze
 step of `fixup-whitespace`. Scans both directions from point but never across a
 newline, so it collapses the gap you are standing in and leaves the line structure
 alone. Point lands just after `keep`."
   (let ([lo hi] (whitespace-run-at buf))
-    (replace-region buf lo hi keep)))
+    (replace-region buf lo hi seq/keep)))
 
 (def- buffer-close-delimiters [")" "]" "}"])
 (def- buffer-open-delimiters ["(" "[" "{"])
@@ -1304,11 +1304,11 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                    nil])
                                (buffer-serve buf (cons {:pid pid :proj proj} subs) version rec)))
       ([:unsubscribe pid] (buffer-serve buf
-                            (remove (fn (s) (= (get s :pid) pid)) subs)
+                            (seq/remove (fn (s) (= (get s :pid) pid)) subs)
                             version
                             rec))
       ([:down _ pid _]
-        (let (ns (remove (fn (s) (= (get s :pid) pid)) subs)
+        (let (ns (seq/remove (fn (s) (= (get s :pid) pid)) subs)
               ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)
               ;; or by a vector containing it (e.g. [pid :mark] — its selection anchor)
               nb (fold (fn (b k) (buffer-marker-delete b k))

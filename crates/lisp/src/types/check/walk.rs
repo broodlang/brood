@@ -1444,7 +1444,7 @@ fn walk_impl_returns(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<
             if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
                 return;
             }
-            if head_name(head) == "register-impl" {
+            if head_name(head) == kw::REGISTER_IMPL {
                 check_one_impl_return(heap, &items, ctx, out);
             }
         }
@@ -1549,7 +1549,7 @@ fn quoted_sym_name(heap: &Heap, v: Value) -> Option<String> {
 }
 
 /// The bare (last `/`-segment) name of a symbol head — `ability/register-impl` and a
-/// bare `register-impl` both read as `"register-impl"`.
+/// bare `%register-impl` both read as `"%register-impl"`.
 fn head_name(sym: Symbol) -> String {
     let full = value::symbol_name(sym);
     full.rsplit('/').next().unwrap_or(&full).to_string()

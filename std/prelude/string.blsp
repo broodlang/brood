@@ -220,54 +220,22 @@ incremental search rides on."
 
 ;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
 ;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.
-(defn parent-directory (path)
-  "The directory containing `path` (\"/a/b/c\" -> \"/a/b\", \"/foo\" -> \"/\", \"rel\" -> \".\")."
-  (let (i (path-last-slash path (dec (string/length path))))
-    (cond (< i 0) "." (= i 0) "/" else (string/substring path 0 i))))
 
-(defn path-join (a b)
+;; The loader calls this during boot, BEFORE any module can load, so a bootstrap copy has
+;; to live here. `%`-prefixed to say so: the public spelling is `path/join`, and this one
+;; exists only because `require` needs to build a path before `require` works.
+(defn %path-join (a b)
   "Join path segments `a` and `b` with a single `/` separator."
   (if (string/ends-with? a "/") (str a b) (str a "/" b)))
 
-(defn temp-path (prefix)
-  "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
-`file/spit` a file there or `file/mkdir` a directory. The name comes from `random-token`, so
-it is unique across processes and across runs, and cannot be guessed ahead of time.
 
-Reach for this instead of writing a program-specific constant like
-`/tmp/myapp-worker.blsp`. A fixed name in a world-writable directory is two bugs: two
-copies of the program fight over one file, and anyone on the machine can create that
-path first — as a symlink to something you own — so the `file/spit` overwrites their choice
-of file with your privileges. Neither is possible with a name they cannot predict."
-  (path-join "/tmp" (str prefix (random-token 16))))
 
-(defn path-basename (path)
-  "The final component of `path` (\"/a/b/c\" -> \"c\", \"/foo\" -> \"foo\",
-\"foo\" -> \"foo\"). The empty string returns itself; a trailing slash isn't
-stripped (`(file/cwd)` doesn't produce one, which is the primary caller)."
-  (let (n (string/length path))
-    (if (= n 0)
-      ""
-      (let (i (path-last-slash path (dec n)))
-        (if (< i 0) path (string/substring path (inc i) n))))))
-
-(defn path-absolute (path &optional base)
-  "Resolve `path` to an absolute path: a `/`-rooted path is returned unchanged, a
-`~`/`~/…` path is expanded against `$HOME`, and any other (relative) path is joined
-onto `base` (default the current directory, `(file/cwd)`). The empty string is returned as
-is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segments."
-  (cond
-    (or (= path "") (string/starts-with? path "/")) path
-    (= path "~") (or (getenv "HOME") path)
-    (string/starts-with? path "~/")
-      (str (or (getenv "HOME") "~") (string/substring path 1 (string/length path)))
-    else (path-join (or base (file/cwd)) path)))
 
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
 ;; Brood has no global mutable state, so randomness is *threaded*: every step
 ;; takes a seed and returns `[value next-seed]`. Pass `next-seed` to the next
 ;; call; thread the seed through your loop state exactly like any other value.
-;; Seed a fresh stream from any integer (e.g. `(now)`) via `%rand-seed`.
+;; Seed a fresh stream from any integer (e.g. `(%now)`) via `%rand-seed`.
 ;;
 ;; The generator is Marsaglia's xorshift32 — fast and good enough for
 ;; simulations, sampling, shuffling, jitter, and ids; NOT for cryptography. Each
@@ -291,56 +259,9 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 
 ;; The seeded PRNG public API (rand/rng / rand/int / rand/float / rand/seed) lives in the
 ;; `rand` module (std/rand.blsp); the `%rand-seed`/`%rand-step` mechanism above stays here
-;; because the sequence ops `sample`/`shuffle` (below) build on it.
+;; because the sequence ops `sample`/`shuffle` (in std/seq.blsp) build on it.
 
-(defn sample (seed coll)
-  "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."
-  (let (items (into [] coll)
-        n (count items))
-    (if (= n 0)
-      (error "sample: cannot sample from an empty collection")
-      (let (s (%rand-step (%rand-seed seed)))
-        [(nth items (rem s n)) s]))))
 
-;; Fisher–Yates, which is what the docstring always claimed — the implementation was
-;; not it. The old `shuffle-acc` rebuilt the remaining collection on every step: two
-;; `count` walks plus `take` + `drop` + `append` + `nth`, each O(n), for each of the n
-;; elements. That is O(n²) in both time and allocation — 20 000 elements took 33 s,
-;; which is not a shuffle anyone can use on real data.
-;;
-;; The working structure is a **map** index→item, not a vector: `assoc` on a vector
-;; copies the whole vector (O(n) per swap, so real Fisher–Yates over one is no better
-;; than what it replaced — measured, it exhausts a 2 GB budget at n = 20 000), while
-;; `assoc` on a CHAMP map shares structure and is O(log₃₂ n). Nothing mutates either
-;; way; this is just the immutable structure with the right update cost.
-(defn- shuffle-swap
-  (m i j)
-  (let (a (get m i)
-        b (get m j))
-    (assoc (assoc m i b) j a)))
-
-(defn- shuffle-at
-  (m i state)
-  ;; Descending Fisher–Yates: draw j in 0..i, swap it into slot i, move left.
-  (if (<= i 0)
-    ; always advance, so a chained next-seed never stalls on a 0/1-element input
-    [m (%rand-step state)]
-    (let (s (%rand-step state)
-          j (rem s (+ i 1)))
-      (shuffle-at (shuffle-swap m i j) (- i 1) s))))
-
-(defn- shuffle-drain
-  (m i acc)
-  ;; Read slots i…0 back out, building the result list front-to-back.
-  (if (< i 0) acc (shuffle-drain m (- i 1) (cons (get m i) acc))))
-
-(defn shuffle (seed coll)
-  "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
-  (let (v (into [] coll)
-        n (count v)
-        slots (fold (fn (m i) (assoc m i (nth v i))) {} (range n))
-        [out state] (shuffle-at slots (- n 1) (%rand-seed seed)))
-    [(shuffle-drain out (- n 1) nil) state]))
 
 ;; ---- bounded printing -------------------------------------------------------
 ;; `pr-str` is *faithful*: whatever it returns reads back as the same value, so it
@@ -427,7 +348,7 @@ have built the flood this bound exists to prevent."
         length (if bytes (count x) (string/length x)))
     (if (or (nil? limit) (<= length limit))
       (pr-str x)
-      (let (printed (pr-str (if bytes (subbytes x 0 limit) (string/substring x 0 limit))))
+      (let (printed (pr-str (if bytes (%subbytes x 0 limit) (string/substring x 0 limit))))
         ;; drop the closing quote, mark the elision, close again
         (str (string/substring printed 0 (dec (string/length printed))) "…\"")))))
 

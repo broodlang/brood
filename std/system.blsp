@@ -8,7 +8,7 @@
     (system/argv)                       ;; => [\"brood\" \"script.blsp\"]
     (system/os-type)                    ;; => :linux
     (system/cwd)                        ;; => \"/home/alice/project\"
-    (system/hostname)                   ;; => \"mymachine\"
+    (system/os/hostname)                   ;; => \"mymachine\"
 
     (def r (system/cmd \"git\" [\"log\" \"--oneline\" \"-3\"]))
     (get r :stdout)                     ;; => \"abc1234 ...\n...\"
@@ -20,7 +20,7 @@
 
 (defn env (name)
   "The value of environment variable `name` as a string, or nil if unset."
-  (getenv name))
+  (os/getenv name))
 
 (defn env-all ()
   "All environment variables as a `{string → string}` map."

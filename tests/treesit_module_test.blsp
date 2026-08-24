@@ -19,7 +19,7 @@
 ;; ships none by default. Skip these suites when absent so a bare `cargo test`
 ;; stays green — `make test` builds them in and runs them.
 (defn tsm-grammar? (lang)
-  (try (do (tree-sitter-parse "" lang) true) (catch _ false)))
+  (try (do (%tree-sitter-parse "" lang) true) (catch _ false)))
 (def tsm-grammars? (and (tsm-grammar? :ruby) (tsm-grammar? :elixir)))
 
 ;; A small Ruby method, used across the navigation tests. Offsets:
