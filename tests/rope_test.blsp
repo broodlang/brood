@@ -117,12 +117,14 @@
 
 (describe "rope out-of-bounds errors"
   (test "insert past the end raises" (assert-error (text/insert (text/from-string "ab") 99 "x")))
-  (test "insert at a negative index raises" (assert-error (text/insert (text/from-string "ab") -1 "x")))
+  (test "insert at a negative index raises"
+    (assert-error (text/insert (text/from-string "ab") -1 "x")))
   (test "delete past the end raises" (assert-error (text/delete (text/from-string "ab") 0 99)))
   (test "delete with end < start raises" (assert-error (text/delete (text/from-string "abc") 2 1)))
   (test "slice past the end raises" (assert-error (text/slice (text/from-string "ab") 0 99)))
   (test "line past the end raises" (assert-error (text/line (text/from-string "ab") 5)))
-  (test "char->line past the end raises" (assert-error (text/char->line (text/from-string "ab") 99))))
+  (test "char->line past the end raises"
+    (assert-error (text/char->line (text/from-string "ab") 99))))
 
 (describe "ropes across processes"
   :isolated

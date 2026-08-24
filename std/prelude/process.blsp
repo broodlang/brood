@@ -54,8 +54,7 @@
 ;;     symbol has no effect, so this is never a legitimate use — the call either
 ;;     works or raises a loud "not callable", never a silent no-op;
 ;;   - anything else is the body expression → `(fn () expr)`.
-(defn spawn-body-thunk
-  (form)
+(defn spawn-body-thunk (form)
   (cond
     (spawn-thunk-form? form) form
     (symbol? form) `(fn () (~form))
@@ -94,7 +93,6 @@ and reports `:noproc` (losing `:normal`). Supervised children should use this so
 `:normal` exit isn't misread as a crash. A zero-arg lambda `(fn () …)` body is
 passed through (not re-wrapped), like `spawn`."
   `(%spawn-link ~(spawn-body-thunk expr)))
-
 
 ;; ---- sleep: park on the scheduler timer (policy in Brood) ---------------
 ;; Sleep `ms` milliseconds in the current process. A bare `(receive (after ms …))`

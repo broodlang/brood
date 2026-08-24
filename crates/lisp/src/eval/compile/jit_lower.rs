@@ -26,7 +26,7 @@ pub(crate) use i64::{arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep};
 // Pure pre-lowering analysis (block leaders / operand depth / …) for
 // `jit_lower_arm_inner` — the first extracted step of decomposing that function.
 #[cfg(feature = "jit")]
-mod prepass;
+pub(crate) mod prepass;
 
 // CLIF emit helpers extracted from `jit_lower_arm_inner`'s closures (the next step
 // of that function's decomposition). They take `b: &mut FunctionBuilder` + the
@@ -34,7 +34,7 @@ mod prepass;
 #[cfg(feature = "jit")]
 mod emit;
 #[cfg(feature = "jit")]
-use emit::{is_bool_op, store_int};
+use emit::store_int;
 
 // Control-flow arm bodies (`Jump` / `JumpIfFalse`) + the block-param edge-typing
 // helper, extracted from the emit loop (the per-`Inst` arm-body decomposition step).
@@ -477,7 +477,12 @@ fn jit_lower_arm_inner(
     } else {
         nslots
     };
+    // KI-49: the reserve is [call-result spills | block-argument spills]. The block-arg
+    // half is indexed by operand-stack POSITION (so predecessors agree), so it gets its own
+    // base rather than sharing `spill_next`'s monotonic counter.
+    let blockarg_spill_len = crate::eval::compile::jit_plan::max_leader_depth_pub(code);
     let spill_base = frame_top_for_spills - reserve;
+    let blockarg_spill_base = spill_base + reserve.saturating_sub(blockarg_spill_len);
     let mut spill_next = 0usize;
     // Return-via-roots writes/reads the result at `roots[base]` (slot 0), and the VM hooks
     // read it back the same way — both require slot 0 to exist. A 0-slot arm (a 0-arg,
@@ -982,6 +987,12 @@ fn jit_lower_arm_inner(
     b.def_var(rb_var, b.inst_results(call)[0]);
     // The frame-access context the extracted slot helpers (`emit::load_slot_int` etc.)
     // read; all fields are `Copy`, so it threads by value.
+    // KI-49: which slots the tier-time profile saw an `Int` in. A profiled-Int slot keeps
+    // the unboxed i64 block-arg carry (`fib`/`collatz`); every other slot crosses a block
+    // boundary as `ParamRepr::Slot`, so it is never forced through `as_int`.
+    let slot_int_profile: Vec<bool> = (0..nslots)
+        .map(|i| slot_tags.get(i).copied() == Some(TAG_INT))
+        .collect();
     let frame = emit::Frame {
         rb_var,
         base,
@@ -990,6 +1001,9 @@ fn jit_lower_arm_inner(
         carry_vars: &carry_vars,
         slot_float: &slot_float,
         slot_bool: &slot_bool,
+        slot_int_profile: &slot_int_profile,
+        blockarg_spill_base,
+        blockarg_spill_len,
         slot_f64_cache: &slot_f64_cache,
     };
     // A scratch `Value`-sized stack slot the handle / call / global ops write their result
@@ -1433,9 +1447,10 @@ fn jit_lower_arm_inner(
     let read_words = |b: &mut FunctionBuilder, op: Op| -> [cranelift_codegen::ir::Value; 3] {
         emit::read_words(b, op, frame)
     };
-    let as_block_arg = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
-        emit::as_block_arg(b, op, frame)
-    };
+    let as_block_arg =
+        |b: &mut FunctionBuilder, op: Op, idx: usize| -> cranelift_codegen::ir::Value {
+            emit::as_block_arg(b, op, idx, frame)
+        };
     // Integer-vs-float dispatch for a binary op: an operand is float if it's an
     // `Op::Float`, or a `Slot` the profile/tracking marks float. (`Op::Int`/`Handle` are
     // integer/non-number.)
@@ -1500,7 +1515,7 @@ fn jit_lower_arm_inner(
     // translated (forward edges, in ip order) — so the flags are set by the time the target
     // is reached. A back-edge target with params would see no flags and default to `Int`;
     // self-tail back-edges target the param-less leader 0, so this doesn't arise in practice.
-    let mut bool_param: Vec<Option<Vec<bool>>> = vec![None; len + 1];
+    let mut bool_param: Vec<Option<Vec<emit::ParamRepr>>> = vec![None; len + 1];
     // Edge typing at joins is handled by `control::record_block_flags` (imported).
 
     // Translate each leader block in ip order.
@@ -1514,14 +1529,16 @@ fn jit_lower_arm_inner(
             .iter()
             .enumerate()
             .map(|(i, &v)| {
-                let is_bool = bool_param[ip]
+                match bool_param[ip]
                     .as_ref()
                     .and_then(|f| f.get(i).copied())
-                    .unwrap_or(false);
-                if is_bool {
-                    Op::Bool(v)
-                } else {
-                    Op::Int(v)
+                    .unwrap_or(emit::ParamRepr::Int)
+                {
+                    emit::ParamRepr::Bool => Op::Bool(v),
+                    // KI-49: the value was never materialised into the arg word — it lives
+                    // in frame slot `k`, which every predecessor agreed on.
+                    emit::ParamRepr::Slot(k) => Op::Slot(k),
+                    emit::ParamRepr::Int => Op::Int(v),
                 }
             })
             .collect();
@@ -1839,11 +1856,16 @@ fn jit_lower_arm_inner(
                 break;
             }
             if is_leader[j] {
-                let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op, frame)).collect();
+                let flags: Vec<emit::ParamRepr> = stack
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &op)| emit::param_repr(&b, op, i, frame))
+                    .collect();
                 if record_block_flags(&mut bool_param[j], flags) {
                     let args: Vec<BlockArg> = stack
                         .iter()
-                        .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
+                        .enumerate()
+                        .map(|(i, &op)| BlockArg::Value(as_block_arg(&mut b, op, i)))
                         .collect();
                     b.ins().jump(leader_block[j]?, &args);
                 } else {

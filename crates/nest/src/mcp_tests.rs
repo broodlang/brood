@@ -432,7 +432,7 @@ fn capture_does_not_leak_between_calls() {
 
 #[test]
 fn term_draw_under_mcp_diverts_escapes_instead_of_corrupting_the_stream() {
-    // term-draw writes terminal escapes via crossterm straight to fd 1 — which,
+    // term/draw writes terminal escapes via crossterm straight to fd 1 — which,
     // under `nest mcp`, is the JSON-RPC channel. Without the capture-divert
     // (`write_term_bytes`), those bytes corrupt the stream and wedge the client.
     // With it: the call returns a clean result envelope and the rendered escapes
@@ -445,14 +445,14 @@ fn term_draw_under_mcp_diverts_escapes_instead_of_corrupting_the_stream() {
                 1,
                 "tools/call",
                 json!({ "name": "eval", "arguments": {
-                        "source": "(term-draw [[:clear] [:text 0 0 \"ab\"]])" } }),
+                        "source": "(term/draw [[:clear] [:text 0 0 \"ab\"]])" } }),
             ),
             notif("exit", json!(null)),
         ],
     );
     assert!(
         resp[0].get("result").is_some(),
-        "term-draw must return a clean result envelope, got {:?}",
+        "term/draw must return a clean result envelope, got {:?}",
         resp[0]
     );
     let content = resp[0]["result"]["content"].as_array().unwrap();

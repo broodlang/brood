@@ -21,7 +21,7 @@ ADRs / topic docs.
 |---|---|---|
 | KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
-| KI-49 | the tagged-tuple `receive` matcher type-deopts 16x and is latched onto the interpreter for the process — 454 ns vs 59 ns for the keyword matcher, and the whole `pingpong`/`ring`/`supervisor` gap to Elixir | ⚠️ **OPEN — root-caused and localised, not fixed.** Deopts all land at `resume_ip=7` (the checkpoint after the `Call` to `vector-length` — the guard is at or after it). NOT the HOF fast-frame: `BROOD_NO_HOF_JIT=1` still deopts 16x. Payload type and every optimizer opt-out are ruled out; next step is per-deopt-site reason codes |
+| KI-49 | the tagged-tuple `receive` matcher type-deopted 16x and was latched onto the interpreter for the process — 454 ns vs 59 ns for the keyword matcher, and the whole `pingpong`/`ring`/`supervisor` gap to Elixir | ✅ **FIXED 2026-08-21.** Root cause: `as_block_arg` forced every non-`Int` block argument through `as_int`, so the matcher deopted on **every** activation and the sixteen-deopt rule latched it to the interpreter. Fixed by spilling boxed args to position-derived frame slots (`ParamRepr`). `hof_decline_bailed` 98 981 → 0, `jit_link_done` 0 → 187 328, `ns_match_run` 457 → 179 ns/msg, **pingpong −12.9%** (reproduced 3x; spawn/fib/collatz flat) |
 | KI-48 | JIT tail dispatch read past the roots stack — `root_at(9)` on a len-8 stack, twice on 2026-08-20, from `jit_dispatch_tail`; an audit then found a **second live instance** in `dispatch.rs` and a **false safety argument** in `vm_cache.rs` | ✅ **root-caused, both instances fixed, and the anti-pattern gated 2026-08-21** — the dispatcher re-derived the frame size from `active_nslots()` (the KI-26/ADR-210 anti-pattern), which the background inline swap can change mid-flight; **measured live on 123 arms**, `fold` at nslots=13 vs inline_nslots=25 (a 12-slot overshoot). Now passed the size the trampoline built the frame to. Original crash never reproduced on demand, so the causal link is strong but not proven |
 | KI-47 | the `differential (tree-walker)` CI job went red on **every** run from the ADR-230/231 namespacing merge onward, always as the same three `adversarial_test.blsp` heap-allocation cases dying on `E0043`. Those cases were not the cause: the suite's **process-wide** allocation had reached **1.145 GB** against the **1 GiB** `TEST_DEFAULT_SOFT` backstop, and a threshold failure names whichever tests are running when the line is crossed | ✅ **fixed 2026-08-19** — backstop raised to 2 GiB soft / 3 GiB hard (`core/alloc.rs`), which is what it documents itself to be: a *host-survival* guard, not a working-set budget. ⚠ **Leaves an unresolved question**: the cap was sized against a ~240 MB suite peak and the suite now peaks ~1 GB (4.8×), so this restores a ~2× margin, not the intended 4× |
 | KI-46 | **deadline margin, not a failure yet.** KI-39 was a fixed cost sitting under a fixed deadline for weeks while reading as a random flake, so every case's CI margin against nextest's 120 s hard kill was audited from the 2026-08-17 logs. `nest::bin/nest mcp::tests::std_check_tool_returns_structured_diagnostics_or_an_error` is now the worst at **87 s = 1.38× margin** — it invokes the MCP `check` tool, which is cwd-based, so it type-checks **this whole repository**, and the cost grows as the repo does | ✅ **fixed 2026-08-18, the real way** (87 s → **2.5 s**) — the three cheap fixes were all worse than the problem: `BROOD_NO_CHECK=1` guts what the case proves, a temp-dir `set_current_dir` is process-global and would race its siblings under plain `cargo test` (trading a slow test for a nondeterministic one), and a bigger nextest budget is what hid KI-39. So the real fix was done instead: `check-project-structured` gained an optional `from` root, and `mcp-check-tool` now passes **`*project-root*`** — the root the server already pins its write sandbox to and that every other project-scoped tool already read. `check` was the one tool taking its project from cwd. The three next-worst (`scaffold_quality`, 89/80/77 s) **were** fixed the same day by splitting one case per template |
@@ -68,7 +68,7 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**One OPEN item: KI-49** (the tagged-tuple receive matcher latched onto the interpreter — root-caused and localised, not fixed). KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**No open items.** KI-49 (the tagged-tuple receive matcher latched onto the interpreter) was root-caused and **fixed 2026-08-21** — `pingpong` −12.9%. KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -2677,7 +2677,32 @@ others.
 
 ---
 
-## KI-49 — the tagged-tuple `receive` matcher is latched onto the interpreter (open)
+## KI-49 — the tagged-tuple `receive` matcher was latched onto the interpreter ✅ FIXED
+
+**Fixed 2026-08-21.** An operand crossing a block boundary now carries a *representation*
+(`ParamRepr::Int | Bool | Slot(k)`), agreed across predecessors by the existing
+`record_block_flags`. A boxed `Op::Handle` with no slot of its own is **spilled to a frame
+slot derived from its operand-stack POSITION** — position, not `spill_next`'s allocation
+order, because every predecessor must name the same slot or the edge is rejected. A slot the
+tier-time profile saw an `Int` in keeps the unboxed carry, so `fib`/`collatz` are untouched.
+
+| | before | after |
+|---|---|---|
+| the matcher | latched to the VM | **native** (`jit_link_done` 0 → 187 328, `hof_decline_bailed` 98 981 → 0) |
+| `ns_match_run` | 457 ns/msg | **179 ns/msg** (2.6x) |
+| `vm_apply` | 100 166 | 6 406 |
+
+`make ab` against the groundwork commit: **`pingpong` −12.9%** (217 → 189 ms, reproduced at
+−12.1/−12.3/−12.9% over N=7/11/15), `ring` −1.4%, and — the risk that made this
+measure-before-ship — **`spawn` −1.6%, `fib` +1.2%, `collatz` 0.0%**, i.e. the frame growth
+did *not* reproduce the 1.9x `spawn` regression blanket-reserving once caused. The reserve
+stays behind the `chunk_in_jit_subset` gate, so only lowerable arms pay it.
+
+That takes `pingpong` from 3.7x to ~3.26x of Elixir. It is not parity and was never going to
+be: the bare-atom path is 739 ns against Elixir's ~290 ns per message, so `receive` +
+`deliver` remain the structural remainder.
+
+### (the diagnosis that led here follows)
 
 **Status:** ⚠️ **open (2026-08-21) — root-caused and localised; not fixed.**
 

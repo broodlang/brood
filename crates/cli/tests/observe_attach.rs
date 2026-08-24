@@ -1,5 +1,5 @@
 //! End-to-end remote-attach test (ADR-053): a target `brood` runtime makes itself
-//! observable (`node-start` + `observe-serve`), and a second runtime attaches over
+//! observable (`node/start` + `observe-serve`), and a second runtime attaches over
 //! the node link, requests a process snapshot, and — when the target dies — sees
 //! the link drop. Exercises the data/protocol path the `nest observe --connect`
 //! TUI rides on, without a terminal.
@@ -27,7 +27,7 @@ fn remote_attach_reads_snapshot_then_sees_disconnect() {
     // Target: become observable, spawn a couple of identifiable workers, park.
     let target = format!(
         r#"
-(node-start :app "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(node/start :app "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (observer/observe-serve)
 (spawn (receive (_ :done)))
 (spawn (receive ([:work _] :done)))
@@ -40,9 +40,9 @@ fn remote_attach_reads_snapshot_then_sees_disconnect() {
     // the link), then poll until the link drops (the harness kills the target).
     let observer = format!(
         r#"
-(node-start :obs "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(def peer (connect "app@127.0.0.1:{port_a}"))
-(monitor-node peer)
+(node/start :obs "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(def peer (node/connect "app@127.0.0.1:{port_a}"))
+(node/monitor peer)
 (def snap (observer/observe-request peer))
 (if (map? snap)
   (println (str "ATTACH-OK node=" (name (get (get snap :node) :name))
@@ -65,10 +65,10 @@ fn remote_attach_reads_snapshot_then_sees_disconnect() {
 
     // Kill the target only once the observer has REPORTED its attach — never after a
     // fixed sleep. KI-43: this was `sleep(5000)`, and no constant can be right here. The
-    // observer has to boot a debug `brood`, `node-start`, `require 'observer'` (a large
+    // observer has to boot a debug `brood`, `node/start`, `require 'observer'` (a large
     // module) and connect before the kill lands; under peak suite load — a 600 s
     // in-language suite plus the scaffold tests on the same box — that overran 5 s, the
-    // target died first, and the observer's `(connect …)` failed with `Connection refused`
+    // target died first, and the observer's `(node/connect …)` failed with `Connection refused`
     // and an EMPTY stdout. Two earlier bumps (1500 → 5000 ms) were the same fix applied to
     // the same wrong idea. Reading the marker makes the wait proportional to the machine
     // instead of to a guess, and it strengthens the test: "attached BEFORE the kill" is

@@ -607,7 +607,10 @@ pub(super) fn tcp_connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 
 pub(super) fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let host = expect_string(heap, "%tcp-listen", arg(args, 0))?;
-    let port = socket_port("%tcp-listen", expect_int(heap, "%tcp-listen", arg(args, 1))?)?;
+    let port = socket_port(
+        "%tcp-listen",
+        expect_int(heap, "%tcp-listen", arg(args, 1))?,
+    )?;
     let owner = crate::process::self_pid();
     match crate::net::listen(&host, port, owner) {
         Ok(id) => Ok(Value::socket(id)),
@@ -620,7 +623,10 @@ pub(super) fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 
 pub(super) fn tls_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let host = expect_string(heap, "%tls-listen", arg(args, 0))?;
-    let port = socket_port("%tls-listen", expect_int(heap, "%tls-listen", arg(args, 1))?)?;
+    let port = socket_port(
+        "%tls-listen",
+        expect_int(heap, "%tls-listen", arg(args, 1))?,
+    )?;
     let cert = expect_string(heap, "%tls-listen", arg(args, 2))?;
     let key = expect_string(heap, "%tls-listen", arg(args, 3))?;
     let owner = crate::process::self_pid();
