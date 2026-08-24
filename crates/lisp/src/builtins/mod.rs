@@ -3214,7 +3214,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::nullary(sym.union(kw)),
         node_name,
     );
-    def(heap, "%nodes", Arity::exact(0), Sig::nullary(list_ty), nodes);
+    def(
+        heap,
+        "%nodes",
+        Arity::exact(0),
+        Sig::nullary(list_ty),
+        nodes,
+    );
     def(
         heap,
         "%monitor-node",

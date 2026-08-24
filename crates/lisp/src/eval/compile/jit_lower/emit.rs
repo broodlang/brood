@@ -87,11 +87,68 @@ pub(super) struct Frame<'a> {
     /// block-arg representation. Shared (`RefCell`) — set by stores, read by loads.
     pub slot_float: &'a std::cell::RefCell<Vec<bool>>,
     pub slot_bool: &'a std::cell::RefCell<Vec<bool>>,
+    /// Per-slot "the tier-time profile saw an `Int` here" (from `slot_tags`). Read only by
+    /// [`param_repr`], to decide how an operand crosses a block boundary: a profiled-Int
+    /// slot keeps the unboxed i64 carry (the `fib`/`collatz` fast path), anything else is
+    /// carried as [`ParamRepr::Slot`] instead of being forced through `as_int` — which is
+    /// KI-49, where a matcher's message vector deopted at every merge.
+    pub slot_int_profile: &'a [bool],
+    /// Base frame slot of the **block-argument spill** region (KI-49). An operand that must
+    /// cross a block boundary but is not a profiled `Int` is stored at
+    /// `blockarg_spill_base + <its operand-stack index>` and carried as `ParamRepr::Slot`.
+    /// Indexed by stack POSITION, not allocation order, so every predecessor of a block
+    /// names the same slot — otherwise `record_block_flags` rejects the edge.
+    pub blockarg_spill_base: usize,
+    /// How many block-argument spill slots exist (`max_leader_depth`). An operand deeper
+    /// than this cannot be spilled, and the arm bails rather than writing out of bounds.
+    pub blockarg_spill_len: usize,
     /// Per-slot cache of the unboxed `f64` SSA value last stored via `store_op`,
     /// valid within a block: a later `as_f64` read returns it directly, skipping the
     /// store→load→bitcast round-trip. `None` for slots not written as a float (params
     /// are always `None`). Shared (`RefCell`) — see `as_f64` for the invalidation rules.
     pub slot_f64_cache: &'a std::cell::RefCell<Vec<Option<cranelift_codegen::ir::Value>>>,
+}
+
+/// How one operand-stack entry crosses a block boundary. Block params are `I64`, so the
+/// representation has to be agreed by every predecessor (`record_block_flags`); a
+/// disagreeing edge is routed to `deopt`, exactly as it was when this was a plain `bool`.
+///
+/// `Slot` is the KI-49 fix. Previously every carried operand went through `as_int`, which
+/// tag-checks `Int` and deopts otherwise — so an arm carrying a non-Int value across a
+/// merge (any tagged-tuple matcher: it tests `vector?`, then `vector-length`, then `nth`
+/// on the same message) deopted on *every* activation and was latched to the interpreter.
+/// Carrying "the value is in frame slot k" instead needs no unboxing and cannot deopt.
+///
+/// Int is kept as the default for profiled-`Int` slots so the unboxed integer carry —
+/// what makes `fib`/`collatz` fast — is untouched.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ParamRepr {
+    Int,
+    Bool,
+    /// The value lives in frame slot `k`; the arg word is a placeholder. Every predecessor
+    /// must name the *same* slot, which `record_block_flags` enforces by equality.
+    Slot(usize),
+}
+
+/// The representation `op` at operand-stack index `idx` will cross a block boundary as.
+///
+/// `idx` selects the block-argument spill slot for a `Handle`, so it must be the operand's
+/// position in the abstract stack — the same value at every predecessor.
+pub(super) fn param_repr(b: &FunctionBuilder, op: Op, idx: usize, f: Frame) -> ParamRepr {
+    if is_bool_op(b, op, f) {
+        return ParamRepr::Bool;
+    }
+    match op {
+        // A slot the tier-time profile did NOT see an Int in: carry it as a slot reference
+        // rather than unboxing it (which would deopt for a vector/map/string/…).
+        Op::Slot(k) if !f.slot_int_profile.get(k).copied().unwrap_or(false) => ParamRepr::Slot(k),
+        // A boxed value with no slot of its own — the KI-49 case (a `MakeVector` result
+        // crossing an `if` merge). Spill it to the block-argument region at its stack index.
+        Op::Handle(..) if idx < f.blockarg_spill_len => {
+            ParamRepr::Slot(f.blockarg_spill_base + idx)
+        }
+        _ => ParamRepr::Int,
+    }
 }
 
 /// Does `op` carry a `Value::Float`? (An `Op::Float`, or a `Slot` flagged float.)
@@ -515,6 +572,7 @@ pub(super) fn as_int(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
 pub(super) fn as_block_arg(
     b: &mut FunctionBuilder,
     op: Op,
+    idx: usize,
     f: Frame,
 ) -> cranelift_codegen::ir::Value {
     // A slot proven to hold a `Value::Bool` (`slot_bool`): load its payload byte (0/1)
@@ -535,6 +593,17 @@ pub(super) fn as_block_arg(
             );
             return b.ins().band_imm(pl, 0xff);
         }
+    }
+    // KI-49: an operand crossing as `ParamRepr::Slot` is NOT materialised — the target
+    // rebuilds `Op::Slot(k)` and reads the frame when it needs the value. Forcing it
+    // through `as_int` here is what deopted every tagged-tuple matcher.
+    if let ParamRepr::Slot(k) = param_repr(b, op, idx, f) {
+        // A Handle has to be materialised INTO the slot first; a Slot operand already
+        // lives in one (and `k` is that same slot, so this would be a self-copy).
+        if matches!(op, Op::Handle(..)) {
+            store_op(b, k as i64, op, f);
+        }
+        return b.ins().iconst(types::I64, 0);
     }
     let v = as_int(b, op, f);
     if b.func.dfg.value_type(v) == types::I8 {
