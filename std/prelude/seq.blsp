@@ -124,7 +124,7 @@ string, keyword, vector, and record keys all work."
 ;; recursion, and split each run in a single `split-at` pass. The previous form
 ;; re-`count`ed and ran a separate `take`+`drop` at every level — three O(n)
 ;; walks per level, O(n log n) wasted overall — purely to find the midpoint.
-(defn merge-sort (less? coll) (merge-sort-n less? coll (count coll)))
+(defn- merge-sort (less? coll) (merge-sort-n less? coll (count coll)))
 ;; check-allow: deliberately non-tail — depth = log2 of the length — ~60 frames for any feasible list.
 (check-allow :non-tail-recursion
   (defn- merge-sort-n
@@ -498,17 +498,17 @@ for a higher-order op that wants a fixed answer."
 ;;
 ;; `xmap`/`xfilter`/`xremove`/`xkeep` are the built-in stages (the same functions
 ;; the `l*` combinators use), and `transduce` runs a stack over any collection.
-(defn xmap (f)
+(defn- xmap (f)
   "The `map` stage as a transducer: `(f x)` for each input. Compose with `comp`, run
 with `transduce`, or reach for `lmap` when you just want a fusing pipeline."
   (%xmap f))
-(defn xfilter (pred)
+(defn- xfilter (pred)
   "The `filter` stage as a transducer: keep inputs where `(pred x)` is truthy."
   (%xfilter pred))
-(defn xremove (pred)
+(defn- xremove (pred)
   "The `remove` stage as a transducer: drop inputs where `(pred x)` is truthy."
   (%xremove pred))
-(defn xkeep (f)
+(defn- xkeep (f)
   "The `keep` stage as a transducer: `(f x)` for each input, dropping `nil` results."
   (%xkeep f))
 
@@ -536,7 +536,7 @@ view, compose `xf` onto its transducer (same source) so the stages fuse."
       (%seqview (vector-ref parts 0) (comp (vector-ref parts 1) xf)))
     (%seqview coll xf)))
 
-(defn lmap (f coll)
+(defn- lmap (f coll)
   "Lazy, fusing `map`: a seq-view of `(f x)` for each `x` in `coll`. Composes with
 adjacent `l*` stages (thread them with `->>`) and folds/reduces in one pass with
 no intermediate lists. Realise with `seq`/`into`, or just consume it
@@ -544,15 +544,15 @@ no intermediate lists. Realise with `seq`/`into`, or just consume it
 iterating for side effects."
   (%seqview-wrap coll (%xmap f)))
 
-(defn lfilter (pred coll)
+(defn- lfilter (pred coll)
   "Lazy, fusing `filter` — see `lmap`."
   (%seqview-wrap coll (%xfilter pred)))
 
-(defn lkeep (f coll)
+(defn- lkeep (f coll)
   "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `lmap`."
   (%seqview-wrap coll (%xkeep f)))
 
-(defn lremove (pred coll)
+(defn- lremove (pred coll)
   "Lazy, fusing `remove` — see `lmap`."
   (%seqview-wrap coll (%xremove pred)))
 
@@ -567,7 +567,7 @@ iterating for side effects."
 (defn- iterate-times-acc
   (f x n acc)
   (if (< n 0) acc (iterate-times-acc f (f x) (dec n) (cons x acc))))
-(defn iterate-times (f x n)
+(defn- iterate-times (f x n)
   "The list (x f(x) f²(x) … fⁿ(x)) — `n`+1 successive states of applying `f`."
   (reverse (iterate-times-acc f x n nil)))
 

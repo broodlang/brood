@@ -155,7 +155,7 @@
 ;; list in reverse (then reversed once at the end). Hoisted to the top level so
 ;; the list builders that reverse-accumulate don't each allocate a fresh closure
 ;; on every call.
-(defn flip-cons (acc x) (cons x acc))
+(defn- flip-cons (acc x) (cons x acc))
 
 ;; A dedicated loop, not `(fold flip-cons …)`: `reverse` is the final pass of
 ;; nearly every sequence builder (`map`/`filter`/`take`/`zip`/`range`/…), so
@@ -168,7 +168,7 @@
   "The items of `coll` in reverse order, as a list."
   (reverse-acc (seq coll) nil))
 
-(defn reverse-onto (coll tail)
+(defn- reverse-onto (coll tail)
   "The items of `coll` reversed, prepended onto `tail`. `(reverse-onto xs ys)` is
 `(append (reverse xs) ys)` — but it walks `xs` **once**, so it is the spelling to
 reach for when a tail-recursive loop has accumulated a reversed prefix and wants to
