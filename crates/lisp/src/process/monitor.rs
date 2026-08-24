@@ -88,9 +88,49 @@ struct PendingRemote {
 /// ref — token or monitor handle — is distinct across the whole runtime.
 static NEXT_REF: AtomicU64 = AtomicU64::new(0);
 
+/// Random high bits for this runtime's ref space, so two *nodes* do not mint the
+/// same ref.
+///
+/// A `Pid` is node-qualified on the wire (`{node, id}`), but a `Ref` crosses as a
+/// bare `u64` (`wire.rs`'s `M_REF`) and every node counts from 0 — so two nodes
+/// running the same code mint ref 1, ref 2, … in lockstep and their refs collide
+/// with near-certainty. A ref is what a pinned `receive` matches on and what
+/// identifies a monitor, so a collision can hand a caller a reply meant for a peer
+/// and strand the real one.
+///
+/// Erlang qualifies the ref itself by node. We cannot do that cheaply here: `Ref` is
+/// a bare `u64` inside `Value`, whose layout is pinned for the JIT
+/// (`value_layout_is_stable_for_the_jit`), so widening it would ripple through the
+/// JIT ABI. Randomising the top 24 bits per runtime instead makes an overlap ~6e-8
+/// per node pair while leaving 40 bits — over a trillion — of counter, which no run
+/// approaches (a million refs a second would take twelve days). This narrows the
+/// window rather than closing it by construction; node-qualified refs remain the
+/// principled fix if `Value` ever gains room.
+fn ref_base() -> u64 {
+    static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BASE.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        // `RandomState` is seeded per process by the OS, so this needs no rng dep.
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(std::process::id() as u64);
+        h.write_u64(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+        );
+        h.finish() & !REF_COUNTER_MASK
+    })
+}
+
+/// Low bits of a ref id that belong to the counter; the rest is [`ref_base`].
+const REF_COUNTER_MASK: u64 = (1 << 40) - 1;
+
 /// A fresh, globally-unique reference id. Backs `Value::Ref`.
 pub fn next_ref() -> u64 {
-    NEXT_REF.fetch_add(1, Ordering::Relaxed)
+    // Masked so a counter that somehow wrapped past 2^40 cannot bleed into — and
+    // thereby forge — another runtime's base.
+    ref_base() | (NEXT_REF.fetch_add(1, Ordering::Relaxed) & REF_COUNTER_MASK)
 }
 
 /// How many watchers are currently monitoring `pid` (the `:monitored-by` count

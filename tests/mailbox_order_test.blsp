@@ -1,0 +1,118 @@
+;; The receive-mark (ADR-195) makes a `receive` pinned on a fresh `(ref)` skip straight
+;; past every message that predates the ref, by BINARY-SEARCHING the mailbox queue on
+;; arrival sequence. That is sound only while the queue really is ordered by that
+;; sequence: a `partition_point` over a predicate that is not partitioned returns an
+;; arbitrary index, and the message it lands past is simply never examined. Nothing
+;; crashes — the caller just times out waiting for a reply sitting in its own mailbox,
+;; which is the hardest failure mode there is to attribute after the fact.
+;;
+;; One thing can perturb that order. A `receive` clause's `:when` guard runs arbitrary
+;; code, DURING the scan, with the mailbox lock released — and a guard that itself runs a
+;; *consuming* nested `receive` removes messages from the very queue being scanned. The
+;; scan had optimistically popped its candidate, so the position it recorded no longer
+;; names that slot; putting the candidate back THERE leaves the queue out of order, while
+;; putting it back in SEQ order does not.
+;;
+;; This file builds exactly that interleaving and then asserts the plain thing: the reply
+;; is delivered. See `reinsert_at_seq` in `crates/lisp/src/process/mailbox.rs`.
+;;
+;; **Verified by sabotage.** With `reinsert_at_seq` reverted to the old clamped index, the
+;; queue this builds is seq `[3, 5, 4]`, `[:noise]` makes it `[3, 5, 4, 6]`, and the
+;; pinned receive's `partition_point(seq < 5)` over that non-partitioned predicate
+;; (`[T, F, T, F]`) returns 3 — stepping straight over the reply at index 1. The case then
+;; fails with `:LOST-THE-REPLY`. Every step below is load-bearing for reaching that state;
+;; if one stops holding, rebuild the case, do not relax it.
+(defmodule mailbox-order-test (:use test))
+
+;; A request/reply peer: `:req` is the one whose reply the pinned receive must find.
+(defn- reply-server
+  ()
+  (if (receive
+        ([:req r from] (do (send from [:reply r :ok]) true))
+        (:stop false))
+    (reply-server)
+    nil))
+
+;; Spin (bounded) until the mailbox holds `n` messages.
+;;
+;; Deliberately NOT `sleep`: `sleep` is `(let (never (ref)) (receive (^never nil) (after ms
+;; nil)))`, and the receive-mark is a SINGLE slot holding only the most recently minted
+;; ref — so sleeping after minting `r` would disarm the very mark this case is about, and
+;; the pinned receive would scan from the front and pass for the wrong reason.
+(defn- await-queued
+  (n tries)
+  (if (or (>= (mailbox-size (self)) n) (<= tries 0))
+    (mailbox-size (self))
+    (await-queued n (- tries 1))))
+
+;; The guard. It runs inside the outer `receive`'s scan, while that scan is holding a
+;; candidate popped out of the queue — so everything it does here shifts the queue under
+;; that scan. Every nested receive carries a timeout: a guard is not a place to block
+;; forever (the enclosing receive's own `after` cannot fire while we are inside it).
+(defn- perturb
+  (box srv)
+  (if (table-get box :done)
+    false ; perturb exactly once, however many candidates the scan offers us
+    (do
+      (table-put box :done true)
+      ;; Eat the three oldest queued messages out from under the scan.
+      (table-put box :ate
+        [(receive ([:junk n] n) (after 500 :none))
+         (receive ([:junk n] n) (after 500 :none))
+         (receive ([:junk n] n) (after 500 :none))])
+      (let (r (ref))
+        ;; Minted HERE, so every message already queued predates it: this is the ref
+        ;; whose receive-mark the perturbed queue has to survive. It must also be the
+        ;; LAST ref this process mints — the mark is a single slot holding only the most
+        ;; recent one, so an intervening `(ref)` (or `monitor`) would disarm it and the
+        ;; case would pass by scanning from the front.
+        (table-put box :ref r)
+        (send srv [:req r (self)])
+        ;; Let the reply land *before* the candidate goes back on the queue: it is the
+        ;; reply sitting behind the out-of-order candidate that the mark skips past.
+        (table-put box :queued (await-queued 2 1000000)))
+      ;; Decline the clause: the candidate goes back on the queue — the step under test.
+      false)))
+
+(describe "mailbox arrival-sequence ordering"
+  :isolated
+
+  (test "a pinned receive still sees its reply after a guard consumed from the mailbox"
+    (let (me (self)
+          box (table)
+          srv (spawn (reply-server)))
+      ;; Four messages the outer receive's leading-keyword filter skips (seq 0..3).
+      (send me [:junk 0])
+      (send me [:junk 1])
+      (send me [:junk 2])
+      (send me [:junk 3])
+      ;; `:go` must arrive only AFTER the outer receive has scanned to the end and is
+      ;; waiting. That is what makes the scan RESUME at index 4 and take that candidate
+      ;; on the optimistic-pop path — a scan starting at 0 pops the head instead, and
+      ;; re-inserting the head is trivially in order.
+      (spawn (do (sleep 150) (send me [:go])))
+      ;; Wrapped in `try` on purpose: a native-nested receive keeps its scan index across
+      ;; the wait, where a plain top-level green receive re-enters from index 0 on every
+      ;; wake. That index is what the re-insert used to get wrong.
+      (assert= (try
+                 (receive
+                   ([:go] :when (perturb box srv) :matched)
+                   (after 1200 :declined))
+                 (catch e [:threw e]))
+        :declined)
+      ;; The interleaving actually happened — if any of this stops holding, the case
+      ;; below is passing for the wrong reason and needs rebuilding, not deleting.
+      (assert= (table-get box :ate) [0 1 2])
+      ;; [:junk 3] and the reply — i.e. the reply really was queued behind the
+      ;; candidate at the moment the candidate was put back.
+      (assert= (table-get box :queued) 2)
+      ;; One more post-mark message, so the mark's search has somewhere wrong to land.
+      (send me [:noise])
+      ;; THE ASSERTION: the reply is in this mailbox, and the pinned receive must find it.
+      (let (r (table-get box :ref))
+        (assert= (receive ([:reply ^r v] v) (after 2000 :LOST-THE-REPLY)) :ok))
+      ;; And nothing the perturbed scan touched was dropped or duplicated.
+      (assert= (receive ([:junk n] n) (after 500 :LOST-JUNK)) 3)
+      (assert= (receive ([:go] :got-go) (after 500 :LOST-GO)) :got-go)
+      (assert= (receive ([:noise] :got-noise) (after 500 :LOST-NOISE)) :got-noise)
+      (send srv :stop))))

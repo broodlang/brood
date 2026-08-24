@@ -46,6 +46,33 @@
     (is (includes? (utf8-bytes->string (bytes-concat (render-response (not-found))))
           "404 Not Found"))))
 
+(describe "http: CR/LF can never be spliced into the wire format"
+  ;; Header names/values and the request target are rendered verbatim into a
+  ;; CRLF-framed protocol, so an embedded \r\n ends the line and starts another —
+  ;; HTTP request/response splitting. Every outbound path must refuse it.
+  (test "a header VALUE carrying CRLF is rejected, not rendered"
+    (assert-error (render-headers {"X-Test" "ok\r\nEvil: yes"}))
+    (assert-error (render-headers {"X-Test" "ok\nEvil: yes"}))
+    (assert-error (render-headers {"X-Test" "ok\rEvil: yes"})))
+  (test "a header NAME carrying CRLF is rejected"
+    (assert-error (render-headers {"X\r\nEvil" "ok"})))
+  (test "an ordinary header still renders"
+    (assert= (render-headers {"X-Test" "ok"}) "X-Test: ok\r\n"))
+  (test "the SERVER response path refuses an injected header too"
+    ;; render-response / render-head both go through render-headers
+    (assert-error (bytes-concat (render-response
+                                  (response 200 {"X-Test" "a\r\nEvil: yes"} "hi"))))
+    (assert-error (bytes-concat (render-head 200 {"X-Test" "a\r\nEvil: yes"}))))
+  (test "a CRLF in the request TARGET is rejected (parse-url happily keeps it)"
+    ;; url parsing does not sanitise, so the render must: this used to inject a
+    ;; header into the outgoing request line.
+    (is (>= (index-of (get (parse-url "http://h/a\r\nInjected: 1") :path) "\r") 0))
+    (assert-error (http/http-crlf-free "request target"
+                    (get (parse-url "http://h/a\r\nInjected: 1") :path)))
+    (assert-error (request "GET" "http://127.0.0.1:1/a\r\nInjected: 1")))
+  (test "a CRLF in the method is rejected"
+    (assert-error (request "GET\r\nX: 1" "http://127.0.0.1:1/"))))
+
 (describe "http: content-length parsing is integer-safe"
   ;; A well-formed Content-Length is a non-negative integer; a fractional value
   ;; (`3.9`) could never be reached exactly and would park the reader on the

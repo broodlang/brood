@@ -241,11 +241,36 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   "A 404 text/plain response."
   (response 404 {"Content-Type" "text/plain; charset=utf-8"} "Not Found"))
 
+;; ---- wire-safety: no CR/LF may reach the wire from caller-supplied text -------
+;; A header name/value or a request target is spliced verbatim into a CRLF-framed
+;; protocol, so a `\r\n` inside one ENDS that line and starts another: the caller
+;; gets to inject headers, a second request, or (server-side) a whole extra
+;; response — classic HTTP request/response splitting. Both the client
+;; (`request`) and the server (`render-response`/`render-head`) render through
+;; `render-headers`, so rejecting here covers every outbound path.
+;;
+;; Raise rather than strip: silently rewriting a caller's value hides an attack
+;; (and a legitimate multi-line value is a bug at the call site either way).
+(defn- http-crlf-free
+  (what s)
+  (let (t (str s))
+    (if (or (>= (index-of t "\r") 0) (>= (index-of t "\n") 0))
+      (error "http: illegal CR/LF in " what ": " (pr-str t))
+      t)))
+
 (defn render-headers (headers)
-  "Render a `headers` map to the `Key: Value\\r\\n` HTTP header block (one string)."
+  "Render a `headers` map to the `Key: Value\\r\\n` HTTP header block (one string).
+
+**Raises** if any header name or value contains a CR or LF — splicing one into
+the CRLF-framed wire format would let the caller inject extra headers (HTTP
+request/response splitting)."
   ;; Render each header line, then one `(apply str …)` — the old `(str acc …)`
   ;; fold rebuilt the whole accumulator per header (O(headers²) in total bytes).
-  (apply str (map (fn (kv) (str (first kv) ": " (second kv) "\r\n")) (map-pairs headers))))
+  (apply str (map (fn (kv) (str (http-crlf-free "header name" (first kv))
+                             ": "
+                             (http-crlf-free "header value" (second kv))
+                             "\r\n"))
+               (map-pairs headers))))
 
 (defn render-response (resp)
   "Render a response map into the HTTP/1.0 wire **iolist** (ADR-139) — hand it to
@@ -488,9 +513,12 @@ response); the root process counts."
         ;; would otherwise drop everything after the `?`.
         target (let (q (/get u :query))
                  (if (or (nil? q) (= q "")) (/get u :path) (str (/get u :path) "?" q)))
-        head (str method
+        ;; The target comes from a caller-supplied URL, so it is untrusted: a CRLF
+        ;; in the path/query would end the request line and inject a header (or a
+        ;; whole second request). Same for a hand-passed method.
+        head (str (http-crlf-free "request method" method)
                " "
-               target
+               (http-crlf-free "request target" target)
                " HTTP/1.0\r\n"
                (render-headers headers)
                "\r\n")

@@ -547,7 +547,6 @@
    "show-args" :io
    "show-print-hook" :meta
    "shuffle" :collections
-   "shuffle-acc" :collections
    "sig" :meta
    "sig!" :meta
    "sig-pos" :meta

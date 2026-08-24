@@ -302,19 +302,45 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
       (let (s (%rand-step (%rand-seed seed)))
         [(nth items (rem s n)) s]))))
 
-(defn- shuffle-acc
-  (state remaining acc)
-  (if (= (count remaining) 0)
-    [acc state]
+;; Fisher–Yates, which is what the docstring always claimed — the implementation was
+;; not it. The old `shuffle-acc` rebuilt the remaining collection on every step: two
+;; `count` walks plus `take` + `drop` + `append` + `nth`, each O(n), for each of the n
+;; elements. That is O(n²) in both time and allocation — 20 000 elements took 33 s,
+;; which is not a shuffle anyone can use on real data.
+;;
+;; The working structure is a **map** index→item, not a vector: `assoc` on a vector
+;; copies the whole vector (O(n) per swap, so real Fisher–Yates over one is no better
+;; than what it replaced — measured, it exhausts a 2 GB budget at n = 20 000), while
+;; `assoc` on a CHAMP map shares structure and is O(log₃₂ n). Nothing mutates either
+;; way; this is just the immutable structure with the right update cost.
+(defn- shuffle-swap
+  (m i j)
+  (let (a (get m i)
+        b (get m j))
+    (assoc (assoc m i b) j a)))
+
+(defn- shuffle-at
+  (m i state)
+  ;; Descending Fisher–Yates: draw j in 0..i, swap it into slot i, move left.
+  (if (<= i 0)
+    ; always advance, so a chained next-seed never stalls on a 0/1-element input
+    [m (%rand-step state)]
     (let (s (%rand-step state)
-          i (rem s (count remaining)))
-      (shuffle-acc s
-        (append (take i remaining) (drop (inc i) remaining))
-        (cons (nth remaining i) acc)))))
+          j (rem s (+ i 1)))
+      (shuffle-at (shuffle-swap m i j) (- i 1) s))))
+
+(defn- shuffle-drain
+  (m i acc)
+  ;; Read slots i…0 back out, building the result list front-to-back.
+  (if (< i 0) acc (shuffle-drain m (- i 1) (cons (get m i) acc))))
 
 (defn shuffle (seed coll)
   "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
-  (shuffle-acc (%rand-seed seed) (into [] coll) nil))
+  (let (v (into [] coll)
+        n (count v)
+        slots (fold (fn (m i) (assoc m i (nth v i))) {} (range n))
+        [out state] (shuffle-at slots (- n 1) (%rand-seed seed)))
+    [(shuffle-drain out (- n 1) nil) state]))
 
 ;; ---- bounded printing -------------------------------------------------------
 ;; `pr-str` is *faithful*: whatever it returns reads back as the same value, so it

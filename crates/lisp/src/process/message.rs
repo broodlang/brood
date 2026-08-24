@@ -365,7 +365,7 @@ fn to_message_rec(
         // ints; rare across a message boundary, so realising it is fine).
         Value::Range(id) => {
             let pos = heap.form_pos_only(v);
-            let items = heap.range_to_vec(id);
+            let items = heap.range_to_vec(id)?;
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 out.push(to_message_rec(
@@ -906,7 +906,9 @@ fn copy_cross_heap_rec(src: &Heap, dst: &mut Heap, v: Value, depth: u32) -> Opti
         }
         // A range stands in for the list of its elements, like `to_message`.
         Value::Range(id) => {
-            let items = src.range_to_vec(id);
+            // `None` here means "cannot be copied", which is exactly what an
+            // un-realisable range is (see `range_to_vec`'s element cap).
+            let items = src.range_to_vec(id).ok()?;
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 out.push(copy_cross_heap_rec(src, dst, item, depth + 1)?);

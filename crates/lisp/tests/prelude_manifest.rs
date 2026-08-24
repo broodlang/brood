@@ -66,7 +66,13 @@ fn every_prelude_file_is_included_in_the_concat() {
 ///
 /// `std/protocol.blsp` joined on 2026-08-21 — behaviour contracts (`defbehaviour`,
 /// `register-protocol`, `ops`, `*protocols*`) are core, so the prelude carries them.
-const EXTRA_PRELUDE_FILES: &[&str] = &["std/protocol.blsp"];
+///
+/// `std/proc/gen.blsp` joined on 2026-08-21 (`7cb796f0`) — the gen_server framework is
+/// core and bare. It was added to `lib.rs`'s `concat!` without being listed here, so this
+/// test had been **red on `main` ever since**; recorded as KI-54 along with the two other
+/// failures that commit caused. That is exactly the drift the hand-maintained list exists
+/// to catch, and it caught it — nothing was watching the result.
+const EXTRA_PRELUDE_FILES: &[&str] = &["std/protocol.blsp", "std/proc/gen.blsp"];
 
 /// The complement: `PRELUDE` is the split files plus [`EXTRA_PRELUDE_FILES`] and nothing
 /// more. Catches a stale `include_str!` of a file that has since been renamed away or

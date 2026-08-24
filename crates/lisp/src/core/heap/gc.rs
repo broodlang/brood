@@ -496,6 +496,13 @@ impl Heap {
         // activation re-resolves a fresh block.
         self.arm_ic_blocks.borrow_mut().clear();
         self.arm_ic_blocks.borrow_mut().shrink_to_fit();
+        // The ability-dispatch ICs are caches on exactly the same terms (every entry is
+        // validated against `global_epoch` before use), so "drop the caches" has to
+        // include them — leaving them behind was an inconsistency, not a decision. Memory
+        // only: a long-idle actor that dispatched over an ability keeps a `HashMap` of
+        // per-op ways alive for nothing.
+        self.dispatch_ics.borrow_mut().clear();
+        self.dispatch_ics.borrow_mut().shrink_to_fit();
         // The compiled-body cache is a cache too, and by far the largest thing a
         // long-idle process can give back. Shared arms (ADR-175) are held by the runtime,
         // so dropping our reference is cheap and they re-install on the next call.
@@ -1053,16 +1060,33 @@ impl Heap {
                 })
                 .collect();
         }
+        // form_pos re-key across a major: only the OLD generation moved, so an old entry
+        // is re-keyed through the forwarding table (dropped if its pair died) and a
+        // NURSERY entry is kept exactly as it is.
+        //
+        // This used to `take` the whole map and reinsert only the entries whose age bit
+        // was set — silently discarding every young entry, i.e. the recorded position of
+        // every still-live *nursery* form, which a major does not move. A load that
+        // allocates heavily (flip minor, survivors stay young) followed by a major thus
+        // lost the positions of the forms it had just read: error messages, `(form-pos …)`
+        // and the test framework's line lookups all went blank for them. The minor path
+        // (`minor_collect`) has always retained in place correctly; this mirrors it, which
+        // also drops the O(all positions recorded so far) rehash the `take` cost per major.
         if self.cold.is_some() {
-            let old_form_pos = std::mem::take(&mut self.cold_mut().form_pos);
-            for (key, pos) in old_form_pos {
-                if (key >> 32) & 1 == 1 {
-                    if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
-                        self.cold_mut()
-                            .form_pos
-                            .insert((new_idx as u64) | (1 << 32), pos);
-                    }
+            let mut moved: Vec<(u64, (crate::error::Pos, Option<Arc<str>>))> = Vec::new();
+            let cold = self.cold_mut();
+            cold.form_pos.retain(|&key, pos| {
+                if (key >> 32) & 1 == 0 {
+                    true // a nursery entry — a major leaves the nursery in place
+                } else if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
+                    moved.push(((new_idx as u64) | (1 << 32), pos.clone()));
+                    false
+                } else {
+                    false // the tenured pair was reclaimed by this major
                 }
+            });
+            for (k, p) in moved {
+                cold.form_pos.insert(k, p);
             }
         }
         self.old = Some(Box::new(dest));
@@ -3092,5 +3116,60 @@ mod gen_handle_tests {
             _ => unreachable!(),
         };
         check_str(h.local.vectors[vec_id.index()][0], "vector elem");
+    }
+
+    /// Regression: a **major collection must not discard the source positions of live
+    /// NURSERY forms.** The major re-keys `form_pos` through the old-gen forwarding
+    /// table, and it used to do so by taking the whole map and reinserting only the
+    /// entries whose age bit was set — so every young entry was dropped on the floor.
+    /// A major does not move the nursery, so those entries were still perfectly valid;
+    /// losing them makes `(form-pos …)`, error messages and the test framework's line
+    /// lookups return nothing for every form read since the last tenure.
+    ///
+    /// The interleave below is the reachable one: tenure an old form, read a young one
+    /// (flip minor keeps it young), then major.
+    #[test]
+    fn major_keeps_nursery_form_positions() {
+        use crate::error::Pos;
+        let mut h = Heap::new();
+        let old_pos = Pos { line: 9, col: 5 };
+        let young_pos = Pos { line: 7, col: 3 };
+
+        // A form that tenures into the old generation.
+        let old_form = h.alloc_pair(Value::int(1), Value::nil());
+        h.set_form_pos(old_form, old_pos);
+        let mut roots = vec![old_form];
+        h.minor_collect(true, &mut roots, &mut []); // tenure
+        let old_form = roots[0];
+        assert!(
+            matches!(old_form.unpack(), ValueRef::Pair(id) if id.is_old()),
+            "the first form should have tenured",
+        );
+
+        // A form read *after* the tenure: still in the nursery.
+        let young_form = h.alloc_pair(Value::int(2), Value::nil());
+        h.set_form_pos(young_form, young_pos);
+
+        // A FLIP minor (survivors stay young) — the nursery entry is re-keyed here.
+        let mut roots = vec![old_form, young_form];
+        h.minor_collect(false, &mut roots, &mut []);
+        let (old_form, young_form) = (roots[0], roots[1]);
+        assert_eq!(h.form_pos_only(young_form), Some(young_pos));
+
+        // The major: compacts the old generation, leaves the nursery alone.
+        let mut roots = vec![old_form, young_form];
+        h.major_collect(&mut roots, &mut []);
+        let (old_form, young_form) = (roots[0], roots[1]);
+
+        assert_eq!(
+            h.form_pos_only(young_form),
+            Some(young_pos),
+            "a major dropped the position of a live NURSERY form (it never moved it)",
+        );
+        assert_eq!(
+            h.form_pos_only(old_form),
+            Some(old_pos),
+            "a major lost the re-keyed position of a surviving OLD form",
+        );
     }
 }

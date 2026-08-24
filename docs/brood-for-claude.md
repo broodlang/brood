@@ -526,6 +526,22 @@ lists); `(remove-nth coll i)` drops one element, keeping the type. So an
 immutable single-element vector edit is just `(assoc buf i x)`, never a manual
 rebuild.
 
+⚠️ **But `assoc` on a *vector* is O(n), not an O(1) indexed replace** — it copies
+the vector. Only the *map* `assoc` is cheap (a CHAMP trie, effectively flat).
+Measured, 20 000 `assoc`s at increasing sizes:
+
+| length | vector `assoc` | map `assoc` |
+|---|---|---|
+| 1 000 | 486 ms | 28 ms |
+| 4 000 | 2 386 ms | — |
+| 16 000 | 7 523 ms | 17 ms |
+
+One edit is fine; an edit **per element** is quadratic. This is not hypothetical —
+`shuffle` was written as a textbook Fisher–Yates over a vector on the assumption
+that indexed replace was cheap, and ran 16 seconds at n=8 000. Rewritten over a
+CHAMP map index→item it is 206 ms (~78×). **If you are updating in a loop, use a
+map keyed by index and convert once at the end.**
+
 **`catch` takes ONE bare binder** — `(catch e body…)`, never Clojure's
 `(catch Type e body…)`, which is rejected with a hint. (Reading it Brood's way
 would bind the *class name* to the raised value and evaluate `e` as a statement;

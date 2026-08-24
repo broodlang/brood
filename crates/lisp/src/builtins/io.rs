@@ -1604,9 +1604,59 @@ pub(super) fn file_swap(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         return Ok(Value::boolean(false));
     }
 
-    let temp_path = format!("{data_path}.swap.{}", std::process::id());
-    std::fs::write(&temp_path, new.as_bytes())
-        .map_err(|e| io_err("cannot write", &temp_path, &e))?;
+    // The temp file is created with O_EXCL (`create_new`) at an *unguessable* path,
+    // and both halves matter. `fs::write` to `{data}.swap.{pid}` is
+    // `O_CREAT|O_WRONLY|O_TRUNC` with no `O_EXCL` and no symlink check, so in a
+    // directory an attacker can write to, a symlink pre-planted at that entirely
+    // predictable name makes this swap overwrite whatever it points at — `O_CREAT`
+    // follows symlinks, `O_EXCL` refuses them. The random suffix removes the
+    // pre-planting; `create_new` removes the follow. Retried because a random name can
+    // (astronomically rarely) already exist.
+    let (mut temp_file, temp_path) = {
+        let mut made = None;
+        let mut last: Option<std::io::Error> = None;
+        for _ in 0..8 {
+            let mut rnd = [0u8; 8];
+            getrandom::fill(&mut rnd).map_err(|e| {
+                LispError::runtime(format!("%file-swap: cannot get randomness: {e}"))
+                    .with_code(crate::error::error_codes::FILE_IO)
+            })?;
+            let suffix = rnd.iter().fold(String::new(), |mut s, b| {
+                use std::fmt::Write as _;
+                let _ = write!(s, "{b:02x}");
+                s
+            });
+            let path = format!("{data_path}.swap.{suffix}");
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(f) => {
+                    made = Some((f, path));
+                    break;
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        match made {
+            Some(pair) => pair,
+            None => {
+                let e =
+                    last.unwrap_or_else(|| std::io::Error::other("no temp path could be created"));
+                return Err(io_err("cannot create temp file beside", &data_path, &e));
+            }
+        }
+    };
+    {
+        use std::io::Write as _;
+        if let Err(e) = temp_file.write_all(new.as_bytes()) {
+            drop(temp_file);
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(io_err("cannot write", &temp_path, &e));
+        }
+    }
+    drop(temp_file);
     if let Err(e) = std::fs::rename(&temp_path, &data_path) {
         // Don't leave the temp file behind on a failed rename.
         let _ = std::fs::remove_file(&temp_path);

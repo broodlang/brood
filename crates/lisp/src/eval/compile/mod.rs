@@ -1877,7 +1877,30 @@ fn compile_arm(
                                 // stages a tail call above `frame_size_for_new_entry()`; if the two
                                 // disagreed, the staged area would be written at one offset
                                 // and read at another.
-                                let leaf_nslots = d.nslots.max(nslots_total);
+                                // **Strictly** larger than the small layout, always. The
+                                // deopt-resume path identifies which of an arm's two
+                                // layouts a live frame was built to *by its size* (see
+                                // `jit_frame_layout`), because the `inline_installed` flag
+                                // is flipped by `jit_tier` between the sizing and the
+                                // deopt. That test is only sound if the sizes differ, and
+                                // `d.nslots.max(nslots_total)` alone does not guarantee it:
+                                // a derivation that splices a callee needing no slot beyond
+                                // the caller's own (`(dec n)`) comes out exactly equal.
+                                //
+                                // When they were equal, a leaf-spliced frame was read as
+                                // the small layout, so the small body's `ckpt_slot` — a
+                                // live local in the spliced layout — was decoded as a deopt
+                                // journal: `(defn sum-down (n acc) (if (<= n 0) acc
+                                // (sum-down (dec n) (+ acc n))))` resumed at ip `n >> 16`
+                                // with operand depth `n & 0xFFFF`, returning 6251217600 for
+                                // `(sum-down 200000 0)` instead of 20000100000, and failing
+                                // as `type error: -: expected number, got nil` at 400000.
+                                // Splicing removes the residual `Call`, which makes the
+                                // derivation `pure_self` and therefore *unjournalled*, so
+                                // the old "leaf and journalled" test could never separate
+                                // this pair. One reserved slot restores the invariant the
+                                // rest of the machinery already documents and asserts.
+                                let leaf_nslots = d.nslots.max(nslots_total + 1);
                                 // The resume arm (see `ir::LeafInline::resume`): the same
                                 // function over the spliced body, so a deopt out of the
                                 // inlined native can be resumed in the ip space it
@@ -2523,7 +2546,12 @@ fn hof_apply_native(
         crate::perf_bump!(hof_decline_epoch);
         return None;
     }
-    let nslots = arm.frame_size_for_new_entry();
+    // Size the fast frame to the version we are about to CALL — keyed on the `code` pointer
+    // loaded above, not on a second (independently-racing) read of `inline_installed`. A peer
+    // process sharing this `CompiledArm` (ADR-215) can swap the inlined upgrade in between the
+    // two reads, and then the small native we hold would run against an `inline_nslots` frame
+    // (its outcome-4 staging read back at the wrong top). See `frame_size_for_code`.
+    let nslots = crate::eval::compile::jit_runtime::frame_size_for_code(arm, code);
     // Diagnostic label for the debug staged-stale report / BROOD_JIT_VERIFY (the arm's defining
     // name if known, else leave the caller's — cosmetic only).
     let dbg_sym = arm.dbg_name.unwrap_or(heap.jit_dbg_fn);
@@ -2664,8 +2692,9 @@ fn hof_apply_native(
         _ => {
             crate::perf_bump!(jit_link_rerun);
             // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the checkpoint,
-            // frame intact — never re-running side effects.
-            if outcome == 1 {
+            // frame intact — never re-running side effects. `1 | 2` (deopt AND preempt),
+            // consistent with the other three consumers — see `jit_run_fast_link` (KI-18).
+            if matches!(outcome, 1 | 2) {
                 if let Some((resume, rip, depth)) = jit_ckpt_resume(heap, arm, base, nslots) {
                     return Some(vm_resume_deopt(heap, resume, base, cenv_live, rip, depth));
                 }

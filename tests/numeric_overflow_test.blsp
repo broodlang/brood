@@ -1,0 +1,270 @@
+;; Unchecked-arithmetic regressions in the Rust kernel (added 2026-08-24).
+;;
+;; Builtins are called from a dynamic language with hostile arguments, and a Rust
+;; **panic** is not a Brood error: `try`/`catch` cannot see it, it kills the green
+;; worker thread it happened on, and it usually hangs the runtime. Each case below
+;; was reachable from ordinary Brood code, and was either an unchecked `+` on an
+;; i64 — which panicked under `-C debug-assertions=on` and, worse, *wrapped
+;; silently* in a release build — or a bignum conversion that allocated without
+;; bound (never finishing) or truncated its exponent with an `as` cast. Every one
+;; of them shipped a wrong answer, a hang, or a dead worker, with no diagnostic.
+;;
+;; What each test pins is therefore one of exactly two acceptable outcomes: the
+;; right answer, or a clean **catchable** error. `assert-error` proves catchability
+;; by construction (it is a `try`/`catch`), which a panic could never satisfy.
+;;
+;; Sibling coverage: arithmetic_edge_test (i64 boundary promotion for the ordinary
+;; operators), decimal_test (the decimal surface), maps_test (map semantics).
+(defmodule numeric-overflow-test
+  (:use test))
+
+(def I64-MAX 9223372036854775807)
+(def I64-MIN -9223372036854775808)
+
+;; A tail-recursive tally over a map accumulator — the shape the linear-map
+;; optimizer rewrites into a `table-incr` loop. Two steps of half of i64::MAX+1
+;; overflow, so the tally below crosses the boundary on its third element. Defined
+;; at file scope (a `defn` inside a `test` body would not be the same shape).
+(defn lm-overflow-tally (xs acc)
+  (if (empty? xs)
+    acc
+    (lm-overflow-tally (rest xs) (map-int-add acc (first xs) 4611686018427387904))))
+
+;; ---------------------------------------------------------------------------
+;; 1. `rest` on a Range stepped past i64::MAX
+;;
+;; `(rest range)` is O(1) — it returns the range one step in rather than
+;; materialising it — but that step was an unchecked `lo + step`. A range whose
+;; step is near i64::MAX overflowed it: a debug panic, and in release a range with
+;; a wrapped negative `lo`, i.e. a garbage sequence out of a one-element range.
+;; The range is *exhausted* at exactly that point, so the tail is empty — which is
+;; what `range_to_vec` has always done with its `checked_add`.
+;; ---------------------------------------------------------------------------
+(describe "rest on a range whose next step leaves i64"
+  (test "ascending: the tail of a one-element max-step range is empty"
+    (let (r (%range 1 2 I64-MAX))
+      (assert= (%range->list r) (list 1))
+      (assert= (rest r) nil)
+      (is (empty? (rest r)))))
+  (test "descending: the same at the bottom of the range"
+    (let (r (%range -2 -3 (- 1 I64-MAX)))
+      (assert= (%range->list r) (list -2))
+      (assert= (rest r) nil)))
+  (test "a range that ends exactly ON i64::MAX still has an empty tail"
+    (let (r (%range (- I64-MAX 1) I64-MAX 2))
+      (assert= (%range->list r) (list (- I64-MAX 1)))
+      (assert= (rest r) nil)))
+  (test "ordinary ranges are unaffected"
+    (assert= (%range->list (rest (%range 1 10 2))) (list 3 5 7 9))
+    (assert= (%range->list (rest (%range 0 3 1))) (list 1 2))
+    (assert= (rest (%range 0 1 1)) nil)))
+
+;; ---------------------------------------------------------------------------
+;; 2. `map-int-add` past i64::MAX
+;;
+;; The fused read-modify-write used an unchecked `+`: a debug panic, and in release
+;; a large NEGATIVE count — the classic silently-corrupt counter. It now raises,
+;; matching `table-incr`, which is what the linear-map optimizer rewrites this call
+;; into on a provably-linear accumulator: promoting to a bignum here (what `+`
+;; itself does) would have made that rewrite *observable*, since the table path
+;; cannot promote. Both arms of the rewrite now fail the same way (only the
+;; operator name in the message differs) — the last test below pins that, since it
+;; is the reason the error was chosen over promotion.
+;; ---------------------------------------------------------------------------
+(describe "map-int-add raises rather than wrapping"
+  (test "MAX + 1 raises a catchable error"
+    (assert-error (map-int-add {:a I64-MAX} :a 1))
+    (is (includes? (error-of (map-int-add {:a I64-MAX} :a 1)) "±2^63")))
+  (test "MIN - 1 raises in the other direction too"
+    (assert-error (map-int-add {:a I64-MIN} :a -1)))
+  (test "a bigint already stored under the key is out of range, not read as 0"
+    ;; It can only have got there via `assoc`; the old `as_int().unwrap_or(0)`
+    ;; silently restarted the count from `delta` instead.
+    (assert-error (map-int-add {:a 9223372036854775808} :a 1)))
+  (test "deep in the trie, not just at the root"
+    ;; 64 keys forces real CHAMP nodes, so the check is exercised on the branch
+    ;; path rather than only on a root data slot.
+    (let (m (fold (fn (acc i) (assoc acc i I64-MAX)) {} (%range->list (%range 0 64 1))))
+      (assert-error (map-int-add m 63 1))
+      (assert-error (map-int-add m 0 2))
+      (assert= (get (map-int-add m 63 -1) 63) (- I64-MAX 1))))
+  (test "the linear-map rewrite is unobservable at the boundary"
+    ;; A tail-recursive tally over a map accumulator is exactly the shape the
+    ;; optimizer rewrites into `table-incr`. Both arms must raise; before this,
+    ;; the rewritten one raised and the plain one wrapped.
+    (assert-error
+      (lm-overflow-tally (list :a :a :a) {})))
+  (test "the ordinary path is unchanged"
+    (assert= (map-int-add {:a 1} :a 2) {:a 3})
+    (assert= (map-int-add {} :a 5) {:a 5})
+    (assert= (map-int-add {:a 1 :b 2} :b -2) {:a 1 :b 0})))
+
+;; ---------------------------------------------------------------------------
+;; 3. A Decimal meeting a Ratio: bounded scale, checked exponent
+;;
+;; `(+ 1/2 <decimal>)` promotes the decimal exactly, as `mantissa / 10^scale` —
+;; and `10^scale` is a `scale`-digit bignum. With no bound that is an unbounded
+;; NATIVE allocation, invisible to the `BROOD_MEM_LIMIT` soft cap: measured,
+;; `(+ 1/2 (decimal "1e-1000000000"))` climbed past 400MB and never finished.
+;; Worse, the exponent was cast with `as u32`, which silently truncates: a scale of
+;; 4294967297 wrapped to 1, so the addend was read as 1/10 and the sum printed
+;; `3/5` — a wrong answer, no error, no warning.
+;; ---------------------------------------------------------------------------
+(describe "ratio + decimal: an out-of-range scale is a clean error, never a wrong answer"
+  (test "a scale past 2^32 raises rather than truncating to a wrong answer"
+    ;; The pre-fix release build answered 3/5 here.
+    (assert-error (+ 1/2 (decimal "1e-4294967297")))
+    (refute (= (error-of (+ 1/2 (decimal "1e-4294967297"))) nil)))
+  (test "a huge-but-representable scale raises instead of allocating unboundedly"
+    (assert-error (+ 1/2 (decimal "1e-1000000000")))
+    (assert-error (- 1/2 (decimal "1e-1000000000")))
+    (assert-error (* 1/2 (decimal "1e-1000000000")))
+    (assert-error (/ 1/2 (decimal "1e-1000000000"))))
+  (test "a huge POSITIVE exponent is bounded the same way"
+    (assert-error (+ 1/2 (decimal "1e1000000000"))))
+  (test "the error is catchable and names the operator"
+    (let (msg (error-of (+ 1/2 (decimal "1e-4294967297"))))
+      (is (string? msg))
+      (is (includes? msg "decimal scale"))))
+  (test "ordinary ratio/decimal arithmetic still works exactly"
+    (assert= (+ 1/2 (decimal "0.25")) 3/4)
+    (assert= (- 1/2 (decimal "0.25")) 1/4)
+    (assert= (* 1/2 (decimal "0.25")) 1/8)
+    (assert= (/ 1/2 (decimal "0.25")) 2)
+    ;; a decimal that reduces the ratio away demotes back to an int
+    (assert= (+ 1/2 0.5M) 1)))
+
+;; ---------------------------------------------------------------------------
+;; 4. `*` on two decimals: the scales ADD
+;;
+;; The ideal exponent of a product is the sum of the operand scales — an unchecked
+;; i64 add (`+`/`-` take `max`, so only `*` had this). Two decimals with scales
+;; near i64::MAX wrapped it, yielding a decimal with a nonsense exponent
+;; (`1e+8446744073709551616M`) instead of an error.
+;; ---------------------------------------------------------------------------
+(describe "decimal *: the summed scale is checked"
+  (test "two enormous scales raise instead of wrapping"
+    (let (d (decimal "1e-5000000000000000000"))
+      (assert-error (* d d))))
+  (test "the same for the negative (large-exponent) direction"
+    (let (d (decimal "1e5000000000000000000"))
+      (assert-error (* d d))))
+  (test "a product whose scale is merely large is still bounded"
+    (assert-error (* (decimal "1e-999999") (decimal "1e-999999"))))
+  (test "ordinary decimal arithmetic keeps its significance"
+    (assert= (decimal->string (* 1.50M 2.0M)) "3.000")
+    (assert= (decimal->string (+ 1.50M 2.0M)) "3.50")
+    (assert= (decimal->string (- 1.50M 2.0M)) "-0.50")
+    (assert= (decimal->string (* 1.00M -1M)) "-1.00")))
+
+;; ---------------------------------------------------------------------------
+;; 5. A Range compared against its own list form near i64::MAX
+;;
+;; `=` walks a range against a list spine without materialising it — with an
+;; unchecked `i += step`. When the last element sits within one step of i64::MAX
+;; the walk wrapped to i64::MIN, which still satisfies `i < hi`, so the range
+;; compared UNEQUAL to the very list `%range->list` produces from it. (Debug: a
+;; panic instead.) The hash arm already used `checked_add`, so this also broke the
+;; equal-values-hash-alike invariant the two share.
+;; ---------------------------------------------------------------------------
+(describe "range = list at the i64 boundary"
+  (test "a range equals its own list form when the next step would overflow"
+    (let (r (%range (- I64-MAX 1) I64-MAX 2))
+      (assert= (%range->list r) (list (- I64-MAX 1)))
+      (is (= r (%range->list r)))
+      (is (= r (list (- I64-MAX 1))))
+      (is (= (list (- I64-MAX 1)) r))))
+  (test "and is still UNequal to a genuinely different list"
+    (let (r (%range (- I64-MAX 1) I64-MAX 2))
+      (refute (= r (list 1)))
+      (refute (= r (list (- I64-MAX 1) 7)))
+      (refute (= r nil))))
+  (test "descending, at the bottom of the range"
+    (let (r (%range (+ I64-MIN 1) I64-MIN -2))
+      (assert= (%range->list r) (list (+ I64-MIN 1)))
+      (is (= r (%range->list r)))))
+  (test "equal values hash alike: a boundary range and its list index the same map entry"
+    (let (r (%range (- I64-MAX 1) I64-MAX 2)
+          m (assoc {} r :ok))
+      (assert= (get m (list (- I64-MAX 1))) :ok)
+      (assert= (get (assoc {} (list (- I64-MAX 1)) :ok) r) :ok)))
+  (test "ordinary ranges are unaffected"
+    (is (= (%range 0 5 1) (list 0 1 2 3 4)))
+    (refute (= (%range 0 5 1) (list 0 1 2 3)))
+    (assert= (get (assoc {} (%range 0 5 1) :ok) (list 0 1 2 3 4)) :ok)))
+
+;; ---------------------------------------------------------------------------
+;; 6. ORDERING a ratio against a decimal (`<`, `sort`)
+;;
+;; The same `10^scale` conversion as §3, on a path with no error channel: an
+;; ordering cannot raise, so the fix is to not need the power. `(< 1/2 (decimal
+;; "1e-1000000000"))` used to allocate without bound (190MB and climbing after 20s,
+;; never finishing), and the `as u32` truncation made the comparison read a
+;; different number entirely — `(< (decimal "1e-4294967297") 1/10)` answered
+;; **false** about a value that is effectively zero. Signs and an O(1) bit-length
+;; magnitude screen now decide the extremes; comparable magnitudes still compare
+;; exactly.
+;; ---------------------------------------------------------------------------
+(describe "ratio vs decimal ordering at absurd scales"
+  (test "a vanishingly small decimal is below every positive ratio"
+    (is (< (decimal "1e-4294967297") 1/10))     ; answered false pre-fix
+    (is (> 1/10 (decimal "1e-4294967297")))
+    (is (< (decimal "1e-1000000000") 1/2))      ; hung pre-fix
+    (refute (> (decimal "1e-1000000000") 1/2)))
+  (test "and an enormous one is above it"
+    (is (> (decimal "1e1000000000") 1/2))
+    (is (< 1/2 (decimal "1e1000000000"))))
+  (test "signs are respected at those scales"
+    (is (< (decimal "-1e-1000000000") 1/2))
+    (is (> (decimal "-1e-1000000000") (- 1/2)))
+    (is (< (decimal "-1e1000000000") (- 1/2))))
+  (test "sorting a mixed list terminates and orders correctly"
+    (assert= (sort (list 1/10 (decimal "1e-4294967297") 1/2))
+      (list (decimal "1e-4294967297") 1/10 1/2)))
+  (test "ordinary ratio/decimal ordering is untouched"
+    (is (< 1/2 (decimal "0.6")))
+    (refute (< (decimal "0.6") 1/2))
+    ;; numerically equal ⇒ neither less nor greater
+    (refute (< 1/2 (decimal "0.5")))
+    (refute (> 1/2 (decimal "0.5")))
+    (is (< 1/3 (decimal "0.4")))
+    (is (> 1/3 (decimal "0.3333333333")))
+    (is (< (- 1/3) (decimal "-0.3")))
+    (assert= (sort (list 1/2 (decimal "0.25") 1/3 (decimal "0.4") (- 1/8) (decimal "-0.5")))
+      (list (decimal "-0.5") (- 1/8) (decimal "0.25") 1/3 (decimal "0.4") 1/2)))
+  (test "differential: `<` agrees with subtracting and comparing to zero"
+    ;; `-` promotes both operands through the arithmetic path (a different
+    ;; conversion from the comparison's magnitude screen), so it is an independent
+    ;; oracle for every sign, scale and magnitude combination below.
+    (let (ratios (list 1/3 -1/3 1/2 2/3 100/7 -100/7 1/1000000 999999/1000000
+                   12345678901234567890/7 -1/9999999999)
+          decs (list 0.5M -0.5M 0.333333M 1e-20M -1e-20M 1e20M -1e20M 0M
+                 14.2857142857M 1763668414462081127.142857M)
+          bad (fold
+                (fn (acc r)
+                  (fold (fn (acc2 d)
+                          (if (and (= (< r d) (< (- r d) 0))
+                                (= (> r d) (> (- r d) 0)))
+                            acc2
+                            (cons (list r d) acc2)))
+                    acc decs))
+                nil ratios))
+      (assert= bad nil))))
+
+;; ---------------------------------------------------------------------------
+;; 7. Set and Ratio no longer share a hash tag byte
+;;
+;; Both claimed byte 23 as their own "distinct" tag. Never a correctness bug (a set
+;; is never `equal` to a ratio, and unequal values may collide), but the invariant
+;; the comments assert was false; the set moved to the unused byte 18. These keep a
+;; set and a ratio addressable side by side in one map.
+;; ---------------------------------------------------------------------------
+(describe "set and ratio keys coexist"
+  (test "a set key and a ratio key round-trip in the same map"
+    (let (m (assoc (assoc {} #{1 2} :set) 1/2 :ratio))
+      (assert= (get m #{1 2}) :set)
+      (assert= (get m 1/2) :ratio)
+      (assert= (count m) 2)))
+  (test "a set is not equal to a ratio (nor to the map with the same keys)"
+    (refute (= #{1 2} 1/2))
+    (refute (= #{1 2} {1 true 2 true}))))

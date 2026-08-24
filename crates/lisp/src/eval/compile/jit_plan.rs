@@ -623,6 +623,53 @@ pub(super) mod codegen {
         }
     }
 
+    /// May this chunk hoist a **LOCAL vector's element base** into the entry block (the matmul
+    /// LICM lever — `brood_rt_vector_base`, then inline `ptr + idx*STRIDE` reads)?
+    ///
+    /// The base is a raw pointer into the element storage, and nothing refreshes it: a small
+    /// vector's elements live INLINE in its `local.vectors` slab slot (`VecStore::Inline`), and
+    /// a spilled one's buffer is re-derived by `VecStore::spill` on a GC copy — so anything that
+    /// can move or free that storage while the arm runs leaves every later read pointed at freed
+    /// memory. Reads there return garbage `Value` words with valid-looking tags, and the per-deref
+    /// tripwire cannot see them: the read never goes through a `Heap` accessor.
+    ///
+    /// So: no non-tail `Call` (a GC safepoint, and a `def` → RUNTIME compaction), and nothing
+    /// [`inst_may_allocate`] — the same *correctness* predicate the `pair_bases` hoist uses, and
+    /// the one this gate used to be narrower than (it listed `Call`/`MakeVector`/`Cons` and left
+    /// out the table ops, whose hashed path reconstructs a compound value into the caller's heap).
+    /// `brood_rt_vector_base`'s own justification is "gated to arms that neither allocate nor make
+    /// a Brood→Brood call"; this is that sentence, as code.
+    ///
+    /// `VectorRef` is the one exception to the allocation rule: `inst_may_allocate` lists it
+    /// conservatively, but `brood_rt_vector_ref` neither allocates nor collects — and it is the
+    /// very instruction being hoisted, so counting it would disable the hoist everywhere.
+    ///
+    /// Deliberately NOT used for the two *global* hoists. A global was promoted out of LOCAL by
+    /// the `def` that bound it, and a shared region's slab is append-only with stable refs, so an
+    /// allocation cannot move what they point at (only a compaction can — which needs a safepoint
+    /// and is caught by the back-edge `entry_epoch` guard). Widening their gate would cost the
+    /// sieve lever, whose dense-table hoist rides on the scalar-global hoist beside a `table-put`.
+    pub fn vector_base_hoist_safe(code: &[Inst]) -> bool {
+        !code.iter().any(|i| {
+            if matches!(
+                i,
+                Inst::Prim2 {
+                    op: PrimOp::VectorRef,
+                    ..
+                } | Inst::Prim2SlotSlot {
+                    op: PrimOp::VectorRef,
+                    ..
+                } | Inst::Prim2SlotInt {
+                    op: PrimOp::VectorRef,
+                    ..
+                }
+            ) {
+                return false;
+            }
+            matches!(i, Inst::Call { .. }) || inst_may_allocate(i)
+        })
+    }
+
     /// Does `i` allocate on its **fast path** — the gate for emitting a back-edge GC safepoint?
     ///
     /// Narrower than [`inst_may_allocate`] by exactly the table ops, and measured: including them

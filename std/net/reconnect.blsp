@@ -62,18 +62,33 @@ still answering control messages between attempts."
         (node/monitor up)
         (reconnect-notify subs [:nodeup up])
         (reconnect-up spec up opts subs))
+      (reconnect-wait spec peer opts subs delay (+ (now) delay)))))
+
+(defn- reconnect-next-delay
+  (delay opts)
+  (min (* delay 2) (get opts :max-ms 30000)))
+
+(defn- reconnect-wait
+  (spec peer opts subs delay deadline)
+  "Wait out one backoff interval between connect attempts, still answering control
+messages — against a fixed `deadline`, not a fresh `(after delay …)` per message.
+`receive` tries its clauses in order, so the old catch-all matched *first* and
+re-entered with a full `delay` again: a steady trickle of unrelated messages (a
+stale `[:nodedown]` storm, an app sending to the watcher's registered name) reset
+the timer indefinitely and the node never reconnected — a silent starvation with
+nothing to point at. Re-deriving the remaining time from the deadline makes an
+unrelated message cost nothing."
+  (let (left (- deadline (now)))
+    (if (<= left 0)
+      (reconnect-down spec peer opts subs (reconnect-next-delay delay opts))
       (receive
-        ([:reconnect-subscribe p] (reconnect-down spec peer opts (cons p subs) delay))
+        ([:reconnect-subscribe p] (reconnect-wait spec peer opts (cons p subs) delay deadline))
         ([:reconnect-stop] :stopped)
-        ;; drop unrelated messages (incl. stale [:nodedown]s) without resetting
-        ;; the backoff timer's growth
-        (_ (reconnect-down spec peer opts subs delay))
-        (after delay
-          (reconnect-down spec
-            peer
-            opts
-            subs
-            (min (* delay 2) (get opts :max-ms 30000))))))))
+        ;; drop unrelated messages (incl. stale [:nodedown]s) — the deadline is
+        ;; unchanged, so they cannot postpone the retry
+        (_ (reconnect-wait spec peer opts subs delay deadline))
+        (after left
+          (reconnect-down spec peer opts subs (reconnect-next-delay delay opts)))))))
 
 (defn- reconnect-boot
   (spec opts)

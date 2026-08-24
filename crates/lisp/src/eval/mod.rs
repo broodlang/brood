@@ -399,7 +399,11 @@ fn eval_tail_loop(
             match special_form(s) {
                 Some(SpecialForm::Quote) => {
                     // `(quote x)` returns x literally — but only x; reject
-                    // `(quote a b)` rather than silently dropping the tail.
+                    // `(quote a b)` rather than silently dropping the tail. A
+                    // *missing* operand is the degenerate case, not a dropped one,
+                    // and follows the house rule the other forms use — `(do)`,
+                    // `(if)`, `((fn ()))` all yield nil, so `(quote)` does too
+                    // (tests/malformed_test.blsp §degenerate special forms).
                     let (form, r) = uncons(heap, rest);
                     if !matches!(r.unpack(), ValueRef::Nil) {
                         return Err(LispError::arity("quote: expected exactly one argument")
@@ -482,6 +486,31 @@ fn eval_tail_loop(
                     // compiled call site resolves — untouched, so the "traced" function is
                     // never the one that runs. Idempotent on an already-rooted name.
                     let name = heap.root_qualified_ref(name).unwrap_or(name);
+                    // **Reserved names** (ADR-166): a global `def` may not rebind
+                    // anything the language ships — the prelude, the builtins, or an
+                    // embedded std module. Checked here because every `def` routes
+                    // through this arm (the VM defers `def` forms to the evaluator),
+                    // so one gate covers both engines, `load`, `eval` and the REPL.
+                    //
+                    // **Before** the value is evaluated: the name is fully known by
+                    // now, so running the RHS first only meant a rejected `def` had
+                    // already fired its side effects — `(def map (do (print "SIDE") 1))`
+                    // printed, *then* errored.
+                    if heap.is_reserved_global(name) {
+                        let shown = value::symbol_name(name);
+                        return Err(LispError::type_err(format!(
+                            "def: `{shown}` is a reserved name — it ships with Brood and cannot be redefined"
+                        ))
+                        .with_hint(format!(
+                            "Reserved names are everything inside the `brood` binary: the prelude, the \
+                             builtins, and the embedded std modules. Your own code and your packages stay \
+                             fully redefinable (that is what hot reload is for). Either pick another name, \
+                             shadow it locally — `(let ({shown} …) …)` is still fine — or define it inside a \
+                             `(defmodule your/mod …)`, where `(defn {shown} …)` defines `your/mod/{shown}` \
+                             and is yours."
+                        ))
+                        .or_form_pos(heap, expr));
+                    }
                     let val = if args.len() > 1 {
                         // The value eval can collect at any depth (ADR-061); root
                         // `env` across it (the result is fresh post-collection, and
@@ -514,26 +543,6 @@ fn eval_tail_loop(
                     };
                     let val = name_value(heap, val, name);
                     let root = heap.env_root(env);
-                    // **Reserved names** (ADR-166): a global `def` may not rebind
-                    // anything the language ships — the prelude, the builtins, or an
-                    // embedded std module. Checked here because every `def` routes
-                    // through this arm (the VM defers `def` forms to the evaluator),
-                    // so one gate covers both engines, `load`, `eval` and the REPL.
-                    if heap.is_reserved_global(name) {
-                        let shown = value::symbol_name(name);
-                        return Err(LispError::type_err(format!(
-                            "def: `{shown}` is a reserved name — it ships with Brood and cannot be redefined"
-                        ))
-                        .with_hint(format!(
-                            "Reserved names are everything inside the `brood` binary: the prelude, the \
-                             builtins, and the embedded std modules. Your own code and your packages stay \
-                             fully redefinable (that is what hot reload is for). Either pick another name, \
-                             shadow it locally — `(let ({shown} …) …)` is still fine — or define it inside a \
-                             `(defmodule your/mod …)`, where `(defn {shown} …)` defines `your/mod/{shown}` \
-                             and is yours."
-                        ))
-                        .or_form_pos(heap, expr));
-                    }
                     // Arity-change diagnostic: if `def` is *rebinding* a callable
                     // to one of a different arity, callers expecting the old shape
                     // will hit a runtime arity error on the next call. Surface it
@@ -604,8 +613,18 @@ fn eval_tail_loop(
                     return make_closure(heap, None, rest, env);
                 }
                 Some(SpecialForm::Quasiquote) => {
-                    let args = heap.list_to_vec(rest)?;
-                    let template = args.into_iter().next().unwrap_or(Value::nil());
+                    // One template, and no trailing tail — the same rule `quote`
+                    // follows, for the same reason: `` `(a) b `` used to return the
+                    // template's value and drop `b` without a peep. (And the same
+                    // degenerate case: no template at all yields nil, like `(quote)`
+                    // / `(do)` / `(if)`, because nothing is being *dropped*.)
+                    let (template, r) = uncons(heap, rest);
+                    if !matches!(r.unpack(), ValueRef::Nil) {
+                        return Err(
+                            LispError::arity("quasiquote: expected exactly one argument")
+                                .or_form_pos(heap, expr),
+                        );
+                    }
                     // Expand the template into *builder code* (a pure structural
                     // transform — no eval re-entry, so no GC-rooting hazard), then
                     // hand it back to the loop to evaluate. The unquoted sub-forms
@@ -993,7 +1012,19 @@ fn eval_arguments(
             let form = match cur.unpack() {
                 ValueRef::Nil => break,
                 ValueRef::Pair(p) => heap.pair(p).0,
-                _ => return Err(LispError::type_err("improper argument list in call")),
+                // A dotted argument spine — `(f a . b)`. Tag it with the call form's
+                // own position like every other call-shape error; this was the one
+                // that propagated bare, leaving the user a message with no source
+                // location. `call_form_r` is the live (post-collection) handle.
+                _ => {
+                    let cf = heap.read_root(call_form_r);
+                    return Err(LispError::type_err("improper argument list in call")
+                        .with_hint(
+                            "The argument list ends in a dotted tail. A call's arguments must be \
+                             a proper list — to call with a list of arguments use `(apply f xs)`.",
+                        )
+                        .or_form_pos(heap, cf));
+                }
             };
             let env_now = heap.read_root_env(env_r);
             let v = eval_at(heap, form, env_now)?;
