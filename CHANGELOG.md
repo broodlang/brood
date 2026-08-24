@@ -4,7 +4,39 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.9.0 — 2026-08-24
+
+**BREAKING — the bare core is smaller: five subsystems moved into namespaces.** Each is a
+Brood module over a `%`-prefixed primitive, so the language core stays close to what a
+basic algorithm actually reaches for and stops colliding with your own names:
+
+- `os/` — `getenv`, `hostname`, `run-process`, `exe-path`, `canonicalize`,
+  `stdin-tty?`, `stdout-tty?`, `now`, `now-ns`
+- `table/` — `new` (was the bare `table` constructor), `get`, `put`, `delete`, `has?`,
+  `count`, `drop`, `incr`, `snapshot`
+- `proc/` — `info`/`flag` (were `process-info`/`process-flag`), `list`, `mailbox-size`,
+  `hibernate`, `cancel-timer`, and the OS-subprocess API `spawn`/`send`/`close`/`set-binary`
+- `audio/beep`, `rand/token`
+
+`table?` stays a bare predicate, `send-after`/`send-interval` stay bare (only the timer
+*cancel* moved), and `offload` stays bare — it is core dirty-native concurrency, used
+during `nest fetch` before any module loads.
+
+**BREAKING — `supervisor/stop` is gone; use `stop`.** A supervisor is an ordinary server
+process and answers the same `[:$stop]` message the core `stop` sends, so the wrapper was
+a verbatim duplicate whose only effect was to shadow `stop` for `(:use supervisor)`.
+`(stop sup)` tears it down exactly as before, children first. If a module of yours defines
+its own `stop`, reach the core one as `/stop`.
+
+**Library names and core names (ADR-241).** A library export may shadow a core name only
+when the module is meant to be used *qualified*. `wasm/call`, `version/compare`,
+`log/error` and `package/update` keep their names on that basis; duplicates were deleted
+and bare-use modules renamed.
+
+**Fixed: `nest run` was broken for every invocation** with `unbound symbol: getenv` — the
+pre-run check is built as a Brood snippet inside a Rust string, which no checker reads.
+Ten sibling sites were repaired with it, plus 13 stress scripts under `scripts/fuzz/`.
+`scripts/stale-names.sh` now finds this class after a rename.
 
 **`supervisor/stop` is gone — use `stop`.** A supervisor is an ordinary server process and
 answers the same `[:$stop]` message the core `stop` sends, so the wrapper was a verbatim
