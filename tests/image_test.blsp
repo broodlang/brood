@@ -12,7 +12,7 @@
 
 (describe "image-thumb: decode + downscale to RGBA"
   (test "decodes a 2x2 PNG to a {:width :height :rgba} map"
-    (let (t (image-thumb *png-2x2* 8 8))
+    (let (t (gui/image-thumb *png-2x2* 8 8))
       (is (map? t))
       ; already within 8x8, so the 2x2 source is unchanged
       (assert= (get t :width) 2)
@@ -27,12 +27,12 @@
 
   (test "downscales to fit the max box, preserving aspect"
     ;; a 2x2 source capped at 1x1 collapses to 1x1 (one RGBA pixel)
-    (let (t (image-thumb *png-2x2* 1 1))
+    (let (t (gui/image-thumb *png-2x2* 1 1))
       (assert= (get t :width) 1)
       (assert= (get t :height) 1)
       (assert= (bytes/length (get t :rgba)) 4)))
 
   (test "non-image bytes and non-positive dims degrade to nil, never throw"
-    (is (nil? (image-thumb (string->utf8-bytes "not an image") 8 8)))
-    (is (nil? (image-thumb *png-2x2* 0 8)))
-    (is (nil? (image-thumb *png-2x2* 8 -1)))))
+    (is (nil? (gui/image-thumb (string->utf8-bytes "not an image") 8 8)))
+    (is (nil? (gui/image-thumb *png-2x2* 0 8)))
+    (is (nil? (gui/image-thumb *png-2x2* 8 -1)))))

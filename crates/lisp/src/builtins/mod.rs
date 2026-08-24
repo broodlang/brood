@@ -2197,7 +2197,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         span_runs);
     def(
         heap,
-        "clipboard-get",
+        "%clipboard-get",
         Arity::exact(0),
         Sig::nullary(any),
         &[],
@@ -2205,7 +2205,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         clipboard_get);
     def(
         heap,
-        "clipboard-set!",
+        "%clipboard-set!",
         Arity::exact(1),
         Sig::new(vec![string], string),
         &["s"],
@@ -2588,7 +2588,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         file_stat);
     def(
         heap,
-        "image-thumb",
+        "%image-thumb",
         Arity::exact(3),
         Sig::new(vec![any, int, int], map_ty.union(nil_ty)),
         &["bytes", "max-w", "max-h"],

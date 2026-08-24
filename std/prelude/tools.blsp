@@ -221,7 +221,7 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ;; `std/tool/project.blsp` did exactly that, so every imaged start restored the root section
 ;; and then loaded every module from source anyway. Nothing failed; the image was simply
 ;; never consulted. Install through here instead.
-(defn set-image-source! (path sections)
+(defn- set-image-source! (path sections)
   "Install `path`'s section directory `sections` (feature name → `[offset len]`) as a source
 of features, so `require` materialises an imaged module instead of loading its source.
 Returns the directory. Pass `{}` to stop consulting an image."
