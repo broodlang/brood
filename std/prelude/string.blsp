@@ -369,7 +369,7 @@ have built the flood this bound exists to prevent."
         length (if bytes (count x) (string/length x)))
     (if (or (nil? limit) (<= length limit))
       (pr-str x)
-      (let (printed (pr-str (if bytes (subbytes x 0 limit) (string/substring x 0 limit))))
+      (let (printed (pr-str (if bytes (bytes/slice x 0 limit) (string/substring x 0 limit))))
         ;; drop the closing quote, mark the elision, close again
         (str (string/substring printed 0 (dec (string/length printed))) "…\"")))))
 

@@ -140,7 +140,7 @@ and a set its elements, as everywhere else `seq` applies."
     (seqview? coll) (fold (fn (n _) (%add n 1)) 0 coll)
     (string? coll) (string/length coll)
     (vector? coll) (vector-length coll)
-    (bytes? coll) (byte-length coll)
+    (bytes? coll) (bytes/length coll)
     ;; a record counts as its `Seqable` view (its fields, id-free, by default) — not the
     ;; raw map, which would include the internal `:__id__`. `map-get` distinguishes it.
     (map? coll) (if (map-get coll :__id__ nil) (count (->seq coll)) (map-count coll))
@@ -190,7 +190,7 @@ and a set its elements, as everywhere else `seq` applies."
   ((coll i) (cond
               (not (int? i)) (nth-bad-index coll i)
               (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
-              (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) nil)
+              (bytes? coll) (if (and (>= i 0) (< i (bytes/length coll))) (bytes/at coll i) nil)
               else (nth-seq-or-fail coll i nil)))
   ((coll i & default) (cond
                         (not (int? i)) (nth-bad-index coll i)
@@ -199,8 +199,8 @@ and a set its elements, as everywhere else `seq` applies."
                             (vector-ref coll i)
                             (first default))
                         (bytes? coll)
-                          (if (and (>= i 0) (< i (byte-length coll)))
-                            (byte-at coll i)
+                          (if (and (>= i 0) (< i (bytes/length coll)))
+                            (bytes/at coll i)
                             (first default))
                         else (nth-seq-or-fail coll i (first default)))))
 

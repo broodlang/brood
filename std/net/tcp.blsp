@@ -91,7 +91,7 @@ are Rust.")
   (sock acc)
   (receive
     ([:tcp ^sock d] (drain-acc sock (cons d acc)))
-    ([:tcp-closed ^sock] (bytes-concat (reverse acc)))))
+    ([:tcp-closed ^sock] (bytes/concat (reverse acc)))))
 
 (defn drain-timeout (sock ms)
   "Like `drain`, but give up after `ms` milliseconds of silence and return whatever was collected (tagged `[:timeout acc]` vs `[:closed acc]` so the caller can tell; `acc` is a `bytes` value)."
@@ -101,8 +101,8 @@ are Rust.")
   (sock acc ms)
   (receive
     ([:tcp ^sock d] (drain-to sock (cons d acc) ms))
-    ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])
-    (after ms [:timeout (bytes-concat (reverse acc))])))
+    ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])
+    (after ms [:timeout (bytes/concat (reverse acc))])))
 
 ;; ---- framed reads: the input-side twin of iolists (ADR-139) ----------------
 ;; The recurring stream-parsing shapes — read a delimited frame (an HTTP request
@@ -204,9 +204,9 @@ are Rust.")
 
   `:seed` is a `bytes` value the caller already holds — the surplus a previous framed read returned — treated as if it had just arrived as the first chunk. A protocol reading frame after frame off one stream needs it: without it, a delimiter sitting in (or straddling) those bytes is missed. A seed containing a whole frame returns without reading the socket at all. Must be called by the socket's owning process."
   (let ([ms maxb end] (read-limits opts)
-        sepb (bytes-concat sep)
+        sepb (bytes/concat sep)
         seed (get opts :seed))
-    (if (or (nil? seed) (= (byte-length seed) 0))
+    (if (or (nil? seed) (= (bytes/length seed) 0))
       (read-until-loop sock sepb nil 0 #b"" ms maxb end)
       ;; Feed the seed through the same step the loop runs on an arriving chunk, so a
       ;; delimiter inside it — or straddling it and the next chunk — is found by exactly the
@@ -243,37 +243,37 @@ are Rust.")
     (if w
       (receive
         ([:tcp ^sock d] (read-until-step sock sep acc have tail ms maxb end d))
-        ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])
-        (after w [:timeout (bytes-concat (reverse acc))]))
+        ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])
+        (after w [:timeout (bytes/concat (reverse acc))]))
       (receive
         ([:tcp ^sock d] (read-until-step sock sep acc have tail ms maxb end d))
-        ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])))))
+        ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])))))
 
 (defn- read-until-step
   (sock sep acc have tail ms maxb end d)
-  (let (probe (bytes-concat tail d)
-        i (bytes-index-of probe sep))
+  (let (probe (bytes/concat tail d)
+        i (bytes/index-of probe sep))
     (if (>= i 0)
       ;; probe byte 0 sits at absolute (have - |tail|); a match must
       ;; include a byte of `d` (|tail| < |sep|), so it is never one
       ;; we already reported past.
-      (let (cut (+ (- have (byte-length tail)) i (byte-length sep)))
+      (let (cut (+ (- have (bytes/length tail)) i (bytes/length sep)))
         ;; The cap is checked against the COMPLETED frame, so a head that lands
         ;; exactly on `:max-bytes` is delivered rather than rejected off-by-one.
         (if (and maxb (> cut maxb))
-          [:too-large (bytes-concat (reverse (cons d acc)))]
-          (let (buf (bytes-concat (reverse (cons d acc))))
-            [(subbytes buf 0 cut) (subbytes buf cut (byte-length buf))])))
-      (let (have (+ have (byte-length d)))
+          [:too-large (bytes/concat (reverse (cons d acc)))]
+          (let (buf (bytes/concat (reverse (cons d acc))))
+            [(bytes/slice buf 0 cut) (bytes/slice buf cut (bytes/length buf))])))
+      (let (have (+ have (bytes/length d)))
         ;; No delimiter yet: stop as soon as what we hold already exceeds the cap,
         ;; rather than waiting for a delimiter that may never come.
         (if (and maxb (> have maxb))
-          [:too-large (bytes-concat (reverse (cons d acc)))]
+          [:too-large (bytes/concat (reverse (cons d acc)))]
           (read-until-loop sock
             sep
             (cons d acc)
             have
-            (straddle probe (byte-length sep))
+            (straddle probe (bytes/length sep))
             ms
             maxb
             end))))))
@@ -282,9 +282,9 @@ are Rust.")
 ;; chunk boundary could need, and nothing more.
 (defn- straddle
   (probe sep-len)
-  (let (n (byte-length probe)
+  (let (n (bytes/length probe)
         k (max 0 (- sep-len 1)))
-    (if (<= n k) probe (subbytes probe (- n k) n))))
+    (if (<= n k) probe (bytes/slice probe (- n k) n))))
 
 (defn read-n (sock n &optional (opts {}))
   "Receive `[:tcp sock data]` chunks until at least `n` bytes have arrived; return `[data rest]` where `data` is exactly the first `n` bytes and `rest` any surplus already received (both `bytes`). Return `[:closed acc]` if the socket closes with fewer than `n` bytes (`acc` = what arrived). For a length-prefixed body — a Content-Length payload, one chunk of a chunked transfer, a WebSocket frame payload. O(total): the running byte count means no rescanning and a single `bytes-concat` at the end. Assumes binary mode (chunk byte lengths).
@@ -301,8 +301,8 @@ are Rust.")
 (defn- read-n-loop
   (sock n have acc ms end)
   (if (>= have n)
-    (let (buf (bytes-concat (reverse acc)))
-      [(subbytes buf 0 n) (subbytes buf n (count buf))])
+    (let (buf (bytes/concat (reverse acc)))
+      [(bytes/slice buf 0 n) (bytes/slice buf n (count buf))])
     ;; As in `read-until-loop`: `after` needs a concrete ms, so the bounded and
     ;; unbounded cases are two receives over the same body, and the wait is recomputed
     ;; per chunk so `:deadline-ms` stays a total budget rather than restarting.
@@ -310,8 +310,8 @@ are Rust.")
       (if w
         (receive
           ([:tcp ^sock d] (read-n-loop sock n (+ have (count d)) (cons d acc) ms end))
-          ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])
-          (after w [:timeout (bytes-concat (reverse acc))]))
+          ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])
+          (after w [:timeout (bytes/concat (reverse acc))]))
         (receive
           ([:tcp ^sock d] (read-n-loop sock n (+ have (count d)) (cons d acc) ms end))
-          ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))]))))))
+          ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))]))))))

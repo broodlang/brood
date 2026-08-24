@@ -122,7 +122,7 @@
           (if (map-get coll :__id__ nil)
             (->seq coll)
             (map-pairs coll))
-          (if (%eq t :bytes) (bytes->list coll) coll))))))
+          (if (%eq t :bytes) (bytes/->list coll) coll))))))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 ;; The public entry coerces once via `seq`; the inner `fold-loop` then stays in

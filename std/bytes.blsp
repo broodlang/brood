@@ -1,0 +1,83 @@
+;; std/bytes.blsp
+(defmodule bytes)
+
+(defn at (b i)
+  "The byte at index i of b as an int 0–255; errors if i is out of range."
+  (%byte-at b i))
+
+(defn length (b)
+  "The number of bytes in b. O(1)."
+  (%byte-length b))
+
+(defn slice (b start & more)
+  "The byte slice [start, end) of b as a fresh bytes value (end defaults to the length). Errors if the range is out of bounds."
+  (if (empty? more) (%subbytes b start) (%subbytes b start (first more))))
+
+(defn concat (& more)
+  "One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model."
+  (apply %bytes-concat more))
+
+(defn index-of (haystack needle & more)
+  "The first index of the needle bytes within haystack at or after from (default 0), or -1 if absent. The byte-protocol workhorse (locate a \\r\\n\\r\\n, a frame delimiter, …)."
+  (if (empty? more) (%bytes-index-of haystack needle) (%bytes-index-of haystack needle (first more))))
+
+(defn ->list (b)
+  "The bytes b as a list of integers 0–255."
+  (%bytes->list b))
+
+(defn append (path bytes)
+  "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. The incremental counterpart to spit-bytes (which truncates) — lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory."
+  (%append-bytes path bytes))
+
+(defn int (bs off n)
+  "Read `n` bytes (1–8) of `bs` at `off` as a big-endian signed (two's-complement) integer."
+  (do
+    (bytes-width-check "bytes-int" n)
+    (let (b0 (bytes/at bs off))
+      (bytes-acc-be bs (+ off 1) (+ off n) (if (>= b0 128) (- b0 256) b0)))))
+
+(defn int-le (bs off n)
+  "Read `n` bytes (1–8) of `bs` at `off` as a little-endian signed (two's-complement) integer."
+  (do
+    (bytes-width-check "bytes-int-le" n)
+    (let (bt (bytes/at bs (+ off (- n 1))))
+      (bytes-acc-le bs off (+ off (- n 2)) (if (>= bt 128) (- bt 256) bt)))))
+
+(defn uint (bs off n)
+  "Read `n` bytes (1–8) of `bs` at `off` as a big-endian unsigned integer."
+  (bytes-acc-be bs off (+ off (bytes-width-check "bytes-uint" n)) 0))
+
+(defn uint-le (bs off n)
+  "Read `n` bytes (1–8) of `bs` at `off` as a little-endian unsigned integer."
+  (bytes-acc-le bs off (+ off (- (bytes-width-check "bytes-uint-le" n) 1)) 0))
+
+(defn int-> (v n)
+  "Encode integer `v` as `n` bytes (1–8), big-endian two's complement. Bits
+above `n` bytes are truncated (the bit-syntax convention), so negatives encode
+to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
+  (bytes (int->bytes-be v (bytes-width-check "int->bytes" n) nil)))
+
+(defn int-le-> (v n)
+  "Encode integer `v` as `n` bytes (1–8), little-endian two's complement
+(truncating, like int->bytes)."
+  (bytes (reverse (int->bytes-be v (bytes-width-check "int->bytes-le" n) nil))))
+
+(defn- bytes-acc-be
+  (bs i end acc)
+  (if (>= i end) acc (bytes-acc-be bs (+ i 1) end (+ (* acc 256) (bytes/at bs i)))))
+
+(defn- bytes-acc-le
+  (bs low i acc)
+  (if (< i low) acc (bytes-acc-le bs low (- i 1) (+ (* acc 256) (bytes/at bs i)))))
+
+(defn- bytes-width-check
+  (who n)
+  (if (and (int? n) (>= n 1) (<= n 8))
+    n
+    (error (str who ": width must be an int in 1–8, got " (pr-str n)))))
+
+(defn- int->bytes-be
+  (v w acc)
+  (if (<= w 0)
+    acc
+    (int->bytes-be (bit-shift-right v 8) (- w 1) (cons (bit-and v 255) acc))))

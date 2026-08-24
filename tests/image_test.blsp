@@ -19,10 +19,10 @@
       (assert= (get t :height) 2)
       ; :rgba is a width*height*4 bytes value
       (is (bytes? (get t :rgba)))
-      (assert= (byte-length (get t :rgba)) 16)
+      (assert= (bytes/length (get t :rgba)) 16)
       ; the first pixel is the fixture colour (10,20,30), fully opaque
       (let (px (get t :rgba))
-        (assert= [(byte-at px 0) (byte-at px 1) (byte-at px 2) (byte-at px 3)]
+        (assert= [(bytes/at px 0) (bytes/at px 1) (bytes/at px 2) (bytes/at px 3)]
           [10 20 30 255]))))
 
   (test "downscales to fit the max box, preserving aspect"
@@ -30,7 +30,7 @@
     (let (t (image-thumb *png-2x2* 1 1))
       (assert= (get t :width) 1)
       (assert= (get t :height) 1)
-      (assert= (byte-length (get t :rgba)) 4)))
+      (assert= (bytes/length (get t :rgba)) 4)))
 
   (test "non-image bytes and non-positive dims degrade to nil, never throw"
     (is (nil? (image-thumb (string->utf8-bytes "not an image") 8 8)))
