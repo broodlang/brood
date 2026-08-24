@@ -59,7 +59,7 @@ use guards::{gc_block_set, macro_block_set, stack_base_set};
 // Re-export the public surface so `scheduler::…`/`process::…` paths are unchanged.
 mod lifecycle;
 pub(crate) use lifecycle::exit_propagate;
-use lifecycle::{deregister, proc_descr};
+use lifecycle::{deregister, proc_descr, retire_root_ctx};
 pub use lifecycle::{exit, spawn, spawn_linked, spawn_root_program};
 
 // The worker pool + run-queue execution loop lives in a child module; shared
@@ -1224,6 +1224,69 @@ pub fn pid_value(id: u64) -> Value {
     Value::pid(crate::dist::local_node(), id)
 }
 
+/// Deregisters a **root-thread** context when its OS thread exits.
+///
+/// `ensure_ctx` mints a pid + mailbox for any thread that touches `self`/`send`/`receive`
+/// outside the scheduler, and until this guard existed nothing ever removed it: green
+/// processes die through `deregister` and `shutdown_runtime_parked` reaps only *parked*
+/// waiters, so a host that churns OS threads leaked one registry entry, one mailbox (plus
+/// every message subsequently sent to it), and one `live_pids()` member per thread for the
+/// life of the OS process.
+///
+/// Armed **only** on the minting branch of `ensure_ctx`, so it is never armed for a green
+/// process's `Ctx` (which `run_one` installs into `CURRENT` and `save_ctx` takes back out
+/// — a worker thread that later exits must not retire the process it last ran).
+struct RootCtxGuard {
+    pid: u64,
+}
+
+impl Drop for RootCtxGuard {
+    fn drop(&mut self) {
+        // This usually runs during **TLS destruction**. The teardown notifies monitors and
+        // links, which can reach `wake_enqueue` → `CURRENT_WORKER`, and touching a
+        // thread-local that has already been destroyed panics — a panic in a TLS
+        // destructor aborts the process. The registry removal (a plain static) happens
+        // first inside `retire_root_ctx` and always succeeds; catching here means a
+        // late-destruction order at worst skips the *notifications*, instead of taking the
+        // host down.
+        let pid = self.pid;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            retire_root_ctx(pid);
+        }));
+    }
+}
+
+thread_local! {
+    /// The live [`RootCtxGuard`] for this thread, if `ensure_ctx` minted a root context on
+    /// it. Held in its own thread-local (not inside `Ctx`, which is `Clone` and gets copied
+    /// into `Process`/`install_ctx`) so exactly one drop happens, at thread exit.
+    static ROOT_CTX_GUARD: RefCell<Option<RootCtxGuard>> = const { RefCell::new(None) };
+}
+
+/// Retire this thread's root context now, rather than at thread exit: remove its pid from
+/// the process registry, fire its monitors/links, and unbind it, so a subsequent
+/// `self`/`receive` mints a fresh one. Returns whether there was one to retire.
+///
+/// For an embedding host that reuses a long-lived thread (a request worker, a thread pool)
+/// and wants the process-table entry gone at a known point instead of whenever the thread
+/// happens to die. A thread that simply exits needs nothing — [`RootCtxGuard`] does this
+/// for it. A no-op on a scheduler worker inside a quantum (that ctx belongs to a green
+/// process, and no guard was ever armed for it).
+pub fn deregister_root_ctx() -> bool {
+    let guard = ROOT_CTX_GUARD.with(|g| g.borrow_mut().take());
+    match guard {
+        Some(g) => {
+            // Unbind first: `retire_root_ctx` (via `Drop`) fires monitors and links, and
+            // anything that runs then must not find a `CURRENT` naming a pid that is on
+            // its way out of the registry.
+            CURRENT.with(|c| *c.borrow_mut() = None);
+            drop(g);
+            true
+        }
+        None => false,
+    }
+}
+
 /// The current process's context. A green process has it installed by `run_one` each
 /// quantum; the first time a *root* thread (the REPL / file runner) uses `self`/`receive`,
 /// register it as a blocking-mailbox process so it can participate in message passing.
@@ -1241,6 +1304,10 @@ pub(super) fn ensure_ctx() -> Ctx {
             capture: Vec::new(),
         };
         *c.borrow_mut() = Some(ctx.clone());
+        // This is the root-thread branch by construction (a green process's ctx is
+        // installed by `run_one`, never minted here), so give it the death path green
+        // processes get from `deregister` — see `RootCtxGuard`.
+        ROOT_CTX_GUARD.with(|g| *g.borrow_mut() = Some(RootCtxGuard { pid }));
         ctx
     })
 }
@@ -1286,6 +1353,67 @@ pub fn capture_append(s: &str) -> bool {
             None => false,
         },
     )
+}
+
+#[cfg(test)]
+mod root_ctx_tests {
+    use super::*;
+
+    /// A **root-thread context** must not outlive its thread.
+    ///
+    /// Any OS thread that touches `self`/`send`/`receive` outside the scheduler gets a pid
+    /// and a mailbox from `ensure_ctx`, and until `RootCtxGuard` existed nothing ever
+    /// removed either: `deregister` runs only for green processes, and
+    /// `shutdown_runtime_parked` reaps only *parked waiters*. A host that churns threads
+    /// (a request-per-thread embedder, a thread pool that recycles) therefore accumulated a
+    /// registry entry, a live mailbox that `deliver` still queues into, and one more
+    /// `live_pids()` member — which also inflates the `live` count the RUNTIME
+    /// drain-completion gate compares its ack count against — for the life of the OS
+    /// process. Asserted per-pid rather than on `REGISTRY.len()` so a concurrently running
+    /// test cannot make it flaky.
+    #[test]
+    fn a_root_thread_context_is_retired_when_its_thread_exits() {
+        let mut pids = Vec::new();
+        for _ in 0..8 {
+            let h = std::thread::spawn(|| {
+                let pid = ensure_ctx().pid;
+                assert!(
+                    REGISTRY.contains_key(pid),
+                    "ensure_ctx must register the root ctx it mints"
+                );
+                pid
+            });
+            // `join` returns after the thread has fully terminated, so its thread-locals
+            // (and therefore `RootCtxGuard`) have been dropped by the time we look.
+            pids.push(h.join().expect("root-ctx thread"));
+        }
+        for pid in pids {
+            assert!(
+                !REGISTRY.contains_key(pid),
+                "root ctx {pid} outlived its thread — the registry entry leaks"
+            );
+        }
+    }
+
+    /// The explicit form, for a host that recycles a long-lived thread and wants the
+    /// process-table entry gone at a known point: retiring unbinds the ctx, so the next
+    /// `self` mints a fresh pid rather than handing back a deregistered one.
+    #[test]
+    fn deregister_root_ctx_retires_and_unbinds() {
+        std::thread::spawn(|| {
+            let first = ensure_ctx().pid;
+            assert!(REGISTRY.contains_key(first));
+            assert!(deregister_root_ctx(), "there was a root ctx to retire");
+            assert!(!REGISTRY.contains_key(first));
+            let second = ensure_ctx().pid;
+            assert_ne!(first, second, "a retired ctx must not be handed back");
+            assert!(REGISTRY.contains_key(second));
+            assert!(deregister_root_ctx());
+            assert!(!deregister_root_ctx(), "retiring twice is a no-op");
+        })
+        .join()
+        .expect("root-ctx thread");
+    }
 }
 
 #[cfg(test)]

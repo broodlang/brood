@@ -517,10 +517,41 @@ pub(super) fn store_words(
 /// Materialise an operand to an unboxed `i64`: a register value as-is, a tag-checked
 /// load of a frame slot, or a tag-checked extract of a `Handle`'s payload (a `Handle`
 /// used as a number — e.g. `(+ (first xs) 1)` — must be an `Int` at runtime or deopt).
+///
+/// **A boolean is not a number here, and must not be admitted as one.** Every boxed shape
+/// (`Slot`, `Handle`, `HoistedVec`) is tag-checked and `Float` deopts, but `Op::Bool` and an
+/// `i8`-typed `Op::Int` (a comparison result — `icmp`/`fcmp` produce `i8`, and `box_scalar`
+/// boxes those as `Value::Bool`) used to pass through raw. That was two bugs at once:
+///
+///   * **an engine divergence.** A `Const` boolean materialises as `Op::Bool(iconst 0/1)`
+///     (`jit_lower.rs`), so a lowered `(+ acc true)` computed `acc + 1` where the tree-walker
+///     and the VM both raise `+: expected number, got bool` (the VM's `prim_apply` returns
+///     `None` for a non-numeric operand and dispatches the real `+` native, which errors).
+///     Guarded by `tests/jit_bool_arith_test.blsp`.
+///   * **an `i8` into `i64` arithmetic.** A comparison used directly as an arithmetic operand
+///     (`(+ (< x 0) 1)`) reached `emit_arith` as `sadd_overflow(i8, i64)`, which Cranelift
+///     refuses — the whole arm then declined to lower with no diagnostic beyond
+///     `reason=lowering-returned-none`, so a cold nonsense branch silently cost the *hot* arm
+///     its native code.
+///
+/// Deopting is right for both: the VM re-runs the arm and produces the real type error (or,
+/// for a branch that never actually executes, never gets there). A bool crossing a block
+/// boundary is a different question and does NOT come through here — see [`as_block_arg`].
 pub(super) fn as_int(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_codegen::ir::Value {
+    // A boolean where a number is required: deopt (the VM raises the type error). Covers both
+    // spellings — an explicit `Op::Bool` and the `i8` comparison result carried as `Op::Int`.
+    if matches!(op, Op::Bool(_))
+        || matches!(op, Op::Int(v) if b.func.dfg.value_type(v) == types::I8)
+    {
+        let __dr = b.ins().iconst(types::I32, 27);
+        b.ins().jump(f.deopt, &[BlockArg::Value(__dr)]);
+        let dead = b.create_block();
+        b.switch_to_block(dead);
+        return b.ins().iconst(types::I64, 0);
+    }
     match op {
         Op::Int(v) => v,
-        Op::Bool(v) => v,
+        Op::Bool(v) => v, // unreachable: handled above
         Op::Slot(k) => load_slot_int(b, k as i64, f),
         Op::Handle(w0, w1, _) => {
             let tagb = b.ins().band_imm(w0, 0xff);
@@ -604,6 +635,17 @@ pub(super) fn as_block_arg(
             store_op(b, k as i64, op, f);
         }
         return b.ins().iconst(types::I64, 0);
+    }
+    // A bool crossing the edge is legitimate (an `(and …)`/`(or …)` short-circuits its bound
+    // operand through the merge) and must NOT go through `as_int`, which deopts on a boolean
+    // operand: the target reconstructs `Op::Bool` from the `bool_param` flag, so what crosses
+    // is the 0/1 word, not a number. `param_repr` already typed this edge `ParamRepr::Bool`.
+    match op {
+        Op::Bool(v) => return v, // already an i64 0/1
+        Op::Int(v) if b.func.dfg.value_type(v) == types::I8 => {
+            return b.ins().uextend(types::I64, v)
+        }
+        _ => {}
     }
     let v = as_int(b, op, f);
     if b.func.dfg.value_type(v) == types::I8 {

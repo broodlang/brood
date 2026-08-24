@@ -297,3 +297,40 @@
       (sleep 80)
       ;; after the fix: ~0. before it, each batch leaked ~4 producers → ~600 parked.
       (is (< (stream-test-parked-children me) 25)))))
+
+;; ---- a producer that is GONE ------------------------------------------------
+;; Since KI-33 an exhausted source answers `:stream-done` once and then EXITS, so a
+;; second `next` on a fully-consumed stream had no reply coming at all — and `next`
+;; was a bare `receive`, which parked the consumer forever, uncatchably. `next` now
+;; monitors the producer: its death is an answer.
+
+(describe "stream/next against a dead or silent producer"
+  (test "a repeated next on an exhausted stream keeps answering :done"
+    (let (s (stream/singleton 1))
+      (assert= [:ok 1] (stream/next s))
+      (assert= :done (stream/next s))
+      ;; the producer has exited by now — this used to hang forever
+      (assert= :done (stream/next s))
+      (assert= :done (stream/next s))))
+
+  (test "a producer that crashed surfaces as [:err …], not a hang"
+    (let (p (spawn (receive ([:next _] (error "producer boom")))))
+      (assert= :err (first (stream/next p)))))
+
+  (test "a producer that already exited answers :done"
+    (let (p (spawn :nothing))
+      (sleep 30)
+      (assert= :done (stream/next p))))
+
+  (test "timeout-ms bounds a producer that is alive but never answers"
+    (let (p (spawn (receive (:never nil) (after 4000 nil))))
+      (assert= :err (first (stream/next p 40)))))
+
+  (test "the monitor leaves no [:down] behind in the caller's mailbox"
+    (let (before (mailbox-size (self))
+          s (stream/singleton 1))
+      (stream/next s)
+      (stream/next s)
+      (stream/next s)
+      (sleep 30)
+      (assert= before (mailbox-size (self))))))

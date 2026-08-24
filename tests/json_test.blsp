@@ -232,3 +232,55 @@
         (is (record? r))
         (assert= (record-id r) :json-test/usd)
         (assert= (encode r) "\"$99\"")))))
+
+;; ---- surrogate escapes -------------------------------------------------------
+;; A `\uXXXX` escape in the D800..DFFF range is half of a pair, never a codepoint.
+;; The lone-HIGH case was already caught; the other two were not: a lone LOW
+;; surrogate leaked the KERNEL's `int->char: 56320 is not a valid Unicode codepoint`,
+;; and a high surrogate followed by a non-low `\u` escape was silently MIS-DECODED
+;; (`"\uD800\u0041"` returned "⑁") — a wrong value, which is worse than an error.
+
+(describe "parse — surrogate escapes"
+  (test "a valid surrogate pair decodes to one astral codepoint"
+    (assert= "\u{1D11E}" (parse "\"\\uD834\\uDD1E\"")))
+  (test "a lone high surrogate is a json error"
+    (is (json-errs? "\"\\uD800\"")))
+  (test "a lone LOW surrogate is a json error, not a kernel int->char error"
+    (is (json-errs? "\"\\uDC00\""))
+    (is (json-errs? "\"\\uDFFF\"")))
+  (test "a high surrogate followed by a NON-low escape errors instead of mis-decoding"
+    (is (json-errs? "\"\\uD800\\u0041\""))
+    (is (json-errs? "\"\\uD800\\uD800\"")))
+  (test "the codepoints either side of the surrogate block still decode"
+    (assert= "\u{D7FF}" (parse "\"\\uD7FF\""))
+    (assert= "\u{E000}" (parse "\"\\uE000\""))))
+
+;; ---- encode emits only numbers JSON actually has -----------------------------
+;; `(number? v)` also covers `:ratio` and `:decimal`, and a float may be inf/nan —
+;; all of which were emitted verbatim as `1/3`, `1.50M`, `inf`, `nan`: output no
+;; parser on earth can read back.
+
+(defn- json-encode-errs?
+  (v)
+  (try (do (encode v) false) (catch e true)))
+
+(describe "encode — only JSON-representable numbers"
+  (test "ints and finite floats encode"
+    (assert= "1" (encode 1))
+    (assert= "-7" (encode -7))
+    (assert= "1.5" (encode 1.5)))
+  (test "a ratio errors instead of emitting 1/3"
+    (is (json-encode-errs? 1/3)))
+  (test "a decimal errors instead of emitting 1.50M"
+    (is (json-encode-errs? 1.50M)))
+  (test "inf / -inf / nan error instead of emitting inf and nan"
+    (let (big 1.0e308
+          pinf (* big 10.0)
+          ninf (- 0.0 pinf)
+          qnan (- pinf pinf))
+      (is (json-encode-errs? pinf))
+      (is (json-encode-errs? ninf))
+      (is (json-encode-errs? qnan))))
+  (test "a non-encodable number inside a structure errors too"
+    (is (json-encode-errs? {:a 1/3}))
+    (is (json-encode-errs? [1 2 1.50M]))))

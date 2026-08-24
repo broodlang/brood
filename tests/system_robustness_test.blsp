@@ -1,0 +1,195 @@
+;;; Robustness regressions for the `builtins/system.rs` primitives — the kernel
+;;; entry points behind `nest check`'s per-file scan, `%isolate`, `%binding` and
+;;; the `{:name :node}` address readers. Each case here pins a failure the
+;;; runtime used to have:
+;;;
+;;;   - `scan-source-extract` recursed down a list's CDR, so a flat list of
+;;;     ~100k symbols overflowed the native stack and SIGABRTed the whole
+;;;     process (uncatchable — a stack overflow is not a panic, so there was no
+;;;     `.brood_crash_dump` either). One generated `.blsp` file killed the whole
+;;;     `nest check` run.
+;;;   - `%isolate`'s orphan reap computed "alive after minus alive before" and
+;;;     killed BYSTANDER processes that unrelated concurrent code had spawned
+;;;     during the thunk's run.
+;;;   - raw `%binding` silently bound `nil` when `vals` was shorter than `syms`.
+;;;   - `monitor`'s `{:name :node}` shape errors were prefixed `send:`.
+;;;
+;;; The process cases are timing-shaped (a bystander has to still be running
+;;; when the reap fires), so the sleeps carry generous margins — they bound how
+;;; long the case takes, not how tight the race is.
+
+(defmodule system-robustness-test (:use test))
+
+;;
+;; --- scan-source-extract: list LENGTH is not nesting depth --------------------
+;;
+
+(describe "scan-source-extract: a long flat list does not blow the native stack"
+
+  (test "a 150k-element flat list scans and counts every occurrence"
+    ;; The reader's MAX_DEPTH (256) bounds how deeply forms NEST; nothing bounds
+    ;; how LONG a list is. A cdr-recursive walker therefore had a native stack
+    ;; depth equal to the element count. 150k is well past the ~100k that aborted
+    ;; a release build (60k passed), so a regression aborts this test's process
+    ;; rather than quietly passing.
+    (let (src (str "(" (string/repeat "a " 150000) ")")
+          extract (scan-source-extract src)
+          counts (nth extract 0))
+      (is (= 150000 (get counts "a")))))
+
+  (test "a long flat list nested inside other forms scans too"
+    ;; The same spine, reached through a vector and a map value, so the worklist
+    ;; is exercised across all three container kinds rather than at the root.
+    (let (src (str "(def big {:xs [" (string/repeat "b " 60000) "]})")
+          extract (scan-source-extract src)
+          counts (nth extract 0))
+      (is (= 60000 (get counts "b")))
+      (is (= 1 (get counts "def")))))
+
+  (test "the extract's other fields still work on a large file"
+    (let (src (str "(defmodule m)\n(defn- helper () 1)\n(defn pub () "
+                   "(list " (string/repeat "helper " 20000) "))")
+          extract (scan-source-extract src)
+          counts (nth extract 0)
+          privs (nth extract 1))
+      (is (= 20001 (get counts "helper")))
+      ;; `defn-` records [bare qualified] for the unused-private verdict.
+      (is (= 1 (count privs)))
+      (is (= "helper" (nth (first privs) 0))))))
+
+;;
+;; --- %isolate: the reap kills what the THUNK spawned, and nothing else --------
+;;
+
+(describe "%isolate: the orphan reap is scoped to the thunk's own descendants"
+
+  (test "a bystander spawned by an unrelated process survives the isolate"
+    ;; `helper` exists BEFORE the isolate and stays alive across it. Halfway
+    ;; through the thunk it spawns a bystander, which then outlives the reap and
+    ;; records that it did. Under the old "every new pid" reap the bystander was
+    ;; killed at the isolate's return and never wrote.
+    (let (t (table))
+      (spawn (fn ()
+               (sleep 100)
+               (spawn (fn () (sleep 400) (table-put t :bystander-ran true)))
+               (sleep 900)))
+      (sleep 40)
+      (%isolate (fn () (sleep 300) :done))
+      (sleep 500)
+      (is (= true (table-get t :bystander-ran)))))
+
+  (test "a process the thunk spawned directly IS reaped"
+    ;; The reap has to keep working: an orphan still running the thunk's code
+    ;; would look up a global the thunk `def`'d and die with a bogus
+    ;; `unbound symbol` once the bindings are rolled back.
+    (let (t (table))
+      (%isolate (fn ()
+                  (spawn (fn () (sleep 400) (table-put t :orphan-ran true)))
+                  (sleep 100)
+                  :done))
+      (sleep 600)
+      (is (nil? (table-get t :orphan-ran)))))
+
+  (test "a grandchild of the thunk IS reaped while its parent is still alive"
+    (let (t (table))
+      (%isolate (fn ()
+                  (spawn (fn ()
+                           (spawn (fn () (sleep 400) (table-put t :grand-ran true)))
+                           (sleep 400)))
+                  (sleep 100)
+                  :done))
+      (sleep 600)
+      (is (nil? (table-get t :grand-ran)))))
+
+  (test "the isolate still rolls its own global bindings back"
+    (%isolate (fn () (eval '(def isolate-scratch-global 41))))
+    (is (not (bound? 'isolate-scratch-global)))))
+
+;;
+;; --- %binding: a name/value length mismatch is an error, not a silent nil -----
+;;
+
+(describe "%binding: names and values must line up"
+
+  (test "fewer values than names is rejected"
+    ;; The `binding` MACRO guarantees equal lengths; the primitive must not
+    ;; assume it. This used to bind nil for the missing value and return 1.
+    ;; Declare the var first so the length check is what raises — an undeclared
+    ;; name would raise on the not-dynamic check instead and pass either way.
+    (eval '(defdyn *system-robustness-dyn* 1))
+    (assert-error (%binding '(*system-robustness-dyn*) [] (fn () 1))))
+
+  (test "more values than names is rejected"
+    (eval '(defdyn *system-robustness-dyn* 1))
+    (assert-error (%binding '(*system-robustness-dyn*) [1 2] (fn () 1))))
+
+  (test "matched lengths still bind, and unwind cleanly"
+    (eval '(defdyn *system-robustness-dyn* 1))
+    (is (= 7 (%binding '(*system-robustness-dyn*) [7] (fn () (eval '*system-robustness-dyn*)))))
+    ;; The push/pop stayed balanced — the outer value is back.
+    (is (= 1 (eval '*system-robustness-dyn*))))
+
+  (test "a rejected binding leaves the dynamic stack untouched"
+    (eval '(defdyn *system-robustness-dyn2* 5))
+    (assert-error (%binding '(*system-robustness-dyn2*) [] (fn () 1)))
+    (is (= 5 (eval '*system-robustness-dyn2*)))))
+
+;;
+;; --- {:name :node} address errors name the operation that raised them ---------
+;;
+
+(describe "name-address errors name their own operation"
+
+  (test "monitor's shape error says monitor, not send"
+    (let (msg (try (monitor {:oops 1}) (catch e (get e :message))))
+      (is (string/starts-with? msg "monitor:"))))
+
+  (test "monitor's field-type error says monitor, not send"
+    (let (msg (try (monitor {:name 5 :node 6}) (catch e (get e :message))))
+      (is (string/starts-with? msg "monitor:"))))
+
+  (test "send's errors still say send"
+    (let (shape (try (send {:oops 1} :x) (catch e (get e :message)))
+          field (try (send {:name 5 :node 6} :x) (catch e (get e :message))))
+      (is (string/starts-with? shape "send:"))
+      (is (string/starts-with? field "send:")))))
+
+;; `%isolate` restores the global BINDING table, but two Rust-side mark registries live
+;; beside it — the `defdyn` set (`core::value::DYNAMICS`) and the `defn-` private set
+;; (`RuntimeCode::private`) — and neither used to be rolled back. A leaked dynamic mark is
+;; not cosmetic: it makes the name permanently *ambient* for namespace resolution
+;; (`macros::is_ambient`) and permanently exempt from the reserved-name check
+;; (`heap::is_sealed` excludes dynamics), so an isolated test could silently change how a
+;; later module's names resolve.
+;;
+;; These use `eval-string` rather than a literal `defdyn`, which matters: the whole file
+;; is compiled before it runs, and the compile pass registers the mark — so a literal
+;; `(defdyn *p*)` anywhere in this file makes `(dynamic? '*p*)` true before the isolate
+;; ever executes, and the test passes vacuously against the broken build. Verified against
+;; a pristine-HEAD binary: `dynamic?` reads true after the isolate there, false here.
+(describe "%isolate rolls back the mark registries, not only the bindings"
+  :isolated
+
+  (test "a defdyn inside an isolate does not leak its dynamic mark"
+    (is (not (dynamic? '*isolate-leak-probe*)))
+    (%isolate (fn () (eval-string "(defdyn *isolate-leak-probe* 9)")))
+    (is (not (dynamic? '*isolate-leak-probe*)))
+    (is (not (bound? '*isolate-leak-probe*))))
+
+  (test "the mark is rolled back on the throwing path too"
+    (is (= :caught
+           (try (%isolate (fn () (eval-string "(defdyn *isolate-leak-throw* 1)")
+                                 (throw :x)))
+                (catch e :caught))))
+    (is (not (dynamic? '*isolate-leak-throw*))))
+
+  (test "a dynamic mark made OUTSIDE an isolate survives it"
+    ;; The restore replaces the set wholesale, so it must not drop pre-existing marks.
+    (eval-string "(defdyn *isolate-keep-probe* 1)")
+    (is (dynamic? '*isolate-keep-probe*))
+    (%isolate (fn () 1))
+    (is (dynamic? '*isolate-keep-probe*)))
+
+  (test "a defn- inside an isolate does not leak its private mark"
+    (%isolate (fn () (eval-string "(defn- isolate-priv-probe () 1)")))
+    (is (not (bound? 'isolate-priv-probe)))))

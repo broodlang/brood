@@ -1061,10 +1061,13 @@ fn spawned_process_picks_up_redefinition() {
               (send (first msg) (handler (first (rest msg))))
               (server))))
         (def srv  (spawn (server)))
-        (def call (fn (x) (send srv (list (self) x)) (receive)))
-        (def before (call 5))             ; 5 * 10 = 50
+        ;; NB: named `ask`, not `call` — `call` became a *reserved* name when the
+        ;; gen_server framework moved into the prelude bare (7cb796f0), so `(def call …)`
+        ;; is refused outright. The name is incidental to what this test proves.
+        (def ask (fn (x) (send srv (list (self) x)) (receive)))
+        (def before (ask 5))              ; 5 * 10 = 50
         (def handler (fn (x) (+ x 100)))  ; hot-reload the handler in place
-        (def after (call 5))              ; 5 + 100 = 105 — on the SAME running server
+        (def after (ask 5))               ; 5 + 100 = 105 — on the SAME running server
         (list before after)
     "#;
     assert_eq!(run(src), "(50 105)");

@@ -343,13 +343,23 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             // face on each of the `h` rows, so the face `:bg` (or `:reverse`) shows.
             let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
             let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
-            let w = expect_int(heap, "%term-draw", arg(&parts, 3))?.max(0) as usize;
-            let h = expect_int(heap, "%term-draw", arg(&parts, 4))?;
+            // `w`/`h` are attacker-reachable ints that size an allocation and a loop,
+            // so they get `clamp_extent`, not a bare `.max(0)`: `" ".repeat(w)` with a
+            // huge `w` is an allocator abort, which no `try` can catch (see MAX_EXTENT).
+            let w = clamp_extent(expect_int(heap, "%term-draw", arg(&parts, 3))?) as usize;
+            let h = clamp_extent(expect_int(heap, "%term-draw", arg(&parts, 4))?) as i64;
             let face = parts.get(5).copied().unwrap_or(Value::nil());
             let fill = " ".repeat(w);
-            for i in 0..h.max(0) {
-                crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row + i)))
-                    .map_err(term_err)?;
+            for i in 0..h {
+                // `saturating_add`: `row` and `i` are both bounded but `row` is a raw
+                // caller int, so `row + i` near i64::MAX panics under debug-assertions
+                // (the build this repo's own debug guidance recommends). Clamp after a
+                // saturating add, never before it.
+                crossterm::queue!(
+                    out,
+                    MoveTo(clamp_u16(col), clamp_u16(row.saturating_add(i)))
+                )
+                .map_err(term_err)?;
                 apply_face(&mut out, heap, face)?;
                 crossterm::queue!(
                     out,
@@ -590,8 +600,30 @@ pub(super) fn color_of(heap: &Heap, v: Value) -> Option<crossterm::style::Color>
 }
 
 /// Clamp a Brood int to a terminal coordinate (crossterm uses `u16`).
+///
+/// The ceiling is `u16::MAX - 1`, not `u16::MAX`: crossterm's `MoveTo` writes
+/// **1-based** ANSI coordinates, so it does `self.0 + 1` on the `u16` we hand it and
+/// `65535` panics there with "attempt to add with overflow" under debug-assertions —
+/// on a scheduler worker, where no `try` can catch it. One unreachable cell column is
+/// not worth a reachable panic.
 pub(super) fn clamp_u16(n: i64) -> u16 {
-    n.clamp(0, u16::MAX as i64) as u16
+    n.clamp(0, u16::MAX as i64 - 1) as u16
+}
+
+/// The largest render *extent* (a `w`/`h` in cells) a frame op may ask for.
+///
+/// Coordinates go through `clamp_u16`, but an extent needs its own bound and for a
+/// different reason: `w` sizes an *allocation* and `h` sizes a *loop*, so an
+/// unbounded `i64` straight out of a frame is an allocator abort (SIGABRT, no crash
+/// dump, uncatchable by Brood `try`) rather than a wrong pixel. `u16::MAX` on both
+/// at once would still be a 4 GB fill, so the cap is the render bound instead: no
+/// terminal is 4096 cells wide or tall, and nothing beyond the terminal renders, so
+/// clamping here costs nothing real and turns a hostile frame into a no-op.
+const MAX_EXTENT: i64 = 4096;
+
+/// Clamp a Brood int to a drawable extent — see [`MAX_EXTENT`].
+pub(super) fn clamp_extent(n: i64) -> u16 {
+    n.clamp(0, MAX_EXTENT) as u16
 }
 
 // ---- the GUI frontend (ADR-046, feature "gui") ------------------------------
@@ -808,8 +840,8 @@ pub(super) fn gui_title(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// pixels (a vector of `w*h*4` byte ints, row-major).
 pub(super) fn gui_icon(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "%gui-icon!", arg(args, 0))?;
-    let w = expect_int(heap, "%gui-icon!", arg(args, 2))? as u32;
-    let h = expect_int(heap, "%gui-icon!", arg(args, 3))? as u32;
+    let w_i = expect_int(heap, "%gui-icon!", arg(args, 2))?;
+    let h_i = expect_int(heap, "%gui-icon!", arg(args, 3))?;
     let rgba: Vec<u8> = match arg(args, 1) {
         Value::Vector(vid) => heap
             .vector(vid)
@@ -823,6 +855,20 @@ pub(super) fn gui_icon(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
             return Err(LispError::runtime(
                 "gui-icon!: rgba must be a vector of bytes".to_string(),
             ))
+        }
+    };
+    // Validate BEFORE the narrowing cast, and against the buffer we actually have:
+    // `expect_int(..)? as u32` truncates silently (4294967296 arrives as 0), and the
+    // backend reads `w * h * 4` bytes out of `rgba`, so a dimension that doesn't match
+    // the pixel count is a malformed icon at best. A caller mistake must be a clean
+    // catchable error, never a cast that lies about the size.
+    let (w, h) = match (u32::try_from(w_i), u32::try_from(h_i)) {
+        (Ok(w), Ok(h)) if (w as u64) * (h as u64) * 4 == rgba.len() as u64 => (w, h),
+        _ => {
+            return Err(LispError::runtime(format!(
+                "gui-icon!: w*h*4 must equal the rgba byte count (w={w_i}, h={h_i}, {} bytes)",
+                rgba.len()
+            )))
         }
     };
     crate::gui::icon(id, rgba, w, h).map_err(LispError::runtime)?;
@@ -1169,7 +1215,9 @@ fn parse_gui_ops(
             ops.push(crate::gui::Op::Cells {
                 row0: clamp_u16(row0_i),
                 col0: clamp_u16(col0_i),
-                w: w_i.max(1) as u32,
+                // Clamp BEFORE the narrowing cast: `w_i.max(1) as u32` truncates
+                // afterwards, so 4294967296 came through the guard as 0.
+                w: clamp_extent(w_i).max(1) as u32,
                 aspect: clamp_u16(asp_i).max(1),
                 bytes,
                 color,
@@ -1217,7 +1265,9 @@ fn parse_gui_ops(
             ops.push(crate::gui::Op::CellsRgb {
                 row0: clamp_u16(row0_i),
                 col0: clamp_u16(col0_i),
-                w: w_i.max(1) as u32,
+                // Clamp BEFORE the narrowing cast: `w_i.max(1) as u32` truncates
+                // afterwards, so 4294967296 came through the guard as 0.
+                w: clamp_extent(w_i).max(1) as u32,
                 aspect: clamp_u16(asp_i).max(1),
                 bytes,
                 colors,

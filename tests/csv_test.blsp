@@ -136,3 +136,38 @@
     (assert= (csv/emit-maps (list {:amount (usd 25)}) ["amount"]) "amount\n$25"))
   (test "a plain string cell is untouched"
     (assert= (csv/emit [["plain"]]) "plain")))
+
+;; ---- emit-maps: presence, not truthiness ------------------------------------
+;; `false` is FALSY in Brood, so the old `(or (get m h) (get m (keyword h) ""))`
+;; treated a legitimately-stored `false` as a missing key and emitted an EMPTY
+;; field — silently corrupting every boolean column.
+
+(describe "emit-maps — a stored false is a value, not a missing key"
+  (test "false emits as false"
+    (assert= "a\nfalse" (csv/emit-maps (list {"a" false}) (list "a"))))
+  (test "false under a keyword key emits as false too"
+    (assert= "a\nfalse" (csv/emit-maps (list {:a false}) (list "a"))))
+  (test "a missing key still emits an empty field"
+    (assert= "a\n" (csv/emit-maps (list {}) (list "a"))))
+  (test "a key present but holding nil emits an empty field"
+    (assert= "a\n" (csv/emit-maps (list {"a" nil}) (list "a"))))
+  (test "true, zero and the empty string are unaffected"
+    (assert= "a,b,c\ntrue,0," (csv/emit-maps (list {"a" true "b" 0 "c" ""}) (list "a" "b" "c")))))
+
+;; ---- parse-maps is linear in the column count -------------------------------
+;; `(into [] row)` used to be rebuilt INSIDE the fold, once per column, making
+;; parse-maps O(cols²) per row (400 columns measured 517 ms). `parse` already
+;; returns vectors, so the conversion is hoisted out.
+
+(defn- csv-wide-header (n acc)
+  (if (= n 0) acc (csv-wide-header (- n 1) (cons (str "c" n) acc))))
+
+(describe "parse-maps — wide rows"
+  (test "a 400-column row parses correctly (and no longer quadratically)"
+    (let (cols (csv-wide-header 400 nil)
+          header (string/join "," cols)
+          row (string/join "," (map (fn (c) (str "v" c)) cols))
+          ms (map-pairs (first (csv/parse-maps (str header "\n" row)))))
+      (assert= 400 (count ms))
+      (assert= "vc1" (get (first (csv/parse-maps (str header "\n" row))) "c1"))
+      (assert= "vc400" (get (first (csv/parse-maps (str header "\n" row))) "c400")))))

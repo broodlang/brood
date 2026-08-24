@@ -53,8 +53,12 @@ fresh (ref)."
   "Like `call`, but wait at most `ms` milliseconds. Monitors the server for
 the duration: a reply returns its value, the server dying raises
 `call: server … died: …`, and crossing the deadline raises
-`call: timed out …`. Both errors are catchable with `try`. The monitor is
-always dropped (and a late `[:down]` flushed) before returning."
+`call: timed out …`. Both errors are catchable with `try`. **Every** exit path
+drops the monitor and flushes this call's already-queued `[:reply]` / `[:down]`,
+so a call that times out leaves nothing addressed to its `ref` behind. (A reply
+the server posts strictly *after* the deadline cannot be caught here — nothing
+can see it before it is sent — so a caller that keeps timing out against a
+slow-but-live server should stop calling it, not raise the timeout.)"
   (let (r (ref) m (monitor pid))
     (send pid [:$call (self) r payload])
     (receive
@@ -62,9 +66,18 @@ always dropped (and a late `[:down]` flushed) before returning."
         ; flush a late down, don't leak it
         (receive ([:down ^m _ _] :ok) (after 0 :ok))
         v)
-      ([:down ^m _ reason] (error "call: server " (pr-str pid) " died: " (pr-str reason)))
+      ([:down ^m _ reason] (demonitor m)
+        (error "call: server " (pr-str pid) " died: " (pr-str reason)))
       (after ms
         (demonitor m)
+        ;; Both envelopes carry an unforgeable `ref`/monitor that NO other receive in
+        ;; this process can match, so anything left queued for them is unreachable
+        ;; garbage: it never gets consumed, grows the mailbox without bound over a
+        ;; retry loop, and is re-scanned by every later selective receive. The reply
+        ;; first — a server that answered just as the deadline passed is the common
+        ;; case — then the monitor's down.
+        (receive ([:reply ^r _] :ok) (after 0 :ok))
+        (receive ([:down ^m _ _] :ok) (after 0 :ok))
         (error "call: timed out after " ms " ms")))))
 
 (defn stop (pid)

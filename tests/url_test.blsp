@@ -161,3 +161,66 @@
     (assert= (url/query-encode {"n" 42}) "n=42"))
   (test "a plain string value is unchanged"
     (assert= (url/query-encode {"q" "hello world"}) "q=hello+world")))
+
+;; ---- authority: userinfo and IPv6 -------------------------------------------
+;; The authority was split on the FIRST ":" with no userinfo (`@`) or bracketed-IPv6
+;; handling, so `https://user:pass@example.com/p` reported host "user" and
+;; `http://[::1]:8080/p` reported host "[". The first is security-relevant, not a
+;; cosmetic parse nit: `https://evil.com@good.com/` reported host `evil.com`, so an
+;; allow-list / logged origin / SSRF guard reading `:host` sees a DIFFERENT host than
+;; the one a real client connects to.
+
+(describe "parse-url — userinfo"
+  (test "userinfo is separated from the host"
+    (let (u (url/parse-url "https://user:pass@example.com/p"))
+      (assert= "example.com" (get u :host))
+      (assert= "user:pass" (get u :userinfo))
+      (assert= nil (get u :port))
+      (assert= "/p" (get u :path))))
+  (test "the @-in-authority phishing shape reports the REAL host"
+    (assert= "good.com" (get (url/parse-url "https://evil.com@good.com/") :host)))
+  (test "userinfo alongside a port"
+    (let (u (url/parse-url "https://u@h.com:8443/x"))
+      (assert= "h.com" (get u :host))
+      (assert= "u" (get u :userinfo))
+      (assert= 8443 (get u :port))))
+  (test "no userinfo means nil, not an empty string"
+    (assert= nil (get (url/parse-url "https://example.com/p") :userinfo))))
+
+(describe "parse-url — bracketed IPv6 hosts"
+  (test "an IPv6 literal with a port"
+    (let (u (url/parse-url "http://[::1]:8080/p"))
+      (assert= "[::1]" (get u :host))
+      (assert= 8080 (get u :port))
+      (assert= "/p" (get u :path))))
+  (test "an IPv6 literal without a port"
+    (let (u (url/parse-url "http://[2001:db8::1]/"))
+      (assert= "[2001:db8::1]" (get u :host))
+      (assert= nil (get u :port))))
+  (test "an IPv6 literal with userinfo"
+    (let (u (url/parse-url "http://bob@[::1]:99/"))
+      (assert= "[::1]" (get u :host))
+      (assert= "bob" (get u :userinfo))
+      (assert= 99 (get u :port))))
+  (test "an unterminated IPv6 literal raises"
+    (assert-error (url/parse-url "http://[::1:8080/p"))))
+
+(describe "parse-url — port validation"
+  (test "an unparseable port raises instead of reading as absent"
+    ;; nil for both `absent` and `garbage` meant http:// silently fell back to 80
+    (assert-error (url/parse-url "http://h:8o80/p"))
+    (assert-error (url/parse-url "http://h:-1/p"))
+    (assert-error (url/parse-url "http://h:99999/p"))
+    (assert-error (url/parse-url "http://h:8.5/p")))
+  (test "an empty port is the scheme default (nil), per RFC 3986 3.2.3"
+    (assert= nil (get (url/parse-url "http://h:/p") :port)))
+  (test "a normal port still parses"
+    (assert= 8080 (get (url/parse-url "http://h:8080/p") :port))))
+
+(describe "build-url — userinfo round-trip"
+  (test "parse then build is lossless for a full authority"
+    (assert= "https://u:p@h.com:8443/x"
+      (url/build-url (url/parse-url "https://u:p@h.com:8443/x"))))
+  (test "an IPv6 authority round-trips"
+    (assert= "http://[::1]:8080/p"
+      (url/build-url (url/parse-url "http://[::1]:8080/p")))))

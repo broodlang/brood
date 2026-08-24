@@ -247,9 +247,15 @@ struct NumericShape {
     /// Passes the cheap pre-filter for `f64::parse` — genuine numeric intent: it
     /// leads with a digit / sign / dot, contains **at least one digit**, holds only
     /// number-ish characters, and every `+`/`-` sits in a valid sign position
-    /// (leading, or right after an `e`/`E`). Conventional identifiers like `-`,
-    /// `++`, `--`, `...`, `1+`, `2+3` are *not* numeric — they read as symbols; only
-    /// a real (possibly-malformed) number like `1e`/`1.2.3`/`1e+` is `numeric`.
+    /// (leading, or right after an `e`/`E`). Only a real (possibly-malformed)
+    /// number like `1e`/`1.2.3`/`1e+` is `numeric`; sign-led identifiers like `-`,
+    /// `++`, `--`, `...` are not, and read as symbols.
+    ///
+    /// A **digit-led** token that isn't numeric is *not* a symbol either: `1+` and
+    /// `2+3` fall through [`classify`] to [`AtomKind::ReservedNumeric`] and are a
+    /// reader error, deliberately — the digit-led space is reserved for number
+    /// literals so future ones stay purely additive. (This comment used to claim
+    /// they read as symbols, which is the pre-`ReservedNumeric` behaviour.)
     numeric: bool,
     /// Has a `.`, `e`, or `E` — i.e. a fractional or exponent part, so it's
     /// float-shaped rather than integer-shaped. Only meaningful when `numeric`.

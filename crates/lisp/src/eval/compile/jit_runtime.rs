@@ -377,20 +377,22 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                         // The panic that poisons the compiler for the rest of the process.
                         // `catch_unwind` swallows it, so without this the FIRST domino is
                         // invisible and only its consequences are seen.
+                        //
+                        // Reported UNCONDITIONALLY (not behind `BROOD_JIT_BAIL_TRACE`): this
+                        // fires at most once per process and turns the JIT off for everything
+                        // queued after it — a whole-process capability loss whose only symptom
+                        // is otherwise "the program got slower". A diagnostic you must have
+                        // armed in advance is a diagnostic that is absent when it matters.
                         {
-                            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                            if *ON
-                                .get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
-                            {
-                                let name = arm
-                                    .dbg_name
-                                    .map(crate::core::value::symbol_name_ref)
-                                    .unwrap_or("<closure>");
-                                eprintln!(
-                                    "[jit-bail] arm={name} reason=CODEGEN-PANICKED (poisons \
-                                     the compiler; every later arm bails untried)"
-                                );
-                            }
+                            let name = arm
+                                .dbg_name
+                                .map(crate::core::value::symbol_name_ref)
+                                .unwrap_or("<closure>");
+                            eprintln!(
+                                "[jit-bail] arm={name} reason=CODEGEN-PANICKED — the JIT is now \
+                                 OFF for the rest of this process (every arm queued after this \
+                                 one bails untried). Please report this with the program."
+                            );
                         }
                         codegen_poisoned = true;
                         slot.store(crate::jit::BAILED, Release);
@@ -879,7 +881,14 @@ pub(crate) fn jit_run_fast_link(
                 // different arm than the one whose native ran; a mismatched frame can't be
                 // resumed and takes the legacy re-run instead. It must be **flag-free** —
                 // see [`jit_frame_shape_matches`] (KI-26).
-                if outcome == 1 && jit_frame_shape_matches(&arm, nslots) {
+                // `1 | 2` — deopt AND preempt — matching `vm_run_bc`'s handler (KI-18): the
+                // journal, not the outcome code, decides whether there is a checkpoint to
+                // resume from, and `jit_ckpt_resume` returns `None` on a zero journal. Today
+                // a preempt provably observes a zero journal (`emit_self_call` resets it
+                // immediately before the tick poll), but that invariant lives in the lowerer
+                // while these consumers depend on it silently — and its failure mode is a
+                // silently REPEATED side effect, so all four consumers now gate the same way.
+                if matches!(outcome, 1 | 2) && jit_frame_shape_matches(&arm, nslots) {
                     if let Some((resume, rip, depth)) =
                         jit_ckpt_resume(heap, arm.arc(), base, nslots)
                     {
@@ -1219,11 +1228,16 @@ pub(crate) fn jit_dispatch_call(
                     }
                 }
                 heap.truncate_roots(stage_base + argc);
-                // Two-stage tiering: size the callee frame to its *installed* native version
-                // (inlined upgrade → `inline_nslots`; small → `nslots`). Capture once and reuse
-                // for both frame extension and the outcome-4 staged_start calculation — the two
-                // must agree on the same frame boundary.
-                let frame_nslots = arm.frame_size_for_new_entry();
+                // Two-stage tiering: size the callee frame to the native version we are about
+                // to CALL (inlined upgrade → `inline_nslots`; small → `nslots`). Keyed on the
+                // `code` pointer loaded above, NOT on `inline_installed`: the flag is a second,
+                // independently-racing read of the same fact, and a peer process swapping the
+                // upgrade in between the two would have us size to `inline_nslots` while
+                // calling the small native — whose outcome-4 tail staging then lands at
+                // `base + nslots` and is read back here at `base + inline_nslots`. Captured
+                // once and reused for both the frame extension and the staged_start
+                // calculation — the two must agree on the same frame boundary.
+                let frame_nslots = frame_size_for_code(&arm, code);
                 heap.extend_roots_to_nil(stage_base + frame_nslots);
                 let base = stage_base;
                 // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
@@ -1333,7 +1347,9 @@ pub(crate) fn jit_dispatch_call(
                         crate::perf_bump!(jit_link_rerun);
                         // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the
                         // checkpoint, frame intact — never re-running side effects.
-                        if outcome == 1 {
+                        // `1 | 2` (deopt AND preempt), consistent with the other three
+                        // consumers — see the note at the fast-link resume above (KI-18).
+                        if matches!(outcome, 1 | 2) {
                             if let Some((resume, rip, depth)) =
                                 jit_ckpt_resume(heap, arm.arc(), base, frame_nslots)
                             {
@@ -1614,7 +1630,7 @@ pub(crate) fn jit_frame_shape_matches(arm: &CompiledArm, frame_nslots: usize) ->
 ///   slot still reads the entry reset's 0 and this returns `None`.
 ///
 /// `frame_nslots` is **the size the caller built this frame to**, and every caller must pass
-/// its own — that is what selects the layout (see [`jit_frame_is_leaf_spliced`] for why the
+/// its own — that is what selects the layout (see [`jit_frame_layout`] for why the
 /// `inline_installed` flag cannot be used instead) and what makes the slot read in bounds.
 /// Call this at most once per deopt: the decision must be taken before anything resizes the
 /// frame, because a second read would come from the resized one.
@@ -1625,64 +1641,69 @@ pub(crate) fn jit_ckpt_resume(
     base: usize,
     frame_nslots: usize,
 ) -> Option<(Arc<CompiledArm>, usize, usize)> {
-    let inlined = jit_frame_is_leaf_spliced(arm, frame_nslots);
-    let slot = jit_ckpt_slot(arm, inlined)?;
+    let layout = jit_frame_layout(arm, frame_nslots);
+    // The journal slot of the layout this frame was BUILT to — never the other one's.
+    // A layout that writes no journal (`u32::MAX`) yields `None` here, which means
+    // "resume from ip 0", and ip-0 re-run is effect-free by construction for exactly
+    // the arms that decline to journal (`jit_ckpt_depth`'s `pure_self` exemption).
+    //
+    // Reading the *small* layout's `ckpt_slot` out of a leaf-spliced frame was a live
+    // miscompile: leaf splicing removes the residual `Call`, which makes the derivation
+    // `pure_self` and therefore unjournalled (`resume.ckpt_slot == u32::MAX`) even
+    // though the small body — which still has the call — journals at a real slot. The
+    // old spelling asked "is this frame leaf-spliced *and journalled*?", answered "no"
+    // for that pair, and fell back to the small slot, whose meaning in the spliced
+    // layout is undefined. In `(defn sum-down (n acc) (if (<= n 0) acc (sum-down (dec n)
+    // (+ acc n))))` it held the live loop counter, so a preempt decoded `n` as a journal
+    // word: resume ip `n >> 16`, operand depth `n & 0xFFFF`. `(sum-down 200000 0)`
+    // returned 6251217600 instead of 20000100000 on the default build, and at 400000 it
+    // surfaced as `type error: -: expected number, got nil` blaming `dec`.
+    let slot = match layout {
+        FrameLayout::LeafSpliced => arm.leaf.as_ref()?.resume.ckpt_slot,
+        FrameLayout::Small => arm.ckpt_slot,
+    };
+    if slot == u32::MAX {
+        return None;
+    }
     let p = match heap.root_at(base + slot as usize) {
         Value::Int(p) if p > 0 => p,
         _ => return None,
     };
     // Continue in whichever layout wrote that journal.
-    let resume = if inlined {
-        arm.leaf.as_ref()?.resume.clone()
-    } else {
-        arm.clone()
+    let resume = match layout {
+        FrameLayout::LeafSpliced => arm.leaf.as_ref()?.resume.clone(),
+        FrameLayout::Small => arm.clone(),
     };
     Some((resume, (p >> 16) as usize, (p & 0xFFFF) as usize))
 }
 
-/// Was the frame at `base` built for the **leaf-spliced** layout (so its journal is the
-/// derivation's, at the derivation's slot) rather than the small one?
+/// Which of the arm's two frame layouts was the frame at `base` built to?
 ///
-/// Decided by the size the frame was actually built to — **not** by reading
-/// `inline_installed`. That flag is flipped by `jit_tier` itself, i.e. exactly between the
-/// frame being sized and the deopt being handled, so on the activation where the inlined
-/// upgrade installs, reading it afterwards claims the inlined layout for a frame built to
-/// the small one: `base + <inlined ckpt slot>` then indexes past the root stack, which
-/// surfaced as an out-of-bounds `root_at` inside a later GC walk. Only a *journalled* leaf
-/// derivation matters here, and such a derivation's frame is strictly larger than the small
-/// one (it splices above `nslots` and then reserves blocks + journal), so the size
-/// comparison is unambiguous — asserted below.
+/// Selected by the size the caller built it to — **never** by reading `inline_installed`.
+/// That flag is flipped by [`jit_tier`] itself, i.e. exactly between the frame being sized
+/// and the deopt being handled, so on the activation where the inlined upgrade installs,
+/// reading it afterwards claims the inlined layout for a frame built to the small one:
+/// `base + <inlined ckpt slot>` then indexes past the root stack, which surfaced as an
+/// out-of-bounds `root_at` inside a later GC walk (KI-26 / ADR-210).
 #[cfg(feature = "jit")]
-fn jit_frame_is_leaf_spliced(arm: &CompiledArm, frame_nslots: usize) -> bool {
-    let Some(leaf) = arm.leaf.as_ref() else {
-        return false;
-    };
-    if leaf.resume.ckpt_slot == u32::MAX {
-        return false; // unjournalled: nothing of ours to resume into
-    }
-    debug_assert!(
-        arm.inline_nslots > arm.nslots,
-        "a journalled leaf layout must be strictly larger than the small one, else the \
-         frame-size test below cannot tell them apart"
-    );
-    frame_nslots == arm.inline_nslots
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameLayout {
+    /// The original small body.
+    Small,
+    /// A leaf-callee-spliced derivation (ADR-210), whose slot range differs from the
+    /// small one's.
+    LeafSpliced,
 }
 
-/// The journal slot for the layout live in `arm`'s frame, or `None` when it writes none.
-/// Its `inlined` argument comes from [`jit_frame_is_leaf_spliced`], so the slot always
-/// belongs to the layout the frame was actually built to.
 #[cfg(feature = "jit")]
-fn jit_ckpt_slot(arm: &CompiledArm, inlined: bool) -> Option<u32> {
-    // A self-spliced native writes no journal, and the small layout's `ckpt_slot` points
-    // INTO its spliced slot range, where an ordinary value (a spliced callee's Int param)
-    // would fake a journal → a garbage resume ip. `jit_frame_is_leaf_spliced` returns
-    // false for it, so this reads the small slot, which its entry reset zeroed.
-    let slot = if inlined {
-        arm.leaf.as_ref()?.resume.ckpt_slot
+fn jit_frame_layout(arm: &CompiledArm, frame_nslots: usize) -> FrameLayout {
+    // A leaf derivation's frame is strictly larger than the small one (it splices extra
+    // slots and then reserves blocks + journal), so the size tells them apart.
+    if arm.leaf.is_some() && arm.inline_nslots > arm.nslots && frame_nslots == arm.inline_nslots {
+        FrameLayout::LeafSpliced
     } else {
-        arm.ckpt_slot
-    };
-    (slot != u32::MAX).then_some(slot)
+        FrameLayout::Small
+    }
 }
 
 /// Resume a deopted JIT frame at its checkpoint on the VM: push the journaled
@@ -1791,12 +1812,51 @@ pub(crate) fn jit_deopt_feedback(arm: &CompiledArm) {
     }
 }
 
+/// The frame size the code pointer `code` runs against — the **non-racy** counterpart of
+/// [`CompiledArm::frame_size_for_new_entry`]. It keys on the pointer the caller is about to
+/// call rather than re-reading `inline_installed`, so the size and the code cannot disagree.
+///
+/// Prefer this wherever the code pointer is already in hand: `frame_size_for_new_entry()`
+/// answers "what does the *currently installed* version want", which is a different question
+/// from "what does *this* pointer want" the moment a peer process swaps the inlined upgrade
+/// in (`CompiledArm` is shared across a runtime's processes since ADR-215).
 #[cfg(feature = "jit")]
-pub(crate) fn jit_tier(
+pub(crate) fn frame_size_for_code(arm: &CompiledArm, code: *mut u8) -> usize {
+    let ic = arm.inline_code.load(std::sync::atomic::Ordering::Acquire);
+    if !ic.is_null() && ic == code {
+        arm.inline_nslots
+    } else {
+        arm.nslots
+    }
+}
+
+/// Tiering entry (ADR-101 1b). `frame_nslots` is **the size the caller already built this
+/// frame to**, and the native entry is declined (`None` — run the VM this activation) when
+/// the installed code turns out to want a *bigger* frame than that. There is deliberately no
+/// size-free spelling: a caller that cannot say what it built cannot be entered safely.
+///
+/// The KI-48 family, fourth appearance. The rule KI-48 wrote down — "the caller captures
+/// the size once and TELLS every consumer" — does not cover this one, because here the
+/// caller tells correctly and it is the **code pointer** that gets re-derived underneath:
+/// `vm_run_bc`/`dispatch` read `inline_installed` first (to size the frame), then call
+/// `jit_tier`, which Acquire-loads `jit_code` *again*. The two-stage swap stores
+/// `inline_installed` before `jit_code` precisely so a reader that sees the inlined pointer
+/// also sees the flag — but only if it reads code *first*. Read flag-then-code and the
+/// Release/Acquire chain guarantees nothing: a peer process swapping in the inlined body in
+/// that window leaves the caller holding a small frame while `jit_tier` runs the inlined
+/// native, which raw-writes slots past the frame top (measured overshoot: 12 slots on
+/// `fold`, `nslots` 13 vs `inline_nslots` 25).
+///
+/// (The other native entries — `jit_dispatch_call`, `hof_apply_native`, `jit_run_fast_link` —
+/// do not come through here at all: each loads the code pointer itself and sizes from THAT,
+/// via [`frame_size_for_code`], which is the same rule spelled the other way round.)
+#[cfg(feature = "jit")]
+pub(crate) fn jit_tier_in_frame(
     arm: &Arc<CompiledArm>,
     heap: &mut Heap,
     base: usize,
     env: EnvRoot,
+    frame_nslots: usize,
 ) -> Option<i64> {
     use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
     const THRESHOLD: u32 = 8;
@@ -2058,9 +2118,8 @@ pub(crate) fn jit_tier(
             // frame, picking up stale Vec-capacity data as slot values and passing garbage
             // through the outcome-4 tail-call staging path.
             //
-            // This arm is PER-PROCESS ([`compiled_arm_for`] caches it in the process's own
-            // `vm_cache`), so the upgrade must only re-point THIS process's fast-links to
-            // this callee — NOT bump the shared `global_epoch`. A global bump invalidated
+            // The upgrade must only re-point THIS process's fast-links to this callee — NOT
+            // bump the shared `global_epoch`. A global bump invalidated
             // every peer process's `compile_epoch` too, so under `pfib` all 100 processes
             // cascaded: each peer nuked its installed code, re-tiered, re-upgraded and
             // re-bumped in turn, permanently diverting calls off the in-IR fast-link onto
@@ -2068,6 +2127,33 @@ pub(crate) fn jit_tier(
             // `compile_epoch` at the current epoch (the arm's inlined operators were just
             // re-validated at compile time) and invalidate only this process's fast-links to
             // this callee, which then re-probe and pick up `inline_code` + `inline_nslots`.
+            //
+            // **The real invariant, stated plainly (this comment used to claim the opposite).**
+            // Since ADR-215 this `CompiledArm` is NOT per-process: `compiled_arm_for` hands
+            // every process of the runtime the same `Arc<CompiledArm>` out of `shared_closures`,
+            // so `inline_installed` / `jit_code` / `inline_code` are shared mutable state read
+            // concurrently by worker threads. `jit_frame_shape_matches`'s doc has this right.
+            // What makes the narrow (this-process-only) `invalidate_fast_links_for` sound is
+            // therefore NOT "peers have their own arm with the flag false" — they don't — but
+            // the fact that a peer's stale `FastLink` is meant to be a **self-consistent
+            // snapshot**: it records a code pointer together with the frame size that pointer
+            // wants, and it enters through that recorded pointer. A peer that never invalidates
+            // keeps running the small native with the small frame, which stays correct code for
+            // this epoch (both bodies are valid; the upgrade is a speed change, not a semantic
+            // one) until its own `jit_tier` entry re-reads and upgrades. Any consumer that mixes
+            // ONE of those two fields with a freshly re-read other one is the bug — which is
+            // exactly the KI-48 family, and why the frame-building callers now go through
+            // `jit_tier_in_frame` / `frame_size_for_code`.
+            //
+            // ⚠ One place still writes a snapshot whose halves are read independently:
+            // `vm_call_ic_fast_link` (`core/heap/vm_cache.rs`) Acquire-loads `code`, then takes
+            // `arm.frame_size_for_new_entry()` — a second, separately-racing read of
+            // `inline_installed`. In the window where this swap lands between those two reads it
+            // records `(small code, inline_nslots)`, and the small native's outcome-4 staging
+            // then lands at `base + nslots` while the link reads it back at
+            // `base + inline_nslots`. The fix is the same one applied here — size from the
+            // pointer you loaded, `frame_size_for_code(arm, code)` — but that file is outside
+            // this change's ownership, so it is recorded rather than done.
             {
                 static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
                 if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
@@ -2106,17 +2192,33 @@ pub(crate) fn jit_tier(
     // processes install it directly instead of recompiling (the spawn lever). The
     // `swap` guard makes this one lock acquire per arm-instance, not one per call; a
     // process that installed the code *from* the cache already has the flag set.
-    // NEVER publish an INLINED arm to the shared `(id, argc)` cache: a peer process that
-    // installed it would run the inlined code with its OWN small `nslots` frame (it has its
-    // own `CompiledArm` with `inline_installed == false`) → frame undersize / corruption.
-    // The inlined upgrade is per-process by design; only the small native is shared (which
-    // is the spawn-friendly path anyway). Guard on `inline_installed`.
+    // NEVER publish an INLINED arm to the *small*-code `(id, argc)` cache: an adopter installs
+    // what it finds there straight into `jit_code` without touching `inline_installed`, so the
+    // inlined body would then be entered against small-`nslots` frames → frame undersize /
+    // corruption. (The inlined body has its own cache — `jit_inline_publish` above — whose
+    // adopters route it through `inline_code` and the swap, which sizes correctly.)
+    //
+    // NB the reason is the *publishing channel*, not process locality: since ADR-215 peers
+    // share this very `CompiledArm` (`compiled_arm_for` → `shared_closures`), so there is no
+    // "peer copy with `inline_installed == false`" — this comment used to say there was.
+    // Guard on `inline_installed`.
     if !arm.inline_installed.load(Acquire) {
         if let Some(key) = arm.share_key {
             if !arm.shared_published.swap(true, Relaxed) {
                 heap.jit_shared_publish(key, code, arm.compile_epoch.load(Acquire));
             }
         }
+    }
+    // Frame-size agreement (KI-48 family, see `jit_tier_in_frame`). The caller built the
+    // frame BEFORE this function re-loaded `jit_code`, so the two can disagree: a peer
+    // process of this runtime (which shares this very `CompiledArm` — ADR-215) may have
+    // swapped the inlined upgrade into `jit_code` in between. Running the inlined native
+    // against the small frame is a raw write past the frame top, so decline and interpret
+    // this activation instead — the next entry sizes to the inlined layout and runs it.
+    // Costs nothing for the ~all arms that never inline: `inline_nslots` is 0 for them, so
+    // the comparison short-circuits before the atomic load.
+    if frame_nslots < arm.inline_nslots && frame_nslots < frame_size_for_code(arm, code) {
+        return None;
     }
     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base) -> i64` produced by
     // `jit_lower_arm`, living in the process-lifetime GLOBAL_JIT module. The frame is set

@@ -1,0 +1,92 @@
+;;; Regression guard: the JIT's loop-invariant VECTOR-BASE hoist must be off in any arm
+;;; that can allocate — table ops included.
+;;;
+;;; The matmul LICM lever resolves an invariant vector param's element base ONCE in the
+;;; entry block (`brood_rt_vector_base` → `v.as_ptr()`) and then reads elements inline as
+;;; `ptr + idx*STRIDE`. That is sound only while nothing can move the storage under it.
+;;; The gate excluded `Call`/`MakeVector`/`Cons` but NOT the table ops, which the compiler's
+;;; own `inst_may_allocate` lists as allocating: `table-get` reconstructs a compound stored
+;;; value into the *caller's* heap (`jit/rt.rs`, "reconstruction may allocate"). A small
+;;; vector's elements live INLINE in its `local.vectors` slab slot (`VecStore::Inline`), so
+;;; a push that reallocates that `Vec` moves them — and every later hoisted read then reads
+;;; freed memory, yielding garbage `Value` words with valid-looking tags. The per-deref
+;;; tripwire cannot see it: the read never goes through a `Heap` accessor.
+;;;
+;;; The asymmetry that made the loose gate look deliberate: the PER-READ inline path
+;;; (`emit.rs`) re-fetches the slab base on every read, "so a prior safepoint that moved the
+;;; slab can't leave it stale". The hoist has no such refresh, so it needs the stricter gate.
+;;; The sibling `pair_bases` hoist already used `inst_may_allocate` — after the same omission
+;;; produced a use-after-free on the pair path.
+;;;
+;;; Shape that triggers it:
+;;;   Prim2SlotSlot{VectorRef, slot_a = an invariant param}  ← the hoisted base is used here
+;;;   Prim2{TableGet}                                        ← reconstruction allocates
+;;;   SelfCall (tail)                                        ← keeps the arm hot + looping
+;;;
+;;; `vh-v` is built INSIDE the test body so its pairs/elements live in the LOCAL nursery
+;;; (a `def`'d vector is promoted to the shared region, whose slab is append-only and would
+;;; not reproduce this). Failure mode without the fix: a wrong sum, a crash, or a tripwire
+;;; panic — all of which fail the test.
+;;;
+;;; HONEST LIMIT — read before trusting a green run here. This file is a behavioural smoke
+;;; test: it pins that the shape computes the right answer end to end, and it does NOT fail
+;;; with the bug live. Verified by sabotage (gate reverted, `[jit-ir]` confirming the arm did
+;;; hoist): a stale base returns *freed-but-intact* memory far more often than it returns
+;;; garbage, so the sum still came out right. The load-bearing guard is therefore the unit
+;;; test `the_vector_base_hoist_is_off_for_any_allocating_arm` in `eval/compile/tests.rs`,
+;;; which pins the predicate (`jit_plan::codegen::vector_base_hoist_safe`) directly and DOES
+;;; fail under the same sabotage. Keep both: this one covers the end-to-end shape, including
+;;; that the gate did not accidentally break the lever it protects.
+
+(defmodule jit-vector-hoist-alloc-test (:use test))
+
+(def vh-n 200000)
+
+;; The arm under test: reads an invariant LOCAL vector by a SLOT index (the fused
+;; `Prim2SlotSlot` form — the only one the hoist recognises), with an allocating table read
+;; in the same body, in a self-tail loop.
+(defn vh-loop (v t i n acc)
+  (if (>= i n)
+    acc
+    (let (k (bit-and i 1)      ; slot-held index: 0, 1, 0, 1, …
+          e (nth v k)          ; hoisted element read (the bug's site)
+          g (table-get t 0)    ; compound value → reconstruction → LOCAL allocation
+          gv (nth g 0))
+      (vh-loop v t (+ i 1) n (+ acc (+ e gv))))))
+
+;; Same shape with a `table-put` (a `Prim3`, also `inst_may_allocate`) in the loop.
+(defn vh-loop-put (v t i n acc)
+  (if (>= i n)
+    acc
+    (let (k (bit-and i 1)
+          e (nth v k)
+          _ (table-put t 1 [i i])
+          g (table-get t 0)
+          gv (nth g 0))
+      (vh-loop-put v t (+ i 1) n (+ acc (+ e gv))))))
+
+(describe "the JIT vector-base hoist must not survive an allocating instruction"
+  (test "an invariant vector read beside a table-get stays correct"
+    (let (v [10 20]                      ; 2 elements → VecStore::Inline, in the slab slot
+          t (table))
+      (table-put t 0 [1 2 3])            ; a compound value: every get reconstructs it
+      ;; Each iteration adds (10 or 20, alternating) + 1.
+      (assert= (+ (* 15 vh-n) vh-n) (vh-loop v t 0 vh-n 0))))
+
+  (test "an invariant vector read beside a table-put stays correct"
+    (let (v [10 20]
+          t (table))
+      (table-put t 0 [1 2 3])
+      (assert= (+ (* 15 vh-n) vh-n) (vh-loop-put v t 0 vh-n 0))))
+
+  (test "the hoist itself still computes the right answer when nothing allocates"
+    ;; The lever this gate must not break: same loop, no table op, so the hoist stays on.
+    (let (v [10 20])
+      (assert= (* 15 vh-n) (vh-sum v 0 vh-n 0)))))
+
+(defn vh-sum (v i n acc)
+  (if (>= i n)
+    acc
+    (let (k (bit-and i 1)
+          e (nth v k))
+      (vh-sum v (+ i 1) n (+ acc e)))))

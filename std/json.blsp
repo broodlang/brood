@@ -198,14 +198,25 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
   (if (> (+ i 4) n)
     (error "json: truncated \\u escape at index " i)
     (let (hi (hex4 s i))
-      (if (and (>= hi 55296) (<= hi 56319))
+      (cond
         ; D800..DBFF: high surrogate — the low half must follow as `\uXXXX` (92 117)
-        (if (and (<= (+ i 10) n) (= (nth s (+ i 4)) 92) (= (nth s (+ i 5)) 117))
-          (let (lo (hex4 s (+ i 6))
-                cp (+ 65536 (* 1024 (- hi 55296)) (- lo 56320)))
-            [cp (+ i 10)])
-          (error "json: lone high surrogate at index " i))
-        [hi (+ i 4)]))))
+        (and (>= hi 55296) (<= hi 56319))
+          (if (and (<= (+ i 10) n) (= (nth s (+ i 4)) 92) (= (nth s (+ i 5)) 117))
+            (let (lo (hex4 s (+ i 6)))
+              ;; The second escape must be a LOW surrogate (DC00..DFFF). Without this
+              ;; check `\uD800A` computed 65536 + 0 - 56320 + 65 = a bogus
+              ;; codepoint (U+2441) and `(json/parse "\"\\uD800\\u0041\"")` silently
+              ;; returned "⑁" — a mis-decode, which is worse than an error.
+              (if (or (< lo 56320) (> lo 57343))
+                (error "json: high surrogate at index " i " is not followed by a low surrogate")
+                [(+ 65536 (* 1024 (- hi 55296)) (- lo 56320)) (+ i 10)]))
+            (error "json: lone high surrogate at index " i))
+        ; DC00..DFFF: a low surrogate with no high half before it is equally invalid —
+        ; it used to fall through to `int->char`, which raised the KERNEL's message
+        ; ("int->char: 56320 is not a valid Unicode codepoint") instead of a json one.
+        (and (>= hi 56320) (<= hi 57343))
+          (error "json: lone low surrogate at index " i)
+        else [hi (+ i 4)]))))
 
 (defn- json-escape
   (s i n)
@@ -480,7 +491,20 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
     (nil? v) (cons "null" acc)
     (= v true) (cons "true" acc)
     (= v false) (cons "false" acc)
-    (number? v) (cons (str v) acc)
+    ;; NOT `number?`: that also covers `:ratio` and `:decimal`, whose `str` forms
+    ;; (`1/3`, `1.50M`) are not JSON at all, and a float may be `inf`/`-inf`/`nan`,
+    ;; which JSON has no syntax for either. All four used to be emitted verbatim,
+    ;; producing output no parser on earth can read back — a silently corrupt
+    ;; document rather than a loud failure. Ints and finite floats only; the rest
+    ;; fall through to the `else` branch's "give its type a JsonEncode impl" error,
+    ;; which is the documented escape hatch (encode a decimal as a string, say).
+    (int? v) (cons (str v) acc)
+    (float? v)
+      (if (or (nan? v) (infinite? v))
+        (error "json: cannot encode "
+          (str v)
+          " — JSON has no infinity or NaN; encode it as a string or null instead")
+        (cons (str v) acc))
     (string? v) (cons (enc-string v) acc)
     (keyword? v) (cons (enc-string (name v)) acc)
     (symbol? v) (cons (enc-string (name v)) acc)

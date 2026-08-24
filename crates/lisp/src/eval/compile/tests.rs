@@ -1167,11 +1167,12 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
         let base = interp.heap.roots_len();
         interp.heap.push_root(Value::int(5)); // i
         interp.heap.push_root(Value::int(0)); // acc
-        let outcome = jit_tier(
+        let outcome = jit_tier_in_frame(
             &sumto,
             &mut interp.heap,
             base,
             EnvRoot::Stable(EnvId::GLOBAL),
+            sumto.nslots,
         );
         match outcome {
             None => {
@@ -1213,11 +1214,12 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
         let base = interp.heap.roots_len();
         interp.heap.push_root(Value::int(0));
         assert_eq!(
-            jit_tier(
+            jit_tier_in_frame(
                 &bailing,
                 &mut interp.heap,
                 base,
-                EnvRoot::Stable(EnvId::GLOBAL)
+                EnvRoot::Stable(EnvId::GLOBAL),
+                bailing.nslots,
             ),
             None,
             "out-of-subset arm bails"
@@ -1329,7 +1331,13 @@ fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
         let base = interp.heap.roots_len();
         interp.heap.push_root(Value::int(5));
         interp.heap.push_root(Value::int(0));
-        let _ = jit_tier(&arm, &mut interp.heap, base, EnvRoot::Stable(EnvId::GLOBAL));
+        let _ = jit_tier_in_frame(
+            &arm,
+            &mut interp.heap,
+            base,
+            EnvRoot::Stable(EnvId::GLOBAL),
+            arm.nslots,
+        );
         interp.heap.truncate_roots(base);
         let code = arm.jit_code.load(Acquire);
         if !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED {
@@ -1480,11 +1488,12 @@ fn jit_speedup_vs_vm() {
         let b = interp.heap.roots_len();
         interp.heap.push_root(Value::int(5));
         interp.heap.push_root(Value::int(0));
-        let _ = jit_tier(
+        let _ = jit_tier_in_frame(
             &jit_arm,
             &mut interp.heap,
             b,
             EnvRoot::Stable(EnvId::GLOBAL),
+            jit_arm.nslots,
         );
         interp.heap.truncate_roots(b);
         let c = jit_arm.jit_code.load(Acquire);
@@ -1918,5 +1927,191 @@ fn sqrt_call_site_inline_recognizes_the_moved_math_wrapper() {
         resolve_prim1(&interp.heap, value::intern("usersq/sqrt")),
         None,
         "a user `usersq/sqrt` computing n*n must not inline as sqrt (it isn't the %f64-sqrt wrapper)"
+    );
+}
+
+/// KI-48, fourth appearance: the caller sizes the frame, then `jit_tier` re-loads the code
+/// pointer — and a peer can swap the inlined body in between (`CompiledArm` is shared across
+/// a runtime's processes since ADR-215). Running the inlined native against the small frame
+/// is a raw write past the frame top (measured overshoot: 12 slots on `fold`).
+///
+/// The guard is `jit_tier_in_frame`: the caller states the size the frame was BUILT to, and
+/// the native entry is declined when the installed code wants a bigger one. This test stages
+/// exactly that state — `jit_code == inline_code`, `inline_nslots > nslots` — and asserts
+/// `None` (interpret this activation).
+///
+/// The "native" here is a real function returning outcome 0, so a regression fails as a clean
+/// `Some(0)` rather than by jumping into garbage.
+#[cfg(feature = "jit")]
+#[test]
+fn jit_tier_declines_the_inlined_body_when_the_frame_was_built_small() {
+    extern "C" fn fake_native(_heap: *mut Heap, _base: i64) -> i64 {
+        0 // Done, with the result already in roots[base]
+    }
+    let mut interp = crate::Interp::new();
+    let heap = &mut interp.heap;
+    let code = fake_native as *mut u8;
+    let chunk = Chunk {
+        code: vec![Inst::Local(0)],
+    };
+    let arm = Arc::new(CompiledArm {
+        nrequired: 1,
+        noptional: 0,
+        optional_defaults: Box::new([]),
+        rest_slot: None,
+        nslots: 2,
+        nsites: 0,
+        ngsites: 0,
+        uid: super::ir::next_arm_uid(),
+        site_pos: Box::new([]),
+        body: Node::Const(ConstVal::new(Value::nil())),
+        chunk: Some(chunk),
+        has_runtime_handles: false,
+        // The state a peer's inline swap leaves behind: the inlined pointer installed…
+        jit_code: std::sync::atomic::AtomicPtr::new(code),
+        jit_calls: std::sync::atomic::AtomicU32::new(0),
+        deopt_watch: false,
+        jit_deopts: std::sync::atomic::AtomicU32::new(0),
+        float_globals: std::sync::OnceLock::new(),
+        self_global_ok: std::sync::atomic::AtomicBool::new(false),
+        ckpt_slot: u32::MAX,
+        compile_epoch: std::sync::atomic::AtomicU64::new(heap.global_epoch()),
+        share_key: None,
+        shared_published: std::sync::atomic::AtomicBool::new(true),
+        fn_name: None,
+        src_file: None,
+        capture_names: Box::new([]),
+        inline_name: Some(value::intern("peer-inlined")),
+        dbg_name: Some(value::intern("peer-inlined")),
+        inline_stride: 2,
+        // …wanting a frame six slots bigger than the one the caller built.
+        inline_nslots: 8,
+        inline_code: std::sync::atomic::AtomicPtr::new(code),
+        inline_queued: std::sync::atomic::AtomicBool::new(true),
+        inline_installed: std::sync::atomic::AtomicBool::new(true),
+        leaf: None,
+    });
+
+    let base = heap.roots_len();
+    heap.push_root(Value::int(1));
+    heap.push_root(Value::nil()); // frame built to the SMALL nslots = 2
+    let env = heap.root_env(heap.global());
+
+    assert_eq!(
+        jit_tier_in_frame(&arm, heap, base, env, arm.nslots),
+        None,
+        "a frame built to `nslots` must not run an `inline_nslots` native — it raw-writes \
+         past the frame top (KI-48 family). Interpret this activation instead."
+    );
+    // The same arm entered with a frame that IS big enough still runs natively — the guard
+    // must decline on size, not on the mere presence of an inlined body.
+    //
+    // Gated on the tier ceiling (ADR-222). Under the `differential (tree-walker)` CI job
+    // (`BROOD_VM=0`, i.e. ceiling `TreeWalk`) — and under `BROOD_TIER=1`/`BROOD_NO_JIT` —
+    // `jit_tier_in_frame` correctly refuses to run *any* native, so this half would fail for
+    // a reason that has nothing to do with what it tests. The half above still runs at every
+    // ceiling: declining is the safe answer, so it is the assertion that must hold always.
+    if crate::eval::compile::tier_ceiling() == crate::eval::compile::Tier::Native {
+        heap.extend_roots_to_nil(base + arm.inline_nslots);
+        assert_eq!(
+            jit_tier_in_frame(&arm, heap, base, env, arm.inline_nslots),
+            Some(0),
+            "an `inline_nslots` frame is the layout the inlined native wants; it must run"
+        );
+    }
+    heap.truncate_roots(base);
+}
+
+/// The LOCAL vector-base hoist (`brood_rt_vector_base` → inline `ptr + idx*STRIDE` reads) must
+/// be OFF in any arm that can allocate. Nothing refreshes that pointer, and a small vector's
+/// elements live inline in the `local.vectors` slab slot — a push that reallocates the slab
+/// moves them, and every later read then reads freed memory. Garbage `Value` words with
+/// valid-looking tags, invisible to the per-deref tripwire (the read bypasses `Heap`).
+///
+/// The gate used to name only `Call`/`MakeVector`/`Cons`, leaving out the table ops that
+/// `inst_may_allocate` lists — the same omission that already produced one use-after-free on
+/// the pair path. This pins the predicate itself, which the end-to-end shape cannot: a stale
+/// read returns *freed-but-intact* memory far more often than it returns garbage, so a
+/// behavioural test passes with the bug live (verified: `tests/jit_vector_hoist_alloc_test.blsp`
+/// passes either way).
+///
+/// Sabotage-verified: reverting `vector_base_hoist_safe` to the old
+/// `Call`/`MakeVector`/`Cons` list fails the `table-get` and `table-put` cases.
+#[cfg(feature = "jit")]
+#[test]
+fn the_vector_base_hoist_is_off_for_any_allocating_arm() {
+    use super::jit_plan::codegen::vector_base_hoist_safe;
+    let vref = || Inst::Prim2SlotSlot {
+        op: PrimOp::VectorRef,
+        map: [0, 1],
+        slot_a: 0,
+        slot_b: 1,
+        head: value::intern("vector-ref"),
+        guard: AtomicU64::new(0),
+        pos: None,
+    };
+    let prim2 = |op: PrimOp, name: &str| Inst::Prim2 {
+        op,
+        map: [0, 1],
+        head: value::intern(name),
+        guard: AtomicU64::new(0),
+        pos: None,
+    };
+
+    // The lever itself: a fused vector read (plus arithmetic) still hoists.
+    assert!(
+        vector_base_hoist_safe(&[vref(), prim2(PrimOp::Add, "+")]),
+        "a pure indexed read loop is exactly what the hoist exists for"
+    );
+
+    // `table-get` reconstructs a compound stored value into the caller's heap — it allocates.
+    assert!(
+        !vector_base_hoist_safe(&[vref(), prim2(PrimOp::TableGet, "table-get")]),
+        "a table-get can reallocate the vector slab under the hoisted base"
+    );
+    assert!(
+        !vector_base_hoist_safe(&[vref(), prim2(PrimOp::TableHas, "table-has?")]),
+        "table-has? takes the same hashed reconstruction path"
+    );
+    // `table-put` (a `Prim3`), and the two builders `hoist_safe` never covered either.
+    assert!(
+        !vector_base_hoist_safe(&[
+            vref(),
+            Inst::Prim3 {
+                op: super::ir::PrimOp3::TablePut,
+                head: value::intern("table-put"),
+                guard: AtomicU64::new(0),
+                pos: None,
+            }
+        ]),
+        "a table-put allocates (it deep-copies key and value)"
+    );
+    assert!(
+        !vector_base_hoist_safe(&[vref(), Inst::MakeMap(2)]),
+        "building a map allocates"
+    );
+
+    // The pre-existing exclusions must still hold.
+    assert!(
+        !vector_base_hoist_safe(&[vref(), Inst::MakeVector(2)]),
+        "building a vector allocates"
+    );
+    assert!(
+        !vector_base_hoist_safe(&[vref(), prim2(PrimOp::Cons, "cons")]),
+        "cons allocates"
+    );
+    assert!(
+        !vector_base_hoist_safe(&[
+            vref(),
+            Inst::Call {
+                argc: 1,
+                tail: false,
+                pos: None,
+                site: NO_SITE,
+                head: None,
+                staged: false,
+            }
+        ]),
+        "a non-tail call is a GC safepoint (and can `def` → RUNTIME compaction)"
     );
 }

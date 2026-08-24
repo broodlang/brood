@@ -48,9 +48,11 @@ impl Heap {
     pub fn runtime_live_closure_count(&self) -> usize {
         let mut visited: HashSet<usize> = HashSet::new();
         let mut work: Vec<Value> = Vec::new();
-        // Seed: every global binding value + this process's in-flight operand roots.
+        // Seed: every global binding value + this process's in-flight operand roots +
+        // its delivered-message (L1) slots, which can park a shared RUNTIME closure.
         work.extend(self.runtime.globals_read().values().copied());
         work.extend(self.roots.iter().copied());
+        work.extend(self.msg_roots.iter().flat_map(|t| t.iter()).copied());
         while let Some(v) = work.pop() {
             match v.unpack() {
                 ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => {
@@ -207,25 +209,20 @@ impl Heap {
     /// sound; it also stops migration's reconcile from mistaking a concurrent
     /// `(def k old-gen-value)` for a stale binding and clobbering it.
     ///
-    /// Holds `promote_lock` (read) so an aging flip can't relocate the current
-    /// generation between reading it and appending the copy — the same discipline
-    /// `promote` uses. A no-op on the default single-generation path (every RUNTIME
-    /// value is already current, so the fast-path check returns immediately).
-    pub(crate) fn rehome_to_current(&self, v: Value) -> Value {
+    /// **The caller must already hold `promote_lock` (read)** — this is called from
+    /// [`Heap::promote_rehome_publish`], which holds one guard across the promote, this
+    /// re-home *and* the publishing store. Taking (and releasing) the lock here instead
+    /// was the TOCTOU that helper's doc comment describes: the generation this validates
+    /// against could flip before the caller stored the handle. A no-op on the default
+    /// single-generation path (every RUNTIME value is already current, so the fast-path
+    /// check returns immediately).
+    pub(crate) fn rehome_to_current_locked(&self, v: Value) -> Value {
         let g = match runtime_gen_of(v) {
             Some(g) => g,
             None => return v,
         };
-        if g == self.runtime.cur_gen() {
-            return v;
-        }
-        let _guard = self
-            .runtime
-            .promote_lock
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        // Re-read the current generation under the lock: aging (which holds the write
-        // lock) can't now flip it out from under the flush.
+        // Read under the caller's guard: aging (which holds the write lock) cannot flip
+        // it out from under the flush, nor between here and the caller's store.
         let cur = self.runtime.cur_gen();
         if g == cur {
             return v;
@@ -287,8 +284,8 @@ impl Heap {
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             for (&old_idx, &new_idx) in fwd.pairs.iter() {
-                if let Some(entry) = p.get(&(old_idx as usize)).cloned() {
-                    p.insert(new_idx as usize, entry);
+                if let Some(entry) = p.get(&rt_pos_key(old_idx as usize, old_gen)).cloned() {
+                    p.insert(rt_pos_key(new_idx as usize, dest_gen), entry);
                 }
             }
         }
@@ -437,7 +434,11 @@ impl Heap {
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
         self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
         // …and the handle-keyed vm_cache (via free_epoch) across every process.
-        self.runtime.free_epoch.fetch_add(1, Ordering::Relaxed);
+        // `Release`, paired with the `Acquire` in `free_epoch_now`: a process that
+        // observes the bump must also observe the empty-slab store above it, since what
+        // this stamp gates is whether a cached arm's RUNTIME handles still address
+        // anything.
+        self.runtime.free_epoch.fetch_add(1, Ordering::Release);
         // Eagerly clear this process's caches (peers clear lazily on their next use).
         self.vm_cache.borrow_mut().clear();
         self.seen_free_epoch
@@ -460,6 +461,28 @@ impl Heap {
         }
         if let Ok(mut c) = self.runtime.jit_inline_cache.write() {
             c.clear();
+        }
+        // ...and the runtime-shared compiled closures (ADR-175), for exactly the reason
+        // the line above gives: an entry's arms can hold RUNTIME handles into the slab
+        // just dropped, and its key is a closure handle whose `(gen, index)` bits a later
+        // aging cycle can reproduce bit-identically in the recycled slot. The `free_epoch`
+        // stamp is the primary guard (bumped above), but a stamp alone leaves the entries
+        // and their `Arc`s in the map forever; taking this write lock reclaims them and
+        // gives the lookup a happens-before it can rely on. Every sibling cache on this
+        // path was already cleared here — `shared_closures` was simply missed.
+        self.shared_closures_clear();
+        // Purge the freed generation's `(form-pos …)` entries. They are keyed by
+        // `(code_gen, index)`, so a *later* generation minted in this reclaimed slot
+        // reuses exactly these keys: without the purge the leftovers alias fresh pairs
+        // (a stranger's line in an error message) and, since nothing else ever removes
+        // them, accumulate for the life of the runtime.
+        {
+            let mut p = self
+                .runtime
+                .positions
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            p.retain(|&key, _| key >> 32 != old_gen as u64);
         }
         // End the drain only if this call actually owned one. Ending unconditionally was
         // the milder half of the same race: a late free could clear a drain armed by a
@@ -674,6 +697,15 @@ impl Heap {
         work.extend(self.roots.iter().copied());
         env_work.extend(self.env_roots.iter().copied());
         work.extend(self.dynamics.iter().map(|(_, v)| *v));
+        // Delivered-message slots (L1). `copy_cross_heap`'s share-fn path hands an
+        // already-shared RUNTIME closure to a parked receiver BY HANDLE, and
+        // `try_deliver_local` parks that handle here — not in any LOCAL slab, so Phase 2
+        // cannot see it. The share-fn soundness argument ("a shared handle retained in
+        // `dst`'s LOCAL data is seen by the drain's Phase 2") holds for a handle embedded
+        // in copied data, but not for the top-level value sitting in this slot table. A
+        // selective `receive` can leave a slot occupied indefinitely, so without seeding
+        // it the drain frees a generation still referenced by a queued message.
+        work.extend(self.msg_roots.iter().flat_map(|t| t.iter()).copied());
         #[cfg(feature = "dev-tools")]
         work.extend(self.trace_context.iter().copied());
         // --- Live VM arms mid-execution: RUNTIME literals baked into Const/MakeClosure
@@ -1076,6 +1108,9 @@ impl Heap {
         let mut fwd = RuntimeForward::for_gens(cg, cg);
         let mut roots: Vec<Value> = self.runtime.globals_read().values().copied().collect();
         roots.extend(self.roots.iter().copied());
+        // Delivered-message slots (L1) — a root set here too, so this preview cannot
+        // disagree with what `runtime_collect_with` actually evacuates.
+        roots.extend(self.msg_roots.iter().flat_map(|t| t.iter()).copied());
         let cur = self.runtime.cur_code();
         for r in roots {
             flush_rt_value(&cur, &new, &mut fwd, r);
@@ -1189,6 +1224,16 @@ impl Heap {
         for v in self.roots.iter_mut() {
             *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
         }
+        // 2b. Delivered-message slots (L1). A shared RUNTIME closure sent to a parked
+        // receiver is handed over BY HANDLE (`copy_cross_heap`'s share-fn path) and
+        // parked directly in this slot table — it is not in any LOCAL slab, so step 3
+        // below cannot see it. Without this rewrite a queued message's closure is
+        // relocated out from under its slot and the `receive` that finally pops it
+        // dispatches a stranger (or panics on a dead handle). The LOCAL collector has
+        // always treated these as roots; the RUNTIME side never did.
+        for v in self.msg_roots.iter_mut().flat_map(|t| t.iter_mut()) {
+            *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
+        }
         for e in self.env_roots.iter_mut() {
             *e = flush_rt_env(&old_code, &new, &mut fwd, *e);
         }
@@ -1252,9 +1297,14 @@ impl Heap {
             let rt = Arc::get_mut(&mut self.runtime).unwrap();
             let mut p = rt.positions.write().unwrap_or_else(|e| e.into_inner());
             let old = std::mem::take(&mut *p);
-            for (old_idx, val) in old {
-                if let Some(&new_idx) = fwd.pairs.get(&(old_idx as u32)) {
-                    p.insert(new_idx as usize, val);
+            // Keys are `(code_gen, index)`; compaction only ever runs on generation
+            // `cur` (it bails otherwise), so entries of the *other* generation are not
+            // ours to move — they are carried across verbatim.
+            for (key, val) in old {
+                if key >> 32 != cur as u64 {
+                    p.insert(key, val);
+                } else if let Some(&new_idx) = fwd.pairs.get(&(key as u32)) {
+                    p.insert(rt_pos_key(new_idx as usize, cur), val);
                 }
             }
         }

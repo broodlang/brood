@@ -244,34 +244,58 @@ milliseconds."
                         (string/char-at padded 2)))
       0)))
 
+;; The parsers used to check *shape* only — three `-`-separated integers, three
+;; `:`-separated integers — and hand whatever came out straight to the record
+;; constructor, which does no checking either. So "2026-02-31", "2026-13-05",
+;; "12:-5:00" and hour 99 all "parsed", producing a value that every later
+;; conversion silently NORMALISED (Feb 31 → Mar 3). A parser that accepts an
+;; impossible date and quietly moves it is worse than one that rejects it: the
+;; caller's validation looks like it passed. The calendar core underneath
+;; (`days-in-month`, `leap-year?`) is correct — only the input gate was missing.
+(defn- dt-in-range?
+  (n lo hi)
+  (and (int? n) (>= n lo) (<= n hi)))
+
 (defn- dt-parse-time-str
   (s)
   ;; Parse "HH:MM:SS" or "HH:MM:SS.mmm" → a time-of-day, or nil.
   (let (dot-parts (string/split s ".")
         hms-str (first dot-parts)
         frac-str (if (> (count dot-parts) 1) (nth dot-parts 1) "")
-        ms-val (dt-frac->ms frac-str)
         parts (string/split hms-str ":"))
-    (when (= (count parts) 3)
+    (when (and (= (count parts) 3)
+            (<= (count dot-parts) 2)
+            ;; a fractional part must itself be digits — "12:00:00.xyz" used to
+            ;; fall back to 0 ms and parse as a clean time
+            (or (= frac-str "") (dt-in-range? (dt-parse-int frac-str) 0 999999999)))
       (let (h (dt-parse-int (nth parts 0))
             mn (dt-parse-int (nth parts 1))
             sc (dt-parse-int (nth parts 2)))
-        (when (and h mn sc)
-          (time-of-day h mn sc ms-val))))))
+        (when (and (dt-in-range? h 0 23) (dt-in-range? mn 0 59) (dt-in-range? sc 0 59))
+          (time-of-day h mn sc (dt-frac->ms frac-str)))))))
 
 (defn parse-date (s)
-  "Parse an ISO 8601 date string \"YYYY-MM-DD\" → a `date`, or nil on failure."
+  "Parse an ISO 8601 date string \"YYYY-MM-DD\" → a `date`, or nil on failure.
+The date must be a **real** one: the month is 1–12 and the day is within that
+month for that year (so \"2026-02-31\" and \"2026-13-05\" are nil, not a silently
+normalised March date)."
   (let (parts (string/split s "-"))
     (when (= (count parts) 3)
       (let (y (dt-parse-int (nth parts 0))
             m (dt-parse-int (nth parts 1))
             d (dt-parse-int (nth parts 2)))
-        (when (and y m d)
+        (when (and (int? y) (dt-in-range? m 1 12) (dt-in-range? d 1 (days-in-month y m)))
           (date y m d))))))
 
 (defn parse-time (s)
-  "Parse \"HH:MM:SS\" or \"HH:MM:SS.mmm\" (optional trailing Z) → a `time-of-day`, or nil."
-  (dt-parse-time-str (first (string/split s "Z"))))
+  "Parse \"HH:MM:SS\" or \"HH:MM:SS.mmm\" (optional trailing Z) → a `time-of-day`, or
+nil. Hour 0–23, minute and second 0–59; anything else is nil."
+  ;; `(first (string/split s "Z"))` threw away everything after the FIRST Z, so
+  ;; "12:00:00Zjunk" parsed as 12:00:00. Only a trailing Z is a UTC designator.
+  (cond
+    (string/ends-with? s "Z") (dt-parse-time-str (string/substring s 0 (- (string/length s) 1)))
+    (>= (index-of s "Z") 0) nil
+    else (dt-parse-time-str s)))
 
 (defn parse-iso8601 (s)
   "Parse an ISO 8601 datetime string \"YYYY-MM-DDTHH:MM:SS[.mmm][Z]\" → a `datetime`, or nil."

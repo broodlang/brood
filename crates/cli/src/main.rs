@@ -92,7 +92,13 @@ fn main() {
     // intercepted by `brood`'s own clap. A plain `brood` has no bundle and falls
     // through to normal CLI dispatch.
     if brood::bundle::is_bundled() {
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        // `args_os` + lossy, not `args`: this runs *before* clap, so nothing has
+        // validated argv yet, and `std::env::args()` panics outright on a non-UTF-8
+        // argument. A bundled app must not die on a filename its own OS allows.
+        let args: Vec<String> = std::env::args_os()
+            .skip(1)
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         run_on_main_stack("brood-main", move || run_bundle(args));
         return;
     }

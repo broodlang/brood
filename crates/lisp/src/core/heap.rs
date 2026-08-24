@@ -732,6 +732,17 @@ fn to_prelude(v: Value) -> Value {
 /// (whose whole tree is live at once) — net CPU-negative in measurement.
 pub(crate) const INLINE_VEC_CAP: usize = 2;
 
+/// The most elements [`Heap::range_to_vec`] will realise from a lazy range before
+/// refusing with a catchable error.
+///
+/// A range is O(1) however wide, so the count is genuinely unbounded — up to `i64::MAX`
+/// — while realising it is bounded by memory. There is no "right" number here, only a
+/// line past which the answer is certainly *no*: 64 Mi elements is a 512 MB `Vec` and,
+/// once consed, ~1 GB of pairs, which already crosses the default soft memory limit. Set
+/// high enough that nothing a program can actually complete is refused, and low enough
+/// that the refusal arrives as an error instead of an allocator abort.
+pub(crate) const MAX_REALISED_RANGE: i64 = 1 << 26;
+
 /// Element storage for one heap vector: **inline** in the slab slot for the
 /// common small case, or **spilled** to a heap `Vec` for larger vectors. This
 /// replaced a bare `Vec<Value>` per slot (`vectors: Vec<Vec<Value>>`), which
@@ -1534,14 +1545,24 @@ pub struct RuntimeCode {
     /// same as the bindings it describes. Read by `(source-location 'name)`; the
     /// image-query foundation for cross-file goto-definition.
     def_sites: RwLock<HashMap<Symbol, SourceLoc>>,
-    /// Source positions of RUNTIME *list forms*, keyed by the pair's RUNTIME slab
-    /// index — the RUNTIME counterpart of the per-heap LOCAL [`Heap::form_pos`] map.
-    /// The reader stamps positions on LOCAL pairs; `promote` carries them here when a
-    /// form is frozen into RUNTIME (a `defn` body, or a top-level inline lambda baked
-    /// for VM-compilation), so `(form-pos …)` still resolves and a position survives a
-    /// cross-node send (`Message::List`). Append-only in practice (a RUNTIME pair never
-    /// moves), so entries stay valid; shared across the runtime's processes via `Arc`.
-    positions: RwLock<HashMap<usize, (crate::error::Pos, Option<Arc<str>>)>>,
+    /// Source positions of RUNTIME *list forms*, keyed by [`rt_pos_key`] — the pair's
+    /// **`(code_gen, slab index)`** — the RUNTIME counterpart of the per-heap LOCAL
+    /// [`Heap::form_pos`] map. The reader stamps positions on LOCAL pairs; `promote`
+    /// carries them here when a form is frozen into RUNTIME (a `defn` body, or a
+    /// top-level inline lambda baked for VM-compilation), so `(form-pos …)` still
+    /// resolves and a position survives a cross-node send (`Message::List`). Shared
+    /// across the runtime's processes via `Arc`.
+    ///
+    /// **The generation is part of the key** (ADR-091). The two generations share one
+    /// index space, so a bare slab index conflates gen-0 #5 with gen-1 #5: once aging is
+    /// active, a `def` into the fresh generation silently overwrote the recorded position
+    /// of a live form in the retained one, and `(form-pos …)` / an error message on gen-0
+    /// code reported a stranger's line. The same conflation also made
+    /// [`Heap::free_runtime_gen_locked`]'s reclamation invisible here — a freed
+    /// generation's leftovers aliased newly-minted pairs at reused indices and
+    /// accumulated forever. Keying by generation fixes the first and lets the free purge
+    /// exactly its own entries (the KI-7/KI-8 class).
+    positions: RwLock<HashMap<u64, (crate::error::Pos, Option<Arc<str>>)>>,
     /// Shared JIT native-code cache (ADR-101, the spawn lever): maps a simple
     /// fixed-arity RUNTIME/PRELUDE closure arm's `(closure_id, argc)` key (see
     /// `CompiledArm::share_key`) to its compiled native code as
@@ -2002,7 +2023,13 @@ impl RuntimeCode {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&sym);
     }
-    /// Is `sym` recorded module-private? The whole of [`Heap::is_private`].    /// Is `sym` recorded module-private? The authoritative (and, since ADR-146 step 2,
+    /// Replace the whole private set (the `%isolate` restore — see
+    /// [`Heap::restore_private_names`]). Set-level because the caller cannot enumerate
+    /// what the isolated thunk marked; one write-lock swap, not a diff.
+    fn restore_private(&self, names: Vec<Symbol>) {
+        *self.private.write().unwrap_or_else(|e| e.into_inner()) = names.into_iter().collect();
+    }
+    /// Is `sym` recorded module-private? The authoritative (and, since ADR-146 step 2,
     /// the *only*) half of [`Heap::is_private`].
     fn is_private_recorded(&self, sym: Symbol) -> bool {
         self.private
@@ -2017,20 +2044,31 @@ impl RuntimeCode {
     fn def_sites_read(&self) -> RwLockReadGuard<'_, HashMap<Symbol, SourceLoc>> {
         self.def_sites.read().unwrap_or_else(|e| e.into_inner())
     }
-    /// RUNTIME-form source position + file by slab index, or `None`. See [`Self::positions`].
-    fn position_of(&self, idx: usize) -> Option<(crate::error::Pos, Option<Arc<str>>)> {
+    /// RUNTIME-form source position + file by `(code_gen, slab index)`, or `None`.
+    /// See [`Self::positions`].
+    fn position_of(
+        &self,
+        idx: usize,
+        code_gen: usize,
+    ) -> Option<(crate::error::Pos, Option<Arc<str>>)> {
         self.positions
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&idx)
+            .get(&rt_pos_key(idx, code_gen))
             .cloned()
     }
     /// Record a RUNTIME-form source position + file (called by `promote`). See [`Self::positions`].
-    fn set_position(&self, idx: usize, pos: crate::error::Pos, file: Option<Arc<str>>) {
+    fn set_position(
+        &self,
+        idx: usize,
+        code_gen: usize,
+        pos: crate::error::Pos,
+        file: Option<Arc<str>>,
+    ) {
         self.positions
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(idx, (pos, file));
+            .insert(rt_pos_key(idx, code_gen), (pos, file));
     }
 
     fn def_sites_write(&self) -> RwLockWriteGuard<'_, HashMap<Symbol, SourceLoc>> {
@@ -2672,7 +2710,6 @@ pub struct Heap {
     /// `runtime_collect`, so this is grown/cleared in lockstep). For diagnosing the JIT
     /// stale-operand bug — see `dbg_site_pos` / `dbg_set_site_pos`.
     #[cfg(debug_assertions)]
-    #[cfg(debug_assertions)]
     dbg_site_pos: RefCell<Vec<Option<(crate::error::Pos, Option<Arc<str>>)>>>,
     /// Global-read inline caches (ADR-096) — the value-position counterpart of
     /// [`Self::vm_call_ics`], indexed by a compiled `Node::GlobalIc`'s site id.
@@ -2788,6 +2825,17 @@ macro_rules! alloc_slot {
 #[inline]
 fn form_pos_key(id: PairId) -> u64 {
     (id.index() as u64) | ((id.is_old() as u64) << 32)
+}
+
+/// The [`RuntimeCode::positions`] key for a RUNTIME pair: its slab index plus its
+/// **code generation**. The RUNTIME twin of [`form_pos_key`] (which packs the LOCAL
+/// age bit at the same offset), and for the same reason: the two RUNTIME generations
+/// share one index space, so a bare index conflates them (see `positions`). Slab
+/// indices are bounded by `GEN_SHIFT` bits, so the low 32 bits always suffice.
+#[inline]
+pub(crate) fn rt_pos_key(idx: usize, code_gen: usize) -> u64 {
+    debug_assert!(code_gen < 2, "RUNTIME code generation must be 0 or 1");
+    (idx as u64) | (((code_gen & 1) as u64) << 32)
 }
 
 /// True iff `v` is a LOCAL heap object the copying collector relocates — the set
@@ -2999,7 +3047,7 @@ impl Heap {
     pub(crate) fn pos_table_bytes(&self) -> (usize, usize) {
         let (_, local_cap, _, rt_cap) = self.pos_table_stats();
         let local_slot = std::mem::size_of::<(u64, (crate::error::Pos, Option<Arc<str>>))>() + 1;
-        let rt_slot = std::mem::size_of::<(usize, (crate::error::Pos, Option<Arc<str>>))>() + 1;
+        let rt_slot = std::mem::size_of::<(u64, (crate::error::Pos, Option<Arc<str>>))>() + 1;
         (local_cap * local_slot, rt_cap * rt_slot)
     }
 
@@ -3080,7 +3128,6 @@ impl Heap {
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]
-            #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
             arm_ic_blocks: RefCell::new(std::collections::HashMap::new()),
@@ -3158,7 +3205,6 @@ impl Heap {
             jit_deopt_reason: std::cell::Cell::new(0),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
-            #[cfg(debug_assertions)]
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
@@ -3320,6 +3366,38 @@ impl Heap {
                 }
                 self.alloc_vector(out)
             }
+            // A range and a seq-view are both a wrapper around a backing vector (`[lo hi
+            // step]` / `[source xform]`), which lives in the *same* slab as an ordinary
+            // vector — so they localize identically and keep their wrapper, exactly as
+            // `flush_rt_value` treats them. Without these arms a non-LOCAL range or view
+            // reaching a prelude global fell through to the `_ => return v` catch-all: the
+            // freeze `debug_assert` below catches that in a debug build, but a release
+            // build would seed a RUNTIME handle into a PRELUDE binding whose backing
+            // runtime is discarded (the KI-12 shape). No prelude form produces one today
+            // — as with `Bytes` in `to_prelude`, silence was the wrong default for a
+            // region re-tag: every kind is either handled or explicitly guarded.
+            ValueRef::Range(id) | ValueRef::SeqView(id) => {
+                let items = self.vector(id).to_vec();
+                let mut out = Vec::with_capacity(items.len());
+                let mut same = id.region() == LOCAL;
+                for it in items {
+                    let c = self.localize_for_freeze(it, fwd);
+                    same &= handle_key(c) == handle_key(it);
+                    out.push(c);
+                }
+                if same {
+                    return v;
+                }
+                let new_id = match self.alloc_vector(out).unpack() {
+                    ValueRef::Vector(nid) => nid,
+                    _ => unreachable!("alloc_vector returns a vector"),
+                };
+                if matches!(v.unpack(), ValueRef::Range(_)) {
+                    Value::range(new_id)
+                } else {
+                    Value::seqview(new_id)
+                }
+            }
             ValueRef::Map(id) => {
                 let entries = self.map_entries(id);
                 let mut out = Vec::with_capacity(entries.len());
@@ -3401,7 +3479,14 @@ impl Heap {
             .vars
             .iter()
             .map(|&(s, v)| {
-                debug_assert!(
+                // HARD, not `debug_assert`. What it guards is a silent region re-tag: in
+                // release, a non-LOCAL handle reaching here is seeded into a PRELUDE
+                // binding whose backing runtime is later discarded — reads then resolve
+                // in a wiped or unrelated slab (KI-12), with no crash at the store. That
+                // is strictly worse than aborting the prelude build, and this runs once
+                // per prelude freeze over a few thousand bindings, so it is free.
+                // `to_prelude`'s `Rope` arm already takes the same position.
+                assert!(
                     matches!(handle_key(v), None | Some((_, _, LOCAL))),
                     "prelude global {} still points outside LOCAL at freeze — \
                      `localize_for_freeze` missed a case (KI-12)",
@@ -3450,7 +3535,14 @@ impl Heap {
                                 work.push(W::V(b));
                             }
                         }
-                        ValueRef::Vector(id) if id.region() == LOCAL => {
+                        // A range's `[lo hi step]` and a seq-view's `[source xform]` live
+                        // in the vectors slab like any other vector, and a view's
+                        // `source`/`xform` can be — indeed usually is — a closure. Not
+                        // descending them left a reachable closure marked dead, and a dead
+                        // closure gets its captured env scrubbed at freeze.
+                        ValueRef::Vector(id) | ValueRef::Range(id) | ValueRef::SeqView(id)
+                            if id.region() == LOCAL =>
+                        {
                             if !std::mem::replace(&mut seen_vec[id.index()], true) {
                                 for &x in slabs.vectors[id.index()].iter() {
                                     work.push(W::V(x));
@@ -3714,7 +3806,12 @@ impl Heap {
                         .cold()
                         .and_then(|c| c.form_pos.get(&form_pos_key(id)).cloned())
                 }
-                crate::core::value::RUNTIME => return self.runtime.position_of(id.index()),
+                // Read with the handle's OWN generation: the two RUNTIME generations
+                // share an index space, so an index-only lookup answers with whichever
+                // generation last wrote that slot (see `RuntimeCode::positions`).
+                crate::core::value::RUNTIME => {
+                    return self.runtime.position_of(id.index(), id.code_gen())
+                }
                 _ => {}
             }
         }
@@ -4148,6 +4245,8 @@ impl Heap {
     /// prelude-build time, to capture the privates `%mark-private` recorded in the
     /// builder heap so they can seed each live runtime (the prelude is inserted, not
     /// re-evaluated — see [`RuntimeCode::seeded`]).
+    /// Also the *snapshot* half of the `%isolate` bracket — see
+    /// [`restore_private_names`](Self::restore_private_names).
     pub fn private_names_snapshot(&self) -> Vec<Symbol> {
         self.runtime
             .private
@@ -4156,6 +4255,24 @@ impl Heap {
             .iter()
             .copied()
             .collect()
+    }
+
+    /// **Replace** this runtime's recorded module-private set with `names` — the restore
+    /// half of [`private_names_snapshot`](Self::private_names_snapshot).
+    ///
+    /// `%isolate` restores only the global *binding* table, so the Rust-side mark
+    /// registries leaked across the boundary: a `defn-`/`def-` evaluated inside an
+    /// isolate left its name marked private forever, even though the binding it
+    /// described was rolled back. Bracketing the thunk with snapshot/restore fixes that.
+    ///
+    /// **Replaces, never unions** — that is the whole point. A mark added inside the
+    /// isolate must be *dropped*, which a union would keep; and because the isolate also
+    /// rolls back the bindings, a mark left behind describes a name that no longer
+    /// exists. (`unmark_private` can only undo marks you can enumerate, which the caller
+    /// cannot.) Takes the same `Vec<Symbol>` the snapshot produces, so the pair composes
+    /// with no conversion.
+    pub fn restore_private_names(&self, names: Vec<Symbol>) {
+        self.runtime.restore_private(names);
     }
 
     // ===== Allocation — LOCAL slab =============================================
@@ -4250,9 +4367,29 @@ impl Heap {
 
     /// Materialise a range's elements into a `Vec<Value>` of `Int`s — the slow
     /// path behind realising a range to a list / vector.
-    pub fn range_to_vec(&self, id: VecId) -> Vec<Value> {
+    ///
+    /// **Fallible**, because a range is lazy and its element count is unbounded: `(range
+    /// 0 9223372036854775807)` is a legal O(1) value, and realising it is not. It used to
+    /// pre-size with the saturated [`range_len`], so `Vec::with_capacity(i64::MAX)`
+    /// exceeded `isize::MAX` and hit the `capacity overflow` **panic** — instantly, with
+    /// no large allocation, and un-catchable by Brood's `try`/`catch`, so it killed the
+    /// worker rather than failing the expression. Reachable straight from
+    /// `(seq …)`/`(reverse …)`/`(nth …)` on a wide range. Capping the reservation alone
+    /// would only trade the panic for a slower allocator abort, so anything past
+    /// [`MAX_REALISED_RANGE`] is refused as a clean, catchable error instead.
+    pub fn range_to_vec(&self, id: VecId) -> Result<Vec<Value>, LispError> {
         let (lo, hi, step) = self.range_parts(id);
-        let mut out = Vec::with_capacity(self.range_len(id).max(0) as usize);
+        let n = self.range_len(id).max(0);
+        if n > MAX_REALISED_RANGE {
+            return Err(LispError::runtime(format!(
+                "range too large to realise: {n} elements (limit {MAX_REALISED_RANGE})"
+            ))
+            .with_hint(
+                "a range is lazy — consume it with `take`/`fold`/`map` instead of \
+                 realising it with `seq`/`reverse`/`vec`",
+            ));
+        }
+        let mut out = Vec::with_capacity(n as usize);
         let mut i = lo;
         while if step > 0 { i < hi } else { i > hi } {
             out.push(Value::int(i));
@@ -4262,7 +4399,7 @@ impl Heap {
                 None => break,
             };
         }
-        out
+        Ok(out)
     }
 
     // ----- promotion: copy code from LOCAL into the shared RUNTIME region -----
@@ -4288,6 +4425,53 @@ impl Heap {
             .unwrap_or_else(|e| e.into_inner());
         let mut fwd = PromoteForward::default();
         self.promote_in(v, &mut fwd)
+    }
+
+    /// [`promote`](Self::promote) + [`rehome_to_current_locked`] + a caller-supplied
+    /// **publish** step, all under ONE `promote_lock` read guard — the atomic
+    /// "share this value and bind it" used by every shared root (`globals`,
+    /// `declared_sigs`).
+    ///
+    /// **Why the guard must span the publish.** Re-homing validates "this handle is in
+    /// the current generation" and the store makes that handle a *shared GC root*. Split
+    /// across two lock acquisitions those two steps are a TOCTOU: an aging flip plus
+    /// `migrate_live_globals` can complete in the gap, and the store then lands on a
+    /// generation that is already draining, after the migration snapshotted the table.
+    /// Both outcomes are live bugs:
+    ///
+    /// - a **new** name's binding pins the aged-out generation through a root the drain
+    ///   deliberately stops probing (post-aging the per-process probes skip the shared
+    ///   roots, on the invariant this guard restores), so the generation is freed and the
+    ///   global is left dangling; and
+    /// - a **rebind** landing between migration's snapshot and its reconcile is
+    ///   indistinguishable from a stale binding to `value_in_gen(cur, old_gen)`, so the
+    ///   reconcile overwrites it with the migrated copy of the *old* value — a `def` that
+    ///   silently reverts.
+    ///
+    /// Holding one read guard across both closes the window: `age_runtime` takes the
+    /// write lock, so it cannot flip `current_gen` while any publish is in flight. This
+    /// is the same shape as the race [`Heap::free_runtime_gen`] documents closing with
+    /// the aging gate. Lock order is `promote_lock` → the published table's lock, and
+    /// nothing takes them the other way round.
+    ///
+    /// Uncontended (one `RwLock` read) off the multi-generation path.
+    pub(crate) fn promote_rehome_publish<R>(
+        &self,
+        v: Value,
+        publish: impl FnOnce(&Heap, Value) -> R,
+    ) -> R {
+        // Acquired ONCE at the top — `promote_in` must not re-acquire (std `RwLock`
+        // read isn't reentrant against a queued writer), which is why this inlines
+        // `promote`'s body rather than calling it.
+        let _promote_guard = self
+            .runtime
+            .promote_lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut fwd = PromoteForward::default();
+        let promoted = self.promote_in(v, &mut fwd);
+        let shared = self.rehome_to_current_locked(promoted);
+        publish(self, shared)
     }
 
     /// The recursive core of [`promote`](Self::promote), threading a forwarding
@@ -4409,15 +4593,19 @@ impl Heap {
             }
         };
         let mut acc = tail;
+        // One read of the current generation for the whole spine: the caller holds the
+        // `promote_lock` read guard, so aging cannot flip it underneath us — and the
+        // position key must name the same generation as the handle we mint.
+        let cur_gen = self.runtime.cur_gen();
         for (src, head) in nodes.into_iter().rev() {
             let idx = self.runtime.cur_code().pairs.push((head, acc));
             if let Some((pos, file)) = self
                 .cold()
                 .and_then(|c| c.form_pos.get(&form_pos_key(src)).cloned())
             {
-                self.runtime.set_position(idx, pos, file);
+                self.runtime.set_position(idx, cur_gen, pos, file);
             }
-            acc = Value::pair(PairId::runtime_gen(idx, self.runtime.cur_gen()));
+            acc = Value::pair(PairId::runtime_gen(idx, cur_gen));
         }
         acc
     }
@@ -5012,7 +5200,7 @@ impl Heap {
             ValueRef::Nil => Ok(Vec::new()),
             ValueRef::Pair(_) => self.list_to_vec(v),
             ValueRef::Vector(id) => Ok(self.vector(id).to_vec()),
-            ValueRef::Range(id) => Ok(self.range_to_vec(id)),
+            ValueRef::Range(id) => self.range_to_vec(id),
             // A set is a sequence of its elements — so `map`/`reduce`/`count`/`vec`/…
             // work on it (Clojure-like). Order is the CHAMP's deterministic-per-shape
             // order, matching how `#{…}` prints.
@@ -5439,7 +5627,12 @@ impl Heap {
                         return false;
                     }
                     let inner = self.map_assoc(inner_id, k2, val);
-                    // `map_assoc` can collect, so re-resolve the outer handle before using it.
+                    // Re-resolve the outer handle from the binding rather than reusing the
+                    // one read above: `registry_update` is the shared entry point for the
+                    // `provide`/`:cons-new` ops, and re-reading keeps it correct if a caller
+                    // ever rebinds `sym` between the two reads. (Allocation itself cannot
+                    // invalidate `outer` — collection in this runtime happens only at eval
+                    // safepoints, never inside `map_assoc`.)
                     let outer = match self.env_get(env, sym).unwrap_or(Value::nil()).unpack() {
                         ValueRef::Map(id) => id,
                         _ => outer,
@@ -5583,15 +5776,25 @@ impl Heap {
                     return;
                 }
             }
-            // Global code/data is shared across inner processes, so promote it
-            // into the shared RUNTIME region before binding. `rehome_to_current`
-            // then re-homes a value that promote left in a *non-current* generation
-            // (an already-RUNTIME handle promote passes through unchanged) into the
-            // current one, so a `def` can never re-pin a draining generation through
-            // the shared globals table (ADR-091 Stage 5 soundness). No-op until aging
-            // has created a non-current generation to re-home out of.
-            let shared = self.rehome_to_current(self.promote(val));
-            let rebind = self.runtime.globals_write().insert(sym, shared).is_some();
+            // Global code/data is shared across inner processes, so promote it into the
+            // shared RUNTIME region before binding, re-homing a value promote left in a
+            // *non-current* generation (an already-RUNTIME handle passes through
+            // unchanged) into the current one — so a `def` can never re-pin a draining
+            // generation through the shared globals table (ADR-091 Stage 5 soundness).
+            //
+            // Promote, re-home and the table insert all happen under ONE `promote_lock`
+            // read guard: an aging flip between the re-home and the store would either
+            // strand this binding on a generation about to be freed or let migration's
+            // reconcile revert it. See `promote_rehome_publish`.
+            let rebind = self.promote_rehome_publish(val, |h, shared| {
+                // Test probe: assert (from inside the window) that the publish really is
+                // covered by the read guard. `try_write` fails iff a read guard is held —
+                // and this thread holds it, so it must fail. Compiled out entirely
+                // otherwise; see `heap::def_publish_probe`.
+                #[cfg(test)]
+                def_publish_probe::observe(&h.runtime.promote_lock);
+                h.runtime.globals_write().insert(sym, shared).is_some()
+            });
             // Invalidate every process's global inline cache (late binding).
             self.runtime.version.fetch_add(1, Ordering::Relaxed);
             // The JIT's code epoch moves only on a REBIND (ADR-217). Binding a name for
@@ -5856,15 +6059,17 @@ impl Heap {
     /// just overwrites. (No `version` bump — declared sigs aren't consulted by the
     /// per-process global inline cache.)
     pub fn set_declared_sig(&mut self, sym: Symbol, type_value: Value) {
-        // Re-home into the current generation, for the same reason as a global `def`
-        // (`declared_sigs` is a shared root the drain scans; a stale old-gen handle
-        // stored here would re-pin a draining generation — ADR-091 Stage 5).
-        let shared = self.rehome_to_current(self.promote(type_value));
-        self.runtime
-            .declared_sigs
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(sym, shared);
+        // Promote + re-home + store under one `promote_lock` read guard, for the same
+        // reason as a global `def` (`declared_sigs` is a shared root the drain scans, so
+        // a handle stored here against a generation that flipped in between would re-pin
+        // a draining generation — ADR-091 Stage 5). See `promote_rehome_publish`.
+        self.promote_rehome_publish(type_value, |h, shared| {
+            h.runtime
+                .declared_sigs
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(sym, shared);
+        });
     }
 
     /// Every `(sig …)` declared so far, as `(qualified-name, type-expression)`.
@@ -6129,5 +6334,165 @@ mod char_index_tests {
         for ci in [0, 1, 31, 32, 33, 500, e.char_len() - 1, e.char_len()] {
             assert_eq!(e.char_to_byte(ci), walk_char_to_byte(&s, ci), "char {}", ci);
         }
+    }
+}
+
+#[cfg(test)]
+mod rt_position_tests {
+    use super::*;
+    use crate::error::Pos;
+
+    /// The `(code_gen, index)` of a RUNTIME pair value — the identity
+    /// [`RuntimeCode::positions`] is keyed by.
+    fn rt_pair(v: Value) -> (usize, usize) {
+        match v.unpack() {
+            ValueRef::Pair(id) => {
+                assert_eq!(id.region(), RUNTIME, "expected a promoted RUNTIME pair");
+                (id.code_gen(), id.index())
+            }
+            _ => panic!("expected a pair"),
+        }
+    }
+
+    /// Regression: the shared RUNTIME source-position table must be keyed by
+    /// **`(code_gen, slab index)`**, not by the bare index.
+    ///
+    /// The two RUNTIME generations share one index space and a fresh generation starts
+    /// its slabs at 0, so once aging is active a `def` into the new generation lands on
+    /// the same index as a live form in the retained one. Keyed by index alone, the
+    /// second write silently clobbered the first, and `(form-pos …)` — plus every error
+    /// message and test-framework line lookup that goes through it — reported a
+    /// stranger's position for still-live old-generation code.
+    #[test]
+    fn runtime_form_positions_are_keyed_by_generation() {
+        let mut h = Heap::new();
+        let pos_a = Pos { line: 11, col: 2 };
+        let pos_b = Pos { line: 22, col: 4 };
+
+        // A positioned form promoted into the current generation.
+        let a = h.alloc_pair(Value::int(1), Value::nil());
+        h.set_form_pos(a, pos_a);
+        let ra = h.promote(a);
+        assert_eq!(h.form_pos_only(ra), Some(pos_a));
+
+        // Age: subsequent promotes land in the other generation, whose slab indices
+        // restart at 0 and therefore collide with the retained generation's.
+        assert!(h.age_runtime(), "the other generation slot should be empty");
+        let b = h.alloc_pair(Value::int(2), Value::nil());
+        h.set_form_pos(b, pos_b);
+        let rb = h.promote(b);
+
+        let ((gen_a, idx_a), (gen_b, idx_b)) = (rt_pair(ra), rt_pair(rb));
+        assert_ne!(
+            gen_a, gen_b,
+            "the two forms must be in different generations"
+        );
+        assert_eq!(
+            idx_a, idx_b,
+            "the test only proves anything if the slab indices actually collide",
+        );
+
+        assert_eq!(h.form_pos_only(rb), Some(pos_b), "new-generation position");
+        assert_eq!(
+            h.form_pos_only(ra),
+            Some(pos_a),
+            "a promote into the fresh generation overwrote a LIVE old-generation form's \
+             recorded position — the RUNTIME position table is keyed by bare slab index",
+        );
+    }
+}
+
+/// Test-only probe for the "a global `def` publishes under the promote lock" invariant
+/// (see [`Heap::promote_rehome_publish`]). Armed by the test, checked from inside
+/// [`Heap::env_define`]'s global arm at the instant just before the globals insert, and
+/// compiled out entirely in every non-test build.
+#[cfg(test)]
+mod def_publish_probe {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::RwLock;
+
+    pub(super) const DISARMED: u8 = 0;
+    pub(super) const ARMED: u8 = 1;
+    /// The publish ran with NO read guard held — the TOCTOU window is open.
+    pub(super) const SAW_UNGUARDED: u8 = 2;
+    /// The publish ran inside the guard — aging cannot flip underneath it.
+    pub(super) const SAW_GUARDED: u8 = 3;
+
+    pub(super) static STATE: AtomicU8 = AtomicU8::new(DISARMED);
+
+    /// A `try_write` fails exactly while some reader holds the lock. This thread is the
+    /// only candidate reader (nothing else is running), so failure ⟺ our own guard is
+    /// still held across the publish.
+    pub(super) fn observe(lock: &RwLock<()>) {
+        if STATE.load(Ordering::Relaxed) != ARMED {
+            return;
+        }
+        let guarded = lock.try_write().is_err();
+        STATE.store(
+            if guarded { SAW_GUARDED } else { SAW_UNGUARDED },
+            Ordering::Relaxed,
+        );
+    }
+}
+
+#[cfg(test)]
+mod def_atomicity_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// Regression: `(def name value)` must promote, re-home **and** install the binding
+    /// under a single `promote_lock` read guard.
+    ///
+    /// The store publishes a shared GC root. If the lock is dropped between the re-home
+    /// (which validates "this handle is in the current generation") and the insert, an
+    /// aging flip + `migrate_live_globals` can complete in the gap — leaving the binding
+    /// pinned to a generation that is already draining and about to be freed (a dangling
+    /// global), or letting migration's reconcile mistake a fresh rebind for the stale
+    /// value it snapshotted and overwrite it (a silently reverted `def`). Both are
+    /// invisible until they aren't, so the invariant is asserted structurally, from
+    /// inside the window itself.
+    #[test]
+    fn global_def_installs_the_binding_under_the_promote_lock() {
+        let mut interp = crate::Interp::new();
+        def_publish_probe::STATE.store(def_publish_probe::ARMED, Ordering::Relaxed);
+        interp.eval_str("(def probe-atomicity 41)").expect("def");
+        let state = def_publish_probe::STATE.swap(def_publish_probe::DISARMED, Ordering::Relaxed);
+        assert_ne!(
+            state,
+            def_publish_probe::ARMED,
+            "the probe never fired — `env_define`'s global arm no longer publishes \
+             through `promote_rehome_publish`",
+        );
+        assert_eq!(
+            state,
+            def_publish_probe::SAW_GUARDED,
+            "a global `def` installed its binding with the promote lock RELEASED: an \
+             aging flip can land between the re-home and the insert (dangling global / \
+             silently reverted def)",
+        );
+    }
+
+    /// The companion for `declared_sigs`, the other shared root published this way.
+    /// Same window, same consequence — a `(sig …)` type-expression stranded on a
+    /// draining generation is read by the checker long after the generation is gone.
+    #[test]
+    fn declared_sig_installs_under_the_promote_lock() {
+        let mut interp = crate::Interp::new();
+        let heap = &interp.heap;
+        let sym = crate::core::value::intern("probe-sig-atomicity");
+        let observed = heap.promote_rehome_publish(Value::int(7), |h, _shared| {
+            h.runtime.promote_lock.try_write().is_err()
+        });
+        assert!(
+            observed,
+            "`promote_rehome_publish` released the promote lock before running its \
+             publish step — the TOCTOU window it exists to close is open",
+        );
+        // And the real caller still stores what it promised to.
+        interp.heap.set_declared_sig(sym, Value::int(7));
+        assert_eq!(
+            interp.heap.declared_sig_value(sym).and_then(|v| v.as_int()),
+            Some(7),
+        );
     }
 }

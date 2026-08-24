@@ -318,13 +318,27 @@ impl Conn {
     /// Returns whether the payload was accepted onto the queue; callers that must
     /// report unreachability (`route`, `link_remote`) use it to fire
     /// `:noconnection`, while best-effort signals ignore it.
-    fn enqueue(&self, bytes: Arc<[u8]>) -> bool {
-        match self.tx.try_send(bytes) {
-            Ok(()) => true,
-            Err(_) => {
-                let _ = self.sock.shutdown(Shutdown::Both);
-                false
-            }
+    /// The pieces [`enqueue_to`] needs, cloned so the caller can drop the `NODES`
+    /// lock before enqueueing. Both clones are cheap (a channel handle and an `Arc`).
+    fn writer_handles(&self) -> (SyncSender<Arc<[u8]>>, Arc<Stream>) {
+        (self.tx.clone(), self.sock.clone())
+    }
+}
+
+/// Hand `bytes` to a link's writer thread, severing the link if its queue is full.
+///
+/// Free-standing so a caller can run it **without holding `NODES`**: the `Err` arm
+/// issues a `shutdown` syscall, and that must not run under the `NODES` lock or it
+/// delays every concurrent link registration and teardown for the syscall's
+/// duration — the rule [`broadcast_peer_table`] documents and follows, which
+/// `route` and `send_frame` used to violate by calling `Conn::enqueue` straight
+/// out of a `read(&NODES).get(..)`.
+fn enqueue_to(tx: &SyncSender<Arc<[u8]>>, sock: &Arc<Stream>, bytes: Arc<[u8]>) -> bool {
+    match tx.try_send(bytes) {
+        Ok(()) => true,
+        Err(_) => {
+            let _ = sock.shutdown(Shutdown::Both);
+            false
         }
     }
 }
@@ -493,8 +507,13 @@ fn send_frame(target_node: Symbol, frame: &Frame) -> bool {
             return false;
         }
     };
-    match crate::core::sync::read(&NODES).get(&target_node) {
-        Some(conn) => conn.enqueue(bytes),
+    // Snapshot the writer handles, then release NODES before enqueueing — see
+    // [`enqueue_to`] for why the shutdown syscall must not run under the lock.
+    let handles = crate::core::sync::read(&NODES)
+        .get(&target_node)
+        .map(Conn::writer_handles);
+    match handles {
+        Some((tx, sock)) => enqueue_to(&tx, &sock, bytes),
         None => false,
     }
 }
@@ -826,11 +845,17 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) -> bool {
             return true; // a link exists; the payload was the problem
         }
     };
-    if let Some(conn) = crate::core::sync::read(&NODES).get(&node) {
-        let _ = conn.enqueue(bytes); // severs the link if the writer is gone/stalled
-        true
-    } else {
-        false
+    // Snapshot the writer handles, then release NODES before enqueueing — see
+    // [`enqueue_to`] for why the shutdown syscall must not run under the lock.
+    let handles = crate::core::sync::read(&NODES)
+        .get(&node)
+        .map(Conn::writer_handles);
+    match handles {
+        Some((tx, sock)) => {
+            let _ = enqueue_to(&tx, &sock, bytes); // severs the link if the writer is gone/stalled
+            true
+        }
+        None => false,
     }
 }
 
@@ -1153,6 +1178,22 @@ fn dial(addr: &str) -> io::Result<Stream> {
 fn accept_link(mut stream: Stream) -> io::Result<()> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let (peer, peer_addr, session) = handshake(&mut stream, Role::Responder)?;
+    // Refuse a peer claiming to BE us — the accept-side counterpart of the check
+    // `node_connect` already makes on the dial side. Reachable by a relay that
+    // cross-wires two connections back to our own listener, or by a misconfigured
+    // second node reusing our name. `establish` would otherwise register a
+    // `NODES[our-own-name]` entry: mostly inert (`is_local()` still short-circuits
+    // sends to our own name) but it produces heartbeat traffic, corrupts `(nodes)`
+    // output, and emits a spurious `[:nodedown our-name]` on teardown.
+    if peer == local_node() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "peer claims our own node name ({})",
+                value::symbol_name(peer)
+            ),
+        ));
+    }
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
     establish(peer, peer_addr, stream, Role::Responder, session);
     Ok(())

@@ -155,22 +155,56 @@ fn is_rationalizable(v: Value) -> bool {
     is_integer(v) || is_ratio(v) || is_decimal(v)
 }
 
+/// The largest decimal **scale** (fractional-digit count; negative = trailing zeros)
+/// any exact decimal path will materialise. Both the ratio conversion below and the
+/// decimal arm of [`num_bin`] turn a scale into a `scale`-digit bignum — `10ˢᶜᵃˡᵉ`, or
+/// the zero padding `with_scale` applies — so an unbounded scale is an unbounded
+/// *native* allocation, which the ADR-043 `BROOD_MEM_LIMIT` cap never sees: measured,
+/// `(+ 1/2 (decimal "1e-1000000000"))` sailed past 400MB and kept climbing with no
+/// error and no end. A million digits is already far past any real decimal; beyond it
+/// the operation raises a clean, catchable error.
+const MAX_DEC_SCALE: i64 = 1_000_000;
+
+/// The out-of-range-scale error shared by the exact decimal paths.
+fn dec_scale_err(who: &str, scale: i64) -> LispError {
+    LispError::runtime(format!(
+        "{who}: decimal scale {scale} exceeds the maximum of ±{MAX_DEC_SCALE} \
+         (the exact result would need a bignum with that many digits)"
+    ))
+}
+
 /// Read an exact number as a `BigRational` — `Int`/`BigInt`/`Ratio` via
 /// `as_bigrational`, and a `Decimal` losslessly (its value is `mantissa · 10⁻ˢᶜᵃˡᵉ`,
 /// exactly `mantissa / 10ˢᶜᵃˡᵉ`). Panics on a non-rationalizable value (callers gate
 /// with [`is_rationalizable`]).
-fn to_bigrational(heap: &Heap, v: Value) -> num_rational::BigRational {
+///
+/// Errors when the decimal's scale exceeds [`MAX_DEC_SCALE`]. The conversion is
+/// `10^|scale|`, so the magnitude has to be checked *before* the `pow` — and the
+/// exponent must be converted with `try_into`, never `as u32`: an `as` cast silently
+/// truncated `4294967297` to `1`, so `(+ 1/2 (decimal "1e-4294967297"))` answered
+/// `3/5` — a wrong answer with no diagnostic at all.
+fn to_bigrational(
+    heap: &Heap,
+    who: &str,
+    v: Value,
+) -> Result<num_rational::BigRational, LispError> {
     use num_bigint::BigInt;
     if let Some(r) = heap.as_bigrational(v) {
-        return r;
+        return Ok(r);
     }
     if let Value::Decimal(id) = v {
         let (m, scale) = heap.decimal(id).as_bigint_and_exponent();
-        return if scale >= 0 {
-            num_rational::BigRational::new(m, BigInt::from(10).pow(scale as u32))
+        // `checked_abs` because `i64::MIN.abs()` itself overflows.
+        let mag = scale.checked_abs().unwrap_or(i64::MAX);
+        if mag > MAX_DEC_SCALE {
+            return Err(dec_scale_err(who, scale));
+        }
+        let pow = BigInt::from(10).pow(u32::try_from(mag).map_err(|_| dec_scale_err(who, scale))?);
+        return Ok(if scale >= 0 {
+            num_rational::BigRational::new(m, pow)
         } else {
-            num_rational::BigRational::from_integer(m * BigInt::from(10).pow((-scale) as u32))
-        };
+            num_rational::BigRational::from_integer(m * pow)
+        });
     }
     unreachable!("to_bigrational on a non-rationalizable value")
 }
@@ -220,7 +254,10 @@ pub(super) fn num_bin(
     int_op: fn(i64, i64) -> Option<i64>,
     big_op: fn(num_bigint::BigInt, num_bigint::BigInt) -> num_bigint::BigInt,
     dec_op: fn(bigdecimal::BigDecimal, bigdecimal::BigDecimal) -> bigdecimal::BigDecimal,
-    dec_scale: fn(i64, i64) -> i64,
+    // `None` when the ideal exponent leaves i64 — `*` adds the operand scales, and
+    // `(* (decimal "1e-5000000000000000000") …)` overflowed that add (a debug panic,
+    // a wrapped scale in release).
+    dec_scale: fn(i64, i64) -> Option<i64>,
     ratio_op: fn(num_rational::BigRational, num_rational::BigRational) -> num_rational::BigRational,
     float_op: fn(f64, f64) -> f64,
 ) -> LispResult {
@@ -248,8 +285,8 @@ pub(super) fn num_bin(
         // promotes losslessly (so `(+ 1/2 0.5M)` is `1/1`). Checked before the decimal
         // arm so a ratio wins over a decimal; a `Float` operand falls to contagion.
         _ if (is_ratio(a) || is_ratio(b)) && is_rationalizable(a) && is_rationalizable(b) => {
-            let x = to_bigrational(heap, a);
-            let y = to_bigrational(heap, b);
+            let x = to_bigrational(heap, who, a)?;
+            let y = to_bigrational(heap, who, b)?;
             Ok(heap.alloc_ratio(ratio_op(x, y)))
         }
         // A decimal operand, and the other is exact (Int/BigInt/Decimal): compute
@@ -271,7 +308,18 @@ pub(super) fn num_bin(
             // cents. The exact result never needs MORE than the ideal scale, so
             // `with_scale` only ever pads with zeros — it cannot round here.
             // (Found by the dectest corpus; see tests/conformance_dectest_test.blsp.)
-            let scale = dec_scale(x.fractional_digit_count(), y.fractional_digit_count());
+            //
+            // The scale is validated BEFORE `dec_op` runs: both the operation and the
+            // `with_scale` padding materialise that many digits, so an out-of-range
+            // ideal exponent has to become a clean error rather than an unbounded
+            // native allocation (or, for `*`, a wrapped i64 scale) — see MAX_DEC_SCALE.
+            let (sx, sy) = (x.fractional_digit_count(), y.fractional_digit_count());
+            let scale = match dec_scale(sx, sy) {
+                Some(s) if s.checked_abs().unwrap_or(i64::MAX) <= MAX_DEC_SCALE => s,
+                // Report the offending input scale when the ideal exponent overflowed.
+                Some(s) => return Err(dec_scale_err(who, s)),
+                None => return Err(dec_scale_err(who, sx.max(sy))),
+            };
             Ok(heap.alloc_decimal(dec_op(x, y).with_scale(scale)))
         }
         // A record operand (a map with a truthy __id__) routes to the `Num` multimethod,
@@ -359,8 +407,8 @@ pub(super) fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         i64::checked_add,
         |a, b| a + b,
         |a, b| a + b,
-        // ideal exponent of a sum: the finer of the two scales
-        |sa, sb| sa.max(sb),
+        // ideal exponent of a sum: the finer of the two scales (never overflows)
+        |sa, sb| Some(sa.max(sb)),
         |a, b| a + b,
         |a, b| a + b,
     )
@@ -373,7 +421,7 @@ pub(super) fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         i64::checked_sub,
         |a, b| a - b,
         |a, b| a - b,
-        |sa, sb| sa.max(sb),
+        |sa, sb| Some(sa.max(sb)),
         |a, b| a - b,
         |a, b| a - b,
     )
@@ -386,8 +434,8 @@ pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         i64::checked_mul,
         |a, b| a * b,
         |a, b| a * b,
-        // ideal exponent of a product: the scales add
-        |sa, sb| sa + sb,
+        // ideal exponent of a product: the scales add (checked — this one can overflow)
+        |sa, sb| sa.checked_add(sb),
         |a, b| a * b,
         |a, b| a * b,
     )
@@ -410,11 +458,11 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     if (is_integer(a) && is_integer(b))
         || ((is_ratio(a) || is_ratio(b)) && is_rationalizable(a) && is_rationalizable(b))
     {
-        let y = to_bigrational(heap, b);
+        let y = to_bigrational(heap, "/", b)?;
         if ratio_is_zero(&y) {
             return Err(div_by_zero());
         }
-        let x = to_bigrational(heap, a);
+        let x = to_bigrational(heap, "/", a)?;
         return Ok(heap.alloc_ratio(x / y));
     }
     // ---- Exact decimal division (a decimal operand, no ratio; both exact) ----

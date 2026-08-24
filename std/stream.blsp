@@ -33,14 +33,50 @@ transformers, and terminals — each transformer adds one green process.
 
 ;; ---- protocol helpers -------------------------------------------------------
 
-(defn next (s)
+;; A producer that is GONE can never answer, so a bare `receive` for its reply parks
+;; the consumer forever — uncatchably, with no timeout and nothing left to wake it.
+;; That is not a hypothetical: since KI-33 an exhausted source answers `:stream-done`
+;; **once and then exits**, so a second `next` on a fully-consumed stream (or on one
+;; whose producer crashed mid-pipeline) had no reply coming at all. `next` therefore
+;; monitors the producer for the duration of the request: its death is an answer.
+(defn- stream-down-result
+  (reason)
+  ;; An exhausted source exits `:normal` after its last `:stream-done`, and a monitor
+  ;; placed on an ALREADY-exited process reports `:noproc` without retaining the
+  ;; original reason — so both read as a clean end of stream. Anything else is a crash,
+  ;; and the consumer gets it as an error rather than as silent exhaustion.
+  (if (or (= reason :normal) (= reason :noproc))
+    :done
+    [:err (str "stream/next: producer died: " (pr-str reason))]))
+
+(defn next (s &optional timeout-ms)
   "Request the next element from stream `s`.
-Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error."
-  (send s [:next (self)])
-  (receive
-    ([:stream-val v] [:ok v])
-    (:stream-done :done)
-    ([:stream-err m] [:err m])))
+Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error.
+
+Monitors `s` for the duration, so a producer that has **exited** — an exhausted
+source (which exits after its last `:stream-done`, KI-33) or one that crashed —
+answers `:done` / `[:err …]` instead of parking the caller forever. `timeout-ms`
+additionally bounds the wait on a producer that is alive but never replies; omit
+it (the default) for an I/O stream that may legitimately be slow, where the
+monitor is the whole guard."
+  (let (m (monitor s))
+    (send s [:next (self)])
+    (let (res (if (nil? timeout-ms)
+                (receive
+                  ([:stream-val v] [:ok v])
+                  (:stream-done :done)
+                  ([:stream-err msg] [:err msg])
+                  ([:down ^m _ reason] (stream-down-result reason)))
+                (receive
+                  ([:stream-val v] [:ok v])
+                  (:stream-done :done)
+                  ([:stream-err msg] [:err msg])
+                  ([:down ^m _ reason] (stream-down-result reason))
+                  (after timeout-ms [:err (str "stream/next: timed out after " timeout-ms " ms")]))))
+      (demonitor m)
+      ; don't leak a late [:down] into the caller's mailbox
+      (receive ([:down ^m _ _] :ok) (after 0 :ok))
+      res)))
 
 (defn close (s)
   "Signal stream `s` to clean up and exit. Returns nil immediately."

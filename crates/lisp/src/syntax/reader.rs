@@ -92,7 +92,10 @@ struct Parser<'a> {
 /// — see `docs/devlog.md` 2026-05-28 hardening). 256 is comfortably above any
 /// hand-written program; pathological deeply-nested input from disk, the LSP,
 /// or `eval-string` is rejected with `LispError::parse`.
-const MAX_DEPTH: u32 = 256;
+///
+/// The printer's cap is derived from this one (`printer::MAX_DEPTH`), so that
+/// everything the reader accepts still prints readably.
+pub(crate) const MAX_DEPTH: u32 = 256;
 
 impl<'a> Parser<'a> {
     fn new(heap: &'a mut Heap, src: &'a str) -> Self {
@@ -281,9 +284,17 @@ impl<'a> Parser<'a> {
         match self.s.peek_after() {
             // `#{…}` — a set literal (`Value::Set`). Consume the '#' and read the
             // brace-delimited elements; the evaluator evaluates + dedups them.
+            // A set literal nests through `read_form` exactly like `(`/`[`/`{`, so it
+            // takes a depth level too (`enter`). Without one it bypassed the cap
+            // altogether: `#{#{…}}` nested deeply enough aborted the process on a
+            // native stack overflow (measured at 300k levels) — the very thing
+            // `MAX_DEPTH` exists to prevent.
             Some('{') => {
                 self.s.bump(); // '#'
-                self.read_set()
+                self.enter()?;
+                let v = self.read_set();
+                self.exit();
+                v
             }
             // `#(…)` — Clojure anonymous-function reader macro.
             Some('(') => Err(LispError::parse(
@@ -421,6 +432,14 @@ impl<'a> Parser<'a> {
                             self.s.bump();
                             break;
                         }
+                        // Input ran out after the dotted tail (`(1 . 2` at EOF). The
+                        // form after `.` WAS given — what's missing is the close — so
+                        // this is *incomplete input*, tagged like every other unclosed
+                        // delimiter so a REPL/editor offers a continuation prompt
+                        // instead of a hard syntax error (see `err_at_incomplete`).
+                        None => {
+                            return Err(self.err_at_incomplete(start, "unclosed list (opened here)"))
+                        }
                         _ => return Err(self.err("expected one form after '.' before close")),
                     }
                 }
@@ -430,6 +449,20 @@ impl<'a> Parser<'a> {
         let form = self.heap.list_with_tail(items, tail);
         self.heap.set_form_pos(form, start); // for (form-pos …); see docs/tooling.md
         Ok(form)
+    }
+
+    /// A lone `.` inside a `[…]` / `{…}` / `#{…}` literal. Only a list has a
+    /// dotted tail, so this is always a mistake — and reading it as the *symbol*
+    /// `.` (what used to happen) silently produced a collection of the wrong
+    /// length: `[1 . 2]` was a three-element vector, with no diagnostic.
+    fn dot_not_allowed(&self, kind: &str) -> LispError {
+        self.err(format!(
+            "'.' is the dotted-pair separator for lists — a {kind} literal has no dotted tail"
+        ))
+        .with_hint(
+            "Drop the `.`. For a dotted pair use a list: `(a . b)`. For the symbol `.` \
+             itself, write it bar-quoted: `|.|`.",
+        )
     }
 
     fn read_vector(&mut self) -> Result<Value, LispError> {
@@ -447,6 +480,9 @@ impl<'a> Parser<'a> {
                 Some(']') => {
                     self.s.bump();
                     break;
+                }
+                Some('.') if self.s.is_dot_separator() => {
+                    return Err(self.dot_not_allowed("vector"))
                 }
                 Some(_) => items.push(self.read_form()?),
             }
@@ -472,6 +508,7 @@ impl<'a> Parser<'a> {
                     self.s.bump();
                     break;
                 }
+                Some('.') if self.s.is_dot_separator() => return Err(self.dot_not_allowed("map")),
                 Some(_) => {
                     let key = self.read_form()?;
                     self.s.skip_trivia();
@@ -481,6 +518,10 @@ impl<'a> Parser<'a> {
                                 start,
                                 "map literal has an odd number of forms (each key needs a value)",
                             ))
+                        }
+                        // Same rule in value position — `{:a . 1}` is not a dotted pair.
+                        Some('.') if self.s.is_dot_separator() => {
+                            return Err(self.dot_not_allowed("map"))
                         }
                         Some(_) => {
                             let val = self.read_form()?;
@@ -507,6 +548,7 @@ impl<'a> Parser<'a> {
             self.s.skip_trivia();
             match self.s.peek() {
                 None => return Err(self.err_at_incomplete(start, "unclosed set (opened here)")),
+                Some('.') if self.s.is_dot_separator() => return Err(self.dot_not_allowed("set")),
                 Some('}') => {
                     self.s.bump();
                     break;
