@@ -87,8 +87,6 @@
    "char->int" :strings
    "string/char-at" :strings
    "check-allow" :meta
-   "clipboard-get" :system
-   "clipboard-set!" :system
    "cmp-ge" :math
    "cmp-gt" :math
    "cmp-le" :math
@@ -220,7 +218,6 @@
    "has-at-least?" :predicates
    "identity" :functions
    "if-let" :control
-   "image-thumb" :system
    "impl" :meta
    "impl-app?" :predicates
    "impl-fn-arity" :meta
@@ -488,7 +485,6 @@
    "queue?" :predicates
    "register-protocol" :meta
    "reserved-package-name?" :meta
-   "set-image-source!" :system
    "spawn-server" :processes
    "spawn-server-link" :processes
    "spawn-server-named" :processes

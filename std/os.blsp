@@ -38,3 +38,11 @@
 (defn now-ns ()
   "Wall-clock nanoseconds since the Unix epoch (finer-grained than os/now)."
   (%now-ns))
+
+(defn clipboard-get ()
+  "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature)."
+  (%clipboard-get))
+
+(defn clipboard-set! (s)
+  "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."
+  (%clipboard-set! s))
