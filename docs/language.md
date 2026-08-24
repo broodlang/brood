@@ -1914,12 +1914,11 @@ right tool for request/reply to a long-lived process.
 gen_server-style framework — ~180 lines of Brood over `spawn`/`send`/`receive`/
 `ref`/`monitor`, no kernel surface (ADR-099). A server carries one immutable
 state value through a tail-recursive `receive` loop; `defprocess` declares how it
-handles each kind of message. Pull it in with `(:use gen)` so `defprocess`,
-`spawn-server` and `!` read bare (otherwise a qualified `gen/…` reference
-auto-loads it but leaves the names qualified):
+handles each kind of message. `gen` is core (in the prelude), so `defprocess`, `spawn-server`, `call`, `cast`,
+`stop` are bare — no `require`, no `(:use)`:
 
 ```clojure
-(defmodule my-app (:use gen))
+(defmodule my-app)
 
 (defprocess counter (n)
   (init  (do (println "up") n))            ; runs once at startup; returns the initial state
