@@ -349,7 +349,7 @@
     (is (reserved-package-name? 'json))
     (is (reserved-package-name? "set"))
     (is (reserved-package-name? 'http)) ; a flat net module (was net/http)
-    (is (reserved-package-name? 'gen)) ; a flat proc module (was proc/gen)
+    (is (reserved-package-name? 'supervisor)) ; a flat proc-group module (std/proc/supervisor.blsp)
     (is (reserved-package-name? 'editor))) ; a group prefix — owns buffer, ui, …
   (test "reserved-package-name? is false for an ordinary package name"
     (is (not (reserved-package-name? 'myapp)))

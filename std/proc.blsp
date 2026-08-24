@@ -16,7 +16,10 @@ root). nil for a remote/dead pid. The process-introspection snapshot the observe
 see std/tool/observer.blsp."
   (%process-info pid))
 
-(defn flag (flag &optional value)
+;; `& more`, not `&optional value`: for this primitive an ABSENT value reads the flag
+;; while an explicit `nil` CLEARS it, and `&optional` collapses the two (both arrive as
+;; nil), which silently turned every read into a clear.
+(defn flag (flag & more)
   "Read or set a per-process runtime flag on the current process; returns the previous
 (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in
 bytes (positive int sets, nil clears, absent reads). Checked after each GC against the
@@ -28,7 +31,7 @@ whole runtime). Set it first thing in a spawned fn to cap that process:
 error instead of silently dropping the message (process liveness stays silent either
 way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect
 reconnector."
-  (%process-flag flag value))
+  (if (empty? more) (%process-flag flag) (%process-flag flag (first more))))
 
 (defn list ()
   "Every currently-live pid on this runtime (one per registered mailbox). Order is
