@@ -4,6 +4,36 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**`nest rename` is context-aware.** It now parses each file into its lossless CST and
+rewrites only *symbol tokens*, so a docstring or `;` comment mentioning the name, and
+symbols inside `(quote …)` / `'…` data, are left byte-for-byte alone — a text-level rename
+corrupts all three (it rewrote comment prose like "the offload pool" and clobbered the very
+`defn` head it should have left alone). New flags:
+
+- `--refs-only` — rename callers, leave the `defn`/`def` head alone
+- `--defs-only` — rename only the definition head
+- `--in-quote` — also rewrite symbols inside quoted data (off by default: a quoted symbol
+  is inert data, e.g. a name in a registry table)
+- `--text` — the old context-blind whole-token replace, for a rename that must touch prose
+
+Verified lossless by round-tripping every in-repo `.blsp` file (320) through a no-op rename
+and requiring byte-identical output. `codemod/cst-rename` / `codemod/cst-rename-text` are
+the in-language entry points.
+
+**Fixed: `(temp-path …)` raised `unbound: rand/token`** unless the caller had required the
+`rand` module. It is prelude code, so it now uses the `%random-token` primitive directly.
+Found by a new build-time lint that rejects any prelude reference to a module wrapper that
+is not loaded at boot.
+
+**Internal (ADR-240): a primitive's name has one definition site.** The `PRIMITIVE_DOCS`
+array is merged into the `def()` registrations (name, arity, signature, arg list and
+docstring in one expression), and a primitive named in more than one Rust file now flows
+from a single `kw::` constant. Renaming a primitive is a one-line edit the compiler then
+enforces at every site, instead of a string-literal hunt whose misses surface as runtime
+`unbound` errors.
+
 ## v0.8.0 — 2026-08-21
 
 **Module-name stutter and abbreviations removed from public APIs.** A qualified call

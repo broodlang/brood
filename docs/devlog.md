@@ -711,6 +711,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-11** — the backend seam: a `JitBackend` contract, and the decisions hoisted above it
 - **2026-08-12** — the forward-ref pre-scan was not module-boundary-aware
 - **2026-08-12** — multiple modules per file: the region model (ADR-223 Phase 1)
+- **2026-08-24** — a primitive's name gets one definition site; CST-backed `nest rename` (ADR-240)
 
 ---
 
@@ -2329,3 +2330,55 @@ from a gate that passes.** `check-stress` was added this morning for the same re
 waves rotted eight files with nothing watching), and the fuzz generators turned out to be emitting
 programs that died on unbound symbols — reporting a checker false positive instead of comparing
 engines, which also looked like working. Prefer proving a new gate red before trusting it green.
+
+## 2026-08-24 — one definition site per primitive name; renames the compiler can check (ADR-240)
+
+Started as fallout from the namespace moves and turned into the structural fix, because the
+same bug shape kept reappearing: **a primitive's name is a string literal copy-pasted across
+sites that agree only by string equality, so a rename that misses one fails silently at a
+user's call site.** Three in one session — `%now-ns` unbound at boot (the registration was a
+single-line `def()` a multi-line `%`-prefixing pass never matched, while its `PRIMITIVE_DOCS`
+entry *was* rewritten); `%table-snapshot`/`%table-incr` unbound from the linmap rewrite (the
+registration moved, the emitter in `macros.rs` and the PrimOp match in `ir.rs` did not); and
+`table/new` reached from prelude code, where the `table/` module is not loaded.
+
+Worth naming the near-miss: the `%table-*` breakage was hidden behind a **stale
+`.brood/image.bin`**, so `nest check` reported the old world and the failures only appeared
+after deleting the startup image. A cached boot image that survives a rename is its own
+category of "gate that cannot fail".
+
+Three layers, each verified by sabotage rather than by watching it pass:
+
+1. **`PRIMITIVE_DOCS` is gone.** 391 `def()` calls now carry `name, arity, sig, params, doc,
+   func` in one expression — the two parallel arrays that produced the `now-ns` desync no
+   longer exist, and the drift-guard test that was supposed to catch it is deleted along with
+   the drift it guarded. Done by script with a **snapshot oracle**: dump every native's
+   `(name, params, doc)` before and after and require an identical diff. 390 rows, zero
+   differences, so the merge is provably doc-preserving rather than plausibly so.
+2. **Cross-file names come from `kw::` constants.** The table ops flow from `kw::TABLE_*`
+   through all five sites (registration, `ir.rs`, `inline.rs`, `macros.rs`,
+   `guard_effects.rs`). A rename is one line; the compiler flags the rest.
+3. **A prelude-hygiene lint** walks the boot image's CST and rejects any qualified `mod/name`
+   that is not a registered primitive or force-loaded. It immediately found a **shipped bug**:
+   `(temp-path "x")` raised `unbound: rand/token` for anyone who had not required `rand`.
+   Calibration mattered — the first version flagged `file/slurp` and friends, which are
+   kernel primitives *named* with a slash and always bound; checking against the actual
+   registration set cut 5 findings to the 1 real one.
+
+**And the caller side: `nest rename` now goes through the CST.** `token-replace` is
+boundary-aware but context-blind, which is why the rename waves rewrote comment prose ("the
+offload pool" → "the proc/offload pool"), edited docstrings, and clobbered the prelude's own
+`defn offload` head — the corruption I spent this session repairing by regenerating files from
+`git show`. `codemod/cst-rename` reassembles each file from `parse-source`'s lossless CST and
+rewrites only `:symbol` leaves, so a docstring, a `;` comment, and `(quote …)` data cannot be
+touched by construction; `--refs-only`/`--defs-only` add the def-vs-reference distinction that
+a text pass cannot express, and `--text` keeps the old behaviour when a rename really must
+touch prose.
+
+Losslessness is the property that matters, and asserting it on toy input was not enough: the
+first version silently **deleted `~@`** from 24 stdlib files, because the CST spells
+unquote-splice `:splice` and I had guessed `:unquote-splice`. Round-tripping all 320 in-repo
+`.blsp` files through a no-op rename found it; an unknown wrapper kind now raises rather than
+emitting its subtree bare. Same lesson as the `--workspace` gate two entries up: **prove the
+new check red before trusting it green** — and prefer a property test over the whole corpus to
+a handful of hand-written cases, since the cases you write are the ones you already thought of.
