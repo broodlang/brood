@@ -224,7 +224,7 @@ pub(super) fn stdin_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 
 // ---------- time ----------
 
-/// `(now)` — wall-clock milliseconds since the Unix epoch, as an integer.
+/// `(%now)` — wall-clock milliseconds since the Unix epoch, as an integer.
 /// Subtract two readings to measure elapsed time (see `std/tool/test.blsp`).
 pub(super) fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     let ms = web_time::SystemTime::now()
@@ -886,7 +886,7 @@ pub(super) fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     }
 }
 
-/// `(process-info pid)` — a snapshot map of a **live local** process, or `nil`
+/// `(%process-info pid)` — a snapshot map of a **live local** process, or `nil`
 /// for a remote/dead pid (a non-pid is a type error). The fields are all
 /// kernel-internal, so the map is assembled here from the registry / scheduler /
 /// name / monitor tables (ADR-051):
@@ -983,7 +983,7 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
 // manipulation and all policy live in Brood (`std/prelude.blsp`, `std/tool/project.blsp`).
 
 /// `(file/cwd)` — the process's current working directory as a string.
-/// `(exe-path)` — the absolute path of the RUNNING executable, or nil when the platform
+/// `(%exe-path)` — the absolute path of the RUNNING executable, or nil when the platform
 /// won't say (a sandbox with no `/proc/self/exe`-equivalent). Nil rather than an error: a
 /// program asking where it lives is asking opportunistically, and the answer is allowed to
 /// be "cannot tell".
@@ -1016,7 +1016,7 @@ pub(super) fn file_exists(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(Value::boolean(std::path::Path::new(&path).exists()))
 }
 
-/// `(canonicalize path)` — the real absolute path of `path` with **symlinks and
+/// `(%canonicalize path)` — the real absolute path of `path` with **symlinks and
 /// `.`/`..` fully resolved**. Works for a not-yet-existing target: the longest
 /// existing prefix is `fs::canonicalize`d (which resolves every symlink in it,
 /// the POSIX-correct way — a `..` after a symlink resolves against the symlink's

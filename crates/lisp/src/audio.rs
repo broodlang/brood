@@ -10,7 +10,7 @@
 //! silent). Beeps are synthesised sine tones mixed concurrently, so overlapping
 //! sounds (a hit during a score jingle) just stack.
 
-/// `(audio-beep freq-hz ms [vol])` — play a short tone at peak amplitude `vol`
+/// `(audio/beep freq-hz ms [vol])` — play a short tone at peak amplitude `vol`
 /// (0..1). No-op without `--features audio`.
 #[cfg(not(feature = "audio"))]
 pub fn beep(_freq: f32, _ms: u64, _vol: f32) {}

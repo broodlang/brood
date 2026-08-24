@@ -40,8 +40,8 @@
 ;; `spawn-live` with a 20.6% noise floor (handoff.md §6). Use:
 ;;   /usr/bin/time -f '%U user %S sys %e wall' brood … ladder.blsp
 
-(def n (let (e (getenv "N")) (if e (string->number e) 100000)))
-(def mode (let (e (getenv "MODE")) (if e e "all")))
+(def n (let (e (os/getenv "N")) (if e (string->number e) 100000)))
+(def mode (let (e (os/getenv "MODE")) (if e e "all")))
 (def payload (into [] (range 16)))
 (def me (self))
 
@@ -81,7 +81,7 @@
 ;;
 ;;   park − park-batched  = what coexistence costs
 ;;   park-batched − nopark = what suspend/resume costs
-(def batch (let (e (getenv "BATCH")) (if e (string->number e) 100)))
+(def batch (let (e (os/getenv "BATCH")) (if e (string->number e) 100)))
 
 (defn spawn-k (f i k acc) (if (%eq i k) acc (spawn-k f (%add i 1) k (cons (spawn (f)) acc))))
 (defn collect-k (got k acc)

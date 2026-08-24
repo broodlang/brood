@@ -143,7 +143,7 @@
   (:use editor/buffer)
   (:use sexp :only [point-forward]))
 
-(def n (let (e (getenv "N")) (if e (string->number e) 2000)))
+(def n (let (e (os/getenv "N")) (if e (string->number e) 2000)))
 
 ;; UTF8=1 re-runs every string row with a NON-ASCII lead, which is a different complexity
 ;; regime, not a cosmetic variation: a char index is a byte offset only for pure-ASCII text,
@@ -152,7 +152,7 @@
 ;; (2026-08-04). Every row here was originally cleared on ASCII fixtures, so a row cleared
 ;; without this knob is only half-cleared. One lead char is enough — it is the string's
 ;; ASCII-ness that is lost, not the position of the character.
-(def utf8? (not (nil? (getenv "UTF8"))))
+(def utf8? (not (nil? (os/getenv "UTF8"))))
 (def utf8-lead (if utf8? "café — " ""))
 ;; Source-shaped fixtures must stay parseable, so lead them with a comment instead.
 (def utf8-src-lead (if utf8? ";; café — em dash\n" ""))

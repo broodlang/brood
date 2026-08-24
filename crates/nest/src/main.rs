@@ -1470,7 +1470,7 @@ fn cmd_run(
     // (whole-project) or `BROOD_NO_CHECK=1` for that case.
     let check_setup = match file {
         Some(path) => format!(
-            "(unless (= (getenv \"BROOD_NO_CHECK\") \"1\") \
+            "(unless (= (%getenv \"BROOD_NO_CHECK\") \"1\") \
                (doseq (w (check-file \"{}\")) (eprintln w))) ",
             brood::introspect::escape_brood_string(path)
         ),

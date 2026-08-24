@@ -260,7 +260,7 @@ pub mod error_codes {
     /// at the eval safepoint so a runaway/hostile program fails cleanly instead
     /// of exhausting host RAM. Catchable; tune via `BROOD_MEM_LIMIT`.
     pub const MEMORY_LIMIT: &str = "E0043";
-    /// This process's live heap stayed over its own `(process-flag :max-heap n)`
+    /// This process's live heap stayed over its own `(proc/flag :max-heap n)`
     /// limit after a collection — the BEAM `max_heap_size` analogue. Raised at
     /// the next safepoint **in that process only** (a catchable kill: uncaught,
     /// it retires just the offender; every other process is untouched — unlike

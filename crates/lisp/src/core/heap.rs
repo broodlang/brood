@@ -2511,7 +2511,7 @@ pub struct Heap {
     gc_ns_max: u64,
     gc_ns_last: u64,
     /// Per-process heap limit (bytes), the BEAM `max_heap_size` analogue — set by
-    /// this process on itself via `(process-flag :max-heap n)`, `None` = unlimited
+    /// this process on itself via `(proc/flag :max-heap n)`, `None` = unlimited
     /// (the default; the ADR-043 global soft/hard cap is separate). Checked
     /// **after** each collection against the *surviving* footprint (nursery +
     /// old gen), so transient garbage a collection reclaims never trips it.
@@ -2521,7 +2521,7 @@ pub struct Heap {
     /// safepoints, which raise a catchable error **in this process only** — the
     /// per-process isolation the global hard cap (whole-OS-process abort) lacks.
     proc_limit_hit: Option<usize>,
-    /// `(process-flag :send-errors on)` — when set, a `send` whose target *node*
+    /// `(proc/flag :send-errors on)` — when set, a `send` whose target *node*
     /// is unknown/disconnected raises a catchable `:noconnection` error instead
     /// of silently dropping the message (the dist self-healing seam). Default
     /// off: Erlang's silent-send semantics.
