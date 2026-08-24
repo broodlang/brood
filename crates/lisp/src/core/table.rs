@@ -412,7 +412,7 @@ pub fn check_key(who: &str, key: Value) -> Result<(), LispError> {
     Err(LispError::type_err(format!("{}: {}", who, reason)))
 }
 
-/// `(table)` — create a new empty table; returns its handle id. `push` hands out the
+/// `(%table)` — create a new empty table; returns its handle id. `push` hands out the
 /// next dense index atomically, so `id = idx + 1` (0 is reserved as "no table").
 /// The dense slot region is reserved lazily on the first dense write, so an
 /// unused (or immediately-hashed) table costs only this small shell.
@@ -429,7 +429,7 @@ pub fn create() -> u64 {
     idx as u64 + 1
 }
 
-/// `(table-drop t)` — tombstone a table (the lock-free registry can't remove entries).
+/// `(%table-drop t)` — tombstone a table (the lock-free registry can't remove entries).
 /// Idempotent; returns whether it was still live. Frees the hashed map and clears the
 /// touched dense slots to `EMPTY`; the slot region itself (like the store shell) is
 /// retained until process exit — the lock-free region has no exclusive owner to unmap.
@@ -466,7 +466,7 @@ pub fn drop_table(id: u64) -> bool {
     }
 }
 
-/// `(table-count t)` — number of entries. Once JIT'd code holds the dense slot
+/// `(%table-count t)` — number of entries. Once JIT'd code holds the dense slot
 /// region (`jit_shared` — inline ops don't maintain the exact counter), the
 /// dense count is a full-region tally instead: O(region), still exact.
 pub fn count(id: u64) -> Result<i64, LispError> {
@@ -518,7 +518,7 @@ fn find_idx(heap: &mut Heap, bucket: &[(Message, Message)], key: Value) -> Optio
     })
 }
 
-/// `(table-put t k v)` — store a clone of `v` under a clone of `k`, overwriting any
+/// `(%table-put t k v)` — store a clone of `v` under a clone of `k`, overwriting any
 /// existing entry for `k`. Returns the table handle (for threading).
 pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
     let store = lookup(id)?;
@@ -553,7 +553,7 @@ pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
     Ok(Value::table(id))
 }
 
-/// `(table-get t k [default])` — a fresh copy of the value under `k`, or `default`.
+/// `(%table-get t k [default])` — a fresh copy of the value under `k`, or `default`.
 pub fn get(heap: &mut Heap, id: u64, key: Value, default: Value) -> LispResult {
     let store = lookup(id)?;
     if store.dense.load(Ordering::Acquire) {
@@ -585,7 +585,7 @@ pub fn get(heap: &mut Heap, id: u64, key: Value, default: Value) -> LispResult {
     Ok(found.map_or(default, |vm| from_message(heap, &vm)))
 }
 
-/// `(table-has? t k)` — whether `k` is present.
+/// `(%table-has? t k)` — whether `k` is present.
 pub fn has(heap: &mut Heap, id: u64, key: Value) -> Result<bool, LispError> {
     let store = lookup(id)?;
     if store.dense.load(Ordering::Acquire) {
@@ -610,7 +610,7 @@ pub fn has(heap: &mut Heap, id: u64, key: Value) -> Result<bool, LispError> {
         .is_some_and(|bucket| find_idx(heap, bucket, key).is_some()))
 }
 
-/// `(table-delete t k)` — remove `k` if present. Returns the table handle.
+/// `(%table-delete t k)` — remove `k` if present. Returns the table handle.
 pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
     let store = lookup(id)?;
     if store.dense.load(Ordering::Acquire) {
@@ -653,7 +653,7 @@ pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
     Ok(Value::table(id))
 }
 
-/// `(table-incr t k [delta])` — **atomically** add `delta` (default 1) to the integer
+/// `(%table-incr t k [delta])` — **atomically** add `delta` (default 1) to the integer
 /// at `k` (treating an absent key as 0) and return the new value. On the dense path
 /// this is a lock-free CAS loop on the key's slot (concurrent increments never lose
 /// an update, and a racing migration can neither lose nor double-apply one — see the
@@ -754,7 +754,7 @@ fn incr_hashed(
     Ok(Value::int(next))
 }
 
-/// `(table-snapshot t)` — a point-in-time copy of the whole table as an immutable
+/// `(%table-snapshot t)` — a point-in-time copy of the whole table as an immutable
 /// Brood map. Because the entries are immutable clones, the returned map is
 /// unaffected by later mutation — the MVCC win over ETS's dirty reads. O(n) copy.
 /// Atomic per entry; on a **dense** table concurrent lock-free writes to *other*

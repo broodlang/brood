@@ -40,7 +40,7 @@
 (describe "gen: sleep"
   :isolated
   (test "sleep waits roughly the requested time"
-    (let (t (now)) (sleep 30) (is (>= (- (now) t) 25))))
+    (let (t (os/now)) (sleep 30) (is (>= (- (os/now) t) 25))))
   ; allow scheduler slack
   (test "sleep does not consume queued messages"
     (send (self) :keep)
@@ -183,13 +183,13 @@
     ;; unreachable garbage: it grows the mailbox without bound over a retry loop and
     ;; is re-scanned by every later selective receive.
     (let (s (spawn-server silent nil)
-          before (mailbox-size (self)))
+          before (proc/mailbox-size (self)))
       (assert= (try (call-timeout s :anything 20) (catch e :timed-out)) :timed-out)
       ;; the server dies AFTER we gave up: a still-armed monitor would deliver a
       ;; [:down] here that nothing would ever consume
       (stop s)
       (sleep 60)
-      (assert= before (mailbox-size (self)))))
+      (assert= before (proc/mailbox-size (self)))))
 
   (test "a timed-out call does not poison the NEXT call on the same server"
     (let (s (spawn-server echoing nil))

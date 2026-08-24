@@ -14,7 +14,7 @@
 //! deref (here a spurious "parameter list" type error as a stale closure-template
 //! handle is read as the wrong object) or, in release, a slab OOB / SIGSEGV.
 //!
-//! Lives in its own integration binary so it can drive `(runtime-collect)`
+//! Lives in its own integration binary so it can drive `(%runtime-collect)`
 //! deterministically without interfering with other tests' process state.
 
 use brood::Interp;
@@ -46,7 +46,7 @@ fn tail_call_into_optional_default_arm_survives_runtime_compaction() {
         ;; 4000 churned closures). Its non-nil `&optional` default forces a
         ;; compaction that reclaims the dead churn, shrinking the slab below that
         ;; template index.
-        (defn g (a &optional (b (do (runtime-collect) 0)))
+        (defn g (a &optional (b (do (%runtime-collect) 0)))
           ((fn () (str "result=" (+ a b marker)))))
         (defn f (n) (if (= n 0) (g 1) (f (- n 1))))
         (f 3)

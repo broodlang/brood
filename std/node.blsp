@@ -78,12 +78,12 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
 ;; A node is addressed by NAME on the local machine (a Unix-domain socket — no
 ;; port to pick) and by "name@host:port" across machines (TCP). The shared secret
 ;; lives in ~/.config/brood/cookie, auto-generated on first use. All of this is
-;; policy in Brood over the %node-listen / %node-connect / random-token /
+;; policy in Brood over the %node-listen / %node-connect / rand/token /
 ;; spit-private primitives — the kernel only carries bytes.
 
 (defn- node-config-dir
   ()
-  (str (or (getenv "XDG_CONFIG_HOME") (str (getenv "HOME") "/.config")) "/brood"))
+  (str (or (os/getenv "XDG_CONFIG_HOME") (str (os/getenv "HOME") "/.config")) "/brood"))
 
 (defn- node-cookie-path () (str (node-config-dir) "/cookie"))
 
@@ -100,11 +100,11 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
   "The shared secret authenticating node links, resolved as: `$BROOD_COOKIE` →
 `~/.config/brood/cookie` → freshly generated and persisted (0600). All your nodes
 on this machine share one cookie; set `$BROOD_COOKIE` to override."
-  (or (getenv "BROOD_COOKIE")
+  (or (os/getenv "BROOD_COOKIE")
     (let (path (node-cookie-path))
       (if (file/exists? path)
         (node-chomp (file/slurp path))
-        (let (secret (random-token 32))
+        (let (secret (rand/token 32))
           (file/spit-private path secret)
           secret)))))
 
@@ -113,8 +113,8 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
 ;; cron / ssh session leaves it unset.
 (defn- node-runtime-dir
   ()
-  (str (or (getenv "XDG_RUNTIME_DIR")
-         (str "/tmp/brood-" (or (getenv "USER") (getenv "LOGNAME") "shared")))
+  (str (or (os/getenv "XDG_RUNTIME_DIR")
+         (str "/tmp/brood-" (or (os/getenv "USER") (os/getenv "LOGNAME") "shared")))
     "/brood"))
 
 (defn- node-socket-path (s) (str (node-runtime-dir) "/" s ".sock"))
@@ -156,7 +156,7 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
 ;; Qualify a node name to `name@host` (ADR-073):
 ;;   - already `name@host` → verbatim (an explicit long/FQDN name);
 ;;   - TCP node (addr given) → `name@<addr-host>`, so it matches how peers reach it;
-;;   - local Unix node → `name@<short hostname>`.
+;;   - local Unix node → `name@<short os/hostname>`.
 ;; The result is the node's global identity, carried in every pid.
 ;; (`/name` is the kernel symbol→string, since `name` here is node/name.)
 (defn- node-qualify
@@ -164,13 +164,13 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
   (let (s (/name nm))
     (cond
       (>= (node-at s 0 (string/length s)) 0) (keyword s)
-      (nil? addr) (keyword (str s "@" (hostname)))
+      (nil? addr) (keyword (str s "@" (os/hostname)))
       else (keyword (str s "@" (node-addr-host addr))))))
 
 (defn start (nm &optional addr cookie-override)
   "Start this runtime as a node so peers can reach it. The node's identity is
 `name@host` (ADR-073): a bare `name` becomes `name@host` where `host` is the
-listen address's host for a TCP node, or this machine's short `(hostname)` for a
+listen address's host for a TCP node, or this machine's short `(os/hostname)` for a
 local node; pass an already-qualified `:name@host` to override (a long/FQDN name).
 `(node/start name)` listens on a local Unix-domain socket (no port) — the common
 same-machine case; `(node/start name \"host:port\")` listens over TCP for remote
@@ -196,7 +196,7 @@ node — call `(node/start …)` first."
     (if (< at 0)
       ;; Bare name → local Unix node. The peer's real name is `name@thishost`;
       ;; pass that as the claimed name (the handshake confirms it).
-      (%node-connect (keyword (str spec "@" (hostname)))
+      (%node-connect (keyword (str spec "@" (os/hostname)))
         (str "unix:" (node-socket-path spec)))
       ;; Qualified → remote TCP: "name@host:port". The node name is everything
       ;; before the (last) port colon; the dial address is everything after `@`.

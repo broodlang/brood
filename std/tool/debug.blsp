@@ -247,7 +247,7 @@ function stops being traced too."
           (let (value (apply orig args))
             (spy-emit {:spy :return :fn sym :value value})
             value))))
-    (swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))
+    (%swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))
     sym))
 
 (defn break-fn (sym)
@@ -263,7 +263,7 @@ context (`break`'s own rule), so a break-fn'd function still works un-debugged.
       (fn (& args)
         (break (str sym) :args args)
         (apply orig args)))
-    (swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))
+    (%swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))
     sym))
 
 (defn untrace-fn (sym)
@@ -272,7 +272,7 @@ registry. Unknown/untraced syms are a no-op (returns nil)."
   (let (orig (get *traced-fns* sym))
     (when orig
       (debug-rebind sym orig)
-      (swap-registry! debug/*traced-fns* (fn (m) (dissoc m sym)))
+      (%swap-registry! debug/*traced-fns* (fn (m) (dissoc m sym)))
       sym)))
 
 (defn untrace-all ()
@@ -343,7 +343,7 @@ was attempted."
 
 (defn observations (dbg)
   "Every `spy` node observation, flattened to `{:pid :form :value}`."
-  (keep (fn (e)
+  (seq/keep (fn (e)
           (let (entry (get e :entry))
             (when (= (get entry :spy) :node)
               {:pid (get e :pid) :form (get entry :form) :value (get entry :value)})))
@@ -358,7 +358,7 @@ was attempted."
 
 (defn value-distribution (dbg form-string)
   "The distribution of observed values for one traced form, `{value -> count}`."
-  (frequencies (keep (fn (o) (when (= (pr-str (get o :form)) form-string) (get o :value)))
+  (frequencies (seq/keep (fn (o) (when (= (pr-str (get o :form)) form-string) (get o :value)))
                  (observations dbg))))
 
 (defn modal-value (dbg form-string)

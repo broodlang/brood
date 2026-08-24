@@ -174,5 +174,32 @@
                     (keys doc-catalog/*catalog*)))
       ;; Names, not just a count — a failure should say WHICH entry to remove.
       (assert= (sort missing) (list))))
+  ;; A floor, not a target: the check above is vacuous against an empty/failed-to-load
+  ;; catalogue, so this only has to be large enough that a broken load cannot pass it.
+  ;; It sat at 500 while the catalogue covered a 613-name core; the namespace waves moved
+  ;; most of those out (they are catalogued by their module now), so 400 is the new floor.
   (test "the catalogue is not empty (a broken load would vacuously pass the check above)"
-    (is (> (count (keys doc-catalog/*catalog*)) 500))))
+    (is (> (count (keys doc-catalog/*catalog*)) 400))))
+
+;; ...and the other direction: every public core name must HAVE a category.
+;;
+;; `category-of` falls back to `:other`, so an uncatalogued name does not error — it just
+;; lands in a junk drawer at the bottom of the hosted reference. That drawer had grown to
+;; 41 entries, mixing genuinely core vocabulary nobody could find (`stop`, `cast`,
+;; `spawn-server` — miscategorised only because `gen` moved into the prelude) with
+;; threading helpers (`tap`, `then`) and internals. A reader scanning by category simply
+;; never saw them. This asserts the drawer stays empty.
+(describe "doc catalogue: every public core name has a category"
+  (test "nothing falls through to :other"
+    (let (uncatalogued
+           (filter (fn (s)
+                     (let (nm (name s) i (index-of nm "/"))
+                       (and (not (and i (> i 0)))         ; not a module function
+                         (not (includes? nm "--"))
+                         (not (string/starts-with? nm "%")) ; not a kernel primitive
+                         (not (private? s))                 ; not an internal helper
+                         (or (fn? (eval s)) (= (type-of (eval s)) :macro))
+                         (= (doc-catalog/category-of nm) :other))))
+             (global-names)))
+      ;; Names, not a count — a failure should say WHICH name needs a category.
+      (assert= (sort (map name uncatalogued)) (list)))))

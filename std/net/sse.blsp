@@ -70,7 +70,7 @@ data) …))` from an `http` handler to push events to a browser `EventSource`."
   ;; remainder (`""` when the buffer ended on a blank line); an empty buffer splits to no
   ;; pieces at all, hence the guard. Covered by the `sse frames-1c` sweep row.
   (let (parts (string/split buf "\n\n"))
-    (if (empty? parts) [nil ""] [(drop-last 1 parts) (last parts)])))
+    (if (empty? parts) [nil ""] [(seq/drop-last 1 parts) (last parts)])))
 
 (defn- field
   (ev line)

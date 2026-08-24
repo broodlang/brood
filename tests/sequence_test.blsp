@@ -51,16 +51,16 @@
 
 (describe "split-at"
   (test "split-at returns [front back], one pass equivalent to [take drop]"
-    (assert= (split-at 3 (range 6)) [(list 0 1 2) (list 3 4 5)])
-    (assert= (split-at 0 (list 1 2 3)) [nil (list 1 2 3)])
-    (assert= (split-at 99 (list 1 2 3)) [(list 1 2 3) nil])
-    (assert= (split-at 2 nil) [nil nil]))
+    (assert= (seq/split-at 3 (range 6)) [(list 0 1 2) (list 3 4 5)])
+    (assert= (seq/split-at 0 (list 1 2 3)) [nil (list 1 2 3)])
+    (assert= (seq/split-at 99 (list 1 2 3)) [(list 1 2 3) nil])
+    (assert= (seq/split-at 2 nil) [nil nil]))
   (test "split-at agrees with take/drop at the same index"
-    (let (xs (range 10) p (split-at 4 xs))
+    (let (xs (range 10) p (seq/split-at 4 xs))
       (assert= (nth p 0) (take 4 xs))
       (assert= (nth p 1) (drop 4 xs))))
   (test "split-at accepts a vector and splits its [k v]-free elements"
-    (assert= (split-at 2 [10 20 30 40]) [(list 10 20) (list 30 40)])))
+    (assert= (seq/split-at 2 [10 20 30 40]) [(list 10 20) (list 30 40)])))
 
 (describe "take-while / drop-while"
   (test "take-while keeps the leading run that satisfies pred"
@@ -84,9 +84,9 @@
     (is (every? even? nil)))
   ; vacuously true on empty
   (test "find returns the first matching element, or nil"
-    (assert= (find even? (list 1 3 4 5 6)) 4)
-    (assert= (find even? (list 1 3 5)) nil)
-    (assert= (find (fn (x) (> x 100)) (range 10)) nil)))
+    (assert= (seq/find even? (list 1 3 4 5 6)) 4)
+    (assert= (seq/find even? (list 1 3 5)) nil)
+    (assert= (seq/find (fn (x) (> x 100)) (range 10)) nil)))
 
 (describe "index-where"
   ;; The predicate counterpart of index-of (which matches by equality).
@@ -127,7 +127,7 @@
   (test "sort is stable (equal elements keep input order)"
     ;; sort by first component; the second tags the original position.
     (let (pairs (list [1 :a] [0 :b] [1 :c] [0 :d]))
-      (assert= (sort (fn (x y) (< (vector-ref x 0) (vector-ref y 0))) pairs)
+      (assert= (sort (fn (x y) (< (seq/vector-ref x 0) (seq/vector-ref y 0))) pairs)
         (list [0 :b] [0 :d] [1 :a] [1 :c]))))
   (test "sort-by orders by a key function"
     (assert= (sort-by (fn (s) (string/length s)) (list "ccc" "a" "bb")) (list "a" "bb" "ccc"))
@@ -234,7 +234,7 @@
     ;; insertion order may vary on rehash; compare as a frequency map.
     (assert= (frequencies (into [] {:a 1 :b 2})) {[:a 1] 1 [:b 2] 1})
     (assert= (into {} {:a 1 :b 2}) {:a 1 :b 2}))
-  (test "times applies f n times" (assert= (times 5 inc 0) 5) (assert= (times 0 inc 9) 9))
+  (test "times applies f n times" (assert= (seq/times 5 inc 0) 5) (assert= (seq/times 0 inc 9) 9))
   (test "iterate-times yields n+1 successive states"
     (assert= (iterate-times (fn (n) (* n 2)) 1 4) (list 1 2 4 8 16)))
   (test "enumerate pairs items with indices"
@@ -250,18 +250,18 @@
 
 (describe "remove / keep"
   (test "remove is the complement of filter"
-    (assert= (remove even? (range 8)) (list 1 3 5 7))
-    (assert= (remove (fn (x) true) (range 3)) nil))
+    (assert= (seq/remove even? (range 8)) (list 1 3 5 7))
+    (assert= (seq/remove (fn (x) true) (range 3)) nil))
   (test "keep takes the non-nil results of f (map+filter fused)"
-    (assert= (keep (fn (x) (if (even? x) (* x x) nil)) (range 6)) (list 0 4 16))
-    (assert= (keep (fn (x) nil) (range 3)) nil)))
+    (assert= (seq/keep (fn (x) (if (even? x) (* x x) nil)) (range 6)) (list 0 4 16))
+    (assert= (seq/keep (fn (x) nil) (range 3)) nil)))
 
 (describe "distinct / dedupe"
   (test "distinct drops duplicates, keeping first occurrence (order-preserving)"
-    (assert= (distinct (list 1 1 2 3 3 3 1 4)) (list 1 2 3 4))
-    (assert= (distinct nil) nil))
+    (assert= (seq/distinct (list 1 1 2 3 3 3 1 4)) (list 1 2 3 4))
+    (assert= (seq/distinct nil) nil))
   (test "distinct works on any equal-able items"
-    (assert= (distinct (list :a :b :a :c :b)) (list :a :b :c)))
+    (assert= (seq/distinct (list :a :b :a :c :b)) (list :a :b :c)))
   (test "dedupe collapses only consecutive runs"
     (assert= (dedupe (list 1 1 2 3 3 3 1 4)) (list 1 2 3 1 4))
     (assert= (dedupe nil) nil)))
@@ -274,10 +274,10 @@
 
 (describe "flatten"
   (test "flatten splices nested lists into one flat list"
-    (assert= (flatten (list 1 (list 2 (list 3 4)) 5 (list (list 6)))) (list 1 2 3 4 5 6)))
+    (assert= (seq/flatten (list 1 (list 2 (list 3 4)) 5 (list (list 6)))) (list 1 2 3 4 5 6)))
   (test "flatten leaves a flat list unchanged and treats vectors as leaves"
-    (assert= (flatten (list 1 2 3)) (list 1 2 3))
-    (assert= (flatten (list [1 2] [3 4])) (list [1 2] [3 4]))))
+    (assert= (seq/flatten (list 1 2 3)) (list 1 2 3))
+    (assert= (seq/flatten (list [1 2] [3 4])) (list [1 2] [3 4]))))
 
 (describe "interpose / interleave"
   (test "interpose inserts a separator between adjacent items"
@@ -290,20 +290,20 @@
 
 (describe "take-last / drop-last"
   (test "take-last returns the final n items (whole list if shorter)"
-    (assert= (take-last 2 (range 5)) (list 3 4))
-    (assert= (take-last 99 (range 3)) (list 0 1 2))
-    (assert= (take-last 0 (range 3)) nil))
+    (assert= (seq/take-last 2 (range 5)) (list 3 4))
+    (assert= (seq/take-last 99 (range 3)) (list 0 1 2))
+    (assert= (seq/take-last 0 (range 3)) nil))
   (test "drop-last removes the final n items"
-    (assert= (drop-last 2 (range 5)) (list 0 1 2))
-    (assert= (drop-last 99 (range 3)) nil)))
+    (assert= (seq/drop-last 2 (range 5)) (list 0 1 2))
+    (assert= (seq/drop-last 99 (range 3)) nil)))
 
 (describe "repeat / repeatedly"
   (test "repeat builds a list of n copies"
     (assert= (repeat 3 :x) (list :x :x :x))
     (assert= (repeat 0 :x) nil))
   (test "repeatedly calls a thunk n times, in order"
-    (assert= (repeatedly 3 (fn () 7)) (list 7 7 7))
-    (assert= (repeatedly 0 (fn () 7)) nil)))
+    (assert= (seq/repeatedly 3 (fn () 7)) (list 7 7 7))
+    (assert= (seq/repeatedly 0 (fn () 7)) nil)))
 
 ;; ---- explicit concurrency (spawn / send / fan-in) ---------------------------
 ;; :isolated so these run against a private globals copy and don't contend with
@@ -470,13 +470,13 @@
     (assert= [] (mapv inc nil)))
 
   (test "filterv returns a VECTOR of kept items"
-    (assert= [2 4] (filterv even? (list 1 2 3 4)))
-    (is (vector? (filterv even? (list 1 2))))
-    (assert= [] (filterv even? (list 1 3))))
+    (assert= [2 4] (seq/filterv even? (list 1 2 3 4)))
+    (is (vector? (seq/filterv even? (list 1 2))))
+    (assert= [] (seq/filterv even? (list 1 3))))
 
   (test "both accept any seqable source"
     (assert= [1 2 3] (mapv inc (range 3)))
-    (assert= [0 2 4] (filterv even? (range 6)))
+    (assert= [0 2 4] (seq/filterv even? (range 6)))
     (assert= [10 20] (mapv (fn (x) (* x 10)) [1 2]))))
 
 ;; `fold` over a VECTOR takes an indexed fast path (`fold-vec`) rather than the generic

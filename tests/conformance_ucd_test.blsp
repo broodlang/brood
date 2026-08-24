@@ -27,7 +27,7 @@
 
 (defn- ucd-file
   (name)
-  (first (filter (fn (p) (= (path-basename p) name)) (corpus-files "ucd"))))
+  (first (filter (fn (p) (= (path/basename p) name)) (corpus-files "ucd"))))
 
 ;; A line's payload: everything before the `#` comment, tabs folded to spaces.
 (defn- ucd-payload
@@ -68,7 +68,7 @@
 (defn- gb-case
   (line)
   "[input expected-clusters] for a test line, or nil if the line has no test."
-  (let (toks (remove string/blank? (string/split (ucd-payload line) " ")))
+  (let (toks (seq/remove string/blank? (string/split (ucd-payload line) " ")))
     (if (nil? toks)
       nil
       (let (clusters (gb-fold toks nil nil))
@@ -94,7 +94,7 @@
 ;; ---- NormalizationTest -------------------------------------------------------
 
 ;; "0044 0307" -> the string it spells.
-(defn- nt-field (s) (ucd-codes->string (map hex->int (remove string/blank? (string/split s " ")))))
+(defn- nt-field (s) (ucd-codes->string (map hex->int (seq/remove string/blank? (string/split s " ")))))
 
 (defn- nt-case
   (line)
@@ -133,8 +133,8 @@
   (cols)
   (let ([c1 c2 c3 c4 c5] cols
         expect (fn (form sources want)
-                 (first (remove (fn (s) (= (string/normalize s form) want)) sources)))
-        fails (remove nil?
+                 (first (seq/remove (fn (s) (= (string/normalize s form) want)) sources)))
+        fails (seq/remove nil?
                 (list (expect :nfc (list c1 c2 c3) c2)
                   (expect :nfc (list c4 c5) c4)
                   (expect :nfd (list c1 c2 c3) c3)
@@ -254,7 +254,7 @@
 ;; default here overwrote the wrapper's 16 back to 1, the sweep stayed full, and the
 ;; wrapper went on timing out. The environment is read at the same moment, by the code
 ;; that needs it, so there is no ordering to get wrong.
-(def- nt-part1-of (max 1 (or (string->number (or (getenv "BROOD_UCD_PART1_OF") "")) 1)))
+(def- nt-part1-of (max 1 (or (string->number (or (os/getenv "BROOD_UCD_PART1_OF") "")) 1)))
 
 ;; Every `*ucd-part1-of*`-th case of the pre-collected Part1 list, from offset `k`.
 (defn- nt-slice-scan

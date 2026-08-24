@@ -94,7 +94,7 @@ cross-file flat-namespace collisions."
     (do
       (load file)
       {:ok true
-       :diagnostics (or (check-file-structured file) [])
+       :diagnostics (or (reflect/check-file-structured file) [])
        :shadows (or (shadows-for file) [])})
     (catch e
       {:ok false :error (error-shape e)})))
@@ -152,12 +152,12 @@ first (cheap) of two gates; the second is the symlink-resolving check in
 (defn- under-root?
   (abs)
   "Whether real path `abs` is the project root itself or lies strictly under it —
-compared after `canonicalize` on both sides, so a **symlinked directory inside
+compared after `os/canonicalize` on both sides, so a **symlinked directory inside
 the project that points outside** cannot be used to escape (the lexical check
 alone misses this — a purely-relative, `..`-free path can still resolve out of
 the tree through a symlink)."
-  (let (real (canonicalize abs)
-        root (canonicalize *project-root*))
+  (let (real (os/canonicalize abs)
+        root (os/canonicalize *project-root*))
     (and (string? real)
       (string? root)
       (or (= real root) (string/starts-with? real (str root "/"))))))
@@ -176,7 +176,7 @@ path). See the section comment above."
     (throw "no project root — nest mcp must run inside a Brood project"))
   (when (not (safe-rel? rel))
     (throw (str "path must be project-relative — no leading '/' or '~', no '..': " (pr-str rel))))
-  (let (abs (path-join *project-root* rel))
+  (let (abs (path/join *project-root* rel))
     (when (not (under-root? abs))
       (throw (str "path escapes the project sandbox — its real target (following symlinks) "
                "is outside the project root: "
@@ -215,7 +215,7 @@ itself as the trust boundary."
       (throw "write: :content must be a string"))
     (try
       (let (abs (project-path rel)
-            _dir (file/mkdir (parent-directory abs))
+            _dir (file/mkdir (path/dirname abs))
             _w (file/spit abs content))
         (write-result rel abs))
       (catch e
@@ -274,8 +274,8 @@ the agent can branch on `(get r :error)` cleanly."
           {:name name
            :arglist (arglist val)
            :doc (doc val)
-           :type (type-signature sym)
-           :source-location (source-location sym)})
+           :type (reflect/type-signature sym)
+           :source-location (reflect/source-location sym)})
         (catch e
           {:name name :error (error-shape e)})))))
 
@@ -343,32 +343,32 @@ Outside a Brood project, returns `{:error msg}`."
 
 (defn- process-infos
   ()
-  "A `(process-info pid)` stat map for every live process, dropping any that died
-mid-scan. The shared snapshot behind both the `processes` and `process-info`
+  "A `(proc/info pid)` stat map for every live process, dropping any that died
+mid-scan. The shared snapshot behind both the `processes` and `proc/info`
 tools — one definition of \"what we know about a process\"."
-  (remove nil? (map process-info (or (list-processes) []))))
+  (seq/remove nil? (map proc/info (or (proc/list) []))))
 
 (defn processes-tool (args)
   "`processes` — snapshot every live green process with its runtime stats.
 Returns `{:processes [{:id :pid :node :name :status :mailbox :memory
 :collections :reductions :monitored-by :parent} ...]}` — the same
-`(process-info pid)` map the observer reads, so an agent sees mailbox
+`(proc/info pid)` map the observer reads, so an agent sees mailbox
 backlog, cumulative reductions (Erlang's work counter — is it busy?),
 heap bytes, GC count and monitors per process, not just the id. Order
 is unspecified — sort by `:id` (or `:reductions` to find the busiest)
 if you need stability."
   {:processes (process-infos)})
 
-(defn process-info-tool (args)
-  "`process-info` — the full stat map for a single process by `:id` (an
-integer from a `processes` listing). Returns the `(process-info pid)`
+(defn proc/info-tool (args)
+  "`proc/info` — the full stat map for a single process by `:id` (an
+integer from a `processes` listing). Returns the `(proc/info pid)`
 map (`{:id :pid :node :name :status :mailbox :memory :collections
 :reductions :monitored-by :parent}`), or `{:error msg}` if no live
 process carries that id."
   (let (id (get args :id))
     (when (not (int? id))
-      (throw "process-info: :id must be an integer"))
-    (or (find (fn (p) (= (get p :id) id)) (process-infos))
+      (throw "proc/info: :id must be an integer"))
+    (or (seq/find (fn (p) (= (get p :id) id)) (process-infos))
       {:error (str "no live process with id " id)})))
 
 (defn node-tool (args)
@@ -380,12 +380,12 @@ peers. Returns `{:node :workers :peak-threads :spawned :process-count
 :mem-bytes :mem-peak :peers}`. The \"is the runtime healthy / busy?\"
 overview, complementing per-process `processes`."
   {:node (node/name)
-   :workers (worker-threads)
-   :peak-threads (peak-threads)
-   :spawned (spawn-count)
-   :process-count (count (or (list-processes) []))
-   :mem-bytes (mem-bytes)
-   :mem-peak (mem-peak)
+   :workers (dev/worker-threads)
+   :peak-threads (dev/peak-threads)
+   :spawned (dev/spawn-count)
+   :process-count (count (or (proc/list) []))
+   :mem-bytes (dev/mem-bytes)
+   :mem-peak (dev/mem-peak)
    :peers (or (node/list) [])})
 
 (defn vitals-tool (args)
@@ -444,7 +444,7 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
     {:references (mapcat (fn (f)
                            (try
                              (map (fn (lc) {:file f :line (first lc) :col (second lc)})
-                               (references-in-source name (file/slurp f)))
+                               (reflect/references-in-source name (file/slurp f)))
                              (catch _ nil)))
                    (project-all-files *project-root*))}))
 
@@ -524,10 +524,10 @@ like `eval`. Returns `{:error msg}` on failure."
       (throw "bench: :iterations must be a positive integer"))
     (try
       (let (form (read-first src)
-            t0 (now)
+            t0 (os/now)
             value (eval form)
             _done (bench-loop form (- iters 1))
-            total (- (now) t0))
+            total (- (os/now) t0))
         {:ms total
          :iterations iters
          :per-iter-ms (/ (* 1.0 total) iters)
@@ -575,10 +575,10 @@ its owner namespace, whether it's derivable, and which types implement it. Retur
     (let (aname (read-string name-str))
       (if (not (contains? *abilities* aname))
         {:name name-str :error (str "not an ability: " name-str)}
-        (let (ops (ability-ops aname)
-              members (sealed-members aname)
-              reqs (ability-requires aname)
-              owner (ability-owner-ns aname))
+        (let (ops (%ability-ops aname)
+              members (%sealed-members aname)
+              reqs (%ability-requires aname)
+              owner (%ability-owner-ns aname))
           {:name name-str
            :ops (map (fn (spec)
                        {:op (str (first spec))
@@ -589,7 +589,7 @@ its owner namespace, whether it's derivable, and which types implement it. Retur
            :members (if members (map name members) [])
            :requires (if reqs (map str reqs) [])
            :owner (if owner (str owner) nil)
-           :derivable (not (nil? (ability-derive-recipe aname)))
+           :derivable (not (nil? (%ability-derive-recipe aname)))
            :impls (ability-impls aname ops)})))))
 
 (defn check-source-tool (args)
@@ -601,7 +601,7 @@ doesn't parse (incomplete input). Backed by `check-string-structured`."
     (when (not (string? src))
       (throw "check-source: :source must be a string"))
     (try
-      {:diagnostics (or (check-string-structured src) [])}
+      {:diagnostics (or (reflect/check-string-structured src) [])}
       (catch e
         {:error (error-shape e)}))))
 
@@ -621,7 +621,7 @@ the eight v0 tools, the ability/type introspection trio `abilities` / `ability`
 find-references), the three discovery tools `apropos` / `all-globals` /
 `doc-search` (search the flat namespace by name or docstring rather than
 looking up a name you already know), `bench` (time an expression in the
-live image), the runtime-introspection pair `process-info` (one process's
+live image), the runtime-introspection pair `proc/info` (one process's
 stats by id) and `node` (runtime-wide stats) plus `watch-runtime` (the
 runtime-event STREAM — GC/spawn/exit/deopt over an interval, a trace not a
 snapshot) — which, with the now-enriched
@@ -714,12 +714,12 @@ Brood pattern, `std/tool/explain.blsp`)."
      :schema {:type "object" :properties {}}
      :handler processes-tool}
     {:name "process-info"
-     :description "Full stat map for one process by numeric :id (from a `processes` listing): status, mailbox, memory, collections, reductions, monitors, parent. Returns the process-info map, or {:error msg} if no live process has that id."
+     :description "Full stat map for one process by numeric :id (from a `processes` listing): status, mailbox, memory, collections, reductions, monitors, parent. Returns the proc/info map, or {:error msg} if no live process has that id."
      :schema {:type "object"
               :properties {:id {:type "integer"
                                 :description "The numeric process id (as shown in `processes`)"}}
               :required ["id"]}
-     :handler process-info-tool}
+     :handler proc/info-tool}
     {:name "node"
      :description "Runtime-wide stats (the observer's header): node name, scheduler worker count, peak concurrency, total spawned, current live-process count, current/peak memory, connected peers. Returns {:node :workers :peak-threads :spawned :process-count :mem-bytes :mem-peak :peers}."
      :schema {:type "object" :properties {}}
@@ -794,6 +794,6 @@ Brood pattern, `std/tool/explain.blsp`)."
 ;; have wired it up — the right time for a hard error.
 (let (root (project/find-root (file/cwd)))
   (when root
-    (let (project-mcp (path-join root "mcp.blsp"))
+    (let (project-mcp (path/join root "mcp.blsp"))
       (when (file/exists? project-mcp)
         (load project-mcp)))))

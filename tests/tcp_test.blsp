@@ -199,7 +199,7 @@
         ;; drive the mailbox directly: the kernel is free to coalesce real socket
         ;; reads, and this case is precisely about NOT being coalesced.
         (dolist (b (list "a" "b" "\r" "\n" "\r" "\n" "z"))
-          (send (self) [:tcp s (bytes-concat b)]))
+          (send (self) [:tcp s (bytes/concat b)]))
         (let (r (read-until s "\r\n\r\n"))
           (assert= (utf8-bytes->string (nth r 0)) "ab\r\n\r\n")
           ;; `rest` is only surplus from the chunk that COMPLETED the delimiter, and
@@ -224,7 +224,7 @@
         ;; also pins the cut offset (computed from the running total + an index into
         ;; the straddle probe, never from a scan of the whole buffer).
         (dolist (b (list "h" "\r\n\r" "x" "\r\n" "\r\ntail"))
-          (send (self) [:tcp s (bytes-concat b)]))
+          (send (self) [:tcp s (bytes/concat b)]))
         (let (r (read-until s "\r\n\r\n"))
           (tcp/close c)
           (tcp/close s)
@@ -241,13 +241,13 @@
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
         (tcp/set-binary s true)
-        (dotimes (i 200) (send (self) [:tcp s (bytes-concat "0123456789")]))
-        (send (self) [:tcp s (bytes-concat "END\r\n\r\nrest")])
+        (dotimes (i 200) (send (self) [:tcp s (bytes/concat "0123456789")]))
+        (send (self) [:tcp s (bytes/concat "END\r\n\r\nrest")])
         (let (r (read-until s "\r\n\r\n"))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (byte-length (nth r 0)) (+ 2000 3 4))
+          (assert= (bytes/length (nth r 0)) (+ 2000 3 4))
           (assert= (utf8-bytes->string (nth r 1)) "rest")))))
   (test "read-until returns [:closed acc] when the delimiter never arrives"
     (let (ls (tcp/listen "127.0.0.1" 0)
@@ -439,9 +439,9 @@
         ;; 40ms between bytes against a 250ms idle timeout: the idle timer is re-armed
         ;; every time and can never fire. Only the 300ms total deadline ends this.
         (spawn (drip-bytes c 100 40))
-        (let (started (now)
+        (let (started (os/now)
               r (read-until s "\r\n\r\n" {:timeout-ms 250 :deadline-ms 300})
-              elapsed (- (now) started))
+              elapsed (- (os/now) started))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
@@ -453,7 +453,7 @@
           ;; "we waited for the peer".
           (assert= (< elapsed 3000) true)
           ;; and bytes really were arriving throughout — the idle timer was being reset
-          (assert= (> (byte-length (nth r 1)) 1) true)))))
+          (assert= (> (bytes/length (nth r 1)) 1) true)))))
   (test "a frame that arrives inside the deadline is delivered normally"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -477,9 +477,9 @@
         (tcp/set-binary s true)
         ;; :deadline-ms 0 — the budget is gone before the first receive. The wait is
         ;; floored at 1ms, so this must return immediately, not block on `after 0`.
-        (let (started (now)
+        (let (started (os/now)
               r (read-until s "\r\n\r\n" {:deadline-ms 0})
-              elapsed (- (now) started))
+              elapsed (- (os/now) started))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
@@ -496,9 +496,9 @@
         (tcp/set-binary s true)
         ;; a declared 100-byte body that drips in and never completes in time
         (spawn (drip-bytes c 100 40))
-        (let (started (now)
+        (let (started (os/now)
               r (read-n s 100 {:timeout-ms 250 :deadline-ms 300})
-              elapsed (- (now) started))
+              elapsed (- (os/now) started))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)

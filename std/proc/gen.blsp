@@ -167,9 +167,9 @@ clause is dropped (so the mailbox can't leak)."
         clauses (if doc (rest clauses) clauses)
         state-sym (first params)
         ;; Lifecycle clauses are pulled out; the rest are message clauses.
-        init-clause (find (fn (c) (= (first c) 'init)) clauses)
-        term-clause (find (fn (c) (= (first c) 'terminate)) clauses)
-        cc-clause (find (fn (c) (= (first c) 'code-change)) clauses)
+        init-clause (seq/find (fn (c) (= (first c) 'init)) clauses)
+        term-clause (seq/find (fn (c) (= (first c) 'terminate)) clauses)
+        cc-clause (seq/find (fn (c) (= (first c) 'code-change)) clauses)
         msg-clauses (filter (fn (c)
                               (not (includes? (list 'init 'terminate 'code-change) (first c))))
                       clauses)

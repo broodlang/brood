@@ -138,13 +138,13 @@
     (assert= (get (/ (usd 900) 3) :cents) 300)
     ;; variadic + folds through the same dispatch
     (assert= (get (+ (usd 100) (usd 200) (usd 300)) :cents) 600))
-  (test "a pair with no method is a loud :no-method error, not a silent coercion"
+  (test "a pair with no method is a loud :%no-method error, not a silent coercion"
     ;; `usd` has no `[usd usd]` mul method — mixing errors instead of silently coercing.
     (let (e (try (* (usd 5) (usd 5)) (catch e e)))
-      (assert= (get e :kind) :no-method)
+      (assert= (get e :kind) :%no-method)
       (assert= (get e :multi) 'num-mul)))
   (test "a hand-written {:__id__ nil} is a plain map, not a record (truthy-id rule)"
-    ;; matches `record?`/`identity-of`: a nil id dispatches as :map, so arithmetic gives the
+    ;; matches `record?`/`%identity-of`: a nil id dispatches as :map, so arithmetic gives the
     ;; ordinary number error rather than routing to the Num multimethod.
     (let (e (try (apply + (list 5 {:__id__ nil})) (catch e (error-message e))))
       (is (includes? e "got map"))))

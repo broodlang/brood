@@ -15989,3 +15989,154 @@ earlier string/`seq` reorganizations — those had left `mod/to-`/`from-` in pla
 finishes the job. Module-qualified *shadows* of prelude globals (`stream/map`,
 `multimap/get`, `string/repeat`) are untouched — those are intentional per-module
 vocabularies, not a naming inconsistency.
+
+## ADR-240 — A primitive's name has one definition site; renames are compiler-enforced
+
+**Context.** Renaming a primitive was the single most error-prone operation in this repo,
+and the failure mode was always the same: the *name* is a bare string literal, copy-pasted
+into sites that agree only by string equality, so a rename that misses one fails **silently
+at a user's call site** rather than at build. Three instances in one session:
+
+- `now-ns` — the registration (`def(heap, "now-ns", …)`) and its `PRIMITIVE_DOCS` entry
+  (`("%now-ns", …)`) were two parallel arrays keyed by string. A `%`-prefixing pass caught the
+  doc and missed the single-line registration. Result: `%now-ns` unbound at boot.
+- `%table-snapshot` / `%table-incr` — the registration moved, but the linmap rewrite in
+  `eval/macros.rs` still *emitted* `value::sym("table-snapshot")` as a call head, and
+  `compile/ir.rs` still matched the old name for its PrimOp fast path. The rewrite produced
+  calls to a name nothing binds.
+- `table/new` in the prelude — `with-err-str`'s macro body and `%table-from-map` reached for
+  the `table/` *module wrapper*, which is not loaded in the boot image or at an arbitrary
+  user call site. `(temp-path …)` shipped broken the same way, via `rand/token`.
+
+The common root is that nothing tied the copies together, so *absence* of an edit was
+invisible. A drift-guard test existed for the docs array and did not fire — it compared the
+two arrays but ran only under `cargo test`, and the mismatch it was built to catch is exactly
+the one that shipped.
+
+**Decision.** Remove the ability to desync, in three layers:
+
+1. **One registration per primitive.** `PRIMITIVE_DOCS` is deleted; `def()` takes
+   `name, arity, sig, params, doc, func` in one call, so a primitive's name, arity, signature,
+   arg list and docstring are one expression. There is no second array to fall out of step
+   with, and the drift-guard test is deleted with it — the invariant is now structural.
+2. **One constant per cross-file name.** A primitive named in more than one Rust file gets a
+   `pub const` in `core/keywords.rs` (the existing `EQ_PRIM`/`TRY_PRIM` convention), and every
+   site references the constant. The table ops now flow from `kw::TABLE_*` through all five
+   sites — registration, `ir.rs` PrimOp match, `inline.rs` linmap ops, `macros.rs` emitted
+   heads, `check/guard_effects.rs`. Renaming is a one-line edit that the compiler then
+   enforces everywhere; a missed site is a build error, not a runtime unbound.
+3. **A build-time prelude-hygiene lint.** Prelude code — including anything a prelude macro
+   expands into — must reach for the `%`-primitive, never a `mod/name` module wrapper, since
+   the wrapper is not loaded at boot or at an arbitrary call site. The lint walks the boot
+   image's CST and flags any qualified symbol that is neither a registered primitive (many
+   kernel primitives are *themselves* slash-named: `file/slurp`, `string/split`) nor in a
+   small force-loaded allow-list. Symbols are the only leaf it inspects, so a docstring or
+   comment naming a module is not a false positive.
+
+**The caller side: renames go through the CST, not through text.** `codemod`'s
+`token-replace` is boundary-aware but context-*blind* — it rewrites the name wherever the
+characters appear, including in docstrings, `;` comments, `(quote …)` data, and on the
+module's own `defn` head. That is what corrupted prose ("the offload pool" →
+"the proc/offload pool") and clobbered the prelude's own `offload` definition. `nest rename`
+now defaults to `codemod/cst-rename`, which reassembles each file from `parse-source`'s
+lossless CST and rewrites only `:symbol` leaves, with `--refs-only` / `--defs-only` /
+`--in-quote` for the def-vs-reference distinction and `--text` as the opt-in escape hatch to
+the old behaviour. Losslessness is verified by round-tripping all 320 in-repo `.blsp` files
+through a no-op rename and requiring byte-identical output.
+
+**Consequences.** A primitive rename is now: edit the constant (or the single registration),
+build, fix what the compiler flags. The classes of bug above cannot recur silently — the
+first two become build errors, the third a failing lint. The cost is one indirection for
+cross-file names, and the discipline that a *new* CST wrapper kind must be added to
+`codemod`'s sigil table — which raises a loud error rather than silently dropping source
+text, the failure that `~@` (kind `:splice`, not the guessed `:unquote-splice`) produced
+across 24 files before the round-trip check caught it.
+
+## ADR-241 — A library name may shadow a core name only if the module is used qualified
+
+**Context.** Making `gen` core (its client verbs `call`/`cast`/`stop` are bare prelude
+names now) turned a latent question into a live one: fourteen library exports across the
+ecosystem shadowed a core name, so `(:use that-module)` silently cost the importer the core
+binding. The blanket reading of "a library must not clash with core" would rename all
+fourteen — including `wasm/call`, `version/compare` and `log/error`, whose names are exactly
+right in their own domain and whose qualified form is what everyone actually writes.
+
+**Decision.** The test is **"would a reasonable caller write `(:use this)`?"**, not "does the
+name collide?". In priority order:
+
+1. **Duplicate → delete it.** If the clashing member does what core already does, remove it.
+   `supervisor/stop` was `(send sup [:$stop])` and core `stop` is `(send pid [:$stop])` — the
+   same message, because a supervisor *is* a server process. `config/last-index-of` was an
+   exact reimplementation of the prelude's. Confirm by running it, not by reading it: the
+   supervisor case was verified by starting one, calling core `stop`, and watching it leave
+   `proc/list`.
+2. **A module meant to be `:use`d bare → rename the member.** A DSL you pipe through
+   (`changeset`, `accounts`) has to stay clash-free: `changeset/cast` → `permit` (which is
+   also the better name — it is Rails' strong-parameters allowlist, not a conversion),
+   `accounts/register` → `sign-up` (core `register` is process-name registration).
+3. **A module meant to be used qualified → keep the name.** `wasm/call`, `wasm/load`,
+   `version/compare`, `version/satisfies?`, `log/error`, `package/update` all read correctly
+   qualified, and renaming them would make the common (qualified) call site worse to serve a
+   rare bare import. The shadow warning already tells that importer to `:exclude` or use
+   `/name`. Note `version/compare` is emphatically *not* redundant with core `compare`, which
+   gets every version case wrong lexicographically (`"1.10.0" < "1.9.0"`, `"1.2" ≠ "1.2.0"`).
+4. **Shadowing a core name from inside your own module → reach core as `/name`.**
+   `hatch/http/server` defines its own `stop (port)`, so a bare `(stop sup)` there called
+   *itself* with a pid and silently failed to tear the supervisor down — caught by its test.
+   The call sites are now `(/stop sup)`, annotated with why.
+
+**Consequences.** The ecosystem is clash-free where it matters and unchanged where the
+qualified name is the point. A deliberate shadow is still allowed (the `shdprov` test fixture
+shadows `inc` on purpose, to test shadowing). Two workarounds retire: `bedit`'s
+`(:use supervisor :exclude [stop])` and four `(:use wire/bytes :exclude [byte-at])` in
+store-postgres, the latter replaced by renaming that genuinely-different extension
+(`byte-at` accepts a byte-string as well as `bytes`) to `octet-at`.
+
+## ADR-242 — The bare core is what a basic algorithm reaches for; everything else earns a namespace
+
+**Context.** The hosted reference listed 613 "core" names. That number was wrong twice over,
+and both errors pushed the same way — making the language look far larger than it is.
+
+**Decision, and what each part of the 613 actually was.**
+
+1. **191 were private.** `/reference/core` is the one doc page built from the LIVE IMAGE
+   rather than from source, and its filter was written in terms of the NAME. A prelude
+   `(defn- helper …)` still binds a root global — privacy is a fact the runtime records
+   (ADR-146), not something the spelling reveals — so the match compiler's 40 `match-*`
+   functions, the `receive-*` expansion helpers, `spy-*`, `defmodule-*` and the `x`/`l`
+   transducers were all published. One `(not (private? sym))` clause.
+2. **22 more should have been private and weren't.** The earlier privatization pass matched
+   `^(defn name`, so it walked past every definition nested inside a `(check-allow …)`
+   wrapper. The bootstrap list builders (`append-2`, `append-rev`, `append-empty?`) are a
+   subtler case: they are `(def name (fn …))` because they run *before* `defn` and `def-`
+   exist, so they cannot use the private form at all and are marked with `%mark-private`
+   once the macro layer is up.
+3. **Runtime diagnostics became `dev/`** (20 names): memory, GC, scheduler, profiler and VM
+   counters. The test is "does it program a running system, or inspect one?" Most were
+   already `dev-tools`-gated out of a lean build, so they never belonged in the vocabulary a
+   released app reads as core.
+4. **The ability/multimethod registry became `%`-prefixed** (26 names). `defability`/`impl`/
+   `defmulti` EMIT these, so they must stay reachable from expanded user code — `defn-`
+   would break dispatch, while `%` hides them from the reference and keeps them callable.
+5. **Source tooling became `reflect/`** (18 names): the advisory checker, the lossless CST,
+   the scanners, the def-site queries. The line is "what a program does to itself" vs "what
+   a tool does to source text" — so `doc`, `arglist`, `bound?`, `apropos`, `macroexpand`
+   stay bare, because you type those at a REPL and namespacing them would tax the commonest
+   exploratory use to serve a rare one. `check-allow` stays too: it is a source PRAGMA the
+   Rust checker matches textually, like `sig`.
+
+**Also: there is no `:other` category any more.** `category-of` fell back to `:other`, which
+is not an error, so an uncatalogued name landed silently in a junk drawer at the bottom of
+the reference — 41 entries deep, and hiding genuinely core vocabulary. `stop`, `cast`,
+`call`, `spawn-server` and `defprocess` were uncategorised only because `gen` moved from a
+module into the prelude, and `tap`/`then` sat there instead of beside `->` and `->>`. A
+reader scanning by category never saw them. Every public core name now has a category and
+`tests/docs_test.blsp` asserts it, printing the offenders rather than a count.
+
+**Consequences.** Public core is **337 names**, and it is an honest number: the reference
+publishes what a caller can actually use. The recurring hazard through all five waves was
+Brood embedded where no checker looks — the ability registry names are read BY THE CHECKER
+from Rust (renaming them broke dispatch instantly, now fixed with `kw::` constants per
+ADR-240), `introspect.rs` builds `(source-location 'name)` as a string, and `nest run`
+builds `(check-file …)`. `scripts/stale-names.sh` is the tool for that, and it earned its
+place: it also found 13 `scripts/fuzz/stress/*.blsp` no wave had ever touched.

@@ -3,7 +3,7 @@
 ;;
 ;; Coverage:
 ;;   cond    — odd clause count → named error
-;;   defseq  — non-string docstring → named error
+;;   %defseq  — non-string docstring → named error
 ;;   dotimes — malformed bind → named error
 ;;   dolist  — malformed bind → named error
 ;;   for     — unpaired binding / bare :when → named error
@@ -68,32 +68,32 @@
     ;; missing-expression error it always was for any other test.
     (assert-error (eval '(cond :else)))))
 
-;; ── 2. defseq — non-string docstring ─────────────────────────────────────────
+;; ── 2. %defseq — non-string docstring ─────────────────────────────────────────
 
 ;; Define the toy sequence op at module level so the compiler sees it.
-(defseq my-double () "Double each element." (cons (* 2 item) acc))
+(%defseq my-double () "Double each element." (cons (* 2 item) acc))
 
-(describe "defseq — wrong syntax"
-  (test "valid defseq works"
+(describe "%defseq — wrong syntax"
+  (test "valid %defseq works"
     (assert= (my-double '(1 2 3)) '(2 4 6)))
 
   (test "non-string docstring raises a clear error"
-    (let (msg (expand-error '(defseq bad-seq () :not-a-string (cons item acc))))
+    (let (msg (expand-error '(%defseq bad-seq () :not-a-string (cons item acc))))
       (is (string? msg))
-      (is (includes? msg "defseq"))
+      (is (includes? msg "%defseq"))
       (is (includes? msg "docstring"))))
 
   (test "error shows the bad value"
-    (let (msg (expand-error '(defseq bad-seq () :not-a-string (cons item acc))))
+    (let (msg (expand-error '(%defseq bad-seq () :not-a-string (cons item acc))))
       (is (includes? msg ":not-a-string"))))
 
   (test "integer docstring raises"
-    (let (msg (expand-error '(defseq bad-seq () 42 (cons item acc))))
-      (is (includes? msg "defseq"))))
+    (let (msg (expand-error '(%defseq bad-seq () 42 (cons item acc))))
+      (is (includes? msg "%defseq"))))
 
   (test "symbol docstring raises"
-    (let (msg (expand-error '(defseq bad-seq () some-sym (cons item acc))))
-      (is (includes? msg "defseq")))))
+    (let (msg (expand-error '(%defseq bad-seq () some-sym (cons item acc))))
+      (is (includes? msg "%defseq")))))
 
 ;; ── 3. dotimes — malformed bind ───────────────────────────────────────────────
 

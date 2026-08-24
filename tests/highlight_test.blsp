@@ -14,19 +14,19 @@
 (describe "scan-tokens — the native lexical token stream"
   ;; scan-tokens returns a VECTOR of [start end kind text] (like parse-source).
   (test "tokens carry [start end kind text], whitespace skipped"
-    (assert= (scan-tokens "(map 42 :k)")
+    (assert= (reflect/scan-tokens "(map 42 :k)")
       [[0 1 :open "("]
         [1 4 :symbol "map"]
         [5 7 :number "42"]
         [8 10 :keyword ":k"]
         [10 11 :close ")"]]))
   (test "strings honour escapes; comments run to end of input"
-    (assert= (scan-tokens "\"a\\\"b\" ; c")
+    (assert= (reflect/scan-tokens "\"a\\\"b\" ; c")
       [[0 6 :string "\"a\\\"b\""] [7 10 :comment "; c"]]))
   (test "nil/true/false classify as keyword (constants)"
-    (assert= (scan-tokens "nil") [[0 3 :keyword "nil"]]))
+    (assert= (reflect/scan-tokens "nil") [[0 3 :keyword "nil"]]))
   (test "empty source yields no tokens"
-    (assert= (scan-tokens "") [])))
+    (assert= (reflect/scan-tokens "") [])))
 
 (describe "highlight-spans — token classification"
   (test "special form vs call vs number"

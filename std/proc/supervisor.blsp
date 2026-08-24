@@ -292,7 +292,7 @@ from the reversed `:back` when it empties. Tail-recursive."
 `over?` is true if the count now exceeds `:max-restarts` (the crash loop won't
 settle) and `window` is the updated intensity window."
   (let (window-ms (* 1000 (get state :max-seconds))
-        w (supervisor-window-add (get state :restarts) (now) window-ms))
+        w (supervisor-window-add (get state :restarts) (os/now) window-ms))
     [(> (get w :count) (get state :max-restarts)) w]))
 
 ;; ---- the supervisor process -------------------------------------------------
@@ -405,9 +405,9 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
                                                                                    :children))
                                     trig-pid
                                     (get state :strategy))
-            survivors (remove (fn (c) (= (get c :pid) trig-pid)) affected)
+            survivors (seq/remove (fn (c) (= (get c :pid) trig-pid)) affected)
             _ (supervisor-terminate-many survivors)
-            restarted (remove nil?
+            restarted (seq/remove nil?
                         (map (fn (c)
                                (supervisor-maybe-restart c
                                  (if (= (get c :pid) trig-pid) reason :killed)))
@@ -619,8 +619,8 @@ Returns the new pid, `:not-found`, or `[:error msg]` if the `:start` thunk raise
 Synchronous (see `which-children` for the deadline / dead-server behaviour)."
   (call sup [:restart-child key]))
 
-(defn stop (sup)
-  "Stop the supervisor `sup`: it leaves its receive loop and terminates each of its
-children (per their `:shutdown`), so nothing is left orphaned. Fire-and-forget —
-returns nil immediately; the teardown happens in the supervisor process."
-  (send sup [:$stop]))
+;; No `stop` here: a supervisor is an ordinary server process and answers the SAME
+;; `[:$stop]` message the core `stop` sends, so `(stop sup)` already tears it down
+;; (children first, per their `:shutdown`). The wrapper this replaces was
+;; `(send sup [:$stop])` verbatim — a duplicate whose only effect was to shadow the
+;; core `stop` for anyone writing `(:use supervisor)`.

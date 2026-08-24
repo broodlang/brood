@@ -7,7 +7,7 @@ use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 
-/// `(getenv name)` — the value of environment variable `name` as a string, or nil
+/// `(%getenv name)` — the value of environment variable `name` as a string, or nil
 /// if it is unset. Lets Brood locate things like the user config directory.
 pub(super) fn getenv(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_string(heap, "getenv", arg(args, 0))?;

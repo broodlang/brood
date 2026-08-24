@@ -349,7 +349,7 @@
     (is (reserved-package-name? 'json))
     (is (reserved-package-name? "set"))
     (is (reserved-package-name? 'http)) ; a flat net module (was net/http)
-    (is (reserved-package-name? 'gen)) ; a flat proc module (was proc/gen)
+    (is (reserved-package-name? 'supervisor)) ; a flat proc-group module (std/proc/supervisor.blsp)
     (is (reserved-package-name? 'editor))) ; a group prefix — owns buffer, ui, …
   (test "reserved-package-name? is false for an ordinary package name"
     (is (not (reserved-package-name? 'myapp)))
@@ -380,34 +380,34 @@
 (describe "require: co-located module by name (nameless project / bare run, ADR-223)"
   :isolated
   (test "a module in a file whose name it does not share is require-able by name"
-    (let (dir (temp-path "brood-coloc-req-"))
+    (let (dir (path/temp "brood-coloc-req-"))
       (file/mkdir dir)
-      (file/spit (path-join dir "combined.blsp")
+      (file/spit (path/join dir "combined.blsp")
         "(defmodule combined-primary)\n(defn cbase () :base)\n(defmodule combined-extra)\n(defn cextra () :extra)\n")
       (set-load-path! (cons dir *load-path*))
       (require-one 'combined-extra)
       (assert= :extra (combined-extra/cextra))))
   (test "requiring one co-located module loads its file's siblings too"
-    (let (dir (temp-path "brood-coloc-sib-"))
+    (let (dir (path/temp "brood-coloc-sib-"))
       (file/mkdir dir)
-      (file/spit (path-join dir "pair.blsp")
+      (file/spit (path/join dir "pair.blsp")
         "(defmodule pair-a)\n(defn pa () 1)\n(defmodule pair-b)\n(defn pb () 2)\n")
       (set-load-path! (cons dir *load-path*))
       (require-one 'pair-b)
       (assert= 3 (+ (pair-a/pa) (pair-b/pb)))))
   (test "two files declaring the same co-located module error loudly"
-    (let (dir (temp-path "brood-coloc-dup-"))
+    (let (dir (path/temp "brood-coloc-dup-"))
       (file/mkdir dir)
-      (file/spit (path-join dir "x.blsp") "(defmodule x-primary)\n(defmodule shared-dup)\n")
-      (file/spit (path-join dir "y.blsp") "(defmodule y-primary)\n(defmodule shared-dup)\n")
+      (file/spit (path/join dir "x.blsp") "(defmodule x-primary)\n(defmodule shared-dup)\n")
+      (file/spit (path/join dir "y.blsp") "(defmodule y-primary)\n(defmodule shared-dup)\n")
       (set-load-path! (cons dir *load-path*))
       (is (try
             (do (require-one 'shared-dup) false)
             (catch e (includes? (str (error-message e)) "more than one"))))))
   (test "across processes: a co-located module's produced value round-trips through send"
-    (let (dir (temp-path "brood-coloc-proc-"))
+    (let (dir (path/temp "brood-coloc-proc-"))
       (file/mkdir dir)
-      (file/spit (path-join dir "vals.blsp")
+      (file/spit (path/join dir "vals.blsp")
         "(defmodule vals-primary)\n(defmodule vals-extra)\n(defn payload (n) {:n n :sq (* n n)})\n")
       (set-load-path! (cons dir *load-path*))
       (require-one 'vals-extra)

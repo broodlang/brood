@@ -367,7 +367,7 @@ fn slurp_round_trips_a_file() {
 #[test]
 fn source_location_records_def_sites_from_a_loaded_file() {
     // ADR-031: loading a file records where each top-level def/defn/defmacro was
-    // defined, so `(source-location 'name)` can answer cross-file goto-definition.
+    // defined, so `(%source-location 'name)` can answer cross-file goto-definition.
     let mut path = std::env::temp_dir();
     path.push(format!("brood-srcloc-{}.blsp", std::process::id()));
     std::fs::write(&path, "(defn foo (x) (* x 2))\n(def bar 10)\n").unwrap();
@@ -383,11 +383,11 @@ fn source_location_records_def_sites_from_a_loaded_file() {
     // `defn` (a macro lowering to `def`) is still located: the site is captured
     // pre-expansion. Both names point at their form's line, column 1.
     assert_eq!(
-        loc(&mut interp, "(source-location 'foo)"),
+        loc(&mut interp, "(%source-location 'foo)"),
         format!("[\"{p}\" 1 1]")
     );
     assert_eq!(
-        loc(&mut interp, "(source-location 'bar)"),
+        loc(&mut interp, "(%source-location 'bar)"),
         format!("[\"{p}\" 2 1]")
     );
     // A prelude `defn` (`map`) does have a recorded site — it points at the
@@ -395,13 +395,13 @@ fn source_location_records_def_sites_from_a_loaded_file() {
     // `introspect::source_location_resolves_prelude_fns_but_not_builtins_or_unbound`).
     // A Rust primitive (`cons`) has no Brood source, and an unknown name has
     // no global at all, so both still yield `nil`.
-    let map_loc = loc(&mut interp, "(source-location 'map)");
+    let map_loc = loc(&mut interp, "(%source-location 'map)");
     assert!(
         map_loc.contains("prelude.blsp"),
         "expected prelude `map` to resolve to its cache copy, got {map_loc}"
     );
-    assert_eq!(loc(&mut interp, "(source-location 'cons)"), "nil");
-    assert_eq!(loc(&mut interp, "(source-location 'no-such-xyz)"), "nil");
+    assert_eq!(loc(&mut interp, "(%source-location 'cons)"), "nil");
+    assert_eq!(loc(&mut interp, "(%source-location 'no-such-xyz)"), "nil");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -512,8 +512,8 @@ fn native_arity_is_enforced_centrally() {
         "arity error: cons: expected 2 arguments, got 1"
     );
     assert_eq!(
-        err("(now 1 2)"),
-        "arity error: now: expected 0 arguments, got 2"
+        err("(%now 1 2)"),
+        "arity error: %now: expected 0 arguments, got 2"
     );
     assert_eq!(
         err("(apply +)"),

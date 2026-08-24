@@ -1,0 +1,80 @@
+;; std/codemod — the CST-backed, context-aware rename behind `nest rename`.
+;;
+;; The property that matters is LOSSLESSNESS: the rewrite reassembles the file from its
+;; CST leaves, so anything that is not a matching symbol token must survive byte-for-byte.
+;; A rename wave that corrupts a docstring, a `;` comment, or quoted data is exactly the
+;; failure these tests pin down — it happened (a `sed`-style wave rewrote "the offload
+;; pool" in prose and clobbered the prelude's own `defn offload` head), which is why the
+;; default rename is CST-backed and `--text` is the opt-in escape hatch.
+
+(defmodule codemod-test (:use test) (:use codemod))
+
+(def src
+  (str "(defn foo (x) \"doc mentions foo\" (bar x)) ; foo in a comment\n"
+    "(quote foo)\n"
+    "(foo 1)\n"
+    "'(foo 2)\n"
+    "(foobar foo)\n"
+    "`(a ~foo ~@foo)\n"
+    "[foo {:k foo}]\n"
+    "#{foo}"))
+
+(describe "cst-rename-text — context-aware symbol rewriting"
+
+  (test "an unmatched name leaves the source byte-identical"
+    (is (= src (cst-rename-text src "no-such-name" "zap"))))
+
+  (test "a docstring mentioning the name is never rewritten"
+    (is (includes? (cst-rename-text src "foo" "zap") "\"doc mentions foo\"")))
+
+  (test "a ; comment mentioning the name is never rewritten"
+    (is (includes? (cst-rename-text src "foo" "zap") "; foo in a comment")))
+
+  (test "quoted data is inert by default"
+    (let (out (cst-rename-text src "foo" "zap"))
+      (is (includes? out "(quote foo)"))
+      (is (includes? out "'(foo 2)"))))
+
+  (test ":in-quote opts quoted data in"
+    (let (out (cst-rename-text src "foo" "zap" :in-quote))
+      (is (includes? out "(quote zap)"))
+      (is (includes? out "'(zap 2)"))))
+
+  (test "a longer identifier containing the name is left alone"
+    (is (includes? (cst-rename-text src "foo" "zap") "(foobar zap)")))
+
+  (test "ordinary call positions are rewritten"
+    (is (includes? (cst-rename-text src "foo" "zap") "(zap 1)")))
+
+  (test "an unquote inside a quasiquote is live code and is rewritten"
+    (is (includes? (cst-rename-text src "foo" "zap") "`(a ~zap ~@zap)")))
+
+  (test "vectors, maps and sets are rewritten and keep their delimiters"
+    (let (out (cst-rename-text src "foo" "zap"))
+      (is (includes? out "[zap {:k zap}]"))
+      (is (includes? out "#{zap}"))))
+
+  (test ":refs-only leaves the definition head alone"
+    (let (out (cst-rename-text src "foo" "zap" :refs-only))
+      (is (includes? out "(defn foo (x)"))
+      (is (includes? out "(zap 1)"))))
+
+  (test ":defs-only rewrites only the definition head"
+    (let (out (cst-rename-text src "foo" "zap" :defs-only))
+      (is (includes? out "(defn zap (x)"))
+      (is (includes? out "(foo 1)"))))
+
+  (test "every def head form is recognised for :refs-only"
+    (for (head ["defn" "defn-" "def" "def-" "defmacro" "defdyn" "defrecord"])
+      (let (text (str "(" head " thing 1)\n(thing)")
+            out (cst-rename-text text "thing" "other" :refs-only))
+        ;; the definition keeps its name; the reference below moves
+        (is (includes? out (str "(" head " thing")))
+        (is (includes? out "(other)")))))
+
+  ;; The regression that motivated the whole tool: a wrapper kind whose sigil the
+  ;; rewriter did not know silently DELETED itself from the output (`~@` vanished from
+  ;; 24 stdlib files). Losslessness over every reader macro is the guard.
+  (test "every reader-macro wrapper round-trips"
+    (for (form ["'x" "`x" "`(a ~b)" "`(a ~@b)" "^:kw x" "#{a b}" "{:a 1}" "[1 2]"])
+      (is (= form (cst-rename-text form "no-such-name" "zap"))))))

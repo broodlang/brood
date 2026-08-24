@@ -25,7 +25,7 @@
   (fn (x)
     (if (%eq (type-of x) :nil)
       true
-      (if (%eq (type-of x) :vector) (%eq (vector-length x) 0) false))))
+      (if (%eq (type-of x) :vector) (%eq (%vector-length x) 0) false))))
 (def append-rev
   (fn (src acc)
     ;; Reverse seq `src` (a list or vector) onto list `acc`. Tail-recursive.
@@ -74,6 +74,15 @@
   "Define a MODULE-PRIVATE global `name` (ADR-146) — like `def`, but the name is not exported outside its module."
   `(do (def ~name ~value) (%mark-private '~name)))
 
+;; The bootstrap append helpers above are defined before `def-` exists (they are plain
+;; `(def name (fn …))` because `defn` itself is not available that early), so they are
+;; marked private here instead — the same `%mark-private` fact `def-` records, just stated
+;; once the macro layer is up. Without this they were published as core vocabulary: three
+;; internal list builders nobody can meaningfully call.
+(%mark-private 'append-empty?)
+(%mark-private 'append-rev)
+(%mark-private 'append-2)
+
 ;; ---- logic ----
 (defn not (x)
   "Logical negation: `nil`/`false` become `true`, everything else `false`."
@@ -113,7 +122,7 @@
           (if (map-get coll :__id__ nil)
             (->seq coll)
             (map-pairs coll))
-          (if (%eq t :bytes) (bytes->list coll) coll))))))
+          (if (%eq t :bytes) (%bytes->list coll) coll))))))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 ;; The public entry coerces once via `seq`; the inner `fold-loop` then stays in
@@ -145,7 +154,7 @@
         ;; Raw kernel ops (`if`/`let`/`vector-ref`) only — `fold` is defined before
         ;; `cond`/`second`.
         (let (parts (%seqview-parts coll))
-          (fold ((vector-ref parts 1) f) acc (vector-ref parts 0)))
+          (fold ((%vector-ref parts 1) f) acc (%vector-ref parts 0)))
         (fold-loop f acc (seq coll))))))
 (defn- fold-loop
   (f acc coll)
@@ -155,7 +164,7 @@
 ;; list in reverse (then reversed once at the end). Hoisted to the top level so
 ;; the list builders that reverse-accumulate don't each allocate a fresh closure
 ;; on every call.
-(defn flip-cons (acc x) (cons x acc))
+(defn- flip-cons (acc x) (cons x acc))
 
 ;; A dedicated loop, not `(fold flip-cons …)`: `reverse` is the final pass of
 ;; nearly every sequence builder (`map`/`filter`/`take`/`zip`/`range`/…), so
@@ -168,7 +177,7 @@
   "The items of `coll` in reverse order, as a list."
   (reverse-acc (seq coll) nil))
 
-(defn reverse-onto (coll tail)
+(defn- reverse-onto (coll tail)
   "The items of `coll` reversed, prepended onto `tail`. `(reverse-onto xs ys)` is
 `(append (reverse xs) ys)` — but it walks `xs` **once**, so it is the spelling to
 reach for when a tail-recursive loop has accumulated a reversed prefix and wants to
@@ -307,7 +316,7 @@ splice it back in front of the remainder."
 ;; binding, and re-def every reload — the bug this fixes). Computed at LOAD time, where
 ;; `current-ns` is the module being loaded; a bare/root context (no current-ns) or an
 ;; already-qualified name passes through, matching `def`.
-(defn defonce-qualified-name (sym)
+(defn- defonce-qualified-name (sym)
   (let (ns (current-ns))
     (if (or (nil? ns) (includes? (str sym) "/"))
       sym
@@ -352,8 +361,8 @@ for variadic tails."
   ;; in a bare file's per-file ctx. Then keep the existing semantics: a runtime
   ;; no-op, or a `sig!` runtime contract under BROOD_CONTRACTS=1.
   `(do
-     ~(if (= (getenv "BROOD_CONTRACTS") "1") nil `(%register-sig '~name '~type))
-     ~(if (= (getenv "BROOD_CONTRACTS") "1")
+     ~(if (= (%getenv "BROOD_CONTRACTS") "1") nil `(%register-sig '~name '~type))
+     ~(if (= (%getenv "BROOD_CONTRACTS") "1")
         ;; Contracts mode turns this *declaration* into an *action*: `sig!` rebinds
         ;; `name` to a checking wrapper, so the definition must already exist. A
         ;; `sig` written above its `defn` — the natural place, since a signature is

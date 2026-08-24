@@ -711,6 +711,9 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-11** — the backend seam: a `JitBackend` contract, and the decisions hoisted above it
 - **2026-08-12** — the forward-ref pre-scan was not module-boundary-aware
 - **2026-08-12** — multiple modules per file: the region model (ADR-223 Phase 1)
+- **2026-08-24** — a primitive's name gets one definition site; CST-backed `nest rename` (ADR-240)
+- **2026-08-24** — a library name may shadow core only when used qualified (ADR-241)
+- **2026-08-24** — the bare core: 613 published names down to 337 (ADR-242)
 
 ---
 
@@ -2330,6 +2333,167 @@ waves rotted eight files with nothing watching), and the fuzz generators turned 
 programs that died on unbound symbols — reporting a checker false positive instead of comparing
 engines, which also looked like working. Prefer proving a new gate red before trusting it green.
 
+## 2026-08-24 — one definition site per primitive name; renames the compiler can check (ADR-240)
+
+Started as fallout from the namespace moves and turned into the structural fix, because the
+same bug shape kept reappearing: **a primitive's name is a string literal copy-pasted across
+sites that agree only by string equality, so a rename that misses one fails silently at a
+user's call site.** Three in one session — `%now-ns` unbound at boot (the registration was a
+single-line `def()` a multi-line `%`-prefixing pass never matched, while its `PRIMITIVE_DOCS`
+entry *was* rewritten); `%table-snapshot`/`%table-incr` unbound from the linmap rewrite (the
+registration moved, the emitter in `macros.rs` and the PrimOp match in `ir.rs` did not); and
+`table/new` reached from prelude code, where the `table/` module is not loaded.
+
+Worth naming the near-miss: the `%table-*` breakage was hidden behind a **stale
+`.brood/image.bin`**, so `nest check` reported the old world and the failures only appeared
+after deleting the startup image. A cached boot image that survives a rename is its own
+category of "gate that cannot fail".
+
+Three layers, each verified by sabotage rather than by watching it pass:
+
+1. **`PRIMITIVE_DOCS` is gone.** 391 `def()` calls now carry `name, arity, sig, params, doc,
+   func` in one expression — the two parallel arrays that produced the `now-ns` desync no
+   longer exist, and the drift-guard test that was supposed to catch it is deleted along with
+   the drift it guarded. Done by script with a **snapshot oracle**: dump every native's
+   `(name, params, doc)` before and after and require an identical diff. 390 rows, zero
+   differences, so the merge is provably doc-preserving rather than plausibly so.
+2. **Cross-file names come from `kw::` constants.** The table ops flow from `kw::TABLE_*`
+   through all five sites (registration, `ir.rs`, `inline.rs`, `macros.rs`,
+   `guard_effects.rs`). A rename is one line; the compiler flags the rest.
+3. **A prelude-hygiene lint** walks the boot image's CST and rejects any qualified `mod/name`
+   that is not a registered primitive or force-loaded. It immediately found a **shipped bug**:
+   `(temp-path "x")` raised `unbound: rand/token` for anyone who had not required `rand`.
+   Calibration mattered — the first version flagged `file/slurp` and friends, which are
+   kernel primitives *named* with a slash and always bound; checking against the actual
+   registration set cut 5 findings to the 1 real one.
+
+**And the caller side: `nest rename` now goes through the CST.** `token-replace` is
+boundary-aware but context-blind, which is why the rename waves rewrote comment prose ("the
+offload pool" → "the proc/offload pool"), edited docstrings, and clobbered the prelude's own
+`defn offload` head — the corruption I spent this session repairing by regenerating files from
+`git show`. `codemod/cst-rename` reassembles each file from `parse-source`'s lossless CST and
+rewrites only `:symbol` leaves, so a docstring, a `;` comment, and `(quote …)` data cannot be
+touched by construction; `--refs-only`/`--defs-only` add the def-vs-reference distinction that
+a text pass cannot express, and `--text` keeps the old behaviour when a rename really must
+touch prose.
+
+Losslessness is the property that matters, and asserting it on toy input was not enough: the
+first version silently **deleted `~@`** from 24 stdlib files, because the CST spells
+unquote-splice `:splice` and I had guessed `:unquote-splice`. Round-tripping all 320 in-repo
+`.blsp` files through a no-op rename found it; an unknown wrapper kind now raises rather than
+emitting its subtree bare. Same lesson as the `--workspace` gate two entries up: **prove the
+new check red before trusting it green** — and prefer a property test over the whole corpus to
+a handful of hand-written cases, since the cases you write are the ones you already thought of.
+
+## 2026-08-24 (later) — the clash rule, and a duplicate that had been costing people (ADR-241)
+
+Making `gen` core put fourteen library exports in conflict with a bare core name. The
+blanket reading of "a library must not clash with core" would rename all fourteen; the
+useful test turned out to be **"would a reasonable caller write `(:use this)`?"**
+
+Best outcome of the pass: `supervisor/stop` did not need a new name, it needed deleting.
+It was `(send sup [:$stop])`; core `stop` is `(send pid [:$stop])`. A supervisor *is* a
+server process, so `(stop sup)` already worked — verified by starting a real supervisor,
+calling core `stop`, and watching it leave `proc/list`, rather than by noting the sources
+matched. The duplicate had already cost `bedit` a `(:use supervisor :exclude [stop])`.
+
+Deleting it then exposed a quieter bug in hatch: `http/server` defines its **own**
+`stop (port)`, so a bare `(stop sup)` inside that module called *itself* with a pid and
+silently failed to tear the worker supervisor down. Its own test caught it. Fixed with the
+root-qualified `(/stop sup)` — worth remembering that a module shadowing a core name
+shadows it for *itself* first, which is where it will hurt.
+
+The same "do we really need it" check retired `config/last-index-of` (an exact
+reimplementation of the prelude's) and, in the other direction, confirmed
+`version/compare` is emphatically NOT redundant: core `compare` gets every version case
+wrong lexicographically (`"1.10.0" < "1.9.0"`, `"1.2" != "1.2.0"`). Kept.
+
+Renames where the module really is used bare: `changeset/cast` -> `permit` (also the more
+accurate name — a strong-parameters allowlist, not a conversion), `accounts/register` ->
+`sign-up`, `docbuild/parse-source` -> `parse-module`, and store-postgres's `byte-at` ->
+`octet-at`, which retired four `:exclude [byte-at]` workarounds and immediately caught a
+test that had been silently relying on the shadow (it passed a *string* to what it thought
+was the extension).
+
+Also fixed hive's three long-standing failures. Two were stale expectations, but the third
+was a real bug: `render-inline` returned a VECTOR of nodes in three branches, and the
+template renderer reads a vector as an element and a list as a child sequence — so
+`[:strong {} ["hi"]]` rendered as `<strong><hi></hi></strong>`. Every bold run on the
+public changelog was broken.
+
+### The same day, later: `nest run` was completely broken and nothing said so
+
+`nest run <anything>` failed with `unbound symbol: getenv` — every invocation, no project
+needed. `nest check` reported 0 warnings and the 4692-test in-language suite was green.
+
+The name lives in a **Rust string**: `crates/nest/src/main.rs` builds the pre-run check as
+`"(unless (= (getenv \"BROOD_NO_CHECK\") …"`. No checker can see that, and no `.blsp` tool
+reads `crates/`. Ten more sites of the same shape turned up once looked for — executable
+fixtures in `distribution.rs`, `reductions.rs`, `basic.rs`, `mcp_sandbox.rs`, plus
+user-facing error hints in `dist.rs`/`mailbox.rs`/`eval/mod.rs` telling people to call
+`(process-flag …)`, a function that no longer exists.
+
+**`crates/nest/tests/run_main.rs` already existed and would have caught it on the first
+run.** It was never run: the RAM ceiling on this machine rules out `make test`, which had
+quietly become "run `cargo test -p brood --lib` and call it verified". The integration
+tests are cheap — `-p nest --tests` is 20 s — and running them also caught the
+`distribution.rs` fixture and two MCP tests, the latter a real API bug: an earlier perl
+pass had renamed the **MCP tool** `process-info` to `proc/info`, and every other tool is
+slash-free kebab-case because `/` is invalid in an MCP tool name. Reverted the tool name;
+the Brood function stays `proc/info`.
+
+A general "extract every Brood snippet embedded in Rust and resolve its free symbols" lint
+was prototyped and **rejected**: ~162 candidates, overwhelmingly docstring prose,
+deliberately-unbound fixtures (`no-such-fn`) and record names defined inside the snippet —
+and the known-names set was itself unreliable (the dump missed `node/connect`, which
+exists). A gate with that signal-to-noise gets ignored.
+
+What shipped instead is `scripts/stale-names.sh`: grep the whole repo — `.rs`, `.md`,
+quoted forms, string literals — for the specific names a wave just moved. It found all
+eleven Rust sites in seconds and then **13 more `scripts/fuzz/stress/*.blsp`** that no
+rename wave had ever touched. Sabotage-testing it caught a bug in the script itself: the
+boundary class was written `[^…^-/]`, where `-` between `^` and `/` is a RANGE, so the
+first version reported a clean tree over a deliberately reintroduced `getenv`. Third
+instance this week of "a gate that cannot fail looks exactly like a gate that passes".
+
+### Later still: the core reference said 613, and two thirds of that was not core
+
+"Core is still too thick" turned out to be two different bugs plus three real moves.
+
+**191 of the 613 were private.** `/reference/core` is the only doc page built from the LIVE
+IMAGE instead of source, and its filter tested the NAME. A prelude `(defn- helper …)` still
+binds a root global — privacy is a recorded fact (ADR-146), not a spelling — so the match
+compiler's 40 `match-*` functions, every `receive-*`/`spy-*`/`defmodule-*` helper and the
+`x`/`l` transducers were published as language vocabulary. One `(not (private? sym))`.
+
+**22 more should have been private and weren't**, because the earlier pass matched
+`^(defn name` and every definition nested in a `(check-allow …)` wrapper slipped through.
+The bootstrap builders were the interesting case: `append-2`/`append-rev`/`append-empty?`
+are `(def name (fn …))` because they run before `defn` *or* `def-` exists, so they cannot
+use the private form at all — they take `%mark-private` once the macro layer is up.
+
+Then the real moves: `dev/` for diagnostics (20), `%`-prefix for the ability registry (26),
+`reflect/` for source tooling (18). The judgement that mattered was where to stop:
+interactive introspection (`doc`, `arglist`, `bound?`, `apropos`, `macroexpand`) stays bare
+because you type it at a REPL, and namespacing it taxes the commonest use to serve a rare
+one. `check-allow` stays for the same reason — it is a pragma the checker matches out of
+source text, so it reads as part of the code.
+
+**And the junk drawer.** `category-of` falls back to `:other`, which is not an error, so an
+uncatalogued name landed silently at the bottom of the reference. 41 entries — including
+`stop`, `cast`, `call`, `spawn-server`, `defprocess` (uncategorised only because `gen`
+moved into the prelude) and `tap`/`then`, which belong next to `->`. A reader scanning by
+category simply never saw them. The category is gone and a test keeps it gone.
+
+Two things this pass kept re-teaching. First, **Brood hides in Rust**: the checker
+recognises the ability-registry names BY NAME, so `%`-prefixing them broke dispatch the
+instant it built (`no impl of localize for :money`) — now `kw::` constants, per ADR-240.
+`introspect.rs` builds `(source-location 'name)` as a string; `nest run` builds
+`(check-file …)`. Second, **`nest rename` renames a token, not a binding**: it rewrote
+`std/tool/workspace.blsp`'s own zero-arg `(check)` into `(reflect/check)`, caught by
+`std_check_test` because the arity no longer matched. A module's own function sharing a
+core name is exactly where the tool cannot tell the difference — the third time that shape
+has bitten (hatch's `stop`, hive's `register`, now this).
 ## 2026-08-24 — A general review: five kernel bugs, and a `main` that was already red
 
 A broad correctness review across the kernel (heap/GC, JIT/VM, scheduler/dist, builtins,

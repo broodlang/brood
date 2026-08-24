@@ -43,22 +43,14 @@
    "=" :math
    ">" :math
    ">=" :math
-   "ability-derive-recipe" :meta
    "ability-id-kw" :meta
-   "ability-ops" :meta
-   "ability-owner-ns" :meta
    "ability-qualify-op" :meta
-   "ability-requires" :meta
    "add-load-path!" :meta
    "and" :control
    "any?" :predicates
    "append" :collections
-   "append-2" :collections
-   "append-bytes" :bytes
    "append-empty?" :predicates
    "append-onto" :collections
-   "append-rev" :collections
-   "append-two" :collections
    "apply" :functions
    "apropos" :meta
    "arglist" :meta
@@ -67,8 +59,6 @@
    "assoc-in" :maps
    "assoc-map-pairs" :maps
    "assoc-vec-pairs" :maps
-   "audio-beep" :system
-   "bench" :meta
    "binding" :meta
    "binding-names" :meta
    "binding-vals" :meta
@@ -87,23 +77,8 @@
    "brood-version" :meta
    "build-id" :meta
    "builtin-modules" :meta
-   "but-last" :collections
-   "byte-at" :bytes
-   "byte-length" :bytes
    "bytes" :bytes
-   "bytes->list" :bytes
-   "bytes-acc-be" :bytes
-   "bytes-acc-le" :bytes
-   "bytes-concat" :bytes
-   "bytes-index-of" :bytes
-   "bytes-int" :bytes
-   "bytes-int-le" :bytes
-   "bytes-uint" :bytes
-   "bytes-uint-le" :bytes
-   "bytes-width-check" :bytes
    "bytes?" :predicates
-   "cancel-timer" :processes
-   "canonicalize" :system
    "string/capitalize" :strings
    "case" :control
    "case-check-test" :control
@@ -111,13 +86,7 @@
    "chain?" :predicates
    "char->int" :strings
    "string/char-at" :strings
-   "check" :meta
    "check-allow" :meta
-   "check-deps-fp" :meta
-   "check-file" :meta
-   "check-file-deps" :meta
-   "check-file-structured" :meta
-   "check-string-structured" :meta
    "clipboard-get" :system
    "clipboard-set!" :system
    "cmp-ge" :math
@@ -145,7 +114,6 @@
    "file/cp" :filesystem
    "count" :collections
    "count-acc" :collections
-   "current-file" :meta
    "current-ns" :meta
    "file/cwd" :filesystem
    "dec" :math
@@ -183,19 +151,16 @@
    "defrecord-fname" :maps
    "defrecord-ftype" :maps
    "defrecord-qualify" :maps
-   "defseq" :collections
    "file/rmdir" :filesystem
    "file/rm" :filesystem
    "demonitor" :processes
    "denominator" :math
    "deprecation-warning" :meta
-   "derive-into" :meta
    "file/dir?" :filesystem
    "disj" :sets
    "display-width" :strings
    "dissoc" :maps
    "dissoc-in" :maps
-   "distinct" :collections
    "distinct-step" :collections
    "doc" :meta
    "doc-search" :meta
@@ -207,8 +172,6 @@
    "dotimes-loop" :control
    "doto" :control
    "drop" :collections
-   "drop-last" :collections
-   "drop-while" :collections
    "dynamic?" :meta
    "empty?" :predicates
    "string/ends-with?" :predicates
@@ -219,7 +182,6 @@
    "eval" :meta
    "eval-string" :meta
    "every?" :predicates
-   "exe-path" :system
    "exit" :processes
    "feature?" :predicates
    "features" :meta
@@ -229,12 +191,8 @@
    "file/size" :filesystem
    "file/stat" :filesystem
    "filter" :collections
-   "filterv" :collections
-   "find" :collections
    "first" :collections
-   "flatten" :collections
    "flatten-acc" :collections
-   "flip-cons" :collections
    "float->bits" :convert
    "float?" :predicates
    "floor" :math
@@ -248,37 +206,27 @@
    "for" :control
    "for-check-binds" :control
    "for-fold" :control
-   "form-pos" :meta
    "format" :strings
    "format-loop" :strings
    "format-prec" :strings
    "format-spec" :strings
-   "gc-collect" :meta
-   "gc-stats" :meta
-   "gc-trace" :meta
    "gensym" :meta
    "get" :maps
    "get-in" :maps
    "get-in-walk" :maps
    "get-unanswerable" :maps
-   "getenv" :system
    "global-names" :meta
    "string/grapheme-at" :strings
    "string/grapheme-count" :strings
    "has-at-least?" :predicates
    "hash-map" :maps
-   "hibernate" :processes
-   "hostname" :system
    "identity" :functions
-   "identity-of" :meta
    "if-let" :control
    "image-thumb" :system
    "impl" :meta
    "impl-app?" :predicates
    "impl-fn-arity" :meta
-   "impl-for" :meta
    "impl-id-owner" :meta
-   "impl-rank" :meta
    "impl-substrate?" :predicates
    "inc" :math
    "includes?" :predicates
@@ -287,37 +235,26 @@
    "infinite?" :predicates
    "inspect" :io
    "inspectln" :io
-   "int->bytes" :bytes
-   "int->bytes-be" :bytes
-   "int->bytes-le" :bytes
    "int->char" :strings
    "int?" :predicates
    "into" :collections
-   "iterate-times" :collections
    "iterate-times-acc" :collections
    "string/join" :strings
-   "keep" :collections
    "keys" :maps
    "keyword" :convert
    "keyword?" :predicates
    "last" :collections
    "last-index-of" :strings
-   "lfilter" :collections
    "link" :processes
    "list" :collections
    "string/list->" :strings
    "file/ls" :filesystem
-   "list-processes" :processes
    "list?" :predicates
-   "lkeep" :collections
-   "lmap" :collections
    "load" :meta
    "string/lower" :strings
-   "lremove" :collections
    "macroexpand" :meta
    "macroexpand-1" :meta
    "macroexpand-loop" :meta
-   "mailbox-size" :processes
    "file/mkdir" :filesystem
    "map" :collections
    "map-assoc" :maps
@@ -327,90 +264,24 @@
    "map-int-add" :maps
    "map-pairs" :maps
    "map?" :predicates
-   "mapcat" :collections
-   "mapv" :collections
    "match" :patterns
    "match*" :patterns
-   "match-and-pattern?" :predicates
-   "match-bind-sym?" :predicates
-   "match-build" :patterns
-   "match-build-clause" :patterns
-   "match-build-from" :patterns
-   "match-bytes-int-spec" :patterns
-   "match-bytes-pattern?" :predicates
-   "match-bytes-seg" :patterns
-   "match-bytes-segs" :patterns
-   "match-bytes-typed-seg" :patterns
-   "match-bytes-vars" :bytes
-   "match-check-reachable" :patterns
-   "match-clause-patterns" :patterns
-   "match-compile" :patterns
-   "match-compile-and" :patterns
-   "match-compile-bytes" :patterns
-   "match-compile-clause" :patterns
-   "match-compile-list" :patterns
-   "match-compile-map" :patterns
-   "match-compile-map-entries" :patterns
-   "match-compile-or" :patterns
-   "match-compile-or-chain" :patterns
-   "match-compile-record" :patterns
-   "match-compile-seq" :patterns
-   "match-compile-vector" :patterns
-   "match-compile-velems" :patterns
-   "match-count-sym" :patterns
-   "match-irrefutable?" :predicates
-   "match-map-binds" :patterns
-   "match-map-check" :patterns
-   "match-map-entries" :patterns
-   "match-map-keys" :patterns
-   "match-map-pattern?" :predicates
-   "match-map-vars" :patterns
-   "match-member?" :predicates
-   "match-no-match" :patterns
-   "match-not-pattern-error" :patterns
-   "match-not-pattern?" :predicates
-   "match-or-check" :patterns
-   "match-or-pattern?" :predicates
-   "match-parse-clause" :patterns
-   "match-pin?" :predicates
-   "match-quoted?" :predicates
-   "match-record-pattern?" :predicates
-   "match-seq-vars" :patterns
-   "match-size-budget" :patterns
-   "match-small?" :predicates
-   "match-splice-fail" :patterns
-   "match-split" :patterns
-   "match-stale-pin?" :predicates
-   "match-vec->list" :patterns
-   "match-vec-collect" :patterns
-   "match-wildcard?" :predicates
    "max" :math
-   "mem-bytes" :meta
-   "mem-limit" :meta
-   "mem-peak" :meta
-   "mem-soft-limit" :meta
    "merge" :maps
    "merge-acc" :collections
    "merge-runs" :collections
-   "merge-sort" :collections
    "merge-sort-n" :collections
    "min" :math
    "mod" :math
    "module-doc" :meta
    "monitor" :processes
-   "multi-resolve" :meta
    "name" :strings
    "nan?" :predicates
    "nil?" :predicates
-   "no-impl" :meta
-   "no-method" :meta
    "not" :predicates
    "not=" :math
-   "now" :system
-   "now-ns" :system
    "nth" :collections
    "nth-bad-index" :collections
-   "nth-list" :collections
    "nth-seq-or-fail" :collections
    "num-add" :meta
    "num-div" :math
@@ -418,24 +289,15 @@
    "num-sub" :meta
    "number?" :predicates
    "numerator" :math
-   "offload" :processes
    "or" :control
    "ord-compare" :meta
    "string/pad-left" :strings
    "string/pad-right" :strings
    "pair?" :predicates
-   "parent-directory" :filesystem
-   "parse-source" :meta
-   "parse-source-positioned" :meta
    "partial" :functions
-   "partition" :collections
    "partition-acc" :collections
-   "path-absolute" :filesystem
-   "path-basename" :filesystem
-   "path-join" :filesystem
    "path-last-slash" :filesystem
    "pattern-vars" :patterns
-   "peak-threads" :meta
    "pid?" :predicates
    "pr-bounded" :io
    "pr-bounded-map" :io
@@ -449,17 +311,8 @@
    "print" :io
    "println" :io
    "private?" :meta
-   "proc-close" :system
-   "proc-send" :system
-   "proc-set-binary" :system
-   "proc-spawn" :system
-   "process-flag" :processes
-   "process-info" :processes
-   "profile-start" :meta
-   "profile-stop" :meta
    "provide" :meta
    "quot" :math
-   "random-token" :system
    "range" :collections
    "range?" :predicates
    "ratio?" :predicates
@@ -482,36 +335,20 @@
    "receive-split" :processes
    "receive-tags" :processes
    "record-id" :maps
-   "record-module-doc!" :meta
    "record-register" :maps
    "record?" :predicates
    "reduce" :collections
    "reduce-kv" :maps
    "ref" :processes
    "ref?" :predicates
-   "references-in-source" :meta
    "register" :processes
-   "register-ability" :meta
-   "register-ability-derive" :meta
-   "register-ability-requires" :meta
-   "register-impl" :meta
    "register-impl-check-arity" :meta
-   "register-method" :meta
    "register-method-derive" :meta
    "register-method-store" :meta
-   "register-multi" :meta
-   "register-package-module!" :meta
-   "register-package-modules!" :meta
-   "register-sealed" :meta
-   "registry-swap!" :meta
    "reload-defs" :meta
    "rem" :math
-   "remove" :collections
-   "remove-nth" :collections
    "file/rename" :filesystem
-   "repeat" :collections
    "repeat-acc" :collections
-   "repeatedly" :collections
    "repeatedly-acc" :collections
    "string/replace" :strings
    "require-await" :meta
@@ -522,19 +359,9 @@
    "rest" :collections
    "reverse" :collections
    "reverse-acc" :collections
-   "reverse-onto" :collections
    "rope?" :predicates
    "run!" :control
-   "run-process" :system
-   "runtime-collect" :meta
-   "sample" :collections
    "satisfies?" :meta
-   "scan-form-start" :meta
-   "scan-form-start-2" :meta
-   "scan-source-extract" :meta
-   "scan-tokens" :meta
-   "sched-stats" :meta
-   "sealed-members" :meta
    "second" :collections
    "self" :processes
    "send" :processes
@@ -546,7 +373,6 @@
    "set?" :predicates
    "show-args" :io
    "show-print-hook" :meta
-   "shuffle" :collections
    "sig" :meta
    "sig!" :meta
    "sig-pos" :meta
@@ -557,12 +383,9 @@
    "some->>" :control
    "some-thread-build" :control
    "sort" :collections
-   "sort-by" :collections
-   "source-location" :meta
    "span-runs" :strings
    "spawn" :processes
    "spawn-body-thunk" :processes
-   "spawn-count" :meta
    "spawn-link" :processes
    "spawn-thunk-form?" :predicates
    "special-forms" :meta
@@ -570,7 +393,6 @@
    "file/spit-append" :filesystem
    "file/spit-bytes" :filesystem
    "file/spit-private" :filesystem
-   "split-at" :collections
    "split-at-acc" :collections
    "spy" :meta
    "spy-default-sink" :meta
@@ -585,9 +407,6 @@
    "spy-walk-let" :meta
    "spy-walk-seq" :meta
    "string/starts-with?" :predicates
-   "stdin-tty?" :system
-   "stdout-tty?" :system
-   "steal-count" :meta
    "str" :strings
    "string/->codepoints" :strings
    "string/->graphemes" :strings
@@ -602,43 +421,20 @@
    "string/span-until" :strings
    "string/split" :strings
    "string?" :predicates
-   "subbytes" :bytes
    "string/substring" :strings
    "string/substring-graphemes" :strings
-   "subvec" :collections
-   "swap-registry!" :meta
    "symbol" :convert
    "symbol?" :predicates
    "system-monitor" :meta
-   "table" :processes
-   "table-count" :maps
-   "table-delete" :processes
-   "table-drop" :maps
-   "table-get" :processes
-   "table-has?" :processes
-   "table-incr" :maps
-   "table-put" :processes
-   "table-snapshot" :maps
    "table?" :predicates
    "take" :collections
    "take-acc" :collections
-   "take-last" :collections
-   "take-while" :collections
    "take-while-acc" :collections
-   "temp-path" :filesystem
-   "third" :collections
-   "thread-first-step" :control
-   "thread-last-step" :control
    "throw" :errors
-   "times" :collections
    "->fixed" :strings
    "->seq" :meta
    "->string" :meta
-   "transduce" :collections
    "trap-exit" :processes
-   "tree-sitter-forget" :meta
-   "tree-sitter-parse" :meta
-   "tree-sitter-reparse" :meta
    "string/trim" :strings
    "string/triml" :strings
    "string/trimr" :strings
@@ -646,12 +442,9 @@
    "try-class-catch?" :predicates
    "type-matches?" :predicates
    "type-of" :convert
-   "type-signature" :meta
-   "unimpl" :meta
    "unimpl-do" :meta
    "unless" :control
    "unlink" :processes
-   "unregister-impl" :meta
    "update" :maps
    "update-in" :maps
    "string/upper" :strings
@@ -659,11 +452,7 @@
    "vals" :maps
    "vec" :convert
    "vector" :collections
-   "vector-assoc" :collections
-   "vector-length" :collections
-   "vector-ref" :collections
    "vector?" :predicates
-   "vm-stats" :meta
    "when" :control
    "when-let" :control
    "whereis" :processes
@@ -672,15 +461,41 @@
    "with-err-str" :io
    "with-out-str" :io
    "with-split-else" :control
-   "worker-threads" :meta
-   "xfilter" :collections
-   "xkeep" :collections
-   "xmap" :collections
-   "xremove" :collections
    "zero?" :predicates
-   "zip" :collections
    "zip-acc" :collections
-   "zipmap" :maps})
+   "zipmap" :maps
+   ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
+   "but-last" :collections
+   "drop-while" :collections
+   "mapcat" :collections
+   "mapv" :collections
+   "partition" :collections
+   "repeat" :collections
+   "sort-by" :collections
+   "take-while" :collections
+   "zip" :collections
+;; ---- added so nothing falls into :other (every core name has a home) ----
+   "call" :processes
+   "call-timeout" :processes
+   "cast" :processes
+   "code-change" :processes
+   "defbehaviour" :meta
+   "defprocess" :processes
+   "multimap?" :predicates
+   "offload" :processes
+   "ops" :meta
+   "pq?" :predicates
+   "queue?" :predicates
+   "register-protocol" :meta
+   "reserved-package-name?" :meta
+   "set-image-source!" :system
+   "spawn-server" :processes
+   "spawn-server-link" :processes
+   "spawn-server-named" :processes
+   "stop" :processes
+   "tap" :control
+   "then" :control
+  })
 
 (defn category-of (function-name)
   "The category keyword for a bare function name, or :other if uncatalogued."

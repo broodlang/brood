@@ -1,4 +1,4 @@
-;; std/proctree.blsp — ordering a flat process-info list as a parent→child forest.
+;; std/proctree.blsp — ordering a flat proc/info list as a parent→child forest.
 ;; Pure over synthetic `{:id :parent}` maps (no spawning needed): the lineage walk
 ;; the observer's tree sort and myedit's *Process List* both share.
 
@@ -24,5 +24,5 @@
                (tree-order [{:id 2 :parent nil} {:id 1 :parent nil} {:id 3 :parent 2}]))
       '(1 2 3)))
   (test "a snapshot with no root (mutual parents) is bounded to empty, not a hang"
-    ;; impossible from real process-info, but a malformed snapshot must terminate
+    ;; impossible from real proc/info, but a malformed snapshot must terminate
     (is (empty? (tree-order [{:id 1 :parent 2} {:id 2 :parent 1}])))))

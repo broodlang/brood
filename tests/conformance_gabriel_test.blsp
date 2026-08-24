@@ -48,7 +48,7 @@
   (name)
   "The s-expressions of the vendored `<name>.input`, in upstream's `(read)` order."
   ;; the prelude's bootstrap `path-join` is 2-arg (`path/join` is the variadic one)
-  (corpus-forms (path-join (path-join (corpus-dir "gabriel") "data") (str name ".input"))))
+  (corpus-forms (path/join (path/join (corpus-dir "gabriel") "data") (str name ".input"))))
 
 ;; ---- (c) upstream's published tables ------------------------------------------
 ;; These two are the only expectations in this file that are typed rather than read,

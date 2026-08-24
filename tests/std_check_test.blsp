@@ -26,7 +26,7 @@
   (dir)
   (if (file/dir? dir)
     (fold (fn (acc entry)
-            (let (p (path-join dir entry))
+            (let (p (path/join dir entry))
               (cond
                 (file/dir? p) (append-two (std-check-files p) acc)
                 (string/ends-with? entry ".blsp") (cons p acc)
@@ -43,7 +43,7 @@
 
   (test "check-file reports nothing for any std file"
     (let (warnings (fold (fn (acc path)
-                           (append acc (or (check-file path) nil)))
+                           (append acc (or (reflect/check-file path) nil)))
                      nil
                      (sort (std-check-files "std"))))
       ;; Assert on the warnings themselves, so a failure names the file, line and lint

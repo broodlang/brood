@@ -736,7 +736,7 @@ pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispEr
     if !routed && heap.proc_send_errors() {
         return Err(LispError::runtime(format!(
             "send: no connection to node {} (noconnection; raised because \
-             this process set (process-flag :send-errors true))",
+             this process set (proc/flag :send-errors true))",
             crate::core::value::symbol_name(node)
         ))
         .with_code(crate::error::error_codes::DISTRIBUTION)

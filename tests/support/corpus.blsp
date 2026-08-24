@@ -20,11 +20,11 @@ because half the corpora encode their expectations as hex.")
 
 ;; tests/support/corpus.blsp -> tests/corpus
 (def- corpus-root
-  (path-join (parent-directory (parent-directory (path-absolute (current-file)))) "corpus"))
+  (path/join (path/dirname (path/dirname (path/absolute (reflect/current-file)))) "corpus"))
 
 (defn corpus-dir (suite)
   "The directory holding the vendored corpus `suite`."
-  (path-join corpus-root suite))
+  (path/join corpus-root suite))
 
 (defn corpus-present? (suite)
   "Whether `suite` has been fetched (`scripts/fetch-corpus.sh <suite>`)."
@@ -33,16 +33,16 @@ because half the corpora encode their expectations as hex.")
 ;; Absolute paths of every entry directly under `dir`, sorted — nil if absent.
 (defn- corpus-entries
   (dir)
-  (if (file/dir? dir) (map (fn (e) (path-join dir e)) (sort (file/ls dir))) nil))
+  (if (file/dir? dir) (map (fn (e) (path/join dir e)) (sort (file/ls dir))) nil))
 
 (defn corpus-files (suite &optional subdir)
   "The corpus files of `suite`, sorted: the complete upstream under `full/` when it
 has been fetched, else the committed subset under `data/`. Pass `subdir` to pin one
 of the two explicitly."
   (if subdir
-    (corpus-entries (path-join (corpus-dir suite) subdir))
-    (or (corpus-entries (path-join (corpus-dir suite) "full"))
-      (corpus-entries (path-join (corpus-dir suite) "data")))))
+    (corpus-entries (path/join (corpus-dir suite) subdir))
+    (or (corpus-entries (path/join (corpus-dir suite) "full"))
+      (corpus-entries (path/join (corpus-dir suite) "data")))))
 
 (defn corpus-lines (path)
   "The lines of corpus file `path`. Only the file's own trailing newline is dropped

@@ -2145,7 +2145,7 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     let r_val = value::gensym("linmap-out");
     let type_of = heap.list(vec![value::sym("type-of"), r_val]);
     let is_table = heap.list(vec![value::sym("="), value::kw("table"), type_of]);
-    let snap_call = heap.list(vec![value::sym("table-snapshot"), r_val]);
+    let snap_call = heap.list(vec![value::sym(kw::TABLE_SNAPSHOT), r_val]);
     let cond = heap.list(vec![value::sym(kw::IF), is_table, snap_call, r_val]);
     let bind = heap.list(vec![r_val, inner_call]);
     let snap = heap.list(vec![value::sym(kw::LET), bind, cond]);
@@ -2193,10 +2193,10 @@ fn linmap_rewrite_form(
         let second_is_acc =
             matches!(items.get(1).map(|v| v.unpack()), Some(ValueRef::Sym(s)) if s == acc);
         if second_is_acc {
-            let update = if value::symbol_is(h, "map-int-add") {
-                Some("table-incr")
-            } else if value::symbol_is(h, "map-dissoc") {
-                Some("table-delete")
+            let update = if value::symbol_is(h, kw::MAP_INT_ADD) {
+                Some(kw::TABLE_INCR)
+            } else if value::symbol_is(h, kw::MAP_DISSOC) {
+                Some(kw::TABLE_DELETE)
             } else {
                 None
             };
@@ -2209,10 +2209,10 @@ fn linmap_rewrite_form(
                 let mutate = heap.list(c);
                 return heap.list(vec![value::sym(kw::DO), mutate, items[1]]);
             }
-            let read = if value::symbol_is(h, "map-get") {
-                Some("table-get")
-            } else if value::symbol_is(h, "map-count") {
-                Some("table-count")
+            let read = if value::symbol_is(h, kw::MAP_GET) {
+                Some(kw::TABLE_GET)
+            } else if value::symbol_is(h, kw::MAP_COUNT) {
+                Some(kw::TABLE_COUNT)
             } else {
                 None
             };

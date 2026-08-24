@@ -543,7 +543,7 @@
       mb-chars))
   (test "substring from a rising start is the reference tail"
     (assert= (into [] (map (fn (i) (string/substring mb-text i (+ i 5))) [0 1 31 32 33 100 495]))
-      (into [] (map (fn (i) (apply str (subvec mb-chars i (+ i 5)))) [0 1 31 32 33 100 495]))))
+      (into [] (map (fn (i) (apply str (seq/subvec mb-chars i (+ i 5)))) [0 1 31 32 33 100 495]))))
   (test "substring to the end, and the whole string"
     (assert= (string/substring mb-text 497) "漢🙂x")
     (assert= (string/substring mb-text 0 (string/length mb-text)) mb-text))

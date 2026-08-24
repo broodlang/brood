@@ -24,11 +24,11 @@
 ;; ("2095257564"). Nothing to test against; not a std/csv problem.
 (def- csv-broken-upstream "location_coordinates")
 
-(defn- csv-dir (sub) (corpus-files "csv" (path-join "data" sub)))
+(defn- csv-dir (sub) (corpus-files "csv" (path/join "data" sub)))
 
 (defn- csv-stem
   (path)
-  (let (b (path-basename path) i (index-of b "."))
+  (let (b (path/basename path) i (index-of b "."))
     (if (< i 0) b (string/substring b 0 i))))
 
 ;; A row map keyed by keyword -> the same map keyed by the header string.

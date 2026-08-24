@@ -1,0 +1,87 @@
+
+;; std/reflect.blsp — reading Brood source as DATA: the advisory checker, the reader's
+;; lossless CST, the string/comment-aware scanners, and where a definition lives.
+;;
+;; The split from core is "what a program does to itself" vs "what a tool does to source
+;; text". Interactive introspection — `doc`, `arglist`, `bound?`, `apropos`, `doc-search`,
+;; `macroexpand` — stays bare, because you type it at a REPL and namespacing it would tax
+;; the most common exploratory use. Everything here takes a FILE or a SOURCE STRING and is
+;; called by tooling (`nest check`, the LSP, the MCP server, the doc builder), never in the
+;; middle of an algorithm.
+;;
+;; `check-allow` deliberately stays core: it is a source PRAGMA, matched textually out of
+;; the source by the Rust checker the way `sig` is, and it reads at 42 call sites as part of
+;; the code rather than as a call into a tool.
+(defmodule reflect)
+
+(defn check (form)
+  "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."
+  (%check form))
+
+(defn check-deps-fp (dep-keys)
+  "Recompute the fingerprint of a file's dep-keys (from check-file-deps) against the current global image. The incremental check cache reuses a file's warnings iff this equals the stored fingerprint."
+  (%check-deps-fp dep-keys))
+
+(defn check-file (path & more)
+  "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file. `required-mods` is the file's transitive require-closure (module-name strings) — the KI-17 reachability set that flags a qualified `mod/name` whose module the file never requires; omit it (single-file / editor) to disable that lint."
+  (if (empty? more) (%check-file path) (%check-file path (first more))))
+
+(defn check-file-deps (path & more)
+  "Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; reuse warnings on a later run iff (check-deps-fp dep-keys) still matches and the file's mtime is unchanged. `required-mods`: see check-file."
+  (if (empty? more) (%check-file-deps path) (%check-file-deps path (first more))))
+
+(defn check-file-structured (path & more)
+  "Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics). `required-mods`: see check-file."
+  (if (empty? more) (%check-file-structured path) (%check-file-structured path (first more))))
+
+(defn check-string-structured (src)
+  "Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics."
+  (%check-string-structured src))
+
+(defn references-in-source (name source)
+  "Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded."
+  (%references-in-source name source))
+
+(defn parse-source (s)
+  "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."
+  (%parse-source s))
+
+(defn parse-source-positioned (s)
+  "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."
+  (%parse-source-positioned s))
+
+(defn scan-form-start (s pos)
+  "The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer."
+  (%scan-form-start s pos))
+
+(defn scan-form-start-2 (s pos)
+  "[prev start] — the greatest column-0 form-start offset <= pos AND the one before it, from a SINGLE forward pass. What tool/sexp narrowing actually wants: computing the pair as two scan-form-start calls runs the O(pos) lexical pass twice over the same prefix. prev is 0 when there is no earlier form start, matching what the second call returned there."
+  (%scan-form-start-2 s pos))
+
+(defn scan-form-end (s from n-forms)
+  "The char offset just after n-forms top-level forms starting at char offset from, skipping strings/comments and tracking bracket depth, or (string/length s) if the text ends first. The forward window-end companion to scan-form-start: tool/sexp narrowing uses the pair to bound structural motion to the neighbourhood of point in ONE native pass, replacing an interpreted char-at loop that was the dominant cost of every keystroke-driven motion."
+  (%scan-form-end s from n-forms))
+
+(defn scan-source-extract (src)
+  "Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of every symbol's occurrence count, this file's `defn-`/`def-` privates as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk."
+  (%scan-source-extract src))
+
+(defn scan-tokens (s)
+  "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens)."
+  (%scan-tokens s))
+
+(defn source-location (name)
+  "Where global name was defined, as [file line col], or nil. Quote it: (source-location 'foo)."
+  (%source-location name))
+
+(defn type-signature (name)
+  "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (type-signature 'map)."
+  (%type-signature name))
+
+(defn form-pos (form)
+  "A form's [line col] source position, or nil."
+  (%form-pos form))
+
+(defn current-file ()
+  "The path of the file currently being loaded, or nil."
+  (%current-file))

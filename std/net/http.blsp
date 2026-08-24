@@ -67,18 +67,18 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
   (if (> have *http-max-head-bytes*)
     nil
     (receive
-      ([:tcp ^sock d] (let (probe (bytes-concat tail d)
-                            k (max 0 (- (byte-length marker) 1))
-                            pn (byte-length probe))
-                        (if (>= (bytes-index-of probe marker) 0)
-                          (apply bytes-concat (reverse (cons d chunks)))
+      ([:tcp ^sock d] (let (probe (bytes/concat tail d)
+                            k (max 0 (- (bytes/length marker) 1))
+                            pn (bytes/length probe))
+                        (if (>= (bytes/index-of probe marker) 0)
+                          (apply bytes/concat (reverse (cons d chunks)))
                           (http-read-until sock
                             (cons d chunks)
-                            (+ have (byte-length d))
-                            (if (<= pn k) probe (subbytes probe (- pn k) pn))
+                            (+ have (bytes/length d))
+                            (if (<= pn k) probe (bytes/slice probe (- pn k) pn))
                             marker))))
-      ([:tcp-closed ^sock] (if (= have 0) nil (apply bytes-concat (reverse chunks))))
-      (after *http-read-timeout-ms* (if (= have 0) nil (apply bytes-concat (reverse chunks)))))))
+      ([:tcp-closed ^sock] (if (= have 0) nil (apply bytes/concat (reverse chunks))))
+      (after *http-read-timeout-ms* (if (= have 0) nil (apply bytes/concat (reverse chunks)))))))
 
 ;; Body read, O(n): collect chunks in a list (O(1) per chunk) and join **once** at
 ;; the end — never re-copy the growing buffer per chunk (that `(bytes-concat acc d)`
@@ -88,11 +88,11 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 (defn- http-read-to-length
   (sock chunks have target)
   (if (>= have target)
-    (apply bytes-concat (reverse chunks))
+    (apply bytes/concat (reverse chunks))
     (receive
-      ([:tcp ^sock d] (http-read-to-length sock (cons d chunks) (+ have (byte-length d)) target))
-      ([:tcp-closed ^sock] (apply bytes-concat (reverse chunks)))
-      (after *http-read-timeout-ms* (apply bytes-concat (reverse chunks))))))
+      ([:tcp ^sock d] (http-read-to-length sock (cons d chunks) (+ have (bytes/length d)) target))
+      ([:tcp-closed ^sock] (apply bytes/concat (reverse chunks)))
+      (after *http-read-timeout-ms* (apply bytes/concat (reverse chunks))))))
 
 (defn- http-read-raw
   (sock)
@@ -103,15 +103,15 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
   ;; `(subbytes head 0 -1)`, which threw and killed the connection's worker
   ;; process (leaking the fd) on a truncated head. A remotely-triggerable crash.
   (let (head (http-read-until sock nil 0 #b"" #b"\r\n\r\n")
-        marker (if (nil? head) -1 (bytes-index-of head #b"\r\n\r\n")))
+        marker (if (nil? head) -1 (bytes/index-of head #b"\r\n\r\n")))
     (if (< marker 0)
       nil
-      (let (clen (http-declared-length (utf8-bytes->string (subbytes head 0 marker))))
+      (let (clen (http-declared-length (utf8-bytes->string (bytes/slice head 0 marker))))
         (if (= clen 0)
           head
           ;; `head` already holds everything read so far (incl. any body bytes in
           ;; the chunk that completed the header); seed the chunk list with it.
-          (http-read-to-length sock (list head) (byte-length head) (+ marker 4 clen)))))))
+          (http-read-to-length sock (list head) (bytes/length head) (+ marker 4 clen)))))))
 
 (defn read-request (sock)
   "Read one HTTP request from `sock` (owned by the calling process): the head
@@ -172,13 +172,13 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   `utf8-bytes->string` for a text/form body). A string `raw` is accepted too (encoded to
   bytes first), so `(parse-request \"GET /…\")` still works."
   (let (raw (if (string? raw) (string->utf8-bytes raw) raw)
-        marker (bytes-index-of raw #b"\r\n\r\n")
+        marker (bytes/index-of raw #b"\r\n\r\n")
         ;; No blank-line terminator (a bare request line, or truncated): the
         ;; whole thing is the head and the body is empty — never `(subbytes raw
         ;; 0 -1)`, which throws. Mirrors `parse-response`'s guard.
-        head-end (if (< marker 0) (byte-length raw) marker)
-        head (utf8-bytes->string (subbytes raw 0 head-end))
-        body (if (< marker 0) #b"" (subbytes raw (+ marker 4) (byte-length raw)))
+        head-end (if (< marker 0) (bytes/length raw) marker)
+        head (utf8-bytes->string (bytes/slice raw 0 head-end))
+        body (if (< marker 0) #b"" (bytes/slice raw (+ marker 4) (bytes/length raw)))
         lines (string/split head "\r\n")
         req (string/split (first lines) " "))
     {:method (nth req 0 "GET")
@@ -282,7 +282,7 @@ iolist: a string, a `bytes` value (binary bodies — images, archives), or a
 nested tree of those; it is materialised once here so the length and the sent
 bytes can never disagree."
   (let (status (/get resp :status 200)
-        body-bytes (bytes-concat (or (/get resp :body) ""))
+        body-bytes (bytes/concat (or (/get resp :body) ""))
         headers (assoc (or (/get resp :headers) {})
                   "Content-Length" (str (count body-bytes))
                   "Connection" "close"))
@@ -436,10 +436,10 @@ too) into a `response` record: the head is decoded to strings (`:headers`
 keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
 `(body-text resp)` when you know it is text."
   (let (raw (if (string? raw) (string->utf8-bytes raw) raw)
-        marker (bytes-index-of raw #b"\r\n\r\n")
-        head-end (if (< marker 0) (byte-length raw) marker)
-        head (utf8-bytes->string (subbytes raw 0 head-end))
-        body (if (< marker 0) #b"" (subbytes raw (+ marker 4) (byte-length raw)))
+        marker (bytes/index-of raw #b"\r\n\r\n")
+        head-end (if (< marker 0) (bytes/length raw) marker)
+        head (utf8-bytes->string (bytes/slice raw 0 head-end))
+        body (if (< marker 0) #b"" (bytes/slice raw (+ marker 4) (bytes/length raw)))
         lines (string/split head "\r\n")
         status (string/split (first lines) " "))
     (response (let (n (string->number (nth status 1 "0"))) (if (nil? n) 0 n))
@@ -462,7 +462,7 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
 ;; a multibyte string, which only loosens the cap — fine for a DoS bound.
 (defn- http-chunk-size
   (d)
-  (if (string? d) (string/length d) (byte-length d)))
+  (if (string? d) (string/length d) (bytes/length d)))
 
 ;; Collect the response delivered as messages until close; [:ok bytes] or
 ;; [:error msg]. `acc` is the chunks in reverse, `have` their running byte total;
@@ -479,7 +479,7 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
                           (tcp/close sock)
                           [:error "http: response exceeded *http-max-response-bytes*"])
                         (http-collect sock (cons d acc) have2))))
-    ([:tcp-closed ^sock] [:ok (bytes-concat (reverse acc))])
+    ([:tcp-closed ^sock] [:ok (bytes/concat (reverse acc))])
     ([:tcp-error ^sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
 
@@ -507,7 +507,7 @@ a PEM certificate replacing the Mozilla roots as the trust anchor (private CAs,
 response); the root process counts."
   (let (u (parse-url url)
         body (or (/get opts :body) "")
-        body-bytes (bytes-concat body)
+        body-bytes (bytes/concat body)
         headers (request-headers u body-bytes (/get opts :headers))
         ;; The request target is path + ?query — a query-string GET (search APIs)
         ;; would otherwise drop everything after the `?`.

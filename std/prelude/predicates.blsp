@@ -26,13 +26,13 @@
   "True if `x` is a rope (editor buffer text from `text/from-string`)."
   (%eq (type-of x) :rope))
 (defn table? (x)
-  "True if `x` is an in-memory table (from `(table)`) — Brood's shared mutable ETS store."
+  "True if `x` is an in-memory table (from `(table/new)`) — Brood's shared mutable ETS store."
   (%eq (type-of x) :table))
 ;; Copy an immutable map into a fresh mutable table. Used only by the compiler's
 ;; linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed the
 ;; private table from the accumulator's input map; never surfaced to user code.
 (defn %table-from-map (m)
-  (reduce (fn (t kv) (table-put t (first kv) (second kv))) (table) (map-pairs m)))
+  (reduce (fn (t kv) (%table-put t (first kv) (second kv))) (%table) (map-pairs m)))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
   "True if `x` is callable (a closure or a primitive)."
@@ -55,30 +55,29 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0."
 ;; ---- list accessors ----
 (defn list (& xs) "A list of the given arguments." xs)
 (defn second (coll) "The second item of `coll`." (first (rest coll)))
-(defn third (coll) "The third item of `coll`." (first (rest (rest coll))))
 
 ;; ---- sequence operations ----
 ;; Many eager seq ops share one structure: reverse-accumulate over `(seq coll)`,
-;; then reverse once. `defseq` encodes the pattern as a single `defn` whose body
+;; then reverse once. `%defseq` encodes the pattern as a single `defn` whose body
 ;; holds a tail-recursive `letrec` loop. This keeps the source location visible to
 ;; `note_definition` (which only recognises `def`/`defn` as outer heads) and
 ;; removes the need for separate `name-acc` globals. Each loop calls the user fn
 ;; directly — no extra `apply` frame per element. Inside `step`: `item` is bound to
 ;; the current element and `acc` is the current accumulator.
-;; `item` and `acc` are *intentional* anaphora: a `defseq` step-expr is documented
+;; `item` and `acc` are *intentional* anaphora: a `%defseq` step-expr is documented
 ;; to reference them (`(cons (f item) acc)`), so they opt out of automatic binding
 ;; hygiene with `~'item`/`~'acc` — an unquoted quoted symbol stays the literal name
-;; (the `aif` `it` case). Every other binder here — `coll`, `--loop` — is auto-renamed
+;; (the `aif` `it` case). Every other binder here — `coll`, `-loop` — is auto-renamed
 ;; by the hygiene pass (ADR-066 amendment) so it can't capture the caller's `step`
 ;; code; no `#`/`(gensym)` needed.
-(defmacro defseq (sym params docstring step)
+(defmacro %defseq (sym params docstring step)
   "Define an eager sequence op that reverse-accumulates over `coll`.
 `params` are the extra arguments before `coll`; inside `step`, `item` is the
 current element and `acc` is the current accumulator."
   (if (not (string? docstring))
-    (error "defseq: third argument must be a docstring string, got "
+    (error "%defseq: third argument must be a docstring string, got "
       (pr-str docstring)
-      ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
+      ". Syntax: (%defseq name (params...) \"docstring\" step-expr)")
     `(defn ~sym (~@params coll)
        ~docstring
        (letrec (-loop (fn (coll ~'acc)
@@ -88,32 +87,24 @@ current element and `acc` is the current accumulator."
                             (-loop (rest coll) ~step)))))
          (reverse (-loop (seq coll) nil))))))
 
-(defseq map
+(%defseq map
   (f)
   "A list of `(f x)` for each `x` in `coll`."
   (cons (f item) acc))
 
-(defseq filter
+(%defseq filter
   (pred)
   "A list of the items of `coll` for which `(pred x)` is truthy."
   (if (pred item) (cons item acc) acc))
 
-(defn mapv (f coll)
-  "A VECTOR of `(f x)` for each `x` in `coll` — `map` when the caller needs
-indexed access or a vector literal shape (`(into [] (map f coll))`, named)."
-  (into [] (map f coll)))
 
-(defn filterv (pred coll)
-  "A VECTOR of the items of `coll` for which `(pred x)` is truthy — `filter`
-when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
-  (into [] (filter pred coll)))
 
 (defn vec (coll)
   "`coll` as a VECTOR (`(into [] coll)`, named). A map becomes its `[k v]` pairs
 and a set its elements, as everywhere else `seq` applies."
   (into [] coll))
 
-(defn append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
+(defn- append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
 
 ;; Prepend every element of `lst` onto `acc` (so `acc` collects all elements in
 ;; reverse); `append` folds this over the lists, then reverses once. Argument order
@@ -139,15 +130,15 @@ and a set its elements, as everywhere else `seq` applies."
     ;; the source once, no list materialised.
     (seqview? coll) (fold (fn (n _) (%add n 1)) 0 coll)
     (string? coll) (string/length coll)
-    (vector? coll) (vector-length coll)
-    (bytes? coll) (byte-length coll)
+    (vector? coll) (%vector-length coll)
+    (bytes? coll) (%byte-length coll)
     ;; a record counts as its `Seqable` view (its fields, id-free, by default) — not the
     ;; raw map, which would include the internal `:__id__`. `map-get` distinguishes it.
     (map? coll) (if (map-get coll :__id__ nil) (count (->seq coll)) (map-count coll))
     (set? coll) (%set-count coll)
     else (count-acc coll 0)))
 
-(defn nth-list (coll i d)
+(defn- nth-list (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (nth-list (rest coll) (- i 1) d)))
 
 ;; A non-integer index is a type error that must name `nth`. Before this it fell
@@ -189,18 +180,18 @@ and a set its elements, as everywhere else `seq` applies."
   ;; behaviour for the rarer 3-arg call.
   ((coll i) (cond
               (not (int? i)) (nth-bad-index coll i)
-              (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
-              (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) nil)
+              (vector? coll) (if (and (>= i 0) (< i (%vector-length coll))) (%vector-ref coll i) nil)
+              (bytes? coll) (if (and (>= i 0) (< i (%byte-length coll))) (%byte-at coll i) nil)
               else (nth-seq-or-fail coll i nil)))
   ((coll i & default) (cond
                         (not (int? i)) (nth-bad-index coll i)
                         (vector? coll)
-                          (if (and (>= i 0) (< i (vector-length coll)))
-                            (vector-ref coll i)
+                          (if (and (>= i 0) (< i (%vector-length coll)))
+                            (%vector-ref coll i)
                             (first default))
                         (bytes? coll)
-                          (if (and (>= i 0) (< i (byte-length coll)))
-                            (byte-at coll i)
+                          (if (and (>= i 0) (< i (%byte-length coll)))
+                            (%byte-at coll i)
                             (first default))
                         else (nth-seq-or-fail coll i (first default)))))
 

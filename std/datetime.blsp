@@ -114,7 +114,7 @@ milliseconds."
 
 (defn utc-now ()
   "The current UTC datetime."
-  (epoch-ms-> (now)))
+  (epoch-ms-> (os/now)))
 
 (defn today ()
   "The current UTC date."

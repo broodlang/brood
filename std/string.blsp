@@ -145,12 +145,6 @@ leaves `s` unchanged."
 ;; Column formatting for tabular/console output. `pad-*` left unchanged when the
 ;; string already meets the width (they never truncate).
 
-(defn repeat (s n)
-  "The string `s` concatenated `n` times (the empty string if `n` <= 0)."
-  ;; Build the list of copies with the generic `range`/`map` (NOT the generic
-  ;; `repeat`, which this name would shadow inside the `string` namespace), then
-  ;; concatenate in one `apply str` pass.
-  (apply str (map (fn (_) s) (range (max 0 n)))))
 
 (defn pad-left (s w &optional (pad " "))
   "Right-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the left; `s` is returned unchanged if it is already at least `w` wide."
@@ -184,3 +178,11 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
         words (filter (fn (w) (not (= w ""))) (string/split flat " "))
         [cur done] (fold (fn (acc w) (fill-pack acc w width)) ["" ()] words))
     (join "\n" (reverse (if (= cur "") done (cons cur done))))))
+
+;; (restored: this is string's repeat, not the sequence one)
+(defn repeat (s n)
+  "The string `s` concatenated `n` times (the empty string if `n` <= 0)."
+  ;; Build the list of copies with the generic `range`/`map` (NOT the generic
+  ;; `repeat`, which this name would shadow inside the `string` namespace), then
+  ;; concatenate in one `apply str` pass.
+  (apply str (map (fn (_) s) (range (max 0 n)))))

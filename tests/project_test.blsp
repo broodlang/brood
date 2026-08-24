@@ -197,9 +197,9 @@
     (assert= (project/project-dep-manifest-path 'nope "/proj") nil))
   (test "a :git plugin's :format-headers reach the effective header table"
     (let (root (temp-dir "brood-fmt-plugin-")
-          hatch (path-join (path-join root "_deps") "hatch"))
+          hatch (path/join (path/join root "_deps") "hatch"))
       (file/mkdir hatch)
-      (file/spit (path-join hatch "project.blsp")
+      (file/spit (path/join hatch "project.blsp")
         "(project :name \"hatch\" :format-headers {deflive 0 on 2 tick 2})\n")
       (project
         :name "demo"
@@ -228,9 +228,9 @@
         (is (includes? warning "not in :dependencies")))))
   (test "a bogus plugin entry does not suppress a valid sibling's rules"
     (let (root (temp-dir "brood-fmt-plugin-")
-          hatch (path-join (path-join root "_deps") "hatch"))
+          hatch (path/join (path/join root "_deps") "hatch"))
       (file/mkdir hatch)
-      (file/spit (path-join hatch "project.blsp")
+      (file/spit (path/join hatch "project.blsp")
         "(project :name \"hatch\" :format-headers {deflive 0 tick 2})\n")
       (project
         :name "demo"
@@ -270,7 +270,7 @@
   (test "project/project-file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
-      (let (f (path-join dir "a.blsp"))
+      (let (f (path/join dir "a.blsp"))
         (file/spit f
           "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
         ;; Under `(defmodule a)` every binding resolves to `a/…`, except the
@@ -280,7 +280,7 @@
   (test "the same short name in two DIFFERENT namespaces is not a collision"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
-      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+      (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule alpha)\n(defn main () 1)\n")
         (file/spit fb "(defmodule beta)\n(defn main () 2)\n")
         ;; alpha/main vs beta/main — distinct keys, no warning.
@@ -288,7 +288,7 @@
   (test "the same name in the SAME namespace IS flagged (qualified)"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
-      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+      (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule shared)\n(defn main () 1)\n(defn only-a () 1)\n")
         (file/spit fb "(defmodule shared)\n(defn main () 2)\n(defn only-b () 2)\n")
         (let (warns (project/project-duplicate-def-warnings-seq [fa fb]))
@@ -298,7 +298,7 @@
   (test "an ambient *earmuff* name collides across namespaces (it stays root)"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
-      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+      (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule alpha)\n(defdyn *cfg* 1)\n")
         (file/spit fb "(defmodule beta)\n(defdyn *cfg* 2)\n")
         (let (warns (project/project-duplicate-def-warnings-seq [fa fb]))
@@ -307,7 +307,7 @@
   (test "files with no defmodule share the root namespace — same name still collides"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
-      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+      (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defn main () 1)\n(defn only-a () 1)\n")
         (file/spit fb "(defn main () 2)\n(defn only-b () 2)\n")
         (let (warns (project/project-duplicate-def-warnings-seq [fa fb]))
@@ -317,7 +317,7 @@
   (test "no duplicates yields no warnings"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
-      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+      (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule alpha)\n(defn alpha-fn () 1)\n")
         (file/spit fb "(defmodule beta)\n(defn beta-fn () 2)\n")
         (assert= (project/project-duplicate-def-warnings-seq [fa fb]) nil))))
@@ -327,7 +327,7 @@
   (test "extract-based passes agree with the from-scratch passes"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
-      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+      (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa
           "(defmodule shared)\n(defn main () 1)\n(defn- shared-helper () 1)\n(defn- shared-dead () 1)\n(defn use-it () (shared-helper))\n")
         (file/spit fb "(defmodule shared)\n(defn main () 2)\n")
@@ -356,9 +356,9 @@
   (test "check-file-deps returns [warnings dep-keys fp]; check-deps-fp is stable"
     (let (dir (temp-dir "brood-p2-"))
       (file/mkdir dir)
-      (let (f (path-join dir "m.blsp"))
+      (let (f (path/join dir "m.blsp"))
         (file/spit f "(defmodule p2m)\n(defn p2m-g (x) (p2m-h x))\n(defn p2m-h (a b) (+ a b))\n")
-        (let (r (check-file-deps f))
+        (let (r (reflect/check-file-deps f))
           (assert= (count r) 3)
           (is (vector? r))
           ;; dep-keys is the observations map; fp is a non-empty string
@@ -366,8 +366,8 @@
           (is (string? (nth r 2)))
           ;; recomputing the fingerprint of the same dep-keys against the unchanged
           ;; image reproduces it exactly (the reuse test the cache relies on)
-          (assert= (check-deps-fp (nth r 1)) (nth r 2))
-          (assert= (check-deps-fp (nth r 1)) (check-deps-fp (nth r 1))))))))
+          (assert= (reflect/check-deps-fp (nth r 1)) (nth r 2))
+          (assert= (reflect/check-deps-fp (nth r 1)) (reflect/check-deps-fp (nth r 1))))))))
 
 ;; The source loader is load-once *within a walk* (a module another file already
 ;; `require`d isn't loaded a second time when the walk reaches its file) and on
@@ -388,19 +388,19 @@
   (test "project-file-feature reads a file's (defmodule NAME) as a string"
     (let (dir (temp-dir "brood-feat-"))
       (file/mkdir dir)
-      (let (f (path-join dir "m.blsp"))
+      (let (f (path/join dir "m.blsp"))
         (file/spit f "(defmodule featmod \"doc\")\n(defn g () 1)\n")
         (assert= (project/project-file-feature f) "featmod"))))
   (test "a file with no defmodule header has no feature (nil → always loaded)"
     (let (dir (temp-dir "brood-feat-"))
       (file/mkdir dir)
-      (let (f (path-join dir "m.blsp"))
+      (let (f (path/join dir "m.blsp"))
         (file/spit f "(defn g () 1)\n")
         (is (nil? (project/project-file-feature f))))))
   (test "an unparseable file yields nil (the load surfaces the real error)"
     (let (dir (temp-dir "brood-feat-"))
       (file/mkdir dir)
-      (let (f (path-join dir "m.blsp"))
+      (let (f (path/join dir "m.blsp"))
         ; unbalanced — won't parse
         (file/spit f "(defmodule oops \n")
         (is (nil? (project/project-file-feature f))))))
@@ -415,10 +415,10 @@
     ;; The fix skips it — without it, zzz would load twice (re-defmacro, state wipe).
     (let (root (temp-dir "brood-walk-"))
       (file/mkdir root)
-      (file/mkdir (path-join root "src"))
-      (let (src (path-join root "src"))
-        (file/spit (path-join src "aaa.blsp") "(defmodule aaa (:use zzz))\n")
-        (file/spit (path-join src "zzz.blsp")
+      (file/mkdir (path/join root "src"))
+      (let (src (path/join root "src"))
+        (file/spit (path/join src "aaa.blsp") "(defmodule aaa (:use zzz))\n")
+        (file/spit (path/join src "zzz.blsp")
           "(defmodule zzz)\n(def *zzz-loads* (inc *zzz-loads*))\n")
         (def zzz/*zzz-loads* 0)
         (project/setup root)
@@ -427,8 +427,8 @@
   (test ":skip-loaded skips an already-provided module; a later walk reloads it"
     (let (root (temp-dir "brood-skip-"))
       (file/mkdir root)
-      (file/mkdir (path-join root "src"))
-      (let (f (path-join (path-join root "src") "skipfix.blsp"))
+      (file/mkdir (path/join root "src"))
+      (let (f (path/join (path/join root "src") "skipfix.blsp"))
         (file/spit f "(defmodule skipfix)\n(def *skip-load-count* (inc *skip-load-count*))\n")
         (def skipfix/*skip-load-count* 0)
         (project/setup root)
@@ -458,8 +458,8 @@
   (test "project-file-has-tests? is true iff a file carries deftest/describe"
     (let (dir (temp-dir "brood-coloc-"))
       (file/mkdir dir)
-      (let (with-tests (path-join dir "with.blsp")
-            no-tests (path-join dir "plain.blsp"))
+      (let (with-tests (path/join dir "with.blsp")
+            no-tests (path/join dir "plain.blsp"))
         (file/spit with-tests
           "(defmodule w (:use test))\n(defn g () 1)\n(deftest gt (assert= 1 (g)))\n")
         (file/spit no-tests "(defmodule p)\n(defn h () 2)\n")
@@ -468,13 +468,13 @@
   (test "project-colocated-test-files returns only source files carrying tests"
     (let (root (temp-dir "brood-coloc-"))
       (file/mkdir root)
-      (file/mkdir (path-join root "src"))
-      (let (src (path-join root "src"))
-        (file/spit (path-join root "project.blsp")
+      (file/mkdir (path/join root "src"))
+      (let (src (path/join root "src"))
+        (file/spit (path/join root "project.blsp")
           "(project :name \"coloc\" :source-paths [\"src\"])\n")
-        (file/spit (path-join src "lib.blsp")
+        (file/spit (path/join src "lib.blsp")
           "(defmodule lib (:use test))\n(defn g () 1)\n(deftest gt (assert= 1 (g)))\n")
-        (file/spit (path-join src "plain.blsp") "(defmodule plain)\n(defn h () 2)\n")
+        (file/spit (path/join src "plain.blsp") "(defmodule plain)\n(defn h () 2)\n")
         (project/setup root)
         (let (files (project/project-colocated-test-files root))
           (is (any? (fn (f) (includes? f "lib.blsp")) files))
@@ -492,11 +492,11 @@
   (test "bundle-collect strips co-located tests from the shipped source"
     (let (root (temp-dir "brood-coloc-"))
       (file/mkdir root)
-      (file/mkdir (path-join root "src"))
-      (let (src (path-join root "src"))
-        (file/spit (path-join root "project.blsp")
+      (file/mkdir (path/join root "src"))
+      (let (src (path/join root "src"))
+        (file/spit (path/join root "project.blsp")
           "(project :name \"coloc\" :source-paths [\"src\"])\n")
-        (file/spit (path-join src "lib.blsp")
+        (file/spit (path/join src "lib.blsp")
           (str "(defmodule lib (:use test))\n"
             "(defn shipped () 1)\n" "(describe \"lib\" (test \"t\" (assert= 1 (shipped))))\n"))
         (let (bundle (project/bundle-collect root))
@@ -546,7 +546,7 @@
   :isolated
   (test "an unparseable manifest names the file, line, and column"
     (let (dir (temp-dir "brood-manifest-")
-          manifest (path-join dir "project.blsp"))
+          manifest (path/join dir "project.blsp"))
       (file/mkdir dir)
       (file/spit manifest "(project :name \"x\"\n")
       (let (msg (try (project/project-apply-manifest manifest) (catch e e)))
@@ -555,14 +555,14 @@
           (is (includes? msg "line"))))))
   (test "an empty manifest says so rather than failing obscurely"
     (let (dir (temp-dir "brood-manifest-")
-          manifest (path-join dir "project.blsp"))
+          manifest (path/join dir "project.blsp"))
       (file/mkdir dir)
       (file/spit manifest "")
       (is (includes? (try (project/project-apply-manifest manifest) (catch e e))
             "cannot parse"))))
   (test "a first form that is not (project …) is REJECTED, not silently ignored"
     (let (dir (temp-dir "brood-manifest-")
-          manifest (path-join dir "project.blsp"))
+          manifest (path/join dir "project.blsp"))
       (file/mkdir dir)
       (file/spit manifest "(porject :name \"x\")\n")
       (let (msg (try (project/project-apply-manifest manifest) (catch e e)))
@@ -571,14 +571,14 @@
           (is (includes? msg "being ignored"))))))
   (test "a non-list manifest is rejected"
     (let (dir (temp-dir "brood-manifest-")
-          manifest (path-join dir "project.blsp"))
+          manifest (path/join dir "project.blsp"))
       (file/mkdir dir)
       (file/spit manifest "42\n")
       (is (includes? (try (project/project-apply-manifest manifest) (catch e e))
             "must begin with a (project"))))
   (test "a well-formed manifest still applies"
     (let (dir (temp-dir "brood-manifest-")
-          manifest (path-join dir "project.blsp"))
+          manifest (path/join dir "project.blsp"))
       (file/mkdir dir)
       (file/spit manifest "(project :name \"applied\" :version \"9.9.9\")\n")
       (project/project-apply-manifest manifest)
@@ -697,9 +697,11 @@
   (let (root (temp-dir "brood-enhancer-"))
     (doseq (kv (map-pairs layout))
       (let ([dep-name enhances] kv
-            dir (path-join (path-join root "_deps") dep-name))
+            ;; `(str dep-name)` — the keys are symbols, and `path/join` takes strings
+            ;; (the prelude's old 2-arg `path-join` stringified implicitly).
+            dir (path/join root "_deps" (str dep-name)))
         (file/mkdir dir)
-        (file/spit (path-join dir "project.blsp")
+        (file/spit (path/join dir "project.blsp")
           (str "(project :name \"" dep-name "\" :version \"1.0.0\" " enhances ")"))))
     root))
 
@@ -749,11 +751,11 @@
 (describe "enhancers-in — plugins under an arbitrary dir"
   (test "finds satisfied bedit enhancers directly under a dir (no _deps layer)"
     (let (dir (temp-dir "brood-enhancer-"))
-      (file/mkdir (path-join dir "good"))
-      (file/spit (path-join (path-join dir "good") "project.blsp")
+      (file/mkdir (path/join dir "good"))
+      (file/spit (path/join (path/join dir "good") "project.blsp")
         "(project :name \"good\" :version \"1.0.0\" :enhances {bedit \">= 0.1\"})")
-      (file/mkdir (path-join dir "plain"))
-      (file/spit (path-join (path-join dir "plain") "project.blsp")
+      (file/mkdir (path/join dir "plain"))
+      (file/spit (path/join (path/join dir "plain") "project.blsp")
         "(project :name \"plain\" :version \"1.0.0\")")
       (assert= (enhancers-in dir "bedit" "0.1.0") ["good"])))
   (test "[] for a dir that doesn't exist"
@@ -779,7 +781,7 @@
   (test "the file→module scan surfaces EVERY declared module, not just the first"
     (let (dir (temp-dir "brood-coloc-"))
       (file/mkdir dir)
-      (file/spit (path-join dir "shapes.blsp")
+      (file/spit (path/join dir "shapes.blsp")
         "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
       (let (pairs (package/module-files dir)
             names (sort (map (fn (p) (name (first p))) pairs)))
@@ -790,9 +792,9 @@
   (test "setup registers a co-located secondary module, rooted"
     (let (root (temp-dir "brood-coloc-"))
       (file/mkdir root)
-      (file/mkdir (path-join root "src"))
-      (file/spit (path-join root "project.blsp") "(project :name \"pkga\" :source-paths [\"src\"])")
-      (file/spit (path-join (path-join root "src") "shapes.blsp")
+      (file/mkdir (path/join root "src"))
+      (file/spit (path/join root "project.blsp") "(project :name \"pkga\" :source-paths [\"src\"])")
+      (file/spit (path/join (path/join root "src") "shapes.blsp")
         "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
       (project/setup root)
       (is (contains? *module-files* "pkga/shapes-internal"))
@@ -803,9 +805,9 @@
     ;; require of the primary — the registry entry is what makes it resolvable.
     (let (root (temp-dir "brood-coloc-"))
       (file/mkdir root)
-      (file/mkdir (path-join root "src"))
-      (file/spit (path-join root "project.blsp") "(project :name \"pkgb\" :source-paths [\"src\"])")
-      (file/spit (path-join (path-join root "src") "shapes.blsp")
+      (file/mkdir (path/join root "src"))
+      (file/spit (path/join root "project.blsp") "(project :name \"pkgb\" :source-paths [\"src\"])")
+      (file/spit (path/join (path/join root "src") "shapes.blsp")
         "(defmodule shapes) (defn area () 7) (defmodule shapes-internal) (defn secret () 42)")
       (project/setup root)
       (require-one 'pkgb/shapes-internal)
@@ -816,12 +818,12 @@
   (test "a consumer file (:use)s a co-located secondary across files"
     (let (root (temp-dir "brood-coloc-"))
       (file/mkdir root)
-      (file/mkdir (path-join root "src"))
-      (file/spit (path-join root "project.blsp") "(project :name \"pkgc\" :source-paths [\"src\"])")
-      (let (src (path-join root "src"))
-        (file/spit (path-join src "shapes.blsp")
+      (file/mkdir (path/join root "src"))
+      (file/spit (path/join root "project.blsp") "(project :name \"pkgc\" :source-paths [\"src\"])")
+      (let (src (path/join root "src"))
+        (file/spit (path/join src "shapes.blsp")
           "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
-        (file/spit (path-join src "consumer.blsp")
+        (file/spit (path/join src "consumer.blsp")
           "(defmodule consumer (:use shapes-internal)) (defn call-secret () (secret))")
         (project/setup root)
         (project/load-sources root)
@@ -832,11 +834,11 @@
     ;; ADR-070 detect-and-reject guard catches a duplicate declared in a second module.
     (let (root (temp-dir "brood-coloc-"))
       (file/mkdir root)
-      (file/mkdir (path-join root "src"))
-      (file/spit (path-join root "project.blsp") "(project :name \"pkgd\" :source-paths [\"src\"])")
-      (let (src (path-join root "src"))
-        (file/spit (path-join src "a.blsp") "(defmodule aye) (defmodule dup)")
-        (file/spit (path-join src "b.blsp") "(defmodule bee) (defmodule dup)")
+      (file/mkdir (path/join root "src"))
+      (file/spit (path/join root "project.blsp") "(project :name \"pkgd\" :source-paths [\"src\"])")
+      (let (src (path/join root "src"))
+        (file/spit (path/join src "a.blsp") "(defmodule aye) (defmodule dup)")
+        (file/spit (path/join src "b.blsp") "(defmodule bee) (defmodule dup)")
         (project/setup root)
         (let (msg (try
                     (do (package/package-guard-collisions root nil) :no-error)
@@ -846,9 +848,9 @@
   (test "concurrent require of a co-located secondary loads its file exactly once"
     (let (root (temp-dir "brood-coloc-"))
       (file/mkdir root)
-      (file/mkdir (path-join root "src"))
-      (file/spit (path-join root "project.blsp") "(project :name \"pkge\" :source-paths [\"src\"])")
-      (file/spit (path-join (path-join root "src") "twomod.blsp")
+      (file/mkdir (path/join root "src"))
+      (file/spit (path/join root "project.blsp") "(project :name \"pkge\" :source-paths [\"src\"])")
+      (file/spit (path/join (path/join root "src") "twomod.blsp")
         (str "(defmodule twomod) (defn area () 1)"
           " (defmodule twomod-internal)" " (def *loads* (inc *loads*)) (defn secret () 42)"))
       (def pkge/twomod-internal/*loads* 0)

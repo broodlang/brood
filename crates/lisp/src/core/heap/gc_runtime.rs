@@ -1143,7 +1143,7 @@ impl Heap {
     /// ADR-091). The eval safepoint calls it automatically once churn
     /// crosses [`rt_gc_threshold`](Self::rt_gc_threshold)
     /// ([`maybe_runtime_collect`](Self::maybe_runtime_collect)); the
-    /// `(runtime-collect)` builtin is the explicit/force form.
+    /// `(%)` builtin is the explicit/force form.
     ///
     /// One pass, evacuate-and-rewrite: every RUNTIME handle in the globals, both
     /// LOCAL generations (`local`+`old`), the operand/env roots, and the dynamic-

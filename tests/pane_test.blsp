@@ -111,7 +111,7 @@
       (assert= (pane-payload-at t (list :a :b)) {:buf 1})
       (assert= (pane-payload-at t (list :b)) {:buf 2})
       ;; the reuse rule: find the path whose pane already shows a given buffer
-      (assert= (find (fn (p) (= 2 (get (pane-payload-at t p) :buf))) (pane-leaf-paths t))
+      (assert= (seq/find (fn (p) (= 2 (get (pane-payload-at t p) :buf))) (pane-leaf-paths t))
         (list :b))))
 
   (test "pane-map rewrites every pane's payload (e.g. re-pointing buffer refs)"

@@ -594,7 +594,7 @@ impl Heap {
     /// GC observability counters (Tier-1; `docs/memory-review.md` §7), as a
     /// `(runs, copied, reclaimed)` triple of cumulative figures since process
     /// start: collections performed, LOCAL objects relocated, LOCAL objects
-    /// dropped. Backs the `(gc-stats)` builtin. Counts both Stage-B safepoint
+    /// dropped. Backs the `(dev/gc-stats)` builtin. Counts both Stage-B safepoint
     /// collections and bare [`flush`](Self::flush) calls (they share [`arena_flip`]).
     pub fn gc_counters(&self) -> (u64, u64, u64) {
         (self.gc_runs, self.gc_copied, self.gc_reclaimed)
@@ -602,7 +602,7 @@ impl Heap {
 
     /// GC pause durations `(total_ns, max_ns, last_ns)` — the timing tier's
     /// per-process figures (cumulative wall time in collections, worst single
-    /// pause, most recent pause). Backs `(gc-stats)`'s `:pause-*-us` keys.
+    /// pause, most recent pause). Backs `(dev/gc-stats)`'s `:pause-*-us` keys.
     pub fn gc_pause_ns(&self) -> (u64, u64, u64) {
         (self.gc_ns_total, self.gc_ns_max, self.gc_ns_last)
     }
@@ -623,7 +623,7 @@ impl Heap {
     }
 
     /// Whether per-collection GC tracing is on for this process. Backs the
-    /// no-arg `(gc-trace)` query.
+    /// no-arg `(%)` query.
     pub fn gc_trace(&self) -> bool {
         self.gc_trace
     }
@@ -673,7 +673,7 @@ impl Heap {
     // (stall_guard defined at module scope, below)
     pub fn collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
         // Pause-duration accounting (the observability timing tier): time the
-        // whole collection and fold it into the per-process totals `(gc-stats)`
+        // whole collection and fold it into the per-process totals `(dev/gc-stats)`
         // reports. Only recorded when a collection actually ran (`gc_runs`
         // moved) — a gated no-op call isn't a pause. Two `Instant` reads per
         // collection: noise against the collection itself.

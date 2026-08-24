@@ -41,8 +41,8 @@
 ;; the pinned receive would scan from the front and pass for the wrong reason.
 (defn- await-queued
   (n tries)
-  (if (or (>= (mailbox-size (self)) n) (<= tries 0))
-    (mailbox-size (self))
+  (if (or (>= (proc/mailbox-size (self)) n) (<= tries 0))
+    (proc/mailbox-size (self))
     (await-queued n (- tries 1))))
 
 ;; The guard. It runs inside the outer `receive`'s scan, while that scan is holding a
@@ -51,12 +51,12 @@
 ;; forever (the enclosing receive's own `after` cannot fire while we are inside it).
 (defn- perturb
   (box srv)
-  (if (table-get box :done)
+  (if (table/get box :done)
     false ; perturb exactly once, however many candidates the scan offers us
     (do
-      (table-put box :done true)
+      (table/put box :done true)
       ;; Eat the three oldest queued messages out from under the scan.
-      (table-put box :ate
+      (table/put box :ate
         [(receive ([:junk n] n) (after 500 :none))
          (receive ([:junk n] n) (after 500 :none))
          (receive ([:junk n] n) (after 500 :none))])
@@ -66,11 +66,11 @@
         ;; LAST ref this process mints — the mark is a single slot holding only the most
         ;; recent one, so an intervening `(ref)` (or `monitor`) would disarm it and the
         ;; case would pass by scanning from the front.
-        (table-put box :ref r)
+        (table/put box :ref r)
         (send srv [:req r (self)])
         ;; Let the reply land *before* the candidate goes back on the queue: it is the
         ;; reply sitting behind the out-of-order candidate that the mark skips past.
-        (table-put box :queued (await-queued 2 1000000)))
+        (table/put box :queued (await-queued 2 1000000)))
       ;; Decline the clause: the candidate goes back on the queue — the step under test.
       false)))
 
@@ -79,7 +79,7 @@
 
   (test "a pinned receive still sees its reply after a guard consumed from the mailbox"
     (let (me (self)
-          box (table)
+          box (table/new)
           srv (spawn (reply-server)))
       ;; Four messages the outer receive's leading-keyword filter skips (seq 0..3).
       (send me [:junk 0])
@@ -102,14 +102,14 @@
         :declined)
       ;; The interleaving actually happened — if any of this stops holding, the case
       ;; below is passing for the wrong reason and needs rebuilding, not deleting.
-      (assert= (table-get box :ate) [0 1 2])
+      (assert= (table/get box :ate) [0 1 2])
       ;; [:junk 3] and the reply — i.e. the reply really was queued behind the
       ;; candidate at the moment the candidate was put back.
-      (assert= (table-get box :queued) 2)
+      (assert= (table/get box :queued) 2)
       ;; One more post-mark message, so the mark's search has somewhere wrong to land.
       (send me [:noise])
       ;; THE ASSERTION: the reply is in this mailbox, and the pinned receive must find it.
-      (let (r (table-get box :ref))
+      (let (r (table/get box :ref))
         (assert= (receive ([:reply ^r v] v) (after 2000 :LOST-THE-REPLY)) :ok))
       ;; And nothing the perturbed scan touched was dropped or duplicated.
       (assert= (receive ([:junk n] n) (after 500 :LOST-JUNK)) 3)

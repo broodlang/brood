@@ -70,7 +70,7 @@
               (tcp/set-binary c true)
               (tcp/controlling-process c (self))
               (let (got (receive ([:tcp ^c d] d) (after *test-wait-ms* :timeout)))
-                (tcp/send c (pr-str (into [] (bytes->list got))))
+                (tcp/send c (pr-str (into [] (bytes/->list got))))
                 (tcp/close c))))))
       (let (port-cert (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout))
             s (tls/request "localhost"

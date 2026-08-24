@@ -57,28 +57,28 @@
 
 (describe "shuffle / sample"
   (test "shuffle is a permutation (preserves the multiset)"
-    (let ([sh _] (shuffle 9 [1 2 3 4 5 5]))
+    (let ([sh _] (seq/shuffle 9 [1 2 3 4 5 5]))
       (assert= (sort sh) (sort [1 2 3 4 5 5]))))
   (test "shuffle of an empty collection is empty"
-    (let ([sh _] (shuffle 1 []))
+    (let ([sh _] (seq/shuffle 1 []))
       (assert= sh nil)))
   (test "shuffle threads a usable next-seed"
-    (let ([_ s1] (shuffle 4 [1 2 3])
-          [sh2 _] (shuffle s1 [1 2 3]))
+    (let ([_ s1] (seq/shuffle 4 [1 2 3])
+          [sh2 _] (seq/shuffle s1 [1 2 3]))
       (assert= (sort sh2) (sort [1 2 3]))))
   (test "sample returns a member of the collection"
-    (let ([x _] (sample 3 [:a :b :c]))
+    (let ([x _] (seq/sample 3 [:a :b :c]))
       (is (includes? [:a :b :c] x))))
   (test "sample of an empty collection errors"
-    (assert-error (sample 1 []))))
+    (assert-error (seq/sample 1 []))))
 
 (describe "property-based testing (check-property)"
   (test "a true property over random ints passes"
     (check-property 200 (fn (s) (rand/int s 1000)) (fn (x) (and (>= x 0) (< x 1000)))))
   (test "shuffle preserves length, checked over many random orders"
-    (check-property 50 (fn (s) (shuffle s [1 2 3 4 5])) (fn (sh) (= (count sh) 5))))
+    (check-property 50 (fn (s) (seq/shuffle s [1 2 3 4 5])) (fn (sh) (= (count sh) 5))))
   (test "sample always returns a member, over many draws"
-    (check-property 100 (fn (s) (sample s [:a :b :c :d])) (fn (x) (includes? [:a :b :c :d] x))))
+    (check-property 100 (fn (s) (seq/sample s [:a :b :c :d])) (fn (x) (includes? [:a :b :c :d] x))))
   (test "a false property raises a test-failure carrying the seed"
     ;; Drive the loop directly so the failure is caught here, not the test runner.
     (is (test/test-failure? (try
@@ -135,16 +135,16 @@
   (test "20 000 elements shuffle to an exact permutation"
     (let (n 20000
           xs (into [] (range n))
-          [sh _] (shuffle 7 xs))
+          [sh _] (seq/shuffle 7 xs))
       (assert= n (count sh))
       ;; a permutation: same multiset, sorted back to the original
       (assert= (into [] (range n)) (into [] (sort sh)))))
   (test "the shuffle actually moves things (it is not the identity)"
-    (let ([sh _] (shuffle 3 (into [] (range 200))))
+    (let ([sh _] (seq/shuffle 3 (into [] (range 200))))
       (refute (= (into [] sh) (into [] (range 200))))))
   (test "a 1-element and empty shuffle still thread a fresh seed"
-    (let ([a s1] (shuffle 5 [])
-          [b s2] (shuffle 5 [:only]))
+    (let ([a s1] (seq/shuffle 5 [])
+          [b s2] (seq/shuffle 5 [:only]))
       (assert= nil a)
       (assert= (list :only) b)
       (refute (= s1 5))
