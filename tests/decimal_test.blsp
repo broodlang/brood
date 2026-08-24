@@ -160,14 +160,14 @@
                       (* (decimal i)
                         0.01M))
                  (range 1000))))
-      (gc-collect)
+      (dev/gc-collect)
       ;; churn: 30k throwaway decimals to force tenuring + a major collection
       (count (into []
                (map (fn (i)
                       (* (decimal i)
                         0.5M))
                  (range 30000))))
-      (gc-collect)
+      (dev/gc-collect)
       (is (= (count xs) 1000))
       (is (= (nth xs 0)
             0.00M))
@@ -176,7 +176,7 @@
       (is (= (nth xs 999)
             9.99M))))
   (test "a promoted (global) decimal survives collection"
-    (gc-collect)
+    (dev/gc-collect)
     (is (= *global-decimal*
           12345.6789M))
     (is (decimal? *global-decimal*))))

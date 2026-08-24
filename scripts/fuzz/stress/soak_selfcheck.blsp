@@ -119,9 +119,9 @@
                  (rss-kb)
                  (if (bound? 'gc-stats)
                    (str " rt-closures="
-                     (get (gc-stats) :runtime-closures)
+                     (get (dev/gc-stats) :runtime-closures)
                      " rt-threshold="
-                     (get (gc-stats) :runtime-threshold))
+                     (get (dev/gc-stats) :runtime-threshold))
                    " (rt-closures unavailable: lean build, no gc-stats)")))
       (loop-once (+ n 1) (if (= 0 (mod n 97)) (+ reloads 1) reloads)))))
 

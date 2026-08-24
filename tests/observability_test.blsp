@@ -13,7 +13,7 @@
 (describe "gc-stats pause durations"
   (test "pause keys exist and are consistent after forced churn"
     (obs-churn 200000 ())
-    (let (s (gc-stats))
+    (let (s (dev/gc-stats))
       (is (> (get s :collections) 0))
       (is (> (get s :pause-total-us) 0))
       (is (>= (get s :pause-total-us) (get s :pause-max-us)))
@@ -25,7 +25,7 @@
     (let (me (self))
       (dotimes (_ 8) (spawn (send me :done)))
       (dotimes (_ 8) (receive (:done nil))))
-    (let (s (sched-stats))
+    (let (s (dev/sched-stats))
       (is (> (get s :spawned) 0))
       (is (> (get s :exited) 0))
       (is (>= (get s :spawned) (get s :exited)))
@@ -38,10 +38,10 @@
 (describe "sampling profiler"
   :isolated
   (test "catches a hot named fn; stop is idempotent"
-    (profile-start 999)
+    (dev/profile-start 999)
     (obs-churn 800000 ())
     (obs-churn 800000 ())
-    (let (prof (profile-stop))
+    (let (prof (dev/profile-stop))
       ;; samples come from the VM driver's frame boundaries — the legacy
       ;; tree-walker (BROOD_VM=0) is by design not sampled, so the content
       ;; assertions only apply on the default engine
@@ -54,8 +54,8 @@
         ;; the hot fn shows up somewhere in the histogram (module-qualified)
         (is (includes? (mapcat (fn (e) (get e :stack)) prof) "observability-test/obs-churn"))))
     ;; a second stop with nothing armed is an empty histogram, not an error
-    (assert= 0 (count (profile-stop)))
+    (assert= 0 (count (dev/profile-stop)))
     ;; restart works after a stop
-    (profile-start 500)
+    (dev/profile-start 500)
     (obs-churn 400000 ())
-    (is (>= (count (profile-stop)) 0))))
+    (is (>= (count (dev/profile-stop)) 0))))

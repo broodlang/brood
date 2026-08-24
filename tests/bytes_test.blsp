@@ -66,17 +66,17 @@
   (test "LOCAL bytes survive forced collections with content intact"
     (let (mk (fn (i) (bytes (mod i 256) (mod (* i 3) 256) 255))
           xs (into [] (map mk (range 1000))))
-      (gc-collect)
+      (dev/gc-collect)
       ;; churn: 30k throwaway bytes to force tenuring + a major collection
       (count (into [] (map (fn (i) (bytes (mod i 256))) (range 30000))))
-      (gc-collect)
+      (dev/gc-collect)
       (is (= (count xs) 1000))
       (is (= (nth xs 0) (mk 0)))
       (is (= (nth xs 500) (mk 500)))
       (is (= (nth xs 999) (mk 999)))
       (is (= (byte-at (nth xs 999) 2) 255))))
   (test "a promoted (global) bytes survives collection"
-    (gc-collect)
+    (dev/gc-collect)
     (is (= *global-bytes* (bytes 1 2 3 255)))
     (is (= (byte-length *global-bytes*) 4))))
 

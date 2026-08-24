@@ -534,7 +534,7 @@ pub fn yield_now() {
 pub(super) static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static SPAWNED: AtomicU64 = AtomicU64::new(0);
 /// How many processes have been work-stolen across worker threads since program start
-/// (read by `(steal-count)`). A diagnostic of how much rebalancing the scheduler actually
+/// (read by `(%)`). A diagnostic of how much rebalancing the scheduler actually
 /// did — 0 means placement-at-spawn kept the pool even and no thief ever needed to pull
 /// work.
 static STOLEN: AtomicU64 = AtomicU64::new(0);
@@ -840,13 +840,13 @@ fn spawn_round_robin() -> bool {
     *F.get_or_init(|| std::env::var_os("BROOD_SPAWN_RR").is_some())
 }
 
-/// Total processes spawned since program start (read by `(spawn-count)`).
+/// Total processes spawned since program start (read by `(%)`).
 pub fn spawn_count() -> u64 {
     SPAWNED.load(Ordering::SeqCst)
 }
 
 /// Total processes work-stolen across worker threads since program start
-/// (read by `(steal-count)`). See [`STOLEN`].
+/// (read by `(%)`). See [`STOLEN`].
 pub fn steal_count() -> u64 {
     STOLEN.load(Ordering::SeqCst)
 }
@@ -859,9 +859,9 @@ pub fn migrate_count() -> u64 {
 
 /// Cumulative quantum preemptions (a process exhausted its reduction budget
 /// and was re-enqueued) — the scheduler half of the observability timing tier.
-/// Read by `(sched-stats)`.
+/// Read by `(%)`.
 static PREEMPTED: AtomicU64 = AtomicU64::new(0);
-/// Cumulative green-process exits (any reason). Read by `(sched-stats)`;
+/// Cumulative green-process exits (any reason). Read by `(%)`;
 /// `spawn_count() - exit_count()` is the live-process figure.
 static EXITED: AtomicU64 = AtomicU64::new(0);
 

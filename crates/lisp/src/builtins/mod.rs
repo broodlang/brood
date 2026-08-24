@@ -1970,7 +1970,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // memory
     def(
         heap,
-        "mem-bytes",
+        "%mem-bytes",
         Arity::exact(0),
         Sig::nullary(int),
         &[],
@@ -1979,7 +1979,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "mem-peak",
+        "%mem-peak",
         Arity::exact(0),
         Sig::nullary(int),
         &[],
@@ -1988,7 +1988,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "mem-limit",
+        "%mem-limit",
         Arity::exact(0),
         Sig::nullary(int),
         &[],
@@ -1996,7 +1996,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         mem_limit);
     def(
         heap,
-        "mem-soft-limit",
+        "%mem-soft-limit",
         Arity::exact(0),
         Sig::nullary(int),
         &[],
@@ -2005,7 +2005,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     #[cfg(feature = "dev-tools")]
     def(
         heap,
-        "ic-stats",
+        "%ic-stats",
         Arity::exact(0),
         Sig::nullary(map_ty),
         &[],
@@ -2014,7 +2014,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     #[cfg(feature = "dev-tools")]
     def(
         heap,
-        "pos-stats",
+        "%pos-stats",
         Arity::exact(0),
         Sig::nullary(map_ty),
         &[],
@@ -2027,15 +2027,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     {
         def(
             heap,
-            "gc-stats",
+            "%gc-stats",
             Arity::exact(0),
             Sig::nullary(map_ty),
             &[],
-            "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the timing tier) for the caller's own LOCAL heap; :runtime-closures and :runtime-threshold for the *shared* RUNTIME code region (its promoted-closure count + next auto-compact trigger — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (runtime-collect) for the RUNTIME live/reclaimable split.",
+            "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the timing tier) for the caller's own LOCAL heap; :runtime-closures and :runtime-threshold for the *shared* RUNTIME code region (its promoted-closure count + next auto-compact trigger — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (dev/runtime-collect) for the RUNTIME live/reclaimable split.",
             gc_stats);
         def(
             heap,
-            "vm-stats",
+            "%vm-stats",
             Arity::exact(0),
             Sig::nullary(map_ty),
             &[],
@@ -2043,7 +2043,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
             vm_stats);
         def(
             heap,
-            "vm-stats-reset",
+            "%vm-stats-reset",
             Arity::exact(0),
             Sig::nullary(map_ty),
             &[],
@@ -2051,7 +2051,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
             vm_stats_reset);
         def(
             heap,
-            "gc-collect",
+            "%gc-collect",
             Arity::exact(0),
             Sig::nullary(map_ty),
             &[],
@@ -2059,7 +2059,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
             gc_collect);
         def(
             heap,
-            "runtime-collect",
+            "%runtime-collect",
             Arity::exact(0),
             Sig::nullary(map_ty),
             &[],
@@ -2067,7 +2067,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
             runtime_collect);
         def(
             heap,
-            "gc-trace",
+            "%gc-trace",
             Arity::range(0, 1),
             Sig::new(vec![any], bool_ty),
             &["on?"],
@@ -3577,7 +3577,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         hibernate_proc);
     def(
         heap,
-        "sched-stats",
+        "%sched-stats",
         Arity::exact(0),
         Sig::nullary(map_ty),
         &[],
@@ -3585,15 +3585,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         sched_stats);
     def(
         heap,
-        "profile-start",
+        "%profile-start",
         Arity::range(0, 1),
         Sig::new(vec![any], nil_ty),
         &["&optional", "hz"],
-        "Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). A JIT-resident loop is attributed when it yields at its reduction-budget preempt (~once a quantum); the legacy tree-walker isn't sampled. Stop and read with (profile-stop).",
+        "Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). A JIT-resident loop is attributed when it yields at its reduction-budget preempt (~once a quantum); the legacy tree-walker isn't sampled. Stop and read with (dev/profile-stop).",
         profile_start);
     def(
         heap,
-        "profile-stop",
+        "%profile-stop",
         Arity::exact(0),
         Sig::nullary(list_ty),
         &[],
@@ -3609,7 +3609,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         system_monitor);
     def(
         heap,
-        "spawn-count",
+        "%spawn-count",
         Arity::exact(0),
         Sig::nullary(int),
         &[],
@@ -3618,7 +3618,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "peak-threads",
+        "%peak-threads",
         Arity::exact(0),
         Sig::nullary(int),
         &[],
@@ -3627,7 +3627,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "worker-threads",
+        "%worker-threads",
         Arity::exact(0),
         Sig::nullary(int),
         &[],
@@ -3660,7 +3660,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         brood_version);
     def(
         heap,
-        "steal-count",
+        "%steal-count",
         Arity::exact(0),
         Sig::nullary(int),
         &[],

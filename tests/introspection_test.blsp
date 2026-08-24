@@ -148,7 +148,7 @@
 ;; Runtime introspection: per-process GC observability (Tier-1;
 (describe "pos-stats"
   (test "is a map with the documented keys, and bytes track CAPACITY not entry count"
-    (let (s (pos-stats))
+    (let (s (dev/pos-stats))
       (is (map? s))
       (is (number? (get s :local-forms)))
       (is (>= (get s :local-forms) 0))
@@ -177,8 +177,8 @@
                       (read-all "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))")
                       (churn (- n 1)))))
           _ (churn 4000)
-          _ (gc-collect)
-          s (pos-stats))
+          _ (dev/gc-collect)
+          s (dev/pos-stats))
       ;; the live set is tiny after the churn is dropped; capacity must have followed it
       ;; down rather than staying at the high-water mark
       (is (< (get s :local-cap) 8192))
@@ -187,15 +187,15 @@
     ;; `read` stamps positions on LOCAL list forms, so reading source must not
     ;; DECREASE the recorded count. (Exact growth is not asserted: a collection may
     ;; drop dead entries between the two samples.)
-    (let (before (get (pos-stats) :local-forms)
+    (let (before (get (dev/pos-stats) :local-forms)
           _ (read-all "(defn probe-fn (a b) (if (> a b) a b))")
-          after (get (pos-stats) :local-forms))
+          after (get (dev/pos-stats) :local-forms))
       (is (>= after before)))))
 
 ;; docs/memory-review.md §7). gc-stats reports the *calling* process's own heap.
 (describe "gc-stats"
   (test "is a map with the documented counter keys"
-    (let (s (gc-stats))
+    (let (s (dev/gc-stats))
       (is (map? s))
       ;; cumulative counters since process start — non-negative integers
       (is (number? (get s :collections)))
@@ -210,9 +210,9 @@
       (is (> (get s :threshold) 0))))
   (test "live count rises after allocating retained data"
     ;; allocate a chunk we keep referenced — :live must reflect it
-    (let (before (get (gc-stats) :live)
+    (let (before (get (dev/gc-stats) :live)
           kept (range 500)
-          after (get (gc-stats) :live))
+          after (get (dev/gc-stats) :live))
       (is (> (count kept) 0))
       (is (>= after before)))))
 

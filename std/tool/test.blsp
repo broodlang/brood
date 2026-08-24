@@ -1707,7 +1707,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
                " failed assertions"
                extra
                ")"))
-    (println (str "  (" elapsed " ms wall, peak " (mb-str (mem-peak)) ")"))
+    (println (str "  (" elapsed " ms wall, peak " (mb-str (dev/mem-peak)) ")"))
     ;; Echo the seed whenever the order was randomised, so the run can be
     ;; reproduced. Deliberately says "same order", not "replay exactly": the seed
     ;; fixes the order tests are SCHEDULED in, but parallel tests genuinely

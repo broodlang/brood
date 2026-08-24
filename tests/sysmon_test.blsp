@@ -92,7 +92,7 @@ worker's mailbox so it can't satisfy a later test's receive."
 
   (test "gc events report the collection with a pause figure"
     (system-monitor (self) {:gc true})
-    (let (worker (spawn (do (sysmon-churn 50000 ()) (gc-collect) :ok)))
+    (let (worker (spawn (do (sysmon-churn 50000 ()) (dev/gc-collect) :ok)))
       (let (m (sysmon-drain-until :gc worker))
         (is (map? m))
         (is (>= (get m :pause-us) 0))
@@ -104,7 +104,7 @@ worker's mailbox so it can't satisfy a later test's receive."
     ;; 10-minute threshold: no minor collection takes that long, so nothing
     ;; may arrive. Wait for the worker to finish, then prove silence.
     (system-monitor (self) {:gc true :gc-min-pause-us 600000000})
-    (let (worker (spawn (do (sysmon-churn 50000 ()) (gc-collect) :ok))
+    (let (worker (spawn (do (sysmon-churn 50000 ()) (dev/gc-collect) :ok))
           wm (monitor worker))
       (receive ([:down ^wm ^worker _] :ok) (after *test-wait-ms* :timeout))
       (assert= :quiet (receive ([:system :gc _ _] :got-one) (after 200 :quiet))))
