@@ -40,7 +40,7 @@ trigger, docs/type-soundness-reload.md).")
 
 ;; The runtime code generation — a plain global (NOT a `defdyn`: a dynamic var is a
 ;; per-process binding stack, the wrong shape for a runtime-wide count) bumped on each
-;; successful hot reload. It is the *pull* counterpart to `(gen/code-change pid)`'s push:
+;; successful hot reload. It is the *pull* counterpart to `(code-change pid)`'s push:
 ;; a long-lived loop can stash the version it started under and, when this differs,
 ;; migrate its own state — detecting "I am running new code with old-shaped state"
 ;; without anyone sending it a message. See docs/live-editing.md Stage 6.
@@ -126,7 +126,7 @@ behind a long-lived loop has changed since it started."
               (reload-in-package-context path (fn () (reload-defs path)))
               ;; Bump the code generation BEFORE the on-reload hook, so a hook (or a
               ;; loop the hook wakes) that reads `(code-version)` already sees the new
-              ;; value. The push hand-off — `(gen/code-change pid)` per affected server —
+              ;; value. The push hand-off — `(code-change pid)` per affected server —
               ;; is the on-reload hook's job; this is the pull signal for loops that poll.
               (def *code-version* (+ 1 *code-version*))
               (println "[reload]" path)

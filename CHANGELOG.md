@@ -41,9 +41,16 @@ always available — no `require`, no `(:use protocol)`. (The type checker alrea
 
 **Two more name fixes.** `crypto/secure=?` → `crypto/constant-time-equal?` (the `=?`
 glyph read oddly; the new name states the actual security property). And the gen cast
-`!` → `gen/cast` — it was an operator glyph that looked like raw send but actually wraps
-a cast envelope (raw asynchronous send is the kernel's bare `send`). `gen` stays a
-namespaced module.
+`!` was an operator glyph that looked like raw send but actually wraps a cast envelope —
+it became `cast` (raw asynchronous send is the kernel's bare `send`).
+
+**The gen_server actor framework is core.** `gen` moved into the prelude (like
+`protocol`), so `spawn-server`, `call`, `cast`, `call-timeout`, `stop`, `code-change`,
+`spawn-server-link`, `spawn-server-named`, and the `defprocess` macro are **bare** — no
+`require`, no `gen/` prefix. It is a peer of `spawn`/`send`/`receive`, not a library. The
+old prelude-freeze concern (its `receive`/`match` expansion stranding lambdas) does not
+apply: the prelude only *defines* `defprocess`, never expands it. `call`/`cast`/`stop`
+join the core-reserved process verbs.
 
 **Transcendental math moved into the `math/` namespace.** `sin`, `cos`, `tan`, `asin`,
 `acos`, `atan`, `atan2`, `exp`, `ln`, `log2`, `log10` are no longer bare — they're
