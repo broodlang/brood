@@ -371,9 +371,9 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
                                                                                    :children))
                                     trig-pid
                                     (get state :strategy))
-            survivors (remove (fn (c) (= (get c :pid) trig-pid)) affected)
+            survivors (seq/remove (fn (c) (= (get c :pid) trig-pid)) affected)
             _ (supervisor-terminate-many survivors)
-            restarted (remove nil?
+            restarted (seq/remove nil?
                         (map (fn (c)
                                (supervisor-maybe-restart c
                                  (if (= (get c :pid) trig-pid) reason :killed)))

@@ -343,7 +343,7 @@ was attempted."
 
 (defn observations (dbg)
   "Every `spy` node observation, flattened to `{:pid :form :value}`."
-  (keep (fn (e)
+  (seq/keep (fn (e)
           (let (entry (get e :entry))
             (when (= (get entry :spy) :node)
               {:pid (get e :pid) :form (get entry :form) :value (get entry :value)})))
@@ -358,7 +358,7 @@ was attempted."
 
 (defn value-distribution (dbg form-string)
   "The distribution of observed values for one traced form, `{value -> count}`."
-  (frequencies (keep (fn (o) (when (= (pr-str (get o :form)) form-string) (get o :value)))
+  (frequencies (seq/keep (fn (o) (when (= (pr-str (get o :form)) form-string) (get o :value)))
                  (observations dbg))))
 
 (defn modal-value (dbg form-string)

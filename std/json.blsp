@@ -81,7 +81,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 (defn- json-slice
   (s i end)
   "The code points [i, end) of `s`, joined back into a string."
-  (apply str (map int->char (subvec s i end))))
+  (apply str (map int->char (seq/subvec s i end))))
 
 (defn- ws? (c) (or (= c 32) (= c 9) (= c 10) (= c 13)))
 

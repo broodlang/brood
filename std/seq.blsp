@@ -72,7 +72,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
   "A map from each `(f x)` to the list of items of `coll` that produced it, each list in original order."
   ;; Prepend per group (O(1)) then reverse every group's list once at the end.
   ;; Direct kernel `map-assoc`/`map-get` — the accumulator is always a map.
-  (update-vals (fold (fn (m x) (let (k (f x)) (map-assoc m k (cons x (map-get m k nil))))) {} coll)
+  (map/update-vals (fold (fn (m x) (let (k (f x)) (map-assoc m k (cons x (map-get m k nil))))) {} coll)
     reverse))
 
 (defn- interpose-acc
@@ -171,3 +171,114 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
 -1 if none does. The predicate counterpart of `index-of` (which matches by
 equality); recover the item itself with `find`."
   (index-where-from pred coll 0))
+
+(defn subvec (v start & more)
+  "A fresh vector of v's elements in [start, end); end defaults to the length."
+  (if (empty? more) (%subvec v start) (%subvec v start (first more))))
+
+(defn vector-assoc (v i x)
+  "A fresh vector like v with index i (in [0, len)) set to x."
+  (%vector-assoc v i x))
+
+(defn vector-ref (v i)
+  "The element at index i of vector v."
+  (%vector-ref v i))
+
+(defn vector-length (v)
+  "The number of elements in vector v."
+  (%vector-length v))
+
+(defn transduce (xform rf init coll)
+  "Reduce `coll` with `rf`/`init` through the transducer `xform` — one pass, no
+intermediate collections. `(transduce (comp (xfilter odd?) (xmap sq)) + 0 (range 10))`
+sums the squares of the odd numbers, allocating nothing in between.
+
+`xform` is any `(rf) -> rf'` function, so a stage of your own is a plain `fn`:
+
+  (defn xtake-while (pred)          ; stop-at-first-failure, as a stage
+    (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
+
+Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter p)
+(xmap f))` filters before mapping — because each stage wraps the next one's reducer.
+`lmap`/`lfilter`/… are the ergonomic front end over the same machinery; use
+`transduce` when the stage stack is computed, reused, or your own."
+  (fold (xform rf) init coll))
+
+
+(defn filterv (pred coll)
+  "A VECTOR of the items of `coll` for which `(pred x)` is truthy — `filter`
+when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
+  (into [] (filter pred coll)))
+
+;; (find pred coll) -> the first element satisfying pred, or nil.
+(defn find (pred coll)
+  "The first item of `coll` for which `(pred x)` holds, or `nil`."
+  (cond (empty? coll) nil (pred (first coll)) (first coll) else (seq/find pred (rest coll))))
+
+(defn distinct (coll)
+  "The items of `coll` with duplicates removed, keeping the first occurrence of each (order-preserving)."
+  (reverse (nth (fold distinct-step [{} nil] coll) 1)))
+
+(defn flatten (coll)
+  "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves."
+  (reverse (flatten-acc coll nil)))
+
+
+(defn split-at (n coll)
+  "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`."
+  (split-at-acc n coll nil))
+
+
+
+
+(defn take-last (n coll)
+  "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0)."
+  (drop (- (count coll) n) coll))
+
+(defn drop-last (n coll)
+  "`coll` without its last `n` items (`()` if `n` >= its length)."
+  (take (- (count coll) n) coll))
+
+
+(defn third (coll) "The third item of `coll`." (first (rest (rest coll))))
+
+(defn times (n f x)
+  "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`."
+  (if (<= n 0) x (seq/times (dec n) f (f x))))
+
+
+(defn repeatedly (n f)
+  "A list of `n` successive calls to the zero-argument function `f` (in call order)."
+  (repeatedly-acc n f nil))
+
+(defn sample (seed coll)
+  "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."
+  (let (items (into [] coll)
+        n (count items))
+    (if (= n 0)
+      (error "sample: cannot sample from an empty collection")
+      (let (s (%rand-step (%rand-seed seed)))
+        [(nth items (rem s n)) s]))))
+
+(defn shuffle (seed coll)
+  "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
+  (shuffle-acc (%rand-seed seed) (into [] coll) nil))
+
+
+(defn remove-nth (coll i)
+  "A fresh collection like `coll` with the element at index `i` removed. Returns
+a vector for a vector and a list for a list. `i` must be in `[0, count)`."
+  (if (vector? coll)
+    (into (seq/subvec coll 0 i) (seq/subvec coll (inc i) (count coll)))
+    (append (take i coll) (drop (inc i) coll))))
+
+
+(%defseq remove
+  (pred)
+  "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`."
+  (if (pred item) acc (cons item acc)))
+
+(%defseq keep
+  (f)
+  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `xkeep`)."
+  (let (y (f item)) (if (nil? y) acc (cons y acc))))

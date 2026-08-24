@@ -256,7 +256,7 @@
           deps (fold (fn (m i)
                        (let (ds (if (= i 0)
                                   []
-                                  (distinct (keep (fn (j)
+                                  (seq/distinct (seq/keep (fn (j)
                                                     (when (and (>= j 0) (< j i)) [(nm j) ">= 1.0"]))
                                               (list (- i 1) (quot i 2) (- i 3))))))
                          (assoc m (nm i) {"1.0.0" ds "1.1.0" ds "2.0.0" ds})))
@@ -389,7 +389,7 @@
     [acc seed]
     (let ([include s1] (rand/int seed 2))
       (if (= include 1)
-        (let ([c s2] (sample s1 rt-g-constraints))
+        (let ([c s2] (seq/sample s1 rt-g-constraints))
           (rt-g-deps s2 pkg (rest others) (cons [(first others) c] acc)))
         (rt-g-deps s1 pkg (rest others) acc)))))
 
@@ -414,7 +414,7 @@
     [acc seed]
     (let ([include s1] (rand/int seed 2))
       (if (= include 1)
-        (let ([c s2] (sample s1 rt-g-constraints))
+        (let ([c s2] (seq/sample s1 rt-g-constraints))
           (rt-g-roots s2 (rest packages) (cons [(first packages) c] acc)))
         (rt-g-roots s1 (rest packages) acc)))))
 
@@ -423,7 +423,7 @@
   (let ([universe s1] (rt-g-universe-map seed rt-g-packages {})
         [roots s2] (rt-g-roots s1 rt-g-packages nil))
     (if (empty? roots)
-      (let ([c s3] (sample s2 rt-g-constraints)) [universe (list ['a c]) s3])
+      (let ([c s3] (seq/sample s2 rt-g-constraints)) [universe (list ['a c]) s3])
       [universe roots s2])))
 
 ;; Compare the solver against the oracle for one universe. nil = agreement; otherwise a

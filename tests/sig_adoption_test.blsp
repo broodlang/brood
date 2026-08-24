@@ -91,7 +91,7 @@
 ;; Every misplaced `(sig …)` line in `lines` (empty when the invariant holds).
 (defn- sig-misplaced
   (lines)
-  (keep (fn (pair) (let ([a b] pair) (when (sig-above-def? a b) a)))
+  (seq/keep (fn (pair) (let ([a b] pair) (when (sig-above-def? a b) a)))
     (zip lines (rest lines))))
 
 ;; ---- occurrence typing: inferred params check callers, zero annotations (ADR-190) ----

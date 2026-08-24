@@ -586,7 +586,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "vector-ref",
+        "%vector-ref",
         Arity::exact(2),
         Sig::new(vec![vec_ty, int], any),
         &["v", "i"],
@@ -595,7 +595,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "vector-length",
+        "%vector-length",
         Arity::exact(1),
         Sig::new(vec![vec_ty], int),
         &["v"],
@@ -604,7 +604,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "vector-assoc",
+        "%vector-assoc",
         Arity::exact(3),
         Sig::new(vec![vec_ty, int, any], vec_ty),
         &["v", "i", "x"],
@@ -613,7 +613,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "subvec",
+        "%subvec",
         Arity::range(2, 3),
         Sig::with_rest(vec![vec_ty, int], int, vec_ty),
         &["v", "start", "end"],

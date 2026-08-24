@@ -37,9 +37,6 @@
   (if (and (pair? coll) (pred (first coll)))
     (take-while-acc pred (rest coll) (cons (first coll) acc))
     (reverse acc)))
-(defn drop-while (pred coll)
-  "`coll` with its leading items for which `(pred x)` holds removed."
-  (if (and (pair? coll) (pred (first coll))) (drop-while pred (rest coll)) coll))
 
 ;; (any? pred coll) -> true if pred holds for any element; (every? pred coll) ->
 ;; true if it holds for all (vacuously true on the empty list). Booleans, by the
@@ -51,10 +48,6 @@
   "True if `(pred x)` holds for every item of `coll` (vacuously true if empty)."
   (cond (empty? coll) true (pred (first coll)) (every? pred (rest coll)) else false))
 
-;; (find pred coll) -> the first element satisfying pred, or nil.
-(defn find (pred coll)
-  "The first item of `coll` for which `(pred x)` holds, or `nil`."
-  (cond (empty? coll) nil (pred (first coll)) (first coll) else (find pred (rest coll))))
 
 ;; (zip a b) -> a list of [x y] vectors, stopping at the shorter input.
 (defn zip (a b)
@@ -70,9 +63,6 @@
 ;; dropped (Clojure `partition` semantics). `has-at-least?` avoids re-counting.
 (defn has-at-least? (n coll)
   (cond (<= n 0) true (empty? coll) false else (has-at-least? (- n 1) (rest coll))))
-(defn partition (n coll)
-  "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped."
-  (partition-acc n coll nil))
 (defn- partition-acc
   (n coll acc)
   (if (has-at-least? n coll)
@@ -103,11 +93,6 @@
     ;; define its own order; every built-in keeps the native `%sort-cmp` path.
     (record? (first a)) (merge-sort (fn (x y) (< (ord-compare x y) 0)) a)
     else (%sort-cmp a)))
-(defn sort-by (key-fn coll)
-  "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the
-structural order (`compare`) — or a key's own `Ord` if the key is a record. Numeric,
-string, keyword, vector, and record keys all work."
-  (merge-sort (fn (x y) (< (ord-compare (key-fn x) (key-fn y)) 0)) coll))
 ;; Split `coll` into its first `n` items and the rest in ONE pass — what
 ;; merge-sort needs instead of a separate `take` + `drop` (two walks). Generally
 ;; useful, so it's public.
@@ -116,9 +101,6 @@ string, keyword, vector, and record keys all work."
   (if (or (<= n 0) (empty? coll))
     [(reverse acc) coll]
     (split-at-acc (dec n) (rest coll) (cons (first coll) acc))))
-(defn split-at (n coll)
-  "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`."
-  (split-at-acc n coll nil))
 
 ;; Length-carrying merge sort: count once up front and halve `n` down the
 ;; recursion, and split each run in a single `split-at` pass. The previous form
@@ -132,7 +114,7 @@ string, keyword, vector, and record keys all work."
     (if (<= n 1)
       coll
       (let (h (quot n 2)
-            parts (split-at h coll))
+            parts (seq/split-at h coll))
         (merge-runs less?
           (merge-sort-n less? (nth parts 0) h)
           (merge-sort-n less? (nth parts 1) (- n h)))))))
@@ -154,10 +136,6 @@ string, keyword, vector, and record keys all work."
 ;; `mapcat` uses `append-onto` instead of `cons` to splice each sublist straight
 ;; onto the reversed accumulator, then reverse once — so we never materialise the
 ;; intermediate list-of-sublists nor spread it through `apply append`.
-(%defseq mapcat
-  (f)
-  "Map `f` over `coll` and concatenate the resulting lists into one."
-  (append-onto acc (f item)))
 
 (defn into (to from)
   "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a **set**, items are added and duplicates collapse (set result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work."
@@ -222,27 +200,13 @@ rather than in `std/set` so a set works with the collection protocol without an
 import (and so `(:use set)` can't shadow them)."
   (fold %set-remove s xs))
 
-(defn remove-nth (coll i)
-  "A fresh collection like `coll` with the element at index `i` removed. Returns
-a vector for a vector and a list for a list. `i` must be in `[0, count)`."
-  (if (vector? coll)
-    (into (subvec coll 0 i) (subvec coll (inc i) (count coll)))
-    (append (take i coll) (drop (inc i) coll))))
 
 ;; ---- more sequence operations -----------------------------------------------
 ;; The eager counterparts of the `x*` transducers, plus the common Clojure-ish
 ;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
 ;; stack-safe on long inputs — see the sequence-library note above.
 
-(%defseq remove
-  (pred)
-  "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`."
-  (if (pred item) acc (cons item acc)))
 
-(%defseq keep
-  (f)
-  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `xkeep`)."
-  (let (y (f item)) (if (nil? y) acc (cons y acc))))
 
 ;; distinct: keep the first occurrence of each item. A map carried alongside the
 ;; result acts as the "seen" set, so membership is O(1)-ish, not the O(n²) a
@@ -255,9 +219,6 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
   (if (map-get (nth state 0) x false)
     state
     [(map-assoc (nth state 0) x true) (cons x (nth state 1))]))
-(defn distinct (coll)
-  "The items of `coll` with duplicates removed, keeping the first occurrence of each (order-preserving)."
-  (reverse (nth (fold distinct-step [{} nil] coll) 1)))
 
 ;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil`
 ;; (so empty sub-lists and nils vanish); vectors and maps are leaf items. The
@@ -271,16 +232,7 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
       (empty? coll) acc
       (list? (first coll)) (flatten-acc (rest coll) (flatten-acc (first coll) acc))
       else (flatten-acc (rest coll) (cons (first coll) acc)))))
-(defn flatten (coll)
-  "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves."
-  (reverse (flatten-acc coll nil)))
 
-(defn take-last (n coll)
-  "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0)."
-  (drop (- (count coll) n) coll))
-(defn drop-last (n coll)
-  "`coll` without its last `n` items (`()` if `n` >= its length)."
-  (take (- (count coll) n) coll))
 
 ;; ---- records: named, optionally-typed maps (defrecord — ADR-130) ------------
 ;; A record is a plain immutable map with a positional constructor and one
@@ -421,9 +373,6 @@ and it must be loaded before this `defrecord`.
 (defn- repeatedly-acc
   (n f acc)
   (if (<= n 0) (reverse acc) (repeatedly-acc (dec n) f (cons (f) acc))))
-(defn repeatedly (n f)
-  "A list of `n` successive calls to the zero-argument function `f` (in call order)."
-  (repeatedly-acc n f nil))
 
 ;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
 ;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
@@ -515,28 +464,13 @@ with `transduce`, or reach for `lmap` when you just want a fusing pipeline."
   "The `keep` stage as a transducer: `(f x)` for each input, dropping `nil` results."
   (%xkeep f))
 
-(defn transduce (xform rf init coll)
-  "Reduce `coll` with `rf`/`init` through the transducer `xform` — one pass, no
-intermediate collections. `(transduce (comp (xfilter odd?) (xmap sq)) + 0 (range 10))`
-sums the squares of the odd numbers, allocating nothing in between.
-
-`xform` is any `(rf) -> rf'` function, so a stage of your own is a plain `fn`:
-
-  (defn xtake-while (pred)          ; stop-at-first-failure, as a stage
-    (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
-
-Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter p)
-(xmap f))` filters before mapping — because each stage wraps the next one's reducer.
-`lmap`/`lfilter`/… are the ergonomic front end over the same machinery; use
-`transduce` when the stage stack is computed, reused, or your own."
-  (fold (xform rf) init coll))
 
 (defn %seqview-wrap (coll xf)
   "Wrap `coll` in a lazy seq-view applying transducer `xf`. If `coll` is already a
 view, compose `xf` onto its transducer (same source) so the stages fuse."
   (if (seqview? coll)
     (let (parts (%seqview-parts coll))
-      (%seqview (vector-ref parts 0) (comp (vector-ref parts 1) xf)))
+      (%seqview (%vector-ref parts 0) (comp (%vector-ref parts 1) xf)))
     (%seqview coll xf)))
 
 (defn- lmap (f coll)
@@ -563,9 +497,6 @@ iterating for side effects."
 ;; Hide the hand-rolled counter/accumulator recursion behind names that read as
 ;; intent (the way `defprocess` hides a receive loop). All ordinary Brood.
 
-(defn times (n f x)
-  "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`."
-  (if (<= n 0) x (times (dec n) f (f x))))
 
 (defn- iterate-times-acc
   (f x n acc)
@@ -671,3 +602,38 @@ iterating for side effects."
     `(do (dolist-loop ~(second bind) (fn (~(first bind)) ~@body)) nil)))
 
 ;; `bench` moved to the `dev` module (`dev/bench`) with the other diagnostics.
+
+
+;; ---- kept in the prelude: used at MACRO-EXPANSION time -----------------------
+;; A prelude macro that calls these runs during boot, before `(require-one 'seq)`,
+;; so they cannot live in the module however late-bound the reference is. `try` uses
+;; `but-last`, `defrecord` uses `mapcat`, `defmethod` uses `mapv`, and those pull in
+;; the rest transitively. Everything else in the sequence library moved to `seq/`.
+
+(defn but-last (xs) "All but the last item of `xs`, as a list." (reverse (rest (reverse xs))))
+
+(defn drop-while (pred coll)
+  "`coll` with its leading items for which `(pred x)` holds removed."
+  (if (and (pair? coll) (pred (first coll))) (drop-while pred (rest coll)) coll))
+
+(%defseq mapcat
+  (f)
+  "Map `f` over `coll` and concatenate the resulting lists into one."
+  (append-onto acc (f item)))
+
+(defn mapv (f coll)
+  "A VECTOR of `(f x)` for each `x` in `coll` — `map` when the caller needs
+indexed access or a vector literal shape (`(into [] (map f coll))`, named)."
+  (into [] (map f coll)))
+
+(defn partition (n coll)
+  "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped."
+  (partition-acc n coll nil))
+
+
+
+(defn sort-by (key-fn coll)
+  "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the
+structural order (`compare`) — or a key's own `Ord` if the key is a record. Numeric,
+string, keyword, vector, and record keys all work."
+  (merge-sort (fn (x y) (< (ord-compare (key-fn x) (key-fn y)) 0)) coll))

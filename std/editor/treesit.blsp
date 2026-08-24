@@ -102,7 +102,7 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 (defn- ts-enclosing
   (node point)
   "The deepest container node strictly containing `point`; `node` if none."
-  (let (hit (find (fn (k)
+  (let (hit (seq/find (fn (k)
                     (and (ts-container? k)
                       (< (get k :start) point)
                       (< point (get k :end))))
@@ -118,7 +118,7 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
   (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point)
-        nxt (find (fn (f) (>= (get f :start) point)) (ts-named-kids enc)))
+        nxt (seq/find (fn (f) (>= (get f :start) point)) (ts-named-kids enc)))
     (if (nil? nxt) point (get nxt :end))))
 
 (defn point-backward (text lang point)
@@ -133,7 +133,7 @@ unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
 stopped at (Emacs `forward-list`); unchanged if none."
   (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point)
-        nxt (find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
+        nxt (seq/find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
               (ts-named-kids enc)))
     (if (nil? nxt) point (get nxt :end))))
 
@@ -164,7 +164,7 @@ unchanged at top level."
 if none."
   (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point)
-        lst (find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
+        lst (seq/find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
               (ts-named-kids enc)))
     (if (nil? lst) point (get lst :start))))
 
@@ -174,7 +174,7 @@ if none."
     (node point)
     "The containers strictly enclosing `point` below `node`, outermost first — each a
   container that contains the next. `()` at the leaf."
-    (let (hit (find (fn (k)
+    (let (hit (seq/find (fn (k)
                       (and (ts-container? k)
                         (< (get k :start) point)
                         (< point (get k :end))))

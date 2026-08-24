@@ -108,7 +108,7 @@
   (i j)
   (and (= (string/char-at mb-text i) (nth mb-cps i))
     ; the char index the language speaks
-    (= (string/substring mb-text i j) (apply str (subvec mb-cps i j)))
+    (= (string/substring mb-text i j) (apply str (seq/subvec mb-cps i j)))
     (= (string/length (string/substring mb-text i j)) (- j i))
     ; forward search from i lands on i, since the char at i is the needle
     (= (index-of mb-text (string/char-at mb-text i) i) i)

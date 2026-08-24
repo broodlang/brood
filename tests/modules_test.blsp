@@ -39,7 +39,7 @@
   (test "no feature is lost when many processes provide at once"
     (let (n 120)
       (concurrently n (fn (i) (provide (symbol (mt-conc-feature i)))))
-      (assert= (count (remove (fn (i) (contains? *features* (mt-conc-feature i))) (range n))) 0))))
+      (assert= (count (seq/remove (fn (i) (contains? *features* (mt-conc-feature i))) (range n))) 0))))
 
 ;; :serial — these mutate the shared *features* global, so run them one-at-a-time.
 (describe "modules: includes? / provide / require"

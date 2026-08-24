@@ -626,7 +626,7 @@ mod prelude_hygiene {
     // Note this is only consulted for names that are NOT registered primitives: a good
     // many kernel primitives are themselves *named* with a slash (`file/slurp`,
     // `string/split`), and those are always bound with no module load at all.
-    const ALLOWED_MODULES: &[&str] = &["string"];
+    const ALLOWED_MODULES: &[&str] = &["string", "seq"];
 
     /// Every name `builtins::register` binds — the always-available set, slash-named
     /// primitives included.

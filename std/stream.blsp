@@ -103,7 +103,7 @@ Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error.
                    (send r :stream-done)
                    (do
                      (send r [:stream-val (second result)])
-                     (fn-loop f (third result))))))
+                     (fn-loop f (seq/third result))))))
     (:stream-close nil)))
 
 (defn range (start stop)
@@ -237,9 +237,6 @@ Call immediately after accept or connect, before any data has been read."
                      ([:stream-err m] (send r [:stream-err m]))))))
     (:stream-close (close up))))
 
-(defn take-while (pred s)
-  "A stream yielding elements from `s` while `(pred element)` is true."
-  (spawn (take-while-loop pred s)))
 
 (defn- take-while-loop
   (pred up)
@@ -470,3 +467,8 @@ then `:stream-eof` when done (or `[:stream-err msg]` + `:stream-eof` on error)."
 (defn ->socket (s sock)
   "Drain stream `s`, writing each chunk to `sock` with `tcp/send`. Returns nil."
   (for-each (fn (chunk) (tcp/send sock chunk)) s))
+
+;; (restored: this is stream's take-while, not the sequence one)
+(defn take-while (pred s)
+  "A stream yielding elements from `s` while `(pred element)` is true."
+  (spawn (take-while-loop pred s)))

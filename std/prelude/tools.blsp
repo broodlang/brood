@@ -30,7 +30,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
     (when (not (empty? terms))
       (map (fn (e) [(second e) (nth e 2)])
         (sort-by (fn (e) [(- (first e)) (str (second e))])
-          (keep (fn (s)
+          (seq/keep (fn (s)
                   (let (d (try (doc (eval s)) (catch _ nil)))
                     (when (string? d)
                       (let (hay (string/lower (str s " " d))
@@ -240,7 +240,7 @@ Returns the directory. Pass `{}` to stop consulting an image."
   *load-path*)
 (defn add-load-path! (& dirs)
   "Prepend `dirs` to the module search path (skipping any already present); returns the new path."
-  (set-load-path! (append (remove (fn (d) (includes? *load-path* d)) dirs) *load-path*)))
+  (set-load-path! (append (seq/remove (fn (d) (includes? *load-path* d)) dirs) *load-path*)))
 
 ;; Package-rooted namespaces (ADR-070): a *dependency* `foo` providing a module `b`
 ;; is loaded as the rooted global namespace `foo/b`, so two deps can both provide a
@@ -556,7 +556,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
   ;; The single file declaring co-located module `key`, or nil if none. Errors if two files
   ;; declare it — the nameless/bare analogue of a named project's duplicate-module rejection.
   (let (key-name (name key)
-        matches (distinct (require-colocated-files key-name *load-path*)))
+        matches (seq/distinct (require-colocated-files key-name *load-path*)))
     (cond
       (empty? matches) nil
       (empty? (rest matches)) (first matches)
@@ -640,7 +640,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 ;; rooted request finds no owner here and simply loads its own embedded source.
 (defn- bundle-resolve-bare
   (key)
-  (let (owner (find (fn (pkg) (includes? (get *package-modules-of* pkg) (symbol key)))
+  (let (owner (seq/find (fn (pkg) (includes? (get *package-modules-of* pkg) (symbol key)))
                 (map first (map-pairs *package-modules-of*))))
     (if owner (str owner "/" key) nil)))
 
@@ -766,7 +766,7 @@ its first segment names a module baked into this binary, so a package taking it 
 root its own modules onto stdlib namespaces. Backs the `nest new` / `nest publish` /
 load-time (`require`) guards."
   (let (seg (first (string/split (name nm) "/"))
-        owned (distinct (map (fn (m) (first (string/split m "/"))) (builtin-modules))))
+        owned (seq/distinct (map (fn (m) (first (string/split m "/"))) (builtin-modules))))
     (includes? owned seg)))
 
 ;; Load a dependency module file `path` under package `key`'s context (ADR-070): set
@@ -871,6 +871,12 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; module (doc tooling sees the file; a project may `(:use string)`); loading it here
 ;; just makes it always-present, like the abilities below.
 (require-one 'string)
+
+;; Same reason, same mechanism: the prelude's own helpers reference `seq/find`,
+;; `seq/vector-ref`, `zip`, … by late binding — a qualified name inside a function
+;; BODY resolves when that function is called, not when it is defined — so the module
+;; only has to be loaded before any of them runs. Nothing calls them during boot.
+(require-one 'seq)
 
 ;; ═══ Abilities + the Display protocol (core) ════════════════════════════════
 ;; Open generic functions with nominal dispatch — Brood's unified polymorphism seam
