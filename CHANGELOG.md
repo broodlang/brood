@@ -4,6 +4,37 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**BREAKING — the core reference went from 613 names to 337 (ADR-242).** Two thirds of that
+was noise or misplacement, not deletion:
+
+- **191 private helpers were being published.** The core reference page reads the live
+  image, and a prelude `defn-` still binds a root global — so the match compiler's 40
+  `match-*` functions, the `receive-*`/`spy-*`/`defmodule-*` helpers and the `x`/`l`
+  transducers all appeared as core API. They never were.
+- **`dev/`** — runtime diagnostics: `dev/mem-bytes`, `dev/gc-collect`, `dev/gc-stats`,
+  `dev/vm-stats`, `dev/sched-stats`, `dev/profile-start`, `dev/bench`, … (20 names)
+- **`reflect/`** — source tooling: `reflect/check-file`, `reflect/parse-source`,
+  `reflect/scan-tokens`, `reflect/source-location`, `reflect/type-signature`, … (18 names)
+- **`%`-prefixed** — the ability/multimethod registry the `defability`/`impl`/`defmulti`
+  expansions emit (`register-impl`, `impl-for`, `identity-of`, …; 26 names)
+
+Interactive introspection stays bare on purpose — `doc`, `arglist`, `bound?`, `apropos`,
+`doc-search`, `macroexpand`, `special-forms` are what you type at a REPL. So does
+`check-allow`, a source pragma, and `system-monitor`, which arms the production event
+stream `telemetry/watch-runtime` re-emits.
+
+**The reference has no "Other" section any more.** Uncatalogued names fell into a junk
+drawer 41 entries deep that was hiding real vocabulary: `stop`, `cast`, `call`,
+`spawn-server` and `defprocess` (uncategorised only because `gen` became core) and the
+`tap`/`then` pipeline helpers. Every public core name now has a category, enforced by a
+test.
+
+**Fixed:** `remote-spawn`, `remote-spawn-sync` and `bench` were still registered as
+highlighter keywords after moving to `node/`/`dev/`, so editors highlighted three unbound
+names as core syntax.
+
 ## v0.9.0 — 2026-08-24
 
 **BREAKING — the bare core is smaller: five subsystems moved into namespaces.** Each is a

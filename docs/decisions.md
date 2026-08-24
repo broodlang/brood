@@ -16091,3 +16091,52 @@ shadows `inc` on purpose, to test shadowing). Two workarounds retire: `bedit`'s
 `(:use supervisor :exclude [stop])` and four `(:use wire/bytes :exclude [byte-at])` in
 store-postgres, the latter replaced by renaming that genuinely-different extension
 (`byte-at` accepts a byte-string as well as `bytes`) to `octet-at`.
+
+## ADR-242 — The bare core is what a basic algorithm reaches for; everything else earns a namespace
+
+**Context.** The hosted reference listed 613 "core" names. That number was wrong twice over,
+and both errors pushed the same way — making the language look far larger than it is.
+
+**Decision, and what each part of the 613 actually was.**
+
+1. **191 were private.** `/reference/core` is the one doc page built from the LIVE IMAGE
+   rather than from source, and its filter was written in terms of the NAME. A prelude
+   `(defn- helper …)` still binds a root global — privacy is a fact the runtime records
+   (ADR-146), not something the spelling reveals — so the match compiler's 40 `match-*`
+   functions, the `receive-*` expansion helpers, `spy-*`, `defmodule-*` and the `x`/`l`
+   transducers were all published. One `(not (private? sym))` clause.
+2. **22 more should have been private and weren't.** The earlier privatization pass matched
+   `^(defn name`, so it walked past every definition nested inside a `(check-allow …)`
+   wrapper. The bootstrap list builders (`append-2`, `append-rev`, `append-empty?`) are a
+   subtler case: they are `(def name (fn …))` because they run *before* `defn` and `def-`
+   exist, so they cannot use the private form at all and are marked with `%mark-private`
+   once the macro layer is up.
+3. **Runtime diagnostics became `dev/`** (20 names): memory, GC, scheduler, profiler and VM
+   counters. The test is "does it program a running system, or inspect one?" Most were
+   already `dev-tools`-gated out of a lean build, so they never belonged in the vocabulary a
+   released app reads as core.
+4. **The ability/multimethod registry became `%`-prefixed** (26 names). `defability`/`impl`/
+   `defmulti` EMIT these, so they must stay reachable from expanded user code — `defn-`
+   would break dispatch, while `%` hides them from the reference and keeps them callable.
+5. **Source tooling became `reflect/`** (18 names): the advisory checker, the lossless CST,
+   the scanners, the def-site queries. The line is "what a program does to itself" vs "what
+   a tool does to source text" — so `doc`, `arglist`, `bound?`, `apropos`, `macroexpand`
+   stay bare, because you type those at a REPL and namespacing them would tax the commonest
+   exploratory use to serve a rare one. `check-allow` stays too: it is a source PRAGMA the
+   Rust checker matches textually, like `sig`.
+
+**Also: there is no `:other` category any more.** `category-of` fell back to `:other`, which
+is not an error, so an uncatalogued name landed silently in a junk drawer at the bottom of
+the reference — 41 entries deep, and hiding genuinely core vocabulary. `stop`, `cast`,
+`call`, `spawn-server` and `defprocess` were uncategorised only because `gen` moved from a
+module into the prelude, and `tap`/`then` sat there instead of beside `->` and `->>`. A
+reader scanning by category never saw them. Every public core name now has a category and
+`tests/docs_test.blsp` asserts it, printing the offenders rather than a count.
+
+**Consequences.** Public core is **337 names**, and it is an honest number: the reference
+publishes what a caller can actually use. The recurring hazard through all five waves was
+Brood embedded where no checker looks — the ability registry names are read BY THE CHECKER
+from Rust (renaming them broke dispatch instantly, now fixed with `kw::` constants per
+ADR-240), `introspect.rs` builds `(source-location 'name)` as a string, and `nest run`
+builds `(check-file …)`. `scripts/stale-names.sh` is the tool for that, and it earned its
+place: it also found 13 `scripts/fuzz/stress/*.blsp` no wave had ever touched.

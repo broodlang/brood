@@ -713,6 +713,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-12** — multiple modules per file: the region model (ADR-223 Phase 1)
 - **2026-08-24** — a primitive's name gets one definition site; CST-backed `nest rename` (ADR-240)
 - **2026-08-24** — a library name may shadow core only when used qualified (ADR-241)
+- **2026-08-24** — the bare core: 613 published names down to 337 (ADR-242)
 
 ---
 
@@ -2454,3 +2455,42 @@ rename wave had ever touched. Sabotage-testing it caught a bug in the script its
 boundary class was written `[^…^-/]`, where `-` between `^` and `/` is a RANGE, so the
 first version reported a clean tree over a deliberately reintroduced `getenv`. Third
 instance this week of "a gate that cannot fail looks exactly like a gate that passes".
+
+### Later still: the core reference said 613, and two thirds of that was not core
+
+"Core is still too thick" turned out to be two different bugs plus three real moves.
+
+**191 of the 613 were private.** `/reference/core` is the only doc page built from the LIVE
+IMAGE instead of source, and its filter tested the NAME. A prelude `(defn- helper …)` still
+binds a root global — privacy is a recorded fact (ADR-146), not a spelling — so the match
+compiler's 40 `match-*` functions, every `receive-*`/`spy-*`/`defmodule-*` helper and the
+`x`/`l` transducers were published as language vocabulary. One `(not (private? sym))`.
+
+**22 more should have been private and weren't**, because the earlier pass matched
+`^(defn name` and every definition nested in a `(check-allow …)` wrapper slipped through.
+The bootstrap builders were the interesting case: `append-2`/`append-rev`/`append-empty?`
+are `(def name (fn …))` because they run before `defn` *or* `def-` exists, so they cannot
+use the private form at all — they take `%mark-private` once the macro layer is up.
+
+Then the real moves: `dev/` for diagnostics (20), `%`-prefix for the ability registry (26),
+`reflect/` for source tooling (18). The judgement that mattered was where to stop:
+interactive introspection (`doc`, `arglist`, `bound?`, `apropos`, `macroexpand`) stays bare
+because you type it at a REPL, and namespacing it taxes the commonest use to serve a rare
+one. `check-allow` stays for the same reason — it is a pragma the checker matches out of
+source text, so it reads as part of the code.
+
+**And the junk drawer.** `category-of` falls back to `:other`, which is not an error, so an
+uncatalogued name landed silently at the bottom of the reference. 41 entries — including
+`stop`, `cast`, `call`, `spawn-server`, `defprocess` (uncategorised only because `gen`
+moved into the prelude) and `tap`/`then`, which belong next to `->`. A reader scanning by
+category simply never saw them. The category is gone and a test keeps it gone.
+
+Two things this pass kept re-teaching. First, **Brood hides in Rust**: the checker
+recognises the ability-registry names BY NAME, so `%`-prefixing them broke dispatch the
+instant it built (`no impl of localize for :money`) — now `kw::` constants, per ADR-240.
+`introspect.rs` builds `(source-location 'name)` as a string; `nest run` builds
+`(check-file …)`. Second, **`nest rename` renames a token, not a binding**: it rewrote
+`std/tool/workspace.blsp`'s own zero-arg `(check)` into `(reflect/check)`, caught by
+`std_check_test` because the arity no longer matched. A module's own function sharing a
+core name is exactly where the tool cannot tell the difference — the third time that shape
+has bitten (hatch's `stop`, hive's `register`, now this).
