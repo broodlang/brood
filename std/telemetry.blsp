@@ -76,7 +76,7 @@ LISTENER process."
         (when (not (empty? failed))
           ;; Auto-detach the handlers that threw. Same shape as `detach`: fold the removals
           ;; over whatever the registry holds NOW, not over the copy this dispatch read.
-          (swap-registry! telemetry/*telemetry-handlers*
+          (%swap-registry! telemetry/*telemetry-handlers*
             (fn (m) (fold telemetry-without-id m failed))))))))
 
 ;; ---- the listener process ---------------------------------------------------
@@ -147,7 +147,7 @@ is a `def`-rebound global). The handler runs in the listener process, so keep it
 fast — `forward` heavy work to a process you own."
   ;; Strip any earlier handler with this id from EVERY bucket, then cons onto this
   ;; event's — one transform, so a concurrent attach cannot land between the two halves.
-  (swap-registry! telemetry/*telemetry-handlers*
+  (%swap-registry! telemetry/*telemetry-handlers*
     (fn (m)
       (let (cleaned (telemetry-without-id m id))
         (assoc cleaned event (cons {:id id :fn handler} (get cleaned event nil))))))
@@ -155,7 +155,7 @@ fast — `forward` heavy work to a process you own."
 
 (defn detach (id)
   "Remove the handler attached under `id`. Returns nil; no-op if no such id."
-  (swap-registry! telemetry/*telemetry-handlers* (fn (m) (telemetry-without-id m id)))
+  (%swap-registry! telemetry/*telemetry-handlers* (fn (m) (telemetry-without-id m id)))
   nil)
 
 (defn detach-all ()
@@ -205,7 +205,7 @@ handler logic in a process you own, off even the listener. Returns `id`."
 (defn register-event (event schema)
   "Register `schema` (`{:name :measurements :metadata :doc}`) for telemetry `event` — the
 introspection + runtime-validation registry `defevent` populates. Returns `event`."
-  (swap-registry! telemetry/*events* (fn (m) (assoc m event schema)))
+  (%swap-registry! telemetry/*events* (fn (m) (assoc m event schema)))
   event)
 
 (defn event-schema (event)

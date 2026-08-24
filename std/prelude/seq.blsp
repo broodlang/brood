@@ -99,7 +99,7 @@
     (empty? a) nil
     (number? (first a)) (%sort-asc a)
     ;; a record element sorts by its `Ord` (`compare-to`, STRICT — no structural default,
-    ;; ADR-179: sorting records without a method is a no-method error), so a type can
+    ;; ADR-179: sorting records without a method is a %no-method error), so a type can
     ;; define its own order; every built-in keeps the native `%sort-cmp` path.
     (record? (first a)) (merge-sort (fn (x y) (< (ord-compare x y) 0)) a)
     else (%sort-cmp a)))
@@ -393,15 +393,15 @@ and it must be loaded before this `defrecord`.
                                 (defrecord-ftype f)))))
                      fields)
                    nil)
-        ;; `:derives [A …]` → one `(derive-into 'A id 'fields (current-ns))` per ability. The
+        ;; `:derives [A …]` → one `(%derive-into 'A id 'fields (current-ns))` per ability. The
         ;; recipe is run at LOAD (not expansion), because the checker expands this `defrecord`
         ;; WITHOUT first evaluating the ability's `defability`, so the recipe isn't registered
-        ;; at expand time. `derive-into` registers the impls at load; the checker reads these
+        ;; at expand time. `%derive-into` registers the impls at load; the checker reads these
         ;; forms statically (they mark the ability's ops as implemented for `id`).
         derives (defrecord-derives opts)
         derive-calls (if derives
                        (map (fn (a)
-                              (list 'derive-into
+                              (list '%derive-into
                                 (list 'quote a)
                                 id
                                 (list 'quote fnames)

@@ -191,8 +191,8 @@
   (test "a kind with no impl still errors loudly"
     (assert-error (encode (fn (x) x))))
   (test "no :default is registered — nil means 'no rule', not 'the fallback'"
-    (is (nil? (impl-for '[JsonEncode ->json] :fn)))
-    (is (not (nil? (impl-for '[JsonEncode ->json] :json-test/usd))))))
+    (is (nil? (%impl-for '[JsonEncode ->json] :fn)))
+    (is (not (nil? (%impl-for '[JsonEncode ->json] :json-test/usd))))))
 
 ;; Cross-process: parse in spawned workers and fan the results back in — the parsed
 ;; maps/vectors are deep-copied across per-process heaps on `send`, proving they

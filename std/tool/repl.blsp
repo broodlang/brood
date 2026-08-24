@@ -206,7 +206,7 @@ registration order, the new one last). The extension seam tools use to add comma
     ;; Filter-then-append as ONE transform: two concurrent registrations of the same
     ;; name each used to filter the old list and each append, so the duplicate this
     ;; promises to replace survived (KI-23 — it failed `repl_test` 2 runs in 5).
-    (swap-registry! repl/*repl-commands*
+    (%swap-registry! repl/*repl-commands*
       (fn (l)
         (append (filter (fn (c) (not (any? (fn (n) (repl-has-name? names n)) (get c :names)))) l)
           (list spec))))

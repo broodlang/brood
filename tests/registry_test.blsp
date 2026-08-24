@@ -10,7 +10,7 @@
 ;; Two mechanisms fix it, both indivisible under the runtime's registry lock:
 ;;   `%registry-update!`  one named map/list op (`:assoc`, `:cons-new`, …)
 ;;   `%registry-cas!`     compare-and-swap, with the transform left as a Brood function
-;;                        and `registry-swap!` / the `swap-registry!` macro retrying
+;;                        and `%registry-swap!` / the `%swap-registry!` macro retrying
 ;;
 ;; Each test below runs the registration from many processes at once and asserts nothing
 ;; was lost. The control (a plain `def` read-modify-write) is measured in the first test
@@ -42,7 +42,7 @@
 
   ;; The mechanism itself, with its own control — so a regression cannot hide behind a
   ;; test that would pass even with the bug.
-  (test "swap-registry! loses no updates where a plain def rebind does"
+  (test "%swap-registry! loses no updates where a plain def rebind does"
     ;; The control: read the global, YIELD, then write it back — the read-modify-write
     ;; shape the registry mechanisms exist to fix. The `sleep` is load-bearing and is why
     ;; this reads as it does: the assertion below needs the control to ACTUALLY lose
@@ -64,7 +64,7 @@
     ;; won, so it must lose nothing under ordinary contention.
     (reg-fan *reg-writers*
       (fn (i)
-        (swap-registry! registry-test/*reg-swapped*
+        (%swap-registry! registry-test/*reg-swapped*
           (fn (m) (assoc m i i)))))
     (assert= *reg-writers* (count *reg-swapped*))
     ;; Now a hard bound rather than a hopeful one: with every writer working from a stale
@@ -75,7 +75,7 @@
     ;; A counter is the sharpest form of this: every increment must survive, which is
     ;; only true if each retry recomputes from the current value.
     (def *reg-count* 0)
-    (reg-fan *reg-writers* (fn (_) (swap-registry! registry-test/*reg-count* (fn (n) (+ n 1)))))
+    (reg-fan *reg-writers* (fn (_) (%swap-registry! registry-test/*reg-count* (fn (n) (+ n 1)))))
     (assert= *reg-writers* *reg-count*)))
 
 ;; ---- the converted std registries (KI-23), each under concurrent registration ------

@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
 use crate::error::Pos;
 
@@ -440,7 +441,7 @@ fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
         if let Some(&Value::Sym(h)) = items.first() {
             let opkey_idx = match sym_name(Value::Sym(h)).as_deref() {
                 Some("%dispatch") => Some(2),
-                Some("impl-for") => Some(1),
+                Some(kw::IMPL_FOR) => Some(1),
                 _ => None,
             };
             if let Some(idx) = opkey_idx {
@@ -564,7 +565,7 @@ fn collect_register_impls(
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("register-impl") {
+            if sym_name(Value::Sym(h)).as_deref() == Some(kw::REGISTER_IMPL) {
                 let a = items
                     .get(1)
                     .and_then(|&v| unquote(heap, v))
@@ -600,7 +601,7 @@ fn collect_derive_into(heap: &Heap, form: Value, out: &mut Vec<(String, String)>
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("derive-into") {
+            if sym_name(Value::Sym(h)).as_deref() == Some(kw::DERIVE_INTO) {
                 let a = items
                     .get(1)
                     .and_then(|&v| unquote(heap, v))
@@ -1009,7 +1010,7 @@ fn collect_register_ability(
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("register-ability") {
+            if sym_name(Value::Sym(h)).as_deref() == Some(kw::REGISTER_ABILITY) {
                 if let (Some(a), Some(ops_form)) = (
                     items
                         .get(1)
@@ -1053,7 +1054,7 @@ fn collect_register_sealed(heap: &Heap, form: Value, out: &mut HashMap<String, V
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("register-sealed") {
+            if sym_name(Value::Sym(h)).as_deref() == Some(kw::REGISTER_SEALED) {
                 if let (Some(a), Some(&list_form)) = (
                     items
                         .get(1)
@@ -1092,7 +1093,7 @@ fn collect_register_ability_requires(
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("register-ability-requires") {
+            if sym_name(Value::Sym(h)).as_deref() == Some(kw::REGISTER_ABILITY_REQUIRES) {
                 if let (Some(a), Some(&list_form)) = (
                     items
                         .get(1)
@@ -1422,7 +1423,7 @@ fn find_multi_name(heap: &Heap, form: Value) -> Option<String> {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let items = list_items(heap, form)?;
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("multi-resolve") {
+            if sym_name(Value::Sym(h)).as_deref() == Some(kw::MULTI_RESOLVE) {
                 if let Some(name) = items
                     .get(1)
                     .and_then(|&v| unquote(heap, v))
@@ -1485,7 +1486,7 @@ fn collect_register_methods(
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("register-method") {
+            if sym_name(Value::Sym(h)).as_deref() == Some(kw::REGISTER_METHOD) {
                 if let Some(mname) = items
                     .get(1)
                     .and_then(|&v| unquote(heap, v))
@@ -1563,7 +1564,7 @@ fn collect_register_multi(heap: &Heap, form: Value, algebras: &mut HashMap<Strin
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("register-multi") {
+            if sym_name(Value::Sym(h)).as_deref() == Some(kw::REGISTER_MULTI) {
                 if let Some(mname) = items
                     .get(1)
                     .and_then(|&v| unquote(heap, v))

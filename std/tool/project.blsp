@@ -1185,9 +1185,9 @@ rules merged in declaration order, then this project's own `:format-headers` on 
             dirs (abs-paths root *project-source-paths*)
             module-files (/apply append (map package/module-files dirs))
             short-modules (map first module-files))
-        (register-package-modules! pkg short-modules)
+        (%register-package-modules! pkg short-modules)
         (map (fn (mf)
-               (register-package-module! (str pkg "/" (name (first mf))) (second mf)))
+               (%register-package-module! (str pkg "/" (name (first mf))) (second mf)))
           module-files)
         ;; Ambient: not restored — the project's default context for the whole run. A dep
         ;; load nests its own context over this and restores back to it.
@@ -2908,7 +2908,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; parity), so its embedded dependency modules — keyed `pkg/mod` — load under their package
 ;; context. A dependency contributes every embedded module key prefixed by its `:name`; the
 ;; short names (the part after `pkg/`) are that package's intra-package set — the same map
-;; `register-package-modules!` builds from disk deps at `setup`. Deps are known from
+;; `%register-package-modules!` builds from disk deps at `setup`. Deps are known from
 ;; the embedded manifest (`*project-dependencies*`, already applied); their paths are gone,
 ;; but the bundle needs only the names. The root project's own modules stay unrooted (they
 ;; are not registered here), so they load at ROOT, matching how `bundle-collect` embedded them.
@@ -2930,7 +2930,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                                     acc)
                                   acc))
                           nil keys))
-             (when shorts (register-package-modules! pkg shorts))))
+             (when shorts (%register-package-modules! pkg shorts))))
       dep-names)
     nil))
 

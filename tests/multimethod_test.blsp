@@ -1,5 +1,5 @@
 ;; Multiple dispatch — `defmulti` / `defmethod` (ADR-179). Dispatch on the IDENTITY-TUPLE of
-;; the arguments: exact match, then a declared `:default`, else a loud `no-method` error —
+;; the arguments: exact match, then a declared `:default`, else a loud `%no-method` error —
 ;; never a nearest guess. A `:commutative`/`:antisymmetric` algebra derives each off-diagonal
 ;; binary method's mirror. `defmulti`/`defmethod` are core (prelude), so they refer bare.
 (defmodule multimethod-test (:use test))
@@ -30,13 +30,13 @@
     (assert= (mm-desc 7) :int)
     (assert= (mm-desc "hi") :other)
     (assert= (mm-desc :k) :other))
-  (test "no method and no :default raises a structured :no-method error"
+  (test "no method and no :default raises a structured :%no-method error"
     ;; `x`/`k` are vars so the static missing-method check can't judge the call — this
     ;; exercises the RUNTIME error path (the checker's call-site pass covers the literal case).
     (let (x 1.5
           k :kw
           e (try (mm-combine x k) (catch e e)))
-      (assert= (get e :kind) :no-method)
+      (assert= (get e :kind) :%no-method)
       (assert= (get e :multi) 'mm-combine)
       (assert= (get e :key) [:float :keyword])
       (is (includes? (get e :have) [:int :int]))
