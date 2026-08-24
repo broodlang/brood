@@ -75,9 +75,9 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (fold (fn (acc sym)
           (let (location (reflect/source-location sym))
             (if (and (not (nil? location))
-                  (coverage-under? (vector-ref location 0) source-dirs)
+                  (coverage-under? (seq/vector-ref location 0) source-dirs)
                   (= (type-of (eval sym)) :fn))
-              (cons {:name sym :file (vector-ref location 0) :line (vector-ref location 1)} acc)
+              (cons {:name sym :file (seq/vector-ref location 0) :line (seq/vector-ref location 1)} acc)
               acc)))
     nil
     (global-names)))
@@ -242,7 +242,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (entries)
   (fold (fn (index entry)
           (assoc index
-            (vector-ref entry 0) (fold (fn (lines l) (assoc lines l true)) {} (vector-ref entry 1))))
+            (seq/vector-ref entry 0) (fold (fn (lines l) (assoc lines l true)) {} (seq/vector-ref entry 1))))
     {}
     (or entries nil)))
 
@@ -255,7 +255,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; instrumented. Values stay lists: they arrive sorted and are only iterated.
 (defn- coverage-instrumented-index
   ()
-  (fold (fn (index entry) (assoc index (vector-ref entry 0) (vector-ref entry 1)))
+  (fold (fn (index entry) (assoc index (seq/vector-ref entry 0) (seq/vector-ref entry 1)))
     {}
     (or (coverage-safely (fn () (%coverage-instrumented))) nil)))
 
@@ -359,9 +359,9 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (edges)
   "Fold a file's `[line col taken]` edge list into `{[line col] -> {:t bool :f bool}}`."
   (fold (fn (m edge)
-          (let (key [(vector-ref edge 0) (vector-ref edge 1)]
+          (let (key [(seq/vector-ref edge 0) (seq/vector-ref edge 1)]
                 cur (get m key {:t false :f false}))
-            (assoc m key (if (vector-ref edge 2) (assoc cur :t true) (assoc cur :f true)))))
+            (assoc m key (if (seq/vector-ref edge 2) (assoc cur :t true) (assoc cur :f true)))))
     {}
     edges))
 
@@ -369,14 +369,14 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   ()
   "`file -> {[line col] -> {:t :f}}` — which edges of each branch ran."
   (fold (fn (index entry)
-          (assoc index (vector-ref entry 0) (coverage-branch-edges (vector-ref entry 1))))
+          (assoc index (seq/vector-ref entry 0) (coverage-branch-edges (seq/vector-ref entry 1))))
     {}
     (or (coverage-safely (fn () (%coverage-branches))) nil)))
 
 (defn- coverage-branch-sites-index
   ()
   "`file -> ([line col] …)` — every instrumented branch point (the denominator)."
-  (fold (fn (index entry) (assoc index (vector-ref entry 0) (vector-ref entry 1)))
+  (fold (fn (index entry) (assoc index (seq/vector-ref entry 0) (seq/vector-ref entry 1)))
     {}
     (or (coverage-safely (fn () (%coverage-branch-instrumented))) nil)))
 

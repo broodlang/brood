@@ -793,7 +793,7 @@ nil."
       (register (keyword (str "idle-" (inc i))) (spawn (observe-idle-worker))))
     (let (w (spawn (observe-backlog-worker)))
       (register :backlog w)
-      (repeatedly 4 (fn () (send w :idle))))
+      (seq/repeatedly 4 (fn () (send w :idle))))
     nil))
 
 (defn observe-attach (&optional (display *term-display*))

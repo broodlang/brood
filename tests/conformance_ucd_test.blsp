@@ -68,7 +68,7 @@
 (defn- gb-case
   (line)
   "[input expected-clusters] for a test line, or nil if the line has no test."
-  (let (toks (remove string/blank? (string/split (ucd-payload line) " ")))
+  (let (toks (seq/remove string/blank? (string/split (ucd-payload line) " ")))
     (if (nil? toks)
       nil
       (let (clusters (gb-fold toks nil nil))
@@ -94,7 +94,7 @@
 ;; ---- NormalizationTest -------------------------------------------------------
 
 ;; "0044 0307" -> the string it spells.
-(defn- nt-field (s) (ucd-codes->string (map hex->int (remove string/blank? (string/split s " ")))))
+(defn- nt-field (s) (ucd-codes->string (map hex->int (seq/remove string/blank? (string/split s " ")))))
 
 (defn- nt-case
   (line)
@@ -133,8 +133,8 @@
   (cols)
   (let ([c1 c2 c3 c4 c5] cols
         expect (fn (form sources want)
-                 (first (remove (fn (s) (= (string/normalize s form) want)) sources)))
-        fails (remove nil?
+                 (first (seq/remove (fn (s) (= (string/normalize s form) want)) sources)))
+        fails (seq/remove nil?
                 (list (expect :nfc (list c1 c2 c3) c2)
                   (expect :nfc (list c4 c5) c4)
                   (expect :nfd (list c1 c2 c3) c3)

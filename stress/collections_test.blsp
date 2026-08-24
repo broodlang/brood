@@ -84,7 +84,7 @@
   (test "filter splits: (filter p) ++ (remove p) permutes the input"
     (let (xs (range 1000)
           evens (filter (fn (x) (= (rem x 2) 0)) xs)
-          odds (remove (fn (x) (= (rem x 2) 0)) xs))
+          odds (seq/remove (fn (x) (= (rem x 2) 0)) xs))
       (do
         (assert= (+ (count evens) (count odds)) 1000)
         (assert= (fold + 0 evens) 249500)

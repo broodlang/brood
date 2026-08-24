@@ -89,7 +89,7 @@ the region functions below."
 (defn region-at (regions pos)
   "The region containing `pos` (boundaries inclusive, so the caret at either edge
 counts as inside), or nil."
-  (find (fn (r) (and (>= pos (get r :start)) (<= pos (get r :end)))) regions))
+  (seq/find (fn (r) (and (>= pos (get r :start)) (<= pos (get r :end)))) regions))
 
 (defn region-index (regions pos)
   "The 0-based index of the region containing `pos`, or nil."

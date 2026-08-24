@@ -230,7 +230,7 @@ all). NONE never matches — a version constraint is about a selected version."
      :pos pos
      :decs decs
      ;; every constrained-but-undecided package is required again after the backjump.
-     :pending (keep (fn (pkg) (when (not (contains? decs pkg)) pkg)) (keys pos))}))
+     :pending (seq/keep (fn (pkg) (when (not (contains? decs pkg)) pkg)) (keys pos))}))
 
 ;; --- term / incompatibility relations --------------------------------------------
 
@@ -684,7 +684,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 
 (defn- pg-availability-lines
   (ctx leaves)
-  (let (pkgs (distinct (apply append (map pg-leaf-packages leaves))))
+  (let (pkgs (seq/distinct (apply append (map pg-leaf-packages leaves))))
     (apply str
       (map (fn (pkg)
              (let (real (filter (fn (v) (not (= v pg-none))) (pg-universe ctx pkg)))

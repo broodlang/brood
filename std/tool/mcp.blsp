@@ -310,7 +310,7 @@ Outside a Brood project, returns `{:error msg}`."
   "A `(proc/info pid)` stat map for every live process, dropping any that died
 mid-scan. The shared snapshot behind both the `processes` and `proc/info`
 tools — one definition of \"what we know about a process\"."
-  (remove nil? (map proc/info (or (proc/list) []))))
+  (seq/remove nil? (map proc/info (or (proc/list) []))))
 
 (defn processes-tool (args)
   "`processes` — snapshot every live green process with its runtime stats.
@@ -332,7 +332,7 @@ process carries that id."
   (let (id (get args :id))
     (when (not (int? id))
       (throw "proc/info: :id must be an integer"))
-    (or (find (fn (p) (= (get p :id) id)) (process-infos))
+    (or (seq/find (fn (p) (= (get p :id) id)) (process-infos))
       {:error (str "no live process with id " id)})))
 
 (defn node-tool (args)

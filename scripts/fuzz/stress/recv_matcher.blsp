@@ -69,7 +69,7 @@
     acc
     (do
       (send (self) [:go i])
-      (receive (m (loop-any (%add i 1) (%add acc (vector-ref m 1))))))))
+      (receive (m (loop-any (%add i 1) (%add acc (seq/vector-ref m 1))))))))
 
 ;; Bisect arms. Same message shape as `vec` throughout, so only the pattern varies.
 (defn loop-bind (i acc)

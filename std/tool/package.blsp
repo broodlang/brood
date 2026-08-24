@@ -244,7 +244,7 @@ land in a later slice."
 ;; closure resolves in a handful of round-trip-bounded rounds, not 300 sequential GETs.
 (defn- package-prefetch-registry
   (base names)
-  (package-prefetch-bfs base (distinct names) {}))
+  (package-prefetch-bfs base (seq/distinct names) {}))
 
 (defn- package-prefetch-bfs
   (base frontier fetched)
@@ -252,7 +252,7 @@ land in a later slice."
     fetched
     (let (results (package-fetch-frontier base frontier)
           fetched2 (fold (fn (m pair) (assoc m (first pair) (second pair))) fetched results)
-          discovered (distinct (apply append
+          discovered (seq/distinct (apply append
                                  (map (fn (pair) (package-release-dep-names (second pair)))
                                    results)))
           next-frontier (filter (fn (nm) (not (contains? fetched2 nm))) discovered))
@@ -290,7 +290,7 @@ land in a later slice."
 ;; The distinct dep-name symbols across a package's releases — the frontier to prefetch next.
 (defn- package-release-dep-names
   (releases)
-  (distinct (apply append
+  (seq/distinct (apply append
               (map (fn (release) (map first (get release :dependencies))) releases))))
 
 ;; A PURE provider over the prefetched map (no I/O), so the resolver's backtracking is free:
@@ -317,7 +317,7 @@ land in a later slice."
           releases (second kv))
       (when (and (not (empty? releases))
               (empty? (filter package-release-brood-ok? releases)))
-        (let (needed (distinct (filter (fn (c) (and c (not (= c ""))))
+        (let (needed (seq/distinct (filter (fn (c) (and c (not (= c ""))))
                                  (map (fn (r) (get r :brood)) releases))))
           (error "package: no published release of "
             (name nm)
@@ -340,7 +340,7 @@ land in a later slice."
                             (map (fn (release) (get release :version))
                               (filter package-release-brood-ok? (or (get fetched nm) nil))))
     (fn (nm version)
-      (let (release (find (fn (r) (= (get r :version) version)) (or (get fetched nm) nil)))
+      (let (release (seq/find (fn (r) (= (get r :version) version)) (or (get fetched nm) nil)))
         (if (nil? release) nil (get release :dependencies))))))
 
 ;; {name → locked concrete version} for every `:registry` row of the prior lock — the
@@ -886,7 +886,7 @@ as having no versions rather than raising mid-search); any other error raises."
 (defn- registry-release-deps
   (base nm version)
   "The `[dep-name constraint]` requirements of `nm`@`version`; empty when absent."
-  (let (release (find (fn (r) (= (get r :version) version))
+  (let (release (seq/find (fn (r) (= (get r :version) version))
                   (or (registry-fetch-releases base nm) nil)))
     (if (nil? release) nil (get release :dependencies))))
 
@@ -1726,8 +1726,8 @@ sha256 pin still holds."
         (let (manifest (path/join root "project.blsp")
               edit (package-edit-manifest! root
                      (fn (src) (package-manifest-add src (dep-entry-node dep))))
-              original (vector-ref edit 0)
-              written (vector-ref edit 1))
+              original (seq/vector-ref edit 0)
+              written (seq/vector-ref edit 1))
           (let (outcome (try
                           (do
                             (package-load-manifest manifest)

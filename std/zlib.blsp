@@ -58,10 +58,6 @@
 
 ;; ---- raw deflate (RFC 1951) — no header or checksum ----
 
-(defn zip (data &optional level)
-  "Raw-DEFLATE-compress `data` (a string or byte sequence), returned as `bytes` — no
-  gzip/zlib header or checksum. Optional `level` is 0-9 (default 6). Inverse: `unzip`."
-  (if (nil? level) (%deflate (as-bytes data)) (%deflate (as-bytes data) level)))
 
 (defn unzip (data)
   "Decompress raw-DEFLATE `bytes` to a `bytes` value. Raises on invalid data."
@@ -78,3 +74,9 @@
 (defn unbrotli (data)
   "Decompress brotli `bytes` back to a `bytes` value. Raises on data that isn't valid brotli."
   (%unbrotli data))
+
+;; (restored: this is zlib's zip — compression, not the sequence pairing)
+(defn zip (data &optional level)
+  "Raw-DEFLATE-compress `data` (a string or byte sequence), returned as `bytes` — no
+  gzip/zlib header or checksum. Optional `level` is 0-9 (default 6). Inverse: `unzip`."
+  (if (nil? level) (%deflate (as-bytes data)) (%deflate (as-bytes data) level)))

@@ -391,7 +391,7 @@
       (concurrently n
         (fn (i) (%register-impl (abt-conc-name i) (abt-conc-op i) :int (fn (x) i) nil)))
       ;; before the fix this lost roughly 40% of them
-      (assert= (count (remove abt-conc-registered? (range n))) 0))))
+      (assert= (count (seq/remove abt-conc-registered? (range n))) 0))))
 
 ;; ---- typed ability ops: the checker consumes an op's `:-> RET` return type ----
 ;; A static/advisory feature, so these assert on the checker's warnings (via

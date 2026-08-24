@@ -261,14 +261,6 @@ incremental search rides on."
 ;; `rand` module (std/rand.blsp); the `%rand-seed`/`%rand-step` mechanism above stays here
 ;; because the sequence ops `sample`/`shuffle` (below) build on it.
 
-(defn sample (seed coll)
-  "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."
-  (let (items (into [] coll)
-        n (count items))
-    (if (= n 0)
-      (error "sample: cannot sample from an empty collection")
-      (let (s (%rand-step (%rand-seed seed)))
-        [(nth items (rem s n)) s]))))
 
 (defn- shuffle-acc
   (state remaining acc)
@@ -280,9 +272,6 @@ incremental search rides on."
         (append (take i remaining) (drop (inc i) remaining))
         (cons (nth remaining i) acc)))))
 
-(defn shuffle (seed coll)
-  "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
-  (shuffle-acc (%rand-seed seed) (into [] coll) nil))
 
 ;; ---- bounded printing -------------------------------------------------------
 ;; `pr-str` is *faithful*: whatever it returns reads back as the same value, so it
@@ -369,7 +358,7 @@ have built the flood this bound exists to prevent."
         length (if bytes (count x) (string/length x)))
     (if (or (nil? limit) (<= length limit))
       (pr-str x)
-      (let (printed (pr-str (if bytes (bytes/slice x 0 limit) (string/substring x 0 limit))))
+      (let (printed (pr-str (if bytes (%subbytes x 0 limit) (string/substring x 0 limit))))
         ;; drop the closing quote, mark the elision, close again
         (str (string/substring printed 0 (dec (string/length printed))) "…\"")))))
 

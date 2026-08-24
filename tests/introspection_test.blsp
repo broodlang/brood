@@ -123,8 +123,8 @@
       (assert= g (global-names))))
   (test "doc-search finds globals whose docstring mentions a word"
     (let (names (map first (doc-search "uniformly random")))
-      (is (includes? names 'shuffle))
-      (is (includes? names 'sample))))
+      (is (includes? names 'seq/shuffle))
+      (is (includes? names 'seq/sample))))
   (test "doc-search returns [name doc] pairs with real docstrings"
     (let (hits (doc-search "xorshift"))
       (refute (empty? hits))

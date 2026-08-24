@@ -25,7 +25,7 @@
   (fn (x)
     (if (%eq (type-of x) :nil)
       true
-      (if (%eq (type-of x) :vector) (%eq (vector-length x) 0) false))))
+      (if (%eq (type-of x) :vector) (%eq (%vector-length x) 0) false))))
 (def append-rev
   (fn (src acc)
     ;; Reverse seq `src` (a list or vector) onto list `acc`. Tail-recursive.
@@ -122,7 +122,7 @@
           (if (map-get coll :__id__ nil)
             (->seq coll)
             (map-pairs coll))
-          (if (%eq t :bytes) (bytes/->list coll) coll))))))
+          (if (%eq t :bytes) (%bytes->list coll) coll))))))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 ;; The public entry coerces once via `seq`; the inner `fold-loop` then stays in
@@ -154,7 +154,7 @@
         ;; Raw kernel ops (`if`/`let`/`vector-ref`) only — `fold` is defined before
         ;; `cond`/`second`.
         (let (parts (%seqview-parts coll))
-          (fold ((vector-ref parts 1) f) acc (vector-ref parts 0)))
+          (fold ((%vector-ref parts 1) f) acc (%vector-ref parts 0)))
         (fold-loop f acc (seq coll))))))
 (defn- fold-loop
   (f acc coll)

@@ -126,7 +126,7 @@ docs/testing.md for the full guide.")
   (form)
   (let (p (reflect/form-pos form))
     ; [line col] vector, or nil
-    (if p (list (reflect/current-file) (vector-ref p 0) (vector-ref p 1)) nil)))
+    (if p (list (reflect/current-file) (seq/vector-ref p 0) (seq/vector-ref p 1)) nil)))
 
 ;; A failing assertion THROWS a tagged failure record rather than mutating shared
 ;; state — Brood data is immutable (no accumulator to push onto). The tag is a
@@ -136,7 +136,7 @@ docs/testing.md for the full guide.")
 ;; runner expects.
 (defn- test-fail (loc details) (throw (list :%test-fail loc details)))
 (defn- test-failure? (e) (and (pair? e) (= (first e) :%test-fail)))
-(defn- test-record (e) (list (second e) (third e)))
+(defn- test-record (e) (list (second e) (seq/third e)))
 
 ;; Run a test body that has been split into one thunk PER top-level form, in
 ;; order, each in its own `try` — so failures across the body's forms are all
@@ -194,10 +194,10 @@ docs/testing.md for the full guide.")
    :line (if loc (second loc) nil)
    :skip (or skip false)})
 
-(defn- test-tags (t) (let (m (third t)) (if (nil? m) [] (or (get m :tags) []))))
-(defn- test-file (t) (let (m (third t)) (if (nil? m) nil (get m :file))))
-(defn- test-line (t) (let (m (third t)) (if (nil? m) nil (get m :line))))
-(defn- test-skip? (t) (let (m (third t)) (and (not (nil? m)) (= (get m :skip) true))))
+(defn- test-tags (t) (let (m (seq/third t)) (if (nil? m) [] (or (get m :tags) []))))
+(defn- test-file (t) (let (m (seq/third t)) (if (nil? m) nil (get m :file))))
+(defn- test-line (t) (let (m (seq/third t)) (if (nil? m) nil (get m :line))))
+(defn- test-skip? (t) (let (m (seq/third t)) (and (not (nil? m)) (= (get m :skip) true))))
 
 ;; Merge a `describe`'s group-level tags into one collected test's own tags. A
 ;; test carries the union, so `--only db` picks up a test tagged only at the
@@ -205,7 +205,7 @@ docs/testing.md for the full guide.")
 ;; A group-level `:skip` marks every test in it; a test-level one already set its own.
 (defn- test-mark-skip
   (t group-skip)
-  (if (not group-skip) t (list (first t) (second t) (assoc (or (third t) {}) :skip true))))
+  (if (not group-skip) t (list (first t) (second t) (assoc (or (seq/third t) {}) :skip true))))
 
 (defn- test-add-tags
   (t group-tags)
@@ -213,7 +213,7 @@ docs/testing.md for the full guide.")
     t
     (list (first t)
       (second t)
-      (assoc (or (third t) {}) :tags (append (into [] group-tags) (into [] (test-tags t)))))))
+      (assoc (or (seq/third t) {}) :tags (append (into [] group-tags) (into [] (test-tags t)))))))
 
 ;; A test registers itself: collected into the enclosing describe if there is
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
@@ -231,7 +231,7 @@ docs/testing.md for the full guide.")
     (add-unit! (if isolated? :isolated :parallel) "" (list (list name thunk meta)))))
 
 ;; Was this test marked `:isolated` individually (inside a `describe`)?
-(defn- test-isolated? (t) (let (m (third t)) (and (not (nil? m)) (= (get m :isolated) true))))
+(defn- test-isolated? (t) (let (m (seq/third t)) (and (not (nil? m)) (= (get m :isolated) true))))
 
 ;; Turn a finished describe's collected tests into units according to its mode:
 ;; default spreads them across one :parallel unit each; :serial/:isolated keep
@@ -280,7 +280,7 @@ docs/testing.md for the full guide.")
     (let (parts (test-split-mods forms :parallel nil)
           mode (first parts)
           tags (second parts)
-          body (third parts)
+          body (seq/third parts)
           skip (nth parts 3))
       `(do
          (def *collecting* true)
@@ -305,7 +305,7 @@ docs/testing.md for the full guide.")
   (let (parts (test-split-mods forms :parallel nil)
         iso (= (first parts) :isolated)
         tags (second parts)
-        body (third parts)
+        body (seq/third parts)
         skip (nth parts 3)
         loc (fail-loc (first body))
         thunks (map (fn (f) (list 'fn nil f)) body))
@@ -509,7 +509,7 @@ the test rather than hanging the run."
 (defn r-name (r) "The test name of a result tuple `(group name fails ms …)`." (second r))
 (defn r-fails (r)
   "The list of failure records for a result — empty means the test passed. Each record is `(loc detail-lines)`."
-  (third r))
+  (seq/third r))
 (defn- r-ms (r) (nth r 3))
 (defn r-failed? (r)
   "True if the result has at least one failed assertion (a non-empty `r-fails`)."
@@ -612,7 +612,7 @@ the test rather than hanging the run."
 ;; and the shard assigner walk.
 (defn- test-all-tests
   (units)
-  (fold (fn (acc unit) (append acc (map (fn (t) (list (second unit) t)) (third unit)))) nil units))
+  (fold (fn (acc unit) (append acc (map (fn (t) (list (second unit) t)) (seq/third unit)))) nil units))
 
 ;; Resolve one FILE:LINE selector to the exact declared line of the test it
 ;; addresses: the LAST test in that file declared at or before LINE. So pointing
@@ -696,11 +696,11 @@ the test rather than hanging the run."
   (if (nil? spec)
     units
     (let (resolved (test-resolve-lines units (get spec :lines)))
-      (filter (fn (unit) (not (empty? (third unit))))
+      (filter (fn (unit) (not (empty? (seq/third unit))))
         (map (fn (unit)
                (list (first unit)
                  (second unit)
-                 (filter (fn (t) (test-select? (second unit) t spec resolved)) (third unit))))
+                 (filter (fn (t) (test-select? (second unit) t spec resolved)) (seq/third unit))))
           units)))))
 
 ;; A stable hash of a test's full label — FNV-1a over its codepoints, masked to
@@ -729,13 +729,13 @@ the test rather than hanging the run."
   (units index total)
   (if (or (nil? total) (< total 2))
     units
-    (filter (fn (unit) (not (empty? (third unit))))
+    (filter (fn (unit) (not (empty? (seq/third unit))))
       (map (fn (unit)
              (list (first unit)
                (second unit)
                (filter (fn (t)
                          (= index (rem (test-label-hash (label (second unit) (first t))) total)))
-                 (third unit))))
+                 (seq/third unit))))
         units))))
 
 ;; Randomise unit order for this run. `nil` seed keeps declaration order (the
@@ -743,7 +743,7 @@ the test rather than hanging the run."
 ;; making it the default would churn every run's output).
 (defn- test-order-units
   (units seed)
-  (if (nil? seed) units (first (shuffle seed units))))
+  (if (nil? seed) units (first (seq/shuffle seed units))))
 
 ;; The seed for this run, or nil. Read straight off the active filter so the
 ;; file-order shuffle below and the unit-order shuffle above can't disagree.
@@ -772,7 +772,7 @@ the test rather than hanging the run."
 (defn- test-order-files
   (loaders)
   (let (seed (test-filter-seed))
-    (if (nil? seed) loaders (first (shuffle seed loaders)))))
+    (if (nil? seed) loaders (first (seq/shuffle seed loaders)))))
 
 ;; The full selection pipeline: filter, shard, then order. One place, so
 ;; `run-tests` and `run-tests-scoped` can't drift on selection semantics.
@@ -929,7 +929,7 @@ the test rather than hanging the run."
 ;; directly for an :isolated unit.
 (defn run-unit (unit)
   "Run every test in `unit` (a `(mode group tests)` tuple) in order via `run-test`, returning the list of their results. What a worker evaluates for a `:parallel`/`:serial` unit, and what the runner does directly for an `:isolated` one."
-  (let (group (second unit)) (map (fn (t) (run-test group t)) (third unit))))
+  (let (group (second unit)) (map (fn (t) (run-test group t)) (seq/third unit))))
 
 ;; --- the two phases ----------------------------------------------------------
 ;; Parallel phase: spawn one worker per non-isolated unit (each worker captures
@@ -1078,7 +1078,7 @@ the test rather than hanging the run."
            (first t)
            (list (list nil (list (str "test process died: " (pr-str reason)))))
            0))
-    (third unit)))
+    (seq/third unit)))
 
 ;; Account for each spawned worker exactly once — by its result if it reported,
 ;; otherwise by its death. A healthy worker sends `[:unit-result pid results]`
@@ -1114,7 +1114,7 @@ the test rather than hanging the run."
                            (quot *test-timeout-ms* 1000)
                            "s — hard-killed (raise *test-timeout-ms* if legitimately slow)"))))
            *test-timeout-ms*))
-    (third unit)))
+    (seq/third unit)))
 
 ;; Tags that buy a batch the raised budget. `:slow` says it directly; `:conformance`
 ;; implies it — an external-corpus sweep is thousands of cases by construction (the
@@ -1129,7 +1129,7 @@ the test rather than hanging the run."
   (workers)
   (any? (fn (w)
           (any? (fn (t) (any? (fn (tag) (includes? *test-long-tags* tag)) (test-tags t)))
-            (third (second w))))
+            (seq/third (second w))))
     workers))
 
 (defn collect-units (workers acc)
@@ -1165,12 +1165,12 @@ the test rather than hanging the run."
               (collect-loop (- pending 1)
                 workers
                 (cons pid reported)
-                (append (third msg) acc)
+                (append (seq/third msg) acc)
                 deadline)))
 
         ;; [:down mref pid reason]
         (= (first msg) :down)
-          (let (pid (third msg)
+          (let (pid (seq/third msg)
                 unit (unit-of-pid pid workers))
             (cond
               (includes? reported pid) (collect-loop pending
@@ -1191,7 +1191,7 @@ the test rather than hanging the run."
 ; -> results
 (defn- run-unit-fresh
   (unit)
-  (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (third unit))))
+  (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (seq/third unit))))
 ;; ─── The test runner ────────────────────────────────────────────────────────
 ;; The runner is one long-lived process gathering every step's results. Its
 ;; per-step transients — worker-result copies, the `append` spine, spawn/monitor
@@ -1451,7 +1451,7 @@ the test rather than hanging the run."
   "Where a failure occurred, as `file:line:col` relative to the working directory. Uses the failure record `rec`'s own captured position when it has one; otherwise falls back to result `r`'s declaration site (`r-where`), and \"\" only when neither is known."
   (let (loc (fail-loc-of rec))
     (cond
-      loc (str (test-relative-path (first loc)) ":" (second loc) ":" (third loc))
+      loc (str (test-relative-path (first loc)) ":" (second loc) ":" (seq/third loc))
       ;; No per-assertion position (a body form the reader recorded no position for) —
       ;; point at the test instead of nowhere.
       (not (= (r-where r) "")) (r-where r)

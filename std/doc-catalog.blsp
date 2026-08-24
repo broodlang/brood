@@ -77,7 +77,6 @@
    "brood-version" :meta
    "build-id" :meta
    "builtin-modules" :meta
-   "but-last" :collections
    "bytes" :bytes
    "bytes?" :predicates
    "string/capitalize" :strings
@@ -162,7 +161,6 @@
    "display-width" :strings
    "dissoc" :maps
    "dissoc-in" :maps
-   "distinct" :collections
    "distinct-step" :collections
    "doc" :meta
    "doc-search" :meta
@@ -174,8 +172,6 @@
    "dotimes-loop" :control
    "doto" :control
    "drop" :collections
-   "drop-last" :collections
-   "drop-while" :collections
    "dynamic?" :meta
    "empty?" :predicates
    "string/ends-with?" :predicates
@@ -195,10 +191,7 @@
    "file/size" :filesystem
    "file/stat" :filesystem
    "filter" :collections
-   "filterv" :collections
-   "find" :collections
    "first" :collections
-   "flatten" :collections
    "flatten-acc" :collections
    "float->bits" :convert
    "float?" :predicates
@@ -247,7 +240,6 @@
    "into" :collections
    "iterate-times-acc" :collections
    "string/join" :strings
-   "keep" :collections
    "keys" :maps
    "keyword" :convert
    "keyword?" :predicates
@@ -272,8 +264,6 @@
    "map-int-add" :maps
    "map-pairs" :maps
    "map?" :predicates
-   "mapcat" :collections
-   "mapv" :collections
    "match" :patterns
    "match*" :patterns
    "max" :math
@@ -305,7 +295,6 @@
    "string/pad-right" :strings
    "pair?" :predicates
    "partial" :functions
-   "partition" :collections
    "partition-acc" :collections
    "path-last-slash" :filesystem
    "pattern-vars" :patterns
@@ -358,12 +347,8 @@
    "register-method-store" :meta
    "reload-defs" :meta
    "rem" :math
-   "remove" :collections
-   "remove-nth" :collections
    "file/rename" :filesystem
-   "repeat" :collections
    "repeat-acc" :collections
-   "repeatedly" :collections
    "repeatedly-acc" :collections
    "string/replace" :strings
    "require-await" :meta
@@ -376,7 +361,6 @@
    "reverse-acc" :collections
    "rope?" :predicates
    "run!" :control
-   "sample" :collections
    "satisfies?" :meta
    "second" :collections
    "self" :processes
@@ -389,7 +373,6 @@
    "set?" :predicates
    "show-args" :io
    "show-print-hook" :meta
-   "shuffle" :collections
    "shuffle-acc" :collections
    "sig" :meta
    "sig!" :meta
@@ -401,7 +384,6 @@
    "some->>" :control
    "some-thread-build" :control
    "sort" :collections
-   "sort-by" :collections
    "span-runs" :strings
    "spawn" :processes
    "spawn-body-thunk" :processes
@@ -412,7 +394,6 @@
    "file/spit-append" :filesystem
    "file/spit-bytes" :filesystem
    "file/spit-private" :filesystem
-   "split-at" :collections
    "split-at-acc" :collections
    "spy" :meta
    "spy-default-sink" :meta
@@ -443,23 +424,17 @@
    "string?" :predicates
    "string/substring" :strings
    "string/substring-graphemes" :strings
-   "subvec" :collections
    "symbol" :convert
    "symbol?" :predicates
    "system-monitor" :meta
    "table?" :predicates
    "take" :collections
    "take-acc" :collections
-   "take-last" :collections
-   "take-while" :collections
    "take-while-acc" :collections
-   "third" :collections
    "throw" :errors
-   "times" :collections
    "->fixed" :strings
    "->seq" :meta
    "->string" :meta
-   "transduce" :collections
    "trap-exit" :processes
    "string/trim" :strings
    "string/triml" :strings
@@ -478,9 +453,6 @@
    "vals" :maps
    "vec" :convert
    "vector" :collections
-   "vector-assoc" :collections
-   "vector-length" :collections
-   "vector-ref" :collections
    "vector?" :predicates
    "when" :control
    "when-let" :control
@@ -491,10 +463,19 @@
    "with-out-str" :io
    "with-split-else" :control
    "zero?" :predicates
-   "zip" :collections
    "zip-acc" :collections
    "zipmap" :maps
-   ;; ---- added so nothing falls into :other (every core name has a home) ----
+   ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
+   "but-last" :collections
+   "drop-while" :collections
+   "mapcat" :collections
+   "mapv" :collections
+   "partition" :collections
+   "repeat" :collections
+   "sort-by" :collections
+   "take-while" :collections
+   "zip" :collections
+;; ---- added so nothing falls into :other (every core name has a home) ----
    "call" :processes
    "call-timeout" :processes
    "cast" :processes

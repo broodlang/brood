@@ -223,10 +223,10 @@ than being fetched into `_deps/<name>/`."
   (and (record? x) (= (record-id x) :project/dep-path)))
 
 ;; The elements of vector `v` from index `start` onward, as a list (tail-recursive).
-(defn- project-vec-drop (v start) (project-vec-drop-acc v start (dec (vector-length v)) nil))
+(defn- project-vec-drop (v start) (project-vec-drop-acc v start (dec (seq/vector-length v)) nil))
 (defn- project-vec-drop-acc
   (v start i acc)
-  (if (< i start) acc (project-vec-drop-acc v start (dec i) (cons (vector-ref v i) acc))))
+  (if (< i start) acc (project-vec-drop-acc v start (dec i) (cons (seq/vector-ref v i) acc))))
 
 ;; The keys of a flat plist (every other element from the head).
 ;; check-allow: deliberately non-tail — depth = the manifest plist's key count.
@@ -247,7 +247,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-git-dep
   (name entry)
-  (let (url (vector-ref entry 2)
+  (let (url (seq/vector-ref entry 2)
         opts (project-vec-drop entry 3)
         ref (plist-get opts :ref)
         version (plist-get opts :version))
@@ -269,7 +269,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-path-dep
   (name entry)
-  (let (path (vector-ref entry 2)
+  (let (path (seq/vector-ref entry 2)
         opts (project-vec-drop entry 3))
     (when (not (string? path))
       (error "project: :path dependency " name " path must be a string, got " path))
@@ -278,7 +278,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-registry-dep
   (name entry)
-  (let (version (vector-ref entry 2)
+  (let (version (seq/vector-ref entry 2)
         opts (project-vec-drop entry 3))
     (when (not (string? version))
       (error "project: registry dependency " name " version must be a string, got " version))
@@ -287,7 +287,7 @@ than being fetched into `_deps/<name>/`."
 
 (defn- project-parse-tarball-dep
   (name entry)
-  (let (url (vector-ref entry 2)
+  (let (url (seq/vector-ref entry 2)
         opts (project-vec-drop entry 3)
         sha (plist-get opts :sha256))
     (when (not (string? url))
@@ -305,9 +305,9 @@ than being fetched into `_deps/<name>/`."
   "Parse one `:dependencies` vector entry `[name kind & opts]` into a normalised dep record, dispatching on `kind` (`:git`/`:path`/`:tarball`/`:version`) and recording the `:optional` flag (ADR-172)."
   (when (not (vector? entry))
     (error "project: each :dependencies entry must be a vector, got " entry))
-  (when (< (vector-length entry) 3) (error "project: dependency entry is too short: " entry))
-  (let (name (vector-ref entry 0)
-        kind (vector-ref entry 1)
+  (when (< (seq/vector-length entry) 3) (error "project: dependency entry is too short: " entry))
+  (let (name (seq/vector-ref entry 0)
+        kind (seq/vector-ref entry 1)
         opts (project-vec-drop entry 3))
     (when (not (symbol? name)) (error "project: dependency name must be a symbol, got " name))
     (let (base (cond
@@ -713,8 +713,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; `distinct`: a dep file declaring more than one module (ADR-223) now has one
   ;; `*module-files*` entry per module, all pointing at the same path — the
   ;; fingerprint wants each file once, not once per module it declares.
-  (sort (distinct (map second
-                    (remove (fn (kv) (not (project-image-dep-module? (first kv))))
+  (sort (seq/distinct (map second
+                    (seq/remove (fn (kv) (not (project-image-dep-module? (first kv))))
                       (seq *module-files*))))))
 
 ;; `before` as a SET. As a list, `member?` is a linear scan run once per global — ~4000 x
@@ -729,7 +729,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; The globals the load CREATED: everything bound now that was not bound before it ran.
 (defn- project-image-fresh-names
   (seen)
-  (remove (fn (n) (contains? seen n)) (global-names)))
+  (seq/remove (fn (n) (contains? seen n)) (global-names)))
 
 ;; The registries the load MUTATED — derived from the funnel, minus the exclusions above,
 ;; minus any that ride their OWN materialised section (writing them here too would double
@@ -742,7 +742,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; imaged start (register-type-layers runs at that module's load, which materialising skips).
 (defn- project-image-registry-names
   (seen)
-  (remove (fn (n)
+  (seq/remove (fn (n)
             (or (includes? *project-image-registry-exclusions* n)
               (and (not (contains? seen n))
                 (let (mod (project-image-section-of n))
@@ -795,7 +795,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
                (or (get grouped "") nil)))
     (cons ["" root]
       (map (fn (k) [k (get grouped k)])
-        (remove
+        (seq/remove
           (fn (k)
             ;; A non-root section is materialised from the image only for the project's
             ;; own modules and its dependencies — both live in `*module-files*`
@@ -1448,11 +1448,11 @@ resolve in the advisory checker. Returns the project root."
               (project-pfold-collect (- pending 1)
                 workers
                 (cons pid reported)
-                (combine acc (third msg))
+                (combine acc (seq/third msg))
                 combine
                 on-death)))
         (= (first msg) :down)
-          (let (pid (third msg) entry (project-pfold-entry pid workers))
+          (let (pid (seq/third msg) entry (project-pfold-entry pid workers))
             (if (or (includes? reported pid) (nil? entry))
               (project-pfold-collect pending
                 workers reported acc combine on-death)
@@ -1742,8 +1742,8 @@ resolve in the advisory checker. Returns the project root."
 ;; CST node accessors (see the `parse-source` doc in builtins.rs): a node is
 ;; `[kind v]` — for a leaf `v` is the raw source text, for a container
 ;; (`[:list …]`, `[:root …]`) `v` is the vector of child nodes.
-(defn- project-node-kind (n) (vector-ref n 0))
-(defn- project-node-val (n) (vector-ref n 1))
+(defn- project-node-kind (n) (seq/vector-ref n 0))
+(defn- project-node-val (n) (seq/vector-ref n 1))
 
 ;; Top-level heads that bind a global (each expands to `def`). `defmodule` is
 ;; excluded — it registers a module feature, not a clashing value binding.
@@ -1803,9 +1803,9 @@ resolve in the advisory checker. Returns the project root."
   (path)
   (let (nodes (filter (fn (c) (= (project-node-kind c) :list))
                 (project-node-val (reflect/parse-source (file/slurp path))))
-        ns (first (keep project-module-name nodes)))
+        ns (first (seq/keep project-module-name nodes)))
     (map (fn (entry) (project-qualify ns (first entry) (second entry)))
-      (keep project-def-entry nodes))))
+      (seq/keep project-def-entry nodes))))
 
 ;; The project's source files (no tests) — the set the flat-namespace rule binds.
 (defn- source-files
@@ -1834,9 +1834,9 @@ resolve in the advisory checker. Returns the project root."
                             acc)))
                   {}
                   extracts))
-    (keep (fn (entry)
+    (seq/keep (fn (entry)
             (let ([nm paths] entry
-                  where (sort (distinct paths)))
+                  where (sort (seq/distinct paths)))
               (when (> (count where) 1)
                 (str "warning: global '"
                   nm
@@ -1867,9 +1867,9 @@ resolve in the advisory checker. Returns the project root."
                           (project-file-def-names path)))
                   {}
                   files))
-    (keep (fn (entry)
+    (seq/keep (fn (entry)
             (let ([nm paths] entry
-                  where (sort (distinct paths)))
+                  where (sort (seq/distinct paths)))
               (when (> (count where) 1)
                 (str "warning: global '"
                   nm
@@ -2011,14 +2011,14 @@ resolve in the advisory checker. Returns the project root."
 (def *project-cache-pruned* false)
 
 (defn- project-cache-prune
-  (base keep)
+  (base seq/keep)
   (when (not *project-cache-pruned*)
     (def *project-cache-pruned* true)
     (try
       (let (cutoff (- (os/now) *project-cache-max-age-ms*))
         (fold (fn (_ entry)
                 (let (p (path/join base entry))
-                  (when (and (not (= p keep))
+                  (when (and (not (= p seq/keep))
                           (file/dir? p)
                           (< (or (file/mtime p) 0) cutoff))
                     (try (file/rmdir p) (catch _ nil)))))
@@ -2162,7 +2162,7 @@ resolve in the advisory checker. Returns the project root."
     ;; the accumulator tail → O(total); a plain `(append acc …)` would be O(files²).
     (fold (fn (acc kv)
             (let ([path entry] kv)
-              (append-two (keep (fn (pd)
+              (append-two (seq/keep (fn (pd)
                                   (let ([bare qual] pd
                                         used (or (>= (map-get counts bare 0) 2)
                                                (and (not (= qual bare))
@@ -2402,7 +2402,7 @@ business."
   (test-file closures module->file)
   "Every project file `test-file` transitively depends on (mapping its reachable module
 names back to files), including itself. Modules with no project file (std/prelude) drop."
-  (conj (into #{} (keep (fn (m) (get module->file m)) (or (get closures test-file) [])))
+  (conj (into #{} (seq/keep (fn (m) (get module->file m)) (or (get closures test-file) [])))
     test-file))
 
 (defn- project-file-max-mtime
@@ -2855,7 +2855,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
             ;; modules are in `project-pairs`, so they never leak in here as a bogus package.
             ;; Baked into the manifest as `:bundled-packages` so `run-bundle` roots every one,
             ;; fixing the transitive-dep case the old direct-deps-only rooting missed.
-            dep-packages (distinct (map (fn (p) (bundle-key-package (first p))) dep-pairs)))
+            dep-packages (seq/distinct (map (fn (p) (bundle-key-package (first p))) dep-pairs)))
         ;; With deps rooted, a same-named module in two deps no longer clashes. This guard now
         ;; only catches a genuine bundle-key collision — two of your own source files declaring
         ;; the same module, or a root-project module keyed identically to a dep's rooted name —

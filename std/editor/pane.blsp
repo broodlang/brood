@@ -93,7 +93,7 @@ content-agnostic — the editor supplies the payload and the keybindings."
 
 (defn pane-selected-path (tree)
   "The path of the selected leaf (`()` for a lone pane)."
-  (find (fn (p) (get (pane-get tree p) :selected)) (pane-leaf-paths tree)))
+  (seq/find (fn (p) (get (pane-get tree p) :selected)) (pane-leaf-paths tree)))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
@@ -171,7 +171,7 @@ returned unchanged — you can't delete the only one."
   (let (p (pane-selected-path tree))
     (if (empty? p)
       tree
-      (let (parent (drop-last 1 p)
+      (let (parent (seq/drop-last 1 p)
             sib (if (= (last p) :a) :b :a)
             pruned (pane-update tree parent (fn (split) (get split sib))))
         (pane-select-path pruned (first (pane-leaf-paths pruned)))))))
