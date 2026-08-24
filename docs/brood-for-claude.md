@@ -724,7 +724,7 @@ quits or crashes is detected without any app-level goodbye message.
 cleanly — no need for an ad-hoc `[:bye]` broadcast. Returns `true` if a link
 existed.
 
-## Stateful servers — the `gen` framework (`(:use gen)`)
+## Stateful servers — the `gen` framework (core, bare)
 
 Raw `spawn`/`receive` is the substrate; for a process that **holds state and
 answers messages** (a gen_server / actor), use `gen`. State is immutable —
@@ -739,7 +739,7 @@ kinds:
   Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
-(defmodule my-counter "…" (:use gen))   ; (:use gen) to write
+(defmodule my-counter "…")   ; gen is core — spawn-server/call/cast/defprocess are bare
                                           ; defprocess/cast/gen-call bare
 
 (defprocess counter (n)                 ; n is the state
