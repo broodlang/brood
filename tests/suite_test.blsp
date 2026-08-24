@@ -230,7 +230,7 @@
   (test "built-ins enforce their declared arity (no silent extra/missing args)"
     (assert= (error-of (type-of)) "arity error: type-of: expected 1 argument, got 0")
     (assert= (error-of (int? 1 2)) "arity error: int?: expected 1 argument, got 2")
-    (assert= (error-of (now 1 2)) "arity error: now: expected 0 arguments, got 2")
+    (assert= (error-of (%now 1 2)) "arity error: %now: expected 0 arguments, got 2")
     (assert= (error-of (apply +)) "arity error: apply: expected at least 2 arguments, got 1"))
   (test "parse errors surface through read-string"
     (assert= (error-of (read-string "(1 2")) "parse error: unclosed list (opened here)"))

@@ -194,7 +194,7 @@ synthesized back-compat timer below and any app that hasn't moved to named timer
   "The current wall-clock in ms — `(os/now)`, unless the model carries a `:now-fn` (a
 0-arg fn), which the loop calls instead. The injection seam tests use to drive timers
 off a scripted clock deterministically, with no real sleeping."
-  ((or (get model :now-fn) now)))
+  ((or (get model :now-fn) os/now)))
 
 (defn- ui-timer-ms
   (spec)

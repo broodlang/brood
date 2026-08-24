@@ -152,46 +152,50 @@
   (filter (fn (i) (not (includes? [:whitespace :comment] (node-kind (nth kids i)))))
     (range 0 (count kids))))
 
-(defn- rename-node
-  (node old new mode in-quote? is-def-name?)
-  "Rewrite one CST node, returning its (possibly rewritten) source text."
-  (let (kind (node-kind node)
-        payload (node-payload node))
-    (cond
-      ;; A symbol leaf is the ONLY thing this rewrites — strings, comments, whitespace
-      ;; and every other leaf pass through byte-for-byte, which is what makes a
-      ;; docstring mentioning the name safe.
-      (= kind :symbol)
-        (if (and (= payload old)
-              (or (not in-quote?) (= mode :in-quote))
-              (cond
-                (= mode :defs-only) is-def-name?
-                (= mode :refs-only) (not is-def-name?)
-                else true))
-          new
-          payload)
-      ;; A container's delimiters are not leaves — the CST records them in the kind, so
-      ;; they have to be re-emitted around the rewritten kids to stay lossless.
-      (includes? *container-kinds* kind)
-        (str (open-delim kind) (rename-kids payload old new mode in-quote?) (close-delim kind))
-      ;; Any other LEAF (string, comment, whitespace, number, keyword…): unchanged.
-      ;; Checked before the wrapper case, since a leaf's payload is a string.
-      (string? payload) payload
-      ;; A wrapper holds ONE node. `'x`/`` `x `` quote their subtree; `~x`/`~@x` unquote
-      ;; back into live code, so they leave quoted context.
-      else
-        (let (sigil (get *wrapper-sigils* kind))
-          (if (nil? sigil)
-            (error "codemod: unknown CST node kind " (pr-str kind)
-              " — add it to *wrapper-sigils* (or *container-kinds*); emitting it blind"
-              " would silently drop source text")
-            (str sigil
-              (rename-node payload old new mode
+;; check-allow: a CST walk is inherently non-tail — the recursion depth is the
+;; source's NESTING depth (a handful of levels), not its length.
+(check-allow :non-tail-recursion
+  (defn- rename-node
+    (node old new mode in-quote? is-def-name?)
+    "Rewrite one CST node, returning its (possibly rewritten) source text."
+    (let (kind (node-kind node)
+          payload (node-payload node))
+      (cond
+        ;; A symbol leaf is the ONLY thing this rewrites — strings, comments, whitespace
+        ;; and every other leaf pass through byte-for-byte, which is what makes a
+        ;; docstring mentioning the name safe.
+        (= kind :symbol)
+          (if (and (= payload old)
+                (or (not in-quote?) (= mode :in-quote))
                 (cond
-                  (includes? [:unquote :splice] kind) false
-                  (includes? [:quote :quasi] kind) true
-                  else in-quote?)
-                false)))))))
+                  (= mode :defs-only) is-def-name?
+                  (= mode :refs-only) (not is-def-name?)
+                  else true))
+            new
+            payload)
+        ;; A container's delimiters are not leaves — the CST records them in the kind, so
+        ;; they have to be re-emitted around the rewritten kids to stay lossless.
+        (includes? *container-kinds* kind)
+          (str (open-delim kind) (rename-kids payload old new mode in-quote?) (close-delim kind))
+        ;; Any other LEAF (string, comment, whitespace, number, keyword…): unchanged.
+        ;; Checked before the wrapper case, since a leaf's payload is a string.
+        (string? payload) payload
+        ;; A wrapper holds ONE node. `'x`/`` `x `` quote their subtree; `~x`/`~@x` unquote
+        ;; back into live code, so they leave quoted context.
+        else
+          (let (sigil (get *wrapper-sigils* kind))
+            (if (nil? sigil)
+              (error "codemod: unknown CST node kind " (pr-str kind)
+                " — add it to *wrapper-sigils* (or *container-kinds*); emitting it blind"
+                " would silently drop source text")
+              (str sigil
+                (rename-node payload old new mode
+                  (cond
+                    (includes? [:unquote :splice] kind) false
+                    (includes? [:quote :quasi] kind) true
+                    else in-quote?)
+                  false)))))))
+  )
 
 (defn- open-delim
   (kind)
