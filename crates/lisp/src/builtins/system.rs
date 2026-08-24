@@ -976,11 +976,11 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // helpers. Opt-in.
     embedded_module!("sse", "std/net/sse.blsp"),
     // The process framework, bundled in the default install (ADR-085 amended —
-    // batteries-included, not externalized). `gen` is the gen_server-style
-    // server loop (`defprocess` / `spawn-server` / `!` / `gen/call` / `stop`); the
-    // core `log` module is a `gen` process. `supervisor` is OTP-style
-    // supervision — independent of `gen`, both over the same kernel primitives.
-    embedded_module!("gen", "std/proc/gen.blsp"),
+    // batteries-included, not externalized). NOTE: `gen` (the gen_server-style actor
+    // framework — `defprocess` / `spawn-server` / `call` / `cast` / `stop`) is CORE — it
+    // lives in the prelude (`std/proc/gen.blsp`, included by lib.rs), so those are bare and
+    // always available, not an on-`require` module here. `supervisor` is supervision —
+    // independent of `gen`, both over the same kernel primitives.
     embedded_module!("supervisor", "std/proc/supervisor.blsp"),
     // Process-backed state cell: start/get/update/get-and-update/cast/stop.
     // A thin Brood layer over spawn/send/receive for the common "stateful process" case.
