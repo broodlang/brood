@@ -1449,7 +1449,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![subprocess_ty, any], nil_ty),
         &["p", "on"],
-        "Switch subprocess p's INBOUND decode between text mode (default) and binary mode (mirrors tcp-set-binary; outbound proc-send is unaffected, ADR-141). In binary mode inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` value (not a string) — for a child speaking a binary protocol over stdio. Returns nil; throws if p is unknown/closed.",
+        "Switch subprocess p's INBOUND decode between text mode (default) and binary mode (mirrors tcp/set-binary; outbound proc/send is unaffected, ADR-141). In binary mode inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` value (not a string) — for a child speaking a binary protocol over stdio. Returns nil; throws if p is unknown/closed.",
         proc_set_binary);
     def(
         heap,
@@ -1468,7 +1468,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(0),
         Sig::nullary(table_ty),
         &[],
-        "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table-put/table-delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle.",
+        "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (`table/put`/`table/delete`) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle.",
         table_new);
     def(
         heap,
@@ -3565,7 +3565,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::range(1, 2),
         Sig::new(vec![any, any], any),
         &["flag", "&optional", "value"],
-        "Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (process-flag :max-heap 8000000) (work))). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (Erlang's default; process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector.",
+        "Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (proc/flag :max-heap 8000000) (work))). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (Erlang's default; process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector.",
         process_flag);
     def(
         heap,
@@ -3948,7 +3948,7 @@ mod primitive_docs_tests {
     /// The doc's own claim is that this column is machine-enforced — it says so at the top
     /// of the file. It was not: the *runtime* checks each `Arity`, but nothing compared the
     /// table against it, and 14 rows had drifted (mostly documenting a range's max as if it
-    /// were exact, so `proc-spawn` read as "3" when 2 is legal). A reader trusts this table
+    /// were exact, so `%proc-spawn` read as "3" when 2 is legal). A reader trusts this table
     /// precisely because it looks generated.
     #[test]
     fn documented_arities_match_the_registered_ones() {
