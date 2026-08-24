@@ -27,7 +27,7 @@
 
 (defn- ucd-file
   (name)
-  (first (filter (fn (p) (= (path-basename p) name)) (corpus-files "ucd"))))
+  (first (filter (fn (p) (= (path/basename p) name)) (corpus-files "ucd"))))
 
 ;; A line's payload: everything before the `#` comment, tabs folded to spaces.
 (defn- ucd-payload

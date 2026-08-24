@@ -1011,7 +1011,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   (if (file/dir? dir)
     (fold
       (fn (acc entry)
-        (let (p (path-join dir entry))
+        (let (p (path/join dir entry))
           (cond
             ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
@@ -1035,7 +1035,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   (root)
   (if (file/dir? root)
     (fold (fn (acc entry)
-            (let (p (path-join root entry))
+            (let (p (path/join root entry))
               (cond
                 (file/dir? p) acc
                 (string/ends-with? entry ".lock.blsp") acc

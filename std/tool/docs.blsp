@@ -313,10 +313,10 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- write-site
   (out-dir model title)
   (when (not (file/dir? out-dir)) (file/mkdir out-dir))
-  (file/spit (path-join out-dir "index.html") (docsite/render model {:title title}))
-  (file/spit (path-join out-dir "model.json") (json/encode model))
+  (file/spit (path/join out-dir "index.html") (docsite/render model {:title title}))
+  (file/spit (path/join out-dir "model.json") (json/encode model))
   (println (str "Wrote "
-             (path-join out-dir "index.html")
+             (path/join out-dir "index.html")
              " and model.json ("
              (count (get model :modules))
              " modules)")))
@@ -483,13 +483,13 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; filename. Empty when there is no `guides/` directory.
 (defn- collect-guides
   (root)
-  (let (dir (path-join root "guides"))
+  (let (dir (path/join root "guides"))
     (if (not (file/dir? dir))
       []
       (apply vector
         (map (fn (path) {:title (guide-title path) :html (markdown->html (file/slurp path))})
           (sort (filter (fn (p) (string/ends-with? p ".md"))
-                  (map (fn (f) (path-join dir f)) (file/ls dir)))))))))
+                  (map (fn (f) (path/join dir f)) (file/ls dir)))))))))
 
 ;; --- doctests (`nest doctest`) -----------------------------------------------
 ;; A doctest is a docstring line of the form `<expr> ;=> <expected>` (the expression

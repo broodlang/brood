@@ -823,10 +823,10 @@ Returns (and the process exits) at end of input."
 `./.broodrc.blsp` for a project-local one. Duplicates collapse, so running the REPL
 from your home directory doesn't load the same file twice."
   (let (user (or (os/getenv "BROOD_RC")
-               (let (home (os/getenv "HOME")) (if home (path-join home ".broodrc.blsp") nil)))
+               (let (home (os/getenv "HOME")) (if home (path/join home ".broodrc.blsp") nil)))
         ;; Compared against the *absolute* local path, since `user` is absolute — a
         ;; bare "./.broodrc.blsp" would never match it and we'd load twice.
-        local (try (path-join (file/cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
+        local (try (path/join (file/cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
     (filter (fn (p) (not (nil? p)))
       (if (= user local) (list user) (list user local)))))
 

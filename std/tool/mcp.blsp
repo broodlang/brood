@@ -147,7 +147,7 @@ sandbox boundary the `write`/`edit` tools share."
     (throw "no project root — nest mcp must run inside a Brood project"))
   (when (not (safe-rel? rel))
     (throw (str "path must be project-relative — no leading '/' or '~', no '..': " (pr-str rel))))
-  (let (abs (path-join *project-root* rel))
+  (let (abs (path/join *project-root* rel))
     (when (not (under-root? abs))
       (throw (str "path escapes the project sandbox — its real target (following symlinks) "
                "is outside the project root: "
@@ -179,7 +179,7 @@ through nest mcp, never the raw filesystem."
       (throw "write: :content must be a string"))
     (try
       (let (abs (project-path rel)
-            _dir (file/mkdir (parent-directory abs))
+            _dir (file/mkdir (path/dirname abs))
             _w (file/spit abs content))
         (write-result rel abs))
       (catch e
@@ -758,6 +758,6 @@ Brood pattern, `std/tool/explain.blsp`)."
 ;; have wired it up — the right time for a hard error.
 (let (root (project/find-root (file/cwd)))
   (when root
-    (let (project-mcp (path-join root "mcp.blsp"))
+    (let (project-mcp (path/join root "mcp.blsp"))
       (when (file/exists? project-mcp)
         (load project-mcp)))))

@@ -165,7 +165,6 @@
    "defrecord-fname" :maps
    "defrecord-ftype" :maps
    "defrecord-qualify" :maps
-   "defseq" :collections
    "file/rmdir" :filesystem
    "file/rm" :filesystem
    "demonitor" :processes
@@ -321,13 +320,9 @@
    "string/pad-left" :strings
    "string/pad-right" :strings
    "pair?" :predicates
-   "parent-directory" :filesystem
    "partial" :functions
    "partition" :collections
    "partition-acc" :collections
-   "path-absolute" :filesystem
-   "path-basename" :filesystem
-   "path-join" :filesystem
    "path-last-slash" :filesystem
    "pattern-vars" :patterns
    "pid?" :predicates
@@ -475,7 +470,6 @@
    "take-last" :collections
    "take-while" :collections
    "take-while-acc" :collections
-   "temp-path" :filesystem
    "third" :collections
    "throw" :errors
    "times" :collections

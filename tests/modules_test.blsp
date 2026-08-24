@@ -19,11 +19,11 @@
     (is (string/ends-with? "x" ""))))
 
 (describe "paths"
-  (test "path-join" (assert= (path-join "a" "b") "a/b") (assert= (path-join "a/" "b") "a/b"))
+  (test "path-join" (assert= (path/join "a" "b") "a/b") (assert= (path/join "a/" "b") "a/b"))
   (test "parent-directory"
-    (assert= (parent-directory "/a/b/c") "/a/b")
-    (assert= (parent-directory "/foo") "/")
-    (assert= (parent-directory "rel") ".")))
+    (assert= (path/dirname "/a/b/c") "/a/b")
+    (assert= (path/dirname "/foo") "/")
+    (assert= (path/dirname "rel") ".")))
 
 ;; Concurrent `provide` must not lose a feature (KI-22's class). `provide` is a
 ;; read-modify-write of one shared global (`(def *features* (assoc *features* key true))`

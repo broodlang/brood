@@ -21,16 +21,16 @@
 ; all distinct — none clobbered
 (describe "file: whole-file read/write/append"
   (test "spit then slurp round-trips"
-    (let (p (path-join (ftmp) "a.txt"))
+    (let (p (path/join (ftmp) "a.txt"))
       (file/spit p "hello")
       (assert= (file/slurp p) "hello")))
   (test "spit-append adds to existing content (and creates if absent)"
-    (let (p (path-join (ftmp) "b.txt"))
+    (let (p (path/join (ftmp) "b.txt"))
       (file/spit-append p "one")
       (file/spit-append p "two")
       (assert= (file/slurp p) "onetwo")))
   (test "spit-append is the atomic primitive spit-append aliases"
-    (let (p (path-join (ftmp) "c.txt"))
+    (let (p (path/join (ftmp) "c.txt"))
       ; creates when absent
       (file/spit-append p "x")
       (file/spit-append p "y")
@@ -39,7 +39,7 @@
     ;; The point of the atomic primitive over a read-modify-write: N processes each
     ;; appending a distinct line never lose or clobber a write. 40 workers each
     ;; append one line; the file must end up with exactly 40 distinct lines.
-    (let (p (path-join (ftmp) "log.txt")
+    (let (p (path/join (ftmp) "log.txt")
           me (self)
           n 40)
       (dotimes (i n)
@@ -57,14 +57,14 @@
 
 (describe "file: size / delete / rename"
   (test "file-size reports byte length, nil when missing"
-    (let (p (path-join (ftmp) "s.txt"))
+    (let (p (path/join (ftmp) "s.txt"))
       (file/spit p "12345")
       (assert= (file/size p) 5)
-      (assert= (file/size (path-join (ftmp) "nope.txt")) nil)))
+      (assert= (file/size (path/join (ftmp) "nope.txt")) nil)))
   ; missing → nil
   (test "file-stat reports size/dir?/symlink? in one map, nil when missing"
     (let (d (ftmp)
-          f (path-join d "stat.txt")
+          f (path/join d "stat.txt")
           _ (file/spit f "12345")
           sf (file/stat f)
           sd (file/stat d))
@@ -83,23 +83,23 @@
       ; resolved name (or numeric id)
       (is (string? (get sf :owner)))
       (is (string? (get sf :group)))
-      (assert= (file/stat (path-join d "nope.txt")) nil)))
+      (assert= (file/stat (path/join d "nope.txt")) nil)))
   ; no-op when already gone
   (test "delete-file removes a file and is idempotent"
-    (let (p (path-join (ftmp) "d.txt"))
+    (let (p (path/join (ftmp) "d.txt"))
       (file/spit p "x")
       (is (regular? p))
       (file/rm p)
       (refute (file/exists? p))
       (assert= (file/rm p) nil)))
   (test "rename-file moves content to a new path"
-    (let (d (ftmp) a (path-join d "a.txt") b (path-join d "b.txt"))
+    (let (d (ftmp) a (path/join d "a.txt") b (path/join d "b.txt"))
       (file/spit a "moved")
       (file/rename a b)
       (refute (file/exists? a))
       (assert= (file/slurp b) "moved")))
   (test "copy-file duplicates content, leaving the original"
-    (let (d (ftmp) a (path-join d "src.txt") b (path-join d "dst.txt"))
+    (let (d (ftmp) a (path/join d "src.txt") b (path/join d "dst.txt"))
       (file/spit a "copied")
       (file/cp a b)
       ; original still there
@@ -108,11 +108,11 @@
 
 (describe "file: line I/O"
   (test "write-lines / read-lines round-trip without a trailing blank line"
-    (let (p (path-join (ftmp) "c.txt"))
+    (let (p (path/join (ftmp) "c.txt"))
       (write-lines p ["alpha" "beta" "gamma"])
       (assert= (read-lines p) (list "alpha" "beta" "gamma"))))
   (test "read-lines of an empty file is nil"
-    (let (p (path-join (ftmp) "empty.txt"))
+    (let (p (path/join (ftmp) "empty.txt"))
       (file/spit p "")
       (assert= (read-lines p) nil)))
   ;; write-lines built its output with `(fold (fn (acc l) (str acc l "\n")) "" lines)`,
@@ -121,16 +121,16 @@
   ;; identical (the empty case especially: an unguarded trailing newline would write a
   ;; one-byte file where the fold wrote an empty one).
   (test "write-lines terminates every line, including a single one"
-    (let (p (path-join (ftmp) "one.txt"))
+    (let (p (path/join (ftmp) "one.txt"))
       (write-lines p ["solo"])
       (assert= (file/slurp p) "solo\n")))
   (test "write-lines of nothing writes an empty file, not a newline"
-    (let (p (path-join (ftmp) "none.txt"))
+    (let (p (path/join (ftmp) "none.txt"))
       (write-lines p ())
       (assert= (file/slurp p) "")
       (assert= (read-lines p) nil)))
   (test "write-lines accepts any seqable, not just a list"
-    (let (p (path-join (ftmp) "seq.txt"))
+    (let (p (path/join (ftmp) "seq.txt"))
       (write-lines p ["a" "b"])
       (assert= (file/slurp p) "a\nb\n")
       (write-lines p (list "c" "d"))
@@ -138,7 +138,7 @@
   ;; The shape guard: 8x the lines must not cost ~64x the time. Generous bound —
   ;; this is a regression tripwire, not a benchmark (see handoff §5 on noise).
   (test "write-lines is linear in the number of lines"
-    (let (p (path-join (ftmp) "scale.txt")
+    (let (p (path/join (ftmp) "scale.txt")
           mk (fn (n) (map (fn (i) (str "line " i " with a little payload")) (range n)))
           ms (fn (n)
                (let (ls (mk n) t0 (os/now-ns))
@@ -150,33 +150,33 @@
 
 (describe "file: predicates"
   (test "file? is true for a regular file, false for a directory"
-    (let (d (ftmp) p (path-join d "f.txt"))
+    (let (d (ftmp) p (path/join d "f.txt"))
       (file/spit p "x")
       (is (regular? p))
       (refute (regular? d))
       (is (file/dir? d))))
   (test "file-exists? covers files and directories"
-    (let (d (ftmp) p (path-join d "f.txt"))
+    (let (d (ftmp) p (path/join d "f.txt"))
       (file/spit p "x")
       (is (file/exists? p))
       (is (file/exists? d))
-      (refute (file/exists? (path-join d "nope.txt"))))))
+      (refute (file/exists? (path/join d "nope.txt"))))))
 
 (describe "file: directory listing"
   (test "list-files and list-dirs separate files from subdirectories"
     (let (d (ftmp))
-      (file/spit (path-join d "f1.txt") "a")
-      (file/spit (path-join d "f2.txt") "b")
-      (file/mkdir (path-join d "sub"))
+      (file/spit (path/join d "f1.txt") "a")
+      (file/spit (path/join d "f2.txt") "b")
+      (file/mkdir (path/join d "sub"))
       (assert= (sort (list-files d)) (list "f1.txt" "f2.txt"))
       (assert= (list-dirs d) (list "sub"))))
   (test "walk-files collects files recursively as full paths"
     (let (d (ftmp))
-      (file/spit (path-join d "top.txt") "a")
-      (file/mkdir (path-join d "sub"))
-      (file/spit (path-join (path-join d "sub") "deep.txt") "b")
+      (file/spit (path/join d "top.txt") "a")
+      (file/mkdir (path/join d "sub"))
+      (file/spit (path/join (path/join d "sub") "deep.txt") "b")
       (assert= (sort (walk-files d))
-        (sort (list (path-join d "top.txt") (path-join (path-join d "sub") "deep.txt")))))))
+        (sort (list (path/join d "top.txt") (path/join (path/join d "sub") "deep.txt")))))))
 
 ;; `extension`/`stem` are pure path-string ops and live in `path` (covered by
 ;; path_test); `file` no longer duplicates them (ADR-234). `path-absolute` below is
@@ -184,16 +184,16 @@
 (describe "file: prelude path-absolute helper"
   (test "path-absolute"
     ; already absolute → unchanged
-    (assert= (path-absolute "/etc/hosts") "/etc/hosts")
+    (assert= (path/absolute "/etc/hosts") "/etc/hosts")
     ; empty → empty
-    (assert= (path-absolute "") "")
+    (assert= (path/absolute "") "")
     ; relative → joined onto base
-    (assert= (path-absolute "foo/bar" "/base") "/base/foo/bar")
+    (assert= (path/absolute "foo/bar" "/base") "/base/foo/bar")
     ; default base is (file/cwd)
-    (assert= (path-absolute "rel") (path-join (file/cwd) "rel"))
+    (assert= (path/absolute "rel") (path/join (file/cwd) "rel"))
     ; ~ expands against $HOME
-    (assert= (path-absolute "~/x") (str (os/getenv "HOME") "/x"))
-    (assert= (path-absolute "~") (os/getenv "HOME"))))
+    (assert= (path/absolute "~/x") (str (os/getenv "HOME") "/x"))
+    (assert= (path/absolute "~") (os/getenv "HOME"))))
 
 ;; `%file-swap` — atomic compare-and-swap of a file's whole contents, serialised
 ;; across processes by an exclusive lock. The mechanism behind a safe
@@ -207,15 +207,15 @@
 (describe "%file-swap: compare-and-swap"
   (test "creates the file when the expected content is empty"
     (let (dir (temp-dir "brood-file-swap-")
-          lock (path-join dir "l")
-          data (path-join dir "d"))
+          lock (path/join dir "l")
+          data (path/join dir "d"))
       (file/mkdir dir)
       (is (%file-swap lock data "" "first"))
       (assert= (file/slurp data) "first")))
   (test "swaps when the current content matches"
     (let (dir (temp-dir "brood-file-swap-")
-          lock (path-join dir "l")
-          data (path-join dir "d"))
+          lock (path/join dir "l")
+          data (path/join dir "d"))
       (file/mkdir dir)
       (file/spit data "old")
       (is (%file-swap lock data "old" "new"))
@@ -224,16 +224,16 @@
     ;; This is the property the retry loop rests on: a stale `expected` must not
     ;; overwrite whatever landed in between.
     (let (dir (temp-dir "brood-file-swap-")
-          lock (path-join dir "l")
-          data (path-join dir "d"))
+          lock (path/join dir "l")
+          data (path/join dir "d"))
       (file/mkdir dir)
       (file/spit data "changed-by-someone-else")
       (refute (%file-swap lock data "what-i-read-earlier" "mine"))
       (assert= (file/slurp data) "changed-by-someone-else")))
   (test "a second swap with the now-stale expected also fails"
     (let (dir (temp-dir "brood-file-swap-")
-          lock (path-join dir "l")
-          data (path-join dir "d"))
+          lock (path/join dir "l")
+          data (path/join dir "d"))
       (file/mkdir dir)
       (file/spit data "v1")
       (is (%file-swap lock data "v1" "v2"))
@@ -241,23 +241,23 @@
       (assert= (file/slurp data) "v2")))
   (test "an empty new value is a legitimate swap, not a no-op"
     (let (dir (temp-dir "brood-file-swap-")
-          lock (path-join dir "l")
-          data (path-join dir "d"))
+          lock (path/join dir "l")
+          data (path/join dir "d"))
       (file/mkdir dir)
       (file/spit data "content")
       (is (%file-swap lock data "content" ""))
       (assert= (file/slurp data) "")))
   (test "a missing file reads as empty, so expecting content fails"
     (let (dir (temp-dir "brood-file-swap-")
-          lock (path-join dir "l")
-          data (path-join dir "absent"))
+          lock (path/join dir "l")
+          data (path/join dir "absent"))
       (file/mkdir dir)
       (refute (%file-swap lock data "something" "new"))
       (refute (file/exists? data))))
   (test "the lock file is created on demand"
     (let (dir (temp-dir "brood-file-swap-")
-          lock (path-join dir "made-on-demand.lock")
-          data (path-join dir "d"))
+          lock (path/join dir "made-on-demand.lock")
+          data (path/join dir "d"))
       (file/mkdir dir)
       (is (%file-swap lock data "" "x"))
       (is (file/exists? lock))))
@@ -265,15 +265,15 @@
     ;; The write goes via a temp file + rename (so a crash can't leave a truncated
     ;; manifest); nothing should survive a successful swap.
     (let (dir (temp-dir "brood-file-swap-")
-          lock (path-join dir "l")
-          data (path-join dir "d"))
+          lock (path/join dir "l")
+          data (path/join dir "d"))
       (file/mkdir dir)
       (is (%file-swap lock data "" "x"))
       (assert= (sort (filter (fn (f) (includes? f ".swap.")) (file/ls dir))) nil)))
   (test "repeated swaps thread through, each seeing the last"
     (let (dir (temp-dir "brood-file-swap-")
-          lock (path-join dir "l")
-          data (path-join dir "d"))
+          lock (path/join dir "l")
+          data (path/join dir "d"))
       (file/mkdir dir)
       (is (%file-swap lock data "" "a"))
       (is (%file-swap lock data "a" "ab"))
@@ -282,7 +282,7 @@
 
 (describe "temp-path"
   (test "unpredictable and unique — never the same path twice"
-    (let (a (temp-path "x-") b (temp-path "x-"))
+    (let (a (path/temp "x-") b (path/temp "x-"))
       (is (string/starts-with? a "/tmp/x-"))
       (is (not= a b))
       ;; long enough that it cannot be guessed and pre-created as a symlink by
@@ -290,4 +290,4 @@
       (is (>= (- (string/length a) (string/length "/tmp/x-")) 32))))
 
   (test "it creates nothing — the caller decides file or directory"
-    (is (not (file/exists? (temp-path "unmade-"))))))
+    (is (not (file/exists? (path/temp "unmade-"))))))
