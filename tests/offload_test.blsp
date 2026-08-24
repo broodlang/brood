@@ -9,7 +9,7 @@
 
 (describe "offload: results round-trip the pool"
   (test "a pure native (%digest) gives the same answer offloaded and direct"
-    (let (data (string->utf8-bytes "the brood digs deep")
+    (let (data (string/->bytes "the brood digs deep")
           direct (%digest :sha256 data)
           pooled (offload %digest :sha256 data))
       (is (bytes? pooled))
@@ -36,7 +36,7 @@
 (describe "offload: concurrency & selectivity"
   (test "waiting for the pool is a selective receive — other mail stays queued"
     (send (self) [:decoy :untouched])
-    (let (r (offload %digest :sha256 (string->utf8-bytes "x")))
+    (let (r (offload %digest :sha256 (string/->bytes "x")))
       (is (bytes? r))
       ;; the decoy was not consumed by the offload wait
       (assert= (receive ([:decoy v] v) (after *test-wait-ms* :lost)) :untouched)))
@@ -45,7 +45,7 @@
           n 8)
       (dotimes (i n)
         (spawn (do
-                 (let (data (string->utf8-bytes (str "worker-" i))
+                 (let (data (string/->bytes (str "worker-" i))
                        direct (%digest :sha256 data)
                        pooled (offload %digest :sha256 data))
                    (send parent [:done i (= pooled direct)])))))

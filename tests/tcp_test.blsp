@@ -73,7 +73,7 @@
           (tcp/close c)
           (tcp/close ls)
           (is (bytes? reply))
-          (assert= (utf8-bytes->string reply) "hello, world"))))))
+          (assert= (string/bytes-> reply) "hello, world"))))))
 
 (describe "tcp: opt-in idle timeout (tcp/set-idle-timeout)"
   :isolated
@@ -168,8 +168,8 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "line one\r\nline two\r\n\r\n")
-          (assert= (utf8-bytes->string (nth r 1)) "body bytes here")))))
+          (assert= (string/bytes-> (nth r 0)) "line one\r\nline two\r\n\r\n")
+          (assert= (string/bytes-> (nth r 1)) "body bytes here")))))
   (test "read-until spans chunk boundaries (delimiter split across sends)"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -183,8 +183,8 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "abc\r\n\r\n")
-          (assert= (utf8-bytes->string (nth r 1)) "xyz")))))
+          (assert= (string/bytes-> (nth r 0)) "abc\r\n\r\n")
+          (assert= (string/bytes-> (nth r 1)) "xyz")))))
   ;; The scan keeps only the last (|sep|-1) bytes of history, so a delimiter spread
   ;; over as many chunks as it has bytes is the exact boundary case — one byte per
   ;; chunk means every straddle slot is in use. A `tail` off by one loses the match
@@ -201,16 +201,16 @@
         (dolist (b (list "a" "b" "\r" "\n" "\r" "\n" "z"))
           (send (self) [:tcp s (bytes/concat b)]))
         (let (r (read-until s "\r\n\r\n"))
-          (assert= (utf8-bytes->string (nth r 0)) "ab\r\n\r\n")
+          (assert= (string/bytes-> (nth r 0)) "ab\r\n\r\n")
           ;; `rest` is only surplus from the chunk that COMPLETED the delimiter, and
           ;; here that chunk is the bare "\n" — so "z" is not surplus, it is still an
           ;; unreceived message. It must survive for the next framed read.
-          (assert= (utf8-bytes->string (nth r 1)) "")
+          (assert= (string/bytes-> (nth r 1)) "")
           (let (r2 (read-n s 1))
             (tcp/close c)
             (tcp/close s)
             (tcp/close ls)
-            (assert= (utf8-bytes->string (nth r2 0)) "z"))))))
+            (assert= (string/bytes-> (nth r2 0)) "z"))))))
   ;; A near-miss that shares a prefix with the delimiter must not be reported: the
   ;; straddle window carries "\r\n\r" forward, so a following "x" has to reject.
   (test "read-until does not match a partial delimiter carried across chunks"
@@ -229,8 +229,8 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "h\r\n\rx\r\n\r\n")
-          (assert= (utf8-bytes->string (nth r 1)) "tail")))))
+          (assert= (string/bytes-> (nth r 0)) "h\r\n\rx\r\n\r\n")
+          (assert= (string/bytes-> (nth r 1)) "tail")))))
   ;; The frame boundary is computed from a running byte total plus an offset into the
   ;; straddle probe, not from a scan of the whole buffer — so the cut must still land
   ;; correctly after many chunks have gone by.
@@ -248,7 +248,7 @@
           (tcp/close s)
           (tcp/close ls)
           (assert= (bytes/length (nth r 0)) (+ 2000 3 4))
-          (assert= (utf8-bytes->string (nth r 1)) "rest")))))
+          (assert= (string/bytes-> (nth r 1)) "rest")))))
   (test "read-until returns [:closed acc] when the delimiter never arrives"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -262,7 +262,7 @@
           (tcp/close s)
           (tcp/close ls)
           (assert= (first r) :closed)
-          (assert= (utf8-bytes->string (nth r 1)) "no delimiter here")))))
+          (assert= (string/bytes-> (nth r 1)) "no delimiter here")))))
   (test "read-n returns exactly n bytes and the surplus"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -275,8 +275,8 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "0123456789")
-          (assert= (utf8-bytes->string (nth r 1)) "EXTRA")))))
+          (assert= (string/bytes-> (nth r 0)) "0123456789")
+          (assert= (string/bytes-> (nth r 1)) "EXTRA")))))
   (test "read-n accumulates across chunks"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -290,8 +290,8 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "aaabbb")
-          (assert= (utf8-bytes->string (nth r 1)) "bb")))))
+          (assert= (string/bytes-> (nth r 0)) "aaabbb")
+          (assert= (string/bytes-> (nth r 1)) "bb")))))
   (test "read-n returns [:closed acc] on early EOF"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -305,7 +305,7 @@
           (tcp/close s)
           (tcp/close ls)
           (assert= (first r) :closed)
-          (assert= (utf8-bytes->string (nth r 1)) "short"))))))
+          (assert= (string/bytes-> (nth r 1)) "short"))))))
 
 ;; The limits a server needs against an untrusted peer. Each case is the shape an
 ;; HTTP worker actually has to answer: a client that goes silent (408), one that
@@ -328,7 +328,7 @@
           (tcp/close s)
           (tcp/close ls)
           (assert= (first r) :timeout)
-          (assert= (utf8-bytes->string (nth r 1)) "GET / HTTP/1.1\r\n")))))
+          (assert= (string/bytes-> (nth r 1)) "GET / HTTP/1.1\r\n")))))
   (test "read-until returns [:too-large acc] when the delimiter never arrives"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -355,7 +355,7 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "abcdef\r\n\r\n")))))
+          (assert= (string/bytes-> (nth r 0)) "abcdef\r\n\r\n")))))
   (test "read-until with limits set still returns a normal frame"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -368,8 +368,8 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "HEAD\r\n\r\n")
-          (assert= (utf8-bytes->string (nth r 1)) "BODY")))))
+          (assert= (string/bytes-> (nth r 0)) "HEAD\r\n\r\n")
+          (assert= (string/bytes-> (nth r 1)) "BODY")))))
   (test "read-n refuses an over-cap declared length before reading anything"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -397,7 +397,7 @@
           (tcp/close s)
           (tcp/close ls)
           (assert= (first r) :timeout)
-          (assert= (utf8-bytes->string (nth r 1)) "abc")))))
+          (assert= (string/bytes-> (nth r 1)) "abc")))))
   (test "read-n with limits set still returns a normal body"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -410,8 +410,8 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "0123456789")
-          (assert= (utf8-bytes->string (nth r 1)) "EXTRA"))))))
+          (assert= (string/bytes-> (nth r 0)) "0123456789")
+          (assert= (string/bytes-> (nth r 1)) "EXTRA"))))))
 
 ;; The bound the other two leave open. A peer that drip-feeds — one byte, just inside
 ;; the idle timeout, forever — defeats `:timeout-ms` (every chunk re-arms it) and is
@@ -466,8 +466,8 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "GET / HTTP/1.1\r\n\r\n")
-          (assert= (utf8-bytes->string (nth r 1)) "BODY")))))
+          (assert= (string/bytes-> (nth r 0)) "GET / HTTP/1.1\r\n\r\n")
+          (assert= (string/bytes-> (nth r 1)) "BODY")))))
   (test "an already-expired deadline fires at once rather than waiting"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -522,12 +522,12 @@
         ;; nothing is ever sent on the socket — the answer is entirely in the seed
         (let (r (read-until s
                   "\r\n\r\n"
-                  {:seed (string->utf8-bytes "GET / HTTP/1.1\r\n\r\nEXTRA") :timeout-ms 2000}))
+                  {:seed (string/->bytes "GET / HTTP/1.1\r\n\r\nEXTRA") :timeout-ms 2000}))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "GET / HTTP/1.1\r\n\r\n")
-          (assert= (utf8-bytes->string (nth r 1)) "EXTRA")))))
+          (assert= (string/bytes-> (nth r 0)) "GET / HTTP/1.1\r\n\r\n")
+          (assert= (string/bytes-> (nth r 1)) "EXTRA")))))
   (test "a delimiter straddling the seed and the first chunk is still found"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -540,12 +540,12 @@
         (tcp/send c "\nBODY")
         (let (r (read-until s
                   "\r\n\r\n"
-                  {:seed (string->utf8-bytes "GET / HTTP/1.1\r\n\r") :timeout-ms 2000}))
+                  {:seed (string/->bytes "GET / HTTP/1.1\r\n\r") :timeout-ms 2000}))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "GET / HTTP/1.1\r\n\r\n")
-          (assert= (utf8-bytes->string (nth r 1)) "BODY")))))
+          (assert= (string/bytes-> (nth r 0)) "GET / HTTP/1.1\r\n\r\n")
+          (assert= (string/bytes-> (nth r 1)) "BODY")))))
   (test "a seed short of the delimiter continues into the socket"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -556,12 +556,12 @@
         (tcp/send c "Host: x\r\n\r\nREST")
         (let (r (read-until s
                   "\r\n\r\n"
-                  {:seed (string->utf8-bytes "GET / HTTP/1.1\r\n") :timeout-ms 2000}))
+                  {:seed (string/->bytes "GET / HTTP/1.1\r\n") :timeout-ms 2000}))
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-          (assert= (utf8-bytes->string (nth r 1)) "REST")))))
+          (assert= (string/bytes-> (nth r 0)) "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+          (assert= (string/bytes-> (nth r 1)) "REST")))))
   (test "the seed counts toward :max-bytes"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -571,7 +571,7 @@
         (tcp/set-binary s true)
         (let (r (read-until s
                   "\r\n\r\n"
-                  {:seed (string->utf8-bytes (string/repeat "x" 200))
+                  {:seed (string/->bytes (string/repeat "x" 200))
                    :max-bytes 64
                    :timeout-ms 2000}))
           (tcp/close c)
@@ -590,5 +590,5 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (assert= (utf8-bytes->string (nth r 0)) "LINE\r\n\r\n")
-          (assert= (utf8-bytes->string (nth r 1)) "TAIL"))))))
+          (assert= (string/bytes-> (nth r 0)) "LINE\r\n\r\n")
+          (assert= (string/bytes-> (nth r 1)) "TAIL"))))))

@@ -21,7 +21,7 @@
       (file/spit p "héllo")
       (let (bs (file/slurp-bytes p))
         (is (bytes? bs))
-        (assert= bs (string->utf8-bytes "héllo")))))
+        (assert= bs (string/->bytes "héllo")))))
 
   (test "package-hash invariant: sha256-bytes∘slurp-bytes == sha256∘slurp"
     ;; The reason switching package-sha256-file to bytes doesn't churn existing
@@ -59,7 +59,7 @@
 (describe "spit-bytes: byte-faithful file writes (the write side of slurp-bytes)"
   (test "round-trips a bytes value (file/spit accepts it too — ADR-139 iolists)"
     (let (p (path/join (sb-tmp) "w.bin")
-          data (string->utf8-bytes "PNG\0\1\2 héllo ☃"))
+          data (string/->bytes "PNG\0\1\2 héllo ☃"))
       ;; Since ADR-139 every write boundary takes an iolist, so plain `spit`
       ;; writes a bytes value byte-faithfully as well — same file either way.
       (file/spit p data)
@@ -87,7 +87,7 @@
       (file/spit-bytes p [104 105])
       (assert= (file/slurp p) "hi")
       ; a bytes value → "hi"
-      (file/spit-bytes p (string->utf8-bytes "hi"))
+      (file/spit-bytes p (string/->bytes "hi"))
       (assert= (file/slurp p) "hi")))
 
   (test "a byte int out of 0–255 range is rejected, not silently truncated"
@@ -95,6 +95,6 @@
 
   (test "replaces an existing file rather than appending"
     (let (p (path/join (sb-tmp) "over.bin"))
-      (file/spit-bytes p (string->utf8-bytes "longer first write"))
-      (file/spit-bytes p (string->utf8-bytes "short"))
+      (file/spit-bytes p (string/->bytes "longer first write"))
+      (file/spit-bytes p (string/->bytes "short"))
       (assert= (file/slurp p) "short"))))

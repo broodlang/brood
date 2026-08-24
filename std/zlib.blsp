@@ -31,7 +31,7 @@
 (defn- as-bytes
   (data)
   "Coerce iodata to a byte sequence: a string is UTF-8-encoded, bytes pass through."
-  (if (string? data) (string->utf8-bytes data) data))
+  (if (string? data) (string/->bytes data) data))
 
 ;; ---- gzip (RFC 1952) — the HTTP `Content-Encoding: gzip` format ----
 

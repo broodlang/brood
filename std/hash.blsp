@@ -43,7 +43,7 @@
 (defn md5 (s)
   "Lowercase hex MD5 of string `s`'s UTF-8 bytes. NOT collision-resistant;
 use sha256 for security-sensitive work. Useful for checksums, ETags, UUID v3."
-  (bytes->hex (%digest :md5 (string->utf8-bytes s))))
+  (bytes->hex (%digest :md5 (string/->bytes s))))
 
 (defn md5-bytes (bytes)
   "Lowercase hex MD5 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -58,7 +58,7 @@ use sha256 for security-sensitive work. Useful for checksums, ETags, UUID v3."
 (defn sha1 (s)
   "Lowercase hex SHA-1 of string `s`'s UTF-8 bytes. NOT collision-resistant;
 use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
-  (bytes->hex (%digest :sha1 (string->utf8-bytes s))))
+  (bytes->hex (%digest :sha1 (string/->bytes s))))
 
 (defn sha1-bytes (bytes)
   "Lowercase hex SHA-1 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -72,7 +72,7 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
 
 (defn sha256 (s)
   "Lowercase hex SHA-256 of string `s`'s UTF-8 bytes."
-  (bytes->hex (%digest :sha256 (string->utf8-bytes s))))
+  (bytes->hex (%digest :sha256 (string/->bytes s))))
 
 (defn sha256-bytes (bytes)
   "Lowercase hex SHA-256 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -88,7 +88,7 @@ value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. S
 
 (defn sha384 (s)
   "Lowercase hex SHA-384 of string `s`'s UTF-8 bytes."
-  (bytes->hex (%digest :sha384 (string->utf8-bytes s))))
+  (bytes->hex (%digest :sha384 (string/->bytes s))))
 
 (defn sha384-bytes (bytes)
   "Lowercase hex SHA-384 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -102,7 +102,7 @@ value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. S
 
 (defn sha512 (s)
   "Lowercase hex SHA-512 of string `s`'s UTF-8 bytes."
-  (bytes->hex (%digest :sha512 (string->utf8-bytes s))))
+  (bytes->hex (%digest :sha512 (string/->bytes s))))
 
 (defn sha512-bytes (bytes)
   "Lowercase hex SHA-512 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -120,16 +120,16 @@ value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. S
 
 (defn hmac-sha256 (key message)
   "HMAC-SHA256 of `message` using `key`. Both are strings; result is lowercase hex."
-  (bytes->hex (%hmac :sha256 (string->utf8-bytes key) (string->utf8-bytes message))))
+  (bytes->hex (%hmac :sha256 (string/->bytes key) (string/->bytes message))))
 
 (defn hmac-sha1 (key message)
   "HMAC-SHA1 of `message` using `key`. Both are strings; result is lowercase hex.
 SHA-1 is not collision-resistant; prefer hmac-sha256 for new protocols."
-  (bytes->hex (%hmac :sha1 (string->utf8-bytes key) (string->utf8-bytes message))))
+  (bytes->hex (%hmac :sha1 (string/->bytes key) (string/->bytes message))))
 
 (defn hmac-sha512 (key message)
   "HMAC-SHA512 of `message` using `key`. Both are strings; result is lowercase hex."
-  (bytes->hex (%hmac :sha512 (string->utf8-bytes key) (string->utf8-bytes message))))
+  (bytes->hex (%hmac :sha512 (string/->bytes key) (string/->bytes message))))
 
 ;; ---- raw-byte HMAC ----------------------------------------------------------
 ;;

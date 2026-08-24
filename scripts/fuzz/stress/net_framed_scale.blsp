@@ -41,7 +41,7 @@
           r (read-until sock sep)
           us (quot (- (now-ns) t0) 1000))
       (do
-        (if (not (= (utf8-bytes->string (nth r 1)) "TRAILER"))
+        (if (not (= (string/bytes-> (nth r 1)) "TRAILER"))
           (do (println "ERROR: wrong remainder") (%halt 1))
           nil)
         (if (not (= (count (nth r 0)) (+ (* size (+ chunks 1)) (count sep))))

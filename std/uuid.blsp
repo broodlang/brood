@@ -206,7 +206,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
   (ns-uuid name hash-fn version)
   "Generic name-based UUID: hash(namespace_bytes || name_bytes), set version."
   (let (ns-bytes (str->bytes ns-uuid)
-        name-bytes (seq (string->utf8-bytes name))
+        name-bytes (seq (string/->bytes name))
         input (append (into [] ns-bytes) (into [] name-bytes))
         digest-hex (hash-fn input)
         ;; Take first 16 bytes (32 hex chars) of the hash output

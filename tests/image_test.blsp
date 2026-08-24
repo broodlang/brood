@@ -33,6 +33,6 @@
       (assert= (bytes/length (get t :rgba)) 4)))
 
   (test "non-image bytes and non-positive dims degrade to nil, never throw"
-    (is (nil? (gui/image-thumb (string->utf8-bytes "not an image") 8 8)))
+    (is (nil? (gui/image-thumb (string/->bytes "not an image") 8 8)))
     (is (nil? (gui/image-thumb *png-2x2* 0 8)))
     (is (nil? (gui/image-thumb *png-2x2* 8 -1)))))
