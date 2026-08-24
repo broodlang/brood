@@ -129,9 +129,9 @@
     (let (p (img-tmp "sig"))
       (%image-write p [["" ['startup-image-test/si-typed]]] "fp-s")
       (%register-sig 'startup-image-test/si-typed '(string -> string))
-      (assert= "(string) -> string" (type-signature 'startup-image-test/si-typed))
+      (assert= "(string) -> string" (reflect/type-signature 'startup-image-test/si-typed))
       (let (idx (%image-index p "fp-s")) (si-load-all p idx))
-      (assert= "(int) -> int" (type-signature 'startup-image-test/si-typed))))
+      (assert= "(int) -> int" (reflect/type-signature 'startup-image-test/si-typed))))
 
   ;; The whole point: an imaged start must not freeze the image.
   (test "hot reload still works after restoring from an image"

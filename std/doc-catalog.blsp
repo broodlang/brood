@@ -100,13 +100,7 @@
    "chain?" :predicates
    "char->int" :strings
    "string/char-at" :strings
-   "check" :meta
    "check-allow" :meta
-   "check-deps-fp" :meta
-   "check-file" :meta
-   "check-file-deps" :meta
-   "check-file-structured" :meta
-   "check-string-structured" :meta
    "clipboard-get" :system
    "clipboard-set!" :system
    "cmp-ge" :math
@@ -134,7 +128,6 @@
    "file/cp" :filesystem
    "count" :collections
    "count-acc" :collections
-   "current-file" :meta
    "current-ns" :meta
    "file/cwd" :filesystem
    "dec" :math
@@ -234,7 +227,6 @@
    "for" :control
    "for-check-binds" :control
    "for-fold" :control
-   "form-pos" :meta
    "format" :strings
    "format-loop" :strings
    "format-prec" :strings
@@ -330,8 +322,6 @@
    "string/pad-right" :strings
    "pair?" :predicates
    "parent-directory" :filesystem
-   "parse-source" :meta
-   "parse-source-positioned" :meta
    "partial" :functions
    "partition" :collections
    "partition-acc" :collections
@@ -383,7 +373,6 @@
    "reduce-kv" :maps
    "ref" :processes
    "ref?" :predicates
-   "references-in-source" :meta
    "register" :processes
    "register-impl-check-arity" :meta
    "register-method-derive" :meta
@@ -410,10 +399,6 @@
    "run!" :control
    "sample" :collections
    "satisfies?" :meta
-   "scan-form-start" :meta
-   "scan-form-start-2" :meta
-   "scan-source-extract" :meta
-   "scan-tokens" :meta
    "second" :collections
    "self" :processes
    "send" :processes
@@ -438,7 +423,6 @@
    "some-thread-build" :control
    "sort" :collections
    "sort-by" :collections
-   "source-location" :meta
    "span-runs" :strings
    "spawn" :processes
    "spawn-body-thunk" :processes
@@ -500,9 +484,6 @@
    "->string" :meta
    "transduce" :collections
    "trap-exit" :processes
-   "tree-sitter-forget" :meta
-   "tree-sitter-parse" :meta
-   "tree-sitter-reparse" :meta
    "string/trim" :strings
    "string/triml" :strings
    "string/trimr" :strings
@@ -510,7 +491,6 @@
    "try-class-catch?" :predicates
    "type-matches?" :predicates
    "type-of" :convert
-   "type-signature" :meta
    "unimpl-do" :meta
    "unless" :control
    "unlink" :processes
@@ -551,7 +531,6 @@
    "queue?" :predicates
    "register-protocol" :meta
    "reserved-package-name?" :meta
-   "scan-form-end" :meta
    "set-image-source!" :system
    "spawn-server" :processes
    "spawn-server-link" :processes

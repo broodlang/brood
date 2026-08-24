@@ -1471,7 +1471,7 @@ fn cmd_run(
     let check_setup = match file {
         Some(path) => format!(
             "(unless (= (%getenv \"BROOD_NO_CHECK\") \"1\") \
-               (doseq (w (check-file \"{}\")) (eprintln w))) ",
+               (doseq (w (%check-file \"{}\")) (eprintln w))) ",
             brood::introspect::escape_brood_string(path)
         ),
         None => String::new(),

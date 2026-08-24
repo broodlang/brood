@@ -905,7 +905,7 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; line preserved between any pair the author separated with one.
 (defn source (src)
   "Format `src` as a Brood source string. Idempotent."
-  (let (root (parse-source src)) (cst-root (node-children root))))
+  (let (root (reflect/parse-source src)) (cst-root (node-children root))))
 
 (defn cst-root (kids)
   "Render the root's child nodes `kids` — the top-level forms — into the formatted source string, with exactly one trailing newline."

@@ -222,7 +222,7 @@ reference and definition outside quoted data), `:refs-only` (leave the `defn`/`d
 alone — for renaming callers when the definition stays), `:defs-only` (only the
 definition head), or `:in-quote` (also rewrite symbols inside `(quote …)`/`'…` data).
 Lossless: an unmatched file comes back byte-identical."
-  (rename-kids (node-payload (parse-source text)) old new (or mode :all) false))
+  (rename-kids (node-payload (reflect/parse-source text)) old new (or mode :all) false))
 
 (defn cst-rename
   (old new &optional mode)

@@ -24,7 +24,7 @@
 ;; absent, so a bare `cargo test` (no grammars) stays green — `make test` builds
 ;; them in and runs them.
 (defn tst-grammar? (lang)
-  (try (do (tree-sitter-parse "" lang) true) (catch _ false)))
+  (try (do (%tree-sitter-parse "" lang) true) (catch _ false)))
 (def tst-ruby? (tst-grammar? :ruby))
 (def tst-elixir? (tst-grammar? :elixir))
 
@@ -44,7 +44,7 @@
   ; 4 + len("\"café\"") = 4 + 6 chars
   (describe "tree-sitter-parse ruby"
     (test "root is a positioned :program node with children"
-      (let (root (tree-sitter-parse "x = 1\n" :ruby))
+      (let (root (%tree-sitter-parse "x = 1\n" :ruby))
         (assert= (get root :kind) :program)
         (assert= (get root :start) 0)
         ; includes the trailing newline
@@ -53,14 +53,14 @@
         (is (not (empty? (get root :kids))))))
 
     (test "an assignment node nests identifier/operator/integer leaves"
-      (let (root (tree-sitter-parse "x = 1\n" :ruby)
+      (let (root (%tree-sitter-parse "x = 1\n" :ruby)
             asgn (tst-find root :assignment))
         (refute (nil? asgn))
         (is (not (nil? (tst-find asgn :identifier))))
         (is (not (nil? (tst-find asgn :integer))))))
 
     (test "leaves carry :text spanning their char offsets"
-      (let (root (tree-sitter-parse "x = 1\n" :ruby)
+      (let (root (%tree-sitter-parse "x = 1\n" :ruby)
             ident (tst-find root :identifier))
         (assert= (get ident :text) "x")
         (assert= (get ident :start) 0)
@@ -68,7 +68,7 @@
         (is (get ident :named))))
 
     (test "anonymous tokens are :named false"
-      (let (root (tree-sitter-parse "x = 1\n" :ruby)
+      (let (root (%tree-sitter-parse "x = 1\n" :ruby)
             op (tst-find root :=))
         (refute (nil? op))
         (refute (get op :named))
@@ -76,7 +76,7 @@
 
     (test "char offsets, not byte offsets, for multibyte source"
       ;; "café" is 4 chars / 5 bytes; the string literal's end must be a CHAR offset.
-      (let (root (tree-sitter-parse "s = \"café\"\n" :ruby)
+      (let (root (%tree-sitter-parse "s = \"café\"\n" :ruby)
             str (tst-find root :string))
         (refute (nil? str))
         (assert= (get str :start) 4)
@@ -85,12 +85,12 @@
 
   (describe "tree-sitter-parse elixir"
     (test "root is a :source node"
-      (let (root (tree-sitter-parse "x = 1\n" :elixir))
+      (let (root (%tree-sitter-parse "x = 1\n" :elixir))
         (assert= (get root :kind) :source)
         (is (not (empty? (get root :kids))))))
 
     (test "an assignment is a binary_operator over identifier and integer"
-      (let (root (tree-sitter-parse "x = 1\n" :elixir)
+      (let (root (%tree-sitter-parse "x = 1\n" :elixir)
             bin (tst-find root :binary_operator))
         (refute (nil? bin))
         (is (not (nil? (tst-find bin :identifier))))
@@ -102,7 +102,7 @@
 
   (describe "tree-sitter-parse error recovery"
     (test "a syntax error surfaces an :error node"
-      (let (root (tree-sitter-parse "@\n" :ruby)
+      (let (root (%tree-sitter-parse "@\n" :ruby)
             err (tst-search root (fn (n) (get n :error))))
         (refute (nil? err))
         (is (get err :error))))
@@ -111,13 +111,13 @@
     (test "an inserted token surfaces a zero-width :missing node"
       ;; `def foo` with no matching `end` makes tree-sitter insert a zero-width
       ;; MISSING `end` for recovery — :kind can't signal that, so :missing must.
-      (let (root (tree-sitter-parse "def foo\n" :ruby)
+      (let (root (%tree-sitter-parse "def foo\n" :ruby)
             miss (tst-search root (fn (n) (get n :missing))))
         (refute (nil? miss))
         (is (get miss :missing))
         (assert= (get miss :start) (get miss :end))))
     (test "valid source carries no :error or :missing nodes"
-      (let (root (tree-sitter-parse "x = 1\n" :ruby))
+      (let (root (%tree-sitter-parse "x = 1\n" :ruby))
         (is (nil? (tst-search root (fn (n) (or (get n :error) (get n :missing)))))))))
 
   ;; ---- incremental reparse ---------------------------------------------------
@@ -144,22 +144,22 @@
                     "def f\n  café\nend\n" "def f\n  café\nend\n")
             ok (reduce (fn (acc s)
                          (and acc
-                           (= (tree-sitter-reparse k s :ruby)
-                             (tree-sitter-parse s :ruby))))
+                           (= (%tree-sitter-reparse k s :ruby)
+                             (%tree-sitter-parse s :ruby))))
                  true edits))
         (is ok)
         ;; forget drops the buffer's cached tree and reports the count.
-        (assert= (tree-sitter-forget k) 1)
-        (assert= (tree-sitter-forget k) 0)))
+        (assert= (%tree-sitter-forget k) 1)
+        (assert= (%tree-sitter-forget k) 0)))
     (test "first reparse with no cache equals a fresh parse"
       (let (k 9002)
-        (assert= (tree-sitter-reparse k "y = 2\n" :elixir)
-          (tree-sitter-parse "y = 2\n" :elixir))
-        (tree-sitter-forget k)))))
+        (assert= (%tree-sitter-reparse k "y = 2\n" :elixir)
+          (%tree-sitter-parse "y = 2\n" :elixir))
+        (%tree-sitter-forget k)))))
 ;; ---- errors ----------------------------------------------------------------
 ;; Runs regardless of grammars: an unknown language throws whether or not any
 ;; grammar is built in.
 
 (describe "tree-sitter-parse errors"
   (test "an unknown language throws"
-    (assert-error (tree-sitter-parse "x" :python))))
+    (assert-error (%tree-sitter-parse "x" :python))))

@@ -1560,7 +1560,7 @@ resolve in the advisory checker. Returns the project root."
   (chunk)
   (fold (fn (k pair)
           (let ([f cl] pair)
-            (fold project-tally-warning k (check-file f cl))))
+            (fold project-tally-warning k (reflect/check-file f cl))))
     0 chunk))
 
 ;; The same pass for the case where every file shares ONE reachability set, which is what
@@ -1576,7 +1576,7 @@ resolve in the advisory checker. Returns the project root."
 (defn- project-check-chunk-shared
   (chunk)
   (let (cl (first chunk))
-    (fold (fn (k f) (fold project-tally-warning k (check-file f cl)))
+    (fold (fn (k f) (fold project-tally-warning k (reflect/check-file f cl)))
       0
       (rest chunk))))
 
@@ -1634,7 +1634,7 @@ resolve in the advisory checker. Returns the project root."
                     ;; this file's mtime moving, so it must invalidate the cache too.
                     (if (and c
                           (= (nth c 0) (file/mtime p))
-                          (= (check-deps-fp (nth c 2)) (nth c 3))
+                          (= (reflect/check-deps-fp (nth c 2)) (nth c 3))
                           (= (nth c 4 nil) cl))
                       ; unchanged file + deps + closure → reuse
                       [(map-assoc reuse p c) recheck]
@@ -1726,7 +1726,7 @@ resolve in the advisory checker. Returns the project root."
   (if (nil? files)
     acc
     (let (f (first files)
-          diags (check-file-structured f (map-get closures f nil))
+          diags (reflect/check-file-structured f (map-get closures f nil))
           done2 (inc done))
       (%mcp-progress done2 total (str "checked " (path-basename f)))
       (project-check-fold (rest files) closures total done2 (append-two diags acc)))))
@@ -1802,7 +1802,7 @@ resolve in the advisory checker. Returns the project root."
 (defn- project-file-def-names
   (path)
   (let (nodes (filter (fn (c) (= (project-node-kind c) :list))
-                (project-node-val (parse-source (file/slurp path))))
+                (project-node-val (reflect/parse-source (file/slurp path))))
         ns (first (keep project-module-name nodes)))
     (map (fn (entry) (project-qualify ns (first entry) (second entry)))
       (keep project-def-entry nodes))))
@@ -1942,7 +1942,7 @@ resolve in the advisory checker. Returns the project root."
 ;; check path (only the native `scan-source-extract` runs), kept for documentation.
 (defn- project-scan-file-entry
   (path)
-  (scan-source-extract (file/slurp path)))
+  (reflect/scan-source-extract (file/slurp path)))
 
 ;; The `:scan-entries` op (runs in a worker): return `[path [mtime counts privs
 ;; def-names]]` for each file in `chunk` — the cache entry. mtime is read BEFORE the
@@ -1970,7 +1970,7 @@ resolve in the advisory checker. Returns the project root."
   (map (fn (pair)
          (let ([p cl] pair
                mt (file/mtime p)
-               r (check-file-deps p cl))
+               r (reflect/check-file-deps p cl))
            [p [mt (nth r 0) (nth r 1) (nth r 2) cl]]))
     chunk))
 
