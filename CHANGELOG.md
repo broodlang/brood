@@ -4,7 +4,7 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.10.0 — 2026-08-24
 
 **BREAKING — the core reference went from 613 names to 337 (ADR-242).** Two thirds of that
 was noise or misplacement, not deletion:
