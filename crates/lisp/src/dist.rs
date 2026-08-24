@@ -130,8 +130,8 @@ const WRITER_QUEUE_CAP: usize = 4096;
 /// is the whole trust boundary (possession ⇒ remote eval), and the HMAC
 /// imposes no strength requirement of its own — an empty or few-byte cookie
 /// authenticates "successfully" and is guessable online. 16 bytes of a
-/// `(random-token …)`-style secret is far beyond online brute force; the
-/// default `(node-cookie)` generates 32.
+/// `(rand/token …)`-style secret is far beyond online brute force; the
+/// default `(node/cookie)` generates 32.
 const MIN_COOKIE_LEN: usize = 16;
 
 /// Monotonic clock base, so `last_seen` can live in an `AtomicU64` of millis.
@@ -745,7 +745,7 @@ pub(crate) enum Target {
 /// a live link; `false` when the node is **unknown/disconnected** (the message
 /// was dropped on the floor). `send` surfaces that as a catchable
 /// `:noconnection` error when the sending process opted in via
-/// `(process-flag :send-errors true)` — so a caller can queue-and-retry instead
+/// `(proc/flag :send-errors true)` — so a caller can queue-and-retry instead
 /// of silently losing messages until the reconnect (the dist self-healing
 /// seam); every other caller ignores it.
 /// Warn, once per name, that a message addressed to a **registered name no process holds**
@@ -847,7 +847,7 @@ pub(crate) fn node_listen(name: Symbol, addr: &str, cookie: String) -> io::Resul
     // Guardrail (kernel audit 2026-06-03): the cookie is the *entire* trust
     // boundary — a holder has remote code execution by design — so refuse one
     // short enough to guess or brute-force online. The default policy
-    // (`node-cookie` in std/prelude) generates `(random-token 32)`; this only
+    // (`node/cookie`) generates `(rand/token 32)`; this only
     // rejects a deliberately weak override (e.g. a short `$BROOD_COOKIE`).
     if cookie.len() < MIN_COOKIE_LEN {
         return Err(io::Error::new(
@@ -855,7 +855,7 @@ pub(crate) fn node_listen(name: Symbol, addr: &str, cookie: String) -> io::Resul
             format!(
                 "node cookie too short: {} bytes (minimum {MIN_COOKIE_LEN}) — \
                  a cookie-holder has full remote eval on this node; use the \
-                 default (node-cookie) or e.g. (random-token 32)",
+                 default (node/cookie) or e.g. (rand/token 32)",
                 cookie.len()
             ),
         ));

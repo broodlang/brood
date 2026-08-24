@@ -677,7 +677,7 @@ Brood pattern, `std/tool/explain.blsp`)."
      :description "Snapshot every live green process with its runtime stats — id, name, status, mailbox backlog, memory, GC collections, cumulative reductions (Erlang's work counter), monitors and parent. The same per-process view the observer shows. Returns {:processes [{:id :status :mailbox :reductions ...} ...]}. Sort by :reductions to find the busiest process."
      :schema {:type "object" :properties {}}
      :handler processes-tool}
-    {:name "proc/info"
+    {:name "process-info"
      :description "Full stat map for one process by numeric :id (from a `processes` listing): status, mailbox, memory, collections, reductions, monitors, parent. Returns the proc/info map, or {:error msg} if no live process has that id."
      :schema {:type "object"
               :properties {:id {:type "integer"

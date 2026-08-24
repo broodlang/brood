@@ -2419,3 +2419,38 @@ was a real bug: `render-inline` returned a VECTOR of nodes in three branches, an
 template renderer reads a vector as an element and a list as a child sequence — so
 `[:strong {} ["hi"]]` rendered as `<strong><hi></hi></strong>`. Every bold run on the
 public changelog was broken.
+
+### The same day, later: `nest run` was completely broken and nothing said so
+
+`nest run <anything>` failed with `unbound symbol: getenv` — every invocation, no project
+needed. `nest check` reported 0 warnings and the 4692-test in-language suite was green.
+
+The name lives in a **Rust string**: `crates/nest/src/main.rs` builds the pre-run check as
+`"(unless (= (getenv \"BROOD_NO_CHECK\") …"`. No checker can see that, and no `.blsp` tool
+reads `crates/`. Ten more sites of the same shape turned up once looked for — executable
+fixtures in `distribution.rs`, `reductions.rs`, `basic.rs`, `mcp_sandbox.rs`, plus
+user-facing error hints in `dist.rs`/`mailbox.rs`/`eval/mod.rs` telling people to call
+`(process-flag …)`, a function that no longer exists.
+
+**`crates/nest/tests/run_main.rs` already existed and would have caught it on the first
+run.** It was never run: the RAM ceiling on this machine rules out `make test`, which had
+quietly become "run `cargo test -p brood --lib` and call it verified". The integration
+tests are cheap — `-p nest --tests` is 20 s — and running them also caught the
+`distribution.rs` fixture and two MCP tests, the latter a real API bug: an earlier perl
+pass had renamed the **MCP tool** `process-info` to `proc/info`, and every other tool is
+slash-free kebab-case because `/` is invalid in an MCP tool name. Reverted the tool name;
+the Brood function stays `proc/info`.
+
+A general "extract every Brood snippet embedded in Rust and resolve its free symbols" lint
+was prototyped and **rejected**: ~162 candidates, overwhelmingly docstring prose,
+deliberately-unbound fixtures (`no-such-fn`) and record names defined inside the snippet —
+and the known-names set was itself unreliable (the dump missed `node/connect`, which
+exists). A gate with that signal-to-noise gets ignored.
+
+What shipped instead is `scripts/stale-names.sh`: grep the whole repo — `.rs`, `.md`,
+quoted forms, string literals — for the specific names a wave just moved. It found all
+eleven Rust sites in seconds and then **13 more `scripts/fuzz/stress/*.blsp`** that no
+rename wave had ever touched. Sabotage-testing it caught a bug in the script itself: the
+boundary class was written `[^…^-/]`, where `-` between `^` and `/` is a RANGE, so the
+first version reported a clean tree over a deliberately reintroduced `getenv`. Third
+instance this week of "a gate that cannot fail looks exactly like a gate that passes".

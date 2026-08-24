@@ -194,7 +194,7 @@ fn start_stdout_reader(
 
 // ---- the primitive operations ----
 
-/// `(proc-spawn prog args opts)` — spawn `prog` with `args`, piping its stdin/
+/// `(proc/spawn prog args opts)` — spawn `prog` with `args`, piping its stdin/
 /// stdout/stderr. `cwd` (if set) is the child's working directory; otherwise it
 /// inherits ours. `env` entries are added on top of the inherited environment.
 /// The stdout/stderr readers deliver to `subscriber`. Returns the handle id.

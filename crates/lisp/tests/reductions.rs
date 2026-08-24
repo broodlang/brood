@@ -21,7 +21,7 @@ fn process_info_reports_reductions() {
           (work 300000 0)
           (receive (_ :ok)))))   ;; park after grinding, so it's stable to query
         (sleep 500)
-        (get (process-info w) :reductions)
+        (get (proc/info w) :reductions)
     "#;
     let v = interp.eval_str(prog).expect("reductions program errored");
     let reds: i64 = interp.print(v).trim().parse().unwrap_or(-1);

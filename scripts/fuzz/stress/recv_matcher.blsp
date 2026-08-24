@@ -54,8 +54,8 @@
 ;; Run under `BROOD_PERF_STATS=1` on a `--features perf-stats` build for the `ns_*` shares;
 ;; `jit_link_done` (0 vs ~N) is the single counter that says whether the fast frame engaged.
 
-(def n (let (e (getenv "N")) (if e (string->number e) 1000000)))
-(def pat (let (e (getenv "PAT")) (if e e "vec")))
+(def n (let (e (os/getenv "N")) (if e (string->number e) 1000000)))
+(def pat (let (e (os/getenv "PAT")) (if e e "vec")))
 
 (defn loop-vec (i acc)
   (if (%eq i n)

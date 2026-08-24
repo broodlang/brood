@@ -94,7 +94,7 @@ fn canonicalize_resolves_symlinks_and_nonexistent_tails() {
     // A symlinked dir is followed to its real target.
     let via_link = interp
         .eval_str(&format!(
-            "(canonicalize (str {} \"/link/inside.txt\"))",
+            "(os/canonicalize (str {} \"/link/inside.txt\"))",
             lit(&base)
         ))
         .unwrap();
@@ -108,7 +108,7 @@ fn canonicalize_resolves_symlinks_and_nonexistent_tails() {
     // A `..` in an existing path is normalized.
     let dotdot = interp
         .eval_str(&format!(
-            "(canonicalize (str {} \"/d/../d/f.txt\"))",
+            "(os/canonicalize (str {} \"/d/../d/f.txt\"))",
             lit(&base)
         ))
         .unwrap();
@@ -123,7 +123,7 @@ fn canonicalize_resolves_symlinks_and_nonexistent_tails() {
     // out of the symlink target entirely; the result must NOT be under `base`.
     let escape = interp
         .eval_str(&format!(
-            "(canonicalize (str {} \"/link/x/../../../../escaped\"))",
+            "(os/canonicalize (str {} \"/link/x/../../../../escaped\"))",
             lit(&base)
         ))
         .unwrap();

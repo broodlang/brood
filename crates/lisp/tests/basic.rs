@@ -512,8 +512,8 @@ fn native_arity_is_enforced_centrally() {
         "arity error: cons: expected 2 arguments, got 1"
     );
     assert_eq!(
-        err("(now 1 2)"),
-        "arity error: now: expected 0 arguments, got 2"
+        err("(%now 1 2)"),
+        "arity error: %now: expected 0 arguments, got 2"
     );
     assert_eq!(
         err("(apply +)"),

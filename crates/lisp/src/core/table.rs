@@ -412,7 +412,7 @@ pub fn check_key(who: &str, key: Value) -> Result<(), LispError> {
     Err(LispError::type_err(format!("{}: {}", who, reason)))
 }
 
-/// `(table)` — create a new empty table; returns its handle id. `push` hands out the
+/// `(%table)` — create a new empty table; returns its handle id. `push` hands out the
 /// next dense index atomically, so `id = idx + 1` (0 is reserved as "no table").
 /// The dense slot region is reserved lazily on the first dense write, so an
 /// unused (or immediately-hashed) table costs only this small shell.

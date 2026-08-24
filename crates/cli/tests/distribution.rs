@@ -1994,7 +1994,7 @@ fn cluster_mesh_simultaneous_joins_converge() {
 /// harness restarts B on the same port; the watcher's backoff `connect` retries
 /// land, the subscriber gets `[:nodeup]`, and a `send` to B works again —
 /// end-to-end recovery with no manual `connect`. Also exercises the opt-in
-/// `(process-flag :send-errors true)` seam: while B is down, a send raises the
+/// `(proc/flag :send-errors true)` seam: while B is down, a send raises the
 /// catchable E0060 noconnection error instead of silently dropping.
 #[test]
 fn reconnect_watcher_heals_a_fallen_link() {
@@ -2051,11 +2051,11 @@ fn reconnect_watcher_heals_a_fallen_link() {
   ([:nodedown _] (println "NODEDOWN-OK"))
   (after 15000 (println "TIMEOUT-no-nodedown")))
 ;; while down: an opted-in send raises catchable noconnection instead of dropping
-(process-flag :send-errors true)
+(proc/flag :send-errors true)
 (println
   (try (do (send {{:name :echo :node (keyword spec)}} [:ping (self)]) "SEND-DID-NOT-RAISE")
     (catch e (if (= (get e :code) "E0060") "NOCONNECTION-OK" (get e :message)))))
-(process-flag :send-errors nil)
+(proc/flag :send-errors nil)
 (receive
   ([:nodeup up]
     (println "NODEUP-OK")
