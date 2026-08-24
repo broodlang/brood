@@ -712,6 +712,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-12** — the forward-ref pre-scan was not module-boundary-aware
 - **2026-08-12** — multiple modules per file: the region model (ADR-223 Phase 1)
 - **2026-08-24** — a primitive's name gets one definition site; CST-backed `nest rename` (ADR-240)
+- **2026-08-24** — a library name may shadow core only when used qualified (ADR-241)
 
 ---
 
@@ -2382,3 +2383,39 @@ unquote-splice `:splice` and I had guessed `:unquote-splice`. Round-tripping all
 emitting its subtree bare. Same lesson as the `--workspace` gate two entries up: **prove the
 new check red before trusting it green** — and prefer a property test over the whole corpus to
 a handful of hand-written cases, since the cases you write are the ones you already thought of.
+
+## 2026-08-24 (later) — the clash rule, and a duplicate that had been costing people (ADR-241)
+
+Making `gen` core put fourteen library exports in conflict with a bare core name. The
+blanket reading of "a library must not clash with core" would rename all fourteen; the
+useful test turned out to be **"would a reasonable caller write `(:use this)`?"**
+
+Best outcome of the pass: `supervisor/stop` did not need a new name, it needed deleting.
+It was `(send sup [:$stop])`; core `stop` is `(send pid [:$stop])`. A supervisor *is* a
+server process, so `(stop sup)` already worked — verified by starting a real supervisor,
+calling core `stop`, and watching it leave `proc/list`, rather than by noting the sources
+matched. The duplicate had already cost `bedit` a `(:use supervisor :exclude [stop])`.
+
+Deleting it then exposed a quieter bug in hatch: `http/server` defines its **own**
+`stop (port)`, so a bare `(stop sup)` inside that module called *itself* with a pid and
+silently failed to tear the worker supervisor down. Its own test caught it. Fixed with the
+root-qualified `(/stop sup)` — worth remembering that a module shadowing a core name
+shadows it for *itself* first, which is where it will hurt.
+
+The same "do we really need it" check retired `config/last-index-of` (an exact
+reimplementation of the prelude's) and, in the other direction, confirmed
+`version/compare` is emphatically NOT redundant: core `compare` gets every version case
+wrong lexicographically (`"1.10.0" < "1.9.0"`, `"1.2" != "1.2.0"`). Kept.
+
+Renames where the module really is used bare: `changeset/cast` -> `permit` (also the more
+accurate name — a strong-parameters allowlist, not a conversion), `accounts/register` ->
+`sign-up`, `docbuild/parse-source` -> `parse-module`, and store-postgres's `byte-at` ->
+`octet-at`, which retired four `:exclude [byte-at]` workarounds and immediately caught a
+test that had been silently relying on the shadow (it passed a *string* to what it thought
+was the extension).
+
+Also fixed hive's three long-standing failures. Two were stale expectations, but the third
+was a real bug: `render-inline` returned a VECTOR of nodes in three branches, and the
+template renderer reads a vector as an element and a list as a child sequence — so
+`[:strong {} ["hi"]]` rendered as `<strong><hi></hi></strong>`. Every bold run on the
+public changelog was broken.

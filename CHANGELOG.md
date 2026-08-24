@@ -6,6 +6,18 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**`supervisor/stop` is gone — use `stop`.** A supervisor is an ordinary server process and
+answers the same `[:$stop]` message the core `stop` sends, so the wrapper was a verbatim
+duplicate whose only effect was to shadow `stop` for anyone writing `(:use supervisor)`.
+`(stop sup)` tears it down exactly as before, children first. If a module of yours defines
+its own `stop`, reach the core one as `/stop`.
+
+**Library names and core names (ADR-241).** A library export may shadow a core name only
+when the module is meant to be used *qualified*. `wasm/call`, `version/compare`,
+`log/error` and `package/update` keep their names on that basis; duplicates were deleted
+and bare-use modules renamed.
+
+
 **`nest rename` is context-aware.** It now parses each file into its lossless CST and
 rewrites only *symbol tokens*, so a docstring or `;` comment mentioning the name, and
 symbols inside `(quote …)` / `'…` data, are left byte-for-byte alone — a text-level rename
