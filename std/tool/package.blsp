@@ -46,7 +46,7 @@ land in a later slice."
     (fn (acc entry)
       (if (includes? *package-hash-skip* entry)
         acc
-        (let (full (path-join dir entry)
+        (let (full (path/join dir entry)
               rel (if (= prefix "") entry (str prefix "/" entry)))
           ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
           ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
@@ -65,7 +65,7 @@ land in a later slice."
 (defn tree-hash (dir)
   "The canonical SHA-256 (hex) of a directory's file contents — order-independent of the filesystem, stable across machines (ADR-037)."
   (hash/sha256 (string/join ""
-                 (map (fn (rel) (str rel "\0" (package-sha256-file (path-join dir rel)) "\n"))
+                 (map (fn (rel) (str rel "\0" (package-sha256-file (path/join dir rel)) "\n"))
                    (package-tree-files dir)))))
 
 ;; --- reading a dependency's own manifest -------------------------------------
@@ -546,13 +546,13 @@ land in a later slice."
 ;; ability serve both `dep-resolve` on a dep and `dep-lock-vec` on an entry).
 (defn- package-resolve-path
   (root dep)
-  (let (abs (path-join root (get dep :path)))
+  (let (abs (path/join root (get dep :path)))
     (when (not (file/dir? abs))
       (error "package: :path dependency " (get dep :name) " not found at " abs))
     (assoc dep
       :resolved-path abs
       :sha256 (tree-hash abs)
-      :deps (package-manifest-deps (path-join abs "project.blsp")))))
+      :deps (package-manifest-deps (path/join abs "project.blsp")))))
 
 ;; --- git deps (ADR-037 Slice 2) ---------------------------------------------
 ;; A git dep is cloned into _deps/<name>/ and pinned to an exact commit. The
@@ -561,8 +561,8 @@ land in a later slice."
 ;; skipped when the cache's .brood-pkg.blsp already records that commit. The dep's
 ;; own project.blsp is read (post-clone) for its transitive deps.
 
-(defn- package-deps-dir (root) (path-join root "_deps"))
-(defn- package-git-target (root nm) (path-join (package-deps-dir root) (name nm)))
+(defn- package-deps-dir (root) (path/join root "_deps"))
+(defn- package-git-target (root nm) (path/join (package-deps-dir root) (name nm)))
 
 ;; The commit to pin: reuse the lock's when it still matches the manifest's
 ;; url+ref (avoids a network round-trip); otherwise resolve via ls-remote.
@@ -586,7 +586,7 @@ land in a later slice."
 
 ;; .brood-pkg.blsp is the cache's source of truth: a clone is current when it
 ;; records the same commit we want.
-(defn- package-pkg-meta-path (target) (path-join target ".brood-pkg.blsp"))
+(defn- package-pkg-meta-path (target) (path/join target ".brood-pkg.blsp"))
 (defn- package-cache-current?
   (target commit)
   (let (meta (package-pkg-meta-path target))
@@ -688,7 +688,7 @@ land in a later slice."
         :commit commit
         :resolved-path target
         :sha256 (package-reuse-or-hash locked commit target)
-        :deps (package-manifest-deps (path-join target "project.blsp")))
+        :deps (package-manifest-deps (path/join target "project.blsp")))
       ;; Cache miss: (re)clone the pinned commit, hash the tree, record the meta.
       (do
         (when (file/dir? target) (%rm-rf target))
@@ -701,7 +701,7 @@ land in a later slice."
             :commit commit
             :resolved-path target
             :sha256 sha
-            :deps (package-manifest-deps (path-join target "project.blsp"))))))))
+            :deps (package-manifest-deps (path/join target "project.blsp"))))))))
 
 ;; The locked sha when it's for this exact commit; otherwise hash the tree.
 (defn- package-reuse-or-hash
@@ -774,7 +774,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
     (if (package-tarball-cache-current? target sha)
       (assoc dep
         :resolved-path target
-        :deps (package-manifest-deps (path-join target "project.blsp")))
+        :deps (package-manifest-deps (path/join target "project.blsp")))
       (do
         (when (file/dir? target) (%rm-rf target))
         (let (bytes (package-fetch-bytes url)
@@ -783,7 +783,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
             (error "package: :tarball "
               nm " sha256 mismatch — the manifest pins " sha " but the download hashed to " got
               " (tampered, wrong URL, or a moved artifact — verify and re-pin)"))
-          (let (archive (path-join (package-deps-dir root) (str (name nm) ".tar.gz")))
+          (let (archive (path/join (package-deps-dir root) (str (name nm) ".tar.gz")))
             (file/mkdir (package-deps-dir root))
             (file/spit-bytes archive bytes)
             ;; Extraction (large archives) runs on the offload pool, like the clone.
@@ -792,7 +792,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
             (package-write-tarball-meta target url sha)
             (assoc dep
               :resolved-path target
-              :deps (package-manifest-deps (path-join target "project.blsp")))))))))
+              :deps (package-manifest-deps (path/join target "project.blsp")))))))))
 
 ;; --- package registry (hive): a hosted HTTP registry ------------------------
 ;; The registry is a hosted service (hive) speaking a small JSON API over HTTP.
@@ -921,7 +921,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
     :version version
     :sha256 checksum
     :pubkey pubkey
-    :deps (package-manifest-deps (path-join target "project.blsp"))))
+    :deps (package-manifest-deps (path/join target "project.blsp"))))
 
 (defn- registry-fetch-release
   (root dep base target nm version locked-pubkey)
@@ -996,7 +996,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
       ;; Signature (ADR-212): advisory TOFU check over the verified checksum. Returns the pubkey
       ;; to PIN in the lock (the pinned one wins — TOFU is sticky, first-seen).
       (let (pinned (package-verify-signature nm version checksum signature pubkey locked-pubkey)
-            archive (path-join (package-deps-dir root) (str (name nm) ".tar.gz")))
+            archive (path/join (package-deps-dir root) (str (name nm) ".tar.gz")))
         (file/mkdir (package-deps-dir root))
         (file/spit-bytes archive bytes)
         ;; Extraction of a large archive runs on the offload pool, like a clone.
@@ -1131,8 +1131,8 @@ sha256 pin still holds."
                       (error "package: "
                         name-str " " version " sha256 mismatch — declared " checksum ", got " got
                         " (tampered or corrupted — not installed)"))
-                    (let (target (path-join dest-dir name-str)
-                          archive (path-join dest-dir (str name-str ".tar.gz")))
+                    (let (target (path/join dest-dir name-str)
+                          archive (path/join dest-dir (str name-str ".tar.gz")))
                       (when (file/dir? target) (%rm-rf target))
                       (file/mkdir dest-dir)
                       (file/spit-bytes archive bytes)
@@ -1193,7 +1193,7 @@ sha256 pin still holds."
   (dir)
   (apply append
     (map (fn (entry)
-           (let (full (path-join dir entry))
+           (let (full (path/join dir entry))
              (cond
                (file/dir? full) (package-blsp-files full)
                (string/ends-with? entry ".blsp") (list full)
@@ -1321,7 +1321,7 @@ sha256 pin still holds."
                 (apply vector (map dep-lock-vec sorted))))
       "\n")))
 
-(defn- package-lockfile-path (root) (path-join root "project.lock.blsp"))
+(defn- package-lockfile-path (root) (path/join root "project.lock.blsp"))
 
 (defn write-lockfile (root entries)
   "Write project.lock.blsp under `root` from resolved `entries`."
@@ -1349,7 +1349,7 @@ sha256 pin still holds."
 ;; --- load-path integration ---------------------------------------------------
 ;; A dep's source dir (its <resolved>/src by default). :path deps load here in
 ;; place; no copy into _deps/.
-(defn- package-dep-src-dir (e) (path-join (get e :resolved-path) "src"))
+(defn- package-dep-src-dir (e) (path/join (get e :resolved-path) "src"))
 
 ;; Record each `[package-name src-dir]` provider's `(defmodule …)` names under its package
 ;; in `*ns-package*` (ADR-172 package identity). A static scan — the same `defmodule`-name
@@ -1421,7 +1421,7 @@ sha256 pin still holds."
   (body-fn)
   (let (root (project/find-root (file/cwd)))
     (when (nil? root) (error "package: not inside a Brood project (no project.blsp found)"))
-    (package-load-manifest (path-join root "project.blsp"))
+    (package-load-manifest (path/join root "project.blsp"))
     (body-fn root)))
 
 (defn fetch ()
@@ -1663,7 +1663,7 @@ sha256 pin still holds."
 (defn- package-manifest-lock
   (root)
   (let (dir (or (project/project-cache-dir root) "/tmp"))
-    (path-join dir (str "manifest-" (hash/sha256 root) ".lock"))))
+    (path/join dir (str "manifest-" (hash/sha256 root) ".lock"))))
 
 ;; Attempts are bounded so a pathological writer can't spin here forever; each retry
 ;; re-reads, so progress is real and 8 is far beyond any plausible contention.
@@ -1672,7 +1672,7 @@ sha256 pin still holds."
 (defn- package-edit-manifest!
   (root transform)
   "Apply `transform` (old manifest source -> new source) to project.blsp atomically, retrying if a concurrent edit lands in between. Returns `[old new]` so the caller can roll its own edit back. Raises if it cannot win within `*package-manifest-edit-attempts*` tries."
-  (package-edit-manifest-try (path-join root "project.blsp")
+  (package-edit-manifest-try (path/join root "project.blsp")
     (package-manifest-lock root)
     transform
     *package-manifest-edit-attempts*))
@@ -1693,7 +1693,7 @@ sha256 pin still holds."
 ;; else has edited since and their content wins — say so rather than overwrite it.
 (defn- package-revert-manifest!
   (root written original)
-  (let (manifest (path-join root "project.blsp"))
+  (let (manifest (path/join root "project.blsp"))
     (if (%file-swap (package-manifest-lock root) manifest written original)
       true
       (do
@@ -1723,7 +1723,7 @@ sha256 pin still holds."
         ;; the project needed hand-repair after one typo.
         ;; The edit is a locked compare-and-swap (see package-edit-manifest!), so a
         ;; concurrent `nest add` can no longer erase this one.
-        (let (manifest (path-join root "project.blsp")
+        (let (manifest (path/join root "project.blsp")
               edit (package-edit-manifest! root
                      (fn (src) (package-manifest-add src (dep-entry-node dep))))
               original (vector-ref edit 0)
@@ -1752,7 +1752,7 @@ sha256 pin still holds."
       (let (name-sym (symbol nm))
         (when (not (package-has-dep? *project-dependencies* name-sym))
           (error "package: " nm " is not a dependency"))
-        (let (manifest (path-join root "project.blsp")
+        (let (manifest (path/join root "project.blsp")
               target (package-git-target root name-sym))
           ;; Same locked compare-and-swap as `add`: a concurrent edit must not be
           ;; erased by this removal (or vice versa).
@@ -1819,7 +1819,7 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
   "Create a gzip'd source tarball of the project at `root` — its files at the archive
   root — excluding `_deps/`, `_build/`, `.git/`, `tests/`, the lock file, and any
   stray tarball. Returns the archive path (under `_deps/`, which the excludes skip)."
-  (let (out (path-join (package-deps-dir root)
+  (let (out (path/join (package-deps-dir root)
               (str *project-name* "-" *project-version* ".tar.gz")))
     (file/mkdir (package-deps-dir root))
     (when (file/exists? out) (file/rm out))
@@ -1865,9 +1865,9 @@ ordinary library, which the server stores as \"nothing\"."
 (defn- package-config-dir
   ()
   (let (xdg (os/getenv "XDG_CONFIG_HOME"))
-    (path-join (if (nil? xdg) (path-join (os/getenv "HOME") ".config") xdg) "brood")))
+    (path/join (if (nil? xdg) (path/join (os/getenv "HOME") ".config") xdg) "brood")))
 
-(defn- package-signing-key-path () (path-join (package-config-dir) "signing-key.blsp"))
+(defn- package-signing-key-path () (path/join (package-config-dir) "signing-key.blsp"))
 
 (defn- package-load-signing-key
   ()

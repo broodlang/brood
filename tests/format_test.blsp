@@ -366,7 +366,7 @@
   (test "a stray close paren does not parse" (refute (format/format-parses? "(def a 1))\n")))
   (test "an unparseable file is reported as :unparseable and left BYTE-IDENTICAL"
     (let (dir (temp-dir "brood-fmt-safe-")
-          path (path-join dir "broken.blsp")
+          path (path/join dir "broken.blsp")
           ;; f's paren is never closed; g is a separate top-level defn
           source "(defn f (x)\n  (+ x 1)\n\n(defn g (y)\n  (* y 2))\n")
       (file/mkdir dir)
@@ -375,14 +375,14 @@
       (assert= (file/slurp path) source)))
   (test "a badly-laid-out but PARSEABLE file is still rewritten"
     (let (dir (temp-dir "brood-fmt-safe-")
-          path (path-join dir "ugly.blsp"))
+          path (path/join dir "ugly.blsp"))
       (file/mkdir dir)
       (file/spit path "(defn f (x)\n        (+ x 1))\n")
       (assert= (format/file path) :rewrote)
       (is (format/format-parses? (file/slurp path)))))
   (test "an already-formatted file is left unchanged"
     (let (dir (temp-dir "brood-fmt-safe-")
-          path (path-join dir "clean.blsp"))
+          path (path/join dir "clean.blsp"))
       (file/mkdir dir)
       (file/spit path "(defn f (x) (+ x 1))\n")
       (format/file path)

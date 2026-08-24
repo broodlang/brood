@@ -59,26 +59,26 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0."
 
 ;; ---- sequence operations ----
 ;; Many eager seq ops share one structure: reverse-accumulate over `(seq coll)`,
-;; then reverse once. `defseq` encodes the pattern as a single `defn` whose body
+;; then reverse once. `%defseq` encodes the pattern as a single `defn` whose body
 ;; holds a tail-recursive `letrec` loop. This keeps the source location visible to
 ;; `note_definition` (which only recognises `def`/`defn` as outer heads) and
 ;; removes the need for separate `name-acc` globals. Each loop calls the user fn
 ;; directly — no extra `apply` frame per element. Inside `step`: `item` is bound to
 ;; the current element and `acc` is the current accumulator.
-;; `item` and `acc` are *intentional* anaphora: a `defseq` step-expr is documented
+;; `item` and `acc` are *intentional* anaphora: a `%defseq` step-expr is documented
 ;; to reference them (`(cons (f item) acc)`), so they opt out of automatic binding
 ;; hygiene with `~'item`/`~'acc` — an unquoted quoted symbol stays the literal name
-;; (the `aif` `it` case). Every other binder here — `coll`, `--loop` — is auto-renamed
+;; (the `aif` `it` case). Every other binder here — `coll`, `-loop` — is auto-renamed
 ;; by the hygiene pass (ADR-066 amendment) so it can't capture the caller's `step`
 ;; code; no `#`/`(gensym)` needed.
-(defmacro defseq (sym params docstring step)
+(defmacro %defseq (sym params docstring step)
   "Define an eager sequence op that reverse-accumulates over `coll`.
 `params` are the extra arguments before `coll`; inside `step`, `item` is the
 current element and `acc` is the current accumulator."
   (if (not (string? docstring))
-    (error "defseq: third argument must be a docstring string, got "
+    (error "%defseq: third argument must be a docstring string, got "
       (pr-str docstring)
-      ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
+      ". Syntax: (%defseq name (params...) \"docstring\" step-expr)")
     `(defn ~sym (~@params coll)
        ~docstring
        (letrec (-loop (fn (coll ~'acc)
@@ -88,12 +88,12 @@ current element and `acc` is the current accumulator."
                             (-loop (rest coll) ~step)))))
          (reverse (-loop (seq coll) nil))))))
 
-(defseq map
+(%defseq map
   (f)
   "A list of `(f x)` for each `x` in `coll`."
   (cons (f item) acc))
 
-(defseq filter
+(%defseq filter
   (pred)
   "A list of the items of `coll` for which `(pred x)` is truthy."
   (if (pred item) (cons item acc) acc))

@@ -154,7 +154,7 @@ string, keyword, vector, and record keys all work."
 ;; `mapcat` uses `append-onto` instead of `cons` to splice each sublist straight
 ;; onto the reversed accumulator, then reverse once — so we never materialise the
 ;; intermediate list-of-sublists nor spread it through `apply append`.
-(defseq mapcat
+(%defseq mapcat
   (f)
   "Map `f` over `coll` and concatenate the resulting lists into one."
   (append-onto acc (f item)))
@@ -209,7 +209,10 @@ APPEND to a vector, PREPEND to a list (`nil` counts as an empty list), ADD to a
 set (a duplicate is a no-op), and `assoc` a `[k v]` pair — or merge a map — into
 a map. Returns a fresh collection; `coll` is untouched. e.g. (conj [1 2] 3) →
 [1 2 3]; (conj '(2 3) 1) → (1 2 3); (conj #{1} 2) → #{1 2};
-(conj {:a 1} [:b 2]) → {:a 1 :b 2}."
+(conj {:a 1} [:b 2]) → {:a 1 :b 2}.
+
+`disj` is the inverse and lives beside it — both stay core rather than in `std/set`
+so a set works with the collection protocol without an import."
   (fold conj-one coll xs))
 
 (defn disj (s & xs)
@@ -231,12 +234,12 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 ;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
 ;; stack-safe on long inputs — see the sequence-library note above.
 
-(defseq remove
+(%defseq remove
   (pred)
   "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`."
   (if (pred item) acc (cons item acc)))
 
-(defseq keep
+(%defseq keep
   (f)
   "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `xkeep`)."
   (let (y (f item)) (if (nil? y) acc (cons y acc))))

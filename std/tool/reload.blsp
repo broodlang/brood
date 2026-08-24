@@ -147,7 +147,7 @@ behind a long-lived loop has changed since it started."
   (if (file/dir? dir)
     (fold
       (fn (acc entry)
-        (let (p (path-join dir entry))
+        (let (p (path/join dir entry))
           (cond
             ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).

@@ -220,50 +220,16 @@ incremental search rides on."
 
 ;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
 ;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.
-(defn parent-directory (path)
-  "The directory containing `path` (\"/a/b/c\" -> \"/a/b\", \"/foo\" -> \"/\", \"rel\" -> \".\")."
-  (let (i (path-last-slash path (dec (string/length path))))
-    (cond (< i 0) "." (= i 0) "/" else (string/substring path 0 i))))
 
-(defn path-join (a b)
+;; The loader calls this during boot, BEFORE any module can load, so a bootstrap copy has
+;; to live here. `%`-prefixed to say so: the public spelling is `path/join`, and this one
+;; exists only because `require` needs to build a path before `require` works.
+(defn %path-join (a b)
   "Join path segments `a` and `b` with a single `/` separator."
   (if (string/ends-with? a "/") (str a b) (str a "/" b)))
 
-(defn temp-path (prefix)
-  "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
-`file/spit` a file there or `file/mkdir` a directory. The name comes from the OS CSPRNG, so
-it is unique across processes and across runs, and cannot be guessed ahead of time.
 
-Reach for this instead of writing a program-specific constant like
-`/tmp/myapp-worker.blsp`. A fixed name in a world-writable directory is two bugs: two
-copies of the program fight over one file, and anyone on the machine can create that
-path first — as a symlink to something you own — so the `file/spit` overwrites their choice
-of file with your privileges. Neither is possible with a name they cannot predict."
-  ;; `%random-token`, not the `rand/token` wrapper: this is prelude code, so it must
-  ;; not depend on a module the caller may never have required.
-  (path-join "/tmp" (str prefix (%random-token 16))))
 
-(defn path-basename (path)
-  "The final component of `path` (\"/a/b/c\" -> \"c\", \"/foo\" -> \"foo\",
-\"foo\" -> \"foo\"). The empty string returns itself; a trailing slash isn't
-stripped (`(file/cwd)` doesn't produce one, which is the primary caller)."
-  (let (n (string/length path))
-    (if (= n 0)
-      ""
-      (let (i (path-last-slash path (dec n)))
-        (if (< i 0) path (string/substring path (inc i) n))))))
-
-(defn path-absolute (path &optional base)
-  "Resolve `path` to an absolute path: a `/`-rooted path is returned unchanged, a
-`~`/`~/…` path is expanded against `$HOME`, and any other (relative) path is joined
-onto `base` (default the current directory, `(file/cwd)`). The empty string is returned as
-is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segments."
-  (cond
-    (or (= path "") (string/starts-with? path "/")) path
-    (= path "~") (or (%getenv "HOME") path)
-    (string/starts-with? path "~/")
-      (str (or (%getenv "HOME") "~") (string/substring path 1 (string/length path)))
-    else (path-join (or base (file/cwd)) path)))
 
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
 ;; Brood has no global mutable state, so randomness is *threaded*: every step

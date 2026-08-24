@@ -23,7 +23,7 @@
 
 (defn- cy-file
   (name)
-  (first (filter (fn (p) (= (path-basename p) name)) (corpus-files "crypto"))))
+  (first (filter (fn (p) (= (path/basename p) name)) (corpus-files "crypto"))))
 
 ;; A `.rsp` field line: "Msg = d3" -> "d3". nil for a non-field line.
 (defn- cy-field

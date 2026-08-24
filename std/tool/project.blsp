@@ -477,13 +477,13 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 (defn find-root (dir)
   "Walk up from `dir` toward the filesystem root, returning the first directory that contains a `project.blsp`, or nil if none is found."
   (cond
-    (file/exists? (path-join dir "project.blsp")) dir
-    (= dir (parent-directory dir)) nil
-    else (find-root (parent-directory dir))))
+    (file/exists? (path/join dir "project.blsp")) dir
+    (= dir (path/dirname dir)) nil
+    else (find-root (path/dirname dir))))
 
 (defn abs-paths (root rels)
   "Resolve each relative path in `rels` against `root`, returning the list of absolute paths."
-  (map (fn (r) (path-join root r)) rels))
+  (map (fn (r) (path/join root r)) rels))
 
 ;; Recursively collect every <name>_test.blsp path under `dir` (skipping nothing
 ;; else). Returns a list of full paths; nil if `dir` isn't a directory.
@@ -495,7 +495,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; reversed (prepend), which is fine: the file list feeds order-independent per-file work.
   (if (file/dir? dir)
     (fold (fn (acc entry)
-            (let (p (path-join dir entry))
+            (let (p (path/join dir entry))
               (cond
                 (file/dir? p) (append-two (project-collect-tests p) acc)
                 (string/ends-with? entry "_test.blsp") (cons p acc)
@@ -511,7 +511,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     ;; Same O(files²)→O(files) fix as `project-collect-tests`: `cons` files, `append-two`
     ;; subdir lists (copies the small list, shares `acc`) instead of `(append acc …)`.
     (fold (fn (acc entry)
-            (let (p (path-join dir entry))
+            (let (p (path/join dir entry))
               (cond
                 (file/dir? p) (append-two (collect-sources p) acc)
                 (string/ends-with? entry ".blsp") (cons p acc)
@@ -667,7 +667,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 
 (defn image-path (root)
   "Where `root`'s startup image lives."
-  (path-join root *project-image-file*))
+  (path/join root *project-image-file*))
 
 ;; The staleness key: every source file's path + size + mtime, plus the running
 ;; binary's build id. Any edit, add or delete changes it, as does a new `brood`.
@@ -813,7 +813,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   "Snapshot the bindings this project load produced into `root`'s image, grouped into
 per-module sections. `before` is the `(global-names)` list captured *before* the sources
 were loaded. Returns the entry count."
-  (let (dir (parent-directory (image-path root)))
+  (let (dir (path/dirname (image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
     (%image-write (image-path root)
       (project-image-sections before)
@@ -927,7 +927,7 @@ program's and the LSP's protocol channel stays clean."
     (cond
       hit hit
       else
-        (let (name (or *project-name* (path-basename root))
+        (let (name (or *project-name* (path/basename root))
               n (count files)
               _ (eprintln (str "Building " name " (" n " file" (if (= n 1) "" "s") ")"))
               t0 (os/now-ns)
@@ -984,8 +984,8 @@ A `:path` dep loads in place, so its manifest sits at its `:path`; a `:git` /
           (cond
             (not (nil? acc)) acc
             (not (= (get d :name) dep-name)) acc
-            (dep-path? d) (path-join (path-join root (get d :path)) "project.blsp")
-            else (path-join (path-join (path-join root "_deps") (name dep-name)) "project.blsp")))
+            (dep-path? d) (path/join (path/join root (get d :path)) "project.blsp")
+            else (path/join (path/join (path/join root "_deps") (name dep-name)) "project.blsp")))
     nil *project-dependencies*))
 
 (defn- project-manifest-format-headers
@@ -1027,7 +1027,7 @@ empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not 
     (if (not (file/exists? dir))
       []
       (vec (filter (fn (dep-name)
-                     (let (enhances (manifest-enhances (path-join (path-join dir dep-name)
+                     (let (enhances (manifest-enhances (path/join (path/join dir dep-name)
                                                          "project.blsp")))
                        (and (get enhances app-symbol)
                          (version/satisfies-all? host enhances))))
@@ -1037,7 +1037,7 @@ empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not 
   "The names of packages installed under `root/_deps` that enhance `app` at a satisfied
 `app-version` — `enhancers-in` over a project's dependency dir. The runtime sibling of the
 registry's `?enhances=` query (`nest search --enhances`)."
-  (enhancers-in (path-join root "_deps") app app-version))
+  (enhancers-in (path/join root "_deps") app app-version))
 
 (defn- project-plugin-format-headers
   (root plugin-name)
@@ -1149,7 +1149,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; Read the manifest as *data* and apply it — rather than `load`ing it, which
   ;; would need the `(project …)` macro bound bare in the (root) manifest file
   ;; (it now lives in this namespace). Manifests stay written `(project …)`.
-  (let (mf (path-join root "project.blsp"))
+  (let (mf (path/join root "project.blsp"))
     (when (file/exists? mf) (project-apply-manifest mf)))
   ;; Refuse an incompatible runtime BEFORE doing any project work (ADR-209).
   (project-check-brood-version)
@@ -1728,7 +1728,7 @@ resolve in the advisory checker. Returns the project root."
     (let (f (first files)
           diags (reflect/check-file-structured f (map-get closures f nil))
           done2 (inc done))
-      (%mcp-progress done2 total (str "checked " (path-basename f)))
+      (%mcp-progress done2 total (str "checked " (path/basename f)))
       (project-check-fold (rest files) closures total done2 (append-two diags acc)))))
 
 ;; --- duplicate-global detection (flat namespace, ADR-019) --------------------
@@ -2017,7 +2017,7 @@ resolve in the advisory checker. Returns the project root."
     (try
       (let (cutoff (- (os/now) *project-cache-max-age-ms*))
         (fold (fn (_ entry)
-                (let (p (path-join base entry))
+                (let (p (path/join base entry))
                   (when (and (not (= p keep))
                           (file/dir? p)
                           (< (or (file/mtime p) 0) cutoff))
@@ -2032,11 +2032,11 @@ resolve in the advisory checker. Returns the project root."
         home (os/getenv "HOME")
         base (cond
                (and xdg (not (= xdg ""))) xdg
-               (and home (not (= home ""))) (path-join home ".cache")
+               (and home (not (= home ""))) (path/join home ".cache")
                else nil))
     (when base
-      (let (checks (path-join (path-join base "brood") "check")
-            dir (path-join checks (hash/sha256 root)))
+      (let (checks (path/join (path/join base "brood") "check")
+            dir (path/join checks (hash/sha256 root)))
         (file/mkdir dir)
         (project-cache-prune checks dir)
         dir))))
@@ -2046,7 +2046,7 @@ resolve in the advisory checker. Returns the project root."
 ;; separate files keyed by the same paths.
 (defn- project-cache-file
   (root name)
-  (let (dir (project-cache-dir root)) (when dir (path-join dir (str name ".blsp")))))
+  (let (dir (project-cache-dir root)) (when dir (path/join dir (str name ".blsp")))))
 
 ;; The cached `{path -> entry}` map for manifest `name`, or `{}` if the cache is off
 ;; / missing / stamp-mismatched / unreadable (any failure falls back to a cold
@@ -2344,7 +2344,7 @@ business."
 ;; only the still-broken ones remain.
 (defn- project-failed-file
   (root)
-  (let (dir (project-cache-dir root)) (if (nil? dir) nil (path-join dir "last-failed.blsp"))))
+  (let (dir (project-cache-dir root)) (if (nil? dir) nil (path/join dir "last-failed.blsp"))))
 
 ;; Stored as a `{:failed (label …)}` record rather than a bare list, because an
 ;; empty list IS nil in a Lisp — a bare list can't distinguish "never run" from
@@ -2378,7 +2378,7 @@ business."
 ;; module in the closure has no file to track and can't change under a --stale run.
 (defn- project-stale-file
   (root)
-  (let (dir (project-cache-dir root)) (if (nil? dir) nil (path-join dir "last-run-mtimes.blsp"))))
+  (let (dir (project-cache-dir root)) (if (nil? dir) nil (path/join dir "last-run-mtimes.blsp"))))
 
 (defn- project-read-stale-record
   (root)
@@ -2782,7 +2782,7 @@ as unchanged (only when some were)."
   (let (prefix (if (string/ends-with? dir "/") dir (str dir "/"))
         rel (if (string/starts-with? path prefix)
               (string/substring path (string/length prefix) (string/length path))
-              (path-basename path)))
+              (path/basename path)))
     (if (string/ends-with? rel ".blsp")
       (string/substring rel 0 (- (string/length rel) 5))
       rel)))
@@ -2802,7 +2802,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
   ;; auto-require via the bare qualified ref below would load it mid-cycle, leaving
   ;; `package/ensure-deps` unbound during `nest release` (not exercised by nest check/suite).
   (require-one 'package)
-  (let (manifest (file/slurp (path-join root "project.blsp")))
+  (let (manifest (file/slurp (path/join root "project.blsp")))
     ;; Apply the manifest as DATA (not `load`) to learn its source paths + deps,
     ;; mirroring `setup`. We don't load any source here — just read it.
     (let (form (read-first manifest))
@@ -2994,9 +2994,9 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (defn- config-base-dir
   ()
   ; $XDG_CONFIG_HOME, else ~/.config
-  (let (xdg (os/getenv "XDG_CONFIG_HOME")) (if (nil? xdg) (path-join (os/getenv "HOME") ".config") xdg)))
-(defn- config-dir () (path-join (config-base-dir) "brood"))
-(defn- config-path () (path-join (config-dir) "config.blsp"))
+  (let (xdg (os/getenv "XDG_CONFIG_HOME")) (if (nil? xdg) (path/join (os/getenv "HOME") ".config") xdg)))
+(defn- config-dir () (path/join (config-base-dir) "brood"))
+(defn- config-path () (path/join (config-dir) "config.blsp"))
 
 (def *config-default-source*
   (str ";; Brood user config — tooling preferences (the sibling of project.blsp).\n"

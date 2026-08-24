@@ -60,12 +60,12 @@ primitives. The kernel also provides the always-available file primitives
 ;; --- directory listing ------------------------------------------------------
 (defn list-files (dir)
   "The names of regular files directly under `dir` (excluding subdirectories), sorted."
-  (filter (fn (e) (not (file/dir? (path-join dir e)))) (file/ls dir)))
+  (filter (fn (e) (not (file/dir? (path/join dir e)))) (file/ls dir)))
 (sig list-files (string -> (list string)))
 
 (defn list-dirs (dir)
   "The names of subdirectories directly under `dir`, sorted."
-  (filter (fn (e) (file/dir? (path-join dir e))) (file/ls dir)))
+  (filter (fn (e) (file/dir? (path/join dir e))) (file/ls dir)))
 (sig list-dirs (string -> (list string)))
 
 (defn walk-files (dir)
@@ -76,7 +76,7 @@ primitives. The kernel also provides the always-available file primitives
     ;; `acc`). A plain `(append acc …)` recopies the growing accumulator per entry → O(files²)
     ;; on a large tree. Order is reversed (prepend) — fine for an unordered file set.
     (fold (fn (acc e)
-            (let (p (path-join dir e))
+            (let (p (path/join dir e))
               (if (file/dir? p) (append-two (walk-files p) acc) (cons p acc))))
       nil
       (file/ls dir))))

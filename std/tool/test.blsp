@@ -108,13 +108,13 @@ docs/testing.md for the full guide.")
 ;;      crashed run can't accumulate forever. `file/rmdir` removes a tree.
 (defn temp-dir (prefix)
   "A fresh, unique /tmp path `<prefix><random>` (NOT created — `file/mkdir` it). Unique across processes and runs, so concurrent tests never collide. Prelude's `temp-path` under a test-shaped name."
-  (temp-path prefix))
+  (path/temp prefix))
 
 (defn purge-stale-temp (prefix)
   "Best-effort remove every `/tmp/<prefix>*` left by an earlier run — a directory tree *or* a plain file (a fixture may be either). Call once at FILE LOAD (a top-level form), before any test creates fixtures, so it never deletes a live one. Bounds /tmp growth to a single run and recovers from crashed runs."
   (doseq (e (file/ls "/tmp"))
     (when (string/starts-with? e prefix)
-      (let (p (path-join "/tmp" e))
+      (let (p (path/join "/tmp" e))
         (if (file/dir? p) (file/rmdir p) (file/rm p))))))
 
 ;; Full source location of a form as (file line col), or nil. Captured at

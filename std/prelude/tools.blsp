@@ -520,7 +520,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
   (filename dirs)
   (cond
     (empty? dirs) nil
-    (file/exists? (path-join (first dirs) filename)) (path-join (first dirs) filename)
+    (file/exists? (%path-join (first dirs) filename)) (%path-join (first dirs) filename)
     else (require-find filename (rest dirs))))
 
 ;; The co-located-module fallback (ADR-223). A module whose name is not its file's —
@@ -545,8 +545,8 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
   (fold (fn (acc dir)
           (fold (fn (a entry)
                   (if (and (string/ends-with? entry ".blsp")
-                        (require-file-declares? (path-join dir entry) key-name))
-                    (cons (path-join dir entry) a)
+                        (require-file-declares? (%path-join dir entry) key-name))
+                    (cons (%path-join dir entry) a)
                     a))
             acc
             (or (try (file/ls dir) (catch _ nil)) nil)))

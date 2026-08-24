@@ -259,7 +259,7 @@
     (let (p (os/exe-path))
       (when (string? p)
         (is (file/exists? p))
-        (is (file/dir? (parent-directory p))))))
+        (is (file/dir? (path/dirname p))))))
 
   (test "it is stable within a process"
     (assert= (os/exe-path) (os/exe-path))))

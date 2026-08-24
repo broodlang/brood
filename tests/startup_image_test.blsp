@@ -14,7 +14,7 @@
 
 (defmodule startup-image-test (:use test))
 
-(defn- img-tmp (n) (path-join "/tmp" (str "brood-startup-image-" n ".bin")))
+(defn- img-tmp (n) (path/join "/tmp" (str "brood-startup-image-" n ".bin")))
 
 ;; A worker that re-reads the global on every request — the late-binding contract.
 (defn si-worker ()
