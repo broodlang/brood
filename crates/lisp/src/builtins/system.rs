@@ -1152,6 +1152,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("table", "std/table.blsp"),
     // Non-mainstream process surface (introspection/control + OS subprocesses) → `proc/*`.
     embedded_module!("proc", "std/proc.blsp"),
+    embedded_module!("dev", "std/dev.blsp"),
     // Distributed nodes (ADR-033/068/073/074): policy over the `%node-*`/`%nodes`/`%disconnect`/
     // `%monitor-node` primitives → `node/*` (node/connect, node/start, node/spawn, …).
     embedded_module!("node", "std/node.blsp"),
@@ -1257,8 +1258,8 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
     // catalogue the `nest mcp` dispatcher reads (ADR-036, docs/mcp.md, step 3).
     embedded_module!("mcp", "std/tool/mcp.blsp"),
-    // One-call performance triage: `(perf/report)`/`(perf/summary)` read `(vm-stats)` +
-    // `(gc-stats)` and apply `docs/benchmarking.md` §2's interpretation rules, so "is this
+    // One-call performance triage: `(perf/report)`/`(perf/summary)` read `(dev/vm-stats)` +
+    // `(dev/gc-stats)` and apply `docs/benchmarking.md` §2's interpretation rules, so "is this
     // dispatch-, env-, or alloc-bound?" does not depend on recalling them. DEV: it serves
     // *developing* a program, and a shipped app has no use for it.
     embedded_module!("perf", "std/tool/perf.blsp"),
@@ -1971,13 +1972,13 @@ pub(super) fn nodes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.list(names))
 }
 
-/// `(spawn-count)` — how many green processes have been spawned since the program
+/// `(%)` — how many green processes have been spawned since the program
 /// started. (Green processes are cheap coroutines, not OS threads — step 4b.)
 pub(super) fn spawn_count(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::process::spawn_count() as i64))
 }
 
-/// `(peak-threads)` — high-water mark of processes running *simultaneously*
+/// `(%)` — high-water mark of processes running *simultaneously*
 /// (bounded by the worker-pool size); how much parallelism was actually reached.
 pub(super) fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::process::peak_threads() as i64))
@@ -2026,13 +2027,13 @@ pub(super) fn features(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_vector(out))
 }
 
-/// `(worker-threads)` — size of the scheduler's worker-thread pool that runs the
+/// `(%)` — size of the scheduler's worker-thread pool that runs the
 /// green processes (≈ `nproc`, or the `-j` setting); 0 until the first spawn.
 pub(super) fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::process::worker_threads() as i64))
 }
 
-/// `(sched-stats)` — one snapshot map of the scheduler's cumulative counters
+/// `(%)` — one snapshot map of the scheduler's cumulative counters
 /// (the scheduler half of the observability timing tier): `:spawned`/`:exited`
 /// totals (their difference is the live-process figure), `:preempts` (quantum
 /// exhaustions), `:steals` + `:migrations` (work-stealing activity),
@@ -2090,7 +2091,7 @@ pub(super) fn profile_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     Ok(Value::nil())
 }
 
-/// `(profile-stop)` — disarm the sampling profiler and return the histogram: a
+/// `(%)` — disarm the sampling profiler and return the histogram: a
 /// list of `{:stack (fn-names… innermost-first) :count n}` maps, most-sampled
 /// first. A sample whose frames were all anonymous appears with `:stack
 /// ("<anonymous>")`.
@@ -2269,7 +2270,7 @@ fn binary_stamp() -> &'static str {
     })
 }
 
-/// `(steal-count)` — how many fresh processes the scheduler work-stole across
+/// `(%)` — how many fresh processes the scheduler work-stole across
 /// worker threads since program start. A diagnostic of how much the pool had to
 /// rebalance; 0 means placement-at-spawn kept it even.
 pub(super) fn steal_count(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {

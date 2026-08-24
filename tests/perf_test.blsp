@@ -132,4 +132,4 @@
 
   (test "zeroing the counters is safe on a build without them"
     ;; `(vm-stats-reset)` is a no-op returning :enabled false there; `measure` must not care.
-    (is (contains? (vm-stats-reset) :enabled))))
+    (is (contains? (dev/vm-stats-reset) :enabled))))

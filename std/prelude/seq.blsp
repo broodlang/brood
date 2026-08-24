@@ -667,12 +667,4 @@ iterating for side effects."
       ". Syntax: (dolist (x xs) body...)")
     `(do (dolist-loop ~(second bind) (fn (~(first bind)) ~@body)) nil)))
 
-;; (bench label expr) — wall-clock timing, in milliseconds (the resolution of
-;; `now`). The gensyms keep `label`/`expr` from capturing `t0`/`r` if the caller
-;; happens to use those names.
-(defmacro bench (label expr)
-  "Evaluate `expr`, print `label: N ms`, and return `expr`'s value."
-  (let (t0 (gensym "t0") r (gensym "r"))
-    `(let (~t0 (%now) ~r ~expr)
-       (println (str ~label ": " (- (%now) ~t0) " ms"))
-       ~r)))
+;; `bench` moved to the `dev` module (`dev/bench`) with the other diagnostics.

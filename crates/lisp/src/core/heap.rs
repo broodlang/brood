@@ -2447,7 +2447,7 @@ pub struct Heap {
     /// the invariant "no compaction while a snapshot is live" holds *structurally* — any
     /// caller of the snapshot/restore protocol is covered, not just `%isolate`.
     /// [`runtime_collect_with`] bails while it's >0 (the choke point for both the auto
-    /// safepoint path — via [`rt_gc_due`] — and a manual `(runtime-collect)`); the
+    /// safepoint path — via [`rt_gc_due`] — and a manual `(%)`); the
     /// isolate's `def`s become garbage at restore and are reclaimed by the next safepoint.
     /// `Cell` so the `&self` snapshot/restore can bump it; a counter (not a bool) so nested
     /// snapshots compose. [`rt_gc_due`]: Self::rt_gc_due
@@ -2487,7 +2487,7 @@ pub struct Heap {
     /// GC observability counters (Tier-1; `docs/memory-review.md` §7). Bumped by
     /// every [`arena_flip`](Self::arena_flip) — so they count both the automatic
     /// Stage-B safepoint collections and any bare [`flush`](Self::flush) (the
-    /// tested arena-flip helper), which share that path. Read out via `(gc-stats)`.
+    /// tested arena-flip helper), which share that path. Read out via `(%)`.
     /// Per-heap (per Brood process), reset
     /// to zero only at process start; survive arena flips (the flip writes them,
     /// it doesn't clear them). `u64` so a long-lived server loop can't wrap them.
@@ -2505,7 +2505,7 @@ pub struct Heap {
     /// measured around [`collect`](Self::collect)'s body (covers both the
     /// legacy flip and the generational path). Timing cost is two `Instant`
     /// reads per *collection* — noise against the µs–ms the collection itself
-    /// takes. Surfaced by `(gc-stats)` as `:pause-total-us` / `:pause-max-us` /
+    /// takes. Surfaced by `(%)` as `:pause-total-us` / `:pause-max-us` /
     /// `:pause-last-us`.
     gc_ns_total: u64,
     gc_ns_max: u64,
@@ -2529,7 +2529,7 @@ pub struct Heap {
     /// Per-process GC **trace** switch (`(gc-trace on/off)`, defaulted from
     /// `BROOD_GC_TRACE`). When set, each minor/major collection prints a one-line
     /// summary to stderr — a Tier-1 observability aid for tests/benchmarks (the
-    /// numbers `(gc-stats)` reports as cumulative totals, but per collection as
+    /// numbers `(%)` reports as cumulative totals, but per collection as
     /// they happen). Per-process like every other heap field: a spawned child
     /// starts from the `BROOD_GC_TRACE` default, not the parent's setting.
     gc_trace: bool,
@@ -2934,7 +2934,7 @@ impl Heap {
     /// green-process floor (`FRONTIER.md` lever 1 puts the IC tables at 896 B/process,
     /// the largest single attributed item). Returns, per table, `(len, capacity, bytes)`
     /// with bytes derived from live CAPACITY and the real element size, so a `Vec` grown
-    /// past its contents reports the memory it actually holds. Read by `(ic-stats)`.
+    /// past its contents reports the memory it actually holds. Read by `(%)`.
     pub(crate) fn ic_table_stats(&self) -> ([(usize, usize, usize); 4], usize) {
         use std::mem::size_of;
         let calls = self.vm_call_ics.borrow();
@@ -2979,7 +2979,7 @@ impl Heap {
     /// Entry counts of the two source-position side tables — the LOCAL
     /// [`Heap::form_pos`] map and the shared RUNTIME [`RuntimeCode::positions`] map.
     /// Measurement surface for the position-table cost (they were 169 MB of a 933 MB
-    /// 1000-module load, and 24% of load time, on 2026-08-06); read by `(pos-stats)`.
+    /// 1000-module load, and 24% of load time, on 2026-08-06); read by `(%)`.
     pub(crate) fn pos_table_stats(&self) -> (usize, usize, usize, usize) {
         let (local, local_cap) = self
             .cold()

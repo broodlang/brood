@@ -367,11 +367,11 @@ the observer's testable core; `observe-loop` feeds it live data."
   ()
   "This runtime's node stats as a map, for the observer's header panel."
   {:name (node/name)
-   :workers (worker-threads)
-   :peak (peak-threads)
-   :spawned (spawn-count)
-   :mem (mem-bytes)
-   :mem-peak (mem-peak)
+   :workers (dev/worker-threads)
+   :peak (dev/peak-threads)
+   :spawned (dev/spawn-count)
+   :mem (dev/mem-bytes)
+   :mem-peak (dev/mem-peak)
    :peers (node/list)})
 
 (defn- observe-sort

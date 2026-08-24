@@ -75,7 +75,7 @@
 (defn spawner-thunk () (spawn (spawn-child-noop)) :spawned)
 
 (defn rt-closures ()
-  (if (bound? 'gc-stats) (get (gc-stats) :runtime-closures) nil))
+  (if (bound? 'gc-stats) (get (dev/gc-stats) :runtime-closures) nil))
 
 (defn send-n (k f)
   (if (= k 0) :ok (do (call-through-busy f) (send-n (- k 1) f))))

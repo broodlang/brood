@@ -1377,7 +1377,7 @@ resolve in the advisory checker. Returns the project root."
 ;; until the first spawn, so warm the pool and poll briefly for the threads to spin.
 (defn- project-await-pool
   (tries)
-  (let (n (worker-threads))
+  (let (n (dev/worker-threads))
     (if (or (> n 0) (<= tries 0))
       (max 1 n)
       (do (sleep 1) (project-await-pool (dec tries))))))

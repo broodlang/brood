@@ -45,9 +45,9 @@
 
 (describe "bench"
   (test "returns its expression's value while timing it"
-    (assert= (bench "sum" (reduce + 0 (range 100))) 4950))
+    (assert= (dev/bench "sum" (reduce + 0 (range 100))) 4950))
   (test "the timed value is whatever the body evaluates to"
-    (assert= (bench "noop" [:a :b]) [:a :b])))
+    (assert= (dev/bench "noop" [:a :b]) [:a :b])))
 
 (describe "os/now-ns (fine-grained timing)"
   (test "is a positive integer"

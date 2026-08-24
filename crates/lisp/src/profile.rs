@@ -19,7 +19,7 @@
 //! loop is attributed when it yields to the driver (its reduction-budget
 //! preempt — about once a quantum), and the legacy tree-walker isn't sampled.
 //! Policy (aggregation, rendering, flame-graph export) belongs in Brood on top
-//! of the raw `(profile-stop)` data, per the mechanism/policy split.
+//! of the raw `(%)` data, per the mechanism/policy split.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

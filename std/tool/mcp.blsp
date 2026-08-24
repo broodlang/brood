@@ -344,12 +344,12 @@ peers. Returns `{:node :workers :peak-threads :spawned :process-count
 :mem-bytes :mem-peak :peers}`. The \"is the runtime healthy / busy?\"
 overview, complementing per-process `processes`."
   {:node (node/name)
-   :workers (worker-threads)
-   :peak-threads (peak-threads)
-   :spawned (spawn-count)
+   :workers (dev/worker-threads)
+   :peak-threads (dev/peak-threads)
+   :spawned (dev/spawn-count)
    :process-count (count (or (proc/list) []))
-   :mem-bytes (mem-bytes)
-   :mem-peak (mem-peak)
+   :mem-bytes (dev/mem-bytes)
+   :mem-peak (dev/mem-peak)
    :peers (or (node/list) [])})
 
 (defn vitals-tool (args)

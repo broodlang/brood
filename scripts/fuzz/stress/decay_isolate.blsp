@@ -110,7 +110,7 @@
 
 (defn report (w n t0)
   (let (dt (max 1 (- (os/now) t0))
-        g (gc-stats))
+        g (dev/gc-stats))
     (println (str "w="
                w
                " ops="

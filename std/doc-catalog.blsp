@@ -64,7 +64,6 @@
    "assoc-in" :maps
    "assoc-map-pairs" :maps
    "assoc-vec-pairs" :maps
-   "bench" :meta
    "binding" :meta
    "binding-names" :meta
    "binding-vals" :meta
@@ -245,9 +244,6 @@
    "format-loop" :strings
    "format-prec" :strings
    "format-spec" :strings
-   "gc-collect" :meta
-   "gc-stats" :meta
-   "gc-trace" :meta
    "gensym" :meta
    "get" :maps
    "get-in" :maps
@@ -314,10 +310,6 @@
    "match" :patterns
    "match*" :patterns
    "max" :math
-   "mem-bytes" :meta
-   "mem-limit" :meta
-   "mem-peak" :meta
-   "mem-soft-limit" :meta
    "merge" :maps
    "merge-acc" :collections
    "merge-runs" :collections
@@ -359,7 +351,6 @@
    "path-join" :filesystem
    "path-last-slash" :filesystem
    "pattern-vars" :patterns
-   "peak-threads" :meta
    "pid?" :predicates
    "pr-bounded" :io
    "pr-bounded-map" :io
@@ -373,8 +364,6 @@
    "print" :io
    "println" :io
    "private?" :meta
-   "profile-start" :meta
-   "profile-stop" :meta
    "provide" :meta
    "quot" :math
    "range" :collections
@@ -441,14 +430,12 @@
    "reverse-acc" :collections
    "rope?" :predicates
    "run!" :control
-   "runtime-collect" :meta
    "sample" :collections
    "satisfies?" :meta
    "scan-form-start" :meta
    "scan-form-start-2" :meta
    "scan-source-extract" :meta
    "scan-tokens" :meta
-   "sched-stats" :meta
    "sealed-members" :meta
    "second" :collections
    "self" :processes
@@ -478,7 +465,6 @@
    "span-runs" :strings
    "spawn" :processes
    "spawn-body-thunk" :processes
-   "spawn-count" :meta
    "spawn-link" :processes
    "spawn-thunk-form?" :predicates
    "special-forms" :meta
@@ -501,7 +487,6 @@
    "spy-walk-let" :meta
    "spy-walk-seq" :meta
    "string/starts-with?" :predicates
-   "steal-count" :meta
    "str" :strings
    "string/->codepoints" :strings
    "string/->graphemes" :strings
@@ -566,7 +551,6 @@
    "vector-length" :collections
    "vector-ref" :collections
    "vector?" :predicates
-   "vm-stats" :meta
    "when" :control
    "when-let" :control
    "whereis" :processes
@@ -575,7 +559,6 @@
    "with-err-str" :io
    "with-out-str" :io
    "with-split-else" :control
-   "worker-threads" :meta
    "zero?" :predicates
    "zip" :collections
    "zip-acc" :collections
@@ -587,11 +570,9 @@
    "code-change" :processes
    "defbehaviour" :meta
    "defprocess" :processes
-   "ic-stats" :meta
    "multimap?" :predicates
    "offload" :processes
    "ops" :meta
-   "pos-stats" :meta
    "pq?" :predicates
    "queue?" :predicates
    "register-protocol" :meta
@@ -604,7 +585,6 @@
    "stop" :processes
    "tap" :control
    "then" :control
-   "vm-stats-reset" :meta
   })
 
 (defn category-of (function-name)

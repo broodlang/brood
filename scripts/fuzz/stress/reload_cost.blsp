@@ -30,10 +30,10 @@
       (when (and (> every 0) (= 0 (mod i every)))
         (eval (list 'def 'g (+ 2 (mod i 3)))))
       (churn (+ i 1) acc))))
-(gc-collect)
+(dev/gc-collect)
 (def r0 (rss-kb))
 (churn 0 0)
-(gc-collect)
+(dev/gc-collect)
 (sleep 300)
 (println (str "iters="
            iters

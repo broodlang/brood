@@ -146,8 +146,8 @@ verdict is `:no-data`, never a claim.
 
 `:debug-build?` true means the timings in `:gc` are from a debug binary and are not
 representative; the *counts* still are."
-  (let (vm (vm-stats)
-        gc (gc-stats)
+  (let (vm (dev/vm-stats)
+        gc (dev/gc-stats)
         on? (= (get vm :enabled) true)
         rs (ratios vm gc)
         v (verdict rs))
@@ -182,7 +182,7 @@ process's work lands in them too — measure one workload at a time, or accept t
 are the whole runtime's. And the **GC figures are not resettable**: there is no counterpart to
 `(vm-stats-reset)` for `(gc-stats)`, so `:gc-collections` stays cumulative from process start
 even inside a `measure`. Read it as a ceiling on the region, not a count of it."
-  (vm-stats-reset)
+  (dev/vm-stats-reset)
   (let (v (thunk))
     {:value v :report (report)}))
 

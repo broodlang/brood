@@ -406,9 +406,9 @@ without the dev-tools stat builtins doesn't error."
 builtins behind one call: `{:gc :sched :vm :processes :metrics}` (the dev-tools-only
 `:gc`/`:vm` are nil on a lean runtime). The one-call, stream-folded replacement for
 scraping the individual stat builtins — what `nest observe` / `nest mcp` can read."
-  {:gc (telemetry-stat 'gc-stats (fn () (gc-stats)))
-   :sched (telemetry-stat 'sched-stats (fn () (sched-stats)))
-   :vm (telemetry-stat 'vm-stats (fn () (vm-stats)))
+  {:gc (telemetry-stat 'gc-stats (fn () (dev/gc-stats)))
+   :sched (telemetry-stat 'sched-stats (fn () (dev/sched-stats)))
+   :vm (telemetry-stat 'vm-stats (fn () (dev/vm-stats)))
    :processes (count (or (proc/list) []))
    :metrics (metrics-snapshot)})
 

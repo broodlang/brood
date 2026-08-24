@@ -349,7 +349,7 @@ fn boot_from_source() -> SharedBundle {
 }
 
 /// The byte-counting allocator (see [`core::alloc`]) backs the whole process, so
-/// `(mem-bytes)` / `(mem-peak)` see every Rust allocation. Declared here in the
+/// `(%)` / `(%)` see every Rust allocation. Declared here in the
 /// library so the CLI and the integration-test binaries all share one.
 #[global_allocator]
 static GLOBAL: core::alloc::Counting = core::alloc::Counting;
