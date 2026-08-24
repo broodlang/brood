@@ -408,7 +408,7 @@ fn compile_let(
             // letrec: pre-allocate every binder's slot (init nil) so a rhs can
             // reference any binder; then compile the rhs in order.
             let mut slots = Vec::with_capacity(elems.len() / 2);
-            for pair in elems.chunks_exact(2) {
+            for pair in elems.as_chunks::<2>().0 {
                 match pair[0].unpack() {
                     ValueRef::Sym(s) => slots.push(scope.bind(s)),
                     _ => return None,
@@ -419,7 +419,7 @@ fn compile_let(
             // can't do letrec's recursive late-binding), so mark them unsafe to
             // capture; they become safe once we reach the body (all rhs done).
             scope.unsafe_slots.extend_from_slice(&slots);
-            for (pair, &slot) in elems.chunks_exact(2).zip(slots.iter()) {
+            for (pair, &slot) in elems.as_chunks::<2>().0.iter().zip(slots.iter()) {
                 // A binder whose RHS is *directly* a `(fn …)` enables the direct
                 // self-recursion path: `compile_captures` may bind that name to the
                 // built closure instead of deferring. Set it only for the fn-RHS
@@ -436,7 +436,7 @@ fn compile_let(
             scope.unsafe_slots.truncate(unsafe_saved);
         } else {
             // let/let*: sequential — a rhs sees only earlier binders.
-            for pair in elems.chunks_exact(2) {
+            for pair in elems.as_chunks::<2>().0 {
                 let name = match pair[0].unpack() {
                     ValueRef::Sym(s) => s,
                     _ => return None,

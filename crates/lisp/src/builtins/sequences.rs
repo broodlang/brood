@@ -794,7 +794,12 @@ pub(super) fn hash_map(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
             "hash-map: expected an even number of arguments (key/value pairs)",
         ));
     }
-    let pairs: Vec<(Value, Value)> = args.chunks_exact(2).map(|kv| (kv[0], kv[1])).collect();
+    let pairs: Vec<(Value, Value)> = args
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|kv| (kv[0], kv[1]))
+        .collect();
     Ok(heap.map_from_pairs(pairs))
 }
 

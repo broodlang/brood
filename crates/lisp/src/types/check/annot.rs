@@ -276,7 +276,7 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                     return None; // malformed — odd field-list length
                 }
                 let mut fields = std::collections::BTreeMap::new();
-                for pair in rest.chunks_exact(2) {
+                for pair in rest.as_chunks::<2>().0 {
                     let Value::Keyword(name) = pair[0] else {
                         return None;
                     };

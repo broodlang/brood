@@ -393,8 +393,7 @@ pub(crate) fn vm_run_bc(
     let mut cur_back_edges: u32;
     // Fresh start (vs. resuming a parked continuation) — the JIT tiering hook fires only
     // on a fresh arm activation, never mid-receive resume.
-    let fresh;
-    match resume {
+    let fresh = match resume {
         // Resume a parked continuation: its frame stack + operand roots are still on
         // the heap (the suspend didn't unwind), so restore the registers and re-enter
         // the loop at the `%receive` `Inst::Call` it rewound to — no fresh frame push.
@@ -415,7 +414,7 @@ pub(crate) fn vm_run_bc(
             {
                 cur_back_edges = cur.back_edges;
             }
-            fresh = false;
+            false
         }
         // Fresh start: push `arm0`'s activation frame.
         None => {
@@ -448,9 +447,9 @@ pub(crate) fn vm_run_bc(
             {
                 cur_back_edges = 0;
             }
-            fresh = true;
+            true
         }
-    }
+    };
     let unwind = |heap: &mut Heap| {
         heap.truncate_roots(entry_roots);
         heap.truncate_env_roots(entry_env);
