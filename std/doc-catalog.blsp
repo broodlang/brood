@@ -53,12 +53,9 @@
    "and" :control
    "any?" :predicates
    "append" :collections
-   "append-2" :collections
    "append-bytes" :bytes
    "append-empty?" :predicates
    "append-onto" :collections
-   "append-rev" :collections
-   "append-two" :collections
    "apply" :functions
    "apropos" :meta
    "arglist" :meta
@@ -234,7 +231,6 @@
    "first" :collections
    "flatten" :collections
    "flatten-acc" :collections
-   "flip-cons" :collections
    "float->bits" :convert
    "float?" :predicates
    "floor" :math
@@ -293,7 +289,6 @@
    "int->char" :strings
    "int?" :predicates
    "into" :collections
-   "iterate-times" :collections
    "iterate-times-acc" :collections
    "string/join" :strings
    "keep" :collections
@@ -302,18 +297,14 @@
    "keyword?" :predicates
    "last" :collections
    "last-index-of" :strings
-   "lfilter" :collections
    "link" :processes
    "list" :collections
    "string/list->" :strings
    "file/ls" :filesystem
    "list-processes" :processes
    "list?" :predicates
-   "lkeep" :collections
-   "lmap" :collections
    "load" :meta
    "string/lower" :strings
-   "lremove" :collections
    "macroexpand" :meta
    "macroexpand-1" :meta
    "macroexpand-loop" :meta
@@ -331,59 +322,6 @@
    "mapv" :collections
    "match" :patterns
    "match*" :patterns
-   "match-and-pattern?" :predicates
-   "match-bind-sym?" :predicates
-   "match-build" :patterns
-   "match-build-clause" :patterns
-   "match-build-from" :patterns
-   "match-bytes-int-spec" :patterns
-   "match-bytes-pattern?" :predicates
-   "match-bytes-seg" :patterns
-   "match-bytes-segs" :patterns
-   "match-bytes-typed-seg" :patterns
-   "match-bytes-vars" :bytes
-   "match-check-reachable" :patterns
-   "match-clause-patterns" :patterns
-   "match-compile" :patterns
-   "match-compile-and" :patterns
-   "match-compile-bytes" :patterns
-   "match-compile-clause" :patterns
-   "match-compile-list" :patterns
-   "match-compile-map" :patterns
-   "match-compile-map-entries" :patterns
-   "match-compile-or" :patterns
-   "match-compile-or-chain" :patterns
-   "match-compile-record" :patterns
-   "match-compile-seq" :patterns
-   "match-compile-vector" :patterns
-   "match-compile-velems" :patterns
-   "match-count-sym" :patterns
-   "match-irrefutable?" :predicates
-   "match-map-binds" :patterns
-   "match-map-check" :patterns
-   "match-map-entries" :patterns
-   "match-map-keys" :patterns
-   "match-map-pattern?" :predicates
-   "match-map-vars" :patterns
-   "match-member?" :predicates
-   "match-no-match" :patterns
-   "match-not-pattern-error" :patterns
-   "match-not-pattern?" :predicates
-   "match-or-check" :patterns
-   "match-or-pattern?" :predicates
-   "match-parse-clause" :patterns
-   "match-pin?" :predicates
-   "match-quoted?" :predicates
-   "match-record-pattern?" :predicates
-   "match-seq-vars" :patterns
-   "match-size-budget" :patterns
-   "match-small?" :predicates
-   "match-splice-fail" :patterns
-   "match-split" :patterns
-   "match-stale-pin?" :predicates
-   "match-vec->list" :patterns
-   "match-vec-collect" :patterns
-   "match-wildcard?" :predicates
    "max" :math
    "mem-bytes" :meta
    "mem-limit" :meta
@@ -392,7 +330,6 @@
    "merge" :maps
    "merge-acc" :collections
    "merge-runs" :collections
-   "merge-sort" :collections
    "merge-sort-n" :collections
    "min" :math
    "mod" :math
@@ -410,7 +347,6 @@
    "now-ns" :system
    "nth" :collections
    "nth-bad-index" :collections
-   "nth-list" :collections
    "nth-seq-or-fail" :collections
    "num-add" :meta
    "num-div" :math
@@ -522,7 +458,6 @@
    "rest" :collections
    "reverse" :collections
    "reverse-acc" :collections
-   "reverse-onto" :collections
    "rope?" :predicates
    "run!" :control
    "run-process" :system
@@ -628,8 +563,6 @@
    "take-while-acc" :collections
    "temp-path" :filesystem
    "third" :collections
-   "thread-first-step" :control
-   "thread-last-step" :control
    "throw" :errors
    "times" :collections
    "->fixed" :strings
@@ -674,10 +607,6 @@
    "with-out-str" :io
    "with-split-else" :control
    "worker-threads" :meta
-   "xfilter" :collections
-   "xkeep" :collections
-   "xmap" :collections
-   "xremove" :collections
    "zero?" :predicates
    "zip" :collections
    "zip-acc" :collections

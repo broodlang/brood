@@ -24,29 +24,29 @@
 ;;   [p1 p2 ...]    a vector of that exact length (the tagged-data / tuple idiom)
 
 ;; -- pattern shape predicates --
-(defn match-wildcard? (p) (= p '_))
-(defn match-bind-sym? (p) (and (symbol? p) (not (= p '_)) (not (= p '&))))
-(defn match-quoted? (p) (and (pair? p) (= (first p) 'quote)))
+(defn- match-wildcard? (p) (= p '_))
+(defn- match-bind-sym? (p) (and (symbol? p) (not (= p '_)) (not (= p '&))))
+(defn- match-quoted? (p) (and (pair? p) (= (first p) 'quote)))
 ;; A **pin** — `^expr`, read as `(%pin expr)`: match the current *value* of `expr`
 ;; rather than binding a name.
-(defn match-pin? (p) (and (pair? p) (= (first p) '%pin)))
+(defn- match-pin? (p) (and (pair? p) (= (first p) '%pin)))
 ;; `~expr` in pattern position — the pre-`^` pin spelling. `~` now belongs to
 ;; quasiquote alone (a pin written `~expr` IS `(unquote expr)`, so a macro template
 ;; consumed it before the pattern compiler ever saw it, making pinned patterns
 ;; unemittable from a macro). Left as a list pattern it would silently try to match
 ;; a 2-element list headed by the symbol `unquote`, so name it instead.
-(defn match-stale-pin? (p) (and (pair? p) (= (first p) 'unquote)))
+(defn- match-stale-pin? (p) (and (pair? p) (= (first p) 'unquote)))
 ;; `(or p q …)` — an ALTERNATIVE pattern: try each in order, first match wins
 ;; (ADR-160). `(and p q …)` — a CONJUNCTION: every pattern must match the same
 ;; value, which is also how you capture the whole while destructuring it (Clojure's
 ;; `:as`, Rust's `x @ pat`): `(and whole {:keys [a]})`.
-(defn match-or-pattern? (p) (and (pair? p) (= (first p) 'or)))
-(defn match-and-pattern? (p) (and (pair? p) (= (first p) 'and)))
+(defn- match-or-pattern? (p) (and (pair? p) (= (first p) 'or)))
+(defn- match-and-pattern? (p) (and (pair? p) (= (first p) 'and)))
 ;; `(not …)` stays rejected: it binds nothing and reads as a *guard*, which is what
 ;; `:when` is for. Read as a plain list pattern it would silently bind a variable
 ;; named `not`, so name it (ADR-152).
-(defn match-not-pattern? (p) (and (pair? p) (= (first p) 'not)))
-(defn match-not-pattern-error (p)
+(defn- match-not-pattern? (p) (and (pair? p) (= (first p) 'not)))
+(defn- match-not-pattern-error (p)
   (error (str "match: `(not …)` is not a pattern — a negative match binds nothing,"
            " so put the test in a `:when` guard instead:"
            " (x :when (not "
@@ -61,12 +61,12 @@
 ;; id is derived SYNTACTICALLY from `name` (via `ability-id-kw`), so no registry lookup is
 ;; needed at expansion (unlike a positional pattern, which would need the definition's field
 ;; order — deferred). Named, like `and`/`or`/`bytes`, so a plain list pattern isn't stolen.
-(defn match-record-pattern? (p) (and (pair? p) (= (first p) 'record)))
+(defn- match-record-pattern? (p) (and (pair? p) (= (first p) 'record)))
 
 ;; Every alternative of an `or` must bind the SAME names — otherwise the body could
 ;; reference a name only some alternatives bind, and which one it is depends on the
 ;; input. Rust enforces the same rule for the same reason.
-(defn match-or-check (alts)
+(defn- match-or-check (alts)
   (let (name-sets (map (fn (a) (sort (map name (pattern-vars a)))) alts))
     (when (not (every? (fn (ns) (= ns (first name-sets))) name-sets))
       (error (str "match: every alternative of an `(or …)` pattern must bind the same"
@@ -76,11 +76,11 @@
                " Use separate clauses when the bindings differ.")))))
 
 ;; -- expand-time helpers --
-(defn match-member? (x xs)
+(defn- match-member? (x xs)
   (cond (empty? xs) false (= x (first xs)) true else (match-member? x (rest xs))))
 
-(defn match-vec->list (v) (match-vec-collect v (dec (vector-length v)) nil))
-(defn match-vec-collect (v i acc)
+(defn- match-vec->list (v) (match-vec-collect v (dec (vector-length v)) nil))
+(defn- match-vec-collect (v i acc)
   (if (< i 0) acc (match-vec-collect v (dec i) (cons (vector-ref v i) acc))))
 
 ;; The variables a pattern binds. Threaded as `bound` through the compiler so a
@@ -113,7 +113,7 @@
 
 ;; The core: compile `pat` against the value of the symbol `target`, given the
 ;; already-`bound` names; on a match run `success`, else `fail`. Returns code.
-(defn match-compile (pat target bound success fail)
+(defn- match-compile (pat target bound success fail)
   (cond
     (match-wildcard? pat) success
     (match-bind-sym? pat)
@@ -222,7 +222,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;;   & rest                bind the remaining bytes (must be the last segment)
 ;; Without a trailing `& rest`, the bytes must be consumed exactly (count match).
 
-(defn match-bytes-pattern? (pat)
+(defn- match-bytes-pattern? (pat)
   (and (pair? pat) (= (first pat) (quote bytes))))
 
 ; literal → binds nothing
@@ -241,7 +241,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
       (match-bind-sym? (first segs)) (cons (first segs) (match-bytes-vars (rest segs)))
       else (match-bytes-vars (rest segs)))))
 ;; typed integer segment spec: :u8/:i8/:u16[-be/-le]/…/:i64[-be/-le] → [width signed? little?]
-(defn match-bytes-int-spec (kw)
+(defn- match-bytes-int-spec (kw)
   (cond
     (= kw :u8) [1 false false]
     (= kw :i8) [1 true false]
@@ -267,7 +267,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 
 ;; (sym :u16) — a typed integer segment: fixed width, endianness + signedness
 ;; from the spec keyword, value read via the bytes-uint/bytes-int family.
-(defn match-bytes-typed-seg (seg more target off bound success fail)
+(defn- match-bytes-typed-seg (seg more target off bound success fail)
   (let (s (first seg)
         spec (match-bytes-int-spec (second seg)))
     (if (nil? spec)
@@ -301,12 +301,12 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
                  ~(match-bytes-segs more target noff (append bound (list s)) success fail))
                ~fail))))))
 
-(defn match-compile-bytes (segs target bound success fail)
+(defn- match-compile-bytes (segs target bound success fail)
   `(if (bytes? ~target)
      ~(match-bytes-segs segs target 0 bound success fail)
      ~fail))
 
-(defn match-bytes-segs (segs target off bound success fail)
+(defn- match-bytes-segs (segs target off bound success fail)
   (cond
     ;; exhausted: require the bytes were consumed exactly
     (empty? segs) `(if (%eq ~off (byte-length ~target)) ~success ~fail)
@@ -317,7 +317,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
         (error "match: bytes pattern '&' must be followed by exactly one rest binding"))
     else (match-bytes-seg (first segs) (rest segs) target off bound success fail)))
 
-(defn match-bytes-seg (seg more target off bound success fail)
+(defn- match-bytes-seg (seg more target off bound success fail)
   (let (noff (gensym "off"))
     (cond
       ;; (sym :u16) — a typed integer segment (spec keyword in size position)
@@ -393,7 +393,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
         (let (sub (match-split (rest pats)))
           [(cons (first pats) (nth sub 0)) (nth sub 1) (nth sub 2)]))))
 
-(defn match-compile-list (pat target bound success fail)
+(defn- match-compile-list (pat target bound success fail)
   (let (parts (match-split pat))
     (match-compile-seq (nth parts 0) (nth parts 1) (nth parts 2) target bound success fail)))
 
@@ -401,7 +401,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; is duplicated per alternative rather than hoisted into a thunk — that keeps every
 ;; alternative's body in TAIL position (a `match` in tail position must stay O(1)
 ;; stack), and alternatives are nearly always literals, so the duplication is small.
-(defn match-compile-or (alts target bound success fail)
+(defn- match-compile-or (alts target bound success fail)
   (do
     (match-or-check alts)
     (match-compile-or-chain alts target bound success fail)))
@@ -458,7 +458,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
         `(if (pair? ~target) (let (~hd (first ~target) ~tl (rest ~target)) ~head) ~fail)))))
 
 ;; vector pattern: a fixed-length tuple, matched element-wise by index.
-(defn match-compile-vector (pat target bound success fail)
+(defn- match-compile-vector (pat target bound success fail)
   (let (elems (match-vec->list pat) n (count elems))
     (when (match-member? '& elems)
       (error "match: '&' (rest) is not allowed in a vector pattern — vectors are fixed-length"))
@@ -488,7 +488,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; map, else the clause fails. Mirrors Clojure's associative destructuring, minus
 ;; the power forms — general `{:key subpattern}` nesting and `:as` are deferred
 ;; (ADR-011: ship the simple shape, add the rest on a concrete need).
-(defn match-map-pattern? (p) (map? p))
+(defn- match-map-pattern? (p) (map? p))
 
 ;; A map pattern understands exactly two keys: `:keys` and `:or`. Any other key
 ;; is REJECTED rather than ignored (ADR-152). Ignoring it was the worst kind of
@@ -499,7 +499,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; `:as` stays rejected. With general `{key subpattern}` support (ADR-160) a stray
 ;; `:as` would otherwise read as "this map must have an `:as` key", silently matching
 ;; something else entirely — and the `and`-pattern spells the intent exactly.
-(defn match-map-check (pat)
+(defn- match-map-check (pat)
   (when (contains? pat :as)
     (error (str "match: a map pattern has no `:as` — capture the whole value with an"
              " `and` pattern instead: (and "
@@ -508,17 +508,17 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
              " map.)"))))
 
 ;; :keys value is a vector [a b] (or a list); return it as a list of symbols.
-(defn match-map-keys (pat)
+(defn- match-map-keys (pat)
   (let (kv (get pat :keys))
     (cond (nil? kv) nil (vector? kv) (match-vec->list kv) else kv)))
 
 ;; The explicit `{key subpattern}` entries — every key except the two markers — as
 ;; a list of `[key subpattern]` pairs.
-(defn match-map-entries (pat)
+(defn- match-map-entries (pat)
   (filter (fn (kv) (not (or (= (first kv) :keys) (= (first kv) :or))))
     (map-pairs pat)))
 
-(defn match-map-vars (pat)
+(defn- match-map-vars (pat)
   (do
     (match-map-check pat)
     (append (match-map-keys pat)
@@ -526,7 +526,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
         nil
         (match-map-entries pat)))))
 
-(defn match-compile-map (pat target bound success fail)
+(defn- match-compile-map (pat target bound success fail)
   (do
     (match-map-check pat)
     ;; Explicit `{key subpattern}` entries are tested FIRST (they can fail), then the
@@ -588,7 +588,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; value's `:__id__` (or nil for a non-record), so the whole test is a single `%eq` against
 ;; the id derived from `name` at expansion; a non-record simply fails. The inner map pattern
 ;; is compiled by the ordinary map path, so `{:k p}` / `:keys` / `:or` all work unchanged.
-(defn match-compile-record (pat target bound success fail)
+(defn- match-compile-record (pat target bound success fail)
   (let (name (second pat)
         mappat (first (rest (rest pat))))
     (when (not (symbol? name))
@@ -607,7 +607,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
          ~fail))))
 
 ;; -- clauses: (pattern [:when guard] body...) — one shape for match / fn / receive --
-(defn match-parse-clause (clause)
+(defn- match-parse-clause (clause)
   (if (not (pair? clause))
     (error (str "match: each clause must be a (pattern body...) list, got " (pr-str clause)))
     (let (pat (first clause) more (rest clause))
@@ -619,10 +619,10 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 
 ;; A clause is irrefutable (always matches) iff its pattern is _ or a bare bind
 ;; and it has no guard. Such a clause must be last; anything after it is dead.
-(defn match-irrefutable? (pat guard)
+(defn- match-irrefutable? (pat guard)
   (and (nil? guard) (or (match-wildcard? pat) (match-bind-sym? pat))))
 
-(defn match-compile-clause (clause target fail)
+(defn- match-compile-clause (clause target fail)
   (let (parsed (match-parse-clause clause)
         pat (nth parsed 0)
         guard (nth parsed 1)
@@ -632,12 +632,12 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 
 ;; The no-match failure: a structured, catchable, self-describing value carrying
 ;; the context (:match / :let / a fn name), the value, and the patterns tried.
-(defn match-no-match (context target patterns)
+(defn- match-no-match (context target patterns)
   `(throw [:match-error (quote ~context) ~target (quote ~patterns)]))
 
-(defn match-clause-patterns (clauses) (map (fn (c) (if (pair? c) (first c) c)) clauses))
+(defn- match-clause-patterns (clauses) (map (fn (c) (if (pair? c) (first c) c)) clauses))
 
-(defn match-check-reachable (clause following)
+(defn- match-check-reachable (clause following)
   (let (parsed (match-parse-clause clause))
     (when (and (match-irrefutable? (nth parsed 0) (nth parsed 1)) (not (empty? following)))
       (error "match: unreachable clause after a catch-all (an irrefutable pattern must come last)"))))
@@ -674,7 +674,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
       (pair? form) (match-size-budget (rest form) (match-size-budget (first form) (- budget 1)))
       else budget)))
 
-(defn match-small? (form) (>= (match-size-budget form 64) 0))
+(defn- match-small? (form) (>= (match-size-budget form 64) 0))
 
 ;; Compile one clause with `rest-code` (the code for every following clause) as
 ;; its fail-continuation — WITHOUT exponential growth. The pattern compilers
@@ -687,7 +687,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; 2–4-arm receive/fn dispatch stays thunk-free, zero runtime cost); 2+ uses of
 ;; a big one → bind it once as `(let (k (fn () rest-code)) …)`. The `(k)` call
 ;; is in tail position wherever fail was, so match stays TCO-safe.
-(defn match-build-clause (clause target rest-code)
+(defn- match-build-clause (clause target rest-code)
   (let (k (gensym "mfail")
         compiled (match-compile-clause clause target (list k))
         uses (match-count-sym compiled k))
@@ -710,7 +710,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
         (match-check-reachable clause following)
         (match-build-clause clause target rest-code)))))
 
-(defn match-build (clauses target context)
+(defn- match-build (clauses target context)
   (match-build-from clauses target (match-no-match context target (match-clause-patterns clauses))))
 
 ;; match* — the shared engine. `context` (a keyword like :match/:let, or a fn
