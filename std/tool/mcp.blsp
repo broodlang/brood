@@ -539,10 +539,10 @@ its owner namespace, whether it's derivable, and which types implement it. Retur
     (let (aname (read-string name-str))
       (if (not (contains? *abilities* aname))
         {:name name-str :error (str "not an ability: " name-str)}
-        (let (ops (ability-ops aname)
-              members (sealed-members aname)
-              reqs (ability-requires aname)
-              owner (ability-owner-ns aname))
+        (let (ops (%ability-ops aname)
+              members (%sealed-members aname)
+              reqs (%ability-requires aname)
+              owner (%ability-owner-ns aname))
           {:name name-str
            :ops (map (fn (spec)
                        {:op (str (first spec))
@@ -553,7 +553,7 @@ its owner namespace, whether it's derivable, and which types implement it. Retur
            :members (if members (map name members) [])
            :requires (if reqs (map str reqs) [])
            :owner (if owner (str owner) nil)
-           :derivable (not (nil? (ability-derive-recipe aname)))
+           :derivable (not (nil? (%ability-derive-recipe aname)))
            :impls (ability-impls aname ops)})))))
 
 (defn check-source-tool (args)

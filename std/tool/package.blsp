@@ -1375,9 +1375,9 @@ sha256 pin still holds."
   (map (fn (e)
          (let (pkg (name (get e :name))
                module-files (module-files (package-dep-src-dir e)))
-           (register-package-modules! pkg (map first module-files))
+           (%register-package-modules! pkg (map first module-files))
            (map (fn (mf)
-                  (register-package-module! (str pkg "/" (name (first mf))) (second mf)))
+                  (%register-package-module! (str pkg "/" (name (first mf))) (second mf)))
              module-files)))
     entries))
 

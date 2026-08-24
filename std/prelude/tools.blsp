@@ -259,11 +259,11 @@ Returns the directory. Pass `{}` to stop consulting an image."
 
 ;; The rooted-key setters (root code, like `set-load-path!`): the package manager
 ;; calls these to register a dependency's modules before its first `require`.
-(defn register-package-module! (rooted-key path)
+(defn %register-package-module! (rooted-key path)
   "Record that rooted module `rooted-key` (e.g. \"foo/b\") is provided by file `path`."
   (%registry-update! '*module-files* :assoc [rooted-key] path)
   rooted-key)
-(defn register-package-modules! (prefix short-modules)
+(defn %register-package-modules! (prefix short-modules)
   "Record package `prefix`'s SHORT module names (a list of symbols) — the intra-package set."
   (%registry-update! '*package-modules-of* :assoc [prefix] short-modules)
   prefix)
@@ -290,27 +290,27 @@ Returns the directory. Pass `{}` to stop consulting an image."
 ;; registry, each compute their own new one, and the second `def` wins — the first
 ;; registration is silently gone (KI-22 lost ~40% of them under load).
 
-(defn registry-swap! (sym read f)
+(defn %registry-swap! (sym read f)
   "Atomically set registry global `sym` to `(f current)`, retrying if another process
 wrote in between; returns the value that landed. `read` is a thunk re-reading the global,
 so each retry recomputes against the value that won. `f` must be pure — it can run more
-than once. Prefer the `swap-registry!` macro, which writes both arguments for you."
+than once. Prefer the `%swap-registry!` macro, which writes both arguments for you."
   (let (old (read)
         new (f old))
     (if (%registry-cas! sym old new)
       new
-      (registry-swap! sym read f))))
+      (%registry-swap! sym read f))))
 
-(defmacro swap-registry! (registry f)
+(defmacro %swap-registry! (registry f)
   "Atomically update registry global `registry` by `(f current)` — e.g.
-`(swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))`.
+`(%swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))`.
 
 `registry` must be the name the global is actually bound under: **fully qualified**
 (`debug/*traced-fns*`) for a module-level `def`, bare for a root or `defdyn` one. It is
 quoted for the kernel *and* spliced as a live reference for the re-read, and a quoted
 symbol is data the namespace resolver never rewrites — so a bare name inside a module
 would name a registry that does not exist."
-  `(registry-swap! '~registry (fn () ~registry) ~f))
+  `(%registry-swap! '~registry (fn () ~registry) ~f))
 
 ;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
 (defn provide (mod)
@@ -328,7 +328,7 @@ would name a registry that does not exist."
 ;; Called from `defmodule`'s expansion, which runs inside the *consumer's* module —
 ;; where a bare `(def *module-docs* …)` would define `mod/*module-docs*`. Defined
 ;; here at root, so the `def` below targets the one real registry.
-(defn record-module-doc! (key doc)
+(defn %record-module-doc! (key doc)
   "Record `doc` as module `key`'s docstring (the registry `module-doc` reads); returns doc."
   (%registry-update! '*module-docs* :assoc [key] doc)
   doc)
@@ -504,7 +504,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
     ;; `foo/b/…`. At root (no package context) `%root-module-name` is the identity, so
     ;; the root project and std stay short. Computed at load time, when the context is set.
     `(let (root-key# (name (%root-module-name '~mod)))
-       (record-module-doc! root-key# ~doc)
+       (%record-module-doc! root-key# ~doc)
        (defmodule-provide root-key#)
        (%in-ns '~mod)
        ~@(defmodule-use-forms clauses)
@@ -574,7 +574,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 ;;
 ;; The `member?` read is a lock-free fast path — every repeat of an edge (the common case,
 ;; since a widely-used module is `:use`d from everywhere) skips the CAS entirely; only a
-;; genuinely new edge pays for the atomic update. `swap-registry!` rather than a plain `def`
+;; genuinely new edge pays for the atomic update. `%swap-registry!` rather than a plain `def`
 ;; because loads run concurrently and a read-modify-write over a whole map silently loses
 ;; ~40% of its updates under contention (KI-22).
 (defn- require-record-edge!
@@ -592,7 +592,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
     (when (and parent
             (not (= parent key))
             (not (includes? (or (get *require-edges* parent) nil) key)))
-      (swap-registry! *require-edges*
+      (%swap-registry! *require-edges*
         (fn (m)
           (let (cur (or (get m parent) nil))
             (if (includes? cur key) m (assoc m parent (cons key cur)))))))))
@@ -897,7 +897,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ; qualified-op-fn-symbol → the ability that declared it. An ability op becomes a global
 ; `defn` named after the op (qualified to the declaring ns), so two abilities in the SAME
 ; ns declaring the same op name would have the second silently clobber the first's op
-; function. This registry lets `register-ability` warn on that collision instead of losing
+; function. This registry lets `%register-ability` warn on that collision instead of losing
 ; an op silently (ADR-172; the checker can't see a same-ns clobber either). Keyed by the
 ; QUALIFIED symbol (`<ns>/op` or bare `op` at root) so cross-module same-name ops — which
 ; get distinct globals and never clash — do not false-warn.
@@ -910,7 +910,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   `defn` `defability` emits is namespaced at load, so `*op-ability*` keys on the real global."
   (if owner (symbol (str (name owner) "/" (name op-name))) op-name))
 
-(defn register-ability (aname specs &optional owner)
+(defn %register-ability (aname specs &optional owner)
   "Record ability `aname`'s declared op specs (raw forms) for the checker / LSP, and its
   OWNER namespace (`defability`'s defining ns, ADR-172) for impl precedence. Warns if an op
   name is already owned by a DIFFERENT ability in the same ns — that op's generic function
@@ -926,7 +926,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         ; Warn only when a real generic function is at stake: a DIFFERENT ability already
         ; owns this op name AND that name is bound (its `defability` emitted the `defn`, so a
         ; second `defability` of the same op name genuinely shadows it). A direct
-        ; `register-ability` that never defines a generic fn (crafted precedence fixtures) is
+        ; `%register-ability` that never defines a generic fn (crafted precedence fixtures) is
         ; harmless and stays quiet.
         (when (and prev (not (= prev aname)) (bound? qsym))
           (println "warning: ability "
@@ -939,11 +939,11 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         (%registry-update! '*op-ability* :assoc [qsym] aname))))
   nil)
 
-(defn ability-owner-ns (aname)
+(defn %ability-owner-ns (aname)
   "The namespace that `defability`'d `aname` (its owner), or nil."
   (get *ability-owner* aname))
 
-(defn ability-ops (aname)
+(defn %ability-ops (aname)
   "The op specs declared for ability `aname` (or nil) — which ops an `impl` must
   provide, with what arities."
   (get *abilities* aname))
@@ -956,13 +956,13 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ; the Elixir `@derive` / Rust `#[derive]` model: each ability decides how it derives itself.
 (def *ability-derives* {})
 
-(defn register-ability-derive (aname recipe)
+(defn %register-ability-derive (aname recipe)
   "Record ability `aname`'s `:derive-record` recipe (the fn `defrecord`'s `:derives` runs to
   synthesise a structural impl). Rebindable like any registry — a later `defability` wins."
   (%registry-update! '*ability-derives* :assoc [aname] recipe)
   nil)
 
-(defn ability-derive-recipe (aname)
+(defn %ability-derive-recipe (aname)
   "Ability `aname`'s `:derive-record` recipe fn (fields → `impl` method forms), or nil when
   the ability declared none — i.e. it is not derivable, and `:derives [aname]` is an error."
   (get *ability-derives* aname))
@@ -970,14 +970,14 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ; ability-name → its SEALED member ids (a closed set), or absent if open
 (def *sealed* {})
 
-(defn register-sealed (aname members)
+(defn %register-sealed (aname members)
   "Record ability `aname`'s SEALED member ids — the closed set of identities it is meant
   to be implemented for. The checker uses this for exhaustiveness: every member must have
   an impl of every declared op. Runtime dispatch is unaffected (sealing is a contract)."
   (%registry-update! '*sealed* :assoc [aname] members)
   nil)
 
-(defn sealed-members (aname)
+(defn %sealed-members (aname)
   "The sealed member ids of ability `aname` (a list of keyword ids), or nil if open."
   (get *sealed* aname))
 
@@ -986,19 +986,19 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ; — checker-only, advisory (late binding means it can't gate); runtime dispatch is unaffected.
 (def *ability-requires* {})
 
-(defn register-ability-requires (aname reqs)
+(defn %register-ability-requires (aname reqs)
   "Record that ability `aname` REQUIRES abilities `reqs` (a list of names) — an implementor of
   `aname` must also implement each of them (ADR-193). The checker enforces it."
   (%registry-update! '*ability-requires* :assoc [aname] reqs)
   nil)
 
-(defn ability-requires (aname)
+(defn %ability-requires (aname)
   "The abilities `aname` requires (a list of names), or nil."
   (get *ability-requires* aname))
 
 ; ---- dispatch identity ------------------------------------------------------
 
-(defn identity-of (x)
+(defn %identity-of (x)
   "The dispatch identity of `x`: its nominal record id (a `module/name` keyword) if it
   is an identity-carrying record, else its `type-of` kind. This — with `record?` /
   `record-id` / `fields` — is the one seam a later kernel slot swaps behind; nothing
@@ -1012,7 +1012,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 (defn record? (x)
   "True if `x` is an identity-carrying record (a `defrecord` value). Requires a
-  *truthy* `:__id__` — matching `identity-of`, which treats a nil/false id as a plain
+  *truthy* `:__id__` — matching `%identity-of`, which treats a nil/false id as a plain
   map and dispatches on `type-of`. (A `defrecord` value always carries a truthy keyword
   id; the guard only matters for a hand-written `{:__id__ nil …}` literal, which must not
   be seen as a record by `record?`/`record-id`/`fields` while dispatching as `:map`.)"
@@ -1020,7 +1020,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 (defn record-id (x)
   "The nominal id (`module/name` keyword) of record `x`, or nil if `x` is not a record.
-  Unlike `identity-of`, never falls back to `type-of`."
+  Unlike `%identity-of`, never falls back to `type-of`."
   (if (record? x) (get x :__id__) nil))
 
 (defn fields (x)
@@ -1076,7 +1076,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
     (bound? '*ns-package*)
     (= (get *ns-package* from) *project-name*)))
 
-(defn impl-rank (aname key from)
+(defn %impl-rank (aname key from)
   ;; Precedence tier (ADR-172 §3), higher wins: **app (4) > type-owner (3) > ability-owner
   ;; (2) > other (1)**. `from` = nil is the root/REPL — the user IS the app, so app tier; a
   ;; module whose package is the project's own is likewise the app. Otherwise `from` owns the
@@ -1086,7 +1086,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
     4
     (let (from-name (name from)
           id-owner (impl-id-owner key)
-          abl-owner (let (o (ability-owner-ns aname)) (if o (name o) nil)))
+          abl-owner (let (o (%ability-owner-ns aname)) (if o (name o) nil)))
       (cond
         (= from-name id-owner) 3
         (= from-name abl-owner) 2
@@ -1126,10 +1126,10 @@ it waits for that load to finish (a half-evaluated module is never observable)."
             " arg(s), but this impl takes "
             (if variadic (str fixed "+") fixed)))))))
 
-(defn register-impl (aname op key f from)
+(defn %register-impl (aname op key f from)
   "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the registering
   namespace `from`. Resolution is by PRECEDENCE, not load order (ADR-172 §3): the impl with
-  the highest tier for a `(aname, op, key)` slot wins, computed by `impl-rank`, so the result
+  the highest tier for a `(aname, op, key)` slot wins, computed by `%impl-rank`, so the result
   is deterministic regardless of registration order. A same-tier re-register from a DIFFERENT
   `from` is a genuine cross-module conflict (warned; last wins); from the SAME `from` it is
   hot-reload (silent); a strictly lower-tier registration is ignored (a higher tier holds the
@@ -1142,23 +1142,23 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         ; Keying off `contains?` keeps a later lower tier from displacing an app impl.
         has-prev (contains? *impl-from* prov-key)
         prev-from (get *impl-from* prov-key)
-        new-rank (impl-rank aname key from)
+        new-rank (%impl-rank aname key from)
         ; recompute the incumbent's tier from its recorded `from` — no extra registry.
-        old-rank (if has-prev (impl-rank aname key prev-from) 0))
+        old-rank (if has-prev (%impl-rank aname key prev-from) 0))
     (when (and has-prev (= new-rank old-rank) (not (= prev-from from)))
       (println "warning: ability "
         aname "/" op " for " key " — same-tier impl from " prev-from " overridden by " from
         " (last wins)"))
     ; Store the winner only when the new impl's tier is >= the incumbent's — so a higher tier
     ; always holds the slot and order can't decide it. A strictly lower tier is dropped (its
-    ; owner already has a stronger claim). The fn is stored DIRECTLY so dispatch (`impl-for`)
+    ; owner already has a stronger claim). The fn is stored DIRECTLY so dispatch (`%impl-for`)
     ; stays a plain map-get; provenance in *impl-from* is read only here, never on dispatch.
     (when (>= new-rank old-rank)
       (%registry-update! '*impls* :assoc [op-key key] f)
       (%registry-update! '*impl-from* :assoc [prov-key] from))
     nil))
 
-(defn impl-for (op-key key)
+(defn %impl-for (op-key key)
   "The impl fn of op `op-key` (a `[ability op]` pair) for id `key`, falling back to a
   `:default` impl, or nil. One map fetch for the op's method set, then one by id."
   (let (methods (get *impls* op-key))
@@ -1167,7 +1167,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 (def *substrate-abilities* ['Display 'Inspect 'Seqable 'Conjable])
 ;; The abilities the LANGUAGE ITSELF dispatches on. Their `:default` impls are the fallback
 ;; every value relies on — `Display`'s is what `print`/`println`/`str` reach for — so they are
-;; substrate, not policy, and `unregister-impl` refuses to retract them: `(unimpl Display
+;; substrate, not policy, and `%unregister-impl` refuses to retract them: `(%unimpl Display
 ;; :default)` is one line that stops the image printing anything, and the only clue is a
 ;; `no impl for :vector` from deep inside an unrelated call. Same reasoning as reserved names
 ;; (ADR-166): the language's own definitions are not yours to remove. An `impl` you wrote for
@@ -1179,15 +1179,15 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   ability the runtime dispatches on itself."
   (and (= key :default) (includes? *substrate-abilities* aname)))
 
-(defn unregister-impl (aname op key)
-  "Remove `key`'s impl of `aname`'s `op` — the inverse of `register-impl`. Returns true when
+(defn %unregister-impl (aname op key)
+  "Remove `key`'s impl of `aname`'s `op` — the inverse of `%register-impl`. Returns true when
   an impl was there, false when there was nothing to remove (idempotent, never raises) — and
   errors for one case only: a `:default` of an ability the language dispatches on itself
   (`impl-substrate?`), because removing that leaves every value unprintable.
 
-  The slot becomes UNCLAIMED, not `:default`: a later `register-impl` of any tier takes it,
+  The slot becomes UNCLAIMED, not `:default`: a later `%register-impl` of any tier takes it,
   because precedence compares against an incumbent and there is none. Dispatch falls back to
-  the ability's `:default` impl if it declares one, else `no-impl` — the same state as before
+  the ability's `:default` impl if it declares one, else `%no-impl` — the same state as before
   anyone implemented it.
 
   Registering an impl was open and reversible in every way but this one. A registry with no
@@ -1195,7 +1195,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   must not leak into the next one, a REPL session undoing an experiment, a hot reload
   retracting an impl the new source no longer declares."
   (when (impl-substrate? aname key)
-    (error "unregister-impl: "
+    (error "%unregister-impl: "
       aname "/" op " :default is part of the language — removing it "
       "would leave every value unprintable. Override it with `impl` for your own id instead."))
   (let (op-key [aname op]
@@ -1206,29 +1206,29 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       (%registry-update! '*impl-from* :dissoc [prov-key] nil))
     had))
 
-(defn derive-into (aname id fields from)
+(defn %derive-into (aname id fields from)
   "Load-time worker for `defrecord`'s `:derives` (ADR-185): register ability `aname`'s derived
   impl for record id `id` (field-name symbols `fields`), tagged with ns `from`. Calls the
   ability's `:derive-record` recipe to get a list of `impl` method forms `((op [args] body…)
   …)`, evals each into a fn, and registers it for `id`. Loud error if `aname` is not derivable
   (declares no recipe). Runs at load, so the ability's `defability` need only precede the
   record's construction — not its macro-expansion."
-  (let (recipe (ability-derive-recipe aname))
+  (let (recipe (%ability-derive-recipe aname))
     (when (not recipe)
       (error "defrecord :derives — ability "
         aname " is not derivable " "(its defability declares no :derive-record recipe)"))
     (doseq (m (recipe fields))
       ;; a method form is `(op [args] body…)` (impl syntax — a `[args]` VECTOR); `fn` wants a
       ;; LIST param, so convert the vector to a list, exactly as the `impl` macro does.
-      (register-impl aname
+      (%register-impl aname
         (first m)
         id
         (eval (cons 'fn (cons (map (fn (s) s) (second m)) (rest (rest m)))))
         from))))
 
-(defn no-impl (op-key key)
+(defn %no-impl (op-key key)
   "The loud, located error an op raises when no impl (and no `:default`) covers id
-  `key`. Throws a STRUCTURED error map — `{:kind :no-impl :message … :ability :op :id
+  `key`. Throws a STRUCTURED error map — `{:kind :%no-impl :message … :ability :op :id
   :have}` — so a handler can branch on the parts (`(get e :id)`) without string-parsing;
   `error-message` still returns the `:message`, so a `(catch e (error-message e))` reads
   the same human text as before. Names the ability, the op, the id, and the ids that ARE
@@ -1239,16 +1239,16 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         message (if (empty? known)
                   (str "ability " aname "/" op ": no impl for " key)
                   (str "ability " aname "/" op ": no impl for " key " — have " known)))
-    (throw {:kind :no-impl :message message :ability aname :op op :id key :have known})))
+    (throw {:kind :%no-impl :message message :ability aname :op op :id key :have known})))
 
 (defn satisfies? (aname x)
   "True if ability `aname` is implemented for `x`'s identity — every declared op
   resolves (directly or via `:default`). Lets a caller branch instead of letting the op
   raise the missing-impl error. False for an unknown ability."
-  (let (key (identity-of x)
-        ops (ability-ops aname))
+  (let (key (%identity-of x)
+        ops (%ability-ops aname))
     (if ops
-      (every? (fn (spec) (impl-for [aname (first spec)] key)) ops)
+      (every? (fn (spec) (%impl-for [aname (first spec)] key)) ops)
       false)))
 
 ; ---- macros -----------------------------------------------------------------
@@ -1372,25 +1372,25 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         ; The specs are stored WITH their bodies so the checker can tell a provided op from
         ; a required one (a body ⇒ provided ⇒ not demanded of a sealed member).
         reg (append
-              (append (cons (list 'register-ability
+              (append (cons (list '%register-ability
                               (list 'quote aname)
                               (list 'quote ops)
                               (list 'current-ns))
                         (if sealed-ids
-                          (list (list 'register-sealed
+                          (list (list '%register-sealed
                                   (list 'quote aname)
                                   (cons 'list sealed-ids)))
                           nil))
                 ; the `:derive-record` recipe is emitted UNQUOTED — evaluated to a closure at
                 ; load, so `defrecord`'s `:derives` can call it at expansion (ADR-185).
                 (if derive-fn
-                  (list (list 'register-ability-derive (list 'quote aname) derive-fn))
+                  (list (list '%register-ability-derive (list 'quote aname) derive-fn))
                   nil))
               ; `:requires [A B]` — an implementor of this ability must also implement A and B
               ; (super-abilities, ADR-193). The names are emitted quoted so the list is the
               ; ability-name symbols, not their (unbound) values.
               (if requires-vec
-                (list (list 'register-ability-requires
+                (list (list '%register-ability-requires
                         (list 'quote aname)
                         (cons 'list (map (fn (r) (list 'quote r)) requires-vec))))
                 nil))
@@ -1404,7 +1404,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
                                   (let (arg-syms (map (fn (s) (if (pair? s) (first s) s))
                                                    (second op)))
                                     (append acc
-                                      (list (list 'register-impl
+                                      (list (list '%register-impl
                                               (list 'quote aname)
                                               (list 'quote (first op))
                                               :default
@@ -1437,11 +1437,11 @@ it waits for that load to finish (a half-evaluated module is never observable)."
                         op-name
                         arg-syms
                         (list 'let
-                          ; `%dispatch` is `impl-for` through the per-op inline cache (ADR-172
+                          ; `%dispatch` is `%impl-for` through the per-op inline cache (ADR-172
                           ; §7): the op passes `*impls*` so the kernel stays decoupled from the
                           ; global's name; a hit skips the two CHAMP lookups. Cache-transparent.
                           (list id-sym
-                            (list 'identity-of first-arg)
+                            (list '%identity-of first-arg)
                             impl-sym
                             (list '%dispatch '*impls* op-key id-sym))
                           (list 'if
@@ -1449,7 +1449,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
                             ; the resolved call — direct for a fixed arity, `apply` for a
                             ; variadic op (`defability-op-call`)
                             (defability-op-call impl-sym arg-syms)
-                            (list 'no-impl op-key id-sym))))))
+                            (list '%no-impl op-key id-sym))))))
                   ops))
     (cons 'do (append reg (append op-defs provided-defs)))))
 
@@ -1462,7 +1462,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
     (impl Size :int             (size [n] n))
     (impl Size geometry/circle  (size [c] (get c :r)))"
   ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
-  ; keyworded to match what `identity-of` produces; a built-in id (`:int`) is already one.
+  ; keyworded to match what `%identity-of` produces; a built-in id (`:int`) is already one.
   (let (id-kw (ability-id-kw key))
     (cons 'do
       (map
@@ -1471,7 +1471,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
                 ; arg vector → list
                 arg-syms (map (fn (s) s) (second m))
                 body (rest (rest m)))
-            (list 'register-impl
+            (list '%register-impl
               (list 'quote aname)
               (list 'quote op-name)
               id-kw
@@ -1479,13 +1479,13 @@ it waits for that load to finish (a half-evaluated module is never observable)."
               (list 'quote (current-ns)))))
         methods))))
 
-(defmacro unimpl (aname key & ops)
+(defmacro %unimpl (aname key & ops)
   "Retract ability `aname`'s implementations for dispatch id `key` — the named `ops`, or
   EVERY op the ability declares when none are named. The inverse of `impl`, and the same
-  shape: `(unimpl Size geometry/circle)` undoes `(impl Size geometry/circle …)`.
+  shape: `(%unimpl Size geometry/circle)` undoes `(impl Size geometry/circle …)`.
 
-    (unimpl Size geometry/circle)          ; every op
-    (unimpl Shape my/rect area)            ; just `area`
+    (%unimpl Size geometry/circle)          ; every op
+    (%unimpl Shape my/rect area)            ; just `area`
 
   Returns the number of impls actually removed, so a caller can tell a retraction from a
   no-op. A `key` that never had an impl is a quiet zero."
@@ -1494,19 +1494,19 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       (list 'quote aname)
       id-kw
       (if (empty? ops)
-        (list 'map 'first (list 'or (list 'ability-ops (list 'quote aname)) (list)))
+        (list 'map 'first (list 'or (list '%ability-ops (list 'quote aname)) (list)))
         (list 'quote ops)))))
 
 (defn- unimpl-do
   (aname key ops)
-  "Runtime worker for `unimpl`: retract each of `ops` for `key`, returning how many were
+  "Runtime worker for `%unimpl`: retract each of `ops` for `key`, returning how many were
   there. Separate from the macro so the op list can come from the ability's own declaration
   at expansion time or from a caller's list at runtime."
-  (fold (fn (n op) (if (unregister-impl aname op key) (inc n) n)) 0 ops))
+  (fold (fn (n op) (if (%unregister-impl aname op key) (inc n) n)) 0 ops))
 
 ;; ── Multiple dispatch: `defmulti` / `defmethod` (ADR-179) ──────────────────────
 ;; Dispatch on the IDENTITY-TUPLE of the arguments, resolved by EXACT match, then a declared
-;; `:default`, else a loud `no-method` error — never a nearest-neighbour guess. Ambiguity is
+;; `:default`, else a loud `%no-method` error — never a nearest-neighbour guess. Ambiguity is
 ;; impossible by construction (no partial wildcards). A `defmulti` may declare a closure
 ;; algebra — `:commutative` or `:antisymmetric` — that derives each off-diagonal binary
 ;; method's mirror, so a binary operator is authored as the upper triangle of its type matrix.
@@ -1515,27 +1515,27 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 (def *methods* {}) ; multimethod name → { [id …] → fn, :default → fn }
 (def *multi-algebra* {}) ; multimethod name → :commutative | :antisymmetric | nil (declared)
 (def *method-from* {}) ; [mname key] → registering ns, for cross-module conflict detection
-(defn register-multi (mname algebra)
+(defn %register-multi (mname algebra)
   "Declare multimethod `mname` with optional closure `algebra` (nil, :commutative, or
-  :antisymmetric). Records the algebra so `register-method` can derive each mirror."
+  :antisymmetric). Records the algebra so `%register-method` can derive each mirror."
   (%registry-update! '*multi-algebra* :assoc [mname] algebra)
   nil)
 
-(defn multi-resolve (mname key)
+(defn %multi-resolve (mname key)
   "The method fn of multimethod `mname` for identity-tuple `key` (a vector), else the declared
   `:default` method, else nil. Exact match or declared fallback — never a nearest guess."
   (let (methods (get *methods* mname))
     (or (get methods key) (get methods :default))))
 
-(defn no-method (mname key)
+(defn %no-method (mname key)
   "The loud, structured error a multimethod raises when neither an exact method nor a
-  `:default` covers identity-tuple `key`: `{:kind :no-method :message … :multi :key :have}`
-  (the multiple-dispatch sibling of `no-impl`). `error-message` returns the human text."
+  `:default` covers identity-tuple `key`: `{:kind :%no-method :message … :multi :key :have}`
+  (the multiple-dispatch sibling of `%no-impl`). `error-message` returns the human text."
   (let (known (keys (or (get *methods* mname) {}))
         message (if (empty? known)
                   (str "multimethod " mname ": no method for " key)
                   (str "multimethod " mname ": no method for " key " — have " known)))
-    (throw {:kind :no-method :message message :multi mname :key key :have known})))
+    (throw {:kind :%no-method :message message :multi mname :key key :have known})))
 
 (defn- register-method-store
   (mname key f)
@@ -1552,7 +1552,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   (%registry-update! '*methods* :assoc-new [mname key] f)
   nil)
 
-(defn register-method (mname key f from)
+(defn %register-method (mname key f from)
   "Register method `f` of multimethod `mname` for identity-tuple `key` (a vector), tagged with
   ns `from`. Derives the mirror per the declared algebra for a BINARY off-diagonal key
   (:commutative → `(f y x)`; :antisymmetric → `(- 0 (f y x))`). STRICT: the multimethod must
@@ -1605,7 +1605,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 (defmacro defmulti (mname & opts)
   "Declare multimethod `mname`, dispatching on the IDENTITY-TUPLE of its arguments: an EXACT
-  method, then a `:default` method, else a loud `no-method` error — never a nearest guess.
+  method, then a `:default` method, else a loud `%no-method` error — never a nearest guess.
   An optional algebra keyword derives each off-diagonal binary method's mirror — `:commutative`
   (`+`/`*`/`min`/`max`) or `:antisymmetric` (`compare-to`) — so a binary op is authored as the
   UPPER TRIANGLE of its type-pair matrix. See [[decisions]] ADR-179.
@@ -1619,19 +1619,19 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       (error "defmulti "
         mname ": unknown algebra " algebra " (expected :commutative, :antisymmetric, or none)"))
     (list 'do
-      (list 'register-multi (list 'quote mname) algebra)
+      (list '%register-multi (list 'quote mname) algebra)
       (list 'defn
         mname
         '(& args)
         (list 'let
           (list 'key
-            (list 'mapv 'identity-of 'args)
+            (list 'mapv '%identity-of 'args)
             'f
-            (list 'multi-resolve (list 'quote mname) 'key))
+            (list '%multi-resolve (list 'quote mname) 'key))
           (list 'if
             'f
             (list 'apply 'f 'args)
-            (list 'no-method (list 'quote mname) 'key)))))))
+            (list '%no-method (list 'quote mname) 'key)))))))
 
 (defmacro defmethod (mname pattern arglist & body)
   "Register a method of multimethod `mname` for identity `pattern` — a vector whose positions
@@ -1646,7 +1646,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
     ; the catch-all: consulted only when no exact identity-tuple matches. A keyword sentinel,
     ; not a tuple — so it is arity-agnostic and never a closure target.
     (= pattern :default)
-      (list 'register-method
+      (list '%register-method
         (list 'quote mname)
         :default
         (cons 'fn (cons arglist body))
@@ -1673,7 +1673,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
             " position(s)"))
         ; resolve each position to the id keyword a value presents (records qualified, `impl`).
         (let (key (mapv ability-id-kw pattern))
-          (list 'register-method
+          (list '%register-method
             (list 'quote mname)
             (list 'quote key)
             (cons 'fn (cons arglist body))
@@ -1746,12 +1746,12 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; `compare-to` is a multimethod (ADR-179): `:antisymmetric`, so a `[ver :int]` method
 ;; derives `[:int ver]` as its negation. STRICT like `Num` — there is NO `:default`: a record
 ;; type must define `compare-to` to be ordered (`<`/`<=`/`>`/`>=`/`sort`), else the pair is a
-;; loud `no-method` (a record is not silently ordered by its map layout). `(compare-to a b)`
+;; loud `%no-method` (a record is not silently ordered by its map layout). `(compare-to a b)`
 ;; → -1 / 0 / 1.
 (defmulti compare-to :antisymmetric)
 
 ;; Record-aware compare: a record uses its `compare-to` (a type with no `Ord` method is a loud
-;; no-method — strict), everything else the kernel `compare`. This is the comparator
+;; %no-method — strict), everything else the kernel `compare`. This is the comparator
 ;; `sort`/`sort-by` use, so an `Ord` record type orders itself while built-ins keep the native
 ;; path.
 (defn ord-compare (a b)
@@ -1764,7 +1764,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; builtins call the matching `num-*` multimethod only on their COLD fallback, when EITHER
 ;; operand is a record, so int/float arithmetic is byte-for-byte untouched. `+`/`*` are
 ;; `:commutative` (author `[usd :int]` and `[:int usd]` is derived); `-`/`/` are not. There is
-;; NO `:default` — a pair with no method gets the loud `no-method` error.
+;; NO `:default` — a pair with no method gets the loud `%no-method` error.
 (defmulti num-add :commutative)
 (defmulti num-sub)
 (defmulti num-mul :commutative)
@@ -1774,7 +1774,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through
 ;; `->string` (a `defrecord` value is the sole thing that can carry a custom impl); every
 ;; other value passes through untouched so the built-in renderer stays on the fast path
-;; — no `identity-of`/`impl-for` lookup per printed int or string. Disable for a scope
+;; — no `%identity-of`/`%impl-for` lookup per printed int or string. Disable for a scope
 ;; with `(binding (*show* nil) …)`.
 (defn- show-print-hook
   (x)

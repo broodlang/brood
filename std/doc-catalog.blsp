@@ -43,12 +43,8 @@
    "=" :math
    ">" :math
    ">=" :math
-   "ability-derive-recipe" :meta
    "ability-id-kw" :meta
-   "ability-ops" :meta
-   "ability-owner-ns" :meta
    "ability-qualify-op" :meta
-   "ability-requires" :meta
    "add-load-path!" :meta
    "and" :control
    "any?" :predicates
@@ -182,7 +178,6 @@
    "demonitor" :processes
    "denominator" :math
    "deprecation-warning" :meta
-   "derive-into" :meta
    "file/dir?" :filesystem
    "disj" :sets
    "display-width" :strings
@@ -255,15 +250,12 @@
    "has-at-least?" :predicates
    "hash-map" :maps
    "identity" :functions
-   "identity-of" :meta
    "if-let" :control
    "image-thumb" :system
    "impl" :meta
    "impl-app?" :predicates
    "impl-fn-arity" :meta
-   "impl-for" :meta
    "impl-id-owner" :meta
-   "impl-rank" :meta
    "impl-substrate?" :predicates
    "inc" :math
    "includes?" :predicates
@@ -318,12 +310,9 @@
    "mod" :math
    "module-doc" :meta
    "monitor" :processes
-   "multi-resolve" :meta
    "name" :strings
    "nan?" :predicates
    "nil?" :predicates
-   "no-impl" :meta
-   "no-method" :meta
    "not" :predicates
    "not=" :math
    "nth" :collections
@@ -388,7 +377,6 @@
    "receive-split" :processes
    "receive-tags" :processes
    "record-id" :maps
-   "record-module-doc!" :meta
    "record-register" :maps
    "record?" :predicates
    "reduce" :collections
@@ -397,19 +385,9 @@
    "ref?" :predicates
    "references-in-source" :meta
    "register" :processes
-   "register-ability" :meta
-   "register-ability-derive" :meta
-   "register-ability-requires" :meta
-   "register-impl" :meta
    "register-impl-check-arity" :meta
-   "register-method" :meta
    "register-method-derive" :meta
    "register-method-store" :meta
-   "register-multi" :meta
-   "register-package-module!" :meta
-   "register-package-modules!" :meta
-   "register-sealed" :meta
-   "registry-swap!" :meta
    "reload-defs" :meta
    "rem" :math
    "remove" :collections
@@ -436,7 +414,6 @@
    "scan-form-start-2" :meta
    "scan-source-extract" :meta
    "scan-tokens" :meta
-   "sealed-members" :meta
    "second" :collections
    "self" :processes
    "send" :processes
@@ -505,7 +482,6 @@
    "string/substring" :strings
    "string/substring-graphemes" :strings
    "subvec" :collections
-   "swap-registry!" :meta
    "symbol" :convert
    "symbol?" :predicates
    "system-monitor" :meta
@@ -535,11 +511,9 @@
    "type-matches?" :predicates
    "type-of" :convert
    "type-signature" :meta
-   "unimpl" :meta
    "unimpl-do" :meta
    "unless" :control
    "unlink" :processes
-   "unregister-impl" :meta
    "update" :maps
    "update-in" :maps
    "string/upper" :strings

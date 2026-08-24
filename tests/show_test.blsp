@@ -34,7 +34,7 @@
     (assert= (with-out-str (print (usd 500))) "$5.00")
     ;; print space-joins its args (`%render`), so a label + record reads "cost $5.00"
     (assert= (with-out-str (print "cost" (usd 500))) "cost $5.00"))
-  (test "a no-impl record still prints its raw form"
+  (test "a %no-impl record still prints its raw form"
     (is (includes? (with-out-str (println (plain 7))) ":__id__")))
   (test "built-ins render identically with the hook installed and disabled"
     ;; the hook only touches records, so every built-in arg is byte-for-byte the same

@@ -275,12 +275,9 @@ pub const SPECIAL_FORMS: &[&str] = &[
     // source. `throw`/`receive` are already above (they're in the core set).
     kw::SPAWN,
     kw::SPAWN_LINK,
-    kw::REMOTE_SPAWN,
-    kw::REMOTE_SPAWN_SYNC,
     kw::ERROR,
     kw::WITH_OUT_STR,
     kw::WITH_ERR_STR,
-    kw::BENCH,
 ];
 
 /// `(special-forms)` — the list of special-form / core-macro names (strings) that

@@ -462,7 +462,7 @@ the named escapes + every C0 control) that would each find nothing."
   (v)
   "`v`'s own `JsonEncode/->json` impl, or nil when its identity has none. `JsonEncode`
 registers no `:default`, so nil here means \"no rule\" rather than \"the fallback\"."
-  (impl-for '[JsonEncode ->json] (identity-of v)))
+  (%impl-for '[JsonEncode ->json] (%identity-of v)))
 
 (defn- emit-record
   (v acc)
