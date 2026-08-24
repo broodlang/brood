@@ -156,58 +156,15 @@
 ;; whose top bit is set exceeds the i64 range and widens to a big integer
 ;; (arithmetic auto-promotes) — read :i64 to get the raw two's complement.
 
-(defn- bytes-acc-be
-  (bs i end acc)
-  (if (>= i end) acc (bytes-acc-be bs (+ i 1) end (+ (* acc 256) (byte-at bs i)))))
 
-(defn- bytes-acc-le
-  (bs low i acc)
-  (if (< i low) acc (bytes-acc-le bs low (- i 1) (+ (* acc 256) (byte-at bs i)))))
 
-(defn- bytes-width-check
-  (who n)
-  (if (and (int? n) (>= n 1) (<= n 8))
-    n
-    (error (str who ": width must be an int in 1–8, got " (pr-str n)))))
 
-(defn bytes-uint (bs off n)
-  "Read `n` bytes (1–8) of `bs` at `off` as a big-endian unsigned integer."
-  (bytes-acc-be bs off (+ off (bytes-width-check "bytes-uint" n)) 0))
 
-(defn bytes-uint-le (bs off n)
-  "Read `n` bytes (1–8) of `bs` at `off` as a little-endian unsigned integer."
-  (bytes-acc-le bs off (+ off (- (bytes-width-check "bytes-uint-le" n) 1)) 0))
 
-(defn bytes-int (bs off n)
-  "Read `n` bytes (1–8) of `bs` at `off` as a big-endian signed (two's-complement) integer."
-  (do
-    (bytes-width-check "bytes-int" n)
-    (let (b0 (byte-at bs off))
-      (bytes-acc-be bs (+ off 1) (+ off n) (if (>= b0 128) (- b0 256) b0)))))
 
-(defn bytes-int-le (bs off n)
-  "Read `n` bytes (1–8) of `bs` at `off` as a little-endian signed (two's-complement) integer."
-  (do
-    (bytes-width-check "bytes-int-le" n)
-    (let (bt (byte-at bs (+ off (- n 1))))
-      (bytes-acc-le bs off (+ off (- n 2)) (if (>= bt 128) (- bt 256) bt)))))
 
-(defn- int->bytes-be
-  (v w acc)
-  (if (<= w 0)
-    acc
-    (int->bytes-be (bit-shift-right v 8) (- w 1) (cons (bit-and v 255) acc))))
 
-(defn int->bytes (v n)
-  "Encode integer `v` as `n` bytes (1–8), big-endian two's complement. Bits
-above `n` bytes are truncated (the bit-syntax convention), so negatives encode
-to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
-  (bytes (int->bytes-be v (bytes-width-check "int->bytes" n) nil)))
 
-(defn int->bytes-le (v n)
-  "Encode integer `v` as `n` bytes (1–8), little-endian two's complement
-(truncating, like int->bytes)."
-  (bytes (reverse (int->bytes-be v (bytes-width-check "int->bytes-le" n) nil))))
 
 ;; ---- bytes patterns: (bytes seg…) — Elixir-style binary destructuring ----
 ;; Each `seg` consumes bytes left-to-right from the target:
@@ -276,27 +233,27 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
                " (expected :u8/:i8/:u16[-be/-le]/…/:i64[-be/-le])"))
       (let (w (vector-ref spec 0)
             reader (cond
-                     (and (vector-ref spec 1) (vector-ref spec 2)) 'bytes-int-le
-                     (vector-ref spec 1) 'bytes-int
-                     (vector-ref spec 2) 'bytes-uint-le
-                     else 'bytes-uint)
+                     (and (vector-ref spec 1) (vector-ref spec 2)) 'bytes/int-le
+                     (vector-ref spec 1) 'bytes/int
+                     (vector-ref spec 2) 'bytes/uint-le
+                     else 'bytes/uint)
             noff (gensym "off"))
         (cond
           ;; (_ :u32) — skip the segment's width
           (match-wildcard? s)
-            `(if (<= (+ ~off ~w) (byte-length ~target))
+            `(if (<= (+ ~off ~w) (bytes/length ~target))
                (let (~noff (+ ~off ~w))
                  ~(match-bytes-segs more target noff bound success fail))
                ~fail)
           ;; non-linear: an already-bound binder requires an equal value
           (match-member? s bound)
-            `(if (and (<= (+ ~off ~w) (byte-length ~target))
+            `(if (and (<= (+ ~off ~w) (bytes/length ~target))
                    (%eq (~reader ~target ~off ~w) ~s))
                (let (~noff (+ ~off ~w))
                  ~(match-bytes-segs more target noff bound success fail))
                ~fail)
           else
-            `(if (<= (+ ~off ~w) (byte-length ~target))
+            `(if (<= (+ ~off ~w) (bytes/length ~target))
                (let (~s (~reader ~target ~off ~w) ~noff (+ ~off ~w))
                  ~(match-bytes-segs more target noff (append bound (list s)) success fail))
                ~fail))))))
@@ -309,11 +266,11 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 (defn- match-bytes-segs (segs target off bound success fail)
   (cond
     ;; exhausted: require the bytes were consumed exactly
-    (empty? segs) `(if (%eq ~off (byte-length ~target)) ~success ~fail)
+    (empty? segs) `(if (%eq ~off (bytes/length ~target)) ~success ~fail)
     ;; & rest — bind everything left (the tail must be exactly `& sym`)
     (= (first segs) '&)
       (if (= (count segs) 2)
-        `(let (~(second segs) (subbytes ~target ~off)) ~success)
+        `(let (~(second segs) (bytes/slice ~target ~off)) ~success)
         (error "match: bytes pattern '&' must be followed by exactly one rest binding"))
     else (match-bytes-seg (first segs) (rest segs) target off bound success fail)))
 
@@ -328,10 +285,10 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
       (pair? seg)
         (let (s (first seg) szv (gensym "sz"))
           `(let (~szv ~(second seg))
-             (if (and (>= ~szv 0) (<= (+ ~off ~szv) (byte-length ~target)))
+             (if (and (>= ~szv 0) (<= (+ ~off ~szv) (bytes/length ~target)))
                (let (~@(if (match-wildcard? s)
                          []
-                         (list s `(subbytes ~target ~off (+ ~off ~szv)))) ~noff
+                         (list s `(bytes/slice ~target ~off (+ ~off ~szv)))) ~noff
                      (+ ~off ~szv))
                  ~(match-bytes-segs more
                     target
@@ -342,7 +299,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
                ~fail)))
       ;; _ — skip one byte
       (match-wildcard? seg)
-        `(if (< ~off (byte-length ~target))
+        `(if (< ~off (bytes/length ~target))
            (let (~noff (+ ~off 1))
              ~(match-bytes-segs more target noff bound success fail))
            ~fail)
@@ -350,13 +307,13 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
       ;; non-linear patterns, consistent with the vector/list matchers)
       (match-bind-sym? seg)
         (if (match-member? seg bound)
-          `(if (and (< ~off (byte-length ~target))
-                 (%eq (byte-at ~target ~off) ~seg))
+          `(if (and (< ~off (bytes/length ~target))
+                 (%eq (bytes/at ~target ~off) ~seg))
              (let (~noff (+ ~off 1))
                ~(match-bytes-segs more target noff bound success fail))
              ~fail)
-          `(if (< ~off (byte-length ~target))
-             (let (~seg (byte-at ~target ~off) ~noff (+ ~off 1))
+          `(if (< ~off (bytes/length ~target))
+             (let (~seg (bytes/at ~target ~off) ~noff (+ ~off 1))
                ~(match-bytes-segs more
                   target
                   noff
@@ -366,15 +323,15 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
              ~fail))
       ;; #b"…" literal — match those exact bytes (count known at expand time)
       (bytes? seg)
-        (let (n (byte-length seg))
-          `(if (and (<= (+ ~off ~n) (byte-length ~target))
-                 (%eq (subbytes ~target ~off (+ ~off ~n)) ~seg))
+        (let (n (bytes/length seg))
+          `(if (and (<= (+ ~off ~n) (bytes/length ~target))
+                 (%eq (bytes/slice ~target ~off (+ ~off ~n)) ~seg))
              (let (~noff (+ ~off ~n))
                ~(match-bytes-segs more target noff bound success fail))
              ~fail))
       ;; int literal — match one exact byte
       (int? seg)
-        `(if (and (< ~off (byte-length ~target)) (%eq (byte-at ~target ~off) ~seg))
+        `(if (and (< ~off (bytes/length ~target)) (%eq (bytes/at ~target ~off) ~seg))
            (let (~noff (+ ~off 1)) ~(match-bytes-segs more target noff bound success fail))
            ~fail)
       else (error (str "match: invalid bytes-pattern segment " (pr-str seg))))))

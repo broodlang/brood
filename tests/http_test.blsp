@@ -26,24 +26,24 @@
     (let (r (parse-request "GET / HTTP/1.0"))
       (assert= (get r :method) "GET")
       (assert= (get r :path) "/")
-      (assert= (byte-length (get r :body)) 0))))
+      (assert= (bytes/length (get r :body)) 0))))
 
 (describe "http: response rendering"
   (test "status line, Content-Length, and body (render-response is an iolist — ADR-139)"
-    (let (s (utf8-bytes->string (bytes-concat (render-response (ok "<p>hi</p>")))))
+    (let (s (utf8-bytes->string (bytes/concat (render-response (ok "<p>hi</p>")))))
       (is (includes? s "HTTP/1.0 200 OK"))
       (is (includes? s "Content-Length: 9"))
       (is (includes? s "\r\n\r\n<p>hi</p>"))))
   (test "Content-Length is the body's BYTE count, not codepoints (the UTF-8 bug)"
     ;; "héllo ☃" = 7 codepoints, 10 UTF-8 bytes — the old string-length render
     ;; said 7 and spec-honoring clients truncated the body.
-    (let (s (utf8-bytes->string (bytes-concat (render-response (text-response "héllo ☃"))))
-          b (bytes-concat (render-response {:status 200 :body (bytes 1 2 3)})))
+    (let (s (utf8-bytes->string (bytes/concat (render-response (text-response "héllo ☃"))))
+          b (bytes/concat (render-response {:status 200 :body (bytes 1 2 3)})))
       (is (includes? s "Content-Length: 10"))
       ;; a binary bytes body rides the plain-response path verbatim
-      (is (= (match b ((bytes _ & r) (subbytes b (- (count b) 3))) (_ :no)) (bytes 1 2 3)))))
+      (is (= (match b ((bytes _ & r) (bytes/slice b (- (count b) 3))) (_ :no)) (bytes 1 2 3)))))
   (test "not-found renders a 404"
-    (is (includes? (utf8-bytes->string (bytes-concat (render-response (not-found))))
+    (is (includes? (utf8-bytes->string (bytes/concat (render-response (not-found))))
           "404 Not Found"))))
 
 (describe "http: content-length parsing is integer-safe"
@@ -83,7 +83,7 @@
 
 (describe "http: streaming responses (the connection-handoff seam)"
   (test "render-head emits the status line + custom headers, no Content-Length"
-    (let (h (utf8-bytes->string (bytes-concat (render-head 200 {"Content-Type" "text/event-stream"}))))
+    (let (h (utf8-bytes->string (bytes/concat (render-head 200 {"Content-Type" "text/event-stream"}))))
       (is (includes? h "HTTP/1.0 200 OK"))
       (is (includes? h "Content-Type: text/event-stream"))
       (is (includes? h "\r\n\r\n"))
@@ -185,7 +185,7 @@
       (is (bytes? (get r :body)))
       (assert= (body-text r) "hi there")))
   (test "parse-response takes wire bytes and keeps a binary body byte-faithful"
-    (let (r (parse-response (bytes-concat ["HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
+    (let (r (parse-response (bytes/concat ["HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
                                             (bytes 255
                                               0 128)])))
       (assert= (get r :status) 200)
@@ -243,7 +243,7 @@
             ;; echo the body's bytes back as text so the client can verify
             (serve-loop ls
               (fn (req)
-                (text-response (pr-str (into [] (bytes->list (get req :body))))))))))
+                (text-response (pr-str (into [] (bytes/->list (get req :body))))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp/connect "127.0.0.1" port))
           ;; raw body bytes 0xFF 0x80 0x41 ride as a `bytes` leaf in the request
@@ -390,13 +390,13 @@
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp/connect "127.0.0.1" port)
               ;; 70 KiB of header-ish bytes, never a blank line
-              junk (bytes-concat (map (fn (_) "X-Junk: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n")
+              junk (bytes/concat (map (fn (_) "X-Junk: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n")
                                    (range 0 1750))))
           (tcp/send c ["GET / HTTP/1.0\r\n" junk])
           ;; the server gives up and closes without ever responding
           (let (got (drain c))
             (tcp/close c)
-            (assert= (byte-length got) 0)))))))
+            (assert= (bytes/length got) 0)))))))
 
 (describe "http: a binary RESPONSE body survives byte-faithfully (client side)"
   ;; The client reads in binary mode (ADR-141), so a response body that isn't
@@ -437,7 +437,7 @@
                  (send me [:port (tcp/local-port ls)])
                  (serve-loop ls
                    (fn (req)
-                     (text-response (pr-str (into [] (bytes->list (get req :body))))))))))
+                     (text-response (pr-str (into [] (bytes/->list (get req :body))))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (post (str "http://127.0.0.1:" port "/up") (bytes 0 255 7)))
           (assert= (get resp :status) 200)

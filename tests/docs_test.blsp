@@ -174,8 +174,12 @@
                     (keys doc-catalog/*catalog*)))
       ;; Names, not just a count — a failure should say WHICH entry to remove.
       (assert= (sort missing) (list))))
+  ;; A floor, not a target: the check above is vacuous against an empty/failed-to-load
+  ;; catalogue, so this only has to be large enough that a broken load cannot pass it.
+  ;; It sat at 500 while the catalogue covered a 613-name core; the namespace waves moved
+  ;; most of those out (they are catalogued by their module now), so 400 is the new floor.
   (test "the catalogue is not empty (a broken load would vacuously pass the check above)"
-    (is (> (count (keys doc-catalog/*catalog*)) 500))))
+    (is (> (count (keys doc-catalog/*catalog*)) 400))))
 
 ;; ...and the other direction: every public core name must HAVE a category.
 ;;

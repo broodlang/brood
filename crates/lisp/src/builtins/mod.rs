@@ -1029,7 +1029,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         bytes_make);
     def(
         heap,
-        "byte-length",
+        "%byte-length",
         Arity::exact(1),
         Sig::new(vec![bytes_ty], int),
         &["b"],
@@ -1038,7 +1038,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "byte-at",
+        "%byte-at",
         Arity::exact(2),
         Sig::new(vec![bytes_ty, int], int),
         &["b", "i"],
@@ -1047,7 +1047,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "subbytes",
+        "%subbytes",
         Arity::range(2, 3),
         Sig::variadic(any, bytes_ty),
         &["b", "start", "&optional", "end"],
@@ -1055,7 +1055,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         subbytes);
     def(
         heap,
-        "bytes-concat",
+        "%bytes-concat",
         Arity::any(),
         Sig::variadic(iolist, bytes_ty),
         &["&", "iolists"],
@@ -1067,7 +1067,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // prims were removed (they did the identical UTF-8 encode/decode).
     def(
         heap,
-        "bytes->list",
+        "%bytes->list",
         Arity::exact(1),
         Sig::new(vec![bytes_ty], pair),
         &["b"],
@@ -1076,7 +1076,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "bytes-index-of",
+        "%bytes-index-of",
         Arity::range(2, 3),
         Sig::new(vec![bytes_ty, bytes_ty], int),
         &["haystack", "needle", "&optional", "from"],
@@ -2555,7 +2555,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         spit_bytes);
     def(
         heap,
-        "append-bytes",
+        "%append-bytes",
         Arity::exact(2),
         Sig::new(vec![string, any], nil_ty),
         &["path", "bytes"],

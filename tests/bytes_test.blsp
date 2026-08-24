@@ -23,13 +23,13 @@
 (describe "bytes: sequence protocol"
   (test "count / byte-length"
     (is (= (count (bytes 1 2 3)) 3))
-    (is (= (byte-length #b"hello") 5))
+    (is (= (bytes/length #b"hello") 5))
     (is (= (count #b"") 0)))
   (test "nth / get / byte-at yield ints 0–255"
     (let (b (bytes 10 20 30))
       (is (= (nth b 0) 10))
       (is (= (get b 2) 30))
-      (is (= (byte-at b 1) 20))
+      (is (= (bytes/at b 1) 20))
       (is (= (nth b 9 :none) :none))))
   (test "first / rest / empty?"
     (is (= (first (bytes 7 8 9)) 7))
@@ -40,18 +40,18 @@
 
 (describe "bytes: slicing, concat, conversions"
   (test "subbytes"
-    (is (= (subbytes #b"hello" 1 3) #b"el"))
-    (is (= (subbytes #b"hello" 2) #b"llo")))
+    (is (= (bytes/slice #b"hello" 1 3) #b"el"))
+    (is (= (bytes/slice #b"hello" 2) #b"llo")))
   (test "bytes-concat (literals and constructed)"
-    (is (= (bytes-concat #b"ab" (bytes 67) #b"\xff") #b"abC\xff"))
-    (is (= (bytes-concat) #b"")))
+    (is (= (bytes/concat #b"ab" (bytes 67) #b"\xff") #b"abC\xff"))
+    (is (= (bytes/concat) #b"")))
   (test "string<->bytes is UTF-8"
     (is (= (string->utf8-bytes "AB") #b"AB"))
     (is (= (string->utf8-bytes "é") #b"\xc3\xa9"))
     (is (= (utf8-bytes->string #b"\xc3\xa9") "é"))
     (is (= (utf8-bytes->string (string->utf8-bytes "round-trip ✓")) "round-trip ✓")))
   (test "bytes->list"
-    (is (= (bytes->list (bytes 1 2 3)) (list 1 2 3)))))
+    (is (= (bytes/->list (bytes 1 2 3)) (list 1 2 3)))))
 
 ; #b"k" and (bytes 107) are equal keys
 (describe "bytes: equality + hashing"
@@ -74,11 +74,11 @@
       (is (= (nth xs 0) (mk 0)))
       (is (= (nth xs 500) (mk 500)))
       (is (= (nth xs 999) (mk 999)))
-      (is (= (byte-at (nth xs 999) 2) 255))))
+      (is (= (bytes/at (nth xs 999) 2) 255))))
   (test "a promoted (global) bytes survives collection"
     (dev/gc-collect)
     (is (= *global-bytes* (bytes 1 2 3 255)))
-    (is (= (byte-length *global-bytes*) 4))))
+    (is (= (bytes/length *global-bytes*) 4))))
 
 (describe "bytes: pattern matching (Elixir-style binary destructuring)"
   (test "literal pattern matches by content"
@@ -129,16 +129,16 @@
     (is (= (match (bytes 255 254) ((bytes (x :i16)) x) (_ :no)) -2))
     (is (= (match (bytes 254 255) ((bytes (x :i16-le)) x) (_ :no)) -2)))
   (test "64-bit segments round-trip through int->bytes"
-    (is (= (match (int->bytes 123456789012345 8) ((bytes (x :u64)) x) (_ :no))
+    (is (= (match (bytes/int-> 123456789012345 8) ((bytes (x :u64)) x) (_ :no))
           123456789012345))
-    (is (= (match (int->bytes -5 8) ((bytes (x :i64)) x) (_ :no)) -5)))
+    (is (= (match (bytes/int-> -5 8) ((bytes (x :i64)) x) (_ :no)) -5)))
   (test "length is enforced — too-short or unconsumed bytes fall through"
     (is (= (match (bytes 1) ((bytes (x :u16)) x) (_ :short)) :short))
     (is (= (match (bytes 1 2 3) ((bytes (x :u16)) x) (_ :inexact)) :inexact)))
   (test "(_ :u32) skips the segment's width"
     (is (= (match (bytes 9 9 9 9 7) ((bytes (_ :u32) x) x) (_ :no)) 7)))
   (test "a typed length prefix drives a sized segment (TLV with :u16 length)"
-    (is (= (match (bytes-concat [(int->bytes 3 2) #b"ABC" (bytes 9)])
+    (is (= (match (bytes/concat [(bytes/int-> 3 2) #b"ABC" (bytes 9)])
              ((bytes (len :u16) (body len) & rest) [len (utf8-bytes->string body) rest])
              (_ :no))
           [3 "ABC" (bytes 9)])))
@@ -146,7 +146,7 @@
     (is (= (match (bytes 0 5 0 5) ((bytes (a :u16) (a :u16)) :equal) (_ :diff)) :equal))
     (is (= (match (bytes 0 5 0 6) ((bytes (a :u16) (a :u16)) :equal) (_ :diff)) :diff)))
   (test "mixes with literals, one-byte binders, and & rest — a mini frame header"
-    (is (= (match (bytes-concat [(bytes 127 2) (int->bytes 5 2) #b"hello" #b"!"])
+    (is (= (match (bytes/concat [(bytes 127 2) (bytes/int-> 5 2) #b"hello" #b"!"])
              ((bytes 127 kind (len :u16) (payload len) & more) [kind
                                                                  len
                                                                  (utf8-bytes->string payload)
@@ -161,31 +161,31 @@
 
 (describe "bytes: integer decode/encode helpers"
   (test "bytes-uint / bytes-int read at offsets, both endians"
-    (is (= (bytes-uint (bytes 1 2 3 4) 1 2) 515))
-    (is (= (bytes-uint-le (bytes 1 2 3 4) 1 2) 770))
-    (is (= (bytes-int (bytes 0 255) 1 1) -1))
-    (is (= (bytes-int-le (bytes 254 255) 0 2) -2)))
+    (is (= (bytes/uint (bytes 1 2 3 4) 1 2) 515))
+    (is (= (bytes/uint-le (bytes 1 2 3 4) 1 2) 770))
+    (is (= (bytes/int (bytes 0 255) 1 1) -1))
+    (is (= (bytes/int-le (bytes 254 255) 0 2) -2)))
   (test "int->bytes round-trips, both endians"
-    (is (= (int->bytes 258 2) (bytes 1 2)))
-    (is (= (int->bytes-le 258 2) (bytes 2 1)))
-    (is (= (int->bytes -1 2) (bytes 255 255)))
-    (is (= (bytes-int (int->bytes -123456 4) 0 4) -123456))
-    (is (= (bytes-uint-le (int->bytes-le 987654321 5) 0 5) 987654321)))
+    (is (= (bytes/int-> 258 2) (bytes 1 2)))
+    (is (= (bytes/int-le-> 258 2) (bytes 2 1)))
+    (is (= (bytes/int-> -1 2) (bytes 255 255)))
+    (is (= (bytes/int (bytes/int-> -123456 4) 0 4) -123456))
+    (is (= (bytes/uint-le (bytes/int-le-> 987654321 5) 0 5) 987654321)))
   (test "encoding truncates to the width (the bit-syntax convention)"
-    (is (= (int->bytes 256 1) (bytes 0)))
-    (is (= (int->bytes 511 1) (bytes 255))))
+    (is (= (bytes/int-> 256 1) (bytes 0)))
+    (is (= (bytes/int-> 511 1) (bytes 255))))
   (test "width outside 1–8 is a clean error"
-    (is (= (try (bytes-uint (bytes 1) 0 0) (catch e :bad-width)) :bad-width))
-    (is (= (try (int->bytes 1 9) (catch e :bad-width)) :bad-width)))
+    (is (= (try (bytes/uint (bytes 1) 0 0) (catch e :bad-width)) :bad-width))
+    (is (= (try (bytes/int-> 1 9) (catch e :bad-width)) :bad-width)))
   (test "a :u64 read past the i64 range widens to a big integer (Erlang parity)"
-    (is (= (bytes-uint (bytes 255 0 0 0 0 0 0 0) 0 8) 18374686479671623680))
+    (is (= (bytes/uint (bytes 255 0 0 0 0 0 0 0) 0 8) 18374686479671623680))
     (is (= (match (bytes 255 255 255 255 255 255 255 255) ((bytes (x :u64)) x) (_ :no))
           18446744073709551615)))
   (test "typed reads cross processes — parse in a worker, send the fields home"
     (let (parent (self))
       (spawn (fn ()
                (send parent
-                 (match (bytes-concat [(int->bytes 7 2) #b"payload"])
+                 (match (bytes/concat [(bytes/int-> 7 2) #b"payload"])
                    ((bytes (n :u16) & body) [n (utf8-bytes->string body)])
                    (_ :no)))))
       (is (= (receive (m m)) [7 "payload"])))))
@@ -193,18 +193,18 @@
 ;; ---- iolists (ADR-139): nested trees flattened once at the write boundary ----
 (describe "iolists"
   (test "bytes-concat flattens nesting, strings (UTF-8), bytes, and byte ints"
-    (is (= (bytes-concat ["ab" ["cd" nil "e"] (bytes 102) 103])
+    (is (= (bytes/concat ["ab" ["cd" nil "e"] (bytes 102) 103])
           #b"abcdefg"))
-    (is (= (bytes-concat "x" [(bytes 121)] [[122]]) #b"xyz")))
+    (is (= (bytes/concat "x" [(bytes 121)] [[122]]) #b"xyz")))
   (test "empty iolists yield empty bytes"
-    (is (= (bytes-concat) #b""))
-    (is (= (bytes-concat nil [] [nil [nil]]) #b"")))
+    (is (= (bytes/concat) #b""))
+    (is (= (bytes/concat nil [] [nil [nil]]) #b"")))
   (test "an improper tail is a final leaf (Erlang iolist parity)"
-    (is (= (bytes-concat (cons "x" "y")) #b"xy")))
+    (is (= (bytes/concat (cons "x" "y")) #b"xy")))
   (test "a non-leaf value is rejected"
-    (is (= (try (bytes-concat [1.5]) (catch e :rejected)) :rejected))
-    (is (= (try (bytes-concat [999]) (catch e :rejected)) :rejected))
-    (is (= (try (bytes-concat [:kw]) (catch e :rejected)) :rejected)))
+    (is (= (try (bytes/concat [1.5]) (catch e :rejected)) :rejected))
+    (is (= (try (bytes/concat [999]) (catch e :rejected)) :rejected))
+    (is (= (try (bytes/concat [:kw]) (catch e :rejected)) :rejected)))
   (test "spit/slurp round-trips an iolist tree; spit-append appends one"
     (let (path (str "/tmp/brood-iolist-" (rand/token 8) ".txt"))
       (file/spit path ["a" ["b" nil "c"] (bytes 100) 101])
@@ -213,7 +213,7 @@
       (is (= (file/slurp path) "abcde:xy"))
       (file/spit-bytes path ["A" [66] (bytes 67)])
       (is (= (file/slurp-bytes path) #b"ABC"))
-      (append-bytes path [[68] "E"])
+      (bytes/append path [[68] "E"])
       (is (= (file/slurp-bytes path) #b"ABCDE"))
       (file/rm path)))
   (test "deep nesting flattens (and survives the heap walkers)"
@@ -222,4 +222,4 @@
     ;; kernel's promote/GC/equal/hash walkers survive this depth too — see
     ;; tests/deep_values_test.blsp for the dedicated coverage.
     (let (deep (fold (fn (acc _) (list acc)) (list "x") (range 40000)))
-      (is (= (bytes-concat deep) #b"x")))))
+      (is (= (bytes/concat deep) #b"x")))))

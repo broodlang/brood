@@ -49,7 +49,6 @@
    "and" :control
    "any?" :predicates
    "append" :collections
-   "append-bytes" :bytes
    "append-empty?" :predicates
    "append-onto" :collections
    "apply" :functions
@@ -79,19 +78,7 @@
    "build-id" :meta
    "builtin-modules" :meta
    "but-last" :collections
-   "byte-at" :bytes
-   "byte-length" :bytes
    "bytes" :bytes
-   "bytes->list" :bytes
-   "bytes-acc-be" :bytes
-   "bytes-acc-le" :bytes
-   "bytes-concat" :bytes
-   "bytes-index-of" :bytes
-   "bytes-int" :bytes
-   "bytes-int-le" :bytes
-   "bytes-uint" :bytes
-   "bytes-uint-le" :bytes
-   "bytes-width-check" :bytes
    "bytes?" :predicates
    "string/capitalize" :strings
    "case" :control
@@ -255,9 +242,6 @@
    "infinite?" :predicates
    "inspect" :io
    "inspectln" :io
-   "int->bytes" :bytes
-   "int->bytes-be" :bytes
-   "int->bytes-le" :bytes
    "int->char" :strings
    "int?" :predicates
    "into" :collections
@@ -457,7 +441,6 @@
    "string/span-until" :strings
    "string/split" :strings
    "string?" :predicates
-   "subbytes" :bytes
    "string/substring" :strings
    "string/substring-graphemes" :strings
    "subvec" :collections
