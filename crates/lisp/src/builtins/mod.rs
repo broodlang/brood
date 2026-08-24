@@ -1003,7 +1003,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "string->utf8-bytes",
+        "%string->utf8-bytes",
         Arity::exact(1),
         Sig::new(vec![string], bytes_ty),
         &["s"],
@@ -1012,7 +1012,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "utf8-bytes->string",
+        "%utf8-bytes->string",
         Arity::exact(1),
         Sig::new(vec![bytes_ty], string),
         &["bytes"],

@@ -408,7 +408,6 @@
    "string/->list" :strings
    "string->number" :convert
    "string->symbol" :strings
-   "string->utf8-bytes" :bytes
    "string/length" :strings
    "string/normalize" :strings
    "string/repeat" :strings
@@ -443,7 +442,6 @@
    "update" :maps
    "update-in" :maps
    "string/upper" :strings
-   "utf8-bytes->string" :bytes
    "vals" :maps
    "vec" :convert
    "vector" :collections

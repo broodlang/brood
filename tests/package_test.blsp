@@ -509,7 +509,7 @@
 ;; checksum — the same bytes package-signing-payload builds), from a fresh keypair.
 (defn mock-sign (nm version checksum)
   (let (kp (crypto/keypair)
-        payload (string->utf8-bytes (str nm "\n" version "\n" checksum)))
+        payload (string/->bytes (str nm "\n" version "\n" checksum)))
     [(encoding/hex-encode-bytes (crypto/sign (get kp :private) payload))
       (encoding/hex-encode-bytes (get kp :public))]))
 
@@ -619,7 +619,7 @@
           ;; a syntactically-valid but WRONG signature (a fresh key over the wrong message)
           [_sig pubkey] (mock-sign "sigbad" "1.0.0" checksum)
           bad-sig (encoding/hex-encode-bytes (crypto/sign (get (crypto/keypair) :private)
-                                               (string->utf8-bytes "not the checksum")))
+                                               (string/->bytes "not the checksum")))
           base (mock-registry-start (mock-registry-handler-signed "sigbad"
                                       "1.0.0" checksum bytes bad-sig pubkey)))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")

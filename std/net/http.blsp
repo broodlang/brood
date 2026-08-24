@@ -106,7 +106,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
         marker (if (nil? head) -1 (bytes/index-of head #b"\r\n\r\n")))
     (if (< marker 0)
       nil
-      (let (clen (http-declared-length (utf8-bytes->string (bytes/slice head 0 marker))))
+      (let (clen (http-declared-length (string/bytes-> (bytes/slice head 0 marker))))
         (if (= clen 0)
           head
           ;; `head` already holds everything read so far (incl. any body bytes in
@@ -171,13 +171,13 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   is ASCII and decoded to strings; `:body` is a `bytes` value (raw — decode it with
   `utf8-bytes->string` for a text/form body). A string `raw` is accepted too (encoded to
   bytes first), so `(parse-request \"GET /…\")` still works."
-  (let (raw (if (string? raw) (string->utf8-bytes raw) raw)
+  (let (raw (if (string? raw) (string/->bytes raw) raw)
         marker (bytes/index-of raw #b"\r\n\r\n")
         ;; No blank-line terminator (a bare request line, or truncated): the
         ;; whole thing is the head and the body is empty — never `(subbytes raw
         ;; 0 -1)`, which throws. Mirrors `parse-response`'s guard.
         head-end (if (< marker 0) (bytes/length raw) marker)
-        head (utf8-bytes->string (bytes/slice raw 0 head-end))
+        head (string/bytes-> (bytes/slice raw 0 head-end))
         body (if (< marker 0) #b"" (bytes/slice raw (+ marker 4) (bytes/length raw)))
         lines (string/split head "\r\n")
         req (string/split (first lines) " "))
@@ -410,10 +410,10 @@ place — `url/parse-url` (the full parser); a scheme-less input is treated as a
 too) into a `response` record: the head is decoded to strings (`:headers`
 keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
 `(body-text resp)` when you know it is text."
-  (let (raw (if (string? raw) (string->utf8-bytes raw) raw)
+  (let (raw (if (string? raw) (string/->bytes raw) raw)
         marker (bytes/index-of raw #b"\r\n\r\n")
         head-end (if (< marker 0) (bytes/length raw) marker)
-        head (utf8-bytes->string (bytes/slice raw 0 head-end))
+        head (string/bytes-> (bytes/slice raw 0 head-end))
         body (if (< marker 0) #b"" (bytes/slice raw (+ marker 4) (bytes/length raw)))
         lines (string/split head "\r\n")
         status (string/split (first lines) " "))
@@ -429,7 +429,7 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
     (cond
       (nil? b) ""
       (string? b) b
-      else (utf8-bytes->string b))))
+      else (string/bytes-> b))))
 
 ;; The size of one response chunk in bytes — plaintext chunks are `bytes`, TLS
 ;; chunks are strings (both land byte-faithfully through the iolist `bytes-concat`

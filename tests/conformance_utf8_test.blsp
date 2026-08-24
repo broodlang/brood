@@ -23,7 +23,7 @@
 (defn- u8-decodes?
   (hex)
   "true if `hex` decodes as UTF-8, false if it is rejected."
-  (try (do (utf8-bytes->string (u8-bytes hex)) true) (catch e false)))
+  (try (do (string/bytes-> (u8-bytes hex)) true) (catch e false)))
 
 ;; Every sequence in `hexes` must be rejected; returns the offenders.
 (defn- u8-accepted (hexes) (filter u8-decodes? hexes))
@@ -172,5 +172,5 @@
   (test "round-trip: decode then encode is identity on the bytes"
     (dolist (hex (list "00"
                    "7F" "C280" "DFBF" "E0A080" "EFBFBF" "F0908080" "F48FBFBF" "EFBFBE"))
-      (assert= (string->utf8-bytes (utf8-bytes->string (u8-bytes hex)))
+      (assert= (string/->bytes (string/bytes-> (u8-bytes hex)))
         (u8-bytes hex)))))
