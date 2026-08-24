@@ -569,8 +569,8 @@ Returns the new pid, or `:not-found`. Synchronous."
     (send sup [:restart-child key (self) r])
     (receive ([:reply ^r v] v))))
 
-(defn stop (sup)
-  "Stop the supervisor `sup`: it leaves its receive loop and terminates each of its
-children (per their `:shutdown`), so nothing is left orphaned. Fire-and-forget —
-returns nil immediately; the teardown happens in the supervisor process."
-  (send sup [:$stop]))
+;; No `stop` here: a supervisor is an ordinary server process and answers the SAME
+;; `[:$stop]` message the core `stop` sends, so `(stop sup)` already tears it down
+;; (children first, per their `:shutdown`). The wrapper this replaces was
+;; `(send sup [:$stop])` verbatim — a duplicate whose only effect was to shadow the
+;; core `stop` for anyone writing `(:use supervisor)`.

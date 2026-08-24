@@ -16051,3 +16051,43 @@ cross-file names, and the discipline that a *new* CST wrapper kind must be added
 `codemod`'s sigil table — which raises a loud error rather than silently dropping source
 text, the failure that `~@` (kind `:splice`, not the guessed `:unquote-splice`) produced
 across 24 files before the round-trip check caught it.
+
+## ADR-241 — A library name may shadow a core name only if the module is used qualified
+
+**Context.** Making `gen` core (its client verbs `call`/`cast`/`stop` are bare prelude
+names now) turned a latent question into a live one: fourteen library exports across the
+ecosystem shadowed a core name, so `(:use that-module)` silently cost the importer the core
+binding. The blanket reading of "a library must not clash with core" would rename all
+fourteen — including `wasm/call`, `version/compare` and `log/error`, whose names are exactly
+right in their own domain and whose qualified form is what everyone actually writes.
+
+**Decision.** The test is **"would a reasonable caller write `(:use this)`?"**, not "does the
+name collide?". In priority order:
+
+1. **Duplicate → delete it.** If the clashing member does what core already does, remove it.
+   `supervisor/stop` was `(send sup [:$stop])` and core `stop` is `(send pid [:$stop])` — the
+   same message, because a supervisor *is* a server process. `config/last-index-of` was an
+   exact reimplementation of the prelude's. Confirm by running it, not by reading it: the
+   supervisor case was verified by starting one, calling core `stop`, and watching it leave
+   `proc/list`.
+2. **A module meant to be `:use`d bare → rename the member.** A DSL you pipe through
+   (`changeset`, `accounts`) has to stay clash-free: `changeset/cast` → `permit` (which is
+   also the better name — it is Rails' strong-parameters allowlist, not a conversion),
+   `accounts/register` → `sign-up` (core `register` is process-name registration).
+3. **A module meant to be used qualified → keep the name.** `wasm/call`, `wasm/load`,
+   `version/compare`, `version/satisfies?`, `log/error`, `package/update` all read correctly
+   qualified, and renaming them would make the common (qualified) call site worse to serve a
+   rare bare import. The shadow warning already tells that importer to `:exclude` or use
+   `/name`. Note `version/compare` is emphatically *not* redundant with core `compare`, which
+   gets every version case wrong lexicographically (`"1.10.0" < "1.9.0"`, `"1.2" ≠ "1.2.0"`).
+4. **Shadowing a core name from inside your own module → reach core as `/name`.**
+   `hatch/http/server` defines its own `stop (port)`, so a bare `(stop sup)` there called
+   *itself* with a pid and silently failed to tear the supervisor down — caught by its test.
+   The call sites are now `(/stop sup)`, annotated with why.
+
+**Consequences.** The ecosystem is clash-free where it matters and unchanged where the
+qualified name is the point. A deliberate shadow is still allowed (the `shdprov` test fixture
+shadows `inc` on purpose, to test shadowing). Two workarounds retire: `bedit`'s
+`(:use supervisor :exclude [stop])` and four `(:use wire/bytes :exclude [byte-at])` in
+store-postgres, the latter replaced by renaming that genuinely-different extension
+(`byte-at` accepts a byte-string as well as `bytes`) to `octet-at`.
