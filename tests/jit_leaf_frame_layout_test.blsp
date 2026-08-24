@@ -65,7 +65,7 @@
     ;; catches it: every length must agree with the closed form. Sub-100k lengths were
     ;; already correct before the fix, which is exactly why the suite missed this.
     (is (= (list 500500 50005000 5000050000 20000100000)
-           (map (fn (n) (sum-down n 0)) (list 1000 10000 100000 200000)))))
+          (map (fn (n) (sum-down n 0)) (list 1000 10000 100000 200000)))))
 
   (test "std/repeat, which is this shape, builds the full sequence"
     ;; `repeat-acc` in std/prelude/seq.blsp is `(repeat-acc (dec n) x (cons x acc))` —

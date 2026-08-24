@@ -103,9 +103,9 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
   (node point)
   "The deepest container node strictly containing `point`; `node` if none."
   (let (hit (seq/find (fn (k)
-                    (and (ts-container? k)
-                      (< (get k :start) point)
-                      (< point (get k :end))))
+                        (and (ts-container? k)
+                          (< (get k :start) point)
+                          (< point (get k :end))))
               (or (get node :kids) [])))
     (if (nil? hit) node (ts-enclosing hit point))))
 
@@ -175,9 +175,9 @@ if none."
     "The containers strictly enclosing `point` below `node`, outermost first — each a
   container that contains the next. `()` at the leaf."
     (let (hit (seq/find (fn (k)
-                      (and (ts-container? k)
-                        (< (get k :start) point)
-                        (< point (get k :end))))
+                          (and (ts-container? k)
+                            (< (get k :start) point)
+                            (< point (get k :end))))
                 (or (get node :kids) [])))
       (if (nil? hit) () (cons hit (ts-chain-rest hit point))))))
 

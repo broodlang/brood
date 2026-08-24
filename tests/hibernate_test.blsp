@@ -18,6 +18,7 @@
 
   (test "a hibernated process still answers messages"
     (let (me (self)
-          worker (spawn (receive ([:go n] (do (proc/hibernate) (send me [:sum (fold + 0 (range n))]))))))
+          worker (spawn (receive
+                          ([:go n] (do (proc/hibernate) (send me [:sum (fold + 0 (range n))]))))))
       (send worker [:go 100])
       (assert= (receive ([:sum v] v)) 4950))))

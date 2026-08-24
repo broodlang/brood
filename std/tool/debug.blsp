@@ -344,9 +344,9 @@ was attempted."
 (defn observations (dbg)
   "Every `spy` node observation, flattened to `{:pid :form :value}`."
   (seq/keep (fn (e)
-          (let (entry (get e :entry))
-            (when (= (get entry :spy) :node)
-              {:pid (get e :pid) :form (get entry :form) :value (get entry :value)})))
+              (let (entry (get e :entry))
+                (when (= (get entry :spy) :node)
+                  {:pid (get e :pid) :form (get entry :form) :value (get entry :value)})))
     (trace-entries dbg)))
 
 (defn hits (dbg)

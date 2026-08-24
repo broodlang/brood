@@ -612,7 +612,8 @@ the test rather than hanging the run."
 ;; and the shard assigner walk.
 (defn- test-all-tests
   (units)
-  (fold (fn (acc unit) (append acc (map (fn (t) (list (second unit) t)) (seq/third unit)))) nil units))
+  (fold (fn (acc unit) (append acc (map (fn (t) (list (second unit) t)) (seq/third unit))))
+    nil units))
 
 ;; Resolve one FILE:LINE selector to the exact declared line of the test it
 ;; addresses: the LAST test in that file declared at or before LINE. So pointing

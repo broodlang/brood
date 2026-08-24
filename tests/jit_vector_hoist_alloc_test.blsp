@@ -48,9 +48,9 @@
 (defn vh-loop (v t i n acc)
   (if (>= i n)
     acc
-    (let (k (bit-and i 1)      ; slot-held index: 0, 1, 0, 1, …
-          e (nth v k)          ; hoisted element read (the bug's site)
-          g (table/get t 0)    ; compound value → reconstruction → LOCAL allocation
+    (let (k (bit-and i 1) ; slot-held index: 0, 1, 0, 1, …
+          e (nth v k) ; hoisted element read (the bug's site)
+          g (table/get t 0) ; compound value → reconstruction → LOCAL allocation
           gv (nth g 0))
       (vh-loop v t (+ i 1) n (+ acc (+ e gv))))))
 
@@ -67,9 +67,9 @@
 
 (describe "the JIT vector-base hoist must not survive an allocating instruction"
   (test "an invariant vector read beside a table/get stays correct"
-    (let (v [10 20]                      ; 2 elements → VecStore::Inline, in the slab slot
+    (let (v [10 20] ; 2 elements → VecStore::Inline, in the slab slot
           t (table/new))
-      (table/put t 0 [1 2 3])            ; a compound value: every get reconstructs it
+      (table/put t 0 [1 2 3]) ; a compound value: every get reconstructs it
       ;; Each iteration adds (10 or 20, alternating) + 1.
       (assert= (+ (* 15 vh-n) vh-n) (vh-loop v t 0 vh-n 0))))
 

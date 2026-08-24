@@ -56,8 +56,8 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
     ;; 1 to the u16 we hand it — clamping to u16::MAX moved the panic from our add
     ;; into crossterm's ("attempt to add with overflow"), still on a worker thread.
     (let (out (with-out-str (%term-draw [[:text 65535 65535 "x"]
-                                         [:cursor 65535 65535]
-                                         [:rect 65535 65535 2 2]])))
+                                          [:cursor 65535 65535]
+                                          [:rect 65535 65535 2 2]])))
       (is (string? out))))
 
   (test "negative extents draw nothing"

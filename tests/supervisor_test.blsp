@@ -462,7 +462,8 @@
       (assert= :raised (try (do (count-children sup) :no-error) (catch e :raised)))
       (assert= :raised (try (do (which-children sup) :no-error) (catch e :raised)))
       (assert= :raised
-        (try (do (start-child sup {:id :x :start (fn () (spawn-link (parked)))}) :no-error)
+        (try
+          (do (start-child sup {:id :x :start (fn () (spawn-link (parked)))}) :no-error)
           (catch e :raised)))
       (assert= :raised (try (do (terminate-child sup :x) :no-error) (catch e :raised)))
       (assert= :raised (try (do (restart-child sup :x) :no-error) (catch e :raised))))))

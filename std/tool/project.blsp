@@ -714,8 +714,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; `*module-files*` entry per module, all pointing at the same path — the
   ;; fingerprint wants each file once, not once per module it declares.
   (sort (seq/distinct (map second
-                    (seq/remove (fn (kv) (not (project-image-dep-module? (first kv))))
-                      (seq *module-files*))))))
+                        (seq/remove (fn (kv) (not (project-image-dep-module? (first kv))))
+                          (seq *module-files*))))))
 
 ;; `before` as a SET. As a list, `member?` is a linear scan run once per global — ~4000 x
 ;; ~313 000 on a big project, which measured 7 s of a 9 s image write and was invisible
@@ -743,10 +743,10 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 (defn- project-image-registry-names
   (seen)
   (seq/remove (fn (n)
-            (or (includes? *project-image-registry-exclusions* n)
-              (and (not (contains? seen n))
-                (let (mod (project-image-section-of n))
-                  (and mod (contains? *module-files* mod))))))
+                (or (includes? *project-image-registry-exclusions* n)
+                  (and (not (contains? seen n))
+                    (let (mod (project-image-section-of n))
+                      (and mod (contains? *module-files* mod))))))
     (%registry-names)))
 
 ;; The module a global belongs to: its name minus the last segment, which IS the feature
@@ -1835,16 +1835,16 @@ resolve in the advisory checker. Returns the project root."
                   {}
                   extracts))
     (seq/keep (fn (entry)
-            (let ([nm paths] entry
-                  where (sort (seq/distinct paths)))
-              (when (> (count where) 1)
-                (str "warning: global '"
-                  nm
-                  "' is defined in "
-                  (count where)
-                  " source files ("
-                  (string/join ", " where)
-                  ") — same namespace; the last loaded wins (ADR-065)"))))
+                (let ([nm paths] entry
+                      where (sort (seq/distinct paths)))
+                  (when (> (count where) 1)
+                    (str "warning: global '"
+                      nm
+                      "' is defined in "
+                      (count where)
+                      " source files ("
+                      (string/join ", " where)
+                      ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
 
 ;; Print the duplicate-def warnings to stderr and return the count. Advisory
@@ -1868,16 +1868,16 @@ resolve in the advisory checker. Returns the project root."
                   {}
                   files))
     (seq/keep (fn (entry)
-            (let ([nm paths] entry
-                  where (sort (seq/distinct paths)))
-              (when (> (count where) 1)
-                (str "warning: global '"
-                  nm
-                  "' is defined in "
-                  (count where)
-                  " source files ("
-                  (string/join ", " where)
-                  ") — same namespace; the last loaded wins (ADR-065)"))))
+                (let ([nm paths] entry
+                      where (sort (seq/distinct paths)))
+                  (when (> (count where) 1)
+                    (str "warning: global '"
+                      nm
+                      "' is defined in "
+                      (count where)
+                      " source files ("
+                      (string/join ", " where)
+                      ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
 
 ;; --- unused module-private defns (whole-project, ADR-146 def-site privacy) ----
@@ -2163,12 +2163,12 @@ resolve in the advisory checker. Returns the project root."
     (fold (fn (acc kv)
             (let ([path entry] kv)
               (append-two (seq/keep (fn (pd)
-                                  (let ([bare qual] pd
-                                        used (or (>= (map-get counts bare 0) 2)
-                                               (and (not (= qual bare))
-                                                 (>= (map-get counts qual 0) 1))))
-                                    (when (not used)
-                                      (str path ": warning: unused private function: " bare))))
+                                      (let ([bare qual] pd
+                                            used (or (>= (map-get counts bare 0) 2)
+                                                   (and (not (= qual bare))
+                                                     (>= (map-get counts qual 0) 1))))
+                                        (when (not used)
+                                          (str path ": warning: unused private function: " bare))))
                             (nth entry 2))
                 acc)))
       '() extracts)))
@@ -2994,7 +2994,8 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (defn- config-base-dir
   ()
   ; $XDG_CONFIG_HOME, else ~/.config
-  (let (xdg (os/getenv "XDG_CONFIG_HOME")) (if (nil? xdg) (path/join (os/getenv "HOME") ".config") xdg)))
+  (let (xdg (os/getenv "XDG_CONFIG_HOME"))
+    (if (nil? xdg) (path/join (os/getenv "HOME") ".config") xdg)))
 (defn- config-dir () (path/join (config-base-dir) "brood"))
 (defn- config-path () (path/join (config-dir) "config.blsp"))
 

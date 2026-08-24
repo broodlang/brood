@@ -228,9 +228,6 @@ incremental search rides on."
   "Join path segments `a` and `b` with a single `/` separator."
   (if (string/ends-with? a "/") (str a b) (str a "/" b)))
 
-
-
-
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
 ;; Brood has no global mutable state, so randomness is *threaded*: every step
 ;; takes a seed and returns `[value next-seed]`. Pass `next-seed` to the next
@@ -260,8 +257,6 @@ incremental search rides on."
 ;; The seeded PRNG public API (rand/rng / rand/int / rand/float / rand/seed) lives in the
 ;; `rand` module (std/rand.blsp); the `%rand-seed`/`%rand-step` mechanism above stays here
 ;; because the sequence ops `sample`/`shuffle` (in std/seq.blsp) build on it.
-
-
 
 ;; ---- bounded printing -------------------------------------------------------
 ;; `pr-str` is *faithful*: whatever it returns reads back as the same value, so it

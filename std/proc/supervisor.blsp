@@ -455,7 +455,8 @@ reply, or the caller blocks forever)."
   (let (seq (get state :next-seq 0)
         started (supervisor-try-start spec))
     (if (nil? started)
-      (do (send from [:reply r [:error "supervisor: :start failed"]])
+      (do
+        (send from [:reply r [:error "supervisor: :start failed"]])
         (supervisor-loop state))
       (let (child (assoc started :seq seq))
         (send from [:reply r (get child :pid)])
@@ -489,9 +490,11 @@ request, like OTP's `restart_child`). Reply the new pid, or `:not-found`."
         ;; caller blocked on a reply that would never come).
         (let (fresh (supervisor-try-start child))
           (if (nil? fresh)
-            (do (send from [:reply r [:error "supervisor: :start failed"]])
+            (do
+              (send from [:reply r [:error "supervisor: :start failed"]])
               (supervisor-loop (supervisor-remove state (get child :pid))))
-            (do (send from [:reply r (get fresh :pid)])
+            (do
+              (send from [:reply r (get fresh :pid)])
               (supervisor-loop (supervisor-swap state (get child :pid) fresh)))))))))
 
 (defn- supervisor-loop
@@ -503,11 +506,10 @@ request, like OTP's `restart_child`). Reply the new pid, or `:not-found`."
   ;; that hangs forever against a dead or wedged supervisor.
   (receive
     ([:EXIT pid reason] (supervisor-handle-exit state pid reason))
-    ([:$call from r :which-children]
-      (send from [:reply r (supervisor-summarize (get state :children))])
+    ([:$call from r :which-children] (send from
+                                       [:reply r (supervisor-summarize (get state :children))])
       (supervisor-loop state))
-    ([:$call from r :count-children]
-      (send from [:reply r (count (get state :children))])
+    ([:$call from r :count-children] (send from [:reply r (count (get state :children))])
       (supervisor-loop state))
     ([:$call from r [:start-child spec]] (supervisor-do-start-child state spec from r))
     ([:$call from r [:terminate-child key]] (supervisor-do-terminate-child state key from r))

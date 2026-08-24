@@ -11,12 +11,7 @@
 
 (def src
   (str "(defn foo (x) \"doc mentions foo\" (bar x)) ; foo in a comment\n"
-    "(quote foo)\n"
-    "(foo 1)\n"
-    "'(foo 2)\n"
-    "(foobar foo)\n"
-    "`(a ~foo ~@foo)\n"
-    "[foo {:k foo}]\n"
+    "(quote foo)\n" "(foo 1)\n" "'(foo 2)\n" "(foobar foo)\n" "`(a ~foo ~@foo)\n" "[foo {:k foo}]\n"
     "#{foo}"))
 
 (describe "cst-rename-text — context-aware symbol rewriting"

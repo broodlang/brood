@@ -378,8 +378,8 @@ The shape a plugin manifest's `:enhances` map is checked with:
 `[name constraint have]` (`have` is nil when absent) — what an application shows
 the user when it declines a plugin, instead of a bare false."
   (seq/keep (fn (kv)
-          (let ([nm constraint] kv
-                have (get versions nm))
-            (when (or (nil? have) (not (satisfies? have constraint)))
-              [nm constraint have])))
+              (let ([nm constraint] kv
+                    have (get versions nm))
+                (when (or (nil? have) (not (satisfies? have constraint)))
+                  [nm constraint have])))
     (map-pairs constraints)))

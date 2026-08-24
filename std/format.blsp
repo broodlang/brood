@@ -468,7 +468,8 @@ retired the `comment-on-own-line?` distinction this used to need."
   (kids i)
   (cond
     (< i 0) true
-    (and (whitespace? (seq/vector-ref kids i)) (includes? (node-text (seq/vector-ref kids i)) "\n")) true
+    (and (whitespace? (seq/vector-ref kids i)) (includes? (node-text (seq/vector-ref kids i)) "\n"))
+      true
     ;; skip one newline-free whitespace gap, then look at what precedes it
     (whitespace? (seq/vector-ref kids i)) (comment-on-own-line?-prev kids (dec i))
     else (comment-on-own-line?-prev kids i)))
@@ -1061,9 +1062,9 @@ retired the `comment-on-own-line?` distinction this used to need."
   ;; plus each whitelisted tree. `distinct` because the whitelists can overlap
   ;; (`:format-paths ["."]`, or a test path nested inside a source path).
   (seq/distinct (append (format-root-files root)
-              (fold (fn (acc dir) (append-two (format-collect-blsp dir) acc))
-                nil
-                (format-roots root)))))
+                  (fold (fn (acc dir) (append-two (format-collect-blsp dir) acc))
+                    nil
+                    (format-roots root)))))
 
 (defn- format-require-root
   ()

@@ -48,7 +48,9 @@
 
   (test "the extract's other fields still work on a large file"
     (let (src (str "(defmodule m)\n(defn- helper () 1)\n(defn pub () "
-                   "(list " (string/repeat "helper " 20000) "))")
+                "(list "
+                (string/repeat "helper " 20000)
+                "))")
           extract (reflect/scan-source-extract src)
           counts (nth extract 0)
           privs (nth extract 1))
@@ -178,9 +180,11 @@
 
   (test "the mark is rolled back on the throwing path too"
     (is (= :caught
-           (try (%isolate (fn () (eval-string "(defdyn *isolate-leak-throw* 1)")
-                                 (throw :x)))
-                (catch e :caught))))
+          (try
+            (%isolate (fn ()
+                        (eval-string "(defdyn *isolate-leak-throw* 1)")
+                        (throw :x)))
+            (catch e :caught))))
     (is (not (dynamic? '*isolate-leak-throw*))))
 
   (test "a dynamic mark made OUTSIDE an isolate survives it"

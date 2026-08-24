@@ -266,11 +266,13 @@ the CRLF-framed wire format would let the caller inject extra headers (HTTP
 request/response splitting)."
   ;; Render each header line, then one `(apply str …)` — the old `(str acc …)`
   ;; fold rebuilt the whole accumulator per header (O(headers²) in total bytes).
-  (apply str (map (fn (kv) (str (http-crlf-free "header name" (first kv))
-                             ": "
-                             (http-crlf-free "header value" (second kv))
-                             "\r\n"))
-               (map-pairs headers))))
+  (apply str
+    (map (fn (kv)
+           (str (http-crlf-free "header name" (first kv))
+             ": "
+             (http-crlf-free "header value" (second kv))
+             "\r\n"))
+      (map-pairs headers))))
 
 (defn render-response (resp)
   "Render a response map into the HTTP/1.0 wire **iolist** (ADR-139) — hand it to

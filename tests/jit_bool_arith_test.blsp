@@ -76,26 +76,27 @@
 (defn ba-and (n i acc)
   (if (> i n)
     acc
-    (ba-and n (+ i 1)
-            (if (and (> i 10) (or (< i 20) (= i 40))) (+ acc 1) acc))))
+    (ba-and n
+      (+ i 1)
+      (if (and (> i 10) (or (< i 20) (= i 40))) (+ acc 1) acc))))
 
 (describe "the JIT must not treat a boolean as a number"
   ;; The exact message, not merely "some error": a lowered arm that raised for the wrong
   ;; reason (an overflow, say) would pass a bare `assert-error`.
   (test "a boolean literal in arithmetic raises, exactly as on the VM"
     (assert= "type error: +: expected number, got bool (true)"
-             (error-of (ba-lit ba-n 0))))
+      (error-of (ba-lit ba-n 0))))
 
   (test "a comparison result in arithmetic raises, exactly as on the VM"
     (assert= "type error: +: expected number, got bool (false)"
-             (error-of (ba-cmp ba-n 0))))
+      (error-of (ba-cmp ba-n 0))))
 
   (test "a boolean vector index raises, exactly as on the VM"
     (assert-error (ba-idx ba-n 0 [1 2 3])))
 
   (test "a boolean literal in multiplication raises, exactly as on the VM"
     (assert= "type error: *: expected number, got bool (true)"
-             (error-of (ba-mul ba-n 0))))
+      (error-of (ba-mul ba-n 0))))
 
   (test "booleans still cross block boundaries in a hot arm"
     ;; i in [11,19] (9) plus i = 40 — independent of `n` once n >= 40.

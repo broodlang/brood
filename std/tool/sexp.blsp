@@ -60,9 +60,9 @@ interpreted and the bottleneck in structural navigation.)"
 list/vector/map children); the root if none. Reader-macro wrappers are navigated
 as a unit — descending through them is a deferred refinement."
   (let (hit (seq/find (fn (k)
-                    (and (container-kind? (get k :kind))
-                      (< (get k :start) point)
-                      (< point (get k :end))))
+                        (and (container-kind? (get k :kind))
+                          (< (get k :start) point)
+                          (< point (get k :end))))
               (or (get anode :kids) (list))))
     (if (nil? hit) anode (enclosing hit point))))
 

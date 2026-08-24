@@ -145,7 +145,6 @@ leaves `s` unchanged."
 ;; Column formatting for tabular/console output. `pad-*` left unchanged when the
 ;; string already meets the width (they never truncate).
 
-
 (defn pad-left (s w &optional (pad " "))
   "Right-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the left; `s` is returned unchanged if it is already at least `w` wide."
   (let (n (string/length s)) (if (>= n w) s (str (repeat pad (- w n)) s))))

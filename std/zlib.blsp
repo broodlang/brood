@@ -58,7 +58,6 @@
 
 ;; ---- raw deflate (RFC 1951) — no header or checksum ----
 
-
 (defn unzip (data)
   "Decompress raw-DEFLATE `bytes` to a `bytes` value. Raises on invalid data."
   (%inflate data))

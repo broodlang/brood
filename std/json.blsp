@@ -214,8 +214,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
         ; DC00..DFFF: a low surrogate with no high half before it is equally invalid —
         ; it used to fall through to `int->char`, which raised the KERNEL's message
         ; ("int->char: 56320 is not a valid Unicode codepoint") instead of a json one.
-        (and (>= hi 56320) (<= hi 57343))
-          (error "json: lone low surrogate at index " i)
+        (and (>= hi 56320) (<= hi 57343)) (error "json: lone low surrogate at index " i)
         else [hi (+ i 4)]))))
 
 (defn- json-escape
