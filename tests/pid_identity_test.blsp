@@ -23,7 +23,7 @@
           ;; same image still checks that equality, hashing and receive-pattern matching
           ;; on pids all agree with each other.
           _ (if (= (node/name) :nonode)
-              (node/start (keyword (str "pid-eq-" (now))) "127.0.0.1:0" (node/cookie))
+              (node/start (keyword (str "pid-eq-" (os/now))) "127.0.0.1:0" (node/cookie))
               nil))
       (let (after (self))
         ;; same process, either stamp: equal both ways round

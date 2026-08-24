@@ -99,7 +99,7 @@ docs/testing.md for the full guide.")
 ;; --- temp fixtures -----------------------------------------------------------
 ;; A test that needs a real directory builds one under /tmp. Two rules keep these
 ;; from biting each other (learned the hard way — see docs/devlog.md):
-;;   1. Name it with `(temp-dir PREFIX)`, which uses `random-token` — unique
+;;   1. Name it with `(temp-dir PREFIX)`, which uses `rand/token` — unique
 ;;      across processes *and* runs. NOT `gensym`, whose counter resets every
 ;;      process, so its names recur and a leftover from a prior run contaminates
 ;;      the next test that draws the same number.
@@ -871,7 +871,7 @@ the test rather than hanging the run."
 ;; ANSI only when stdout is an interactive terminal, so a piped run, a CI log, or an
 ;; LLM reading the output gets clean text (`stdout-tty?` is the same gate the REPL
 ;; uses). Wrapped in one place so every bit of the report agrees.
-(defn- test-colour (code s) (if (stdout-tty?) (str "\e[" code "m" s "\e[0m") s))
+(defn- test-colour (code s) (if (os/stdout-tty?) (str "\e[" code "m" s "\e[0m") s))
 (defn- test-green (s) (test-colour "32" s))
 (defn- test-red (s) (test-colour "31" s))
 (defn- test-dim (s) (test-colour "90" s))
@@ -907,9 +907,9 @@ the test rather than hanging the run."
   "Run one `(name thunk meta)` test `t` in group `group` and return its result tuple `(group name fails ms false where)`. A `:skip`-marked test is not run — it yields a skipped result instead. The thunk carries its own failures, so this is safe to run concurrently. Reports the result via `trace-result`."
   (if (test-skip? t)
     (trace-result (test-skipped-result group t))
-    (let (start (now)
+    (let (start (os/now)
           fails ((second t))
-          ms (- (now) start))
+          ms (- (os/now) start))
       (trace-result (list group (first t) fails ms false (test-where t))))))
 
 ;; Like run-test, but evaluate the body with a private copy of the global
@@ -919,9 +919,9 @@ the test rather than hanging the run."
   (group t)
   (if (test-skip? t)
     (trace-result (test-skipped-result group t))
-    (let (start (now)
+    (let (start (os/now)
           fails (%isolate (second t))
-          ms (- (now) start))
+          ms (- (os/now) start))
       (trace-result (list group (first t) fails ms false (test-where t))))))
 
 ;; Run every test in a unit, in order, returning the list of results. This is
@@ -1140,15 +1140,15 @@ the test rather than hanging the run."
   ;; than threading a number keeps the timeout *message* accurate too.
   (if (collect-slow-batch? workers)
     (binding (*test-timeout-ms* (max *test-timeout-ms* *test-slow-timeout-ms*))
-      (collect-loop (count workers) workers nil acc (+ (now) *test-timeout-ms*)))
-    (collect-loop (count workers) workers nil acc (+ (now) *test-timeout-ms*))))
+      (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*)))
+    (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*))))
 
 (defn- collect-loop
   (pending workers reported acc deadline)
   (if (= pending 0)
     acc
     ;; `(m m)` takes the next message; `(after …)` fires when the budget is spent.
-    (let (msg (receive (m m) (after (max 0 (- deadline (now))) :%test-timeout)))
+    (let (msg (receive (m m) (after (max 0 (- deadline (os/now))) :%test-timeout)))
       (cond
         ;; budget spent — kill + fail the stragglers
         (= msg :%test-timeout) (collect-timeout workers reported acc)
@@ -1200,7 +1200,7 @@ the test rather than hanging the run."
 ;; driver loop is a SPAWNED process body, so it runs at the depth-1 eval safepoint
 ;; where **Stage B's automatic copying GC** (ADR-055) fires — each iteration's
 ;; garbage is reclaimed while the live `acc` is kept (it's rooted as a tail-call
-;; argument). A plain tail call bounds the suite; the `(hibernate)` Stage A used
+;; argument). A plain tail call bounds the suite; the `(proc/hibernate)` Stage A used
 ;; here is gone (and the primitive itself was removed — automatic GC made it
 ;; redundant, docs/memory-review.md §6).
 ;;
@@ -1386,9 +1386,9 @@ the test rather than hanging the run."
 ;; repeated run is genuinely independent rather than replaying one registry.
 (defn- run-tests-scoped-pass
   (loaders opts)
-  (let (start (now)
+  (let (start (os/now)
         results (drain-files-scoped loaders))
-    (test-report-pass results (- (now) start) opts "")))
+    (test-report-pass results (- (os/now) start) opts "")))
 
 ;; Structured analogue of `run-tests-scoped` — the memory-bounded counterpart of
 ;; `run-tests-structured`. Same per-file scoping (so a long-lived `nest mcp` hot-reload
@@ -1398,9 +1398,9 @@ the test rather than hanging the run."
 (defn run-tests-scoped-structured (loaders & opts)
   "Like `run-tests-scoped`, but returns the structured result `{:total :passed :failed :failed-assertions :ms :results [...]}` instead of printing and raising — the memory-bounded counterpart of `run-tests-structured`. Backs the `nest mcp` run-tests tool."
   (test-apply-opts opts)
-  (let (start (now)
+  (let (start (os/now)
         results (drain-files-scoped loaders)
-        elapsed (- (now) start)
+        elapsed (- (os/now) start)
         total (count results)
         failed (count-failed results)
         fails (count-failures results))
@@ -1733,12 +1733,12 @@ the exit code still reflects the run. An unknown formatter name is a clean error
         par (filter (fn (u) (not= (first u) :isolated)) units)
         ; parallel + serial
         iso (filter (fn (u) (= (first u) :isolated)) units)
-        start (now))
+        start (os/now))
     ;; All result-gathering runs in the hibernating driver (isolated units first
     ;; and serially, then the parallel groups), so the runner's per-step transients
     ;; are reclaimed between steps. See the Stage-A block above.
     (let (results (drain-runner iso par))
-      (test-report-pass results (- (now) start) opts (str ", " (count iso) " isolated")))))
+      (test-report-pass results (- (os/now) start) opts (str ", " (count iso) " isolated")))))
 
 ;; Structured analogue of `run-tests` — runs the same suite (isolated phase,
 ;; then parallel/serial), but **returns data** instead of printing + throwing.
@@ -1754,9 +1754,9 @@ the exit code still reflects the run. An unknown formatter name is a clean error
   (let (units (test-select-units (reverse *units*) *test-filter*)
         par (filter (fn (u) (not= (first u) :isolated)) units)
         iso (filter (fn (u) (= (first u) :isolated)) units)
-        start (now))
+        start (os/now))
     (let (results (drain-runner iso par)
-          elapsed (- (now) start)
+          elapsed (- (os/now) start)
           total (count results)
           failed (count-failed results)
           fails (count-failures results))

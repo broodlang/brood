@@ -1,4 +1,4 @@
-;; Per-process resource limits — `(process-flag :max-heap n)` (BEAM
+;; Per-process resource limits — `(proc/flag :max-heap n)` (BEAM
 ;; `max_heap_size` analogue; ROADMAP "Robustness gaps vs BEAM / .NET" #2).
 ;;
 ;; Coverage:
@@ -20,16 +20,16 @@
 (defn build-capped (bytes)
   "Set a heap cap, then allocate unboundedly; returns the caught [kind code]."
   (try
-    (do (process-flag :max-heap bytes) (build ()))
-    (catch e (do (process-flag :max-heap nil) [(get e :kind) (get e :code)]))))
+    (do (proc/flag :max-heap bytes) (build ()))
+    (catch e (do (proc/flag :max-heap nil) [(get e :kind) (get e :code)]))))
 
-(describe "process-flag :max-heap"
+(describe "proc/flag :max-heap"
   (test "read/set/clear returns the previous value"
-    (assert= nil (process-flag :max-heap))
-    (assert= nil (process-flag :max-heap 50000000))
-    (assert= 50000000 (process-flag :max-heap))
-    (assert= 50000000 (process-flag :max-heap nil))
-    (assert= nil (process-flag :max-heap)))
+    (assert= nil (proc/flag :max-heap))
+    (assert= nil (proc/flag :max-heap 50000000))
+    (assert= 50000000 (proc/flag :max-heap))
+    (assert= 50000000 (proc/flag :max-heap nil))
+    (assert= nil (proc/flag :max-heap)))
 
   (test "exceeding the limit raises catchable E0045"
     (assert= [:runtime "E0045"] (build-capped 2000000)))
@@ -40,29 +40,29 @@
     (assert= 1000 (count (into () (range 1000)))))
 
   (test "unknown flag errors cleanly"
-    (assert-error (process-flag :no-such-flag 1)))
+    (assert-error (proc/flag :no-such-flag 1)))
 
   (test "bad :max-heap value errors cleanly"
-    (assert-error (process-flag :max-heap -5))
-    (assert-error (process-flag :max-heap "big"))))
+    (assert-error (proc/flag :max-heap -5))
+    (assert-error (proc/flag :max-heap "big"))))
 
 (describe "process isolation"
   (test "a capped process dies alone; the monitoring parent survives"
-    (let (pid (spawn (fn () (do (process-flag :max-heap 2000000) (build ())))))
+    (let (pid (spawn (fn () (do (proc/flag :max-heap 2000000) (build ())))))
       (let (m (monitor pid))
         (assert= :worker-died
           (receive
             ([:down ^m ^pid _] :worker-died)
             (after 30000 :timeout)))))
     ;; the parent's own limit is untouched and it can still allocate
-    (assert= nil (process-flag :max-heap))
+    (assert= nil (proc/flag :max-heap))
     (assert= 100 (count (into () (range 100)))))
 
   (test "the limit is per-process: an uncapped sibling is unaffected"
     (let (me (self))
       (spawn (fn ()
                (do
-                 (process-flag :max-heap 2000000)
+                 (proc/flag :max-heap 2000000)
                  (try (build ()) (catch _ nil))
                  (send me [:capped-done]))))
       (spawn (fn () (send me [:sibling (count (into () (range 5000)))])))

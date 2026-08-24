@@ -74,15 +74,15 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 (defmacro with-err-str (& body)
   "Evaluate `body` with the `*err*` port captured, returning everything written to it as a string (`\"\"` if nothing was), discarding `body`'s own value. For asserting on a warning — and for keeping an expected warning out of a test run's output. Only intercepts writes through `*err*` (`eprint`/`eprintln`), not stderr written by the kernel itself."
   (let (sink (gensym "err-sink"))
-    `(let (~sink (table))
+    `(let (~sink (%table))
        (try
          (do
            (binding (*err* (fn (s)
-                             (table-put ~sink :text (str (table-get ~sink :text "") s))
+                             (%table-put ~sink :text (str (%table-get ~sink :text "") s))
                              nil))
              ~@body)
-           (table-get ~sink :text ""))
-         (catch e (do (table-drop ~sink) (throw e)))))))
+           (%table-get ~sink :text ""))
+         (catch e (do (%table-drop ~sink) (throw e)))))))
 
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
@@ -144,7 +144,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread-build v clauses thread-last-step))))
 
 (defmacro doto (x & forms)
-  "Evaluate `x` once, run each `form` with it spliced in as the *first* argument (for side effects), then return `x`: `(doto (table) (table-put :a 1) (table-put :b 2))`."
+  "Evaluate `x` once, run each `form` with it spliced in as the *first* argument (for side effects), then return `x`: `(doto (table/new) (table/put :a 1) (table/put :b 2))`."
   (let (v (gensym "v"))
     `(let (~v ~x)
        ~@(map (fn (form) (thread-first-step v form)) forms)

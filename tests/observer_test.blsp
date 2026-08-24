@@ -5,7 +5,7 @@
 ;; are exercised by `nest observe`.
 ;;
 ;; The closing :isolated block adds cross-process coverage: it drives the
-;; `process-info` primitive + `observer/observe-snapshot` against a live runtime, proving
+;; `proc/info` primitive + `observer/observe-snapshot` against a live runtime, proving
 ;; the kernel introspection works under the scheduler.
 
 (defmodule observer-test
@@ -61,7 +61,7 @@
       ;; 5 + 12 + 8 + 6 + 8 + 9 + 8 + 4 columns + 7 single-space gaps
       (assert= (string/length r) 67)))
   ; nil name / absent memory
-  (test "observer/observe-proc-cells renders a process-info map (absent fields → dash)"
+  (test "observer/observe-proc-cells renders a proc/info map (absent fields → dash)"
     (let (r (observer/observe-proc-cells {:id 2
                                           :name nil
                                           :status :waiting
@@ -452,9 +452,9 @@
         ;; submit pushes the new command onto history, newest first
         (assert= (get submitted :history) '("(* 3 4)" "(+ 1 2)"))))))
 
-;; Cross-process coverage: drive `process-info` + `observer/observe-snapshot` against a
+;; Cross-process coverage: drive `proc/info` + `observer/observe-snapshot` against a
 ;; live runtime (each :isolated test runs alone).
-(describe "process-info over live processes"
+(describe "proc/info over live processes"
   :isolated
 
   (test "a parked receiver reports :waiting + its mailbox backlog"
@@ -463,7 +463,7 @@
       (send w :a)
       (send w :b)
       (sleep 20)
-      (let (info (process-info w))
+      (let (info (proc/info w))
         (is (map? info))
         (assert= (get info :status) :waiting)
         (is (>= (get info :mailbox) 2))
@@ -480,29 +480,29 @@
     (let (m (spawn (receive (_ :done))))
       (monitor m)
       (sleep 10)
-      (is (>= (get (process-info m) :monitored-by) 1))))
+      (is (>= (get (proc/info m) :monitored-by) 1))))
 
-  (test "process-info of self is a live, running map with an id"
-    (let (info (process-info (self)))
+  (test "proc/info of self is a live, running map with an id"
+    (let (info (proc/info (self)))
       (is (map? info))
       (is (number? (get info :id)))
       ;; self is executing this call, so the status cell reads :running
       (assert= (get info :status) :running)))
 
-  (test "process-info carries the process's :pid value (for kill/exit)"
+  (test "proc/info carries the process's :pid value (for kill/exit)"
     (let (w (spawn (receive (_ :done))))
       (sleep 10)
-      (let (info (process-info w))
+      (let (info (proc/info w))
         (is (contains? info :pid))
         (is (pid? (get info :pid)))
         ;; the pid round-trips: it equals the value spawn returned
         (assert= (get info :pid) w))))
 
   (test ":parent is the spawner's id"
-    (let (me (get (process-info (self)) :id)
+    (let (me (get (proc/info (self)) :id)
           kid (spawn (receive (_ :done))))
       (sleep 10)
-      (assert= (get (process-info kid) :parent) me)))
+      (assert= (get (proc/info kid) :parent) me)))
 
   (test "observer/observe-local-source includes this runtime's live processes"
     (let (w (spawn (receive (_ :done))))
@@ -511,7 +511,7 @@
             ids (map (fn (p) (get p :id)) procs))
         (is (every? map? procs))
         ;; the inline source sees the just-spawned process
-        (is (includes? ids (get (process-info w) :id))))))
+        (is (includes? ids (get (proc/info w) :id))))))
 
   (test "observer/observe-local-snapshot is a frame-ready {:node :procs} snapshot"
     (spawn (receive (_ :done)))

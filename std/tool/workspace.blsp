@@ -2,7 +2,7 @@
 ;;
 ;; Drives `nest ws`. The Brood ecosystem is many sibling git repos (brood, hatch, hive,
 ;; bedit, pong, …); an ecosystem-wide change means the same check → commit → push in each.
-;; This runs that fan-out, in Brood over `%os-cmd` / `run-process`. It discovers the sibling
+;; This runs that fan-out, in Brood over `%os-cmd` / `os/run-process`. It discovers the sibling
 ;; repos of the current directory: any sibling with a `.git` dir AND a `project.blsp`, plus
 ;; `brood` itself. Nothing here force-pushes, resets, stashes, or checks out.
 (defmodule workspace
@@ -25,7 +25,7 @@
 (defn- git-run
   (dir git-args)
   "Run `git -C dir <git-args…>` inheriting stdio; returns the exit code."
-  (run-process "git" (cons "-C" (cons dir git-args))))
+  (os/run-process "git" (cons "-C" (cons dir git-args))))
 
 (defn- dirty-count
   (dir)
@@ -54,7 +54,7 @@
     (when (file/exists? (str dir "/project.blsp"))
       (println "=== " (repo-name dir) " ===")
       ;; `nest check` reads the project in its own dir, so run it there (via the shell's cd).
-      (when (not (= 0 (run-process "sh" (list "-c" (str "cd " dir " && nest check")))))
+      (when (not (= 0 (os/run-process "sh" (list "-c" (str "cd " dir " && nest check")))))
         (println "  CHECK FAILED: " (repo-name dir))))))
 
 (defn- commit

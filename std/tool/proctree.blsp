@@ -1,7 +1,7 @@
-;; std/proctree.blsp — order a flat process-info list as a parent→child forest.
+;; std/proctree.blsp — order a flat proc/info list as a parent→child forest.
 ;;
-;; A pure, dependency-free transform over `process-info` maps (ADR-051): given the
-;; flat `(map process-info (list-processes))` snapshot, produce a depth-tagged forest
+;; A pure, dependency-free transform over `proc/info` maps (ADR-051): given the
+;; flat `(map proc/info (proc/list))` snapshot, produce a depth-tagged forest
 ;; — roots first, each followed by its DFS descendants — for an indented tree view.
 ;; The lineage comes from each map's `:parent` (the spawner's id, nil for the root),
 ;; the Erlang-`process_info` field. Shared by std/observer's tree sort and bedit's
@@ -9,7 +9,7 @@
 ;; ordering.
 
 (defmodule proctree
-  "Order a flat `process-info` list as a parent→child forest. `tree-order` returns the procs re-ordered roots-first, each followed by its
+  "Order a flat `proc/info` list as a parent→child forest. `tree-order` returns the procs re-ordered roots-first, each followed by its
 descendants (DFS by id), every map tagged with `:depth` (0 = root) for indentation;
 lineage is read from `:parent`. `by-id` is the plain ascending-by-id sort (the flat
 view). Pure — no IO, no UI deps — so a TUI (std/observer) and a buffer editor
@@ -26,7 +26,7 @@ view). Pure — no IO, no UI deps — so a TUI (std/observer) and a buffer edito
   "DFS: emit `p` (tagged `:depth`) then its children's subtrees, each child sorted by
 id. Normally terminates because a child's id exceeds its parent's (spawn order);
 `limit` (the process count) caps the depth so a malformed snapshot with a parent
-cycle (impossible from `process-info`, but a buggy remote peer could send one) is
+cycle (impossible from `proc/info`, but a buggy remote peer could send one) is
 bounded rather than overflowing the stack."
   (if (>= depth limit)
     [(assoc p :depth depth)]

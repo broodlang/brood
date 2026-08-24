@@ -31,25 +31,25 @@
   ;; `-b main` pins the initial branch: a bare `git init` uses the ambient
   ;; `init.defaultBranch` (often `master` on CI runners), but the deps below pin
   ;; `:ref "main"`, so without this the ref wouldn't resolve on those hosts.
-  (run-process "git" (list "-C" dir "init" "-q" "-b" "main"))
-  (run-process "git" (list "-C" dir "config" "user.email" "t@example.com"))
-  (run-process "git" (list "-C" dir "config" "user.name" "Test"))
+  (os/run-process "git" (list "-C" dir "init" "-q" "-b" "main"))
+  (os/run-process "git" (list "-C" dir "config" "user.email" "t@example.com"))
+  (os/run-process "git" (list "-C" dir "config" "user.name" "Test"))
   ;; Disable commit/tag signing in the fixture repo: the dev's global config may
   ;; force SSH/GPG signing (e.g. via 1Password), which would fail here — an unlocked
   ;; agent isn't a test prerequisite, and these throwaway commits don't need signing.
-  (run-process "git" (list "-C" dir "config" "commit.gpgsign" "false"))
-  (run-process "git" (list "-C" dir "config" "tag.gpgsign" "false"))
-  (run-process "git" (list "-C" dir "add" "-A"))
-  (run-process "git" (list "-C" dir "commit" "-q" "-m" "init"))
+  (os/run-process "git" (list "-C" dir "config" "commit.gpgsign" "false"))
+  (os/run-process "git" (list "-C" dir "config" "tag.gpgsign" "false"))
+  (os/run-process "git" (list "-C" dir "add" "-A"))
+  (os/run-process "git" (list "-C" dir "commit" "-q" "-m" "init"))
   (str "file://" dir))
-(defn pkg-git-tag (dir tag) (run-process "git" (list "-C" dir "tag" tag)))
+(defn pkg-git-tag (dir tag) (os/run-process "git" (list "-C" dir "tag" tag)))
 
 ;; Build a .tar.gz of fixture dir `<parent>/<wrapper>` (so the archive has the
 ;; single `<wrapper>/` prefix the resolver strips). Returns [file-url sha256] — a
 ;; file:// URL keeps :tarball resolution offline, like pkg-git-init's for :git.
 (defn pkg-tar-init (parent wrapper)
   (let (archive (path-join parent (str wrapper ".tar.gz")))
-    (run-process "tar" (list "-czf" archive "-C" parent wrapper))
+    (os/run-process "tar" (list "-czf" archive "-C" parent wrapper))
     (list (str "file://" archive) (hash/sha256-bytes (file/slurp-bytes archive)))))
 
 (defn pkg-write-project (root nm src-module body deps-line)
@@ -458,7 +458,7 @@
   (let (dep-dir (path-join parent nm))
     (pkg-write-project dep-dir nm nm "(defn greet (w) w)" "")
     (let (archive (path-join parent (str nm ".tar.gz")))
-      (run-process "tar" (list "-czf" archive "-C" dep-dir "."))
+      (os/run-process "tar" (list "-czf" archive "-C" dep-dir "."))
       (let (bytes (file/slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
 
 ;; A handler whose release points at an EXTERNAL tarball — it serves the wrapped tarball over
@@ -468,7 +468,7 @@
 (defn mock-registry-handler-external (cfg nm version checksum wrapped-bytes)
   (fn (req)
     (let (path (get req :path)
-          src (str (table-get cfg :base "") "/ext/" nm ".tar.gz"))
+          src (str (table/get cfg :base "") "/ext/" nm ".tar.gz"))
       (cond
         (= path (str "/ext/" nm ".tar.gz"))
           (http/response 200 {"Content-Type" "application/gzip"} wrapped-bytes)
@@ -485,7 +485,7 @@
   (let (dep-dir (path-join parent nm))
     (pkg-write-project dep-dir nm nm "(defn greet (w) w)" "")
     (let (archive (path-join parent (str nm "-wrapped.tar.gz")))
-      (run-process "tar" (list "-czf" archive "-C" parent nm))
+      (os/run-process "tar" (list "-czf" archive "-C" parent nm))
       [(file/slurp-bytes archive) (hash/sha256-bytes (file/slurp-bytes archive))])))
 
 ;; A handler serving a SIGNED hosted release (ADR-212): its metadata carries `:signature` +
@@ -540,10 +540,10 @@
     (let (parent (pkg-fixture-root)
           app-dir (path-join parent "app")
           [wrapped-bytes checksum] (mock-package-tarball-wrapped parent "extdep")
-          cfg (table)
+          cfg (table/new)
           base (mock-registry-start (mock-registry-handler-external cfg
                                       "extdep" "1.0.0" checksum wrapped-bytes)))
-      (table-put cfg :base base)
+      (table/put cfg :base base)
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (let (e (package/package-resolve-registry app-dir (dep-registry 'extdep "1.0.0") nil base))
         (assert= (dep-kind e) :registry)
@@ -558,10 +558,10 @@
     (let (parent (pkg-fixture-root)
           app-dir (path-join parent "app")
           [wrapped-bytes _real] (mock-package-tarball-wrapped parent "extbad")
-          cfg (table)
+          cfg (table/new)
           base (mock-registry-start (mock-registry-handler-external cfg
                                       "extbad" "1.0.0" "deadbeef" wrapped-bytes)))
-      (table-put cfg :base base)
+      (table/put cfg :base base)
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (is (includes? (try
                        (package/package-resolve-registry app-dir
@@ -768,7 +768,7 @@
   (let (dir (path-join parent (str nm "-" version)))
     (pkg-write-project dir nm nm "(defn f () 1)" deps-line)
     (let (archive (path-join parent (str nm "-" version ".tar.gz")))
-      (run-process "tar" (list "-czf" archive "-C" dir "."))
+      (os/run-process "tar" (list "-czf" archive "-C" dir "."))
       (let (bytes (file/slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
 
 ;; A handler serving `spec`. Path shapes: …/packages/<n>/releases (list),

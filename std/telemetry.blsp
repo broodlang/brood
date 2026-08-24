@@ -387,7 +387,7 @@ at start are the baseline (no spurious `:nodeup` for them)."
 
 ;; ---- unified runtime vitals (the snapshot builtins, behind one stream) -------
 ;; The kernel exposes its runtime state through several point-in-time snapshot builtins —
-;; `gc-stats`, `sched-stats`, `vm-stats`, `process-info` — that tools scrape individually
+;; `gc-stats`, `sched-stats`, `vm-stats`, `proc/info` — that tools scrape individually
 ;; (`nest observe`, `nest mcp`). `runtime-snapshot` folds them into ONE map, and
 ;; `watch-vitals` samples that onto the telemetry stream as `[:runtime :vitals]` events, so
 ;; a consumer subscribes ONCE to the attach seam instead of polling N builtins — the same
@@ -409,7 +409,7 @@ scraping the individual stat builtins — what `nest observe` / `nest mcp` can r
   {:gc (telemetry-stat 'gc-stats (fn () (gc-stats)))
    :sched (telemetry-stat 'sched-stats (fn () (sched-stats)))
    :vm (telemetry-stat 'vm-stats (fn () (vm-stats)))
-   :processes (count (or (list-processes) []))
+   :processes (count (or (proc/list) []))
    :metrics (metrics-snapshot)})
 
 (defn- telemetry-vitals-measurements
@@ -544,15 +544,15 @@ unsubscribes and exits."
 (defn- telemetry-span
   (event metadata thunk)
   (let (metadata (or metadata {})
-        t0 (now))
+        t0 (os/now))
     (emit (telemetry-sub event :start) {:system-time t0} metadata)
     (try
       (let (result (thunk))
-        (emit (telemetry-sub event :stop) {:duration (- (now) t0)} metadata)
+        (emit (telemetry-sub event :stop) {:duration (- (os/now) t0)} metadata)
         result)
       (catch e
         (emit (telemetry-sub event :exception)
-          {:duration (- (now) t0)}
+          {:duration (- (os/now) t0)}
           (assoc metadata :error (error-message e)))
         (throw e)))))
 
@@ -583,13 +583,13 @@ the caller. Returns `body`'s value."
   ()
   "The shared metrics table, created on first use (configuration-time, so the lazy
 init is single-threaded)."
-  (when (nil? *telemetry-metrics*) (def *telemetry-metrics* (table)))
+  (when (nil? *telemetry-metrics*) (def *telemetry-metrics* (table/new)))
   *telemetry-metrics*)
 
 (defn reset-metrics ()
   "Drop every aggregated metric (fresh table). Does NOT detach the handlers — call
 `detach`/`detach-all` for that. Returns nil."
-  (def *telemetry-metrics* (table))
+  (def *telemetry-metrics* (table/new))
   nil)
 
 (defn counter (id event)
@@ -599,8 +599,8 @@ init is single-threaded)."
     (attach id
       event
       (fn (e m md)
-        (let (cur (table-get t id {:kind :counter :count 0}))
-          (table-put t id (assoc cur :count (+ (get cur :count) 1))))))))
+        (let (cur (table/get t id {:kind :counter :count 0}))
+          (table/put t id (assoc cur :count (+ (get cur :count) 1))))))))
 
 (defn sum (id event key)
   "Sum measurement `key` across each emit of `event` under metric `id`. Float-safe.
@@ -609,8 +609,8 @@ init is single-threaded)."
     (attach id
       event
       (fn (e m md)
-        (let (v (get m key 0) cur (table-get t id {:kind :sum :sum 0}))
-          (table-put t id (assoc cur :sum (+ (get cur :sum) v))))))))
+        (let (v (get m key 0) cur (table/get t id {:kind :sum :sum 0}))
+          (table/put t id (assoc cur :sum (+ (get cur :sum) v))))))))
 
 (defn last-value (id event key)
   "Track the latest value of measurement `key` (a gauge) under metric `id`.
@@ -619,7 +619,7 @@ init is single-threaded)."
     (attach id
       event
       (fn (e m md)
-        (table-put t id {:kind :gauge :value (get m key)})))))
+        (table/put t id {:kind :gauge :value (get m key)})))))
 
 (defn summary (id event key)
   "Accumulate running statistics of measurement `key` under metric `id` — a bounded
@@ -631,10 +631,10 @@ read). Returns `id`."
       event
       (fn (e m md)
         (let (v (get m key)
-              cur (table-get t id nil))
+              cur (table/get t id nil))
           (if (nil? cur)
-            (table-put t id {:kind :summary :count 1 :sum v :sumsq (* v v) :min v :max v})
-            (table-put t
+            (table/put t id {:kind :summary :count 1 :sum v :sumsq (* v v) :min v :max v})
+            (table/put t
               id
               (assoc cur
                 :count (+ (get cur :count) 1)
@@ -673,7 +673,7 @@ no samples). `(metric id)` → `{:kind :distribution :count :sum :min :max :mean
       event
       (fn (e m md)
         (let (v (get m key)
-              cur (table-get t id nil)
+              cur (table/get t id nil)
               cur (if (nil? cur)
                     {:kind :distribution
                      :bounds bounds
@@ -685,7 +685,7 @@ no samples). `(metric id)` → `{:kind :distribution :count :sum :min :max :mean
                     cur)
               counts (get cur :counts)
               idx (telemetry-bucket-index (get cur :bounds) v 0))
-          (table-put t
+          (table/put t
             id
             (assoc cur
               :counts (assoc counts idx (+ (get counts idx 0) 1))
@@ -742,14 +742,14 @@ others pass through."
 (defn metric (id)
   "The current value of metric `id` as a map (with `:summary`'s `:mean`/`:stddev`
 derived), or nil if no such metric has recorded anything yet."
-  (let (state (table-get (telemetry-metrics) id nil))
+  (let (state (table/get (telemetry-metrics) id nil))
     (when state (telemetry-present state))))
 
 (defn metrics-snapshot ()
   "A point-in-time map of every metric `id` → its reader value (see `metric`).
 Atomic; safe to poll from any process (this is the stream-folded replacement for
 scraping N snapshot builtins). Empty map if no metrics recorded."
-  (let (snap (table-snapshot (telemetry-metrics)))
+  (let (snap (table/snapshot (telemetry-metrics)))
     (reduce-kv (fn (acc id state) (assoc acc id (telemetry-present state))) {} snap)))
 
 (defn- telemetry-quantile
@@ -773,7 +773,7 @@ in, then linearly interpolate within `[prev-bound, upper]`. The overflow bucket
 bucketed counts — linear interpolation within the containing bucket, the standard
 `histogram_quantile` estimate (approximate; precision is the bucket granularity).
 Returns nil unless `id` is a `distribution` with at least one observation."
-  (let (state (table-get (telemetry-metrics) id nil))
+  (let (state (table/get (telemetry-metrics) id nil))
     (when (and state
             (= (get state :kind) :distribution)
             (> (get state :count) 0))
@@ -794,4 +794,4 @@ folds only a fraction of a hot event. Deterministic (an atomic counter under `id
 not a PRNG), so it never loses count. Compose with an aggregator's handler, or any
 attach handler. Returns the wrapped handler."
   (let (t (telemetry-metrics) k [id :sample-seen])
-    (fn (e m md) (when (= 0 (rem (table-incr t k 1) n)) (handler e m md)))))
+    (fn (e m md) (when (= 0 (rem (table/incr t k 1) n)) (handler e m md)))))

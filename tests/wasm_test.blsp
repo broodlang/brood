@@ -196,7 +196,7 @@
           ([:r i r] (assert= r (* 2 i)))
           (after 10000 (is false))))
       (close inst)))
-  (test "a long call rides the offload pool (call-blocking)"
+  (test "a long call rides the proc/offload pool (call-blocking)"
     (let (inst (instantiate *scalars-wat*))
       (assert= (call-blocking inst "add" 1000 337) 1337)
       (close inst))))

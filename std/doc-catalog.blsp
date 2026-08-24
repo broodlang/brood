@@ -64,7 +64,6 @@
    "assoc-in" :maps
    "assoc-map-pairs" :maps
    "assoc-vec-pairs" :maps
-   "audio-beep" :system
    "bench" :meta
    "binding" :meta
    "binding-names" :meta
@@ -99,8 +98,6 @@
    "bytes-uint-le" :bytes
    "bytes-width-check" :bytes
    "bytes?" :predicates
-   "cancel-timer" :processes
-   "canonicalize" :system
    "string/capitalize" :strings
    "case" :control
    "case-check-test" :control
@@ -216,7 +213,6 @@
    "eval" :meta
    "eval-string" :meta
    "every?" :predicates
-   "exe-path" :system
    "exit" :processes
    "feature?" :predicates
    "features" :meta
@@ -257,14 +253,11 @@
    "get-in" :maps
    "get-in-walk" :maps
    "get-unanswerable" :maps
-   "getenv" :system
    "global-names" :meta
    "string/grapheme-at" :strings
    "string/grapheme-count" :strings
    "has-at-least?" :predicates
    "hash-map" :maps
-   "hibernate" :processes
-   "hostname" :system
    "identity" :functions
    "identity-of" :meta
    "if-let" :control
@@ -301,14 +294,12 @@
    "list" :collections
    "string/list->" :strings
    "file/ls" :filesystem
-   "list-processes" :processes
    "list?" :predicates
    "load" :meta
    "string/lower" :strings
    "macroexpand" :meta
    "macroexpand-1" :meta
    "macroexpand-loop" :meta
-   "mailbox-size" :processes
    "file/mkdir" :filesystem
    "map" :collections
    "map-assoc" :maps
@@ -343,8 +334,6 @@
    "no-method" :meta
    "not" :predicates
    "not=" :math
-   "now" :system
-   "now-ns" :system
    "nth" :collections
    "nth-bad-index" :collections
    "nth-seq-or-fail" :collections
@@ -354,7 +343,6 @@
    "num-sub" :meta
    "number?" :predicates
    "numerator" :math
-   "offload" :processes
    "or" :control
    "ord-compare" :meta
    "string/pad-left" :strings
@@ -385,17 +373,10 @@
    "print" :io
    "println" :io
    "private?" :meta
-   "proc-close" :system
-   "proc-send" :system
-   "proc-set-binary" :system
-   "proc-spawn" :system
-   "process-flag" :processes
-   "process-info" :processes
    "profile-start" :meta
    "profile-stop" :meta
    "provide" :meta
    "quot" :math
-   "random-token" :system
    "range" :collections
    "range?" :predicates
    "ratio?" :predicates
@@ -460,7 +441,6 @@
    "reverse-acc" :collections
    "rope?" :predicates
    "run!" :control
-   "run-process" :system
    "runtime-collect" :meta
    "sample" :collections
    "satisfies?" :meta
@@ -521,8 +501,6 @@
    "spy-walk-let" :meta
    "spy-walk-seq" :meta
    "string/starts-with?" :predicates
-   "stdin-tty?" :system
-   "stdout-tty?" :system
    "steal-count" :meta
    "str" :strings
    "string/->codepoints" :strings
@@ -546,15 +524,6 @@
    "symbol" :convert
    "symbol?" :predicates
    "system-monitor" :meta
-   "table" :processes
-   "table-count" :maps
-   "table-delete" :processes
-   "table-drop" :maps
-   "table-get" :processes
-   "table-has?" :processes
-   "table-incr" :maps
-   "table-put" :processes
-   "table-snapshot" :maps
    "table?" :predicates
    "take" :collections
    "take-acc" :collections

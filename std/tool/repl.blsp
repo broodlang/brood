@@ -13,7 +13,7 @@
 ;;    transients are reclaimed at the eval safepoint between iterations, keeping
 ;;    only the loop fn + its args live. `run` runs the loop in a spawned
 ;;    process and `monitor`s it to await EOF. (Pre-ADR-055 this used an explicit
-;;    `(hibernate)` arena flip; automatic GC made that redundant — see ADR-048.)
+;;    `(proc/hibernate)` arena flip; automatic GC made that redundant — see ADR-048.)
 ;;  - Multi-line input is driven by the reader, not a hand-rolled scanner: an
 ;;    unclosed form or string makes `eval-string` raise the INCOMPLETE_INPUT
 ;;    error (code "E0002", ADR-049), the signal to read another line. Because
@@ -31,7 +31,7 @@
 ;;    the already-typed prefix passed in as read-only context so highlighting /
 ;;    matching / hints see the whole form.
 ;;  - Reads work piped, too: `echo '(+ 1 2)' | brood` prints `3`. Prompts and the
-;;    banner are gated on `(stdout-tty?)`, so they never pollute a redirected
+;;    banner are gated on `(os/stdout-tty?)`, so they never pollute a redirected
 ;;    stdout; results always print (matching the old plain reader).
 
 ; highlight-spans — colourised result output
@@ -282,12 +282,12 @@ forms into the eval rather than fail cleanly."
   (repl-call
     (fn ()
       (try
-        (let (t0 (now)
+        (let (t0 (os/now)
               v (eval-string expr)
-              ms (- (now) t0))
+              ms (- (os/now) t0))
           ; value shown only interactively (piped ,time reports just the
           ; timing, as before) — and bounded, like any printed result
-          (when (stdout-tty?) (println (repl-colorize (pr-str-bounded v))))
+          (when (os/stdout-tty?) (println (repl-colorize (pr-str-bounded v))))
           (println (str "\e[90m; " ms " ms\e[0m")))
         (catch e (eprint (str (repl-error-message e) "\n")))))))
 
@@ -341,7 +341,7 @@ form that is unreadable on one line."
             text (try
                    (do (string/trim (format/source (pr-str out))))
                    (catch _ (pr-str out))))
-        (println (if (stdout-tty?) (repl-colorize text) text)))
+        (println (if (os/stdout-tty?) (repl-colorize text) text)))
       (catch e (eprint (str (repl-error-message e) "\n"))))))
 
 (defn- repl-run-meta
@@ -462,7 +462,7 @@ Printed with `pr-str-bounded`, so a huge or deeply-nested result elides with `�
 instead of scrolling the session away; `(pr-str *1)` still shows the whole thing,
 and `(binding (*print-length* nil) …)` lifts the bound for a form."
   (let (s (pr-str-bounded v))
-    (println (if (stdout-tty?) (repl-colorize s) s))))
+    (println (if (os/stdout-tty?) (repl-colorize s) s))))
 
 ;; ---- advisory type-check (the checker, at the prompt) -----------------------
 ;; The REPL is the one place every `def` is already LOADED, so the checker's inference
@@ -475,7 +475,7 @@ and `(binding (*print-length* nil) …)` lifts the bound for a form."
   (src)
   "The advisory type-check warning strings for REPL input `src` (each complete form checked
 against the live image), or nil. Nil on incomplete input — there is nothing to check yet."
-  (if (getenv "BROOD_NO_CHECK")
+  (if (os/getenv "BROOD_NO_CHECK")
     nil
     (mapcat check (try (read-all src) (catch _ nil)))))
 
@@ -483,7 +483,7 @@ against the live image), or nil. Nil on incomplete input — there is nothing to
   (src)
   "Print `src`'s advisory type-check warnings to stderr — yellow on a TTY, plain on a pipe."
   (for (w (repl-check-warnings src))
-    (eprint (if (stdout-tty?)
+    (eprint (if (os/stdout-tty?)
               (str "\e[33mwarning:\e[0m " w "\n")
               (str "warning: " w "\n")))))
 
@@ -495,12 +495,12 @@ was slow — `:more` if `src` is an incomplete form (read another line), or `:er
 reporting a real error. Never lets an error escape the loop."
   (try
     (let (_ (repl-warn src)
-          t0 (now)
+          t0 (os/now)
           v (eval-string src)
-          ms (- (now) t0))
+          ms (- (os/now) t0))
       (repl-remember-value v)
       (repl-print-value v)
-      (when (and (stdout-tty?) (>= ms *repl-slow-ms*))
+      (when (and (os/stdout-tty?) (>= ms *repl-slow-ms*))
         (println (str "\e[90m; " ms " ms\e[0m")))
       :ok)
     (catch e
@@ -580,35 +580,35 @@ reporting a real error. Never lets an error escape the loop."
 ;; as its child runs — so push/pop never race. If the head pid has *died* without
 ;; popping (its runner was killed rather than returning), the next poller repairs the
 ;; stack instead of leaving the flag permanently unowned.
-(def- *repl-interrupt-owners* (table))
+(def- *repl-interrupt-owners* (table/new))
 
 (defn- repl-interrupt-push
   ()
   "Register the calling process as the innermost interrupt owner."
-  (table-put *repl-interrupt-owners*
+  (table/put *repl-interrupt-owners*
     :stack
-    (cons (self) (or (table-get *repl-interrupt-owners* :stack) '()))))
+    (cons (self) (or (table/get *repl-interrupt-owners* :stack) '()))))
 
 (defn- repl-interrupt-pop
   ()
   "Deregister the calling process (must be the current head — strict nesting)."
-  (table-put *repl-interrupt-owners*
+  (table/put *repl-interrupt-owners*
     :stack
-    (rest (or (table-get *repl-interrupt-owners* :stack) '()))))
+    (rest (or (table/get *repl-interrupt-owners* :stack) '()))))
 
 (defn- repl-interrupt-owner?
   ()
   "Is the calling process the innermost live interrupt owner? Repairs the stack past
 dead heads (a runner that was killed instead of returning), so ownership can never be
 wedged on a corpse."
-  (let (stack (or (table-get *repl-interrupt-owners* :stack) '()))
+  (let (stack (or (table/get *repl-interrupt-owners* :stack) '()))
     (cond
       (empty? stack) true
       (= (first stack) (self)) true
       ;; a dead head can't poll — drop it and re-ask
-      (nil? (process-info (first stack)))
+      (nil? (proc/info (first stack)))
         (do
-          (table-put *repl-interrupt-owners*
+          (table/put *repl-interrupt-owners*
             :stack
             (rest stack))
           (repl-interrupt-owner?))
@@ -677,10 +677,10 @@ session is armed, else inline. The meta-command counterpart of `repl-eval`."
   ()
   "The history file path: `$BROOD_HISTORY`, else `$HOME/.brood_history` (or, with no
 `$HOME`, `.brood_history` in the current directory)."
-  (let (override (getenv "BROOD_HISTORY"))
+  (let (override (os/getenv "BROOD_HISTORY"))
     (if override
       override
-      (str (or (getenv "HOME") ".") "/.brood_history"))))
+      (str (or (os/getenv "HOME") ".") "/.brood_history"))))
 
 (defn- repl-history->text
   (history)
@@ -757,7 +757,7 @@ ends input; Ctrl-C drops the form and re-prompts."
   "Piped/redirected read: accumulate physical lines (no editor) until the form is
 complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplete form."
   (do
-    (when (stdout-tty?) (print (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
+    (when (os/stdout-tty?) (print (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
     (let (line (read-line))
       (cond
         (nil? line)
@@ -792,7 +792,7 @@ body); `interactive` and `history` stay live as rooted tail-call arguments.
 Returns (and the process exits) at end of input."
   (let (r (repl-read-eval interactive "" history))
     (if (get r :eof)
-      (when (stdout-tty?) (print "\n"))
+      (when (os/stdout-tty?) (print "\n"))
       (repl-loop interactive (get r :history)))))
 
 (defn- repl-await
@@ -822,8 +822,8 @@ Returns (and the process exits) at end of input."
   "The startup files to load, in order: `$BROOD_RC` (else `$HOME/.broodrc.blsp`), then
 `./.broodrc.blsp` for a project-local one. Duplicates collapse, so running the REPL
 from your home directory doesn't load the same file twice."
-  (let (user (or (getenv "BROOD_RC")
-               (let (home (getenv "HOME")) (if home (path-join home ".broodrc.blsp") nil)))
+  (let (user (or (os/getenv "BROOD_RC")
+               (let (home (os/getenv "HOME")) (if home (path-join home ".broodrc.blsp") nil)))
         ;; Compared against the *absolute* local path, since `user` is absolute — a
         ;; bare "./.broodrc.blsp" would never match it and we'd load twice.
         local (try (path-join (file/cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
@@ -884,7 +884,7 @@ Loads the startup files first (`$BROOD_RC` or `~/.broodrc.blsp`, then a project-
 fatal. Nestable: `pry` calls this from inside a session — prompts rebound with
 `binding` around the call are honoured, and the SIGINT handler is installed/restored
 by the outermost invocation only."
-  (let (interactive (and (stdin-tty?) (stdout-tty?))
+  (let (interactive (and (os/stdin-tty?) (os/stdout-tty?))
         _rc (repl-load-rc)
         ;; Resolve `*repl-interruptible*` to the real armed state: the user's knob (the
         ;; rc has already run, so an opt-out short-circuits before the handler is ever
@@ -905,7 +905,7 @@ by the outermost invocation only."
         prompt *repl-prompt*
         cont-prompt *repl-cont-prompt*
         history (if interactive (repl-load-history) '()))
-    (when (stdout-tty?) (eprint (str *repl-banner* "\n")))
+    (when (os/stdout-tty?) (eprint (str *repl-banner* "\n")))
     ;; `%in-ns` must run in the LOOP process (its persistent `compile_ns` is what each
     ;; `eval-string` inherits), not the parent — and only there does it see the ambient
     ;; package context that roots the module name. A no-op when `*repl-start-ns*` is nil

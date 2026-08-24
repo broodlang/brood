@@ -133,8 +133,8 @@ pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Optio
 /// Whitelisted map READ ops (return a value — safe in any position) → Table op.
 pub(crate) fn linmap_read_op(sym: Symbol) -> Option<&'static str> {
     match value::symbol_name_opt(sym)? {
-        "map-get" => Some("table-get"),
-        "map-count" => Some("table-count"),
+        n if n == kw::MAP_GET => Some(kw::TABLE_GET),
+        n if n == kw::MAP_COUNT => Some(kw::TABLE_COUNT),
         _ => None,
     }
 }
@@ -145,8 +145,8 @@ pub(crate) fn linmap_read_op(sym: Symbol) -> Option<&'static str> {
 /// cannot serialize — so it is excluded until the Table can hold non-serializable values.
 pub(crate) fn linmap_update_op(sym: Symbol) -> Option<&'static str> {
     match value::symbol_name_opt(sym)? {
-        "map-int-add" => Some("table-incr"),
-        "map-dissoc" => Some("table-delete"),
+        n if n == kw::MAP_INT_ADD => Some(kw::TABLE_INCR),
+        n if n == kw::MAP_DISSOC => Some(kw::TABLE_DELETE),
         _ => None,
     }
 }

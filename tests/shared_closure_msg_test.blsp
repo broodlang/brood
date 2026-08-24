@@ -30,10 +30,10 @@
 ;; A worker that is deliberately BUSY when the message arrives: it spins briefly before its
 ;; first `receive`, so the L1 parked-receiver path cannot apply and the send must serialise —
 ;; which is the path under test.
-(defn spin-until (t) (if (>= (now-ns) t) :ok (spin-until t)))
+(defn spin-until (t) (if (>= (os/now-ns) t) :ok (spin-until t)))
 
 (defn busy-worker (parent)
-  (spin-until (+ (now-ns) 2000000))
+  (spin-until (+ (os/now-ns) 2000000))
   (receive
     ([:call f from] (send from [:result (f)]))
     (after 30000 (send parent [:result :timeout]))))
@@ -41,7 +41,7 @@
 ;; A long-lived worker that stays BUSY between requests (it spins before each receive), so a
 ;; send to it cannot take the L1 parked-receiver path and must serialise — the path under test.
 (defn echo-loop ()
-  (spin-until (+ (now-ns) 300000))
+  (spin-until (+ (os/now-ns) 300000))
   (receive
     ([:call f from] (send from [:result (f)]) (echo-loop))
     (:stop :ok)

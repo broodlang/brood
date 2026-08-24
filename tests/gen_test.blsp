@@ -40,7 +40,7 @@
 (describe "gen: sleep"
   :isolated
   (test "sleep waits roughly the requested time"
-    (let (t (now)) (sleep 30) (is (>= (- (now) t) 25))))
+    (let (t (os/now)) (sleep 30) (is (>= (- (os/now) t) 25))))
   ; allow scheduler slack
   (test "sleep does not consume queued messages"
     (send (self) :keep)

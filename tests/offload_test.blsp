@@ -15,7 +15,7 @@
       (is (bytes? pooled))
       (assert= pooled direct)))
   (test "file IO through the pool: file/spit, file/slurp-bytes, cleanup"
-    (let (path (str "/tmp/brood-offload-" (now-ns) ".bin")
+    (let (path (str "/tmp/brood-offload-" (os/now-ns) ".bin")
           payload (bytes 0 255 128 65 7))
       (offload file/spit-bytes path payload)
       (let (back (offload file/slurp-bytes path))

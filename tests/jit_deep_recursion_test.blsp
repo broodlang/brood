@@ -31,7 +31,7 @@
 ;; Read from the ENVIRONMENT at the point of use, not from a global the wrapper defines
 ;; first: the wrapper's `def` would run before this file loads (the mistake the UCD knob's
 ;; comment records).
-(def- jdr-of (max 1 (or (string->number (or (getenv "BROOD_JDR_OF") "")) 1)))
+(def- jdr-of (max 1 (or (string->number (or (os/getenv "BROOD_JDR_OF") "")) 1)))
 
 (defn- jdr-parse
   (path)

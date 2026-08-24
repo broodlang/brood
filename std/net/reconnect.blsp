@@ -2,7 +2,7 @@
 ;;
 ;; Heartbeats detect a dead node link (2 s ping / 6 s down) but nothing
 ;; reconnects: `send` to a disconnected node drops (or raises, with
-;; `(process-flag :send-errors true)`), and recovery is a manual `(node/connect …)`.
+;; `(proc/flag :send-errors true)`), and recovery is a manual `(node/connect …)`.
 ;; This module is that recovery, as pure Brood policy over the existing
 ;; primitives (`connect` / `monitor-node` / `nodes`):
 ;;
@@ -15,7 +15,7 @@
 ;; exponential backoff (`:min-ms` 500 doubling to `:max-ms` 30000) until the
 ;; peer is back — then re-arms the monitor and tells every subscriber
 ;; `[:nodeup name]`. A sender that must not lose messages across the gap pairs
-;; this with `(process-flag :send-errors true)`: the send raises `:noconnection`
+;; this with `(proc/flag :send-errors true)`: the send raises `:noconnection`
 ;; (E0060) instead of dropping, so it can queue and resend on `[:nodeup …]`.
 
 (defmodule reconnect
@@ -23,7 +23,7 @@
 a peer node alive with exponential-backoff `(node/connect …)` retries; `subscribe`
 delivers `[:nodeup name]` / `[:nodedown name]` to your mailbox; `unwatch` stops.
 Pure Brood policy over connect/monitor-node/nodes. Pair with
-`(process-flag :send-errors true)` for queue-and-retry senders.")
+`(proc/flag :send-errors true)` for queue-and-retry senders.")
 
 (defn- reconnect-proc-name
   (spec)

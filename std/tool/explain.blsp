@@ -62,10 +62,10 @@ the `nest mcp` tools of the same names.")
             :causes "A recursive call that isn't in tail position (work happens after the call), so each call grows the stack: `(defn sum (n) (+ n (sum (- n 1))))`."
             :fix "Rewrite as a tail-recursive loop with an accumulator (proper tail calls are O(1) stack), or use `reduce`/`fold`."
             :example "(defn sum (n acc) (if (= n 0) acc (sum (- n 1) (+ acc n))))"}
-   "E0045" {:summary "Per-process heap limit — this process stayed over its `(process-flag :max-heap n)` after GC."
+   "E0045" {:summary "Per-process heap limit — this process stayed over its `(proc/flag :max-heap n)` after GC."
             :causes "One process accumulating too much live data under its own declared cap (the BEAM `max_heap_size` analogue)."
             :fix "Reduce the process's live set, or raise/clear its `:max-heap` flag. Uncaught, it kills only the offending process — others are untouched."
-            :example "(process-flag :max-heap 10000000)   ; per-process, in bytes"}
+            :example "(proc/flag :max-heap 10000000)   ; per-process, in bytes"}
    "E0050" {:summary "File I/O failed — a path couldn't be read or written."
             :causes "A missing file, a permissions problem, a wrong path (relative to the cwd, not the project)."
             :fix "Check the path exists (`(file/exists? p)`); use `(file/cwd)` to see the working directory. For binary data use `file/slurp-bytes`/`file/spit-bytes`."
@@ -73,7 +73,7 @@ the `nest mcp` tools of the same names.")
    "E0051" {:summary "Subprocess failed to start — the program couldn't be spawned."
             :causes "The program isn't on PATH; a wrong executable name."
             :fix "Confirm the binary is installed and on PATH; pass an absolute path if needed."
-            :example "(proc-spawn \"git\" [\"status\"])"}
+            :example "(proc/spawn \"git\" [\"status\"])"}
    "E0060" {:summary "Distribution-layer failure — a node/connect/send operation failed."
             :causes "A wrong `name@host`; the peer not listening; a cookie mismatch; a dropped link (E0060 noconnection when `:send-errors` is on)."
             :fix "Confirm both nodes ran `node-start` with the SAME cookie and reachable addresses; `std/net/reconnect` auto-heals a dropped link."
@@ -168,10 +168,10 @@ the `nest mcp` tools of the same names.")
      :example "(match frame ((bytes (len :u16) (body len) & rest) body) (_ :short))"
      :see "docs/language.md §Bytes patterns"}
     {:intent "run a slow / blocking native call without stalling"
-     :keywords ["blocking" "slow" "offload" "git" "long" "io" "dirty"]
-     :idiom "Run an allow-listed blocking native on the offload pool: `(offload f & args)` parks only this process, never a scheduler worker."
-     :example "(offload file/slurp-bytes \"big.tar\")"
-     :see "docs/language.md §Blocking natives (offload)"}
+     :keywords ["blocking" "slow" "proc/offload" "git" "long" "io" "dirty"]
+     :idiom "Run an allow-listed blocking native on the proc/offload pool: `(proc/offload f & args)` parks only this process, never a scheduler worker."
+     :example "(proc/offload file/slurp-bytes \"big.tar\")"
+     :see "docs/language.md §Blocking natives (proc/offload)"}
     {:intent "define a private helper / hide an implementation detail"
      :keywords ["private" "hidden" "internal" "encapsulate" "defp" "defn-" "def-"]
      :idiom "`defn-` and `def-` define a MODULE-PRIVATE name (ADR-146) — a clean name, no marker in it. Another module can't reference it (compile error) without `(:use-internals foo)`."

@@ -863,7 +863,7 @@ NOT call this: it requires its entry point and lets the rest stay on disk."
 ;; is exactly the failure mode worth a special case.
 (defn image-usable? ()
   "Whether a cached startup image may be used — false under `BROOD_COVERAGE`, whose instrumentation an image cannot represent."
-  (nil? (getenv "BROOD_COVERAGE")))
+  (nil? (os/getenv "BROOD_COVERAGE")))
 
 ;; Milliseconds as "12.3s" / "845ms" — build output should read at a glance.
 (defn- project-ms-str
@@ -901,11 +901,11 @@ Reports the build on stderr when it actually builds, and says nothing on an imag
 hit — a cold load of a large project takes tens of seconds, and silence there is
 indistinguishable from a hang. stderr, not stdout, so `nest run`'s output stays the
 program's and the LSP's protocol channel stays clean."
-  (let (t-a (now-ns)
+  (let (t-a (os/now-ns)
         files (source-files root)
-        t-b (now-ns)
+        t-b (os/now-ns)
         fp (project-fingerprint-of files)
-        t-c (now-ns)
+        t-c (os/now-ns)
         hit (cond
               (image-usable?)
                 (let (n (project-install-image root fp))
@@ -915,8 +915,8 @@ program's and the LSP's protocol channel stays clean."
                     ;; whole project. `nest run` uses `setup-lazy-image` instead.
                     else (do (materialize-all) n)))
               else nil)
-        t-d (now-ns)
-        _ (when (getenv "BROOD_IMAGE_TRACE")
+        t-d (os/now-ns)
+        _ (when (os/getenv "BROOD_IMAGE_TRACE")
             (eprintln (str "[loader] collect "
                         (quot (- t-b t-a) 1000000)
                         " ms, fingerprint "
@@ -930,10 +930,10 @@ program's and the LSP's protocol channel stays clean."
         (let (name (or *project-name* (path-basename root))
               n (count files)
               _ (eprintln (str "Building " name " (" n " file" (if (= n 1) "" "s") ")"))
-              t0 (now-ns)
+              t0 (os/now-ns)
               before (global-names)
               _ (/apply load-sources (cons root opts))
-              t-load (quot (- (now-ns) t0) 1000000)
+              t-load (quot (- (os/now-ns) t0) 1000000)
               ;; A project whose globals are not all portable — a `table` global is the
               ;; documented mutable-state idiom, and a table is deliberately local to its
               ;; runtime — simply cannot be imaged. That is correct (loading from source is
@@ -954,7 +954,7 @@ program's and the LSP's protocol channel stays clean."
                                           (get e :message)))
                               nil)))
                       else nil)
-              t-all (quot (- (now-ns) t0) 1000000))
+              t-all (quot (- (os/now-ns) t0) 1000000))
           (eprintln (str "Built "
                       name
                       " in "
@@ -1660,7 +1660,7 @@ resolve in the advisory checker. Returns the project root."
 
 (defn- project-check-files
   (files root)
-  (if (= (getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/getenv "BROOD_NO_CHECK") "1")
     0
     ;; Build the KI-17 reachability closures from the WHOLE project (every file's
     ;; header), not just `files` — a `nest check FILE` still needs the full graph to
@@ -1709,7 +1709,7 @@ resolve in the advisory checker. Returns the project root."
         (or from (file/cwd))
         ")"))
     (project-ensure-loaded root)
-    (if (= (getenv "BROOD_NO_CHECK") "1")
+    (if (= (os/getenv "BROOD_NO_CHECK") "1")
       nil
       ;; `append-two` (copy the small per-file diagnostic list, share `acc`) not
       ;; `(append acc …)` (recopies the growing accumulator each file → O(files²)).
@@ -1852,7 +1852,7 @@ resolve in the advisory checker. Returns the project root."
 ;; type-check pre-flight. Shared by `check-project` / `check-project-sources`.
 (defn- project-check-duplicate-defs
   (extracts source-set)
-  (if (= (getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/getenv "BROOD_NO_CHECK") "1")
     0
     (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project-duplicate-def-warnings extracts source-set))))
 
@@ -1989,7 +1989,7 @@ resolve in the advisory checker. Returns the project root."
 ; v2: check-result entries gained a 5th field, the KI-17 require-closure (ADR-189).
 (def *check-cache-version* "v2")
 (defn- project-cache-stamp () (str (build-id) "|" *check-cache-version*))
-(defn- project-cache-off? () (= (getenv "BROOD_NO_CHECK_CACHE") "1"))
+(defn- project-cache-off? () (= (os/getenv "BROOD_NO_CHECK_CACHE") "1"))
 
 ;; The cache directory for `root` (created if absent), or nil if no cache base is
 ;; available: `$XDG_CACHE_HOME` (or `~/.cache`) `/brood/check/<sha256 of root>`.
@@ -2015,7 +2015,7 @@ resolve in the advisory checker. Returns the project root."
   (when (not *project-cache-pruned*)
     (def *project-cache-pruned* true)
     (try
-      (let (cutoff (- (now) *project-cache-max-age-ms*))
+      (let (cutoff (- (os/now) *project-cache-max-age-ms*))
         (fold (fn (_ entry)
                 (let (p (path-join base entry))
                   (when (and (not (= p keep))
@@ -2028,8 +2028,8 @@ resolve in the advisory checker. Returns the project root."
 
 (defn- project-cache-dir
   (root)
-  (let (xdg (getenv "XDG_CACHE_HOME")
-        home (getenv "HOME")
+  (let (xdg (os/getenv "XDG_CACHE_HOME")
+        home (os/getenv "HOME")
         base (cond
                (and xdg (not (= xdg ""))) xdg
                (and home (not (= home ""))) (path-join home ".cache")
@@ -2126,7 +2126,7 @@ resolve in the advisory checker. Returns the project root."
 ;; / per-file), noted as future work (ADR-119). Tunable via `BROOD_CHECK_CACHE_MAX`.
 (defn- project-cache-max-files
   ()
-  (let (e (getenv "BROOD_CHECK_CACHE_MAX"))
+  (let (e (os/getenv "BROOD_CHECK_CACHE_MAX"))
     (if (and e (not (= e ""))) (or (string->number e) 50000) 50000)))
 
 ;; Return `{path -> [mtime counts privs def-names]}` for `files` by scanning them
@@ -2177,7 +2177,7 @@ resolve in the advisory checker. Returns the project root."
 ;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.
 (defn- project-check-unused-private
   (extracts)
-  (if (= (getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/getenv "BROOD_NO_CHECK") "1")
     0
     (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project-unused-private-warnings extracts))))
 
@@ -2632,7 +2632,7 @@ as unchanged (only when some were)."
 ;; load-all-then-run-all path under `BROOD_TEST_NO_SCOPE`.
 (defn- project-run-suite
   (files opts)
-  (if (getenv "BROOD_TEST_NO_SCOPE")
+  (if (os/getenv "BROOD_TEST_NO_SCOPE")
     (do
       (fold (fn (_ f) (load f)) nil files)
       (/apply test/run-tests opts))
@@ -2660,7 +2660,7 @@ as unchanged (only when some were)."
       ;; Per-file scoped run (see `run-project-tests`) — matters most here: `nest mcp`
       ;; is a long-lived hot-reload image, so a load-all-then-run would accumulate every
       ;; file's promoted code on EVERY run-tests call. `BROOD_TEST_NO_SCOPE` reverts.
-      (if (getenv "BROOD_TEST_NO_SCOPE")
+      (if (os/getenv "BROOD_TEST_NO_SCOPE")
         (do
           (fold (fn (_ f) (load f)) nil files)
           (/apply test/run-tests-structured opts))
@@ -2972,7 +2972,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
 ;; It's auto-created with documented defaults on first tool use, then loaded by
-;; the `nest` subcommands. Rust mechanism: getenv (locate it) + run-process.
+;; the `nest` subcommands. Rust mechanism: os/getenv (locate it) + os/run-process.
 (defdyn *config-git-init* false)
 ; nest new: run `git init` in the new project?
 
@@ -2994,7 +2994,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (defn- config-base-dir
   ()
   ; $XDG_CONFIG_HOME, else ~/.config
-  (let (xdg (getenv "XDG_CONFIG_HOME")) (if (nil? xdg) (path-join (getenv "HOME") ".config") xdg)))
+  (let (xdg (os/getenv "XDG_CONFIG_HOME")) (if (nil? xdg) (path-join (os/getenv "HOME") ".config") xdg)))
 (defn- config-dir () (path-join (config-base-dir) "brood"))
 (defn- config-path () (path-join (config-dir) "config.blsp"))
 

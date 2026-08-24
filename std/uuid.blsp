@@ -64,7 +64,7 @@ always — useful for content-based IDs and idempotent generation.")
 
 (defn v4 ()
   "Generate a random RFC 4122 version 4 UUID string."
-  (let (raw (random-token 16)
+  (let (raw (rand/token 16)
         ;; raw is 32 lowercase hex chars; inject version (pos 12) and variant (pos 16)
         p0 (string/substring raw 0 8)
         p1 (string/substring raw 8 12)
@@ -93,8 +93,8 @@ always — useful for content-based IDs and idempotent generation.")
   "Generate an RFC 9562 version 7 UUID. The first 48 bits encode the current
 Unix timestamp in milliseconds, giving chronological sort order. The rest is
 random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
-  (let (ms (now)
-        rand (random-token 10)
+  (let (ms (os/now)
+        rand (rand/token 10)
         ts (pad-hex (int->hex ms) 12)
         ;; p0 (8 hex = bytes 0-3): timestamp high 32 bits
         ;; p1 (4 hex = bytes 4-5): timestamp low 16 bits

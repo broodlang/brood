@@ -1,0 +1,40 @@
+;; std/os.blsp — operating-system & environment surface. Policy over the %-prefixed
+;; primitives, so a program reaches the OS as os/getenv, os/run-process, os/now, … rather
+;; than the bare language core.
+(defmodule os)
+
+(defn getenv (name)
+  "The value of environment variable name, or nil if unset."
+  (%getenv name))
+
+(defn hostname ()
+  "This machine's short hostname (no domain). Used to qualify a node name as name@host."
+  (%hostname))
+
+(defn run-process (prog args)
+  "Run external program prog with an args list, inheriting stdio; returns its exit code."
+  (%run-process prog args))
+
+(defn exe-path ()
+  "The absolute path of the running executable, or nil when the platform won't say (a sandbox with no /proc/self/exe equivalent). For locating something installed ALONGSIDE this binary: a shipped app cannot assume PATH — a desktop launch inherits the session's, which routinely lacks ~/.local/bin — so \"the runtime that installed me is my sibling\" is the reliable lookup. Nil rather than an error, because asking where you live is opportunistic."
+  (%exe-path))
+
+(defn canonicalize (path)
+  "The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. Use it to make path sandboxing symlink-escape-proof."
+  (%canonicalize path))
+
+(defn stdin-tty? ()
+  "True when stdin is an interactive terminal (false when redirected from a pipe or file). The REPL gates raw-mode line editing on this."
+  (%stdin-tty?))
+
+(defn stdout-tty? ()
+  "True when stdout is an interactive terminal (false when piped or captured)."
+  (%stdout-tty?))
+
+(defn now ()
+  "Wall-clock milliseconds since the Unix epoch."
+  (%now))
+
+(defn now-ns ()
+  "Wall-clock nanoseconds since the Unix epoch (finer-grained than os/now)."
+  (%now-ns))
