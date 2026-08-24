@@ -51,7 +51,7 @@ carrying half-open character `:start`/`:end` positions. The kernel's
 the structure queries below navigate the result directly. (This replaced an
 in-Brood `annotate` walk that re-derived positions by summing leaf lengths: O(n)
 interpreted and the bottleneck in structural navigation.)"
-  (parse-source-positioned text))
+  (reflect/parse-source-positioned text))
 
 ;; ---- structure queries ------------------------------------------------------
 
@@ -107,11 +107,11 @@ cost of ~three forms, not the whole buffer."
         ;; ONE lexical pass for both offsets. The pair used to be two `scan-form-start`
         ;; calls, and the second re-walked the prefix the first had already covered — the
         ;; dominant cost of every structural motion, paid twice (2026-08-04).
-        [base start] (scan-form-start-2 text (min p (max 0 (dec n))))
+        [base start] (reflect/scan-form-start-2 text (min p (max 0 (dec n))))
         ;; The window END was an interpreted `sexp-scan` char-at loop over the ~3-form
         ;; window — ~85% of every structural motion. `scan-form-end` is the same lexical
         ;; scan (strings/comments skipped, bracket depth tracked) in one native byte pass.
-        end (scan-form-end text base 3))
+        end (reflect/scan-form-end text base 3))
     [base (string/substring text base end)]))
 
 ;; ---- pure navigation: (text point) -> point ---------------------------------

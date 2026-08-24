@@ -88,7 +88,7 @@ cross-file flat-namespace collisions."
     (do
       (load file)
       {:ok true
-       :diagnostics (or (check-file-structured file) [])
+       :diagnostics (or (reflect/check-file-structured file) [])
        :shadows (or (shadows-for file) [])})
     (catch e
       {:ok false :error (error-shape e)})))
@@ -238,8 +238,8 @@ the agent can branch on `(get r :error)` cleanly."
           {:name name
            :arglist (arglist val)
            :doc (doc val)
-           :type (type-signature sym)
-           :source-location (source-location sym)})
+           :type (reflect/type-signature sym)
+           :source-location (reflect/source-location sym)})
         (catch e
           {:name name :error (error-shape e)})))))
 
@@ -408,7 +408,7 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
     {:references (mapcat (fn (f)
                            (try
                              (map (fn (lc) {:file f :line (first lc) :col (second lc)})
-                               (references-in-source name (file/slurp f)))
+                               (reflect/references-in-source name (file/slurp f)))
                              (catch _ nil)))
                    (project-all-files *project-root*))}))
 
@@ -565,7 +565,7 @@ doesn't parse (incomplete input). Backed by `check-string-structured`."
     (when (not (string? src))
       (throw "check-source: :source must be a string"))
     (try
-      {:diagnostics (or (check-string-structured src) [])}
+      {:diagnostics (or (reflect/check-string-structured src) [])}
       (catch e
         {:error (error-shape e)}))))
 

@@ -207,8 +207,8 @@ module's namespace-rooted globals (ADR-070) back to it."
      :sig (pr-str (cons (symbol bare) (arglist v)))
      :doc (doc v)
      :macro (= (type-of v) :macro)
-     :type (try (type-signature sym) (catch _ nil))
-     :source (try (source-location sym) (catch _ nil))}))
+     :type (try (reflect/type-signature sym) (catch _ nil))
+     :source (try (reflect/source-location sym) (catch _ nil))}))
 
 ;; The public documentable definitions among `syms`, as records (in `syms` order).
 (defn- docs-def-records

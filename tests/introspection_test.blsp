@@ -67,11 +67,11 @@
 (defn sl-subject (x) (* x x))
 ;; Sends the parent its own view of the site, to prove a spawned process sees the
 ;; same shared def-site table (it lives in the runtime code region, like globals).
-(defn sl-worker (parent) (send parent (source-location 'introspection-test/sl-subject)))
+(defn sl-worker (parent) (send parent (reflect/source-location 'introspection-test/sl-subject)))
 
 (describe "source-location (cross-file def sites)"
   (test "records a top-level defn's site in this file"
-    (let (loc (source-location 'introspection-test/sl-subject))
+    (let (loc (reflect/source-location 'introspection-test/sl-subject))
       (refute (nil? loc))
       (is (vector? loc))
       (assert= (count loc) 3)
@@ -84,14 +84,14 @@
     ;; Prelude defns have a recorded site (the unpacked stdlib copy).
     ;; What stays `nil`: a Rust builtin (no .blsp source) or an unknown
     ;; name.
-    (let (loc (source-location 'map))
+    (let (loc (reflect/source-location 'map))
       (is (vector? loc))
       (is (string? (first loc))))
-    (assert= (source-location 'no-such-name-xyz) nil))
+    (assert= (reflect/source-location 'no-such-name-xyz) nil))
   (test "the site is visible from a spawned process (shared runtime code)"
     (let (me (self) _w (spawn (sl-worker me)))
       ;; the worker's copied-across value equals the parent's own lookup
-      (assert= (receive) (source-location 'introspection-test/sl-subject)))))
+      (assert= (receive) (reflect/source-location 'introspection-test/sl-subject)))))
 
 ;; Discovery over the flat namespace (std/prelude.blsp): apropos matches names,
 ;; doc-search matches docstrings, all-globals lists everything. Built on the
@@ -220,15 +220,15 @@
 ;; `lookup` share — a thin builtin over the checker's `signature_string`).
 (describe "type-signature"
   (test "returns the checker's arrow signature for a builtin"
-    (let (sig (type-signature 'count))
+    (let (sig (reflect/type-signature 'count))
       (is (string? sig))
       (is (includes? sig "-> int"))))
   (test "accepts a string name too, same as the symbol"
-    (assert= (type-signature "inc") (type-signature 'inc)))
+    (assert= (reflect/type-signature "inc") (reflect/type-signature 'inc)))
   (test "an interned-but-unbound name has no signature"
-    (assert= (type-signature 'no-such-global-xyz) nil))
+    (assert= (reflect/type-signature 'no-such-global-xyz) nil))
   (test "a never-interned string name is nil, not an error"
-    (assert= (type-signature "definitely-not-a-real-global-42") nil)))
+    (assert= (reflect/type-signature "definitely-not-a-real-global-42") nil)))
 
 ;; `features` / `feature?` — asking the BUILD what it can do.
 ;;

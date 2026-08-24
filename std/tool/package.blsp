@@ -1601,7 +1601,7 @@ sha256 pin still holds."
 ;; Re-render `src` after applying `f` to its (project …) node. Comments survive.
 (defn- package-manifest-transform
   (src f)
-  (let (kids (vec->list (node-children (parse-source src))))
+  (let (kids (vec->list (node-children (reflect/parse-source src))))
     (format/cst-root (apply vector
                        (map (fn (n) (if (package-project-list? n) (f n) n)) kids)))))
 

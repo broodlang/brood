@@ -2164,7 +2164,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // vectors; see `parse_source` for the shape.
     def(
         heap,
-        "parse-source",
+        "%parse-source",
         Arity::exact(1),
         Sig::new(vec![string], vec_ty),
         &["s"],
@@ -2173,7 +2173,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "scan-source-extract",
+        "%scan-source-extract",
         Arity::exact(1),
         Sig::new(vec![string], vec_ty),
         &["src"],
@@ -2181,7 +2181,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         scan_source_extract);
     def(
         heap,
-        "scan-tokens",
+        "%scan-tokens",
         Arity::exact(1),
         Sig::new(vec![string], vec_ty),
         &["s"],
@@ -2216,7 +2216,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // `parse_source_positioned` for the shape.
     def(
         heap,
-        "parse-source-positioned",
+        "%parse-source-positioned",
         Arity::exact(1),
         Sig::new(vec![string], map_ty),
         &["s"],
@@ -2227,7 +2227,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // it unchanged. Always registered; errors if built without the feature. §C.
     def(
         heap,
-        "tree-sitter-parse",
+        "%tree-sitter-parse",
         Arity::exact(2),
         Sig::new(vec![string, kw], map_ty),
         &["source", "lang"],
@@ -2237,7 +2237,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // a cache-eviction hook for when a buffer closes. §C.
     def(
         heap,
-        "tree-sitter-reparse",
+        "%tree-sitter-reparse",
         Arity::exact(3),
         Sig::new(vec![int, string, kw], map_ty),
         &["key", "source", "lang"],
@@ -2245,7 +2245,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         tree_sitter_reparse);
     def(
         heap,
-        "tree-sitter-forget",
+        "%tree-sitter-forget",
         Arity::exact(1),
         Sig::new(vec![int], int),
         &["key"],
@@ -2944,7 +2944,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // advisory type checker (the Ty lattice's first consumer; see docs/types.md)
     def(
         heap,
-        "check",
+        "%check",
         Arity::exact(1),
         Sig::new(vec![any], list_ty),
         &["form"],
@@ -2953,7 +2953,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "check-file",
+        "%check-file",
         Arity::range(1, 2),
         // 2nd arg (optional required-mods) is a list OR vector of module names — `any`
         // so a vector closure doesn't trip the arg-type lint on our own callers.
@@ -2963,7 +2963,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         check_file_builtin);
     def(
         heap,
-        "check-file-structured",
+        "%check-file-structured",
         Arity::range(1, 2),
         Sig::with_rest(vec![string], any, list_ty),
         &["path", "&optional required-mods"],
@@ -2971,7 +2971,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         check_file_structured);
     def(
         heap,
-        "check-file-deps",
+        "%check-file-deps",
         Arity::range(1, 2),
         Sig::with_rest(vec![string], any, any),
         &["path", "&optional required-mods"],
@@ -2987,7 +2987,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         module_direct_requires);
     def(
         heap,
-        "check-deps-fp",
+        "%check-deps-fp",
         Arity::exact(1),
         Sig::new(vec![any], string),
         &["dep-keys"],
@@ -2995,7 +2995,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         check_deps_fp);
     def(
         heap,
-        "check-string-structured",
+        "%check-string-structured",
         Arity::exact(1),
         Sig::new(vec![string], list_ty),
         &["src"],
@@ -3005,7 +3005,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // source positions (editor tooling; see docs/tooling.md)
     def(
         heap,
-        "form-pos",
+        "%form-pos",
         Arity::exact(1),
         Sig::new(vec![any], vec_ty.union(nil_ty)),
         &["form"],
@@ -3014,7 +3014,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "current-file",
+        "%current-file",
         Arity::exact(0),
         Sig::nullary(string.union(nil_ty)),
         &[],
@@ -3023,11 +3023,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "source-location",
+        "%source-location",
         Arity::exact(1),
         Sig::new(vec![sym], vec_ty.union(nil_ty)),
         &["name"],
-        "Where global name was defined, as [file line col], or nil. Quote it: (source-location 'foo).",
+        "Where global name was defined, as [file line col], or nil. Quote it: (reflect/source-location 'foo).",
         source_location);
     def(
         heap,
@@ -3039,7 +3039,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         private_p);
     def(
         heap,
-        "references-in-source",
+        "%references-in-source",
         Arity::exact(2),
         Sig::new(vec![sym.union(string), string], any),
         &["name", "source"],
@@ -3047,11 +3047,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         references_in_source);
     def(
         heap,
-        "type-signature",
+        "%type-signature",
         Arity::exact(1),
         Sig::new(vec![sym.union(string)], string.union(nil_ty)),
         &["name"],
-        "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (type-signature 'map).",
+        "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (reflect/type-signature 'map).",
         type_signature);
 
     // introspection (editor tooling; see docs/lsp.md) — derive what we can from
@@ -3859,7 +3859,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // preserves every existing id. The real fix is insertion-ordered map iteration.
     def(
         heap,
-        "scan-form-start",
+        "%scan-form-start",
         Arity::exact(2),
         Sig::new(vec![string, int], int),
         &["s", "pos"],
@@ -3867,7 +3867,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         scan_form_start);
     def(
         heap,
-        "scan-form-start-2",
+        "%scan-form-start-2",
         Arity::exact(2),
         Sig::new(vec![string, int], Ty::vector_of(int)),
         &["s", "pos"],
@@ -3875,7 +3875,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         scan_form_start_2);
     def(
         heap,
-        "scan-form-end",
+        "%scan-form-end",
         Arity::exact(3),
         Sig::new(vec![string, int, int], int),
         &["s", "from", "n-forms"],

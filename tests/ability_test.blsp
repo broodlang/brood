@@ -398,7 +398,7 @@
 ;; `check-string-structured`) rather than on runtime behaviour, which is unchanged.
 (defn abt-warns-of (src)
   "The advisory warning messages for source `src`."
-  (map (fn (w) (get w :message)) (check-string-structured src)))
+  (map (fn (w) (get w :message)) (reflect/check-string-structured src)))
 (defn abt-warns-about? (src needle)
   (any? (fn (w) (includes? w needle)) (abt-warns-of src)))
 

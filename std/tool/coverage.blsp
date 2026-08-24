@@ -73,7 +73,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 (defn- coverage-targets
   (source-dirs)
   (fold (fn (acc sym)
-          (let (location (source-location sym))
+          (let (location (reflect/source-location sym))
             (if (and (not (nil? location))
                   (coverage-under? (vector-ref location 0) source-dirs)
                   (= (type-of (eval sym)) :fn))

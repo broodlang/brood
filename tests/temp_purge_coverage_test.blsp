@@ -25,12 +25,12 @@
 ;; rather than hardcoded as "tests" so this does not depend on the cwd of the runner
 ;; (`nest test`, `cargo test` via suite.rs, and a bare `--test` all differ).
 (def tests-dir
-  (let (f (current-file) b (path-basename f))
+  (let (f (reflect/current-file) b (path-basename f))
     (string/substring f 0 (- (string/length f) (string/length b)))))
 
 ;; This file quotes the two markers below as string literals, so scanning it would find
 ;; them in its own source and report a phantom prefix. Skip it by name.
-(def self-name (path-basename (current-file)))
+(def self-name (path-basename (reflect/current-file)))
 
 (defn- test-files
   ()

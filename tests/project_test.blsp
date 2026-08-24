@@ -358,7 +358,7 @@
       (file/mkdir dir)
       (let (f (path-join dir "m.blsp"))
         (file/spit f "(defmodule p2m)\n(defn p2m-g (x) (p2m-h x))\n(defn p2m-h (a b) (+ a b))\n")
-        (let (r (check-file-deps f))
+        (let (r (reflect/check-file-deps f))
           (assert= (count r) 3)
           (is (vector? r))
           ;; dep-keys is the observations map; fp is a non-empty string
@@ -366,8 +366,8 @@
           (is (string? (nth r 2)))
           ;; recomputing the fingerprint of the same dep-keys against the unchanged
           ;; image reproduces it exactly (the reuse test the cache relies on)
-          (assert= (check-deps-fp (nth r 1)) (nth r 2))
-          (assert= (check-deps-fp (nth r 1)) (check-deps-fp (nth r 1))))))))
+          (assert= (reflect/check-deps-fp (nth r 1)) (nth r 2))
+          (assert= (reflect/check-deps-fp (nth r 1)) (reflect/check-deps-fp (nth r 1))))))))
 
 ;; The source loader is load-once *within a walk* (a module another file already
 ;; `require`d isn't loaded a second time when the walk reaches its file) and on

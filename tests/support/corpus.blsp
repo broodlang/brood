@@ -20,7 +20,7 @@ because half the corpora encode their expectations as hex.")
 
 ;; tests/support/corpus.blsp -> tests/corpus
 (def- corpus-root
-  (path-join (parent-directory (parent-directory (path-absolute (current-file)))) "corpus"))
+  (path-join (parent-directory (parent-directory (path-absolute (reflect/current-file)))) "corpus"))
 
 (defn corpus-dir (suite)
   "The directory holding the vendored corpus `suite`."
