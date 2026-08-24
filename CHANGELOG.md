@@ -4,6 +4,36 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.11.0 — 2026-08-24
+
+**BREAKING — the bare core drops from 337 to 291.** Subsystems keep moving out of the
+core namespace into modules, so the names left bare are the ones a basic algorithm
+actually reaches for:
+
+- **`path/`** — `path/join`, `path/dirname`, `path/basename`, `path/absolute`,
+  `path/temp`. The prelude's `path-*` set was a second path library beside
+  `std/path.blsp` with subtly different contracts (`path/join` is variadic and resets on
+  an absolute segment; `path/basename` strips a trailing slash). One boot helper,
+  `%path-join`, remains because the module loader needs a path before modules load.
+- **`bytes/`** — 13 names, de-stuttered: `bytes/at`, `bytes/length`, `bytes/slice`,
+  `bytes/concat`, `bytes/int`, `bytes/uint`, `bytes/int->`, …
+- **`seq/`** — 20 names: `transduce`, `filterv`, `mapv`, `find`, `distinct`, `flatten`,
+  `split-at`, `sample`, `shuffle`, `remove`, `keep`, `subvec`, `vector-ref`, … Nine had to
+  stay (`but-last`, `mapcat`, `mapv`, `partition`, `take-while`, `zip`, …) because a
+  prelude MACRO calls them at expansion time, which happens during boot.
+- **`os/`** / **`gui/`** — `os/clipboard-get`, `os/clipboard-set!`, `gui/image-thumb`.
+- **`map/reduce-kv`**. `hash-map` and `zipmap` stay core: the quasiquote lowering emits
+  `hash-map` for `{…}` literals inside templates, and a prelude helper calls `zipmap`.
+
+**Duplicates retired.** `string->utf8-bytes`/`utf8-bytes->string` were the same conversion
+as `string/->bytes`/`string/bytes->`; the module pair is now the only spelling.
+
+**`%defseq`** — the definer behind `map`/`filter`/`mapcat`/`remove`/`keep` — is no longer
+published: it is prelude scaffolding with no user call sites.
+
+Untouched by design: I/O (`println` and friends), predicates, and the reflection
+leftovers, pending a decision on whether a script or REPL can refer a module's names bare.
+
 ## v0.10.0 — 2026-08-24
 
 **BREAKING — the core reference went from 613 names to 337 (ADR-242).** Two thirds of that
