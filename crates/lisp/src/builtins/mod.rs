@@ -3883,15 +3883,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         scan_form_end);
 }
 
-/// Docstrings + parameter names for the public primitives, so `(doc 'name)`,
-/// `(arglist 'name)`, and LSP hover treat a Rust builtin like a Brood `defn`
-/// (which can't apply here — primitives have no source body). One row per
-/// user-facing primitive; mirrors the "Purpose" column of `docs/primitives.md`.
-/// `&` in the params marks a rest (variadic) tail. Internal `%`-prefixed
-/// primitives are intentionally absent (they aren't meant to be called directly).
-#[rustfmt::skip]
-
-
+// (The doc comment and `#[rustfmt::skip]` that used to sit here belonged to the
+// `PRIMITIVE_DOCS` table, which the v0.10.0 namespacing removed — a primitive's
+// docstring now rides on its `NativeFn` (see `builtins/tooling.rs`). The attribute was
+// left behind attached to nothing, which clippy reports as "empty lines after outer
+// attribute". The test module below is unrelated and still live.)
 #[cfg(test)]
 mod primitive_docs_tests {
     use super::*;
@@ -3968,5 +3964,4 @@ mod primitive_docs_tests {
             mismatched.join("\n  ")
         );
     }
-
 }

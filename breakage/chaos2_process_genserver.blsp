@@ -203,7 +203,7 @@
 (let (me (self))
   ;; Flood our mailbox so mailbox count is visible
   (dotimes (_ 10) (send me :dummy))
-  (let (info (process-info me))
+  (let (info (proc/info me))
     (println "P48: process-info keys:" (into [] (keys info)))
     (println "P48: status:" (get info :status))
     (println "P48: mailbox >= 10:" (>= (get info :mailbox) 10))

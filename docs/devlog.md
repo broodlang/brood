@@ -2605,3 +2605,43 @@ that claim is why `shuffle` was written as a textbook Fisher–Yates and ran 16 
 Measured, 20 000 `assoc`s: vector 486 ms / 2 386 ms / 7 523 ms at lengths 1 000 / 4 000 / 16 000;
 map 28 ms / 17 ms at 1 000 / 16 000. Only the *map* `assoc` is cheap. `shuffle` rewritten over a
 CHAMP index→item map is 206 ms (~78×). `docs/brood-for-claude.md` now carries the table.
+
+## 2026-08-24 (later) — merging the review onto the namespacing waves; `main` is green again
+
+The review branch landed onto an `origin/main` that had moved 17 commits (v0.9.0 + v0.10.0, the
+bare core going 613 → 337 published names). Two things are worth recording.
+
+**`origin/main` was itself red — 21 of 996.** Measured, not inferred: built `5952f5bd` in a clean
+worktree and ran it. The namespacing waves moved names out from under a batch of tests
+(`gc-collect` → `dev/gc-collect`, `vector-ref` → `seq/vector-ref`, `check` →
+`reflect/check`, …) and nothing caught it. Combined with KI-54's three failures from `7cb796f0`,
+`main` had been red for a while under a file asserting it was green.
+
+All 19 remaining are now fixed by updating the *tests* to the new names. One deserves note because
+it is exactly the trap in this kind of repair: `throw_and_catch` asserted error code **E0042** and
+was getting **E0010**. The tempting "fix" is to update the expectation. That would have been
+wrong — the test's Brood source called `(vector-ref [1 2 3] 7)` to provoke an out-of-range error,
+and `vector-ref` had moved, so the call raised *unbound* before it could ever index. Fixing the
+source to `seq/vector-ref` restores E0042 and the test proves what it always did. **A test that
+starts reporting a different error code after a rename is usually telling you the rename broke its
+setup, not that its expectation is stale.**
+
+**A behaviour regression the merge exposed (KI-55, open).** Auto-require runs when a form is
+*compiled*, so a closure shipped to another node — already compiled — never triggers it, and any
+namespaced global in its body is unbound on the receiver. That guarantee used to hold for free
+because these were bare prelude names. The failure surfaces on the receiving node, far from the
+code that wrote the closure. Workaround is `(require-one 'reflect)` on the receiver; the real fix
+is an auto-require hook on the deserialize path.
+
+Also found while merging: `std/net/reconnect.blsp` was calling bare `now` (moved to `os/now`) — a
+real break in shipped code, and the cause of two `cli::distribution` failures, not test rot. And
+bare **`require` is not a bound name** at all (the callable is `require-one`), despite `CLAUDE.md`
+and the ADR-065 note describing `(require 'test)`.
+
+The `shuffle` conflict is the one that needed judgement rather than mechanics: upstream *moved*
+`shuffle` into `seq/` while keeping the O(n²) body, and the helper it calls had been deleted by
+this branch's Fisher–Yates rewrite — so the merged form would not even have resolved. Carried the
+linear implementation and its private helpers into `std/seq.blsp`; re-verified post-merge at
+n=20 000 (0.13 s, checked permutation).
+
+**Both engines now pass 1012/1012.**

@@ -172,7 +172,7 @@ fn in_place_collect_reclaims_and_preserves_correctness() {
     // top-level form, so the collect runs with `g` live — it must rewrite `g`'s
     // handle so `(g 3)` still calls the right (compacted) code.
     let v = interp
-        .eval_str("(let (g f) (runtime-collect) (g 3))")
+        .eval_str("(let (g f) (dev/runtime-collect) (g 3))")
         .expect("let-held collect errored");
     assert_eq!(interp.print(v), (1999 * 3 + 1999).to_string());
 
@@ -186,7 +186,7 @@ fn in_place_collect_reclaims_and_preserves_correctness() {
 }
 
 /// The **automatic** safepoint trigger bounds the RUNTIME region with *no*
-/// explicit `(runtime-collect)`. A single-process `Interp` uniquely owns the
+/// explicit `(dev/runtime-collect)`. A single-process `Interp` uniquely owns the
 /// runtime `Arc`, so the eval safepoint auto-compacts once churn crosses
 /// `rt_gc_floor()` (default 4096). Redefining far past that must leave the live
 /// region a small fraction of the promotions — i.e. it didn't grow unbounded.
@@ -305,7 +305,7 @@ fn per_isolate_scoping_bounds_runtime_region_growth() {
         .eval_str("(loopf (fn (fi) (%isolate (fn () (defmany fi 0 200)))) 0 300)")
         .expect("scoped loop errored");
     interp
-        .eval_str("(runtime-collect)")
+        .eval_str("(dev/runtime-collect)")
         .expect("collect errored");
     let count = interp.heap.runtime_closure_count();
     assert!(
@@ -346,7 +346,7 @@ fn declared_sigs_survive_a_runtime_compaction() {
 
 /// Regression for the KI-6 hardening: a globals snapshot now suppresses RUNTIME
 /// compaction at the `runtime_collect_with` choke point — covering BOTH the auto
-/// safepoint path AND an explicit `(runtime-collect)`. So a manual collect *inside* an
+/// safepoint path AND an explicit `(dev/runtime-collect)`. So a manual collect *inside* an
 /// `%isolate` (which the original KI-6 fix left out of scope) is a no-op rather than a
 /// snapshot-stranding corruption. A pre-isolate global must survive it.
 #[test]
@@ -359,7 +359,7 @@ fn manual_runtime_collect_inside_isolate_is_a_noop() {
             "(%isolate (fn () \
                (defn dm (i n) (if (= i n) :done (do (eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) 'x))) (dm (+ i 1) n)))) \
                (dm 0 300) \
-               (runtime-collect)))",
+               (dev/runtime-collect)))",
         )
         .expect("isolate thunk");
     let v = interp
@@ -368,7 +368,7 @@ fn manual_runtime_collect_inside_isolate_is_a_noop() {
     assert_eq!(
         interp.print(v),
         "42",
-        "an explicit (runtime-collect) inside %isolate stranded the globals snapshot",
+        "an explicit (dev/runtime-collect) inside %isolate stranded the globals snapshot",
     );
 }
 
