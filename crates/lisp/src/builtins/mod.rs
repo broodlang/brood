@@ -628,7 +628,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // a fresh map.
     def(
         heap,
-        "hash-map",
+        "%hash-map",
         Arity::any(),
         Sig::variadic(any, map_ty),
         &["&", "kvs"],
