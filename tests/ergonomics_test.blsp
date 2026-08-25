@@ -6,17 +6,17 @@
 (describe "fmt — string interpolation"
   (test "splices expression values between literal text"
     (let (a 3 b 4)
-      (assert= "sum=7 a=3" (fmt "sum={(+ a b)} a={a}"))))
+      (assert= "sum=7 a=3" (string/interp "sum={(+ a b)} a={a}"))))
   (test "no holes is the literal string"
-    (assert= "plain text" (fmt "plain text")))
+    (assert= "plain text" (string/interp "plain text")))
   (test "doubled braces are literal braces"
-    (assert= "a {brace} b" (fmt "a {{brace}} b")))
+    (assert= "a {brace} b" (string/interp "a {{brace}} b")))
   (test "braces nest inside a hole (a map literal)"
-    (assert= "m={:a 1}" (fmt "m={ {:a 1} }")))
+    (assert= "m={:a 1}" (string/interp "m={ {:a 1} }")))
   (test "adjacent holes"
-    (let (x 1 y 2) (assert= "12" (fmt "{x}{y}"))))
+    (let (x 1 y 2) (assert= "12" (string/interp "{x}{y}"))))
   (test "composes with error"
-    (assert-error (throw (fmt "bad value: {(+ 1 2)}")))))
+    (assert-error (throw (string/interp "bad value: {(+ 1 2)}")))))
 
 (describe "if-let / when-let"
   (test "if-let binds and takes the then branch on a truthy value"
@@ -252,7 +252,7 @@
     (let (me (self))
       (spawn (send me
                [:result
-                 (letrec (go (fn (i acc) (if (= i 3) acc (go (inc i) (fmt "{acc}{i}")))))
+                 (letrec (go (fn (i acc) (if (= i 3) acc (go (inc i) (string/interp "{acc}{i}")))))
                    (go 0 ""))]))
       (assert= "012" (receive ([:result r] r)))))
   (test "with matches a result tuple that a worker built and sent across the heap boundary"
