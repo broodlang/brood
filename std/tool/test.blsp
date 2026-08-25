@@ -803,7 +803,7 @@ the test rather than hanging the run."
 ;; so it shows up as a red line rather than as a start with no end.
 ;;
 ;; Runs in the worker process, so lines from parallel workers interleave (each is one
-;; flushed `println`), in waves of `*parallel-batch*`.
+;; flushed `io/puts`), in waves of `*parallel-batch*`.
 ;; The structured per-test reporting seam: a 1-arg fn (or nil) handed each result
 ;; tuple as its test finishes, in the WORKER process — the machine-readable
 ;; counterpart of `--trace`'s human line. A `defdyn`, so an external runner (an
@@ -1028,7 +1028,7 @@ the test rather than hanging the run."
 ;; default, and never set by `run-tests-structured` / the `--test` path, so machine-
 ;; parsed and structured output stays clean. `(run-tests :trace)` turns it on, and
 ;; `nest test` passes `:trace`. Lines from parallel workers interleave (each is one
-;; flushed `println`); they come in waves of `*parallel-batch*`.
+;; flushed `io/puts`); they come in waves of `*parallel-batch*`.
 (defdyn *test-trace* false)
 
 ;; The active output formatter name (`nest test --formatter NAME`), or nil for the
@@ -1698,7 +1698,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
     (report-slow-over results *test-slow-ms*)
     (when slowest (report-slow results slowest))
     (io/puts "")
-    ;; Built as one string rather than `println`'s space-joined arguments, so the
+    ;; Built as one string rather than `io/puts`'s space-joined arguments, so the
     ;; commas land correctly whether or not the optional skipped clause is present.
     (io/puts (str total
                " tests, "
