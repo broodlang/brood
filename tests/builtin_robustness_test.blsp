@@ -92,7 +92,7 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
       (if (nil? bin)
         (is true)
         (let (probe (str "/tmp/brood-envall-probe-" (os-pid) ".blsp")
-              _ (file/spit probe "(print (str (map? (%env-all))))")
+              _ (file/spit probe "(io/print (str (map? (%env-all))))")
               cmd (str "BADENV=$(printf '\\377\\376') exec " bin " " probe)
               r (%os-cmd "/bin/sh" ["-c" cmd])
               _ (file/rm probe))

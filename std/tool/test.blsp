@@ -291,7 +291,10 @@ docs/testing.md for the full guide.")
          (emit-describe! ~mode ~group (reverse *collected*) ~tags ~skip)
          ;; Advisory: a describe with no tests is a heading over nothing (ADR-225).
          ~(unless (describe-body-has-tests? body)
-            (list 'eprintln (str "warning: describe " (pr-str group) " has no tests")))
+            (list 'io/puts
+              (str "warning: describe " (pr-str group) " has no tests")
+              :to
+              '*err*))
          nil))))
 
 ;; (test "name" [:isolated] body...) — register one test. Each top-level body form
@@ -642,11 +645,12 @@ the test rather than hanging the run."
           (let (resolved (test-resolve-line units (first entry) (second entry)))
             (if (nil? resolved)
               (do
-                (eprintln (str "warning: no test found at "
-                            (first entry)
-                            ":"
-                            (second entry)
-                            " — that file/line addresses nothing"))
+                (io/puts (str "warning: no test found at "
+                           (first entry)
+                           ":"
+                           (second entry)
+                           " — that file/line addresses nothing")
+                  :to *err*)
                 acc)
               (cons [(first entry) resolved] acc))))
     nil
@@ -814,7 +818,7 @@ the test rather than hanging the run."
   "Report one finished result `r` through the per-test seams, then return `r` unchanged. Feeds it to any installed `*test-report-sink*` (the machine-readable seam) and, under `*test-trace*`, prints the coloured `--trace` line (glyph, label, timing, location, failure count). Runs in the worker process."
   (when *test-report-sink* (*test-report-sink* r))
   (when *test-trace*
-    (println (str (trace-glyph r)
+    (io/puts (str (trace-glyph r)
                " "
                (trace-label r)
                "  "
@@ -895,10 +899,10 @@ the test rather than hanging the run."
   ;; `--formatter` (whose output must stay parseable — no stray dots).
   (unless (or *test-trace* *test-formatter*)
     (fold (fn (_ r)
-            (print (cond
-                     (r-skipped? r) (test-orange "○")
-                     (r-failed? r) (test-red "F")
-                     else (test-green "."))))
+            (io/print (cond
+                        (r-skipped? r) (test-orange "○")
+                        (r-failed? r) (test-red "F")
+                        else (test-green "."))))
       nil results)))
 
 ;; Run one (name thunk) and produce its result (group name fails ms). The thunk
@@ -1464,9 +1468,9 @@ the test rather than hanging the run."
 (defn- print-failure
   (indent r)
   (fold (fn (_ rec)
-          (println "")
-          (println (fail-anchor r rec))
-          (fold (fn (_ line) (println (str indent (test-dim-label line)))) nil (fail-lines-of rec)))
+          (io/puts "")
+          (io/puts (fail-anchor r rec))
+          (fold (fn (_ line) (io/puts (str indent (test-dim-label line)))) nil (fail-lines-of rec)))
     nil
     (r-fails r)))
 
@@ -1489,11 +1493,11 @@ the test rather than hanging the run."
 
 (defn- report-slow
   (results n)
-  (println "")
-  (println (str "Slowest " n " tests:"))
+  (io/puts "")
+  (io/puts (str "Slowest " n " tests:"))
   (let (timings (map (fn (r) [(full-name r) (r-ms r)]) results))
     (fold (fn (_ entry)
-            (println (str "  "
+            (io/puts (str "  "
                        (string/pad-right (str (first entry)) 28)
                        (string/pad-left (str (rest entry)) 6)
                        " ms")))
@@ -1515,10 +1519,10 @@ the test rather than hanging the run."
   (let (slow (filter (fn (p) (> (second p) over))
                (map (fn (r) [(full-name r) (r-ms r)]) results)))
     (unless (empty? slow)
-      (println "")
-      (println (str "Slow tests (> " (secs-str over) "):"))
+      (io/puts "")
+      (io/puts (str "Slow tests (> " (secs-str over) "):"))
       (fold (fn (_ p)
-              (println (str "  " (string/pad-right (str (first p)) 40) " " (secs-str (second p)))))
+              (io/puts (str "  " (string/pad-right (str (first p)) 40) " " (secs-str (second p)))))
         nil
         (sort-by-ms slow)))))
 
@@ -1602,11 +1606,11 @@ runner's job, not the formatter's. Returns `name`."
   "TAP version 13: a `1..N` plan then one `ok`/`not ok N - name` line per test (a skip
 adds `# SKIP`); a failure's detail lines follow as `#` comments. Numbered in result
 order (deterministic — the results are already collected)."
-  (println "TAP version 13")
-  (println (str "1.." (count results)))
+  (io/puts "TAP version 13")
+  (io/puts (str "1.." (count results)))
   (fold (fn (i r)
           (let (status (if (r-failed? r) "not ok" "ok"))
-            (println (str status
+            (io/puts (str status
                        " "
                        (+ i 1)
                        " - "
@@ -1614,7 +1618,7 @@ order (deterministic — the results are already collected)."
                        (if (r-skipped? r) " # SKIP" "")))
             (when (r-failed? r)
               (fold (fn (_ rec)
-                      (fold (fn (_ line) (println (str "# " line))) nil (fail-lines-of rec)))
+                      (fold (fn (_ line) (io/puts (str "# " line))) nil (fail-lines-of rec)))
                 nil
                 (r-fails r)))
             (+ i 1)))
@@ -1638,7 +1642,7 @@ order (deterministic — the results are already collected)."
 the suite programmatically. Printed once, at the end, so parallel ordering is irrelevant."
   (let (total (count results)
         failed (count-failed results))
-    (println (json/encode {:total total
+    (io/puts (json/encode {:total total
                            :passed (- total failed)
                            :failed failed
                            :failed-assertions (count-failures results)
@@ -1689,14 +1693,15 @@ the exit code still reflects the run. An unknown formatter name is a clean error
     ;; this human/formatter split, so `--failed` works on either path.)
     ;; A narrowing selector that matched nothing must not pass for success.
     (when (and (= total 0) (test-filter-narrows?))
-      (eprintln "warning: no tests matched the given filters — 0 tests ran (check the selector, or a stale --failed record naming tests that no longer exist)"))
+      (io/puts "warning: no tests matched the given filters — 0 tests ran (check the selector, or a stale --failed record naming tests that no longer exist)"
+        :to *err*))
     (report-failures results)
     (report-slow-over results *test-slow-ms*)
     (when slowest (report-slow results slowest))
-    (println "")
+    (io/puts "")
     ;; Built as one string rather than `println`'s space-joined arguments, so the
     ;; commas land correctly whether or not the optional skipped clause is present.
-    (println (str total
+    (io/puts (str total
                " tests, "
                (- total failed skipped)
                " passed, "
@@ -1708,14 +1713,14 @@ the exit code still reflects the run. An unknown formatter name is a clean error
                " failed assertions"
                extra
                ")"))
-    (println (str "  (" elapsed " ms wall, peak " (mb-str (dev/mem-peak)) ")"))
+    (io/puts (str "  (" elapsed " ms wall, peak " (mb-str (dev/mem-peak)) ")"))
     ;; Echo the seed whenever the order was randomised, so the run can be
     ;; reproduced. Deliberately says "same order", not "replay exactly": the seed
     ;; fixes the order tests are SCHEDULED in, but parallel tests genuinely
     ;; interleave, so a concurrency-dependent failure may not recur from the seed
     ;; alone. Promising exact replay here would be a lie.
     (when seed
-      (println (str "  (random order, seed "
+      (io/puts (str "  (random order, seed "
                  seed " — same order with --seed " seed "; parallel tests still interleave)")))
     (if (> failed 0) (error (str failed " test(s) failed")) :ok)))
 

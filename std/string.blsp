@@ -11,9 +11,13 @@
 ;;   - bare        = operations over ANY collection (`map`/`filter`/`reduce`/`count`/
 ;;                   `contains?`/`includes?`/`index-of`/`join`? no — `join`
 ;;                   is string-flavoured, so it is here), plus the primitives
-;;                   `str`/`string?`/`string` and the scalar bridges that merely
-;;                   REINTERPRET a string as another type (`string->number`,
-;;                   `string->symbol`) — those stay bare with their reverse partners.
+;;                   `str`/`string?`/`string`.
+;;   - The scalar bridges that REINTERPRET a string as another type are
+;;     `string/->number` and `string/->symbol`: module-rooted, and the source drops
+;;     out of the name because the module already says it (the same rule as
+;;     `string/->bytes` / `string/bytes->`). They were bare `string->number` /
+;;     `string->symbol`, which read as a third naming convention beside `str` and
+;;     `->float`; the reverse direction is `str`, which is bare and generic.
 ;;
 ;; Kernel seam: the low-level primitives are Rust builtins registered directly under
 ;; their `string/…` names — `string/length` `string/substring` `string/split`
@@ -33,8 +37,8 @@ trimming, padding, case folding, search, split/join, and char-content conversion
 The low-level primitives (`string/length` `string/substring` `string/split`
 `string/upper` `string/lower` …) are Rust builtins; the rest is pure Brood over them.
 Bare-in-the-prelude by contrast: the generic collection ops (`map`/`filter`/`count`/
-`contains?`/`includes?`/`index-of`) and the scalar bridges (`string->number`,
-`string->symbol`) that reinterpret a string as another type.")
+`contains?`/`includes?`/`index-of`). The scalar bridges that reinterpret a string as
+another type live here too, module-rooted: `string/->number`, `string/->symbol`.")
 
 ;; ---- case -------------------------------------------------------------------
 

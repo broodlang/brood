@@ -65,7 +65,7 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(* 2 3)",
         "(< 1 2)",
         "(<= 1 1)",
-        "(string->number \"5\")",
+        "(string/->number \"5\")",
         // sequence constructors / extractors
         "(list 1 2 3)",
         "(vector 1 2 3)",

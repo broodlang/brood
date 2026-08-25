@@ -1,6 +1,6 @@
 ;; Symbol & keyword tools: `name` (existing kernel) plus the new constructors
 ;; `symbol` / `keyword` (Rust, lenient — string/symbol/keyword in) and the strict
-;; string → symbol conversion `string->symbol` (Brood, in prelude). The reverse
+;; string → symbol conversion `string/->symbol` (Brood, in prelude). The reverse
 ;; direction is the polymorphic `->string` (Display) op / `name`, not a wrapper.
 ;; Register-only — discovered and run by `nest test` (and `cargo test`, via
 ;; crates/lisp/tests/suite.rs).
@@ -45,8 +45,8 @@
   (test "name of a symbol" (assert= (name 'foo) "foo"))
   (test "->string agrees with name" (assert= (->string 'bar) (name 'bar))))
 
-(describe "string->symbol (strict)"
-  (test "string input" (assert= (string->symbol "foo") 'foo))
-  (test "rejects symbol" (assert-error (string->symbol 'foo)))
-  (test "rejects keyword" (assert-error (string->symbol :foo)))
-  (test "rejects int" (assert-error (string->symbol 42))))
+(describe "string/->symbol (strict)"
+  (test "string input" (assert= (string/->symbol "foo") 'foo))
+  (test "rejects symbol" (assert-error (string/->symbol 'foo)))
+  (test "rejects keyword" (assert-error (string/->symbol :foo)))
+  (test "rejects int" (assert-error (string/->symbol 42))))

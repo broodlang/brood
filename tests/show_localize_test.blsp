@@ -1,6 +1,6 @@
 ;; A worked example / prototype: locale-aware display, the Elixir-`Money` shape.
 ;; Shows how `Display`/`Inspect` (std/show.blsp) compose with an app-defined
-;; `Localize` ability + a `*locale*` dynamic var so even a plain `(println money)`
+;; `Localize` ability + a `*locale*` dynamic var so even a plain `(io/puts money)`
 ;; localizes — the reusable half of an i18n story. Register-only; run by `nest test`.
 ;;
 ;; NOTE: `Localize` and `*locale*` are defined HERE (not in std) on purpose — this is
@@ -35,7 +35,7 @@
   show-localize-test/money
   (localize [m locale] (money-render m locale)))
 
-;; `Display` reads the AMBIENT locale, so plain `(println money)` localizes — the op
+;; `Display` reads the AMBIENT locale, so plain `(io/puts money)` localizes — the op
 ;; stays 1-arg; the locale flows through the dynamic var, not an extra parameter.
 (impl Display
   show-localize-test/money
@@ -51,10 +51,10 @@
 (describe "locale-aware Display via *locale*"
   (test "the ambient default locale (:en)"
     (assert= (->string (money 10.5 :usd)) "$10.50")
-    (assert= (with-out-str (println (money 10.5 :usd))) "$10.50\n"))
+    (assert= (with-out-str (io/puts (money 10.5 :usd))) "$10.50\n"))
   (test "(binding (*locale* :de) …) switches the rendering, print included"
     (assert= (binding (*locale* :de) (->string (money 10.5 :eur))) "10,50 €")
-    (assert= (with-out-str (binding (*locale* :de) (println (money 10.5 :eur))))
+    (assert= (with-out-str (binding (*locale* :de) (io/puts (money 10.5 :eur))))
       "10,50 €\n"))
   (test "the explicit Localize op takes the locale as data (no dynamic var)"
     (assert= (localize (money 3 :gbp) :en) "£3.00")

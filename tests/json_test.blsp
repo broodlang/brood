@@ -32,7 +32,7 @@
     (assert= (parse "123") 123)
     (assert= (parse "1E+3") 1000.0)
     (assert= (parse "1.5e-2") 0.015))
-  (test "a leading + is rejected (string->number would accept it)"
+  (test "a leading + is rejected (string/->number would accept it)"
     (is (json-errs? "+5"))
     (is (json-errs? "+.5")))
   (test "leading zeros are rejected"

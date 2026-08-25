@@ -1132,8 +1132,8 @@ fn a_curated_sig_does_not_mask_the_unbound_lint_for_a_moved_name() {
 
 #[test]
 fn curated_output_and_numeric_sigs() {
-    // println/eprintln/eprint return nil — feeding to a numeric sink is caught.
-    for f in ["println", "eprintln", "eprint"] {
+    // io/puts and io/print return nil — feeding to a numeric sink is caught.
+    for f in ["io/puts", "io/print"] {
         let w = warnings(&format!("(+ 1 ({f} \"hi\"))"));
         assert!(
             w.iter().any(|s| s.contains('+') && s.contains("nil")),
@@ -1153,7 +1153,7 @@ fn curated_output_and_numeric_sigs() {
         .any(|w| w.contains("string/length")));
     // Correct uses stay silent.
     for ok in [
-        "(println \"hi\")",
+        "(io/puts \"hi\")",
         "(min 1 2 3)",
         "(max 0.5 1.5)",
         "(+ 1 (min 2 3))",
@@ -1269,10 +1269,10 @@ fn curated_equality_and_string_sigs() {
     assert!(warnings("(+ 1 (not= x y))")
         .iter()
         .any(|w| w.contains('+') && w.contains("bool")));
-    // string->symbol requires a string.
-    assert!(warnings("(string->symbol 99)")
+    // string/->symbol requires a string.
+    assert!(warnings("(string/->symbol 99)")
         .iter()
-        .any(|w| w.contains("string->symbol") && w.contains("string")));
+        .any(|w| w.contains("string/->symbol") && w.contains("string")));
     // String predicates require string args.
     for f in ["string/starts-with?", "string/ends-with?"] {
         assert!(
@@ -1662,7 +1662,7 @@ fn guard_purity_does_not_flag_an_effect_in_the_clause_body() {
     let src = "
 (defn f (n)
   (match n
-    (x :when (> x 0) (println x))
+    (x :when (> x 0) (io/puts x))
     (_ :neg)))
 ";
     assert!(
@@ -2020,7 +2020,7 @@ fn file_defn_shadowing_a_builtin_wins_over_its_signature() {
     // from the builtin's 1-arg Arity.
     let w = file_warnings(
         "(defn %bytes->list (node) (if (nil? node) 1 (+ 1 (%bytes->list (nth node 0)))))\n\
-             (println (%bytes->list nil))",
+             (io/puts (%bytes->list nil))",
     );
     assert!(
         !w.iter().any(|s| s.contains("expects")),
@@ -2029,14 +2029,14 @@ fn file_defn_shadowing_a_builtin_wins_over_its_signature() {
     );
     // Arity from the stale builtin must not leak either: the builtin `%bytes->list`
     // is 1-ary, the file's redefinition is 2-ary.
-    let w = file_warnings("(defn %bytes->list (a b) (+ a b))\n(println (%bytes->list 1 2))");
+    let w = file_warnings("(defn %bytes->list (a b) (+ a b))\n(io/puts (%bytes->list 1 2))");
     assert!(
         !w.iter().any(|s| s.contains("argument")),
         "stale builtin arity leaked into a shadowed call: {:?}",
         w
     );
     // No over-suppression: the real builtin (not redefined) still warns.
-    let w = file_warnings("(println (+ 1 (%bytes->list (bytes 1))))");
+    let w = file_warnings("(io/puts (+ 1 (%bytes->list (bytes 1))))");
     assert!(
         w.iter().any(|s| s.contains("expects number")),
         "the un-shadowed builtin's signature should still warn: {:?}",
@@ -3132,7 +3132,7 @@ fn shadowing_clears_an_alias() {
         w
     );
     // The outer `x` must not be narrowed by the inner shadowing.
-    let w = warnings("(let (m x) (let (m 5) (println x)))");
+    let w = warnings("(let (m x) (let (m 5) (io/puts x)))");
     assert!(
         w.iter().all(|s| !s.contains("first")),
         "shadowing must not leak narrowing back to the original: {:?}",
@@ -3999,7 +3999,7 @@ fn unexpandable_macro_calls_dont_false_flag() {
         "names a macro splices into a binder must not look unbound: {b:?}"
     );
     // A genuine typo under a *known* (arg-evaluating) callee is still flagged.
-    let c = file_warnings("(println (genuine-typo 5))");
+    let c = file_warnings("(io/puts (genuine-typo 5))");
     assert!(
         c.iter().any(|m| m.contains("unbound symbol: genuine-typo")),
         "a real unbound call head must still be flagged: {c:?}"

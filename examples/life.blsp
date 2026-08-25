@@ -42,10 +42,10 @@ Redraws in place — each cell overwrites the last, so no clear and no flicker."
   (doseq (gen (range frames))
     (let (board (call srv :board))
       ; call: fetch the current board
-      (unless (= gen 0) (print (str "\e[" (+ h 1) "A")))
+      (unless (= gen 0) (io/print (str "\e[" (+ h 1) "A")))
       ; move the cursor back up
-      (println "generation" gen "— population" (count board) "\e[K")
-      (print (render board w h)))
+      (io/puts "generation" gen "— population" (count board) "\e[K")
+      (io/print (render board w h)))
     (cast srv :step)
     ; cast: advance to the next gen
     (sleep 70)))

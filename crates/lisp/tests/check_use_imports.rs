@@ -38,7 +38,7 @@ fn warnings(src: &str) -> Vec<String> {
 /// run time, so neither warning may fire.
 #[test]
 fn use_import_resolves_a_module_level_name() {
-    let ws = warnings("(defmodule wftest (:use file))\n(println (fn? walk-files))");
+    let ws = warnings("(defmodule wftest (:use file))\n(io/puts (fn? walk-files))");
     assert!(ws.is_empty(), "expected a clean check, got {ws:?}");
 }
 
@@ -68,7 +68,7 @@ fn use_import_of_an_already_loaded_module_still_resolves() {
 /// the false positive wasn't "fixed" by turning the diagnostic off.
 #[test]
 fn a_genuinely_unbound_name_still_warns() {
-    let ws = warnings("(defmodule wftest (:use file))\n(println (fn? walk-filez))");
+    let ws = warnings("(defmodule wftest (:use file))\n(io/puts (fn? walk-filez))");
     assert!(
         ws.iter().any(|w| w.contains("unbound symbol: walk-filez")),
         "a real typo must still be flagged, got {ws:?}"
@@ -79,7 +79,7 @@ fn a_genuinely_unbound_name_still_warns() {
 /// loaded — the module being resolvable is what makes this provable.
 #[test]
 fn a_qualified_typo_in_a_used_module_still_warns() {
-    let ws = warnings("(defmodule wftest (:use file))\n(println (fn? file/walk-filez))");
+    let ws = warnings("(defmodule wftest (:use file))\n(io/puts (fn? file/walk-filez))");
     assert!(
         ws.iter()
             .any(|w| w.contains("unbound symbol: file/walk-filez")),
@@ -105,8 +105,8 @@ fn a_genuinely_unused_use_import_still_warns() {
 #[test]
 fn unbound_and_unused_import_are_never_reported_together() {
     for src in [
-        "(defmodule wftest (:use file))\n(println (fn? walk-files))",
-        "(defmodule wftest (:use file))\n(println (fn? walk-filez))",
+        "(defmodule wftest (:use file))\n(io/puts (fn? walk-files))",
+        "(defmodule wftest (:use file))\n(io/puts (fn? walk-filez))",
         "(defmodule wftest (:use file))\n(defn foo (x) (+ x 1))",
         "(defmodule wftest (:use file))\n(defn foo (x) (nope-zzz x))",
     ] {
@@ -141,7 +141,7 @@ fn a_bound_guarded_ambient_is_not_unbound() {
 fn an_unguarded_reference_elsewhere_still_warns() {
     let ws = warnings(
         "(defn app? (from) (and from (bound? '*absent-ambient-zzz*) *absent-ambient-zzz*))\n\
-         (defn other () (println *absent-ambient-zzz*))",
+         (defn other () (io/puts *absent-ambient-zzz*))",
     );
     assert!(
         ws.iter()

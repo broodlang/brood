@@ -151,9 +151,9 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // *known* and so suppresses the unbound lint, `nest check` accepted `(length x)` in
     // silence for months while the runtime raised `unbound symbol: length`. The string case
     // is `string-length`, which has its own entry; sequences use `count`.
-    // Output fns: println/eprintln/eprint are Brood closures with rest params,
-    // so infer_sig bails — pin their nil result so `(+ 1 (println x))` is caught.
-    for n in ["println", "eprintln", "eprint"] {
+    // Output fns: io/puts / io/print are Brood closures with rest params,
+    // so infer_sig bails — pin their nil result so `(+ 1 (io/puts x))` is caught.
+    for n in ["io/puts", "io/print"] {
         put(n, Sig::variadic(any, nil_ty));
     }
     // min/max: at least one number-or-`Ord`-record arg (fixed) plus a variadic rest of the
@@ -223,8 +223,8 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
         put(n, Sig::variadic(any, bool_ty));
     }
     // String conversions: branchy bodies or `apply` — infer_sig bails.
-    //   string->symbol — if-guard over (string? s).
-    put("string->symbol", Sig::new(vec![str_ty], sym_ty));
+    //   string/->symbol — if-guard over (string? s).
+    put("string/->symbol", Sig::new(vec![str_ty], sym_ty));
     // String predicates: nested calls or let+branch bodies.
     //   starts-with?/ends-with? — let + and + branch.
     //   blank?                  — let + cond recursion.

@@ -47,7 +47,7 @@ arg silently becoming `nil`.
 | | `%str-last-index-of` | 2-3 | char index of the **last** occurrence starting strictly before the optional `before` bound (default end; -1 if none). One forward pass with an advancing cursor. Backs `last-index-of`, which used to walk forward in Brood calling `index-of` per match — O(matches × length), and on an editor hot path both ways (reverse buffer search; finding the current line's start per keystroke) |
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
 | | `lower` | 1 | `s` lower-cased (Unicode-aware) |
-| | `string->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
+| | `string/->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
 | | `string->codepoints` | 1 | the characters of `s` as a vector of integer Unicode codepoints, one O(n) pass — the random-access form text parsers index with `nth` and compare as ints (`codepoints->string` is its Brood inverse) |
 | | `string-span` | 3 | `(string-span s start chars)` → the char index just past the maximal run of chars in the set `chars` (a string) starting at char `start` — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native |
 | | `string-span-until` | 3 | the char index of the first char of `s` in the set `chars` at or after `start`, or `(string-length s)` if none — the maximal run of chars *not* in the set, for scanning up to a delimiter. The complement of `string-span` |
@@ -121,7 +121,7 @@ arg silently becoming `nil`.
 | | `reload-defs` | 1 | Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil. |
 | | `%offload` | 2 | Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. |
 | **Symbols** | `name` | 1 | a symbol/keyword's spelling as a string (no leading `:`) |
-| | `symbol` | 1 | coerce a string / symbol / keyword to the matching symbol (intern as needed). Lenient inverse of `name`; strict `string->symbol` is a Brood wrapper |
+| | `symbol` | 1 | coerce a string / symbol / keyword to the matching symbol (intern as needed). Lenient inverse of `name`; strict `string/->symbol` is a Brood wrapper |
 | | `keyword` | 1 | coerce a string / symbol / keyword to the matching keyword (intern as needed). Mirrors `symbol`; they share an interner so `(= (name 'x) (name :x))` |
 | **Filesystem** | `file/cwd` | 0 | current working directory |
 | | `file/exists?` `file/dir?` | 1 | path exists / is a directory → bool |

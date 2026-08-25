@@ -169,7 +169,7 @@
   (test "no catalogue entry is a name the runtime cannot resolve"
     (let (forms (into #{} (map (fn (f) (if (pair? f) (first f) f)) (special-forms)))
           missing (filter (fn (k)
-                            (let (s (string->symbol k))
+                            (let (s (string/->symbol k))
                               (not (or (bound? s) (contains? forms s)))))
                     (keys doc-catalog/*catalog*)))
       ;; Names, not just a count — a failure should say WHICH entry to remove.

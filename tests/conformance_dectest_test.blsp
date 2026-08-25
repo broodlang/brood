@@ -53,7 +53,7 @@
   (s)
   (let (i (index-of (string/lower s) "e"))
     (or (< i 0)
-      (< (abs (or (string->number (string/substring s (inc i))) 0)) 400))))
+      (< (abs (or (string/->number (string/substring s (inc i))) 0)) 400))))
 
 (defn- dt-unquote
   (w)

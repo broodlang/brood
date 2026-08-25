@@ -2233,7 +2233,7 @@ fn linmap_rewrite_form(
             return heap.list(c);
         }
         // `(quote …)` is inert DATA, never evaluated — rewriting inside it corrupts the
-        // datum instead of the program. `(println '(map-get acc 1))` printed
+        // datum instead of the program. `(io/puts '(map-get acc 1))` printed
         // `(table-get acc 1)`. The probe cannot catch this: a quoted form compiles to a
         // single `Node::Const`, so the linearity analysis sees no `acc` use at all and
         // passes, while the source rewrite walks straight through the quote.
