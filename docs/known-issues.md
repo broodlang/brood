@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl Port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl Port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
 | KI-59 | **`nest run --for` reported failure for a program that succeeded.** The wrapper was `(%spawn …)` then `(monitor p)` — two steps. A program that finished before the monitor attached fired a synthetic `:noproc`, `(= :noproc :normal)` was false, and the run exited 1 after printing its output correctly. Worst in the mode documented as the CI-friendly way to exercise an app | ✅ **fixed 2026-08-25** — `%spawn-link` + `trap-exit`, atomic by construction: the kernel already names this race on `%spawn-link` itself ("no spawn->link :noproc race", ADR-067). Reproduced ~1 run in 6 under load, 0/20 after. Reading `:noproc` as success would be wrong the other way — a program that *crashed* before the monitor attached is indistinguishable |
 | KI-58 | **the namespacing silently killed the `table-put` call-site inline — `sieve` 11.6× slower.** `resolve_prim3` accepted only a *direct* native head, on the stated grounds that `table-put` "has no prelude wrapper to follow"; the v0.9/v0.10 waves made the head `table/put`, a `std/table.blsp` wrapper, so the call stopped inlining and became an ordinary `Call` in the hot arm. The **2-ary** `resolve_prim` follows its wrapper, so `table/has?` went on inlining beside it — the asymmetry is visible in one IR dump | ✅ **fixed 2026-08-25** — `resolve_prim3` follows a thin wrapper like the 2-ary path, requiring the identity argument map (`Node::Prim3` has no permutation field, so a reordering wrapper must decline rather than store under the wrong key). `make ab`: **457 → 68 ms, −85.1%**. Guards: `table_put_call_site_inline_recognizes_the_namespaced_wrapper` (sabotage-verified) and the new `every_inlinable_head_still_reaches_its_primitive`, which caught a **second** dead inline on its first run — `table/get`, whose `&optional` head is not a thin wrapper; fixed in `std/table.blsp` with two arity clauses |
 | KI-57 | **a use-after-GC on every selective receive with a backlog.** `scan_mailbox` took the clauses' leading-keyword vector as a bare `Value` and decoded it **lazily, inside the scan loop** — so on any iteration after the first the decode dereferenced a handle held across a matcher `apply`, which can collect at any eval depth (ADR-061). The `matcher` beside it is rooted at `rbase+0` and re-read per candidate for exactly this reason; `tags` was not | ✅ **fixed 2026-08-25** — `tags` is rooted at `rbase+1` and re-read at the decode, like `matcher`. Found by running `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` by hand while verifying ADR-245: `use-after-GC: vector handle … is from epoch 12, but that generation is now epoch 13` out of `collect_receive_tags`. **No CI job could have caught it** — every one collects on a threshold, so the collection has to land inside the window by luck; the new `make gcstress` step closes that, and is verified red on the pre-fix code and green on the fix |
@@ -96,7 +97,7 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**No open items.** **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**No open items.** **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
 **fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
 **KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
@@ -176,6 +177,53 @@ activation, and no `std` suite tests a large input. It is invisible below ~10⁵
 loop that calls the same function eleven times at increasing sizes stays correct throughout — so
 repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-60 — the stdlib lost stderr: `Port` was implemented for `:fn`, but `*err*` is a native ✅ FIXED 2026-08-25
+
+**Status:** ✅ fixed. Found while merging `origin/main`, which was **red on three `nest` tests** —
+verified red at `f390bd56` with none of this branch's work present.
+
+**What.** `io/print` and friends take their destination as a trailing `:to <port>` pair, and
+`split-target` only treats it as a destination when `(port? (nth xs (- n 1)))`. `port?` is
+`(satisfies? 'Port x)`, and the ability is implemented as `(impl Port :fn (write [f s] (f s)))`
+— "a bare 1-arg sink fn is a port".
+
+But `*err*` is not a `:fn`:
+
+```lisp
+(def *err* %write-err)     ; std/prelude/control.blsp
+(type-of *err*)  ;=> :native      (port? *err*)  ;=> false
+(type-of (fn (s) s))  ;=> :fn     (port? (fn (s) s))  ;=> true
+```
+
+A Rust primitive's identity is `:native`, so the `:fn` impl never matched it. Every
+`(io/print … :to *err*)` in the stdlib — `log`, `std/tool/test`, `supervisor`, `repl`,
+`telemetry`, `format` — therefore failed the port test, and the pair fell through as ordinary
+values: the text went to **stdout** with a literal ` :to #<native %write-err>` appended.
+
+```
+Building mf (1 file) :to #<native %write-err>
+src/main.blsp:3:15: warning: unbound symbol: print :to #<native %write-err>
+```
+
+`*out*` is `%write-out` and has the identical shape, so an explicit `:to *out*` was equally
+broken; it just looked right because the fallback destination is also stdout.
+
+**Why the tests are the ones that caught it.** `declared_sig_is_authoritative_cross_module`
+asserts on warnings read from **stderr** — with the diagnostics diverted to stdout it saw none.
+That is a much better tripwire than the two that merely used a renamed `print`, and reverting
+only this impl confirms it: that test fails, the other two pass.
+
+**Fix.** `(impl Port :native (write [f s] (f s)))` beside the `:fn` one. One line, in Brood.
+
+**The lesson is about ability dispatch, not about ports.** `impl` is keyed on *identity*, and
+`:fn` and `:native` are two identities for things that are both "callable with one argument".
+Any ability meant to cover "a function" needs both, and nothing warns when it covers only one —
+the failure is a silently-declined dispatch, which is the same failure mode ADR-182's
+monomorphization notes and the stdimage boot-install note both describe: bindings present,
+registration missing, type-checks clean.
 
 ---
 

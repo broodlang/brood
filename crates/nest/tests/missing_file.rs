@@ -38,7 +38,7 @@ fn project() -> TempDir {
     .unwrap();
     std::fs::write(
         path.join("src/main.blsp"),
-        "(defmodule main \"d\")\n\n(defn main () (print \"ran\"))\n",
+        "(defmodule main \"d\")\n\n(defn main () (io/print \"ran\"))\n",
     )
     .unwrap();
     TempDir { path }

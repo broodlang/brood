@@ -3148,3 +3148,46 @@ handles it with no change.
 Three instances of this class now (`sqrt`, `table/put`, `table/get`), each found by a different
 accident — a dead benchmark row, a cross-language harness run, and a test written about the
 previous one. The gate is the first thing that will find the fourth on the commit that causes it.
+
+## 2026-08-25 — the stdlib had lost stderr, and only a checker test noticed
+
+Merging `origin/main` (the `output moves to io/` wave) brought in three failing `nest` tests.
+Checked out at `f390bd56` with none of this branch's work present, they fail there too — main
+was red.
+
+Two causes, one interesting. The dull one: two test fixtures still wrote bare `(print …)`,
+which the wave made unbound. Worth noting anyway that two of them were the **argument-injection
+payloads** in `complete.rs` — with `print` unbound a payload cannot print even if it *did*
+execute, so those security tests had quietly become false passes.
+
+The real one: `(io/print … :to *err*)` was writing to **stdout**, with a literal
+` :to #<native %write-err>` appended, everywhere in the stdlib.
+
+```
+Building mf (1 file) :to #<native %write-err>
+src/main.blsp:3:15: warning: unbound symbol: print :to #<native %write-err>
+```
+
+`split-target` only reads a trailing `:to <port>` as a destination when `port?` accepts it, and
+`port?` is `(satisfies? 'Port x)` over `(impl Port :fn (write [f s] (f s)))` — "a bare 1-arg
+sink fn is a port". `*err*` is `%write-err`: `(type-of *err*)` is **`:native`**, not `:fn`, so
+the impl never matched, and the pair fell through as ordinary values. `log`, the test runner,
+`supervisor`, `repl`, `telemetry` and `format` all lost stderr. `*out*` (`%write-out`) had the
+identical defect and merely looked correct, because the fallback destination is stdout too.
+
+The fix is one line — `(impl Port :native (write [f s] (f s)))`.
+
+**What caught it is worth more than the fix.** Of the three red tests, two only tripped over the
+renamed `print`. The one that actually pointed here was
+`declared_sig_is_authoritative_cross_module`, which asserts on **warnings read from stderr** and
+saw none. Reverting only the new impl confirms the split: that test fails, the other two pass.
+A test that reads the stream it cares about found a stream-routing bug that every test asserting
+on *stdout* was blind to — several of which were happily matching text that now carried a
+` :to #<native %write-err>` suffix.
+
+**The general lesson is about ability dispatch.** `impl` is keyed on identity, and `:fn` and
+`:native` are two identities for things that are both "callable with one argument". An ability
+meant to cover "a function" needs both impls, and nothing warns when it covers only one: the
+result is a silently-declined dispatch with every binding present — the same failure shape the
+stdimage boot-install note describes ("defines its bindings and evaluates NOTHING… the failure
+type-checks perfectly clean").
