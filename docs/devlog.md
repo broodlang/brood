@@ -2755,3 +2755,72 @@ outright). Resolving once per distinct symbol instead of per occurrence is worth
 `a_shipped_closure_requires_its_modules_on_the_receiver` ships a body calling two modules node A
 has never heard of (and a quoted `'math/not-a-real-name`, proving quoted data drags nothing
 along). Both sabotage-verified against the original unbound errors. Suite 1026/1026.
+
+## 2026-08-25 — ADR-243: a framework's client API is a module, not ten bare names
+
+`7cb796f0` made the gen_server framework "core and bare" by concatenating `std/proc/gen.blsp`
+into the `PRELUDE` bundle. A prelude name is *reserved* (ADR-166), so that one move seized ten
+of the most generic identifiers in the language — `call`, `cast`, `stop`, `call-timeout`,
+`code-change`, `spawn-server`, `spawn-server-link`, `spawn-server-named`, `gen-clause`,
+`defprocess` — into the un-redefinable set.
+
+The bill arrived the same day, as KI-54: `(def call …)` was refused outright (breaking
+`basic::spawned_process_picks_up_redefinition`), `gen` dropped out of `(builtin-modules)` and
+un-reserved the *package* name (failing `namespace_test`), and the file was bundled without being
+declared (failing `prelude_manifest`). Worse, it propagated: ADR-241 was written under the new
+premise and audited fourteen ecosystem exports for "clashes with core", renaming
+`changeset/cast` and `accounts/register` — clashes that existed only because a framework had
+taken the words.
+
+`gen` is now an ordinary `embedded_module!` like its siblings `supervisor` and `agent`:
+`gen/call`, `gen/cast`, `gen/spawn-server`, or bare inside a module that writes `(:use gen)`.
+Nothing aliased, nothing shimmed — every caller in the tree updated.
+
+The rule worth keeping: **being core does not entitle a framework to a bare global name.** The
+prelude is the language (`map`, `first`, `send`, `spawn`); a framework's client API is a
+vocabulary for talking to one kind of process, however central that kind is. `call`/`cast`/`stop`
+are the clearest case — three of the most ordinary verbs in programming, none of which mean
+"gen_server" outside this framework.
+
+`PRELUDE_MODULES` and its `prelude_modules_are_bundled` honesty test existed only to re-reserve a
+package name the bundling had orphaned; with `gen` back in `CORE_MODULES` the reservation is
+automatic, so both are deleted and `EXTRA_PRELUDE_FILES` is back to one entry. Guard:
+`tests/reserved_names_test.blsp` asserts the ten names are *free* while `gen/call` and friends
+are reserved, and that `gen` is still a reserved package name.
+
+## 2026-08-25 — ADR-244: a late reply now dies at the door, not in the mailbox
+
+`gen/call-timeout` flushes anything already queued for its reply `ref` when it gives up. That is
+only half the problem, and the missing half leaks. A reply the server posts *strictly after* the
+deadline cannot be flushed — it has not been sent yet — so it lands carrying an unforgeable token
+no `receive` of that process will ever match again: never consumed, growing the mailbox without
+bound across a retry loop, and re-scanned by every later selective receive. A caller timing out
+repeatedly against a slow-but-live server leaks one message per attempt.
+
+Erlang answered this twice. Through OTP 23 the caller simply **exits** on a `gen_server:call`
+timeout, which makes a late reply moot. OTP 24 added **process aliases**: the reply is addressed
+to a one-shot alias, and once deactivated the VM drops later replies before they enter the
+mailbox. We take OTP 24's answer, as a kernel mechanism rather than a library workaround.
+
+**No new `Value` kind was needed** — which is the part worth internalising. A Brood `ref` is
+already the unforgeable per-request token a reply carries, so deactivating the ref *is* the alias:
+`(%ref-deactivate r)`, after which a message addressed to that ref is dropped **at delivery**,
+before queueing, rather than filtered at receive time. "Addressed to" is the request/reply idiom's
+own shape — a keyword-led vector whose second element is the ref (`[:reply r v]`,
+`[:down mref pid reason]`) — which keeps the check O(1) and keeps a deactivated alias from
+swallowing anything unrelated.
+
+**Bounded by construction, free when unused.** The set is a fixed eight `u64`s stored inline in
+`MailboxState`: it cannot allocate and cannot grow. An entry only has to outlive the one in-flight
+reply its alias was minted for, so the common case reclaims itself — the late reply arrives, is
+dropped, and the entry is forgotten in the same step. Overflow evicts the *oldest*, restoring
+exactly the pre-alias behaviour for one long-abandoned ref rather than dropping anything wrong.
+Both delivery paths already hold the mailbox lock, so the check is `dead_aliases.is_empty()` on a
+field they have just touched: `pingpong` / `ring` / `spawn` / `spawn-live`, best-of-11 and pinned,
+every row within its own noise floor.
+
+A timed-out `gen/call` now leaves an *empty* mailbox rather than a flushed-so-far one, and the
+same holds on the server-died path. `%ref-deactivate` is deliberately delivery-only — queued
+messages are untouched, like `demonitor` without `flush` — so the flush and the alias compose
+rather than overlap. Guard: `tests/ref_alias_test.blsp`, with both delivery paths
+sabotage-verified separately, plus the eviction boundary and the end-to-end late-reply case.
