@@ -59,8 +59,7 @@
   (pn-scan-files (corpus-files "parse-number") 0 nil))
 
 (describe "parse-number-fxx: decimal text -> binary64 is bit-exact"
-  :tags
-  [:conformance :slow]
+  :tags [:conformance :slow]
 
   (test "the corpus is present"
     (is (corpus-present? "parse-number"))
@@ -79,8 +78,7 @@
 ;; The cases worth naming: each of these broke a shipped implementation. They are
 ;; in the corpus too, but spelled out here they document what the sweep protects.
 (describe "parse-number-fxx: the historically fatal inputs"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the denormal that hung PHP's and Java's strtod"
     (assert= (float->bits (string/->number "2.2250738585072011e-308"))
@@ -116,8 +114,7 @@
 ;; float->bits is new kernel surface (it is what makes the sweep above possible), so
 ;; it gets its own coverage rather than being trusted implicitly.
 (describe "float->bits / bits->float"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "round-trips every kind of double"
     (dolist (b ["0000000000000000"

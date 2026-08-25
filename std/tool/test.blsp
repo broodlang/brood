@@ -293,8 +293,7 @@ docs/testing.md for the full guide.")
          ~(unless (describe-body-has-tests? body)
             (list 'io/puts
               (str "warning: describe " (pr-str group) " has no tests")
-              :to
-              '*err*))
+              :to '*err*))
          nil))))
 
 ;; (test "name" [:isolated] body...) — register one test. Each top-level body form

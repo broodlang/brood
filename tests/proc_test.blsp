@@ -25,8 +25,7 @@
       (after 3000 acc))))
 
 (describe "proc: handle + type-of"
-  :isolated
-  (test "proc/spawn returns a distinct :subprocess handle"
+  :isolated (test "proc/spawn returns a distinct :subprocess handle"
     (let (p (proc/spawn "cat" []))
       (assert= (type-of p) :subprocess)
       (refute (= (type-of 5) :subprocess))
@@ -34,8 +33,7 @@
       (proc/close p))))
 
 (describe "proc: stdin echo via mailbox delivery"
-  :isolated
-  (test "proc/send to `cat` comes back as [:proc handle data]"
+  :isolated (test "proc/send to `cat` comes back as [:proc handle data]"
     (let (p (proc/spawn "cat" []))
       (proc/send p "ping over proc")
       (let (got (receive ([:proc ^p d] d) (after *test-wait-ms* :timeout)))
@@ -75,8 +73,7 @@
         (proc/close p)))))
 
 (describe "proc: stdout stream + exit code"
-  :isolated
-  (test "a child's stdout then [:proc-closed handle code] with its exit status"
+  :isolated (test "a child's stdout then [:proc-closed handle code] with its exit status"
     (let (p (proc/spawn "sh" ["-c" "printf hello; exit 3"]))
       (let (out (receive ([:proc ^p d] d) (after *test-wait-ms* :timeout)))
         (assert= out "hello")
@@ -84,8 +81,7 @@
           (assert= code 3))))))
 
 (describe "proc: stderr is a separate channel"
-  :isolated
-  (test "stderr arrives as [:proc-err …], never mixed into [:proc …]"
+  :isolated (test "stderr arrives as [:proc-err …], never mixed into [:proc …]"
     (let (p (proc/spawn "sh" ["-c" "printf oops 1>&2"]))
       (let (err (receive ([:proc-err ^p d] d) (after *test-wait-ms* :timeout)))
         (assert= err "oops")
@@ -102,8 +98,7 @@
           (assert= code 0))))))
 
 (describe "proc: :env adds environment variables"
-  :isolated
-  (test "proc/spawn opts :env is visible to the child"
+  :isolated (test "proc/spawn opts :env is visible to the child"
     (let (p (proc/spawn "sh" ["-c" "printf %s \"$MYVAR\""] {:env {"MYVAR" "hello"}}))
       (let (out (receive ([:proc ^p d] d) (after *test-wait-ms* :timeout)))
         (assert= out "hello")

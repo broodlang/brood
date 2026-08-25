@@ -76,8 +76,7 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
             (csv-parse-loop s
               (+ i 1)
               n
-              :field-start
-              nil
+              :field-start nil
               (cons (csv-field field-acc) row-acc)
               rows-acc)
           ;; newline \n → empty field, end of row
@@ -87,24 +86,21 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
               (csv-parse-loop s
                 (+ i 1)
                 n
-                :field-start
-                nil
+                :field-start nil
                 nil
                 (cons row rows-acc)))
           ;; \r\n — skip the \r, the \n will be processed on the next call
           (= c "\r") (csv-parse-loop s
                        (+ i 1)
                        n
-                       :field-start
-                       field-acc
+                       :field-start field-acc
                        row-acc
                        rows-acc)
           ;; any other char → start unquoted field
           else (csv-parse-loop s
                  (+ i 1)
                  n
-                 :unquoted
-                 (cons c field-acc)
+                 :unquoted (cons c field-acc)
                  row-acc
                  rows-acc))
 
@@ -115,8 +111,7 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
             (csv-parse-loop s
               (+ i 1)
               n
-              :field-start
-              nil
+              :field-start nil
               (cons (csv-field field-acc) row-acc)
               rows-acc)
           (= c "\n")
@@ -125,16 +120,14 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
               (csv-parse-loop s
                 (+ i 1)
                 n
-                :field-start
-                nil
+                :field-start nil
                 nil
                 (cons row rows-acc)))
           (= c "\r") (csv-parse-loop s (+ i 1) n :unquoted field-acc row-acc rows-acc)
           else (csv-parse-loop s
                  (+ i 1)
                  n
-                 :unquoted
-                 (cons c field-acc)
+                 :unquoted (cons c field-acc)
                  row-acc
                  rows-acc))
 
@@ -161,8 +154,7 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
           (= c "\"") (csv-parse-loop s
                        (+ i 1)
                        n
-                       :quoted
-                       (cons "\"" field-acc)
+                       :quoted (cons "\"" field-acc)
                        row-acc
                        rows-acc)
           ;; comma after closing quote → end of field
@@ -170,8 +162,7 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
             (csv-parse-loop s
               (+ i 1)
               n
-              :field-start
-              nil
+              :field-start nil
               (cons (csv-field field-acc) row-acc)
               rows-acc)
           ;; newline after closing quote → end of row
@@ -181,24 +172,21 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
               (csv-parse-loop s
                 (+ i 1)
                 n
-                :field-start
-                nil
+                :field-start nil
                 nil
                 (cons row rows-acc)))
           ;; \r after closing quote → skip (wait for \n)
           (= c "\r") (csv-parse-loop s
                        (+ i 1)
                        n
-                       :quote-seen
-                       field-acc
+                       :quote-seen field-acc
                        row-acc
                        rows-acc)
           ;; anything else after closing quote → back to unquoted (lenient)
           else (csv-parse-loop s
                  (+ i 1)
                  n
-                 :unquoted
-                 (cons c field-acc)
+                 :unquoted (cons c field-acc)
                  row-acc
                  rows-acc))
 

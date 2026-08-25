@@ -23,8 +23,7 @@
 (defn h-last (i bad) (if (= i 0) bad (h-last (- i 1) (if (= (last V) :z) bad (+ bad 1)))))
 
 (describe "JIT cons correctness (regression)"
-  :serial
-  (test "reverse length stays correct after the arm tiers"
+  :serial (test "reverse length stays correct after the arm tiers"
     (assert= (h-count 4000 0) 0))
   (test "first of a reversed list stays correct after tiering"
     (assert= (h-first 4000 0) 0))

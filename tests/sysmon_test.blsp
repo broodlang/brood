@@ -42,8 +42,7 @@ worker's mailbox so it can't satisfy a later test's receive."
   (receive ([:system _ _ _] (sysmon-done)) (after 0 nil)))
 
 (describe "system-monitor arming"
-  :isolated
-  (test "read / arm / clear round-trip, previous config returned"
+  :isolated (test "read / arm / clear round-trip, previous config returned"
     ; unarmed by default
     (assert= nil (system-monitor))
     ; arm-all: previous was nil
@@ -71,8 +70,7 @@ worker's mailbox so it can't satisfy a later test's receive."
     (system-monitor nil)))
 
 (describe "system-monitor events"
-  :isolated
-  (test "spawn and exit events arrive with pid, parent, and reason"
+  :isolated (test "spawn and exit events arrive with pid, parent, and reason"
     (system-monitor (self) {:spawn true :exit true})
     (let (me (self)
           child (spawn :done))
@@ -121,8 +119,7 @@ worker's mailbox so it can't satisfy a later test's receive."
       (assert= nil (sysmon-wait-disarm 100)))))
 
 (describe "telemetry watch-runtime"
-  :isolated
-  (test "kernel events flow through the telemetry seam as [:runtime …] events"
+  :isolated (test "kernel events flow through the telemetry seam as [:runtime …] events"
     (telemetry/start-telemetry)
     (let (me (self))
       (telemetry/attach :t-spawn

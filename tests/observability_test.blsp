@@ -36,8 +36,7 @@
       (is (>= (get s :peak-threads) 1)))))
 
 (describe "sampling profiler"
-  :isolated
-  (test "catches a hot named fn; stop is idempotent"
+  :isolated (test "catches a hot named fn; stop is idempotent"
     (dev/profile-start 999)
     (obs-churn 800000 ())
     (obs-churn 800000 ())

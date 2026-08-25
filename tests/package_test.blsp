@@ -1281,8 +1281,7 @@
 ;; *load-path* — the whole point of the slice. :isolated because it mutates
 ;; *load-path* and loads a module (ADR-017 rolls both back).
 (describe "package: a resolved :path dep is require-able"
-  :isolated
-  (test "require finds the dep's module after ensure-deps extends *load-path*"
+  :isolated (test "require finds the dep's module after ensure-deps extends *load-path*"
     (let (parent (pkg-fixture-root)
           dep-dir (path/join parent "greeter")
           app-dir (path/join parent "app"))
@@ -1298,8 +1297,7 @@
 ;; The git equivalent: a :git dep is cloned into _deps/, its src/ joins *load-path*,
 ;; and its module becomes require-able. :isolated for the same load-path reason.
 (describe "package: a resolved :git dep is require-able"
-  :isolated
-  (test "require finds a cloned git dep's module after ensure-deps"
+  :isolated (test "require finds a cloned git dep's module after ensure-deps"
     (let (parent (pkg-fixture-root)
           dep-dir (path/join parent "salutation")
           app-dir (path/join parent "app"))
@@ -1323,8 +1321,7 @@
 ;; `bundle-collect` errored. :isolated because it mutates *load-path* + the package
 ;; registries and writes a lock file (ADR-017 rolls them back).
 (describe "package: bundle-collect roots dependency modules (dev/release parity)"
-  :isolated
-  (test "two deps providing a same-named module are embedded under distinct rooted keys"
+  :isolated (test "two deps providing a same-named module are embedded under distinct rooted keys"
     (let (parent (pkg-fixture-root)
           alpha-dir (path/join parent "alpha")
           beta-dir (path/join parent "beta")

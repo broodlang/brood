@@ -103,8 +103,7 @@
 
 ;; Cross-process: the record's identity survives the deep copy on `send`.
 (describe "multimap across processes"
-  :isolated
-  (test "a multimap built in a worker arrives as a multimap"
+  :isolated (test "a multimap built in a worker arrives as a multimap"
     (let (me (self))
       (spawn (send me [:mm (multimap/assoc-all (multimap/empty) :k [1 2 3])]))
       (let (back (receive ([:mm m] m) (after *test-wait-ms* :timeout)))

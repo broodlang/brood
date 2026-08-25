@@ -21,9 +21,7 @@
 (defmacro ag-escape () `'(^'x# x#))
 
 (describe "auto-gensym (x#)"
-  :isolated
-
-  (test "the same x# within one expansion is one symbol"
+  :isolated (test "the same x# within one expansion is one symbol"
     (let (l (ag-pair))
       (is (= (first l) (second l)))))
 
@@ -61,9 +59,7 @@
 (defn ag-one-worker-b (parent) (send parent (ag-one)))
 
 (describe "auto-gensym across processes"
-  :isolated
-
-  (test "consistency survives send: a worker's (a# a#) round-trips equal"
+  :isolated (test "consistency survives send: a worker's (a# a#) round-trips equal"
     (let (me (self) _w (spawn (ag-pair-worker me)))
       (let (l (receive))
         (is (symbol? (first l)))

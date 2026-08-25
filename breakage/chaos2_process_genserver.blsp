@@ -66,8 +66,7 @@
 
 (defn call-with-retry (server payload max-retries timeout-ms)
   (if (= max-retries 0)
-    :give-up
-    (do
+    :give-up (do
       (send server [:request (self) payload])
       (let (r (receive
                 ([:response v] [:ok v])

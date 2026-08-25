@@ -73,9 +73,7 @@
     (c3-collect (+ got 1) total (receive ([:done v] (+ acc v))))))
 
 (describe "JIT handles held across safepoints in spawned processes (bug #2 regression)"
-  :isolated
-
-  (test "fan-out: many workers run handle-heavy JIT'd code concurrently under GC"
+  :isolated (test "fan-out: many workers run handle-heavy JIT'd code concurrently under GC"
     ;; 24 worker processes each push the pressure/vdiff arms past the JIT tiering
     ;; threshold and run them JIT'd while allocating heavily (frequent GC). Each
     ;; pressure run builds a 150-char string ⇒ checksum 150; vdiff on equal vectors

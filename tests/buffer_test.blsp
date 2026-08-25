@@ -541,9 +541,7 @@
 ;; The actor shell: a buffer process owns its buffer (and process-local rope) and
 ;; replies only with derived views. Edits/reads cross as closures (ADR-033).
 (describe "buffer actor shell"
-  :isolated
-
-  (test "spawn-buffer + edit + query"
+  :isolated (test "spawn-buffer + edit + query"
     (let (bp (spawn-buffer (make-buffer "hello")))
       (buffer-edit bp (fn (b) (-> b end-of-buffer (insert " world"))))
       (assert= (buffer-query bp buffer-text) "hello world")
@@ -752,9 +750,7 @@
   (receive ([:relayed t v txt] (drain-relayed (cons [t v txt] acc))) (after 500 (reverse acc))))
 
 (describe "buffer process — subscribe / push (the collaboration seam)"
-  :isolated
-
-  (test "a subscriber is seeded, then pushed each edit with a bumped version"
+  :isolated (test "a subscriber is seeded, then pushed each edit with a bumped version"
     (let (bp (spawn-buffer (make-buffer "hi")))
       (subscribe-buffer bp buffer-text)
       (assert= (receive ([:buffer-updated _bp v txt _] [v txt]) (after 2000 :none)) [0 "hi"])

@@ -886,11 +886,9 @@ insertion point shift with the text. Throws if `buf` is read-only."
                                                     :rope (text/insert (get buf :rope) p s)
                                                     :point (+ p (string/length s))
                                                     :mark nil)
-                             :insert
-                             p
+                             :insert p
                              (string/length s))
-        :insert
-        p
+        :insert p
         (string/length s)))))
 
 (defn delete-char (buf &optional (n 1))

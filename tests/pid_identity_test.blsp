@@ -9,8 +9,7 @@
 (defmodule pid-identity-test (:use test))
 
 (describe "pid identity across node-start"
-  :isolated
-  (test "a pid captured before node-start equals (self) after — and still works as a map key"
+  :isolated (test "a pid captured before node-start equals (self) after — and still works as a map key"
     (let (before (self)
           keyed {before :cursor}
           ;; `node-start` is ONE-SHOT per runtime — a second listener would need a second

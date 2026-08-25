@@ -15,8 +15,7 @@
 ;; ---- helpers ----------------------------------------------------------------
 (defn tt-await (n)
   (if (= n 0)
-    :ok
-    (receive (:done (tt-await (- n 1))) (after *test-wait-ms* :timeout))))
+    :ok (receive (:done (tt-await (- n 1))) (after *test-wait-ms* :timeout))))
 
 ;; Put i -> (* i i) for i in [0,n) (fold is tail-recursive in the kernel).
 (defn tt-fill (t n) (fold (fn (_ i) (table/put t i (* i i))) nil (range n)))

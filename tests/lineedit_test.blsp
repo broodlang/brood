@@ -376,9 +376,7 @@
 ;; and is edited on the far side, proving the immutable state survives copy-on-send
 ;; and the keymap runs identically under the scheduler.
 (describe "editor state across processes"
-  :isolated
-
-  (test "a state map sent to a worker edits identically"
+  :isolated (test "a state map sent to a worker edits identically"
     (let (st (editor/lineedit/lineedit-init "x> " "" '())
           w (spawn (receive
                      ([:edit s from] (send from (get (le-keys s (list "a" "b" "c")) :text))))))

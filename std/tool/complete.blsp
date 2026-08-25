@@ -316,8 +316,7 @@ suggestions\", never to an error on the user's command line."
                                                          (complete-under dir ".blsp")))
                                                  nil
                                                  (complete-manifest-dirs root
-                                                   :source-paths
-                                                   ["src"])))))
+                                                   :source-paths ["src"])))))
                         nil))))))))
 
 (defn project-modules ()

@@ -206,8 +206,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
                      (do
                        (table/put acc :n (inc n))
                        (table/put acc
-                         :entries
-                         (cons (eval-server-spy-entry e)
+                         :entries (cons (eval-server-spy-entry e)
                            (or (table/get acc :entries) '())))
                        ;; the entry that FILLS the budget already answers stop: nothing
                        ;; after it would be kept, so nothing after it should be paid for

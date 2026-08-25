@@ -57,8 +57,7 @@
       (table/put box :done true)
       ;; Eat the three oldest queued messages out from under the scan.
       (table/put box
-        :ate
-        [(receive ([:junk n] n) (after 500 :none))
+        :ate [(receive ([:junk n] n) (after 500 :none))
           (receive ([:junk n] n) (after 500 :none))
           (receive ([:junk n] n) (after 500 :none))])
       (let (r (ref))
@@ -76,9 +75,7 @@
       false)))
 
 (describe "mailbox arrival-sequence ordering"
-  :isolated
-
-  (test "a pinned receive still sees its reply after a guard consumed from the mailbox"
+  :isolated (test "a pinned receive still sees its reply after a guard consumed from the mailbox"
     (let (me (self)
           box (table/new)
           srv (spawn (reply-server)))

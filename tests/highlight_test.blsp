@@ -191,9 +191,7 @@
 ;; send (a deep copy) before being compared, proving the analysis output survives
 ;; the copy-on-send round-trip under the scheduler — not just same-heap building.
 (describe "highlight-spans across processes"
-  :isolated
-
-  (test "spans built in another process round-trip intact"
+  :isolated (test "spans built in another process round-trip intact"
     (let (w (spawn (receive ([:lex src from] (send from (highlight-spans src))))))
       (send w [:lex "(+ 1)" (self)])
       (assert= (receive (r r))

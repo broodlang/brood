@@ -16,9 +16,7 @@
 (defmodule adversarial-test (:use test))
 
 (describe "adversarial: reader / parser"
-  :isolated
-
-  (test "deeply nested parens are rejected cleanly (reader depth bound)"
+  :isolated (test "deeply nested parens are rejected cleanly (reader depth bound)"
     ;; Construct (((((... 1000 deep ...))))). The reader should error out,
     ;; not blow the host stack. `read-string` evaluates to a value or throws.
     (let (src (str (string/repeat "(" 1000) "x" (string/repeat ")" 1000)))
@@ -79,9 +77,7 @@
 ;;
 
 (describe "adversarial: heap allocation"
-  :isolated
-
-  (test "1 MB string allocates as a Shared blob"
+  :isolated (test "1 MB string allocates as a Shared blob"
     (when (bound? '%blob-ptr)
       (let (big (string/repeat "X" 1048576))
         (assert= 1048576 (string/length big))
@@ -108,9 +104,7 @@
 ;;
 
 (describe "adversarial: messages"
-  :isolated
-
-  (test "a 300-deep nested list send errors cleanly (MAX_MESSAGE_DEPTH = 256)"
+  :isolated (test "a 300-deep nested list send errors cleanly (MAX_MESSAGE_DEPTH = 256)"
     (let (build (fn (n acc) (if (= n 0) acc (build (- n 1) (list acc))))
           deep (build 300 :leaf)
           me (self))
@@ -152,9 +146,7 @@
 ;;
 
 (describe "adversarial: blob heap stress"
-  :isolated
-
-  (test "boundary: 255 B is Inline, 256 B is Shared (nil vs ptr)"
+  :isolated (test "boundary: 255 B is Inline, 256 B is Shared (nil vs ptr)"
     (when (bound? '%blob-ptr)
       (assert= nil (%blob-ptr (string/repeat "x" 255)))
       (is (not (nil? (%blob-ptr (string/repeat "x" 256)))))
@@ -200,9 +192,7 @@
 ;;
 
 (describe "adversarial: concurrency / scheduler"
-  :isolated
-
-  (test "1000 spawn + send + receive across green processes drains cleanly"
+  :isolated (test "1000 spawn + send + receive across green processes drains cleanly"
     ;; Spawn at top level to avoid the let-bound-closure → promote-cycle bug.
     (do
       (adv-fan-out 1000 (self))
@@ -263,8 +253,7 @@
 
 (defn adv-collect (got total expected)
   (if (= got total)
-    :ok
-    (receive (v (if (= v expected) (adv-collect (+ got 1) total expected) [:mismatch v expected])))))
+    :ok (receive (v (if (= v expected) (adv-collect (+ got 1) total expected) [:mismatch v expected])))))
 
 ;; ---- Bombard helpers: 5000 sequential sends of one blob ----------------------
 
@@ -280,8 +269,7 @@
 
 (defn adv-drain-acks (n expected)
   (if (= n 0)
-    :ok
-    (receive (p (if (= p expected) (adv-drain-acks (- n 1) expected) [:mismatch p expected])))))
+    :ok (receive (p (if (= p expected) (adv-drain-acks (- n 1) expected) [:mismatch p expected])))))
 
 ;; ---- 1000-process fan-out ----------------------------------------------------
 
@@ -315,8 +303,7 @@
 
 (defn adv-drain-downs (n)
   (if (= n 0)
-    :ok
-    (receive ([:down _ _ _] (adv-drain-downs (- n 1))))))
+    :ok (receive ([:down _ _ _] (adv-drain-downs (- n 1))))))
 
 ;; ---- Hot reload race ---------------------------------------------------------
 

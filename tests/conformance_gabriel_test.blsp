@@ -63,8 +63,7 @@
 (def- gb-nqueens-solutions [1 0 0 2 10 4 40 92 352 724])
 
 (describe "Gabriel benchmarks: whole programs with known answers"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the corpus is present, one .input per ported program"
     (is (corpus-present? "gabriel"))
@@ -147,8 +146,7 @@
 ;; timeout (a `:conformance` tag does too) rather than skipping them, so they really do
 ;; run — they are the cases that put sustained pressure on the rewriter and the GC.
 (describe "Gabriel benchmarks: the heavier sizes"
-  :tags
-  [:conformance :slow]
+  :tags [:conformance :slow]
 
   (test "nboyer — n=1 and n=2, 0.6M and 1.8M rewrites"
     ;; Each step of upstream's scaling parameter wraps the term in `(or term (f))` again,

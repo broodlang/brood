@@ -11,8 +11,7 @@
 (defmodule tcp-test (:use test) (:use tcp :exclude [send]))
 
 (describe "tcp: predicate + handles"
-  :isolated
-  (test "socket? distinguishes sockets from other values"
+  :isolated (test "socket? distinguishes sockets from other values"
     (let (ls (tcp/listen "127.0.0.1" 0))
       (is (socket? ls))
       (refute (socket? 5))
@@ -24,8 +23,7 @@
       (tcp/close ls))))
 
 (describe "tcp: loopback echo via mailbox delivery"
-  :isolated
-  (test "accept, client send, server echo — all in one process"
+  :isolated (test "accept, client send, server echo — all in one process"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
@@ -46,8 +44,7 @@
             (assert= back "pong back")))))))
 
 (describe "tcp: EOF surfaces as [:tcp-closed …]"
-  :isolated
-  (test "closing one end delivers [:tcp-closed sock] to the other"
+  :isolated (test "closing one end delivers [:tcp-closed sock] to the other"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
@@ -59,8 +56,7 @@
           (assert= ev :closed))))))
 
 (describe "tcp: drain collects a request/response"
-  :isolated
-  (test "drain concatenates chunks until the peer closes; returns bytes"
+  :isolated (test "drain concatenates chunks until the peer closes; returns bytes"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
@@ -76,8 +72,7 @@
           (assert= (string/bytes-> reply) "hello, world"))))))
 
 (describe "tcp: opt-in idle timeout (tcp/set-idle-timeout)"
-  :isolated
-  (test "an armed, silent connection is reaped with [:tcp-closed]"
+  :isolated (test "an armed, silent connection is reaped with [:tcp-closed]"
     ;; Neither side speaks; the client's armed idle bound reaps it. (The reap is
     ;; detected on the reactor's ~1s housekeep tick, so allow slack.)
     (let (ls (tcp/listen "127.0.0.1" 0)
@@ -136,8 +131,7 @@
           (assert= still :alive))))))
 
 (describe "tcp: binary mode is inbound-only (ADR-141)"
-  :isolated
-  (test "binary inbound is bytes; string leaves always go out as UTF-8"
+  :isolated (test "binary inbound is bytes; string leaves always go out as UTF-8"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
@@ -155,8 +149,7 @@
           (assert= got (bytes 0 255 128 195 169)))))))
 
 (describe "tcp: framed reads — read-until / read-n"
-  :isolated
-  (test "read-until returns the frame up to+including the delimiter, plus the remainder"
+  :isolated (test "read-until returns the frame up to+including the delimiter, plus the remainder"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
@@ -313,8 +306,7 @@
 ;; (413 before reading a byte). Without these the combinators hold a process open
 ;; or accumulate without bound, which is why hatch could not adopt them.
 (describe "tcp: framed-read limits — :timeout-ms / :max-bytes"
-  :isolated
-  (test "read-until returns [:timeout acc] when the peer goes silent"
+  :isolated (test "read-until returns [:timeout acc] when the peer goes silent"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
@@ -428,8 +420,7 @@
     (drip-bytes sock (- n 1) gap)))
 
 (describe "tcp: framed-read limits — :deadline-ms (total budget)"
-  :isolated
-  (test "a drip that keeps re-arming the idle timeout is still cut off by the deadline"
+  :isolated (test "a drip that keeps re-arming the idle timeout is still cut off by the deadline"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
@@ -511,8 +502,7 @@
 ;; with bytes in hand; those may contain the delimiter, or its first half. hatch's HTTP worker
 ;; re-enters its head read with the leftover of a pipelined request, which is exactly this.
 (describe "tcp: framed reads — :seed (bytes already in hand)"
-  :isolated
-  (test "a seed containing the whole frame returns without reading the socket"
+  :isolated (test "a seed containing the whole frame returns without reading the socket"
     (let (ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
       (let (c (tcp/connect "127.0.0.1" port)

@@ -130,8 +130,7 @@
   ;; :isolated — tracing rebinds globals and `untrace-all` clears a SHARED registry,
   ;; so these must not run beside each other (concurrently they flipped each other's
   ;; wrappers in and out: a traced loop would keep or lose its tail-calls at random).
-  :isolated
-  (test "a defn and its call in ONE request still trace (install-per-form)"
+  :isolated (test "a defn and its call in ONE request still trace (install-per-form)"
     (let (r (eval-capturing "(defn evsrv-t-fac ((0) 1) ((n) (* n (evsrv-t-fac (- n 1)))))\n(evsrv-t-fac 3)"
               ["evsrv-t-fac"]))
       (assert= (get r :ok) true)
@@ -241,9 +240,7 @@
       (assert= (count (filter (fn (e) (= (get e :kind) "call")) (get r :spy))) 5))))
 
 (describe "process accounting (:procs)"
-  :isolated
-
-  (test "a plain evaluation leaves nothing running"
+  :isolated (test "a plain evaluation leaves nothing running"
     (assert= (get (eval-capturing "(+ 1 2)") :procs) {:alive 0}))
 
   (test "a round-trip that finishes leaves nothing running"

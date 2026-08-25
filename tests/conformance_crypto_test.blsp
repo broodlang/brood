@@ -128,8 +128,7 @@
         else (cy-hmac-scan (rest lines) algo tlen key msg ran skipped bad)))))
 
 (describe "NIST CAVP: SHA byte vectors"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the corpus is present"
     (is (corpus-present? "crypto"))
@@ -161,8 +160,7 @@
       (assert= (take 3 bad) ()))))
 
 (describe "NIST CAVP: HMAC vectors"
-  :tags
-  [:conformance :slow]
+  :tags [:conformance :slow]
 
   (test "every HMAC case for a digest Brood exposes"
     (let ([ran skipped bad] (cy-hmac-scan (corpus-lines (cy-file "HMAC.rsp")) nil 0 "" "" 0 0 nil))
@@ -177,8 +175,7 @@
 ;; opening a 839 KB .rsp, and they pin the string-input wrappers the .rsp files never
 ;; touch (the .rsp path is all bytes).
 (describe "the canonical published digests"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the empty-input digests"
     (assert= (hash/sha1 "") "da39a3ee5e6b4b0d3255bfef95601890afd80709")

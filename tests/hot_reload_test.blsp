@@ -9,8 +9,7 @@
 
 ; zero garbage results across 1600 calls
 (describe "late binding (def redefinition is visible on the next call)"
-  :isolated
-  (test "a caller picks up a redefined global fn within the same process"
+  :isolated (test "a caller picks up a redefined global fn within the same process"
     (def hr-a (fn () 1))
     (defn hr-call-a () (hr-a))
     (let (before (hr-call-a) _ (def hr-a (fn () 2)) after (hr-call-a))

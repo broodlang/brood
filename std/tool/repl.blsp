@@ -508,8 +508,7 @@ reporting a real error. Never lets an error escape the loop."
       ;; An incomplete form is not a failure — it's "read another line" — so it must
       ;; NOT land in `*e` and clobber the error the user is actually debugging.
       (if (repl-incomplete? e)
-        :more
-        (do
+        :more (do
           (repl-remember-error e)
           (io/print (str (repl-error-message e) "\n") :to *err*)
           :error)))))
@@ -587,15 +586,13 @@ reporting a real error. Never lets an error escape the loop."
   ()
   "Register the calling process as the innermost interrupt owner."
   (table/put *repl-interrupt-owners*
-    :stack
-    (cons (self) (or (table/get *repl-interrupt-owners* :stack) '()))))
+    :stack (cons (self) (or (table/get *repl-interrupt-owners* :stack) '()))))
 
 (defn- repl-interrupt-pop
   ()
   "Deregister the calling process (must be the current head — strict nesting)."
   (table/put *repl-interrupt-owners*
-    :stack
-    (rest (or (table/get *repl-interrupt-owners* :stack) '()))))
+    :stack (rest (or (table/get *repl-interrupt-owners* :stack) '()))))
 
 (defn- repl-interrupt-owner?
   ()
@@ -610,8 +607,7 @@ wedged on a corpse."
       (nil? (proc/info (first stack)))
         (do
           (table/put *repl-interrupt-owners*
-            :stack
-            (rest stack))
+            :stack (rest stack))
           (repl-interrupt-owner?))
       else false)))
 

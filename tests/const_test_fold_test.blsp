@@ -40,9 +40,7 @@
   (cond (>= i n) acc :else (count-up (+ i 1) n (+ acc i))))
 
 (describe "constant-test fold: which branch runs"
-  :serial
-
-  (test "a keyword catch-all selects the same branch as a bare `else`"
+  :serial (test "a keyword catch-all selects the same branch as a bare `else`"
     (assert= (classify 1) :one)
     (assert= (classify 2) :two)
     (assert= (classify 99) :other))
@@ -69,9 +67,7 @@
     (assert= (cond false (throw [:should-not-run]) :else :ok) :ok)))
 
 (describe "constant-test fold: folded arms still tier correctly"
-  :serial
-
-  (test "`:else` and `else` spellings agree past the tier threshold"
+  :serial (test "`:else` and `else` spellings agree past the tier threshold"
     ;; ack(3,5) = 253, deep double recursion — well past the tier threshold, and
     ;; exactly the shape the register worker claims.
     (assert= (ack 3 5) 253)

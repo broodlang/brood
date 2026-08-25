@@ -1590,8 +1590,7 @@ resolve in the advisory checker. Returns the project root."
 (defn- project-check-files-fresh
   (files closures)
   (project-pfold-files (project-with-closures files closures)
-    :check
-    (fn (n c) (+ n c))
+    :check (fn (n c) (+ n c))
     (fn (n chunk reason)
       (io/puts (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason))
         :to *err*)
@@ -1605,8 +1604,7 @@ resolve in the advisory checker. Returns the project root."
   (files closure)
   (project-pfold-files-shared files
     closure
-    :check-shared
-    (fn (n c) (+ n c))
+    :check-shared (fn (n c) (+ n c))
     (fn (n chunk reason)
       (io/puts (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason))
         :to *err*)
@@ -2093,8 +2091,7 @@ resolve in the advisory checker. Returns the project root."
   (if (empty? files)
     nil
     (project-pfold-files files
-      :scan-entries
-      (fn (acc chunk-results) (append-two chunk-results acc))
+      :scan-entries (fn (acc chunk-results) (append-two chunk-results acc))
       (fn (acc chunk reason)
         (io/puts (str "warning: check scan worker died on "
                    (count chunk)
@@ -2114,8 +2111,7 @@ resolve in the advisory checker. Returns the project root."
   (if (empty? files)
     nil
     (project-pfold-files files
-      :check-deps
-      (fn (acc chunk-results) (append-two chunk-results acc))
+      :check-deps (fn (acc chunk-results) (append-two chunk-results acc))
       (fn (acc chunk reason)
         (io/puts (str "warning: check worker died on "
                    (count chunk)

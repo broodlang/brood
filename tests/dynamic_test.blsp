@@ -126,9 +126,7 @@
 ;; the rest of the suite.
 
 (describe "dynamic variables across processes"
-  :isolated
-
-  (test "each process has its own binding stack (no cross-talk under contention)"
+  :isolated (test "each process has its own binding stack (no cross-talk under contention)"
     ;; 20 workers, each binding *dt* to a distinct i in 1..20 and reporting it.
     ;; Σ 1..20 = 210 — only correct if no binding leaked between processes.
     (dt-spawn-workers (self) (dt-range 1 21))

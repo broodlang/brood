@@ -46,8 +46,7 @@ transformers, and terminals — each transformer adds one green process.
   ;; original reason — so both read as a clean end of stream. Anything else is a crash,
   ;; and the consumer gets it as an error rather than as silent exhaustion.
   (if (or (= reason :normal) (= reason :noproc))
-    :done
-    [:err (str "stream/next: producer died: " (pr-str reason))]))
+    :done [:err (str "stream/next: producer died: " (pr-str reason))]))
 
 (defn next (s &optional timeout-ms)
   "Request the next element from stream `s`.

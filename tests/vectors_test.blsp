@@ -102,8 +102,7 @@
   (receive (v (send parent (assoc v 1 99)))))
 
 (describe "vectors across processes"
-  :isolated
-  (test "an assoc-built vector survives a send round-trip"
+  :isolated (test "an assoc-built vector survives a send round-trip"
     (let (me (self) _w (spawn (vt-builder me)))
       (assert= (receive) [0 1 4 9 16])))
   (test "a worker's assoc does not mutate the sender's vector"
