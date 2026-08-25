@@ -376,6 +376,14 @@ release: release-brood ## Build optimized `brood`, `nest` and `brood-lsp` into $
 
 install: release ## Build (per ./configure) + install `brood`, `nest`, `brood-lsp` into $(PREFIX)/bin
 	$(call install_binaries,$(RELEASE_DIR))
+	# Build the standard-library startup image for the binaries just installed (ADR-218).
+	# Without it every `require` of a std module re-evaluates its embedded source — `format`
+	# alone is ~77 ms — and a program pulling http+json+format+datetime pays ~124 ms instead
+	# of ~27 ms. Keyed on `build-id`, which includes each executable's mtime, so the freshly
+	# installed binaries need their own; that is exactly why this runs here.
+	# Best-effort: a failure must not fail the install, since everything still works from
+	# source, just slower.
+	-$(PREFIX)/bin/nest stdimage
 
 uninstall: ## Remove the installed binaries from $(PREFIX)/bin (leaves the local $(RELEASE_DIR) build intact)
 	# Removes only what `install` placed on the system — the local release build

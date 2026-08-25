@@ -458,6 +458,7 @@
    "hash-map" :maps
    "dissoc-in" :maps
    "zipmap" :maps
+   "stdlib-id" :meta
    ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
    "but-last" :collections
    "drop-while" :collections

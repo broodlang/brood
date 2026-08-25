@@ -328,6 +328,20 @@ enum Cmd {
     /// Print the project's resolved dependency tree (root → direct → transitive).
     Tree,
 
+    /// Build this binary's standard-library startup image (ADR-218).
+    ///
+    /// A std module is embedded SOURCE, so `require` re-evaluates it every run —
+    /// `format` alone costs ~77 ms, almost all of it materialising closures. This
+    /// snapshots every baked-in module's bindings into
+    /// `~/.cache/brood/std-image-<build-id>.bin`, and `require` restores from it instead:
+    /// a program pulling http+json+format+datetime goes ~124 ms -> ~31 ms, and even a
+    /// trivial script gains ~8 ms because boot's own `string`/`seq` come from it.
+    ///
+    /// Costs ~2 s and ~2 MB, once per binary. The image is keyed on `build-id` (which
+    /// includes the executable's mtime), so a rebuilt or reinstalled binary simply misses
+    /// and falls back to source until this is run again — it can never go stale.
+    Stdimage,
+
     /// Add a dependency to project.blsp and re-lock (ADR-037).
     ///
     /// Context-aware rename across the project's .blsp sources.
@@ -823,6 +837,27 @@ fn run_main(cli: Cli) {
                 "(project/load-config) (scaffold/update-tooling)",
             );
         }
+        // Build THIS binary's image, then ask the `brood` on PATH to build its own.
+        // `build-id` embeds each executable's mtime — the same reason the expanded-prelude
+        // cache is named per binary — so `nest` and `brood` never share one, and a user
+        // running `brood app.blsp` would otherwise see no benefit from `nest stdimage`.
+        Cmd::Stdimage => run(
+            &mut interp,
+            concat!(
+                "(require-one 'stdimage) ",
+                "(let (r (stdimage/build)) ",
+                "  (if (nil? r) ",
+                "    (println \"no cache directory (set XDG_CACHE_HOME or HOME)\") ",
+                "    (println \"nest:  \" (second r) \" bindings -> \" (first r)))) ",
+                // `brood` runs a FILE, it has no -e; write one and hand it over.
+                "(let (f (path/temp \"brood-stdimage-\") ",
+                "      _ (file/spit f \"(require-one (quote stdimage)) (stdimage/build)\") ",
+                "      code (try (os/run-process \"brood\" [f]) (catch _ nil)) ",
+                "      _ (try (file/rm f) (catch _ nil))) ",
+                "  (println (if (= code 0) \"brood: image built\" ",
+                "             \"brood: skipped (no `brood` on PATH — run it there yourself)\")))",
+            ),
+        ),
         Cmd::Tree => {
             require_project("tree", None);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/tree)"))

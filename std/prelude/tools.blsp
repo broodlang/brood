@@ -613,6 +613,34 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 ;; genuinely new edge pays for the atomic update. `%swap-registry!` rather than a plain `def`
 ;; because loads run concurrently and a read-modify-write over a whole map silently loses
 ;; ~40% of its updates under contention (KI-22).
+(def *std-require-edges* nil)
+
+(defn- set-std-require-edges!
+  (edges)
+  "Record `edges` in the ROOT global the stdlib image carries them in, and return it.
+
+Deliberately a root global set through the prelude rather than a `def` inside `stdimage`:
+a `def` there would be namespaced `stdimage/*std-edges*`, and the boot install loads that
+section BEFORE anything requires `stdimage` — which left the module looking already-present,
+so its source never loaded and `(:use stdimage)` referred nothing. A root name belongs to no
+module, so restoring it cannot half-load one."
+  (def *std-require-edges* edges)
+  *std-require-edges*)
+
+(defn- merge-require-edges!
+  (edges)
+  "MERGE `edges` (feature name → [dep …]) into `*require-edges*`, keeping any edge already
+recorded for a key. Restoring a module from an image defines its bindings but evaluates
+NOTHING, so the requires its header would have run are replayed from these edges — an image
+that carries no edges restores `url` without `path`, and its first `path/join` is unbound.
+Merging rather than replacing because a project image and the stdlib image each carry their
+own, and whichever installs second must not erase the first."
+  (doseq (kv (map-pairs edges))
+    (let ([k deps] kv)
+      (when (not (contains? *require-edges* k))
+        (%registry-update! '*require-edges* :assoc [k] deps))))
+  *require-edges*)
+
 (defn- require-record-edge!
   (key)
   ;; `current-ns` first: it is the module whose FILE is being loaded, which is the accurate
@@ -913,6 +941,23 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; prelude, so the qualified refs don't auto-require. It stays an ordinary embedded
 ;; module (doc tooling sees the file; a project may `(:use string)`); loading it here
 ;; just makes it always-present, like the abilities below.
+;; The stdlib image is NOT installed here. It is built (`nest stdimage`, `make install`) and
+;; can be installed explicitly, but installing it at BOOT is not yet correct:
+;;
+;; Materialising a module from an image defines its bindings and evaluates NOTHING — which
+;; is the whole point, and also the trap. Any registration a module performs AT LOAD TIME is
+;; silently skipped. `*require-edges*` was the first instance and is carried explicitly in
+;; the `%std-edges` section; `defrecord` and the ability impls are the second, and those
+;; registries live kernel-side rather than as globals, so they cannot simply be imaged
+;; alongside. With boot install enabled the suite fails 132 tests — queues and priority
+;; queues lose their record identity, ui overlay records stop dispatching, `nest tree` stops
+;; displaying a dependency — and every one of them type-checks clean, because the bindings
+;; are all present and only their registrations are missing.
+;;
+;; So the remaining work is a snapshot/restore for the record + ability registries (the
+;; `%std-edges` treatment, generalised), not another special case here. Until then the win
+;; measured with it on — http+json+format+datetime 124 ms -> 27 ms — is not one we can take.
+
 (require-one 'string)
 
 ;; Same reason, same mechanism: the prelude's own helpers reference `seq/find`,
