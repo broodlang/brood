@@ -127,7 +127,10 @@ A multi-key result prints in the map's internal order, not the order given."
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks)
-  "A fresh map like `m` with each of the given keys removed."
+  "A fresh map like `m` with each of the given keys removed.
+
+    (dissoc {:a 1 :b 2} :b)   → {:a 1}
+    (dissoc {:a 1} :zz)       → {:a 1}   ; absent key is a no-op"
   (fold map-dissoc m ks))
 
 ;; `map-pairs` (kernel) is the single map enumerator: the entries as a list of
@@ -156,7 +159,11 @@ absence). O(1) via the CHAMP hash path (`map-get`), not an O(n) key scan: probe
 with two distinct sentinels — a present key returns its stored value both times;
 an absent key returns each sentinel, and those differ. (One sentinel can't tell
 absence from a key whose *stored value* happens to equal it; two distinct ones
-can.)"
+can.)
+
+    (contains? {:a 1} :a)      → true
+    (contains? {:a nil} :a)    → true    ; a stored nil is still present
+    (contains? {:a 1} :zz)     → false"
   (if (set? m)
     (%set-has? m k)
     (let (a (map-get m k :%contains-miss-a))
@@ -185,7 +192,12 @@ can.)"
 (defn update (coll k f & args)
   "A collection like `coll` with the value at key/index `k` replaced by
 `(apply f current args)`, where `current` is the existing value (`nil` if absent).
-Works on maps (by key) and vectors (by integer index, which must be in range)."
+Works on maps (by key) and vectors (by integer index, which must be in range).
+
+    (update {:n 1} :n inc)       → {:n 2}
+    (update {:n 1} :n + 10)      → {:n 11}
+    (update {} :n (fn (v) 1))    → {:n 1}   ; absent value arrives as nil
+    (update [1 2 3] 0 inc)       → [2 2 3]"
   (assoc coll k (apply f (get coll k) args)))
 
 ;; Nested-map access along a `path` (a sequence of keys). `get-in` walks; missing
