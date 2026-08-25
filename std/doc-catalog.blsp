@@ -200,10 +200,6 @@
    "float->bits" :convert
    "float?" :predicates
    "floor" :math
-   "fmt" :strings
-   "fmt-flush" :strings
-   "fmt-hole" :strings
-   "fmt-lit" :strings
    "fn?" :predicates
    "fold" :collections
    "fold-loop" :collections
