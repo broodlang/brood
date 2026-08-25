@@ -106,17 +106,17 @@ impl LineIndex {
     /// end (never spilling into the next line).
     pub fn offset_of_char_pos(&self, text: &str, pos: brood::error::Pos) -> u32 {
         let line = pos.line.saturating_sub(1) as usize;
-        let target_col = pos.col.saturating_sub(1);
+        let target_col = pos.col.saturating_sub(1) as usize;
         let Some(&line_start) = self.line_starts.get(line) else {
             return text.len() as u32;
         };
         let mut byte = floor_char_boundary(text, line_start as usize);
-        let mut col = 0u32;
-        for c in text[byte..].chars() {
+        // `col` is the count of characters already stepped over, so the enumerate index
+        // is it exactly — the walk advances `byte` by whole characters, never bytes.
+        for (col, c) in text[byte..].chars().enumerate() {
             if c == '\n' || col >= target_col {
                 break;
             }
-            col += 1;
             byte += c.len_utf8();
         }
         byte as u32

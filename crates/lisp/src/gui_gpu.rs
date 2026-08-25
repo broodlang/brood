@@ -124,6 +124,22 @@ pub struct GlWindow {
     glyphs: std::collections::HashMap<u64, GlGlyph>,
 }
 
+/// Whether a quad at `(x, y)` sized `w x h` could put any pixel inside a `fw x fh`
+/// viewport.
+///
+/// GL would clip an off-screen quad away for free, but this path **buffers** every quad
+/// before drawing — unlike the CPU painter, whose fills clip against the framebuffer and
+/// cost nothing when off-screen. `Op::Cells` pushes one quad per live bit of a
+/// caller-supplied bitboard, so without a cull a board far larger than the window grows
+/// the instance buffer (28 bytes a quad) without bound instead of drawing nothing.
+///
+/// Written as a **positive** test on purpose: a frame is ordinary Brood data, so a
+/// coordinate can be NaN, and every comparison against NaN is false. Phrased this way
+/// that culls the quad; phrased as a negation it would buffer it.
+fn quad_visible(x: f32, y: f32, w: f32, h: f32, fw: f32, fh: f32) -> bool {
+    w > 0.0 && h > 0.0 && x + w > 0.0 && y + h > 0.0 && x < fw && y < fh
+}
+
 impl GlWindow {
     /// Create a GL context + surface on an existing winit window, compile the quad
     /// pipeline, and switch the swapchain to immediate (non-vsync) present.
@@ -232,15 +248,7 @@ impl GlWindow {
         let mut glyph_reqs: Vec<GlyphReq> = Vec::new();
         let (fwf, fhf) = (fw as f32, fh as f32);
         let mut push = |x: f32, y: f32, w: f32, h: f32, c: [u8; 3]| {
-            // Cull anything the viewport could not show. GL would clip these away for
-            // free, but this path BUFFERS every quad before drawing — unlike the CPU
-            // painter, whose fills clip against the framebuffer and cost nothing when
-            // off-screen. `Op::Cells` pushes one quad per live bit of a caller-supplied
-            // bitboard, so without a cull a board far larger than the window grows
-            // `insts` (28 bytes a quad) without bound instead of drawing nothing.
-            // Written as a positive test so a NaN coordinate — every comparison false —
-            // is culled rather than buffered.
-            if !(w > 0.0 && h > 0.0 && x + w > 0.0 && y + h > 0.0 && x < fwf && y < fhf) {
+            if !quad_visible(x, y, w, h, fwf, fhf) {
                 return;
             }
             insts.extend_from_slice(&[
@@ -631,4 +639,83 @@ unsafe fn build_pipeline(
 
     let u_viewport = gl.get_uniform_location(program, "viewport");
     Ok((program, vao, inst_vbo, u_viewport))
+}
+
+/// The GPU painter's cull, which no in-language test can reach: `quad_visible` runs
+/// inside a closure that needs a live GL context, and `BROOD_GUI_HEADLESS=1` makes every
+/// draw op a no-op. Extracted to a free function precisely so the decision it encodes is
+/// testable on its own.
+///
+/// These run under `--features gui-gpu` only, so CI reaches them through the dedicated
+/// gui step, not the default nextest run.
+#[cfg(test)]
+mod cull_tests {
+    use super::quad_visible;
+
+    const FW: f32 = 800.0;
+    const FH: f32 = 600.0;
+
+    #[test]
+    fn an_on_screen_quad_is_kept() {
+        assert!(quad_visible(0.0, 0.0, 10.0, 10.0, FW, FH));
+        assert!(quad_visible(799.0, 599.0, 10.0, 10.0, FW, FH)); // straddles the far edge
+        assert!(quad_visible(-5.0, -5.0, 10.0, 10.0, FW, FH)); // straddles the near edge
+    }
+
+    #[test]
+    fn a_quad_entirely_outside_the_viewport_is_culled() {
+        assert!(!quad_visible(-10.0, 0.0, 10.0, 10.0, FW, FH)); // exactly left of x=0
+        assert!(!quad_visible(0.0, -10.0, 10.0, 10.0, FW, FH)); // exactly above y=0
+        assert!(!quad_visible(FW, 0.0, 10.0, 10.0, FW, FH)); // exactly right of the edge
+        assert!(!quad_visible(0.0, FH, 10.0, 10.0, FW, FH)); // exactly below the edge
+        assert!(!quad_visible(1.0e9, 1.0e9, 10.0, 10.0, FW, FH));
+    }
+
+    /// A degenerate extent draws nothing, so buffering it is pure waste. `Op::Cells`
+    /// with a zero width is the ordinary way to reach this.
+    #[test]
+    fn a_degenerate_quad_is_culled() {
+        assert!(!quad_visible(10.0, 10.0, 0.0, 10.0, FW, FH));
+        assert!(!quad_visible(10.0, 10.0, 10.0, 0.0, FW, FH));
+        assert!(!quad_visible(10.0, 10.0, -5.0, 10.0, FW, FH));
+    }
+
+    /// The case the positive phrasing exists for. Every comparison against NaN is
+    /// false, so a NaN anywhere must fall out as "not visible" — a negated predicate
+    /// would buffer it instead, one quad per bit, for a whole bitboard.
+    #[test]
+    fn a_nan_coordinate_is_culled_not_buffered() {
+        assert!(!quad_visible(f32::NAN, 0.0, 10.0, 10.0, FW, FH));
+        assert!(!quad_visible(0.0, f32::NAN, 10.0, 10.0, FW, FH));
+        assert!(!quad_visible(0.0, 0.0, f32::NAN, 10.0, FW, FH));
+        assert!(!quad_visible(0.0, 0.0, 10.0, f32::NAN, FW, FH));
+        // NaN in the *viewport* extent is not reachable from Brood data, but the same
+        // rule has to hold: nothing is visible in a viewport of unknown size.
+        assert!(!quad_visible(0.0, 0.0, 10.0, 10.0, f32::NAN, FH));
+        assert!(!quad_visible(0.0, 0.0, 10.0, 10.0, FW, f32::NAN));
+    }
+
+    /// An infinity is not automatically garbage, and the cull deliberately does not
+    /// treat it as such: a quad of infinite *width* anchored on screen genuinely covers
+    /// the viewport, so it is kept and GL clips it — and keeping it costs one quad, not
+    /// a bitboard's worth. What must be culled is an infinity that puts the quad
+    /// somewhere it cannot be seen.
+    #[test]
+    fn an_infinity_is_judged_by_where_it_puts_the_quad() {
+        assert!(quad_visible(0.0, 0.0, f32::INFINITY, 10.0, FW, FH)); // covers the viewport
+        assert!(quad_visible(0.0, 0.0, 10.0, f32::INFINITY, FW, FH));
+        assert!(!quad_visible(0.0, 0.0, f32::NEG_INFINITY, 10.0, FW, FH)); // no extent
+        assert!(!quad_visible(0.0, 0.0, 10.0, f32::NEG_INFINITY, FW, FH));
+        assert!(!quad_visible(f32::INFINITY, 0.0, 10.0, 10.0, FW, FH)); // past the far edge
+        assert!(!quad_visible(0.0, f32::INFINITY, 10.0, 10.0, FW, FH));
+        assert!(!quad_visible(f32::NEG_INFINITY, 0.0, 10.0, 10.0, FW, FH)); // ends off-screen
+        assert!(!quad_visible(0.0, f32::NEG_INFINITY, 10.0, 10.0, FW, FH));
+    }
+
+    /// `x + w` overflowing to infinity must not read as "extends into view".
+    #[test]
+    fn a_saturating_extent_does_not_wrap_into_view() {
+        assert!(!quad_visible(-f32::MAX, 0.0, f32::MAX, 10.0, FW, FH));
+        assert!(!quad_visible(0.0, -f32::MAX, 10.0, f32::MAX, FW, FH));
+    }
 }

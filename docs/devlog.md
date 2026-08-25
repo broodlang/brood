@@ -2878,3 +2878,32 @@ assumption. Writing the test is what found that the string-payload charge I had 
 KI-56's second instance — selective-receive's peek-in-place branch calling `from_message` under
 the lock — stays open and unmeasured. This entry exists because a plausible claim about the send
 side turned out half wrong; fixing the receive side blind would repeat the mistake.
+
+## 2026-08-25 — the overflow check that overflowed, and 17 guards CI never ran
+
+Two findings from finishing the GUI robustness sweep, both of the same shape: a guard that does
+not guard.
+
+**`%gui-icon!`'s overflow validation panicked on the case it was written for.** The check reads
+`(w as u64) * (h as u64) * 4 == rgba.len() as u64`. For `w = h = 4294967295` the product fits u64
+(1.8446744065e19) and the `× 4` does not — so under debug-assertions the *validation* panics with
+`attempt to multiply with overflow`, on whatever thread it runs on, which for a GUI call is
+exactly the uncatchable failure the validation existed to prevent. `checked_mul` throughout: an
+overflow is `None`, which can never equal `Some(len)`, so it rejects. The test that caught it was
+already in the tree — `dimensions whose product overflows do not wrap into a false match` — and
+was failing the suite, killed rather than asserted.
+
+**The `gui` renderer tests were never executed by CI.** `src/gui.rs`'s `render_robustness` cases —
+the ones pinning that a wild `:scroll-region` offset cannot overflow the coordinate math — are
+behind `--features gui`, which is opt-in. CI's clippy step builds `--all-features` and so
+*compiles* them; the nextest step builds the default surface plus grammars and so runs everything
+except them. Compiled by one step, executed by none. A dedicated CI step now runs
+`cargo test -p brood --features gui,gui-gpu --lib gui` (17 cases); the system deps were already
+installed in that job for clippy.
+
+The GPU painter's cull got its guard the same way: the predicate was inline in a closure that
+needs a live GL context, so it was extracted to `quad_visible` and tested directly. Writing those
+cases corrected the change — an infinite *width* anchored on screen is not garbage to be culled,
+it genuinely covers the viewport, costs one quad, and GL clips it. What must be culled is NaN
+(every comparison false, which is why the predicate is phrased positively) and an infinity that
+puts the quad off-screen.
