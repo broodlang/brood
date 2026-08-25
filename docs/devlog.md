@@ -3076,3 +3076,44 @@ resolving to a **PRELUDE** closure"). An inline keyed on how a name is *spelled*
 region it is *bound* in, is a performance cliff no test, checker or CI job can see, because the
 program remains correct. The structural, wrapper-following resolutions survive a rename; the
 direct-binding checks do not. Worth auditing the remaining ones before the next wave.
+
+## 2026-08-25 — KI-59: the CI-friendly run mode reported failure for programs that worked
+
+A suite run went red on `nest::cli_failure_reporting`, on an assertion that reads "a clean run
+must exit 0". Standalone it passed eight times out of eight; the failing run was under full
+suite load. Under twelve spinning cores it reproduced at about **one run in six**, and the
+output named the bug immediately:
+
+```
+fine
+[exit] :noproc
+```
+
+The program ran, printed its output, and the driver reported `:noproc` — then exited 1. The
+wrapper `nest run --for` generates was `(%spawn …)` followed by `(monitor p)`: two steps. A
+program that finishes in the window between them leaves nothing to monitor, so `monitor` fires
+a **synthetic** `:noproc`, `(= :noproc :normal)` is false, and success reports as failure. The
+narrower the program, the likelier it lands in the window — and `--for` is documented as the
+CI-friendly way to exercise an app, which is exactly where a spurious red costs most.
+
+The kernel already names this race one field over. `%spawn-link`'s docstring: "atomically links
+the child to the caller before it runs (**no spawn->link :noproc race**)" (ADR-067). The link
+half was solved; the monitor half kept the two-step form.
+
+**Reading `:noproc` as success would have been the wrong fix**, and it is worth writing down
+why, because it is the tempting one-liner. A program that *crashed* before the monitor attached
+produces the identical `:noproc`. The comment beside this code records that `nest run --for 3s
+boom.blsp` once printed a crash and reported success — the bug this wrapper exists to prevent.
+Mapping `:noproc` to 0 restores it for fast-crashing programs.
+
+So the fix is atomicity, and it needed no kernel change: `%spawn-link` + `trap-exit`. The link
+is established before the child runs, so the real reason always arrives, and trapping turns it
+into `[:EXIT pid reason]` rather than killing the driver — which is what `monitor` was there
+for. 0/20 under the same load that failed before.
+
+**One thing not to overclaim.** The extended test — an instant-exit program, asserting the
+printed reason and not just the exit code — does **not** make this deterministic: with the fix
+reverted it still fails only ~1 in 6 under load, no better than the original. What prevents the
+bug is the structural change. The test is a tripwire, not a gate, and a single green run of it
+proves nothing. That is worth saying because the natural move after fixing a flake is to point
+at the now-passing test as the evidence, and here it is not.

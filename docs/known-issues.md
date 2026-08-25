@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-59 | **`nest run --for` reported failure for a program that succeeded.** The wrapper was `(%spawn …)` then `(monitor p)` — two steps. A program that finished before the monitor attached fired a synthetic `:noproc`, `(= :noproc :normal)` was false, and the run exited 1 after printing its output correctly. Worst in the mode documented as the CI-friendly way to exercise an app | ✅ **fixed 2026-08-25** — `%spawn-link` + `trap-exit`, atomic by construction: the kernel already names this race on `%spawn-link` itself ("no spawn->link :noproc race", ADR-067). Reproduced ~1 run in 6 under load, 0/20 after. Reading `:noproc` as success would be wrong the other way — a program that *crashed* before the monitor attached is indistinguishable |
 | KI-58 | **the namespacing silently killed the `table-put` call-site inline — `sieve` 11.6× slower.** `resolve_prim3` accepted only a *direct* native head, on the stated grounds that `table-put` "has no prelude wrapper to follow"; the v0.9/v0.10 waves made the head `table/put`, a `std/table.blsp` wrapper, so the call stopped inlining and became an ordinary `Call` in the hot arm. The **2-ary** `resolve_prim` follows its wrapper, so `table/has?` went on inlining beside it — the asymmetry is visible in one IR dump | ✅ **fixed 2026-08-25** — `resolve_prim3` follows a thin wrapper like the 2-ary path, requiring the identity argument map (`Node::Prim3` has no permutation field, so a reordering wrapper must decline rather than store under the wrong key). `make ab`: **457 → 68 ms, −85.1%**. Guard `table_put_call_site_inline_recognizes_the_namespaced_wrapper`, sabotage-verified |
 | KI-57 | **a use-after-GC on every selective receive with a backlog.** `scan_mailbox` took the clauses' leading-keyword vector as a bare `Value` and decoded it **lazily, inside the scan loop** — so on any iteration after the first the decode dereferenced a handle held across a matcher `apply`, which can collect at any eval depth (ADR-061). The `matcher` beside it is rooted at `rbase+0` and re-read per candidate for exactly this reason; `tags` was not | ✅ **fixed 2026-08-25** — `tags` is rooted at `rbase+1` and re-read at the decode, like `matcher`. Found by running `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` by hand while verifying ADR-245: `use-after-GC: vector handle … is from epoch 12, but that generation is now epoch 13` out of `collect_receive_tags`. **No CI job could have caught it** — every one collects on a threshold, so the collection has to land inside the window by luck; the new `make gcstress` step closes that, and is verified red on the pre-fix code and green on the fix |
 | KI-56 | **a large L1 send head-of-line-blocks unrelated mailbox operations**, linear in payload: an unrelated `mailbox-size` probe sits at **p50 ~5 ms** for a 1.6 MB send and 7–13 ms at 4 MB, against a wire path flat at **4–10 µs** across a 500× payload range. Onset between 8 KB (nothing) and 80 KB (p90 ~25×). Needs a *parked* receiver, so it is the synchronous request/reply shape, not fan-in | ✅ **fixed 2026-08-25** (ADR-245) — a **work budget** on the L1 copy (one heap node = one unit, default 4096, `BROOD_L1_BUDGET=0` to uncap): past it the copy declines and takes the wire path, whose heavy work is already outside the lock. The `st.waiter` invariant is untouched. Every container kind also declines *before materialising* — the first cut checked only per node, so a 100k vector still paid `to_vec` under the lock and measured p99 243 µs; with the early-out it is 5.4 µs. Same probe as the measurement below: **p99 1 875 → 5.4 µs at ~1.6 MB, p50 2 360 → 3.9 µs at ~3.9 MB**, indistinguishable from the wire arm at every size. **The second site (selective-receive's peek-in-place rebuild) is fixed too** — same budget on the wire form, p50 1 252 → 0.8 µs and p99 5 569 → 11.2 µs at a backlog of 8 × 40k |
@@ -95,7 +96,7 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**No open items.** **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**No open items.** **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
 **fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
 **KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
@@ -175,6 +176,47 @@ activation, and no `std` suite tests a large input. It is invisible below ~10⁵
 loop that calls the same function eleven times at increasing sizes stays correct throughout — so
 repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-59 — a successful `nest run --for` could exit 1 ✅ FIXED 2026-08-25
+
+**Status:** ✅ fixed. Guard: `nest::cli_failure_reporting::run_for_exits_nonzero_when_the_program_dies`,
+extended with an instant-exit case that asserts the printed *reason*, not just the code. Read the
+caveat below before trusting it as a gate.
+
+**What.** `nest run --for 5s ok.blsp` on a program that prints and exits printed its output, then
+`[exit] :noproc`, and exited **1**. The wrapper `nest` generates was:
+
+```lisp
+(let (p (%spawn (fn () …))) (monitor p)
+  (receive ([:down _ ^p reason] (println "[exit]" reason) (= reason :normal)) …))
+```
+
+`%spawn` and `monitor` are two steps. If the program finishes in the window between them,
+monitoring an already-dead pid fires a **synthetic `:noproc`** — the monitor never saw the real
+exit — so `(= :noproc :normal)` is false and a program that *succeeded* reports failure.
+
+The kernel already names this exact race, one field over: `%spawn-link`'s own docstring says it
+"atomically links the child to the caller before it runs (**no spawn->link :noproc race**)"
+(ADR-067). The link half was solved; the monitor half kept the two-step form.
+
+**Why not just treat `:noproc` as success.** Because it is ambiguous in the direction that
+matters: a program that *crashed* before the monitor attached produces the same `:noproc`, and
+the whole reason this wrapper exists is the exit-nonzero contract beside it — a comment in
+`main.rs` records that `nest run --for 3s boom.blsp` once printed a crash and reported success.
+Mapping `:noproc` to 0 would restore that bug for fast-crashing programs.
+
+**The fix is atomicity, in Brood rather than the kernel.** `%spawn-link` establishes the link
+*before the child runs*, so the child's real reason always arrives; `trap-exit` turns it into a
+trappable `[:EXIT pid reason]` message instead of killing the driver, which is what `monitor` was
+chosen for. No new builtin — the primitives were already there.
+
+**Honest caveat about the guard.** The race is timing-dependent and the test is load-sensitive,
+not deterministic: with the fix reverted it fails ~1 run in 6 under 12 spinning cores, and
+adding an instant-exit case did **not** measurably raise that. What prevents the bug is the
+structural change; the test is a tripwire that will catch a regression eventually, not on the
+next run. Do not read a single green run of it as proof.
 
 ---
 
