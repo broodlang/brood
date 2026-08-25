@@ -714,6 +714,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-24** — a primitive's name gets one definition site; CST-backed `nest rename` (ADR-240)
 - **2026-08-24** — a library name may shadow core only when used qualified (ADR-241)
 - **2026-08-24** — the bare core: 613 published names down to 337 (ADR-242)
+- **2026-08-24** — the namespace waves: 337 bare core names down to 291
 
 ---
 
@@ -2647,6 +2648,39 @@ linear implementation and its private helpers into `std/seq.blsp`; re-verified p
 n=20 000 (0.13 s, checked permutation).
 
 **Both engines now pass 1012/1012.**
+
+### The namespace waves: path/, bytes/, seq/, map/, os/, gui/ (337 -> 291)
+
+Five more subsystems out of the core namespace. The mechanism that made `seq/` possible is
+worth stating plainly, because I got it wrong first: **the prelude may reference a module's
+names freely** — it already does so for 55 `string/…` names — because a qualified name
+inside a function BODY is late-bound and resolves at CALL time. The module only has to load
+before anything invokes it, which `(require-one 'string)` in tools.blsp already arranges.
+
+The real constraint is narrower: **nothing may be called during boot before its module
+loads** — and macro EXPANSION counts as during boot. Nine sequence names had to stay for
+exactly that reason (`try` calls `but-last`, `defrecord` calls `mapcat`, `defmethod` calls
+`mapv`, and those pull in the rest transitively). Computed as a transitive closure over
+macro bodies rather than discovered one 40-second rebuild at a time.
+
+Three failures worth remembering, none of which pointed at their cause:
+
+- The mover picked a definition by glob order over all of `std/**`, so it cut `take-while`
+  out of `stream`, `repeat` out of `string` and `zip` out of `zlib` — three modules' own
+  functions that merely share a name with a core one. It searches the prelude only now.
+- `hash-map` is EMITTED by the quasiquote lowering for `{…}` literals. Moving it broke
+  `std/tool/test.blsp`, which surfaced as `describe`/`test`/`assert=` reading unbound
+  across the suite — a failure that looks nothing like a map problem.
+- The generated wrapper for a VARIADIC primitive forwarded `(first more)`, silently
+  dropping every later argument. `bytes/concat` joined only its first iolist, and it
+  surfaced as three tcp framed-read TIMEOUTS.
+
+The prelude-hygiene lint from ADR-242 earned itself twice more, catching prelude code left
+calling `bytes/->list` and `map/zipmap` with neither module force-loaded — latent unbounds
+at a user call site, invisible to `nest check`.
+
+Also: `%defseq` (the definer behind map/filter/mapcat) is now unpublished scaffolding, and
+the `string->utf8-bytes` pair retired in favour of the `string/->bytes` pair it duplicated.
 
 ## 2026-08-25 — `brood --check` resolved `(:use M)` against the namespace, not the module
 

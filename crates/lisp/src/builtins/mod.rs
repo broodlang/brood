@@ -628,7 +628,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // a fresh map.
     def(
         heap,
-        "hash-map",
+        "%hash-map",
         Arity::any(),
         Sig::variadic(any, map_ty),
         &["&", "kvs"],
@@ -1003,7 +1003,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "string->utf8-bytes",
+        "%string->utf8-bytes",
         Arity::exact(1),
         Sig::new(vec![string], bytes_ty),
         &["s"],
@@ -1012,7 +1012,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "utf8-bytes->string",
+        "%utf8-bytes->string",
         Arity::exact(1),
         Sig::new(vec![bytes_ty], string),
         &["bytes"],
@@ -2197,7 +2197,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         span_runs);
     def(
         heap,
-        "clipboard-get",
+        "%clipboard-get",
         Arity::exact(0),
         Sig::nullary(any),
         &[],
@@ -2205,7 +2205,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         clipboard_get);
     def(
         heap,
-        "clipboard-set!",
+        "%clipboard-set!",
         Arity::exact(1),
         Sig::new(vec![string], string),
         &["s"],
@@ -2588,7 +2588,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         file_stat);
     def(
         heap,
-        "image-thumb",
+        "%image-thumb",
         Arity::exact(3),
         Sig::new(vec![any, int, int], map_ty.union(nil_ty)),
         &["bytes", "max-w", "max-h"],

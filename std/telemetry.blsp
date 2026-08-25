@@ -750,7 +750,7 @@ derived), or nil if no such metric has recorded anything yet."
 Atomic; safe to poll from any process (this is the stream-folded replacement for
 scraping N snapshot builtins). Empty map if no metrics recorded."
   (let (snap (table/snapshot (telemetry-metrics)))
-    (reduce-kv (fn (acc id state) (assoc acc id (telemetry-present state))) {} snap)))
+    (map/reduce-kv (fn (acc id state) (assoc acc id (telemetry-present state))) {} snap)))
 
 (defn- telemetry-quantile
   (bounds counts nb rank i prev-cum prev-bound maxv)

@@ -19,16 +19,16 @@
 
 (describe "string->utf8-bytes / utf8-bytes->string"
   (test "ASCII roundtrip"
-    (let (bytes (string->utf8-bytes "ABC"))
+    (let (bytes (string/->bytes "ABC"))
       (assert= [65 66 67] (into [] bytes))
-      (assert= "ABC" (utf8-bytes->string bytes))))
+      (assert= "ABC" (string/bytes-> bytes))))
   (test "multi-byte UTF-8 roundtrip"
     (let (s "é")
       ; U+00E9 = 0xC3 0xA9 in UTF-8
-      (assert= s (utf8-bytes->string (string->utf8-bytes s)))))
+      (assert= s (string/bytes-> (string/->bytes s)))))
   (test "empty string"
-    (assert= [] (into [] (string->utf8-bytes "")))
-    (assert= "" (utf8-bytes->string (string->utf8-bytes "")))))
+    (assert= [] (into [] (string/->bytes "")))
+    (assert= "" (string/bytes-> (string/->bytes "")))))
 
 ;; ---- hex encode -------------------------------------------------------------
 

@@ -56,7 +56,7 @@ encoding everything else as %XX. Accumulates pieces into the reversed list `acc`
   "Percent-encode string `s` for use in a URL path or query component. Every byte
 that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 %XX (uppercase hex). Multi-byte UTF-8 sequences are encoded byte-by-byte."
-  (apply str (reverse (url-encode-bytes (seq (string->utf8-bytes s)) nil))))
+  (apply str (reverse (url-encode-bytes (seq (string/->bytes s)) nil))))
 
 ;; ---- percent-decoding -------------------------------------------------------
 
@@ -90,7 +90,7 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
   (s i n acc)
   "Decode percent-encoded code-point vector `s` (count `n`), accumulating decoded bytes into `acc`."
   (if (>= i n)
-    (utf8-bytes->string (reverse acc))
+    (string/bytes-> (reverse acc))
     (let (c (nth s i))
       (if (= c "%")
         (if (>= (+ i 2) n)
@@ -106,7 +106,7 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
         (url-pct-decode-loop s
           (+ i 1)
           n
-          (reverse-onto (string->utf8-bytes c) acc))))))
+          (reverse-onto (string/->bytes c) acc))))))
 
 (defn percent-decode (s)
   "Decode percent-encoded sequences in `s`, returning the original string.
@@ -136,7 +136,7 @@ Invalid or incomplete %XX sequences are passed through as-is."
   (s)
   "Encode a single key or value for use in a query string: unreserved chars
 pass through, space becomes +, all other bytes become %XX."
-  (apply str (reverse (url-qenc-bytes (seq (string->utf8-bytes s)) nil))))
+  (apply str (reverse (url-qenc-bytes (seq (string/->bytes s)) nil))))
 
 (defn- url-pairs->query
   (pairs acc first?)

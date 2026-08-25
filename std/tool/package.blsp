@@ -1907,7 +1907,7 @@ to overwrite an existing key unless `:force true`. Backs `nest key gen`."
 ;; chain is signature → (name, version, checksum) → bytes.
 (defn- package-signing-payload
   (name-str version checksum)
-  (string->utf8-bytes (str name-str "\n" version "\n" checksum)))
+  (string/->bytes (str name-str "\n" version "\n" checksum)))
 
 ;; Sign the current release with the stored private key → `[signature-hex public-hex]`, or nil
 ;; when there is no key (an unsigned publish).

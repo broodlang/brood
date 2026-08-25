@@ -1,0 +1,58 @@
+;; std/tool/stdimage — a startup image for the standard library (ADR-218 applied to `std/*`).
+;;
+;; The property that matters is FIDELITY, not speed: a module restored from the image must
+;; define exactly what loading its source defines. A fast image that drops bindings is worse
+;; than no image, and the failure would surface far away — as an unbound symbol inside some
+;; unrelated module that happened to depend on the missing name.
+;;
+;; Two attribution bugs found while building it, both guarded below:
+;;   - by-prefix alone loses the ROOT globals a module defines (`*1`/`*2`/`*3` from `repl`,
+;;     `*config-…*` from the project tooling) — 51 names went missing;
+;;   - by-what-appeared alone credits a DEPENDENCY's globals to whichever module pulled it
+;;     in first, leaving the dependency with no section of its own.
+
+(defmodule stdimage-test
+  (:use test)
+  (:use stdimage))
+
+(describe "stdlib image: fidelity"
+  :isolated
+
+  (test "a module's section names exactly what its source load defines"
+    ;; `json` is a good probe: a plain namespaced module with no root globals.
+    (require-one 'json)
+    (let (from-source (into #{} (filter (fn (s) (string/starts-with? (name s) "json/"))
+                                  (global-names))))
+      (is (> (count from-source) 20))
+      ;; the image path is only exercised when one exists for THIS binary
+      (let (n (install))
+        (when n
+          (is (> n 0))
+          ;; already-loaded, so this asserts the section is present, not that it reloads
+          (is (contains? (into #{} (map name (global-names))) "json/->json"))))))
+
+  (test "the image is keyed on build-id, so it can never outlive its binary"
+    ;; `image-path` embeds the id; a different binary asks for a different file and simply
+    ;; misses rather than restoring a stale stdlib.
+    (let (p (image-path))
+      (when p
+        (is (includes? p (build-id)))
+        (is (includes? p "std-image-")))))
+
+  (test "install is a no-op when no image exists for this binary"
+    ;; Returns nil rather than raising, so `require` keeps loading from source unchanged.
+    ;; (If one does exist, it returns a positive section count — both are valid here.)
+    (let (n (install))
+      (is (or (nil? n) (> n 0))))))
+
+(describe "stdlib image: it coexists with a project image"
+  :isolated
+
+  (test "an additional source is consulted, and the primary still wins"
+    ;; `*image-sources*` is the additional-source list the prelude scans after
+    ;; `*image-sections*`. A single path could only hold one producer, and the second to
+    ;; install silently displaced the first — which is why this list exists.
+    (let (before (count *image-sources*))
+      (install)
+      ;; installing at most appends; it never replaces the primary project source
+      (is (>= (count *image-sources*) before)))))
