@@ -707,14 +707,14 @@ a node link (ADR-073). The whole model in one example:
 
 ```lisp
 ;; --- on node "alice" ---------------------------------------------------------
-(node-start "alice")                  ; this runtime is now :alice@host (a keyword)
+(node/start "alice")                  ; this runtime is now :alice@host (a keyword)
 (register :inbox (self))              ; bind a LOCAL name -> this pid
 (let (bob (connect "bob"))            ; dial peer "bob"; returns its :bob@host name
-  (monitor-node bob)                  ; get [:nodedown :bob@host] when the link drops
-  (send {:name :inbox :node bob} [:hi (node-name)]))   ; reach bob's :inbox
+  (node/monitor bob)                  ; get [:nodedown :bob@host] when the link drops
+  (send {:name :inbox :node bob} [:hi (node/name)]))   ; reach bob's :inbox
 
 ;; --- on node "bob" -----------------------------------------------------------
-(node-start "bob")
+(node/start "bob")
 (register :inbox (self))
 (receive ([:hi from] (println "hi from " from)))       ; => hi from :alice@host
 ```
@@ -728,15 +728,15 @@ The three pieces and how they relate:
   a registered process *on a specific node*. `(send {:name … :node …} msg)` is the
   remote analogue of `(send (whereis name) msg)`: it's how you reach a peer's
   registered process.
-- **`node-start` / `connect` / `node-name` return keywords** (`:bob@host`), not
+- **`node/start` / `connect` / `node/name` return keywords** (`:bob@host`), not
   strings — use them directly as the `:node` value; `(str …)` only for display.
 
-`(nodes)` lists currently-connected peers. `(monitor-node name)` fires
+`(node/list)` lists currently-connected peers. `(node/monitor name)` fires
 `[:nodedown name]` on a clean socket close *or* a heartbeat timeout, so a peer that
 quits or crashes is detected without any app-level goodbye message.
-`(disconnect name)` is the deliberate counterpart: it drops the link to `name`
+`(node/disconnect name)` is the deliberate counterpart: it drops the link to `name`
 **now, without exiting your process** (Erlang's `disconnect_node`), firing
-`[:nodedown]` on both sides and pruning `(nodes)`. Use it to leave a node/cluster
+`[:nodedown]` on both sides and pruning `(node/list)`. Use it to leave a node cluster
 cleanly — no need for an ad-hoc `[:bye]` broadcast. Returns `true` if a link
 existed.
 

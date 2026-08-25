@@ -30,7 +30,11 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Condvar, LazyLock, Mutex, Once};
+use std::sync::{Condvar, LazyLock, Mutex};
+// Only `TIMER_STARTED` uses it, and that is native-only — wasm32 has no timer thread to
+// spawn once, so importing it unconditionally warns on that target.
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Once;
 use web_time::Instant;
 
 /// Min-heap of `(deadline, pid, gen)`: `Reverse` turns the max-heap into

@@ -54,9 +54,12 @@ pub fn run(source: &str) -> String {
 }
 
 /// The Brood version string, for the playground UI to show which build it runs.
+///
+/// `brood::VERSION`, not `env!("CARGO_PKG_VERSION")` — the latter expands to THIS crate's
+/// version, so the playground reported `0.1.0` as the Brood build it was running.
 #[wasm_bindgen]
 pub fn version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    brood::VERSION.to_string()
 }
 
 // ---- editor helpers ---------------------------------------------------------

@@ -164,7 +164,7 @@ network is just a longer copy.** Slice 1 is **done** — two runtimes connect ov
 TCP and message each other (ADR-034; full reference in
 [`distribution.md`](distribution.md)). What landed:
 
-- ✅ **Nodes** — named runtimes (`node-start`/`connect`, `name@host`) that link
+- ✅ **Nodes** — named runtimes (`node/start`/`connect`, `name@host`) that link
   over TCP, authenticated by a shared cookie (Erlang-style; a placeholder for
   real auth/TLS).
 - ✅ **Pids carry node identity** — `Value::Pid { node, id }` instead of a bare
@@ -180,7 +180,7 @@ TCP and message each other (ADR-034; full reference in
   `remote-spawn` works.
 - ✅ **Distributed links/monitors and node-down detection** — cross-node
   `monitor`/`link` fire `[:down … :noconnection]`/`[:EXIT pid :noconnection]`
-  on link teardown; `monitor-node` delivers `[:nodedown name]`
+  on link teardown; `node/monitor` delivers `[:nodedown name]`
   (see [`distribution.md`](distribution.md)).
 
 Caveats Erlang learned the hard way, still to address: security (the cookie is a

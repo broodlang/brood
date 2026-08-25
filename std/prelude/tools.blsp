@@ -941,22 +941,29 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; prelude, so the qualified refs don't auto-require. It stays an ordinary embedded
 ;; module (doc tooling sees the file; a project may `(:use string)`); loading it here
 ;; just makes it always-present, like the abilities below.
-;; The stdlib image is NOT installed here. It is built (`nest stdimage`, `make install`) and
-;; can be installed explicitly, but installing it at BOOT is not yet correct:
+;; The stdlib image is built (`nest stdimage`, `make install`) but is NOT installed here.
+;; Installing it at BOOT is not yet correct, and the reason is sharper than "some effects
+;; are missed" — it was measured, so it is recorded rather than left to be rediscovered.
 ;;
-;; Materialising a module from an image defines its bindings and evaluates NOTHING — which
-;; is the whole point, and also the trap. Any registration a module performs AT LOAD TIME is
-;; silently skipped. `*require-edges*` was the first instance and is carried explicitly in
-;; the `%std-edges` section; `defrecord` and the ability impls are the second, and those
-;; registries live kernel-side rather than as globals, so they cannot simply be imaged
-;; alongside. With boot install enabled the suite fails 132 tests — queues and priority
-;; queues lose their record identity, ui overlay records stop dispatching, `nest tree` stops
-;; displaying a dependency — and every one of them type-checks clean, because the bindings
-;; are all present and only their registrations are missing.
+;; Materialising a module defines its bindings and evaluates NOTHING. That is the whole win
+;; and the whole trap: every registration the module's load would have performed is skipped,
+;; while all its bindings are present — so the failure type-checks perfectly clean and shows
+;; up only as a record that lost its identity or an ability op that stopped dispatching. With
+;; boot install on, the suite fails 131 of 4873.
 ;;
-;; So the remaining work is a snapshot/restore for the record + ability registries (the
-;; `%std-edges` treatment, generalised), not another special case here. Until then the win
-;; measured with it on — http+json+format+datetime 124 ms -> 27 ms — is not one we can take.
+;; A SNAPSHOT of those registries does not fix it. `%image-write` does not round-trip a
+;; closure nested inside a snapshotted value: `*record-ids*` (symbols) restores exactly, but
+;; `*impls*` — `[ability op]` -> `{id -> fn}` — comes back holding only its `:default` entry,
+;; because that fn lives in the prelude region and the module impls do not survive. Tried and
+;; reverted; `%std-edges` works only because an edge is data all the way down.
+;;
+;; Excluding the modules that register does not fix it either: 28 of the 95 do, and they are
+;; `format`, `json`, `http`, `datetime` — precisely the ones the 124 ms -> 27 ms measurement
+;; came from. What is left after excluding them is not worth having.
+;;
+;; So the remaining work is a REPLAY, not a snapshot: record the registration calls a module
+;; makes at load and re-run them when it materialises. That is a real design change, not
+;; another special case here.
 
 (require-one 'string)
 

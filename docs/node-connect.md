@@ -41,7 +41,7 @@ now — with a present-day consumer — is consistent, not premature.
 Today a node is hand-wired:
 
 ```lisp
-(node-start :server "127.0.0.1:9001" "demo-cookie")   ; pick a port, invent a secret
+(node/start :server "127.0.0.1:9001" "demo-cookie")   ; pick a port, invent a secret
 (connect "client@127.0.0.1:9002")                      ; know the peer's host:port
 ```
 
@@ -54,21 +54,21 @@ Three frictions, all incidental to the share-nothing model:
    which is the common dev case *and* the editor case (a buffer/render server and
    the editor sharing a box). A TCP port is heavyweight addressing for "the brood
    node called `foobar` on this machine."
-3. **Bringing a node up is ceremony.** `node-start` has to be called in-program
+3. **Bringing a node up is ceremony.** `node/start` has to be called in-program
    with all three args before any app logic runs.
 
 ## The shape
 
 ```lisp
 ;; same machine — name is the whole address, secret is implicit
-(node-start :server)            ; listen on a per-user Unix socket; cookie auto-loaded
+(node/start :server)            ; listen on a per-user Unix socket; cookie auto-loaded
 (register :echo (self))
 
-(node-start :client)
+(node/start :client)
 (connect "server")              ; dial the local node named "server"
 
 ;; across machines — explicit, exactly as today
-(node-start :server "0.0.0.0:9001")
+(node/start :server "0.0.0.0:9001")
 (connect "server@10.0.0.4:9001")
 ```
 
@@ -80,7 +80,7 @@ nest run --name foobar app.blsp     # brings the node up, then runs app.blsp
 
 - **Path:** `~/.config/brood/cookie` (XDG: `$XDG_CONFIG_HOME`, else `$HOME/.config`).
   One line of hex, mode `0600`.
-- **Resolution at `node-start`** (when no explicit cookie is passed):
+- **Resolution at `node/start`** (when no explicit cookie is passed):
   `$BROOD_COOKIE` → the file → **generate + persist**. The generated secret is 32
   bytes from `getrandom` (the same CSPRNG the handshake nonce already uses,
   `dist/handshake.rs:174`), hex-encoded.
@@ -96,12 +96,12 @@ nest run --name foobar app.blsp     # brings the node up, then runs app.blsp
 `$BROOD_COOKIE` still wins so CI / multi-tenant setups can override without
 touching the file.
 
-**As built, the connecting side resolves its cookie at `node-start`, not via a
+**As built, the connecting side resolves its cookie at `node/start`, not via a
 handshake fallback.** The original plan was a handshake-time fallback (if
 `NODE.cookie` is empty, use `default_cookie()`), so a bare `(connect "foobar")`
-would work without `node-start`. The implementation took the simpler route: the
-prelude `connect` *requires* a prior `node-start` (it errors `:nonode`
-otherwise), and `node-start` is what calls `(node-cookie)` to populate
+would work without `node/start`. The implementation took the simpler route: the
+prelude `connect` *requires* a prior `node/start` (it errors `:nonode`
+otherwise), and `node/start` is what calls `(node-cookie)` to populate
 `NODE.cookie`. The handshake then reads that `NODE.cookie` as-is
 (`dist/handshake.rs`) with **no empty-cookie fallback**. So the shared secret is
 resolved once, in Brood, at start — not lazily in the Rust handshake.
@@ -153,7 +153,7 @@ framing, tie-break, and heartbeat are byte-for-byte unchanged.
   though same-user filesystem perms already gate access — belt-and-suspenders, and
   it keeps one protocol.
 
-## 3. `node-start` / `connect` surface
+## 3. `node/start` / `connect` surface
 
 Multi-arity, **mostly additive** — the 3-arg TCP form and `name@host:port`
 `connect` are unchanged, so the existing `distribution.rs` TCP suite keeps
@@ -161,34 +161,34 @@ passing:
 
 | Form | Effect | Status |
 |---|---|---|
-| `(node-start name)` | local Unix node, cookie from default source | new |
-| `(node-start name "host:port")` | TCP node, default cookie | new |
-| `(node-start name "host:port" cookie)` | TCP node, explicit cookie | unchanged |
+| `(node/start name)` | local Unix node, cookie from default source | new |
+| `(node/start name "host:port")` | TCP node, default cookie | new |
+| `(node/start name "host:port" cookie)` | TCP node, explicit cookie | unchanged |
 | `(connect "name")` | dial local peer by name (Unix) | new |
 | `(connect "name@host:port")` | dial peer over TCP | unchanged |
 | `(node-cookie)` | the resolved default cookie (reads/creates the file) | new |
 
-`node-start` becomes arity `1..3`. Arity-1 = Unix only; an addr = TCP (preserving
+`node/start` becomes arity `1..3`. Arity-1 = Unix only; an addr = TCP (preserving
 today's behavior). **Dual listen** (a TCP node *also* reachable locally by name)
 is deferred per ADR-011 until the editor needs it.
 
 ## 4. `nest run --name`
 
 Add `--name NAME` to the `Run` command (`nest/src/main.rs:86`). Before running the
-user's file, nest evals `(node-start 'NAME)`. Pure CLI→Brood glue — no new policy
+user's file, nest evals `(node/start 'NAME)`. Pure CLI→Brood glue — no new policy
 in Rust; the app file becomes just `(register :echo (self))` + logic.
 `nest observe --connect foobar` (bare name) gains Unix support and the cookie-file
 fallback for free.
 
 `--name` is for files that *don't* self-start a node; a file that also calls
-`node-start` would hit the existing double-start guard (`dist.rs:482`). Documented
+`node/start` would hit the existing double-start guard (`dist.rs:482`). Documented
 as mutually exclusive rather than silently no-op'd.
 
 ## 5. Serving a `ui-run` app — `serve` / `nest attach` (done, ADR-090)
 
 The payoff this design was the local leg of: a daemon **serves a `ui-run` app** and a
 thin client paints it. `std/editor/serve.blsp` is the policy (`(require 'editor/serve)`),
-purely over `node-start`/`connect`/`send`/`monitor` + the M3 display seam:
+purely over `node/start`/`connect`/`send`/`monitor` + the M3 display seam:
 
 ```
 ;; daemon — `nest run --name ed app.blsp`, whose main calls:
@@ -211,7 +211,7 @@ Deferred (ADR-011): a shared model across clients, live resize, per-client viewp
 Everything new is **mechanism** — Unix sockets, filesystem paths, `0600`/`0700`
 perms, CSPRNG — which ADR-006 assigns to Rust ("primitives the language can't
 bootstrap: low-level I/O"), and which `nest observe` must reach without a Brood
-image. So the smart-args live in the `node-start`/`connect` builtins, and the
+image. So the smart-args live in the `node/start`/`connect` builtins, and the
 path/cookie conventions are shared Rust functions rather than a `std/node.blsp`
 wrapper.
 
@@ -226,7 +226,7 @@ consumer of the path convention appears that *is* Brood.
 1. `Stream` enum + generic `handshake`/`establish` (the transport seam).
 2. `socket_path()` + Unix listen/dial + stale-socket handling.
 3. `default_cookie()` + `(node-cookie)`.
-4. Multi-arity `node-start`/`connect` builtins + `@`-based dispatch.
+4. Multi-arity `node/start`/`connect` builtins + `@`-based dispatch.
 5. `nest run --name` + `observe` cookie fallback.
 6. Tests, examples, docs, ADR-068.
 
@@ -237,7 +237,7 @@ Only step 1 is a nontrivial refactor; the rest is additive.
 `crates/cli/tests/distribution.rs` spawns real `brood` children (`:45`) — mirror
 that for Unix:
 
-- `two_unix_nodes_connect_and_message` — two children, `node-start` by name,
+- `two_unix_nodes_connect_and_message` — two children, `node/start` by name,
   `connect` by name, echo round-trip.
 - `wrong_cookie_rejected_over_unix` — MAC mismatch closes the link.
 - `cookie_file_autogen_and_reuse` — point `$HOME`/`$XDG_CONFIG_HOME` at a tempdir;

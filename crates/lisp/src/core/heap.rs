@@ -2678,6 +2678,9 @@ pub struct Heap {
     /// site is allocated at compile time ([`Heap::vm_site_alloc`]), so ids are
     /// only as dense as the code this process actually compiled.
     /// See [`Heap::note_jit_deopt_reason`] — the JIT's last deopt reason id.
+    /// Written only by the JIT runtime; `Heap` is built the same way either way, so the
+    /// field stays and only the unused-warning is waived in a no-JIT build.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_deopt_reason: std::cell::Cell<u32>,
     vm_call_ics: RefCell<Vec<Option<CallIcEntry>>>,
     /// **IR-readable mirror** of the fast-link memo (Track B / Technique A): a flat,
@@ -2983,6 +2986,7 @@ impl Heap {
     /// the largest single attributed item). Returns, per table, `(len, capacity, bytes)`
     /// with bytes derived from live CAPACITY and the real element size, so a `Vec` grown
     /// past its contents reports the memory it actually holds. Read by `(%)`.
+    #[cfg(feature = "dev-tools")]
     pub(crate) fn ic_table_stats(&self) -> ([(usize, usize, usize); 4], usize) {
         use std::mem::size_of;
         let calls = self.vm_call_ics.borrow();
@@ -3015,11 +3019,13 @@ impl Heap {
     /// Exists because a deopt previously told you only *where it resumed* — the last
     /// checkpoint — and an arm can have a dozen guards after that point. KI-49 sat at
     /// "one of five guards" for exactly this reason.
+    #[cfg(feature = "jit")]
     pub(crate) fn note_jit_deopt_reason(&self, reason: u32) {
         self.jit_deopt_reason.set(reason);
     }
 
     /// The reason id from the most recent JIT type-deopt (see `note_jit_deopt_reason`).
+    #[cfg(feature = "jit")]
     pub(crate) fn jit_deopt_reason(&self) -> u32 {
         self.jit_deopt_reason.get()
     }
@@ -3028,6 +3034,7 @@ impl Heap {
     /// [`Heap::form_pos`] map and the shared RUNTIME [`RuntimeCode::positions`] map.
     /// Measurement surface for the position-table cost (they were 169 MB of a 933 MB
     /// 1000-module load, and 24% of load time, on 2026-08-06); read by `(%)`.
+    #[cfg(feature = "dev-tools")]
     pub(crate) fn pos_table_stats(&self) -> (usize, usize, usize, usize) {
         let (local, local_cap) = self
             .cold()
@@ -3044,6 +3051,7 @@ impl Heap {
     /// capacity rather than guessed: hashbrown lays out `(K, V)` slots in one flat
     /// array with a control byte each, so a table costs `capacity * (size_of::<(K,V)>() + 1)`.
     /// Excludes the `Arc<str>` filenames the values point at (shared, counted once).
+    #[cfg(feature = "dev-tools")]
     pub(crate) fn pos_table_bytes(&self) -> (usize, usize) {
         let (_, local_cap, _, rt_cap) = self.pos_table_stats();
         let local_slot = std::mem::size_of::<(u64, (crate::error::Pos, Option<Arc<str>>))>() + 1;
