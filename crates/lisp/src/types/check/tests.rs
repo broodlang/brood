@@ -1132,8 +1132,8 @@ fn a_curated_sig_does_not_mask_the_unbound_lint_for_a_moved_name() {
 
 #[test]
 fn curated_output_and_numeric_sigs() {
-    // io/puts and io/print return nil — feeding to a numeric sink is caught.
-    for f in ["io/puts", "io/print"] {
+    // io/puts and io/write return nil — feeding to a numeric sink is caught.
+    for f in ["io/puts", "io/write"] {
         let w = warnings(&format!("(+ 1 ({f} \"hi\"))"));
         assert!(
             w.iter().any(|s| s.contains('+') && s.contains("nil")),

@@ -1,4 +1,4 @@
-;; std/ansi — `strip-ansi`, the escape-sequence stripper for subprocess pipe output.
+;; std/ansi — `strip`, the escape-sequence stripper for subprocess pipe output.
 ;; (Distinct from `editor/ansi`, which BUILDS escape strings and is covered by
 ;; `ansi_test.blsp`.) This module had no tests at all, which was noticed while fixing
 ;; its scan: it read one char with `char-at` (O(i) on UTF-8) and called `string-length`
@@ -12,57 +12,57 @@
 
 (defmodule ansi-strip-test (:use test) (:use ansi))
 
-(describe "strip-ansi: what it removes"
+(describe "strip: what it removes"
   (test "plain text is returned unchanged"
-    (assert= "hello world" (strip-ansi "hello world")))
+    (assert= "hello world" (strip "hello world")))
   (test "an SGR colour sequence is removed, its text kept"
-    (assert= "ok" (strip-ansi (str "\e" "[32mok" "\e" "[0m"))))
+    (assert= "ok" (strip (str "\e" "[32mok" "\e" "[0m"))))
   (test "cursor sequences are removed"
-    (assert= "ab" (strip-ansi (str "a" "\e" "[2Jb")))
-    (assert= "ab" (strip-ansi (str "a" "\e" "[1;5Hb"))))
+    (assert= "ab" (strip (str "a" "\e" "[2Jb")))
+    (assert= "ab" (strip (str "a" "\e" "[1;5Hb"))))
   (test "bare carriage returns are dropped"
-    (assert= "abc" (strip-ansi "a\rbc"))
+    (assert= "abc" (strip "a\rbc"))
     ;; the no-ESC fast path handles this one — same answer, different code path
-    (assert= "line" (strip-ansi "line\r")))
+    (assert= "line" (strip "line\r")))
   (test "several sequences in one string"
     (assert= "redgreen"
-      (strip-ansi (str "\e" "[31mred" "\e" "[0m" "\e" "[32mgreen" "\e" "[0m"))))
+      (strip (str "\e" "[31mred" "\e" "[0m" "\e" "[32mgreen" "\e" "[0m"))))
   (test "a sequence at the very start and at the very end"
-    (assert= "x" (strip-ansi (str "\e" "[1mx")))
-    (assert= "x" (strip-ansi (str "x" "\e" "[0m"))))
+    (assert= "x" (strip (str "\e" "[1mx")))
+    (assert= "x" (strip (str "x" "\e" "[0m"))))
 
   ;; Boundary handling: the scan must terminate rather than run past the end.
   (test "an unterminated CSI at the end consumes the rest"
-    (assert= "a" (strip-ansi (str "a" "\e" "[32"))))
+    (assert= "a" (strip (str "a" "\e" "[32"))))
   (test "an ESC at the very end does not run off the end"
-    (assert= "a" (strip-ansi (str "a" "\e"))))
+    (assert= "a" (strip (str "a" "\e"))))
   (test "an ESC not followed by [ drops the ESC and the next char"
-    (assert= "ac" (strip-ansi (str "a" "\e" "bc"))))
+    (assert= "ac" (strip (str "a" "\e" "bc"))))
   (test "empty and escape-only inputs"
-    (assert= "" (strip-ansi ""))
-    (assert= "" (strip-ansi (str "\e" "[0m")))
-    (assert= "" (strip-ansi "\r\r\r"))))
+    (assert= "" (strip ""))
+    (assert= "" (strip (str "\e" "[0m")))
+    (assert= "" (strip "\r\r\r"))))
 
-(describe "strip-ansi: UTF-8 is indexed by code point, not byte"
+(describe "strip: UTF-8 is indexed by code point, not byte"
   ;; The scan walks a code-point vector; a byte index leaking in would split or drop
   ;; multi-byte characters. Accents are 2 bytes, emoji 4.
   (test "accented text survives untouched"
-    (assert= "héllo wörld" (strip-ansi "héllo wörld")))
+    (assert= "héllo wörld" (strip "héllo wörld")))
   (test "accented text around a stripped sequence"
-    (assert= "héllo" (strip-ansi (str "\e" "[32mhéllo" "\e" "[0m"))))
+    (assert= "héllo" (strip (str "\e" "[32mhéllo" "\e" "[0m"))))
   (test "emoji survive, including after a sequence"
-    (assert= "a😀b" (strip-ansi (str "a" "\e" "[1m😀b" "\e" "[0m")))
-    (assert= "😀😀" (strip-ansi (str "😀" "\e" "[0m😀"))))
+    (assert= "a😀b" (strip (str "a" "\e" "[1m😀b" "\e" "[0m")))
+    (assert= "😀😀" (strip (str "😀" "\e" "[0m😀"))))
   (test "a CR between multi-byte characters is dropped cleanly"
-    (assert= "é😀" (strip-ansi "é\r😀"))))
+    (assert= "é😀" (strip "é\r😀"))))
 
-(describe "strip-ansi: at scale"
+(describe "strip: at scale"
   ;; 2000 colourised lines. The old implementation produced the right answer here too,
   ;; just quadratically — this guards the rewrite's index arithmetic, where an
   ;; off-by-one would silently eat or duplicate characters far into the input.
   (test "many lines strip to exactly the plain text"
     (let (line (str "\e" "[32mok" "\e" "[0m  a test name\r\n")
           want (apply str (repeat 2000 "ok  a test name\n"))
-          got (strip-ansi (apply str (repeat 2000 line))))
+          got (strip (apply str (repeat 2000 line))))
       (assert= (string/length want) (string/length got))
       (assert= want got))))
