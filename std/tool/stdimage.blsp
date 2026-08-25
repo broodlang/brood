@@ -24,7 +24,8 @@
   (:use seq)
   (:use file))
 
-(defn- cache-dir ()
+(defn- cache-dir
+  ()
   "`$XDG_CACHE_HOME/brood` (or `~/.cache/brood`), or nil when neither is set."
   (let (xdg (os/getenv "XDG_CACHE_HOME")
         home (os/getenv "HOME")
@@ -46,8 +47,7 @@ Named by `build-id`, so two builds never share one and a stale file is simply ne
 claims it by prefix."
   (not (empty? (filter (fn (m) (string/starts-with? nm (str m "/"))) names))))
 
-(defn build
-  (&optional modules)
+(defn build (&optional modules)
   "Build (or rebuild) this binary's stdlib image and return `[path entry-count]`, or nil
 when there is no cache directory. `modules` defaults to every baked-in module.
 
@@ -68,26 +68,26 @@ claims it by prefix, so no binding lands in two sections."
             _ (when (not (file/dir? dir)) (file/mkdir dir))
             names (or modules (builtin-modules))
             ;; load every module, recording what each one introduced
-            introduced
-              (fold (fn (acc m)
-                      (let (before (into #{} (global-names))
-                            _ (try (require-one m) (catch _ nil))
-                            new (filter (fn (s) (not (contains? before s))) (global-names)))
-                        (map-assoc acc (name m) new)))
-                {} names)
-            sections
-              (seq/keep
-                (fn (m)
-                  (let (mn (name m)
-                        pfx (str mn "/")
-                        owned (filter (fn (s) (string/starts-with? (name s) pfx)) (global-names))
-                        roots (filter (fn (s) (not (prefixed-by-any? (name s) names)))
-                                (or (map-get introduced mn nil) (list)))
-                        syms (apply vector (append owned roots)))
-                    ;; A module contributing nothing would image as materialisable-but-empty,
-                    ;; and a later require would restore no bindings rather than fall back.
-                    (when (> (count syms) 0) [mn syms])))
-                names))
+            introduced (fold (fn (acc m)
+                               (let (before (into #{} (global-names))
+                                     _ (try (require-one m) (catch _ nil))
+                                     new (filter (fn (s) (not (contains? before s))) (global-names)))
+                                 (map-assoc acc (name m) new)))
+                         {}
+                         names)
+            sections (seq/keep
+                       (fn (m)
+                         (let (mn (name m)
+                               pfx (str mn "/")
+                               owned (filter (fn (s) (string/starts-with? (name s) pfx))
+                                       (global-names))
+                               roots (filter (fn (s) (not (prefixed-by-any? (name s) names)))
+                                       (or (map-get introduced mn nil) (list)))
+                               syms (apply vector (append owned roots)))
+                           ;; A module contributing nothing would image as materialisable-but-empty,
+                           ;; and a later require would restore no bindings rather than fall back.
+                           (when (> (count syms) 0) [mn syms])))
+                       names))
         [path (%image-write path sections (build-id))]))))
 
 (defn install ()
@@ -105,4 +105,4 @@ case `require` keeps loading stdlib modules from source exactly as before."
   "Install the stdlib image, building it first if this binary has none yet. Returns the
 section count. The build cost is paid once per binary; every later process just indexes."
   (or (install)
-      (do (build) (install))))
+    (do (build) (install))))
