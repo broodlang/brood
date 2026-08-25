@@ -133,7 +133,7 @@ fn completion_never_fails_however_it_is_called() {
         "../..",
         "\"",
         "$(id)",
-        "x\") (io/print \"PWNED\") (\"",
+        "x\") (io/write *out* \"PWNED\") (\"",
     ];
 
     for dir in [&proj.path, &bare.path, &broken.path] {
@@ -156,7 +156,7 @@ fn hostile_input_is_never_evaluated() {
     // The payload prints 24690 only if it is EVALUATED; an error message merely
     // echoing it cannot be mistaken for execution.
     let proj = project();
-    let payload = "x\") (io/print (* 12345 2)) (\"";
+    let payload = "x\") (io/write *out* (str (* 12345 2))) (\"";
     for words in [
         vec!["doc", payload],
         vec!["test", payload],
