@@ -3212,3 +3212,44 @@ nothing tested.
 That is the generalisable bit. A test that installs its own double to observe an effect is not
 testing the default path, and for `*out*`/`*err*` the default path is the entire product. Both
 comments are now in `std/io.blsp`; neither alone tells you to go look at the default.
+
+### Auditing the standard library's surface — and what "document everything" actually costs
+
+A sweep over all 1707 public names, asking three things of each: can it be namespaced, is it
+documented with an example, and does its name repeat its namespace. Two of the three turned out
+to be mostly answered already, in ways worth writing down.
+
+**Namespacing.** The 66 bare `*…*` names look like module config that leaked into core. They are
+not: `defdyn` marks a name **ambient — never namespaced**, by design, because that is what makes
+`binding` and cross-module rebinding work. Its own docstring says so. So they are bare
+*correctly*, and the reflexive "move it into its module" would have broken the dynamic-variable
+mechanism. The genuinely movable ones were the eight hand-named stutters (`docs/generate-docs` →
+`docs/generate`, `telemetry/start-telemetry` → `telemetry/start`, …).
+
+The stutters that remain are `defrecord` accessors — `<record>-<field>` on a record named after
+its module gives `datetime/datetime-year`, and `datetime/year` already exists as a hand-written
+wrapper beside it. That is duplicate surface, but changing `defrecord`'s accessor convention is a
+language change with real collision risk, so it is left.
+
+**Documentation.** The audit's first headline was "248 names have no docstring", which is true
+and misleading. Of those 248, exactly **three** are `defn`/`defmacro` — and all three
+(`->string`, `inspect`, `io/emit`) are ability ops. The other 245 are `def` constants, `defdyn`
+variables, `defrecord` constructors and accessors: four forms with **nowhere to put a
+docstring**. Every public `defn`/`defmacro` in the library is already documented.
+
+So "document everything" is not a writing task, it is a language question: `def`, `defdyn`,
+`defrecord` and `defability` ops would each need a doc slot, plus a registry — `doc` reads the
+docstring off a closure, and a constant's value carries none. Left as a decision, since it
+changes `def`'s arity.
+
+**The actionable gap was examples**, and it needed a mechanism more than it needed prose.
+`tests/doc_examples_test.blsp` extracts every indented `form → result` line from every public
+docstring, evaluates it, and compares. Of the first 27 examples written for this pass, **seven
+were wrong** — four map results written in insertion order when a map prints in trie order, and
+`(reverse "abc")`, which does not merely print differently, it raises. Two more slipped in later
+and were caught the same way. A wrong example is worse than none: it reads as authoritative and
+nothing else in the tree evaluates prose.
+
+`scripts/stdlib-audit.blsp` is the standing report, and both it and the example harness are
+Brood — the library being audited is Brood, so the audit is a program in it rather than a script
+parsing it from outside.
