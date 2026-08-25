@@ -1662,14 +1662,7 @@ pub(super) fn hibernate_proc(_args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let flag = match arg(args, 0) {
         Value::Keyword(k) => k,
-        other => {
-            return Err(LispError::wrong_type(
-                heap,
-                "process-flag",
-                "keyword",
-                other,
-            ))
-        }
+        other => return Err(LispError::wrong_type(heap, "proc/flag", "keyword", other)),
     };
     match value::symbol_name_ref(flag) {
         "max-heap" => {
@@ -1682,7 +1675,7 @@ pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
                     other => {
                         return Err(LispError::wrong_type(
                             heap,
-                            "process-flag :max-heap",
+                            "proc/flag :max-heap",
                             "positive int (bytes) or nil",
                             other,
                         ))
@@ -1701,7 +1694,7 @@ pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             Ok(Value::boolean(prev))
         }
         other => Err(LispError::runtime(format!(
-            "process-flag: unknown flag :{other} (known: :max-heap, :send-errors)"
+            "proc/flag: unknown flag :{other} (known: :max-heap, :send-errors)"
         ))),
     }
 }
@@ -1864,7 +1857,7 @@ pub(super) fn node_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let addr = expect_string(heap, "%node-listen", arg(args, 1))?;
     let cookie = expect_string(heap, "%node-listen", arg(args, 2))?;
     crate::dist::node_listen(name, &addr, cookie).map_err(|e| {
-        LispError::runtime(format!("node-start: {e}"))
+        LispError::runtime(format!("node/start: {e}"))
             .with_code(crate::error::error_codes::DISTRIBUTION)
     })?;
     Ok(Value::keyword(name))

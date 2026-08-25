@@ -741,6 +741,7 @@ impl Heap {
     /// It grows to the full `vm_call_ics` length rather than to `abs + 1`, so a process that
     /// does tier pays one allocation and lands back on the old layout instead of reallocating
     /// per newly-linked site.
+    #[cfg(feature = "jit")]
     fn fastlink_slot_grown(&self, abs: usize) -> std::cell::RefMut<'_, Vec<FastLink>> {
         let mut fls = self.vm_fast_links.borrow_mut();
         if abs >= fls.len() {

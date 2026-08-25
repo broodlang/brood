@@ -1762,10 +1762,16 @@ fn tier_order_is_treewalk_lowest_and_native_highest() {
         Tier::Native >= Tier::Bytecode && Tier::Bytecode >= Tier::Bytecode,
         "ceilings 2 and 1 must both admit the bytecode VM (`run_top_form`, `apply_engine`)"
     );
-    assert!(
-        !(Tier::TreeWalk >= Tier::Bytecode),
-        "ceiling 0 must NOT admit the bytecode VM"
-    );
+    // Spelled as the negation of the call site's own `>=` rather than as `<`: the point is to
+    // mirror the comparison the code actually makes, so a reordering fails against the real
+    // expression. Clippy would rather see `<`, which is equivalent and loses that.
+    #[allow(clippy::nonminimal_bool)]
+    {
+        assert!(
+            !(Tier::TreeWalk >= Tier::Bytecode),
+            "ceiling 0 must NOT admit the bytecode VM"
+        );
+    }
     assert!(
         Tier::TreeWalk < Tier::Native && Tier::Bytecode < Tier::Native,
         "ceilings 0 and 1 must both refuse native tiering (`jit_tier`)"
