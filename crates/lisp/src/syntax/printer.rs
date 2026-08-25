@@ -6,12 +6,19 @@
 use crate::core::heap::Heap;
 use crate::core::value::{symbol_name_ref, Value, ValueRef};
 
-/// Maximum nesting the printer will descend into. Past this we emit `…`
-/// rather than recursing — a printed REPL value should never be the thing
-/// that overflows the native Rust stack. (The reader caps inputs at the
-/// same depth, but a closure built by `cons`-ing in a loop can produce a
-/// value deeper than any reader could parse.)
-const MAX_DEPTH: u32 = 256;
+/// Maximum nesting the printer will descend into. Past this we stop
+/// recursing — a printed REPL value should never be the thing that overflows
+/// the native Rust stack. (A value built by `cons`-ing in a loop can be far
+/// deeper than any reader could parse.)
+///
+/// It is **one more** than the reader's cap, and that `+ 1` is load-bearing:
+/// the reader accepts `reader::MAX_DEPTH` nesting *levels*, and the innermost
+/// element of such a form sits one printer level below the outermost list — so
+/// with equal caps the printer truncated the deepest element of a form the
+/// reader had just accepted (a 256-deep form printed to a *different* value,
+/// with no error; 255 round-tripped). Anything the reader accepts must print
+/// readably.
+const MAX_DEPTH: u32 = crate::syntax::reader::MAX_DEPTH + 1;
 
 pub fn print(heap: &Heap, v: Value) -> String {
     let mut out = String::new();
@@ -27,7 +34,12 @@ pub fn display(heap: &Heap, v: Value) -> String {
 
 fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u32) {
     if depth >= MAX_DEPTH {
-        out.push('…');
+        // Past the cap, stop descending. In *readable* output a bare `…` would
+        // re-read as the symbol `…` — a truncation indistinguishable from real
+        // data — so emit an unreadable marker instead: `#` is a reader dispatch
+        // character, so `#<deep>` is a hard parse error rather than a silently
+        // wrong value. Human output keeps the compact ellipsis.
+        out.push_str(if readable { "#<deep>" } else { "…" });
         return;
     }
     match v.unpack() {
@@ -339,10 +351,19 @@ fn symbol_needs_bars(name: &str, keyword: bool) -> bool {
         // numeric-looking one (`:123` is the keyword `123`) — so nothing more to check.
         false
     } else {
+        // `#` and `^` are reader **dispatch** characters at form start (`#{…}`/`#b"…"`,
+        // and `^x` → `(%pin x)`) while correctly *not* being atom delimiters — so a
+        // bare `^foo` re-reads as `(%pin foo)`, a silently different value, and `#foo`
+        // as a hard parse error. Only the FIRST character dispatches: `a^b` and `a#`
+        // are ordinary atom text and stay bare. (Keywords are exempt — `:^foo`/`:#foo`
+        // read back as themselves, since the `:` has already committed the token.)
+        //
         // A lone `.` is the dotted-pair separator inside a list, not a symbol; and a
         // name that classifies as anything but a plain symbol (a number, `nil`/`true`/
         // `false`/`inf`/`nan`, or a `:`-led keyword) would read back as that value.
-        name == "." || !matches!(classify(name), AtomKind::Symbol)
+        name == "."
+            || matches!(name.chars().next(), Some('#') | Some('^'))
+            || !matches!(classify(name), AtomKind::Symbol)
     }
 }
 

@@ -160,6 +160,22 @@ fn qq_elem(heap: &mut Heap, v: Value, depth: u32, autogen: &mut AutoGen) -> Lisp
             }
             Ok(heap.list(out))
         }
+        // A set template builds a `(%set e…)` — the set counterpart of the map
+        // arm above. Without this arm `#{…}` fell through to the verbatim
+        // catch-all, so the *evaluator* evaluated the set's elements instead of
+        // the template quoting them: `` `#{a} `` silently gave `#{5}` where
+        // `` `(a) ``/`` `[a] `` correctly give the symbol, and `` `#{~x} `` died
+        // with "unbound symbol: unquote". No `~@` splicing into a set, same as a
+        // map — `qq_elem` rejects a stray `~@` for us.
+        ValueRef::Set(id) => {
+            let elems = heap.map_entries(id);
+            let mut out = Vec::with_capacity(elems.len() + 1);
+            out.push(sym("%set"));
+            for (e, _) in elems {
+                out.push(qq_elem(heap, e, depth + 1, autogen)?);
+            }
+            Ok(heap.list(out))
+        }
         // A literal symbol is data — quote it (auto-gensym `x#` first).
         ValueRef::Sym(_) => {
             let sv = maybe_autogensym(v, autogen);
@@ -941,6 +957,12 @@ fn has_autogensym(heap: &Heap, form: Value) -> bool {
             .map_entries(id)
             .iter()
             .any(|(k, v)| has_autogensym(heap, *k) || has_autogensym(heap, *v)),
+        // A set's elements are template positions too — skipping them meant an
+        // `x#` inside `` `#{x#} `` never took the runtime (fresh-gensym) path.
+        ValueRef::Set(id) => heap
+            .map_entries(id)
+            .iter()
+            .any(|(k, _)| has_autogensym(heap, *k)),
         _ => false,
     }
 }
@@ -965,7 +987,14 @@ fn expand_qq_rec(heap: &mut Heap, form: Value) -> (Value, bool) {
             return (form, false); // pure data — never touch
         }
         if value::symbol_is(h, kw::QUASIQUOTE) {
-            let template = items.get(1).copied().unwrap_or(Value::nil());
+            // `(quasiquote a b)` is malformed — the evaluator rejects it with an
+            // arity error. Leave the form alone so it gets there: expanding only
+            // `a` here would silently drop the tail (the same reasoning as the
+            // compiler's `(quote a b)` deferral).
+            if items.len() != 2 {
+                return (form, false);
+            }
+            let template = items[1];
             if has_autogensym(heap, template) || template_introduces_binder(heap, template) {
                 // Runtime-only: fresh gensyms per invocation — a `#` auto-gensym, or a
                 // template whose own `let`/`fn` binder the hygiene pass renames (so two
@@ -1745,31 +1774,56 @@ pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Opti
 
 /// Expand `form` by one step if its head is a macro; returns `(expanded, did_expand)`.
 pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value, bool), LispError> {
-    if let ValueRef::Pair(p) = form.unpack() {
-        let (head, tail) = heap.pair(p);
-        if let ValueRef::Sym(s) = head.unpack() {
-            // A qualified call head into a not-yet-loaded module may be a macro that
-            // must expand at compile time (the compile-time require-for-macros rule) —
-            // infer the require from the qualified name so the module loads before this lookup.
-            // A no-op for a bare head or an already-loaded one (ADR-227 follow-up).
-            if macro_head_id(heap, env, s).is_none() {
-                crate::eval::derive::require_qualified_head(heap, env, s)?;
-            }
-            if let Some(mid) = macro_head_id(heap, env, s) {
-                let args = heap.list_to_vec(tail)?;
-                // Run the expander through the ACTIVE ENGINE (VM when enabled), not the
-                // tree-walker. Paired with the compile pass expanding a macro's
-                // autogensym-free `quasiquote` body to builder code (see `compile`), a
-                // hot macro (`defn`, …) now compiles once and expands as bytecode/native
-                // — macro expansion dominated the advisory checker (ADR-119). Same result
-                // as `apply_closure`; the VM is the default engine for all other calls.
-                let expanded =
-                    crate::eval::compile::apply_engine(heap, Value::Fn(mid), &args, env)?;
-                return Ok((expanded, true));
-            }
-        }
+    let ValueRef::Pair(p) = form.unpack() else {
+        return Ok((form, false));
+    };
+    let ValueRef::Sym(s) = heap.pair(p).0.unpack() else {
+        return Ok((form, false));
+    };
+    // A qualified call head into a not-yet-loaded module may be a macro that
+    // must expand at compile time (the compile-time require-for-macros rule) —
+    // infer the require from the qualified name so the module loads before this lookup.
+    // A no-op for a bare head or an already-loaded one (ADR-227 follow-up).
+    let mut form = form;
+    let mut env = env;
+    if macro_head_id(heap, env, s).is_none() {
+        // The require LOADS a module — arbitrary eval, therefore a collection that
+        // relocates `form` and the env chain. Root both across it and re-read: the
+        // `(macroexpand-1 …)` / `(macroexpand …)` BUILTINS reach here with
+        // MACRO_BLOCK *off* (unlike the compile pass, which holds a
+        // `MacroBlockGuard`), so a handle read before this call and used after it is
+        // a live use-after-GC — an epoch-tripwire abort in debug and silent heap
+        // corruption in release (it walked relocated memory and reported a garbage
+        // list length as an arity error).
+        let rb = heap.roots_len();
+        let eb = heap.env_roots_len();
+        heap.push_root(form);
+        heap.push_env_root(env);
+        let r = crate::eval::derive::require_qualified_head(heap, env, s);
+        form = heap.root_at(rb);
+        env = heap.env_root_at(eb);
+        heap.truncate_roots(rb);
+        heap.truncate_env_roots(eb);
+        r?;
     }
-    Ok((form, false))
+    let Some(mid) = macro_head_id(heap, env, s) else {
+        return Ok((form, false));
+    };
+    // Re-derive the tail from the (possibly relocated) form rather than reusing the
+    // one read before the require.
+    let ValueRef::Pair(p) = form.unpack() else {
+        return Ok((form, false));
+    };
+    let tail = heap.pair(p).1;
+    let args = heap.list_to_vec(tail)?;
+    // Run the expander through the ACTIVE ENGINE (VM when enabled), not the
+    // tree-walker. Paired with the compile pass expanding a macro's
+    // autogensym-free `quasiquote` body to builder code (see `compile`), a
+    // hot macro (`defn`, …) now compiles once and expands as bytecode/native
+    // — macro expansion dominated the advisory checker (ADR-119). Same result
+    // as `apply_closure`; the VM is the default engine for all other calls.
+    let expanded = crate::eval::compile::apply_engine(heap, Value::Fn(mid), &args, env)?;
+    Ok((expanded, true))
 }
 
 /// Repeatedly expand `form` until its head is no longer a macro.

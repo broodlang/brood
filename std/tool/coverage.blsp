@@ -77,7 +77,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
             (if (and (not (nil? location))
                   (coverage-under? (seq/vector-ref location 0) source-dirs)
                   (= (type-of (eval sym)) :fn))
-              (cons {:name sym :file (seq/vector-ref location 0) :line (seq/vector-ref location 1)} acc)
+              (cons {:name sym :file (seq/vector-ref location 0) :line (seq/vector-ref location 1)}
+                acc)
               acc)))
     nil
     (global-names)))
@@ -242,7 +243,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (entries)
   (fold (fn (index entry)
           (assoc index
-            (seq/vector-ref entry 0) (fold (fn (lines l) (assoc lines l true)) {} (seq/vector-ref entry 1))))
+            (seq/vector-ref entry 0)
+              (fold (fn (lines l) (assoc lines l true)) {} (seq/vector-ref entry 1))))
     {}
     (or entries nil)))
 

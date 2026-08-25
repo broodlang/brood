@@ -48,7 +48,6 @@
   "True if `(pred x)` holds for every item of `coll` (vacuously true if empty)."
   (cond (empty? coll) true (pred (first coll)) (every? pred (rest coll)) else false))
 
-
 ;; (zip a b) -> a list of [x y] vectors, stopping at the shorter input.
 (defn zip (a b)
   "A list of `[x y]` pairs from `a` and `b`, stopping at the shorter input."
@@ -200,13 +199,10 @@ rather than in `std/set` so a set works with the collection protocol without an
 import (and so `(:use set)` can't shadow them)."
   (fold %set-remove s xs))
 
-
 ;; ---- more sequence operations -----------------------------------------------
 ;; The eager counterparts of the `x*` transducers, plus the common Clojure-ish
 ;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
 ;; stack-safe on long inputs — see the sequence-library note above.
-
-
 
 ;; distinct: keep the first occurrence of each item. A map carried alongside the
 ;; result acts as the "seen" set, so membership is O(1)-ish, not the O(n²) a
@@ -232,7 +228,6 @@ import (and so `(:use set)` can't shadow them)."
       (empty? coll) acc
       (list? (first coll)) (flatten-acc (rest coll) (flatten-acc (first coll) acc))
       else (flatten-acc (rest coll) (cons (first coll) acc)))))
-
 
 ;; ---- records: named, optionally-typed maps (defrecord — ADR-130) ------------
 ;; A record is a plain immutable map with a positional constructor and one
@@ -450,20 +445,23 @@ for a higher-order op that wants a fixed answer."
 ;;
 ;; `xmap`/`xfilter`/`xremove`/`xkeep` are the built-in stages (the same functions
 ;; the `l*` combinators use), and `transduce` runs a stack over any collection.
-(defn- xmap (f)
+(defn- xmap
+  (f)
   "The `map` stage as a transducer: `(f x)` for each input. Compose with `comp`, run
 with `transduce`, or reach for `lmap` when you just want a fusing pipeline."
   (%xmap f))
-(defn- xfilter (pred)
+(defn- xfilter
+  (pred)
   "The `filter` stage as a transducer: keep inputs where `(pred x)` is truthy."
   (%xfilter pred))
-(defn- xremove (pred)
+(defn- xremove
+  (pred)
   "The `remove` stage as a transducer: drop inputs where `(pred x)` is truthy."
   (%xremove pred))
-(defn- xkeep (f)
+(defn- xkeep
+  (f)
   "The `keep` stage as a transducer: `(f x)` for each input, dropping `nil` results."
   (%xkeep f))
-
 
 (defn %seqview-wrap (coll xf)
   "Wrap `coll` in a lazy seq-view applying transducer `xf`. If `coll` is already a
@@ -473,7 +471,8 @@ view, compose `xf` onto its transducer (same source) so the stages fuse."
       (%seqview (%vector-ref parts 0) (comp (%vector-ref parts 1) xf)))
     (%seqview coll xf)))
 
-(defn- lmap (f coll)
+(defn- lmap
+  (f coll)
   "Lazy, fusing `map`: a seq-view of `(f x)` for each `x` in `coll`. Composes with
 adjacent `l*` stages (thread them with `->>`) and folds/reduces in one pass with
 no intermediate lists. Realise with `seq`/`into`, or just consume it
@@ -481,15 +480,18 @@ no intermediate lists. Realise with `seq`/`into`, or just consume it
 iterating for side effects."
   (%seqview-wrap coll (%xmap f)))
 
-(defn- lfilter (pred coll)
+(defn- lfilter
+  (pred coll)
   "Lazy, fusing `filter` — see `lmap`."
   (%seqview-wrap coll (%xfilter pred)))
 
-(defn- lkeep (f coll)
+(defn- lkeep
+  (f coll)
   "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `lmap`."
   (%seqview-wrap coll (%xkeep f)))
 
-(defn- lremove (pred coll)
+(defn- lremove
+  (pred coll)
   "Lazy, fusing `remove` — see `lmap`."
   (%seqview-wrap coll (%xremove pred)))
 
@@ -497,11 +499,11 @@ iterating for side effects."
 ;; Hide the hand-rolled counter/accumulator recursion behind names that read as
 ;; intent (the way `defprocess` hides a receive loop). All ordinary Brood.
 
-
 (defn- iterate-times-acc
   (f x n acc)
   (if (< n 0) acc (iterate-times-acc f (f x) (dec n) (cons x acc))))
-(defn- iterate-times (f x n)
+(defn- iterate-times
+  (f x n)
   "The list (x f(x) f²(x) … fⁿ(x)) — `n`+1 successive states of applying `f`."
   (reverse (iterate-times-acc f x n nil)))
 
@@ -603,7 +605,6 @@ iterating for side effects."
 
 ;; `bench` moved to the `dev` module (`dev/bench`) with the other diagnostics.
 
-
 ;; ---- kept in the prelude: used at MACRO-EXPANSION time -----------------------
 ;; A prelude macro that calls these runs during boot, before `(require-one 'seq)`,
 ;; so they cannot live in the module however late-bound the reference is. `try` uses
@@ -629,8 +630,6 @@ indexed access or a vector literal shape (`(into [] (map f coll))`, named)."
 (defn partition (n coll)
   "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped."
   (partition-acc n coll nil))
-
-
 
 (defn sort-by (key-fn coll)
   "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the

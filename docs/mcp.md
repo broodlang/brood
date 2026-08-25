@@ -162,6 +162,17 @@ Claude Code already has those:
 | `write`       | `{path, content}`           | `{ok, path, diagnostics, shadows}`     | Create/overwrite a project file *through* the image, not the raw filesystem: `path` is project-relative and sandboxed under the project root (absolute paths, `~`, `..` rejected); a `.blsp` file is loaded into the session and checked, so success carries `diagnostics`/`shadows` like `load` (failure is `{ok: false, error}`) |
 | `edit`        | `{path, old, new}`          | `{ok, path, diagnostics, shadows}`     | Exact-string replace in a project file (sandboxed like `write`; `old` must occur exactly once); a `.blsp` file is reloaded and checked, same result shape as `write` |
 | `lookup`      | `{name}`                    | `{arglist, doc, type, source_location}`| Resolves prelude, project, macros uniformly; `type` is the checker's arrow signature (shared with LSP hover) |
+
+> **"Sandboxed" above means an ergonomic guardrail on `write`/`edit`, not a containment
+> boundary for the server.** The path gate itself is real and was audited: `project-path`
+> rejects `/`, `~` and `..` lexically *and* re-checks containment after `canonicalize` on
+> both sides, and `canonicalize` resolves the longest existing prefix through the
+> filesystem (so symlinks in it are followed) before applying any non-existent tail
+> lexically — no traversal or symlink escape was found. But `eval` runs arbitrary Brood
+> with the full builtin set (`file/spit`, `run-process`, `%os-cmd`) and `load` takes an
+> unsandboxed path, and neither goes through `project-path`. So an agent driving this
+> server can write anywhere the process can: **the `nest mcp` process is the trust
+> boundary, not the project root.** Run it as a principal you would give that access to.
 | `abilities`   | `{}`                        | `{abilities: [name]}`                  | List every ability (generic-function interface) in the image — the discovery entry point for `ability` |
 | `ability`     | `{name}`                    | `{ops, sealed, members, requires, owner, derivable, impls}` or `{error}` | Describe a dispatch point: its ops (with params, provided-default flag), sealed member set, `:requires` super-abilities, and which types implement it — read it before writing an `impl` |
 | `check-source`| `{source}`                  | `{diagnostics: [{line, col, message}]}`| Advisory type-check a source **string** (not the whole project) — iterate on a snippet before writing it to a file |

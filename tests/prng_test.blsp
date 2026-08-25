@@ -123,3 +123,29 @@
   (test "a single random draw round-trips intact across heaps"
     (let (me (self) _w (spawn (prng-emit me 42)))
       (assert= (receive ([:r seed draws] draws)) (prng-draws 42 5 nil)))))
+
+;; ---- shuffle is Fisher–Yates, and therefore O(n) ----------------------------
+;; The docstring always claimed Fisher–Yates; the implementation was not it. Each
+;; step did two `count` walks plus `take` + `drop` + `append` + `nth` over the whole
+;; remaining collection — O(n²), which took 33 s on 20 000 elements. Real Fisher–Yates
+;; swaps in place, and `assoc` on a vector is an O(1) indexed replace (returning a
+;; fresh immutable vector — nothing mutates).
+
+(describe "shuffle: linear, not quadratic"
+  (test "20 000 elements shuffle to an exact permutation"
+    (let (n 20000
+          xs (into [] (range n))
+          [sh _] (seq/shuffle 7 xs))
+      (assert= n (count sh))
+      ;; a permutation: same multiset, sorted back to the original
+      (assert= (into [] (range n)) (into [] (sort sh)))))
+  (test "the shuffle actually moves things (it is not the identity)"
+    (let ([sh _] (seq/shuffle 3 (into [] (range 200))))
+      (refute (= (into [] sh) (into [] (range 200))))))
+  (test "a 1-element and empty shuffle still thread a fresh seed"
+    (let ([a s1] (seq/shuffle 5 [])
+          [b s2] (seq/shuffle 5 [:only]))
+      (assert= nil a)
+      (assert= (list :only) b)
+      (refute (= s1 5))
+      (refute (= s2 5)))))

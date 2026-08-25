@@ -20,7 +20,7 @@ read by call (`call`). Run:  ./bin/cli examples/life.blsp"
 
 (defn step (board)
   "The next generation of `board`."
-  (let (counts (frequencies (seq/mapcat neighbours (keys board))))
+  (let (counts (frequencies (mapcat neighbours (keys board))))
     (into {} (for ([cell n] (map-pairs counts) :when (alive-next? cell n board)) [cell true]))))
 
 (defn render-row (board y w) (apply str (for (x (range w)) (if (contains? board [x y]) "█" "·"))))

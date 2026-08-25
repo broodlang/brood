@@ -19,6 +19,12 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-55 | **closure-shipping across nodes broke for every namespaced std name.** Auto-require runs on the node that *compiles* a form, never on the node that *receives* an already-compiled closure — so a shipped closure whose body calls `reflect/form-pos`, `seq/…`, `dev/…` raises `unbound symbol` on the receiver. Before the v0.9.0/v0.10.0 namespacing these were bare prelude names and always bound, so closure-shipping "just worked" | ⚠️ **open — behaviour regression, workaround known.** The receiving node must load the module itself (`(require-one 'reflect)`). Found 2026-08-24 while repairing `source_positions_survive_a_cross_node_send`; a deserialize-path auto-require hook is the real fix |
+| KI-54 | **`main` was already red**: making the gen_server framework core-and-**bare** in the prelude (`7cb796f0`) seized ten generic global names — including `call`, `cast` and `stop` — into the *reserved* set, breaking `basic::spawned_process_picks_up_redefinition` (`(def call …)` is now refused); the same move dropped `gen` out of `(builtin-modules)`, failing `namespace_test`, and bundled `gen.blsp` without declaring it, failing `prelude_manifest` | ✅ **both fixed 2026-08-24** — `PRELUDE_MODULES` restores the reservation (with a bundle-checked honesty test); the `basic.rs` helper renamed `call` → `ask`. ⚠ **the name seizure itself is left as-is** — it follows from ADR-166 and the deliberate "bare" decision, but see the note below |
+| KI-50 | **the JIT leaf inliner silently miscompiled the most idiomatic loop in the language.** `(defn sum-down (n acc) (if (<= n 0) acc (sum-down (dec n) (+ acc n))))` returned **6251217600 instead of 20000100000** for `(sum-down 200000 0)` on the default build, and at 400000 raised `type error: -: expected number, got nil` blaming `dec`. `std/repeat` is this exact shape, so `(count (repeat 200000 :a))` gave **28033** | ✅ **fixed 2026-08-24** — a leaf-spliced frame was read as the *small* layout, so the small body's journal slot (a live loop counter in the spliced layout) was decoded as a deopt journal. Guard `tests/jit_leaf_frame_layout_test.blsp`, sabotage-verified |
+| KI-51 | `macroexpand-1` held a heap handle across an auto-`require` that loads a module (arbitrary eval → GC), then dereferenced it — **use-after-GC on a user-reachable path**: an epoch-tripwire abort in debug, silent heap corruption in release (a 5-element list reported an arity of 31309) | ✅ **fixed 2026-08-24** — roots `form`/`env` across the require and re-derives the tail |
+| KI-52 | `msg_roots` — the L1 delivered-message slot table — was in **every LOCAL collector root set and no RUNTIME one**, so a shared closure sent by handle to a parked receiver could have its code compacted or freed while still queued: a **use-after-free of shared code** | ✅ **fixed 2026-08-24** — seeded into `runtime_collect_with`, `seed_phase1_and_walk`, `runtime_evacuate` and `runtime_live_closure_count` |
+| KI-53 | a `Ref` crossed the wire as a **bare u64 counter starting at 0 on every node**, so two nodes minted colliding refs — and a ref is what a pinned `receive` matches and what identifies a monitor, so a collision could hand a caller a reply meant for a peer | ✅ **mitigated 2026-08-24** — per-runtime random top 24 bits (`next_ref`); node-qualified refs remain the principled fix, blocked on `Value`'s JIT-pinned layout |
 | KI-45 | `examples/editor` calls `eval-command/eval-last-sexp`, but that module moved to the sibling `brood-edit` project on 2026-05-31 (`650eb89f`) — so the example has referenced a module this repo lacks for 2.5 months; `nest test` there is 4/5. Nothing gates `examples/` | ✅ **fixed 2026-08-17** — deleted the stale `examples/editor` (brood-edit is the real editor project) |
 | KI-44 | `nbody` died with `unbound symbol: sqrt` (and `json` on the dropped `json-` prefix) — ADR-227 moved `sqrt` to `std/math.blsp` and the separate benchmarks repo was never migrated, so a published harness run would fail. Fixing it the correct way then exposed that the `sqrt` **call-site inline** was dead: it required a bare head resolving to a PRELUDE closure, and neither spelling qualifies now — **~1.8× on the row** | ✅ **fixed 2026-08-17** — correctness (both rows run, checksums match) + the inline restored via a structural identity for `math/sqrt` (321 ms vs 905 ms on a 3M-iter loop) |
 | KI-49 | the tagged-tuple `receive` matcher type-deopted 16x and was latched onto the interpreter for the process — 454 ns vs 59 ns for the keyword matcher, and the whole `pingpong`/`ring`/`supervisor` gap to Elixir | ✅ **FIXED 2026-08-21.** Root cause: `as_block_arg` forced every non-`Int` block argument through `as_int`, so the matcher deopted on **every** activation and the sixteen-deopt rule latched it to the interpreter. Fixed by spilling boxed args to position-derived frame slots (`ParamRepr`). `hof_decline_bailed` 98 981 → 0, `jit_link_done` 0 → 187 328, `ns_match_run` 457 → 179 ns/msg, **pingpong −12.9%** (reproduced 3x; spawn/fib/collatz flat) |
@@ -68,7 +74,27 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open items.** KI-49 (the tagged-tuple receive matcher latched onto the interpreter) was root-caused and **fixed 2026-08-21** — `pingpong` −12.9%. KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**2026-08-24 — a general review found five kernel bugs the suite could not see** (KI-50 … KI-54),
+all now fixed. The one that matters most is **KI-50**: the JIT produced *silently wrong arithmetic*
+on the default build for the ordinary counting loop, and `std`'s `repeat` was already corrupted by
+it. It is worth being precise about why five CI jobs were green through it. Every case in the
+`std` suites is small — grepping the eight non-`datetime` suites for `100000`/`200000`/`50000`
+returns nothing — and this corruption needs **one long activation**, not many calls: a loop calling
+the same function eleven times at 1 000 → 100 000 is entirely correct, while a single 180 000
+-iteration call is not. So the bug lived in the gap between "we test that it works" and "we test
+that it still works at scale", and no amount of re-running the existing suite would have found it.
+The lesson generalises past this bug: **a size sweep is a test dimension, not a stress test.**
+Asserting the same closed-form answer at 10³/10⁵/10⁶ *and* across `BROOD_TIER` 0/1/2 would have
+caught it the day the leaf inliner defaulted on, and costs milliseconds.
+
+The other three are the same shape as bugs this file already records — a handle held across an
+operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that one collector knows
+about and another does not (KI-52), and an identity that is unique per node but not across nodes
+(KI-53).
+
+**One open item: KI-55** (a shipped closure cannot call a namespaced std name on the receiving
+node — a consequence of the v0.9.0/v0.10.0 namespacing, with a known workaround). Otherwise
+KI-49 (the tagged-tuple receive matcher latched onto the interpreter) was root-caused and **fixed 2026-08-21** — `pingpong` −12.9%. KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -78,6 +104,223 @@ walked straight through the helpers' 20 s / 30 s deadlines. Warming the cache on
 fan-out takes the three tests from a 20.1 s failure to 1.9–2.6 s. No bug in the *language or
 runtime* was implied at any point — every sighting was a boot wait, never an assertion about
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
+
+---
+
+## KI-50 — the JIT leaf inliner miscompiled the ordinary counting loop ✅ FIXED 2026-08-24
+
+**Status:** ✅ fixed. Guard: `tests/jit_leaf_frame_layout_test.blsp` (sabotage-verified — 4 of its
+6 cases fail with the fix reverted).
+
+**Symptom.** On the **default build**, silently wrong arithmetic:
+
+```lisp
+(defn sum-down (n acc) (if (<= n 0) acc (sum-down (dec n) (+ acc n))))
+(sum-down 200000 0)   ;; => 6251217600, want 20000100000
+(sum-down 400000 0)   ;; => type error: -: expected number, got nil   … at dec
+```
+
+The wrong value varied run to run (7004720064, 6251217600, 4138068672 …) because it depends on
+where the background compile lands. `BROOD_TIER=1`, `BROOD_NO_JIT=1`, `BROOD_TIER=0`,
+`BROOD_NO_LEAF_INLINE=1` and `BROOD_NO_DEOPT_RESUME=1` were all correct; `BROOD_NO_INLINE=1`
+(the *self*-inliner) was **not**, which is what isolated it to the leaf-callee inliner.
+
+**`std` was already corrupted by it.** `repeat-acc` (`std/prelude/seq.blsp`) is exactly this shape
+— `(repeat-acc (dec n) x (cons x acc))` — so `(count (repeat 200000 :a))` returned **28033** and
+`(string/length (apply str (repeat 200000 "x")))` returned **0**.
+
+**Mechanism.** A tiering arm has two frame layouts: the small body's (`nslots`) and, once the
+deferred upgrade installs, a leaf-spliced derivation's (`inline_nslots`). On a deopt or preempt
+the runtime must know which one the live frame was built to, because each keeps its deopt journal
+at its own slot. It decides **by frame size** — deliberately, because the `inline_installed` flag
+is flipped by `jit_tier` between the sizing and the deopt (that is KI-26, and reading the flag
+there caused an out-of-bounds `root_at`).
+
+Two things then combined:
+
+1. `leaf_nslots = d.nslots.max(nslots_total)` came out **exactly equal** to the small `nslots`
+   whenever the spliced callee needed no slot beyond the caller's own. `(dec n)` is that shape —
+   measured `nslots=4, inline_nslots=4`. So the size test could not tell the layouts apart, even
+   though every comment around it asserted a leaf layout is *strictly* larger.
+2. Splicing **removes the residual `Call`**, which makes the derivation `pure_self` and therefore
+   *unjournalled* (`ckpt_slot == u32::MAX`), while the small body — which still has the call —
+   journals at a real slot. The old predicate asked "is this frame leaf-spliced **and**
+   journalled?", answered *no* for that pair, and fell through to the **small** layout's slot.
+
+In the spliced layout that slot is an ordinary local. It held the live loop counter, so
+`jit_ckpt_resume` read `Int(165825)`, saw a positive integer, and decoded it as a journal word:
+resume ip `n >> 16` = 2, operand depth `n & 0xFFFF` = 34689. The loop resumed at a garbage
+instruction with thousands of phantom operands.
+
+**Fix.** Two halves, both in the "make the invariant true rather than work around it" direction:
+
+- `leaf_nslots = d.nslots.max(nslots_total + 1)` (`eval/compile/mod.rs`) — one reserved slot, so a
+  leaf layout is **strictly** larger than the small one and the size test means what the
+  surrounding comments already claimed.
+- `jit_frame_is_leaf_spliced`/`jit_ckpt_slot` replaced by a `FrameLayout` enum +
+  `jit_frame_layout(arm, frame_nslots)` (`eval/compile/jit_runtime.rs`), so a frame reads the
+  journal slot of the layout it was **built to** and never the other one's. An unjournalled layout
+  now yields `None` (resume from ip 0, effect-free by construction for exactly the arms that
+  decline to journal) instead of falling back to a foreign slot.
+
+**Why nothing caught it.** See the note under the index: the corruption needs one *long*
+activation, and no `std` suite tests a large input. It is invisible below ~10⁵ iterations and a
+loop that calls the same function eleven times at increasing sizes stays correct throughout — so
+repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
+(same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-55 — a shipped closure cannot call a namespaced std name on the receiving node ⚠️ OPEN
+
+**Status:** ⚠️ open. Not a regression *this* review introduced — a consequence of the
+v0.9.0/v0.10.0 namespacing waves — but found by it, and it will bite any distribution user.
+
+**What.** Auto-require (ADR-227/229) fires when a form is **compiled**. A closure shipped to
+another node arrives *already compiled*, so nothing on the receiver triggers the require, and any
+namespaced global in its body is unbound there:
+
+```
+unbound symbol: reflect/form-pos
+```
+
+Before the namespacing these were bare prelude names, bound on every node by construction, so
+closure-shipping worked without anyone having to think about it. The refactor silently moved that
+guarantee: `seq/`, `dev/`, `reflect/`, `os/`, `table/`, `proc/` are all module globals now.
+
+**Workaround.** The receiving node loads the module itself — `(require-one 'reflect)` in the
+program it starts with. That is what `source_positions_survive_a_cross_node_send`
+(`crates/cli/tests/distribution.rs:466`) now does, with a comment saying why.
+
+**The real fix** is an auto-require hook on the deserialize path: when a closure lands, resolve
+the module prefixes its body references before binding it. Until then this is a documented sharp
+edge, and it is worth a note in the distribution docs — the failure surfaces on the *receiver*,
+far from the code that wrote the closure.
+
+**Related, found the same way:** bare **`require` is not a bound name** — the callable is
+`require-one` (`git log -S"defmacro require"` finds no definition in any commit). Several places
+in `CLAUDE.md` and the ADR-065 note describe writing `(require 'test)`; that guidance does not
+work against this tree.
+
+---
+
+## KI-54 — `main` was red, and a "core, bare" prelude module seized ten generic names ✅ FIXED 2026-08-24
+
+**Status:** ✅ both failures fixed. ⚠️ One judgement call is deliberately left to the owner.
+
+This entry exists because the sentence above the index said **"No open items… `main` is green on
+all five CI jobs"**, and it was not true. **Three** tests fail on a pristine `28e8eeb2` checkout,
+verified by building HEAD in a clean worktree rather than inferred:
+
+- `brood::basic spawned_process_picks_up_redefinition`
+- `namespace_test` — `(is (reserved-package-name? 'gen))`
+- `brood::prelude_manifest prelude_const_is_exactly_the_split_files`
+
+**One commit caused all three.** `7cb796f0` made the gen_server framework core and **bare** in the
+prelude. Three consequences followed, two of them in opposite directions:
+
+1. **It reserved too much.** A prelude name is un-redefinable (ADR-166), and `std/proc/gen.blsp`
+   defines these *bare*: `cast`, `call`, `call-timeout`, `stop`, `code-change`, `spawn-server`,
+   `spawn-server-link`, `spawn-server-named`, `gen-clause`, `defprocess`. So `(def call …)` — a
+   perfectly ordinary thing to write, and what that test did — is now refused outright.
+2. **It reserved too little.** `reserved-package-name?` derives its set from `(builtin-modules)`,
+   which lists only `embedded_module!` entries. Moving `gen` into the prelude bundle removed it
+   from that list, so the name `gen` silently stopped being reserved and a package could claim it —
+   while its siblings `supervisor` and `agent`, still embedded, stayed reserved.
+3. **It bundled a file without declaring it.** `std/proc/gen.blsp` was added to `lib.rs`'s
+   `concat!` but not to `prelude_manifest.rs`'s hand-maintained `EXTRA_PRELUDE_FILES`, so the
+   manifest test — which exists precisely to make "a file joined the prelude" a decision rather
+   than a drift — went red and stayed red. It did its job; nobody was reading the result.
+
+**Fixes.** (3) is one line: `gen.blsp` added to `EXTRA_PRELUDE_FILES` with the rationale.
+For (2), a `PRELUDE_MODULES` table (`builtins/system.rs`) feeds `builtin_modules`
+alongside `CORE_MODULES`/`DEV_MODULES`. It is kept honest by `prelude_modules_are_bundled`, which
+checks the source file exists *and* that `lib.rs` still `include_str!`s it into the prelude — so a
+module moving out cannot leave an entry reserving a name nothing owns. Note the test deliberately
+does **not** probe for a `gen/…` global: these modules define their functions bare, so no such
+namespace exists, and the reservation is about the *module name a package could claim*. For (1),
+the test's helper was renamed `call` → `ask`; the name was incidental to what it proves.
+
+**Left for the owner.** Whether `call`/`cast`/`stop` should be permanently un-redefinable is a
+design call, not a bug — it follows correctly from ADR-166 plus the deliberate "bare" decision.
+But it is a real cost that the commit may not have priced: these are among the most likely names
+for user code to want, the failure is a hard refusal at `def`, and the only escapes are a local
+`let` or a `defmodule`. If that is too aggressive, the options are to qualify them (`gen/call`),
+or to exempt a small set from sealing.
+
+**The meta-lesson.** The green-tree rule says a known failure *is* the work. Both of these had
+been red since the commit landed, and the file recording known issues asserted the opposite — so
+the claim was load-bearing and wrong, which is worse than no claim. Re-verify "green" against a
+clean checkout before writing it down.
+
+---
+
+## KI-51 — `macroexpand-1` dereferenced a handle across a module load ✅ FIXED 2026-08-24
+
+**Status:** ✅ fixed. `eval/macros.rs`'s `macroexpand_1` now roots `form` **and** `env` across
+`require_qualified_head` and re-derives the tail from the relocated pair.
+
+`macroexpand_1` read `let (head, tail) = heap.pair(p)`, then — for a qualified head into a
+not-yet-loaded module — called `require_qualified_head`, which **loads a module**: arbitrary eval,
+therefore a collection that relocates the nursery. It then dereferenced the stale `tail`.
+
+The compile pass is safe (it holds a `MacroBlockGuard`), but the **`macroexpand-1` / `macroexpand`
+builtins run with MACRO_BLOCK off** — so this was reachable from ordinary Brood, from the MCP
+`macroexpand` tool, and from editor/LSP tooling. Debug builds hit the epoch tripwire
+(`use-after-GC: pair handle (nursery slot 33) is from epoch 0, but that generation is now epoch 3`);
+**release silently walked relocated memory** and reported a garbage list length — a 5-element form
+came back as `arity error: expected 1 argument, got 31309`.
+
+The neighbouring `macroexpand` loop already roots `env` and argues in a comment that `cur` "needs
+no slot". That argument was correct when written and was invalidated by the ADR-227 auto-require
+landing inside `macroexpand_1` — the recurring shape being **a rooting argument that a later call
+quietly falsified**.
+
+---
+
+## KI-52 — `msg_roots` was a root set for one collector and not the other ✅ FIXED 2026-08-24
+
+**Status:** ✅ fixed. `msg_roots` is now seeded into `runtime_collect_with`,
+`seed_phase1_and_walk`, `runtime_evacuate` and `runtime_live_closure_count`.
+
+`Heap::msg_roots` is the L1 delivered-message slot table. `copy_cross_heap`'s share-fn path
+(default on; `BROOD_NO_SHARE_FN` reverts) hands an **already-shared RUNTIME closure to a parked
+receiver by handle**, and `try_deliver_local` parks that handle directly in a `msg_roots` slot —
+not in any LOCAL slab. A selective `receive` may leave the slot occupied indefinitely.
+
+The LOCAL collector treats `msg_roots` as a root set in all three of its walks. **No RUNTIME-side
+walk did**, so the shared code a queued message points at could be compacted or freed underneath
+it: a use-after-free of shared code, surfacing either as a panic on a dead handle or — after aging
+recycles the slot — as a silent dispatch to an unrelated closure.
+
+The share-fn path's own soundness note says a shared handle retained in the receiver's LOCAL data
+is safe because "the drain's Phase 2 walks the whole local heap". That is true for a handle
+*embedded in copied data* and false for the **top-level value sitting in the slot table**, which is
+the case this path actually produces.
+
+The structural cause is worth keeping: RUNTIME root enumeration is duplicated across four
+functions with no single "these are the heap's roots" visitor, which is exactly how a root set
+added later (`msg_roots`, ADR-177) got into the LOCAL lists and none of the RUNTIME ones.
+
+---
+
+## KI-53 — a `Ref` was unique per node, not across nodes ✅ MITIGATED 2026-08-24
+
+**Status:** ✅ mitigated (not closed by construction) — `process/monitor.rs`'s `next_ref` now
+randomises the top 24 bits per runtime, leaving a 40-bit counter.
+
+A `Pid` crosses the wire node-qualified (`{node, id}`). A `Ref` crosses as a **bare u64**
+(`dist/wire.rs`'s `M_REF`) and every node's `NEXT_REF` starts at **0**, so two nodes running the
+same code mint ref 1, ref 2, … in lockstep. A ref is what a pinned `receive` matches on and what
+identifies a monitor, so a collision can match a peer's message in a caller's pinned receive —
+delivering the wrong reply and stranding the real one.
+
+**Why this is a mitigation rather than a fix.** Erlang qualifies the ref itself by node. Here
+`Ref` is a bare `u64` inside `Value`, whose layout is pinned for the JIT
+(`value_layout_is_stable_for_the_jit`), so widening it would ripple through the JIT ABI. The
+random prefix makes an overlap ~6e-8 per node pair and leaves over a trillion counter values (a
+million refs a second for twelve days). Node-qualified refs remain the principled fix if `Value`
+ever gains room.
 
 ---
 

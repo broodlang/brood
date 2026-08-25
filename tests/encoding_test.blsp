@@ -179,3 +179,29 @@
     (let (s (encoding/base64-url-encode-bytes [251 255]))
       (refute (includes? s "+"))
       (refute (includes? s "/")))))
+
+;; ---- base64 padding must be TERMINAL ----------------------------------------
+;; Decoding did `(string/replace s "=" "")`, deleting every `=` ANYWHERE — so a
+;; misplaced one was not merely tolerated but erased: "QQ==QQ==" (two concatenated
+;; payloads, not base64 at all) collapsed to "QQQQ" and decoded to a value, instead
+;; of the nil a caller validating untrusted input relies on.
+
+(describe "base64-decode — padding placement"
+  (test "interior padding is rejected"
+    (assert= nil (encoding/base64-decode "QQ==QQ=="))
+    (assert= nil (encoding/base64-decode "Q=QQ"))
+    (assert= nil (encoding/base64-decode "=QQQ")))
+  (test "more than two pad characters is rejected"
+    (assert= nil (encoding/base64-decode "QQ===")))
+  (test "ordinary trailing padding still decodes"
+    (assert= "A" (encoding/base64-decode "QQ=="))
+    (assert= "AB" (encoding/base64-decode "QUI="))
+    (assert= "ABC" (encoding/base64-decode "QUJD")))
+  (test "unpadded input still decodes (the RFC 4648 §3.2 no-padding form)"
+    (assert= "A" (encoding/base64-decode "QQ"))
+    (assert= "AB" (encoding/base64-decode "QUI")))
+  (test "the URL-safe decoder enforces the same rule"
+    (assert= nil (encoding/base64-url-decode "QQ==QQ=="))
+    (assert= "A" (encoding/base64-url-decode "QQ==")))
+  (test "encode/decode still round-trips"
+    (assert= "hello, world" (encoding/base64-decode (encoding/base64-encode "hello, world")))))

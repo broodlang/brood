@@ -140,30 +140,41 @@ fn scan_head2(heap: &Heap, f: Value) -> Option<(Value, Value)> {
 /// and qualified name, both ordinary symbols. The bare count is project-global, so a
 /// name shared across modules reads as "used" (a false negative, never a false
 /// positive — safe for the zero-false-positive advisory contract).
+///
+/// **Iterative on purpose — an explicit worklist, never Rust recursion.** This walks
+/// *reader output*, whose size is bounded only by the file. The reader's `MAX_DEPTH`
+/// caps how deeply forms **nest**, but nothing caps how **long** a list is, so a
+/// recursive walker that recursed into the cdr had a native-stack depth equal to the
+/// list's LENGTH: one generated `.blsp` with a flat ~100k-element list overflowed the
+/// stack and SIGABRTed the whole runtime — uncatchable, no `.brood_crash_dump` (a
+/// stack overflow is not a panic), taking down every file's `nest check` with it
+/// (ADR-119's per-file scan runs through here). A worklist makes the walk O(1) in
+/// native stack for both length and nesting.
 fn scan_count_syms(heap: &Heap, v: Value, counts: &mut std::collections::HashMap<String, i64>) {
-    match v {
-        Value::Sym(s) => {
-            if let Some(n) = crate::core::value::symbol_name_opt(s) {
-                *counts.entry(n.to_string()).or_insert(0) += 1;
+    let mut work = vec![v];
+    while let Some(cur) = work.pop() {
+        match cur {
+            Value::Sym(s) => {
+                if let Some(n) = crate::core::value::symbol_name_opt(s) {
+                    *counts.entry(n.to_string()).or_insert(0) += 1;
+                }
             }
-        }
-        Value::Pair(id) => {
-            let (car, cdr) = heap.pair(id);
-            scan_count_syms(heap, car, counts);
-            scan_count_syms(heap, cdr, counts);
-        }
-        Value::Vector(vid) => {
-            for it in heap.vector(vid).to_vec() {
-                scan_count_syms(heap, it, counts);
+            Value::Pair(id) => {
+                let (car, cdr) = heap.pair(id);
+                work.push(car);
+                work.push(cdr);
             }
-        }
-        Value::Map(mid) => {
-            for (k, val) in heap.map_entries(mid) {
-                scan_count_syms(heap, k, counts);
-                scan_count_syms(heap, val, counts);
+            Value::Vector(vid) => {
+                work.extend(heap.vector(vid).to_vec());
             }
+            Value::Map(mid) => {
+                for (k, val) in heap.map_entries(mid) {
+                    work.push(k);
+                    work.push(val);
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -911,6 +922,29 @@ macro_rules! embedded_module {
 /// the `dev-tools` feature), so a `nest release` lean runtime
 /// (`--no-default-features`) carries no test/observer/tooling/REPL source
 /// (ADR-038, docs/release.md). `builtin_module` consults both.
+/// Module namespaces the **prelude** provides directly, rather than as an
+/// [`embedded_module!`] entry.
+///
+/// A prelude-bundled module is resolvable as `name/…` with no load-path — which is
+/// exactly what [`builtin_modules`] documents itself as reporting — but it is not in
+/// [`CORE_MODULES`], so it was invisible there. `gen` moved into the prelude in
+/// `7cb796f0` and silently fell out of the list, which quietly un-reserved it:
+/// `reserved-package-name?` (`std/prelude/tools.blsp`) derives the reserved set from
+/// `(builtin-modules)`, so a dependency or project could take the name `gen` and root
+/// its own modules onto the namespace the prelude already owns — the precise collision
+/// that guard exists to prevent. `supervisor` and `agent`, its siblings, stayed
+/// embedded and so stayed reserved; only `gen` was exposed.
+///
+/// Each entry is `(namespace, source path)`. The path is what keeps the list honest —
+/// `prelude_modules_are_bundled` asserts the file exists **and** that `lib.rs` really
+/// `include_str!`s it into the prelude bundle, so a module that later moves out cannot
+/// leave a phantom entry reserving a name nothing owns.
+///
+/// Note these modules define their functions **bare** (`call`, not `gen/call`), which is
+/// what "core, bare, in the prelude" means — so the reservation is about the *module
+/// name* a package could claim, not about a live `gen/…` global namespace.
+const PRELUDE_MODULES: &[(&str, &str)] = &[("gen", "std/proc/gen.blsp")];
+
 const CORE_MODULES: &[EmbeddedModule] = &[
     // Output ports: the redirectable sink behind print/println — a port is a 1-arg
     // string sink, with `process-port`/`fn-port` + `with-out`/`with-err`. Pairs
@@ -1447,6 +1481,7 @@ pub(super) fn builtin_modules(_: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         .iter()
         .chain(DEV_MODULES.iter())
         .map(|module| module.key)
+        .chain(PRELUDE_MODULES.iter().map(|(name, _)| *name))
         .collect();
     names.sort_unstable();
     names.dedup();
@@ -1721,7 +1756,18 @@ pub(super) fn monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         // far side at monitor time, so we redirect the user to ship the pid
         // directly. Documented in `docs/primitives.md`.
         Value::Map(mid) => {
-            let (name, node) = crate::process::read_name_address(heap, mid)?;
+            // `read_name_address` is shared with `send` and hardcodes a `send:` prefix
+            // in its two shape errors, so `(monitor {:oops 1})` reported "send: name
+            // address needs …" — naming an operation the caller never invoked. Retag
+            // the prefix to this operation. (The clean fix is an `op: &str` parameter on
+            // `read_name_address` in `process/mailbox.rs`, passed "send"/"monitor" by
+            // its two call sites; this retag is the caller-side equivalent.)
+            let (name, node) = crate::process::read_name_address(heap, mid).map_err(|mut e| {
+                if let Some(rest) = e.message.strip_prefix("send: ") {
+                    e.message = format!("monitor: {rest}");
+                }
+                e
+            })?;
             if crate::dist::is_local(node) {
                 match crate::dist::whereis(name) {
                     Some(pid) => Ok(crate::process::monitor(pid)),
@@ -2298,17 +2344,53 @@ pub(super) fn list_processes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// `:isolated` test in this so a test's definitions never leak to another test.
 /// Restores the bindings even if the thunk raises (the error then propagates).
 ///
-/// This only isolates *bindings* — the shared code slabs and the symbol interner
-/// still grow (memory, not behaviour; there's no GC yet) — and it is sound only
-/// with no other process mutating globals concurrently, which the runner ensures
-/// by running isolated tests alone.
-
+/// It also reaps processes the thunk left running, so an orphan can't outlive the
+/// bindings it was written against. **Blast radius: descendants of this call only.**
+/// A process is reaped when it is alive at return, was not alive when the isolate
+/// started, and its spawn-ancestry chain reaches a *newly spawned* direct child of
+/// this process — i.e. the thunk spawned it, directly or transitively. Bystanders
+/// spawned concurrently by anyone else are left alone. The one thing it misses is a
+/// grandchild whose intermediate parent already exited (the ancestry link dies with
+/// that process), which leaks rather than over-kills — see the filter below.
+///
+/// **What this does NOT isolate.** Only the global *binding* table is snapshotted
+/// and rolled back. Three kinds of leak survive an isolate:
+/// - *Memory-only:* the shared code slabs and the symbol interner still grow.
+/// - **Behavioural — the `defdyn` mark.** A `defdyn` inside the thunk leaves its
+///   name permanently marked dynamic in the process-wide registry
+///   (`core::value::DYNAMICS`), even though the binding itself is rolled back. The
+///   name is then ambient forever for namespace resolution
+///   (`eval::macros::is_ambient`) and permanently exempt from the reserved-name
+///   check (`heap::is_sealed` excludes dynamics), so an isolate can silently widen
+///   what later code is allowed to define. Fixing this needs an un-mark/restore
+///   API on the registry, which it does not currently expose.
+/// - **Behavioural — the `private` mark.** A `defn-`/`def-` inside the thunk leaves
+///   its qualified name in the runtime's recorded-private set (`RuntimeCode::private`)
+///   after the binding is gone, so the now-unbound name still reads as module-private.
+///   Same cause: `Heap` exposes `mark_private`/`private_names_snapshot` but no
+///   restore.
+///
+/// (The `sealed` set leaks the same way but benignly — the `in_module_load`
+/// exemption means a stale seal never rejects a legitimate def.)
+///
+/// It is sound only with no other process mutating globals concurrently, which the
+/// runner ensures by running isolated tests alone.
 pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let thunk = arg(args, 0);
     // `snapshot_globals`/`restore_globals` now bracket RUNTIME compaction themselves (the
     // snapshot holds off-graph RUNTIME handles a mid-thunk relocation would strand — KI-6),
     // so this reset+run+rollback is compaction-safe with no extra bookkeeping here.
     let saved = heap.snapshot_globals();
+    // The global *binding* table is not the whole image. Two mark registries live beside
+    // it — the `defdyn` set (`value::DYNAMICS`) and the `defn-` private set — and neither
+    // is covered by `snapshot_globals`, so a mark made inside the thunk used to survive
+    // the rollback while its binding did not. That is not cosmetic: a leaked dynamic mark
+    // makes the name permanently *ambient* for namespace resolution (`macros::is_ambient`,
+    // so a later module's `(def *q* …)` stays bare instead of being qualified) and
+    // permanently exempt from the reserved-name check (`heap::is_sealed` excludes
+    // dynamics). Snapshot both and put them back with the bindings.
+    let saved_dynamics = crate::core::value::dynamic_syms();
+    let saved_private = heap.private_names_snapshot();
     // Pids alive before the run, to tell apart the ones the thunk spawns.
     let before: std::collections::HashSet<u64> =
         crate::process::list_local_pids().into_iter().collect();
@@ -2322,6 +2404,47 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
     // isolated unit's own green process, so a thread sleep would freeze its worker
     // and starve any orphan pinned to that same worker. Bounded so a wedged orphan
     // can't hang the run.
+    //
+    // **The kill set is what the THUNK spawned, by ancestry — not "alive after minus
+    // alive before".** That set difference is not ownership: any process running
+    // concurrently — a helper the suite spawned before the isolate, a service under
+    // test, a node connection — can spawn during the thunk's run, and the difference
+    // swept those bystanders in and killed them.
+    //
+    // Ownership is decided by walking each newcomer up its `parent_of` chain looking
+    // for US, and then checking the last hop: the direct child of ours that the chain
+    // arrives through must itself be a newcomer. That second half matters — "the chain
+    // reaches me" alone is too coarse, because a child we spawned *before* the isolate
+    // is our descendant too, so everything it spawns during the thunk would read as
+    // ours (exactly the reported bystander: a helper spawned before the isolate,
+    // registering a name 50 ms in). Since `me` runs nothing but the thunk for the whole
+    // window, a direct child of `me` that is new IS the thunk's.
+    //
+    // Known gap, deliberately left: a chain that dead-ends at a process which has
+    // already exited (its registry entry, and with it its own parent link, is gone)
+    // cannot be proven ours, so an orphaned *grandchild* whose middle process exited
+    // during the thunk is not reaped. Erring that way is the right side to err on — a
+    // missed orphan leaks a process, a wrong kill takes down someone else's. Closing it
+    // needs an ownership generation stamped at spawn time, which the scheduler does not
+    // expose today.
+    let me = crate::process::self_pid();
+    let owned = |start: u64| {
+        let mut cur = start;
+        // Bounded: a cycle is impossible (a parent pid always predates its child), but
+        // the walk reads a live table, so cap it rather than trust that invariant.
+        for _ in 0..10_000 {
+            match crate::process::parent_of(cur) {
+                // `cur` is the direct child of ours this chain runs through.
+                Some(p) if p == me => return !before.contains(&cur),
+                // `0` is the root's no-parent sentinel and reports as `None`; a `None`
+                // here also covers a parent that died and deregistered, taking the rest
+                // of the chain with it. Either way we can't prove ownership — decline.
+                Some(p) => cur = p,
+                None => return false,
+            }
+        }
+        false
+    };
     let spawned: std::collections::HashSet<u64> = crate::process::list_local_pids()
         .into_iter()
         // Never reap the CALLER: the root's mailbox registers lazily (its first
@@ -2330,7 +2453,7 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
         // running the isolate. That kill was silently ignored for as long as
         // exit signals couldn't reach a natively-nested receive; now that they can
         // (Control::Killed), it would abort the whole run.
-        .filter(|p| !before.contains(p) && *p != crate::process::self_pid())
+        .filter(|p| !before.contains(p) && *p != me && owned(*p))
         .collect();
     if !spawned.is_empty() {
         let kill = crate::process::Message::Keyword(crate::core::value::intern(
@@ -2359,6 +2482,11 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
         }
     }
     heap.restore_globals(saved);
+    // Both registries are restored on the error path too — `result` is returned below
+    // rather than `?`-propagated, so a throwing thunk rolls back exactly as a clean one
+    // does. Replaces rather than unions, so a mark *added* inside the thunk is dropped.
+    crate::core::value::restore_dynamics(saved_dynamics);
+    heap.restore_private_names(saved_private);
     result
 }
 
@@ -2743,8 +2871,20 @@ pub(super) fn binding(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
         }
         names.push(sym);
     }
-    for (i, &sym) in names.iter().enumerate() {
-        heap.push_dynamic(sym, arg(&vals, i));
+    // Matched lengths are a guarantee of the `binding` MACRO, not of this primitive —
+    // a raw `(%binding '(*x*) [] thunk)` used to read the missing value as `nil` via
+    // `arg`'s default and bind that silently. Reject the shape instead: like the
+    // not-dynamic check above, this raises before anything is pushed, so the dynamic
+    // stack is untouched.
+    if syms.len() != vals.len() {
+        return Err(LispError::type_err(format!(
+            "binding: {} name(s) but {} value(s) — each name needs exactly one value",
+            syms.len(),
+            vals.len()
+        )));
+    }
+    for (&sym, &val) in names.iter().zip(vals.iter()) {
+        heap.push_dynamic(sym, val);
     }
     let result = apply_engine(heap, thunk, &[], env);
     for _ in 0..names.len() {
@@ -3119,7 +3259,52 @@ pub(super) fn coverage_reset(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispRes
 
 #[cfg(test)]
 mod tests {
-    use super::{CORE_MODULES, DEV_MODULES};
+    use super::{CORE_MODULES, DEV_MODULES, PRELUDE_MODULES};
+
+    /// Every [`PRELUDE_MODULES`] entry must name a module the prelude really bundles,
+    /// and must not duplicate an [`embedded_module!`] key.
+    ///
+    /// The list exists because a prelude-bundled module is invisible to
+    /// `CORE_MODULES`, and its whole job is to keep such a module *reserved*
+    /// (`reserved-package-name?` derives the reserved set from `(builtin-modules)`).
+    /// A stale entry would silently reserve a name nothing owns; a missing one
+    /// silently un-reserves a name the standard library does own, which is exactly how
+    /// `gen` was exposed when it moved into the prelude. So verify against the source
+    /// of truth — `lib.rs`'s bundle — rather than trusting the list.
+    ///
+    /// It deliberately does **not** probe for a `name/…` global: these modules define
+    /// their functions bare, so there is no such namespace to find.
+    #[test]
+    fn prelude_modules_are_bundled() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .to_path_buf();
+        let lib_rs =
+            std::fs::read_to_string(root.join("crates/lisp/src/lib.rs")).expect("read lib.rs");
+        for (name, path) in PRELUDE_MODULES {
+            assert!(
+                !CORE_MODULES
+                    .iter()
+                    .chain(DEV_MODULES.iter())
+                    .any(|m| m.key == *name),
+                "`{name}` is an embedded module — it does not belong in PRELUDE_MODULES too"
+            );
+            assert!(
+                root.join(path).is_file(),
+                "PRELUDE_MODULES lists `{name}` at `{path}`, which does not exist"
+            );
+            // The bundle is a list of `include_str!("../../../std/…")` entries.
+            let needle = path.strip_prefix("std/").unwrap_or(path);
+            assert!(
+                lib_rs.contains(needle),
+                "PRELUDE_MODULES lists `{name}` at `{path}`, but lib.rs does not bundle \
+                 it into the prelude — the module moved, so this entry is stale and is \
+                 reserving a name nothing owns"
+            );
+        }
+    }
 
     /// A release bundle runs on the LEAN runtime, which compiles [`DEV_MODULES`] away
     /// entirely — and `run-bundle` loads every module the app ships, so one top-level

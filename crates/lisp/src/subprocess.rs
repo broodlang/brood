@@ -62,7 +62,7 @@ struct Proc {
     /// Shared with the stdout reader, which reaps the child on EOF. `proc-close`
     /// locks it briefly to `kill`; the reader locks it briefly to `try_wait`.
     /// Never held across a blocking call, so the two never deadlock.
-    child: Arc<Mutex<Child>>,
+    child: Arc<ChildHandle>,
     /// Inbound decode mode (default text; mirrors `net`'s socket flag, ADR-141:
     /// outbound `proc-send` is unaffected — string leaves are always UTF-8).
     /// Binary mode delivers `[:proc …]` data as byte-faithful `bytes` values.
@@ -70,6 +70,27 @@ struct Proc {
     /// `proc-set-binary` flips an already-running child mid-stream.
     binary: Arc<AtomicBool>,
 }
+
+/// The `Child` plus a condvar the reaper waits on.
+///
+/// `std::process::Child::wait` needs `&mut Child`, so a reaper blocking in it would hold
+/// this mutex for the child's whole life and `proc-close` could never take it to `kill` —
+/// which is why the reaper polls `try_wait` instead. The condvar makes that poll a real
+/// *wait*: [`close`] signals it after killing, so a kill is observed at once, and the
+/// residual poll (for a child that exits on its own after closing stdout) backs off
+/// geometrically to [`REAP_POLL_MAX`] instead of running a 5 ms spin for the whole
+/// lifetime of a daemon-style child.
+struct ChildHandle {
+    child: Mutex<Child>,
+    /// Notified by [`close`] once it has killed the child, so the reaper stops waiting.
+    killed: std::sync::Condvar,
+}
+
+/// First reap-poll interval after stdout EOF, and the cap it backs off to. The child has
+/// almost always already exited by then, so the first `try_wait` answers and neither is
+/// reached; these only bound the *daemon-closed-stdout-early* case.
+const REAP_POLL_MIN: Duration = Duration::from_millis(5);
+const REAP_POLL_MAX: Duration = Duration::from_millis(500);
 
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Proc>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -140,14 +161,17 @@ fn start_pipe_reader<R: Read + Send + 'static>(
 /// The stdout reader: stream stdout as `[:proc id data]`, then **reap** the child
 /// and emit the final `[:proc-closed id code]`. It owns the reap so there is
 /// exactly one waiter (the stderr reader never waits — it would race for the
-/// zombie). After stdout EOF the child has exited or is exiting; poll `try_wait`
-/// with a brief lock + short nap (never holding the lock while blocked) so a
-/// concurrent `proc-close`/`kill` can always take the lock. On exit, drop the
-/// registry entry.
+/// zombie). After stdout EOF the child has usually already exited, so one `try_wait`
+/// answers; a child that merely *closed* stdout (a daemon) is waited for on the
+/// [`ChildHandle::killed`] condvar — which releases the mutex, so a concurrent
+/// `proc-close`/`kill` can always take it, and wakes the reaper immediately when it
+/// does. Deferring `[:proc-closed]` to the child's actual exit is the contract; what
+/// changed is that waiting for it no longer costs a 200 Hz poll for the child's whole
+/// lifetime. On exit, drop the registry entry.
 fn start_stdout_reader(
     id: u64,
     out: ChildStdout,
-    child: Arc<Mutex<Child>>,
+    child: Arc<ChildHandle>,
     subscriber: u64,
     binary: Arc<AtomicBool>,
 ) {
@@ -173,20 +197,30 @@ fn start_stdout_reader(
             }
         }
         // stdout is at EOF: reap the child for its exit status.
+        let mut guard = child.child.lock().expect("subprocess child mutex");
+        let mut backoff = REAP_POLL_MIN;
         let code = loop {
-            let status = {
-                let mut c = child.lock().expect("subprocess child mutex");
-                c.try_wait()
-            };
-            match status {
+            match guard.try_wait() {
                 Ok(Some(st)) => break st.code(),
-                // Not exited yet (e.g. stdout closed early): nap and re-poll. The
-                // lock is released between polls so `proc-close` can `kill`.
-                Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                // Not exited yet — the child closed stdout but is still running. Wait on
+                // the condvar (which RELEASES the mutex, so `proc-close` can take it to
+                // `kill`, and wakes us the moment it has). The timeout is only the
+                // backstop for a child that exits by itself with nobody to signal us; it
+                // grows to `REAP_POLL_MAX` so a long-lived daemon child costs a couple of
+                // wakeups a second rather than 200.
+                Ok(None) => {
+                    let (g, _) = child
+                        .killed
+                        .wait_timeout(guard, backoff)
+                        .expect("subprocess child mutex");
+                    guard = g;
+                    backoff = (backoff * 2).min(REAP_POLL_MAX);
+                }
                 // wait() failed (already reaped elsewhere, etc.): give up cleanly.
                 Err(_) => break None,
             }
         };
+        drop(guard);
         reg().remove(&id);
         sink.emit(closed_msg(id, code));
     });
@@ -225,7 +259,10 @@ pub fn spawn(
     let stderr: ChildStderr = child.stderr.take().expect("piped stderr");
 
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let child = Arc::new(Mutex::new(child));
+    let child = Arc::new(ChildHandle {
+        child: Mutex::new(child),
+        killed: std::sync::Condvar::new(),
+    });
     let binary = Arc::new(AtomicBool::new(false));
     reg().insert(
         id,
@@ -284,10 +321,15 @@ pub fn close(id: u64) {
         reg.remove(&id)
     };
     if let Some(Proc { child, .. }) = removed {
-        // Brief lock (kill doesn't block) — the stdout reaper polls try_wait, so
-        // we never contend with a blocked wait().
-        let mut c = child.lock().expect("subprocess child mutex");
-        let _ = c.kill();
+        // Brief lock (kill doesn't block) — the stdout reaper waits on the condvar rather
+        // than holding this mutex across a blocking `wait()`, so we never contend.
+        {
+            let mut c = child.child.lock().expect("subprocess child mutex");
+            let _ = c.kill();
+        }
+        // Rouse the reaper so it reaps *now* instead of at its next backoff tick, and the
+        // `[:proc-closed …]` follows the kill promptly.
+        child.killed.notify_all();
         // `stdin` (in `removed`) drops here, sending EOF to the child too.
     }
 }

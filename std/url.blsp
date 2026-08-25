@@ -209,21 +209,75 @@ decoding + as space and %XX sequences."
       nil
       [(string/substring s 0 i) (string/substring s (+ i (string/length sep)) (string/length s))])))
 
+;; An RFC-3986 authority is `[userinfo@]host[:port]`, and `host` may be a **bracketed
+;; IPv6 literal** (`[::1]`) — which itself contains colons. Splitting on the *first*
+;; colon got both wrong, and not merely cosmetically:
+;;
+;;   "user:pass@example.com"  → host "user"   (the userinfo was read as the host)
+;;   "[::1]:8080"             → host "["      (the literal's own colons won)
+;;
+;; The first is a security bug, not a parse nit: `https://evil.com@good.com/` reported
+;; host `evil.com`, so an allow-list check, a logged origin, or an SSRF guard built on
+;; `:host` sees a *different* host than the one a real client connects to. That is the
+;; classic userinfo-confusion phishing/SSRF primitive.
+(defn- url-authority-split
+  (hostport)
+  "Split a `host[:port]` (userinfo already removed) into `[host port-str]`, honouring
+a bracketed IPv6 literal. `port-str` is nil when no `:port` is present."
+  (if (string/starts-with? hostport "[")
+    (let (close (index-of hostport "]"))
+      (if (< close 0)
+        (error "url: unterminated IPv6 literal in authority: " (pr-str hostport))
+        (let (host (string/substring hostport 0 (+ close 1))
+              tail (string/substring hostport (+ close 1) (string/length hostport)))
+          (cond
+            (= tail "") [host nil]
+            (string/starts-with? tail ":") [host (string/substring tail 1 (string/length tail))]
+            else (error "url: junk after the IPv6 literal in authority: " (pr-str hostport))))))
+    (let (colon (index-of hostport ":"))
+      (if (< colon 0)
+        [hostport nil]
+        [(string/substring hostport 0 colon)
+          (string/substring hostport (+ colon 1) (string/length hostport))]))))
+
+(defn- url-parse-port
+  (port-str)
+  ;; An unparseable port used to come back as nil — indistinguishable from "no port
+  ;; given", so `http://h:8o80/` silently fell back to port 80 and connected somewhere
+  ;; the URL never named. Raise instead. An EMPTY port (`host:`) stays nil: RFC 3986
+  ;; §3.2.3 defines that as "use the scheme's default".
+  (cond
+    (nil? port-str) nil
+    (= port-str "") nil
+    else
+      (let (n (string->number port-str))
+        (if (and (int? n) (>= n 0) (<= n 65535))
+          n
+          (error "url: invalid port " (pr-str port-str) " — expected an integer 0..65535")))))
+
 (defn- url-parse-authority
   (auth)
-  "Parse `host` or `host:port` into `{:host :port}`. Port is int or nil."
-  (let (colon (index-of auth ":"))
-    (if (< colon 0)
-      {:host auth :port nil}
-      (let (port-str (string/substring auth (+ colon 1) (string/length auth))
-            port-n (string->number port-str))
-        {:host (string/substring auth 0 colon) :port port-n}))))
+  "Parse an RFC-3986 authority `[userinfo@]host[:port]` into `{:userinfo :host :port}`.
+`:host` keeps the brackets of an IPv6 literal (`\"[::1]\"`, which is what a Host
+header and a `build-url` round-trip both need); `:userinfo` is nil when absent and
+`:port` is an int or nil. An unparseable port raises."
+  (let (at (last-index-of auth "@")
+        ;; the LAST `@` — userinfo may itself contain an encoded one
+        userinfo (if (< at 0) nil (string/substring auth 0 at))
+        hostport (if (< at 0) auth (string/substring auth (+ at 1) (string/length auth)))
+        [host port-str] (url-authority-split hostport))
+    {:userinfo userinfo :host host :port (url-parse-port port-str)}))
 
 (defn parse-url (s)
-  "Parse URL string `s` into a map `{:scheme :host :port :path :query :fragment}`.
-`:port` is an integer when present, nil otherwise. `:query` and `:fragment` are
-the raw (still-encoded) strings, or nil when absent. Relative URLs (no scheme)
-have nil `:scheme`, `:host`, and `:port`."
+  "Parse URL string `s` into a map
+`{:scheme :userinfo :host :port :path :query :fragment}`.
+`:port` is an integer when present, nil otherwise (an unparseable one **raises**,
+so it is never confused with `absent`). `:userinfo` is the raw `user[:pass]` before
+the `@`, or nil — it is **not** part of `:host`, so an allow-list or SSRF check on
+`:host` sees the host a client would actually connect to (`https://evil.com@good.com/`
+→ host `good.com`). An IPv6 literal keeps its brackets (`\"[::1]\"`). `:query` and
+`:fragment` are the raw (still-encoded) strings, or nil when absent. Relative URLs
+(no scheme) have nil `:scheme`, `:host`, and `:port`."
   ;; 1. strip fragment
   (let (frag-split (url-split-first s "#")
         before-frag (if frag-split (first frag-split) s)
@@ -252,11 +306,15 @@ have nil `:scheme`, `:host`, and `:port`."
 ;; ---- URL building -----------------------------------------------------------
 
 (defn build-url (parts)
-  "Build a URL string from a map `{:scheme :host :port :path :query-params :query :fragment}`.
+  "Build a URL string from a map
+`{:scheme :userinfo :host :port :path :query-params :query :fragment}`.
 `:query-params` is a map encoded via `query-encode`; `:query` is a raw query string
-(used only when `:query-params` is absent). Both `:port` and `:fragment` are optional."
+(used only when `:query-params` is absent). `:userinfo`, `:port` and `:fragment` are
+optional — `:userinfo` is emitted as `userinfo@` before the host, so a `parse-url`
+round-trip is lossless."
   (let (scheme (get parts :scheme)
         host (get parts :host)
+        userinfo (get parts :userinfo)
         port (get parts :port)
         path (or (get parts :path) "/")
         query-params (get parts :query-params)
@@ -266,7 +324,9 @@ have nil `:scheme`, `:host`, and `:port`."
         fragment (get parts :fragment)
         authority (if (nil? host)
                     ""
-                    (str host (if (nil? port) "" (str ":" port)))))
+                    (str (if (nil? userinfo) "" (str userinfo "@"))
+                      host
+                      (if (nil? port) "" (str ":" port)))))
     (str (if (nil? scheme) "" (str scheme "://"))
       authority
       path

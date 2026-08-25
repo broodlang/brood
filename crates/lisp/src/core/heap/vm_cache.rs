@@ -196,10 +196,11 @@ impl Heap {
     /// bits (not `version`), so a stale compiled body could otherwise be served for a
     /// *new* closure. The version-stamped caches self-heal on the `version` bump a
     /// free also does; only `vm_cache` needs this one-shot clear. Called on the
-    /// `vm_cache` read path — one relaxed load + compare in the common (no-free) case.
+    /// `vm_cache` read path — one acquire load + compare in the common (no-free) case
+    /// (free on x86; see [`Self::free_epoch_now`] for why it is not `Relaxed`).
     #[inline]
     fn sync_free_epoch(&self) {
-        let cur = self.runtime.free_epoch.load(Ordering::Relaxed);
+        let cur = self.free_epoch_now();
         if self.seen_free_epoch.get() != cur {
             self.vm_cache.borrow_mut().clear();
             self.seen_free_epoch.set(cur);
@@ -284,7 +285,10 @@ impl Heap {
     /// The runtime's current free-generation epoch (ADR-091). Read *before* compiling a
     /// closure that may be published to the shared cache, and validated on lookup.
     pub fn free_epoch_now(&self) -> u64 {
-        self.runtime.free_epoch.load(Ordering::Relaxed)
+        // `Acquire`: this stamp gates whether a cached arm's RUNTIME handles are still
+        // addressable, so a reader that observes the bump must also observe everything
+        // the freer did before it (the empty-slab store, the cache clears).
+        self.runtime.free_epoch.load(Ordering::Acquire)
     }
 
     /// Look up the runtime-shared compiled closure for closure-handle `bits` (ADR-175).
@@ -296,8 +300,15 @@ impl Heap {
         &self,
         bits: u64,
     ) -> Option<Arc<crate::eval::compile::CompiledClosure>> {
-        let cur = self.free_epoch_now();
+        // Take the lock FIRST, then read the epoch. The stamp is the only thing standing
+        // between this and a freed generation's arm, and a `Relaxed` load taken *before*
+        // the lock carries no happens-before against the freer's `fetch_add` — so the
+        // ordering has to come from somewhere. `free_runtime_gen_locked` bumps
+        // `free_epoch` and then clears this map under the write lock, so a reader that
+        // acquires the read lock either sees the cleared map or, having got in first,
+        // reads the already-bumped epoch here and misses on the stamp.
         let m = self.runtime.shared_closures.read().ok()?;
+        let cur = self.free_epoch_now();
         match m.get(&bits) {
             Some((fe, cc)) if *fe == cur => Some(cc.clone()),
             _ => None,
@@ -674,7 +685,16 @@ impl Heap {
         // against the larger installed frame. Not known to be reachable (the swap needs
         // `inline_code`, which is only built for a qualifying named arm) — but it is an
         // invariant held by construction elsewhere rather than enforced here.
-        let active_ns = arm.frame_size_for_new_entry();
+        //
+        // Size from the CODE POINTER we are about to record, never from `inline_installed`.
+        // This whole slot's value is that it is a self-consistent `(code, nslots)` snapshot —
+        // a reader enters through the pointer recorded here, so the size must be the one that
+        // pointer wants. Re-reading the flag is a second, independently-racing read: a peer's
+        // swap landing between the `code` load above and this line would pair the **small**
+        // native with an `inline_nslots` frame, and its outcome-4 tail staging is then written
+        // at `base+nslots` and read back at `base+inline_nslots`. Same KI-48 family as the
+        // `jit_tier` torn read, in the one place that was still spelled the old way.
+        let active_ns = crate::eval::compile::frame_size_for_code(arm, code);
         // Fully validated + installed at this epoch — publish into the one flat table that
         // both this probe's hot path (above) and JIT'd code (an epoch-guarded raw load)
         // read. One representation, one write.

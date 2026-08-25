@@ -1,6 +1,13 @@
 //! CHAMP map operations (child of heap).
 use super::*;
 
+/// `map-int-add` past the i64 range. Deliberately the same sentence as
+/// [`crate::core::table::incr`]'s: the linear-map optimizer rewrites one into the
+/// other, so the two must fail the same way (see [`Heap::map_int_add`]).
+fn int_add_range_err() -> LispError {
+    LispError::runtime("map-int-add: incrementing would exceed the ±2^63 range")
+}
+
 impl Heap {
     // ===== map operations (ADR-040: CHAMP — see `core/map_champ.rs`) =====
     //
@@ -62,17 +69,51 @@ impl Heap {
         Value::map(new_root)
     }
 
-    /// A fresh map with `key`'s integer value incremented by `delta`, or
-    /// `delta` itself when `key` is absent. Semantically equivalent to
-    /// `(assoc m key (+ (get m key 0) delta))` but in a **single trie walk**:
-    /// the read and write are fused into one path-copy traversal instead of two.
-    pub fn map_int_add(&mut self, id: MapId, key: Value, delta: i64) -> Value {
+    /// A fresh map with `key`'s **i64** value incremented by `delta`, or `delta`
+    /// itself when `key` is absent. `(assoc m key (+ (get m key 0) delta))` in a
+    /// **single trie walk**: the read and write are fused into one path-copy
+    /// traversal instead of two.
+    ///
+    /// The one place the equivalence stops is the i64 boundary: `+` promotes to a
+    /// bignum, this **errors** (`incrementing would exceed the ±2^63 range`), exactly
+    /// as [`crate::core::table::incr`] does. That is deliberate, and it is why this
+    /// returns a `Result` — the linear-map optimizer rewrites `map-int-add` on a
+    /// provably-linear accumulator into `table-incr` (`eval/compile/inline.rs`), so a
+    /// promoting map path would make the rewrite *observable*: the same program
+    /// returned a bignum with `BROOD_LINMAP=0` and raised with it on. Counters agree
+    /// on both paths instead. (An unchecked `+` here previously panicked under
+    /// debug-assertions and wrapped to a negative count in release — the silently
+    /// corrupt counter this replaces.)
+    pub fn map_int_add(&mut self, id: MapId, key: Value, delta: i64) -> Result<Value, LispError> {
         let hash = self.hash_value(key);
-        let new_root = self.champ_int_add(id, key, delta, hash, 0);
-        Value::map(new_root)
+        let new_root = self.champ_int_add(id, key, delta, hash, 0)?;
+        Ok(Value::map(new_root))
     }
 
-    fn champ_int_add(&mut self, id: MapId, key: Value, delta: i64, hash: u64, depth: u32) -> MapId {
+    /// `old + delta`, checked. A non-integer existing value reads as `0`, as it
+    /// always has; past i64 the operation errors rather than wrapping — see
+    /// [`Heap::map_int_add`] for why this errors instead of promoting.
+    fn int_add_checked(&self, old: Value, delta: i64) -> Result<Value, LispError> {
+        // A bignum already stored under the key is out of this operation's range
+        // too — it can only have got there through `assoc`, never through here.
+        let base = match old {
+            Value::Int(n) => n,
+            Value::BigInt(_) => return Err(int_add_range_err()),
+            _ => 0,
+        };
+        base.checked_add(delta)
+            .map(Value::int)
+            .ok_or_else(int_add_range_err)
+    }
+
+    fn champ_int_add(
+        &mut self,
+        id: MapId,
+        key: Value,
+        delta: i64,
+        hash: u64,
+        depth: u32,
+    ) -> Result<MapId, LispError> {
         let node = self.map_node(id);
         let is_collision = node.is_collision;
         let data_map = node.data_map;
@@ -87,18 +128,18 @@ impl Heap {
             match pos {
                 Some(i) => {
                     let old_v = self.map_node(id).data[i].1;
-                    let new_val = Value::int(old_v.as_int().unwrap_or(0) + delta);
+                    let new_val = self.int_add_checked(old_v, delta)?;
                     let mut new_data = self.map_node(id).data.clone();
                     let size = self.map_node(id).size;
                     new_data[i].1 = new_val;
-                    return self.alloc_map_node(MapNode {
+                    return Ok(self.alloc_map_node(MapNode {
                         size,
                         data_map: 0,
                         node_map: 0,
                         is_collision: true,
                         data: new_data,
                         children: SmallVec::new(),
-                    });
+                    }));
                 }
                 None => {
                     let new_val = Value::int(delta);
@@ -106,14 +147,14 @@ impl Heap {
                     let mut new_data = node.data.clone();
                     let size = node.size + 1;
                     new_data.push((key, new_val));
-                    return self.alloc_map_node(MapNode {
+                    return Ok(self.alloc_map_node(MapNode {
                         size,
                         data_map: 0,
                         node_map: 0,
                         is_collision: true,
                         data: new_data,
                         children: SmallVec::new(),
-                    });
+                    }));
                 }
             }
         }
@@ -125,18 +166,18 @@ impl Heap {
             let i = map_champ::rank(data_map, slot);
             let (existing_k, existing_v) = self.map_node(id).data[i];
             if self.equal(existing_k, key) {
-                let new_val = Value::int(existing_v.as_int().unwrap_or(0) + delta);
+                let new_val = self.int_add_checked(existing_v, delta)?;
                 let node = self.map_node(id);
                 let mut new_data = node.data.clone();
                 new_data[i].1 = new_val;
-                return self.alloc_map_node(MapNode {
+                return Ok(self.alloc_map_node(MapNode {
                     size: node.size,
                     data_map,
                     node_map,
                     is_collision: false,
                     data: new_data,
                     children: node.children.clone(),
-                });
+                }));
             }
             // Key absent — insert delta as new entry, splitting the slot.
             let other_hash = self.hash_value(existing_k);
@@ -158,33 +199,33 @@ impl Heap {
             new_data.remove(i);
             let mut new_children = node.children.clone();
             new_children.insert(child_pos, child_id);
-            return self.alloc_map_node(MapNode {
+            return Ok(self.alloc_map_node(MapNode {
                 size: node.size + 1,
                 data_map: new_data_map,
                 node_map: new_node_map,
                 is_collision: false,
                 data: new_data,
                 children: new_children,
-            });
+            }));
         }
 
         if node_map & bit != 0 {
             let j = map_champ::rank(node_map, slot);
             let old_child = self.map_node(id).children[j];
             let old_child_size = self.map_node(old_child).size;
-            let new_child = self.champ_int_add(old_child, key, delta, hash, depth + 1);
+            let new_child = self.champ_int_add(old_child, key, delta, hash, depth + 1)?;
             let new_child_size = self.map_node(new_child).size;
             let node = self.map_node(id);
             let mut new_children = node.children.clone();
             new_children[j] = new_child;
-            return self.alloc_map_node(MapNode {
+            return Ok(self.alloc_map_node(MapNode {
                 size: node.size + new_child_size - old_child_size,
                 data_map,
                 node_map,
                 is_collision: false,
                 data: node.data.clone(),
                 children: new_children,
-            });
+            }));
         }
 
         // Empty slot — insert key → delta.
@@ -194,14 +235,14 @@ impl Heap {
         let node = self.map_node(id);
         let mut new_data = node.data.clone();
         new_data.insert(new_data_pos, (key, new_val));
-        self.alloc_map_node(MapNode {
+        Ok(self.alloc_map_node(MapNode {
             size: node.size + 1,
             data_map: new_data_map,
             node_map,
             is_collision: false,
             data: new_data,
             children: node.children.clone(),
-        })
+        }))
     }
 
     /// True iff `id` names a node *this transient build allocated*, so it is

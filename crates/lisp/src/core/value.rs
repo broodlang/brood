@@ -180,6 +180,32 @@ pub fn dynamic_names() -> Vec<String> {
     names
 }
 
+/// Every symbol currently marked dynamic — the snapshot half of the pair
+/// [`restore_dynamics`] completes.
+///
+/// `%isolate` exists to run a thunk and then put the image back the way it was, but it
+/// swaps back only the global *binding* table. `DYNAMICS` is a process-wide static
+/// beside it, so `(%isolate (fn () (defdyn *q* 9)))` used to leave `*q*` marked dynamic
+/// while unbound — and that mark is not cosmetic: it makes the name permanently
+/// *ambient* for later namespace resolution (`macros::is_ambient`, so a later module's
+/// `(def *q* …)` stays bare instead of being qualified) and permanently exempt from the
+/// reserved-name check (`heap::is_sealed` excludes dynamics).
+pub fn dynamic_syms() -> Vec<Symbol> {
+    DYNAMICS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .copied()
+        .collect()
+}
+
+/// Replace the dynamic-mark set wholesale with `syms` — the restore half of
+/// [`dynamic_syms`]. Replaces rather than unions, so a mark *added* inside an isolate is
+/// dropped, which is the point.
+pub fn restore_dynamics(syms: Vec<Symbol>) {
+    *DYNAMICS.write().unwrap_or_else(|e| e.into_inner()) = syms.into_iter().collect();
+}
+
 // ----- handles into the Heap -----
 
 /// A handle is a packed `u64`: the two top bits tag the heap **region**, the

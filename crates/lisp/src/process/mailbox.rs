@@ -142,10 +142,17 @@ pub(super) struct Mailbox {
     /// since re-parked (a new deadline) or moved on. Without this, a server looping
     /// `(receive … (after ms …))` that is woken by `send` each iteration leaves a
     /// fresh entry on the TIMERS heap every iteration, none ever cancelled, each
-    /// firing a spurious wakeup when its long-past deadline finally comes due. Heap
-    /// growth is still bounded by the deadline horizon (stale entries are reaped at
-    /// their deadline, not before) — acceptable. The "spurious wakeups are harmless"
-    /// re-validation in `receive_match` stays as the backstop.
+    /// firing a spurious wakeup when its long-past deadline finally comes due.
+    ///
+    /// Reaping a stale entry only when its deadline comes due is not, on its own, a
+    /// useful bound: it bounds each entry's *lifetime* by the deadline horizon, so the
+    /// heap's size is bounded by **arm-rate × horizon**. That is the message rate — a
+    /// server looping `(receive … (after 3600000 …))` at 10k msg/s reaches ~36M dead
+    /// entries before the first comes due. So `super::timer::arm_timer` also *compacts*
+    /// the heap against this counter (see there); this gen is what makes both the
+    /// firing-time drop and the compaction able to tell a superseded entry from a live
+    /// one. The "spurious wakeups are harmless" re-validation in `receive_match` stays
+    /// as the backstop.
     pub(super) timer_gen: AtomicU64,
     /// The pid that spawned this process (`0` = none, i.e. the root). Written once before
     /// the mailbox is published to the registry and never mutated after, so `Relaxed` is
@@ -175,9 +182,24 @@ pub(super) enum Payload {
 pub(super) struct Envelope {
     pub(super) msg: Payload,
     /// Arrival sequence, assigned under the mailbox lock by [`MailboxState::push`].
-    /// Monotonic per mailbox, so the queue is always ordered by it — which is what lets
-    /// a `receive` pinned on a fresh `ref` binary-search to the first message that could
-    /// possibly carry that ref instead of walking the backlog (the receive-mark, ADR-195).
+    ///
+    /// **Invariant: `queue` is ALWAYS strictly increasing in `seq`.** This is what lets a
+    /// `receive` pinned on a fresh `ref` binary-search (`partition_point`) to the first
+    /// message that could possibly carry that ref instead of walking the backlog (the
+    /// receive-mark, ADR-195) — a `partition_point` over a predicate that is not actually
+    /// partitioned returns an arbitrary index, so a break in this ordering makes a pinned
+    /// receive **silently skip a matchable message**.
+    ///
+    /// Exactly three operations touch the queue, and all three preserve it:
+    /// - [`MailboxState::push`] appends with a strictly increasing `next_seq`;
+    /// - `queue.remove(i)` (the scan's optimistic pop / the match consume) drops one
+    ///   element and shifts the rest, which cannot reorder anything;
+    /// - [`reinsert_at_seq`] puts an optimistically-popped candidate back **at its
+    ///   seq-ordered position**, not merely at its recorded scan index — see there for
+    ///   why those two can differ.
+    ///
+    /// Nothing else may insert into `queue`. `debug_assert`s in `reinsert_at_seq` guard
+    /// the one non-obvious case.
     pub(super) seq: u64,
     #[cfg(feature = "dev-tools")]
     pub(super) trace: Option<Message>,
@@ -967,7 +989,15 @@ fn receive_match_timed(
                 // the dirty-scheduler carve-out (§7.4). Only a clean top-level receive
                 // captures (and can migrate).
                 if crate::process::in_capture_run() && crate::process::capture_top_level() {
-                    crate::core::sync::lock(&ctx.mailbox.state).scanned = i;
+                    {
+                        // Clamp: a matcher that ran a *consuming* nested `receive` can
+                        // leave the queue shorter than the scan index, and `scanned` past
+                        // the length means `park_on_receive`'s `queue.len() > scanned`
+                        // gate needs several more messages before it will re-run us — a
+                        // process that sleeps through the very message it is waiting for.
+                        let mut st = crate::core::sync::lock(&ctx.mailbox.state);
+                        st.scanned = i.min(st.queue.len());
+                    }
                     set_self_status(&ctx, ST_WAITING);
                     if let Some(d) = deadline {
                         let gen = ctx.mailbox.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1186,7 +1216,7 @@ fn scan_mailbox(
                 // An erroring matcher must not lose the candidate: put an
                 // optimistically-popped message back before propagating.
                 if let Some(m) = popped {
-                    reinsert_candidate(ctx, *i, m);
+                    let _ = reinsert_candidate(ctx, *i, m);
                 }
                 return Err(e);
             }
@@ -1224,25 +1254,67 @@ fn scan_mailbox(
             return Ok(Some(answer));
         }
         if let Some(m) = popped {
-            reinsert_candidate(ctx, *i, m);
+            // Resume from where the envelope actually landed, not from the stale recorded
+            // position: if a matcher-run nested `receive` shifted the queue under us, `*i`
+            // no longer names this message and advancing from it would either re-examine
+            // it or run off the end (leaving `scanned` past the queue length, which parks
+            // the process until *two* more messages arrive).
+            *i = reinsert_candidate(ctx, *i, m);
             optimistic = false; // one non-match → peek-in-place for the rest of the scan
         }
         *i += 1; // no clause matched — leave it queued, try the next message
     }
 }
 
-/// Put an optimistically-popped candidate back at its scan position. The index is
-/// clamped: a matcher that itself ran a nested `receive` (native-nested — a guard
-/// calling into arbitrary code) may have removed earlier messages during the
-/// unlocked window, leaving the recorded position past the end; clamping appends
-/// instead of panicking. (Queue order around such a nested consume was already
-/// perturbed before the optimistic-pop scheme — the scan index points at shifted
-/// content either way — so the clamp preserves the message, not a stronger
-/// ordering guarantee than the peek-era code had.)
-fn reinsert_candidate(ctx: &Ctx, i: usize, m: Envelope) {
-    let mut st = crate::core::sync::lock(&ctx.mailbox.state);
-    let idx = i.min(st.queue.len());
+/// Put an optimistically-popped candidate back **in seq order**, returning the index it
+/// landed at (the caller resumes its scan from there).
+///
+/// The obvious thing — insert at the recorded scan position `i` — is wrong, and used to
+/// be what this did (clamped to the queue length). The matcher runs with the mailbox lock
+/// **released**, and a matcher can run arbitrary code: a `receive` clause's `:when` guard
+/// is evaluated during the scan (`std/prelude/process.blsp`), and a guard that itself runs
+/// a *consuming* nested `receive` removes messages from this very queue during that
+/// window. If it consumes entries *ahead* of `i`, everything after them shifts down and
+/// position `i` no longer names this envelope's slot — it now names a message with a
+/// **higher** `seq`. Re-inserting there leaves the queue out of order, e.g. `[10, 12, 5,
+/// 13]`, and a later `receive` pinned on a fresh `ref` then runs `partition_point` over a
+/// predicate that is not partitioned (`[T, F, T, F]`), which is free to return an index
+/// past a matchable post-mark message. Nothing crashes: the reply is silently never seen
+/// and the caller times out — the exact failure mode [`recv_mark_enabled`]'s comment calls
+/// the hardest to attribute.
+///
+/// So restore the [`Envelope::seq`] invariant instead. The recorded position is checked
+/// first (O(1)) because it is right whenever nothing shifted, which is every scan that
+/// doesn't have a mailbox-consuming guard; only the perturbed case pays the search.
+fn reinsert_at_seq(st: &mut MailboxState, i: usize, m: Envelope) -> usize {
+    let seq = m.seq;
+    let len = st.queue.len();
+    // Is the recorded scan position still this envelope's seq-ordered slot?
+    let unshifted =
+        i <= len && (i == 0 || st.queue[i - 1].seq < seq) && (i == len || st.queue[i].seq > seq);
+    let idx = if unshifted {
+        i
+    } else {
+        // Sound because the queue is ordered by `seq` (the invariant this function is
+        // what maintains), so the predicate really is partitioned here.
+        st.queue.partition_point(|e| e.seq < seq)
+    };
     st.queue.insert(idx, m);
+    debug_assert!(
+        idx == 0 || st.queue[idx - 1].seq < seq,
+        "mailbox queue left out of seq order by a reinsert"
+    );
+    debug_assert!(
+        idx + 1 == st.queue.len() || st.queue[idx + 1].seq > seq,
+        "mailbox queue left out of seq order by a reinsert"
+    );
+    idx
+}
+
+/// [`reinsert_at_seq`] against the current process's mailbox, taking the lock.
+fn reinsert_candidate(ctx: &Ctx, i: usize, m: Envelope) -> usize {
+    let mut st = crate::core::sync::lock(&ctx.mailbox.state);
+    reinsert_at_seq(&mut st, i, m)
 }
 
 /// Block until a message beyond index `i` might be available, honouring `deadline`,
@@ -1297,6 +1369,18 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
 /// so we drop it without waking — lazy timer cancellation (see `Mailbox::timer_gen`).
 /// A no-op too if `send` already woke it. The process always re-validates its own
 /// deadline, so even a wakeup that slips through is harmless (at most one spurious).
+/// The park generation local process `pid`'s mailbox is currently on, or `None` if it is
+/// dead/unknown. A pending timer entry is **live** iff its stamped gen equals this — the
+/// same test [`wake_for_timeout`] applies at firing time, exposed so `super::timer`'s
+/// compaction can apply it early instead of leaving superseded entries on the heap until
+/// their deadlines come due. One relaxed load behind a sharded registry lookup; never
+/// takes the mailbox `state` lock, so it cannot deadlock against a sender.
+pub(super) fn current_timer_gen(pid: u64) -> Option<u64> {
+    REGISTRY
+        .get(pid)
+        .map(|mb| mb.timer_gen.load(Ordering::Relaxed))
+}
+
 pub(super) fn wake_for_timeout(pid: u64, gen: u64) {
     let mailbox = REGISTRY.get(pid);
     if let Some(mb) = mailbox {
@@ -1380,6 +1464,116 @@ fn set_self_status(ctx: &Ctx, status: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Seq ordering after a candidate is re-inserted — the invariant the receive-mark
+    /// (ADR-195) binary-searches on, and the one the clamped re-insert used to break.
+    ///
+    /// The interleaving: a `receive` scan resumed at index 3 (the root thread and a
+    /// native-nested receive both keep their scan index across a wait) and
+    /// *optimistically popped* that candidate; the matcher then ran with the mailbox lock
+    /// released, and a clause's `:when` guard did a **consuming nested `receive`**
+    /// (`std/prelude/process.blsp` evaluates guards during the scan, and `scan_mailbox`'s
+    /// own comment names this case). That consume shifted the queue, so the recorded scan
+    /// position no longer named this envelope's slot — it named a message with a *higher*
+    /// seq. Putting the candidate back there left `[4, 5, 3, 6]`, and a later `receive`
+    /// pinned on a fresh `ref` then ran `partition_point` over a predicate that is not
+    /// partitioned. Nothing crashes: it silently skips a matchable post-mark message and
+    /// the caller times out.
+    #[test]
+    fn a_consuming_matcher_cannot_leave_the_queue_out_of_seq_order() {
+        // Every mailbox seq the mark could take must skip only *pre-mark* messages —
+        // that is exactly what makes the `partition_point` in `scan_mailbox` sound.
+        fn assert_mark_skips_only_older(q: &VecDeque<Envelope>) {
+            for mark in 0..=8u64 {
+                let lo = q.partition_point(|e| e.seq < mark);
+                assert!(
+                    q.iter().take(lo).all(|e| e.seq < mark),
+                    "receive-mark {mark} skipped a message that could carry the pinned \
+                     ref (queue seqs {:?}, skipped to {lo})",
+                    q.iter().map(|e| e.seq).collect::<Vec<_>>()
+                );
+            }
+        }
+
+        // The exact state `tests/mailbox_order_test.blsp` reaches at runtime.
+        //
+        // Five queued messages, seq 0..4; the scan resumed at index 4 (a native-nested
+        // receive keeps its index across a wait) and optimistically popped that candidate.
+        let mb = Mailbox::new();
+        let mut st = crate::core::sync::lock(&mb.state);
+        for n in 0..5 {
+            st.push(Envelope::plain(Message::Int(n)));
+        }
+        let popped = st.queue.remove(4).expect("candidate at 4");
+        assert_eq!(popped.seq, 4);
+        // Unlocked window: the guard's nested `receive` consumed the three oldest
+        // messages, and the request it fired brought its reply in as seq 5.
+        for _ in 0..3 {
+            st.queue.pop_front();
+        }
+        st.push(Envelope::plain(Message::Int(5)));
+        assert_eq!(
+            st.queue.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![3, 5]
+        );
+
+        // What the clamped re-insert did — kept here so this test states the bug, not
+        // only the fix. The scan index (4) is now past the end, so it clamped to 2 and
+        // produced `[3, 5, 4]`; one more arrival makes it `[3, 5, 4, 6]`, on which
+        // `partition_point(seq < 5)` sees `[T, F, T, F]` and returns 3, stepping over
+        // the seq-5 reply at index 1. `tests/mailbox_order_test.blsp` asserts that
+        // user-visible consequence; asserted here is the invariant itself, which does
+        // not depend on which index a binary search over an unpartitioned predicate
+        // happens to pick.
+        {
+            let mut clamped: VecDeque<u64> = st.queue.iter().map(|e| e.seq).collect();
+            clamped.insert(4usize.min(clamped.len()), popped.seq);
+            assert_eq!(clamped, vec![3, 5, 4]);
+            assert!(
+                clamped
+                    .iter()
+                    .zip(clamped.iter().skip(1))
+                    .any(|(a, b)| a > b),
+                "the clamped re-insert is only a bug because it breaks seq order — if \
+                 this stops holding, rebuild the case, don't delete it"
+            );
+        }
+
+        // The fix: re-insert at the seq-ordered position instead, and report where it
+        // landed so the scan resumes from there rather than from the stale index.
+        let idx = reinsert_at_seq(&mut st, 4, popped);
+        st.push(Envelope::plain(Message::Int(6)));
+        assert_eq!(
+            st.queue.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![3, 4, 5, 6],
+            "re-insert must restore the Envelope::seq ordering"
+        );
+        assert_eq!(
+            idx, 1,
+            "the scan resumes from where the candidate actually landed"
+        );
+        assert_mark_skips_only_older(&st.queue);
+    }
+
+    /// The unperturbed path (every scan without a mailbox-consuming matcher): the
+    /// recorded index is still the right slot, it is taken without a search, and the
+    /// queue is unchanged from before the pop.
+    #[test]
+    fn reinsert_at_the_unshifted_position_is_a_no_op() {
+        let mb = Mailbox::new();
+        let mut st = crate::core::sync::lock(&mb.state);
+        for n in 0..4 {
+            st.push(Envelope::plain(Message::Int(n)));
+        }
+        for i in 0..4 {
+            let popped = st.queue.remove(i).expect("candidate");
+            assert_eq!(reinsert_at_seq(&mut st, i, popped), i);
+            assert_eq!(
+                st.queue.iter().map(|e| e.seq).collect::<Vec<_>>(),
+                vec![0, 1, 2, 3]
+            );
+        }
+    }
 
     /// The lazy-cancellation core (Fix 1): each park-with-deadline bumps the
     /// mailbox's `timer_gen` and stamps its timer entry with the new value; the

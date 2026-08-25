@@ -1,0 +1,74 @@
+;;; Regression guard: a leaf-spliced JIT frame must never be read as the small layout.
+;;;
+;;; An arm that tiers has two possible frame layouts — the small body's (`nslots`) and,
+;;; once the deferred upgrade installs, a leaf-callee-spliced derivation's
+;;; (`inline_nslots`, ADR-210). On a deopt or preempt the runtime must know which of the
+;;; two the live frame was built to, because each has its journal at its own slot. It
+;;; decides **by frame size** (`jit_frame_layout`), since the `inline_installed` flag is
+;;; flipped by `jit_tier` between the sizing and the deopt (KI-26).
+;;;
+;;; That test is sound only while the two sizes actually differ, and they did not:
+;;; `leaf_nslots` was `d.nslots.max(nslots_total)`, which comes out *equal* whenever the
+;;; spliced callee needs no slot beyond the caller's own — `(dec n)` is exactly that
+;;; shape. The pair was then unseparable in the other direction too: splicing removes the
+;;; residual `Call`, so the derivation becomes `pure_self` and declines to journal
+;;; (`ckpt_slot == u32::MAX`), while the small body — which still has the call — journals
+;;; at a real slot. The old "is it leaf *and* journalled?" test answered "no", fell back
+;;; to the small layout's slot, and decoded whatever the spliced layout kept there.
+;;;
+;;; What it kept there was the live loop counter. A preempt read `n` as a journal word —
+;;; resume ip `n >> 16`, operand depth `n & 0xFFFF` — and the loop resumed at a garbage
+;;; instruction with thousands of phantom operands. `(sum-down 200000 0)` returned
+;;; 6251217600 instead of 20000100000 on the default build (values varied run to run with
+;;; where the background compile landed), and at 400000 it surfaced as
+;;; `type error: -: expected number, got nil` blaming `dec` — a prelude function the
+;;; caller never mis-called.
+;;;
+;;; The fix reserves one slot so a leaf layout is *strictly* larger than the small one,
+;;; making the size test mean what every comment around it already claimed. These cases
+;;; need the iteration count to be high enough that the deferred leaf compile installs
+;;; mid-activation, which is why they run in the hundreds of thousands rather than the
+;;; usual hundreds. They pass on every tier; before the fix the default build failed and
+;;; `BROOD_TIER=1` / `BROOD_NO_LEAF_INLINE=1` / `BROOD_NO_DEOPT_RESUME=1` passed.
+
+(defmodule jit-leaf-frame-layout-test (:use test))
+
+;; The canonical shape: a self-tail loop whose recursive call passes the result of a
+;; one-argument leaf callee. `dec` is spliceable and needs no extra slot.
+(defn- sum-down (n acc) (if (<= n 0) acc (sum-down (dec n) (+ acc n))))
+
+;; A user-defined leaf, to prove this is about the splice and not about `dec` specifically.
+(defn- my-inc (x) (%add x 1))
+(defn- count-up (i n acc) (if (>= i n) acc (count-up (my-inc i) n (+ acc i))))
+
+;; Two leaf callees in one body.
+(defn- both-ends (n acc) (if (<= n 0) acc (both-ends (dec n) (inc acc))))
+
+(describe "leaf-spliced frame layout"
+  (test "a long self-tail loop through a spliced leaf sums correctly"
+    ;; n(n+1)/2 for n = 200000. Wrong by ~2/3 before the fix.
+    (is (= 20000100000 (sum-down 200000 0))))
+
+  (test "the same loop is correct past the point it used to fail hard"
+    ;; At 400000 the garbage resume produced `nil` where a number belonged, so this
+    ;; case guards the crash as well as the wrong answer.
+    (is (= 80000200000 (sum-down 400000 0))))
+
+  (test "a user-defined spliceable leaf behaves the same"
+    (is (= 44999850000 (count-up 0 300000 0))))
+
+  (test "two spliced leaves in one body"
+    (is (= 300000 (both-ends 300000 0))))
+
+  (test "the answer does not depend on how long the loop ran"
+    ;; The corruption needed one *long* activation, so a size sweep is the shape that
+    ;; catches it: every length must agree with the closed form. Sub-100k lengths were
+    ;; already correct before the fix, which is exactly why the suite missed this.
+    (is (= (list 500500 50005000 5000050000 20000100000)
+          (map (fn (n) (sum-down n 0)) (list 1000 10000 100000 200000)))))
+
+  (test "std/repeat, which is this shape, builds the full sequence"
+    ;; `repeat-acc` in std/prelude/seq.blsp is `(repeat-acc (dec n) x (cons x acc))` —
+    ;; the same spliced-leaf self-tail loop. It returned 28033 of 200000 elements.
+    (is (= 200000 (count (repeat 200000 :a))))
+    (is (= 200000 (string/length (apply str (repeat 200000 "x")))))))

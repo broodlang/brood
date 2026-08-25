@@ -128,11 +128,11 @@ fn server_style_receive_loop_stays_bounded() {
     );
 }
 
-/// `(gc-stats)` observability (Tier-1; `docs/memory-review.md` §7). A tail loop
+/// `(dev/gc-stats)` observability (Tier-1; `docs/memory-review.md` §7). A tail loop
 /// that churns garbage at the depth-1 eval safepoint triggers automatic Stage-B
 /// collection; afterwards the per-process counters must reflect it: at least one
 /// collection, more objects reclaimed than survive, and a positive threshold.
-/// Proves `arena_flip` bumps the counters and `(gc-stats)` reads them back —
+/// Proves `arena_flip` bumps the counters and `(dev/gc-stats)` reads them back —
 /// not just that the keys exist.
 #[test]
 fn gc_stats_counts_automatic_collections() {
@@ -148,7 +148,7 @@ fn gc_stats_counts_automatic_collections() {
               (let (junk (map inc (range 200)))
                 (churn (- n 1) (+ acc (count junk))))))
         (churn 2000 0)
-        (gc-stats)
+        (dev/gc-stats)
     "#;
     let v = interp.eval_str(prog).expect("churn program errored");
     let stats = interp.print(v);
@@ -186,10 +186,10 @@ fn gc_stats_counts_automatic_collections() {
     );
 }
 
-/// `(gc-collect)` forces a collection on demand and reports the post-collection
+/// `(dev/gc-collect)` forces a collection on demand and reports the post-collection
 /// stats (Tier-1 observability). Allocate a batch of garbage *without* crossing
 /// the GC floor (so no automatic safepoint collection fires — `:collections` is 0),
-/// then call `(gc-collect)` and assert it (a) ran exactly the collection we asked
+/// then call `(dev/gc-collect)` and assert it (a) ran exactly the collection we asked
 /// for and (b) reclaimed the dead batch. This proves the forced collect is a real
 /// collection (not a no-op) and is safe to invoke as a leaf builtin at depth.
 #[test]
@@ -203,7 +203,7 @@ fn gc_collect_forces_a_collection() {
         (build 2000 nil)
         ;; Nothing above is retained (the list is discarded), so a forced collect
         ;; should reclaim it. Returns the post-collection gc-stats map.
-        (gc-collect)
+        (dev/gc-collect)
     "#;
     let v = interp.eval_str(prog).expect("gc-collect program errored");
     let stats = interp.print(v);
@@ -219,7 +219,7 @@ fn gc_collect_forces_a_collection() {
     );
 }
 
-/// `(gc-trace on/off)` toggles per-collection trace logging and reports state.
+/// `(dev/gc-trace on/off)` toggles per-collection trace logging and reports state.
 /// We can't capture the child-thread stderr the trace prints to from here, so we
 /// assert the *observable contract*: the query/set protocol returns the right
 /// booleans (no arg = current state; truthy arg = set + return new state), and
@@ -228,12 +228,12 @@ fn gc_collect_forces_a_collection() {
 fn gc_trace_toggles_and_reports_state() {
     let mut interp = Interp::new();
     let prog = r#"
-        [(gc-trace)         ;; default: off
-         (gc-trace true)    ;; turn on -> true
-         (gc-trace)         ;; still on
-         (gc-collect)       ;; a traced collection (output goes to stderr)
-         (gc-trace false)   ;; turn off -> false
-         (gc-trace)]        ;; still off
+        [(dev/gc-trace)         ;; default: off
+         (dev/gc-trace true)    ;; turn on -> true
+         (dev/gc-trace)         ;; still on
+         (dev/gc-collect)       ;; a traced collection (output goes to stderr)
+         (dev/gc-trace false)   ;; turn off -> false
+         (dev/gc-trace)]        ;; still off
     "#;
     let v = interp.eval_str(prog).expect("gc-trace program errored");
     let out = interp.print(v);
@@ -287,7 +287,7 @@ fn collects_below_the_outermost_eval() {
         ;; a lazy O(1) Range value and would churn nothing).
         (defn churn (n acc)
           (if (= n 0)
-              (gc-stats)
+              (dev/gc-stats)
               (let (junk (map inc (range 200)))
                 (churn (- n 1) (+ acc (count junk))))))
         ;; `try` runs `churn` via a thunk apply, so its loop body sits at eval
@@ -394,7 +394,7 @@ fn sends_closure_capturing_closure_without_crashing() {
 /// literal would blow the native stack at the next `runtime_collect`. That path is
 /// now reachable because RT compaction runs at eval auto-safepoints (ADR-091), so
 /// the spine was made iterative (mirroring the LOCAL `flush_pair`). This forces a
-/// RUNTIME collection via `(runtime-collect)` over a promoted 100k-element list and
+/// RUNTIME collection via `(dev/runtime-collect)` over a promoted 100k-element list and
 /// asserts it survives intact — a stack overflow here is the regression. Run it
 /// under `BROOD_GC_VERIFY=1` for the extra walk over the evacuated graph.
 #[test]
@@ -411,7 +411,7 @@ fn runtime_collect_iterates_long_promoted_list_spine() {
         ;; uniquely owned and the collect actually runs (:ran true), driving
         ;; flush_rt_pair down the whole spine. The pre-fix recursive flush
         ;; overflowed the native stack at this depth.
-        (def stats (runtime-collect))
+        (def stats (dev/runtime-collect))
         ;; Read the evacuated list back: its length and endpoints must be intact,
         ;; proving the iterative spine rebuilt every cell and wired the cdrs right.
         (list (count big) (first big) (last big) (get stats :ran))

@@ -1,0 +1,204 @@
+;; Front-end round-trip regressions — reader, printer, quasiquote, and the
+;; `quote`/`quasiquote`/`def` special forms.
+;;
+;; What every case here has in common: the old behaviour produced a **silently
+;; wrong value** (or ran a side effect it should not have) instead of an error.
+;; A printed value that re-reads as something else, a template that evaluates
+;; what it was asked to quote, and a stray form that vanishes are all worse than
+;; a loud failure — so each test pins the shape, not just the absence of a crash.
+(defmodule syntax-roundtrip-test (:use test))
+
+;; Build the source text `((( … 1 … )))` with `n` levels of nesting.
+(defn nest-str (n s) (if (= n 0) s (nest-str (- n 1) (str "(" s ")"))))
+;; Build the *value* `((( … 1 … )))` with `n` levels — a value can be deeper
+;; than any reader could parse, which is what the printer's cap is for.
+(defn nest-list (n acc) (if (= n 0) acc (nest-list (- n 1) (list acc))))
+
+(describe "quasiquote — set templates"
+  (test "a set template QUOTES its elements, exactly as a list/vector template does"
+    ;; `qq_elem` had no set arm, so `#{…}` was emitted verbatim and the evaluator
+    ;; evaluated the elements: with `a` bound to 5, `` `#{a} `` gave `#{5}` while
+    ;; `` `(a) `` and `` `[a] `` correctly gave the symbol.
+    (let (a 5)
+      (assert= #{'a} `#{a})
+      (assert= '(a) `(a))
+      (assert= ['a] `[a])))
+
+  (test "~unquote inside a set template evaluates in place"
+    ;; This used to die with the baffling "unbound symbol: unquote" — the verbatim
+    ;; set carried an unexpanded `(unquote x)` into the evaluator.
+    (let (x 2)
+      (assert= #{1 2} `#{1 ~x})))
+
+  (test "a set template nested inside a list template expands too"
+    (let (x 7)
+      (assert= (list #{'a 7}) `(#{a ~x}))))
+
+  (test "an empty set template is still a set"
+    (assert= #{} `#{}))
+
+  (test "~@ splicing into a set is refused, as it is for a map"
+    ;; Splicing into an unordered collection is ill-defined — the point is that it
+    ;; says so instead of building something odd.
+    (assert= :error
+      (try (eval (list 'quasiquote (read-string "#{~@xs}"))) (catch e :error))))
+
+  (test "auto-gensym works inside a set template"
+    ;; `has_autogensym` skipped sets, so a set template was expanded STATICALLY
+    ;; and its `x#` renamed once — every evaluation then shared one symbol.
+    ;; Each evaluation must mint its own.
+    (let (a `#{x# 1}
+          b `#{x# 1})
+      (is (not (= a b))) ; a fresh gensym per evaluation
+      (assert= 2 (count a))
+      (is (not (contains? a 'x#)))))) ; and not the literal symbol `x#`
+(describe "printer — a symbol whose first character is a reader dispatch char"
+  (test "^ leads a pin form, so a symbol named ^foo must print bar-quoted"
+    ;; `^` and `#` are *dispatch* characters at form start while correctly not
+    ;; being atom delimiters, so `^foo` printed bare re-read as `(%pin foo)` —
+    ;; a different value, with no error anywhere.
+    (let (s (symbol "^foo"))
+      (assert= "|^foo|" (pr-str s))
+      (assert= s (read-string (pr-str s)))))
+
+  (test "# is the dispatch character, so a symbol named #foo must print bar-quoted"
+    (let (s (symbol "#foo"))
+      (assert= "|#foo|" (pr-str s))
+      (assert= s (read-string (pr-str s)))))
+
+  (test "only the FIRST character dispatches — mid-atom ^ and # stay bare"
+    (assert= "a^b" (pr-str (symbol "a^b")))
+    (assert= "a#" (pr-str (symbol "a#")))
+    (assert= (symbol "a^b") (read-string (pr-str (symbol "a^b"))))
+    (assert= (symbol "a#") (read-string (pr-str (symbol "a#")))))
+
+  (test "keywords are unaffected — the : has already committed the token"
+    (assert= ":^k" (pr-str (keyword "^k")))
+    (assert= (keyword "^k") (read-string (pr-str (keyword "^k"))))))
+
+(describe "reader and printer agree on nesting depth"
+  (test "a form at the reader's MAXIMUM nesting depth still prints readably"
+    ;; The reader accepts 256 levels; the printer used to elide at 256 *too*,
+    ;; which replaced the innermost element with `…` — and `…` re-reads as a
+    ;; symbol, so a form the reader had just accepted printed to a different
+    ;; value with no error. (255 levels always round-tripped, which is what made
+    ;; this an off-by-one rather than an obvious break.)
+    (let (src (nest-str 256 "1")
+          v (read-string src))
+      (assert= src (pr-str v))
+      (assert= v (read-string (pr-str v)))))
+
+  (test "one level past the cap is a clean reader error, not a crash"
+    (assert= :parse-error
+      (try
+        (do (read-string (nest-str 257 "1")) :read-ok)
+        (catch e :parse-error))))
+
+  (test "a value deeper than the reader can parse prints UNreadably, not as a fake symbol"
+    ;; The cap itself is right — printing a 100k-deep value must not overflow the
+    ;; native stack. What it must not do is emit a truncation that reads back as
+    ;; data, so readable output uses the unreadable `#<deep>` marker.
+    (let (deep (nest-list 400 1)
+          p (pr-str deep))
+      (is (not (nil? (index-of p "#<deep>"))))
+      (assert= :parse-error (try (do (read-string p) :read-ok) (catch e :parse-error)))))
+
+  (test "the human (display) form keeps the compact ellipsis"
+    (is (not (nil? (index-of (str (nest-list 400 1)) "…"))))))
+
+(describe "quote and quasiquote take at most one form"
+  ;; Built as data and `eval`ed so the malformed shapes are values, not source
+  ;; the file's own compile pass has to survive.
+  (test "(quasiquote a b) raises rather than returning a and dropping b"
+    ;; `quote` grew this rejection so a stray form can't vanish without a peep;
+    ;; quasiquote had the same trap and silently returned `a`.
+    (assert= :error (try (eval (list 'quasiquote 'a 'b)) (catch e :error))))
+
+  (test "quote does the same"
+    (assert= :error (try (eval (list 'quote 'a 'b)) (catch e :error))))
+
+  (test "the degenerate no-operand forms agree with each other, and with (do)/(if)"
+    ;; Nothing is being *dropped* here, so both follow the house rule for a
+    ;; missing operand (tests/malformed_test.blsp §degenerate special forms).
+    (assert= nil (eval (list 'quote)))
+    (assert= nil (eval (list 'quasiquote)))
+    (assert= nil (eval (list 'do)))
+    (assert= nil (eval (list 'if))))
+
+  (test "the well-formed one-argument forms are untouched"
+    (assert= 'a (eval (list 'quote 'a)))
+    (assert= '(1 2) (eval (list 'quasiquote (list 1 2))))))
+
+(describe "def checks the name before it runs the value"
+  (test "a reserved-name def does NOT run its right-hand side"
+    ;; The name is fully known before the value is evaluated, so a rejected `def`
+    ;; must not have fired its side effects first. (Its own global name — tests
+    ;; run concurrently in separate processes over one shared global table.)
+    (assert= :error
+      (try
+        (eval '(def map (do (def def-rhs-must-not-run 1) 2)))
+        (catch e :error)))
+    (is (not (bound? 'def-rhs-must-not-run))))
+
+  (test "an ordinary def still evaluates its value"
+    (eval '(def def-rhs-ordinary 3))
+    (assert= 3 (eval 'def-rhs-ordinary))))
+
+(describe "reader diagnostics for a misplaced dot"
+  (test "EOF after a dotted tail is INCOMPLETE input, not a syntax error"
+    ;; A REPL/editor keys its continuation prompt off E0002; this path used to
+    ;; return a plain parse error (with a message that described the wrong
+    ;; problem — the form after `.` was given, the close was missing).
+    (let (e (try (read-string "(1 . 2") (catch e e)))
+      (assert= "E0002" (get e :code)))
+    ;; the same as every other unclosed delimiter
+    (assert= "E0002" (get (try (read-string "(1 2") (catch e e)) :code)))
+
+  (test "a genuinely malformed dotted list is still a hard error"
+    (assert= :error (try (do (read-string "(1 . 2 3)") :ok) (catch e :error))))
+
+  (test "a lone . inside a vector/map/set literal is an error, not the symbol ."
+    ;; `[1 . 2]` used to read as a THREE-element vector whose middle element was
+    ;; the symbol `.`, with no diagnostic at all.
+    (assert= :error (try (do (read-string "[1 . 2]") :ok) (catch e :error)))
+    (assert= :error (try (do (read-string "{:a . 1}") :ok) (catch e :error)))
+    (assert= :error (try (do (read-string "#{1 . 2}") :ok) (catch e :error))))
+
+  (test "the symbol . itself is still writable, bar-quoted"
+    (assert= (symbol ".") (read-string "|.|"))
+    (assert= (symbol ".") (read-string (pr-str (symbol "."))))))
+
+;; Worker fns for the cross-process block below. Distinct `sr-` names so the
+;; isolated group's private globals copy can't collide with anything else.
+(defn sr-build (parent x) (send parent `#{a ~x}))
+(defn sr-spawn (parent n)
+  (when (> n 0) (spawn (sr-build parent n)) (sr-spawn parent (- n 1))))
+(defn sr-collect (got total acc)
+  (if (= got total) acc (sr-collect (+ got 1) total (receive (s (cons s acc))))))
+
+(describe "set templates across processes"
+  :isolated
+  ;; A set a template built has to survive `send`'s deep copy between per-process
+  ;; heaps (`to_message`/`from_message` plus promote/freeze) and still print and
+  ;; re-read as itself in the receiving heap.
+
+  (test "a set a worker built from a template arrives intact"
+    ;; `me` is bound in the PARENT — `(self)` inside the spawn form would be the
+    ;; child's own pid, and the message would never come back.
+    (let (me (self))
+      (spawn (sr-build me 7))
+      (assert= #{'a 7} (receive))))
+
+  (test "many workers each build one, and every one round-trips through the printer"
+    (sr-spawn (self) 20)
+    (let (all (sr-collect 0 20 '()))
+      (assert= 20 (count all))
+      (is (every? (fn (s) (contains? s 'a)) all))
+      (is (every? (fn (s) (= s (read-string (pr-str s)))) all)))))
+
+(describe "an improper argument list is reported like every other call-shape error"
+  (test "it carries a source position and a hint"
+    (let (e (try (eval '(list 1 . 2)) (catch e e)))
+      (assert= "improper argument list in call" (get e :message))
+      (is (not (nil? (get e :line))))
+      (is (not (nil? (get e :col)))))))

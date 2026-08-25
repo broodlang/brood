@@ -102,8 +102,9 @@
 ;;     need renaming, so it is opt-in rather than never).
 
 (def- *def-heads*
-  ["defn" "defn-" "def" "def-" "defmacro" "defdyn" "defrecord" "defability" "defmodule"
-   "defprocess" "defbehaviour" "defalias"])
+  ["defn"
+    "defn-" "def" "def-" "defmacro" "defdyn" "defrecord" "defability" "defmodule" "defprocess"
+    "defbehaviour" "defalias"])
 
 ;; Node shapes `parse-source` produces (all vectors):
 ;;   leaf       [:symbol "foo"] [:str "\"…\""] [:comment "; …\n"] [:whitespace " "] [:int "1"]
@@ -185,17 +186,20 @@
         else
           (let (sigil (get *wrapper-sigils* kind))
             (if (nil? sigil)
-              (error "codemod: unknown CST node kind " (pr-str kind)
+              (error "codemod: unknown CST node kind "
+                (pr-str kind)
                 " — add it to *wrapper-sigils* (or *container-kinds*); emitting it blind"
                 " would silently drop source text")
               (str sigil
-                (rename-node payload old new mode
+                (rename-node payload
+                  old
+                  new
+                  mode
                   (cond
                     (includes? [:unquote :splice] kind) false
                     (includes? [:quote :quasi] kind) true
                     else in-quote?)
-                  false)))))))
-  )
+                  false))))))))
 
 (defn- open-delim
   (kind)
@@ -214,8 +218,7 @@
     (includes? [:map :set] kind) "}"
     else ""))
 
-(defn cst-rename-text
-  (text old new &optional mode)
+(defn cst-rename-text (text old new &optional mode)
   "`text` with the symbol `old` renamed to `new`, rewriting ONLY symbol tokens — never
 a docstring, a `;` comment, or any other leaf. `mode` is `:all` (default — every symbol
 reference and definition outside quoted data), `:refs-only` (leave the `defn`/`def` head
@@ -224,8 +227,7 @@ definition head), or `:in-quote` (also rewrite symbols inside `(quote …)`/`'�
 Lossless: an unmatched file comes back byte-identical."
   (rename-kids (node-payload (reflect/parse-source text)) old new (or mode :all) false))
 
-(defn cst-rename
-  (old new &optional mode)
+(defn cst-rename (old new &optional mode)
   "Apply `cst-rename-text` across the project's own .blsp sources — the context-aware
 counterpart to `rename`. Prints each changed file and returns the count."
   (let (changed (filter (fn (f) (not (nil? f)))
