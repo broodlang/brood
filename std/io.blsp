@@ -57,6 +57,15 @@ Your own port type is a `defrecord` plus an `impl Port` for it — `write`,
 ;; working unchanged.
 (impl Port :fn (write [f s] (f s)))
 
+;; A NATIVE 1-arg sink is a port too. The prelude's default `*out*`/`*err*` are the
+;; primitives `%write-out`/`%write-err`, whose `type-of` is `:native`, not `:fn` — so
+;; without this `(io/port? *err*)` was false for the very ports the language ships with.
+;; That made `(io/puts "…" :to *err*)` decline the target and print `:to #<native
+;; %write-err>` as two more values. Every test passed anyway, because `with-err-str`
+;; rebinds `*err*` to a Brood closure, which is `:fn` — the default was the broken case
+;; and the tests never exercised it.
+(impl Port :native (write [f s] (f s)))
+
 (defn port? (x)
   "True if `x` can be written to — it has a `Port` impl (a 1-arg sink fn, a port record,
 or your own type). The check a function taking a port can branch on instead of letting
