@@ -3191,3 +3191,24 @@ meant to cover "a function" needs both impls, and nothing warns when it covers o
 result is a silently-declined dispatch with every binding present — the same failure shape the
 stdimage boot-install note describes ("defines its bindings and evaluates NOTHING… the failure
 type-checks perfectly clean").
+
+## 2026-08-25 — the same one-line fix, arrived at twice
+
+The `Port :native` fix above landed twice within the hour: here, from three red `nest` tests
+after merging the `io/` wave, and upstream as `2b6b1672 fix(io): the ports the language ships
+with were not ports`. Identical line, `(impl Port :native (write [f s] (f s)))`. Git merged both
+additions without a conflict — they were in different places in the file — so the merged tree
+briefly had **two** impls of the same op for the same identity, which is a last-wins collision
+rather than an error. De-duplicated by hand, keeping upstream's comment.
+
+Worth recording because the two routes to it found different halves of the story. This side had
+"which call sites broke" (every `:to *err*` in the stdlib: log, the test runner, supervisor,
+repl, telemetry, format) and "what surfaced it" (a checker test asserting on warnings read from
+stderr saw none). Upstream had the sharper question — **why did every test pass?** — and its
+answer: `with-err-str` rebinds `*err*` to a Brood closure, which *is* a `:fn`, so the whole
+capture-based test suite only ever exercised the working case. The shipped default was the one
+nothing tested.
+
+That is the generalisable bit. A test that installs its own double to observe an effect is not
+testing the default path, and for `*out*`/`*err*` the default path is the entire product. Both
+comments are now in `std/io.blsp`; neither alone tells you to go look at the default.
