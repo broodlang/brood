@@ -2824,3 +2824,57 @@ same holds on the server-died path. `%ref-deactivate` is deliberately delivery-o
 messages are untouched, like `demonitor` without `flush` — so the flush and the alias compose
 rather than overlap. Guard: `tests/ref_alias_test.blsp`, with both delivery paths
 sabotage-verified separately, plus the eviction boundary and the end-to-end late-reply case.
+
+## 2026-08-25 — KI-56: bounding the L1 copy, and why counting nodes was not a bound
+
+The L1 local-send fast path copies a message straight into a **parked** receiver's heap while
+holding that receiver's mailbox mutex. The lock is not incidental to the copy — it is what hands
+us the parked process and therefore the exclusive `&mut` on its heap — so the hold is proportional
+to the message, and a large one stalls every unrelated operation on that mailbox. Measured with a
+`%mailbox-size` probe (a pure lock-acquire, zero message work, so a stall can only be lock wait):
+p99 **1 106 µs at ~80 KB** and p50 **5 011 µs at ~1.6 MB**, against a wire path flat at 4–10 µs
+across a 500× payload range, because its heavy work happens outside the lock.
+
+ADR-245 takes the fix that leaves the lock discipline alone: **bound the copy** and decline past
+the bound, falling through to the wire path. Moving the copy out of the lock was already rejected
+on soundness — `shutdown_runtime_parked` reaps parked waiters, and during the window the process
+is in neither place.
+
+**The first cut was wrong in an instructive way.** Charging one unit per heap node as the walk
+visits it *looks* like a bound, and it measured p99 **243 µs** at ~1.6 MB — 26× better than
+uncapped, and still 45× worse than the wire path it was supposed to match. The reason is that
+every container arm materialises before it descends: `src.vector(id).to_vec()` copies the entire
+element array, and `map_entries` / `set_elems` / `list_to_vec` do the same. The O(n) cost was paid
+under the lock and only *then* declined. A per-node charge bounds the recursion, not the work.
+
+Each kind now declines **before** materialising — `len()` for a vector, `map_size` for a map
+(doubled, for key and value) and a set, `range_len` for a range, and a bounded spine walk for a
+cons list, the one kind with no O(1) length. That is worth 45× on its own:
+
+| payload | uncapped p99 | per-node only | + early-out | wire p99 |
+|---|---|---|---|---|
+| ~78 KB | 89.7 µs | 23.1 µs | **3.2 µs** | 3.0 µs |
+| ~1.6 MB | 1 875 µs | 242.5 µs | **5.4 µs** | 7.7 µs |
+| ~3.9 MB | 13 029 µs | 576.7 µs | **5.7 µs** | 7.7 µs |
+
+The ~8 KB row does not move at all, which is the point — below the budget nothing happens. The
+A/B is unusually clean: `BROOD_L1_BUDGET` is a runtime flag, so both arms are the *same binary*
+and nothing but the cap can differ.
+
+On throughput the honest answer is **no resolvable difference**: capped read +2.9 % and +9.0 % at
+10- and 100-element payloads (best-of-9, 4 clients), against a same-config base-vs-base spread of
+6.4–9.4 % and 2.8–14.5 % on the same box. Neither clears `max(5 %, 2 × floor)`, so this is not
+evidence of a cost and not evidence of none.
+
+Two details worth keeping. An early-out returns before spending anything, so it marks the budget
+negative explicitly — the *sign* is how `try_deliver_local` tells "too big" from "a value kind the
+copier does not handle", and `BROOD_L1_STATS=1` now reports them separately. And the budget counts
+nodes only because no node carries an unbounded payload: a string at or above
+`SHARED_BLOB_THRESHOLD` crosses by handle, never memcpy'd, so only a sub-threshold string is ever
+copied — a `const _` assertion fails the build if that threshold is ever raised out from under the
+assumption. Writing the test is what found that the string-payload charge I had first added was
+**dead code**.
+
+KI-56's second instance — selective-receive's peek-in-place branch calling `from_message` under
+the lock — stays open and unmeasured. This entry exists because a plausible claim about the send
+side turned out half wrong; fixing the receive side blind would repeat the mistake.

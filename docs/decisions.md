@@ -16229,3 +16229,77 @@ deliberately delivery-only — already-queued messages are untouched, like `demo
 `flush` — so the flush and the alias compose rather than overlap. Guard:
 `tests/ref_alias_test.blsp` (both delivery paths sabotage-verified separately, plus the
 eviction boundary and the end-to-end late-reply case).
+
+## ADR-245 — The L1 local-send copy is bounded, not relocated
+
+**Context.** The L1 fast path (`try_deliver_local`) copies a message straight from the
+sender's heap into a **parked** receiver's, skipping the `Value → Message → Value` round
+trip. It does that copy while holding the receiver's mailbox mutex, and that is not an
+oversight: the lock is what hands us the parked receiver's `Box<Process>`, and therefore
+the exclusive `&mut` on its heap that makes the copy sound at all. The same quiescence
+`trim_parked` relies on.
+
+So the lock hold is proportional to the message. KI-56 measured what that costs an
+*unrelated* operation on the same mailbox — a `%mailbox-size` probe, which is a pure
+lock-acquire with zero message work, so any stall it sees can only be lock wait:
+
+| payload | L1 p50 | L1 p99 | wire p50 | wire p99 |
+|---|---|---|---|---|
+| ~8 KB | 4.8 µs | 11 µs | 4.4 µs | 7.5 µs |
+| ~80 KB | 4.9 µs | **1 106 µs** | 4.9 µs | 8.7 µs |
+| ~1.6 MB | **5 011 µs** | 13 994 µs | 7.3 µs | 15.0 µs |
+
+The wire arm is flat across a 500× payload range, because its heavy work — `to_message` —
+happens *outside* the lock.
+
+**The rejected fix.** Move the copy out of the lock: take the waiter, release, copy,
+re-acquire. This is unsound and was already rejected once on that ground —
+`shutdown_runtime_parked` reaps parked waiters, and during the window the process is in
+neither place, so shutdown would skip it. Any repair means changing what `st.waiter` means,
+which is load-bearing for the whole fast path.
+
+**Decision.** Leave the copy where it is and **bound it**. `copy_cross_heap` takes a budget
+in work units — one heap node is one unit — decremented as it walks, declining (`None`) the
+moment it goes negative. A decline falls through to the wire path, which already handles
+large messages well and does its work outside the lock. `BROOD_L1_BUDGET=<units>` overrides
+the default; `0` means unlimited (the pre-cap behaviour, for A/B and bisect).
+
+Counting nodes is sufficient only because no single node carries an unbounded payload: a
+string at or above `SHARED_BLOB_THRESHOLD` (256 B) is an `Arc<SharedBlob>` and crosses **by
+handle**, so the only string ever memcpy'd is a sub-threshold one. That coupling is not left
+implicit — a `const _` assertion fails the build if the threshold is raised past what a
+node-counting budget can bound.
+
+**Charging per node is not, by itself, a bound** — and this is the part that only a measurement
+would have caught. Every container arm *materialised before descending*: `to_vec()` for a vector,
+`map_entries` / `set_elems` / `list_to_vec` for the rest. So a 100k-element vector still paid its
+full O(n) copy under the lock and only then declined, measuring p99 **243 µs** where the wire path
+read 5.4. Each kind therefore declines **before materialising** — `len()` for a vector, `map_size`
+for a map (doubled, for key and value) and a set, `range_len` for a range, and a bounded spine
+walk for a cons list, which is the one kind with no O(1) length. With that, the capped arm is
+indistinguishable from the wire arm at every payload size measured.
+
+An early-out returns before spending anything, so it sets the budget negative explicitly
+(`over_budget`) — otherwise the sign, which is how the caller attributes the decline, would say
+"uncopyable value kind" for what is really the cap.
+
+**Why this is the right shape.** The stall is a *tail* problem, not a throughput one. L1 is
+cheaper than the wire path at every size measured (1.09× tiny to 2.58× at 100k elements),
+so the cap is not buying throughput back — it is trading the fast path away on the rare
+large send in exchange for bounding what that send does to everyone else. The budget sits
+between "no measurable effect" (~8 KB) and "p99 blow-up" (~80 KB), so every ordinary
+message — a request, a reply, a tagged tuple, a record — keeps the fast path untouched.
+
+Crucially, it does not touch the `st.waiter` invariant at all, so the soundness objection
+that killed the relocation does not apply to it.
+
+**Consequences.** A decline is now attributable: the *sign* of the budget distinguishes
+"too big" from "a value kind the copier does not handle", and `BROOD_L1_STATS=1` reports
+them separately (`over-budget` vs `value-declined`). A workload that sends multi-MB
+messages between local processes gives up L1 and runs at wire-path speed, which is the
+speed it had before L1 existed.
+
+**Not fixed here.** KI-56 names a second instance of the same pattern on the *receive*
+side: the selective-receive peek-in-place branch calls `from_message` under the lock, so a
+scan that has skipped the head holds the mutex across a deep rebuild per candidate. Same
+shape, unmeasured, left open rather than fixed blind.

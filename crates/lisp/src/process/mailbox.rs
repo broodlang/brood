@@ -682,6 +682,9 @@ pub mod l1_stats {
     pub static HIT: AtomicU64 = AtomicU64::new(0);
     pub static NO_WAITER: AtomicU64 = AtomicU64::new(0);
     pub static DECLINED: AtomicU64 = AtomicU64::new(0);
+    /// Declined because the message exceeded the copy budget (KI-56), as opposed to
+    /// `DECLINED`, which is a value kind the copier does not handle.
+    pub static OVER_BUDGET: AtomicU64 = AtomicU64::new(0);
     pub static NO_PROC: AtomicU64 = AtomicU64::new(0);
     pub fn bump(c: &AtomicU64) {
         if enabled() {
@@ -696,13 +699,14 @@ pub mod l1_stats {
         if !enabled() {
             return;
         }
-        let (h, w, d, n) = (
+        let (h, w, d, n, b) = (
             HIT.load(Relaxed),
             NO_WAITER.load(Relaxed),
             DECLINED.load(Relaxed),
             NO_PROC.load(Relaxed),
+            OVER_BUDGET.load(Relaxed),
         );
-        let total = h + w + d + n;
+        let total = h + w + d + n + b;
         let pct = if total == 0 {
             0.0
         } else {
@@ -710,7 +714,7 @@ pub mod l1_stats {
         };
         eprintln!(
             "[l1] local-send fast path: {h} hit ({pct:.1}%), {w} not-parked, \
-             {d} value-declined, {n} no-process  (of {total} local sends)"
+             {d} value-declined, {b} over-budget, {n} no-process  (of {total} local sends)"
         );
     }
 }
@@ -751,12 +755,26 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> LocalDelivery {
             runtime_tag: Some(tag),
         };
     };
-    let copied = crate::process::message::copy_cross_heap(src, proc.heap_mut(), v);
+    // Bounded (KI-56): this copy runs with the mailbox mutex held — that is what gives us
+    // exclusive access to the parked receiver's heap — so its cost is a stall for every
+    // unrelated operation on that mailbox. A message past the budget declines here and
+    // takes the wire path, whose heavy work happens outside the lock. See `l1_copy_budget`.
+    let mut budget = crate::process::message::l1_copy_budget();
+    let copied = crate::process::message::copy_cross_heap(src, proc.heap_mut(), v, &mut budget);
     let Some(copied) = copied else {
         // Declined: put the process back exactly as we found it and let the caller
-        // deliver through `Message`. Nothing observable happened.
+        // deliver through `Message`. Nothing observable happened — the partial copy left
+        // unreachable cells in the receiver's heap, which is ordinary garbage (allocation
+        // never collects; the receiver is parked and runs nothing until we wake it).
         st.waiter = Some(proc);
-        l1_stats::bump(&l1_stats::DECLINED);
+        // A negative budget is the size cap; anything else is a value kind we do not copy.
+        // Kept apart because they call for opposite responses: one is the cap working as
+        // intended, the other is a gap in the copier.
+        l1_stats::bump(if budget < 0 {
+            &l1_stats::OVER_BUDGET
+        } else {
+            &l1_stats::DECLINED
+        });
         return LocalDelivery::Declined {
             runtime_tag: Some(tag),
         };

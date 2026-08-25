@@ -19,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-56 | **a large L1 send head-of-line-blocks unrelated mailbox operations**, linear in payload: an unrelated `mailbox-size` probe sits at **p50 ~5 ms** for a 1.6 MB send and 7–13 ms at 4 MB, against a wire path flat at **4–10 µs** across a 500× payload range. Onset between 8 KB (nothing) and 80 KB (p90 ~25×). Needs a *parked* receiver, so it is the synchronous request/reply shape, not fan-in | 🔧 **measured 2026-08-25, fix decided** — a size/element budget on the L1 copy: decline above a threshold and fall through to the existing wire path. Bounds the lock hold without touching the `st.waiter` invariant |
+| KI-56 | **a large L1 send head-of-line-blocks unrelated mailbox operations**, linear in payload: an unrelated `mailbox-size` probe sits at **p50 ~5 ms** for a 1.6 MB send and 7–13 ms at 4 MB, against a wire path flat at **4–10 µs** across a 500× payload range. Onset between 8 KB (nothing) and 80 KB (p90 ~25×). Needs a *parked* receiver, so it is the synchronous request/reply shape, not fan-in | ✅ **fixed 2026-08-25** (ADR-245) — a **work budget** on the L1 copy (one heap node = one unit, default 4096, `BROOD_L1_BUDGET=0` to uncap): past it the copy declines and takes the wire path, whose heavy work is already outside the lock. The `st.waiter` invariant is untouched. Every container kind also declines *before materialising* — the first cut checked only per node, so a 100k vector still paid `to_vec` under the lock and measured p99 243 µs; with the early-out it is 5.4 µs. Same probe as the measurement below: **p99 1 875 → 5.4 µs at ~1.6 MB, p50 2 360 → 3.9 µs at ~3.9 MB**, indistinguishable from the wire arm at every size |
 | KI-55 | **closure-shipping across nodes broke for every namespaced std name.** Auto-require runs on the node that *compiles* a form, never on the node that *receives* an already-compiled closure — so a shipped closure whose body calls `reflect/form-pos`, `seq/…`, `dev/…` raises `unbound symbol` on the receiver. Before the v0.9.0/v0.10.0 namespacing these were bare prelude names and always bound, so closure-shipping "just worked" | ✅ **fixed 2026-08-25** — the **sender** names the modules its closure's body references (`ClosureMsg::modules`, a `(module, probe)` pair per module, encoded in the wire's `M_CLOSURE` record — protocol `BRD\x06`), and the receiver weaves a `(if (bound? 'probe) nil (require-one 'module))` guard into the rebuilt body for each module it lacks, so the load runs at the closure's own **call site** — where errors are catchable and no mailbox lock is held. A module this node cannot load now raises `this closure was shipped from another runtime and needs module \`zz\`…`, not a bare `unbound symbol`. Guards: `cli::distribution::a_shipped_closure_requires_its_modules_on_the_receiver` (new) + `source_positions_survive_a_cross_node_send` with its `(require-one 'reflect)` workaround removed; both sabotage-verified |
 | KI-54 | **`main` was already red**: making the gen_server framework core-and-**bare** in the prelude (`7cb796f0`) seized ten generic global names — including `call`, `cast` and `stop` — into the *reserved* set, breaking `basic::spawned_process_picks_up_redefinition` (`(def call …)` is now refused); the same move dropped `gen` out of `(builtin-modules)`, failing `namespace_test`, and bundled `gen.blsp` without declaring it, failing `prelude_manifest` | ✅ **both fixed 2026-08-24** — `PRELUDE_MODULES` restores the reservation (with a bundle-checked honesty test); the `basic.rs` helper renamed `call` → `ask`. ⚠ **the name seizure itself is left as-is** — it follows from ADR-166 and the deliberate "bare" decision, but see the note below |
 | KI-50 | **the JIT leaf inliner silently miscompiled the most idiomatic loop in the language.** `(defn sum-down (n acc) (if (<= n 0) acc (sum-down (dec n) (+ acc n))))` returned **6251217600 instead of 20000100000** for `(sum-down 200000 0)` on the default build, and at 400000 raised `type error: -: expected number, got nil` blaming `dec`. `std/repeat` is this exact shape, so `(count (repeat 200000 :a))` gave **28033** | ✅ **fixed 2026-08-24** — a leaf-spliced frame was read as the *small* layout, so the small body's journal slot (a live loop counter in the spliced layout) was decoded as a deopt journal. Guard `tests/jit_leaf_frame_layout_test.blsp`, sabotage-verified |
@@ -93,9 +93,10 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**Open: KI-56** (a large L1 send blocks unrelated mailbox operations; fix decided, a size budget
-on the copy). **KI-55** (a shipped closure could not call a namespaced std name on the receiving
-node) was **fixed 2026-08-25** — the closure now carries the modules its body references and the
+**No open items.** **KI-56** (a large L1 send blocked unrelated mailbox operations) was
+**fixed 2026-08-25** — ADR-245's copy budget; one instance of the same pattern on the *receive*
+side is recorded there as unmeasured and deliberately not fixed blind. **KI-55** (a shipped
+closure could not call a namespaced std name on the receiving node) was **fixed 2026-08-25** — the closure now carries the modules its body references and the
 receiver loads them at the call site. Otherwise KI-49 (the tagged-tuple receive matcher latched onto the interpreter) was root-caused and **fixed 2026-08-21** — `pingpong` −12.9%. KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
@@ -173,9 +174,12 @@ repetition, the usual flake defence, does not help. The missing dimension is a *
 
 ---
 
-## KI-56 — the L1 under-lock copy: the hazard was real, but not where it was claimed 🔧
+## KI-56 — the L1 under-lock copy: the hazard was real, but not where it was claimed ✅ FIXED 2026-08-25
 
-**Status:** measured 2026-08-25; fix decided (a size budget), not yet landed.
+**Status:** ✅ fixed (ADR-245). Guards: seven cases in `process::message::copy_budget_tests`
+(the boundary both sides, every container kind declining attributably, the string/blob coupling,
+and the env override's three rules) plus a `const _` build assertion tying the budget to
+`SHARED_BLOB_THRESHOLD`.
 
 This entry is kept mostly for the **measurement**, because a plausible-sounding review finding
 was half wrong and only a measurement could say which half.
@@ -209,18 +213,52 @@ waiters and would skip the process during the window.
 The wire arm is **flat across a 500× payload range** because its heavy work happens outside the
 lock. Effects are 25×–1000× against a ≤3 % noise floor.
 
-**The fix (decided).** A size/element budget on the L1 copy — decline above a threshold, fall
-through to the existing wire path. It bounds the lock hold **without touching the `st.waiter`
-invariant at all**, so the soundness objection that killed the first redesign does not apply. It
-keeps the win where essentially all sends live and gives it up only on the rare multi-MB send that
-is causing the stall.
+**The fix (landed).** A work budget on the L1 copy — one heap node is one unit, default 4096,
+`BROOD_L1_BUDGET=0` to uncap — declining past it and falling through to the existing wire path. It
+bounds the lock hold **without touching the `st.waiter` invariant at all**, so the soundness
+objection that killed the first redesign does not apply. It keeps the win where essentially all
+sends live and gives it up only on the large send that is causing the stall.
 
-**A second instance, unmeasured.** The *receive* side already implements the mitigation the first
-investigation ruled unsafe on the send side, and its comment names this concern verbatim: the
-optimistic-pop path pops under the lock, then rebuilds with the mutex released. But its sibling
-**peek-in-place** branch still calls `from_message` **under** the lock — so a selective-receive
-scan that has skipped the head holds the mutex across a deep rebuild *per candidate*. Same
-pattern, second site. Not measured, not fixed.
+**A per-node charge alone was not enough, and the measurement is what said so.** The first cut
+decremented the budget as the walk visited each node — correct-looking, and it still measured p99
+**243 µs** at ~1.6 MB against the wire path's 5.4. The reason is that every container arm
+*materialised before descending*: `src.vector(id).to_vec()` copies the whole element array, and
+`map_entries` / `set_elems` / `list_to_vec` do the same, so the O(n) cost was paid under the lock
+and only *then* declined. Each kind now checks against the budget **before** materialising —
+`len()` for a vector, `map_size` for a map (doubled for key+value) and a set, `range_len` for a
+range, and a bounded spine walk for a cons list, which has no O(1) length. That is what moves the
+tail the rest of the way.
+
+The result, same probe and same harness as the table above (best of 200 trials per row, on one
+box, the *same binary* with only `BROOD_L1_BUDGET` changed — no rebuild, so nothing else can
+differ):
+
+| payload | uncapped p50 | uncapped p99 | capped p50 | capped p99 | wire p99 |
+|---|---|---|---|---|---|
+| ~8 KB | 0.76 µs | 3.8 µs | 0.77 µs | 3.5 µs | 3.2 µs |
+| ~78 KB | 0.73 µs | 89.7 µs | 0.80 µs | **3.2 µs** | 3.0 µs |
+| ~1.6 MB | 2.9 µs | 1 875 µs | 2.5 µs | **5.4 µs** | 7.7 µs |
+| ~3.9 MB | 2 360 µs | 13 029 µs | 3.9 µs | **5.7 µs** | 7.7 µs |
+
+The capped arm is indistinguishable from the wire arm at every size, and the ~8 KB row is
+unchanged — which is the point: below the budget nothing happens at all.
+
+**Throughput on the fast path: no resolvable cost.** Synchronous request/reply at 4 clients,
+best-of-9 per-request: capped reads +2.9 % at a 10-element payload and +9.0 % at 100 elements,
+against a **same-config base-vs-base spread of 6.4–9.4 % and 2.8–14.5 %** on the same box. Neither
+clears `max(5 %, 2 × floor)`, so this measurement cannot resolve a difference — it is not evidence
+of a cost, and it is not evidence of none either. `BROOD_L1_STATS=1` confirms the mechanism fires
+exactly where intended: 0 over-budget at a 100-element payload, 48 of 404 sends over-budget at
+20 000.
+
+**A second instance, still unmeasured and deliberately not fixed.** The *receive* side already
+implements the mitigation the first investigation ruled unsafe on the send side, and its comment
+names this concern verbatim: the optimistic-pop path pops under the lock, then rebuilds with the
+mutex released. But its sibling **peek-in-place** branch still calls `from_message` **under** the
+lock — so a selective-receive scan that has skipped the head holds the mutex across a deep rebuild
+*per candidate*. Same pattern, second site. Left open rather than fixed blind: this whole entry
+exists because a plausible-sounding claim about the send side turned out half wrong, and only a
+measurement could say which half.
 
 **Method note, since it is reusable:** no source change was needed to A/B this. `send` tries L1
 only for a `Value::Pid` target, so `(send pid v)` takes L1 and
