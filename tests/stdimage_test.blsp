@@ -65,6 +65,24 @@
   (test "the edges the image carries live in a global no module owns"
     (is (not (includes? (name '*std-require-edges*) "/"))))
 
+  ;; The image is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately the same for
+  ;; `brood`, `nest` and `brood-lsp` from one tree so they share one copy. But those binaries
+  ;; do NOT bake in the same modules: a lean runtime (what `nest release` and
+  ;; `make install INSTALL_FEATURES=RUN_FEATURES` produce — what ships) has no dev-tools, and
+  ;; `project`'s recorded edges name `test`. Replaying an edge to a module this binary cannot
+  ;; load made the very next `require` die with `cannot find module 'test'`, i.e. installing
+  ;; the image BROKE `require` on the shipped build — so its 4-33x win was never available
+  ;; there. `require format` measured 62 ms from source against 12.8 ms restored.
+  :isolated (test "a replayed edge naming a module this binary lacks does not break require"
+    (let (fake {"somemod" ['definitely-not-a-real-module 'string]}
+          _ (merge-require-edges! fake)
+          deps (get *require-edges* "somemod"))
+      ;; the unloadable dep is dropped, the real one kept
+      (is (nil? (seq/find (fn (d) (= (name d) "definitely-not-a-real-module")) deps)))
+      (is (not (nil? (seq/find (fn (d) (= (name d) "string")) deps))))
+      ;; and requiring still works afterwards
+      (is (= :ok (try (do (require-one 'json) :ok) (catch e (get e :message)))))))
+
   (test "install is a no-op when no image exists for this binary"
     ;; Returns nil rather than raising, so `require` keeps loading from source unchanged.
     ;; (If one does exist, it returns a positive section count — both are valid here.)
