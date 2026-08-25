@@ -247,9 +247,17 @@
     (assert= (get (eval-capturing "(+ 1 2)") :procs) {:alive 0}))
 
   (test "a round-trip that finishes leaves nothing running"
-    ;; the child sends and dies before we look — correctly reported as 0, and
-    ;; deliberately NOT guessed at as a spawn count (see the docstring)
-    (let (r (eval-capturing "(let (me (self)) (spawn (send me :hi)) (receive (:hi :got)))"))
+    ;; The child sends and dies — correctly reported as 0, and deliberately NOT guessed at
+    ;; as a spawn count (see the docstring).
+    ;;
+    ;; It WAITS for the child's `:down` rather than assuming the send implies the death.
+    ;; Receiving `:hi` only proves the message was delivered, and the child still has to
+    ;; finish and be reaped after that — so under a loaded scheduler `:alive` could sample
+    ;; the child mid-teardown and read 1. Seen once in a full-suite run, then not again in
+    ;; four; monitoring makes the ordering a fact instead of a likelihood.
+    (let (r (eval-capturing (str "(let (me (self))"
+                              "  (let (child (spawn (send me :hi)) mref (monitor child))"
+                              "    (receive (:hi nil))" "    (receive ([:down ^mref _ _] :got))))")))
       (assert= (get r :value) ":got")
       (assert= (get-in r [:procs :alive]) 0)))
 
