@@ -198,8 +198,7 @@
 ;; maps/vectors are deep-copied across per-process heaps on `send`, proving they
 ;; round-trip through to_message/from_message + promote under the scheduler.
 (describe "json across processes"
-  :isolated
-  (test "workers parse the same payload; results agree after crossing heaps"
+  :isolated (test "workers parse the same payload; results agree after crossing heaps"
     (let (me (self)
           src "{\"id\":7,\"tags\":[\"a\",\"b\"],\"ok\":true}")
       (doseq (i (range 8))

@@ -71,8 +71,7 @@
 ;; send. A worker renders under its OWN bound locale; the parent under its own.
 ; parent still :en
 (describe "locale is per-process"
-  :isolated
-  (test "a worker binds its own locale; the parent keeps :en"
+  :isolated (test "a worker binds its own locale; the parent keeps :en"
     (let (me (self))
       (spawn (send me [:r (binding (*locale* :de) (->string (money 20 :eur)))]))
       (let (worker-rendered (receive ([:r s] s)))

@@ -421,9 +421,7 @@
 (defn mt-stage1 (next) (receive (m (send next (assoc m :s1 true)))))
 
 (describe "maps across processes"
-  :isolated
-
-  (test "a map round-trips through a worker unchanged (deep copy across heaps)"
+  :isolated (test "a map round-trips through a worker unchanged (deep copy across heaps)"
     (let (me (self) w (spawn (mt-echo me)))
       (send w {:a {:b [1 2 {:c 3}]} :d "deep"})
       (assert= (receive) {:a {:b [1 2 {:c 3}]} :d "deep"})))

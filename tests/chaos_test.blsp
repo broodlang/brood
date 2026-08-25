@@ -233,13 +233,10 @@
 
 (defn chaos-drain (n)
   (if (= n 0)
-    :ok
-    (receive (:done (chaos-drain (- n 1))) (after *test-wait-ms* :timeout))))
+    :ok (receive (:done (chaos-drain (- n 1))) (after *test-wait-ms* :timeout))))
 
 (describe "concurrent spawn/send chaos"
-  :isolated
-
-  (test "100 spawned processes each send a number; drain all of them"
+  :isolated (test "100 spawned processes each send a number; drain all of them"
     (chaos-fan-out 100 (self))
     (assert= 5050 (chaos-fan-in 0 100 0)))
 

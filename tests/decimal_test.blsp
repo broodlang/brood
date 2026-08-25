@@ -153,8 +153,7 @@
           100M))))
 
 (describe "decimal: GC survival"
-  :isolated
-  (test "LOCAL decimals survive forced collections with value intact"
+  :isolated (test "LOCAL decimals survive forced collections with value intact"
     (let (xs (into []
                (map (fn (i)
                       (* (decimal i)

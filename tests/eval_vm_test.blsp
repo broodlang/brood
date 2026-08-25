@@ -63,8 +63,7 @@
 ;; Cross-process: an eval'd closure is deep-copied to another process (proving the
 ;; compiled-on-eval closure round-trips through to_message/from_message + promote).
 (describe "eval on the VM: cross-process"
-  :isolated
-  (test "a closure built by eval survives a send and runs on the receiver"
+  :isolated (test "a closure built by eval survives a send and runs on the receiver"
     (let (f (eval '(fn (x) (* x x)))
           w (spawn (receive ([:go g from] (send from [:r (g 9)])))))
       (send w [:go f (self)])

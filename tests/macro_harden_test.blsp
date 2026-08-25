@@ -188,8 +188,7 @@
 ;; ── 6. receive — (after …) in non-last position ───────────────────────────────
 
 (describe "receive — wrong syntax"
-  :serial
-  (test "correct receive with after works"
+  :serial (test "correct receive with after works"
     ;; A process that sends itself a message, then receives with a short timeout.
     (let (me (self))
       (spawn (send me :ping))

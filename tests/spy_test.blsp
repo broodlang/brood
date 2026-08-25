@@ -71,8 +71,7 @@
 ;; own; the *returned value* is what crosses the heap boundary on `send`.
 ; 1+4+9+16
 (describe "spy across processes"
-  :isolated
-  (test "a worker spy-computes a value and sends it; the parent gets it intact"
+  :isolated (test "a worker spy-computes a value and sends it; the parent gets it intact"
     (let (me (self))
       (spawn (binding (*spy-sink* (fn (entry) nil))
                (send me [:ok (spy (+ (* 6 7) (- 0 0)))])))

@@ -45,9 +45,7 @@
 (defn cap-child (parent) (io/print "from-child") (send parent :done))
 
 (describe "with-out-str across processes"
-  :isolated
-
-  (test "captures output printed by a spawned child"
+  :isolated (test "captures output printed by a spawned child"
     (let (out (with-out-str (let (me (self)) (spawn (cap-child me)) (receive (:done nil)))))
       (assert= out "from-child")))
 

@@ -103,8 +103,7 @@
 (defn- pa-smallest-positive () (pa-tiny-acc 1.0))
 
 (describe "Paranoia: the derived machine properties"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   ;; The derivations must agree with binary64. Anything else means the arithmetic under
   ;; test is not what the rest of this file assumes.
@@ -126,8 +125,7 @@
       (- (bits->float (+ (float->bits 1.0) 1)) 1.0))))
 
 (describe "Paranoia: guard digits and rounding"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   ;; A missing guard digit is the classic hardware defect Paranoia was written to catch:
   ;; `(1 + eps) - 1` collapses to 0 on a machine that truncates the subtraction.
@@ -160,8 +158,7 @@
       (assert= (/ x 1.0) x))))
 
 (describe "Paranoia: exact integer arithmetic in the float domain"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   ;; Every integer up to 2^53 is exactly representable; the boundary is where it stops.
   (test "integers below 2^53 are exact"
@@ -184,8 +181,7 @@
     (assert= (/ 6.0 3) 2.0)))
 
 (describe "Paranoia: the exponent range"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   ;; Derived, not asserted from a constant: halving from 1.0 must walk all the way down
   ;; to the smallest subnormal. A machine that flushed subnormals to zero would stop at
@@ -224,8 +220,7 @@
     (assert= (bits->float (+ (float->bits (pa-max-finite)) 1)) (pa-inf))))
 
 (describe "Paranoia: square root"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "sqrt is exact on perfect squares"
     (dolist (n [0.0 1.0 4.0 9.0 16.0 100.0 1048576.0])
@@ -246,8 +241,7 @@
     (assert= (sqrt (pow 2.0 -1074)) (sqrt (bits->float 1)))))
 
 (describe "Paranoia: comparison and sign laws"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the ordering is a total order"
     (dolist (p [[1.0 2.0] [-2.0 -1.0] [-1.0 1.0] [0.0 1.0e-300] [1.0e300 (pa-inf)]])

@@ -13,8 +13,7 @@
 ;; registrations, and now go through the atomic registry swap (KI-23). Concurrent
 ;; registration is covered directly in `tests/registry_test.blsp`.
 (describe "face registry"
-  :isolated
-  (test "def-face registers a face and face resolves it"
+  :isolated (test "def-face registers a face and face resolves it"
     (def-face :t/plain {:fg :red :bold true})
     (assert= (face :t/plain) {:fg :red :bold true}))
   (test "def-face returns the name"
@@ -35,8 +34,7 @@
     (assert= (get (face :ui/error) :fg) :red)))
 
 (describe "face :inherit resolution"
-  :isolated
-  (test "a face layers over its :inherit parent, local keys winning"
+  :isolated (test "a face layers over its :inherit parent, local keys winning"
     (def-face :t/base {:fg :blue :bold true})
     (def-face :t/derived {:inherit :t/base :fg :green :italic true})
     ;; parent contributes :bold; child overrides :fg and adds :italic; :inherit stripped
@@ -66,8 +64,7 @@
 ;; workers — proving the registry's `def` rebind reaches the shared code region
 ;; (the mechanism behind "set a theme in the REPL, the running observer restyles").
 (describe "faces across processes"
-  :isolated
-  (test "a face defined here resolves in spawned workers, fanned back in"
+  :isolated (test "a face defined here resolves in spawned workers, fanned back in"
     (def-face :t/shared {:fg :cyan :bold true})
     (let (me (self)
           _workers (map (fn (i)

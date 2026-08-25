@@ -54,8 +54,7 @@
 ;; and a second worker prints one in its OWN process (captured via with-out-str,
 ;; which is inherited by spawned children).
 (describe "Display across processes"
-  :isolated
-  (test "a record sent home prints via the protocol in the parent"
+  :isolated (test "a record sent home prints via the protocol in the parent"
     (let (me (self))
       (spawn (send me [:price (usd 2500)]))
       (assert= (with-out-str (receive ([:price p] (io/puts p)))) "$25.00\n")))

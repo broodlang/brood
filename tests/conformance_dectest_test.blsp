@@ -140,8 +140,7 @@
 (defn- dt-scan () (dt-scan-files (corpus-files "dectest") 0 nil))
 
 (describe "dectest: exact decimal arithmetic"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the corpus is present"
     (is (corpus-present? "dectest"))
@@ -160,8 +159,7 @@
 ;; decimal, and they are the part a naive implementation gets wrong — so they are
 ;; spelled out here rather than left implicit in the sweep.
 (describe "dectest: ideal exponents (trailing zeros are significant)"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "multiply adds the operand exponents"
     (assert= (decimal->string (* 1.50M

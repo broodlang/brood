@@ -160,8 +160,7 @@ milliseconds."
 
 (defability Temporal
   "A calendar value that renders as ISO 8601."
-  :sealed
-  [datetime date time-of-day]
+  :sealed [datetime date time-of-day]
   (->iso [self] :-> string))
 
 ;; The two halves, shared by the three impls (a datetime is date + \"T\" + time + \"Z\").

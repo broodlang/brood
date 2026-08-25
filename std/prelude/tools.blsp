@@ -1513,8 +1513,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
                                       (list (list '%register-impl
                                               (list 'quote aname)
                                               (list 'quote (first op))
-                                              :default
-                                              (cons 'fn (cons arg-syms body))
+                                              :default (cons 'fn (cons arg-syms body))
                                               (list 'current-ns))))))))
                         nil ops)
         op-defs (map
@@ -1755,8 +1754,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
     (= pattern :default)
       (list '%register-method
         (list 'quote mname)
-        :default
-        (cons 'fn (cons arglist body))
+        :default (cons 'fn (cons arglist body))
         (list 'current-ns))
     (vector? pattern)
       (do
@@ -1837,8 +1835,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   "Add element `x` to collection `self`, returning a fresh collection."
   (-conj [self x] :-> any))
 (impl Conjable
-  :default
-  (-conj [coll x]
+  :default (-conj [coll x]
     (cond
       (map? x) (merge coll x)
       (and (vector? x) (%eq (count x) 2)) (assoc coll (nth x 0) (nth x 1))

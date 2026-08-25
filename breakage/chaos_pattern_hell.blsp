@@ -41,8 +41,7 @@
 
 (defn bench-compiled-match (n)
   (if (= n 0)
-    :done
-    (do
+    :done (do
       (compiled-100-match (rem n 101))
       (bench-compiled-match (- n 1)))))
 (io/puts "bench 100k calls to compiled 100-clause match..." (bench-compiled-match 100000))

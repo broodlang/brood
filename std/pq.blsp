@@ -52,21 +52,18 @@ Stable: among equal priorities, earlier inserts pop first (FIFO)."
 (defn pop (q)
   "Return `[min-value new-pq]`, or `:empty` if the queue is empty."
   (if (empty? q)
-    :empty
-    (let (entries (get q :entries))
+    :empty (let (entries (get q :entries))
       [(second (first entries)) (pq (rest entries))])))
 
 (defn peek (q)
   "Return the minimum-priority value without removing it, or `:empty` if empty."
   (if (empty? q)
-    :empty
-    (second (first (get q :entries)))))
+    :empty (second (first (get q :entries)))))
 
 (defn peek-priority (q)
   "Return the minimum priority (the key), or `:empty` if empty."
   (if (empty? q)
-    :empty
-    (first (first (get q :entries)))))
+    :empty (first (first (get q :entries)))))
 
 ;; The pq joins the collection protocol too: `Seqable` yields its values in priority order,
 ;; so `seq`/`count`/`map`/`fold`/`for`/`into`-from work on a pq. (No `Conjable`: inserting

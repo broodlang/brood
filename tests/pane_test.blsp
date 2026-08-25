@@ -153,9 +153,7 @@
           aw (get (first (get (pane-layout tiny [0 0 80 24]) :panes)) :rect))
       (is (>= (nth aw 2) 1)))))
 (describe "pane layout across processes"
-  :isolated
-
-  (test "a layout tree round-trips through a worker unchanged (deep copy)"
+  :isolated (test "a layout tree round-trips through a worker unchanged (deep copy)"
     (let (me (self) w (spawn (wt-echo me)) t (wt-tree3))
       (send w t)
       (assert= (receive) t)))

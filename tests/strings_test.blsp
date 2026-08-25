@@ -443,8 +443,7 @@
   (if (= got total) acc (str-collect (+ got 1) total (receive ([:p i s] (assoc acc i s))))))
 
 (describe "string formatting across processes"
-  :isolated
-  (test "padded strings round-trip through 20 workers unchanged"
+  :isolated (test "padded strings round-trip through 20 workers unchanged"
     (str-spawn-padders (self) 20)
     (let (merged (str-collect 0 20 {}))
       (assert= (count merged) 20)
@@ -572,10 +571,8 @@
       (spawn (send me
                [:idx
                  (index-of mb-text "🙂" 400)
-                 :sub
-                 (string/substring mb-text 400 405)
-                 :last
-                 (last-index-of mb-text "漢")]))
+                 :sub (string/substring mb-text 400 405)
+                 :last (last-index-of mb-text "漢")]))
       (receive
         ([:idx i :sub s :last l] (do
                                    (assert= i 403)

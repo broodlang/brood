@@ -39,8 +39,7 @@
       (assert= (get m [9 9]) nil))))
 
 (describe "large map across processes (deep copy)"
-  :isolated
-  (test "a 2000-key map round-trips through send equal to the original"
+  :isolated (test "a 2000-key map round-trips through send equal to the original"
     (let (orig (ms-build N)
           me (self)
           w (spawn (let (m (receive (x x))) (send me [:back m]))))

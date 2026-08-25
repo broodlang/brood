@@ -135,18 +135,15 @@
 
 ;; `:isolated` — `apply` clobbers the ambient `*project-*` globals; roll them back.
 (describe "project: :optional deps and :dev-dependencies (ADR-172)"
-  :isolated
-  (test ":optional defaults to false"
+  :isolated (test ":optional defaults to false"
     (assert= (get (project/parse-dep '[a :path "../a"]) :optional) false))
   (test ":optional true is recorded on any dep kind"
     (assert= (get (project/parse-dep '[a :path "../a" :optional true]) :optional) true)
     (assert= (get (project/parse-dep '[a :git "u" :ref "r" :optional true]) :optional) true))
   (test ":dev-dependencies parse and tag :dev true, kept separate from :dependencies"
     (project/apply-config '(:name demo
-                             :dependencies
-                             [[core :git "u" :ref "r"]]
-                             :dev-dependencies
-                             [[testkit :path "../tk"]]))
+                             :dependencies [[core :git "u" :ref "r"]]
+                             :dev-dependencies [[testkit :path "../tk"]]))
     ; production deps stay in their own slot, untagged
     (assert= (map :name *project-dependencies*) (list 'core))
     (assert= (map :dev *project-dependencies*) (list nil))
@@ -160,8 +157,7 @@
 ;; `:isolated` runs against a rolled-back private copy of the globals (ADR-017),
 ;; so the *project-* globals this clobbers via `(project ...)` don't leak.
 (describe "project: the (project ...) manifest macro treats its args as data"
-  :isolated
-  (test "bare dep-name symbols survive without quoting; :dependencies populates *project-dependencies*"
+  :isolated (test "bare dep-name symbols survive without quoting; :dependencies populates *project-dependencies*"
     (project
       :name "demo"
       :version "0.0.1"
@@ -175,8 +171,7 @@
 ;; checkout. Regression: a project that swapped a framework from a `:path` to a `:git`
 ;; dep silently lost the framework's formatter rules.
 (describe "project: :format-plugins manifest resolution"
-  :isolated
-  (test "a :path dep's manifest is read in place, relative to the root"
+  :isolated (test "a :path dep's manifest is read in place, relative to the root"
     (project :name "demo" :dependencies [[shared :path "../shared"]])
     (assert= (project/project-dep-manifest-path 'shared "/proj")
       "/proj/../shared/project.blsp"))
@@ -384,8 +379,7 @@
 ;; module 'zzz'"). Isolation runs them alone against a rolled-back private copy of
 ;; the globals, so the walk sees its own freshly-`spit` project. (KI-2 class.)
 (describe "project: source load-once"
-  :isolated
-  (test "project-file-feature reads a file's (defmodule NAME) as a string"
+  :isolated (test "project-file-feature reads a file's (defmodule NAME) as a string"
     (let (dir (temp-dir "brood-feat-"))
       (file/mkdir dir)
       (let (f (path/join dir "m.blsp"))
@@ -454,8 +448,7 @@
 ;; private copy of the globals per test keeps that mutation from racing other project
 ;; tests (notably the ADR-223 concurrent-require case) under the parallel runner.
 (describe "project: co-located tests (ADR-225)"
-  :isolated
-  (test "project-file-has-tests? is true iff a file carries deftest/describe"
+  :isolated (test "project-file-has-tests? is true iff a file carries deftest/describe"
     (let (dir (temp-dir "brood-coloc-"))
       (file/mkdir dir)
       (let (with-tests (path/join dir "with.blsp")
@@ -543,8 +536,7 @@
           "[\"tests\"]"))))
 
 (describe "project: manifest loading errors point at the file"
-  :isolated
-  (test "an unparseable manifest names the file, line, and column"
+  :isolated (test "an unparseable manifest names the file, line, and column"
     (let (dir (temp-dir "brood-manifest-")
           manifest (path/join dir "project.blsp"))
       (file/mkdir dir)
@@ -730,8 +722,7 @@
 ;; `:isolated` — the last test runs `(project …)`, which clobbers the ambient `*project-*`
 ;; globals; roll them back so a later test doesn't inherit *project-kind* :app.
 (describe "project: :kind parsing"
-  :isolated
-  (test "absent defaults to :library"
+  :isolated (test "absent defaults to :library"
     (assert= (project/project-parse-kind nil) :library))
   (test ":app and :library pass through"
     (assert= (project/project-parse-kind :app) :app)
@@ -776,9 +767,7 @@
   (when (> n 0) (receive) (coloc-await-n (dec n))))
 
 (describe "namespaces: cross-file require-by-name for a co-located module (ADR-223 Phase 2)"
-  :isolated
-
-  (test "the file→module scan surfaces EVERY declared module, not just the first"
+  :isolated (test "the file→module scan surfaces EVERY declared module, not just the first"
     (let (dir (temp-dir "brood-coloc-"))
       (file/mkdir dir)
       (file/spit (path/join dir "shapes.blsp")

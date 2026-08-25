@@ -446,8 +446,7 @@ causal tree, and the hottest traced forms by hit count. The one-call overview."
   (io/puts "── watch  (Ctrl-C to exit) ──")
   (report dbg)
   (if (= frames 1)
-    :done
-    (do (sleep 500) (debug-watch-loop dbg (dec frames)))))
+    :done (do (sleep 500) (debug-watch-loop dbg (dec frames)))))
 (defn watch (dbg & frames)
   "Live, read-only terminal view of the debug session — clears the screen and
 reprints `report` every 500ms. Runs until Ctrl-C, or for a fixed frame count
@@ -617,8 +616,7 @@ no raw-terminal setup and works when piped."
     (io/print "debug> ")
     (let (raw (read-line))
       (if (nil? raw)
-        :done
-        (let (line (string/trim raw) parts (string/split line " ") cmd (first parts))
+        :done (let (line (string/trim raw) parts (string/split line " ") cmd (first parts))
           (cond
             (= line "q") :done
             (or (= line "") (= line "p")) (repl-session dbg)

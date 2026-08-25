@@ -238,9 +238,7 @@
   (if (= got total) acc (mth-sum (+ got 1) total (receive ([:p v] (+ acc v))))))
 
 (describe "math across processes"
-  :isolated
-
-  (test "fan-out / fan-in: workers compute squares and cubes, parent folds them"
+  :isolated (test "fan-out / fan-in: workers compute squares and cubes, parent folds them"
     (mth-spawn (self) (range 1 21))
     ; 20 workers, n = 1..20
     (let (m (mth-collect 0 20 {}))

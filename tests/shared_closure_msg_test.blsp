@@ -81,9 +81,7 @@
   (if (= k 0) :ok (do (call-through-busy f) (send-n (- k 1) f))))
 
 (describe "a shared closure crossing a serialised send"
-  :isolated
-
-  (test "the receiver runs it and gets the right answer"
+  :isolated (test "the receiver runs it and gets the right answer"
     (assert= 42 (call-through-busy shared-thunk)))
 
   (test "a capturing closure still crosses and still works"
@@ -138,6 +136,5 @@
                   (eval (list 'def (symbol (str "scm-churn-" i)) (fn () i)))
                   (assert= 42 (call-through srv shared-thunk))
                   :ok))
-          :ok
-          (range 40)))
+          :ok (range 40)))
       (send srv :stop))))

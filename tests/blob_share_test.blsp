@@ -73,9 +73,7 @@
         (bs-hib-spin big parent 70000)))))
 
 (describe "shared blob heap (ADR-041)"
-  :isolated
-
-  (test "a >= 256 B string is allocated as Shared (has a non-nil blob ptr)"
+  :isolated (test "a >= 256 B string is allocated as Shared (has a non-nil blob ptr)"
     (when (bound? '%blob-ptr)
       (let (big (string/repeat "x" 1024))
         (assert= 1024 (string/length big))

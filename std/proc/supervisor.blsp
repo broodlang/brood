@@ -337,8 +337,7 @@ is a *failed restart attempt*, never a supervisor crash."
         (pr-str (get child :id (get child :name)))
         " failed to start: "
         (error-message e)
-        :to
-        *err*)
+        :to *err*)
       nil)))
 
 (defn- supervisor-restart

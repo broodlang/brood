@@ -36,9 +36,7 @@
 (defmacro still-hash (a b) `(let (r# ~a) (if r# r# ~b)))
 
 (describe "automatic binding hygiene"
-  :isolated
-
-  (test "a plain let binder does not capture a spliced caller binding"
+  :isolated (test "a plain let binder does not capture a spliced caller binding"
     ;; Without hygiene this returns false (caller's r captured); with it, 99.
     (assert= (let (r 99) (my-or false r)) 99)
     (assert= (my-or false 42) 42)
@@ -82,9 +80,7 @@
 (defn sumto-worker (parent) (send parent (sum-to 10)))
 
 (describe "hygiene across processes"
-  :isolated
-
-  (test "no capture after building the value in another process"
+  :isolated (test "no capture after building the value in another process"
     (let (me (self) _ (spawn (caps-worker me)))
       (assert= (receive) 77)))
 
