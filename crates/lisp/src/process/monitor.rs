@@ -106,16 +106,34 @@ static NEXT_REF: AtomicU64 = AtomicU64::new(0);
 /// approaches (a million refs a second would take twelve days). This narrows the
 /// window rather than closing it by construction; node-qualified refs remain the
 /// principled fix if `Value` ever gains room.
+///
+/// **Every source here must exist on wasm32.** This runs on the very first `(ref)`,
+/// and `(ref)` is not a corner of the language: `(monitor …)` mints one, every
+/// request/reply `call` mints one, and `sleep` is implemented as a `receive` pinned
+/// on a never-matching `(ref)` (`std/prelude/process.blsp`). So a panic in here is a
+/// panic in `sleep` — and a Rust panic on wasm is an uncatchable
+/// `RuntimeError: unreachable`, which took out most of `std/proc/*` in the browser
+/// playground. Entropy is negotiable; a trap is not.
 fn ref_base() -> u64 {
     static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *BASE.get_or_init(|| {
         use std::hash::{BuildHasher, Hasher};
-        // `RandomState` is seeded per process by the OS, so this needs no rng dep.
+        // The main source: `RandomState` is seeded per process by the host, so this
+        // needs no rng dep. Portable — it is what seeds every `HashMap` on every
+        // target, wasm included.
         let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        // A secondary mix-in, host-only: `std::process::id()` is `unsupported` on
+        // wasm32 and PANICS there. Gated rather than replaced, because a wasm module
+        // is one runtime with no peer to collide with — the whole hazard this guards
+        // against is two *nodes*, and a browser playground has none.
+        #[cfg(not(target_arch = "wasm32"))]
         h.write_u64(std::process::id() as u64);
+        // `web_time` is the repo's portable clock — real `SystemTime` natively, JS
+        // `Date.now()` under wasm. `std::time::SystemTime::now()` is the same trap as
+        // `process::id()` on wasm32, so do not reach for it here.
         h.write_u64(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0),
         );
@@ -382,4 +400,32 @@ pub(crate) fn fire_noconnection(target_node: Symbol, target_pid: u64, watcher_pi
             Message::Keyword(value::intern(pk::NOCONNECTION)),
         ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`ref_base`] runs on the first `(ref)` of the process, and `(ref)` underpins
+    /// `monitor`, every request/reply `call`, and `sleep` — so it must not panic, and
+    /// its layout invariant must hold: high bits identify the runtime, low 40 are the
+    /// counter. (A `std::process::id()` in here trapped on wasm32 and broke `sleep` in
+    /// the browser playground; this asserts the shape the fix has to preserve.)
+    #[test]
+    fn ref_base_is_a_stable_nonzero_high_half_and_leaves_the_counter_alone() {
+        let base = ref_base();
+        assert_eq!(base, ref_base(), "ref_base must be minted once and cached");
+        assert_eq!(
+            base & REF_COUNTER_MASK,
+            0,
+            "the base must not touch the counter bits"
+        );
+
+        let a = next_ref();
+        let b = next_ref();
+        assert_ne!(a, b);
+        assert_eq!(a & !REF_COUNTER_MASK, base);
+        assert_eq!(b & !REF_COUNTER_MASK, base);
+        assert_eq!((b & REF_COUNTER_MASK).wrapping_sub(a & REF_COUNTER_MASK), 1);
+    }
 }

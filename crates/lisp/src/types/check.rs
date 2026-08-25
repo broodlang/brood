@@ -154,6 +154,30 @@ fn is_require_form(heap: &Heap, form: Value) -> bool {
     false
 }
 
+/// Is module `name` already loaded — i.e. present in the `*features*` registry the
+/// runtime's `require-one` consults? The checker's "do I need to load this `(:use …)`
+/// target?" test (see `setup_check_imports`).
+///
+/// Deliberately the *feature* record and not "does some `name/…` global exist": a std
+/// module can share its namespace with kernel primitives (`file/slurp` & co. exist with
+/// no `std/file.blsp` loaded), and the presence test then reports loaded for a module
+/// whose Brood-level definitions are entirely absent.
+///
+/// A read, never a load. `false` whenever the answer can't be read off the image
+/// (no `*features*`, a non-map value) — the safe direction, since the caller's
+/// response is an idempotent `require-one`.
+fn feature_loaded(heap: &mut Heap, name: &str) -> bool {
+    // Allocate the key BEFORE reading the map handle: an allocation must not run
+    // between reading `mid` and using it (this runs under the checker's GC block, so
+    // nothing collects here, but the ordering keeps that independent of the block).
+    let key = heap.alloc_string(name);
+    let features = heap.env_get(heap.global(), value::intern("*features*"));
+    match features {
+        Some(Value::Map(mid)) => heap.map_get(mid, key).is_some(),
+        _ => false,
+    }
+}
+
 /// Qualify a `(sig …)` declaration's target name to the file's namespace, the way
 /// the resolve pass qualifies a def head — but only with the same *positive
 /// evidence* the resolver requires: the file actually defines `ns/name` (recorded
@@ -560,19 +584,32 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
     // PASS B — apply. Only `Symbol`s (Copy, GC-stable) are held, so the `require` eval below
     // (standalone-file path) can safely collect. `module_public_exports` re-reads globals
     // fresh; `add_import` takes `Symbol`s.
-    // Load `mod_sym` if absent (no `mod/*` globals) — the standalone path; in a
-    // whole-project check it's already loaded, so this is a no-op. Advisory: any
-    // load error is swallowed (the checker never gates on a missing module).
-    fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol, prefix: &str) {
-        if deps::obs_module_exports(heap, prefix).is_empty() {
-            let quoted = heap.list(vec![
-                Value::Sym(value::intern("quote")),
-                Value::Sym(mod_sym),
-            ]);
-            let form = heap.list(vec![Value::Sym(value::intern("require-one")), quoted]);
-            let root = heap.global();
-            let _ = crate::eval::eval(heap, form, root);
+    // Load `mod_sym` unless it's already loaded — the standalone path; in a whole-project
+    // check every module is loaded up front, so this is a no-op. Advisory: any load error
+    // is swallowed (the checker never gates on a missing module).
+    //
+    // "Already loaded" is the FEATURE registry, not "some `mod/*` global exists". The
+    // latter was the bug: a std module whose namespace is *also* a kernel-primitive
+    // namespace — `file`, with its 18 `file/…` primitives — looked loaded before its
+    // `.blsp` had ever been read, so `(:use file)` imported the primitives only and every
+    // Brood-level name in it (`walk-files`, `read-lines`, `regular?`) was reported unbound
+    // in a single-file `brood --check` (the whole-project path was unaffected: it loads
+    // every module first). `*features*` is exactly what the runtime `require-one` consults,
+    // so the checker's notion of loaded now matches the runtime's.
+    //
+    // Erring toward "not loaded" is free: `require-one` is idempotent, so a spurious call
+    // costs a map lookup; erring toward "loaded" is what produced the false positives.
+    fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol) {
+        if feature_loaded(heap, &value::symbol_name(mod_sym)) {
+            return;
         }
+        let quoted = heap.list(vec![
+            Value::Sym(value::intern("quote")),
+            Value::Sym(mod_sym),
+        ]);
+        let form = heap.list(vec![Value::Sym(value::intern("require-one")), quoted]);
+        let root = heap.global();
+        let _ = crate::eval::eval(heap, form, root);
     }
     for clause in clauses {
         match clause {
@@ -586,7 +623,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 let mod_sym = heap.root_module_name(mod_sym);
                 let mod_name = value::symbol_name(mod_sym);
                 let prefix = format!("{}/", mod_name);
-                ensure_loaded(heap, mod_sym, &prefix);
+                ensure_loaded(heap, mod_sym);
                 match subset {
                     Some(names) => {
                         // Mirror the runtime `%refer`: a module-private name in `:only`
@@ -617,7 +654,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 let mod_sym = heap.root_module_name(mod_sym); // ADR-070, as in Clause::Use
                 let mod_name = value::symbol_name(mod_sym);
                 let prefix = format!("{}/", mod_name);
-                ensure_loaded(heap, mod_sym, &prefix);
+                ensure_loaded(heap, mod_sym);
                 let excluded: std::collections::HashSet<Symbol> = excluded.into_iter().collect();
                 for (bare, qual) in deps::obs_module_exports(heap, &prefix) {
                     if !excluded.contains(&bare) {
@@ -1110,12 +1147,18 @@ pub fn check_file_ext(
         // impls' bodies checked against that return type (gradual, false-positive-clean).
         // Runs with `ctx` carrying the ability facts just set.
         walk::check_impl_returns(heap, &expanded, &ctx, &mut out);
-        // Pass 3: check each expanded form with the accumulated file-globals.
+        // Pass 3: check each expanded form with the accumulated file-globals, plus the
+        // names *this* form guards with `(bound? 'name)` — a deliberately conditional
+        // reference to an ambient another module defines, which must not read as unbound.
         for &form in &expanded {
+            let mut guarded = HashSet::new();
+            collect_bound_guards(heap, form, &mut guarded);
+            ctx.set_bound_guarded(guarded);
             check_into(heap, form, &ctx, &mut out);
         }
-        // Pass 3.5: flag non-tail self-recursion (overflow footgun — Brood loops
-        // must be tail-recursive). Walks the same expanded tree.
+        ctx.set_bound_guarded(HashSet::new()); // the exemption is per-form; don't leak it
+                                               // Pass 3.5: flag non-tail self-recursion (overflow footgun — Brood loops
+                                               // must be tail-recursive). Walks the same expanded tree.
         for &form in &expanded {
             recursion::check_recursion(heap, form, &mut out);
         }
@@ -1140,8 +1183,19 @@ pub fn check_file_ext(
         // for references. Warn only when the module contributed ≥1 public name and none
         // appear.
         {
+            // A file with an unresolved BARE reference has, by construction, an import
+            // table that doesn't cover everything it names — so "module M contributed
+            // nothing you reference" is not provable: the name we failed to resolve may
+            // be M's. Emitting both is self-contradictory advice, and the dangerous half
+            // is this one ("delete the import your code needs"). So the lint stands down
+            // whenever the unbound diagnostic fired on a bare name. It stays fully live
+            // for a file that resolves cleanly, which is the case it exists for.
+            let unresolved_bare = out.iter().any(|(_, m)| {
+                m.strip_prefix("unbound symbol: ")
+                    .is_some_and(|rest| !rest.split(' ').next().unwrap_or("").contains('/'))
+            });
             let use_modules = extract_use_module_names(heap, &forms);
-            if !use_modules.is_empty() {
+            if !use_modules.is_empty() && !unresolved_bare {
                 let all_refs = collect_all_syms(heap, &expanded);
                 let imported = heap.imported_pairs();
                 // Group each module's contributed names by source module. We record BOTH
@@ -1230,6 +1284,41 @@ fn def_name_and_value(heap: &Heap, form: Value) -> Option<(Symbol, Value)> {
         return None;
     };
     Some((name, items[2]))
+}
+
+/// Every name `form` guards with an explicit `(bound? 'name)` test, recursively.
+///
+/// A `(bound? 'x)` test says, in the source itself, "this name may not exist in this
+/// image" — the prelude's ability dispatch reads `*project-name*` / `*ns-package*` that
+/// way, since those ambients are `defdyn`'d by `std/tool/project.blsp` and simply absent
+/// under a bare `brood script.blsp`. Flagging the guarded reference as unbound reports a
+/// *correct* program, which is exactly what the advisory contract forbids
+/// (ADR-123..126) — so the guarded name is exempt for the top-level form that guards it.
+///
+/// Scoped to one top-level form (usually one `defn`) rather than the whole file so a
+/// `bound?` probe in one function can't silence a genuine typo in another.
+fn collect_bound_guards(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(head)) = items.first() {
+            if value::symbol_is(head, "bound?") {
+                // `(bound? 'name)` reads as `(bound? (quote name))` in the expanded tree.
+                if let Some(quoted) = items.get(1).copied().and_then(|q| list_items(heap, q)) {
+                    if matches!(quoted.first(), Some(&Value::Sym(q)) if value::symbol_is(q, kw::QUOTE))
+                    {
+                        if let Some(&Value::Sym(name)) = quoted.get(1) {
+                            out.insert(name);
+                        }
+                    }
+                }
+            }
+        }
+        for &item in items.iter() {
+            collect_bound_guards(heap, item, out);
+        }
+    })
 }
 
 /// Count every `(def NAME …)` for each name across `form`, **including nested** defs (a

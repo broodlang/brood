@@ -19,7 +19,8 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-55 | **closure-shipping across nodes broke for every namespaced std name.** Auto-require runs on the node that *compiles* a form, never on the node that *receives* an already-compiled closure — so a shipped closure whose body calls `reflect/form-pos`, `seq/…`, `dev/…` raises `unbound symbol` on the receiver. Before the v0.9.0/v0.10.0 namespacing these were bare prelude names and always bound, so closure-shipping "just worked" | ⚠️ **open — behaviour regression, workaround known.** The receiving node must load the module itself (`(require-one 'reflect)`). Found 2026-08-24 while repairing `source_positions_survive_a_cross_node_send`; a deserialize-path auto-require hook is the real fix |
+| KI-56 | **a large L1 send head-of-line-blocks unrelated mailbox operations**, linear in payload: an unrelated `mailbox-size` probe sits at **p50 ~5 ms** for a 1.6 MB send and 7–13 ms at 4 MB, against a wire path flat at **4–10 µs** across a 500× payload range. Onset between 8 KB (nothing) and 80 KB (p90 ~25×). Needs a *parked* receiver, so it is the synchronous request/reply shape, not fan-in | ✅ **fixed 2026-08-25** (ADR-245) — a **work budget** on the L1 copy (one heap node = one unit, default 4096, `BROOD_L1_BUDGET=0` to uncap): past it the copy declines and takes the wire path, whose heavy work is already outside the lock. The `st.waiter` invariant is untouched. Every container kind also declines *before materialising* — the first cut checked only per node, so a 100k vector still paid `to_vec` under the lock and measured p99 243 µs; with the early-out it is 5.4 µs. Same probe as the measurement below: **p99 1 875 → 5.4 µs at ~1.6 MB, p50 2 360 → 3.9 µs at ~3.9 MB**, indistinguishable from the wire arm at every size |
+| KI-55 | **closure-shipping across nodes broke for every namespaced std name.** Auto-require runs on the node that *compiles* a form, never on the node that *receives* an already-compiled closure — so a shipped closure whose body calls `reflect/form-pos`, `seq/…`, `dev/…` raises `unbound symbol` on the receiver. Before the v0.9.0/v0.10.0 namespacing these were bare prelude names and always bound, so closure-shipping "just worked" | ✅ **fixed 2026-08-25** — the **sender** names the modules its closure's body references (`ClosureMsg::modules`, a `(module, probe)` pair per module, encoded in the wire's `M_CLOSURE` record — protocol `BRD\x06`), and the receiver weaves a `(if (bound? 'probe) nil (require-one 'module))` guard into the rebuilt body for each module it lacks, so the load runs at the closure's own **call site** — where errors are catchable and no mailbox lock is held. A module this node cannot load now raises `this closure was shipped from another runtime and needs module \`zz\`…`, not a bare `unbound symbol`. Guards: `cli::distribution::a_shipped_closure_requires_its_modules_on_the_receiver` (new) + `source_positions_survive_a_cross_node_send` with its `(require-one 'reflect)` workaround removed; both sabotage-verified |
 | KI-54 | **`main` was already red**: making the gen_server framework core-and-**bare** in the prelude (`7cb796f0`) seized ten generic global names — including `call`, `cast` and `stop` — into the *reserved* set, breaking `basic::spawned_process_picks_up_redefinition` (`(def call …)` is now refused); the same move dropped `gen` out of `(builtin-modules)`, failing `namespace_test`, and bundled `gen.blsp` without declaring it, failing `prelude_manifest` | ✅ **both fixed 2026-08-24** — `PRELUDE_MODULES` restores the reservation (with a bundle-checked honesty test); the `basic.rs` helper renamed `call` → `ask`. ⚠ **the name seizure itself is left as-is** — it follows from ADR-166 and the deliberate "bare" decision, but see the note below |
 | KI-50 | **the JIT leaf inliner silently miscompiled the most idiomatic loop in the language.** `(defn sum-down (n acc) (if (<= n 0) acc (sum-down (dec n) (+ acc n))))` returned **6251217600 instead of 20000100000** for `(sum-down 200000 0)` on the default build, and at 400000 raised `type error: -: expected number, got nil` blaming `dec`. `std/repeat` is this exact shape, so `(count (repeat 200000 :a))` gave **28033** | ✅ **fixed 2026-08-24** — a leaf-spliced frame was read as the *small* layout, so the small body's journal slot (a live loop counter in the spliced layout) was decoded as a deopt journal. Guard `tests/jit_leaf_frame_layout_test.blsp`, sabotage-verified |
 | KI-51 | `macroexpand-1` held a heap handle across an auto-`require` that loads a module (arbitrary eval → GC), then dereferenced it — **use-after-GC on a user-reachable path**: an epoch-tripwire abort in debug, silent heap corruption in release (a 5-element list reported an arity of 31309) | ✅ **fixed 2026-08-24** — roots `form`/`env` across the require and re-derives the tail |
@@ -92,9 +93,11 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**One open item: KI-55** (a shipped closure cannot call a namespaced std name on the receiving
-node — a consequence of the v0.9.0/v0.10.0 namespacing, with a known workaround). Otherwise
-KI-49 (the tagged-tuple receive matcher latched onto the interpreter) was root-caused and **fixed 2026-08-21** — `pingpong` −12.9%. KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
+**No open items.** **KI-56** (a large L1 send blocked unrelated mailbox operations) was
+**fixed 2026-08-25** — ADR-245's copy budget; one instance of the same pattern on the *receive*
+side is recorded there as unmeasured and deliberately not fixed blind. **KI-55** (a shipped
+closure could not call a namespaced std name on the receiving node) was **fixed 2026-08-25** — the closure now carries the modules its body references and the
+receiver loads them at the call site. Otherwise KI-49 (the tagged-tuple receive matcher latched onto the interpreter) was root-caused and **fixed 2026-08-21** — `pingpong` −12.9%. KI-48 (JIT tail dispatch read past the roots stack) was root-caused and fixed 2026-08-21 — though never reproduced on demand, so watch for a recurrence. Before that, no open items — KI-36 was reproduced and fixed 2026-08-19, KI-47 the same day. `main` is green on all five CI jobs at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing merge. KI-44 (the `sqrt` call-site inline, worth ~1.8× on `nbody`) and KI-45 (the stale `examples/editor`) were both fixed 2026-08-17. KI-43 (a fixed-sleep race in the remote-attach test) was found and fixed 2026-08-14. KI-28 is **no longer a watch item — it recurred twice
 and is folded into KI-38**, which is the larger pattern it turned out to be part of: three tests
 that wait for a freshly spawned debug `brood` to finish booting, failing together under peak suite
 load. **Diagnosed, reproduced deterministically, and fixed on 2026-08-08**: the expanded-prelude
@@ -171,14 +174,109 @@ repetition, the usual flake defence, does not help. The missing dimension is a *
 
 ---
 
-## KI-55 — a shipped closure cannot call a namespaced std name on the receiving node ⚠️ OPEN
+## KI-56 — the L1 under-lock copy: the hazard was real, but not where it was claimed ✅ FIXED 2026-08-25
 
-**Status:** ⚠️ open. Not a regression *this* review introduced — a consequence of the
-v0.9.0/v0.10.0 namespacing waves — but found by it, and it will bite any distribution user.
+**Status:** ✅ fixed (ADR-245). Guards: seven cases in `process::message::copy_budget_tests`
+(the boundary both sides, every container kind declining attributably, the string/blob coupling,
+and the env override's three rules) plus a `const _` build assertion tying the budget to
+`SHARED_BLOB_THRESHOLD`.
+
+This entry is kept mostly for the **measurement**, because a plausible-sounding review finding
+was half wrong and only a measurement could say which half.
+
+**The claim.** `try_deliver_local` (`process/mailbox.rs`) performs the whole cross-heap deep copy
+while holding the receiver's mailbox mutex — "a latency/contention hazard on the hottest lock in
+the system". A first investigation then *retracted* it, correctly noting that the obvious fix
+(take the waiter out, copy, re-lock) is unsound because `shutdown_runtime_parked` reaps parked
+waiters and would skip the process during the window.
+
+**What the measurement found.**
+
+1. **The fan-in framing is wrong, and provably so.** Under fan-in, L1 fires **0.4–1.2 %** of the
+   time (measured across 1/2/4/8 senders). The reason is structural, and worth internalising: **a
+   contended mailbox has a runnable receiver by definition, and L1 requires a *parked* one.** The
+   shape everyone pictures when they say "hottest lock" is precisely the shape where this code
+   almost never runs.
+2. **L1 is cheaper than the fallback everywhere**, 1.09× (tiny) to 2.58× (100k-element vector),
+   with no crossover across a call-count sweep. So "hazard" is the wrong word for throughput.
+3. **But there is a real, large latency effect** in synchronous request/reply (where the receiver
+   *is* parked — 61–81 % hit rate). An unrelated `%mailbox-size` probe — a pure lock-acquire, zero
+   message work, so a stall can only be lock wait — measures:
+
+| payload | L1 p50 | L1 p99 | wire p50 | wire p99 |
+|---|---|---|---|---|
+| ~8 KB | 4.8 µs | 11 µs | 4.4 µs | 7.5 µs |
+| ~80 KB | 4.9 µs | **1 106 µs** | 4.9 µs | 8.7 µs |
+| ~1.6 MB | **5 011 µs** | 13 994 µs | 7.3 µs | 15.0 µs |
+| ~4 MB | **6 777 µs** | 16 946 µs | 7.6 µs | 17.1 µs |
+
+The wire arm is **flat across a 500× payload range** because its heavy work happens outside the
+lock. Effects are 25×–1000× against a ≤3 % noise floor.
+
+**The fix (landed).** A work budget on the L1 copy — one heap node is one unit, default 4096,
+`BROOD_L1_BUDGET=0` to uncap — declining past it and falling through to the existing wire path. It
+bounds the lock hold **without touching the `st.waiter` invariant at all**, so the soundness
+objection that killed the first redesign does not apply. It keeps the win where essentially all
+sends live and gives it up only on the large send that is causing the stall.
+
+**A per-node charge alone was not enough, and the measurement is what said so.** The first cut
+decremented the budget as the walk visited each node — correct-looking, and it still measured p99
+**243 µs** at ~1.6 MB against the wire path's 5.4. The reason is that every container arm
+*materialised before descending*: `src.vector(id).to_vec()` copies the whole element array, and
+`map_entries` / `set_elems` / `list_to_vec` do the same, so the O(n) cost was paid under the lock
+and only *then* declined. Each kind now checks against the budget **before** materialising —
+`len()` for a vector, `map_size` for a map (doubled for key+value) and a set, `range_len` for a
+range, and a bounded spine walk for a cons list, which has no O(1) length. That is what moves the
+tail the rest of the way.
+
+The result, same probe and same harness as the table above (best of 200 trials per row, on one
+box, the *same binary* with only `BROOD_L1_BUDGET` changed — no rebuild, so nothing else can
+differ):
+
+| payload | uncapped p50 | uncapped p99 | capped p50 | capped p99 | wire p99 |
+|---|---|---|---|---|---|
+| ~8 KB | 0.76 µs | 3.8 µs | 0.77 µs | 3.5 µs | 3.2 µs |
+| ~78 KB | 0.73 µs | 89.7 µs | 0.80 µs | **3.2 µs** | 3.0 µs |
+| ~1.6 MB | 2.9 µs | 1 875 µs | 2.5 µs | **5.4 µs** | 7.7 µs |
+| ~3.9 MB | 2 360 µs | 13 029 µs | 3.9 µs | **5.7 µs** | 7.7 µs |
+
+The capped arm is indistinguishable from the wire arm at every size, and the ~8 KB row is
+unchanged — which is the point: below the budget nothing happens at all.
+
+**Throughput on the fast path: no resolvable cost.** Synchronous request/reply at 4 clients,
+best-of-9 per-request: capped reads +2.9 % at a 10-element payload and +9.0 % at 100 elements,
+against a **same-config base-vs-base spread of 6.4–9.4 % and 2.8–14.5 %** on the same box. Neither
+clears `max(5 %, 2 × floor)`, so this measurement cannot resolve a difference — it is not evidence
+of a cost, and it is not evidence of none either. `BROOD_L1_STATS=1` confirms the mechanism fires
+exactly where intended: 0 over-budget at a 100-element payload, 48 of 404 sends over-budget at
+20 000.
+
+**A second instance, still unmeasured and deliberately not fixed.** The *receive* side already
+implements the mitigation the first investigation ruled unsafe on the send side, and its comment
+names this concern verbatim: the optimistic-pop path pops under the lock, then rebuilds with the
+mutex released. But its sibling **peek-in-place** branch still calls `from_message` **under** the
+lock — so a selective-receive scan that has skipped the head holds the mutex across a deep rebuild
+*per candidate*. Same pattern, second site. Left open rather than fixed blind: this whole entry
+exists because a plausible-sounding claim about the send side turned out half wrong, and only a
+measurement could say which half.
+
+**Method note, since it is reusable:** no source change was needed to A/B this. `send` tries L1
+only for a `Value::Pid` target, so `(send pid v)` takes L1 and
+`(send {:name :r :node (%node-name)} v)` takes the wire path — same binary, same value, same
+parked receiver. `BROOD_L1_STATS=1` confirms the split every run.
+
+---
+
+## KI-55 — a shipped closure could not call a namespaced std name on the receiver ✅ FIXED 2026-08-25
+
+**Status:** ✅ fixed. Guards: `cli::distribution::a_shipped_closure_requires_its_modules_on_the_receiver`
+(new) and `source_positions_survive_a_cross_node_send`, whose `(require-one 'reflect)` workaround is
+gone. Both sabotage-verified — with the sender-side scan disabled they fail with exactly the
+original `unbound symbol: math/sqrt` / `unbound symbol: reflect/form-pos`.
 
 **What.** Auto-require (ADR-227/229) fires when a form is **compiled**. A closure shipped to
-another node arrives *already compiled*, so nothing on the receiver triggers the require, and any
-namespaced global in its body is unbound there:
+another node arrives *already compiled*, so nothing on the receiver triggered the require, and any
+namespaced global in its body was unbound there:
 
 ```
 unbound symbol: reflect/form-pos
@@ -186,16 +284,63 @@ unbound symbol: reflect/form-pos
 
 Before the namespacing these were bare prelude names, bound on every node by construction, so
 closure-shipping worked without anyone having to think about it. The refactor silently moved that
-guarantee: `seq/`, `dev/`, `reflect/`, `os/`, `table/`, `proc/` are all module globals now.
+guarantee: `seq/`, `dev/`, `reflect/`, `os/`, `table/`, `proc/`, `math/` are all module globals now.
 
-**Workaround.** The receiving node loads the module itself — `(require-one 'reflect)` in the
-program it starts with. That is what `source_positions_survive_a_cross_node_send`
-(`crates/cli/tests/distribution.rs:466`) now does, with a comment saying why.
+**The fix, in three parts.**
 
-**The real fix** is an auto-require hook on the deserialize path: when a closure lands, resolve
-the module prefixes its body references before binding it. Until then this is a documented sharp
-edge, and it is worth a note in the distribution docs — the failure surfaces on the *receiver*,
-far from the code that wrote the closure.
+1. **The sender names the modules.** `closure_to_message` walks the arms' body and
+   optional-default forms — the pass it is already deep-copying — collecting every *qualified*
+   symbol outside a `quote`/`quasiquote` subtree, then resolves each **distinct** one through
+   `derive::module_to_require`. A candidate is kept only when it is **bound as a global on the
+   sender**, which is what separates a real reference (auto-require loaded its module when the
+   body was compiled *here*) from a qualified-looking symbol sitting in the body — and is why an
+   unloadable module on the receiver is a genuine error rather than a false alarm. The result is a
+   `(module, probe)` pair per module in `ClosureMsg::modules`. Skipped entirely when the
+   destination is **this** runtime (its processes share our globals) and for the startup image.
+2. **It rides the wire.** Appended to the `M_CLOSURE` record (`dist/wire.rs`); protocol magic
+   bumped `BRD\x05` → `BRD\x06`, because a v5 peer would read the new count as the start of
+   `captured` — a silent mis-decode of every closure sent, which is exactly what a version byte is
+   for.
+3. **The receiver loads it at the closure's own call site.** `closure_from_message` filters the
+   list against `env_get` (one allocation-free lookup — a runtime that already has the module pays
+   only that) and, for each module it lacks, weaves a guard into the rebuilt body:
+
+   ```lisp
+   (do (if (bound? 'math/sqrt)
+         nil
+         (%try (fn () (require-one 'math))
+               (fn (e) (throw (str "this closure was shipped from another runtime and needs
+                                    module `math` …: " (if (map? e) (get e :message) e))))))
+       <original first body form>)
+   ```
+
+   Built from primitives and core special forms only, because a rebuilt body is **never
+   macroexpanded** on the receiver — `unless`/`try` would survive to the compiler as unexpanded
+   calls. Optional defaults are wrapped the same way: they are evaluated at frame setup, before
+   the body.
+
+**Why the load is not run at deserialize time**, which is the obvious place and is wrong twice
+over:
+
+- `from_message` rebuilds a value graph whose half-built lists/vectors/maps sit in **unrooted Rust
+  locals**, and a module load evaluates arbitrary top-level code, which collects. That is the
+  KI-51 shape.
+- Worse, the selective-`receive` scan calls `from_message` **while holding the mailbox lock** (the
+  peek-in-place branch of `mailbox::scan`), and `require-one` **sleeps** while another process
+  finishes an in-flight load of the same feature — a `sleep` is a `receive`, so that is a deadlock,
+  reachable whenever two processes on a node get shipped closures needing the same module.
+
+Woven into the body, the load runs in ordinary evaluation context, on the call that needs it, and
+its failure is a catchable Brood error naming the module, the reference and the fact that the
+closure was shipped — instead of an `unbound symbol` at whatever line touches the name first.
+
+**Cost.** The sender-side scan is the only new work on a hot-ish path, and it does not run for a
+same-runtime send at all. Measured on a deliberately reference-dense closure (8 forms, 10
+qualified references, 20 000 serialisations through `table/put`, best of 5): **51 ms → 75 ms**,
+i.e. +1.2 µs per closure serialisation. Against a cross-node send — the only path that needs it —
+that is noise beside the wire encode and the TCP hop. Resolving once per *distinct* symbol rather
+than per occurrence is what keeps it there: `module_to_require` interns and consults the import
+table, and doing that inside the walk cost 4× as much.
 
 **Related, found the same way:** bare **`require` is not a bound name** — the callable is
 `require-one` (`git log -S"defmacro require"` finds no definition in any commit). Several places
@@ -441,8 +586,15 @@ was dead too, calling `json/json-parse`/`json/json-encode` after stage 4 dropped
 export prefix. Both fixed by referencing the module qualified — `math/sqrt`, `json/parse`/`json/encode` —
 which loads it by inference (ADR-229 removed the user-facing `require` a day later, and that
 removal broke `base64`/`json`/`regex` in the same repo for the same reason; fixed together), and
-all verified against the other ports' checksums (`nbody` −169063618 = node = python, `json`
-364568836 = node) rather than merely "it runs now".
+all verified against the other ports' checksums rather than merely "it runs now".
+
+> ⚠️ **The two checksums this paragraph used to quote (`nbody` −169063618, `json` 364568836)
+> are stale and should not be treated as canonical.** Re-audited 2026-08-25: neither is
+> reproducible at any `BENCH_N` (an `nbody` sweep from 1k to 500k produced −169087605 …
+> −169096567 and never that value). `nbody`'s checksum is **N-dependent** — it is an
+> energy sum over a step count — so a figure quoted without its N means nothing. The
+> canonical values are the ones in `brood-benchmarks/results/results.json`, and all eight
+> ports agree with them. Quote a checksum with its N, or point at `results.json`.
 
 This is the **KI-42 pattern**: a suite that gates nothing rots silently. `brood-benchmarks` is a
 separate repo, so the ADR-227 migration sweep — which did cover `breakage/`, `examples/`,

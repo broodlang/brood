@@ -21,7 +21,7 @@ read+write primitive for compare-and-swap-style patterns.")
 ;;
 ;; The wire format is `gen`'s: `[:$call from ref payload]` in, `[:reply ref v]` out,
 ;; `[:$cast payload]` for the async update, `[:$stop]` to end the loop. That is what
-;; lets the public API below simply BE `gen`'s `call` — with its monitor + deadline —
+;; lets the public API below simply BE `gen/call` — with its monitor + deadline —
 ;; instead of a second hand-rolled request/reply that blocked forever against a dead
 ;; agent.
 
@@ -54,7 +54,7 @@ read+write primitive for compare-and-swap-style patterns.")
 if its owner crashes and vice versa."
   (spawn-link (agent-loop (init-fn))))
 
-;; Every synchronous op below is `gen`'s `call` (core, bare): it monitors the agent
+;; Every synchronous op below is `gen/call`: it monitors the agent
 ;; for the duration, so a **dead** agent raises `call: server … died: …` at once and a
 ;; wedged one raises `call: timed out …` after 5 s (Elixir's Agent default). The
 ;; hand-rolled `(receive ([:reply ^r v] v))` these replaced had neither, so any of
@@ -64,18 +64,18 @@ if its owner crashes and vice versa."
   "Call `(f state)` inside the agent and return the result. Blocks until the
 agent replies (up to 5 s; a dead agent raises rather than hanging). Use
 `identity` to return the state as-is."
-  (call pid [:get f]))
+  (gen/call pid [:get f]))
 
 (defn update (pid f)
   "Replace the agent's state with `(f state)`. Blocks until acknowledged (up to
 5 s; a dead agent raises rather than hanging)."
-  (call pid [:update f]))
+  (gen/call pid [:update f]))
 
 (defn get-and-update (pid f)
   "Atomically read and update: `f` must return a 2-vector `[result new-state]`.
 Returns `result` and leaves the agent with `new-state`. Blocks until the agent
 replies (up to 5 s; a dead agent raises rather than hanging)."
-  (call pid [:get-and-update f]))
+  (gen/call pid [:get-and-update f]))
 
 (defn cast (pid f)
   "Fire-and-forget update: apply `(f state)` asynchronously, no reply waited."
@@ -84,4 +84,4 @@ replies (up to 5 s; a dead agent raises rather than hanging)."
 (defn stop (pid)
   "Ask the agent to exit its loop cleanly. Blocks until it acknowledges (up to
 5 s; a dead agent raises rather than hanging)."
-  (call pid :stop))
+  (gen/call pid :stop))

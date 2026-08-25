@@ -20,6 +20,28 @@ pub fn beep(freq: f32, ms: u64, vol: f32) {
     backend::beep(freq, ms, vol);
 }
 
+/// The longest a single `audio-beep` may run. `audio-beep` is fire-and-forget:
+/// nothing ever stops a tone early, and the mixer holds each one until it ends.
+/// So an unbounded duration is not "a long beep", it is a source that never
+/// leaves the mixer — and since the primitive reaches this through
+/// `ms.max(0.0) as u64`, a float `ms` of `1e300` saturates to `u64::MAX`
+/// (~584 million years) instead of erroring. One stray expression in a frame loop
+/// then piles up permanent tones for the process's life. 30 s is far past any
+/// game blip or jingle and is what a *bounded* mistake costs.
+#[cfg(feature = "audio")]
+const MAX_BEEP_MS: u64 = 30_000;
+
+/// The tone range a beep may ask for, in Hz — roughly human hearing. Outside it
+/// there is nothing to hear, and the ends are actively bad: `SineWave::new` takes
+/// the frequency straight into `sin(2*pi*f*t)`, so a NaN/inf `freq-hz` (which
+/// `num_to_f64(…) as f32` will happily produce from `(/ 0.0 0.0)`) feeds NaN
+/// samples into the shared mixer, where they contaminate every tone stacked
+/// alongside them rather than just the bad one.
+#[cfg(feature = "audio")]
+const MIN_BEEP_HZ: f32 = 1.0;
+#[cfg(feature = "audio")]
+const MAX_BEEP_HZ: f32 = 20_000.0;
+
 #[cfg(feature = "audio")]
 mod backend {
     use rodio::source::SineWave;
@@ -85,12 +107,23 @@ mod backend {
     }
 
     pub fn beep(freq: f32, ms: u64, vol: f32) {
+        use super::{MAX_BEEP_HZ, MAX_BEEP_MS, MIN_BEEP_HZ};
         // Clamp to a sane amplitude; non-finite or <=0 falls back to the default.
         let vol = if vol.is_finite() && vol > 0.0 {
             vol.min(1.0)
         } else {
             VOLUME
         };
+        // A non-finite frequency has no tone to play and would poison the shared
+        // mixer with NaN samples, so it is dropped rather than clamped — unlike
+        // `vol`, there is no sensible default pitch to substitute. A finite one is
+        // clamped into the audible band. A zero-length beep is likewise nothing to
+        // play, and the length is capped so a fire-and-forget tone always ends.
+        if !freq.is_finite() || ms == 0 {
+            return;
+        }
+        let freq = freq.clamp(MIN_BEEP_HZ, MAX_BEEP_HZ);
+        let ms = ms.min(MAX_BEEP_MS);
         if let Some(tx) = sender() {
             let _ = tx.send(Beep { freq, ms, vol });
         }

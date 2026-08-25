@@ -102,6 +102,15 @@ jobs:
       - name: Test (nextest)
         run: cargo nextest run --no-fail-fast --features brood/treesit-grammars
 
+      # The `gui`/`gui-gpu` renderer tests do not run above: the nextest step builds
+      # the DEFAULT surface plus grammars, and `gui` is opt-in, so every
+      # `#[cfg(test)]` case under `src/gui.rs` / `src/gui_gpu.rs` was compiled by the
+      # clippy step and executed by nothing. A guard that never runs is not a guard —
+      # and these are exactly the cases that pin a GUI-thread panic, which no Brood
+      # `try` can catch. The system deps this needs are already installed above.
+      - name: Test (gui renderer — feature-gated, not covered by the run above)
+        run: cargo test -p brood --features gui,gui-gpu --lib gui
+
       # nextest doesn't run doctests; run them separately so future ones are covered.
       - name: Doctests
         run: cargo test --doc

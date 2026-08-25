@@ -26,7 +26,8 @@
   (:use seq)
   (:use file))
 
-(defn- cache-dir ()
+(defn- cache-dir
+  ()
   "`$XDG_CACHE_HOME/brood` (or `~/.cache/brood`), or nil when neither is set."
   (let (xdg (os/getenv "XDG_CACHE_HOME")
         home (os/getenv "HOME")
@@ -50,8 +51,7 @@ write their own ~2 MB copy of an identical image; keyed this way they share one.
 claims it by prefix."
   (not (empty? (filter (fn (m) (string/starts-with? nm (str m "/"))) names))))
 
-(defn build
-  (&optional modules)
+(defn build (&optional modules)
   "Build (or rebuild) this binary's stdlib image and return `[path entry-count]`, or nil
 when there is no cache directory. `modules` defaults to every baked-in module.
 
@@ -75,15 +75,17 @@ since the prelude is always present."
       (let (dir (path/dirname path)
             _ (when (not (file/dir? dir)) (file/mkdir dir))
             names (or modules (builtin-modules))
-            probed
-              (fold (fn (acc m)
-                      (map-assoc acc (name m)
-                        (%isolate (fn ()
-                          (let (before (into #{} (global-names))
-                                _ (try (require-one m) (catch _ nil)))
-                            (into #{} (filter (fn (s) (not (contains? before s)))
-                                        (global-names))))))))
-                {} names)
+            probed (fold (fn (acc m)
+                           (map-assoc acc
+                             (name m)
+                             (%isolate (fn ()
+                                         (let (before (into #{} (global-names))
+                                               _ (try (require-one m) (catch _ nil)))
+                                           (into #{}
+                                             (filter (fn (s) (not (contains? before s)))
+                                               (global-names))))))))
+                     {}
+                     names)
             ;; now load them for real, so the globals being imaged are live in THIS heap
             _ (doseq (m names) (try (require-one m) (catch _ nil)))
             ;; The edges every restored module needs replayed, held in a ROOT global so the
@@ -91,31 +93,32 @@ since the prelude is always present."
             ;; `stdimage` look already-loaded at boot, and its source then never loaded.
             _ (set-std-require-edges! *require-edges*)
             roots (filter (fn (s) (not (prefixed-by-any? (name s) names))) (global-names))
-            owner-of
-              (fold (fn (acc g)
-                      (let (best (fold (fn (winner m)
-                                         (let (probe (map-get probed (name m) nil))
-                                           (if (and probe (contains? probe g)
-                                                 (or (nil? winner) (< (count probe) (second winner))))
-                                             [m (count probe)]
-                                             winner)))
-                                   nil names))
-                        (if best (map-assoc acc g (name (first best))) acc)))
-                {} roots)
-            sections
-              (append
-                [["%std-edges" ['*std-require-edges*]]]
-                (seq/keep
-                  (fn (m)
-                    (let (mn (name m)
-                          pfx (str mn "/")
-                          owned (filter (fn (s) (string/starts-with? (name s) pfx)) (global-names))
-                          mine (filter (fn (g) (= (map-get owner-of g nil) mn)) roots)
-                          syms (apply vector (append owned mine)))
-                      ;; A module contributing nothing would image as materialisable-but-empty,
-                      ;; and a later require would restore no bindings rather than fall back.
-                      (when (> (count syms) 0) [mn syms])))
-                  names)))
+            owner-of (fold (fn (acc g)
+                             (let (best (fold (fn (winner m)
+                                                (let (probe (map-get probed (name m) nil))
+                                                  (if (and probe
+                                                        (contains? probe g)
+                                                        (or (nil? winner)
+                                                          (< (count probe) (second winner))))
+                                                    [m (count probe)]
+                                                    winner)))
+                                          nil names))
+                               (if best (map-assoc acc g (name (first best))) acc)))
+                       {}
+                       roots)
+            sections (append [["%std-edges" ['*std-require-edges*]]]
+                       (seq/keep
+                         (fn (m)
+                           (let (mn (name m)
+                                 pfx (str mn "/")
+                                 owned (filter (fn (s) (string/starts-with? (name s) pfx))
+                                         (global-names))
+                                 mine (filter (fn (g) (= (map-get owner-of g nil) mn)) roots)
+                                 syms (apply vector (append owned mine)))
+                             ;; A module contributing nothing would image as materialisable-but-empty,
+                             ;; and a later require would restore no bindings rather than fall back.
+                             (when (> (count syms) 0) [mn syms])))
+                         names)))
         [path (%image-write path sections (stdlib-id))]))))
 
 (defn install ()
@@ -140,4 +143,4 @@ case `require` keeps loading stdlib modules from source exactly as before."
   "Install the stdlib image, building it first if this binary has none yet. Returns the
 section count. The build cost is paid once per binary; every later process just indexes."
   (or (install)
-      (do (build) (install))))
+    (do (build) (install))))

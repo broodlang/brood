@@ -376,6 +376,13 @@ pub(super) struct Ctx {
     /// the expanded tree, naming a module the user's file never mentions) is never
     /// flagged. `Arc` so per-scope clones stay cheap.
     raw_qualified: Arc<HashSet<String>>,
+    /// Names the top-level form currently being walked guards with an explicit
+    /// `(bound? 'name)` test. Such a reference is *correct code for an image that
+    /// doesn't define the name* — the whole point of the guard — so the unbound
+    /// diagnostic must not fire on it. See [`is_bound_guarded`](Ctx::is_bound_guarded).
+    /// Reset per top-level form by `check_file`, so the exemption is scoped to the
+    /// function that actually does the guarding. `Arc` so per-scope clones stay cheap.
+    bound_guarded: Arc<HashSet<Symbol>>,
 }
 
 impl Ctx {
@@ -622,6 +629,18 @@ impl Ctx {
     /// Did the qualified name `name` (`"mod/name"`) appear literally in the source?
     pub(super) fn raw_qualified_has(&self, name: &str) -> bool {
         self.raw_qualified.contains(name)
+    }
+    /// Record the `(bound? 'name)`-guarded names of the top-level form about to be
+    /// walked (see [`bound_guarded`](Ctx::bound_guarded)).
+    pub(super) fn set_bound_guarded(&mut self, names: HashSet<Symbol>) {
+        self.bound_guarded = Arc::new(names);
+    }
+    /// Does the enclosing top-level form test `sym` with `(bound? 'sym)`? Then a
+    /// reference to it is deliberately conditional — an ambient global some other
+    /// module `def`s (`*project-name*`, set at project setup) — and reporting it
+    /// unbound would flag code that is correct precisely *because* of the guard.
+    pub(super) fn is_bound_guarded(&self, sym: Symbol) -> bool {
+        self.bound_guarded.contains(&sym)
     }
     /// Record that file-local `sym`'s value is a **variadic** `fn` (has a `&`
     /// rest param). Consulted by the arity check so a `(sig …)`-derived *exact*

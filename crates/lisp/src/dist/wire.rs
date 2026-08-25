@@ -145,8 +145,11 @@ const MAX_GOSSIP_PEERS: usize = 4096;
 /// frame** (Noise-style session, ADR-089) — so a v3 and v4 node can't interop;
 /// **v5** drops the redundant `from_node` field from the link/monitor/exit
 /// frames (the reader always used the authenticated peer instead), shifting
-/// every later field — a v4 peer would mis-decode them, so the byte bumps.
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x05";
+/// every later field — a v4 peer would mis-decode them, so the byte bumps;
+/// **v6** adds the shipped-closure module list to the `M_CLOSURE` record (KI-55),
+/// which a v5 peer would read as the start of `captured` — a silent mis-decode of
+/// every closure sent, so again the byte bumps rather than being made optional.
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x06";
 pub(super) const NONCE_LEN: usize = 32;
 pub(super) const MAC_LEN: usize = 32;
 /// Length of an X25519 public key (the ephemeral DH key in `Hello`, ADR-089).
@@ -618,6 +621,14 @@ fn encode_closure(w: &mut Vec<u8>, c: &crate::process::ClosureMsg) -> io::Result
         }
     }
     put_opt_str(w, c.doc.as_deref());
+    // Modules the receiver must load before this body can run (KI-55): `(module, probe)`
+    // symbol pairs, by name like every other symbol here. Almost always zero-length, which
+    // costs the four bytes of the count.
+    put_u32(w, c.modules.len() as u32);
+    for need in &c.modules {
+        put_sym(w, need.module);
+        put_sym(w, need.probe);
+    }
     put_u32(w, c.captured.len() as u32);
     for (s, m) in &c.captured {
         put_sym(w, *s);
@@ -748,6 +759,13 @@ fn decode_closure_at(
     }
     let doc = get_opt_str(r)?;
     let n = get_u32(r)? as usize;
+    let mut modules = Vec::with_capacity(prealloc(r, n));
+    for _ in 0..n {
+        let module = get_sym(r)?;
+        let probe = get_sym(r)?;
+        modules.push(crate::process::message::ModuleNeed { module, probe });
+    }
+    let n = get_u32(r)? as usize;
     let mut captured = Vec::with_capacity(prealloc(r, n));
     for _ in 0..n {
         let s = get_sym(r)?;
@@ -759,6 +777,7 @@ fn decode_closure_at(
         arms,
         doc,
         captured,
+        modules,
     })
 }
 

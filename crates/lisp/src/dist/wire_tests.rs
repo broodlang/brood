@@ -234,6 +234,19 @@ fn closure_roundtrips_through_the_wire() {
         ],
         doc: Some("add three".to_string()),
         captured: vec![(value::intern("seed"), Message::Int(42))],
+        // The modules the receiver must load before this body runs (KI-55) —
+        // two of them, so the count + the `(module, probe)` pairing are both
+        // exercised, and a mis-encoded list would shift `captured` after it.
+        modules: vec![
+            crate::process::message::ModuleNeed {
+                module: value::intern("math"),
+                probe: value::intern("math/sqrt"),
+            },
+            crate::process::message::ModuleNeed {
+                module: value::intern("json"),
+                probe: value::intern("json/encode"),
+            },
+        ],
     };
     let f = Frame::Send {
         target: Target::Pid(1),
@@ -268,6 +281,12 @@ fn closure_roundtrips_through_the_wire() {
                 _ => panic!("body[0] should be Message::List"),
             }
             assert_eq!(c.doc.as_deref(), Some("add three"));
+            // The shipped-module list survived, in order and paired (KI-55).
+            assert_eq!(c.modules.len(), 2);
+            assert_eq!(value::symbol_name(c.modules[0].module), "math");
+            assert_eq!(value::symbol_name(c.modules[0].probe), "math/sqrt");
+            assert_eq!(value::symbol_name(c.modules[1].module), "json");
+            assert_eq!(value::symbol_name(c.modules[1].probe), "json/encode");
             assert_eq!(c.captured.len(), 1);
             assert!(matches!(&c.captured[0].1, Message::Int(42)));
         }
@@ -294,6 +313,7 @@ fn closure_with_all_options_absent_roundtrips() {
         }],
         doc: None,
         captured: vec![],
+        modules: vec![],
     };
     let f = Frame::Send {
         target: Target::Pid(1),

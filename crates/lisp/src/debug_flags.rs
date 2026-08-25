@@ -237,6 +237,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "deep-copy an already-shared closure across a local send instead of passing it by handle",
     ),
     f(
+        "BROOD_L1_BUDGET",
+        SCHED,
+        "copy-work units the L1 fast path may spend under the mailbox lock (0 = unlimited, the pre-KI-56 behaviour)",
+    ),
+    f(
         "BROOD_NO_MSGTAG",
         SCHED,
         "drop the L1 fast path's leading-keyword tag, defeating the selective-receive pre-filter",

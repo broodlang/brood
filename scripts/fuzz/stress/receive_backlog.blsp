@@ -15,6 +15,6 @@
 (stuff backlog)
 (defn call1 () (let (r (ref)) (do (send s [:ping (self) r]) (receive ([:reply ^r v] v)))))
 (defn go (i) (if (>= i n) i (do (call1) (go (+ i 1)))))
-(def t0 (now-ns))
+(def t0 (os/now-ns))
 (go 0)
-(println (str "backlog=" backlog " us/round-trip=" (quot (- (now-ns) t0) (* n 1000))))
+(println (str "backlog=" backlog " us/round-trip=" (quot (- (os/now-ns) t0) (* n 1000))))

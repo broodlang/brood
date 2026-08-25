@@ -44,8 +44,8 @@ A *backend* is any value implementing the **`LogBackend`** ability (one op,
 build it with `stdout-backend` / `stderr-backend` / `process-backend` / `file-backend` /
 `fn-backend`. For anything else (batching, JSON lines, sampling), `defrecord` your own
 and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
-  ; defprocess / spawn-server / ! / stop
-
+  ;; `gen` for defprocess / spawn-server / cast / stop; `io` for the port sinks.
+  (:use gen)
   (:use io))
 ;; ---- levels -----------------------------------------------------------------
 (def- log-ranks {:debug 0 :info 1 :warn 2 :error 3})

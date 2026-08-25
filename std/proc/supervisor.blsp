@@ -18,7 +18,7 @@
 ;;    mistaken for a fresh crash (Erlang `receive` keeps non-matching msgs queued).
 ;;  - Teardown cascades into nested supervisors two ways: (1) a *crash* propagates
 ;;    down links automatically (a child supervisor traps, recognises its parent's
-;;    `[:EXIT]`, and shuts its own subtree down); (2) a *graceful* `stop`
+;;    `[:EXIT]`, and shuts its own subtree down); (2) a *graceful* `gen/stop`
 ;;    sends `[:$stop]` to a child marked `:shutdown :infinity`, which tears its own
 ;;    children down first. Mark every supervisor child `:shutdown :infinity`.
 
@@ -60,7 +60,7 @@ and roughly 9× more expensive per child. That is the right trade to make when a
 genuinely needs per-instance state; it is only worth avoiding when you are starting
 thousands of otherwise-identical children.
 
-Shutdown policy (how the supervisor *terminates* a child — on `stop`, a
+Shutdown policy (how the supervisor *terminates* a child — on `gen/stop`, a
 group restart, or intensity shutdown): `:brutal-kill` (default) hard-kills it;
 `:infinity` sends `[:$stop]` and waits for a clean exit; an integer waits that many
 ms before falling back to a hard kill. **Mark a supervisor child `:shutdown
@@ -73,7 +73,7 @@ link propagation — but a deliberate hard kill is untrappable, hence `:infinity
                 {:id :b :start (fn () (spawn-link (worker-b))) :restart :transient}]
                {:strategy :one-for-all :max-restarts 3 :max-seconds 5}))
     (which-children sup)   ; => list of {:id :pid :restart}
-    (stop sup)  ; stop supervising AND terminate the children
+    (gen/stop sup)  ; stop supervising AND terminate the children
 
 Children can also be managed at runtime (Elixir's DynamicSupervisor / OTP's
 start_child·terminate_child·restart_child·count_children) — a supervisor started
@@ -580,25 +580,25 @@ another, the parent links it, so the parent's death tears this sub-tree down too
       ; named & idempotent
       else (spawn (supervisor-init children opts parent)))))
 
-;; Each synchronous client fn below is `gen`'s `call` (core, bare) against the
+;; Each synchronous client fn below is `gen/call` against the
 ;; supervisor's loop, which speaks `gen`'s `[:$call from ref payload]` envelope.
 ;; That is deliberate reuse rather than a second hand-rolled request/reply: the
 ;; hand-rolled version was a bare `(receive ([:reply ^r v] v))` with **no monitor
 ;; and no deadline**, so every one of these calls blocked the caller FOREVER against
 ;; a supervisor that had died (or was wedged mid-restart) — a hang with no error, no
-;; timeout and nothing in the mailbox to wake it. `call` monitors the server for the
+;; timeout and nothing in the mailbox to wake it. `gen/call` monitors the server for the
 ;; duration, so a dead supervisor raises at once and a wedged one raises after 5 s.
 
 (defn which-children (sup)
   "Ask supervisor `sup` for its current children: a list of `{:id :pid :restart}`
-summaries. Synchronous — blocks for the reply, up to `gen`'s 5 s `call` deadline;
+summaries. Synchronous — blocks for the reply, up to `gen/call`'s 5 s deadline;
 a dead supervisor raises instead of hanging."
-  (call sup :which-children))
+  (gen/call sup :which-children))
 
 (defn count-children (sup)
   "How many children supervisor `sup` currently has. Synchronous (see
 `which-children` for the deadline / dead-server behaviour)."
-  (call sup :count-children))
+  (gen/call sup :count-children))
 
 (defn start-child (sup spec)
   "Start a new child under a running supervisor `sup` from child `spec` (the same
@@ -606,23 +606,22 @@ map shape `start` takes) — the dynamic-supervisor entry point. The
 child is linked and supervised like any static child. Returns its pid, or
 `[:error msg]` if the spec's `:start` thunk raised. Synchronous (see
 `which-children` for the deadline / dead-server behaviour)."
-  (call sup [:start-child spec]))
+  (gen/call sup [:start-child spec]))
 
 (defn terminate-child (sup key)
   "Terminate a child of `sup` identified by `key` (its `:id` or pid) and drop it
 from supervision — it is *not* restarted. Returns `:ok`, or `:not-found`.
 Synchronous (see `which-children` for the deadline / dead-server behaviour)."
-  (call sup [:terminate-child key]))
+  (gen/call sup [:terminate-child key]))
 
 (defn restart-child (sup key)
   "Terminate the child of `sup` identified by `key` (`:id` or pid) and start a fresh
 incarnation from the same spec (not counted against the restart-intensity window).
 Returns the new pid, `:not-found`, or `[:error msg]` if the `:start` thunk raised.
 Synchronous (see `which-children` for the deadline / dead-server behaviour)."
-  (call sup [:restart-child key]))
+  (gen/call sup [:restart-child key]))
 
 ;; No `stop` here: a supervisor is an ordinary server process and answers the SAME
-;; `[:$stop]` message the core `stop` sends, so `(stop sup)` already tears it down
+;; `[:$stop]` message `gen/stop` sends, so `(gen/stop sup)` already tears it down
 ;; (children first, per their `:shutdown`). The wrapper this replaces was
-;; `(send sup [:$stop])` verbatim — a duplicate whose only effect was to shadow the
-;; core `stop` for anyone writing `(:use supervisor)`.
+;; `(send sup [:$stop])` verbatim — a duplicate of `gen/stop` under another name.

@@ -1,4 +1,4 @@
-;; std/proc/gen.blsp — the gen_server-style process framework. Loaded with
+;; std/proc/gen.blsp — the gen_server-style process framework.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - Messages ride internal envelopes — [:$cast …] / [:$call from ref …] — so the
@@ -6,11 +6,12 @@
 ;;    fresh (ref) (the request/reply idiom in docs/language.md). A message that is
 ;;    *not* one of those envelopes (a monitor `[:down …]`, a link `[:EXIT …]`, a
 ;;    timer tick, a plain send) is an `info` message — Erlang's handle_info.
-;;  - CORE: this is part of the language (loaded in the prelude), so `spawn-server`,
-;;    `call`, `cast`, `stop`, `defprocess`, … are bare — no require, no `gen/` prefix.
-;;    `defprocess` only expands at user call sites (after boot), so the old prelude-freeze
-;;    concern — its receive/match expansion stranding lambdas — does not apply: nothing in
-;;    the prelude expands it.
+;;  - An ORDINARY module with a bare namespace: `gen/spawn-server`, `gen/call`,
+;;    `gen/cast`, `gen/stop`, `gen/defprocess`, or bare after `(:use gen)`. It was
+;;    briefly bundled into the prelude with those names *bare* (`7cb796f0`), which
+;;    seized ten very generic globals — `call`, `cast`, `stop`, … — into the
+;;    un-redefinable reserved set (ADR-166), so `(def call …)` was refused outright.
+;;    A framework, however core, does not get to own `call` (ADR-243).
 ;;
 ;; A gen_server-style process framework on the kernel's spawn / send / receive / ref /
 ;; monitor (ADR-006). A server carries one immutable state value through its receive loop
@@ -31,8 +32,28 @@
 ;;     (query :double (* n 2))                       ; reply n*2; state untouched
 ;;     (info  [:down _ pid r] (do (log-death pid r) n))
 ;;     (terminate reason (println "down: " reason)))
-;;   (def c (spawn-server counter 0))
-;;   (cast c :inc) (call c :value) (stop c)
+;;   (def c (gen/spawn-server counter 0))
+;;   (gen/cast c :inc) (gen/call c :value) (gen/stop c)
+
+(defmodule gen
+  "The gen_server-style actor framework: a server carries one immutable state value
+through a tail-recursive `receive` loop, and `defprocess` declares how it handles each
+kind of message — CAST (async), CALL (sync), QUERY (sync, read-only), INFO (anything
+else), plus the `init` / `terminate` / `code-change` lifecycle clauses.
+
+    (defprocess counter (n)
+      (cast  :inc   (+ n 1))       ; body => next state
+      (call  :value [n n])         ; body => [reply next-state]
+      (query :double (* n 2)))     ; body => reply; state untouched
+
+    (def c (gen/spawn-server counter 0))
+    (gen/cast c :inc)
+    (gen/call c :value)   ;; => 1
+    (gen/stop c)
+
+Names are qualified (`gen/call`, `gen/cast`, `gen/stop`, …) or bare after
+`(:use gen)`. `call`/`cast`/`stop` are far too generic to own as globals, so this is
+a module like any other — `(def call …)` in your own code is yours.")
 
 ;; ---- client side ------------------------------------------------------------
 
@@ -54,11 +75,18 @@ fresh (ref)."
 the duration: a reply returns its value, the server dying raises
 `call: server … died: …`, and crossing the deadline raises
 `call: timed out …`. Both errors are catchable with `try`. **Every** exit path
-drops the monitor and flushes this call's already-queued `[:reply]` / `[:down]`,
-so a call that times out leaves nothing addressed to its `ref` behind. (A reply
-the server posts strictly *after* the deadline cannot be caught here — nothing
-can see it before it is sent — so a caller that keeps timing out against a
-slow-but-live server should stop calling it, not raise the timeout.)"
+drops the monitor, deactivates this call's reply `ref` as a one-shot alias, and
+flushes anything already queued for it — so a call that gives up leaves nothing
+addressed to its `ref` behind, and nothing can arrive for it afterwards either.
+
+The reply `ref` is a **one-shot alias** (OTP 24's `{alias, demonitor}` mechanism).
+Flushing alone only clears what is *already* queued; a reply the server posts
+strictly after the deadline would still land, unmatchable, and sit in the mailbox
+forever — unbounded growth over a retry loop, plus a re-scan by every later
+selective receive. `(%ref-deactivate r)` closes that: the kernel drops a message
+addressed to a deactivated ref **at delivery**, so it never enters the queue at
+all (ADR-244). (Erlang through OTP 23 solved the same problem by having the caller
+simply exit on timeout, which made a late reply moot.)"
   (let (r (ref) m (monitor pid))
     (send pid [:$call (self) r payload])
     (receive
@@ -67,9 +95,18 @@ slow-but-live server should stop calling it, not raise the timeout.)"
         (receive ([:down ^m _ _] :ok) (after 0 :ok))
         v)
       ([:down ^m _ reason] (demonitor m)
+        ;; The server is gone, so nothing will ever match this ref again — but a reply
+        ;; it posted just before dying may still be in flight. Deactivate first (drops
+        ;; the in-flight one at delivery), then flush one already queued.
+        (%ref-deactivate r)
+        (receive ([:reply ^r _] :ok) (after 0 :ok))
         (error "call: server " (pr-str pid) " died: " (pr-str reason)))
       (after ms
         (demonitor m)
+        ;; Deactivate BEFORE flushing: from here on a late `[:reply r …]` is dropped by
+        ;; the kernel at delivery, so the flush below only has to clear what was queued
+        ;; before this instant, and nothing can slip in behind it.
+        (%ref-deactivate r)
         ;; Both envelopes carry an unforgeable `ref`/monitor that NO other receive in
         ;; this process can match, so anything left queued for them is unreachable
         ;; garbage: it never gets consumed, grows the mailbox without bound over a

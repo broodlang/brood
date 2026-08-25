@@ -1,0 +1,93 @@
+;; The WASM sandbox's SPACE budget (ADR-071/145) — the half fuel does not cover.
+;;
+;; Fuel meters instructions; nothing about it stops a guest from making the HOST
+;; allocate. wasmtime's stock `StoreLimits` is not enough on its own here, and
+;; that is the whole point of this file:
+;;
+;;   * `memory_size` is applied to each linear memory INDIVIDUALLY, so a
+;;     component declaring N core instances of a just-under-cap memory multiplies
+;;     straight through it (measured: 20 x 256 MiB = 5.1 GB RSS);
+;;   * `table_elements` is unlimited by default, so `(table 100000000 funcref)`
+;;     was never charged at all (measured: 851 MB RSS from one `%wasm-load`).
+;;
+;; Both are one `%wasm-load` away from any program that runs untrusted wasm, and a
+;; host OOM is a SIGKILL — no Brood `try` can catch it. `crates/lisp/src/wasm.rs`
+;; therefore runs its own whole-store `GuestBudget`: memories AND tables charged
+;; against ONE 256 MiB pot. These cases pin that budget's shape, so a future
+;; refactor back onto per-object limits fails here instead of in production.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule wasm-sandbox-limits-test (:use test) (:use wasm))
+
+;; N core instances of one module holding a `pages`-page (64 KiB each) memory.
+;; Nothing is written, so a permitted load costs reservation, not resident bytes.
+(defn- memory-wat
+  (pages n)
+  (str "(component (core module $m (memory (export \"m\") "
+    pages
+    "))"
+    (string/join ""
+      (map (fn (i) (str " (core instance $i" i " (instantiate $m))")) (range n)))
+    ")"))
+
+(defn- table-wat
+  (elems)
+  (str "(component (core module $m (table (export \"t\") "
+    elems " funcref))" " (core instance $i (instantiate $m)))"))
+
+;; :loaded / :denied — and a permitted instance is closed, never leaked (an
+;; instance is a manual resource; the suite must not strand a 250 MiB store).
+(defn- try-load
+  (src)
+  (try
+    (let (i (instantiate src)) (close i) :loaded)
+    (catch e :denied)))
+
+(describe "wasm sandbox: the space budget is whole-store, not per-object"
+  (test "one memory just under the cap still loads"
+    ;; 4000 pages = 250 MiB < 256 MiB. The budget must not have been tightened
+    ;; below what the module docs promise a codec/parser.
+    (assert= (try-load (memory-wat 4000 1)) :loaded))
+
+  (test "a SECOND just-under-cap memory is denied — the cap is not per memory"
+    ;; This is the regression: with wasmtime's per-memory `memory_size` both of
+    ;; these passed, and 20 of them reached 5.1 GB RSS.
+    (assert= (try-load (memory-wat 4000 2)) :denied))
+
+  (test "many small memories are summed, not waved through one at a time"
+    (assert= (try-load (memory-wat 500 8)) :loaded) ; 8 x 31.25 MiB = 250 MiB
+    (assert= (try-load (memory-wat 500 9)) :denied)) ; 9 x 31.25 MiB = 281 MiB
+  (test "a single over-cap memory is still denied (the case that already worked)"
+    (assert= (try-load (memory-wat 5000 1)) :denied))
+
+  (test "a table is charged at all — it used to be free"
+    ;; wasmtime charges one pointer per element, so 40M elements = 320 MiB.
+    ;; Before the budget, `table_elements` was unlimited and a 100M-element table
+    ;; loaded happily at 851 MB RSS. The small table stays permitted: unlike a
+    ;; memory reservation a table is committed on creation, so keep this one tiny
+    ;; — the point is that it is charged, not that 240 MiB fits.
+    (assert= (try-load (table-wat 1000000)) :loaded) ; 1M x 8 B = 8 MiB
+    (assert= (try-load (table-wat 40000000)) :denied)) ; 40M x 8 B = 320 MiB
+  (test "memory and table share the budget — neither can be spent twice"
+    (let (both (str "(component"
+                 " (core module $m (memory (export \"m\") 3000) (table (export \"t\") 20000000 funcref))"
+                 " (core instance $i (instantiate $m)))"))
+      ;; 3000 pages = 187.5 MiB, plus 20M elements = 160 MiB → 347 MiB total.
+      ;; Each half fits on its own; only a shared pot rejects the pair.
+      (assert= (try-load both) :denied))))
+
+(describe "wasm sandbox: a trap says WHY"
+  (test "a runaway guest names the fuel meter, not just `error while executing`"
+    ;; `wasmtime::Error` is an `anyhow::Error`: its plain Display prints only the
+    ;; outermost context ("error while executing at wasm backtrace: …") and hides
+    ;; the actual cause one link down the source chain. A caller that cannot tell
+    ;; out-of-fuel from a division trap cannot act on either.
+    (let (spin "(component (core module $m (func (export \"spin\") (loop $l (br $l))))
+                  (core instance $i (instantiate $m))
+                  (func $s (canon lift (core func $i \"spin\")))
+                  (export \"spin\" (func $s)))"
+          inst (instantiate spin)
+          msg (try (do (call inst "spin") "no trap") (catch e (get e :message))))
+      (is (includes? msg "fuel"))
+      (close inst))))

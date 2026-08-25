@@ -38,7 +38,7 @@ pub fn inlay_hints(
     // Memoize `arglist` per name within one request — a hot file repeats heads.
     let mut cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
     walk(
-        interp, root, text, scope, index, range, &mut cache, &mut out,
+        interp, root, root, text, scope, index, range, &mut cache, &mut out,
     );
     out
 }
@@ -46,6 +46,7 @@ pub fn inlay_hints(
 #[allow(clippy::too_many_arguments)]
 fn walk(
     interp: &mut Interp,
+    root: &Node,
     node: &Node,
     text: &str,
     scope: &ScopeTree,
@@ -54,21 +55,30 @@ fn walk(
     cache: &mut HashMap<String, Option<Vec<String>>>,
     out: &mut Vec<InlayHint>,
 ) {
+    // Prune whole subtrees outside the requested (visible) range: their hints
+    // would all be filtered out anyway, and each call head we *don't* visit is an
+    // `arglist` eval we don't run.
+    if node.span.end < range.0 || node.span.start > range.1 {
+        return;
+    }
     if node.kind == NodeKind::List {
         if let Some(head) = node.forms().next() {
             if head.kind == NodeKind::Symbol {
-                hints_for_call(interp, node, head, text, scope, index, range, cache, out);
+                hints_for_call(
+                    interp, root, node, head, text, scope, index, range, cache, out,
+                );
             }
         }
     }
     for child in &node.children {
-        walk(interp, child, text, scope, index, range, cache, out);
+        walk(interp, root, child, text, scope, index, range, cache, out);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn hints_for_call(
     interp: &mut Interp,
+    root: &Node,
     call: &Node,
     head: &Node,
     text: &str,
@@ -79,18 +89,45 @@ fn hints_for_call(
     out: &mut Vec<InlayHint>,
 ) {
     let name = head.text(text);
-    // A locally-bound head isn't the global we'd introspect — skip it.
+    // Where the head's parameter names come from — the same three-way split
+    // signature help makes (`signature.rs`), and for the same reason: the *live
+    // image* is not the authority on a name this buffer redefines.
+    //
+    //  - a **local** head isn't a global at all → no hints;
+    //  - a head defined in **this buffer** takes its params from the buffer's own
+    //    CST def. Reading `arglist` for the raw name here was a live bug: a file
+    //    that defines its own `(defn map (a b c) …)` got the *prelude* `map`'s
+    //    parameter names painted over its arguments — a confidently wrong hint,
+    //    which the module docs call out as worse than none;
+    //  - a **free** head is resolved through this file's namespace + `(:use …)`
+    //    imports before asking the image, so a bare imported name gets hints too
+    //    (`arglist` on the unqualified name would just miss).
+    let resolution = scope.resolve_at(root, text, head.span.start);
     if let Resolution::Defined {
         kind: BindingKind::Local,
         ..
-    } = scope.resolve_at(call, text, head.span.start)
+    } = resolution
     {
         return;
     }
-
-    let params = cache
-        .entry(name.to_string())
-        .or_insert_with(|| leading_required(introspect::arglist_tokens(interp, name)));
+    let in_buffer_def = match resolution {
+        Resolution::Defined {
+            def,
+            kind: BindingKind::Global,
+        } => Some(def),
+        _ => None,
+    };
+    let params = cache.entry(name.to_string()).or_insert_with(|| {
+        let tokens = match in_buffer_def {
+            Some(def) => crate::defs::find_def(root, text, def)
+                .map(|d| d.params.iter().map(|p| (*p).to_string()).collect()),
+            None => {
+                let resolved = introspect::resolve_in_source(interp, text, name);
+                introspect::arglist_tokens(interp, &resolved)
+            }
+        };
+        leading_required(tokens)
+    });
     let Some(params) = params else { return };
 
     // The args are the call's forms after the head; label as many as we have
