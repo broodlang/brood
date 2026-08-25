@@ -3027,7 +3027,7 @@ covers per-pane font); `gui-font!` takes an optional window id for per-window fo
 - **`cargo test --test suite` debug segfault** — coroutine stack overflow, not a
   memory bug; `WORKER_STACK_BYTES` raised (pages mmap'd lazily, ~0 cost until needed).
 
-## KI-21 — `nest run --for` / `--watch` emit a pre-ADR-150 `~p` pin
+## KI-21 — `nest run --for` / `--watch` emit a pre-ADR-150 `~p` pin ✅ FIXED 2026-07-30
 
 **Status:** ✅ **fixed** 2026-07-30 (`~p` → `^p`). Found while smoke-testing a
 TUI/GUI app end to end.
@@ -3099,7 +3099,12 @@ be: the bare-atom path is 739 ns against Elixir's ~290 ns per message, so `recei
 
 ### (the diagnosis that led here follows)
 
-**Status:** ⚠️ **open (2026-08-21) — root-caused and localised; not fixed.**
+> Everything below is the diagnosis **as it was recorded before the fix above**, kept because
+> the elimination order is what made the root cause findable. Its status line is historical
+> and superseded — KI-49 is fixed; nothing here is open.
+
+**Status (as recorded then; superseded by the fix above):** ⚠️ **open (2026-08-21) —
+root-caused and localised; not fixed.**
 
 **What it costs.** `pingpong` is Brood **211 ms** vs Elixir **58 ms** (3.7x); `ring` 2.9x;
 `supervisor` 3.3x. Those three rows are exactly the ones whose protocols are **tagged
@@ -3196,7 +3201,7 @@ real but does not reach parity on its own: the bare-atom path is already 739 ns 
 Elixir's ~290 ns per message, so `receive` + `deliver` (61% of even the cheapest path) is
 the structural remainder.
 
-## KI-48 — JIT tail dispatch read past the roots stack (open)
+## KI-48 — JIT tail dispatch read past the roots stack ✅ FIXED 2026-08-21
 
 **Status:** ✅ **root cause found and fixed 2026-08-21.** Two crashes, 4 s apart, captured in
 `.brood_crash_dump` on 2026-08-20; never reproduced on demand, so the causal link to the fix
