@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | 🔧 **diagnosed 2026-08-25, not fixed.** The fix is not to revert a wave — it is to make a module load cheap at boot, which is what the std image already does (4-33x) and why it is *not* installed at boot: materialising defines bindings and evaluates NOTHING, so registrations are skipped (131/4873 fail). See the replay note below |
 | KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl Port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl Port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
 | KI-59 | **`nest run --for` reported failure for a program that succeeded.** The wrapper was `(%spawn …)` then `(monitor p)` — two steps. A program that finished before the monitor attached fired a synthetic `:noproc`, `(= :noproc :normal)` was false, and the run exited 1 after printing its output correctly. Worst in the mode documented as the CI-friendly way to exercise an app | ✅ **fixed 2026-08-25** — `%spawn-link` + `trap-exit`, atomic by construction: the kernel already names this race on `%spawn-link` itself ("no spawn->link :noproc race", ADR-067). Reproduced ~1 run in 6 under load, 0/20 after. Reading `:noproc` as success would be wrong the other way — a program that *crashed* before the monitor attached is indistinguishable |
 | KI-58 | **the namespacing silently killed the `table-put` call-site inline — `sieve` 11.6× slower.** `resolve_prim3` accepted only a *direct* native head, on the stated grounds that `table-put` "has no prelude wrapper to follow"; the v0.9/v0.10 waves made the head `table/put`, a `std/table.blsp` wrapper, so the call stopped inlining and became an ordinary `Call` in the hot arm. The **2-ary** `resolve_prim` follows its wrapper, so `table/has?` went on inlining beside it — the asymmetry is visible in one IR dump | ✅ **fixed 2026-08-25** — `resolve_prim3` follows a thin wrapper like the 2-ary path, requiring the identity argument map (`Node::Prim3` has no permutation field, so a reordering wrapper must decline rather than store under the wrong key). `make ab`: **457 → 68 ms, −85.1%**. Guards: `table_put_call_site_inline_recognizes_the_namespaced_wrapper` (sabotage-verified) and the new `every_inlinable_head_still_reaches_its_primitive`, which caught a **second** dead inline on its first run — `table/get`, whose `&optional` head is not a thin wrapper; fixed in `std/table.blsp` with two arity clauses |
@@ -97,7 +98,7 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**No open items.** **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**Open: KI-61** (startup +82%, a per-wave namespacing tax; diagnosed, fix is the stdimage replay). **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
 **fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
 **KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
@@ -177,6 +178,69 @@ activation, and no `std` suite tests a large input. It is invisible below ~10⁵
 loop that calls the same function eleven times at increasing sizes stays correct throughout — so
 repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-61 — startup is a per-wave namespacing tax 🔧 DIAGNOSED 2026-08-25
+
+**Status:** 🔧 diagnosed, not fixed. Every figure below is best-of-15, `taskset`-pinned, on an
+empty program, with **each binary warmed first** — the boot cache is keyed on build-id *and the
+executable's mtime*, so a freshly copied binary's first run measures cache population (~1.2 s
+cold against ~0.11 s warm) and would have made the whole sweep meaningless.
+
+**What.** The first cross-language run on 0.12.0 read `startup` at **29.9 ms** against 0.3.11's
+16.5. A sweep of 8 points across the 244 commits shows two clean **steps**, not a ramp — which
+is what makes this bisectable at all, unlike the `primes` hunt FRONTIER records:
+
+```
+d5572d61  13.9      07538dea  13.5      3d734516  17.5
+4fb903ce  13.5      cf97b1d4  17.6 <-   0f326ead  24.8 <-
+                    7505e44a  17.5      c39ca87c  24.8
+```
+
+Both steps are the same mechanism, and it is not a bug in either commit:
+
+| step | commit | cause | cost |
+|---|---|---|---|
+| 1 | `1f613d23` "move the string surface into a `string` library module" | `(require-one 'string)` | **+4.0 ms** |
+| 2 | the v0.10.0/v0.11.0 waves | `(require-one 'seq)` | **+7.5 ms** |
+
+Step 2 was proven by deleting the single line and rebuilding: **24.3 -> 16.8 ms, -30.8%**.
+
+**Why the load is there.** A prelude helper referencing `seq/find` or `string/char-at` is
+late-bound — a qualified name in a function *body* resolves when the function is called — but
+boot's namespace-resolve is a no-op for the root prelude, so those refs never auto-require. The
+module therefore has to be force-loaded before anything can call such a helper.
+
+**Why this matters more than 11 ms.** It is a **per-wave tax**. The core has gone 613 -> ~280
+published names across these refactors, each tranche leaving another module the prelude must
+force-load, and each costs a few ms of *every* `brood` invocation forever. It also deflates
+every other published benchmark row: `compute = wall - startup`, so a bigger startup makes each
+row's reported compute *smaller* than its wall-clock regression.
+
+**A suspect that measurement cleared.** `7bbf979d feat(stdimage): a startup image for the
+standard library` sits inside step 2's range and is **flat against its parent**. A startup
+regression in a window containing a commit named "startup image" is exactly the coincidence one
+would bank without checking.
+
+**The fix is not to revert a wave.** It is to make a module load cheap at boot — which is
+precisely what the std image does (4-33x) and precisely why it is not installed at boot:
+materialising a module defines its bindings and evaluates nothing, so every registration its
+load would have performed is skipped, and the suite fails 131 of 4873 with errors that
+type-check perfectly clean.
+
+**The recorded blocker is narrower than it reads, and there is a precedent in the same file.**
+The note rules out *snapshotting* `*impls*` — correct, since a closure nested in a snapshotted
+value does not round-trip. But `stdimage/install` **already replays** `*require-edges*` through
+a `%std-edges` section, for exactly this reason ("a restored module defines its bindings but
+evaluates nothing, so without them `url` comes back with no `path`"). The extension is to record
+the registration **forms** — `(impl Port :fn (write [f s] (f s)))` — rather than the resulting
+values: a form is symbols and lists all the way down, so it images cleanly, and evaluating it on
+materialise rebuilds the closure *and* performs the registration. Bounded: 56 `impl` forms
+across 13 files, 24 `defability`, 35 `defrecord`; `*record-ids*` (plain symbols) already
+restores correctly.
+
+The scoping question to answer before writing it: are the 131 failures all ability dispatch?
 
 ---
 
