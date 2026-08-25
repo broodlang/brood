@@ -1,4 +1,3 @@
-
 ;; std/reflect.blsp — reading Brood source as DATA: the advisory checker, the reader's
 ;; lossless CST, the string/comment-aware scanners, and where a definition lives.
 ;;

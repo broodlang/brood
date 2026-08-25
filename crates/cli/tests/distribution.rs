@@ -465,6 +465,10 @@ fn source_positions_survive_a_cross_node_send() {
 
     let server = format!(
         r#"
+;; The shipped closure's body references `reflect/form-pos`, and auto-require runs on
+;; the node that COMPILES a form — never on the node that merely *receives* an already
+;; compiled closure. So the receiver has to load the module itself.
+(require-one 'reflect)
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (register :probe (self))
 (defn serve ()
@@ -488,7 +492,7 @@ fn source_positions_survive_a_cross_node_send() {
 (let (me (self))
   ;; The next line is line 7 in this file — the quoted literal whose position
   ;; must survive across the wire and reach the receiver's `form-pos`.
-  (send {{:name :probe :node :a@127.0.0.1}} [:run (fn () (form-pos '(positioned-marker))) me]))
+  (send {{:name :probe :node :a@127.0.0.1}} [:run (fn () (reflect/form-pos '(positioned-marker))) me]))
 (receive
   ([:pos p] (println (str "GOT: " p)))
   (after 30000 (throw "no reply from probe")))

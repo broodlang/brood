@@ -1,0 +1,172 @@
+;;; Robustness of the Rust primitive kernel against hostile arguments.
+;;;
+;;; Every case here guards a bug where a builtin turned a *value* a Brood program
+;;; can produce into something the language cannot survive: a Rust panic or an
+;;; allocator abort. Neither is a `LispError` — `try`/`catch` cannot see either
+;;; one, a panic kills the scheduler worker (observed: the runtime then hangs),
+;;; and an abort takes the process down with exit 134 and no `.brood_crash_dump`.
+;;; So "the assertion ran at all" is a real part of what each test proves.
+;;;
+;;; A few cases need a *separate OS process* or a *symlink*, which Brood has no
+;;; primitive for; they shell out via `%os-cmd`. `os-pid` below exists because the
+;;; kernel exposes no OS pid — a child shell's `$PPID` is ours.
+
+(defmodule builtin-robustness-test (:use test))
+
+(defn os-pid ()
+  "This OS process's pid, via a child shell's `$PPID` (Brood has no pid primitive)."
+  (string/trim (get (%os-cmd "/bin/sh" ["-c" "echo $PPID"]) :stdout)))
+
+(defn grow (s n)
+  "`s` doubled until it is at least `n` chars. `string/repeat` is quadratic enough
+that a megabyte of it costs seconds; doubling costs milliseconds."
+  (if (>= (count s) n) s (grow (str s s) n)))
+
+;;
+;; --- %term-draw: render-op extents ------------------------------------------
+;;
+
+(describe "%term-draw: hostile frame extents"
+
+  (test "a huge rect width returns cleanly instead of aborting the runtime"
+    ;; Was: `" ".repeat(w)` on an unclamped i64 ->
+    ;; `memory allocation of 1125899906842624 bytes failed`, SIGABRT, exit 134,
+    ;; in release AND debug, with no crash dump and nothing for `try` to catch.
+    (let (out (with-out-str (%term-draw [[:rect 0 0 1125899906842624 1]])))
+      (is (string? out))
+      ;; Bounded, not merely survivable: nothing wider than the terminal renders.
+      (is (< (count out) 100000))))
+
+  (test "a huge rect height returns cleanly instead of looping forever"
+    ;; Was: `for i in 0..h.max(0)` over an attacker-supplied h — an effectively
+    ;; infinite loop appending escape bytes until the allocator gave up.
+    (let (out (with-out-str (%term-draw [[:rect 0 0 1 1125899906842624]])))
+      (is (string? out))
+      (is (< (count out) 1000000))))
+
+  (test "a rect row near i64::MAX does not overflow the coordinate add"
+    ;; Was: `clamp_u16(row + i)` — two caller-controlled i64s added BEFORE the
+    ;; clamp, which panics under debug-assertions (the build this repo's own
+    ;; debug guidance recommends) and silently wraps without them.
+    (let (out (with-out-str (%term-draw [[:rect 9223372036854775807 0 1 4]])))
+      (is (string? out))))
+
+  (test "a coordinate at the u16 ceiling does not overflow crossterm's 1-based MoveTo"
+    ;; Found by the case above: `MoveTo` emits 1-BASED ANSI coordinates, so it adds
+    ;; 1 to the u16 we hand it — clamping to u16::MAX moved the panic from our add
+    ;; into crossterm's ("attempt to add with overflow"), still on a worker thread.
+    (let (out (with-out-str (%term-draw [[:text 65535 65535 "x"]
+                                          [:cursor 65535 65535]
+                                          [:rect 65535 65535 2 2]])))
+      (is (string? out))))
+
+  (test "negative extents draw nothing"
+    (let (out (with-out-str (%term-draw [[:rect 0 0 -5 -5]])))
+      (assert= "" out))))
+
+;;
+;; --- %env-all / %argv: non-UTF-8 from the OS --------------------------------
+;;
+
+(describe "%env-all: a hostile environment"
+
+  (test "every key and value comes back as a string"
+    (let (e (%env-all))
+      (is (map? e))
+      (is (every? string? (keys e)))
+      (is (every? string? (vals e)))))
+
+  (test "%argv comes back as strings"
+    (is (every? string? (%argv))))
+
+  (test "a non-UTF-8 env var value is decoded lossily, not panicked on"
+    ;; Was: `std::env::vars()` unwraps, so ONE non-UTF-8 value anywhere in the
+    ;; environment panicked the worker thread mid-`%env-all`; `try` did not
+    ;; contain it and the runtime hung until killed.
+    ;;
+    ;; The variable has to be set before the process starts, and Brood has no
+    ;; setenv, so this needs a child `brood`. When no runner binary is built
+    ;; (a plain `cargo test` need not have one) the case can only be skipped —
+    ;; `BADENV=$'\xff\xfe' brood -- probe.blsp` is the equivalent by hand.
+    (let (bin (first (filter file/exists? ["target/release/brood" "target/debug/brood"])))
+      (if (nil? bin)
+        (is true)
+        (let (probe (str "/tmp/brood-envall-probe-" (os-pid) ".blsp")
+              _ (file/spit probe "(print (str (map? (%env-all))))")
+              cmd (str "BADENV=$(printf '\\377\\376') exec " bin " " probe)
+              r (%os-cmd "/bin/sh" ["-c" cmd])
+              _ (file/rm probe))
+          (assert= 0 (get r :exit))
+          (is (>= (index-of (get r :stdout) "true") 0)))))))
+
+;;
+;; --- %file-swap: the temp file is not hijackable ----------------------------
+;;
+
+(describe "%file-swap: temp-file creation"
+  :isolated
+
+  (test "a symlink at the old predictable temp path cannot redirect the write"
+    ;; Was: the temp file was `{data-path}.swap.{pid}` written with `fs::write`
+    ;; (O_CREAT|O_WRONLY|O_TRUNC, no O_EXCL, no symlink check). In any directory
+    ;; an attacker can write to, a symlink pre-planted at that entirely
+    ;; predictable name made the swap overwrite whatever it pointed at.
+    (let (dir (str "/tmp/brood-swap-robust-" (os-pid))
+          _ (file/rmdir dir)
+          _ (file/mkdir dir)
+          victim (str dir "/victim")
+          data (str dir "/data")
+          lock (str dir "/lock")
+          _ (file/spit victim "PRECIOUS")
+          _ (file/spit data "old")
+          planted (str data ".swap." (os-pid))
+          _ (%os-cmd "/bin/ln" ["-s" victim planted])
+          ok (%file-swap lock data "old" "new"))
+      (is ok)
+      (assert= "new" (file/slurp data))
+      ;; The whole point. Before the fix this read "new".
+      (assert= "PRECIOUS" (file/slurp victim))
+      (file/rmdir dir)))
+
+  (test "a swap leaves no temp file behind"
+    (let (dir (str "/tmp/brood-swap-clean-" (os-pid))
+          _ (file/rmdir dir)
+          _ (file/mkdir dir)
+          data (str dir "/data")
+          _ (file/spit data "old")
+          _ (%file-swap (str dir "/lock") data "old" "new")
+          left (filter (fn (n) (>= (index-of n ".swap.") 0)) (file/ls dir)))
+      (assert= '() (seq left))
+      (file/rmdir dir))))
+
+;;
+;; --- %os-cmd-stdin: both pipe directions make progress ----------------------
+;;
+
+(describe "%os-cmd-stdin: no pipe deadlock"
+  :isolated
+
+  (test "a child echoing back more than one pipe buffer completes"
+    ;; Was: the whole of stdin was written before anything read stdout, so a
+    ;; child that emits more than the ~64 KiB pipe buffer while being fed
+    ;; deadlocked with us — a scheduler worker pinned forever, uninterruptible
+    ;; and uncatchable. (2 MiB through `cat` hung indefinitely; killed at 15 s.)
+    (let (big (grow "x" 2000000)
+          r (%os-cmd-stdin "/bin/cat" [] big))
+      (assert= 0 (get r :exit))
+      (assert= (count big) (count (get r :stdout))))))
+
+;;
+;; --- %halt: the exit status is not silently truncated -----------------------
+;;
+
+(describe "%halt: exit-code range"
+
+  (test "an out-of-range code raises instead of exiting successfully"
+    ;; Was: `code as i32` truncated, so `(%halt 4294967296)` exited 0 — a
+    ;; script's "fail" silently became "success". If this regresses, the whole
+    ;; test run simply stops here with status 0, which is itself the symptom.
+    (assert= :raised (try (%halt 4294967296) (catch e :raised))))
+
+  (test "a negative code raises rather than wrapping"
+    (assert= :raised (try (%halt -1) (catch e :raised)))))

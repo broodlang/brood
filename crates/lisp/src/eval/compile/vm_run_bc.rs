@@ -393,8 +393,7 @@ pub(crate) fn vm_run_bc(
     let mut cur_back_edges: u32;
     // Fresh start (vs. resuming a parked continuation) — the JIT tiering hook fires only
     // on a fresh arm activation, never mid-receive resume.
-    let fresh;
-    match resume {
+    let fresh = match resume {
         // Resume a parked continuation: its frame stack + operand roots are still on
         // the heap (the suspend didn't unwind), so restore the registers and re-enter
         // the loop at the `%receive` `Inst::Call` it rewound to — no fresh frame push.
@@ -415,7 +414,7 @@ pub(crate) fn vm_run_bc(
             {
                 cur_back_edges = cur.back_edges;
             }
-            fresh = false;
+            false
         }
         // Fresh start: push `arm0`'s activation frame.
         None => {
@@ -448,9 +447,9 @@ pub(crate) fn vm_run_bc(
             {
                 cur_back_edges = 0;
             }
-            fresh = true;
+            true
         }
-    }
+    };
     let unwind = |heap: &mut Heap| {
         heap.truncate_roots(entry_roots);
         heap.truncate_env_roots(entry_env);
@@ -654,7 +653,7 @@ pub(crate) fn vm_run_bc(
                         // The size this frame is BUILT to, captured here. The deopt-resume
                         // helpers must be told it rather than re-deriving it from
                         // `inline_installed`, which `jit_tier` flips below — see
-                        // `jit_frame_is_leaf_spliced`.
+                        // `jit_frame_layout`.
                         let frame_nslots = if inlined_active {
                             cur_arm.inline_nslots
                         } else {
@@ -664,7 +663,13 @@ pub(crate) fn vm_run_bc(
                         // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
                         // assumes roots return to exactly here.
                         let pre_roots = heap.roots_len();
-                        let jit_outcome = jit_tier(cur_arm.arc(), heap, cur_base, cur_env);
+                        // `jit_tier_in_frame`, not `jit_tier`: the frame above was sized from
+                        // `inline_installed`, and `jit_tier` re-loads `jit_code` — a peer
+                        // process can swap the inlined body in between, and running it against
+                        // this (small) frame writes past the frame top. Telling it the size the
+                        // frame was BUILT to lets it decline instead. See its doc (KI-48 family).
+                        let jit_outcome =
+                            jit_tier_in_frame(cur_arm.arc(), heap, cur_base, cur_env, frame_nslots);
                         // The deopt-resume decision, taken ONCE and taken HERE, before the
                         // frame is resized below. Reading the journal twice — once to decide
                         // the resize, once to resume — is wrong two ways: the second read

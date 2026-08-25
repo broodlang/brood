@@ -31,11 +31,11 @@ degrades to a plain case-insensitive name/docstring search, e.g.
       (map (fn (e) [(second e) (nth e 2)])
         (sort-by (fn (e) [(- (first e)) (str (second e))])
           (seq/keep (fn (s)
-                  (let (d (try (doc (eval s)) (catch _ nil)))
-                    (when (string? d)
-                      (let (hay (string/lower (str s " " d))
-                            hits (count (filter (fn (t) (includes? hay t)) terms)))
-                        (when (> hits 0) [hits s d])))))
+                      (let (d (try (doc (eval s)) (catch _ nil)))
+                        (when (string? d)
+                          (let (hay (string/lower (str s " " d))
+                                hits (count (filter (fn (t) (includes? hay t)) terms)))
+                            (when (> hits 0) [hits s d])))))
             (global-names)))))))
 
 ;; ---- spy: homoiconic tree-tracing debug (ADR-173) ---------------------------

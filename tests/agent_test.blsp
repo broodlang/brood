@@ -71,3 +71,38 @@
           _ (agent/update a (fn (m) (assoc m :y 2))))
       (assert= {:x 1 :y 2} (agent/get a identity))
       (agent/stop a))))
+
+(describe "agent: an unmatched message is dropped, not left in the mailbox"
+  ;; `agent-loop` had no catch-all, so a stray send matched no clause and sat in the
+  ;; agent's mailbox forever — growing it and being re-scanned by every later
+  ;; selective receive. `gen` has always dropped one (OTP's default handle_info).
+  (test "strays are consumed, and the agent keeps working"
+    (let (a (agent/start (fn () 0)))
+      (dotimes (i 20) (send a :stray))
+      (send a [:not-an-envelope 1 2])
+      ;; forces the loop to walk past everything queued before this call
+      (agent/update a inc)
+      (assert= 1 (agent/get a identity))
+      (sleep 30)
+      (assert= 0 (proc/mailbox-size a))
+      (agent/stop a))))
+
+(describe "agent: a dead agent raises instead of hanging forever"
+  ;; Every op was a bare `(receive ([:reply ^r v] v))` — no monitor, no deadline — so
+  ;; a stopped or crashed agent parked the caller with nothing left to wake it.
+  ;; They now ride `gen`'s `call`, which monitors the server.
+  (test "get / update / get-and-update / stop raise on a stopped agent"
+    (let (a (agent/start (fn () 1)))
+      (agent/stop a)
+      (sleep 60)
+      (assert= :raised (try (do (agent/get a identity) :no-error) (catch e :raised)))
+      (assert= :raised (try (do (agent/update a inc) :no-error) (catch e :raised)))
+      (assert= :raised
+        (try (do (agent/get-and-update a (fn (n) [n n])) :no-error) (catch e :raised)))
+      (assert= :raised (try (do (agent/stop a) :no-error) (catch e :raised)))))
+  (test "a crashed agent raises too"
+    (let (a (agent/start (fn () 0)))
+      ;; the update fn throws inside the agent, killing it
+      (try (agent/update a (fn (n) (error "agent boom"))) (catch e nil))
+      (sleep 60)
+      (assert= :raised (try (do (agent/get a identity) :no-error) (catch e :raised))))))

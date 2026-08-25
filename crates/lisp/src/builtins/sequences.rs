@@ -199,7 +199,16 @@ pub(super) fn rest(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         // (`alloc_range` returns `Nil` once it's empty).
         Value::Range(id) => {
             let (lo, hi, step) = heap.range_parts(id);
-            Ok(heap.alloc_range(lo + step, hi, step))
+            // The next start can leave i64 near MIN/MAX — `(rest (%range 1 2 i64::MAX))`
+            // — and the range is exhausted at exactly that point, so yield the empty
+            // range instead of a wrapped `lo`. Matches `range_to_vec`/`range_eq_list`,
+            // which end their walk on the same `checked_add` miss. (An unchecked `+`
+            // here panicked under debug-assertions and silently produced a garbage
+            // range in release.)
+            match lo.checked_add(step) {
+                Some(next) => Ok(heap.alloc_range(next, hi, step)),
+                None => Ok(Value::nil()),
+            }
         }
         // The tail of a bytes value is a fresh bytes value (all but the first byte).
         Value::Bytes(id) => {
@@ -307,7 +316,9 @@ pub(super) fn range_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 pub(super) fn range_to_list(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Range(id) => {
-            let items = heap.range_to_vec(id);
+            // Fallible since the pre-size `capacity overflow` panic fix: a range wider
+            // than `MAX_REALISED_RANGE` is refused as a catchable error, not a panic.
+            let items = heap.range_to_vec(id)?;
             Ok(heap.list(items))
         }
         Value::Nil => Ok(Value::nil()),
@@ -794,7 +805,12 @@ pub(super) fn hash_map(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
             "hash-map: expected an even number of arguments (key/value pairs)",
         ));
     }
-    let pairs: Vec<(Value, Value)> = args.chunks_exact(2).map(|kv| (kv[0], kv[1])).collect();
+    let pairs: Vec<(Value, Value)> = args
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|kv| (kv[0], kv[1]))
+        .collect();
     Ok(heap.map_from_pairs(pairs))
 }
 
@@ -969,11 +985,13 @@ pub(super) fn map_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 }
 
 /// `(map-int-add m k delta)` — a fresh map with `k`'s integer value incremented
-/// by `delta` (inserts `delta` when `k` is absent). Single trie traversal.
+/// by `delta` (inserts `delta` when `k` is absent). Single trie traversal. Raises
+/// past the i64 range, like `table-incr` — which the linear-map optimizer rewrites
+/// this into, so the two agree (see [`Heap::map_int_add`]).
 pub(super) fn map_int_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_map(heap, "map-int-add", arg(args, 0))?;
     let delta = expect_int(heap, "map-int-add", arg(args, 2))?;
-    Ok(heap.map_int_add(id, arg(args, 1), delta))
+    heap.map_int_add(id, arg(args, 1), delta)
 }
 
 /// `(map-dissoc m k)` — a fresh map with `k` removed.

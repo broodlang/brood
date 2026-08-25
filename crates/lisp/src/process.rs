@@ -49,6 +49,9 @@ mod scheduler;
 /// `(system-monitor …)` builtin reach it without per-fn re-exports.
 pub mod sysmon;
 mod timer;
+/// Pending `(after ms …)` deadline entries, runtime-wide — the leak/compaction test hook
+/// for `timer`'s lazy cancellation.
+pub use timer::pending_timer_count;
 
 pub use mailbox::{
     list_local_pids, mailbox_len, process_gc_runs, process_mem, process_reductions, process_status,
@@ -73,8 +76,8 @@ pub(crate) use links::{
 #[cfg(target_arch = "wasm32")]
 pub(crate) use scheduler::pump_until_quiescent;
 pub use scheduler::{
-    begin_capture, capture_append, current_pid, deadline_exceeded, exit, exit_count,
-    free_drained_gen, gc_block_depth, in_green_process, live_pids, macro_block_active,
+    begin_capture, capture_append, current_pid, deadline_exceeded, deregister_root_ctx, exit,
+    exit_count, free_drained_gen, gc_block_depth, in_green_process, live_pids, macro_block_active,
     migrate_count, native_stack_headroom_ok, old_gen_drained, parent_of, peak_threads, pid_value,
     preempt_count, report_drain_liveness, self_mailbox_seq, self_pid, set_deadline,
     set_max_parallel, set_test_no_workers, shutdown_runtime_parked, spawn, spawn_count,

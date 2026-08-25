@@ -2495,6 +2495,157 @@ instant it built (`no impl of localize for :money`) — now `kw::` constants, pe
 `std_check_test` because the arity no longer matched. A module's own function sharing a
 core name is exactly where the tool cannot tell the difference — the third time that shape
 has bitten (hatch's `stop`, hive's `register`, now this).
+## 2026-08-24 — A general review: five kernel bugs, and a `main` that was already red
+
+A broad correctness review across the kernel (heap/GC, JIT/VM, scheduler/dist, builtins,
+front-end) and `std/`. The headline is that **the default build computed wrong arithmetic on
+the most idiomatic loop in the language**, and five green CI jobs did not know.
+
+### The one that matters — KI-50
+
+```lisp
+(defn sum-down (n acc) (if (<= n 0) acc (sum-down (dec n) (+ acc n))))
+(sum-down 200000 0)   ;; => 6251217600, want 20000100000
+```
+
+`std`'s `repeat` is this exact shape (`(repeat-acc (dec n) x (cons x acc))`), so
+`(count (repeat 200000 :a))` returned **28033**. At 400 000 the corruption stopped being
+silent and became `type error: -: expected number, got nil`, blaming `dec` — a prelude
+function the caller never mis-called.
+
+An arm that tiers has two frame layouts, and on a deopt the runtime must know which one the
+live frame was built to, because each keeps its journal at its own slot. It decides by
+**frame size**, deliberately, because `inline_installed` is flipped by `jit_tier` between the
+sizing and the deopt (KI-26). Two facts then combined: `leaf_nslots =
+d.nslots.max(nslots_total)` came out **exactly equal** to the small `nslots` when the spliced
+callee needs no extra slot — `(dec n)` is that shape, measured `nslots=4, inline_nslots=4` —
+and splicing *removes the residual `Call`*, which makes the derivation `pure_self` and hence
+unjournalled, so the old "leaf **and** journalled?" predicate answered *no* and fell back to
+the **small** layout's slot. In the spliced layout that slot is an ordinary local holding the
+loop counter, so `jit_ckpt_resume` read `Int(165825)`, saw a positive integer, and decoded it
+as a journal word: resume ip `n >> 16`, operand depth `n & 0xFFFF`.
+
+Fixed in the "make the invariant true" direction rather than around it: one reserved slot so a
+leaf layout is *strictly* larger, plus a `FrameLayout` enum so a frame reads only the journal
+of the layout it was built to, and an unjournalled layout yields `None` instead of a foreign
+slot. Guarded by `tests/jit_leaf_frame_layout_test.blsp`, sabotage-verified.
+
+**Why nothing caught it, which is the transferable part.** The corruption needs *one long
+activation*, not many calls — a loop calling the same function eleven times at 1 000 → 100 000
+is entirely correct, while a single 180 000-iteration call is not. No `std` suite tests a large
+input (grepping the eight non-`datetime` suites for `100000`/`200000`/`50000` returns nothing),
+so it was invisible, and re-running the suite — the usual flake defence — could never help. The
+missing thing is not a stress test but a **test dimension**: assert the same closed-form answer
+at 10³/10⁵/10⁶ *and* across `BROOD_TIER` 0/1/2. That costs milliseconds and would have caught
+this the day the leaf inliner defaulted on.
+
+### The other four kernel bugs
+
+- **KI-51** — `macroexpand_1` read a pair, then called the ADR-227 auto-`require`, which *loads
+  a module* (arbitrary eval → GC), then dereferenced the stale handle. Debug tripped the epoch
+  tripwire; **release silently walked relocated memory** and reported a 5-element form as
+  `arity error: expected 1 argument, got 31309`. The neighbouring `macroexpand` loop argues in a
+  comment that its handle "needs no slot" — correct when written, falsified by a later call.
+- **KI-52** — `msg_roots`, the L1 delivered-message slot table, was a root set for the LOCAL
+  collector in all three of its walks and for **no** RUNTIME walk, so a shared closure sent by
+  handle to a parked receiver could have its code freed or compacted while still queued. The
+  share-fn path's soundness note ("Phase 2 walks the whole local heap") is true for a handle
+  embedded in copied data and false for the top-level value in the slot — which is what that
+  path actually produces.
+- **KI-53** — a `Pid` crosses the wire node-qualified; a `Ref` crosses as a bare `u64` and every
+  node counts from 0, so two nodes mint colliding refs. A ref is what a pinned `receive` matches
+  and what identifies a monitor. Mitigated with a per-runtime random prefix (node-qualified refs
+  need a `Value` layout change, which the JIT ABI pins).
+- **The receive-mark searched an unsorted queue.** `Envelope::seq`'s doc promised "the queue is
+  always ordered by it — which is what lets a pinned `receive` binary-search", while
+  `reinsert_candidate` reinserted at a *clamped* index and its own comment disclaimed exactly
+  that guarantee. Reproduced end to end at the predicted values (`queue=[3,5,4,6]`,
+  `partition_point → 3`, reply lost). Fixed by making reinsert seq-ordered, so the invariant is
+  now total.
+
+### `main` was already red — KI-54
+
+Three tests fail on a pristine `28e8eeb2`, verified by building HEAD in a clean worktree rather
+than inferred, and one commit caused all three: `7cb796f0`, making gen_server core and **bare**.
+It reserved *too much* (ten generic names — `call`, `cast`, `stop` — became un-redefinable, which
+is what broke `spawned_process_picks_up_redefinition`), reserved *too little* (`gen` fell out of
+`(builtin-modules)`, un-reserving the package name), and bundled `gen.blsp` into `PRELUDE`
+without declaring it in `EXTRA_PRELUDE_FILES`.
+
+The last one is worth sitting with: that manifest test exists *precisely* so a file joining the
+prelude is a decision rather than a drift. It worked. Nobody read the result. And
+`docs/known-issues.md` asserted "No open items… `main` is green on all five CI jobs" the whole
+time — a load-bearing claim that was false, which is worse than no claim. **Re-verify "green"
+against a clean checkout before writing it down.**
+
+Whether `call`/`cast`/`stop` *should* be permanently un-redefinable is left as a design call for
+the owner — it follows correctly from ADR-166 plus the deliberate "bare" decision, but it is a
+real cost that commit may not have priced.
+
+### Also fixed
+
+CRLF injection in the HTTP client and server (header values and the request target were spliced
+raw); `gen`'s `call-timeout` leaking late replies; a throwing `:start` killing a whole supervisor
+instead of counting against restart intensity; supervisor and agent client APIs hanging forever
+against a dead server (they now use `gen/call`'s monitor+timeout discipline); a flat 100k-element
+list overflowing the native stack in `scan_count_syms` (the reader's depth cap bounds *nesting*,
+not length) and taking the runtime with it; `%isolate` killing bystander processes it did not own
+and leaking its `defdyn`/`private` mark registries; `[:rect]` with an unbounded extent aborting
+the process via the allocator; `%env-all` panicking on a non-UTF-8 environment variable and
+*hanging* the runtime; `%os-cmd-stdin` deadlocking on any child that emits >64 KiB; a predictable
+`%file-swap` temp path that a planted symlink turned into an arbitrary-file overwrite; several
+i64 overflow panics and silent wrong answers in numeric/sequence builtins; quasiquote evaluating
+set-literal elements instead of quoting them; symbols starting with `#`/`^` printing unreadably;
+and a nested-set literal that bypassed the reader's depth cap entirely (`#{` × 300 000 → stack
+overflow).
+
+### A measurement worth keeping
+
+**`assoc` on a vector is O(n), not an O(1) indexed replace** — the guide implied otherwise, and
+that claim is why `shuffle` was written as a textbook Fisher–Yates and ran 16 s at n=8 000.
+Measured, 20 000 `assoc`s: vector 486 ms / 2 386 ms / 7 523 ms at lengths 1 000 / 4 000 / 16 000;
+map 28 ms / 17 ms at 1 000 / 16 000. Only the *map* `assoc` is cheap. `shuffle` rewritten over a
+CHAMP index→item map is 206 ms (~78×). `docs/brood-for-claude.md` now carries the table.
+
+## 2026-08-24 (later) — merging the review onto the namespacing waves; `main` is green again
+
+The review branch landed onto an `origin/main` that had moved 17 commits (v0.9.0 + v0.10.0, the
+bare core going 613 → 337 published names). Two things are worth recording.
+
+**`origin/main` was itself red — 21 of 996.** Measured, not inferred: built `5952f5bd` in a clean
+worktree and ran it. The namespacing waves moved names out from under a batch of tests
+(`gc-collect` → `dev/gc-collect`, `vector-ref` → `seq/vector-ref`, `check` →
+`reflect/check`, …) and nothing caught it. Combined with KI-54's three failures from `7cb796f0`,
+`main` had been red for a while under a file asserting it was green.
+
+All 19 remaining are now fixed by updating the *tests* to the new names. One deserves note because
+it is exactly the trap in this kind of repair: `throw_and_catch` asserted error code **E0042** and
+was getting **E0010**. The tempting "fix" is to update the expectation. That would have been
+wrong — the test's Brood source called `(vector-ref [1 2 3] 7)` to provoke an out-of-range error,
+and `vector-ref` had moved, so the call raised *unbound* before it could ever index. Fixing the
+source to `seq/vector-ref` restores E0042 and the test proves what it always did. **A test that
+starts reporting a different error code after a rename is usually telling you the rename broke its
+setup, not that its expectation is stale.**
+
+**A behaviour regression the merge exposed (KI-55, open).** Auto-require runs when a form is
+*compiled*, so a closure shipped to another node — already compiled — never triggers it, and any
+namespaced global in its body is unbound on the receiver. That guarantee used to hold for free
+because these were bare prelude names. The failure surfaces on the receiving node, far from the
+code that wrote the closure. Workaround is `(require-one 'reflect)` on the receiver; the real fix
+is an auto-require hook on the deserialize path.
+
+Also found while merging: `std/net/reconnect.blsp` was calling bare `now` (moved to `os/now`) — a
+real break in shipped code, and the cause of two `cli::distribution` failures, not test rot. And
+bare **`require` is not a bound name** at all (the callable is `require-one`), despite `CLAUDE.md`
+and the ADR-065 note describing `(require 'test)`.
+
+The `shuffle` conflict is the one that needed judgement rather than mechanics: upstream *moved*
+`shuffle` into `seq/` while keeping the O(n²) body, and the helper it calls had been deleted by
+this branch's Fisher–Yates rewrite — so the merged form would not even have resolved. Carried the
+linear implementation and its private helpers into `std/seq.blsp`; re-verified post-merge at
+n=20 000 (0.13 s, checked permutation).
+
+**Both engines now pass 1012/1012.**
 
 ### The namespace waves: path/, bytes/, seq/, map/, os/, gui/ (337 -> 291)
 

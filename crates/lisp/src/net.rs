@@ -1169,10 +1169,39 @@ fn housekeep(conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) {
 
 // ---- the primitive operations (control plane) ----
 
-/// `(tcp-connect host port)` — blocking connect (name resolution + TCP on the
-/// calling thread, as before); reads start at once, delivering to `subscriber`.
+/// How long a `tcp-connect` may stall its worker on the TCP handshake.
+///
+/// This is the one blocking hole in an otherwise mio-based socket layer, and the
+/// caller is a *green process* multiplexed onto ~nproc worker threads — so an
+/// unbounded connect does not merely stall the caller, it removes a worker from the
+/// pool and with it every other green process scheduled there. Left to the OS, a
+/// blackholed host costs ~2 minutes of that. Bounded here so the failure is a prompt,
+/// catchable error instead of a silent scheduler brownout. Name resolution below is
+/// still blocking (`ToSocketAddrs` has no timeout in std); it is bounded in practice
+/// by the resolver's own timeout, and is noted rather than hidden.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `(tcp-connect host port)` — connect (name resolution + a time-bounded TCP
+/// handshake on the calling thread); reads start at once, delivering to `subscriber`.
 pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
-    let std_stream = std::net::TcpStream::connect((host, port))?;
+    // Resolve first so we can use `connect_timeout`, which needs a concrete addr.
+    // Try each resolved address in turn, as `TcpStream::connect` does.
+    let mut addrs = std::net::ToSocketAddrs::to_socket_addrs(&(host, port))?.peekable();
+    let mut last_err: Option<std::io::Error> = None;
+    let std_stream = loop {
+        let Some(addr) = addrs.next() else {
+            return Err(last_err.unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("could not resolve any address for {host}:{port}"),
+                )
+            }));
+        };
+        match std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            Ok(s) => break s,
+            Err(e) => last_err = Some(e),
+        }
+    };
     std_stream.set_nonblocking(true)?;
     // Disable Nagle so a large request body isn't paced one delayed-ACK per record
     // (see the TLS client path for the measured impact).

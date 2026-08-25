@@ -7,6 +7,7 @@ use super::jit_plan::chunk_in_jit_subset;
 use super::jit_plan::codegen::{
     inst_allocates_hot, inst_may_allocate, inst_opcode_name, invariant_global_vecs,
     invariant_param_slots, jit_dump_ir_enabled, jit_i64_enabled, plan_general_lowering,
+    vector_base_hoist_safe,
 };
 
 // The unboxed scalar (i64/f64) register worker lives in a child module; it's used
@@ -363,10 +364,18 @@ fn jit_lower_arm_inner(
                 }
         )
     });
+    // …and the STRICTER gate for the LOCAL element-base hoist below — the raw `v.as_ptr()` one,
+    // which nothing refreshes. `hoist_safe` alone is NARROWER than the invariant
+    // `brood_rt_vector_base` is justified by ("gated to arms that neither allocate nor make a
+    // Brood→Brood call"): it leaves out the table ops, `MakeMap` and `MakeClosure`. The decision
+    // lives in `jit_plan` with `inst_may_allocate`, its sibling for the pair-base hoist — see
+    // [`vector_base_hoist_safe`] for the full reasoning and for why the two *global* hoists
+    // (below) deliberately keep the looser gate.
+    let hoist_local_base_safe = vector_base_hoist_safe(code);
     // Invariant slots actually read as a fused `(nth slot idx)` vector operand — the only
     // form that names its vector slot directly (a global / computed vector can't hoist).
     let mut hoist_slots: Vec<usize> = Vec::new();
-    if hoist_safe {
+    if hoist_local_base_safe {
         for i in code.iter() {
             if let Inst::Prim2SlotSlot {
                 op: PrimOp::VectorRef,

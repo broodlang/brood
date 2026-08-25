@@ -19,7 +19,9 @@
 
 (defn index-of (haystack needle & more)
   "The first index of the needle bytes within haystack at or after from (default 0), or -1 if absent. The byte-protocol workhorse (locate a \\r\\n\\r\\n, a frame delimiter, …)."
-  (if (empty? more) (%bytes-index-of haystack needle) (%bytes-index-of haystack needle (first more))))
+  (if (empty? more)
+    (%bytes-index-of haystack needle)
+    (%bytes-index-of haystack needle (first more))))
 
 (defn ->list (b)
   "The bytes b as a list of integers 0–255."

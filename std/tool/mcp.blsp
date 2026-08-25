@@ -44,7 +44,13 @@ as errors."
 across calls (hot reload, ADR-013): a `def` here is visible to the next call
 and to spawned processes. Returns `{:value pr-str-of-result}` on success and
 `{:error msg}` on failure; the dispatcher catches `throw`s, but a parse/eval
-error inside the user expression surfaces here as the `:error` branch."
+error inside the user expression surfaces here as the `:error` branch.
+
+**Unsandboxed by design.** `:source` runs with the full builtin set — `file/spit`,
+`file/slurp`, `run-process`, `%os-cmd`, sockets — so it is not confined to the
+project the way `write`/`edit` are, and the `write`/`edit` sandbox does not
+constrain it. Anyone who can call this tool can do anything the `nest mcp`
+process's OS user can; that process is the trust boundary."
   (let (src (get args :source))
     (when (not (string? src))
       (throw "eval: :source must be a string"))
@@ -100,17 +106,36 @@ cross-file flat-namespace collisions."
 type/arity/unbound/non-tail-recursion warnings from `check-file-structured`;
 `shadows` flags names this file defines that another project source file also
 defines (the silent flat-namespace collision). On a load error:
-`{:ok false :error msg}`."
+`{:ok false :error msg}`.
+
+`:file` is **not** run through the `write`/`edit` project sandbox — any path this
+process can read, it will load (and loading executes the file's top-level forms).
+Like `eval`, this tool is bounded by the `nest mcp` process, not by the project."
   (let (file (get args :file))
     (when (not (string? file))
       (throw "load: :file must be a string"))
     (load-checked file)))
 
 ;; ---- the project sandbox for write/edit -----------------------------------
-;; Every file the MCP server writes goes through `project-path`, which
-;; refuses to resolve anything outside `*project-root*`. That's the whole
-;; guarantee the `write`/`edit` tools rest on: an agent driving nest mcp can only
-;; touch files **inside the project it serves**, never the wider filesystem.
+;; Every path the `write`/`edit` tools resolve goes through `project-path`, which
+;; refuses anything outside `*project-root*` — both lexically (no absolute path,
+;; `~`, or `..` segment) and after `canonicalize`, so a symlinked directory inside
+;; the project that points outside cannot be used to escape either.
+;;
+;; **This is an ergonomic guardrail on `write`/`edit`, NOT a containment boundary
+;; for the server.** Do not read it as one, and do not build a trust decision on
+;; it. `eval` sits beside these tools and runs arbitrary Brood source with the
+;; **full builtin set** — including `file/spit`, `run-process` and `%os-cmd` — and
+;; `load` takes an unsandboxed path; neither goes through `project-path`. So an
+;; agent driving `nest mcp` can already write anywhere the *process* can, and the
+;; sandbox only keeps `write`/`edit` from doing it by accident.
+;;
+;; The security boundary that actually holds is therefore the one around the whole
+;; `nest mcp` process — who may connect to it, and what that OS user can reach —
+;; exactly as for any other tool that offers an eval endpoint. Sandboxing `eval`
+;; and `load` would be a deliberate design change (and gutting `eval` would break
+;; the tool), not a bug fix; it is the owner's call, not something this comment
+;; should pretend has already happened.
 
 (defn- safe-rel?
   (rel)
@@ -141,8 +166,12 @@ the tree through a symlink)."
   (rel)
   "Resolve project-relative `rel` to an absolute path under `*project-root*`, or
 `throw` if it would escape the project — a lexical violation (absolute/`~`/`..`,
-or no project root), OR a **symlink** whose real target is outside the tree. The
-sandbox boundary the `write`/`edit` tools share."
+or no project root), OR a **symlink** whose real target is outside the tree.
+
+Shared by `write` and `edit`, and by **only** those two: it is a guardrail on the
+file-writing tools, not a containment boundary for the server (`eval` runs
+arbitrary code with full filesystem access, and `load` takes an unsandboxed
+path). See the section comment above."
   (when (nil? *project-root*)
     (throw "no project root — nest mcp must run inside a Brood project"))
   (when (not (safe-rel? rel))
@@ -171,8 +200,15 @@ Missing parent directories are created. A `.blsp` file is then loaded into the
 session and checked, so the result carries `:diagnostics` and `:shadows` exactly
 like the `load` tool — closing the edit→load→check loop in one call; any other
 file is written verbatim. Returns `{:ok true :path rel :diagnostics [...]
-:shadows [...]}` or `{:ok false :error ...}`. This is how an agent writes code —
-through nest mcp, never the raw filesystem."
+:shadows [...]}` or `{:ok false :error ...}`. This is the intended way for an
+agent to write code — through nest mcp, so the session image stays in sync with
+disk.
+
+The project-relative restriction is a **guardrail, not a containment
+guarantee**: the `eval` tool beside it runs arbitrary Brood with the full builtin
+set (`file/spit` included) and `load` takes an unsandboxed path, so the server as
+a whole can already reach the wider filesystem. Treat the `nest mcp` process
+itself as the trust boundary."
   (let (rel (get args :path)
         content (get args :content))
     (when (not (string? content))

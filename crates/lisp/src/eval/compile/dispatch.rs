@@ -344,7 +344,14 @@ pub(crate) fn dispatch(
                         heap.truncate_env_roots(env_base);
                         return Err(e);
                     }
-                    let jit_outcome = jit_tier(arm.arc(), heap, base, env_root);
+                    // `jit_tier_in_frame`, not `jit_tier`: `push_frame` ALWAYS sizes to
+                    // `arm.nslots`, and the `!inline_installed` gate above was read before
+                    // that — but `jit_tier` re-loads `jit_code`, and a peer process sharing
+                    // this `CompiledArm` (ADR-215) can swap the inlined body in inside that
+                    // window. Telling it the size this frame was built to lets it decline
+                    // rather than raw-write past the frame top. See its doc (KI-48 family).
+                    let jit_outcome =
+                        jit_tier_in_frame(arm.arc(), heap, base, env_root, arm.nslots);
                     heap.set_ic_bases(saved_bases);
                     match jit_outcome {
                         Some(0) => {
@@ -450,7 +457,9 @@ pub(crate) fn dispatch(
                             // the checkpoint — never re-running its side effects.
                             // This path is gated on `!inline_installed` above, so the
                             // resume arm is always `arm` itself here.
-                            if matches!(jit_outcome, Some(1)) {
+                            // `Some(1) | Some(2)` (deopt AND preempt), consistent with the
+                            // other three consumers — see `jit_run_fast_link` (KI-18).
+                            if matches!(jit_outcome, Some(1) | Some(2)) {
                                 if let Some((resume, rip, depth)) =
                                     jit_ckpt_resume(heap, arm.arc(), base, arm.nslots)
                                 {

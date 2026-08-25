@@ -34,8 +34,22 @@ pub(super) fn hostname(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 /// `(%env-all)` — all environment variables as a `{string → string}` map.
+///
+/// Non-UTF-8 names and values are **lossily decoded** (invalid bytes become U+FFFD)
+/// rather than skipped, so a hostile or merely unusual environment still reports the
+/// variable's presence. `std::env::vars()` would *panic* on such an entry, and a
+/// panic on a scheduler worker is not a Brood error: `try`/`catch` cannot see it, the
+/// worker dies, and the runtime hangs. `vars_os` is the only version of this that a
+/// Brood program can survive.
 pub(super) fn env_all(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let env: Vec<(String, String)> = std::env::vars().collect();
+    let env: Vec<(String, String)> = std::env::vars_os()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
     let pairs: Vec<(Value, Value)> = env
         .iter()
         .map(|(k, v)| (heap.alloc_string(k), heap.alloc_string(v)))
@@ -44,8 +58,16 @@ pub(super) fn env_all(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 /// `(%argv)` — command-line arguments as a vector of strings, including argv[0].
+///
+/// Lossy like `%env-all`, and for the same reason: `std::env::args()` panics on a
+/// non-UTF-8 argument. The plain `brood`/`nest` CLIs happen to be shielded (clap's
+/// `parse()` rejects non-UTF-8 argv before any Brood code runs), but a **bundled**
+/// app (`nest release`, ADR-038) boots *before* clap and never runs it at all — so
+/// this primitive cannot rely on someone else having validated argv.
 pub(super) fn argv_builtin(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let vals: Vec<Value> = args.iter().map(|a| heap.alloc_string(a)).collect();
     Ok(heap.alloc_vector(vals))
 }
@@ -89,9 +111,15 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 /// `(%os-cmd-stdin prog args stdin-str)` — like `%os-cmd` but writes `stdin-str` to the
-/// child's stdin (pipe closed after writing → EOF). Safe for inputs well under 64 KiB
-/// (the OS pipe buffer); used by the git porcelain to pipe patch text to `git apply -`
-/// instead of writing a temp file.
+/// child's stdin (pipe closed after writing → EOF); used by the git porcelain to pipe
+/// patch text to `git apply -` instead of writing a temp file.
+///
+/// The write runs on its own thread so **both directions make progress**. Writing the
+/// whole input before reading any output deadlocks the moment the child emits more than
+/// one pipe buffer (~64 KiB) while still being fed: the child blocks writing stdout,
+/// we block writing stdin, and neither ever moves. That is not a slow call — it is a
+/// permanently pinned scheduler worker that no timeout or `try` can recover. `stdin-str`
+/// is therefore unbounded in size, and so is the child's output.
 pub(super) fn os_cmd_stdin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use std::io::Write;
     let prog = expect_string(heap, "%os-cmd-stdin", arg(args, 0))?;
@@ -110,14 +138,25 @@ pub(super) fn os_cmd_stdin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         LispError::runtime(format!("%os-cmd-stdin: {prog}: {e}"))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
     })?;
-    if let Some(mut stdin_pipe) = child.stdin.take() {
-        let _ = stdin_pipe.write_all(stdin_str.as_bytes());
-        // stdin_pipe dropped here → EOF sent to child
-    }
+    // Feed stdin from a separate thread; `wait_with_output` drains stdout and stderr
+    // concurrently, so all three pipes move at once. A child that exits early makes
+    // the write fail with EPIPE, which ends the thread — the same "we tried" outcome
+    // the inline write had.
+    let writer = child.stdin.take().map(|mut stdin_pipe| {
+        std::thread::spawn(move || {
+            let _ = stdin_pipe.write_all(stdin_str.as_bytes());
+            // stdin_pipe dropped here → EOF sent to child
+        })
+    });
     let output = child.wait_with_output().map_err(|e| {
         LispError::runtime(format!("%os-cmd-stdin: {prog}: {e}"))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
     })?;
+    // The child is gone, so the write has either finished or hit EPIPE; joining is a
+    // formality that keeps the thread from outliving the call.
+    if let Some(handle) = writer {
+        let _ = handle.join();
+    }
     let stdout = heap.alloc_string(&String::from_utf8_lossy(&output.stdout));
     let stderr = heap.alloc_string(&String::from_utf8_lossy(&output.stderr));
     let exit_code = output.status.code().unwrap_or(-1) as i64;
@@ -129,9 +168,21 @@ pub(super) fn os_cmd_stdin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     ]))
 }
 
-/// `(%halt code)` — terminate the process immediately with `code`.
+/// `(%halt code)` — terminate the process immediately with `code`, which must be a
+/// POSIX exit status (0–255).
+///
+/// Anything outside that range is a **clean catchable error**, not a silent
+/// truncation: `code as i32` turned `(%halt 4294967296)` into `exit(0)`, so a script
+/// reporting failure reported success instead — the worst possible way for this to be
+/// wrong, since every caller (CI, a shell, a supervisor) trusts the status.
 pub(super) fn halt_builtin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let code = expect_int(heap, "%halt", arg(args, 0))?;
+    if !(0..=255).contains(&code) {
+        return Err(
+            LispError::runtime(format!("%halt: exit code {code} is out of range (0-255)"))
+                .with_hint("a POSIX exit status is a single byte; pick a code in 0-255"),
+        );
+    }
     std::process::exit(code as i32);
 }
 

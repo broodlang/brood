@@ -94,7 +94,9 @@
 ;; ---- NormalizationTest -------------------------------------------------------
 
 ;; "0044 0307" -> the string it spells.
-(defn- nt-field (s) (ucd-codes->string (map hex->int (seq/remove string/blank? (string/split s " ")))))
+(defn- nt-field
+  (s)
+  (ucd-codes->string (map hex->int (seq/remove string/blank? (string/split s " ")))))
 
 (defn- nt-case
   (line)

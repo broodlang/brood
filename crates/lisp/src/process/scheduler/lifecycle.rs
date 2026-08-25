@@ -61,6 +61,13 @@ fn deregister_timed(pid: u64, reason: Message, heap: &Heap) {
     // that it's out of the live set (after the REGISTRY remove above, so the two
     // stay consistent). A no-op when no drain is armed.
     heap.drain_note_exit(pid);
+    retire_pid_tail(pid, reason);
+}
+
+/// The heap-independent half of retirement: sockets, registered names, monitors, links.
+/// Split out so [`retire_root_ctx`] — which runs where no `Heap` is reachable — can share
+/// exactly this teardown rather than a hand-copied approximation of it.
+fn retire_pid_tail(pid: u64, reason: Message) {
     // Close any sockets this process still owns (an OS-process model: fds are
     // reclaimed on exit). Done before `notify_peers` below, so a linked supervisor
     // that restarts a dead listener finds its port already being freed. A process
@@ -85,6 +92,47 @@ fn deregister_timed(pid: u64, reason: Message, heap: &Heap) {
     // reason propagates as a hard kill that cascades through *its* links. Mirrors
     // the sequential lock discipline above (never holds REGISTRY/MONITORS here).
     links::notify_peers(pid, &reason);
+}
+
+/// Retire a **root-thread context** — a pid + mailbox [`ensure_ctx`] minted for an OS
+/// thread that touched `self`/`send`/`receive` without being a scheduler-run green
+/// process. Called from that thread's [`RootCtxGuard`] when it exits (and by
+/// [`deregister_root_ctx`] for a host that wants it deterministically).
+///
+/// Such a context had no death path at all before this: `deregister` runs only for green
+/// processes and `shutdown_runtime_parked` reaps only *parked waiters*, so an embedder or
+/// host that churns threads accumulated a registry entry, a mailbox (and every message
+/// anyone ever sent it, since `deliver` still finds it), a monitor/link/name footprint and
+/// one more entry in `live_pids()` per thread, for the whole OS-process lifetime — which
+/// also inflated the `live` count the RUNTIME drain-completion gate compares against.
+///
+/// Deliberately **not** `deregister`: that would call `live_process_dec` (unbalanced — a
+/// root ctx never ran `live_process_inc`, which is `spawn`'s) and needs a `Heap` for
+/// `drain_note_exit`, which a dying thread no longer has. Leaving that drain ack behind is
+/// safe: it can only make the O(1) `drain_acked_count() >= live` pre-gate fire early, and
+/// the authoritative `gen_drained(&live_pids())` then re-checks against the *live* set,
+/// from which this pid is now gone.
+pub(super) fn retire_root_ctx(pid: u64) {
+    let Some(mailbox) = REGISTRY.remove(pid) else {
+        return; // already retired (an explicit `deregister_root_ctx`, then thread exit)
+    };
+    let reason = Message::Keyword(value::intern(pk::NORMAL));
+    if crate::process::sysmon::armed() {
+        crate::process::sysmon::emit_exit(pid, &reason);
+        crate::process::sysmon::clear_if(pid);
+    }
+    clear_parked(&mailbox);
+    // Drop anything still queued. A root ctx blocks on the condvar rather than parking a
+    // `Box<Process>`, so `waiter` is normally `None` — but take it if some path did park
+    // one, or its heap would ride out the OS process in a mailbox nothing can reach.
+    let waiter = {
+        let mut st = crate::core::sync::lock(&mailbox.state);
+        st.queue.clear();
+        st.kill = None;
+        st.waiter.take()
+    };
+    drop(waiter);
+    retire_pid_tail(pid, reason);
 }
 
 /// The untrappable hard-kill reason — Erlang's `exit(pid, kill)`. A `:kill` exit

@@ -56,15 +56,104 @@ fn ratio_cmp_float(r: &num_rational::BigRational, f: f64) -> std::cmp::Ordering 
 }
 
 /// Convert an exact `BigDecimal` to the equal `BigRational` (lossless — a decimal
-/// `mantissa · 10⁻ˢᶜᵃˡᵉ` is exactly `mantissa / 10ˢᶜᵃˡᵉ`). Used only by the rare
-/// ratio-vs-decimal ordering arm; `BigRational::new` reduces the result.
-fn bigdecimal_to_ratio(d: &bigdecimal::BigDecimal) -> num_rational::BigRational {
+/// `mantissa · 10⁻ˢᶜᵃˡᵉ` is exactly `mantissa / 10ˢᶜᵃˡᵉ`), or `None` when the scale
+/// does not fit the `pow` exponent. Used only by the rare ratio-vs-decimal ordering
+/// arm; `BigRational::new` reduces the result.
+///
+/// The exponent is converted with `try_from`, never `as u32`: an `as` cast silently
+/// truncates, and a scale of `4294967297` wrapped to `1` — so a decimal that is
+/// effectively zero was compared as `1/10`, and `(< (decimal "1e-4294967297") 1/10)`
+/// answered **false**. Callers must screen the magnitude first
+/// ([`ratio_cmp_bigdecimal`]): `10ˢᶜᵃˡᵉ` is a `scale`-digit bignum, so a large scale
+/// is an unbounded allocation even when it does fit a `u32`.
+fn bigdecimal_to_ratio(d: &bigdecimal::BigDecimal) -> Option<num_rational::BigRational> {
     use num_bigint::BigInt;
     let (mantissa, scale) = d.as_bigint_and_exponent(); // value = mantissa · 10^(-scale)
-    if scale >= 0 {
-        num_rational::BigRational::new(mantissa, BigInt::from(10).pow(scale as u32))
+    let mag = u32::try_from(scale.checked_abs().unwrap_or(i64::MAX)).ok()?;
+    let pow = BigInt::from(10).pow(mag);
+    Some(if scale >= 0 {
+        num_rational::BigRational::new(mantissa, pow)
     } else {
-        num_rational::BigRational::from_integer(mantissa * BigInt::from(10).pow((-scale) as u32))
+        num_rational::BigRational::from_integer(mantissa * pow)
+    })
+}
+
+/// Bounds on `log₁₀ x` for a nonzero big integer, from its **bit length** alone —
+/// no bignum division, so it is O(1). `2^(b-1) ≤ |x| < 2^b` gives
+/// `(b-1)·log₁₀2 ≤ log₁₀|x| < b·log₁₀2`; the constants are rounded outward so each
+/// side is a true bound. Zero has no logarithm — callers screen it off.
+fn log10_bounds(x: &num_bigint::BigInt) -> (i128, i128) {
+    let b = x.magnitude().bits() as i128;
+    let lo = ((b - 1) * 30102) / 100_000; // 0.30102 < log₁₀2 → a valid lower bound
+    let hi = (b * 30104) / 100_000 + 1; // 0.30104 > log₁₀2 → a valid upper bound
+    (lo, hi)
+}
+
+/// Order a `BigRational` against a `BigDecimal` — the ratio-vs-decimal `value_cmp`
+/// arms. Exact, but **without materialising `10ˢᶜᵃˡᵉ` when the two are orders of
+/// magnitude apart**. That power is a `scale`-digit bignum, so the naive conversion
+/// made `(< 1/2 (decimal "1e-1000000000"))` allocate without bound (190MB and still
+/// climbing after 20s, never finishing) — and unlike the arithmetic path, an
+/// ordering has no error channel to raise on, so the fix has to be to *not need*
+/// the power.
+///
+/// Signs decide first; then an O(1) magnitude screen from bit lengths. Only when
+/// the two are within about a factor of ten does it fall back to the exact
+/// conversion — and in that band the scale is pinned to the operands' own digit
+/// counts, so the cost is proportional to values the caller already holds.
+fn ratio_cmp_bigdecimal(
+    r: &num_rational::BigRational,
+    d: &bigdecimal::BigDecimal,
+) -> std::cmp::Ordering {
+    use num_traits::{Signed, Zero};
+    use std::cmp::Ordering;
+    let (m, scale) = d.as_bigint_and_exponent(); // value = m · 10^(-scale)
+    let (n, den) = (r.numer(), r.denom()); // den > 0 (BigRational invariant)
+
+    // Signs first — this also covers a zero on either side.
+    let sign = |x: &num_bigint::BigInt| {
+        if x.is_zero() {
+            0i8
+        } else if x.is_negative() {
+            -1
+        } else {
+            1
+        }
+    };
+    let (sr, sd) = (sign(n), sign(&m));
+    if sr != sd {
+        return sr.cmp(&sd);
+    }
+    if sr == 0 {
+        return Ordering::Equal;
+    }
+
+    // Same nonzero sign: compare magnitudes, then flip for a negative pair.
+    // log₁₀|r| ∈ [nlo - dhi, nhi - dlo]; log₁₀|d| ∈ [mlo - scale, mhi - scale].
+    let (nlo, nhi) = log10_bounds(n);
+    let (dlo, dhi) = log10_bounds(den);
+    let (mlo, mhi) = log10_bounds(&m);
+    let scale = scale as i128;
+    let (rlo, rhi) = (nlo - dhi, nhi - dlo);
+    let (dec_lo, dec_hi) = (mlo - scale, mhi - scale);
+    let mag = if rlo > dec_hi {
+        Ordering::Greater
+    } else if dec_lo > rhi {
+        Ordering::Less
+    } else {
+        match bigdecimal_to_ratio(d) {
+            Some(x) => r.abs().cmp(&x.abs()),
+            // Comparable magnitudes AND a scale past u32 — that needs a ratio of
+            // over four billion digits (a couple of GB of bignum) to reach, so this
+            // is unreachable in practice. Fall back to the (deterministic) bound
+            // comparison rather than allocating unboundedly or panicking.
+            None => rhi.cmp(&dec_hi),
+        }
+    };
+    if sr < 0 {
+        mag.reverse()
+    } else {
+        mag
     }
 }
 
@@ -336,10 +425,13 @@ impl Heap {
             }
             ValueRef::Set(id) => {
                 // Order-insensitive like Map (XOR the per-element hashes), but a
-                // distinct tag byte (23) and **keys only** (a set's backing values are
+                // distinct tag byte (18) and **keys only** (a set's backing values are
                 // all `true`) — so a set never hashes the same as the map with the same
-                // keys, matching that a set is never `equal` to a map (ADR-060).
-                23u8.hash(h);
+                // keys, matching that a set is never `equal` to a map (ADR-060). (Was
+                // 23, which `Ratio` above also claims as its own "distinct fresh" byte;
+                // harmless — the two are never `equal` — but the stated invariant was
+                // false, so the set moved to the unused 18.)
+                18u8.hash(h);
                 let mut acc: u64 = 0;
                 let size = self.map_size(id);
                 self.fold_entries(id, &mut |k, _vv| {
@@ -427,8 +519,18 @@ impl Heap {
                     if !self.equal(Value::int(i), car) {
                         return false;
                     }
-                    i += step;
-                    lst = cdr;
+                    match i.checked_add(step) {
+                        Some(next) => {
+                            i = next;
+                            lst = cdr;
+                        }
+                        // The next step leaves i64, so the range ends HERE — exactly
+                        // where `range_to_vec`/the Range hash arm break. Wrapping `i`
+                        // instead kept `i < hi` true and made a range compare unequal
+                        // to its own list form (a wrong answer in release, a panic
+                        // under debug-assertions), so the list must simply run out too.
+                        None => return matches!(cdr.unpack(), ValueRef::Nil),
+                    }
                 }
                 // One ran out before the other (or the list is improper).
                 _ => return false,
@@ -740,8 +842,10 @@ impl Heap {
             }
             (Ratio(x), Float(y)) => ratio_cmp_float(&self.ratio(x), y),
             (Float(x), Ratio(y)) => ratio_cmp_float(&self.ratio(y), x).reverse(),
-            (Ratio(x), Decimal(y)) => self.ratio(x).cmp(&bigdecimal_to_ratio(&self.decimal(y))),
-            (Decimal(x), Ratio(y)) => bigdecimal_to_ratio(&self.decimal(x)).cmp(&self.ratio(y)),
+            (Ratio(x), Decimal(y)) => ratio_cmp_bigdecimal(&self.ratio(x), &self.decimal(y)),
+            (Decimal(x), Ratio(y)) => {
+                ratio_cmp_bigdecimal(&self.ratio(y), &self.decimal(x)).reverse()
+            }
             (Str(x), Str(y)) => self.string(x).cmp(&self.string(y)),
             // Symbols/keywords sort by spelling so it's stable and human-meaningful.
             (Sym(x), Sym(y)) | (Keyword(x), Keyword(y)) => {

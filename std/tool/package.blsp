@@ -253,8 +253,8 @@ land in a later slice."
     (let (results (package-fetch-frontier base frontier)
           fetched2 (fold (fn (m pair) (assoc m (first pair) (second pair))) fetched results)
           discovered (seq/distinct (apply append
-                                 (map (fn (pair) (package-release-dep-names (second pair)))
-                                   results)))
+                                     (map (fn (pair) (package-release-dep-names (second pair)))
+                                       results)))
           next-frontier (filter (fn (nm) (not (contains? fetched2 nm))) discovered))
       (package-prefetch-bfs base next-frontier fetched2))))
 
@@ -291,7 +291,7 @@ land in a later slice."
 (defn- package-release-dep-names
   (releases)
   (seq/distinct (apply append
-              (map (fn (release) (map first (get release :dependencies))) releases))))
+                  (map (fn (release) (map first (get release :dependencies))) releases))))
 
 ;; A PURE provider over the prefetched map (no I/O), so the resolver's backtracking is free:
 ;; Whether a release's `:brood` runtime constraint (ADR-209) is satisfied by the brood we
@@ -318,7 +318,7 @@ land in a later slice."
       (when (and (not (empty? releases))
               (empty? (filter package-release-brood-ok? releases)))
         (let (needed (seq/distinct (filter (fn (c) (and c (not (= c ""))))
-                                 (map (fn (r) (get r :brood)) releases))))
+                                     (map (fn (r) (get r :brood)) releases))))
           (error "package: no published release of "
             (name nm)
             " is compatible with the brood you are running ("

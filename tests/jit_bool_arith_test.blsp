@@ -1,0 +1,103 @@
+;;; Regression guard: a BOOLEAN is not a number, on every engine.
+;;;
+;;; The JIT's `as_int` (jit_lower/emit.rs) materialises an operand as an unboxed i64. It
+;;; tag-checks and deopts for every boxed shape (`Slot`, `Handle`, `HoistedVec`) and for
+;;; `Float` — but it used to pass `Op::Bool` and an `i8`-typed `Op::Int` straight through.
+;;; Two failures came out of that:
+;;;
+;;;   1. ENGINE DIVERGENCE. A `Const` boolean materialises as `Op::Bool(iconst 0/1)`, so a
+;;;      lowered `(+ acc true)` computed `acc + 1`, while the tree-walker and the bytecode
+;;;      VM both raise `+: expected number, got bool`. Measured at HEAD before the fix:
+;;;      `(f 5000000 0)` returned 12500002500000 at tier 2 and raised at tiers 0 and 1.
+;;;   2. A COLD NONSENSE BRANCH COST THE HOT ARM ITS NATIVE CODE. A comparison used
+;;;      directly as an arithmetic operand — `(+ (< n 0) 1)` — reached `emit_arith` as
+;;;      `sadd_overflow(i8, i64)`, which Cranelift refuses; the whole arm then declined to
+;;;      lower (`[jit-bail] reason=lowering-returned-none`), silently, for a branch that
+;;;      never executes. That one is a *performance* failure, not a wrong answer — the
+;;;      arm ran on the VM, which raises correctly — so its case here is a guard against
+;;;      it becoming a divergence, not a reproduction of one.
+;;;
+;;; Both are fixed by deopting on a boolean operand: the VM re-runs the arm and produces
+;;; the real type error (and the hot arm keeps its native code, since the deopt is on the
+;;; cold path). The bool must still be able to CROSS a block boundary — `(and …)`/`(or …)`
+;;; short-circuit a bound bool through a merge — which is the last test here.
+;;;
+;;; Every case must behave identically at `BROOD_TIER=0`, `1` and `2`; the suite runs at
+;;; the default ceiling, so run this file at each tier by hand when touching `as_int`:
+;;;   for t in 0 1 2; do BROOD_TIER=$t ./target/release/brood --test tests/jit_bool_arith_test.blsp; done
+;;;
+;;; Sabotage-verified: with `as_int`'s bool guard removed, "a boolean literal in
+;;; arithmetic" and "a boolean literal in multiplication" both fail — `error-of` returns
+;;; nil, i.e. the lowered arm quietly computed a number. The comparison and vector-index
+;;; cases pass either way (see 2 above: those arms decline to lower rather than miscompute),
+;;; so they are guards, not reproductions.
+
+(defmodule jit-bool-arith-test (:use test))
+
+;; Big enough that the self-tail loop tiers and runs native long before it reaches the
+;; cold branch (measured: the divergence needs the arm hot, which the back-edge sync
+;; compile reaches well inside this count).
+(def ba-n 3000000)
+
+;; The bool operand sits in a branch taken ONCE, on the last iteration — the shape that
+;; matters, because an arm whose bool arithmetic runs on the first call errors before it
+;; is ever hot, and so never reaches the JIT at all.
+;; check-allow: `(+ acc true)` is deliberately a type error — that is the subject.
+(check-allow :type-mismatch
+  (defn ba-lit (n acc)
+    (if (= n 1)
+      (+ acc true)
+      (if (<= n 0) acc (ba-lit (- n 1) (+ acc n))))))
+
+;; The same shape with a COMPARISON (an i8 in the lowering) as the arithmetic operand.
+(check-allow :type-mismatch
+  (defn ba-cmp (n acc)
+    (if (= n 1)
+      (+ (< n 0) 1)
+      (if (<= n 0) acc (ba-cmp (- n 1) (+ acc n))))))
+
+;; A boolean as a vector INDEX — the other `as_int` consumer (the fused `(nth v i)`).
+(check-allow :type-mismatch
+  (defn ba-idx (n acc v)
+    (if (= n 1)
+      (nth v true)
+      (if (<= n 0) acc (ba-idx (- n 1) (+ acc n) v)))))
+
+;; Multiplication too, so the guard isn't accidentally tied to `+`.
+(check-allow :type-mismatch
+  (defn ba-mul (n acc)
+    (if (= n 1)
+      (* acc true)
+      (if (<= n 0) acc (ba-mul (- n 1) (+ acc n))))))
+
+;; A hot arm that carries booleans through `(and …)`/`(or …)` merges — the case that must
+;; keep working: `as_block_arg` materialises the 0/1 word itself rather than going through
+;; the (now deopting) `as_int`. Counts how many i in [1, n] satisfy the predicate.
+(defn ba-and (n i acc)
+  (if (> i n)
+    acc
+    (ba-and n
+      (+ i 1)
+      (if (and (> i 10) (or (< i 20) (= i 40))) (+ acc 1) acc))))
+
+(describe "the JIT must not treat a boolean as a number"
+  ;; The exact message, not merely "some error": a lowered arm that raised for the wrong
+  ;; reason (an overflow, say) would pass a bare `assert-error`.
+  (test "a boolean literal in arithmetic raises, exactly as on the VM"
+    (assert= "type error: +: expected number, got bool (true)"
+      (error-of (ba-lit ba-n 0))))
+
+  (test "a comparison result in arithmetic raises, exactly as on the VM"
+    (assert= "type error: +: expected number, got bool (false)"
+      (error-of (ba-cmp ba-n 0))))
+
+  (test "a boolean vector index raises, exactly as on the VM"
+    (assert-error (ba-idx ba-n 0 [1 2 3])))
+
+  (test "a boolean literal in multiplication raises, exactly as on the VM"
+    (assert= "type error: *: expected number, got bool (true)"
+      (error-of (ba-mul ba-n 0))))
+
+  (test "booleans still cross block boundaries in a hot arm"
+    ;; i in [11,19] (9) plus i = 40 — independent of `n` once n >= 40.
+    (assert= 10 (ba-and 100000 1 0))))

@@ -97,8 +97,6 @@ current element and `acc` is the current accumulator."
   "A list of the items of `coll` for which `(pred x)` is truthy."
   (if (pred item) (cons item acc) acc))
 
-
-
 (defn vec (coll)
   "`coll` as a VECTOR (`(into [] coll)`, named). A map becomes its `[k v]` pairs
 and a set its elements, as everywhere else `seq` applies."
@@ -138,7 +136,8 @@ and a set its elements, as everywhere else `seq` applies."
     (set? coll) (%set-count coll)
     else (count-acc coll 0)))
 
-(defn- nth-list (coll i d)
+(defn- nth-list
+  (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (nth-list (rest coll) (- i 1) d)))
 
 ;; A non-integer index is a type error that must name `nth`. Before this it fell
@@ -180,7 +179,8 @@ and a set its elements, as everywhere else `seq` applies."
   ;; behaviour for the rarer 3-arg call.
   ((coll i) (cond
               (not (int? i)) (nth-bad-index coll i)
-              (vector? coll) (if (and (>= i 0) (< i (%vector-length coll))) (%vector-ref coll i) nil)
+              (vector? coll)
+                (if (and (>= i 0) (< i (%vector-length coll))) (%vector-ref coll i) nil)
               (bytes? coll) (if (and (>= i 0) (< i (%byte-length coll))) (%byte-at coll i) nil)
               else (nth-seq-or-fail coll i nil)))
   ((coll i & default) (cond

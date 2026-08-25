@@ -765,10 +765,10 @@ else edits normally even while these are set. Orthogonal to the whole-buffer `re
 flag, which still refuses the buffer entire."
   (let (len (buffer-length buf))
     (seq/keep (fn (s)
-            (let ([lo hi] s
-                  l (buffer-clamp 0 len lo)
-                  h (buffer-clamp 0 len hi))
-              (when (< l h) [l h])))
+                (let ([lo hi] s
+                      l (buffer-clamp 0 len lo)
+                      h (buffer-clamp 0 len hi))
+                  (when (< l h) [l h])))
       (or (get buf :read-only-spans) '()))))
 
 (defn set-read-only-spans (buf spans)

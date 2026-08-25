@@ -224,9 +224,13 @@ An empty string returns an empty list."
   "Build a list of maps from `rows`, using `headers` (a vector of strings) as keys."
   (if (empty? rows)
     (reverse acc)
+    ;; `(into [] row)` was INSIDE the fold, so a row was rebuilt into a fresh vector
+    ;; once per COLUMN — O(cols²) per row, quadratic in the header count (400 columns
+    ;; measured 517 ms). `parse` already hands back vectors, so hoisting it out of the
+    ;; fold is enough; the `into` stays only to tolerate a hand-built list row.
     (let (row (first rows)
-          m (fold (fn (acc i)
-                    (assoc acc (nth headers i "") (nth (into [] row) i "")))
+          cells (if (vector? row) row (into [] row))
+          m (fold (fn (acc i) (assoc acc (nth headers i "") (nth cells i "")))
               {}
               (range (count headers))))
       (csv-rows->maps headers (rest rows) (cons m acc)))))
@@ -288,10 +292,23 @@ doubled. Rows are separated by `\\n`."
 
 ;; ---- emit-maps ----------------------------------------------------------
 
+(defn- csv-cell
+  (m h)
+  ;; Presence, not truthiness. The `(or (get m h) (get m (keyword h) ""))` this
+  ;; replaced was wrong for every FALSY value Brood has: `false` is falsy here, so a
+  ;; legitimately-stored `false` fell through the `or` and emitted an EMPTY field —
+  ;; `(emit-maps (list {"a" false}) (list "a"))` gave `,` instead of `false`, silently
+  ;; corrupting boolean columns. `contains?` asks the question actually meant.
+  ;; A key present but holding `nil` still emits an empty field (nil = no value).
+  (cond
+    (contains? m h) (let (v (get m h)) (if (nil? v) "" v))
+    (contains? m (keyword h)) (let (v (get m (keyword h))) (if (nil? v) "" v))
+    else ""))
+
 (defn- csv-map->row
   (m headers)
   "Extract values from map `m` in the order given by `headers`."
-  (map (fn (h) (or (get m h) (get m (keyword h) ""))) headers))
+  (map (fn (h) (csv-cell m h)) headers))
 
 (defn emit-maps (maps headers)
   "Serialize a list of maps to CSV, with the given `headers` list determining

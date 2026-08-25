@@ -398,3 +398,72 @@
       (is (not (= before fresh)))
       (assert= fresh (get (second (which-children sup)) :pid))
       (stop sup))))
+
+;; ---- a child :start that RAISES ---------------------------------------------
+;; A `:start` thunk can throw — a typo, an unbound symbol after a hot reload, a
+;; `connect` to a peer that is down. Uncaught inside the supervisor's receive loop
+;; that throw killed the SUPERVISOR (and every healthy sibling), bypassing the
+;; intensity budget entirely: the failure mode supervision exists to contain became
+;; the loudest way to lose the whole tree.
+
+;; A spec whose `:start` succeeds exactly `ok-times` times and raises after that.
+;; The counter lives in a `table` (Brood's only mutable structure) so it survives
+;; across the supervisor's restart attempts.
+(defn flaky-spec (t ok-times)
+  {:id :flaky
+   :restart :permanent
+   :start (fn ()
+            (if (<= (table/incr t :starts) ok-times)
+              (spawn-link (parked))
+              (error "flaky: cannot start")))})
+
+(describe "supervisor: a child :start that raises"
+  :isolated
+
+  (test "a raising restart is a FAILED RESTART, not a supervisor crash"
+    ;; The child starts fine, then crashes; every restart attempt raises. The
+    ;; supervisor must absorb those, count each against :max-restarts, and finally
+    ;; die of its OWN intensity limit — not of the child's throw escaping the loop.
+    (let (t (table/new)
+          sup (start (list (flaky-spec t 1)) {:max-restarts 2 :max-seconds 5})
+          m (monitor sup)
+          kid (get (first (which-children sup)) :pid))
+      (send kid :die)
+      (let (reason (receive ([:down ^m _ r] r) (after 4000 :no-down)))
+        ;; the giveup path, having walked the budget down through failed attempts
+        (is (includes? (pr-str reason) "restart intensity exceeded"))
+        ;; and NOT the raw throw escaping the receive loop
+        (is (not (includes? (pr-str reason) "flaky: cannot start"))))
+      (table/drop t)))
+
+  (test "start-child replies [:error …] instead of killing the supervisor"
+    ;; The caller must get a reply either way — the old code threw out of the loop,
+    ;; which killed the supervisor AND left the caller blocked on a reply that
+    ;; could never come.
+    (let (t (table/new)
+          sup (start (list)))
+      (let (r (start-child sup (flaky-spec t 0)))
+        (is (= (first r) :error)))
+      ;; the supervisor is still alive and still answering
+      (assert= 0 (count-children sup))
+      (stop sup)
+      (table/drop t))))
+
+;; ---- the synchronous client API is monitored + deadlined --------------------
+(describe "supervisor: a client call against a dead supervisor raises, never hangs"
+  :isolated
+
+  (test "count-children / which-children / start-child raise on a dead supervisor"
+    ;; These were bare `(receive ([:reply ^r v] v))` with no monitor and no timeout,
+    ;; so each parked the caller FOREVER — no error, no timeout, nothing to wake it.
+    (let (sup (start (list)))
+      (stop sup)
+      (sleep 60)
+      (assert= :raised (try (do (count-children sup) :no-error) (catch e :raised)))
+      (assert= :raised (try (do (which-children sup) :no-error) (catch e :raised)))
+      (assert= :raised
+        (try
+          (do (start-child sup {:id :x :start (fn () (spawn-link (parked)))}) :no-error)
+          (catch e :raised)))
+      (assert= :raised (try (do (terminate-child sup :x) :no-error) (catch e :raised)))
+      (assert= :raised (try (do (restart-child sup :x) :no-error) (catch e :raised))))))

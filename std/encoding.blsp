@@ -185,17 +185,43 @@ UTF-8 form."
 ;; Decode base64 `s` to a list of byte ints, or the `:invalid` sentinel on bad
 ;; input. As with hex, `:invalid` (not nil) keeps an empty valid input distinct
 ;; from a failure; the public wrappers map `:invalid` → nil.
+;; The length of `s` with its TRAILING '=' run removed.
+(defn- encoding-b64-body-length
+  (s n)
+  (if (and (> n 0) (= (string/char-at s (- n 1)) "="))
+    (encoding-b64-body-length s (- n 1))
+    n))
+
+(defn- encoding-b64-strip-padding
+  (s)
+  ;; `=` is *terminal* padding, at most two of it. The old
+  ;; `(string/replace s "=" "")` deleted every `=` ANYWHERE, so a misplaced one was
+  ;; not merely tolerated but erased: `"QQ==QQ=="` (two concatenated payloads — not
+  ;; base64 at all) collapsed to `"QQQQ"` and decoded to a value, instead of the nil
+  ;; a caller validating untrusted input is relying on. Returns the payload, or nil
+  ;; when a `=` sits anywhere but the ≤2-char trailing run.
+  (let (n (string/length s)
+        body-len (encoding-b64-body-length s n)
+        body (string/substring s 0 body-len))
+    (cond
+      (> (- n body-len) 2) nil
+      (>= (index-of body "=") 0) nil
+      else body)))
+
 (defn- encoding-b64-decode
   (s vals)
-  (let (
-        ; codepoint vector: O(1) nth, int lookups
-        s (string/->codepoints (string/replace s "=" ""))
-        n (count s)
-        tail (rem n 4))
-    (if (= tail 1)
-      ; 1 leftover char is always invalid
+  (let (body (encoding-b64-strip-padding s))
+    (if (nil? body)
       :invalid
-      (encoding-b64-dec-loop s 0 n vals nil))))
+      (let (
+            ; codepoint vector: O(1) nth, int lookups
+            s (string/->codepoints body)
+            n (count s)
+            tail (rem n 4))
+        (if (= tail 1)
+          ; 1 leftover char is always invalid
+          :invalid
+          (encoding-b64-dec-loop s 0 n vals nil))))))
 
 (defn- encoding-b64-dec-loop
   (s i n vals acc)
