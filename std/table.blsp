@@ -11,9 +11,17 @@
   "Store v under key k in table t, overwriting any existing entry. Keys use the same structural equality as map keys. Returns t (for threading). Both k and v are deep-copied into the store."
   (%table-put t k v))
 
-(defn get (t k &optional default)
-  "A fresh copy of the value stored under k in table t, or default (nil if omitted) when absent."
-  (%table-get t k default))
+(defn get "A fresh copy of the value stored under k in table t, or default (nil if omitted) when absent."
+  ;; Two arity CLAUSES rather than one `&optional` head, and the reason is performance, not
+  ;; style: a call-site inline follows a *thin wrapper* to the primitive underneath, and an
+  ;; `&optional` head is not one — it binds a default first, so `(table/get t k)` stopped
+  ;; resolving to `PrimOp::TableGet` and compiled to an ordinary call. `%table-get` is
+  ;; `Arity::range(2, 3)` with "default (nil if omitted)", so the 2-arg forward is exactly
+  ;; equivalent and the inline comes back. `has?` beside it never lost it, being a plain
+  ;; 2-ary forward — which is what made the gap invisible. See KI-58 for the same shape on
+  ;; `put`, and `every_inlinable_head_still_reaches_its_primitive`, which is what caught this.
+  ((t k) (%table-get t k))
+  ((t k default) (%table-get t k default)))
 
 (defn has? (t k)
   "True if table t has an entry for key k."
