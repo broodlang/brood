@@ -7,7 +7,12 @@
 
 ;; (range hi) -> 0..hi-1 ; (range lo hi) -> lo..hi-1 ; (range lo hi step).
 (defn range (a & more)
-  "A range of integers: `(range hi)` is 0..hi-1, `(range lo hi)` is lo..hi-1, `(range lo hi step)` strides by `step`. The result is a *lazy* range — `fold`/`reduce`/`sum`/`count` walk it without building a list (O(1) memory); every other op treats it as the list of those integers. Empty ranges are `nil`."
+  "A range of integers: `(range hi)` is 0..hi-1, `(range lo hi)` is lo..hi-1, `(range lo hi step)` strides by `step`. The result is a *lazy* range — `fold`/`reduce`/`sum`/`count` walk it without building a list (O(1) memory); every other op treats it as the list of those integers. Empty ranges are `nil`.
+
+    (range 4)        → (0 1 2 3)
+    (range 2 5)      → (2 3 4)
+    (range 0 10 3)   → (0 3 6 9)
+    (range 0)        → nil"
   (cond
     (empty? more) (%range 0 a 1)
     (empty? (rest more)) (%range a (first more) 1)
@@ -15,7 +20,11 @@
 
 ;; (take n coll) -> the first n elements (fewer if coll is shorter).
 (defn take (n coll)
-  "The first `n` items of `coll` (fewer if it is shorter), as a list."
+  "The first `n` items of `coll` (fewer if it is shorter), as a list.
+
+    (take 2 [1 2 3 4])  → (1 2)
+    (take 9 [1 2])      → (1 2)
+    (take 0 [1 2])      → nil"
   (take-acc n coll nil))
 (defn- take-acc
   (n coll acc)
@@ -25,7 +34,10 @@
 
 ;; (drop n coll) -> coll without its first n elements.
 (defn drop (n coll)
-  "`coll` without its first `n` items."
+  "`coll` without its first `n` items.
+
+    (drop 2 [1 2 3 4])  → (3 4)
+    (drop 9 [1 2])      → nil"
   (if (or (<= n 0) (empty? coll)) coll (drop (- n 1) (rest coll))))
 
 ;; (take-while pred coll) / (drop-while pred coll) split on the first failure.
@@ -82,7 +94,11 @@
 ;; `(number? (first a))` is one tag-of compare. Empty coll → empty list.
 ;; Custom-comparator `(sort less? coll)` stays on the Brood-side `merge-sort`.
 (defn sort (a & more)
-  "Sort a collection (stable). `(sort coll)` is ascending by `<` for numbers, or by structural order (lexicographic on vectors/lists, text order on strings/symbols/keywords) for anything else. `(sort less? coll)` uses a strict less-than predicate."
+  "Sort a collection (stable). `(sort coll)` is ascending by `<` for numbers, or by structural order (lexicographic on vectors/lists, text order on strings/symbols/keywords) for anything else. `(sort less? coll)` uses a strict less-than predicate.
+
+    (sort [3 1 2])              → (1 2 3)
+    (sort [\"b\" \"a\"])            → (\"a\" \"b\")
+    (sort > [3 1 2])            → (3 2 1)"
   (cond
     (not (empty? more)) (merge-sort a (first more))
     (empty? a) nil

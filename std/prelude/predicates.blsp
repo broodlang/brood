@@ -118,7 +118,12 @@ and a set its elements, as everywhere else `seq` applies."
 
 (defn- count-acc (coll n) (if (empty? coll) n (count-acc (rest coll) (%add n 1))))
 (defn count (coll)
-  "The number of items in `coll` (a list, vector, string, or map)."
+  "The number of items in `coll` (a list, vector, string, or map).
+
+    (count [1 2 3])      → 3
+    (count \"hello\")      → 5
+    (count {:a 1 :b 2})  → 2
+    (count nil)          → 0"
   ;; `vector?`/`map?` short-circuit to the O(1) `vector-length`/`map-count`
   ;; kernels (both were O(n) — a fold walk / a `map-pairs` allocation); lists
   ;; and nil go through a dedicated tail loop, not a per-element counting closure.
