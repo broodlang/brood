@@ -2130,7 +2130,7 @@ fn reconnect_watcher_heals_a_fallen_link() {
   (after 15000 (io/puts "TIMEOUT-no-nodedown")))
 ;; while down: an opted-in send raises catchable noconnection instead of dropping
 (proc/flag :send-errors true)
-(println
+(io/puts
   (try (do (send {{:name :echo :node (keyword spec)}} [:ping (self)]) "SEND-DID-NOT-RAISE")
     (catch e (if (= (get e :code) "E0060") "NOCONNECTION-OK" (get e :message)))))
 (proc/flag :send-errors nil)
