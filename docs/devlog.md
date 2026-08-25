@@ -3290,3 +3290,37 @@ RUNTIME GC floor, or either inliner.
 And one suspect cleared by measurement rather than reasoning: `7bbf979d feat(stdimage)` sits in
 the middle of a startup regression and is **flat against its parent**. Its name is the only thing
 connecting it.
+
+## 2026-08-25 — correcting KI-63, and the measurement method that manufactured a threshold
+
+KI-63 went out with "0.3.11 −5.8% (no tax), 0.12.0 +27.9%". The direction holds; the single
+numbers do not, and the method that produced them is unsound in a way worth recording.
+
+**The method that failed.** Loop time as `wall(file with the loop) − wall(the identical file
+without it)`. It cancels module-load cost exactly, which is why it looked right — and it is fine
+while the non-loop part is small and stable. It is not fine otherwise: chasing the mechanism I
+generated files with N extra `defn`s, and at 2000 the subtraction reported the loop taking
+**4 ms** (the two walls are both dominated by compiling 2000 functions, and their difference is
+noise). Worse, it manufactured a clean-looking **threshold** — "+0.3% at 800 functions, +64.4%
+at 2000" — which in-process timing shows is not there at all: flat 24–26 ms from 0 to 4000 extra
+functions. A fabricated threshold is more dangerous than a fabricated number, because a threshold
+suggests a mechanism and sends you looking for it.
+
+**What in-process timing says**, 25 runs, unpinned, `os/now-ns` either side of the loop:
+
+| | 0.3.11 | 0.12.0 |
+|---|---|---|
+| 0 modules | min 23, med 23, p90 23 | min 25, med 26, p90 29 |
+| 4 modules | min 22, med 26, p90 30 | min 28, med 33, p90 50 |
+| tax | −4.3% min / +13.0% med | +12.0% min / +26.9% med |
+
+Three samples of the same comparison gave a 0.12.0 tax of +27.9%, +25.0% and +12.0% on min. So
+the honest claim is the **ratio** — 0.12.0's module tax is about double 0.3.11's — plus the
+observation that the p90 moved most (30 → 50 ms), i.e. the distribution degraded more than the
+best case. Quoting one figure would be quoting a sample.
+
+**What is ruled out.** Not the global table: 5000 extra integer globals cost +7.5%, against
++27% for four modules. Not closure count: 4000 extra functions cost nothing. Not shared arms,
+the RUNTIME GC floor, or either inliner. So it is something a *module load* does that neither
+defining globals nor defining functions does — which is where the next session should start,
+with `perf` and root, since `perf_event_paranoid=4` blocks profiling here.
