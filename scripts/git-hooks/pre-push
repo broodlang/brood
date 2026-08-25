@@ -28,11 +28,32 @@ blsp_touched=$( { git diff --name-only "$upstream..HEAD" 2>/dev/null; \
                   git diff --name-only --cached 2>/dev/null; \
                   git ls-files --others --exclude-standard 2>/dev/null; } | grep -c '\.blsp$' )
 if [ "$blsp_touched" -gt 0 ]; then
-    # Prefer a release binary, then debug, then whatever is installed. If none
-    # exists, skip: a missing build must never block a push.
+    # Pick the nest that MATCHES THIS TREE, not merely the first one that exists.
+    # The old order was release, then debug, then PATH — so it used whatever
+    # `make gcstress` / `make breakagetests` last left in target/release/, which can be
+    # arbitrarily old. On 2026-08-25 that was `nest 0.10.0 (f53ad7dc)` against a tree at
+    # 0.11.0: a formatter one release behind reported "134 files need formatting" and
+    # blocked a push whose tree the CURRENT formatter calls clean. A stale gate that
+    # refuses correct work is worse than no gate, because the reflex is to --no-verify.
+    #
+    # So: prefer a binary whose build sha matches HEAD; failing that take the newest by
+    # mtime and say the answer may be stale. Never block on "no binary" — unchanged.
+    head_sha=$(git rev-parse --short=8 HEAD 2>/dev/null)
     for candidate in ./target/release/nest ./target/debug/nest "$(command -v nest 2>/dev/null)"; do
-        [ -n "$candidate" ] && [ -x "$candidate" ] && nest_bin="$candidate" && break
+        [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+        case "$("$candidate" --version 2>/dev/null)" in
+            *"$head_sha"*) nest_bin="$candidate"; break ;;
+        esac
     done
+    if [ -z "$nest_bin" ]; then
+        # Nothing matches HEAD (a dirty tree, or nothing rebuilt since the last commit).
+        # Fall back to the most recently BUILT candidate rather than a fixed order.
+        for candidate in ./target/release/nest ./target/debug/nest "$(command -v nest 2>/dev/null)"; do
+            [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+            if [ -z "$nest_bin" ] || [ "$candidate" -nt "$nest_bin" ]; then nest_bin="$candidate"; fi
+        done
+        [ -n "$nest_bin" ] && echo "pre-push: no nest built at $head_sha; using the newest ($nest_bin, $("$nest_bin" --version 2>/dev/null)) — this check may be stale." >&2
+    fi
     if [ -z "$nest_bin" ]; then
         echo "pre-push: .blsp files changed but no nest binary found — skipping the format check." >&2
     elif ! "$nest_bin" format --check >/dev/null 2>&1; then
