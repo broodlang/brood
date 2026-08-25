@@ -151,9 +151,9 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // *known* and so suppresses the unbound lint, `nest check` accepted `(length x)` in
     // silence for months while the runtime raised `unbound symbol: length`. The string case
     // is `string-length`, which has its own entry; sequences use `count`.
-    // Output fns: io/puts / io/print are Brood closures with rest params,
+    // Output fns: io/puts / io/write are Brood closures with rest params,
     // so infer_sig bails — pin their nil result so `(+ 1 (io/puts x))` is caught.
-    for n in ["io/puts", "io/print"] {
+    for n in ["io/puts", "io/write"] {
         put(n, Sig::variadic(any, nil_ty));
     }
     // min/max: at least one number-or-`Ord`-record arg (fixed) plus a variadic rest of the
@@ -262,7 +262,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     put("string/list->", Sig::new(vec![seq], str_ty));
     put("string/codepoints->", Sig::new(vec![seq], str_ty));
     // format: variadic with a required string template arg and a string result.
-    put("format", Sig::with_rest(vec![str_ty], any, str_ty));
+    put("string/format", Sig::with_rest(vec![str_ty], any, str_ty));
     // Search → int: all have branchy/recursive/optional-param bodies.
     //   index-of      — multi-clause cond over collection type; &optional from.
     //   index-where   — tail-recursive helper; 1-ary predicate.

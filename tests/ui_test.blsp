@@ -10,7 +10,9 @@
   (:use test)
   (:use editor/ui)
   (:use editor/display)
-  (:use io))
+  ;; `:exclude [inspect]` — `io/inspect` WRITES, while the root `inspect` is the `Inspect`
+  ;; ability op that RETURNS a string. Referring the writer bare here would shadow the op.
+  (:use io :exclude [inspect]))
 
 ;; Collect every [:saw x] message now in the mailbox, in send order — the tests
 ;; below have `view` announce each model it renders with `(send me [:saw …])`, so

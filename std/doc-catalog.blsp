@@ -210,7 +210,6 @@
    "for" :control
    "for-check-binds" :control
    "for-fold" :control
-   "format" :strings
    "format-loop" :strings
    "format-prec" :strings
    "format-spec" :strings

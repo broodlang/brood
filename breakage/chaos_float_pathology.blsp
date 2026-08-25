@@ -133,11 +133,11 @@
 (io/puts "->fixed(f-min, 400):" (->fixed f-min 400))
 (when f-inf
   (io/puts "format %.2f of f-inf:"
-    (try (format "%.2f" f-inf) (catch e (str "raises: " (error-message e))))))
+    (try (string/format "%.2f" f-inf) (catch e (str "raises: " (error-message e))))))
 (when f-nan
   (io/puts "format %.2f of f-nan:"
-    (try (format "%.2f" f-nan) (catch e (str "raises: " (error-message e))))))
-(io/puts "format %d of 2^53+1:" (format "%d" two53p1))
+    (try (string/format "%.2f" f-nan) (catch e (str "raises: " (error-message e))))))
+(io/puts "format %d of 2^53+1:" (string/format "%d" two53p1))
 
 (io/puts "--- cascading float loss ---")
 ;; Repeatedly add a tiny delta to a large number — eventually the delta is lost

@@ -108,12 +108,12 @@
     ;; dynamic name is ambient by declaration (ADR-151).
     (let (sink (table/new))
       (def *out* (fn (s) (table/put sink :last s)))
-      (io/print "redirected")
+      (io/write "redirected")
       ; restore BEFORE asserting
       (def *out* %write-out)
       (assert= "redirected" (table/get sink :last))))
   (test "the scoped form is unaffected"
-    (assert= "scoped" (with-out-str (io/print "scoped")))))
+    (assert= "scoped" (with-out-str (io/write "scoped")))))
 
 (describe "the escapes the error names"
   (test "a local `let` may still shadow a reserved name"

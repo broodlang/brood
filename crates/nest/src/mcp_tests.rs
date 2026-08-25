@@ -376,7 +376,7 @@ fn handler_print_is_captured_not_leaked_onto_the_channel() {
                   (list
                     {:name "chatty"
                      :schema {:type "object" :properties {}}
-                     :handler (fn (_) (io/write *out* "debug line") 42)}))
+                     :handler (fn (_) (io/write "debug line") 42)}))
                 "#,
         )
         .unwrap();

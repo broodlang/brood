@@ -7,7 +7,7 @@
 ;; the registry. Bodies stay tail-recursive (a test runs in a small-stack green
 ;; process). Register-only — `nest test` discovers it.
 
-(defmodule log-test (:use test) (:use log) (:use io))
+(defmodule log-test (:use test) (:use log) (:use io :exclude [inspect]))
 
 ;; ---- file-local helpers -----------------------------------------------------
 ;; A backend that forwards each formatted line to `pid` (so the test can receive
