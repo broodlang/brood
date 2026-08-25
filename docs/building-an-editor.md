@@ -33,7 +33,7 @@ Two properties of the framework shape everything below:
 1. **A buffer is an immutable value.** Every editing operation returns a *fresh*
    buffer; nothing mutates. (This makes undo nearly free — see the end.)
 2. **The frontend is a protocol of data.** You render by building a *frame* — a
-   vector of render-op values — and handing it to `term-draw`. The same frame
+   vector of render-op values — and handing it to `term/draw`. The same frame
    could be sent to a remote frontend over a socket; that's how local-native and
    server modes become one code path later.
 
@@ -49,13 +49,13 @@ into the binary, so you reach them by *naming* them — no dependency wiring and
 step (ADR-229): a qualified reference loads its module, and `(:use …)` refers it bare.
 
 ```clojure
-(editor/buffer/make "")            ; the buffer model — the reference loads it
-(editor/display/render-frame …)    ; the render-op protocol
+(editor/buffer/make-buffer "")     ; the buffer model — the reference loads it
+(editor/display/frame …)           ; the render-op protocol
 ;; …or, in a module header: (defmodule my-editor (:use editor/buffer) (:use editor/display))
 ```
 
-The `term-*` primitives (`term-enter`, `term-leave`, `term-size`, `term-poll`,
-`term-draw`) are always available — they're part of the kernel.
+The `term/*` functions (`term/enter`, `term/leave`, `term/size`, `term/poll`,
+`term/draw`) wrap the kernel's `%term-*` primitives and load like any other module.
 
 ## 2. The buffer model (`std/editor/buffer.blsp`)
 
@@ -127,13 +127,13 @@ splice conditional ops inline.
 
 The terminal primitives:
 
-- `(term-enter)` / `(term-leave)` — take over / restore the terminal
-- `(term-size)` → `[cols rows]`
-- `(term-poll ms)` → a key, or `nil` on timeout. A printable key is a **1-char
+- `(term/enter)` / `(term/leave)` — take over / restore the terminal
+- `(term/size)` → `[cols rows]`
+- `(term/poll ms)` → a key, or `nil` on timeout. A printable key is a **1-char
   string** (`"a"`); special keys are **keywords** (`:up :down :left :right :enter
   :escape :backspace :tab :delete :home :end :page-up :page-down`, and control
   combos like `:ctrl-c`/`:ctrl-s`). Always pass a finite `ms`.
-- `(term-draw frame)` — paint a frame.
+- `(term/draw frame)` — paint a frame.
 
 ## 4. Render a buffer to a frame
 
@@ -185,7 +185,7 @@ the process observer. That's the payoff of the pure-core / thin-IO split.
 ## 5. Keymaps and commands
 
 A **command** is a function `editor -> editor` (or `editor -> :quit` to exit). A
-**keymap** is a map from a key (the value `term-poll` returns) to a command:
+**keymap** is a map from a key (the value `term/poll` returns) to a command:
 
 ```clojure
 ;; src/commands.blsp
@@ -248,22 +248,22 @@ state — until a command returns `:quit`.
 
 (defn editor--loop (ed)
   "Render, wait for a key, dispatch, repeat — until a command returns :quit."
-  (let ([cols rows] (term-size)
+  (let ([cols rows] (term/size)
         ed (assoc ed :height (max 1 (dec rows))))   ; keep height in state for scrolling
-    (term-draw (render-frame ed cols rows))
-    (let (key (term-poll 1000))
+    (term/draw (render-frame ed cols rows))
+    (let (key (term/poll 1000))
       (if (nil? key)
         (editor--loop ed)                            ; timeout: just redraw (e.g. for a clock)
         (let (next (dispatch ed key))
           (if (= next :quit)
-            (term-leave)
+            (term/leave)
             (editor--loop next)))))))
 
 (defn run (path)
   "Open `path` and run the editor. Pairs with a Rust-side terminal-restore guard
 (like `nest observe`) so a crash never wrecks the terminal."
   (let (buf (if (file/exists? path) (buffer-from-file path) (make-buffer "" path path)))
-    (term-enter)
+    (term/enter)
     (editor--loop {:buffer buf :top 0 :height 1})))
 
 (defn main (args)
@@ -328,10 +328,10 @@ Everything except the loop is pure, so test it like any other Brood code:
 - **Drop in a process observer.** Your editor is a runtime full of processes
   (buffers-as-processes, timers, jobs). bind a key/command to `(observer/observe-attach)`
   — the qualified reference loads the module — it brings up the full-screen process viewer over *your
-  editor's own* processes and returns control on `q`. (Since it `term-leave`s on
-  quit, redraw your UI afterward.) The observer reads the same `process-info` /
+  editor's own* processes and returns control on `q`. (Since it `term/leave`s on
+  quit, redraw your UI afterward.) The observer reads the same `proc/info` /
   display seam this guide uses. To watch the editor **while it runs** (you can't show
-  both in one terminal), have it `(node-start …)` + `(observe-serve)`, then from
+  both in one terminal), have it `(node/start …)` + `(observe-serve)`, then from
   another terminal `nest observe --connect editor@host:port --cookie …` — remote
   attach is the same observer loop with a remote data source (ADR-053).
 

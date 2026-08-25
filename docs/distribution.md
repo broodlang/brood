@@ -12,7 +12,7 @@
 
 ```lisp
 ;; --- node A (same machine) ------------------------------------------------
-(node-start :a)                               ; local Unix-socket node, by name
+(node/start :a)                               ; local Unix-socket node, by name
 (register :echo (self))                       ; expose this process by name
 (defn serve ()
   (receive
@@ -21,7 +21,7 @@
 (serve)
 
 ;; --- node B (same machine) ------------------------------------------------
-(node-start :b)
+(node/start :b)
 (connect "a")                                 ; dial A by name — no port, no IP
 (send {:name :echo :node :a} [:hi (self)])    ; reach A's :echo by name
 (def remote (receive ([:pong p] p)))          ; p is A's pid — a remote pid
@@ -29,7 +29,7 @@
 (receive ([:pong _] :done))                   ; location-transparent reply
 
 ;; --- across machines: TCP, explicit host:port -----------------------------
-(node-start :a "0.0.0.0:9001")                ; listen over TCP
+(node/start :a "0.0.0.0:9001")                ; listen over TCP
 (connect "a@10.0.0.4:9001")                   ; dial a remote peer
 ```
 
@@ -41,20 +41,20 @@ local node up before running `app.blsp` (the Emacs `--daemon` model).
 ## Node names are `name@host` (ADR-073)
 
 A node's identity is `name@host`, Erlang-style — globally unique, carried in every
-pid (`#<pid a@whkbus/3>`). `node-start` qualifies a bare name: a **local** node
+pid (`#<pid a@whkbus/3>`). `node/start` qualifies a bare name: a **local** node
 takes this machine's short `(hostname)` (`:a@whkbus`); a **TCP** node takes its
 listen address's host (`:a@127.0.0.1`), so peers and `reconnect` derive the same
 name. Pass an explicit `:name@host` for a long/FQDN name. **`connect` returns the
 peer's authoritative `name@host`** — address peers with that value (a `let`/`def`
-binding, or `(nodes)`), not a bare literal.
+binding, or `(node/list)`), not a bare literal.
 
 ## Primitives
 
 | Primitive | Meaning |
 |---|---|
-| `(node-start name)` | Start a **local** node (Unix-domain socket, no port). Returns its `name@host`. |
-| `(node-start name "host:port")` | Start a node listening over **TCP** for remote peers. |
-| `(node-start name "host:port" cookie)` | …with an explicit cookie (the default is `(node-cookie)`). |
+| `(node/start name)` | Start a **local** node (Unix-domain socket, no port). Returns its `name@host`. |
+| `(node/start name "host:port")` | Start a node listening over **TCP** for remote peers. |
+| `(node/start name "host:port" cookie)` | …with an explicit cookie (the default is `(node-cookie)`). |
 | `(node-also-listen)` / `(node-also-listen "host:port")` | **Dual-listen** (ADR-074): add another front door to this node — the local Unix socket, or a TCP endpoint — sharing its identity + cookie. |
 | `(connect "name")` | Dial a local peer by name (Unix socket). Returns the peer's `name@host`. |
 | `(connect "name@host:port")` | Dial a remote peer over TCP. Returns its `name@host`. |
@@ -63,10 +63,10 @@ binding, or `(nodes)`), not a bare literal.
 | `(node-cookie)` | The shared link secret: `$BROOD_COOKIE` → `~/.config/brood/cookie` → freshly minted. |
 | `(hostname)` | This machine's short hostname (used to qualify a local node name). |
 | `(register name pid)` | Bind a local name so peers can address this process. Returns the pid. |
-| `(node-name)` | This runtime's node name (`:nonode` until `node-start`). |
-| `(nodes)` | A list of currently connected peer node names. |
-| `(monitor-node name)` | Deliver `[:nodedown name]` to the caller when the link to `name` goes down (clean close or heartbeat timeout). Persistent. |
-| `(disconnect name)` | Tear the link to `name` down now, without exiting this process (Erlang's `disconnect_node`). Fires `[:nodedown name]` on both sides, prunes `(nodes)`. Returns `true` if a link existed, else `false`. |
+| `(node/name)` | This runtime's node name (`:nonode` until `node/start`). |
+| `(node/list)` | A list of currently connected peer node names. |
+| `(node/monitor name)` | Deliver `[:nodedown name]` to the caller when the link to `name` goes down (clean close or heartbeat timeout). Persistent. |
+| `(node/disconnect name)` | Tear the link to `name` down now, without exiting this process (Erlang's `disconnect_node`). Fires `[:nodedown name]` on both sides, prunes `(node/list)`. Returns `true` if a link existed, else `false`. |
 | `(send target msg)` | `target` is a **pid** (local or remote) or a `{:name :node}` address. |
 | `(pid? x)` | True if `x` is a process id. |
 
@@ -79,13 +79,13 @@ node's name; a **remote** pid (received from a peer) carries the peer's. The sam
 value addresses a process whether it lives here or across a link — `send`
 dispatches on the node part:
 
-- node is us (or `:nonode`, i.e. minted before `node-start`) → deliver in-process
+- node is us (or `:nonode`, i.e. minted before `node/start`) → deliver in-process
   (the existing `process::deliver`);
 - node is a connected peer → encode a `Send` frame and forward over its link.
 
 Sending to an unknown name, a disconnected node, or a dead pid is a **silent
 no-op** (Erlang semantics) — with one opt-in exception: a process that set
-`(process-flag :send-errors true)` gets a catchable `E0060` noconnection error
+`(proc/flag :send-errors true)` gets a catchable `E0060` noconnection error
 when the target **node** is unknown/disconnected (the message would otherwise
 drop until a reconnect), so it can queue-and-retry. Process liveness stays
 silent either way.
@@ -102,7 +102,7 @@ two ways:
 
 #### Startup invariant: the listener goes up **last**
 
-**Register everything a peer may address *before* calling `node-start`.** `node-start` is the
+**Register everything a peer may address *before* calling `node/start`.** `node/start` is the
 moment this node becomes reachable, and a peer can connect and send within milliseconds of it —
 so any name registered *after* it has a window in which the name does not yet exist. A message
 that arrives in that window is **dropped**, not queued: `send` is fire-and-forget, and a
@@ -111,12 +111,12 @@ right ones — the name may legitimately be gone).
 
 ```brood
 ;; wrong — the listener is open before :echo exists
-(node-start :b "127.0.0.1:9001" cookie)
+(node/start :b "127.0.0.1:9001" cookie)
 (register :echo (spawn (serve)))
 
 ;; right — the name is live before anyone can reach the node
 (register :echo (spawn (serve)))
-(node-start :b "127.0.0.1:9001" cookie)
+(node/start :b "127.0.0.1:9001" cookie)
 ```
 
 This is OTP's own rule (the dist listener comes up after the supervision tree), and it is not
@@ -132,7 +132,7 @@ instead of surfacing as a distant timeout. The drop behaviour is unchanged; only
 Silence it with `BROOD_NO_DROP_WARN=1`.
 
 ### Transport (off the scheduler)
-`node-start` binds a listener — a `UnixListener` for a local name or a
+`node/start` binds a listener — a `UnixListener` for a local name or a
 `TcpListener` for `host:port` — and runs an acceptor thread; `connect` dials the
 matching carrier. A single `Stream { Tcp | Unix }` enum (ADR-068) carries the
 link, so everything below is transport-agnostic. Both ends perform the
@@ -230,11 +230,11 @@ independent symbol interners. (In-process messages keep the interned id.)
   - **Auto-reconnect** — `(reconnect/watch "name@host:port")` (Brood policy
     in `std/net/reconnect.blsp`, `(require 'reconnect)`; superseded the
     prelude's `ensure-link`, 2026-07-18) maintains a peer link across restarts:
-    a named, idempotent watcher `monitor-node`s the peer and retries `connect`
+    a named, idempotent watcher `node/monitor`s the peer and retries `connect`
     with exponential backoff (`:min-ms` 500 → `:max-ms` 30000) on every
     `[:nodedown …]`; `reconnect/subscribe` delivers `[:nodeup name]` /
     `[:nodedown name]` to your mailbox (pair with
-    `(process-flag :send-errors true)` for queue-and-retry senders). See
+    `(proc/flag :send-errors true)` for queue-and-retry senders). See
     `ensure_link_reconnects_across_a_node_restart` and
     `reconnect_watcher_heals_a_fallen_link`.
   - **Handshake v2 + encrypted session** (ADR-034 v2 + ADR-089) — magic+version
@@ -287,7 +287,7 @@ a dead one is detected within a couple of intervals.
 
 Down detection funnels into the same generation-checked teardown (§4), which
 fires **`[:nodedown name]`** to every process that called
-**`(monitor-node name)`** — the new Brood primitive (persistent, fires on each
+**`(node/monitor name)`** — the new Brood primitive (persistent, fires on each
 down event; mirrors process `monitor` in spirit).
 
 **Perf.** One thread total for all links, not per-link. Probes are idle-gated:
@@ -301,13 +301,13 @@ frees its socket, both threads, and its table entry exactly once. Clean peer
 exits (the test exercises this via `[:bye …]`) fire `nodedown` immediately via
 reader EOF; heartbeat covers the hard-down (no FIN) case.
 
-**Deliberate teardown — `(disconnect name)`.** The three triggers above are all
-*involuntary* (a peer left, or the link died). `disconnect` is the *voluntary*
+**Deliberate teardown — `(node/disconnect name)`.** The three triggers above are all
+*involuntary* (a peer left, or the link died). `node/disconnect` is the *voluntary*
 one — Erlang's `disconnect_node/1`. It `shutdown`s the peer's socket (so the
 peer's reader hits EOF and fires its own node-down) and runs the same §4
 `drop_link` on our side, firing `[:nodedown name]` to our monitors and pruning
-`(nodes)` — all without exiting the process. It is the clean way to **leave a
-node/cluster while staying alive** (a server dropping one client; a node bowing
+`(node/list)` — all without exiting the process. It is the clean way to **leave a
+node cluster while staying alive** (a server dropping one client; a node bowing
 out of a multi-node group), so an application no longer needs an ad-hoc
 `[:bye]`-broadcast convention to get prompt pruning. Our own reader also hits
 EOF and calls `drop_link` again, but the generation-id guard (§4) makes that a
@@ -356,7 +356,7 @@ cases; the long-soak test is its own thing).
 
 ### Sequencing
 Built in the planned order: §4 (generation-checked teardown) → §1 (de-dup +
-tie-break) → §2 (node-down + `monitor-node`). §3 (handshake v2: protocol-version
+tie-break) → §2 (node-down + `node/monitor`). §3 (handshake v2: protocol-version
 + challenge–response) is still future; the existing cookie compare and version
 omission are documented as not-yet-security.
 
@@ -380,7 +380,7 @@ to each other too — you don't have to dial every peer by hand.
   naming the same peer). Each new link re-gossips, so the mesh closes
   transitively and then goes quiet (a reconnect/duplicate doesn't re-broadcast).
 - Simultaneous cross-dials (A dials C while C dials A) collapse to one link via
-  the existing **connector tie-break** (§1). `(nodes)` reflects the full mesh.
+  the existing **connector tie-break** (§1). `(node/list)` reflects the full mesh.
 
 **Address chosen to advertise:** the first TCP listener if any (reachable
 locally over loopback *and* remotely), else the local Unix socket. A dual-listen

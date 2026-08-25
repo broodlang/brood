@@ -2128,17 +2128,17 @@ Only long/blocking **data-in/data-out** natives are allowed (`%git-clone`,
 clear error. Args and the result are deep-copied across (like `send`), so
 they must be sendable values. The package manager's clones already ride it.
 
-### Per-process limits (`process-flag`)
+### Per-process limits (`proc/flag`)
 
-`(process-flag flag [value])` reads or sets a runtime flag on the **current**
+`(proc/flag flag [value])` reads or sets a runtime flag on the **current**
 process (Erlang's `process_flag/2` shape) and returns the previous — or, with no
 value, current — setting. The first flag is **`:max-heap`**: a per-process heap
 limit in bytes, the BEAM `max_heap_size` analogue.
 
 ```clojure
-(process-flag :max-heap 8000000)   ; cap this process at ~8 MB; returns previous
-(process-flag :max-heap)           ; read it
-(process-flag :max-heap nil)       ; clear it (also cancels a pending trip)
+(proc/flag :max-heap 8000000)  ; cap this process at ~8 MB; returns previous
+(proc/flag :max-heap)          ; read it
+(proc/flag :max-heap nil)      ; clear it (also cancels a pending trip)
 ```
 
 The limit is checked after each of the process's own GC collections against the
@@ -2152,12 +2152,12 @@ Policy stays in Brood: to spawn a capped worker, set the flag first thing in
 the spawned fn —
 
 ```clojure
-(spawn (fn () (process-flag :max-heap 8000000) (work)))
+(spawn (fn () (proc/flag :max-heap 8000000) (work)))
 ```
 
-### Going idle (`hibernate`)
+### Going idle (`proc/hibernate`)
 
-`(hibernate)` tells the runtime this process is about to wait a long time, so it
+`(proc/hibernate)` tells the runtime this process is about to wait a long time, so it
 should give back everything it can: collect, shrink its heap, and drop its
 inline caches and compiled-body cache. It returns the bytes released. This is
 Erlang's `erlang:hibernate/3` (without the continuation argument — a Brood
@@ -2166,7 +2166,7 @@ process resumes from its own `receive`).
 ```clojure
 ;; a pooled connection that will sit idle between requests
 (defn serve (conn)
-  (hibernate)                       ; ~40% smaller while parked
+  (proc/hibernate)                  ; ~40% smaller while parked
   (receive ([:request r] (do (handle conn r) (serve conn)))))
 ```
 
@@ -2187,12 +2187,12 @@ transparently.
 
 ```clojure
 ;; node A: name the runtime, listen, expose a process by name
-(node-start :a "127.0.0.1:9001" "secret")
+(node/start :a "127.0.0.1:9001" "secret")
 (register :echo (self))
 
 ;; node B: connect, reach A's :echo by name, then talk to the pid it replies with
-(node-start :b "127.0.0.1:9002" "secret")
-(connect "a@127.0.0.1:9001")
+(node/start :b "127.0.0.1:9002" "secret")
+(node/connect "a@127.0.0.1:9001")
 (send {:name :echo :node :a} [:hi (self)])
 (def peer (receive ([:pong p] p)))   ; p is a remote pid
 (send peer [:ping (self)])           ; addressed directly — location-transparent
@@ -2200,12 +2200,12 @@ transparently.
 
 | Form | Meaning |
 |---|---|
-| `(node-start name "host:port" cookie)` | Name this runtime and listen for peers. Returns the node name. |
-| `(connect "name@host:port")` | Dial + authenticate a peer (shared cookie). Returns the peer's node name. |
+| `(node/start name "host:port" cookie)` | Name this runtime and listen for peers. Returns the node name. |
+| `(node/connect "name@host:port")` | Dial + authenticate a peer (shared cookie). Returns the peer's node name. |
 | `(register name pid)` | Bind a local name so peers can reach this process via `{:name name :node this-node}`. |
-| `(node-name)` | This runtime's node name (`:nonode` until `node-start`). |
-| `(nodes)` | A list of currently connected peer node names. |
-| `(monitor-node name)` | Deliver `[:nodedown name]` when the link to `name` goes down (clean close or heartbeat timeout). |
+| `(node/name)` | This runtime's node name (`:nonode` until `node/start`). |
+| `(node/list)` | A list of currently connected peer node names. |
+| `(node/monitor name)` | Deliver `[:nodedown name]` when the link to `name` goes down (clean close or heartbeat timeout). |
 | `(pid? x)` | True if `x` is a process id. |
 
 The cookie is a shared secret (Erlang-style; links are encrypted — ADR-089). One
@@ -2215,7 +2215,7 @@ heartbeat node-down detection, and mesh join have all shipped — full reference
 
 **Send semantics across a net-split:** `send` to a *disconnected* node silently
 drops the message (Erlang's default). A process that must not lose messages opts
-in with `(process-flag :send-errors true)` — its sends then raise a catchable
+in with `(proc/flag :send-errors true)` — its sends then raise a catchable
 `E0060` noconnection error, so it can queue and resend. Pair it with
 **`reconnect`** (a `reconnect/…` reference auto-loads it): `(reconnect/watch spec)`
 keeps the link alive with exponential-backoff reconnects, and
@@ -2667,7 +2667,7 @@ linear on any text.
   to `print`: `ansi-clear` (erase + home — the per-frame reset), `ansi-cursor`,
   `ansi-home`, `ansi-hide-cursor`/`ansi-show-cursor`. The ESC byte is the `\e`
   string escape. For a structured render-op frame buffer instead, use
-  `std/display` (`term-draw`/`term-emit`).
+  `std/display` (`term/draw`/`term/emit`).
 
 ### Iolists (write-boundary trees)
 
@@ -2715,7 +2715,7 @@ iolist in memory.
   for observing reclamation *and* pause behaviour: the `:pause-*` trio is
   cumulative wall time spent in this process's collections, the worst single
   pause, and the most recent one (µs). `:debug-build` is `true` when the binary
-  carries debug assertions (i.e. *not* a performance build); `process-info`
+  carries debug assertions (i.e. *not* a performance build); `proc/info`
   carries the per-process `:collections` count too.
 - `(vm-stats)` returns the VM **work-attribution** counters — `:vm-apply`,
   `:tail-call`/`:self-tail`, `:tw-defer` (tree-walker fallbacks),
@@ -2771,7 +2771,7 @@ iolist in memory.
   major compacts the old generation (ADR-072). So a long-running tail loop or
   `receive` server runs in bounded memory with nothing from the author — no
   manual GC call, no `while`, just recursion. (You never collect by hand; the old
-  `(hibernate)` primitive that did so was removed once automatic collection
+  `(proc/hibernate)` primitive that did so was removed once automatic collection
   landed.) The three thresholds are tunable for a given workload via
   `BROOD_GC_FLOOR` / `BROOD_GC_TENURE` / `BROOD_GC_MAJOR` (object counts, `K`/`M`
   suffixes accepted).
