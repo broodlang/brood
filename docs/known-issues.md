@@ -19,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-63 | **loading std modules taxes subsequent JIT'd hot loops, and the tax roughly DOUBLED since 0.3.11.** An identical, allocation-free, natively-compiled 20M-iteration loop with 4 modules required first, timed **in-process** (so module-load time is outside the measurement), unpinned. Direction is stable across samples; magnitude is not — 25 runs: **0.3.11 −4.3% min / +13.0% median, 0.12.0 +12.0% min / +26.9% median**, and the tail is worse still (p90 30 ms vs 50 ms). JIT-only — `BROOD_NO_JIT=1`/`BROOD_TIER=1` read 0.0%. Every program loads modules after the namespacing, so this is the common path | 🔧 **measured 2026-08-25, mechanism not identified.** Not shared arms, not the RUNTIME GC floor, not the inliners (`BROOD_NO_SHARED_ARMS` / `BROOD_RT_GC_FLOOR` / `BROOD_NO_INLINE` / `BROOD_NO_LEAF_INLINE` each leave it). `perf_event_paranoid=4` on this box, so a profile needs root |
+| KI-63 | ~~loading std modules taxes JIT'd hot loops~~ — **RETRACTED 2026-08-25, the effect does not exist.** After a discarded warm-up run in-process, a 20M loop is 23-24 ms whether or not `format` is loaded. Every earlier figure measured the FIRST run, i.e. JIT warm-up, which is variable and shape-sensitive — the same loop read 25 ms in one file and 40-51 ms in another differing only by having three call sites | ☑️ **retracted** — no bug. What is real, and is the reusable part: a whole-process benchmark of a short row measures tiering, not steady state |
 | KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
 | KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | 🔧 **diagnosed 2026-08-25, not fixed.** The fix is not to revert a wave — it is to make a module load cheap at boot, which is what the std image already does (4-33x) and why it is *not* installed at boot: materialising defines bindings and evaluates NOTHING, so registrations are skipped (131/4873 fail). See the replay note below |
 | KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl Port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl Port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
@@ -100,7 +100,7 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**Open: KI-63** (module loads tax JIT'd loops ~28%, mechanism unknown) and **KI-61** (startup +82%, a per-wave namespacing tax; diagnosed, fix is the stdimage replay). **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**Open: KI-61** (startup +82%, a per-wave namespacing tax; diagnosed, fix is the stdimage replay). **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
 **fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
 **KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
@@ -183,10 +183,38 @@ repetition, the usual flake defence, does not help. The missing dimension is a *
 
 ---
 
-## KI-63 — loading modules taxes JIT'd hot loops 🔧 MEASURED 2026-08-25
+## KI-63 — loading modules taxes JIT'd hot loops ☑️ RETRACTED 2026-08-25 (no such effect)
 
-**Status:** 🔧 measured, mechanism not identified. Reproducer and method below; the method is
-most of the value, because two different traps nearly produced two different wrong answers.
+**Status:** ☑️ **RETRACTED — there is no such effect.** Kept in full because the way it was
+wrong is worth more than the claim was: three successive measurement methods each produced a
+confident number, and each was an artifact.
+
+**The refutation, first.** Run the loop once and discard it, then time a second run in the same
+process:
+
+| | 20M loop, after a discarded warm-up |
+|---|---|
+| no module loaded | min 23, med 24, max 25 ms |
+| `format` loaded first | min 23, med 24, max 26 ms |
+
+Identical. Every figure below measured the **first** run of the loop — i.e. JIT tiering — not
+steady-state execution. Running the loop three times in one process shows it plainly: with
+`format`, 50 / 24 / 24 ms; without `format`, 51 / 24 / 24 ms. The first run is slow either way.
+
+**And first-run timing is not even stable against program shape.** The identical loop measured a
+median of 25 ms as the only statement in a file, and 40-51 ms as the first of three call sites in
+another — same code, same binary. That sensitivity is what produced the "`format` costs +92%"
+result: `format` was never the variable, the file's shape was.
+
+**What is actually true, and worth keeping:** a whole-process benchmark of a short row measures
+tiering as much as it measures the code. The harness does one discarded warm-up run *per
+language*, which warms the boot cache — but every row runs in a fresh process, so the program's
+own functions tier from cold on every measured run. For rows in the tens of milliseconds that is
+a large and variable share of the number.
+
+Everything below is the retracted investigation, kept for the traps it documents.
+
+
 
 **What.** The same allocation-free 20M-iteration loop, natively compiled, runs measurably slower
 if std modules were loaded first, and the penalty roughly **doubled** since 0.3.11. Timed

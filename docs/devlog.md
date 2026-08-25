@@ -3324,3 +3324,45 @@ best case. Quoting one figure would be quoting a sample.
 the RUNTIME GC floor, or either inliner. So it is something a *module load* does that neither
 defining globals nor defining functions does — which is where the next session should start,
 with `perf` and root, since `perf_event_paranoid=4` blocks profiling here.
+
+## 2026-08-25 — KI-63 retracted: three methods, three confident numbers, no effect
+
+KI-63 claimed loading std modules taxes JIT'd hot loops. It does not. The refutation is one
+line of experiment: run the loop once and throw it away, then time a second run in the same
+process.
+
+| | 20M loop, after a discarded warm-up |
+|---|---|
+| no module | min 23, med 24, max 25 ms |
+| `format` loaded first | min 23, med 24, max 26 ms |
+
+Identical. Three runs in one process makes it obvious — with `format` 50 / 24 / 24 ms, without
+`format` 51 / 24 / 24 ms. **The first run is slow either way.** Everything I measured was JIT
+tiering, not steady-state execution.
+
+Worth writing down how three separate methods each produced a confident wrong answer:
+
+1. **Differencing two programs** (`wall(with loop) − wall(without)`). Cancels module-load cost
+   exactly — and collapses when the non-loop part is large: at 2000 `defn`s it reported the loop
+   taking 4 ms, and manufactured a clean "+0.3% at 800 functions, +64.4% at 2000" threshold that
+   does not exist.
+2. **Pinning.** `taskset` charged the loop for background JIT compilation, reading +68% where
+   unpinned read +28% — the trap CLAUDE.md documents for `make ab`, which applies to any
+   hand-rolled measurement.
+3. **First-run in-process timing.** Looked rigorous — `os/now-ns` either side of the loop, 25
+   runs, min and median, unpinned. Still wrong, because it timed a cold arm. And it is not even
+   stable against program shape: the identical loop read a median of 25 ms as the only statement
+   in a file and 40–51 ms as the first of three call sites. That shape sensitivity is what
+   produced "`format` costs +92%" — `format` was never the variable.
+
+The pattern in all three: each method was *sound in principle* and violated an assumption I had
+not checked — that the non-loop part is small, that one core is representative, that the first
+run is the steady state. Each produced tight spreads and plausible mechanisms, which is exactly
+what makes them convincing. Tight spreads measure repeatability, not validity.
+
+**What is real, and is the useful residue:** a whole-process benchmark of a short row measures
+tiering as much as it measures the code under test. The harness does one discarded warm-up run
+per *language*, which warms the boot cache — but each row runs in a fresh process, so the
+program's own functions tier from cold every measured run. For rows in the tens of milliseconds
+that is a large, variable share of the published number, and it is not subtracted by
+`compute = wall − startup` because the `startup` row has no hot function to tier.
