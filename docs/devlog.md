@@ -1234,8 +1234,10 @@ mentioning length" is true of an unbound warning too, so it proved nothing.
 symbol: sqrt` and `json` with the dropped `json-` prefix: ADR-227's migration sweep covered
 `breakage/`, `examples/`, `stress/`, `std/` and `crates/` but could not see `brood-benchmarks`,
 a separate repo. A published harness run would have failed outright. Both fixed by qualifying the reference (which loads the module by
-inference) and verified against the other ports' checksums (`nbody` −169063618
-= node = python; `json` 364568836 = node), not merely "it runs now". The structural cause — that
+inference) and verified against the other ports' checksums, not merely "it runs now".
+(Those two figures — `nbody` −169063618, `json` 364568836 — turned out to be **stale**;
+see the warning in KI-44. `nbody`'s checksum is N-dependent, so quoting one without its
+`BENCH_N` is meaningless. `results/results.json` is canonical.) The structural cause — that
 nothing runs those programs for *correctness*, only for timing, by hand, over tens of minutes —
 is fixed by `bench/smoke.py`: every row at the harness's own quick sizes, exit status only,
 about a minute, sabotage-verified — and it immediately paid for itself: ADR-229's `require`
@@ -2645,3 +2647,77 @@ linear implementation and its private helpers into `std/seq.blsp`; re-verified p
 n=20 000 (0.13 s, checked permutation).
 
 **Both engines now pass 1012/1012.**
+
+## 2026-08-25 — `brood --check` resolved `(:use M)` against the namespace, not the module
+
+A single-file `brood --check` reported `unbound symbol: walk-files` for a file whose header
+says `(defmodule codemod (:use file))` — and then, for good measure, `unused :use import: file`.
+Both false; `walk-files` resolves at run time. The whole-project path (`nest check`) was clean,
+which is what localised it.
+
+**Root cause.** `types::check::setup_check_imports`' `ensure_loaded` asked "is this module already
+loaded?" by testing whether *any* `M/…` global exists. `file` shares its namespace with 18 kernel
+primitives (`file/slurp`, `file/ls`, …), so the answer was yes before `std/file.blsp` had ever been
+read: the `(:use file)` imported the primitives and none of the module's own `defn`s
+(`walk-files`, `read-lines`, `regular?`, `list-files`, `list-dirs`, `write-lines`). A whole-project
+check never hit it because `project-ensure-loaded` loads every module first. `file` is the only
+namespace a fresh image shares between primitives and an *unloaded* module (the other prefixes
+present at boot — `map`, `seq`, `string` — are all loaded features), which is why it stayed hidden.
+
+The test is now the **feature registry** (`*features*`), i.e. exactly what the runtime's
+`require-one` consults, read from Rust with no eval. Erring toward "not loaded" is free —
+`require-one` is idempotent — while erring toward "loaded" is what produced the false positives.
+
+**The second warning was the dangerous one.** "Unbound name" and "this import contributes nothing"
+are contradictory advice, and the second would have the reader delete an import their program
+needs. The unused-`:use` lint now stands down whenever the unbound diagnostic fired on a bare
+name: an import table that failed to resolve something the file references cannot prove any
+import unused. It stays fully live for a file that resolves cleanly.
+
+**Also fixed, different cause.** `std/prelude/tools.blsp`'s `impl-app?` reads `*project-name*` /
+`*ns-package*` — ambients `defdyn`'d by `std/tool/project.blsp`, absent under a bare
+`brood script.blsp` — behind `(bound? '…)` guards. The checker flagged them, i.e. warned on
+correct code. A `(bound? 'name)` test in a top-level form now exempts that name for that form
+(scoped per form, so a probe in one function can't silence a typo in another).
+
+`brood --check` over all 104 `std/*.blsp` files: **zero warnings** (was 4). Regression coverage in
+`crates/lisp/tests/check_use_imports.rs` (9 cases, including both "a real typo still warns" and
+"a genuinely unused import still warns" — verified by sabotage: reverting the loader test fails
+the two `file` cases) plus a `feature_loaded` unit test pinning both directions. Both engines
+1025/1025.
+
+
+## 2026-08-25 — KI-55: a shipped closure now brings its modules with it
+
+Auto-require (ADR-227/229) fires when a form is **compiled**. A closure that crosses a node
+boundary arrives already expanded and resolved, so nothing on the receiver ever inferred its
+imports and `(fn () (reflect/form-pos …))` died there with `unbound symbol: reflect/form-pos`.
+Before the v0.9.0/v0.10.0 namespacing waves those were bare prelude names, bound on every node by
+construction — the guarantee moved without anyone noticing.
+
+**The sender names them; the receiver loads them at the call site.** `closure_to_message` walks
+the arms' forms it is already deep-copying, collects each *qualified* symbol outside a
+`quote`/`quasiquote` subtree, and resolves the **distinct** ones through
+`derive::module_to_require`, keeping only those bound as globals here — the filter that separates
+a real reference from a qualified-looking symbol, and the reason an unloadable module on the far
+side is a genuine error. The result is a `(module, probe)` pair per module in
+`ClosureMsg::modules`, appended to the wire's `M_CLOSURE` record (protocol `BRD\x05` → `BRD\x06`;
+a v5 peer would have read the count as the start of `captured`). On arrival, each module this
+runtime lacks gets a guard woven into the rebuilt body —
+`(if (bound? 'math/sqrt) nil (%try (fn () (require-one 'math)) (fn (e) (throw …))))` — built from
+primitives and core special forms only, because a rebuilt body is never macroexpanded here.
+
+**Not at deserialize time**, which is where it obviously belongs and is wrong twice: `from_message`
+holds half-built values in unrooted Rust locals (the KI-51 shape), and the selective-`receive` scan
+calls it **while holding the mailbox lock**, where `require-one`'s wait-for-another-loader `sleep`
+— itself a `receive` — deadlocks. At the call site the load is ordinary evaluation, and its failure
+is a catchable error naming the module, the reference, and the fact that the closure was shipped.
+
+Cost, best-of-5 on a deliberately reference-dense closure (8 forms, 10 qualified refs, 20 000
+serialisations): **51 → 75 ms**, +1.2 µs per closure, and zero for a same-runtime send (skipped
+outright). Resolving once per distinct symbol instead of per occurrence is worth 4× here.
+
+`source_positions_survive_a_cross_node_send` lost its `(require-one 'reflect)` workaround; a new
+`a_shipped_closure_requires_its_modules_on_the_receiver` ships a body calling two modules node A
+has never heard of (and a quoted `'math/not-a-real-name`, proving quoted data drags nothing
+along). Both sabotage-verified against the original unbound errors. Suite 1026/1026.

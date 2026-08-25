@@ -696,7 +696,7 @@ named form.
 ```
 
 Use it for anything supervised — `std/proc/supervisor.blsp`'s `:start` thunks are
-`(fn () (spawn-link (worker …)))`, and `gen`'s `spawn-server-link` is the
+`(fn () (spawn-link (worker …)))`, and `gen/spawn-server-link` is the
 same idea for a `defprocess` server.
 
 ## Distributed nodes — named processes & cross-node addressing
@@ -748,15 +748,17 @@ each clause *returns the next state* to carry through the loop. Two message
 kinds:
 
 - **cast** — fire-and-forget; the clause body is the **next state**. Send with
-  `(! pid payload)`.
+  `(cast pid payload)`.
 - **call** — synchronous; the clause body is `[reply next-state]` and the caller
-  blocks for `reply`. Send with `(gen-call pid payload)`.
+  blocks for `reply`. Send with `(call pid payload)`.
 - **query** — synchronous read-only; the body is just the reply, state unchanged.
   Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
-(defmodule my-counter "…")   ; gen is core — spawn-server/call/cast/defprocess are bare
-                                          ; defprocess/cast/gen-call bare
+;; `gen` is an ordinary module: `(:use gen)` refers defprocess / spawn-server /
+;; cast / call / stop bare. Without it, qualify: `gen/spawn-server`, `gen/call`, …
+;; (`call`/`cast`/`stop` are NOT global names — `(def call …)` is yours.)
+(defmodule my-counter "…" (:use gen))
 
 (defprocess counter (n)                 ; n is the state
   (cast  :inc       (+ n 1))            ; new state = n+1
@@ -766,17 +768,20 @@ kinds:
   (query :double    (* n 2)))           ; reply n*2; state untouched
 
 (def c (spawn-server counter 0))        ; spawn with initial state 0 → pid
-(! c :inc)                              ; cast (returns immediately)
-(! c [:add 10])
-(gen-call c :value)                     ; => 11  (synchronous; blocks for reply)
-(gen-call c :double)                    ; => 22  (query — read-only)
+(cast c :inc)                           ; cast (returns immediately)
+(cast c [:add 10])
+(call c :value)                         ; => 11  (synchronous; blocks for reply)
+(call c :double)                        ; => 22  (query — read-only)
 (stop c)                                ; graceful shutdown; ends the loop
 ```
 
 Other primitives: `(sleep ms)` parks the current process without touching its
-mailbox (it does *not* block a worker thread). `(stop pid)` ends a server
-process's receive loop cleanly — every `gen` process automatically handles
-the stop envelope, no `:stop` clause needed.
+mailbox (it does *not* block a worker thread). `(stop pid)` (i.e. `gen/stop`)
+ends a server process's receive loop cleanly — every `gen` process automatically
+handles the stop envelope, no `:stop` clause needed. `(call pid payload)` blocks
+up to 5 s and `(call-timeout pid payload ms)` sets a custom deadline; a call that
+times out leaves **nothing** in your mailbox — it deactivates its reply ref, and
+the kernel drops a later reply carrying it at delivery (OTP 24's process alias).
 
 **Worker pool — fan out work, fan in results** (plain `spawn`/`receive`, the
 pattern most demos want):

@@ -191,6 +191,16 @@ independent symbol interners. (In-process messages keep the interned id.)
     `ClosureMsg` field (name, params, optionals + default *forms*, rest, body
     forms, doc, captured free locals); the receiver's `closure_from_message`
     rebuilds against its own prelude, so free globals re-resolve there.
+  - **The modules a shipped body needs ride with it** (KI-55). A *namespaced*
+    free global (`math/sqrt`, `reflect/form-pos`) does not re-resolve by itself:
+    auto-require (ADR-227/229) fires when a form is **compiled**, and a shipped
+    closure arrives already compiled. So `M_CLOSURE` also carries the modules the
+    sender's body references — one `(module, probe)` pair each — and the receiver
+    weaves `(if (bound? 'probe) nil (require-one 'module))` into the rebuilt body
+    for each one it lacks, loading it at the closure's first call. A module the
+    receiving node cannot find raises there, naming the module and the fact that
+    the closure was shipped. Nothing is asked for that the *sender* does not have
+    loaded, and quoted data (`'json/x`) drags nothing along.
   - **`(remote-spawn node expr)`** macro (`std/prelude.blsp`) — the surface
     convenience over the `[:run …]` pattern; ships the closure to a
     `:remote-spawn` server on `node` (lazily started via `(start-remote-spawn)`).

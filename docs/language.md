@@ -1898,6 +1898,38 @@ separate `await`/join. `(ref)` values are their own type (`ref?`, `:ref`),
 compared by identity, and may be sent in messages. (`call`/`reply` aren't in the
 prelude yet — see `examples/life.blsp`.)
 
+#### One-shot reply aliases (`%ref-deactivate`)
+
+A call with a deadline has a loose end: if you give up and the server answers
+anyway, its `[:reply ^tag v]` lands in your mailbox carrying a token **no receive
+of yours will ever match again**. It is unreachable garbage — it never gets
+consumed, it grows the mailbox without bound over a retry loop, and every later
+*selective* receive re-scans it.
+
+Erlang lived with this through OTP 23 by having the caller simply **exit** on a
+`gen_server:call` timeout, which made a late reply moot. OTP 24 added **process
+aliases** instead: the reply is addressed to a one-shot alias rather than the pid,
+and once the alias is deactivated the VM *drops* later replies addressed to it.
+Brood does the same thing without a new value kind, because a `ref` is already the
+unforgeable per-request token a reply carries:
+
+```clojure
+(%ref-deactivate r)   ;; r is a ref THIS process minted
+```
+
+From then on, a message **addressed to `r`** — a keyword-tagged vector whose second
+element is `r`, i.e. the `[:reply r v]` / `[:down r pid reason]` shape — is dropped
+**at delivery**. It never enters the queue, so nothing has to scan past it later.
+Only the minting process can deactivate its own refs (the set lives on its own
+mailbox), already-queued messages are untouched (like `demonitor` without `flush`),
+and an alias is one-shot: the entry is forgotten as soon as it swallows a message.
+The per-mailbox set is a fixed eight entries, so it cannot grow; past that the
+oldest is evicted, which merely restores the old behaviour for one long-abandoned
+ref rather than dropping anything wrong.
+
+`gen/call-timeout` uses it on both give-up paths (deadline and server death), which
+is why a timed-out `gen/call` leaves an empty mailbox behind.
+
 The opt-in **`task` module** (`(:use task)`) packages the common "run this
 thunk off my loop, with a timeout, cancellable" pattern over `spawn`/`receive`/
 `exit`: `(task thunk opts)` returns a handle and delivers a tagged `[:task-done
@@ -1905,7 +1937,7 @@ handle v]` / `[:task-error handle msg]` / `[:task-timeout handle]` message to
 `:reply-to`; `cancel-task` stops it early; and `(await thunk timeout-ms)` is the
 *synchronous* run-with-timeout that blocks for the value (throwing on error or
 timeout). This `await` is a userland convenience for bounding a single
-computation — distinct from the gen_server `call` idiom above, which is the
+computation — distinct from the gen_server `gen/call` idiom above, which is the
 right tool for request/reply to a long-lived process.
 
 ### The `gen` server framework (gen_server in Brood)
@@ -1914,11 +1946,16 @@ right tool for request/reply to a long-lived process.
 gen_server-style framework — ~180 lines of Brood over `spawn`/`send`/`receive`/
 `ref`/`monitor`, no kernel surface (ADR-099). A server carries one immutable
 state value through a tail-recursive `receive` loop; `defprocess` declares how it
-handles each kind of message. `gen` is core (in the prelude), so `defprocess`, `spawn-server`, `call`, `cast`,
-`stop` are bare — no `require`, no `(:use)`:
+handles each kind of message.
+
+`gen` is an **ordinary module** with a bare namespace, so its client API is
+`gen/spawn-server`, `gen/call`, `gen/cast`, `gen/stop`, `gen/defprocess` — or bare
+after `(:use gen)`. (It was briefly prelude-bundled with those names bare; that
+seized `call`, `cast` and `stop` as un-redefinable global names, which a framework
+does not get to own. `(def call …)` is yours again.)
 
 ```clojure
-(defmodule my-app)
+(defmodule my-app (:use gen))   ;; refers defprocess / spawn-server / call / cast / stop bare
 
 (defprocess counter (n)
   (init  (do (println "up") n))            ; runs once at startup; returns the initial state
@@ -1929,10 +1966,14 @@ handles each kind of message. `gen` is core (in the prelude), so `defprocess`, `
   (terminate reason (println "down: " reason)))  ; runs on (stop); body for cleanup
 
 (def c (spawn-server counter 0))
-(! c :inc)                 ; cast
-(gen-call c :value)        ; => 1  (synchronous, 5 s default timeout)
+(cast c :inc)              ; fire-and-forget
+(call c :value)            ; => 1  (synchronous, 5 s default timeout)
 (stop c)                   ; graceful shutdown — runs terminate, then ends the loop
 ```
+
+Without `(:use gen)` the same three lines are `(gen/cast c :inc)`,
+`(gen/call c :value)`, `(gen/stop c)`, and the definition head is
+`(gen/defprocess counter (n) …)`.
 
 The clause kinds map onto Erlang's `handle_cast`/`handle_call`/`handle_info` plus
 two lifecycle hooks: **`cast`** (body → next state), **`call`** (body →
@@ -1945,13 +1986,23 @@ a plain `send`. Optional **`init`** runs once at startup (the place to
 before `info` clauses, and **any message matched by no clause is dropped** rather
 than left to pile up in the mailbox (OTP's default `handle_info`).
 
-Client API: `(! pid payload)` casts; `(gen-call pid payload)` calls and blocks up
-to 5 s (it `monitor`s the server, so a *dead* server raises at once instead of
-hanging); `(gen-call-timeout pid payload ms)` sets a custom deadline; `(stop pid)`
-ends the loop. Spawn with `spawn-server`, `spawn-server-link` (Erlang
-`start_link` — links the server to the caller), or `spawn-server-named` (registers
-it for `whereis`). A `defprocess` server composes directly under
-`supervisor` (see `std/proc/supervisor.blsp`).
+Client API: `(gen/cast pid payload)` casts; `(gen/call pid payload)` calls and
+blocks up to 5 s (it `monitor`s the server, so a *dead* server raises at once
+instead of hanging); `(gen/call-timeout pid payload ms)` sets a custom deadline;
+`(gen/stop pid)` ends the loop; `(gen/code-change pid)` asks a running server to
+migrate its state after a hot reload. Spawn with `gen/spawn-server`,
+`gen/spawn-server-link` (Erlang `start_link` — links the server to the caller), or
+`gen/spawn-server-named` (registers it for `whereis`). A `defprocess` server
+composes directly under `supervisor` (see `std/proc/supervisor.blsp`).
+
+**A call that times out leaves nothing behind.** `gen/call-timeout` mints a fresh
+`(ref)` for the reply and, on the deadline path, **deactivates** it with
+`(%ref-deactivate r)` — the kernel then *drops a later reply carrying that ref at
+delivery*, so it never enters the caller's mailbox at all. This is OTP 24's
+process-alias mechanism (`{alias, demonitor}`): before it, a slow-but-live server
+answering after the deadline left an unmatchable `[:reply ^r v]` queued forever,
+growing the mailbox over a retry loop and re-scanned by every later selective
+receive. See "One-shot reply aliases" under Synchronous calls above.
 
 ### Monitors
 
@@ -2036,7 +2087,7 @@ failure only appears under load — exactly where a supervisor matters.
 
 **Use `spawn-link` for anything supervised.** `std/proc/supervisor.blsp`'s
 `:start` thunks do (`(fn () (spawn-link (worker …)))`), and `gen`'s
-`spawn-server-link` is the same guarantee for a `defprocess` server. The prelude
+`gen/spawn-server-link` is the same guarantee for a `defprocess` server. The prelude
 macro expands to the `%spawn-link` primitive (ADR-067).
 
 ### Timers

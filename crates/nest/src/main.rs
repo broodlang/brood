@@ -665,6 +665,19 @@ fn run_main(cli: Cli) {
     // Flag a stressed/retuned heap so a benchmark can't silently measure one.
     brood::cli_support::warn_nondefault_gc_env();
 
+    // Completion runs on a KEYPRESS, so it must not pay interpreter boot for an
+    // answer clap already knows. Both arms were below the unconditional
+    // `Interp::new()` and so paid it anyway — 31 ms against a 9 ms floor for
+    // `nest complete -- te`, whose answer ("test") is a static subcommand name; the
+    // project-dependent path paid it TWICE, once here and once in
+    // `print_dynamic_values`. Handle them before any interpreter exists, which is
+    // what the module comment already claimed happened.
+    match &cli.cmd {
+        Cmd::Completions { shell } => return cmd_completions(*shell),
+        Cmd::Complete { words } => return cmd_complete(words),
+        _ => {}
+    }
+
     let mut interp = Interp::new();
 
     match cli.cmd {
@@ -742,8 +755,8 @@ fn run_main(cli: Cli) {
             }
             cmd_check(&mut interp, &files)
         }
-        Cmd::Completions { shell } => cmd_completions(shell),
-        Cmd::Complete { words } => cmd_complete(&words),
+        // Handled above, before the interpreter is built.
+        Cmd::Completions { .. } | Cmd::Complete { .. } => unreachable!(),
         Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
         Cmd::Format { check, changed } => {
             require_project("format", None);
@@ -1431,9 +1444,18 @@ fn cmd_run(
         // is the first-class form of `timeout Ns nest run` — it lets a loop /
         // TUI app be exercised end-to-end (not just its pure fns) and makes
         // time-based behaviour reproducible in CI.
+        //
+        // Both clauses YIELD a boolean the Rust side turns into the exit status:
+        // reaching the `--for` cap is success, and so is a `:normal` exit, but a
+        // program that *died* must not exit 0. It used to: the `[:down …]` arm
+        // printed the reason and fell out of `run`'s `Ok`, so `nest run --for 3s
+        // boom.blsp` printed a crash and reported success — in the one mode
+        // documented as the CI-friendly way to exercise a long-running app, where a
+        // green exit is exactly what nobody re-reads. The unwrapped path (a plain
+        // `nest run FILE`) has always propagated the throw and exited 1.
         let after_clause = match &timed {
             Some((ms, label)) => format!(
-                "(after {} (println \"[stopped after {}]\"))",
+                "(after {} (println \"[stopped after {}]\") true)",
                 ms,
                 brood::introspect::escape_brood_string(label)
             ),
@@ -1442,7 +1464,7 @@ fn cmd_run(
         format!(
             "(let (p (%spawn (fn () {}))) \
                   (monitor p) \
-                  (receive ([:down _ ^p reason] (println \"[exit]\" reason)) {}))",
+                  (receive ([:down _ ^p reason] (println \"[exit]\" reason) (= reason :normal)) {}))",
             run_form, after_clause
         )
     } else {
@@ -1480,7 +1502,16 @@ fn cmd_run(
         "{}{}{}{} {}",
         project_setup, check_setup, node_setup, watch_setup, body
     );
-    run(interp, &code);
+    if !wrap {
+        run(interp, &code);
+        return;
+    }
+    // The wrapped form's value is the monitor verdict built above: `false` means the
+    // supervised program died. Its failure was already printed (`[exit] <reason>`), so
+    // exit non-zero silently rather than reporting a second time.
+    if let brood::core::value::Value::Bool(false) = run_for_value(interp, &code) {
+        std::process::exit(1);
+    }
 }
 
 /// `nest update [NAME...]` — re-resolve refs and re-lock (ADR-037). No NAMES
@@ -1718,7 +1749,15 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
                 brood::introspect::call_form("observer/observe-connect", &args)
             )
         }
-        None => "(observer/observe-run)".to_string(),
+        None => {
+            // `--cookie` only authenticates a link, and the local demo makes none.
+            // Say so rather than accepting a flag that does nothing — the same
+            // "warn rather than ignore silently" rule `nest run --main` follows.
+            if cookie.is_some() {
+                eprintln!("nest observe: --cookie is ignored without --connect (the local demo opens no link)");
+            }
+            "(observer/observe-run)".to_string()
+        }
     };
     // The guard restores the terminal on a panic unwind; the inner scope drops it
     // (restoring) before any error is reported and we exit — `process::exit`
@@ -1846,6 +1885,21 @@ fn cmd_release(
         );
         std::process::exit(2);
     }
+    // A DEFAULTED output name is manifest data, not an argument: `:name` is read out
+    // of a project.blsp that may not be ours (a cloned repo, a `nest release` run
+    // before anyone read it). `(project :name |../../escaped-app|)` wrote a 30 MB
+    // **executable** two directories above the project root, with no `-o` and no
+    // warning — verified. A defaulted artifact must land in the project directory, so
+    // require a plain filename; an explicit `-o PATH` is the user's own choice and
+    // stays unrestricted (that is what it is for).
+    if output.is_none() && !is_plain_filename(&name) {
+        eprintln!(
+            "nest release: the manifest's :name ({name:?}) is not a plain filename, so it \
+             cannot name the output binary."
+        );
+        eprintln!("  Give the path explicitly: nest release -o <path>");
+        std::process::exit(2);
+    }
     let stem = output.unwrap_or(&name);
     let plans: Vec<(Option<&str>, std::path::PathBuf)> = if targets.is_empty() {
         vec![(None, std::path::PathBuf::from(stem))]
@@ -1885,6 +1939,20 @@ fn cmd_release(
             triple.map(|t| format!(", {t}")).unwrap_or_default(),
         );
     }
+}
+
+/// Is `s` a single path component that names a file in the current directory —
+/// no separator, no `.`/`..`, not empty? The test a *defaulted* output name has to
+/// pass before it may become a filesystem path (see `cmd_release`). Deliberately
+/// rejects `\` too: a name is data, and a name written for one platform must not
+/// traverse on another.
+fn is_plain_filename(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains('\0')
 }
 
 // ---------- helpers ----------
@@ -1939,10 +2007,14 @@ fn run(interp: &mut Interp, code: &str) {
 /// to exit non-zero based on it. Used by `nest check` to convert a non-zero
 /// warning count into a non-zero exit without throwing a synthetic error.
 fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
-    match interp.eval_str(code) {
+    let result = interp.eval_str(code);
+    // Restore on BOTH paths, exactly as `run` does — `nest run --for` routes a
+    // full-screen TUI app through here, and an app that returned without its own
+    // `term-raw-leave` would otherwise leave the shell wedged. No-op unless raw.
+    brood::builtins::restore_terminal_on_exit();
+    match result {
         Ok(v) => v,
         Err(e) => {
-            brood::builtins::restore_terminal_on_exit();
             report_error(&e);
             std::process::exit(1);
         }
@@ -2205,11 +2277,25 @@ fn positional_possible_values(subcommand: &str) -> Option<Vec<String>> {
 /// whichever internal function happened to read it first
 /// (`check-file-deps: cannot read …`, plus a trace through `project-pfold-files`).
 /// Same mistake, same message, wherever it is made.
+///
+/// A DIRECTORY is rejected here too, for the same reason: `nest check src` passed
+/// the `metadata` probe (a directory has metadata), handed `src` to Brood, and came
+/// back with `check-file-deps: cannot read src: Is a directory (os error 21)` plus a
+/// four-frame trace through `project-pfold-files` — the exact internals-leak this
+/// guard exists to prevent.
 fn require_readable_files(command: &str, files: &[String]) {
     for path in files {
-        if let Err(e) = std::fs::metadata(path) {
-            eprintln!("nest {command}: cannot read {path}: {e}");
-            std::process::exit(2);
+        match std::fs::metadata(path) {
+            Err(e) => {
+                eprintln!("nest {command}: cannot read {path}: {e}");
+                std::process::exit(2);
+            }
+            Ok(meta) if meta.is_dir() => {
+                eprintln!("nest {command}: {path} is a directory, not a .blsp file.");
+                eprintln!("  Name the files, or omit them to cover the whole project.");
+                std::process::exit(2);
+            }
+            Ok(_) => {}
         }
     }
 }

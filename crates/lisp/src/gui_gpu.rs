@@ -230,7 +230,19 @@ impl GlWindow {
 
         let mut insts: Vec<f32> = Vec::new();
         let mut glyph_reqs: Vec<GlyphReq> = Vec::new();
+        let (fwf, fhf) = (fw as f32, fh as f32);
         let mut push = |x: f32, y: f32, w: f32, h: f32, c: [u8; 3]| {
+            // Cull anything the viewport could not show. GL would clip these away for
+            // free, but this path BUFFERS every quad before drawing — unlike the CPU
+            // painter, whose fills clip against the framebuffer and cost nothing when
+            // off-screen. `Op::Cells` pushes one quad per live bit of a caller-supplied
+            // bitboard, so without a cull a board far larger than the window grows
+            // `insts` (28 bytes a quad) without bound instead of drawing nothing.
+            // Written as a positive test so a NaN coordinate — every comparison false —
+            // is culled rather than buffered.
+            if !(w > 0.0 && h > 0.0 && x + w > 0.0 && y + h > 0.0 && x < fwf && y < fhf) {
+                return;
+            }
             insts.extend_from_slice(&[
                 x,
                 y,

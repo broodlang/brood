@@ -111,16 +111,35 @@ fn behaviour_in_files(files: &[String], name: &str) -> Option<Location> {
     None
 }
 
-/// Project a recorded [`introspect::SourceLoc`] (1-based line/col into some
-/// other file) into an LSP [`Location`]. The position is a zero-width caret at
-/// the definition's start — editors land the cursor there and select the line.
-/// `line`/`col` are *character* columns; for an all-ASCII definition line (the
-/// common case for a top-level `(defn …`) that equals the UTF-16 column LSP
-/// wants. A non-ASCII prefix on the def line could be off by a few columns —
-/// acceptable until it bites, since the jump still lands on the right line.
+/// Project a recorded [`introspect::SourceLoc`] (1-based line + 1-based
+/// **character** column into some other file) into an LSP [`Location`]. The
+/// position is a zero-width caret at the definition's start — editors land the
+/// cursor there and select the line.
+///
+/// The column needs the target file's text to be right: `SourceLoc.col` counts
+/// characters and `Position.character` counts UTF-16 code units, so treating one
+/// as the other lands short on any def line with non-ASCII ahead of the name
+/// (short by one per astral char). Goto-definition is user-initiated and this is
+/// one small read, so we read the file and convert properly; if it can't be read
+/// (deleted, unreadable, or a `%builtin-module` with no file) we fall back to the
+/// raw column, which is still the right *line*.
 fn cross_file_location(loc: &introspect::SourceLoc) -> Option<Location> {
     let uri = crate::path_to_uri(&loc.file)?;
-    let pos = Position::new(loc.line.saturating_sub(1), loc.col.saturating_sub(1));
+    let line = loc.line.saturating_sub(1);
+    let pos = match std::fs::read_to_string(&loc.file) {
+        Ok(text) => {
+            let index = LineIndex::new(&text);
+            let off = index.offset_of_char_pos(
+                &text,
+                brood::error::Pos {
+                    line: loc.line,
+                    col: loc.col,
+                },
+            );
+            index.position(&text, off)
+        }
+        Err(_) => Position::new(line, loc.col.saturating_sub(1)),
+    };
     Some(Location::new(uri, Range::new(pos, pos)))
 }
 

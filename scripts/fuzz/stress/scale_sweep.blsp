@@ -133,7 +133,7 @@
 
 ;; `:only` on the two proc modules: they both export `stop` (an import clash the
 ;; namespacing hardening now rejects outright), and `agent` also shadows the prelude's
-;; `get`/`update`. `gen-calls` below already calls `stop` qualified.
+;; `get`/`update`. `gen-calls` below calls `gen/stop` qualified.
 (defmodule scale-sweep
   ;; `sse--frames` is module-private (ADR-146); a stress harness measuring an internal is
   ;; exactly the `:use-internals` case, as `tests/sse_test.blsp` does.
@@ -158,14 +158,14 @@
 (def utf8-src-lead (if utf8? ";; café — em dash\n" ""))
 
 (defn ms (f)
-  (let (t0 (now-ns)
+  (let (t0 (os/now-ns)
         _ (f))
-    (quot (- (now-ns) t0) 1000000)))
+    (quot (- (os/now-ns) t0) 1000000)))
 
 (defn us (f k)
-  (let (t0 (now-ns)
+  (let (t0 (os/now-ns)
         _ (f))
-    (quot (- (now-ns) t0) (* k 1000))))
+    (quot (- (os/now-ns) t0) (* k 1000))))
 
 (defn row (label base f)
   (let (t1 (ms (fn () (f base)))
@@ -196,7 +196,7 @@
 (defn agent-updates (k)
   (let (pid (start (fn () 0))
         _ (loop-updates pid k))
-    (stop pid)))
+    (gen/stop pid)))
 
 ;; ---- gen: N synchronous calls against one server -----------------------
 
@@ -214,7 +214,7 @@
 (defn gen-calls (k)
   (let (pid (spawn-server counter-server 0)
         _ (loop-calls pid k))
-    (stop pid)))
+    (gen/stop pid)))
 
 ;; ---- editor/buffer: N inserts, then N line navigations ----------------------
 

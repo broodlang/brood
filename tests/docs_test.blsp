@@ -186,7 +186,7 @@
 ;; `category-of` falls back to `:other`, so an uncatalogued name does not error — it just
 ;; lands in a junk drawer at the bottom of the hosted reference. That drawer had grown to
 ;; 41 entries, mixing genuinely core vocabulary nobody could find (`stop`, `cast`,
-;; `spawn-server` — miscategorised only because `gen` moved into the prelude) with
+;; `spawn-server` — miscategorised while `gen` was briefly prelude-bundled) with
 ;; threading helpers (`tap`, `then`) and internals. A reader scanning by category simply
 ;; never saw them. This asserts the drawer stays empty.
 (describe "doc catalogue: every public core name has a category"

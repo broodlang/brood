@@ -279,6 +279,129 @@ pub(super) struct MailboxState {
     /// absolute deadline here; resumes reuse it; the matching/timeout exit clears it.
     /// Single slot: one `receive` runs at a time per process.
     pub(super) recv_deadline: Option<Instant>,
+    /// **Deactivated one-shot reply aliases** — see [`DeadAliases`]. A message
+    /// addressed to one of these refs is dropped *at delivery*, before it is ever
+    /// queued. Empty for the overwhelming majority of processes, which is what makes
+    /// the delivery check free (`is_empty` on a line the deliverer already holds).
+    pub(super) dead_aliases: DeadAliases,
+}
+
+/// How many deactivated aliases one mailbox remembers. Fixed and small — the whole
+/// set is 8 × `u64` stored inline in [`MailboxState`], so this costs no allocation
+/// and cannot grow.
+///
+/// **Why a bound at all, and why this one.** An entry only has to outlive the *one*
+/// in-flight reply the alias was minted for, so the common case reclaims itself: the
+/// late reply arrives, is dropped, and [`DeadAliases::take`] forgets the entry in the
+/// same step. The capacity only matters for a caller that times out repeatedly
+/// against a server that never answers at all — nothing ever arrives to clear those
+/// entries. Eight covers any realistic nesting of in-flight calls (a process has one
+/// `gen/call` outstanding per stack frame, and a *reply* is what a `call` blocks for),
+/// and the failure mode past it is a graceful one: evicting the oldest entry restores
+/// exactly the pre-alias behaviour for that one long-abandoned ref (its late reply, if
+/// one ever comes, queues as it always did). Never a wrong drop, never unbounded.
+const DEAD_ALIAS_CAP: usize = 8;
+
+/// The per-mailbox set of deactivated one-shot reply aliases (OTP 24's process
+/// aliases, `{alias, demonitor}`) — ADR-244.
+///
+/// Erlang through OTP 23 answered the stale-reply problem by having the caller *exit*
+/// on a `gen_server:call` timeout, so a late reply was moot. OTP 24 added aliases: the
+/// reply is addressed to a one-shot alias rather than the pid, and once the alias is
+/// deactivated at the deadline the VM drops later replies addressed to it — they never
+/// enter the mailbox. This is that, minus the separate alias identity: a Brood `ref` is
+/// already the unforgeable request token a reply carries, so deactivating *the ref*
+/// (`%ref-deactivate`) is the same guarantee with no new `Value` kind.
+///
+/// A tiny insertion-ordered array rather than a set: it is capped at
+/// [`DEAD_ALIAS_CAP`], so a linear scan is a handful of `u64` compares on one cache
+/// line — cheaper than hashing, and it never allocates on the delivery path.
+#[derive(Default)]
+pub(super) struct DeadAliases {
+    ids: [u64; DEAD_ALIAS_CAP],
+    len: usize,
+}
+
+impl DeadAliases {
+    /// Nothing deactivated — the case every delivery to every ordinary process takes.
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Deactivate `id`. Idempotent; evicts the oldest entry when full (see
+    /// [`DEAD_ALIAS_CAP`] for why that is the right way to fail).
+    fn insert(&mut self, id: u64) {
+        if self.ids[..self.len].contains(&id) {
+            return;
+        }
+        if self.len == DEAD_ALIAS_CAP {
+            self.ids.copy_within(1..DEAD_ALIAS_CAP, 0);
+            self.len -= 1;
+        }
+        self.ids[self.len] = id;
+        self.len += 1;
+    }
+
+    /// Is `id` deactivated? If so, **forget it** — an alias is one-shot, so the entry
+    /// has done its job the moment the reply it was waiting to swallow arrives. This
+    /// is what keeps the set at zero in steady state rather than at its cap.
+    fn take(&mut self, id: u64) -> bool {
+        let Some(i) = self.ids[..self.len].iter().position(|&x| x == id) else {
+            return false;
+        };
+        self.ids.copy_within(i + 1..self.len, i);
+        self.len -= 1;
+        true
+    }
+}
+
+/// The ref a message is *addressed to*, if it is an alias-addressed envelope.
+///
+/// The shape is the request/reply idiom's own: a **keyword-led vector whose second
+/// element is a `Ref`** — `[:reply <ref> v]`, `[:down <mref> pid reason]`. Nothing
+/// else is considered, which is what keeps the check O(1) and keeps a deactivated
+/// alias from ever swallowing an unrelated message: the ref was minted by the
+/// deactivating process itself and handed out only as this call's reply token, so a
+/// message carrying it in the reply-token position *is* that reply. (Refs are
+/// node-qualified only by a random per-runtime prefix — KI-53 — so requiring both the
+/// keyword tag and the exact position is deliberate belt-and-braces.)
+#[inline]
+fn message_alias(msg: &Message) -> Option<u64> {
+    let Message::Vector(items) = msg else {
+        return None;
+    };
+    match (items.first(), items.get(1)) {
+        (Some(Message::Keyword(_)), Some(Message::Ref(id))) => Some(*id),
+        _ => None,
+    }
+}
+
+/// [`message_alias`] for a value still in the *sender's* heap — the L1 local-send
+/// path checks before it copies, so a dropped reply costs no copy at all.
+#[inline]
+fn value_alias(heap: &Heap, v: Value) -> Option<u64> {
+    let Value::Vector(h) = v else { return None };
+    let items = heap.vector(h);
+    match (items.first(), items.get(1)) {
+        (Some(Value::Keyword(_)), Some(Value::Ref(id))) => Some(*id),
+        _ => None,
+    }
+}
+
+/// Deactivate `ref_id` as a one-shot reply alias on the **current** process's mailbox
+/// (`%ref-deactivate`). From here on, a message addressed to that ref
+/// (see [`message_alias`]) is dropped at delivery and never enters the queue.
+///
+/// Only the minting process can deactivate its own refs — the set lives on *its*
+/// mailbox and only its own `%ref-deactivate` writes to it — so this cannot be used to
+/// suppress someone else's traffic. Already-queued messages are untouched: this is
+/// about what arrives next, exactly like `demonitor` without `flush`.
+pub fn deactivate_alias(ref_id: u64) {
+    let mb = ensure_ctx().mailbox;
+    crate::core::sync::lock(&mb.state)
+        .dead_aliases
+        .insert(ref_id);
 }
 
 impl Mailbox {
@@ -322,6 +445,7 @@ impl Mailbox {
                 kill: None,
                 kill_hard: false,
                 recv_deadline: None,
+                dead_aliases: DeadAliases::default(),
             }),
             cv: Condvar::new(),
             // The root (which never goes through enqueue/run_one) keeps this; a
@@ -609,6 +733,17 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> LocalDelivery {
     };
     let tag = mb.runtime_tag();
     let mut st = crate::core::sync::lock(&mb.state);
+    // One-shot reply alias (OTP 24): the receiver deactivated this ref, so the reply is
+    // dropped here — before the cross-heap copy, before the queue, before any wake.
+    // `is_empty` is the whole cost when nothing is deactivated, which is every ordinary
+    // process; we already hold the lock, so it is a field read on a hot line.
+    if !st.dead_aliases.is_empty() {
+        if let Some(id) = value_alias(src, v) {
+            if st.dead_aliases.take(id) {
+                return LocalDelivery::Delivered; // silently swallowed, like a send to a dead pid
+            }
+        }
+    }
     // Not parked → we have no safe access to its heap.
     let Some(mut proc) = st.waiter.take() else {
         l1_stats::bump(&l1_stats::NO_WAITER);
@@ -652,6 +787,18 @@ fn deliver_envelope_timed(pid: u64, env: Envelope) {
     let mailbox = REGISTRY.get(pid);
     if let Some(mb) = mailbox {
         let mut st = crate::core::sync::lock(&mb.state);
+        // One-shot reply alias (OTP 24) — the wire-path twin of the check in
+        // `try_deliver_local`. Dropped here, so it never occupies a queue slot and no
+        // later selective receive ever re-scans it. See `DeadAliases`.
+        if !st.dead_aliases.is_empty() {
+            if let Payload::Wire(msg) = &env.msg {
+                if let Some(id) = message_alias(msg) {
+                    if st.dead_aliases.take(id) {
+                        return;
+                    }
+                }
+            }
+        }
         st.push(env);
         if let Some(proc) = wake_parked(&mut st) {
             drop(st);
@@ -1326,6 +1473,24 @@ fn reinsert_candidate(ctx: &Ctx, i: usize, m: Envelope) -> usize {
 /// by the root thread and a **native-nested** capture `receive`; a clean *top-level*
 /// capture receive never gets here — it captures its continuation and returns instead
 /// (the gate in `receive_match`).
+///
+/// **Clock domain.** The deadline was minted on the scheduler clock
+/// (`timer::sched_now()`, see `receive_match_timed`), so the elapsed check below reads
+/// that same clock — never `Instant::now()`. Off wasm the two are literally the same
+/// function, so this costs nothing; what it buys is that the domain-mixing shape which
+/// spun the wasm pump forever at `park_on_receive` is now absent from *every* gate,
+/// rather than from all-but-one. Guarded by `crates/lisp/tests/sched_clock_domain.rs`.
+///
+/// **This function does not work on wasm32 at all, for a reason unrelated to the
+/// clock** — and that is a live defect, not a theoretical one. `std`'s `no_threads`
+/// `Condvar` *panics* in `wait`/`wait_timeout`, and a Rust panic on wasm is an
+/// uncatchable `RuntimeError: unreachable`. It is reachable there: verified 2026-08-25
+/// against a `wasm-bindgen --target nodejs` build of `crates/playground`, a bare
+/// top-level `(receive (after 1 :fired))` captures and answers `:fired`, but
+/// `(do (sleep 5) :slept)` traps *here* — `sleep`'s `receive` sits inside a called
+/// function, so it takes the native-nested carve-out above instead of capturing. The
+/// fix for that is a non-blocking park for the nested case on wasm; it is not the
+/// clock, and reading `sched_now()` here neither helps nor hurts it.
 fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
     let st = crate::core::sync::lock(&ctx.mailbox.state);
     if st.queue.len() > i {
@@ -1349,7 +1514,8 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
     let _dirty = crate::process::dirty_block();
     match deadline {
         Some(d) => {
-            let now = Instant::now();
+            // The SCHEDULER clock — the one `d` was minted on. See the doc comment.
+            let now = super::timer::sched_now();
             if now < d {
                 // Guard dropped at end of scope (before we return).
                 let _g = ctx.mailbox.cv.wait_timeout(st, d - now);
