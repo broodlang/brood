@@ -28,6 +28,15 @@
 (def *catalog*
   {"*" :math
    "*err*" :io
+   "*features*" :meta
+   "*load-path*" :meta
+   "*print-length*" :io
+   "*print-level*" :io
+   "*print-string-length*" :io
+   "*protocols*" :meta
+   "*reload-diagnostics*" :meta
+   "*require-parent*" :meta
+   "*spy-sink*" :io
    "*out*" :io
    "*show*" :meta
    "+" :math

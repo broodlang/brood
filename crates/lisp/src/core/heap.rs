@@ -5656,7 +5656,19 @@ impl Heap {
         };
         // Reuse `env_define`'s global path: it promotes into the shared RUNTIME region and
         // bumps the version that invalidates every process's global inline cache.
+        //
+        // It also calls `unmark_private` — correct for a real `def` (an author editing
+        // `def-` → `def` and reloading must stop being private), wrong here. This is an
+        // in-place UPDATE of an existing registry, not a redefinition, and nothing re-marks
+        // afterwards the way a `def-` form does. So a `def-`'d registry silently turned
+        // public on its first write: `*impls*`, `*record-ids*` and friends read
+        // `private? = true` at boot and `false` the moment any module registered anything,
+        // which put all of them back on the published core reference.
+        let was_private = self.runtime.is_private_recorded(sym);
         self.env_define(root, sym, next);
+        if was_private {
+            self.runtime.mark_private(sym);
+        }
         // Only on the write path: a declined op leaves the registry untouched, and a name
         // that was never written has nothing for an image to carry.
         guard.insert(sym);
