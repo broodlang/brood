@@ -55,48 +55,66 @@ claims it by prefix."
   "Build (or rebuild) this binary's stdlib image and return `[path entry-count]`, or nil
 when there is no cache directory. `modules` defaults to every baked-in module.
 
-Attribution is deliberately BOTH ways round, because either alone loses bindings:
+A binding is attributed to the module that DEFINES it, by two different routes:
 
-  - by PREFIX (`format/…` belongs to `format`) — a set-difference alone attributes a
-    DEPENDENCY's globals to whichever module happened to pull it in first, leaving the
-    dependency with no section and silently falling back to source;
-  - by WHAT APPEARED during its load, for the globals a module defines at ROOT and so
-    carries no prefix — `*1`/`*2`/`*3` from `repl`, `*config-…*` from the project tooling.
-    Prefix attribution alone dropped 51 such names.
+  - by PREFIX — `format/…` belongs to `format`, which is exact and needs no probing;
+  - by PROBE, for the globals a module defines at ROOT and so carries no prefix
+    (`*1`/`*2`/`*3` from `repl`, `*lineedit-keymap*` from the line editor,
+    `*config-…*` from the project tooling) — 52 names in all.
 
-A root global is credited to the first module that introduced it and only if no module
-claims it by prefix, so no binding lands in two sections."
+Root globals cannot be attributed from a plain sequential load: whichever module pulls a
+dependency in FIRST is credited with everything that dependency defined, so
+`*lineedit-keymap*` landed in `repl`'s section and `(require 'editor/lineedit)` restored
+the module without it. So each module is probed inside `%isolate` for what it introduces
+ON ITS OWN, and a root global goes to the SMALLEST such set containing it — the module
+that defines it, never one that merely depends on that module. All 95 probes cost ~0.7 s,
+paid once per build. A root global no probe claims belongs to the prelude and is skipped,
+since the prelude is always present."
   (let (path (image-path))
     (when path
       (let (dir (path/dirname path)
             _ (when (not (file/dir? dir)) (file/mkdir dir))
             names (or modules (builtin-modules))
-            ;; load every module, recording what each one introduced
-            introduced
+            probed
               (fold (fn (acc m)
-                      (let (before (into #{} (global-names))
-                            _ (try (require-one m) (catch _ nil))
-                            new (filter (fn (s) (not (contains? before s))) (global-names)))
-                        (map-assoc acc (name m) new)))
+                      (map-assoc acc (name m)
+                        (%isolate (fn ()
+                          (let (before (into #{} (global-names))
+                                _ (try (require-one m) (catch _ nil)))
+                            (into #{} (filter (fn (s) (not (contains? before s)))
+                                        (global-names))))))))
                 {} names)
-            ;; The edges every restored module needs replayed. Carried in their own section
-            ;; under a name no module owns, so loading it cannot clobber a project image's
-            ;; registries the way imaging `*require-edges*` itself would.
-            _ (def *std-edges* *require-edges*)
+            ;; now load them for real, so the globals being imaged are live in THIS heap
+            _ (doseq (m names) (try (require-one m) (catch _ nil)))
+            ;; The edges every restored module needs replayed, held in a ROOT global so the
+            ;; section that carries them belongs to no module — named `stdimage/…` it made
+            ;; `stdimage` look already-loaded at boot, and its source then never loaded.
+            _ (set-std-require-edges! *require-edges*)
+            roots (filter (fn (s) (not (prefixed-by-any? (name s) names))) (global-names))
+            owner-of
+              (fold (fn (acc g)
+                      (let (best (fold (fn (winner m)
+                                         (let (probe (map-get probed (name m) nil))
+                                           (if (and probe (contains? probe g)
+                                                 (or (nil? winner) (< (count probe) (second winner))))
+                                             [m (count probe)]
+                                             winner)))
+                                   nil names))
+                        (if best (map-assoc acc g (name (first best))) acc)))
+                {} roots)
             sections
               (append
-                [["%std-edges" ['stdimage/*std-edges*]]]
+                [["%std-edges" ['*std-require-edges*]]]
                 (seq/keep
-                (fn (m)
-                  (let (mn (name m)
-                        pfx (str mn "/")
-                        owned (filter (fn (s) (string/starts-with? (name s) pfx)) (global-names))
-                        roots (filter (fn (s) (not (prefixed-by-any? (name s) names)))
-                                (or (map-get introduced mn nil) (list)))
-                        syms (apply vector (append owned roots)))
-                    ;; A module contributing nothing would image as materialisable-but-empty,
-                    ;; and a later require would restore no bindings rather than fall back.
-                    (when (> (count syms) 0) [mn syms])))
+                  (fn (m)
+                    (let (mn (name m)
+                          pfx (str mn "/")
+                          owned (filter (fn (s) (string/starts-with? (name s) pfx)) (global-names))
+                          mine (filter (fn (g) (= (map-get owner-of g nil) mn)) roots)
+                          syms (apply vector (append owned mine)))
+                      ;; A module contributing nothing would image as materialisable-but-empty,
+                      ;; and a later require would restore no bindings rather than fall back.
+                      (when (> (count syms) 0) [mn syms])))
                   names)))
         [path (%image-write path sections (stdlib-id))]))))
 
@@ -114,7 +132,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
           (let (sec (get idx "%std-edges"))
             (when sec
               (%image-load-section path (first sec) (second sec))
-              (merge-require-edges! *std-edges*)))
+              (merge-require-edges! *std-require-edges*)))
           (add-image-source! path (dissoc idx "%std-edges"))
           (count (keys idx)))))))
 

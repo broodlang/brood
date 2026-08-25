@@ -42,6 +42,30 @@
         (is (not (includes? p (build-id))))
         (is (includes? p "std-image-")))))
 
+  ;; Root globals — the ones carrying no `mod/` prefix — used to be credited to whichever
+  ;; module pulled their definer in FIRST, so `*lineedit-keymap*` landed in `repl`'s section
+  ;; and restoring `editor/lineedit` gave the module without it. Attribution now probes each
+  ;; module in isolation and takes the SMALLEST introduced set containing the name.
+  (test "a root global is attributed to the module that defines it, not to a dependent"
+    (let (own (%isolate (fn ()
+                (let (before (into #{} (global-names))
+                      _ (require-one 'editor/lineedit))
+                  (into #{} (filter (fn (s) (not (contains? before s))) (global-names))))))
+          via (%isolate (fn ()
+                (let (before (into #{} (global-names))
+                      _ (require-one 'repl))
+                  (into #{} (filter (fn (s) (not (contains? before s))) (global-names)))))))
+      ;; both see the name; the definer's set is the smaller one, which is what build picks
+      (is (contains? own '*lineedit-keymap*))
+      (is (contains? via '*lineedit-keymap*))
+      (is (< (count own) (count via)))))
+
+  ;; The require-edges section is keyed on a ROOT name for the same reason in reverse: as
+  ;; `stdimage/*std-edges*` it made `stdimage` look already-loaded the moment that section
+  ;; was restored, so its source never loaded and `(:use stdimage)` referred nothing.
+  (test "the edges the image carries live in a global no module owns"
+    (is (not (includes? (name '*std-require-edges*) "/"))))
+
   (test "install is a no-op when no image exists for this binary"
     ;; Returns nil rather than raising, so `require` keeps loading from source unchanged.
     ;; (If one does exist, it returns a positive section count — both are valid here.)
