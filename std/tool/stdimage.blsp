@@ -1,0 +1,108 @@
+;; std/tool/stdimage.blsp — a startup image for the STANDARD LIBRARY (ADR-218 applied to
+;; `std/*` rather than to a project's own modules).
+;;
+;; The problem it solves: a stdlib module is `include_str!`'d source, so `(require 'format)`
+;; re-reads and re-EVALUATES it on every run. Measured on 0.11.0, loading `format` costs
+;; 82 ms — of which 1.1 ms is reading and **81 ms is eval + promote**, i.e. materialising
+;; closures into the heap. An image skips exactly that: the same 81 bindings restore from a
+;; section in ~1–2 ms, a 40–57x difference, and they come back as real closures (a restored
+;; function still enforces its own arity).
+;;
+;; It is the same mechanism `std/tool/project.blsp` already uses, pointed at a different set
+;; of modules, and the two coexist through `add-image-source!` — the prelude consults the
+;; project's sections first, then any additional source, so a project can still shadow a
+;; stdlib module name.
+;;
+;; **Staleness is `build-id`.** The stdlib lives inside the binary, so any rebuild changes
+;; both the source and the id, and a stale image can never be read. That is the same key the
+;; expanded-prelude boot cache uses, for the same reason.
+;;
+;; Policy only (ADR-006): `%image-write` / `%image-index` / `%image-load-section` are the
+;; mechanism; what to snapshot, where it lives and when it is rebuilt is here.
+
+(defmodule stdimage
+  (:use seq)
+  (:use file))
+
+(defn- cache-dir ()
+  "`$XDG_CACHE_HOME/brood` (or `~/.cache/brood`), or nil when neither is set."
+  (let (xdg (os/getenv "XDG_CACHE_HOME")
+        home (os/getenv "HOME")
+        base (cond
+               (and xdg (not (= xdg ""))) xdg
+               (and home (not (= home ""))) (path/join home ".cache")
+               else nil))
+    (when base (path/join base "brood"))))
+
+(defn image-path ()
+  "Where this binary's stdlib image lives, or nil if there is no cache directory.
+Named by `build-id`, so two builds never share one and a stale file is simply never opened."
+  (let (dir (cache-dir))
+    (when dir (path/join dir (str "std-image-" (build-id) ".bin")))))
+
+(defn- prefixed-by-any?
+  (nm names)
+  "Whether global `nm` is qualified by ANY module in `names` — i.e. some module already
+claims it by prefix."
+  (not (empty? (filter (fn (m) (string/starts-with? nm (str m "/"))) names))))
+
+(defn build
+  (&optional modules)
+  "Build (or rebuild) this binary's stdlib image and return `[path entry-count]`, or nil
+when there is no cache directory. `modules` defaults to every baked-in module.
+
+Attribution is deliberately BOTH ways round, because either alone loses bindings:
+
+  - by PREFIX (`format/…` belongs to `format`) — a set-difference alone attributes a
+    DEPENDENCY's globals to whichever module happened to pull it in first, leaving the
+    dependency with no section and silently falling back to source;
+  - by WHAT APPEARED during its load, for the globals a module defines at ROOT and so
+    carries no prefix — `*1`/`*2`/`*3` from `repl`, `*config-…*` from the project tooling.
+    Prefix attribution alone dropped 51 such names.
+
+A root global is credited to the first module that introduced it and only if no module
+claims it by prefix, so no binding lands in two sections."
+  (let (path (image-path))
+    (when path
+      (let (dir (path/dirname path)
+            _ (when (not (file/dir? dir)) (file/mkdir dir))
+            names (or modules (builtin-modules))
+            ;; load every module, recording what each one introduced
+            introduced
+              (fold (fn (acc m)
+                      (let (before (into #{} (global-names))
+                            _ (try (require-one m) (catch _ nil))
+                            new (filter (fn (s) (not (contains? before s))) (global-names)))
+                        (map-assoc acc (name m) new)))
+                {} names)
+            sections
+              (seq/keep
+                (fn (m)
+                  (let (mn (name m)
+                        pfx (str mn "/")
+                        owned (filter (fn (s) (string/starts-with? (name s) pfx)) (global-names))
+                        roots (filter (fn (s) (not (prefixed-by-any? (name s) names)))
+                                (or (map-get introduced mn nil) (list)))
+                        syms (apply vector (append owned roots)))
+                    ;; A module contributing nothing would image as materialisable-but-empty,
+                    ;; and a later require would restore no bindings rather than fall back.
+                    (when (> (count syms) 0) [mn syms])))
+                names))
+        [path (%image-write path sections (build-id))]))))
+
+(defn install ()
+  "Install this binary's stdlib image as an additional feature source, if one exists and is
+current. Returns the section count, or nil on a miss (absent, stale, unreadable) — in which
+case `require` keeps loading stdlib modules from source exactly as before."
+  (let (path (image-path))
+    (when (and path (file/exists? path))
+      (let (idx (try (%image-index path (build-id)) (catch _ nil)))
+        (when idx
+          (add-image-source! path idx)
+          (count (keys idx)))))))
+
+(defn ensure ()
+  "Install the stdlib image, building it first if this binary has none yet. Returns the
+section count. The build cost is paid once per binary; every later process just indexes."
+  (or (install)
+      (do (build) (install))))

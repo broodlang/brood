@@ -962,6 +962,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // the file; a project may `(:use string)`).
     embedded_module!("string", "std/string.blsp"),
     embedded_module!("project", "std/tool/project.blsp"),
+    embedded_module!("stdimage", "std/tool/stdimage.blsp"),
     embedded_module!("coverage", "std/tool/coverage.blsp"),
     embedded_module!("complete", "std/tool/complete.blsp"),
     // `nest new` scaffolding (templates + new-project), split out of `project` so
