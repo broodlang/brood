@@ -45,6 +45,13 @@
 // directory tree mirrors this — core/, syntax/, eval/, types/ — so the layout
 // reads as the architecture.
 
+/// This runtime's semantic version — the same string `(brood-version)` returns.
+///
+/// Exported because `env!("CARGO_PKG_VERSION")` read from a DEPENDENT crate yields that
+/// crate's version, not brood's: the playground's `version()` advertised itself as the
+/// Brood build it runs and reported `0.1.0`, the wasm shim's own number.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod core; // substrate: value, heap, alloc — what everything is addressed through
 pub mod eval; // the tree-walking evaluator + its macro / compile pass
 pub mod syntax; // surface: reader (text to Value) + printer (Value to text)
