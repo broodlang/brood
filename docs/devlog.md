@@ -3401,3 +3401,30 @@ So the remaining work is the replay, now sized: 56 `impl`, 24 `defability` and 3
 forms across std. Record the **forms**, not the values — symbols and lists image cleanly, where
 a value snapshot cannot round-trip the closures an `impl` holds — and evaluate them on
 materialise, exactly as `%std-edges` already replays require-edges.
+
+## 2026-08-25 — why every probe said the image was fine while the suite said 150 failures
+
+A note for whoever writes the stdimage replay, because it cost several rounds here.
+
+Post-boot probes of materialisation do not work, and they fail in the direction that looks like
+success. The shape is: install the image, `require` a module, check its registrations. Three
+attempts — `queue`, `io`, `datetime` — all reported every `satisfies?` green, against a suite
+that reports 150 failures with the image installed at boot.
+
+The reason is auto-require. A qualified name resolves its module **at compile time**, so every
+module the probe file mentions is loaded from source before the probe's first line runs. The
+probe then inspects a source-loaded module and finds it perfect. `io` is worse still: the prelude
+itself loads it, so it can never materialise in any post-boot test.
+
+Routing through `eval` does not rescue it — the `eval`'d forms are read at runtime, but the
+enclosing file still names the module somewhere, and that is enough. Nor does installing the
+image earlier in the file.
+
+So: the only measurement that means anything for this work is the full suite with the image
+installed at boot. That costs a build and a suite run, and there is no cheap proxy. Budget for it
+rather than trying to shortcut it, and treat a green probe as evidence of nothing.
+
+The corollary is a small design observation: the same auto-require behaviour is why the prelude
+must force-load `string` and `seq` explicitly (KI-61) — boot's namespace-resolve is a no-op for
+the root prelude, so *there* the mechanism does not fire, while everywhere else it fires so
+eagerly that it defeats measurement.
