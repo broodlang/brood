@@ -13,9 +13,11 @@
 ;; project's sections first, then any additional source, so a project can still shadow a
 ;; stdlib module name.
 ;;
-;; **Staleness is `build-id`.** The stdlib lives inside the binary, so any rebuild changes
-;; both the source and the id, and a stale image can never be read. That is the same key the
-;; expanded-prelude boot cache uses, for the same reason.
+;; **Staleness is `stdlib-id`** — version + git sha + a content hash of every baked-in
+;; `.blsp`, computed at build time. Deliberately NOT `build-id`, which embeds the running
+;; executable's mtime: that would give `brood`, `nest` and `brood-lsp` three different keys
+;; for one identical stdlib, and three ~2 MB images. It still changes on any edit to any
+;; `.blsp`, committed or not, so a stale image can never be read.
 ;;
 ;; Policy only (ADR-006): `%image-write` / `%image-index` / `%image-load-section` are the
 ;; mechanism; what to snapshot, where it lives and when it is rebuilt is here.
@@ -36,9 +38,11 @@
 
 (defn image-path ()
   "Where this binary's stdlib image lives, or nil if there is no cache directory.
-Named by `build-id`, so two builds never share one and a stale file is simply never opened."
+Named by `stdlib-id` — a hash of what is BAKED IN, not of this executable. `build-id`
+embeds the binary's own mtime, so `brood`, `nest` and `brood-lsp` from one tree would each
+write their own ~2 MB copy of an identical image; keyed this way they share one."
   (let (dir (cache-dir))
-    (when dir (path/join dir (str "std-image-" (build-id) ".bin")))))
+    (when dir (path/join dir (str "std-image-" (stdlib-id) ".bin")))))
 
 (defn- prefixed-by-any?
   (nm names)
@@ -75,8 +79,14 @@ claims it by prefix, so no binding lands in two sections."
                             new (filter (fn (s) (not (contains? before s))) (global-names)))
                         (map-assoc acc (name m) new)))
                 {} names)
+            ;; The edges every restored module needs replayed. Carried in their own section
+            ;; under a name no module owns, so loading it cannot clobber a project image's
+            ;; registries the way imaging `*require-edges*` itself would.
+            _ (def *std-edges* *require-edges*)
             sections
-              (seq/keep
+              (append
+                [["%std-edges" ['stdimage/*std-edges*]]]
+                (seq/keep
                 (fn (m)
                   (let (mn (name m)
                         pfx (str mn "/")
@@ -87,8 +97,8 @@ claims it by prefix, so no binding lands in two sections."
                     ;; A module contributing nothing would image as materialisable-but-empty,
                     ;; and a later require would restore no bindings rather than fall back.
                     (when (> (count syms) 0) [mn syms])))
-                names))
-        [path (%image-write path sections (build-id))]))))
+                  names)))
+        [path (%image-write path sections (stdlib-id))]))))
 
 (defn install ()
   "Install this binary's stdlib image as an additional feature source, if one exists and is
@@ -96,9 +106,16 @@ current. Returns the section count, or nil on a miss (absent, stale, unreadable)
 case `require` keeps loading stdlib modules from source exactly as before."
   (let (path (image-path))
     (when (and path (file/exists? path))
-      (let (idx (try (%image-index path (build-id)) (catch _ nil)))
+      (let (idx (try (%image-index path (stdlib-id)) (catch _ nil)))
         (when idx
-          (add-image-source! path idx)
+          ;; Replay the recorded edges FIRST: a restored module defines its bindings but
+          ;; evaluates nothing, so without them `url` comes back with no `path` and its
+          ;; first `path/join` is unbound.
+          (let (sec (get idx "%std-edges"))
+            (when sec
+              (%image-load-section path (first sec) (second sec))
+              (merge-require-edges! *std-edges*)))
+          (add-image-source! path (dissoc idx "%std-edges"))
           (count (keys idx)))))))
 
 (defn ensure ()

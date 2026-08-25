@@ -31,12 +31,15 @@
           ;; already-loaded, so this asserts the section is present, not that it reloads
           (is (contains? (into #{} (map name (global-names))) "json/->json"))))))
 
-  (test "the image is keyed on build-id, so it can never outlive its binary"
-    ;; `image-path` embeds the id; a different binary asks for a different file and simply
-    ;; misses rather than restoring a stale stdlib.
+  (test "the image is keyed on stdlib-id — content, not the executable"
+    ;; Deliberately NOT `build-id`: that embeds the running executable's mtime, so `brood`,
+    ;; `nest` and `brood-lsp` from one tree would each write their own ~2 MB copy of an
+    ;; identical image. `stdlib-id` hashes what is baked in, so they share one — and it
+    ;; still changes on any `.blsp` edit, committed or not, so a stale image is never read.
     (let (p (image-path))
       (when p
-        (is (includes? p (build-id)))
+        (is (includes? p (stdlib-id)))
+        (is (not (includes? p (build-id))))
         (is (includes? p "std-image-")))))
 
   (test "install is a no-op when no image exists for this binary"

@@ -611,6 +611,20 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 ;; genuinely new edge pays for the atomic update. `%swap-registry!` rather than a plain `def`
 ;; because loads run concurrently and a read-modify-write over a whole map silently loses
 ;; ~40% of its updates under contention (KI-22).
+(defn- merge-require-edges!
+  (edges)
+  "MERGE `edges` (feature name → [dep …]) into `*require-edges*`, keeping any edge already
+recorded for a key. Restoring a module from an image defines its bindings but evaluates
+NOTHING, so the requires its header would have run are replayed from these edges — an image
+that carries no edges restores `url` without `path`, and its first `path/join` is unbound.
+Merging rather than replacing because a project image and the stdlib image each carry their
+own, and whichever installs second must not erase the first."
+  (doseq (kv (map-pairs edges))
+    (let ([k deps] kv)
+      (when (not (contains? *require-edges* k))
+        (%registry-update! '*require-edges* :assoc [k] deps))))
+  *require-edges*)
+
 (defn- require-record-edge!
   (key)
   ;; `current-ns` first: it is the module whose FILE is being loaded, which is the accurate
@@ -911,6 +925,18 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; prelude, so the qualified refs don't auto-require. It stays an ordinary embedded
 ;; module (doc tooling sees the file; a project may `(:use string)`); loading it here
 ;; just makes it always-present, like the abilities below.
+;; The stdlib image is NOT installed here yet — `stdimage/install` is opt-in.
+;;
+;; Both blockers that made it unsafe are now fixed: it is keyed on `stdlib-id` (content,
+;; not executable mtime) so every binary shares one, and it carries a `%std-edges` section
+;; that `install` merges into `*require-edges*` — without which a restored module comes back
+;; without its dependencies (`url` with no `path`, and its first `path/join` unbound).
+;;
+;; What remains is narrower: installing at boot makes `stdimage` itself an imaged module
+;; while it is doing the installing, and `(:use stdimage)` then fails to refer its names —
+;; `:use` against any other imaged module (`url`) is fine. Until that is understood, the
+;; default path is unchanged and a caller opts in explicitly.
+
 (require-one 'string)
 
 ;; Same reason, same mechanism: the prelude's own helpers reference `seq/find`,

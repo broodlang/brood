@@ -2278,6 +2278,13 @@ pub(super) fn build_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&id))
 }
 
+/// `(stdlib-id)` — the embedded standard library's content identity. See
+/// [`stdlib_id_string`]: same for every binary built from one tree, which is what lets them
+/// share a stdlib startup image.
+pub(super) fn stdlib_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(heap.alloc_string(&stdlib_id_string()))
+}
+
 /// `(brood-version)` — this runtime's semantic version (`CARGO_PKG_VERSION`,
 /// e.g. `"0.1.0"`): the string a project's `:brood` manifest constraint is
 /// checked against (ADR-209). Just the semver — the git-sha and binary-stamp
@@ -2291,6 +2298,25 @@ pub(super) fn brood_version(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// The `(build-id)` string as plain Rust — shared with the boot cache
 /// (`lib.rs`), which uses it as the staleness key for the expanded-prelude
 /// cache (the prelude is `include_str!`'d, so any binary change covers it).
+/// A **content** id for the embedded standard library: version + git sha + a hash of every
+/// baked-in module's source. Unlike [`build_id_string`] it carries no executable mtime, so
+/// `brood`, `nest` and `brood-lsp` built from one tree all report the SAME id — which is what
+/// lets them share one stdlib startup image instead of writing ~2 MB each.
+///
+/// The hash is computed at COMPILE time. Hashing ~1 MB of sources per process would cost
+/// around a millisecond of a ~23 ms boot, and the boot path is exactly where this is read;
+/// a `const fn` moves that to the build for free. It also means the id changes precisely
+/// when the stdlib does — an uncommitted edit to a `.blsp` invalidates the image, which the
+/// git sha alone would not catch.
+pub(crate) fn stdlib_id_string() -> String {
+    format!(
+        "{}+{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("BROOD_GIT_SHA"),
+        env!("BROOD_STDLIB_HASH")
+    )
+}
+
 pub(crate) fn build_id_string() -> String {
     format!(
         "{}+{}+{}",
