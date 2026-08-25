@@ -2,6 +2,16 @@
 
 (defmodule stream-test (:use test) (:use math))
 
+(defn- drained-to
+  (target budget-ms)
+  "This process's mailbox size once it has fallen back to `target`, or its size when
+`budget-ms` run out. Polling rather than sleeping: a leaked message never drains, so the
+full budget still yields the failing value, while a merely slow one is forgiven."
+  (cond
+    (<= (proc/mailbox-size (self)) target) (proc/mailbox-size (self))
+    (<= budget-ms 0) (proc/mailbox-size (self))
+    else (do (sleep 20) (drained-to target (- budget-ms 20)))))
+
 ;; ---- sources ----------------------------------------------------------------
 
 (describe "empty"
@@ -324,10 +334,16 @@
       (assert= :err (first (stream/next p 40)))))
 
   (test "the monitor leaves no [:down] behind in the caller's mailbox"
+    ;; WAITS for the mailbox to drain rather than sleeping past the expected moment. A
+    ;; fixed 30 ms is a guess about scheduling: on a loaded box the producer's `[:down]`
+    ;; can still be in flight when the assertion reads, and the run goes red for no
+    ;; defect (seen once in a full-suite run, 3/3 green in isolation).
+    ;;
+    ;; The verdict is unchanged, because a LEAKED down never drains: the poll then runs
+    ;; its full budget and the assertion still fails. Only the slow case is forgiven.
     (let (before (proc/mailbox-size (self))
           s (stream/singleton 1))
       (stream/next s)
       (stream/next s)
       (stream/next s)
-      (sleep 30)
-      (assert= before (proc/mailbox-size (self))))))
+      (assert= before (drained-to before 2000)))))
