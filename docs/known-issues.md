@@ -1022,10 +1022,11 @@ patterns match, annotates the log's last 30 lines verbatim plus its size. A diag
 reports nothing when its patterns miss is precisely the failure this step exists to prevent —
 three sightings have now been lost to it.
 
-**Blocked on:** `gh`'s stored token is invalid (`gh auth status`: "The token in
-~/.config/gh/hosts.yml is invalid"), so API calls fall back to the unauthenticated 60/hour
-limit and artifact/log downloads return 401/403. Re-authenticating (`gh auth login -h
-github.com`) is what makes the next sighting readable.
+**Blocked on:** ~~`gh`'s stored token is invalid~~ — **unblocked 2026-08-25.** `gh auth
+status` reports a valid token (scopes `repo`, `admin:org`, `gist`, `project`) and
+`gh api rate_limit` returns the authenticated 5000/hour rather than the anonymous 60, so
+artifact and log downloads no longer 401. The next sighting is readable, which is the whole
+point of the artifact upload above: nothing else is waiting on this entry.
 
 **Status:** ⚠️ watching (2026-08-12). Not reproduced locally. The diagnostic gap is closed:
 the failing case is now uploaded as a CI artifact, so the next occurrence is readable.
