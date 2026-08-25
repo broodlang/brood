@@ -153,8 +153,18 @@ incremental search rides on."
 ;; explicitly. Hex/octal/etc. aren't here; add them on demand. Errors on an
 ;; unknown spec or a format string that ends inside one; a missing arg renders
 ;; as `nil` (debuggable), extra args are ignored.
-(defn format (fmt & args)
-  "Render `fmt`, replacing each %-specifier with the next of `args`. Supports `%s` `%d` `%f` `%.Nf` `%%`; use `pad-left`/`pad-right` for width."
+(defn string/format (fmt & args)
+  "Render `fmt`, replacing each %-specifier with the next of `args`. Supports `%s` `%d` `%f` `%.Nf` `%%`; use `pad-left`/`pad-right` for width.
+
+The runtime half of the pair with [[fmt]], which is a MACRO: `(fmt \"x={x}\")` reads its
+values from the surrounding scope and expands to a plain `(str …)` at compile time, so its
+template must be a literal. This one parses at CALL time, so its template can be a value —
+a config string, a translated message — with the arguments passed separately. Neither
+subsumes the other.
+
+Module-rooted rather than bare `format` because that name is also the source FORMATTER
+(`std/format.blsp`, the 81 names behind `nest format`), and one word meaning two unrelated
+things in the same image is a name worth spending to fix."
   (format-loop fmt 0 (string/length fmt) args ""))
 
 (defn- format-loop
@@ -168,7 +178,7 @@ incremental search rides on."
   (fmt i n args acc)
   ;; called with `i` pointing one past the `%`
   (cond
-    (>= i n) (error "format: unterminated specifier (lone '%' at end of format string)")
+    (>= i n) (error "string/format: unterminated specifier (lone '%' at end of format string)")
     (= (string/char-at fmt i) "%") (format-loop fmt (inc i) n args (str acc "%"))
     (= (string/char-at fmt i) "s")
       (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
