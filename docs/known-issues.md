@@ -401,8 +401,18 @@ registration failures that make it unshippable.
 So the remaining work is exactly the replay, and it is now sized: record each module's
 registration **forms** at image-build time (56 `impl`, 24 `defability`, 35 `defrecord` across
 std), store them as data — symbols and lists image cleanly, unlike the closures a value snapshot
-would need — and evaluate them when the module materialises, the way `%std-edges` already
-replays require-edges.
+would need — and evaluate them when the module materialises. The hook is the image branch of
+`require-one` in `std/prelude/tools.blsp`, immediately after the `*require-edges*` fold that
+already replays the header's requires for the same reason.
+
+**Do not try to validate this with a post-boot probe — it cannot work, and it will tell you the
+bug is fixed.** A qualified name auto-requires *at compile time*, so every module a probe
+mentions is loaded from source before its first line executes; the probe then measures a
+source-loaded module and reports every `satisfies?` green. Routing through `eval` does not help
+(the `eval`'d forms are read at runtime but the enclosing file still names the module), and
+neither does installing the image first. Three separate probes here — `queue`, `io`, `datetime`
+— all reported "no registrations lost" while the suite under boot-install reported 150 failures.
+The only measurement that means anything is the suite with the image installed at boot.
 
 ---
 
