@@ -14,9 +14,15 @@
 ;;;   - raw `%binding` silently bound `nil` when `vals` was shorter than `syms`.
 ;;;   - `monitor`'s `{:name :node}` shape errors were prefixed `send:`.
 ;;;
-;;; The process cases are timing-shaped (a bystander has to still be running
-;;; when the reap fires), so the sleeps carry generous margins — they bound how
-;;; long the case takes, not how tight the race is.
+;;; The process cases are timing-shaped — a bystander has to still be running when
+;;; the reap fires. Where a case asserts that a write DID happen, the order is
+;;; established by messages and the arrival is polled (`wait-for-key`), so no sleep
+;;; decides the verdict: a fixed margin is a guess about scheduling that holds on an
+;;; idle machine and fails on a loaded CI box, for no defect.
+;;;
+;;; The two cases asserting a write did NOT happen still sleep, because absence
+;;; cannot be polled for. Their sleeps bound how long the case takes; overrunning
+;;; them can only mask a real reap failure, never invent one.
 
 (defmodule system-robustness-test (:use test))
 
@@ -63,22 +69,52 @@
 ;; --- %isolate: the reap kills what the THUNK spawned, and nothing else --------
 ;;
 
+(defn- wait-for-key
+  (t key budget-ms)
+  "Poll table `t` for `key` until it is set or `budget-ms` elapse; the value, else nil.
+
+Waiting for the WRITE rather than sleeping past its expected arrival: a fixed sleep
+encodes a guess about scheduling that only holds on an idle machine, and turns a loaded
+CI box into a red run. A poll is correct at any speed — and still fails the assertion if
+the write never comes, which is what these cases actually test."
+  (cond
+    (not (nil? (table/get t key))) (table/get t key)
+    (<= budget-ms 0) nil
+    else (do (sleep 20) (wait-for-key t key (- budget-ms 20)))))
+
 (describe "%isolate: the orphan reap is scoped to the thunk's own descendants"
 
   (test "a bystander spawned by an unrelated process survives the isolate"
-    ;; `helper` exists BEFORE the isolate and stays alive across it. Halfway
-    ;; through the thunk it spawns a bystander, which then outlives the reap and
-    ;; records that it did. Under the old "every new pid" reap the bystander was
-    ;; killed at the isolate's return and never wrote.
-    (let (t (table/new))
-      (spawn (fn ()
-               (sleep 100)
-               (spawn (fn () (sleep 400) (table/put t :bystander-ran true)))
-               (sleep 900)))
-      (sleep 40)
-      (%isolate (fn () (sleep 300) :done))
-      (sleep 500)
-      (is (= true (table/get t :bystander-ran)))))
+    ;; `helper` exists BEFORE the isolate and stays alive across it. While the thunk
+    ;; runs, it spawns a bystander, which must outlive the reap and record that it
+    ;; did. Under the old "every new pid" reap the bystander was killed at the
+    ;; isolate's return and never wrote.
+    ;;
+    ;; Every ORDER here is established by a message, not by a sleep. The original
+    ;; timed it — helper spawns at 100 ms, isolate returns at 340, the bystander
+    ;; writes at 500 and the assertion reads at 840 — and that 340 ms of slack is
+    ;; not slack at all in CI, where this file runs beside ~1000 other tests: a
+    ;; starved green process misses it and the run goes red for no defect. Seen on
+    ;; `30974b73`, passing 6/6 locally on an idle machine.
+    (let (t (table/new)
+          me (self)
+          helper (spawn
+                   (fn ()
+                     (receive
+                       ([:go from]
+                         ;; sleeps only to still be ALIVE at reap time — the
+                         ;; case the reap must not touch. How long it sleeps
+                         ;; no longer decides the verdict.
+                         (do
+                           (spawn (fn ()
+                                    (sleep 200)
+                                    (table/put t :bystander-ran true)))
+                           (send from :spawned)))))))
+      (%isolate (fn ()
+                  (send helper [:go me])
+                  (receive (:spawned nil))
+                  :done))
+      (is (= true (wait-for-key t :bystander-ran 5000)))))
 
   (test "a process the thunk spawned directly IS reaped"
     ;; The reap has to keep working: an orphan still running the thunk's code
