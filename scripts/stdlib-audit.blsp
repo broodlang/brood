@@ -95,7 +95,16 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
   (report "STUTTER — local part repeats its module" stutter)
   (io/puts "")
   (io/puts "== DOCS")
-  (io/puts "   no docstring at all : " (count no-doc))
+  ;; "no docstring" is a misleading headline on its own. Measured 2026-08-25: of 248 such
+  ;; names, exactly THREE were `defn`/`defmacro` — and those three turned out to be
+  ;; ability ops. The other 245 come from `def`, `defdyn`, `defrecord` and `defability`
+  ;; op declarations, none of which HAS a docstring slot, so no amount of writing prose
+  ;; fixes them. Every public `defn`/`defmacro` in the library is documented.
+  ;;
+  ;; The actionable number is therefore the example count below, not this one.
+  (io/puts "   no docstring at all : "
+    (count no-doc)
+    "  (def/defdyn/defrecord/ability ops — no docstring slot exists)")
   (io/puts "   docstring, no example: " (count no-example))
   (io/puts "   documented + example : " (- (count names) (count no-doc) (count no-example)))
   (report "BARE core names — each must earn staying unnamespaced" bare))
