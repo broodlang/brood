@@ -1889,6 +1889,80 @@ fn resolving_a_closure_arm_twice_reuses_one_memoized_handle() {
     );
 }
 
+/// **The gate the KI-58 class was missing.** Every call-site inline is keyed on what a head
+/// *resolves to*, and nothing asserted that it still resolves — so a rename retires an inline
+/// silently: the program stays correct, the checker stays clean, and the only symptom is a
+/// benchmark row nobody runs per commit. It has happened three times (KI-42 `sqrt` moving,
+/// KI-44 the `sqrt` inline dying with it, KI-58 `table-put` behind a `table/` wrapper).
+///
+/// So: one table of the spellings a *program actually writes*, asserted to still reach their
+/// primitive. A future namespacing wave fails here instead of costing 11x on a row.
+///
+/// This deliberately checks the user-facing names (`+`, `nth`, `table/get`), not the `%`-prefixed
+/// natives — the natives are what the resolver bottoms out at, and testing those would pass
+/// while every real call site had stopped inlining, which is precisely the failure being guarded.
+#[test]
+fn every_inlinable_head_still_reaches_its_primitive() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(require-one 'table)")
+        .expect("load std/table");
+
+    // 2-ary: the arithmetic/compare heads a program writes, plus the table reads. `+`/`-`/`*`
+    // are variadic Brood `defn`s, so these also pin that `resolve_prim` still follows a
+    // thin wrapper to the native underneath.
+    for (head, want) in [
+        ("+", PrimOp::Add),
+        ("-", PrimOp::Sub),
+        ("*", PrimOp::Mul),
+        ("cons", PrimOp::Cons),
+        ("max", PrimOp::Max),
+        ("min", PrimOp::Min),
+        ("bit-and", PrimOp::BitAnd),
+        ("bit-or", PrimOp::BitOr),
+        ("bit-xor", PrimOp::BitXor),
+        ("nth", PrimOp::VectorRef),
+        ("table/get", PrimOp::TableGet),
+        ("table/has?", PrimOp::TableHas),
+    ] {
+        assert_eq!(
+            resolve_prim(&interp.heap, value::intern(head)).map(|(op, _)| op),
+            Some(want),
+            "`{head}` no longer inlines to {want:?} — a rename or rewording retired the \
+             call-site inline; the program is still correct, which is why only this test fails"
+        );
+    }
+
+    // 1-ary. `resolve_prim1` accepts only a DIRECT native binding (plus the structural `sqrt`
+    // probe), so any of these gaining a wrapper would silently stop inlining — the KI-58 shape.
+    for (head, want) in [
+        ("first", PrimOp1::First),
+        ("rest", PrimOp1::Rest),
+        ("nil?", PrimOp1::IsNil),
+        ("pair?", PrimOp1::IsPair),
+        ("empty?", PrimOp1::IsEmpty),
+        ("type-of", PrimOp1::TypeOf),
+    ] {
+        assert_eq!(
+            resolve_prim1(&interp.heap, value::intern(head)),
+            Some(want),
+            "`{head}` no longer inlines to {want:?} — see the note above"
+        );
+    }
+
+    // 3-ary.
+    assert_eq!(
+        resolve_prim3(&interp.heap, value::intern("table/put")),
+        Some(PrimOp3::TablePut)
+    );
+    // And the one that is name-gated rather than binding-gated (KI-44).
+    interp.eval_str("(require-one 'math)").expect("load math");
+    assert_eq!(
+        resolve_prim1(&interp.heap, value::intern("math/sqrt")),
+        Some(PrimOp1::Sqrt)
+    );
+}
+
 /// The 3-arg `table-put` call-site inline survives the namespacing that turned it into a
 /// `std/table.blsp` wrapper. `resolve_prim3` used to accept only a *direct* native binding,
 /// on the stated grounds that `table-put` "has no prelude wrapper to follow" — true when it

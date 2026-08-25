@@ -3117,3 +3117,34 @@ reverted it still fails only ~1 in 6 under load, no better than the original. Wh
 bug is the structural change. The test is a tripwire, not a gate, and a single green run of it
 proves nothing. That is worth saying because the natural move after fixing a flake is to point
 at the now-passing test as the evidence, and here it is not.
+
+## 2026-08-25 — the gate KI-58 prompted found a second dead inline on its first run
+
+KI-58's write-up ended "worth auditing the remaining direct-binding checks before the next
+wave". The audit turned out to be a test rather than a reading: every call-site inline is keyed
+on what a head *resolves to*, and nothing asserted it still resolves — which is precisely how a
+rename retires an inline in silence, since the program stays correct and the checker stays
+clean.
+
+`every_inlinable_head_still_reaches_its_primitive` is one table of the spellings a program
+actually writes — `+`, `-`, `*`, `cons`, `max`, `min`, `nth`, `first`, `rest`, `nil?`, `pair?`,
+`empty?`, `type-of`, `table/get`, `table/has?`, `table/put`, `math/sqrt` — asserted to reach
+their primitives. It deliberately checks the user-facing names rather than the `%`-prefixed
+natives: the natives are where the resolver bottoms out, so testing those would pass while every
+real call site had stopped inlining.
+
+It failed on its first run. **`table/get` does not resolve either** — different cause, same
+class. Its wrapper is `(defn get (t k &optional default) (%table-get t k default))`, and an
+`&optional` head is not a thin wrapper: it binds a default before forwarding, so a 2-arg
+`(table/get t k)` has no passthrough for `resolve_prim` to follow. `table/has?` sitting beside
+it — a plain 2-ary forward — never lost its inline, which is what kept the gap invisible, the
+same asymmetry that hid `put`.
+
+The fix is in Brood rather than the compiler: two arity clauses instead of one `&optional`
+head, so the 2-arg arm is a pure forward. `%table-get` is `Arity::range(2, 3)` documented as
+"default (nil if omitted)", so the 2-arg call is exactly equivalent and the existing resolver
+handles it with no change.
+
+Three instances of this class now (`sqrt`, `table/put`, `table/get`), each found by a different
+accident — a dead benchmark row, a cross-language harness run, and a test written about the
+previous one. The gate is the first thing that will find the fourth on the commit that causes it.
