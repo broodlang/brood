@@ -186,6 +186,18 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 (def *image-sections* {})
 (def *image-path* nil)
 
+;; ADDITIONAL image sources, consulted in order AFTER `*image-sections*` — a list of
+;; `[path sections]` pairs. There are two independent producers of images and they must
+;; coexist: a PROJECT image (built by `std/tool/project.blsp` from the project's own
+;; modules) and a STDLIB image (the embedded `std/*` modules, whose source `require`
+;; otherwise re-evaluates every run — measured at 81 ms of eval+promote for `format`
+;; alone). A single `*image-path*` could only ever hold one of them, so the second
+;; producer to install silently displaced the first.
+;;
+;; Order is precedence: the project's own section for a name wins over the stdlib's, which
+;; is what lets a project shadow a stdlib module name if it ever needs to.
+(def *image-sources* (list))
+
 ;; feature name -> [feature name …] : the modules each module required WHILE ITS BODY
 ;; LOADED — its `(:use …)` clauses and any top-level `(require …)`.
 ;;
@@ -228,6 +240,28 @@ Returns the directory. Pass `{}` to stop consulting an image."
   (def *image-path* path)
   (def *image-sections* sections)
   *image-sections*)
+
+(defn- add-image-source! (path sections)
+  "Append `path`'s section directory as an ADDITIONAL feature source, consulted after the
+primary one. Use this for a second, independently-produced image — the stdlib image beside
+a project's — rather than `set-image-source!`, which replaces."
+  (def *image-sources* (append *image-sources* (list [path sections])))
+  *image-sources*)
+
+(defn- image-section-for
+  (key)
+  "`[path [offset len]]` for the first installed image that carries feature `key`, or nil.
+The primary source is consulted first, then `*image-sources*` in install order."
+  (if (contains? *image-sections* key)
+    [*image-path* (get *image-sections* key)]
+    (letrec (scan (fn (srcs)
+                    (if (empty? srcs)
+                      nil
+                      (let ([p secs] (first srcs))
+                        (if (contains? secs key)
+                          [p (get secs key)]
+                          (scan (rest srcs)))))))
+      (scan *image-sources*))))
 
 ;; `*load-path*` lives in the ROOT namespace, so only root code can rebind it: a
 ;; `(def *load-path* …)` written inside a module defines `mod/*load-path*` (ambient
@@ -668,6 +702,34 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
         src (or direct (if alt (%builtin-module alt) nil))
         load-key (if direct key alt))
     (cond
+       ;; The IMAGE branch is tested FIRST — before the embedded-source branch below.
+       ;; Every baked-in std module has embedded source, so `src` matches for all of them
+       ;; and this branch was unreachable for exactly the modules a stdlib image exists to
+       ;; serve. Preferring it is safe on its own terms: an image is only ever installed
+       ;; after its fingerprint matched (the stdlib image keys on `build-id`, so it cannot
+       ;; outlive the binary whose source it snapshotted), and a module with no section
+       ;; still falls through to the source branch unchanged.
+      (not (nil? (image-section-for key)))
+        (let ([img-path sec] (image-section-for key))
+          (%image-load-section img-path (first sec) (second sec))
+          ;; `provide` BEFORE following the edges, mirroring the source path (`defmodule`
+          ;; expands to `defmodule-provide` and only then to its `(:use …)` requires). A
+          ;; require CYCLE terminates either way — `require-one`'s `*features-loading*`
+          ;; marker already returns immediately for this process's own in-flight load, and
+          ;; reordering these two lines was measured not to break the cycle case — so this
+          ;; is agreement with the source path, not a load-bearing ordering.
+          (provide key)
+          ;; Materialising defines this module's bindings but evaluates nothing, so the
+          ;; requires its header would have run have to be replayed from the edges the
+          ;; original load recorded. Without this an imaged start built a heap with holes
+          ;; and the program died on the first call across a missing edge — and it looked
+          ;; like it worked, because `nest run`'s advisory pre-flight incidentally requires
+          ;; each checked file's header deps, which propped up exactly one level.
+          (fold (fn (_ d) (require-one d)) nil (or (get *require-edges* key) nil))
+          key)
+      ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
+      ;; manager mapped to a file. Load it under `foo`'s package context so its
+      ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
       src
       ;; Attribute the baked-in source to the file it was WRITTEN in, not to whichever
       ;; file happened to be mid-load when the `require` ran. The path comes from the
@@ -717,27 +779,6 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
       ;; its own terms: an image is only ever installed after its fingerprint matched the
       ;; sources the package branch would otherwise re-evaluate, and a module with no section
       ;; still falls through to that branch.
-      (contains? *image-sections* key)
-        (let (sec (get *image-sections* key))
-          (%image-load-section *image-path* (first sec) (second sec))
-          ;; `provide` BEFORE following the edges, mirroring the source path (`defmodule`
-          ;; expands to `defmodule-provide` and only then to its `(:use …)` requires). A
-          ;; require CYCLE terminates either way — `require-one`'s `*features-loading*`
-          ;; marker already returns immediately for this process's own in-flight load, and
-          ;; reordering these two lines was measured not to break the cycle case — so this
-          ;; is agreement with the source path, not a load-bearing ordering.
-          (provide key)
-          ;; Materialising defines this module's bindings but evaluates nothing, so the
-          ;; requires its header would have run have to be replayed from the edges the
-          ;; original load recorded. Without this an imaged start built a heap with holes
-          ;; and the program died on the first call across a missing edge — and it looked
-          ;; like it worked, because `nest run`'s advisory pre-flight incidentally requires
-          ;; each checked file's header deps, which propped up exactly one level.
-          (fold (fn (_ d) (require-one d)) nil (or (get *require-edges* key) nil))
-          key)
-      ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
-      ;; manager mapped to a file. Load it under `foo`'s package context so its
-      ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
       (contains? *module-files* key) (require-force-package key
                                        (get *module-files* key))
       else
