@@ -2491,6 +2491,11 @@ fn hof_apply_native(
         // Which of the three, under `perf-stats`: `jit_link_done` reading 0 against N calls
         // says the fast frame never engaged but not why, and the three have entirely
         // different fixes (never got hot / deopt-latched off / still compiling).
+        //
+        // The arms bump three DIFFERENT counters and are identical only in a build without
+        // `perf-stats`, where `perf_bump!` expands to nothing — so collapsing them would
+        // silently merge the three cases this comment exists to keep apart.
+        #[allow(clippy::if_same_then_else)]
         if code == crate::jit::BAILED {
             crate::perf_bump!(hof_decline_bailed);
             // Name the arm under BROOD_JIT_BAIL_TRACE. The counter says "some HOF arm is

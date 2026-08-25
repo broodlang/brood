@@ -105,4 +105,7 @@
   ;; is not simply refusing everything.
   (test "a correctly-sized buffer passes validation and reaches the backend"
     (let (msg (try (%gui-icon! 999999 [1 2 3 4] 1 1) :no-error (catch e (error-message e))))
-      (is (not (includes? msg "w*h*4"))))))
+      ;; `:no-error` counts: with no gui feature (or headless) the call can return without
+      ;; raising at all, which is the same verdict this test wants — the size check did not
+      ;; reject a buffer that matches. Guarding it also keeps `includes?` off a keyword.
+      (is (or (= msg :no-error) (not (includes? msg "w*h*4")))))))
