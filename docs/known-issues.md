@@ -182,8 +182,15 @@ repetition, the usual flake defence, does not help. The missing dimension is a *
 
 ## KI-60 — the stdlib lost stderr: `Port` was implemented for `:fn`, but `*err*` is a native ✅ FIXED 2026-08-25
 
-**Status:** ✅ fixed. Found while merging `origin/main`, which was **red on three `nest` tests** —
-verified red at `f390bd56` with none of this branch's work present.
+**Status:** ✅ fixed — **independently and concurrently**, here and upstream in
+`2b6b1672 fix(io): the ports the language ships with were not ports`, with the identical
+one-line impl. The merge brought both in and they had to be de-duplicated; upstream's comment
+is the one kept. Found here while merging `origin/main`, which was **red on three `nest`
+tests** — verified red at `f390bd56` with none of this branch's work present.
+
+Upstream's note adds the half this entry lacked, and it is the better half: **every test passed
+anyway**, because `with-err-str` rebinds `*err*` to a Brood closure — a `:fn` — so the tests
+only ever exercised the working case and the *default* was the broken one.
 
 **What.** `io/print` and friends take their destination as a trailing `:to <port>` pair, and
 `split-target` only treats it as a destination when `(port? (nth xs (- n 1)))`. `port?` is
