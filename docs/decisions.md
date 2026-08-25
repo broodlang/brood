@@ -16299,7 +16299,41 @@ them separately (`over-budget` vs `value-declined`). A workload that sends multi
 messages between local processes gives up L1 and runs at wire-path speed, which is the
 speed it had before L1 existed.
 
-**Not fixed here.** KI-56 names a second instance of the same pattern on the *receive*
-side: the selective-receive peek-in-place branch calls `from_message` under the lock, so a
-scan that has skipped the head holds the mutex across a deep rebuild per candidate. Same
-shape, unmeasured, left open rather than fixed blind.
+**The receive side, same budget.** KI-56 named a second instance of the pattern: a
+selective-receive scan that has skipped the head cannot pop its candidate (it may not match
+and has to stay queued), so it rebuilds *in place* — `from_message` under the lock, once per
+candidate. Measured with the same probe, it was worse than the send side: an unrelated
+`%mailbox-size` probe read p50 **1 252 µs** and p99 **5 569 µs** against a backlog of 8
+40k-element messages.
+
+The fix is the same budget asking the same question, on the wire form: `message_fits` is a
+bounded, allocation-free walk of the `Message` tree that stops the moment the count clears
+the budget. A candidate past it is popped, rebuilt with the mutex released, and put back in
+seq order if it does not match — which is precisely what the optimistic branch beside it
+already did, so no new machinery was needed, only a condition on which route to take.
+
+What made this clean rather than a trade: the comment defending peek-in-place argued it
+keeps "the scan's lock count ≤ the peek-only scheme's for every backlog length". That was
+written before the **leading-keyword filter**, which rejects a message no clause could match
+on its tag, without rebuilding it. So pop/re-insert now applies only to candidates that
+could actually match — never to backlog length — and the objection no longer holds.
+
+| backlog × payload | peek-in-place p90 | p99 | popped p90 | p99 |
+|---|---|---|---|---|
+| 4 × 8 000 | 112 µs | 950 µs | **0.5 µs** | 12.2 µs |
+| 4 × 40 000 | 952 µs | 2 179 µs | **0.9 µs** | 2.4 µs |
+| 8 × 40 000 | 2 800 µs | 5 569 µs | **1.5 µs** | 11.2 µs |
+
+Scan throughput over *small* candidates — the shape that stays peeked in both arms, where
+the only added cost is the probe itself — is +0.9 % / +0.4 % / +0.2 % at backlogs of 4 / 16 /
+64 against a 0.6–1.0 % base-vs-base floor, i.e. within noise, and shrinking as the rebuild
+comes to dominate.
+
+Two asymmetries with the send side are deliberate. A `Str` **is** charged by payload here:
+`to_message` routes anything at or above `SHARED_BLOB_THRESHOLD` to a shared blob, but a
+`Message` decoded from a remote node's wire frame carries whatever that encoder chose, so a
+long inline string can arrive. And a shipped closure never fits — rebuilding one
+reconstructs code (arms, captured env, KI-55's woven module guards), which does not belong
+under a mailbox lock at any size.
+
+`BROOD_L1_BUDGET` governs both sites, so one lever A/Bs or disables the whole ADR.

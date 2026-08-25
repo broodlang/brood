@@ -1,0 +1,88 @@
+;;; ADR-245, the receive side: a selective-receive scan that has skipped the head cannot
+;;; pop its candidate (it may not match, and has to stay queued), so it used to rebuild
+;;; every candidate IN PLACE — `from_message` into this heap, with the mailbox mutex held,
+;;; once per candidate. That is the same unbounded lock hold the send-side copy budget
+;;; bounds, at the second site KI-56 named.
+;;;
+;;; A candidate past the budget is now popped, rebuilt with the mutex released, and put
+;;; back in seq order if it does not match — the route the optimistic branch beside it
+;;; already took. So what has to be pinned here is that the *re-insertion* is faithful:
+;;; nothing lost, nothing duplicated, nothing reordered, and every payload intact.
+;;;
+;;; These messages are deliberately SAME-TAG. The leading-keyword filter rejects a
+;;; different-tag message without rebuilding it at all, which would skip the code under
+;;; test entirely — so a test that used `[:junk …]`/`[:want …]` would prove nothing here.
+(defmodule receive-under-lock-test (:use test))
+
+;; Comfortably past the 4096-unit budget, so every one of these takes the pop/rebuild/
+;; re-insert route.
+(defn big (n) (vec (range 0 (+ 8000 n))))
+
+;; Under the budget, so it stays on the peek-in-place route — both branches in one scan.
+(defn small (n) (vec (range 0 (+ 3 n))))
+
+(describe "ADR-245: a large candidate is rebuilt with the mailbox lock released"
+
+  (test "a guard scans past large candidates, then every one is still queued in order"
+    (let (me (self))
+      ;; Four same-tag messages the guard will reject, then the one it wants. Every
+      ;; rejected candidate is a full rebuild the scan must undo cleanly.
+      (doseq (i (range 0 4)) (send me [:v i (big i)]))
+      (send me [:v 99 (big 99)])
+      ;; `:when` forces the matcher to run per candidate — a tag match alone would stop
+      ;; at the head and never reach peek-in-place.
+      (assert= (receive ([:v i _] :when (= i 99) i)) 99)
+      ;; The four rejected ones survived, in arrival order, with their payloads intact.
+      (doseq (i (range 0 4))
+        (assert= (receive ([:v j p] [j (count p)])) [i (+ 8000 i)]))
+      ;; and nothing else is left
+      (assert= (receive (m m) (after 20 :empty)) :empty)))
+
+  (test "large and small candidates interleave without disturbing each other"
+    ;; Exercises both branches in one scan: the small ones stay peeked in place, the
+    ;; large ones are popped and re-inserted around them.
+    (let (me (self))
+      (send me [:v 0 (small 0)])
+      (send me [:v 1 (big 1)])
+      (send me [:v 2 (small 2)])
+      (send me [:v 3 (big 3)])
+      (send me [:v 99 (small 99)])
+      (assert= (receive ([:v i _] :when (= i 99) i)) 99)
+      (assert= (receive ([:v j p] [j (count p)])) [0 3])
+      (assert= (receive ([:v j p] [j (count p)])) [1 8001])
+      (assert= (receive ([:v j p] [j (count p)])) [2 5])
+      (assert= (receive ([:v j p] [j (count p)])) [3 8003])
+      (assert= (receive (m m) (after 20 :empty)) :empty)))
+
+  (test "a scan that matches nothing leaves the whole backlog untouched"
+    ;; The timed-out scan walks every candidate — rebuilding, rejecting and re-inserting
+    ;; each one — and must leave the queue exactly as it found it.
+    (let (me (self))
+      (doseq (i (range 0 3)) (send me [:v i (big i)]))
+      (assert= (receive ([:v i _] :when (= i 99) i) (after 20 :timed-out)) :timed-out)
+      (doseq (i (range 0 3))
+        (assert= (receive ([:v j p] [j (count p)])) [i (+ 8000 i)]))
+      (assert= (receive (m m) (after 20 :empty)) :empty)))
+
+  (test "two scans in a row over the same backlog stay consistent"
+    ;; A re-inserted candidate is rebuilt again by the NEXT scan, so an off-by-one in the
+    ;; re-insert index shows up as a message seen twice or skipped on the second pass.
+    (let (me (self))
+      (doseq (i (range 0 4)) (send me [:v i (big i)]))
+      (assert= (receive ([:v i _] :when (= i 99) i) (after 20 :timed-out)) :timed-out)
+      (assert= (receive ([:v i _] :when (= i 3) i)) 3)
+      (assert= (receive ([:v j p] [j (count p)])) [0 8000])
+      (assert= (receive ([:v j p] [j (count p)])) [1 8001])
+      (assert= (receive ([:v j p] [j (count p)])) [2 8002])
+      (assert= (receive (m m) (after 20 :empty)) :empty)))
+
+  (test "works across a process boundary, where the receiver is parked"
+    ;; A parked receiver is the L1 case: the big payload declines the copy budget on the
+    ;; send side and arrives as a wire payload, which is exactly the kind this scan has
+    ;; to rebuild.
+    (let (me (self)
+          w (spawn (receive ([:v i p] :when (= i 99) (send me [:done i (count p)])))))
+      (send w [:v 0 (big 0)])
+      (send w [:v 1 (big 1)])
+      (send w [:v 99 (big 99)])
+      (assert= (receive ([:done i n] [i n])) [99 8099]))))

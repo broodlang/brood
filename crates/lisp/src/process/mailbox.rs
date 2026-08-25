@@ -1348,11 +1348,40 @@ fn scan_mailbox(
                 // Peek-in-place: a Local payload must NOT be taken here (the candidate
                 // may not match and has to stay queued), so read the slot without
                 // clearing it.
-                let v = match &st.queue[*i].msg {
-                    Payload::Wire(w) => from_message(heap, w),
-                    Payload::Local { slot, .. } => heap.msg_root_peek(*slot),
+                //
+                // But `from_message` on a Wire payload is a full rebuild into this heap,
+                // and peeking means doing it WITH THE LOCK HELD, once per candidate —
+                // the receive-side twin of the send-side stall ADR-245 bounds. A Local
+                // payload is free here (`msg_root_peek` is a slot read, no rebuild), so
+                // only Wire is at issue, and only when it is big: ask first, and for
+                // anything past the budget take the optimistic branch's route instead —
+                // pop, rebuild unlocked, and let the non-match path re-insert it in seq
+                // order. That costs one extra lock acquire for that candidate and bounds
+                // the hold; the leading-keyword filter above means it applies only to
+                // candidates that could match, never to backlog length.
+                let over = match &st.queue[*i].msg {
+                    Payload::Wire(w) => {
+                        !crate::process::message::message_fits(w, crate::process::message::l1_copy_budget())
+                    }
+                    Payload::Local { .. } => false,
                 };
-                (None, v)
+                if over {
+                    let m = st.queue.remove(*i).expect("bounds checked above");
+                    drop(st);
+                    let v = match &m.msg {
+                        Payload::Wire(w) => from_message(heap, w),
+                        Payload::Local { slot, .. } => heap.msg_root_peek(*slot),
+                    };
+                    // `Some(m)` routes it through the same re-insert path the optimistic
+                    // branch uses on a non-match, so nothing new has to be maintained.
+                    (Some(m), v)
+                } else {
+                    let v = match &st.queue[*i].msg {
+                        Payload::Wire(w) => from_message(heap, w),
+                        Payload::Local { slot, .. } => heap.msg_root_peek(*slot),
+                    };
+                    (None, v)
+                }
             }
         };
         let matcher = heap.root_at(rbase);

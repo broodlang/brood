@@ -778,6 +778,61 @@ fn local_lookup(heap: &Heap, env: EnvId, sym: Symbol) -> Option<Value> {
     None
 }
 
+/// Whether rebuilding `m` into a heap is small enough to do **with the mailbox mutex
+/// held** — the receive-side counterpart of [`l1_copy_budget`]'s question on the send side
+/// (KI-56, ADR-245).
+///
+/// A selective-receive scan that has skipped the head cannot pop its candidate (it may not
+/// match, and has to stay queued), so it rebuilds *in place*, under the lock, once per
+/// candidate. That is the same unbounded hold the send side had. The scan asks this first
+/// and, for anything too big, pops the candidate and rebuilds with the mutex released —
+/// which is exactly what the optimistic branch beside it already does.
+///
+/// The probe is a bounded, **allocation-free** walk of the wire tree that stops the moment
+/// the count clears `budget`, so it is O(min(n, budget)) and cannot itself become the
+/// stall it exists to prevent.
+pub(crate) fn message_fits(m: &Message, budget: i64) -> bool {
+    fn walk(m: &Message, left: &mut i64) {
+        if *left < 0 {
+            return;
+        }
+        *left -= 1;
+        match m {
+            Message::List(items, _) | Message::Vector(items) | Message::Set(items) => {
+                for it in items {
+                    walk(it, left);
+                    if *left < 0 {
+                        return;
+                    }
+                }
+            }
+            Message::Map(entries) => {
+                for (k, v) in entries {
+                    walk(k, left);
+                    walk(v, left);
+                    if *left < 0 {
+                        return;
+                    }
+                }
+            }
+            // Unlike the send side, a `Str` here IS worth charging for. `to_message` routes
+            // anything at or above `SHARED_BLOB_THRESHOLD` to `StrShared` (an `Arc` bump on
+            // rebuild, free) — but a `Message` does not only come from `to_message`: one
+            // decoded from a remote node's wire frame carries whatever that encoder chose,
+            // so an inline `Str` of any length can arrive here and `alloc_string` memcpys it.
+            Message::Str(s) => *left -= (s.len() / 1024) as i64,
+            // Rebuilding a shipped closure reconstructs *code* — arms, captured env, and
+            // (ADR-245's sibling, KI-55) the woven module guards. Never under the lock.
+            Message::Closure(_) => *left = -1,
+            // Everything else is one node: an atom, or an `Arc` handed over without a copy.
+            _ => {}
+        }
+    }
+    let mut left = budget;
+    walk(m, &mut left);
+    left >= 0
+}
+
 /// Rebuild a message into `heap`.
 pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
     crate::perf_time!(ns_msg_in, { from_message_timed(heap, m) })
@@ -1710,5 +1765,82 @@ mod copy_budget_tests {
         for bad in ["", "yes", "-1", "4096x", "1e6"] {
             assert_eq!(parse_l1_budget(Some(bad)), L1_COPY_BUDGET, "`{bad}`");
         }
+    }
+}
+
+/// [`message_fits`] — the receive-side budget probe (ADR-245). What it has to get right is
+/// the *direction* of its errors: judging a big message small leaves the stall in place,
+/// while judging a small one big costs only one extra lock acquire.
+#[cfg(test)]
+mod message_fits_tests {
+    use super::{message_fits, Message};
+
+    fn ints(n: usize) -> Vec<Message> {
+        (0..n as i64).map(Message::Int).collect()
+    }
+
+    #[test]
+    fn an_ordinary_message_fits() {
+        // The dominant shape: a small keyword-led tuple.
+        let m = Message::Vector(vec![
+            Message::Keyword(1),
+            Message::Int(7),
+            Message::Str("ok".into()),
+        ]);
+        assert!(message_fits(&m, 4096));
+    }
+
+    #[test]
+    fn a_large_container_does_not_fit() {
+        assert!(!message_fits(&Message::Vector(ints(10_000)), 4096));
+        assert!(!message_fits(&Message::List(ints(10_000), None), 4096));
+        assert!(!message_fits(&Message::Set(ints(10_000)), 4096));
+        let entries: Vec<(Message, Message)> = (0..10_000i64)
+            .map(|i| (Message::Int(i), Message::Int(i)))
+            .collect();
+        assert!(!message_fits(&Message::Map(entries), 4096));
+    }
+
+    /// Nesting must not hide size: a shallow container of deep ones is still big.
+    #[test]
+    fn nesting_does_not_hide_the_count() {
+        let inner: Vec<Message> = (0..8).map(|_| Message::Vector(ints(1000))).collect();
+        assert!(!message_fits(&Message::Vector(inner), 4096));
+    }
+
+    /// The probe must stop at the budget rather than walking the whole tree — otherwise
+    /// it becomes the stall it exists to prevent. Pinned behaviourally: a message far
+    /// past the budget answers the same as one just past it.
+    #[test]
+    fn the_walk_is_bounded_not_exhaustive() {
+        assert!(!message_fits(&Message::Vector(ints(4098)), 4096));
+        assert!(!message_fits(&Message::Vector(ints(2_000_000)), 4096));
+    }
+
+    /// A `Str` is one node but a `memcpy` on rebuild, and — unlike the send side — a
+    /// `Message` can arrive from a remote encoder, so a long inline string is possible.
+    #[test]
+    fn a_long_inline_string_is_charged_by_its_payload() {
+        assert!(message_fits(&Message::Str("x".repeat(4096)), 4096));
+        assert!(!message_fits(
+            &Message::Str("x".repeat(8 * 1024 * 1024)),
+            4096
+        ));
+    }
+
+    /// A refusal deep inside a container has to propagate out — the walk returns early on
+    /// a negative count rather than continuing to the next sibling.
+    ///
+    /// (`Message::Closure`, the other refusal, is not constructed here: a `ClosureMsg`
+    /// needs a real compiled closure. It is covered end-to-end by the closure-shipping
+    /// tests, which rebuild one through this same scan.)
+    #[test]
+    fn a_refusal_inside_a_container_propagates_out() {
+        let m = Message::Vector(vec![
+            Message::Keyword(1),
+            Message::Str("x".repeat(8 * 1024 * 1024)),
+            Message::Int(2),
+        ]);
+        assert!(!message_fits(&m, 4096));
     }
 }
