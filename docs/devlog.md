@@ -2907,3 +2907,62 @@ cases corrected the change — an infinite *width* anchored on screen is not gar
 it genuinely covers the viewport, costs one quad, and GL clips it. What must be culled is NaN
 (every comparison false, which is why the predicate is phrased positively) and an infinity that
 puts the quad off-screen.
+
+## 2026-08-25 — KI-56's second site: the fix that turned out not to be a trade-off
+
+ADR-245 bounded the L1 send-side copy and left KI-56's other instance recorded as "unmeasured,
+not fixed blind": a selective-receive scan that has skipped the head cannot pop its candidate
+(it may not match, and has to stay queued), so it rebuilds *in place* — `from_message` into this
+heap, with the mailbox mutex held, once per candidate.
+
+The reason given for not fixing it was a real-looking trade: pop/release/re-insert costs a lock
+round-trip per candidate, and the comment in the code says peek-in-place exists precisely so that
+"the scan's lock count stays ≤ the peek-only scheme's for every backlog length". Reading it again
+in the light of the send-side result, that argument is **obsolete**. It predates the
+leading-keyword filter, which rejects a message no clause could match on its tag *without
+rebuilding it at all*. So pop/re-insert never applied to backlog length in the first place — only
+to candidates that could actually match, which is a far smaller set. The design traded an
+unbounded lock *hold* for a bounded lock *count*, and the send-side measurement had just shown
+which of those hurts.
+
+And the machinery was already there: the optimistic branch pops, releases, rebuilds, and calls
+`reinsert_at_seq` on a non-match, with the seq-ordered re-insertion that survives a guard running
+a nested consuming `receive`. The whole change is a condition on which route to take —
+`message_fits`, a bounded, allocation-free walk of the `Message` tree that stops the moment the
+count clears the budget, so the probe cannot become the stall it prevents.
+
+**It was worse than the first site.** Same probe, and sent by name in both arms so the payload is
+wire-format either way (the L1 path would otherwise hand a parked receiver a heap value that the
+scan peeks without rebuilding, and the unfixed arm would look fine for the wrong reason):
+
+| backlog × payload | peek p50 | peek p90 | peek p99 | popped p90 | popped p99 |
+|---|---|---|---|---|---|
+| 4 × 8 000 | 0.5 µs | 112 µs | 950 µs | **0.5 µs** | 12.2 µs |
+| 4 × 40 000 | 0.7 µs | 952 µs | 2 179 µs | **0.9 µs** | 2.4 µs |
+| 8 × 40 000 | **1 252 µs** | 2 800 µs | 5 569 µs | **1.5 µs** | 11.2 µs |
+
+78× to 1 640×. The cost side is nothing: a scan over *small* candidates — which stay peeked in
+both arms, so the only difference is the probe — reads +0.9 % / +0.4 % / +0.2 % at backlogs of
+4 / 16 / 64 against a 0.6–1.0 % base-vs-base floor, and the ratio *shrinks* as the backlog grows
+because the rebuild comes to dominate. (The first version of that harness measured 1 087 µs a
+scan for every arm: with no matching message queued, `(after 1 :t)` was the entire measurement.
+Parking a marker at the end of the backlog and re-sending it each round is what makes the scan,
+rather than the timeout, the thing being timed.)
+
+Two asymmetries with the send side are deliberate. A `Str` **is** charged by payload here —
+`to_message` routes anything at or above `SHARED_BLOB_THRESHOLD` to a shared blob, but a
+`Message` decoded from a *remote* node's wire frame carries whatever that encoder chose, so a
+long inline string can arrive. And a shipped closure never fits at any size: rebuilding one
+reconstructs code — arms, captured env, KI-55's woven module guards — which has no business
+under a mailbox lock.
+
+Guards: `tests/receive_under_lock_test.blsp`, five cases on same-tag backlogs (a different tag
+would be rejected by the keyword filter and never reach the code under test — a test written
+with `[:junk …]`/`[:want …]` would prove nothing here), sabotage-verified: dropping the popped
+candidate instead of re-inserting it fails four of the five. Plus six `message_fits` unit cases,
+including that the walk is bounded rather than exhaustive.
+
+**KI-56 is now closed at both sites**, and the interaction is worth stating: ADR-245's send-side
+cap pushes a large local message onto the wire path, i.e. from a `Payload::Local` (which the scan
+peeks for free) to a `Payload::Wire` (which it must rebuild). Fixing only the send side would
+have moved the stall from the sender to the receiver's own scan rather than removing it.
