@@ -1496,10 +1496,24 @@ fn cmd_run(
             ),
             None => String::new(),
         };
+        // `%spawn-link` + `trap-exit`, NOT `%spawn` + `monitor`: the two-step form has a
+        // race the kernel already names on `%spawn-link` itself ("no spawn->link :noproc
+        // race", ADR-067). If the program finishes before `(monitor p)` runs, monitoring an
+        // already-dead pid fires a synthetic `:noproc`, `(= :noproc :normal)` is false, and a
+        // program that SUCCEEDED reports exit 1 — in the mode documented as the CI-friendly
+        // way to exercise an app, which is where a spurious red costs the most. Reproduced
+        // under load at ~1 run in 6 (`fine` printed, then `[exit] :noproc`).
+        //
+        // Reading `:noproc` as success would be wrong in the other direction: a program that
+        // *crashed* before the monitor attached is indistinguishable, and the exit-nonzero
+        // contract above is exactly what this wrapper exists to enforce. So make it atomic
+        // instead. The link is established before the child runs, so its real reason always
+        // arrives; `trap-exit` turns that into a trappable `[:EXIT pid reason]` message
+        // rather than killing this driver, which is what `monitor` was chosen for.
         format!(
-            "(let (p (%spawn (fn () {}))) \
-                  (monitor p) \
-                  (receive ([:down _ ^p reason] (println \"[exit]\" reason) (= reason :normal)) {}))",
+            "(let (_ (trap-exit true) \
+                   p (%spawn-link (fn () {}))) \
+                  (receive ([:EXIT ^p reason] (println \"[exit]\" reason) (= reason :normal)) {}))",
             run_form, after_clause
         )
     } else {
