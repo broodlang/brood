@@ -118,7 +118,7 @@ test discovery, lints, release, config)."
     "  ;; owns a buffer (an editor's *Messages*); the line is sent as [:write s]:\n"
     "  ;;   (add-backend (file-backend \"app.log\"))\n"
     "  ;;   (add-backend (process-backend buffer-pid))\n"
-    "  ;; To redirect plain `println` the same way, reference `io/with-out` — a\n"
+    "  ;; To redirect plain `io/puts` the same way, reference `io/with-out` — a\n"
     "  ;; qualified name loads its module, so there is nothing to require:\n"
     "  ;;   (io/with-out (process-port buffer-pid) (io/puts \"…\")).\n"
     "  (io/puts (greeting)))\n"))

@@ -418,7 +418,7 @@ running shows `:value :running`."
   (dbg)
   "The session summary as a list of strings: parked processes (the break queue), the
 cross-process causal tree, and the hottest traced forms. Rendered by both the
-`println`-based `report` (cooked mode) and the cursor-positioned `attach`
+`io/puts`-based `report` (cooked mode) and the cursor-positioned `attach`
 (raw mode, where `\\n` would not return to column 0)."
   (let (state (dbg-state dbg))
     (append (cons "── parked processes ──"
@@ -460,7 +460,7 @@ tree grow as a workload runs; drive resume from another session or a timer."
 ;; same `report`; input via `term/poll` (nil on the 400ms timeout → just redraw).
 (defn- debug-attach-render
   (dbg)
-  ;; In raw mode `\n` moves down but NOT to column 0, so a `println` frame staircases.
+  ;; In raw mode `\n` moves down but NOT to column 0, so a `io/puts` frame staircases.
   ;; Clear, then place every line absolutely at (row, col 1) with `ansi-cursor`.
   (io/print (ansi-clear))
   (letrec (place (fn (lines row)

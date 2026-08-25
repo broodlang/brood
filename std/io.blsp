@@ -1,4 +1,4 @@
-;; std/io.blsp — output ports: the redirectable sink behind print/println.
+;; std/io.blsp — output ports: the redirectable sink behind `io/print` / `io/puts`.
 ;;
 ;; A *port* is any value with a **`Port` impl** — the ability whose one op, `write`,
 ;; is the single seam every output path goes through. Two shapes matter:
@@ -16,7 +16,7 @@
 ;; for it, and every `write` / `with-out` / logger backend accepts it.
 ;;
 ;; `*out*`/`*err*` (declared in the prelude) still hold a plain **1-arg fn** — the
-;; prelude's `print`/`println` call it directly, so printing pays no dispatch cost.
+;; prelude's `io/print`/`io/puts` call it directly, so printing pays no dispatch cost.
 ;; `port-fn` is the adapter at that boundary, and `with-out`/`with-err` apply it for
 ;; you, so a record port installs just as a fn port does.
 ;;
@@ -26,7 +26,7 @@
 ;; the same safe mechanism the logger's `process-backend` uses (std/log.blsp).
 
 (defmodule io
-  "Output ports — the redirectable sink the prelude's `print`/`println` write to.
+  "Output ports — the redirectable sink the prelude's `io/print`/`io/puts` write to.
 A port is any value implementing the **`Port`** ability: a 1-arg fn
 `(fn (s) …)` that consumes a ready string, or a port record. `*out*`/`*err*` (declared
 in the prelude) hold the current stdout/stderr ports.
@@ -34,8 +34,8 @@ in the prelude) hold the current stdout/stderr ports.
 Build one with `stdout-port`/`stderr-port`/`process-port`/`file-port`/`fn-port`, then
 redirect output for a dynamic extent with `with-out`/`with-err`:
 
-    (with-out (process-port editor) (println \"into the editor's buffer\"))
-    (with-out (fn-port (fn (s) (collect s))) (println \"into a callback\"))
+    (with-out (process-port editor) (io/puts \"into the editor's buffer\"))
+    (with-out (fn-port (fn (s) (collect s))) (io/puts \"into a callback\"))
 
 A `process-port` sends `[:write s]` to its target — async and share-nothing, so
 output crosses process boundaries with no shared mutable state. (Dynamic bindings
@@ -161,18 +161,18 @@ by a trailing `:to <port>`. Returns nil. The everyday output function.
 (defn port-fn (port)
   "`port` as a bare 1-arg sink fn: itself when it already is one, else a closure that
 `write`s to it. The adapter at the `*out*`/`*err*` boundary — those dynamic vars hold
-a plain fn so the prelude's `print` can call it directly with no dispatch, while a record
+a plain fn so the prelude can call it directly with no dispatch, while a record
 port still reaches them through this. `with-out`/`with-err` apply it for you."
   (if (fn? port) port (fn (s) (write port s))))
 
 (defmacro with-out (port & body)
   "Evaluate `body` with `*out*` bound to `port` (a fn port or a port record — adapted
-with `port-fn`), restoring the previous port on exit (even on error). `print`/`println`
+with `port-fn`), restoring the previous port on exit (even on error). `io/print`/`io/puts`
 inside `body` write to `port`."
   `(binding (*out* (port-fn ~port)) ~@body))
 
 (defmacro with-err (port & body)
   "Evaluate `body` with `*err*` bound to `port` (a fn port or a port record — adapted
-with `port-fn`), restoring the previous port on exit (even on error). `eprint`/`eprintln`
+with `port-fn`), restoring the previous port on exit (even on error). `io/print`/`io/puts` with `:to *err*`
 inside `body` write to `port`."
   `(binding (*err* (port-fn ~port)) ~@body))

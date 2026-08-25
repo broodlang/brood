@@ -61,7 +61,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ;;
 ;; A sink's RETURN VALUE is part of the contract, and it has exactly one meaning:
 ;; **`:spy-stop` says "I have all I want — stop tracing"**. Anything else (nil,
-;; whatever `eprintln` returned) means "keep going". A bounded sink — one that keeps
+;; whatever `io/puts` returned) means "keep going". A bounded sink — one that keeps
 ;; the first N entries, which every display sink should be — answers `:spy-stop` once
 ;; it is full, and the tracer then stops paying for instrumentation it can see will be
 ;; thrown away (`debug/trace-fn` reverts to a plain tail call; see its wrapper). The
@@ -1272,7 +1272,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 (def- *substrate-abilities* ['Display 'Inspect 'Seqable 'Conjable])
 ;; The abilities the LANGUAGE ITSELF dispatches on. Their `:default` impls are the fallback
-;; every value relies on — `Display`'s is what `print`/`println`/`str` reach for — so they are
+;; every value relies on — `Display`'s is what `io/print`/`io/puts`/`str` reach for — so they are
 ;; substrate, not policy, and `%unregister-impl` refuses to retract them: `(%unimpl Display
 ;; :default)` is one line that stops the image printing anything, and the only clue is a
 ;; `no impl for :vector` from deep inside an unrelated call. Same reasoning as reserved names
@@ -1789,7 +1789,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 ;; ── Display / Inspect: the print protocol (always on) ──────────────────────────
 (defability Display
-  "A value's human display string — what `print`/`println` show for it."
+  "A value's human display string — what `io/print`/`io/puts` show for it."
   (->string [self] :-> string))
 
 ;; Every built-in kind, and every record without a custom impl, lands here: the

@@ -1528,7 +1528,7 @@ resolve in the advisory checker. Returns the project root."
 ;; (see `project-pfold-files`). Each worker PRINTS its own chunk's warnings and
 ;; ships back only the integer count — NOT the warning list: a list would be
 ;; deep-copied across process heaps (message passing), which on a warning-heavy
-;; project costs more than the check itself. `eprintln` writes one line per call,
+;; project costs more than the check itself. `io/puts` writes one line per call,
 ;; so lines from concurrent workers interleave only between warnings, never
 ;; mid-line (like the test runner's `:trace`); warning *order* is no longer sorted
 ;; by filename, which is fine for advisory GNU `FILE:LINE:COL` diagnostics. Honors
