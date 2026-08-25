@@ -4,7 +4,7 @@
 ;; and that a `process-port` carries output across a process boundary as
 ;; `[:write s]` (the buffer/editor path). Register-only — `nest test` discovers it.
 
-(defmodule io-test (:use test) (:use io))
+(defmodule io-test (:use test) (:use io :exclude [inspect]))
 
 (describe "io: ports reroute print/println"
   ;; These send to (self) and receive — no globals, no spawn — so they can run in
@@ -16,7 +16,7 @@
 
   (test "with-out routes print (no newline) and joins args with spaces"
     (let (me (self))
-      (with-out (process-port me) (io/print "a" "b" 42))
+      (with-out (process-port me) (io/write "a" "b" 42))
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "a b 42")))
 
   (test "fn-port hands each written string to a callback"
@@ -26,7 +26,7 @@
 
   (test "write writes a string straight to a port"
     (let (me (self))
-      (write (process-port me) "direct")
+      (emit (process-port me) "direct")
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "direct")))
 
   (test "with-err reroutes eprintln"
@@ -57,7 +57,7 @@
 (describe "io: ports are Port impls"
   (test "a bare 1-arg fn is a port"
     (let (me (self))
-      (write (fn (s) (send me [:write s])) "raw fn")
+      (emit (fn (s) (send me [:write s])) "raw fn")
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "raw fn")))
   (test "port? is true for a fn port and for each port record"
     (is (port? (fn (s) s)))
@@ -75,7 +75,7 @@
     (assert= (->string (file-port "/tmp/x.log")) "#<port file /tmp/x.log>")
     (is (includes? (->string (process-port (self))) "#<port process ")))
   (test "a stdout port record still routes through the capture stack"
-    (assert= (with-out-str (write (stdout-port) "captured")) "captured"))
+    (assert= (with-out-str (emit (stdout-port) "captured")) "captured"))
   (test "port-fn adapts a record port to the bare fn *out* holds"
     (let (me (self)
           f (port-fn (process-port me)))
@@ -91,18 +91,19 @@
 (defrecord counting-port (target))
 (impl Port
   io-test/counting-port
-  (write [p s] (write (get p :target) (str "[" (string/length s) "] " s))))
+  ;; The op is `emit` — `write` is the caller-facing function now.
+  (emit [p s] (emit (get p :target) (str "[" (string/length s) "] " s))))
 
 (describe "io: a third-party port type"
   (test "a record from another module is a port once it impls Port"
     (is (port? (counting-port (stdout-port))))
-    (assert= (with-out-str (write (counting-port (stdout-port)) "abc")) "[3] abc"))
+    (assert= (with-out-str (emit (counting-port (stdout-port)) "abc")) "[3] abc"))
   (test "with-out installs a third-party port like any other"
     (let (me (self))
-      (with-out (counting-port (process-port me)) (io/print "xy"))
+      (with-out (counting-port (process-port me)) (io/write "xy"))
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "[2] xy")))
   (test "a value with no Port impl raises the named ability error"
-    (assert-error (write 42 "nope"))))
+    (assert-error (emit 42 "nope"))))
 
 ;; The DEFAULT `*out*`/`*err*` are the primitives `%write-out`/`%write-err`, whose
 ;; `type-of` is `:native` — not `:fn`. `Port` only had a `:fn` impl, so `io/port?` was
@@ -125,3 +126,35 @@
 
   (test "a Brood closure port still works — the case that always passed"
     (is (io/port? (fn (s) s)))))
+
+;; The three writers, as chosen: `write` is raw, `puts` adds the newline, `inspect` shows
+;; the re-readable form. `write` is the CALLER's name; the port ability's seam is `emit`,
+;; so a name a user reaches for is not spent on the implementor's side of the contract.
+(describe "io/write, io/puts, io/inspect"
+
+  (test "write adds no newline; puts does"
+    ;; `%render` space-joins, so two values render as "a b" — `write` differs from
+    ;; `puts` only in the trailing newline, not in the separator.
+    (assert= "a b" (with-out-str (io/write "a" "b")))
+    (assert= "a b\n" (with-out-str (io/puts "a" "b"))))
+
+  (test "inspect shows the re-readable form, where puts shows the display form"
+    ;; The whole point of the pair: a string with an escape prints as two lines through
+    ;; `puts` and as its source form through `inspect`.
+    (assert= "a\nb\n" (with-out-str (io/puts "a\nb")))
+    (assert= "\"a\\nb\"\n" (with-out-str (io/inspect "a\nb"))))
+
+  (test "all three take a :to port"
+    (let (buf (with-err-str (io/write "w" :to *err*)
+                (io/puts "p" :to *err*)
+                (io/inspect "i" :to *err*)))
+      (is (includes? buf "w"))
+      (is (includes? buf "p"))
+      (is (includes? buf "\"i\""))))
+
+  (test "emit is the port seam, and it is not `write`"
+    ;; `write` used to be the ability op, which is what forced the caller-facing function
+    ;; to be named `print`. Pinning the split so it cannot silently swap back.
+    (is (bound? 'io/emit))
+    (is (bound? 'io/write))
+    (assert= "direct" (with-out-str (emit (fn (s) (io/write s)) "direct")))))

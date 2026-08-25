@@ -31,9 +31,9 @@
   (test "println routes a record through ->string"
     (assert= (with-out-str (io/puts (usd 1050))) "$10.50\n"))
   (test "print, with mixed built-in + record args (space-joined, like print always is)"
-    (assert= (with-out-str (io/print (usd 500))) "$5.00")
+    (assert= (with-out-str (io/write (usd 500))) "$5.00")
     ;; print space-joins its args (`%render`), so a label + record reads "cost $5.00"
-    (assert= (with-out-str (io/print "cost" (usd 500))) "cost $5.00"))
+    (assert= (with-out-str (io/write "cost" (usd 500))) "cost $5.00"))
   (test "a %no-impl record still prints its raw form"
     (is (includes? (with-out-str (io/puts (plain 7))) ":__id__")))
   (test "built-ins render identically with the hook installed and disabled"
@@ -61,6 +61,6 @@
   (test "a worker prints a record in its own process, honoring *show*"
     (let (me (self))
       (assert= (with-out-str (do
-                               (spawn (do (io/print (usd 199)) (send me :done)))
+                               (spawn (do (io/write (usd 199)) (send me :done)))
                                (receive (:done :ok))))
         "$1.99"))))

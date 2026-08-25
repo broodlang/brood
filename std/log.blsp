@@ -46,7 +46,9 @@ build it with `stdout-backend` / `stderr-backend` / `process-backend` / `file-ba
 and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
   ;; `gen` for defprocess / spawn-server / cast / stop; `io` for the port sinks.
   (:use gen)
-  (:use io))
+  ;; `:exclude [inspect]` — `io/inspect` WRITES, while the root `inspect` is the `Inspect`
+  ;; ability op that RETURNS a string. Referring the writer bare here would shadow the op.
+  (:use io :exclude [inspect]))
 ;; ---- levels -----------------------------------------------------------------
 (def- log-ranks {:debug 0 :info 1 :warn 2 :error 3})
 (def- log-labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})
@@ -92,7 +94,7 @@ backend's policy — a custom `LogBackend` should call this so it honours the sa
   log/line-backend
   (backend-emit [b record]
     (when (backend-passes? b record)
-      (write (get b :sink) ((get b :format) record)))
+      (emit (get b :sink) ((get b :format) record)))
     nil))
 
 (impl Display
@@ -218,7 +220,7 @@ line falls back to stderr so a log is never lost. Returns nil."
         pid (logger))
     (if pid
       (cast pid [:log rec])
-      (io/print (log-default-format rec) :to *err*)))
+      (io/write (log-default-format rec) :to *err*)))
   nil)
 
 (defn debug (msg & meta) "Log `msg` at `:debug`." (apply log :debug msg meta))

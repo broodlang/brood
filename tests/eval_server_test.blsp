@@ -48,12 +48,12 @@
       (is (int? (get r :ms)))))
 
   (test "keeps both halves: the value AND what was printed"
-    (let (r (eval-capturing "(do (io/print \"hi\") 7)"))
+    (let (r (eval-capturing "(do (io/write \"hi\") 7)"))
       (assert= (get r :value) "7")
       (assert= (get r :output) "hi")))
 
   (test "an error keeps the output printed before the throw"
-    (let (r (eval-capturing "(do (io/print \"before\") (error \"boom\"))"))
+    (let (r (eval-capturing "(do (io/write \"before\") (error \"boom\"))"))
       (assert= (get r :ok) false)
       (is (includes? (get r :error) "boom"))
       (assert= (get r :output) "before")))
@@ -63,7 +63,7 @@
 
   (test "a failed eval leaves no dangling capture"
     (eval-capturing "(error \"x\")")
-    (assert= (with-out-str (io/print "clean")) "clean"))
+    (assert= (with-out-str (io/write "clean")) "clean"))
 
   (test "a huge value elides instead of flooding the reply"
     (is (includes? (get (eval-capturing "(range 10000)") :value) "…"))))

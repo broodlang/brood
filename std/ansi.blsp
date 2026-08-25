@@ -1,5 +1,5 @@
 ;; std/ansi.blsp — ANSI / VT100 escape-sequence stripping.
-;; Callers use `ansi/strip-ansi` — a qualified name loads the module. Pure Brood over string
+;; Callers use `ansi/strip` — a qualified name loads the module. Pure Brood over string
 ;; primitives, no IO or editor dependency — reusable in any process that reads
 ;; pipe output from a subprocess that emits colour escapes (a shell, a build
 ;; tool, a test runner).
@@ -7,7 +7,7 @@
   "ANSI / VT100 escape-sequence stripping for pipe output.
 Strips CSI colour/cursor sequences (`ESC [ … letter`, the SGR `m` and cursor
 `A`–`D`/`H`/`J`/`K` family) and bare carriage returns (`\\r`) — the characters a
-subprocess emits when it detects a TTY but gets a pipe instead. `strip-ansi` is
+subprocess emits when it detects a TTY but gets a pipe instead. `strip` is
 the public entry point; the helpers are private (`--`).")
 
 (defn- ansi-csi-final?
@@ -15,7 +15,7 @@ the public entry point; the helpers are private (`--`).")
   "Whether `c` is the final byte of a CSI sequence — a letter (SGR `m`, cursor ops)."
   (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" c))
 
-;; `v` below is a CODE-POINT VECTOR (built once in `strip-ansi`), and `n` its length,
+;; `v` below is a CODE-POINT VECTOR (built once in `strip`), and `n` its length,
 ;; threaded rather than recomputed. Both matter: `char-at` on a raw UTF-8 string is O(i)
 ;; and `string-length` is `chars().count()`, i.e. O(n) — so the previous scan, which did
 ;; one of each per character, was O(n²) twice over. Measured 7.6× then 14.0× per 4× of
@@ -48,7 +48,7 @@ escape sequences and carriage returns."
         ; bare CR: drop
         else (ansi-strip v (+ i 1) n (cons c out))))))
 
-(defn strip-ansi (s)
+(defn strip (s)
   "`s` with all ANSI escape sequences and bare carriage returns removed.
 Fast path: a chunk with no ESC byte only needs its CRs dropped (a single
 `replace` pass, no char-by-char scan)."

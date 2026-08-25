@@ -1272,7 +1272,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 (def- *substrate-abilities* ['Display 'Inspect 'Seqable 'Conjable])
 ;; The abilities the LANGUAGE ITSELF dispatches on. Their `:default` impls are the fallback
-;; every value relies on — `Display`'s is what `io/print`/`io/puts`/`str` reach for — so they are
+;; every value relies on — `Display`'s is what `io/write`/`io/puts`/`str` reach for — so they are
 ;; substrate, not policy, and `%unregister-impl` refuses to retract them: `(%unimpl Display
 ;; :default)` is one line that stops the image printing anything, and the only clue is a
 ;; `no impl for :vector` from deep inside an unrelated call. Same reasoning as reserved names
@@ -1789,7 +1789,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 ;; ── Display / Inspect: the print protocol (always on) ──────────────────────────
 (defability Display
-  "A value's human display string — what `io/print`/`io/puts` show for it."
+  "A value's human display string — what `io/write`/`io/puts` show for it."
   (->string [self] :-> string))
 
 ;; Every built-in kind, and every record without a custom impl, lands here: the
