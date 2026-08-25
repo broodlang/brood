@@ -19,6 +19,9 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl Port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl Port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
+| KI-59 | **`nest run --for` reported failure for a program that succeeded.** The wrapper was `(%spawn …)` then `(monitor p)` — two steps. A program that finished before the monitor attached fired a synthetic `:noproc`, `(= :noproc :normal)` was false, and the run exited 1 after printing its output correctly. Worst in the mode documented as the CI-friendly way to exercise an app | ✅ **fixed 2026-08-25** — `%spawn-link` + `trap-exit`, atomic by construction: the kernel already names this race on `%spawn-link` itself ("no spawn->link :noproc race", ADR-067). Reproduced ~1 run in 6 under load, 0/20 after. Reading `:noproc` as success would be wrong the other way — a program that *crashed* before the monitor attached is indistinguishable |
+| KI-58 | **the namespacing silently killed the `table-put` call-site inline — `sieve` 11.6× slower.** `resolve_prim3` accepted only a *direct* native head, on the stated grounds that `table-put` "has no prelude wrapper to follow"; the v0.9/v0.10 waves made the head `table/put`, a `std/table.blsp` wrapper, so the call stopped inlining and became an ordinary `Call` in the hot arm. The **2-ary** `resolve_prim` follows its wrapper, so `table/has?` went on inlining beside it — the asymmetry is visible in one IR dump | ✅ **fixed 2026-08-25** — `resolve_prim3` follows a thin wrapper like the 2-ary path, requiring the identity argument map (`Node::Prim3` has no permutation field, so a reordering wrapper must decline rather than store under the wrong key). `make ab`: **457 → 68 ms, −85.1%**. Guards: `table_put_call_site_inline_recognizes_the_namespaced_wrapper` (sabotage-verified) and the new `every_inlinable_head_still_reaches_its_primitive`, which caught a **second** dead inline on its first run — `table/get`, whose `&optional` head is not a thin wrapper; fixed in `std/table.blsp` with two arity clauses |
 | KI-57 | **a use-after-GC on every selective receive with a backlog.** `scan_mailbox` took the clauses' leading-keyword vector as a bare `Value` and decoded it **lazily, inside the scan loop** — so on any iteration after the first the decode dereferenced a handle held across a matcher `apply`, which can collect at any eval depth (ADR-061). The `matcher` beside it is rooted at `rbase+0` and re-read per candidate for exactly this reason; `tags` was not | ✅ **fixed 2026-08-25** — `tags` is rooted at `rbase+1` and re-read at the decode, like `matcher`. Found by running `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` by hand while verifying ADR-245: `use-after-GC: vector handle … is from epoch 12, but that generation is now epoch 13` out of `collect_receive_tags`. **No CI job could have caught it** — every one collects on a threshold, so the collection has to land inside the window by luck; the new `make gcstress` step closes that, and is verified red on the pre-fix code and green on the fix |
 | KI-56 | **a large L1 send head-of-line-blocks unrelated mailbox operations**, linear in payload: an unrelated `mailbox-size` probe sits at **p50 ~5 ms** for a 1.6 MB send and 7–13 ms at 4 MB, against a wire path flat at **4–10 µs** across a 500× payload range. Onset between 8 KB (nothing) and 80 KB (p90 ~25×). Needs a *parked* receiver, so it is the synchronous request/reply shape, not fan-in | ✅ **fixed 2026-08-25** (ADR-245) — a **work budget** on the L1 copy (one heap node = one unit, default 4096, `BROOD_L1_BUDGET=0` to uncap): past it the copy declines and takes the wire path, whose heavy work is already outside the lock. The `st.waiter` invariant is untouched. Every container kind also declines *before materialising* — the first cut checked only per node, so a 100k vector still paid `to_vec` under the lock and measured p99 243 µs; with the early-out it is 5.4 µs. Same probe as the measurement below: **p99 1 875 → 5.4 µs at ~1.6 MB, p50 2 360 → 3.9 µs at ~3.9 MB**, indistinguishable from the wire arm at every size. **The second site (selective-receive's peek-in-place rebuild) is fixed too** — same budget on the wire form, p50 1 252 → 0.8 µs and p99 5 569 → 11.2 µs at a backlog of 8 × 40k |
 | KI-55 | **closure-shipping across nodes broke for every namespaced std name.** Auto-require runs on the node that *compiles* a form, never on the node that *receives* an already-compiled closure — so a shipped closure whose body calls `reflect/form-pos`, `seq/…`, `dev/…` raises `unbound symbol` on the receiver. Before the v0.9.0/v0.10.0 namespacing these were bare prelude names and always bound, so closure-shipping "just worked" | ✅ **fixed 2026-08-25** — the **sender** names the modules its closure's body references (`ClosureMsg::modules`, a `(module, probe)` pair per module, encoded in the wire's `M_CLOSURE` record — protocol `BRD\x06`), and the receiver weaves a `(if (bound? 'probe) nil (require-one 'module))` guard into the rebuilt body for each module it lacks, so the load runs at the closure's own **call site** — where errors are catchable and no mailbox lock is held. A module this node cannot load now raises `this closure was shipped from another runtime and needs module \`zz\`…`, not a bare `unbound symbol`. Guards: `cli::distribution::a_shipped_closure_requires_its_modules_on_the_receiver` (new) + `source_positions_survive_a_cross_node_send` with its `(require-one 'reflect)` workaround removed; both sabotage-verified |
@@ -94,7 +97,7 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**No open items.** **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**No open items.** **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
 **fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
 **KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
@@ -174,6 +177,170 @@ activation, and no `std` suite tests a large input. It is invisible below ~10⁵
 loop that calls the same function eleven times at increasing sizes stays correct throughout — so
 repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-60 — the stdlib lost stderr: `Port` was implemented for `:fn`, but `*err*` is a native ✅ FIXED 2026-08-25
+
+**Status:** ✅ fixed — **independently and concurrently**, here and upstream in
+`2b6b1672 fix(io): the ports the language ships with were not ports`, with the identical
+one-line impl. The merge brought both in and they had to be de-duplicated; upstream's comment
+is the one kept. Found here while merging `origin/main`, which was **red on three `nest`
+tests** — verified red at `f390bd56` with none of this branch's work present.
+
+Upstream's note adds the half this entry lacked, and it is the better half: **every test passed
+anyway**, because `with-err-str` rebinds `*err*` to a Brood closure — a `:fn` — so the tests
+only ever exercised the working case and the *default* was the broken one.
+
+**What.** `io/print` and friends take their destination as a trailing `:to <port>` pair, and
+`split-target` only treats it as a destination when `(port? (nth xs (- n 1)))`. `port?` is
+`(satisfies? 'Port x)`, and the ability is implemented as `(impl Port :fn (write [f s] (f s)))`
+— "a bare 1-arg sink fn is a port".
+
+But `*err*` is not a `:fn`:
+
+```lisp
+(def *err* %write-err)     ; std/prelude/control.blsp
+(type-of *err*)  ;=> :native      (port? *err*)  ;=> false
+(type-of (fn (s) s))  ;=> :fn     (port? (fn (s) s))  ;=> true
+```
+
+A Rust primitive's identity is `:native`, so the `:fn` impl never matched it. Every
+`(io/print … :to *err*)` in the stdlib — `log`, `std/tool/test`, `supervisor`, `repl`,
+`telemetry`, `format` — therefore failed the port test, and the pair fell through as ordinary
+values: the text went to **stdout** with a literal ` :to #<native %write-err>` appended.
+
+```
+Building mf (1 file) :to #<native %write-err>
+src/main.blsp:3:15: warning: unbound symbol: print :to #<native %write-err>
+```
+
+`*out*` is `%write-out` and has the identical shape, so an explicit `:to *out*` was equally
+broken; it just looked right because the fallback destination is also stdout.
+
+**Why the tests are the ones that caught it.** `declared_sig_is_authoritative_cross_module`
+asserts on warnings read from **stderr** — with the diagnostics diverted to stdout it saw none.
+That is a much better tripwire than the two that merely used a renamed `print`, and reverting
+only this impl confirms it: that test fails, the other two pass.
+
+**Fix.** `(impl Port :native (write [f s] (f s)))` beside the `:fn` one. One line, in Brood.
+
+**The lesson is about ability dispatch, not about ports.** `impl` is keyed on *identity*, and
+`:fn` and `:native` are two identities for things that are both "callable with one argument".
+Any ability meant to cover "a function" needs both, and nothing warns when it covers only one —
+the failure is a silently-declined dispatch, which is the same failure mode ADR-182's
+monomorphization notes and the stdimage boot-install note both describe: bindings present,
+registration missing, type-checks clean.
+
+---
+
+## KI-59 — a successful `nest run --for` could exit 1 ✅ FIXED 2026-08-25
+
+**Status:** ✅ fixed. Guard: `nest::cli_failure_reporting::run_for_exits_nonzero_when_the_program_dies`,
+extended with an instant-exit case that asserts the printed *reason*, not just the code. Read the
+caveat below before trusting it as a gate.
+
+**What.** `nest run --for 5s ok.blsp` on a program that prints and exits printed its output, then
+`[exit] :noproc`, and exited **1**. The wrapper `nest` generates was:
+
+```lisp
+(let (p (%spawn (fn () …))) (monitor p)
+  (receive ([:down _ ^p reason] (println "[exit]" reason) (= reason :normal)) …))
+```
+
+`%spawn` and `monitor` are two steps. If the program finishes in the window between them,
+monitoring an already-dead pid fires a **synthetic `:noproc`** — the monitor never saw the real
+exit — so `(= :noproc :normal)` is false and a program that *succeeded* reports failure.
+
+The kernel already names this exact race, one field over: `%spawn-link`'s own docstring says it
+"atomically links the child to the caller before it runs (**no spawn->link :noproc race**)"
+(ADR-067). The link half was solved; the monitor half kept the two-step form.
+
+**Why not just treat `:noproc` as success.** Because it is ambiguous in the direction that
+matters: a program that *crashed* before the monitor attached produces the same `:noproc`, and
+the whole reason this wrapper exists is the exit-nonzero contract beside it — a comment in
+`main.rs` records that `nest run --for 3s boom.blsp` once printed a crash and reported success.
+Mapping `:noproc` to 0 would restore that bug for fast-crashing programs.
+
+**The fix is atomicity, in Brood rather than the kernel.** `%spawn-link` establishes the link
+*before the child runs*, so the child's real reason always arrives; `trap-exit` turns it into a
+trappable `[:EXIT pid reason]` message instead of killing the driver, which is what `monitor` was
+chosen for. No new builtin — the primitives were already there.
+
+**Honest caveat about the guard.** The race is timing-dependent and the test is load-sensitive,
+not deterministic: with the fix reverted it fails ~1 run in 6 under 12 spinning cores, and
+adding an instant-exit case did **not** measurably raise that. What prevents the bug is the
+structural change; the test is a tripwire that will catch a regression eventually, not on the
+next run. Do not read a single green run of it as proof.
+
+---
+
+## KI-58 — the namespacing killed the `table-put` call-site inline ✅ FIXED 2026-08-25
+
+**Status:** ✅ fixed. Guard:
+`eval::compile::tests::table_put_call_site_inline_recognizes_the_namespaced_wrapper`,
+sabotage-verified against the pre-fix resolver.
+
+**What.** `sieve` ran **11.6× slower** than on 0.3.11 — 34 → 394 ms in the cross-language
+harness — with the benchmark program changed only from `(table)` to `(table/new)`, i.e. the
+same algorithm. The cause is in a comment that had quietly become false:
+
+> `resolve_prim3` — *"Only a **direct** native binding qualifies (its one member,
+> `table-put`, has no prelude wrapper to follow)."*
+
+True when written. The v0.9/v0.10 namespacing waves moved the table API into `std/table.blsp`,
+so the head is now `table/put`, a closure whose whole body is `(%table-put t k v)`. The
+resolver stopped matching, `(table/put …)` compiled to an ordinary `Call` inside the hot arm,
+and the JIT-lowered `PrimOp3::TablePut` — which `sieve` is a benchmark *of* — was never
+emitted. Nothing errored. No test failed.
+
+**What hid it.** The **2-ary** `resolve_prim` already follows its wrapper through
+`passthrough_arm`, so `table/has?` in the very same loop went on inlining as `Prim2`. One
+`BROOD_JIT_DUMP_IR` dump of `mark` shows both states side by side:
+
+```
+before:  … GlobalIc Local Const Call  Pop Local Prim2SlotSlot SelfCall
+after:   … GlobalIc Local Const Prim3 Pop Local Prim2SlotSlot SelfCall
+```
+
+The arm lowered to native in both cases, which is why no bail trace and no JIT-vs-no-JIT
+ratio flagged it — the loop was native, it just called out per element.
+
+**The fix** mirrors the 2-ary wrapper-following into `resolve_prim3`. Two properties are
+inherited rather than added: `head` stays the *original* call head, so any deopt dispatches
+the real wrapper with bit-identical errors, and the existing epoch `guard` re-validates on
+every `global_epoch` change, so rebinding `table/put` or `%table-put` cleanly drops the
+inline. The identity argument map is **required, not applied** — `Node::Prim3` carries no
+permutation (unlike `Node::Prim2`'s `map`), so a wrapper that reorders its parameters must
+decline; inlining one would store the value under the wrong key. That case is the second half
+of the guard.
+
+`make ab`, best-of-7 against the parent commit: **457 → 68 ms, −85.1%**, with all 29 other
+rows noise. (The sweep flagged `spawn-live` +5.4%; it does not survive — that row executes no
+table code, and a base-vs-base control reads a 7.5% floor with the new binary landing
+*between* two base samples. Reversing the arm order alone moved the verdict from +8.9% to
++4.5%.)
+
+**A second instance, found immediately by the gate this prompted.** Writing
+`every_inlinable_head_still_reaches_its_primitive` — one table asserting that each spelling a
+program actually writes (`+`, `nth`, `first`, `table/get`, …) still reaches its primitive —
+failed on its first run: **`table/get` did not resolve either.** Different cause, same class.
+Its wrapper is `(defn get (t k &optional default) (%table-get t k default))`, and an
+`&optional` head is not a thin wrapper — it binds a default before forwarding, so a 2-arg
+`(table/get t k)` had no passthrough to follow. `table/has?` beside it, a plain 2-ary forward,
+never lost its inline, which is exactly what kept the gap invisible.
+
+Fixed **in Brood, not the compiler**: `get` becomes two arity clauses, so the 2-arg arm is a
+pure forward. `%table-get` is `Arity::range(2, 3)` documented as "default (nil if omitted)", so
+the 2-arg call is exactly equivalent and the existing resolver follows it unchanged.
+
+**The class matters more than the instance.** This is the third time a rename has silently
+retired an inline — KI-44 was the same shape on `sqrt`, and its fix note names the same
+requirement ("a **bare** head resolving to a **PRELUDE** closure"). A call-site inline keyed
+on how a name is *spelled* or where it is *bound* is a performance cliff that no test, no
+checker and no CI job can see, because the program stays correct. The structural,
+wrapper-following resolutions (`sqrt`, the 2-ary prims, and now this) are the shape that
+survives a rename; a direct-binding check is the shape that does not.
 
 ---
 

@@ -56,14 +56,16 @@ Your own port type is a `defrecord` plus an `impl Port` for it — `write`,
 ;; This impl is what keeps `%write-out`, `fn-port`, and every hand-written `(fn (s) …)`
 ;; working unchanged.
 (impl Port :fn (write [f s] (f s)))
-
 ;; A NATIVE 1-arg sink is a port too. The prelude's default `*out*`/`*err*` are the
 ;; primitives `%write-out`/`%write-err`, whose `type-of` is `:native`, not `:fn` — so
 ;; without this `(io/port? *err*)` was false for the very ports the language ships with.
 ;; That made `(io/puts "…" :to *err*)` decline the target and print `:to #<native
 ;; %write-err>` as two more values. Every test passed anyway, because `with-err-str`
 ;; rebinds `*err*` to a Brood closure, which is `:fn` — the default was the broken case
-;; and the tests never exercised it.
+;; and the tests never exercised it. What it cost in practice: every `:to *err*` in the
+;; stdlib — `log`, the test runner, `supervisor`, `repl`, `telemetry`, `format` — wrote to
+;; stdout with that suffix, which is how it surfaced (a checker test asserting on warnings
+;; read from stderr saw none).
 (impl Port :native (write [f s] (f s)))
 
 (defn port? (x)

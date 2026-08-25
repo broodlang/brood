@@ -88,7 +88,22 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
     ;; setenv, so this needs a child `brood`. When no runner binary is built
     ;; (a plain `cargo test` need not have one) the case can only be skipped —
     ;; `BADENV=$'\xff\xfe' brood -- probe.blsp` is the equivalent by hand.
-    (let (bin (first (filter file/exists? ["target/release/brood" "target/debug/brood"])))
+    ;; The candidate must be THIS build, not merely present. `target/release/brood` is
+    ;; whatever `make gcstress` / `make breakagetests` last left there, which can be
+    ;; arbitrarily old — on 2026-08-25 it was five hours and a stdlib rename stale, so the
+    ;; child ran a runtime with no `io/print` and the case failed with `unbound symbol`
+    ;; while the code under test was fine. `stdlib-id` is documented as identical for every
+    ;; binary built from one tree, so it is exactly the "same build" question.
+    (let (this-build (stdlib-id)
+          same-build? (fn (bin)
+                        (let (p (str "/tmp/brood-bid-" (os-pid) ".blsp")
+                              _ (file/spit p "(io/print (stdlib-id))")
+                              r (%os-cmd bin [p])
+                              _ (file/rm p))
+                          (= (get r :stdout) this-build)))
+          bin (first (filter same-build?
+                       (filter file/exists?
+                         ["target/release/brood" "target/debug/brood"]))))
       (if (nil? bin)
         (is true)
         (let (probe (str "/tmp/brood-envall-probe-" (os-pid) ".blsp")
