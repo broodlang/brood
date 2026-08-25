@@ -6,7 +6,7 @@
 ;; each worker and `collect-units` reaps a `[:down …]` into failing results.
 ;;
 ;; We reproduce the death deterministically (no race needed): a unit whose
-;; thunk throws when `run-unit` calls it — `run-test` evaluates `((second t))`
+;; thunk throws when `run-unit` calls it — `run` evaluates `((second t))`
 ;; for the failure list with no `try` around it, so the throw propagates out of
 ;; the worker and kills it before `(send me …)`. The monitor fires `[:down …]`,
 ;; and the collector must come back with a failing result instead of blocking.

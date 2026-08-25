@@ -371,7 +371,7 @@ and it must be loaded before this `defrecord`.
 
 ;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
 ;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
-;; running them for side effects (`(map require-one mods)`, `(map run-test ts)`)
+;; running them for side effects (`(map require-one mods)`, `(map run ts)`)
 ;; works as it always has. Fusion is **opt-in**, via `lmap`/`lfilter`/`lkeep`/
 ;; `lremove` composed with `->>`. Each returns a lazy seq-view (`%seqview`): a
 ;; non-materialising value carrying a transducer over a source. Chaining

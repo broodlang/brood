@@ -24,7 +24,7 @@
 ;;       ([:task-done t v]    (when (= t h) (use v)))
 ;;       ([:task-error t msg] (when (= t h) (oops msg)))
 ;;       ([:task-timeout t]   (when (= t h) (gave-up))))
-;;     (cancel-task h)        ; stop it early (no reply is sent)
+;;     (cancel h)        ; stop it early (no reply is sent)
 ;;
 ;;     ;; sync: block this process for the value, or throw on error/timeout
 ;;     (await (fn () (heavy-compute)) 2000)
@@ -33,7 +33,7 @@
   "Run a thunk off the current process, with an optional timeout and cancellation.
 `task` is asynchronous — it returns a *handle* and delivers
 `[:task-done handle value]` / `[:task-error handle message]` / `[:task-timeout
-handle]` to `:reply-to` (default the caller); `cancel-task` stops a task early;
+handle]` to `:reply-to` (default the caller); `cancel` stops a task early;
 `await` is the synchronous form that blocks for the value (throwing on error or
 timeout). Pure Brood over spawn / receive / exit (ADR-006).")
 
@@ -73,13 +73,13 @@ return a *handle* (the coordinator pid). When `thunk` finishes, `:reply-to`
 hard-killed after that long and `:reply-to` gets `[:task-timeout handle]`
 instead. Every reply is tagged with `handle`, so a reply from a finished or
 cancelled task is easy to ignore — match on the handle you last started. Cancel
-early with `cancel-task`."
+early with `cancel`."
   (let (o (if (empty? opts) {} (first opts))
         reply-to (or (get o :reply-to) (self))
         timeout (get o :timeout))
     (spawn (task-run thunk reply-to timeout))))
 
-(defn cancel-task (handle)
+(defn cancel (handle)
   "Stop the task identified by `handle` early: its worker is hard-killed and no
 reply is delivered. A no-op if the task already finished (its handle is a dead
 pid). Returns nil."
@@ -88,12 +88,12 @@ pid). Returns nil."
 
 (defn latest (prev thunk & opts)
   "Start `thunk` as the *latest* job of its kind, superseding an in-flight one:
-`cancel-task` the `prev` handle (nil = none running) so its reply never arrives, then
+`cancel` the `prev` handle (nil = none running) so its reply never arrives, then
 `(task thunk & opts)` and return the new handle. The 'only the most recent matters'
 pattern — a debounced search, an interactive eval re-run, a live recheck — where a new
 trigger should abandon the previous job rather than queue behind it. Store the returned
 handle and pass it back as `prev` on the next trigger."
-  (when (not (nil? prev)) (cancel-task prev))
+  (when (not (nil? prev)) (cancel prev))
   (apply task thunk opts))
 
 (defn await (thunk timeout-ms)

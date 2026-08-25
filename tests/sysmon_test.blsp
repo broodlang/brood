@@ -120,7 +120,7 @@ worker's mailbox so it can't satisfy a later test's receive."
 
 (describe "telemetry watch-runtime"
   :isolated (test "kernel events flow through the telemetry seam as [:runtime …] events"
-    (telemetry/start-telemetry)
+    (telemetry/start)
     (let (me (self))
       (telemetry/attach :t-spawn
         [:runtime :spawn]
@@ -137,4 +137,4 @@ worker's mailbox so it can't satisfy a later test's receive."
         (assert= nil (sysmon-wait-disarm 100)))
       (telemetry/detach :t-spawn)
       (telemetry/detach :t-exit)
-      (telemetry/stop-telemetry))))
+      (telemetry/stop))))

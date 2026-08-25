@@ -907,7 +907,7 @@ the test rather than hanging the run."
 ;; Run one (name thunk) and produce its result (group name fails ms). The thunk
 ;; returns its own failure list (it catches its first failing assertion), sharing
 ;; no mutable state — so running these concurrently is safe.
-(defn run-test (group t)
+(defn run (group t)
   "Run one `(name thunk meta)` test `t` in group `group` and return its result tuple `(group name fails ms false where)`. A `:skip`-marked test is not run — it yields a skipped result instead. The thunk carries its own failures, so this is safe to run concurrently. Reports the result via `trace-result`."
   (if (test-skip? t)
     (trace-result (test-skipped-result group t))
@@ -916,10 +916,10 @@ the test rather than hanging the run."
           ms (- (os/now) start))
       (trace-result (list group (first t) fails ms false (test-where t))))))
 
-;; Like run-test, but evaluate the body with a private copy of the global
+;; Like run, but evaluate the body with a private copy of the global
 ;; bindings (`%isolate`): an :isolated test's `def`s are rolled back when it
 ;; finishes, so they can't leak to any other test. Used only in the isolated phase.
-(defn- run-test-fresh
+(defn- run-fresh
   (group t)
   (if (test-skip? t)
     (trace-result (test-skipped-result group t))
@@ -932,8 +932,8 @@ the test rather than hanging the run."
 ;; what a worker does (for a :parallel/:serial unit) and what the runner does
 ;; directly for an :isolated unit.
 (defn run-unit (unit)
-  "Run every test in `unit` (a `(mode group tests)` tuple) in order via `run-test`, returning the list of their results. What a worker evaluates for a `:parallel`/`:serial` unit, and what the runner does directly for an `:isolated` one."
-  (let (group (second unit)) (map (fn (t) (run-test group t)) (seq/third unit))))
+  "Run every test in `unit` (a `(mode group tests)` tuple) in order via `run`, returning the list of their results. What a worker evaluates for a `:parallel`/`:serial` unit, and what the runner does directly for an `:isolated` one."
+  (let (group (second unit)) (map (fn (t) (run group t)) (seq/third unit))))
 
 ;; --- the two phases ----------------------------------------------------------
 ;; Parallel phase: spawn one worker per non-isolated unit (each worker captures
@@ -1195,7 +1195,7 @@ the test rather than hanging the run."
 ; -> results
 (defn- run-unit-fresh
   (unit)
-  (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (seq/third unit))))
+  (let (group (second unit)) (map (fn (t) (run-fresh group t)) (seq/third unit))))
 ;; ─── The test runner ────────────────────────────────────────────────────────
 ;; The runner is one long-lived process gathering every step's results. Its
 ;; per-step transients — worker-result copies, the `append` spine, spawn/monitor
@@ -1398,7 +1398,7 @@ the test rather than hanging the run."
 ;; `run-tests-structured`. Same per-file scoping (so a long-lived `nest mcp` hot-reload
 ;; image doesn't accumulate every file's code across repeated run-tests calls), but
 ;; returns `{:total :passed :failed :failed-assertions :ms :results [...]}` instead of
-;; printing + raising. Backs `run-project-tests-structured` (the `nest mcp` run-tests tool).
+;; printing + raising. Backs `run-tests-structured` (the `nest mcp` run-tests tool).
 (defn run-tests-scoped-structured (loaders & opts)
   "Like `run-tests-scoped`, but returns the structured result `{:total :passed :failed :failed-assertions :ms :results [...]}` instead of printing and raising — the memory-bounded counterpart of `run-tests-structured`. Backs the `nest mcp` run-tests tool."
   (test-apply-opts opts)

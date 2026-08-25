@@ -416,7 +416,7 @@
 
   (test "eager map runs side effects; a lazy view defers them until realised"
     ;; The regression guard. Eager `map` must EXECUTE its fn (the loader and the
-    ;; test-runner rely on `(map require-one …)` / `(map run-test …)` for effect).
+    ;; test-runner rely on `(map require-one …)` / `(map run …)` for effect).
     ;; A lazy view must NOT run its fn until something realises it.
     ; eager → runs now
     (assert= (with-out-str (map io/write (range 5))) "01234")

@@ -1010,7 +1010,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // *Process List*), so a `nest release` binary needs it baked in.
     embedded_module!("proctree", "std/tool/proctree.blsp"),
     // Run a thunk off the current process with an optional timeout + cancel
-    // (ADR-006): `task` (async, tagged-reply handle), `cancel-task`, and the
+    // (ADR-006): `task` (async, tagged-reply handle), `cancel`, and the
     // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
     // version of the editor's hand-rolled async-eval watchdog. Opt-in.
     embedded_module!("task", "std/task.blsp"),
@@ -1042,7 +1042,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // for-each/pipe/to-socket. Foundation for the HTTP streaming layer.
     embedded_module!("stream", "std/stream.blsp"),
     // URL encoding/decoding and parsing: percent-encode/decode, query-string
-    // encode/decode, parse-url, build-url. Pure Brood over string primitives.
+    // encode/decode, parse-url, build. Pure Brood over string primitives.
     embedded_module!("url", "std/url.blsp"),
     // CSV parsing and emitting: csv-parse, csv-parse-maps, csv-emit,
     // csv-emit-maps. Handles quoted fields, escaped quotes, \r\n endings.
