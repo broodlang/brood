@@ -193,7 +193,7 @@
 
   (test "RFC 4231 §4.2 — HMAC-SHA-256 test case 1"
     ;; key = 20 bytes of 0x0b, data = "Hi There"
-    (assert= (hash/hmac-sha256 (utf8-bytes->string (encoding/hex-decode-bytes "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"))
+    (assert= (hash/hmac-sha256 (string/bytes-> (encoding/hex-decode-bytes "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"))
                "Hi There")
       "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"))
 

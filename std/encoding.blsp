@@ -35,15 +35,15 @@ For pure ASCII input the string and byte forms agree.")
 
 (defn- encoding-hex-encode-codes
   (bs codes)
-  (utf8-bytes->string (encoding-hex-encode-loop (seq bs) codes nil)))
+  (string/bytes-> (encoding-hex-encode-loop (seq bs) codes nil)))
 
 (defn hex-encode (s)
   "Encode string `s` as lowercase hexadecimal (each UTF-8 byte → 2 hex chars)."
-  (encoding-hex-encode-codes (string->utf8-bytes s) encoding-hex-lower-codes))
+  (encoding-hex-encode-codes (string/->bytes s) encoding-hex-lower-codes))
 
 (defn hex-encode-upper (s)
   "Encode string `s` as uppercase hexadecimal (each UTF-8 byte → 2 hex chars)."
-  (encoding-hex-encode-codes (string->utf8-bytes s) encoding-hex-upper-codes))
+  (encoding-hex-encode-codes (string/->bytes s) encoding-hex-upper-codes))
 
 (defn hex-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
@@ -94,7 +94,7 @@ UTF-8-encodes a string."
 (defn hex-decode (s)
   "Decode a hexadecimal string → original string, or nil if the input is invalid."
   (let (bs (encoding-hex-decode-bytelist s))
-    (if (= bs :invalid) nil (utf8-bytes->string bs))))
+    (if (= bs :invalid) nil (string/bytes-> bs))))
 
 (defn hex-decode-bytes (s)
   "Decode a hexadecimal string → a `bytes` value, or nil if invalid.
@@ -119,7 +119,7 @@ binary payload (digests, salts, wire bytes)."
 ;; Encode a byte sequence to base64 using the given 64-entry code-point vector.
 (defn- encoding-b64-encode
   (bytes codes)
-  (utf8-bytes->string (encoding-b64-enc-loop (seq bytes) codes nil)))
+  (string/bytes-> (encoding-b64-enc-loop (seq bytes) codes nil)))
 
 (defn- encoding-b64-enc-loop
   (bytes codes acc)
@@ -152,11 +152,11 @@ binary payload (digests, salts, wire bytes)."
 
 (defn base64-encode (s)
   "Encode string `s` as standard Base64 (RFC 4648, `+/` alphabet, `=` padding)."
-  (encoding-b64-encode (string->utf8-bytes s) encoding-b64-std-codes))
+  (encoding-b64-encode (string/->bytes s) encoding-b64-std-codes))
 
 (defn base64-url-encode (s)
   "Encode string `s` as URL-safe Base64 (RFC 4648 §5, `-_` alphabet, `=` padding)."
-  (encoding-b64-encode (string->utf8-bytes s) encoding-b64-url-codes))
+  (encoding-b64-encode (string/->bytes s) encoding-b64-url-codes))
 
 (defn base64-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
@@ -250,12 +250,12 @@ UTF-8 form."
 (defn base64-decode (s)
   "Decode a standard Base64 string → original string, or nil on invalid input."
   (let (bs (encoding-b64-decode s encoding-b64-std-vals))
-    (if (= bs :invalid) nil (utf8-bytes->string bs))))
+    (if (= bs :invalid) nil (string/bytes-> bs))))
 
 (defn base64-url-decode (s)
   "Decode a URL-safe Base64 string → original string, or nil on invalid input."
   (let (bs (encoding-b64-decode s encoding-b64-url-vals))
-    (if (= bs :invalid) nil (utf8-bytes->string bs))))
+    (if (= bs :invalid) nil (string/bytes-> bs))))
 
 (defn base64-decode-bytes (s)
   "Decode a standard Base64 string → a `bytes` value, or nil on invalid input.

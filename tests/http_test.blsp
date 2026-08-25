@@ -19,7 +19,7 @@
   (test "a body after the blank line is captured"
     (let (r (parse-request "POST /x HTTP/1.0\r\nContent-Length: 5\r\n\r\nhello"))
       ;; :body is a bytes value (raw); decode it for a text body
-      (assert= (utf8-bytes->string (get r :body)) "hello")))
+      (assert= (string/bytes-> (get r :body)) "hello")))
   (test "a headerless request (no blank-line terminator) parses, not throws"
     ;; the whole thing is the head, body empty — regression: this used to do
     ;; (subbytes raw 0 -1) and throw.
@@ -30,20 +30,20 @@
 
 (describe "http: response rendering"
   (test "status line, Content-Length, and body (render-response is an iolist — ADR-139)"
-    (let (s (utf8-bytes->string (bytes/concat (render-response (ok "<p>hi</p>")))))
+    (let (s (string/bytes-> (bytes/concat (render-response (ok "<p>hi</p>")))))
       (is (includes? s "HTTP/1.0 200 OK"))
       (is (includes? s "Content-Length: 9"))
       (is (includes? s "\r\n\r\n<p>hi</p>"))))
   (test "Content-Length is the body's BYTE count, not codepoints (the UTF-8 bug)"
     ;; "héllo ☃" = 7 codepoints, 10 UTF-8 bytes — the old string-length render
     ;; said 7 and spec-honoring clients truncated the body.
-    (let (s (utf8-bytes->string (bytes/concat (render-response (text-response "héllo ☃"))))
+    (let (s (string/bytes-> (bytes/concat (render-response (text-response "héllo ☃"))))
           b (bytes/concat (render-response {:status 200 :body (bytes 1 2 3)})))
       (is (includes? s "Content-Length: 10"))
       ;; a binary bytes body rides the plain-response path verbatim
       (is (= (match b ((bytes _ & r) (bytes/slice b (- (count b) 3))) (_ :no)) (bytes 1 2 3)))))
   (test "not-found renders a 404"
-    (is (includes? (utf8-bytes->string (bytes/concat (render-response (not-found))))
+    (is (includes? (string/bytes-> (bytes/concat (render-response (not-found))))
           "404 Not Found"))))
 
 (describe "http: CR/LF can never be spliced into the wire format"
@@ -109,7 +109,7 @@
 
 (describe "http: streaming responses (the connection-handoff seam)"
   (test "render-head emits the status line + custom headers, no Content-Length"
-    (let (h (utf8-bytes->string (bytes/concat (render-head 200 {"Content-Type" "text/event-stream"}))))
+    (let (h (string/bytes-> (bytes/concat (render-head 200 {"Content-Type" "text/event-stream"}))))
       (is (includes? h "HTTP/1.0 200 OK"))
       (is (includes? h "Content-Type: text/event-stream"))
       (is (includes? h "\r\n\r\n"))
@@ -135,7 +135,7 @@
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp/connect "127.0.0.1" port))
           (tcp/send c "GET /events HTTP/1.0\r\nHost: localhost\r\n\r\n")
-          (let (resp (utf8-bytes->string (drain c)))
+          (let (resp (string/bytes-> (drain c)))
             (tcp/close c)
             (is (includes? resp "text/event-stream"))
             (is (includes? resp "data: one"))
@@ -229,7 +229,7 @@
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp/connect "127.0.0.1" port))
           (tcp/send c "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
-          (let (resp (utf8-bytes->string (drain c)))
+          (let (resp (string/bytes-> (drain c)))
             (tcp/close c)
             (is (includes? resp "200 OK"))
             (is (includes? resp "<h1>brood</h1>")))))))
@@ -252,7 +252,7 @@
         ;; the server is still alive and serves a normal request
         (let (c (tcp/connect "127.0.0.1" port))
           (tcp/send c "GET / HTTP/1.0\r\n\r\n")
-          (let (resp (utf8-bytes->string (drain c)))
+          (let (resp (string/bytes-> (drain c)))
             (tcp/close c)
             (is (includes? resp "200 OK"))))))))
 
@@ -278,7 +278,7 @@
             ["POST /echo HTTP/1.0\r\nHost: localhost\r\n"
               "Content-Length: 3\r\n\r\n"
               (bytes 255 128 65)])
-          (let (resp (utf8-bytes->string (drain c)))
+          (let (resp (string/bytes-> (drain c)))
             (tcp/close c)
             (is (includes? resp "200 OK"))
             ;; the body round-tripped as the exact bytes, not U+FFFD (65533)
@@ -312,7 +312,7 @@
 ; added
 (describe "http: request building (http/request-headers)"
   (test "adds Host / User-Agent / Connection, and Content-Length when there's a body"
-    (let (h (http/request-headers {:host "localhost"} (string->utf8-bytes "abc") nil))
+    (let (h (http/request-headers {:host "localhost"} (string/->bytes "abc") nil))
       (assert= (get h "Host") "localhost")
       (assert= (get h "User-Agent") "brood")
       (assert= (get h "Connection") "close")
@@ -335,7 +335,7 @@
                    (fn (req)
                      (ok (str (get req :method)
                            "|"
-                           (utf8-bytes->string (get req :body))
+                           (string/bytes-> (get req :body))
                            "|"
                            (get (get req :headers) "x-token"))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
@@ -403,7 +403,7 @@
           (tcp/send c "GET /drip HTT")
           (tcp/send c "P/1.0\r\nHost: x\r\n\r")
           (tcp/send c "\n")
-          (let (resp (utf8-bytes->string (drain c)))
+          (let (resp (string/bytes-> (drain c)))
             (tcp/close c)
             (is (includes? resp "200 OK"))
             (is (includes? resp "/drip")))))))

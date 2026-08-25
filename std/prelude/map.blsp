@@ -138,9 +138,6 @@ can.)"
       (if (= a :%contains-miss-a)
         (not (= (map-get m k :%contains-miss-b) :%contains-miss-b))
         true))))
-(defn reduce-kv (f init m)
-  "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
-  (fold (fn (acc p) (f acc (first p) (second p))) init (map-pairs m)))
 
 ;; ---- map: merge / update / nested access -----------------------------------
 ;; All Brood over the kernel ops (`map-assoc`/`map-pairs`) and the surface above
@@ -162,9 +159,6 @@ can.)"
 Works on maps (by key) and vectors (by integer index, which must be in range)."
   (assoc coll k (apply f (get coll k) args)))
 
-(defn zipmap (ks vs)
-  "A map pairing each key in `ks` with the value at the same position in `vs`, stopping at the shorter."
-  (into {} (zip ks vs)))
 
 ;; Nested-map access along a `path` (a sequence of keys). `get-in` walks; missing
 ;; key → default. `assoc-in` rebuilds, coercing a non-map node to `{}` so it can
@@ -239,3 +233,18 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
   ;; `(abs b)` inlined so bare `mod` stays self-sufficient — `abs` now lives in the
   ;; `math` module (ADR-227) and the boot-time prelude cannot require a module.
   (let (r (rem a b)) (if (< r 0) (+ r (if (< b 0) (- b) b)) r)))
+
+
+;; `hash-map` stays core: the quasiquote lowering (eval/macros.rs) emits it as the
+;; call head for a `{…}` map literal inside a template, so every macro that builds a
+;; map depends on the bare name existing.
+(defn hash-map (& more)
+  "A map from alternating key/value arguments (last wins on duplicate keys)."
+  (apply %hash-map more))
+
+
+;; `zipmap` stays core: a prelude sequence helper builds a map with it, and `map` is
+;; not force-loaded at boot.
+(defn zipmap (ks vs)
+  "A map pairing each key in `ks` with the value at the same position in `vs`, stopping at the shorter."
+  (into {} (zip ks vs)))

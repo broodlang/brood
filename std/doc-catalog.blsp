@@ -87,8 +87,6 @@
    "char->int" :strings
    "string/char-at" :strings
    "check-allow" :meta
-   "clipboard-get" :system
-   "clipboard-set!" :system
    "cmp-ge" :math
    "cmp-gt" :math
    "cmp-le" :math
@@ -160,7 +158,6 @@
    "disj" :sets
    "display-width" :strings
    "dissoc" :maps
-   "dissoc-in" :maps
    "distinct-step" :collections
    "doc" :meta
    "doc-search" :meta
@@ -219,10 +216,8 @@
    "string/grapheme-at" :strings
    "string/grapheme-count" :strings
    "has-at-least?" :predicates
-   "hash-map" :maps
    "identity" :functions
    "if-let" :control
-   "image-thumb" :system
    "impl" :meta
    "impl-app?" :predicates
    "impl-fn-arity" :meta
@@ -338,7 +333,6 @@
    "record-register" :maps
    "record?" :predicates
    "reduce" :collections
-   "reduce-kv" :maps
    "ref" :processes
    "ref?" :predicates
    "register" :processes
@@ -413,7 +407,6 @@
    "string/->list" :strings
    "string->number" :convert
    "string->symbol" :strings
-   "string->utf8-bytes" :bytes
    "string/length" :strings
    "string/normalize" :strings
    "string/repeat" :strings
@@ -448,7 +441,6 @@
    "update" :maps
    "update-in" :maps
    "string/upper" :strings
-   "utf8-bytes->string" :bytes
    "vals" :maps
    "vec" :convert
    "vector" :collections
@@ -463,8 +455,10 @@
    "with-split-else" :control
    "zero?" :predicates
    "zip-acc" :collections
+      "hash-map" :maps
+   "dissoc-in" :maps
    "zipmap" :maps
-   ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
+;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
    "but-last" :collections
    "drop-while" :collections
    "mapcat" :collections
@@ -486,7 +480,6 @@
    "queue?" :predicates
    "register-protocol" :meta
    "reserved-package-name?" :meta
-   "set-image-source!" :system
    "tap" :control
    "then" :control})
 

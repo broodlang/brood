@@ -46,10 +46,10 @@
     (is (= (bytes/concat #b"ab" (bytes 67) #b"\xff") #b"abC\xff"))
     (is (= (bytes/concat) #b"")))
   (test "string<->bytes is UTF-8"
-    (is (= (string->utf8-bytes "AB") #b"AB"))
-    (is (= (string->utf8-bytes "é") #b"\xc3\xa9"))
-    (is (= (utf8-bytes->string #b"\xc3\xa9") "é"))
-    (is (= (utf8-bytes->string (string->utf8-bytes "round-trip ✓")) "round-trip ✓")))
+    (is (= (string/->bytes "AB") #b"AB"))
+    (is (= (string/->bytes "é") #b"\xc3\xa9"))
+    (is (= (string/bytes-> #b"\xc3\xa9") "é"))
+    (is (= (string/bytes-> (string/->bytes "round-trip ✓")) "round-trip ✓")))
   (test "bytes->list"
     (is (= (bytes/->list (bytes 1 2 3)) (list 1 2 3)))))
 
@@ -88,16 +88,16 @@
     (is (= (match (bytes 1 2 3 4) ((bytes a b & rest) [a b rest]) (_ :no))
           [1 2 (bytes 3 4)])))
   (test "literal prefix then capture the tail"
-    (is (= (match #b"GET /index" ((bytes #b"GET " & p) (utf8-bytes->string p)) (_ :other))
+    (is (= (match #b"GET /index" ((bytes #b"GET " & p) (string/bytes-> p)) (_ :other))
           "/index"))
     (is (= (match #b"POST /x"
-             ((bytes #b"GET " & p) [:get (utf8-bytes->string p)])
-             ((bytes #b"POST " & p) [:post (utf8-bytes->string p)])
+             ((bytes #b"GET " & p) [:get (string/bytes-> p)])
+             ((bytes #b"POST " & p) [:post (string/bytes-> p)])
              (_ :other))
           [:post "/x"])))
   (test "dynamic size — a length byte then that many bytes (TLV)"
     (is (= (match (bytes 3 65 66 67 99 100)
-             ((bytes len (body len) & rest) [len (utf8-bytes->string body) rest])
+             ((bytes len (body len) & rest) [len (string/bytes-> body) rest])
              (_ :no))
           [3 "ABC" (bytes 99 100)])))
   (test "fixed length is enforced (no & rest means exact)"
@@ -139,7 +139,7 @@
     (is (= (match (bytes 9 9 9 9 7) ((bytes (_ :u32) x) x) (_ :no)) 7)))
   (test "a typed length prefix drives a sized segment (TLV with :u16 length)"
     (is (= (match (bytes/concat [(bytes/int-> 3 2) #b"ABC" (bytes 9)])
-             ((bytes (len :u16) (body len) & rest) [len (utf8-bytes->string body) rest])
+             ((bytes (len :u16) (body len) & rest) [len (string/bytes-> body) rest])
              (_ :no))
           [3 "ABC" (bytes 9)])))
   (test "non-linear: a repeated typed binder requires an equal value"
@@ -149,7 +149,7 @@
     (is (= (match (bytes/concat [(bytes 127 2) (bytes/int-> 5 2) #b"hello" #b"!"])
              ((bytes 127 kind (len :u16) (payload len) & more) [kind
                                                                  len
-                                                                 (utf8-bytes->string payload)
+                                                                 (string/bytes-> payload)
                                                                  more])
              (_ :no))
           [2 5 "hello" (bytes 33)])))
@@ -186,7 +186,7 @@
       (spawn (fn ()
                (send parent
                  (match (bytes/concat [(bytes/int-> 7 2) #b"payload"])
-                   ((bytes (n :u16) & body) [n (utf8-bytes->string body)])
+                   ((bytes (n :u16) & body) [n (string/bytes-> body)])
                    (_ :no)))))
       (is (= (receive (m m)) [7 "payload"])))))
 
