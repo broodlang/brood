@@ -56,6 +56,13 @@ Your own port type is a `defrecord` plus an `impl Port` for it — `write`,
 ;; This impl is what keeps `%write-out`, `fn-port`, and every hand-written `(fn (s) …)`
 ;; working unchanged.
 (impl Port :fn (write [f s] (f s)))
+;; …and the same for a NATIVE 1-arg sink, which is not a `:fn`: `type-of` reports a Rust
+;; primitive as `:native`, so the `:fn` impl above does not match it. That matters because
+;; `*err*` IS one — `(def *err* %write-err)` — so without this every `:to *err*` in the
+;; stdlib (log, the test runner, supervisor, repl, telemetry) failed `port?`, and
+;; `split-target` then read the trailing pair as ordinary values: the text went to *stdout*
+;; with a literal ` :to #<native %write-err>` appended instead of to stderr.
+(impl Port :native (write [f s] (f s)))
 
 (defn port? (x)
   "True if `x` can be written to — it has a `Port` impl (a 1-arg sink fn, a port record,
