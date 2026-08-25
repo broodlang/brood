@@ -57,6 +57,31 @@ fn run_for_exits_nonzero_when_the_program_dies() {
         .expect("run nest");
     assert_eq!(out.status.code(), Some(0), "a clean run must exit 0");
 
+    // The instant-exit case, which is what makes the spawn/monitor race reachable: the
+    // narrower the program, the likelier it finishes before the driver has attached. With
+    // `%spawn` + `monitor` this printed `[exit] :noproc` and exited 1 — a program that
+    // SUCCEEDED reporting failure — at roughly 1 run in 6 under load. Asserting the printed
+    // reason as well as the code is deliberate: the code alone says "something went wrong",
+    // while `:noproc` vs `:normal` says the driver never saw the real exit.
+    std::fs::write(dir.join("instant.blsp"), "nil\n").unwrap();
+    for _ in 0..5 {
+        let out = nest()
+            .current_dir(&dir)
+            .args(["run", "--for", "5s", "instant.blsp"])
+            .output()
+            .expect("run nest");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            text.contains("[exit] :normal"),
+            "an instant-exit program must report its real reason, not :noproc — got: {text}"
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "an instant-exit program must exit 0 (stdout: {text})"
+        );
+    }
+
     std::fs::write(
         dir.join("spin.blsp"),
         "(defn spin () (sleep 20) (spin))\n(spin)\n",
