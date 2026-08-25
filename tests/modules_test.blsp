@@ -35,16 +35,14 @@
 (defn mt-conc-feature (i) (str "mt-conc-feature-" i))
 
 (describe "modules: concurrent provide (KI-22 class)"
-  :isolated
-  (test "no feature is lost when many processes provide at once"
+  :isolated (test "no feature is lost when many processes provide at once"
     (let (n 120)
       (concurrently n (fn (i) (provide (symbol (mt-conc-feature i)))))
       (assert= (count (seq/remove (fn (i) (contains? *features* (mt-conc-feature i))) (range n))) 0))))
 
 ;; :serial — these mutate the shared *features* global, so run them one-at-a-time.
 (describe "modules: includes? / provide / require"
-  :serial
-  (test "includes?" (is (includes? (list 1 2 3) 2)) (refute (includes? (list 1 2 3) 9)))
+  :serial (test "includes?" (is (includes? (list 1 2 3) 2)) (refute (includes? (list 1 2 3) 9)))
   (test "provide records a feature idempotently"
     (provide 'demo-feature)
     (is (contains? *features* "demo-feature"))
@@ -155,8 +153,7 @@
 ;; An import that shadows a prelude/root name is allowed but WARNS. Providers are set up with
 ;; `%load-string` (which `provide`s them, so a later `(:use …)` finds them).
 (describe "modules: (:use …) import clashes and shadows"
-  :isolated
-  (test "importing two modules that share a name is fine until the name is used bare"
+  :isolated (test "importing two modules that share a name is fine until the name is used bare"
     (%load-string "(defmodule clpa) (defn thing (x) (list :a x))")
     (%load-string "(defmodule clpb) (defn thing (x) (list :b x))")
     ;; both :used, shared name NEVER referenced -> loads clean (no eager clash)
@@ -202,8 +199,7 @@
 ;; partial import; `:only` (lazy) stays cycle-safe. File-based (require loads from
 ;; the load-path), like the circular-require test above.
 (describe "modules: circular :use"
-  :serial
-  (test "a circular :use refer-all errors clearly; :only is cycle-safe"
+  :serial (test "a circular :use refer-all errors clearly; :only is cycle-safe"
     (let (dir "/tmp"
           a1 (str dir "/cyca.blsp")
           b1 (str dir "/cycb.blsp")

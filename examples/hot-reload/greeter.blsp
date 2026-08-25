@@ -3,4 +3,4 @@
 ;; the global, and the *next* (greet) call from the running ticker picks it up.
 (defmodule greeter "The hot-reloadable greeting — re-loading this file rebinds the global `greet`.")
 
-(defn greet () (println "hello"))
+(defn greet () (io/puts "hello"))

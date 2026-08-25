@@ -140,9 +140,7 @@
     (cc-spawn-loopers parent (rest ks))))
 
 (describe "capturing closures across processes"
-  :isolated
-
-  (test "a captured closure round-trips through send and applies on the receiver"
+  :isolated (test "a captured closure round-trips through send and applies on the receiver"
     (let (me (self) w (spawn (cc-apply-worker me)))
       (send w [(make-adder 1000) 5])
       (assert= (receive) 1005)))

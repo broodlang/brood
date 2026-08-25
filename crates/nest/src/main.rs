@@ -847,14 +847,14 @@ fn run_main(cli: Cli) {
                 "(require-one 'stdimage) ",
                 "(let (r (stdimage/build)) ",
                 "  (if (nil? r) ",
-                "    (println \"no cache directory (set XDG_CACHE_HOME or HOME)\") ",
-                "    (println \"nest:  \" (second r) \" bindings -> \" (first r)))) ",
+                "    (io/puts \"no cache directory (set XDG_CACHE_HOME or HOME)\") ",
+                "    (io/puts \"nest:  \" (second r) \" bindings -> \" (first r)))) ",
                 // `brood` runs a FILE, it has no -e; write one and hand it over.
                 "(let (f (path/temp \"brood-stdimage-\") ",
                 "      _ (file/spit f \"(require-one (quote stdimage)) (stdimage/build)\") ",
                 "      code (try (os/run-process \"brood\" [f]) (catch _ nil)) ",
                 "      _ (try (file/rm f) (catch _ nil))) ",
-                "  (println (if (= code 0) \"brood: image built\" ",
+                "  (io/puts (if (= code 0) \"brood: image built\" ",
                 "             \"brood: skipped (no `brood` on PATH — run it there yourself)\")))",
             ),
         ),
@@ -1490,7 +1490,7 @@ fn cmd_run(
         // `nest run FILE`) has always propagated the throw and exited 1.
         let after_clause = match &timed {
             Some((ms, label)) => format!(
-                "(after {} (println \"[stopped after {}]\") true)",
+                "(after {} (io/puts \"[stopped after {}]\") true)",
                 ms,
                 brood::introspect::escape_brood_string(label)
             ),
@@ -1513,7 +1513,7 @@ fn cmd_run(
         format!(
             "(let (_ (trap-exit true) \
                    p (%spawn-link (fn () {}))) \
-                  (receive ([:EXIT ^p reason] (println \"[exit]\" reason) (= reason :normal)) {}))",
+                  (receive ([:EXIT ^p reason] (io/puts \"[exit]\" reason) (= reason :normal)) {}))",
             run_form, after_clause
         )
     } else {
@@ -1542,7 +1542,7 @@ fn cmd_run(
     let check_setup = match file {
         Some(path) => format!(
             "(unless (= (%getenv \"BROOD_NO_CHECK\") \"1\") \
-               (doseq (w (%check-file \"{}\")) (eprintln w))) ",
+               (doseq (w (%check-file \"{}\")) (io/puts w :to *err*))) ",
             brood::introspect::escape_brood_string(path)
         ),
         None => String::new(),
@@ -1651,7 +1651,7 @@ fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>, enhances: O
 /// reference) and ignores MODULE.
 fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
     let code = if all {
-        "(println (docs/document-all))".to_string()
+        "(io/puts (docs/document-all))".to_string()
     } else {
         match module {
             Some(name) => format!(
@@ -1704,7 +1704,7 @@ fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
         GrammarTarget::Emacs => "(grammar/emacs-special-forms)",
         GrammarTarget::TreeSitter => "(grammar/tree-sitter-highlights)",
     };
-    run(interp, &format!("(require-one 'grammar) (println {call})"));
+    run(interp, &format!("(require-one 'grammar) (io/puts {call})"));
 }
 
 /// `nest repl` — project-aware REPL. Inside a project, pre-load every source

@@ -76,8 +76,7 @@
     (assert= {:error "unknown"}
       (with ([:ok a] [:error :no-user])
         [:ok a]
-        :else
-        ([:error :no-user] {:error "unknown"})
+        :else ([:error :no-user] {:error "unknown"})
         ([:error e] {:error e}))))
   (test ":else sees whichever step missed, matched by a later generic clause"
     (assert= {:error :no-card}
@@ -85,8 +84,7 @@
               [:ok b]
               [:error :no-card])
         [:ok b]
-        :else
-        ([:error :no-user] {:error "unknown"})
+        :else ([:error :no-user] {:error "unknown"})
         ([:error e] {:error e}))))
   (test "with no bindings the body runs unconditionally"
     (assert= 42 (with () 42)))
@@ -250,8 +248,7 @@
 
 ;; ---- cross-process: the new forms survive send/spawn like any Brood code ----
 (describe "ergonomics across processes"
-  :isolated
-  (test "a closure using fmt + a letrec loop deep-copies across a send and runs on the receiver"
+  :isolated (test "a closure using fmt + a letrec loop deep-copies across a send and runs on the receiver"
     (let (me (self))
       (spawn (send me
                [:result
@@ -272,8 +269,7 @@
       (assert= {:error :worker-down}
         (with ([:ok v] (receive (r r)))
           [:ok v]
-          :else
-          ([:error e] {:error e})))))
+          :else ([:error e] {:error e})))))
   (test "many workers each send a result; with folds them by fanning in"
     (letrec (spawn-n (fn (n)
                        (when (> n 0)

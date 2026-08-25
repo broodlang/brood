@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn ignores_non_definitions() {
-        assert!(defs("(println \"hi\") 42").is_empty());
+        assert!(defs("(io/puts \"hi\") 42").is_empty());
     }
 
     #[test]

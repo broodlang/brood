@@ -25,17 +25,17 @@
 ;; connect returns the peer's authoritative name@host identity (ADR-073) —
 ;; address the peer by that value, not a bare literal.
 (def srv (connect-retry 30))
-(println "[client] connected to " srv)
+(io/puts "[client] connected to " srv)
 
 ;; 1) Reach :echo by registered name (you don't have its pid yet).
 (send {:name :echo :node srv} [:hi (self)])
 (def remote (receive ([:pong p] p) (after 5000 (throw "no reply from :echo"))))
-(println "[client] got the server's pid: " remote " (pid? " (pid? remote) ")")
+(io/puts "[client] got the server's pid: " remote " (pid? " (pid? remote) ")")
 
 ;; 2) Now address that REMOTE pid directly — location transparency.
 (send remote [:ping (self)])
 (receive
-  ([:pong p] (println "[client] round-trip OK — replied by " p))
+  ([:pong p] (io/puts "[client] round-trip OK — replied by " p))
   (after 5000 (throw "no reply from the remote pid")))
 
-(println "[client] done")
+(io/puts "[client] done")

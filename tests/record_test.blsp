@@ -156,8 +156,7 @@
 ;; Records cross process boundaries as the maps they are — build in a worker, send home,
 ;; read with the accessors and the id (proves the record round-trips per-heap).
 (describe "defrecord: across processes"
-  :isolated
-  (test "a record built in a spawned process survives the send, id and all"
+  :isolated (test "a record built in a spawned process survives the send, id and all"
     (let (me (self))
       (spawn (fn () (send me (point 11 22))))
       (receive

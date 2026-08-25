@@ -81,9 +81,7 @@
 ;; ---- the converted std registries (KI-23), each under concurrent registration ------
 
 (describe "std registries register concurrently without loss"
-  :isolated
-
-  (test "def-face — every concurrently registered face is present"
+  :isolated (test "def-face — every concurrently registered face is present"
     (reg-fan *reg-writers* (fn (i) (def-face (keyword (str "rt/f" i)) {:fg :red})))
     (assert= *reg-writers*
       (count (filter (fn (i) (map? (face (keyword (str "rt/f" i))))) (range *reg-writers*)))))

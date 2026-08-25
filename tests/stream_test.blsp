@@ -243,8 +243,7 @@
 ;; ---- socket stream ----------------------------------------------------------
 
 (describe "from-socket / to-socket"
-  :isolated
-  (test "loopback: write chunks to a socket, read them back as a stream"
+  :isolated (test "loopback: write chunks to a socket, read them back as a stream"
     (let (_me (self)
           ls (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port ls))
@@ -280,9 +279,7 @@
            (proc/list))))
 
 (describe "streams do not leak producer processes"
-  :isolated
-
-  (test "fully consuming exhausted streams of every shape leaves no parked producers"
+  :isolated (test "fully consuming exhausted streams of every shape leaves no parked producers"
     (let (me (stream-test-my-id))
       (defn- stream-test-consume-batch
         (k)

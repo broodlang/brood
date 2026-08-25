@@ -49,7 +49,7 @@ fn bundled_brood_boots_embedded_main_with_cross_module_use() {
             // out of the embedded archive, not the disk load-path.
             (
                 "main",
-                "(defmodule main (:use lib))\n(defn main () (println (greet)))",
+                "(defmodule main (:use lib))\n(defn main () (io/puts (greet)))",
             ),
             ("lib", "(defmodule lib)\n(defn greet () \"embedded-ok\")"),
         ],
@@ -82,7 +82,7 @@ fn bundled_deps_with_same_module_name_coexist_rooted() {
         &[
             (
                 "main",
-                "(defmodule main)\n(defn main () (println (str (alpha/parser/tag) \"|\" (beta/parser/tag))))",
+                "(defmodule main)\n(defn main () (io/puts (str (alpha/parser/tag) \"|\" (beta/parser/tag))))",
             ),
             // `parser` in each dep uses its OWN `util` via a bare intra-package `(:use util)`,
             // which must root to `alpha/util` / `beta/util` under each dep's package context.
@@ -122,7 +122,7 @@ fn bundled_app_receives_argv() {
         "(project :name \"t\" :version \"0\")",
         &[(
             "main",
-            "(defmodule main)\n(defn main (& args) (println (str \"argv:\" args)))",
+            "(defmodule main)\n(defn main (& args) (io/puts (str \"argv:\" args)))",
         )],
     );
     let mut cmd = Command::new(&app);
@@ -156,7 +156,7 @@ fn bundled_bare_reference_to_unique_dep_module_resolves() {
         &[
             (
                 "main",
-                "(defmodule main (:alias repo))\n(defn main () (println (repo/tag)))",
+                "(defmodule main (:alias repo))\n(defn main () (io/puts (repo/tag)))",
             ),
             (
                 "store/repo",

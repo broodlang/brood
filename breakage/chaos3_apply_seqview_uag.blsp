@@ -31,8 +31,7 @@
   (if (= i 0) acc (hammer (- i 1) (+ acc (f n)) f n)))
 
 (describe "apply over a lazy seq-view keeps the callee/args live across the realise"
-  :isolated
-  (test "fresh-closure callee, seq-view tail — no stale handle"
+  :isolated (test "fresh-closure callee, seq-view tail — no stale handle"
     ;; each call returns n; Σ over 200 calls of n=50 = 10000
     (assert= (hammer 200 0 count-via-apply 50) 10000))
   (test "local-list leading arg, seq-view tail — no stored stale handle"

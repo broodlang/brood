@@ -47,8 +47,8 @@
 ;; closure no longer overflows).
 (def app (http/router {"/" home "/hello" hello "/echo" echo}))
 
-(println (str "Brood web server listening on http://localhost:" *port*))
-(println "Routes: /  /hello  /echo   (Ctrl-C to stop)")
+(io/puts (str "Brood web server listening on http://localhost:" *port*))
+(io/puts "Routes: /  /hello  /echo   (Ctrl-C to stop)")
 
 ;; `serve` blocks here, accepting connections and dispatching each request through
 ;; `app`. Each connection is handled in its own spawned process.

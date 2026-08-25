@@ -59,7 +59,7 @@
           m (cy-field line "Msg")
           d (cy-field line "MD"))
       (cond
-        l (cy-sha-scan algo (rest lines) (string->number l) msg ran bad)
+        l (cy-sha-scan algo (rest lines) (string/->number l) msg ran bad)
         m (cy-sha-scan algo (rest lines) len m ran bad)
         d
           (let (got (cy-sha-digest algo (cy-msg-bytes len msg)))
@@ -86,7 +86,7 @@
 (defn- cy-section-l
   (line)
   (if (and (string/starts-with? line "[L=") (string/ends-with? line "]"))
-    (string->number (string/substring line 3 (dec (string/length line))))
+    (string/->number (string/substring line 3 (dec (string/length line))))
     nil))
 
 ;; `Tlen` is in BYTES and truncates the MAC; the hex is 2 chars per byte.
@@ -106,7 +106,7 @@
           mac (cy-field line "Mac"))
       (cond
         sect (cy-hmac-scan (rest lines) (cy-l->algo sect) tlen key msg ran skipped bad)
-        t (cy-hmac-scan (rest lines) algo (string->number t) key msg ran skipped bad)
+        t (cy-hmac-scan (rest lines) algo (string/->number t) key msg ran skipped bad)
         k (cy-hmac-scan (rest lines) algo tlen k msg ran skipped bad)
         m (cy-hmac-scan (rest lines) algo tlen key m ran skipped bad)
         mac
@@ -128,8 +128,7 @@
         else (cy-hmac-scan (rest lines) algo tlen key msg ran skipped bad)))))
 
 (describe "NIST CAVP: SHA byte vectors"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the corpus is present"
     (is (corpus-present? "crypto"))
@@ -161,8 +160,7 @@
       (assert= (take 3 bad) ()))))
 
 (describe "NIST CAVP: HMAC vectors"
-  :tags
-  [:conformance :slow]
+  :tags [:conformance :slow]
 
   (test "every HMAC case for a digest Brood exposes"
     (let ([ran skipped bad] (cy-hmac-scan (corpus-lines (cy-file "HMAC.rsp")) nil 0 "" "" 0 0 nil))
@@ -177,8 +175,7 @@
 ;; opening a 839 KB .rsp, and they pin the string-input wrappers the .rsp files never
 ;; touch (the .rsp path is all bytes).
 (describe "the canonical published digests"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the empty-input digests"
     (assert= (hash/sha1 "") "da39a3ee5e6b4b0d3255bfef95601890afd80709")

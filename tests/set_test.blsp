@@ -143,8 +143,7 @@
   (if (= got total) acc (st-collect (+ got 1) total (receive (s (union acc s))))))
 
 (describe "sets across processes"
-  :isolated
-  (test "a set round-trips through a worker unchanged"
+  :isolated (test "a set round-trips through a worker unchanged"
     (let (me (self) _w (spawn (st-build-echo me [:x :y [1 2]])))
       (let (got (receive))
         (is (set? got))

@@ -12,9 +12,7 @@
 (defmodule pids-test (:use test))
 
 (describe "pids: first-class process handles"
-  :isolated
-
-  (test "self and spawn return pids, distinct from refs and ints"
+  :isolated (test "self and spawn return pids, distinct from refs and ints"
     (is (pid? (self)))
     (is (pid? (spawn (receive (:go nil)))))
     (refute (pid? 7))

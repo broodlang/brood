@@ -92,7 +92,7 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
       (if (nil? bin)
         (is true)
         (let (probe (str "/tmp/brood-envall-probe-" (os-pid) ".blsp")
-              _ (file/spit probe "(print (str (map? (%env-all))))")
+              _ (file/spit probe "(io/print (str (map? (%env-all))))")
               cmd (str "BADENV=$(printf '\\377\\376') exec " bin " " probe)
               r (%os-cmd "/bin/sh" ["-c" cmd])
               _ (file/rm probe))
@@ -104,9 +104,7 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
 ;;
 
 (describe "%file-swap: temp-file creation"
-  :isolated
-
-  (test "a symlink at the old predictable temp path cannot redirect the write"
+  :isolated (test "a symlink at the old predictable temp path cannot redirect the write"
     ;; Was: the temp file was `{data-path}.swap.{pid}` written with `fs::write`
     ;; (O_CREAT|O_WRONLY|O_TRUNC, no O_EXCL, no symlink check). In any directory
     ;; an attacker can write to, a symlink pre-planted at that entirely
@@ -144,9 +142,7 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
 ;;
 
 (describe "%os-cmd-stdin: no pipe deadlock"
-  :isolated
-
-  (test "a child echoing back more than one pipe buffer completes"
+  :isolated (test "a child echoing back more than one pipe buffer completes"
     ;; Was: the whole of stdin was written before anything read stdout, so a
     ;; child that emits more than the ~64 KiB pipe buffer while being fed
     ;; deadlocked with us — a scheduler worker pinned forever, uninterruptible

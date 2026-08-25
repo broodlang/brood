@@ -37,7 +37,7 @@ them at that core (npm/Cargo rule). `+build` metadata never affects order or mat
 compare what a human typed in a manifest, not to validate it (that is
 `valid?`)."
   (let (core (first (string/split (first (string/split v "+")) "-")))
-    (map (fn (p) (or (string->number p) 0)) (string/split core "."))))
+    (map (fn (p) (or (string/->number p) 0)) (string/split core "."))))
 
 (defn- digit-run?
   (s)
@@ -106,8 +106,8 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
   (x y)
   ;; numeric identifiers compare numerically and rank BELOW alphanumeric ones; two
   ;; alphanumeric identifiers compare in ASCII order.
-  (let (nx (string->number x)
-        ny (string->number y))
+  (let (nx (string/->number x)
+        ny (string/->number y))
     (cond
       (and nx ny) (cond (< nx ny) -1 (> nx ny) 1 else 0)
       nx -1

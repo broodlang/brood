@@ -105,8 +105,7 @@
 
 ;; ---- conflict detection: provenance distinguishes hot-reload from a real clash ----
 (describe "impl conflict detection"
-  :serial
-  (test "a cross-module re-register overrides — last wins"
+  :serial (test "a cross-module re-register overrides — last wins"
     (defability Ping (ping [self] :-> any))
     (%register-impl 'Ping 'ping :int (fn (n) :a) 'lib-a)
     (assert= (ping 1) :a)
@@ -162,8 +161,7 @@
 
 ;; ---- late / open extension: an impl added after the fact, for a built-in ----
 (describe "open extension"
-  :serial
-  (test "a new impl can be added for any kind after the ability is declared"
+  :serial (test "a new impl can be added for any kind after the ability is declared"
     ;; `Extend` is declared at load with no :vector impl — adding one here is the point.
     ;; (Deliberately NOT asserting the pre-registration `-1` first: that would make the
     ;; test depend on running once per image, which is the fragility being fixed.)
@@ -201,8 +199,7 @@
 ;; standing up real cross-module fixtures. Unique ability names avoid clashing the shared
 ;; registries. app (4) > type-owner (3) > ability-owner (2) > other (1); an ancestor ≠ owner.
 (describe "impl precedence (deterministic by tier)"
-  :serial
-  (test "type-owner beats ability-owner regardless of registration order"
+  :serial (test "type-owner beats ability-owner regardless of registration order"
     ;; PaintA/PaintB owned by 'artlib; the record shapes/circle owned by 'shapes.
     (%register-ability 'PaintA '((paint [self])) 'artlib)
     (%register-impl 'PaintA 'paint :shapes/circle (fn (x) :ability) 'artlib)
@@ -351,8 +348,7 @@
     (abt-collect (+ got 1) total (receive ([:r v] (cons v acc))))))
 
 (describe "abilities across processes"
-  :isolated
-  (test "polymorphic dispatch resolves each worker's own id in its own process"
+  :isolated (test "polymorphic dispatch resolves each worker's own id in its own process"
     (let (xs [1 "a" :k 1.5 true [0]])
       (abt-spawn-workers (self) xs)
       (let (kinds (abt-collect 0 (count xs) nil))
@@ -384,8 +380,7 @@
   (not (nil? (%impl-for [(abt-conc-name i) (abt-conc-op i)] :int))))
 
 (describe "concurrent impl registration (KI-22)"
-  :isolated
-  (test "no impl is lost when many processes register at once"
+  :isolated (test "no impl is lost when many processes register at once"
     (let (n 120)
       (dotimes (i n) (abt-conc-declare i))
       (concurrently n
@@ -509,8 +504,7 @@
 
 ;; ---- across processes: a provided op's default body dispatches on the worker's own heap ----
 (describe "provided ops across processes"
-  :isolated
-  (test "a provided op runs in a spawned worker, resolving its default in that process"
+  :isolated (test "a provided op runs in a spawned worker, resolving its default in that process"
     (let (parent (self))
       (spawn
         (send parent
@@ -533,8 +527,7 @@
 (defability Columns
   (columns [self] :-> vector) ; required (derived)
   (ncols [self] :-> int (count (columns self))) ; provided
-  :derive-record
-  (fn (flds)
+  :derive-record (fn (flds)
     ;; a list of `impl` method forms: derive `columns` as the field values, in field order
     (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (name f)))) flds)]))))
 (defrecord cpoint (x y) :derives [Columns])
@@ -564,8 +557,7 @@
                "no impl of")))))
 
 (describe "derive across processes"
-  :isolated
-  (test "a derived op runs in a spawned worker"
+  :isolated (test "a derived op runs in a spawned worker"
     (let (parent (self))
       (spawn (send parent [:c (columns (cpoint 7 8))]))
       (assert= (receive ([:c v] v)) [7 8]))))
@@ -632,8 +624,7 @@
 (defrecord retractable (n))
 
 (describe "%unimpl — retracting an implementation"
-  :serial
-  (test "an impl dispatches, and after %unimpl it is gone again"
+  :serial (test "an impl dispatches, and after %unimpl it is gone again"
     (do
       (impl Retract ability-test/retractable (rsize [r] (get r :n)))
       (assert= 7 (rsize (retractable 7)))

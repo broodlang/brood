@@ -58,8 +58,7 @@
             (cons (path/basename (first files)) wrong))))))
 
 (describe "JSONTestSuite: RFC 8259 accept/reject"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the corpus is present"
     (is (corpus-present? "json"))
@@ -87,8 +86,7 @@
 ;; The specific traps the corpus is famous for, named so the sweep's coverage is
 ;; legible without opening 318 files.
 (describe "JSONTestSuite: the classic traps"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "a bare scalar is a valid JSON text (RFC 8259 §2, not the 2006 grammar)"
     (assert= (json/parse "123") 123)

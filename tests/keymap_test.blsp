@@ -78,8 +78,7 @@
 (defn km-worker (parent km keys) (send parent (first (km-run km keys ""))))
 
 (describe "keymap chords across processes"
-  :isolated
-  (test "a spawned process can resolve and run a chord"
+  :isolated (test "a spawned process can resolve and run a chord"
     (let (me (self)
           km (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e))
       (spawn (km-worker me km [:ctrl-x :ctrl-e]))

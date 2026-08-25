@@ -124,9 +124,7 @@
 ;; before formatting, so this proves the structured-error path survives the
 ;; copy-on-send round-trip — not just same-heap formatting.
 (describe "repl/repl-error-message across processes"
-  :isolated
-
-  (test "an error map sent between processes still formats correctly"
+  :isolated (test "an error map sent between processes still formats correctly"
     (let (w (spawn (receive ([:fmt e from] (send from (repl/repl-error-message e))))))
       (send w [:fmt {:kind :type :message "across"} (self)])
       (assert= (receive (r r)) "type error: across"))))

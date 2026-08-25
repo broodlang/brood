@@ -61,20 +61,20 @@ fn assert_parity(src: &str) {
 
 #[test]
 fn type_error_format_matches_across_engines() {
-    assert_parity("(defn boom (x) (bit-and x 0.25))\n(println (boom 5))\n");
+    assert_parity("(defn boom (x) (bit-and x 0.25))\n(io/puts (boom 5))\n");
 }
 
 #[test]
 fn unbound_error_format_matches_across_engines() {
-    assert_parity("(println (this-symbol-is-not-bound 1 2 3))\n");
+    assert_parity("(io/puts (this-symbol-is-not-bound 1 2 3))\n");
 }
 
 #[test]
 fn arity_error_format_matches_across_engines() {
-    assert_parity("(defn f (a b) (+ a b))\n(println (f 1))\n");
+    assert_parity("(defn f (a b) (+ a b))\n(io/puts (f 1))\n");
 }
 
 #[test]
 fn thrown_error_format_matches_across_engines() {
-    assert_parity("(defn g (n) (if (< n 0) (throw [:neg n]) n))\n(println (g -5))\n");
+    assert_parity("(defn g (n) (if (< n 0) (throw [:neg n]) n))\n(io/puts (g -5))\n");
 }

@@ -87,9 +87,7 @@
       (receive ([_ hexkey] (and all-ok (= hexkey scram-test-expected-stored)))))))
 
 (describe "SCRAM chain across processes"
-  :isolated
-
-  (test "a byte-vector StoredKey round-trips through a worker unchanged"
+  :isolated (test "a byte-vector StoredKey round-trips through a worker unchanged"
     (let (me (self)
           _w (spawn (scram-test-worker me 1)))
       (assert= [1 scram-test-expected-stored] (receive))))

@@ -64,7 +64,7 @@ fn write_fixture() -> TempDir {
     // callable global before we assert the checker agrees.
     std::fs::write(
         dir.join("run.blsp"),
-        "(defmodule runner (:use main))\n(println (go))\n",
+        "(defmodule runner (:use main))\n(io/puts (go))\n",
     )
     .unwrap();
 

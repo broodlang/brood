@@ -315,7 +315,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   (when (not (file/dir? out-dir)) (file/mkdir out-dir))
   (file/spit (path/join out-dir "index.html") (docsite/render model {:title title}))
   (file/spit (path/join out-dir "model.json") (json/encode model))
-  (println (str "Wrote "
+  (io/puts (str "Wrote "
              (path/join out-dir "index.html")
              " and model.json ("
              (count (get model :modules))
@@ -542,8 +542,8 @@ module's namespace-rooted globals (ADR-070) back to it."
     (doseq (r results)
       (let ([sym expr expected outcome] r)
         (match outcome
-          ([:ok] (println (str "  ok   " (name sym) ": " expr " ;=> " expected)))
-          ([:fail actual _] (println (str "  FAIL "
+          ([:ok] (io/puts (str "  ok   " (name sym) ": " expr " ;=> " expected)))
+          ([:fail actual _] (io/puts (str "  FAIL "
                                        (name sym)
                                        ": "
                                        expr
@@ -551,8 +551,8 @@ module's namespace-rooted globals (ADR-070) back to it."
                                        expected
                                        " — got "
                                        (pr-str actual))))
-          ([:error msg] (println (str "  ERR  " (name sym) ": " expr " — " msg))))))
-    (println (str (count results)
+          ([:error msg] (io/puts (str "  ERR  " (name sym) ": " expr " — " msg))))))
+    (io/puts (str (count results)
                " doctests, "
                (- (count results) (count fails))
                " passed, "
@@ -574,4 +574,4 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 (defn generate-docs (& args)
   "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`."
-  (if (empty? args) (println (document-project)) (println (document-module (first args)))))
+  (if (empty? args) (io/puts (document-project)) (io/puts (document-module (first args)))))

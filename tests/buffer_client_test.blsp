@@ -110,9 +110,7 @@
 ;; ---- the round-trip against a real buffer process --------------------------------
 
 (describe "link round-trip over a spawned buffer"
-  :isolated
-
-  (test "propagate → echo folds as :noop; a foreign edit folds as a splice"
+  :isolated (test "propagate → echo folds as :noop; a foreign edit folds as a splice"
     (let (bp (spawn-buffer (make-buffer "hello")))
       (subscribe-buffer bp buffer-text)
       ;; seed

@@ -114,9 +114,7 @@
       (stop sup))))
 
 (describe "supervisor: one-for-all"
-  :isolated
-
-  (test "a crash restarts every child with a fresh pid"
+  :isolated (test "a crash restarts every child with a fresh pid"
     (let (me (self)
           sup (start (list (tagged-spec me :a :permanent)
                        (tagged-spec me :b :permanent))
@@ -149,9 +147,7 @@
       (stop sup))))
 
 (describe "supervisor: rest-for-one"
-  :isolated
-
-  (test "restarts the crashed child and those started after it, not before"
+  :isolated (test "restarts the crashed child and those started after it, not before"
     (let (me (self)
           sup (start (list (tagged-spec me :a :permanent)
                        (tagged-spec me :b :permanent)
@@ -171,9 +167,7 @@
         (stop sup)))))
 
 (describe "supervisor: restart intensity"
-  :isolated
-
-  (test "exceeding the restart limit shuts the supervisor down abnormally"
+  :isolated (test "exceeding the restart limit shuts the supervisor down abnormally"
     ;; A child that crashes immediately on every start. With max-restarts 2,
     ;; the 3rd restart trips the intensity window and the supervisor throws,
     ;; so a monitor on the supervisor sees `[:down … [:error …]]`.
@@ -188,9 +182,7 @@
           ([:down ^mref ^sup [:error _]] :gaveup))))))
 
 (describe "supervisor: shutdown terminates children"
-  :isolated
-
-  (test "stop kills its children (no orphans)"
+  :isolated (test "stop kills its children (no orphans)"
     (let (me (self)
           sup (start (list (watched-spec me :permanent)))
           p1 (receive ([:up p] p))
@@ -201,9 +193,7 @@
       (assert= :down (receive ([:down ^mp ^p1 _] :down))))))
 
 (describe "supervisor: nested trees + graceful shutdown"
-  :isolated
-
-  (test "stop cascades through a :shutdown :infinity sub-supervisor"
+  :isolated (test "stop cascades through a :shutdown :infinity sub-supervisor"
     ;; parent → (sub-supervisor child, :shutdown :infinity) → announcing worker.
     ;; Stopping the parent must tear the *grandchild* down too, not orphan it.
     (let (me (self)
@@ -237,9 +227,7 @@
         (receive ([:down ^pm ^p _] :killed))))))
 
 (describe "supervisor: shutdown order + named children"
-  :isolated
-
-  (test "stop terminates children in reverse start order"
+  :isolated (test "stop terminates children in reverse start order"
     (let (me (self)
           sup (start (list (stop-announce-spec me :a)
                        (stop-announce-spec me :b)
@@ -272,9 +260,7 @@
         (stop sup)))))
 
 (describe "supervisor: crash teardown (link propagation, ADR-067)"
-  :isolated
-
-  (test "killing a supervisor tears its child down too (no orphan)"
+  :isolated (test "killing a supervisor tears its child down too (no orphan)"
     ;; The supervisor links its children; when the *supervisor itself* dies, the
     ;; kernel propagates the exit down the links and the child dies. Monitors
     ;; couldn't do this — the whole reason for the link rewrite.
@@ -307,9 +293,7 @@
         (receive ([:down ^gm ^gc _] :torn-down))))))
 
 (describe "supervisor: runtime child API (DynamicSupervisor)"
-  :isolated
-
-  (test "start-child adds and supervises a child at runtime"
+  :isolated (test "start-child adds and supervises a child at runtime"
     (let (me (self)
           ; empty — a dynamic supervisor
           sup (start (list))
@@ -357,9 +341,7 @@
       (stop sup))))
 
 (describe "supervisor: introspection and validation"
-  :isolated
-
-  (test "which-children reports a summary per live child"
+  :isolated (test "which-children reports a summary per live child"
     (let (me (self)
           sup (start (list (watched-spec me :permanent)))
           ; wait until the child is up
@@ -418,9 +400,7 @@
               (error "flaky: cannot start")))})
 
 (describe "supervisor: a child :start that raises"
-  :isolated
-
-  (test "a raising restart is a FAILED RESTART, not a supervisor crash"
+  :isolated (test "a raising restart is a FAILED RESTART, not a supervisor crash"
     ;; The child starts fine, then crashes; every restart attempt raises. The
     ;; supervisor must absorb those, count each against :max-restarts, and finally
     ;; die of its OWN intensity limit — not of the child's throw escaping the loop.
@@ -451,9 +431,7 @@
 
 ;; ---- the synchronous client API is monitored + deadlined --------------------
 (describe "supervisor: a client call against a dead supervisor raises, never hangs"
-  :isolated
-
-  (test "count-children / which-children / start-child raise on a dead supervisor"
+  :isolated (test "count-children / which-children / start-child raise on a dead supervisor"
     ;; These were bare `(receive ([:reply ^r v] v))` with no monitor and no timeout,
     ;; so each parked the caller FOREVER — no error, no timeout, nothing to wake it.
     (let (sup (start (list)))

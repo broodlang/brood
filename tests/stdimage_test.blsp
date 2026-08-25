@@ -16,9 +16,7 @@
   (:use stdimage))
 
 (describe "stdlib image: fidelity"
-  :isolated
-
-  (test "a module's section names exactly what its source load defines"
+  :isolated (test "a module's section names exactly what its source load defines"
     ;; `json` is a good probe: a plain namespaced module with no root globals.
     (require-one 'json)
     (let (from-source (into #{}
@@ -74,9 +72,7 @@
       (is (or (nil? n) (> n 0))))))
 
 (describe "stdlib image: it coexists with a project image"
-  :isolated
-
-  (test "an additional source is consulted, and the primary still wins"
+  :isolated (test "an additional source is consulted, and the primary still wins"
     ;; `*image-sources*` is the additional-source list the prelude scans after
     ;; `*image-sections*`. A single path could only hold one producer, and the second to
     ;; install silently displaced the first — which is why this list exists.

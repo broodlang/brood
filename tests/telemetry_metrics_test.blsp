@@ -20,8 +20,7 @@
   (when (> n 0) (emit event m) (tmm-emit-n event m (- n 1))))
 
 (describe "telemetry metrics: counter / sum / gauge"
-  :isolated
-  (test "counter tallies each emit of its event"
+  :isolated (test "counter tallies each emit of its event"
     (start-telemetry)
     (detach-all)
     (reset-metrics)
@@ -73,8 +72,7 @@
       (is (nil? got)))))
 
 (describe "telemetry metrics: summary (running statistics)"
-  :isolated
-  (test "count / sum / min / max / mean / stddev over a fold"
+  :isolated (test "count / sum / min / max / mean / stddev over a fold"
     (start-telemetry)
     (detach-all)
     (reset-metrics)
@@ -108,8 +106,7 @@
 
 ; nil for an unknown / non-distribution metric
 (describe "telemetry metrics: distribution (bucketed histogram)"
-  :isolated
-  (test "buckets by upper bound, with an overflow bucket"
+  :isolated (test "buckets by upper bound, with an overflow bucket"
     (start-telemetry)
     (detach-all)
     (reset-metrics)
@@ -170,8 +167,7 @@
       (is (< (abs (- p90 18)) 0.0001))
       (is (nil? none)))))
 (describe "telemetry metrics: snapshot & sampling"
-  :isolated
-  (test "metrics-snapshot returns every metric's reader value"
+  :isolated (test "metrics-snapshot returns every metric's reader value"
     (start-telemetry)
     (detach-all)
     (reset-metrics)
@@ -205,8 +201,7 @@
 (defn tmm-drain (n) (receive (:fired (tmm-drain (+ n 1))) (after 150 n)))
 
 (describe "telemetry metrics: across processes"
-  :isolated
-  (test "concurrent emitters aggregate into one counter (serial listener)"
+  :isolated (test "concurrent emitters aggregate into one counter (serial listener)"
     (start-telemetry)
     (detach-all)
     (reset-metrics)
@@ -284,14 +279,11 @@
 ;; `(tmm-req-stop …)` calls via the emitted `sig`; these tests cover the runtime half.
 (defevent tmm-req-stop
   [:tmm :req :stop]
-  :measurements
-  ((duration int))
-  :metadata
-  ((path string)))
+  :measurements ((duration int))
+  :metadata ((path string)))
 
 (describe "defevent — the typed emitter"
-  :isolated
-  (test "the emitter emits its event with the declared measurement/metadata maps"
+  :isolated (test "the emitter emits its event with the declared measurement/metadata maps"
     (reset-metrics)
     (detach-all)
     (start-telemetry)
@@ -335,8 +327,7 @@
 
 ;; ---- unified runtime vitals (snapshot builtins → one stream) -----------------
 (describe "telemetry — runtime-snapshot + watch-vitals"
-  :isolated
-  (test "runtime-snapshot folds the stat builtins into one map"
+  :isolated (test "runtime-snapshot folds the stat builtins into one map"
     (let (snap (runtime-snapshot))
       (is (int? (get snap :processes)))
       ;; dev-tools builds have gc/vm/sched; each key is present (nil only on a lean build)
@@ -364,8 +355,7 @@
 ;; by the dist suite). It exercises subscribe → attach forwarder → forward on emit →
 ;; re-emit locally.
 (describe "telemetry — remote tier"
-  :isolated
-  (test "a target emit is forwarded to a subscriber and re-emitted into the local stream"
+  :isolated (test "a target emit is forwarded to a subscriber and re-emitted into the local stream"
     (reset-metrics)
     (detach-all)
     (start-telemetry)

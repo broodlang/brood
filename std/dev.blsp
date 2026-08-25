@@ -96,5 +96,5 @@
   "Evaluate `expr`, print `label: N ms`, and return `expr`'s value."
   (let (t0 (gensym "t0") r (gensym "r"))
     `(let (~t0 (%now) ~r ~expr)
-       (println (str ~label ": " (- (%now) ~t0) " ms"))
+       (io/puts (str ~label ": " (- (%now) ~t0) " ms"))
        ~r)))

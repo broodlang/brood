@@ -90,9 +90,7 @@
 ;; ---- ADR-151: ambient is declared, not spelled ------------------------------
 
 (describe "ADR-151: ambient names are declared with defdyn, not spelled *earmuffed*"
-  :isolated
-
-  (test "an undeclared earmuffed def inside a module is namespaced, not root"
+  :isolated (test "an undeclared earmuffed def inside a module is namespaced, not root"
     ;; Two modules writing `(def *width* …)` used to share — and clobber — one root
     ;; binding; the second load silently changed the first module's reads.
     (let (dir (temp-dir "brood-ambient-"))

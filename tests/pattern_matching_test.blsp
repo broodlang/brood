@@ -455,8 +455,7 @@
 ;; fn / defn — multi-clause dispatch and pattern parameters  (:serial: defs globals)
 ;; ─────────────────────────────────────────────────────────────────────────────
 (describe "fn / defn clauses"
-  :serial
-  (test "multi-clause recursion (fac)"
+  :serial (test "multi-clause recursion (fac)"
     ;; deliberately non-tail (`* n (recurse)`) — the point is multi-clause recursion.
     (check-allow :non-tail-recursion
       (defn pm-fac ((0) 1) ((n) (* n (pm-fac (- n 1))))))
@@ -519,8 +518,7 @@
 
 ;; :serial — these define a macro/global, like the fn/defn group above.
 (describe "lowering fallback via same-form macros"
-  :serial
-  (test "a macro expanded within its defining form yields a pattern let"
+  :serial (test "a macro expanded within its defining form yields a pattern let"
     (defmacro pm-with-pair (v & body) `(let ((a b) ~v) ~@body))
     (assert= (pm-with-pair (list 3 4) (+ a b)) 7))
   (test "a macro expanded within its defining form yields a multi-clause fn"
@@ -574,8 +572,7 @@
                ((record pm-circle {:r r}) [:circle r])
                ((record pm-rect {:w w :h h}) [:rect (* w h)]))])))
 (describe "record patterns across processes"
-  :isolated
-  (test "a record pattern matches a value received from another process"
+  :isolated (test "a record pattern matches a value received from another process"
     (let (parent (self))
       (pm-shape-worker parent (pm-circle 4))
       (pm-shape-worker parent (pm-rect 2 3))

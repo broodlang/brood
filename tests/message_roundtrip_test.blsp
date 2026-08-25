@@ -116,8 +116,7 @@
 (defn reload-thunk () (* reload-target 2))
 
 (describe "a retained shared closure follows a hot-reloaded global"
-  :isolated
-  (test "a closure held by another process sees a global redefined after it was sent"
+  :isolated (test "a closure held by another process sees a global redefined after it was sent"
     (let (me (self)
           h (spawn (holder me))
           _ (send h [:hold reload-thunk])

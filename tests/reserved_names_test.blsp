@@ -93,8 +93,7 @@
 (describe "a dynamic var is never reserved"
   ;; :isolated — this rebinds the global `*out*` port, which would otherwise swallow
   ;; the output of every test running concurrently with it.
-  :isolated
-  (test "declared dynamic wins over function-valued"
+  :isolated (test "declared dynamic wins over function-valued"
     ;; `defdyn`/`%declare-dynamic` *declares a name rebindable* — the whole meaning of
     ;; the declaration — so reserving one would contradict it. The case that forced
     ;; this: an output port IS a function, so `*out*`/`*err*` would otherwise have been
@@ -109,12 +108,12 @@
     ;; dynamic name is ambient by declaration (ADR-151).
     (let (sink (table/new))
       (def *out* (fn (s) (table/put sink :last s)))
-      (print "redirected")
+      (io/print "redirected")
       ; restore BEFORE asserting
       (def *out* %write-out)
       (assert= "redirected" (table/get sink :last))))
   (test "the scoped form is unaffected"
-    (assert= "scoped" (with-out-str (print "scoped")))))
+    (assert= "scoped" (with-out-str (io/print "scoped")))))
 
 (describe "the escapes the error names"
   (test "a local `let` may still shadow a reserved name"
@@ -130,8 +129,7 @@
     (assert= 1 (get {:a 1} :a))))
 
 (describe "reserved names across processes"
-  :isolated
-  (test "the reserved set is shared — a spawned process refuses too"
+  :isolated (test "the reserved set is shared — a spawned process refuses too"
     ;; the set lives in the runtime's shared code region, like the globals table
     (let (me (self))
       (spawn (send me

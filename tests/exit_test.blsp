@@ -142,8 +142,7 @@
   (if (= k 0) :all-down (receive ([:down a b c] (ex-collect-downs (- k 1))))))
 
 (describe "exit under load"
-  :isolated
-  (test "mass kill: spawn 100 parked processes, exit all, collect every :down"
+  :isolated (test "mass kill: spawn 100 parked processes, exit all, collect every :down"
     (let (n 100 ps (ex-spawn-parked n nil))
       ; let them all park
       (sleep 50)

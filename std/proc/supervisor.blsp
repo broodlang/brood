@@ -333,10 +333,11 @@ is a *failed restart attempt*, never a supervisor crash."
   (try
     (supervisor-start-child child)
     (catch e
-      (eprintln "supervisor: child "
+      (io/puts "supervisor: child "
         (pr-str (get child :id (get child :name)))
         " failed to start: "
-        (error-message e))
+        (error-message e)
+        :to *err*)
       nil)))
 
 (defn- supervisor-restart

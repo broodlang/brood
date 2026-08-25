@@ -15,7 +15,7 @@
 ;;;   P60 — concurrent sends: 50 processes simultaneously sending to one mailbox
 
 ;;; ---- P56: BigInt round-trip via send ----
-(println "=== P56: BigInt round-trip across process boundary ===")
+(io/puts "=== P56: BigInt round-trip across process boundary ===")
 (let (me (self)
       bignum (* 999999999999999999 999999999999999999))
   ; ~10^36, large BigInt
@@ -33,12 +33,12 @@
                         (after 5000 :timeout))))
     (send worker [:big bignum])
     (let (r (receive ([:result v] v) (after 5000 :timeout)))
-      (println "P56: sent:" bignum)
-      (println "P56: received back (* 2):" r)
-      (println "P56-correct:" (= (* bignum 2) r)))))
+      (io/puts "P56: sent:" bignum)
+      (io/puts "P56: received back (* 2):" r)
+      (io/puts "P56-correct:" (= (* bignum 2) r)))))
 
 ;;; ---- P57: deep list (10k pairs) cross-process ----
-(println "=== P57: 10k-element list round-trip ===")
+(io/puts "=== P57: 10k-element list round-trip ===")
 (let (me (self)
       deep-list (range 1 10001))
   (let (worker (spawn (receive
@@ -47,14 +47,14 @@
                         (after 10000 :timeout))))
     (send worker [:list deep-list])
     (let (r (receive ([:sum s c] [s c]) (after 10000 :timeout)))
-      (println "P57: sum=" (get r 0) "count=" (get r 1))
-      (println "P57-correct:"
+      (io/puts "P57: sum=" (get r 0) "count=" (get r 1))
+      (io/puts "P57-correct:"
         (and (= 50005000 (get r 0))
           ; 1+2+...+10000 = 10000*10001/2
           (= 10000 (get r 1)))))))
 
 ;;; ---- P58: map of closures shipped cross-process ----
-(println "=== P58: map of 500 closures with captured BigInt ===")
+(io/puts "=== P58: map of 500 closures with captured BigInt ===")
 (let (me (self)
       big-base (* 12345678901234 56789012345678))
   (def closure-map-58
@@ -70,16 +70,16 @@
                    (after 10000 :timeout))))
     (send worker [:cmap closure-map-58])
     (let (r (receive ([:p58 r0 r250 r499] [r0 r250 r499]) (after 10000 :timeout)))
-      (println "P58: [0]=" (get r 0) "expected:" (+ big-base 0))
-      (println "P58: [250]=" (get r 1) "expected:" (+ big-base 250))
-      (println "P58: [499]=" (get r 2) "expected:" (+ big-base 499))
-      (println "P58-correct:"
+      (io/puts "P58: [0]=" (get r 0) "expected:" (+ big-base 0))
+      (io/puts "P58: [250]=" (get r 1) "expected:" (+ big-base 250))
+      (io/puts "P58: [499]=" (get r 2) "expected:" (+ big-base 499))
+      (io/puts "P58-correct:"
         (and (= (+ big-base 0) (get r 0))
           (= (+ big-base 250) (get r 1))
           (= (+ big-base 499) (get r 2)))))))
 
 ;;; ---- P59: allocation storm while sending ----
-(println "=== P59: alloc storm during concurrent sends ===")
+(io/puts "=== P59: alloc storm during concurrent sends ===")
 ;; Have one process continuously allocating while another sends it messages.
 ;; Any stale-pointer bug in the allocating process would corrupt the received value.
 (let (me (self))
@@ -101,13 +101,13 @@
     (doseq (i (range 10000))
       (send receiver [:val i]))
     (let (r (receive ([:p59 v] v) (after 30000 :timeout)))
-      (println "P59: accumulated sum:" r)
+      (io/puts "P59: accumulated sum:" r)
       ;; We can't know exactly which messages the receive captured (since it uses
       ;; (after 0 nil)) — just verify it's a reasonable number and not a crash
-      (println "P59: non-negative sum:" (>= r 0)))))
+      (io/puts "P59: non-negative sum:" (>= r 0)))))
 
 ;;; ---- P60: 50 senders → 1 receiver, order and count check ----
-(println "=== P60: 50 concurrent senders to one mailbox ===")
+(io/puts "=== P60: 50 concurrent senders to one mailbox ===")
 (let (me (self)
       n-senders 50
       msgs-each 100)
@@ -124,11 +124,11 @@
         (dotimes (_ msgs-each)
           (send receiver (+ i 1)))))
     (let (r (receive ([:p60 v] v) (after 30000 :timeout)))
-      (println "P60: total sum:" r)
+      (io/puts "P60: total sum:" r)
       ;; Each sender i sends (i+1) msgs-each times; sum = msgs-each * Σ(i+1) for i in [0,n-senders)
       ;;   = msgs-each * (1+2+...+n-senders) = msgs-each * n-senders*(n-senders+1)/2
       (def expected-sum (* msgs-each (quot (* n-senders (+ n-senders 1)) 2)))
-      (println "P60: expected:" expected-sum)
-      (println "P60-correct:" (= r expected-sum)))))
+      (io/puts "P60: expected:" expected-sum)
+      (io/puts "P60-correct:" (= r expected-sum)))))
 
-(println "=== chaos2_gc_under_send DONE ===")
+(io/puts "=== chaos2_gc_under_send DONE ===")

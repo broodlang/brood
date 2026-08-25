@@ -7,10 +7,10 @@
 
 (describe "with-out-str"
   (test "captures printed output as a string"
-    (assert= (with-out-str (print "hello")) "hello"))
+    (assert= (with-out-str (io/print "hello")) "hello"))
 
   (test "captures across several prints in the body"
-    (assert= (with-out-str (print "a") (print "b") (println "c")) "abc\n"))
+    (assert= (with-out-str (io/print "a") (io/print "b") (io/puts "c")) "abc\n"))
 
   (test "empty string when the body prints nothing, discarding the body's value"
     (assert= (with-out-str 42) "")
@@ -18,18 +18,18 @@
 
   (test "captured output does not reach the next capture (buffer is popped)"
     ;; if the first call leaked its buffer, the second would also see "first".
-    (assert= (with-out-str (print "first")) "first")
-    (assert= (with-out-str (print "second")) "second"))
+    (assert= (with-out-str (io/print "first")) "first")
+    (assert= (with-out-str (io/print "second")) "second"))
 
   (test "nested captures compose: inner drains only its own output"
-    (let (result (with-out-str (print "outer-1")
-                   (let (inner (with-out-str (print "inner")))
+    (let (result (with-out-str (io/print "outer-1")
+                   (let (inner (with-out-str (io/print "inner")))
                      (assert= inner "inner")
-                     (print "outer-2"))))
+                     (io/print "outer-2"))))
       (assert= result "outer-1outer-2"))))
 
 ;; ---- error safety -----------------------------------------------------------
-(defn cap-boom () (print "discarded") (throw "boom"))
+(defn cap-boom () (io/print "discarded") (throw "boom"))
 
 (describe "with-out-str error safety"
   (test "a throwing body re-raises and leaves no dangling capture"
@@ -37,17 +37,15 @@
     (assert= (try (with-out-str (cap-boom)) (catch e e)) "boom")
     ;; …and the buffer pushed before the throw must have been popped, so a fresh
     ;; capture starts clean rather than inheriting the orphaned buffer.
-    (assert= (with-out-str (print "clean")) "clean")))
+    (assert= (with-out-str (io/print "clean")) "clean")))
 
 ;; ---- across processes -------------------------------------------------------
 ;; Capture is process-scoped but inherited by spawned children (same Arc), so a
 ;; printer running in a child process is captured by the parent's with-out-str.
-(defn cap-child (parent) (print "from-child") (send parent :done))
+(defn cap-child (parent) (io/print "from-child") (send parent :done))
 
 (describe "with-out-str across processes"
-  :isolated
-
-  (test "captures output printed by a spawned child"
+  :isolated (test "captures output printed by a spawned child"
     (let (out (with-out-str (let (me (self)) (spawn (cap-child me)) (receive (:done nil)))))
       (assert= out "from-child")))
 
@@ -66,31 +64,37 @@
 ;; of the suite's output.
 (describe "with-err-str"
   (test "captures a single eprintln, newline included"
-    (assert= (with-err-str (eprintln "a warning")) "a warning\n"))
-  (test "captures eprint with no newline" (assert= (with-err-str (eprint "bare")) "bare"))
+    (assert= (with-err-str (io/puts "a warning" :to *err*)) "a warning\n"))
+  (test "captures eprint with no newline"
+    (assert= (with-err-str (io/print "bare" :to *err*)) "bare"))
   (test "concatenates several writes in order"
-    (assert= (with-err-str (eprint "a") (eprint "b") (eprintln "c")) "abc\n"))
+    (assert= (with-err-str (io/print "a" :to *err*)
+               (io/print "b" :to *err*)
+               (io/puts "c" :to *err*))
+      "abc\n"))
   (test "yields the empty string when nothing was written"
     (assert= (with-err-str 42) ""))
   (test "discards the body's own value, like with-out-str"
-    (assert= (with-err-str (eprint "x") :ignored) "x"))
+    (assert= (with-err-str (io/print "x" :to *err*) :ignored) "x"))
   (test "does NOT capture stdout — the two channels stay separate"
     ;; The inner `with-out-str` proves `print` went to stdout, and the outer
     ;; `with-err-str` proves stderr saw only the eprint.
-    (let (captured-err (with-err-str (assert= (with-out-str (print "to-stdout")) "to-stdout")
-                         (eprint "to-stderr")))
+    (let (captured-err (with-err-str (assert= (with-out-str (io/print "to-stdout")) "to-stdout")
+                         (io/print "to-stderr" :to *err*)))
       (assert= captured-err "to-stderr")))
   (test "restores the previous port afterwards"
     ;; A second capture must see its own writes only — if the sink leaked, the
     ;; first capture's text would reappear here.
-    (with-err-str (eprint "first"))
-    (assert= (with-err-str (eprint "second")) "second"))
+    (with-err-str (io/print "first" :to *err*))
+    (assert= (with-err-str (io/print "second" :to *err*)) "second"))
   (test "nests, each capture draining only its own writes"
-    (let (inner (with-err-str (eprint "IN")))
+    (let (inner (with-err-str (io/print "IN" :to *err*)))
       (assert= inner "IN")))
   (test "a throwing body propagates the error rather than swallowing it"
-    (is (includes? (try (with-err-str (eprint "before") (error "boom")) (catch e e))
+    (is (includes? (try
+                     (with-err-str (io/print "before" :to *err*) (error "boom"))
+                     (catch e e))
           "boom")))
   (test "the sink does not leak after a throw"
     (try (with-err-str (error "boom")) (catch _ nil))
-    (assert= (with-err-str (eprint "clean")) "clean")))
+    (assert= (with-err-str (io/print "clean" :to *err*)) "clean")))

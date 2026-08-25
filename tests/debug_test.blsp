@@ -41,8 +41,7 @@
     (assert= 42 (span "s" (fn () 42)))))
 
 (describe "debugger — trace fan-in across processes"
-  :isolated
-  (test "spy events from many workers fan into one debugger's ordered log"
+  :isolated (test "spy events from many workers fan into one debugger's ordered log"
     (let (dbg (start-debugger) me (self))
       (dotimes (i 4)
         (let (n i)
@@ -53,8 +52,7 @@
       (dbg-stop dbg))))
 
 (describe "debugger — break parks without a timeout"
-  :isolated
-  (test "a parked process shows in :paused and finishes only after resume"
+  :isolated (test "a parked process shows in :paused and finishes only after resume"
     (let (dbg (start-debugger) me (self))
       (spawn (with-debugger dbg (fn () (break "bp" :v 1) (send me [:done]))))
       ;; it parks (no timeout) — confirm before resuming
@@ -80,8 +78,7 @@
       (dbg-stop dbg))))
 
 (describe "debugger — causal tree across processes"
-  :isolated
-  (test "span-spawn nests child spans under the parent, on distinct pids"
+  :isolated (test "span-spawn nests child spans under the parent, on distinct pids"
     (let (dbg (start-debugger))
       (with-debugger dbg
         (fn ()
@@ -103,8 +100,7 @@
       (dbg-stop dbg))))
 
 (describe "debugger — transparent causal propagation (kernel-propagated *trace-context*)"
-  :isolated
-  (test "a PLAIN spawn (no span-spawn, no with-debugger in the child) inherits the context and nests"
+  :isolated (test "a PLAIN spawn (no span-spawn, no with-debugger in the child) inherits the context and nests"
     (let (dbg (start-debugger))
       (with-debugger dbg
         (fn ()
@@ -133,8 +129,7 @@
       (dbg-stop dbg))))
 
 (describe "debugger — send-level causality (context follows a message)"
-  :isolated
-  (test "a server handles a request in the SENDER's causal context, across processes"
+  :isolated (test "a server handles a request in the SENDER's causal context, across processes"
     (let (dbg (start-debugger))
       (let (srv (spawn (sl-server)))
         (with-debugger dbg
@@ -156,8 +151,7 @@
         (dbg-stop dbg)))))
 
 (describe "debugger — an adopted context does not leak onward"
-  :isolated
-  (test "a context adopted from a message is NOT propagated to a child the adopter spawns"
+  :isolated (test "a context adopted from a message is NOT propagated to a child the adopter spawns"
     (let (dbg (start-debugger) me (self))
       (let (b (spawn (leak-b me)))
         (with-debugger dbg
@@ -167,8 +161,7 @@
         (dbg-stop dbg)))))
 
 (describe "debugger — single-step evaluation"
-  :isolated
-  (test "step parks at each spy node; resuming walks through them to the right value"
+  :isolated (test "step parks at each spy node; resuming walks through them to the right value"
     (let (dbg (start-debugger) me (self))
       ;; a process that single-steps through (+ (* 2 3) 4) and reports its result
       (spawn (with-debugger dbg (fn () (send me [:result (step (+ (* 2 3) 4))]))))
@@ -189,8 +182,7 @@
       (dbg-stop dbg))))
 
 (describe "debugger — eval in a paused process's captured scope"
-  :isolated
-  (test "eval-at evaluates an expression against a breakpoint's named locals"
+  :isolated (test "eval-at evaluates an expression against a breakpoint's named locals"
     (let (dbg (start-debugger) me (self))
       (spawn (with-debugger dbg (fn () (break "bp" :n 6 :total 10) (send me [:done]))))
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
@@ -202,8 +194,7 @@
       (dbg-stop dbg))))
 
 (describe "debugger — aggregate / population queries"
-  :isolated
-  (test "value-distribution, modal-value and outliers summarise many workers"
+  :isolated (test "value-distribution, modal-value and outliers summarise many workers"
     (let (dbg (start-debugger) me (self))
       (dotimes (i 10)
         (let (n i)
@@ -218,8 +209,7 @@
       (dbg-stop dbg))))
 
 (describe "debugger — data-driven breakpoints"
-  :isolated
-  (test "break-when parks only when its predicate holds"
+  :isolated (test "break-when parks only when its predicate holds"
     (let (dbg (start-debugger) me (self))
       ;; false predicate -> no park, worker runs straight through
       (spawn (with-debugger dbg (fn () (break-when false "no" :x 1) (send me [:passed]))))
@@ -237,8 +227,7 @@
 (defn tfn-add (a b) (+ a b))
 
 (describe "debugger — function-boundary instrumentation (trace-fn / break-fn)"
-  :isolated
-  (test "trace-fn emits :call and :return through *spy-sink* and is value-transparent"
+  :isolated (test "trace-fn emits :call and :return through *spy-sink* and is value-transparent"
     (let (me (self))
       (trace-fn 'debug-test/tfn-square)
       (let (r (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
@@ -334,8 +323,7 @@
         :spy-stop))))
 
 (describe "trace-fn — a sink that says when it is full stops costing the traced program"
-  :isolated
-  (test "`:spy-stop` ends the trace: the sink sees its budget and not one entry more"
+  :isolated (test "`:spy-stop` ends the trace: the sink sees its budget and not one entry more"
     (let (acc (table/new))
       (trace-fn 'debug-test/tfn-countdown)
       (assert= :liftoff
@@ -372,8 +360,7 @@
       (assert= :return (:spy (receive ([:spy-entry e] e) (after 1000 :timeout)))))))
 
 (describe "debugger — step parks carry an eval-at-able :vals map"
-  :isolated
-  (test "eval-at resolves `value` at a step park (the :vals shape matches break's)"
+  :isolated (test "eval-at resolves `value` at a step park (the :vals shape matches break's)"
     (let (dbg (start-debugger) me (self))
       (spawn (with-debugger dbg (fn () (send me [:result (step (* 2 3))]))))
       (assert= true (wait-until dbg (fn (s) (> (count (get s :paused)) 0)) 200))
@@ -400,9 +387,7 @@
 ;; `pry` binds, so the tests bind it the same way and call the handlers directly —
 ;; `pry` itself needs a TTY (`run`), which a test can't provide.
 (describe "debugger — ,resume / ,step meta-command handlers"
-  :isolated
-
-  (test "no active session is a friendly no-op, not a crash"
+  :isolated (test "no active session is a friendly no-op, not a crash"
     ;; *debug-session* defaults to nil; the handler must tolerate that
     (assert= nil (debug/debug-repl-resume ""))
     (assert= nil (debug/debug-repl-step "")))
@@ -451,9 +436,7 @@
     (send done [:result sum prod])))
 
 (describe "debugger — path B: automatic local capture via %scope"
-  :isolated
-
-  (test "eval-at reaches locals that were NOT named at break (params + lets)"
+  :isolated (test "eval-at reaches locals that were NOT named at break (params + lets)"
     (let (dbg (start-debugger) me (self))
       (spawn (with-debugger dbg (fn () (pb-worker 3 4 me))))
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))

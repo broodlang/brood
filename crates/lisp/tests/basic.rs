@@ -223,10 +223,10 @@ fn string_kernel() {
     assert_eq!(run("(string/upper \"abc\")"), "\"ABC\"");
     assert_eq!(run("(string/lower \"ABC\")"), "\"abc\"");
     assert_eq!(run("(string/upper \"ß\")"), "\"SS\""); // Unicode case folding
-    assert_eq!(run("(string->number \"42\")"), "42");
-    assert_eq!(run("(string->number \"3.5\")"), "3.5");
-    assert_eq!(run("(string->number \"3abc\")"), "nil"); // strict parse, not read-string
-    assert_eq!(run("(string->number \"\")"), "nil");
+    assert_eq!(run("(string/->number \"42\")"), "42");
+    assert_eq!(run("(string/->number \"3.5\")"), "3.5");
+    assert_eq!(run("(string/->number \"3abc\")"), "nil"); // strict parse, not read-string
+    assert_eq!(run("(string/->number \"\")"), "nil");
 }
 
 /// The headline property: deep tail recursion uses O(1) Rust stack, so it must
@@ -1153,7 +1153,7 @@ fn unbound_head_in_tail_position_carries_call_pos() {
     // `(nope-fn)` is the tail of a `do` whose top-level form opens on line 1;
     // before the fix this reported line 1, now it reports line 3 col 3.
     let err = interp
-        .eval_source("(do\n  (println :a)\n  (nope-fn))\n")
+        .eval_source("(do\n  (io/puts :a)\n  (nope-fn))\n")
         .unwrap_err();
     let pos = err.pos.expect("unbound error should have a position");
     assert_eq!((pos.line, pos.col), (3, 3));
@@ -1210,7 +1210,7 @@ fn eval_str_attaches_position_no_file() {
     let mut interp = Interp::new();
     // Multi-line input; misuse is on line 3 col 3.
     let err = interp
-        .eval_str("(do\n  (println :a)\n  (first 5))")
+        .eval_str("(do\n  (io/puts :a)\n  (first 5))")
         .unwrap_err();
     let pos = err
         .pos

@@ -60,8 +60,7 @@
     (refute (test/r-skipped? (progress-test-fail "t")))))
 
 (describe "test runner: --trace replaces the dots"
-  :isolated
-  (test "tracing suppresses the progress marks"
+  :isolated (test "tracing suppresses the progress marks"
     (def *test-trace* true)
     (assert= (with-out-str (test/progress-mark (list (progress-test-pass "t")))) ""))
   (test "an ungrouped test traces just its name, with no group prefix"

@@ -953,14 +953,14 @@ pub(super) fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     }
 }
 
-/// `(string->number s)` — parse `s` as an integer if it is one, else as a float,
+/// `(string/->number s)` — parse `s` as an integer if it is one, else as a float,
 /// else `nil`. The inverse of `str`. A robust parse-or-nil can't be
 /// expressed over `read-string` (which would read `"3abc"` as `3` and stop), so
 /// the strict parse is a primitive. Surrounding whitespace is not accepted —
 /// `trim` first if the input may carry any.
 
 pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "string->number", arg(args, 0))?;
+    let s = expect_string(heap, "string/->number", arg(args, 0))?;
     if let Ok(i) = s.parse::<i64>() {
         Ok(Value::int(i))
     } else if let Ok(n) = s.parse::<num_bigint::BigInt>() {

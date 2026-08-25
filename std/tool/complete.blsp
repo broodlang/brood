@@ -316,8 +316,7 @@ suggestions\", never to an error on the user's command line."
                                                          (complete-under dir ".blsp")))
                                                  nil
                                                  (complete-manifest-dirs root
-                                                   :source-paths
-                                                   ["src"])))))
+                                                   :source-paths ["src"])))))
                         nil))))))))
 
 (defn project-modules ()
@@ -376,7 +375,7 @@ suggestions\", never to an error on the user's command line."
 
 (defn print-candidates (kind prefix)
   "Print one candidate per line for `kind`, keeping only those starting with `prefix` — the form `nest complete` consumes. Prints nothing (and never raises) when there is nothing to suggest, so the shell falls back to filename completion."
-  (fold (fn (_ c) (println c))
+  (fold (fn (_ c) (io/puts c))
     nil
     (filter (fn (c) (or (= prefix "") (string/starts-with? c prefix)))
       (or (complete-safely (fn () (for-kind kind))) nil)))

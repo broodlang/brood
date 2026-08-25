@@ -33,8 +33,7 @@
   (defn- tc-step (n) (let ([v j] (tc-value n)) [(+ v 1) j])))
 
 (describe "KI-11: JIT tail-chain recursion stays bounded"
-  :tags
-  [:regression]
+  :tags [:regression]
 
   ;; The old threshold was between 10,000 and 20,000 levels; 30,000 is comfortably past
   ;; it and still fast. A regression here does not fail the test — it aborts the whole

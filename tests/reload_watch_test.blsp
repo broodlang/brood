@@ -33,7 +33,7 @@
         (let (f (path/join dir "w.blsp"))
           (file/spit f "(def rwt-val 1)\n")
           (load f)
-          (on-change f (fn (p) (println "[reload-watch-test] on-reload fired" p)))
+          (on-change f (fn (p) (io/puts "[reload-watch-test] on-reload fired" p)))
           ;; `file-mtime` is millisecond-resolution; without a gap here the two
           ;; `spit`s can land in the same millisecond and the watcher correctly
           ;; sees no change at all (not a watcher bug — a race in the test).

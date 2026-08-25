@@ -411,7 +411,7 @@ running shows `:value :running`."
     nodes))
 (defn print-causal (dbg)
   "Pretty-print the causal tree (`causal-tree`) as an indented, pid-tagged outline."
-  (doseq (line (causal-lines (causal-tree dbg) 0)) (println line)))
+  (doseq (line (causal-lines (causal-tree dbg) 0)) (io/puts line)))
 
 ;; ---- one-glance session report ----------------------------------------------
 (defn- debug-report-lines
@@ -437,17 +437,16 @@ cross-process causal tree, and the hottest traced forms. Rendered by both the
 (defn report (dbg)
   "Print a session summary: parked processes (the break queue), the cross-process
 causal tree, and the hottest traced forms by hit count. The one-call overview."
-  (doseq (line (debug-report-lines dbg)) (println line)))
+  (doseq (line (debug-report-lines dbg)) (io/puts line)))
 
 ;; ---- live terminal view -----------------------------------------------------
 (defn- debug-watch-loop
   (dbg frames)
-  (print (str (ansi-clear) (ansi-home)))
-  (println "── watch  (Ctrl-C to exit) ──")
+  (io/print (str (ansi-clear) (ansi-home)))
+  (io/puts "── watch  (Ctrl-C to exit) ──")
   (report dbg)
   (if (= frames 1)
-    :done
-    (do (sleep 500) (debug-watch-loop dbg (dec frames)))))
+    :done (do (sleep 500) (debug-watch-loop dbg (dec frames)))))
 (defn watch (dbg & frames)
   "Live, read-only terminal view of the debug session — clears the screen and
 reprints `report` every 500ms. Runs until Ctrl-C, or for a fixed frame count
@@ -463,10 +462,10 @@ tree grow as a workload runs; drive resume from another session or a timer."
   (dbg)
   ;; In raw mode `\n` moves down but NOT to column 0, so a `println` frame staircases.
   ;; Clear, then place every line absolutely at (row, col 1) with `ansi-cursor`.
-  (print (ansi-clear))
+  (io/print (ansi-clear))
   (letrec (place (fn (lines row)
                    (when (not (empty? lines))
-                     (print (str (ansi-cursor row 1) (first lines)))
+                     (io/print (str (ansi-cursor row 1) (first lines)))
                      (place (rest lines) (inc row)))))
     (place (cons "── attach    [r] resume all parked    [q] quit ──"
              (debug-report-lines dbg))
@@ -536,12 +535,12 @@ under `with-debugger`; advance the steps from `repl-session` (`r`) or `attach`."
 the Nth if a number is given (`,resume 2`). No-op note when no session is active."
   (let (dbg *debug-session*)
     (if (nil? dbg)
-      (println "\e[90m(no active debug session)\e[0m")
+      (io/puts "\e[90m(no active debug session)\e[0m")
       (let (r (string/trim rest))
         (if (= r "")
-          (println (str "resumed " (resume-all dbg) " parked"))
+          (io/puts (str "resumed " (resume-all dbg) " parked"))
           (let (entries (vec (get (dbg-state dbg) :paused)))
-            (println (debug-resume-nth dbg entries (try (eval-string r) (catch _ nil))))))))))
+            (io/puts (debug-resume-nth dbg entries (try (eval-string r) (catch _ nil))))))))))
 
 (defn- debug-repl-step
   (rest)
@@ -549,14 +548,14 @@ the Nth if a number is given (`,resume 2`). No-op note when no session is active
 under `step`/`stepping-sink` it re-parks at the next node). Note when nothing is parked."
   (let (dbg *debug-session*)
     (if (nil? dbg)
-      (println "\e[90m(no active debug session)\e[0m")
+      (io/puts "\e[90m(no active debug session)\e[0m")
       (let (entries (vec (get (dbg-state dbg) :paused)))
         (if (empty? entries)
-          (println "\e[90m(nothing parked)\e[0m")
+          (io/puts "\e[90m(nothing parked)\e[0m")
           (do
             (resume dbg (first (first entries)))
             (sleep 30)
-            (println (str "stepped [" (first (first entries)) "]"))))))))
+            (io/puts (str "stepped [" (first (first entries)) "]"))))))))
 
 (defn pry (dbg)
   "Drop into the REAL Brood REPL — fully styled (highlighting, history, `,help`, Tab) —
@@ -573,8 +572,8 @@ re-implementation; it registers the `,resume`/`,step` commands via the REPL regi
                                :usage ",step"
                                :summary "advance one parked process a single step"
                                :handler debug-repl-step})
-  (doseq (line (debug-report-lines dbg)) (println line))
-  (println "── pry: the real REPL. `,resume` / `,step` to drive the session · Ctrl-D to continue ──")
+  (doseq (line (debug-report-lines dbg)) (io/puts line))
+  (io/puts "── pry: the real REPL. `,resume` / `,step` to drive the session · Ctrl-D to continue ──")
   (binding (*debug-session* dbg *repl-prompt* "debug> ")
     (repl/run)))
 
@@ -611,30 +610,29 @@ and the causal tree, then reads a line: `r` resume all, `r N` resume the Nth par
 Enter refresh, `q` quit, or any Brood expression to evaluate. Cooked mode, so it needs
 no raw-terminal setup and works when piped."
   (let (entries (vec (get (dbg-state dbg) :paused)))
-    (println "── parked processes ──")
-    (doseq (line (debug-numbered entries)) (println line))
-    (doseq (line (cons "── causal tree ──" (causal-lines (causal-tree dbg) 0))) (println line))
-    (print "debug> ")
+    (io/puts "── parked processes ──")
+    (doseq (line (debug-numbered entries)) (io/puts line))
+    (doseq (line (cons "── causal tree ──" (causal-lines (causal-tree dbg) 0))) (io/puts line))
+    (io/print "debug> ")
     (let (raw (read-line))
       (if (nil? raw)
-        :done
-        (let (line (string/trim raw) parts (string/split line " ") cmd (first parts))
+        :done (let (line (string/trim raw) parts (string/split line " ") cmd (first parts))
           (cond
             (= line "q") :done
             (or (= line "") (= line "p")) (repl-session dbg)
             (= cmd "r")
               (do
                 (if (> (count parts) 1)
-                  (println (debug-resume-nth dbg
+                  (io/puts (debug-resume-nth dbg
                              entries
                              (try (eval-string (second parts)) (catch _ nil))))
-                  (do (resume-all dbg) (println "resumed all")))
+                  (do (resume-all dbg) (io/puts "resumed all")))
                 ; let a resumed process reach its next break before redraw
                 (sleep 30)
                 (repl-session dbg))
             else
               (do
                 (try
-                  (println (str "=> " (pr-str-bounded (eval-string line))))
-                  (catch e (println (str "! " (pr-str-bounded e)))))
+                  (io/puts (str "=> " (pr-str-bounded (eval-string line))))
+                  (catch e (io/puts (str "! " (pr-str-bounded e)))))
                 (repl-session dbg))))))))

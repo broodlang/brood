@@ -206,9 +206,7 @@ the write never comes, which is what these cases actually test."
 ;; ever executes, and the test passes vacuously against the broken build. Verified against
 ;; a pristine-HEAD binary: `dynamic?` reads true after the isolate there, false here.
 (describe "%isolate rolls back the mark registries, not only the bindings"
-  :isolated
-
-  (test "a defdyn inside an isolate does not leak its dynamic mark"
+  :isolated (test "a defdyn inside an isolate does not leak its dynamic mark"
     (is (not (dynamic? '*isolate-leak-probe*)))
     (%isolate (fn () (eval-string "(defdyn *isolate-leak-probe* 9)")))
     (is (not (dynamic? '*isolate-leak-probe*)))

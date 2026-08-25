@@ -250,7 +250,7 @@ a bracketed IPv6 literal. `port-str` is nil when no `:port` is present."
     (nil? port-str) nil
     (= port-str "") nil
     else
-      (let (n (string->number port-str))
+      (let (n (string/->number port-str))
         (if (and (int? n) (>= n 0) (<= n 65535))
           n
           (error "url: invalid port " (pr-str port-str) " — expected an integer 0..65535")))))

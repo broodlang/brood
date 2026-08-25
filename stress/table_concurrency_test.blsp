@@ -83,8 +83,7 @@
 ;; some point, and count must never exceed writers' key space.
 (defn snap-loop (t n)
   (if (= n 0)
-    :ok
-    (let (s (table/snapshot t))
+    :ok (let (s (table/snapshot t))
       (do
         (fold (fn (_ [k v]) (assert= v (* k 3))) nil (seq s))
         (snap-loop t (- n 1))))))

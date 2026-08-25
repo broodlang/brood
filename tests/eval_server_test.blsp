@@ -48,12 +48,12 @@
       (is (int? (get r :ms)))))
 
   (test "keeps both halves: the value AND what was printed"
-    (let (r (eval-capturing "(do (print \"hi\") 7)"))
+    (let (r (eval-capturing "(do (io/print \"hi\") 7)"))
       (assert= (get r :value) "7")
       (assert= (get r :output) "hi")))
 
   (test "an error keeps the output printed before the throw"
-    (let (r (eval-capturing "(do (print \"before\") (error \"boom\"))"))
+    (let (r (eval-capturing "(do (io/print \"before\") (error \"boom\"))"))
       (assert= (get r :ok) false)
       (is (includes? (get r :error) "boom"))
       (assert= (get r :output) "before")))
@@ -63,7 +63,7 @@
 
   (test "a failed eval leaves no dangling capture"
     (eval-capturing "(error \"x\")")
-    (assert= (with-out-str (print "clean")) "clean"))
+    (assert= (with-out-str (io/print "clean")) "clean"))
 
   (test "a huge value elides instead of flooding the reply"
     (is (includes? (get (eval-capturing "(range 10000)") :value) "…"))))
@@ -118,7 +118,7 @@
 
 (describe "output bounding"
   (test "a println flood is capped with a truncation marker"
-    (let (r (eval-capturing "(dotimes (i 5000) (println i))"))
+    (let (r (eval-capturing "(dotimes (i 5000) (io/puts i))"))
       (is (<= (string/length (get r :output)) (+ eval-server/*output-cap-chars* 64)))
       (is (includes? (get r :output) "…[output truncated]"))))
   (test "evaluated code stealing the capture yields \"\" output, not nil"
@@ -130,8 +130,7 @@
   ;; :isolated — tracing rebinds globals and `untrace-all` clears a SHARED registry,
   ;; so these must not run beside each other (concurrently they flipped each other's
   ;; wrappers in and out: a traced loop would keep or lose its tail-calls at random).
-  :isolated
-  (test "a defn and its call in ONE request still trace (install-per-form)"
+  :isolated (test "a defn and its call in ONE request still trace (install-per-form)"
     (let (r (eval-capturing "(defn evsrv-t-fac ((0) 1) ((n) (* n (evsrv-t-fac (- n 1)))))\n(evsrv-t-fac 3)"
               ["evsrv-t-fac"]))
       (assert= (get r :ok) true)
@@ -241,9 +240,7 @@
       (assert= (count (filter (fn (e) (= (get e :kind) "call")) (get r :spy))) 5))))
 
 (describe "process accounting (:procs)"
-  :isolated
-
-  (test "a plain evaluation leaves nothing running"
+  :isolated (test "a plain evaluation leaves nothing running"
     (assert= (get (eval-capturing "(+ 1 2)") :procs) {:alive 0}))
 
   (test "a round-trip that finishes leaves nothing running"

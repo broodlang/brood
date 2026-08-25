@@ -298,8 +298,7 @@
     (rt-collect (+ got 1) total (receive ([:sol s] (cons s acc))))))
 
 (describe "resolver across processes"
-  :isolated
-  (test "many workers resolve the same graph to the same solution"
+  :isolated (test "many workers resolve the same graph to the same solution"
     (let (versions {'a ["1.0.0" "2.0.0"] 'b ["1.0.0"] 'c ["1.0.0" "2.0.0"]}
           deps {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
                 'b {"1.0.0" [['c "= 2.0.0"]]}}

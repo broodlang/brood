@@ -276,7 +276,7 @@ record built at root and an impl for it at root must land on the same dispatch i
 ;; id (`:module/circle`) is registered here, so a same-named non-record fn is never
 ;; mistaken for a record constructor. Always populated (cheap load-time metadata, like
 ;; `*impls*`); read only under the flag.
-(def *record-ids* {})
+(def- *record-ids* {})
 (defn record-register (id nm)
   "Record that `id` (a `:module/name` keyword) is a `defrecord`'s nominal identity."
   (%registry-update! '*record-ids* :assoc [id] nm)

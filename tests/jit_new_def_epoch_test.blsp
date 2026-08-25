@@ -35,9 +35,7 @@
         (nde-fresh-defs tag (- k 1)))))
 
 (describe "ADR-217: first-time defs leave a hot arm alone; a rebind still invalidates it"
-  :isolated
-
-  (test "a hot arm keeps answering correctly while new globals are defined around it"
+  :isolated (test "a hot arm keeps answering correctly while new globals are defined around it"
     (assert= 5000 (nde-hot 5000 0))
     (nde-fresh-defs "a" 200)
     (assert= 5000 (nde-hot 5000 0))

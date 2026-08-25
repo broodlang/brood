@@ -143,8 +143,7 @@
 ;; :serial — these tests `defn`/`defmacro` into the shared global table, so run
 ;; them one-at-a-time (in a single worker) rather than racing each other.
 (describe "macros"
-  :serial
-  (test "defn" (defn sq (x) (* x x)) (assert= (sq 6) 36))
+  :serial (test "defn" (defn sq (x) (* x x)) (assert= (sq 6) 36))
   (test "defmacro"
     (defmacro my-when (c & body) `(if ~c (do ~@body) nil))
     (assert= (my-when true 1 2 3) 3)
@@ -154,8 +153,7 @@
 ;; :serial — the side-effecting loop macros write into a global accumulator;
 ;; isolating the writes keeps them out of the cross-test race window.
 (describe "loop macros"
-  :serial
-  (test "dotimes runs body 0..n-1"
+  :serial (test "dotimes runs body 0..n-1"
     (def- loop-acc nil)
     (dotimes (i 5) (def- loop-acc (cons i loop-acc)))
     (assert= (reverse loop-acc) (list 0 1 2 3 4)))
@@ -267,8 +265,7 @@
 ;; itself is guarded by the Rust test `isolate_rolls_back_global_defs`; here we
 ;; just confirm an isolated test can def/use a global through the framework.)
 (describe "isolation"
-  :isolated
-  (test "an isolated test may def globals freely" (def isolated-only 99) (assert= isolated-only 99)))
+  :isolated (test "an isolated test may def globals freely" (def isolated-only 99) (assert= isolated-only 99)))
 
 ;; Process spawning, message passing, selective receive, timeouts, and scheduler
 ;; fairness/preemption live in their own suite: tests/concurrency_test.blsp.

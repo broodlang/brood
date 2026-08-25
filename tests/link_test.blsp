@@ -107,9 +107,7 @@
       (exit watcher :kill))))
 
 (describe "links: cascade through a chain"
-  :isolated
-
-  (test "killing the head of a linked chain takes the whole chain down"
+  :isolated (test "killing the head of a linked chain takes the whole chain down"
     ;; a — b — c linked in a chain (each links the next). Kill a → b dies
     ;; (propagation) → c dies. We monitor c and watch it fall.
     (let (_me (self)

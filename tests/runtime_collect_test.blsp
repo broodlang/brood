@@ -16,8 +16,7 @@
 ;; global would race on its final value.
 (defn rc-churn (sym i n)
   (if (= i n)
-    :done
-    (do
+    :done (do
       (eval (list 'def sym (list 'fn '(x) (list '+ (list '* 'x i) i))))
       (rc-churn sym (+ i 1) n))))
 

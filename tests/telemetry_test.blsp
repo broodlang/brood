@@ -24,8 +24,7 @@
 
 ;; ---- emit + handlers --------------------------------------------------------
 (describe "telemetry: emit and handlers"
-  :isolated
-  (test "emit delivers event + measurements + metadata to a handler"
+  :isolated (test "emit delivers event + measurements + metadata to a handler"
     (let (me (self))
       (start-telemetry)
       (detach-all)
@@ -111,8 +110,7 @@
 
 ;; ---- the isolation guarantee ------------------------------------------------
 (describe "telemetry: handlers run in the listener, isolated from the emitter"
-  :isolated
-  (test "a handler's (self) is the listener, not the emitter"
+  :isolated (test "a handler's (self) is the listener, not the emitter"
     (let (lpid (start-telemetry) me (self))
       (detach-all)
       (attach :w :evt (fn (e m md) (send me [:where (self)])))
@@ -171,8 +169,7 @@
 
 ;; ---- forward ----------------------------------------------------------------
 (describe "telemetry: forward"
-  :isolated
-  (test "forward delivers the event to a process you own"
+  :isolated (test "forward delivers the event to a process you own"
     (let (me (self))
       (start-telemetry)
       (detach-all)
@@ -185,8 +182,7 @@
 ;; ---- span -------------------------------------------------------------------
 ; emitter alive after the span throw
 (describe "telemetry: span"
-  :isolated
-  (test "span emits :start then :stop with a duration, returns the body value"
+  :isolated (test "span emits :start then :stop with a duration, returns the body value"
     (let (me (self))
       (start-telemetry)
       (detach-all)
@@ -215,8 +211,7 @@
         (assert= (+ 1 1) 2)))))
 ;; ---- not started / after stop ----------------------------------------------
 (describe "telemetry: not started / after stop"
-  :isolated
-  (test "emit and span are no-ops when telemetry isn't started"
+  :isolated (test "emit and span are no-ops when telemetry isn't started"
     (do
       (stop-telemetry)
       (assert= (pid) nil)
@@ -234,8 +229,7 @@
 
 ;; ---- concurrency ------------------------------------------------------------
 (describe "telemetry: concurrent emitters"
-  :isolated
-  (test "sync flushes: after sync the handler effect is observable"
+  :isolated (test "sync flushes: after sync the handler effect is observable"
     (let (me (self))
       (start-telemetry)
       (detach-all)
