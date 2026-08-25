@@ -1,7 +1,7 @@
 ;; ---- I/O --------------------------------------------------------------------
 ;; Output is redirectable. A *port* is just a 1-arg fn that consumes a ready
 ;; string (`(fn (s) …)`); `*out*`/`*err*` are dynamic vars holding the current
-;; stdout/stderr ports, and `print`/`println`/`eprint`/`eprintln` render their
+;; stdout/stderr ports, and `io/print`/`io/puts`/`io/print`/`io/puts` with `:to *err*` render their
 ;; args (Rust `%render` — the exact text stdout would show) and hand the string to
 ;; the port. The defaults are the kernel writers `%write-out`/`%write-err`; rebind
 ;; with `binding` (or `std/io`'s `with-out`/`with-err`) to send output to a
@@ -15,7 +15,7 @@
 (%declare-dynamic '*err*)
 (def *err* %write-err)
 ;; `*show*` — a late-bound per-argument display transform for the SCREEN printers
-;; (`print`/`println`/`eprint`/`eprintln`). Declared here; the Display protocol (core,
+;; (`io/print`/`io/puts`/`io/print`/`io/puts` with `:to *err*`). Declared here; the Display protocol (core,
 ;; defined at the end of this prelude) sets it to `show-print-hook`, which routes a
 ;; *record* through the `Display` ability's `->string` op so a record can define how it
 ;; prints (Elixir's `String.Chars` model) while built-ins keep the fast native render.
@@ -54,7 +54,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
        (catch e (do (%capture-take) (throw e))))))
 
 ;; The stderr counterpart of `with-out-str`. It works differently, and has to:
-;; stdout capture is a kernel buffer (`%capture-begin`), while `eprint`/`eprintln`
+;; stdout capture is a kernel buffer (`%capture-begin`), while `io/print`/`io/puts` with `:to *err*`
 ;; write through the `*err*` PORT — so this rebinds that port to a collecting sink
 ;; instead. Consequences worth knowing: it captures only what goes through `*err*`
 ;; (a Rust-side `eprintln!`, e.g. a kernel reload diagnostic, is NOT interceptable
@@ -62,7 +62,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; does. Accumulation uses a `Table` because data is immutable — the one sanctioned
 ;; mutable structure, and a local one that never escapes.
 (defmacro with-err-str (& body)
-  "Evaluate `body` with the `*err*` port captured, returning everything written to it as a string (`\"\"` if nothing was), discarding `body`'s own value. For asserting on a warning — and for keeping an expected warning out of a test run's output. Only intercepts writes through `*err*` (`eprint`/`eprintln`), not stderr written by the kernel itself."
+  "Evaluate `body` with the `*err*` port captured, returning everything written to it as a string (`\"\"` if nothing was), discarding `body`'s own value. For asserting on a warning — and for keeping an expected warning out of a test run's output. Only intercepts writes through `*err*` (`io/print`/`io/puts` with `:to *err*`), not stderr written by the kernel itself."
   (let (sink (gensym "err-sink"))
     `(let (~sink (%table))
        (try
@@ -211,7 +211,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 
 ;; ---- side-effecting iteration (function form of `doseq`) --------------------
 (defn run! (f coll)
-  "Apply `f` to each item of `coll` for its side effects, returning `nil`. The function-valued counterpart of `doseq`: `(run! println xs)`."
+  "Apply `f` to each item of `coll` for its side effects, returning `nil`. The function-valued counterpart of `doseq`: `(run! io/puts xs)`."
   (fold (fn (acc x) (f x) acc) nil coll)
   nil)
 
@@ -228,7 +228,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; ONE bare symbol and has no exception class, so this shape is not an error the
 ;; reader can see: the class name silently becomes the binding and the intended
 ;; binder is evaluated as a statement. It produces a WRONG PROGRAM, not a
-;; diagnostic — `(catch Exception e (println "caught" e))` binds the value to
+;; diagnostic — `(catch Exception e (io/puts "caught" e))` binds the value to
 ;; `Exception` and prints the prelude's `e` (2.718…). Detected by shape: a symbol
 ;; binder whose handler *starts* with a bare symbol and has more forms after it.
 ;; There is no legitimate reading to protect — a leading bare symbol followed by

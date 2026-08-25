@@ -93,7 +93,7 @@ lines (see the module preamble on stray output)."
 ;; ---- the evaluation core ------------------------------------------------------
 
 ;; The most captured-output characters a reply carries — the `:value` bound's
-;; rationale applies verbatim to `:output` (one println loop must not pump
+;; rationale applies verbatim to `:output` (one io/puts loop must not pump
 ;; megabytes into a single reply line the client reads whole).
 (def *output-cap-chars* 8192)
 
