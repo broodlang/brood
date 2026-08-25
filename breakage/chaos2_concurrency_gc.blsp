@@ -14,7 +14,7 @@
 ;;;   P73 — cross-process send of a value that requires nursery promotion
 
 ;;; ---- P68: 200 processes all GC-ing simultaneously ----
-(println "=== P68: 200 concurrent heavy-allocating processes ===")
+(io/puts "=== P68: 200 concurrent heavy-allocating processes ===")
 (let (me (self)
       n 200)
   (dotimes (_ n)
@@ -33,12 +33,12 @@
     (when (> remaining 0)
       (receive
         (:done (wait-all (- remaining 1)))
-        (after 60000 (println "P68: timeout waiting for processes")))))
+        (after 60000 (io/puts "P68: timeout waiting for processes")))))
   (wait-all n)
-  (println "P68: all 200 processes finished without crash"))
+  (io/puts "P68: all 200 processes finished without crash"))
 
 ;;; ---- P69: heavy allocation while receiving large messages ----
-(println "=== P69: alloc during large-message receive ===")
+(io/puts "=== P69: alloc during large-message receive ===")
 (let (me (self))
   (let (worker (spawn
                  (defn recv-and-alloc (n)
@@ -53,10 +53,10 @@
     (doseq (i (range 100))
       (send worker (into [] (range (rem (* i 17) 200)))))
     (let (r (receive (:p69-done :ok) (after 30000 :timeout)))
-      (println "P69: completed:" (= :ok r)))))
+      (io/puts "P69: completed:" (= :ok r)))))
 
 ;;; ---- P70: promoted closure called by many concurrent processes ----
-(println "=== P70: promoted closure called concurrently by 100 processes ===")
+(io/puts "=== P70: promoted closure called concurrently by 100 processes ===")
 
 ;; `def` promotes code to the RUNTIME region
 (defn p70-compute (x n)
@@ -78,11 +78,11 @@
           (collect-p70 (- remaining 1)
             (if (= expected (get r 1)) wrong (+ wrong 1)))))))
   (def p70-wrong (collect-p70 n 0))
-  (println "P70: wrong results:" p70-wrong)
-  (println "P70-correct:" (= 0 p70-wrong)))
+  (io/puts "P70: wrong results:" p70-wrong)
+  (io/puts "P70-correct:" (= 0 p70-wrong)))
 
 ;;; ---- P71: def rebind while 100 readers are running ----
-(println "=== P71: def rebind under concurrent read (late binding) ===")
+(io/puts "=== P71: def rebind under concurrent read (late binding) ===")
 
 (def p71-global-val 0)
 
@@ -115,10 +115,10 @@
       (let (r (receive ([:p71 v] v) (after 30000 :timeout)))
         (collect-p71 (- n 1) (and all-valid (int? r))))))
   (def p71-ok (collect-p71 n-readers true))
-  (println "P71: all reads produced valid ints:" p71-ok))
+  (io/puts "P71: all reads produced valid ints:" p71-ok))
 
 ;;; ---- P72: minor_collect on every receive (GC safepoint stress) ----
-(println "=== P72: process triggering GC on every receive ===")
+(io/puts "=== P72: process triggering GC on every receive ===")
 ;; By allocating heavily before each receive, we ensure the nursery fills up
 ;; and minor_collect fires at the next safepoint (inside receive).
 (let (me (self)
@@ -137,10 +137,10 @@
     (doseq (i (range n))
       (send worker i))
     (let (r (receive (:p72-done :ok) (after 60000 :timeout)))
-      (println "P72: done without crash:" (= :ok r)))))
+      (io/puts "P72: done without crash:" (= :ok r)))))
 
 ;;; ---- P73: cross-process send of nursery-young value (forces promotion) ----
-(println "=== P73: nursery-young value sent cross-process (forces to_message promotion) ===")
+(io/puts "=== P73: nursery-young value sent cross-process (forces to_message promotion) ===")
 (let (me (self))
   ;; Allocate a fresh value (young nursery generation) and immediately send it
   ;; to_message must deep-copy it; it may trigger a partial GC on the sender side
@@ -165,7 +165,7 @@
               (:p73-done :ok)
               ([:p73-error n n2] (str "corrupt: " n " -> " n2 " expected " (* n n)))
               (after 30000 :timeout)))
-      (println "P73: result:" r)
-      (println "P73-correct:" (= :ok r)))))
+      (io/puts "P73: result:" r)
+      (io/puts "P73-correct:" (= :ok r)))))
 
-(println "=== chaos2_concurrency_gc DONE ===")
+(io/puts "=== chaos2_concurrency_gc DONE ===")

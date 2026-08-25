@@ -48,7 +48,7 @@ fn two_nodes_connect_and_message() {
 (def remote (receive ([:pong p] p) (after 30000 (throw "no reply by name"))))
 (unless (pid? remote) (throw "reply was not a pid"))
 (send remote [:ping (self)])
-(receive ([:pong _] (println "ROUNDTRIP-OK")) (after 30000 (throw "no reply by pid")))
+(receive ([:pong _] (io/puts "ROUNDTRIP-OK")) (after 30000 (throw "no reply by pid")))
 "#
     );
 
@@ -119,9 +119,9 @@ fn clean_peer_exit_fires_nodedown_promptly() {
 (receive
   ([:nodedown p]
     (if (empty? (node/list))
-      (println "NODEDOWN-OK " p)
-      (println "NODEDOWN-BUT-NODES-NOT-PRUNED " (node/list))))
-  (after 5000 (println "TIMEOUT-no-nodedown " (node/list))))
+      (io/puts "NODEDOWN-OK " p)
+      (io/puts "NODEDOWN-BUT-NODES-NOT-PRUNED " (node/list))))
+  (after 5000 (io/puts "TIMEOUT-no-nodedown " (node/list))))
 "#
     );
 
@@ -174,8 +174,8 @@ fn disconnect_drops_a_peer_link_while_both_nodes_stay_up() {
 (defn wait-link () (if (empty? (node/list)) (do (sleep 50) (wait-link)) (first (node/list))))
 (node/monitor (wait-link))
 (receive
-  ([:nodedown p] (println "B-NODEDOWN " p " " (node/list)))
-  (after 5000 (println "B-TIMEOUT " (node/list))))
+  ([:nodedown p] (io/puts "B-NODEDOWN " p " " (node/list)))
+  (after 5000 (io/puts "B-TIMEOUT " (node/list))))
 "#
     );
 
@@ -188,11 +188,11 @@ fn disconnect_drops_a_peer_link_while_both_nodes_stay_up() {
 (def peer (node/connect "b@127.0.0.1:{port_b}"))
 (node/monitor peer)
 (sleep 400)
-(if (node/disconnect peer) (println "RETURNED-TRUE") (println "RETURNED-FALSE"))
+(if (node/disconnect peer) (io/puts "RETURNED-TRUE") (io/puts "RETURNED-FALSE"))
 (receive
-  ([:nodedown p] (if (empty? (node/list)) (println "A-NODEDOWN-OK " p) (println "A-NODES-NOT-PRUNED " (node/list))))
-  (after 5000 (println "A-TIMEOUT " (node/list))))
-(if (node/disconnect :ghost@nowhere) (println "GHOST-TRUE") (println "GHOST-FALSE"))
+  ([:nodedown p] (if (empty? (node/list)) (io/puts "A-NODEDOWN-OK " p) (io/puts "A-NODES-NOT-PRUNED " (node/list))))
+  (after 5000 (io/puts "A-TIMEOUT " (node/list))))
+(if (node/disconnect :ghost@nowhere) (io/puts "GHOST-TRUE") (io/puts "GHOST-FALSE"))
 "#
     );
 
@@ -268,7 +268,7 @@ fn two_unix_nodes_connect_by_name_and_message() {
 (def remote (receive ([:pong p] p) (after 30000 (throw "no reply by name"))))
 (unless (pid? remote) (throw "reply was not a pid"))
 (send remote [:hi (self)])
-(receive ([:pong _] (println "UNIX-ROUNDTRIP-OK")) (after 30000 (throw "no reply by pid")))
+(receive ([:pong _] (io/puts "UNIX-ROUNDTRIP-OK")) (after 30000 (throw "no reply by pid")))
 "#;
 
     let mut a = spawn_brood_env(&home, "userver.blsp", server, &env);
@@ -322,8 +322,8 @@ fn wrong_cookie_rejected_over_unix() {
     // A wrong cookie → handshake MAC mismatch → connect raises → we print REJECTED.
     let client = r#"
 (node/start :ud)
-(try (do (node/connect "uc") (println "UNEXPECTED-CONNECT"))
-     (catch _ (println "REJECTED")))
+(try (do (node/connect "uc") (io/puts "UNEXPECTED-CONNECT"))
+     (catch _ (io/puts "REJECTED")))
 "#;
 
     let mut a = spawn_brood_env(&home, "bserver.blsp", server, &env_a);
@@ -353,7 +353,7 @@ fn cookie_file_autogen_and_reuse() {
         ("HOME", home.to_str().unwrap()),
         ("XDG_CONFIG_HOME", cfg.to_str().unwrap()),
     ];
-    let prog = "(println (node/cookie))";
+    let prog = "(io/puts (node/cookie))";
 
     let first = spawn_brood_env(&home, "c1.blsp", prog, &env)
         .wait_with_output()
@@ -419,7 +419,7 @@ fn lambda_ships_across_nodes_and_runs() {
   (send {{:name :worker :node :a@127.0.0.1}} [:run (fn (x) (* x n)) 14 (self)]))
 (receive
   ([:result r] (if (= r 42)
-                 (println "CROSS-NODE-LAMBDA-OK")
+                 (io/puts "CROSS-NODE-LAMBDA-OK")
                  (throw (str "expected 42, got " r))))
   (after 30000 (throw "no reply")))
 "#
@@ -490,7 +490,7 @@ fn source_positions_survive_a_cross_node_send() {
   ;; must survive across the wire and reach the receiver's `form-pos`.
   (send {{:name :probe :node :a@127.0.0.1}} [:run (fn () (reflect/form-pos '(positioned-marker))) me]))
 (receive
-  ([:pos p] (println (str "GOT: " p)))
+  ([:pos p] (io/puts (str "GOT: " p)))
   (after 30000 (throw "no reply from probe")))
 "#
     );
@@ -569,7 +569,7 @@ fn a_shipped_closure_requires_its_modules_on_the_receiver() {
 (send {{:name :calc :node :a@127.0.0.1}}
   [:run (fn (x) (str (math/sqrt x) " " (json/encode {{:q (quote math/not-a-real-name)}}))) 144 (self)])
 (receive
-  ([:result r] (println (str "GOT: " r)))
+  ([:result r] (io/puts (str "GOT: " r)))
   (after 30000 (throw "no reply from calc")))
 "#
     );
@@ -634,7 +634,7 @@ fn remote_spawn_runs_a_thunk_on_a_peer() {
   (node/spawn :a@127.0.0.1 (send me [:hello-from-a (node/name)])))
 (receive
   ([:hello-from-a from] (if (= from :a@127.0.0.1)
-                          (println "REMOTE-SPAWN-OK")
+                          (io/puts "REMOTE-SPAWN-OK")
                           (throw (str "spawned on wrong node: " from))))
   (after 30000 (throw "no reply from remote-spawn")))
 "#
@@ -705,7 +705,7 @@ fn cross_node_pid_monitor_fires_down() {
 (receive
   ([:down mref pid reason]
     (if (and (= mref m) (pid? pid))
-      (println "DOWN-OK")
+      (io/puts "DOWN-OK")
       (throw (str "wrong down: " mref " " pid " " reason))))
   (after 30000 (throw "no :down message")))
 "#
@@ -774,11 +774,11 @@ fn remote_monitor_fires_noconnection_on_node_down() {
 ;; Tell the parent harness we're armed; the harness will kill A. We can't
 ;; kill A from inside the language, so we wait a beat and the harness sends
 ;; SIGKILL to A externally.
-(println "ARMED")
+(io/puts "ARMED")
 (receive
   ([:down mref pid reason]
     (if (and (= mref m) (= reason :noconnection))
-      (println "NOCONNECTION-OK")
+      (io/puts "NOCONNECTION-OK")
       (throw (str "wrong down on netsplit: mref=" mref " reason=" reason))))
   (after 10000 (throw "no :noconnection within 10s")))
 "#
@@ -875,16 +875,16 @@ fn ensure_link_reconnects_across_a_node_restart() {
 (wait-link)
 ;; First probe — proves the initial link came up.
 (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
-(receive ([:pong _] (println "FIRST-OK")) (after 30000 (throw "no first pong")))
+(receive ([:pong _] (io/puts "FIRST-OK")) (after 30000 (throw "no first pong")))
 ;; Tell the harness we're ready for the restart.
-(println "ARMED")
+(io/puts "ARMED")
 ;; Now retry the second ping until something answers — the harness will
 ;; bounce A1 → A2 in between. The watcher re-`connect`s on :nodedown.
 (defn try-second (n)
   (when (= n 0) (throw "no second pong after retries"))
   (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
   (receive
-    ([:pong _] (println "SECOND-OK"))
+    ([:pong _] (io/puts "SECOND-OK"))
     (after 500 (try-second (- n 1)))))
 (try-second 40)
 "#
@@ -1019,7 +1019,7 @@ fn mismatched_cookie_is_rejected() {
     let client = format!(
         r#"
 (node/start :b "127.0.0.1:{port_b}" "wrong-cookie-test-16+")
-(println (try (do (node/connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECTED")
+(io/puts (try (do (node/connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECTED")
               (catch e "REJECTED-AS-EXPECTED")))
 "#
     );
@@ -1077,7 +1077,7 @@ fn duplicate_connect_is_deduplicated() {
 (node/connect "a@127.0.0.1:{port_a}")          ; second connect — should reuse, not add
 (send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
 (receive ([:welcome] :ok) (after 30000 (throw "no welcome")))
-(println (str "NODES=" (node/list)))           ; expect exactly (:a@127.0.0.1)
+(io/puts (str "NODES=" (node/list)))           ; expect exactly (:a@127.0.0.1)
 (send {{:name :echo :node :a@127.0.0.1}} [:bye (self)])
 "#
     );
@@ -1140,8 +1140,8 @@ fn cluster_mesh_connects_peers_transitively() {
 (node/connect "b@127.0.0.1:{port_b}")
 (defn wait-sees (n)
   (cond
-    (includes? (node/list) :c@127.0.0.1) (println (str "A-SEES-C nodes=" (node/list)))
-    (<= n 0)                       (println (str "A-MISSED-C nodes=" (node/list)))
+    (includes? (node/list) :c@127.0.0.1) (io/puts (str "A-SEES-C nodes=" (node/list)))
+    (<= n 0)                       (io/puts (str "A-MISSED-C nodes=" (node/list)))
     else                           (do (sleep 100) (wait-sees (- n 1)))))
 (wait-sees 150)
 "#
@@ -1202,7 +1202,7 @@ fn no_mesh_env_keeps_links_point_to_point() {
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (node/connect "b@127.0.0.1:{port_b}")
 (sleep 2000)
-(println (str "A-NODES=" (node/list)))
+(io/puts (str "A-NODES=" (node/list)))
 "#
     );
 
@@ -1241,7 +1241,7 @@ fn connect_to_self_refused() {
     let src = format!(
         r#"
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(println (try (do (node/connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECTED")
+(io/puts (try (do (node/connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECTED")
               (catch e "REFUSED-AS-EXPECTED")))
 "#
     );
@@ -1269,7 +1269,7 @@ fn monitor_unconnected_node_fires_immediately() {
         r#"
 (node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (node/monitor :ghost)
-(receive ([:nodedown :ghost] (println "IMMEDIATE-NODEDOWN"))
+(receive ([:nodedown :ghost] (io/puts "IMMEDIATE-NODEDOWN"))
          (after 5000 (throw "monitor-node did not fire immediately")))
 "#
     );
@@ -1304,7 +1304,7 @@ fn node_down_is_detected() {
 (send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
 (receive ([:welcome] :ok) (after 30000 (throw "no welcome")))   ; link + monitor are up
 (send {{:name :echo :node :a@127.0.0.1}} [:bye (self)])                  ; make :a exit
-(receive ([:nodedown _] (println "NODEDOWN-OK"))
+(receive ([:nodedown _] (io/puts "NODEDOWN-OK"))
          (after 10000 (throw "no nodedown")))
 "#
     );
@@ -1364,7 +1364,7 @@ fn remote_link_death_delivers_exit_to_a_trapping_peer() {
 (unless (pid? w) (throw "whoami reply was not a pid"))
 (link w)                                  ; cross-node link (Frame::Link → A records its half)
 (send w [:die-now])                       ; ordered after the link on this connection
-(receive ([:EXIT ^w [:error _]] (println "REMOTE-LINK-EXIT-OK"))
+(receive ([:EXIT ^w [:error _]] (io/puts "REMOTE-LINK-EXIT-OK"))
          ([:EXIT ^w r] (throw (str "unexpected EXIT reason " r)))
          (after 30000 (throw "no remote [:EXIT]")))
 "#
@@ -1416,7 +1416,7 @@ fn remote_exit_kills_a_worker() {
 (def w (receive ([:iam p] p) (after 30000 (throw "no whoami"))))
 (def m (monitor w))
 (exit w :kill)                            ; remote kill (non-link Frame::Exit)
-(receive ([:down ^m ^w _] (println "REMOTE-EXIT-KILL-OK"))
+(receive ([:down ^m ^w _] (io/puts "REMOTE-EXIT-KILL-OK"))
          (after 30000 (throw "remote worker did not die")))
 "#
     );
@@ -1488,7 +1488,7 @@ fn supervisor_restarts_a_remote_child() {
 (def w1 (receive ([:up p] p) (after 6000 (throw "no first :up"))))
 (send w1 :die)                              ; crash the remote worker
 (def w2 (receive ([:up p] p) (after 6000 (throw "no restart :up"))))
-(if (not (= w1 w2)) (println "CROSS-NODE-SUP-OK") (throw "restart reused the pid"))
+(if (not (= w1 w2)) (io/puts "CROSS-NODE-SUP-OK") (throw "restart reused the pid"))
 "#
     );
 
@@ -1517,8 +1517,8 @@ fn node_name_is_qualified_with_host() {
     std::fs::create_dir_all(&dir).unwrap();
     let prog = r#"
 (node/start :a "127.0.0.1:0")
-(println (str "NODE=" (node/name)))
-(println (str "SELF=" (self)))
+(io/puts (str "NODE=" (node/name)))
+(io/puts (str "SELF=" (self)))
 "#;
     let out = spawn_brood(&dir, "qual.blsp", prog)
         .wait_with_output()
@@ -1563,7 +1563,7 @@ fn remote_spawn_sync_returns_a_usable_remote_pid() {
 (unless (pid? child) (throw "remote-spawn-sync did not return a pid"))
 (receive
   ([:ran on val] (if (= val 42)
-                   (println (str "REMOTE-SPAWN-SYNC-OK child=" child " ran-on=" on))
+                   (io/puts (str "REMOTE-SPAWN-SYNC-OK child=" child " ran-on=" on))
                    (throw (str "wrong value " val))))
   (after 30000 (throw "remote child never ran")))
 "#
@@ -1624,7 +1624,7 @@ fn dual_listen_serves_tcp_and_unix_at_once() {
 (receive ([:pong _] :ok) (after 30000 (throw "no pong over tcp")))
 (send {{:name :echo :node via-unix}} [:hi (self)])
 (receive ([:pong _] :ok) (after 30000 (throw "no pong over unix")))
-(println "DUAL-LISTEN-OK")
+(io/puts "DUAL-LISTEN-OK")
 "#
     );
 
@@ -1679,9 +1679,9 @@ fn monitor_node_fires_on_every_reconnect_cycle() {
 (node/monitor :a)   ; register once — must survive across reconnect cycles
 (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
 (receive ([:pong] :ok) (after 10000 (throw "no first pong")))
-(println "ARMED")
+(io/puts "ARMED")
 ; Wait for the first nodedown (harness kills A1 after ARMED).
-(receive ([:nodedown _] (println "FIRST-NODEDOWN"))
+(receive ([:nodedown _] (io/puts "FIRST-NODEDOWN"))
          (after 15000 (throw "no first nodedown")))
 ; Reconnect to A2 (harness restarted A on the same port). Retry until it's up.
 (defn retry-connect (n)
@@ -1691,10 +1691,10 @@ fn monitor_node_fires_on_every_reconnect_cycle() {
 (retry-connect 60)
 (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
 (receive ([:pong] :ok) (after 10000 (throw "no second pong")))
-(println "RECONNECTED")
+(io/puts "RECONNECTED")
 ; Wait for the second nodedown (harness kills A2 after RECONNECTED).
 ; The original monitor — registered before the first down — must fire again.
-(receive ([:nodedown _] (println "SECOND-NODEDOWN"))
+(receive ([:nodedown _] (io/puts "SECOND-NODEDOWN"))
          (after 15000 (throw "no second nodedown from persistent monitor")))
 "#
     );
@@ -1796,11 +1796,11 @@ fn demonitor_node_stops_future_deliveries() {
 (def peer (node/connect "a@127.0.0.1:{port_a}"))
 (node/monitor peer)
 (node/demonitor peer)
-(println "DEMONITORED")
+(io/puts "DEMONITORED")
 ; Give the harness time to kill A, then wait for a nodedown that must NOT arrive.
 (receive
   ([:nodedown _] (throw "demonitor-node did not cancel the monitor"))
-  (after 4000 (println "NO-NODEDOWN-OK")))
+  (after 4000 (io/puts "NO-NODEDOWN-OK")))
 "#
     );
 
@@ -1880,8 +1880,8 @@ fn cluster_mesh_late_joiner_reaches_all_hub_peers() {
          (node/connect \"b@127.0.0.1:{port_b}\")\n\
          (defn wait-all (n)\n\
             (cond (and (includes? (node/list) :c@127.0.0.1) (includes? (node/list) :d@127.0.0.1))\n\
-                    (println (str \"A-SEES-ALL nodes=\" (node/list)))\n\
-                  (<= n 0) (println (str \"A-MISSED nodes=\" (node/list)))\n\
+                    (io/puts (str \"A-SEES-ALL nodes=\" (node/list)))\n\
+                  (<= n 0) (io/puts (str \"A-MISSED nodes=\" (node/list)))\n\
                   else (do (sleep 100) (wait-all (- n 1)))))\n\
          (wait-all 200)\n"
     );
@@ -2126,8 +2126,8 @@ fn reconnect_watcher_heals_a_fallen_link() {
 (reconnect/watch spec {{:min-ms 100 :max-ms 400}})
 (reconnect/subscribe spec)
 (receive
-  ([:nodedown _] (println "NODEDOWN-OK"))
-  (after 15000 (println "TIMEOUT-no-nodedown")))
+  ([:nodedown _] (io/puts "NODEDOWN-OK"))
+  (after 15000 (io/puts "TIMEOUT-no-nodedown")))
 ;; while down: an opted-in send raises catchable noconnection instead of dropping
 (proc/flag :send-errors true)
 (println
@@ -2136,19 +2136,19 @@ fn reconnect_watcher_heals_a_fallen_link() {
 (proc/flag :send-errors nil)
 (receive
   ([:nodeup up]
-    (println "NODEUP-OK")
+    (io/puts "NODEUP-OK")
     ;; the healed link routes: ping B's echoer by registered name
     (send {{:name :echo :node up}} [:ping (self)])
     (receive
-      ([:pong] (println "PONG-OK"))
-      (after 20000 (println "TIMEOUT-no-pong"))))
+      ([:pong] (io/puts "PONG-OK"))
+      (after 20000 (io/puts "TIMEOUT-no-pong"))))
   ;; Liveness deadlines, not latency assertions: what this test proves is that the watcher
   ;; heals the link at all. It runs under `make test`, i.e. on a machine saturated by dozens
   ;; of other test processes, where B's restart and A's next backoff attempt can both slip.
   ;; 20 s was not enough there (KI-27) while being ample solo — an unhelpful combination.
   ;; Kept so nodeup + pong together stay well inside nextest's 2 min per-test cap: past that
   ;; the process is killed and you lose the diagnostic these branches exist to print.
-  (after 45000 (println "TIMEOUT-no-nodeup")))
+  (after 45000 (io/puts "TIMEOUT-no-nodeup")))
 "#
     );
 
@@ -2271,7 +2271,7 @@ fn a_dropped_send_to_an_unregistered_name_warns_once() {
 ;; unregistered-*name* path this half of the test is about.
 (send {{:name :localghost :node (node/name)}} [:x])
 (sleep 1200)
-(println "A-DONE")
+(io/puts "A-DONE")
 "#
     );
 

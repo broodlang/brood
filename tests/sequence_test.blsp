@@ -422,12 +422,12 @@
     ;; test-runner rely on `(map require-one …)` / `(map run-test …)` for effect).
     ;; A lazy view must NOT run its fn until something realises it.
     ; eager → runs now
-    (assert= (with-out-str (map print (range 5))) "01234")
+    (assert= (with-out-str (map io/print (range 5))) "01234")
     ; view built, not realised → nothing
-    (assert= (with-out-str (lmap print (range 5))) "")
+    (assert= (with-out-str (lmap io/print (range 5))) "")
     ; seq realises → runs
-    (assert= (with-out-str (seq (lmap print (range 5)))) "01234")
-    (assert= (with-out-str (reduce (fn (a _) a) nil (lmap print (range 5)))) "01234")))
+    (assert= (with-out-str (seq (lmap io/print (range 5)))) "01234")
+    (assert= (with-out-str (reduce (fn (a _) a) nil (lmap io/print (range 5)))) "01234")))
 
 ;; ---- views across processes / network / hot-reload --------------------------
 ;; A view is heap-local: `send` REFUSES to ship one (it references the sender's

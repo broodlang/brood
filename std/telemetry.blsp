@@ -64,12 +64,13 @@ LISTENER process."
   "Dispatch `event` to its handlers and detach any that threw. Runs in the listener."
   (when *telemetry-validate*
     (doseq (problem (telemetry-check-event event measurements metadata))
-      (eprintln (str "telemetry: event "
-                  (pr-str event)
-                  " "
-                  (name (first problem))
-                  " missing key "
-                  (pr-str (second problem))))))
+      (io/puts (str "telemetry: event "
+                 (pr-str event)
+                 " "
+                 (name (first problem))
+                 " missing key "
+                 (pr-str (second problem)))
+        :to *err*)))
   (let (bucket (get *telemetry-handlers* event nil))
     (when bucket
       (let (failed (telemetry-dispatch bucket event measurements metadata))

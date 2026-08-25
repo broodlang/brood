@@ -1331,7 +1331,7 @@ pub(super) fn string_span_until(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
 
 /// Lexical category of an atom token (a maximal run of non-delimiter chars), matching
 /// `std/editor/highlight`'s `hl--atom-face` shape: a `:`-prefixed or `nil`/`true`/`false`
-/// constant is a `keyword`; one that parses as an int/float (like `string->number`) is a
+/// constant is a `keyword`; one that parses as an int/float (like `string/->number`) is a
 /// `number`; anything else is a plain `symbol`. The head-position special-form vs call
 /// distinction is left to the consumer (it needs the surrounding `(`).
 

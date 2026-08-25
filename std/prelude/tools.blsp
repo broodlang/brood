@@ -80,16 +80,19 @@ Values print through `pr-str-bounded`, not `pr-str`: this is a display protocol,
 one traced call carrying a megabyte string must not paint a megabyte to stderr. Lift
 the bound for a run with `(binding (*print-string-length* nil) …)`."
   (case (:spy entry)
-    :enter (eprintln (str "spy: " (pr-str-bounded (:form entry))))
+    :enter (%write-err (str (str "spy: " (pr-str-bounded (:form entry))) "\n"))
     :node
-      (eprintln (str "  "
-                  (spy-indent (:depth entry))
-                  (pr-str-bounded (:form entry))
-                  " => "
-                  (pr-str-bounded (:value entry))))
-    :exit (eprintln (str "=> " (pr-str-bounded (:value entry))))
-    :call (eprintln (str "trace: " (pr-str-bounded (cons (:fn entry) (:args entry)))))
-    :return (eprintln (str "trace: " (pr-str (:fn entry)) " => " (pr-str-bounded (:value entry))))
+      (%write-err (str (str "  "
+                         (spy-indent (:depth entry))
+                         (pr-str-bounded (:form entry))
+                         " => "
+                         (pr-str-bounded (:value entry)))
+                    "\n"))
+    :exit (%write-err (str (str "=> " (pr-str-bounded (:value entry))) "\n"))
+    :call (%write-err (str (str "trace: " (pr-str-bounded (cons (:fn entry) (:args entry)))) "\n"))
+    :return
+      (%write-err (str (str "trace: " (pr-str (:fn entry)) " => " (pr-str-bounded (:value entry)))
+                    "\n"))
     nil))
 (defn- spy-emit (entry) ((or *spy-sink* spy-default-sink) entry))
 (defn- spy-node
@@ -388,7 +391,7 @@ would name a registry that does not exist."
 deprecation primitive — emit it from a macro's expansion to flag a deprecated use."
   (unless (includes? *deprecation-seen* key)
     (%registry-update! '*deprecation-seen* :cons-new nil key)
-    (eprintln "deprecation: " message))
+    (%write-err (str "deprecation: " message "\n")))
   nil)
 
 ;; The `(require …)`+`(%refer …)` forms for one `(:use mod [:only|:exclude [a b]])`
@@ -1030,13 +1033,14 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         ; `%register-ability` that never defines a generic fn (crafted precedence fixtures) is
         ; harmless and stays quiet.
         (when (and prev (not (= prev aname)) (bound? qsym))
-          (println "warning: ability "
-            aname
-            " declares op `"
-            (first spec)
-            "` already owned by ability "
-            prev
-            " — its generic function will be shadowed (rename one op)"))
+          (%write-out (str "warning: ability "
+                        aname
+                        " declares op `"
+                        (first spec)
+                        "` already owned by ability "
+                        prev
+                        " — its generic function will be shadowed (rename one op)"
+                        "\n")))
         (%registry-update! '*op-ability* :assoc [qsym] aname))))
   nil)
 
@@ -1218,14 +1222,15 @@ it waits for that load to finish (a half-evaluated module is never observable)."
             fixed (nth shape 0)
             variadic (nth shape 1))
         (when (if variadic (> fixed op-arity) (not (= fixed op-arity)))
-          (println "warning: ability "
-            aname
-            "/"
-            op
-            " expects "
-            op-arity
-            " arg(s), but this impl takes "
-            (if variadic (str fixed "+") fixed)))))))
+          (%write-out (str "warning: ability "
+                        aname
+                        "/"
+                        op
+                        " expects "
+                        op-arity
+                        " arg(s), but this impl takes "
+                        (if variadic (str fixed "+") fixed)
+                        "\n")))))))
 
 (defn %register-impl (aname op key f from)
   "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the registering
@@ -1247,9 +1252,9 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         ; recompute the incumbent's tier from its recorded `from` — no extra registry.
         old-rank (if has-prev (%impl-rank aname key prev-from) 0))
     (when (and has-prev (= new-rank old-rank) (not (= prev-from from)))
-      (println "warning: ability "
-        aname "/" op " for " key " — same-tier impl from " prev-from " overridden by " from
-        " (last wins)"))
+      (%write-out (str "warning: ability "
+                    aname "/" op " for " key " — same-tier impl from " prev-from " overridden by "
+                    from " (last wins)" "\n")))
     ; Store the winner only when the new impl's tier is >= the incumbent's — so a higher tier
     ; always holds the slot and order can't decide it. A strictly lower tier is dropped (its
     ; owner already has a stronger claim). The fn is stored DIRECTLY so dispatch (`%impl-for`)
@@ -1669,8 +1674,9 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         has-prev (contains? *method-from* prov)
         prev-from (get *method-from* prov))
     (when (and has-prev (not (= prev-from from)))
-      (println "warning: multimethod "
-        mname " method for " key " — redefined from " prev-from " by " from " (last wins)"))
+      (%write-out (str "warning: multimethod "
+                    mname " method for " key " — redefined from " prev-from " by " from
+                    " (last wins)" "\n")))
     (register-method-store mname key f)
     (%registry-update! '*method-from* :assoc [prov] from))
   (let (algebra (get *multi-algebra* mname))
@@ -1805,11 +1811,10 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 (impl Inspect :default (inspect [x] (pr-str x)))
 
-(defn inspectln (x)
-  "Print `x`'s debug form (`inspect`) followed by a newline — the `IO.inspect` move,
-  for tracing. Returns `x`, so it drops into a pipeline: `(-> v f inspectln g)`."
-  (println (inspect x))
-  x)
+;; `inspectln` (print the debug form, return the value) is gone: it had no call site in
+;; the tree, and the pipeline it existed for is `(-> v f (io/puts (inspect …)) g)` or just
+;; `inspect` plus `io/puts`. `inspect` itself stays — it is the `Inspect` ability op and
+;; returns a STRING, so it belongs with `pr-str`, not with the printers.
 
 ;; Seqable — a value's list/seq view: the seam `seq` (and thus `map`/`filter`/`fold`/
 ;; `for`/`into`, plus `count`/`keys`/`vals`) consults for a RECORD. The default is the

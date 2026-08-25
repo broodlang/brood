@@ -1,0 +1,42 @@
+;; std/timer.blsp — scheduled sends and their cancellation.
+;;
+;; A timer here is a tiny green process parked on the scheduler's timer wheel (the same
+;; mechanism `sleep` rides), so a pending timer costs no worker thread. The handle is that
+;; process's pid: inspectable with `proc/info`, cancellable with `timer/cancel`.
+;;
+;; `sleep` deliberately does NOT live here. It parks the CURRENT process rather than
+;; scheduling a message — a peer of `receive`, not of these — and it is load-bearing inside
+;; the module loader itself (`require-await` sleeps between polls). Rooting it here would
+;; mean the loader auto-requires `timer` while a require is already in flight.
+
+(defmodule timer
+  "Scheduled sends: `send-after` fires once, `send-interval` repeats, `cancel` stops
+either. Each is a green process on the scheduler's timer wheel, so a pending timer costs
+no worker thread and its handle is an ordinary pid.")
+
+(defn send-after (ms pid msg)
+  "Send `msg` to `pid` after `ms` milliseconds. Returns a timer handle; `(timer/cancel h)`
+stops it if it hasn't fired. One-shot; fires even if `pid` is already dead (the send is
+then a silent no-op, like any send to a dead process)."
+  (spawn (do (sleep ms) (send pid msg))))
+
+(defn send-interval (ms pid msg)
+  "Send `msg` to `pid` every `ms` milliseconds until cancelled. Returns a timer handle for
+`(timer/cancel h)`. Self-cleaning: the timer monitors `pid` and exits when it dies, so a
+forgotten interval can't tick against a dead process forever."
+  (spawn
+    (let (target pid interval ms payload msg)
+      (monitor target)
+      (letrec (tick (fn ()
+                      (receive
+                        ; target died — stop ticking
+                        ([:down _ ^target _] nil)
+                        (after interval (do (send target payload) (tick))))))
+        (tick)))))
+
+(defn cancel (timer)
+  "Cancel a `timer/send-after` / `timer/send-interval` timer by its handle. Idempotent (a
+fired or already-cancelled timer is a dead process; the exit is a no-op). Returns nil.
+Cancellation races an in-flight fire — a message already sent stays sent."
+  (exit timer :kill)
+  nil)

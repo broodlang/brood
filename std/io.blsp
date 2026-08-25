@@ -96,6 +96,57 @@ count, or forward however it likes."
 (impl Port io/file-port (write [p s] (file/spit-append (get p :path) s) nil))
 (impl Display io/file-port (->string [p] (str "#<port file " (get p :path) ">")))
 
+;; ---- writing values ---------------------------------------------------------
+;; `write` above is the one-string seam every port implements. These two are the
+;; convenience layer over it: variadic, they render their arguments the way the
+;; prelude's printer does, and they choose a destination.
+;;
+;; The destination is a trailing `:to <port>` rather than a leading argument, because
+;; the values are variadic and a leading port would make `(io/puts p)` ambiguous —
+;; write the port, or target it? A trailing keyword pair has no such reading: `:to`
+;; must be BOTH the keyword and followed by something `port?` accepts, so
+;; `(io/puts :to 3)` prints `:to 3` like any other pair of values.
+
+(defn- shown
+  (xs)
+  ;; Each argument through the installed `*show*` transform, or untouched when none is
+  ;; installed (the default fast path). Mirrors the prelude's own printer.
+  (if *show* (map *show* xs) xs))
+
+(defn- split-target
+  (xs)
+  "`[values port]` for an argument list that may end in `:to <port>`; `port` is nil when
+it does not."
+  (let (n (count xs))
+    (if (and (>= n 2) (= (nth xs (- n 2)) :to) (port? (nth xs (- n 1))))
+      [(take (- n 2) xs) (nth xs (- n 1))]
+      [xs nil])))
+
+(defn- emit
+  (xs suffix)
+  (let ([vals port] (split-target xs)
+        text (str (apply %render (shown vals)) suffix))
+    (if port (write port text) (*out* text))
+    nil))
+
+(defn print (& xs)
+  "Write the display forms of `xs` with NO trailing newline, to `*out*` — or to the port
+named by a trailing `:to <port>`. Returns nil.
+
+    (io/print \"working\")
+    (io/print \"progress: \" n :to (io/stderr-port))"
+  (emit xs ""))
+
+(defn puts (& xs)
+  "Write the display forms of `xs` followed by a newline, to `*out*` — or to the port named
+by a trailing `:to <port>`. Returns nil. The everyday output function.
+
+    (io/puts \"hello\")
+    (io/puts \"count = \" n)
+    (io/puts \"boom\" :to (io/stderr-port))
+    (io/puts \"entry\" :to (io/file-port \"log.txt\"))"
+  (emit xs "\n"))
+
 ;; ---- installing a port for a dynamic extent ---------------------------------
 
 (defn port-fn (port)

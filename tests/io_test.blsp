@@ -11,17 +11,17 @@
   ;; parallel with the rest of the suite.
   (test "with-out routes println to a process-port"
     (let (me (self))
-      (with-out (process-port me) (println "hi"))
+      (with-out (process-port me) (io/puts "hi"))
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "hi\n")))
 
   (test "with-out routes print (no newline) and joins args with spaces"
     (let (me (self))
-      (with-out (process-port me) (print "a" "b" 42))
+      (with-out (process-port me) (io/print "a" "b" 42))
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "a b 42")))
 
   (test "fn-port hands each written string to a callback"
     (let (me (self))
-      (with-out (fn-port (fn (s) (send me [:write s]))) (println "cb"))
+      (with-out (fn-port (fn (s) (send me [:write s]))) (io/puts "cb"))
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "cb\n")))
 
   (test "write writes a string straight to a port"
@@ -31,23 +31,23 @@
 
   (test "with-err reroutes eprintln"
     (let (me (self))
-      (with-err (process-port me) (eprintln "err"))
+      (with-err (process-port me) (io/puts "err" :to *err*))
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "err\n"))))
 
 (describe "io: the prelude defaults are untouched"
   (test "with-out-str still captures stdout (regression for the print rewire)"
-    (assert= (with-out-str (println "x")) "x\n"))
+    (assert= (with-out-str (io/puts "x")) "x\n"))
 
   (test "with-out restores the previous port on exit"
     (let (me (self))
-      (with-out (process-port me) (println "redirected"))
+      (with-out (process-port me) (io/puts "redirected"))
       ;; the redirect is over; the default (capturable) port is back
-      (assert= (with-out-str (println "back")) "back\n")))
+      (assert= (with-out-str (io/puts "back")) "back\n")))
 
   (test "with-out restores even when the body throws"
     (let (me (self))
       (try (with-out (process-port me) (throw "boom")) (catch e nil))
-      (assert= (with-out-str (println "after-throw")) "after-throw\n"))))
+      (assert= (with-out-str (io/puts "after-throw")) "after-throw\n"))))
 
 ;; ---- the Port ability -------------------------------------------------------
 ;; `write` is an ability op, so a port is any value with an impl: a bare 1-arg fn
@@ -99,7 +99,7 @@
     (assert= (with-out-str (write (counting-port (stdout-port)) "abc")) "[3] abc"))
   (test "with-out installs a third-party port like any other"
     (let (me (self))
-      (with-out (counting-port (process-port me)) (print "xy"))
+      (with-out (counting-port (process-port me)) (io/print "xy"))
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "[2] xy")))
   (test "a value with no Port impl raises the named ability error"
     (assert-error (write 42 "nope"))))

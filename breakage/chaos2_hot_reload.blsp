@@ -15,7 +15,7 @@
 ;;;   P35 — concurrent binding: two processes binding the same dyn var independently
 
 ;;; ---- P29: def rebind visible via late binding ----
-(println "=== P29: late binding — def rebind visible on next call ===")
+(io/puts "=== P29: late binding — def rebind visible on next call ===")
 
 (def p29-version 1)
 
@@ -23,53 +23,53 @@
 
 ;; Warm the arm
 (dotimes (_ 10) (p29-get-version))
-(println "P29: before redef:" (p29-get-version))
+(io/puts "P29: before redef:" (p29-get-version))
 
 ;; Redefine p29-version
 (def p29-version 2)
 
 ;; Next call should see the new value (late binding — global lookup at call time)
-(println "P29: after redef:" (p29-get-version))
-(println "P29-correct:" (= 2 (p29-get-version)))
+(io/puts "P29: after redef:" (p29-get-version))
+(io/puts "P29-correct:" (= 2 (p29-get-version)))
 
 ;;; ---- P30: defonce is idempotent ----
-(println "=== P30: defonce idempotency ===")
+(io/puts "=== P30: defonce idempotency ===")
 
 (defonce p30-state {:initialized true :value 42})
 ;; Re-evaluate defonce — must NOT overwrite
 (defonce p30-state {:initialized false :value 0})
 
-(println "P30: state:" (pr-str p30-state))
-(println "P30-correct (first wins):"
+(io/puts "P30: state:" (pr-str p30-state))
+(io/puts "P30-correct (first wins):"
   (and (= true (get p30-state :initialized))
     (= 42 (get p30-state :value))))
 
 ;;; ---- P31: reload-defs skips side-effecting top-level calls ----
-(println "=== P31: reload-defs only re-evaluates defs ===")
+(io/puts "=== P31: reload-defs only re-evaluates defs ===")
 
 ;; Write a temp file with a def and a side-effecting println
 (def p31-tmpfile "/tmp/brood_chaos_reload_test.blsp")
 (file/spit p31-tmpfile
-  "(def p31-reloaded-val 100)\n(println \"SIDE-EFFECT-FROM-RELOAD\")\n")
+  "(def p31-reloaded-val 100)\n(io/puts \"SIDE-EFFECT-FROM-RELOAD\")\n")
 
 ;; First: plain load runs everything
-(println "P31: loading fresh (should print SIDE-EFFECT)...")
+(io/puts "P31: loading fresh (should print SIDE-EFFECT)...")
 (def p31-printed false)
 ;; We can't easily capture stdout mid-test, so we verify via the def value
 (load p31-tmpfile)
-(println "P31: after load, val:" p31-reloaded-val)
-(println "P31: correct val:" (= 100 p31-reloaded-val))
+(io/puts "P31: after load, val:" p31-reloaded-val)
+(io/puts "P31: correct val:" (= 100 p31-reloaded-val))
 
 ;; Now change the def value and use reload-defs — side effect should NOT re-run
 (file/spit p31-tmpfile
-  "(def p31-reloaded-val 200)\n(println \"SIDE-EFFECT-SHOULD-NOT-APPEAR\")\n")
-(println "P31: reload-defs (should NOT print SIDE-EFFECT-SHOULD-NOT-APPEAR)...")
+  "(def p31-reloaded-val 200)\n(io/puts \"SIDE-EFFECT-SHOULD-NOT-APPEAR\")\n")
+(io/puts "P31: reload-defs (should NOT print SIDE-EFFECT-SHOULD-NOT-APPEAR)...")
 (reload-defs p31-tmpfile)
-(println "P31: after reload-defs, val:" p31-reloaded-val)
-(println "P31-correct (200):" (= 200 p31-reloaded-val))
+(io/puts "P31: after reload-defs, val:" p31-reloaded-val)
+(io/puts "P31-correct (200):" (= 200 p31-reloaded-val))
 
 ;;; ---- P32: hot-swap fn while it runs ----
-(println "=== P32: hot-swap recursive fn via def ===")
+(io/puts "=== P32: hot-swap recursive fn via def ===")
 
 ;; Define a recursive fn that counts down, but checks a global flag mid-loop
 (def p32-use-new-impl false)
@@ -87,7 +87,7 @@
 
 ;; Start with old impl
 (def p32-old-result (p32-compute 1000 0))
-(println "P32: old impl:" (first p32-old-result))
+(io/puts "P32: old impl:" (first p32-old-result))
 
 ;; Hot-swap: rebind p32-compute to the new version
 ;; (In a running system this would happen from a file reload or REPL)
@@ -95,14 +95,14 @@
 
 ;; Next top-level call sees new impl (late binding at the call site)
 (def p32-new-result (p32-compute 1000 0))
-(println "P32: new impl after hot-swap:" (first p32-new-result))
-(println "P32-correct (both 500500):"
+(io/puts "P32: new impl after hot-swap:" (first p32-new-result))
+(io/puts "P32-correct (both 500500):"
   (and (= 500500 (second p32-old-result))
     (= 500500 (second p32-new-result))
     (= :new (first p32-new-result))))
 
 ;;; ---- P33: defdyn per-process isolation ----
-(println "=== P33: defdyn per-process isolation ===")
+(io/puts "=== P33: defdyn per-process isolation ===")
 
 (defdyn *p33-request-id* :none)
 
@@ -133,27 +133,27 @@
     (send w2 :go)
     (let (r1 (receive ([:p33 1 v] v) (after 3000 :timeout))
           r2 (receive ([:p33 2 v] v) (after 3000 :timeout)))
-      (println "P33: proc1 binding:" r1 "proc2 binding:" r2)
-      (println "P33-isolated:" (and (= :req-1 r1) (= :req-2 r2)))
+      (io/puts "P33: proc1 binding:" r1 "proc2 binding:" r2)
+      (io/puts "P33-isolated:" (and (= :req-1 r1) (= :req-2 r2)))
       ;; Main process binding is unaffected
-      (println "P33-main-unaffected:" (= :none *p33-request-id*)))))
+      (io/puts "P33-main-unaffected:" (= :none *p33-request-id*)))))
 
 ;;; ---- P34: binding restores on error ----
-(println "=== P34: binding restores dynamic var on error ===")
+(io/puts "=== P34: binding restores dynamic var on error ===")
 
 (defdyn *p34-level* 0)
 
-(println "P34: before:" *p34-level*)
+(io/puts "P34: before:" *p34-level*)
 (try
   (binding (*p34-level* 99)
-    (println "P34: inside binding:" *p34-level*)
+    (io/puts "P34: inside binding:" *p34-level*)
     (error "deliberate error inside binding"))
   (catch e
-    (println "P34: caught error, level now:" *p34-level*)
-    (println "P34-restored:" (= 0 *p34-level*))))
+    (io/puts "P34: caught error, level now:" *p34-level*)
+    (io/puts "P34-restored:" (= 0 *p34-level*))))
 
 ;;; ---- P35: concurrent binding — 100 processes each with their own binding ----
-(println "=== P35: 100 concurrent processes with independent defdyn bindings ===")
+(io/puts "=== P35: 100 concurrent processes with independent defdyn bindings ===")
 
 (defdyn *p35-worker-id* :unset)
 
@@ -176,7 +176,7 @@
             wrong
             (+ wrong 1))))))
   (def p35-wrong (collect-p35 n 0))
-  (println "P35: wrong bindings:" p35-wrong)
-  (println "P35-correct (0 wrong):" (= 0 p35-wrong)))
+  (io/puts "P35: wrong bindings:" p35-wrong)
+  (io/puts "P35-correct (0 wrong):" (= 0 p35-wrong)))
 
-(println "=== chaos2_hot_reload DONE ===")
+(io/puts "=== chaos2_hot_reload DONE ===")

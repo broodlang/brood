@@ -1028,7 +1028,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
       signed
         (do
           (when (not verified)
-            (println "package: WARNING — "
+            (io/puts "package: WARNING — "
               (name nm)
               " "
               version
@@ -1036,7 +1036,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
           ;; a genuine key change is only meaningful when the new signature actually verifies;
           ;; otherwise the "does not verify" warning already covers it.
           (when (and verified had-pin (not (= locked-pubkey pubkey)))
-            (println "package: WARNING — "
+            (io/puts "package: WARNING — "
               (name nm)
               " "
               version
@@ -1052,7 +1052,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
       ;; unsigned now, but a prior release was signed → a dropped signature (downgrade).
       had-pin
         (do
-          (println "package: WARNING — "
+          (io/puts "package: WARNING — "
             (name nm)
             " "
             version
@@ -1428,13 +1428,13 @@ sha256 pin still holds."
   "Resolve and lock the current project's dependencies, (re)writing project.lock.blsp. Reuses the existing lock's pins where the manifest still matches (so a re-run is network-free); :git deps whose ref changed are re-resolved and (re)cloned into _deps/, :path deps are re-hashed. Returns the resolved entries (nil when none are declared). Backs `nest fetch`."
   (package-in-project (fn (root)
                         (if (empty? *project-dependencies*)
-                          (do (println "package: no dependencies declared") nil)
+                          (do (io/puts "package: no dependencies declared") nil)
                           (let (entries (resolve-deps root
                                           *project-dependencies*
                                           (read-lockfile root)))
                             (package-guard-collisions root entries)
                             (write-lockfile root entries)
-                            (println (str "package: locked "
+                            (io/puts (str "package: locked "
                                        (count entries)
                                        " dependencies in project.lock.blsp"))
                             entries)))))
@@ -1444,7 +1444,7 @@ sha256 pin still holds."
   (package-in-project
     (fn (root)
       (if (empty? *project-dependencies*)
-        (do (println "package: no dependencies declared") nil)
+        (do (io/puts "package: no dependencies declared") nil)
         (let (lock (package-lock-without (read-lockfile root)
                      (map symbol names))
               entries (resolve-deps root *project-dependencies* lock))
@@ -1454,7 +1454,7 @@ sha256 pin still holds."
           ;; and only surface it at the next run.
           (package-guard-collisions root entries)
           (write-lockfile root entries)
-          (println (str "package: updated "
+          (io/puts (str "package: updated "
                      (if (empty? names) "all dependencies" (string/join ", " names))
                      " ("
                      (count entries)
@@ -1486,17 +1486,17 @@ sha256 pin still holds."
           dup (includes? seen nm)
           entry (get index nm))
       ;; a dep's tree label is its DISPLAY form (`impl Display` per kind, in
-      ;; std/tool/project.blsp beside the records), so this and `(println dep)` can't drift
-      (println (str prefix "- " (->string d) (if dup " (already shown)" "")))
+      ;; std/tool/project.blsp beside the records), so this and `(io/puts dep)` can't drift
+      (io/puts (str prefix "- " (->string d) (if dup " (already shown)" "")))
       (when (and entry (not dup) (not (empty? (get entry :deps))))
         (package-print-tree (get entry :deps) index (str prefix "  ") (cons nm seen))))))
 
 (defn tree ()
   "Print the resolved dependency tree of the current project (root → direct → transitive). Backs `nest tree`."
   (package-in-project (fn (root)
-                        (println (or *project-name* "(this project)"))
+                        (io/puts (or *project-name* "(this project)"))
                         (if (empty? *project-dependencies*)
-                          (println "  (no dependencies)")
+                          (io/puts "  (no dependencies)")
                           (package-print-tree *project-dependencies*
                             (package-index-by-name (resolve-deps root
                                                      *project-dependencies*
@@ -1697,7 +1697,8 @@ sha256 pin still holds."
     (if (%file-swap (package-manifest-lock root) manifest written original)
       true
       (do
-        (eprintln "warning: could not undo the project.blsp edit — it changed again in the meantime; check :dependencies by hand")
+        (io/puts "warning: could not undo the project.blsp edit — it changed again in the meantime; check :dependencies by hand"
+          :to *err*)
         false))))
 
 (defn add (nm & spec)
@@ -1743,7 +1744,7 @@ sha256 pin still holds."
                 (package-revert-manifest! root written original)
                 (package-load-manifest manifest)
                 (throw (second outcome)))
-              (println (str "package: added " nm)))))))))
+              (io/puts (str "package: added " nm)))))))))
 
 (defn remove-dep (nm)
   "Remove dependency `nm` from project.blsp and re-lock (an empty lock if no deps remain). Backs `nest remove`."
@@ -1761,7 +1762,7 @@ sha256 pin still holds."
           ; drop its _deps/ cache, if any
           (when (file/dir? target) (%rm-rf target))
           (write-lockfile root (resolve-deps root *project-dependencies* (read-lockfile root)))
-          (println (str "package: removed " nm)))))))
+          (io/puts (str "package: removed " nm)))))))
 
 ;; --- `nest search` / `nest publish` (hive HTTP API) -------------------------
 
@@ -1802,14 +1803,14 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
       ([:error _status message] (error "package: " message))
       ([:ok data] (let (pkgs (get data :packages))
                     (if (or (nil? pkgs) (empty? pkgs))
-                      (println (str "No packages matching \""
+                      (io/puts (str "No packages matching \""
                                  term-string
                                  "\""
                                  (if (or (nil? enhances) (= enhances ""))
                                    ""
                                    (str " that enhance " enhances))
                                  "."))
-                      (dolist (p pkgs) (println (registry-search-line p)))))
+                      (dolist (p pkgs) (io/puts (registry-search-line p)))))
         nil))))
 
 ;; --- publish: build a source tarball, then POST it (Bearer-token authed) -----
@@ -1839,7 +1840,7 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
   (let (registry-deps (filter (fn (d) (= (dep-kind d) :registry)) *project-dependencies*)
         other (filter (fn (d) (not (= (dep-kind d) :registry))) *project-dependencies*))
     (dolist (d other)
-      (println (str "package: warning — omitting non-registry dependency "
+      (io/puts (str "package: warning — omitting non-registry dependency "
                  (name (get d :name))
                  " ("
                  (dep-kind d)
@@ -1896,8 +1897,8 @@ to overwrite an existing key unless `:force true`. Backs `nest key gen`."
         (str ";; Brood package signing key (ADR-212). KEEP :private SECRET — never commit or share it.\n"
           (pr-str (list 'signing-key :public public-hex :private private-hex))
           "\n"))
-      (println "package: wrote signing key to " p)
-      (println "package: public key (share this so others can pin it): " public-hex)
+      (io/puts "package: wrote signing key to " p)
+      (io/puts "package: public key (share this so others can pin it): " public-hex)
       public-hex)))
 
 ;; The canonical bytes a release signature covers (ADR-212): the package NAME, VERSION, and
@@ -1987,7 +1988,7 @@ published is refused. Backs `nest publish`."
         checksum (hash/sha256-bytes bytes)
         sig (package-sign-checksum checksum))
     (file/rm archive)
-    (println (str "package: publishing "
+    (io/puts (str "package: publishing "
                *project-name*
                " "
                *project-version*
@@ -2007,7 +2008,7 @@ published is refused. Backs `nest publish`."
   (let (bytes (package-fetch-bytes source-url)
         checksum (hash/sha256-bytes bytes)
         sig (package-sign-checksum checksum))
-    (println (str "package: publishing "
+    (io/puts (str "package: publishing "
                *project-name*
                " "
                *project-version*
@@ -2034,13 +2035,13 @@ published is refused. Backs `nest publish`."
     (cond
       (= status 0) (error "package: cannot reach the registry at " base ": " (get resp :error))
       (and (>= status 200) (< status 300))
-        (println (str "package: published "
+        (io/puts (str "package: published "
                    *project-name* " " *project-version* "."))
       else (error "package: publish failed (HTTP " status "): " (registry-error-text resp)))))
 
 (defn- semver-bump
   (cur level)
-  (let (p (map string->number (string/split cur "."))
+  (let (p (map string/->number (string/split cur "."))
         ma (nth p 0)
         mi (nth p 1)
         pa (nth p 2))
@@ -2073,5 +2074,5 @@ published is refused. Backs `nest publish`."
   (let (new (bump-version level))
     (os/run-process "git" (list "add" "project.blsp"))
     (os/run-process "git" (list "commit" "-q" "-m" (str "release: v" new)))
-    (println "package: bumped to v" new)
+    (io/puts "package: bumped to v" new)
     (apply publish opts)))

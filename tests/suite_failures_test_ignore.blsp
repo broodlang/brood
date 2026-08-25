@@ -56,4 +56,4 @@
 ;; cleanly instead of aborting with a backtrace.
 (try
   (run-tests :trace)
-  (catch e (println (str "\n(run-tests signalled: " e " — expected for this demo)"))))
+  (catch e (io/puts (str "\n(run-tests signalled: " e " — expected for this demo)"))))

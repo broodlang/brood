@@ -10,19 +10,19 @@
 
 (node/start :server)
 (register :echo (self))
-(println "[server] node " (node/name) " up (local socket), :echo registered")
-(println "[server] waiting for messages — start the client now, Ctrl-C to quit")
+(io/puts "[server] node " (node/name) " up (local socket), :echo registered")
+(io/puts "[server] waiting for messages — start the client now, Ctrl-C to quit")
 
 (defn serve ()
   (receive
     ([:hi from] (do
-                  (println "[server] :hi from " from " — replying")
+                  (io/puts "[server] :hi from " from " — replying")
                   (send from [:pong (self)])
                   (serve)))
     ([:ping from] (do
-                    (println "[server] :ping from " from " — replying")
+                    (io/puts "[server] :ping from " from " — replying")
                     (send from [:pong (self)])
                     (serve)))
-    (other (do (println "[server] ignoring " other) (serve)))))
+    (other (do (io/puts "[server] ignoring " other) (serve)))))
 
 (serve)

@@ -218,7 +218,7 @@ line falls back to stderr so a log is never lost. Returns nil."
         pid (logger))
     (if pid
       (cast pid [:log rec])
-      (eprint (log-default-format rec))))
+      (io/print (log-default-format rec) :to *err*)))
   nil)
 
 (defn debug (msg & meta) "Log `msg` at `:debug`." (apply log :debug msg meta))

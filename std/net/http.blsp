@@ -162,7 +162,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
         v (/get (http-parse-headers (rest lines)) "content-length"))
     (if (nil? v)
       0
-      (let (n (string->number v))
+      (let (n (string/->number v))
         (if (and (int? n) (>= n 0)) n 0)))))
 
 (defn parse-request (raw)
@@ -444,7 +444,7 @@ keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
         body (if (< marker 0) #b"" (bytes/slice raw (+ marker 4) (bytes/length raw)))
         lines (string/split head "\r\n")
         status (string/split (first lines) " "))
-    (response (let (n (string->number (nth status 1 "0"))) (if (nil? n) 0 n))
+    (response (let (n (string/->number (nth status 1 "0"))) (if (nil? n) 0 n))
       (http-parse-headers (rest lines))
       body)))
 

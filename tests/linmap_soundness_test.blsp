@@ -12,7 +12,7 @@
 ;;;      wrapper had to account for what it allows.
 ;;;
 ;;;   2. The source rewrite descended into `(quote …)`, turning inert DATA into table ops:
-;;;      `(println '(map-get acc 1))` printed `(table/get acc 1)`. The probe cannot catch
+;;;      `(io/puts '(map-get acc 1))` printed `(table/get acc 1)`. The probe cannot catch
 ;;;      this — a quoted form compiles to one `Node::Const`, so the analysis sees no
 ;;;      accumulator use at all and passes while the rewrite walks straight through it.
 ;;;

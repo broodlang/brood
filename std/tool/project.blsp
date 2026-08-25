@@ -194,7 +194,7 @@ the `nest new` scaffolder."
 (defrecord dep-tarball (name url sha256))
 (defrecord dep-registry (name version))
 
-;; A dep's display form is its `nest tree` line — one place, so `(println dep)` and the
+;; A dep's display form is its `nest tree` line — one place, so `(io/puts dep)` and the
 ;; tree agree. Registered here (the type owner) rather than in the package manager.
 (impl Display
   project/dep-path
@@ -917,19 +917,21 @@ program's and the LSP's protocol channel stays clean."
               else nil)
         t-d (os/now-ns)
         _ (when (os/getenv "BROOD_IMAGE_TRACE")
-            (eprintln (str "[loader] collect "
-                        (quot (- t-b t-a) 1000000)
-                        " ms, fingerprint "
-                        (quot (- t-c t-b) 1000000)
-                        " ms, image-read "
-                        (quot (- t-d t-c) 1000000)
-                        " ms"))))
+            (io/puts (str "[loader] collect "
+                       (quot (- t-b t-a) 1000000)
+                       " ms, fingerprint "
+                       (quot (- t-c t-b) 1000000)
+                       " ms, image-read "
+                       (quot (- t-d t-c) 1000000)
+                       " ms")
+              :to *err*)))
     (cond
       hit hit
       else
         (let (name (or *project-name* (path/basename root))
               n (count files)
-              _ (eprintln (str "Building " name " (" n " file" (if (= n 1) "" "s") ")"))
+              _ (io/puts (str "Building " name " (" n " file" (if (= n 1) "" "s") ")")
+                  :to *err*)
               t0 (os/now-ns)
               before (global-names)
               _ (/apply load-sources (cons root opts))
@@ -947,21 +949,23 @@ program's and the LSP's protocol channel stays clean."
                             ;; No once-per-key guard needed: this is the cold path, which
                             ;; already prints Building/Built exactly once per build.
                             (do
-                              (eprintln (str "note: "
-                                          name
-                                          " cannot use a startup image, so it loads from"
-                                          " source every time — "
-                                          (get e :message)))
+                              (io/puts (str "note: "
+                                         name
+                                         " cannot use a startup image, so it loads from"
+                                         " source every time — "
+                                         (get e :message))
+                                :to *err*)
                               nil)))
                       else nil)
               t-all (quot (- (os/now-ns) t0) 1000000))
-          (eprintln (str "Built "
-                      name
-                      " in "
-                      (project-ms-str t-load)
-                      (cond
-                        wrote (str " (+" (project-ms-str (- t-all t-load)) " image)")
-                        else "")))
+          (io/puts (str "Built "
+                     name
+                     " in "
+                     (project-ms-str t-load)
+                     (cond
+                       wrote (str " (+" (project-ms-str (- t-all t-load)) " image)")
+                       else ""))
+            :to *err*)
           nil))))
 
 ;; Load the manifest (if present) and put the project's source dirs on *load-path*
@@ -1051,9 +1055,10 @@ A declared-but-unfetched dep stays silent — that's the ordinary offline case."
   (let (manifest (project-dep-manifest-path plugin-name root))
     (if (nil? manifest)
       (do
-        (eprintln (str "warning: :format-plugins names "
-                    plugin-name
-                    ", which is not in :dependencies — its formatter rules are not applied"))
+        (io/puts (str "warning: :format-plugins names "
+                   plugin-name
+                   ", which is not in :dependencies — its formatter rules are not applied")
+          :to *err*)
         {})
       (project-manifest-format-headers manifest))))
 
@@ -1548,8 +1553,8 @@ resolve in the advisory checker. Returns the project root."
 (defn- project-tally-warning
   (n w)
   (if (project-advisory-warning? w)
-    (do (eprintln (str w "  (advisory — not gating)")) n)
-    (do (eprintln w) (+ n 1))))
+    (do (io/puts (str w "  (advisory — not gating)") :to *err*) n)
+    (do (io/puts w :to *err*) (+ n 1))))
 
 ;; The `:check` op (runs in a worker): check every file in `chunk`, PRINT each
 ;; file's warnings, return the GATING count. A global (not a shipped closure) so
@@ -1588,7 +1593,8 @@ resolve in the advisory checker. Returns the project root."
     :check
     (fn (n c) (+ n c))
     (fn (n chunk reason)
-      (eprintln (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason)))
+      (io/puts (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason))
+        :to *err*)
       (+ n 1))
     0))
 
@@ -1602,7 +1608,8 @@ resolve in the advisory checker. Returns the project root."
     :check-shared
     (fn (n c) (+ n c))
     (fn (n chunk reason)
-      (eprintln (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason)))
+      (io/puts (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason))
+        :to *err*)
       (+ n 1))
     0))
 
@@ -1854,7 +1861,9 @@ resolve in the advisory checker. Returns the project root."
   (extracts source-set)
   (if (= (os/getenv "BROOD_NO_CHECK") "1")
     0
-    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project-duplicate-def-warnings extracts source-set))))
+    (fold (fn (n w) (io/puts w :to *err*) (+ n 1))
+      0
+      (project-duplicate-def-warnings extracts source-set))))
 
 ;; SEQUENTIAL duplicate-defs over `files` (over-cap / cache-off path): parse each
 ;; source file's def-names directly (no extract map, no cache). The original path;
@@ -2087,10 +2096,11 @@ resolve in the advisory checker. Returns the project root."
       :scan-entries
       (fn (acc chunk-results) (append-two chunk-results acc))
       (fn (acc chunk reason)
-        (eprintln (str "warning: check scan worker died on "
-                    (count chunk)
-                    " file(s), re-scanning: "
-                    (pr-str reason)))
+        (io/puts (str "warning: check scan worker died on "
+                   (count chunk)
+                   " file(s), re-scanning: "
+                   (pr-str reason))
+          :to *err*)
         (append-two (project-scan-entries-chunk chunk) acc))
       nil)))
 
@@ -2107,10 +2117,11 @@ resolve in the advisory checker. Returns the project root."
       :check-deps
       (fn (acc chunk-results) (append-two chunk-results acc))
       (fn (acc chunk reason)
-        (eprintln (str "warning: check worker died on "
-                    (count chunk)
-                    " file(s), re-checking: "
-                    (pr-str reason)))
+        (io/puts (str "warning: check worker died on "
+                   (count chunk)
+                   " file(s), re-checking: "
+                   (pr-str reason))
+          :to *err*)
         (append-two (project-check-deps-chunk chunk) acc))
       nil)))
 
@@ -2127,7 +2138,7 @@ resolve in the advisory checker. Returns the project root."
 (defn- project-cache-max-files
   ()
   (let (e (os/getenv "BROOD_CHECK_CACHE_MAX"))
-    (if (and e (not (= e ""))) (or (string->number e) 50000) 50000)))
+    (if (and e (not (= e ""))) (or (string/->number e) 50000) 50000)))
 
 ;; Return `{path -> [mtime counts privs def-names]}` for `files` by scanning them
 ;; all, in parallel. NOT disk-cached: the per-file scan is now native
@@ -2179,7 +2190,9 @@ resolve in the advisory checker. Returns the project root."
   (extracts)
   (if (= (os/getenv "BROOD_NO_CHECK") "1")
     0
-    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project-unused-private-warnings extracts))))
+    (fold (fn (n w) (io/puts w :to *err*) (+ n 1))
+      0
+      (project-unused-private-warnings extracts))))
 
 (defn check-project ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
@@ -2454,7 +2467,7 @@ as unchanged (only when some were)."
   (let (run (project-stale-filter root files)
         skipped (- (count files) (count run)))
     (when (> skipped 0)
-      (println (str "stale: "
+      (io/puts (str "stale: "
                  (count run)
                  " of "
                  (count files)
@@ -2473,11 +2486,13 @@ as unchanged (only when some were)."
     (cond
       (nil? record)
         (do
-          (eprintln "warning: --failed: no record of a previous run here — running every test")
+          (io/puts "warning: --failed: no record of a previous run here — running every test"
+            :to *err*)
           spec)
       (empty? failed)
         (do
-          (eprintln "warning: --failed: nothing failed on the last run — running every test")
+          (io/puts "warning: --failed: nothing failed on the last run — running every test"
+            :to *err*)
           spec)
       else (assoc (or spec {}) :names failed))))
 
@@ -2595,8 +2610,8 @@ as unchanged (only when some were)."
       ;; appended `1:58: error: …`, `at error` and a version banner to a report the user
       ;; had already read. Same treatment as a failing suite (`run_expecting_failure_signal`).
       (do
-        (println "")
-        (println (str "FAILED: coverage " percent "% is below the required minimum " minimum "%"))
+        (io/puts "")
+        (io/puts (str "FAILED: coverage " percent "% is below the required minimum " minimum "%"))
         (error "coverage below minimum"))
       :ok)))
 
@@ -2617,7 +2632,8 @@ as unchanged (only when some were)."
     (if (nil? root)
       (do
         (when (test/opt? :cover opts)
-          (eprintln "warning: --cover needs a project (no project.blsp found) — running without coverage"))
+          (io/puts "warning: --cover needs a project (no project.blsp found) — running without coverage"
+            :to *err*))
         (/apply test/run-tests opts))
       (let (_ (when (test/opt? :cover opts) (project-coverage-begin! root))
             resolved (project-resolve-test-opts root opts)
@@ -3013,7 +3029,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     (unless (file/exists? p)
       (file/mkdir (config-dir))
       (file/spit p *config-default-source*)
-      (println (str "Created " p)))
+      (io/puts (str "Created " p)))
     ;; Read the config as DATA and apply the `(config …)` form directly, rather
     ;; than `(load)`-ing it as code. `load` evaluates a file at the *root*
     ;; namespace with a fresh (empty) import table (ADR-065), so a bare

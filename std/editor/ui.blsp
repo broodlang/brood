@@ -302,7 +302,8 @@ already-open window instead of opening a duplicate (e.g. a repeated `(observe)`)
   "Log a caught `view`/`update` error to stderr (via `*err*`, so it's redirectable)
 — it would otherwise vanish with the echo-area message on quit, leaving no trace.
 `where` names the phase it came from (`\"view\"` / `\"update\"`). Returns nil."
-  (eprintln (str "ui-run: " where " error (recovering to last good frame): " (error-message e))))
+  (io/puts (str "ui-run: " where " error (recovering to last good frame): " (error-message e))
+    :to *err*))
 
 (defn- ui-drain-input
   (model update display cols rows fuel)

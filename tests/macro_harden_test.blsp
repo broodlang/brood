@@ -132,13 +132,13 @@
     :ok)
 
   (test "bare symbol bind raises a clear error"
-    (let (msg (expand-error '(dolist xs (println xs))))
+    (let (msg (expand-error '(dolist xs (io/puts xs))))
       (is (string? msg))
       (is (includes? msg "dolist"))
       (is (includes? msg "(x xs)"))))
 
   (test "single-element list bind raises"
-    (let (msg (expand-error '(dolist (x) (println x))))
+    (let (msg (expand-error '(dolist (x) (io/puts x))))
       (is (includes? msg "dolist"))))
 
   (test "empty list bind raises"

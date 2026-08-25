@@ -91,11 +91,4 @@ unknown/closed."
   (%proc-set-binary p on))
 
 ;; ---- timers ----------------------------------------------------------------
-;; send-after / send-interval stay bare in the prelude (mainstream); cancelling one
-;; is the less-common op, so it lives here.
-(defn cancel-timer (timer)
-  "Cancel a `send-after`/`send-interval` timer by its handle. Idempotent (a fired or
-already-cancelled timer is a dead process; the exit is a no-op). Returns nil. Cancellation
-races an in-flight fire — a message already sent stays sent."
-  (exit timer :kill)
-  nil)
+;; Cancellation moved to `timer/cancel`, beside the two functions that create a timer.

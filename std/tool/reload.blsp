@@ -113,7 +113,7 @@ behind a long-lived loop has changed since it started."
     (cond
       (nil? now)
         (do
-          (println "[reload] missing:" path)
+          (io/puts "[reload] missing:" path)
           (sleep *reload-poll-ms*)
           (reload-loop path last on-reload))
       (= now last) (do
@@ -129,13 +129,13 @@ behind a long-lived loop has changed since it started."
               ;; value. The push hand-off — `(gen/code-change pid)` per affected server —
               ;; is the on-reload hook's job; this is the pull signal for loops that poll.
               (def *code-version* (+ 1 *code-version*))
-              (println "[reload]" path)
+              (io/puts "[reload]" path)
               (when on-reload
                 (try
                   (on-reload path)
-                  (catch e (println "[reload] on-reload failed:" path "—" e)))))
+                  (catch e (io/puts "[reload] on-reload failed:" path "—" e)))))
             (catch e
-              (println "[reload] failed:" path "—" e)))
+              (io/puts "[reload] failed:" path "—" e)))
           (sleep *reload-poll-ms*)
           (reload-loop path now on-reload)))))
 
@@ -175,15 +175,15 @@ behind a long-lived loop has changed since it started."
   (let (current (reload-collect-blsp dir))
     (dolist (p current)
       (unless (includes? known p)
-        (println "[reload] +" p)
+        (io/puts "[reload] +" p)
         (try
           (do
             (reload-in-package-context p (fn () (load p)))
             (when on-reload
               (try
                 (on-reload p)
-                (catch e (println "[reload] on-reload failed:" p "—" e)))))
-          (catch e (println "[reload] +load failed:" p "—" e)))
+                (catch e (io/puts "[reload] on-reload failed:" p "—" e)))))
+          (catch e (io/puts "[reload] +load failed:" p "—" e)))
         (spawn (reload-loop p (file/mtime p) on-reload))))
     (sleep *reload-scan-ms*)
     (reload-dir-loop dir current on-reload)))

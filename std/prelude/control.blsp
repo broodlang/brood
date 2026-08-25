@@ -28,22 +28,12 @@
   ;; Each print argument, run through the installed `*show*` transform — or the
   ;; arguments untouched when none is installed (the default fast path).
   (if *show* (map *show* xs) xs))
-(defn print (& xs)
-  "Write the display forms of the arguments to the current `*out*` port (stdout by default); returns nil."
-  (*out* (apply %render (show-args xs)))
-  nil)
-(defn println (& xs)
-  "Write the display forms of the arguments to the current `*out*` port, followed by a newline."
-  (*out* (str (apply %render (show-args xs)) "\n"))
-  nil)
-(defn eprint (& xs)
-  "Write the display forms of the arguments to the current `*err*` port (stderr by default); returns nil."
-  (*err* (apply %render (show-args xs)))
-  nil)
-(defn eprintln (& xs)
-  "Write the display forms of the arguments to the current `*err*` port, followed by a newline."
-  (*err* (str (apply %render (show-args xs)) "\n"))
-  nil)
+; The printing functions live in `std/io.blsp` as `io/print` / `io/puts`, beside the
+; `Port` ability they write through. `*out*`/`*err*` stay here: they are the dynamic
+; vars a port is installed into, and the kernel's own diagnostics reach them without
+; loading a module. The prelude itself never calls `io/…` on a path that can run while
+; a module is loading — it writes with `%write-err` directly (see `spy`/`deprecation`),
+; so a warning during a require cannot re-enter the loader.
 
 ;; `with-out-str` runs `body` for effect with stdout diverted into a capture
 ;; buffer, and returns the captured text (a string) instead of `body`'s value —

@@ -4,13 +4,13 @@
 ;; kernel `name`/`str`; only the strict string → symbol wrapper below is a named
 ;; conversion (it errors on the wrong input shape). Thin Brood wrapper, no new kernel.
 
-(defn string->symbol (s)
+(defn string/->symbol (s)
   "The symbol whose spelling is the string `s`. Errors if `s` isn't a string."
-  (if (string? s) (symbol s) (error "string->symbol: expected a string, got " (type-of s))))
+  (if (string? s) (symbol s) (error "string/->symbol: expected a string, got " (type-of s))))
 
 ;; ---- strings ----------------------------------------------------------------
 ;; The string library, written over the kernel primitives `substring` /
-;; `string-length` / `str` and `upper` / `lower` / `string->number`. Brood has no
+;; `string-length` / `str` and `upper` / `lower` / `string/->number`. Brood has no
 ;; distinct char type, so a "character" is a 1-char string; all indices are
 ;; char-based, matching `string-length`. The helpers below are tail-recursive
 ;; (stack-safe over long strings).
@@ -195,7 +195,7 @@ incremental search rides on."
         (rest args)
         (str acc (->fixed (first args) p)))
     else
-      (let (d (string->number (string/char-at fmt i)))
+      (let (d (string/->number (string/char-at fmt i)))
         (if (and (int? d) (>= d 0) (<= d 9))
           (format-prec fmt (inc i) n args acc (+ (* p 10) d))
           (error (str "format: expected digit or 'f' after '.' in specifier, got '"

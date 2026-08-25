@@ -24,7 +24,7 @@ transformers, and terminals — each transformer adds one green process.
 
   ;; HTTP body line-by-line (with http):
   (let (body-stream (socket-> sock))
-    (for-each println (lines body-stream)))
+    (for-each io/puts (lines body-stream)))
 
   ;; Lazy integer processing:
   (->list

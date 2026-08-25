@@ -188,7 +188,7 @@ even inside a `measure`. Read it as a ceiling on the region, not a count of it."
 
 (defn- line
   (label value)
-  (println (fmt "  {label}  {value}")))
+  (io/puts (fmt "  {label}  {value}")))
 
 (defn summary ()
   "Print `(perf/report)` for a human, then return it.
@@ -197,9 +197,9 @@ The shape a terminal reader wants: the verdict first, the numbers that produced 
 next, then the raw snapshots' headline counters. Returns the map so it is still usable
 from a script."
   (let (r (report))
-    (println (fmt "perf: {(get r :verdict)} — {(get r :why)}"))
+    (io/puts (fmt "perf: {(get r :verdict)} — {(get r :why)}"))
     (when (get r :debug-build?)
-      (println "  (debug build — treat the GC pause times as meaningless; counts are fine)"))
+      (io/puts "  (debug build — treat the GC pause times as meaningless; counts are fine)"))
     (let (rs (get r :ratios))
       (line "defer rate       " (dp2 (get rs :defer-rate)))
       (line "call-IC hit rate " (dp2 (get rs :call-ic-hit-rate)))

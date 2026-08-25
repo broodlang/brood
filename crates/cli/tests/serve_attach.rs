@@ -64,7 +64,7 @@ fn attach_drives_a_served_app_over_the_link() {
 (def f1 (receive ([:frame f] (frame-text f)) (after 5000 :no-frame)))
 (send session [:key "q"])
 (def bye (receive ([:bye] :bye) (after 5000 :no-bye)))
-(println (str "SERVE f0=" f0 " f1=" f1 " bye=" bye))
+(io/puts (str "SERVE f0=" f0 " f1=" f1 " bye=" bye))
 "#
     );
 

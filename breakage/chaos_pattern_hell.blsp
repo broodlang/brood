@@ -13,12 +13,12 @@
 ;;;   - `match` on heterogeneous value streams
 ;;;   - Mutual pattern recursion (a match that builds a value, matched again)
 
-(println "--- 500-clause match: linear scan or jump table? ---")
+(io/puts "--- 500-clause match: linear scan or jump table? ---")
 
 ;; CRASH FOUND: eval of a 500-clause match expression causes "recursion too deep"
 ;; in the pattern compiler — it recurses through each clause without TCO.
 ;; 100 clauses are safe; 500 are not.
-(println "SKIP: 500-clause match crashes pattern compiler (stack overflow at ~200 clauses)")
+(io/puts "SKIP: 500-clause match crashes pattern compiler (stack overflow at ~200 clauses)")
 
 ;; 100-clause version works. Each clause is a (pattern body) list.
 (defn make-100-match (v)
@@ -26,11 +26,11 @@
            ~@(map (fn (i) (list i (str "hit-" i))) (range 100))
            (_ "miss"))))
 
-(println "make-100-match(0):" (make-100-match 0))
-(println "make-100-match(50):" (make-100-match 50))
-(println "make-100-match(99):" (make-100-match 99))
-(println "make-100-match(100):" (make-100-match 100))
-(println "make-100-match(-1):" (make-100-match -1))
+(io/puts "make-100-match(0):" (make-100-match 0))
+(io/puts "make-100-match(50):" (make-100-match 50))
+(io/puts "make-100-match(99):" (make-100-match 99))
+(io/puts "make-100-match(100):" (make-100-match 100))
+(io/puts "make-100-match(-1):" (make-100-match -1))
 
 ;; Benchmark: compile the match fn ONCE, then call it 100k times
 (def compiled-100-match
@@ -45,21 +45,21 @@
     (do
       (compiled-100-match (rem n 101))
       (bench-compiled-match (- n 1)))))
-(println "bench 100k calls to compiled 100-clause match..." (bench-compiled-match 100000))
+(io/puts "bench 100k calls to compiled 100-clause match..." (bench-compiled-match 100000))
 
-(println "--- non-linear pattern: (match [a a a] to check all-equal) ---")
+(io/puts "--- non-linear pattern: (match [a a a] to check all-equal) ---")
 
 (defn all-same? (triple)
   (match triple
     ([x x x] true)
     (_ false)))
 
-(println "all-same? [1 1 1]:" (all-same? [1 1 1]))
-(println "all-same? [1 1 2]:" (all-same? [1 1 2]))
-(println "all-same? [\"a\" \"a\" \"a\"]:" (all-same? ["a" "a" "a"]))
-(println "all-same? [:k :k :j]:" (all-same? [:k :k :j]))
+(io/puts "all-same? [1 1 1]:" (all-same? [1 1 1]))
+(io/puts "all-same? [1 1 2]:" (all-same? [1 1 2]))
+(io/puts "all-same? [\"a\" \"a\" \"a\"]:" (all-same? ["a" "a" "a"]))
+(io/puts "all-same? [:k :k :j]:" (all-same? [:k :k :j]))
 
-(println "--- non-linear: find duplicates in a pair (same head twice) ---")
+(io/puts "--- non-linear: find duplicates in a pair (same head twice) ---")
 
 (defn dup-head? (xs)
   (match xs
@@ -67,11 +67,11 @@
     ((x x & _) true)
     (_ false)))
 
-(println "dup-head? (1 1 2):" (dup-head? (list 1 1 2)))
-(println "dup-head? (1 2 1):" (dup-head? (list 1 2 1)))
-(println "dup-head? (\"x\" \"x\"):" (dup-head? (list "x" "x")))
+(io/puts "dup-head? (1 1 2):" (dup-head? (list 1 1 2)))
+(io/puts "dup-head? (1 2 1):" (dup-head? (list 1 2 1)))
+(io/puts "dup-head? (\"x\" \"x\"):" (dup-head? (list "x" "x")))
 
-(println "--- pin expressions: runtime-value matching ---")
+(io/puts "--- pin expressions: runtime-value matching ---")
 
 (def target-key :magic)
 (def target-val 42)
@@ -81,10 +81,10 @@
     (^target-val "found the magic value!")
     (other (str "got: " (pr-str other)))))
 
-(println (find-magic {:magic 42}))
-(println (find-magic {:magic 99}))
-(println (find-magic {:magic nil}))
-(println (find-magic {}))
+(io/puts (find-magic {:magic 42}))
+(io/puts (find-magic {:magic 99}))
+(io/puts (find-magic {:magic nil}))
+(io/puts (find-magic {}))
 
 ;; Pin inside a nested structure
 (def expected-pair [1 2])
@@ -93,10 +93,10 @@
     ([^expected-pair x] (str "outer with pair, x=" x))
     (_ "no match")))
 
-(println "pin-nested [[1 2] 3]:" (pin-nested [[1 2] 3]))
-(println "pin-nested [[1 3] 3]:" (pin-nested [[1 3] 3]))
+(io/puts "pin-nested [[1 2] 3]:" (pin-nested [[1 2] 3]))
+(io/puts "pin-nested [[1 3] 3]:" (pin-nested [[1 3] 3]))
 
-(println "--- guard chains (:when with complex conditions) ---")
+(io/puts "--- guard chains (:when with complex conditions) ---")
 
 (defn classify-num (n)
   (match n
@@ -108,15 +108,15 @@
     (x :when (float? x) (str "float: " x))
     (_ "other")))
 
-(println (classify-num -4))
-(println (classify-num -7))
-(println (classify-num 0))
-(println (classify-num 6))
-(println (classify-num 9))
-(println (classify-num 3.14))
-(println (classify-num "hello"))
+(io/puts (classify-num -4))
+(io/puts (classify-num -7))
+(io/puts (classify-num 0))
+(io/puts (classify-num 6))
+(io/puts (classify-num 9))
+(io/puts (classify-num 3.14))
+(io/puts (classify-num "hello"))
 
-(println "--- deeply nested pattern: 8-level deep list destructuring ---")
+(io/puts "--- deeply nested pattern: 8-level deep list destructuring ---")
 
 (defn deep-extract (v)
   (match v
@@ -124,11 +124,11 @@
     (_ :nomatch)))
 
 (def deep-val (list 1 (list 2 (list 3 (list 4 (list 5 (list 6 (list 7 (list 8)))))))))
-(println "deep-extract:" (pr-str (deep-extract deep-val)))
-(println "correct?" (= [1 2 3 4 5 6 7 8] (deep-extract deep-val)))
-(println "non-match:" (pr-str (deep-extract (list 1 2))))
+(io/puts "deep-extract:" (pr-str (deep-extract deep-val)))
+(io/puts "correct?" (= [1 2 3 4 5 6 7 8] (deep-extract deep-val)))
+(io/puts "non-match:" (pr-str (deep-extract (list 1 2))))
 
-(println "--- match in a loop: classify 100k integers ---")
+(io/puts "--- match in a loop: classify 100k integers ---")
 
 (defn classify-loop (n acc-pos acc-neg acc-zero)
   (if (= n 0)
@@ -139,10 +139,10 @@
       (_ (classify-loop (- n 1) acc-pos (+ acc-neg 1) acc-zero)))))
 
 (def class-result (classify-loop 100000 0 0 0))
-(println "classified:" class-result)
-(println "total:" (+ (get class-result :pos) (get class-result :neg) (get class-result :zero)))
+(io/puts "classified:" class-result)
+(io/puts "total:" (+ (get class-result :pos) (get class-result :neg) (get class-result :zero)))
 
-(println "--- match on BigInt ---")
+(io/puts "--- match on BigInt ---")
 
 ; ~10^20, BigInt
 (def huge-int (* 9999999999 9999999999))
@@ -154,12 +154,12 @@
     (x :when (> x 0) (str "positive: " (type-of x)))
     (_ "other")))
 
-(println "match-bigint(0):" (match-bigint 0))
-(println "match-bigint(huge-int):" (match-bigint huge-int))
-(println "match-bigint(1000):" (match-bigint 1000))
-(println "match-bigint(-5):" (match-bigint -5))
+(io/puts "match-bigint(0):" (match-bigint 0))
+(io/puts "match-bigint(huge-int):" (match-bigint huge-int))
+(io/puts "match-bigint(1000):" (match-bigint 1000))
+(io/puts "match-bigint(-5):" (match-bigint -5))
 
-(println "--- match on float edge cases ---")
+(io/puts "--- match on float edge cases ---")
 
 ;; Brood raises on float /0; produce inf via overflow
 (def f-inf (* 1.7976931348623157e308 2.0))
@@ -175,14 +175,14 @@
     (x :when (int? x) (str "int:" x))
     (_ "other")))
 
-(println "match-float(0.0):" (match-float 0.0))
-(println "match-float(1.0):" (match-float 1.0))
-(println "match-float(3.14):" (match-float 3.14))
-(println "match-float(f-nan):" (match-float f-nan))
-(println "match-float(f-inf):" (match-float f-inf))
-(println "match-float(42):" (match-float 42))
+(io/puts "match-float(0.0):" (match-float 0.0))
+(io/puts "match-float(1.0):" (match-float 1.0))
+(io/puts "match-float(3.14):" (match-float 3.14))
+(io/puts "match-float(f-nan):" (match-float f-nan))
+(io/puts "match-float(f-inf):" (match-float f-inf))
+(io/puts "match-float(42):" (match-float 42))
 
-(println "--- match-in-match: nested match expressions ---")
+(io/puts "--- match-in-match: nested match expressions ---")
 
 (defn parse-command (cmd)
   (match cmd
@@ -199,15 +199,15 @@
     ([:wait n] (str "waiting " n " turns"))
     (_ "unknown command")))
 
-(println (parse-command [:move :north 5]))
-(println (parse-command [:move :east 3]))
-(println (parse-command [:move :diagonal 2]))
-(println (parse-command [:say :player "hello!"]))
-(println (parse-command [:say :npc "greetings"]))
-(println (parse-command [:wait 10]))
-(println (parse-command [:quit]))
+(io/puts (parse-command [:move :north 5]))
+(io/puts (parse-command [:move :east 3]))
+(io/puts (parse-command [:move :diagonal 2]))
+(io/puts (parse-command [:say :player "hello!"]))
+(io/puts (parse-command [:say :npc "greetings"]))
+(io/puts (parse-command [:wait 10]))
+(io/puts (parse-command [:quit]))
 
-(println "--- head-tail pattern with 1000-element list ---")
+(io/puts "--- head-tail pattern with 1000-element list ---")
 
 (defn sum-alternating (xs acc take-flag)
   (match xs
@@ -220,7 +220,7 @@
 (def alt-sum (sum-alternating big-list 0 true))
 ;; Takes elements at even positions (1-indexed): 1, 3, 5, ... 999
 ;; Sum = 500^2 = 250000
-(println "alternating sum of 1..1000 (odd-indexed):" alt-sum)
-(println "expected 250000:" (= 250000 alt-sum))
+(io/puts "alternating sum of 1..1000 (odd-indexed):" alt-sum)
+(io/puts "expected 250000:" (= 250000 alt-sum))
 
-(println "--- DONE ---")
+(io/puts "--- DONE ---")

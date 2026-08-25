@@ -1082,10 +1082,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &["haystack", "needle", "&optional", "from"],
         "The first index of the needle bytes within haystack at or after from (default 0), or -1 if absent. The byte-protocol workhorse (locate a \\r\\n\\r\\n, a frame delimiter, …).",
         bytes_index_of);
-    // string->number returns int *or* float *or* nil (the parse-failed case).
+    // string/->number returns int *or* float *or* nil (the parse-failed case).
     def(
         heap,
-        "string->number",
+        "string/->number",
         Arity::exact(1),
         Sig::new(vec![string], num.union(nil_ty)),
         &["s"],
@@ -1876,7 +1876,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "print",
+        "%print",
         Arity::any(),
         Sig::variadic(any, nil_ty),
         &["&", "xs"],
@@ -1885,7 +1885,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "eprint",
+        "%eprint",
         Arity::any(),
         Sig::variadic(any, nil_ty),
         &["&", "xs"],
@@ -2189,7 +2189,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         scan_tokens);
     def(
         heap,
-        "span-runs",
+        "%span-runs",
         Arity::range(3, 4),
         Sig::with_rest(vec![string, int, any], any, list_ty),
         &["text", "base", "spans", "ranges"],

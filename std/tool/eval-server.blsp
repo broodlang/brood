@@ -303,7 +303,7 @@ process died without answering."
       ; nil = EOF: the parent closed stdin — done
       (let (req (evsrv-decode-request line))
         (when req
-          (println (evsrv-encode-reply (answer req)))))
+          (io/puts (evsrv-encode-reply (answer req)))))
       (eval-server-loop))))
 
 (defn run ()
@@ -311,5 +311,5 @@ process died without answering."
 per stdin line until EOF. This is the child's whole program — a client spawns
 `nest run <script>` where the script references `eval-server/…`
 `(run)`, and drives it over stdin/stdout."
-  (println (evsrv-encode-reply {:ready true}))
+  (io/puts (evsrv-encode-reply {:ready true}))
   (eval-server-loop))

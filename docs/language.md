@@ -43,7 +43,7 @@ these are the ones to unlearn:
 | `#"[0-9]+"` regex literal | Regexes are library values: a `(regex/match? "pat" s)` reference auto-loads the `regex` module. | A parse error **with a hint** naming `(regex/match? …)` (was a stray `#`-symbol). |
 | `\c` / `\newline` character literal | No character type — a character is a 1-char string `"c"` (or `(int->char 99)`). | A parse error **with a hint** naming the 1-char string (was `unbound symbol: \c`). |
 | `#\|…\|#` block comment (Scheme/CL) | No block comments — comment each line with `;`, or wrap forms in `(comment …)` (read but never evaluated). | A parse error **with a hint** (ADR-169; used to read as a bar-quoted symbol). Any other `#…` is likewise reserved — `#` is a dispatch character, and `#{…}` / `#b"…"` are its only forms. |
-| `0x1F`/`0b1010` radix, `1_000` separators, `1N` bigint | None of these — a digit-led token must be a number Brood has. `(string->number "1F" 16)` parses hex, `1000` needs no separator, plain `1` already widens to bignum. | A parse error **with a targeted hint** (ADR-169; these read as symbols before, surfacing as a far-away "unbound symbol"). Reserving the tokens keeps each future numeric syntax additive. |
+| `0x1F`/`0b1010` radix, `1_000` separators, `1N` bigint | None of these — a digit-led token must be a number Brood has. `(string/->number "1F" 16)` parses hex, `1000` needs no separator, plain `1` already widens to bignum. | A parse error **with a targeted hint** (ADR-169; these read as symbols before, surfacing as a far-away "unbound symbol"). Reserving the tokens keeps each future numeric syntax additive. |
 | `(/ 7 2)` → ratio `7/2` | **Yes — this is what happens** (ADR-196). `/` on integers is exact: `(/ 7 2)` → `7/2`, `(/ 12 3)` → `4` (divides evenly → int). `1/2` is a reader literal. Reach for `->float` when you want an inexact result. | A ratio, exactly as in Clojure/Scheme. |
 
 Within a *single* clause, optional and rest arguments use the Common-Lisp /
@@ -2092,8 +2092,8 @@ macro expands to the `%spawn-link` primitive (ADR-067).
 
 ### Timers
 
-`(send-after ms pid msg)` delivers `msg` to `pid` after `ms` milliseconds
-(Erlang `send_after/3`, same argument order); `(send-interval ms pid msg)`
+`(timer/send-after ms pid msg)` delivers `msg` to `pid` after `ms` milliseconds
+(Erlang `send_after/3`, same argument order); `(timer/send-interval ms pid msg)`
 delivers it every `ms` until cancelled. Both return a **timer handle** (the
 timer's pid — a tiny green process parked on the scheduler's timer wheel, so a
 pending timer costs no worker thread); `(cancel-timer h)` stops it, idempotently
@@ -2102,7 +2102,7 @@ stays sent). An interval timer monitors its target and exits when the target
 dies, so a forgotten interval can't tick forever.
 
 ```clojure
-(def t (send-interval 1000 (self) :heartbeat))
+(def t (timer/send-interval 1000 (self) :heartbeat))
 (receive (:heartbeat (redraw)))
 (cancel-timer t)
 ```
@@ -2544,8 +2544,8 @@ Every operation whose **subject is a string** lives in the `string` module
 
 Bare in the prelude — these operate on *any* collection or bridge a string to
 another type, so they are **not** string-library ops:
-`str`  `pr-str`  `index-of`  `includes?`  `string->number`
-`string->symbol`  `->fixed`  `format`  `fmt`  `display-width`
+`str`  `pr-str`  `index-of`  `includes?`  `string/->number`
+`string/->symbol`  `->fixed`  `format`  `fmt`  `display-width`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
@@ -2584,8 +2584,8 @@ another type, so they are **not** string-library ops:
   what you want for round-tripping text. Both are pinned by the UCD conformance
   corpora (`tests/conformance_ucd_test.blsp`).
 - `string/upper` / `string/lower` case-fold (Unicode-aware: `(string/upper "ß")` → `"SS"`).
-- `string->number` is a **strict** parse — int if it is one, else float, else
-  `nil`; it rejects partial input (`(string->number "3abc")` → `nil`) and
+- `string/->number` is a **strict** parse — int if it is one, else float, else
+  `nil`; it rejects partial input (`(string/->number "3abc")` → `nil`) and
   surrounding whitespace (`string/trim` first if needed). `str` is its inverse
   (the textual form of a number).
 - `index-of` returns the first char index of a substring or `-1`;
@@ -2618,10 +2618,10 @@ another type, so they are **not** string-library ops:
 (string/join "-" (list "x" "y" "z"))   ;=> "x-y-z"
 (string/replace "one fish two fish" "fish" "cat")  ;=> "one cat two cat"
 (string/upper (string/trim "  hi  "))         ;=> "HI"
-(string->number "3.5")          ;=> 3.5
+(string/->number "3.5")          ;=> 3.5
 ```
 
-Only `string/upper`/`string/lower` (Unicode tables), `string->number` (strict parse-or-nil),
+Only `string/upper`/`string/lower` (Unicode tables), `string/->number` (strict parse-or-nil),
 `->fixed` (float formatting), and the O(n) char-access mechanisms
 (`string/split`, `string/->codepoints`, `string-span`/`string-span-until`,
 `%str-index-of` — one native pass each, where the pure-Brood equivalent is a
