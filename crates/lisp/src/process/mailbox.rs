@@ -1086,6 +1086,15 @@ fn receive_match_timed(
     // mailbox, so the scanned prefix is stable and `send` only appends.)
     let rbase = heap.roots_len();
     heap.push_root(matcher); // rbase + 0
+                             // `tags` needs exactly the same treatment, for exactly the same reason, and used to
+                             // be passed down as a bare `Value` instead. It is a LOCAL vector the `receive` macro
+                             // built, and the scan decodes it LAZILY — inside the loop, so on any iteration after
+                             // the first the decode happens *after* a matcher `apply` has run and possibly
+                             // collected, dereferencing a handle that moved. `BROOD_GC_STRESS=1` makes that
+                             // deterministic: `use-after-GC: vector handle … is from epoch N` out of
+                             // `collect_receive_tags`. In release it is silent corruption of the tag filter, i.e.
+                             // a selective receive that skips a message it should have matched.
+    heap.push_root(tags); // rbase + 1
 
     // Receive-mark (ADR-195): when EVERY clause pins a ref this process minted, no message
     // already queued when that ref was made can match — the ref did not exist yet — so the
@@ -1102,7 +1111,7 @@ fn receive_match_timed(
         // non-matches). The wait, below, is the only blocking step — this split is
         // the seam the coming state-capture path uses: there, a `None` becomes a
         // *suspend signal* returned to the scheduler instead of a `wait_for_message`.
-        match scan_mailbox(heap, &ctx, rbase, &mut i, tags, mark) {
+        match scan_mailbox(heap, &ctx, rbase, &mut i, mark) {
             Ok(Some(matched)) => {
                 // The receive completed (a clause matched) — clear any persisted
                 // capture-mode deadline so the next receive starts fresh. A nil-timeout
@@ -1221,8 +1230,9 @@ fn receive_match_timed(
 /// currently-queued message was scanned with no match (the caller then either captures
 /// a suspend signal or blocks and re-scans — see `receive_match`).
 ///
-/// This does the matcher `apply` (which can collect at any eval depth — ADR-061 — so
-/// the operand-rooted `matcher` at `rbase+0` is re-read each candidate) but **never
+/// This does the matcher `apply` (which can collect at any eval depth — ADR-061 — so the
+/// operand-rooted `matcher` at `rbase+0` and clause tags at `rbase+1` are re-read at each
+/// use rather than captured) but **never
 /// blocks/waits for a message** — that's the caller's `wait_for_message`. It is thus the
 /// reusable scan for both the capture-suspend and the worker-block paths. The
 /// `receive`-boundary kill check rides at the top (a soft `(exit …)` — and any hard
@@ -1233,8 +1243,6 @@ fn scan_mailbox(
     ctx: &Ctx,
     rbase: usize,
     i: &mut usize,
-    // The clauses' leading-keyword vector (or nil). Decoded LAZILY — see below.
-    tags: Value,
     // The receive-mark, if this receive pinned a ref we minted (ADR-195): no message with
     // `seq` below it can match, so the scan may start past them.
     mark: Option<u64>,
@@ -1258,6 +1266,13 @@ fn scan_mailbox(
     // peek-in-place, so a long selective-receive backlog isn't popped/re-inserted
     // per candidate — the scan's lock count stays ≤ the peek-only scheme's for
     // every backlog length.
+    //
+    // Since ADR-245 that is true for SMALL candidates only. Peeking in place means
+    // rebuilding under the lock, so a large candidate takes this same pop/re-insert
+    // route regardless (see the `message_fits` check below): one extra lock acquire,
+    // in exchange for a bounded hold. The leading-keyword filter is what keeps that
+    // from applying to backlog length — a message no clause could match is rejected
+    // on its tag and never rebuilt at all.
     let mut optimistic = true;
     // Lazily-decoded clause tags (see the filter below). `None` = not decoded yet.
     let mut tagbuf = [0u32; MAX_RECEIVE_TAGS];
@@ -1297,6 +1312,9 @@ fn scan_mailbox(
             // shape is a one-message mailbox whose single candidate matches, and paying
             // a decode per receive for that cost `pingpong` ~3.5%.
             if st.queue.len() > 1 && ntags.is_none() {
+                // Re-read the RELOCATED handle from the roots stack, exactly as `matcher`
+                // is re-read below: this decode can run after a matcher `apply` collected.
+                let tags = heap.root_at(rbase + 1);
                 ntags = Some(collect_receive_tags(heap, tags, &mut tagbuf));
             }
             // Skip every tag-rejected candidate under THIS one lock hold. The filter needs
@@ -1360,9 +1378,10 @@ fn scan_mailbox(
                 // the hold; the leading-keyword filter above means it applies only to
                 // candidates that could match, never to backlog length.
                 let over = match &st.queue[*i].msg {
-                    Payload::Wire(w) => {
-                        !crate::process::message::message_fits(w, crate::process::message::l1_copy_budget())
-                    }
+                    Payload::Wire(w) => !crate::process::message::message_fits(
+                        w,
+                        crate::process::message::l1_copy_budget(),
+                    ),
                     Payload::Local { .. } => false,
                 };
                 if over {

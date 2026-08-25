@@ -193,6 +193,41 @@ check-stress: ## Run every `stress/` + `scripts/fuzz/stress/` harness and fail o
 	# `stress/*_test.blsp`, which are real tests, cheap (78 cases), and held to passing.
 	@./scripts/check-stress.sh
 
+GC_STRESS_TESTS := concurrency receive_filter receive_under_lock mailbox_order proc \
+                   ref_alias supervisor gen agent pid_identity offload process_limit
+
+gcstress: ## Run the concurrency/mailbox tests with GC_STRESS+GC_VERIFY armed — the use-after-GC hunt
+	# `make test` collects on a threshold, so a handle held across a collection is only
+	# caught when a collection happens to land inside the window — which is why KI-57 (a
+	# stale `tags` handle in the selective-receive scan) survived every green run and the
+	# CI breakage job, whose tripwire is armed but whose collections are threshold-driven.
+	# BROOD_GC_STRESS collects at EVERY eval safepoint, which turns that window into a
+	# certainty; BROOD_GC_VERIFY adds the whole-graph walk that catches a stale handle
+	# *stored* rather than dereferenced.
+	#
+	# Only the process/mailbox-heavy files, because stress is slow and this is where the
+	# class lives: values crossing heaps, held across an `apply` that can collect.
+	# The DEBUG build, deliberately — and this was verified, not assumed. `--release` with
+	# `-C debug-assertions=on` (what `make breakagetests` uses) reports KI-57 CLEAN on the
+	# faithful pre-fix code, while the debug build catches it on every run. Optimised
+	# builds shift where allocations and safepoints land, so the collection stops falling
+	# inside the window the stale handle spans. A gate that cannot fail on the bug it was
+	# written for is not a gate.
+	@echo ">>> building brood (debug — see the note above; release cannot see KI-57) ..."
+	cargo build -p cli
+	@bin=target/debug/brood; fail=0; \
+	for t in $(GC_STRESS_TESTS); do \
+		printf ">>> %-24s " "$$t"; \
+		if BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 $$bin --test tests/$$t\_test.blsp >/tmp/gcstress.$$t.log 2>&1; then \
+			echo "ok"; \
+		else \
+			echo "FAILED"; fail=1; \
+			grep -E "test failed|use-after-GC|tests," /tmp/gcstress.$$t.log | head -5 | sed 's/^/      /'; \
+		fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then echo ">>> gcstress: FAILURES above"; exit 1; fi; \
+	echo ">>> gcstress: all clean"
+
 breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwire armed) — try to break the JIT/VM/memory. NOT part of `make test`.
 	# These are deliberately abusive tests that live OUTSIDE tests/ (so neither
 	# `make test` nor `nest test` ever discovers them) and try to make the JIT

@@ -350,6 +350,20 @@ jobs:
         shell: bash
         run: make breakagetests 2>&1 | tee breakage.log
 
+      # KI-57: a handle held across a collection is only caught when a collection happens
+      # to land inside the window, and every job above collects on a THRESHOLD — including
+      # the breakage suite right here, whose tripwire is armed but whose collections are
+      # incidental. So a stale `tags` handle in the selective-receive scan survived every
+      # green run in the repo's history until someone ran GC stress by hand.
+      #
+      # `make gcstress` collects at every safepoint over the process/mailbox-heavy tests,
+      # which is where this class lives. It is a DEBUG build on purpose: `--release` with
+      # debug-assertions — what the step above uses — reports KI-57 clean, verified against
+      # the faithful pre-fix code. Takes well under a minute.
+      - name: GC stress (use-after-GC hunt over the process/mailbox tests)
+        shell: bash
+        run: make gcstress
+
       - name: Annotate the failing files (on failure)
         if: failure()
         shell: bash
