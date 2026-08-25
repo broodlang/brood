@@ -3246,3 +3246,47 @@ is green". Second, it would have wrecked the KI-61 replay investigation had it n
 first: a boot-install experiment on a lean build would have produced a pile of failures with
 nothing to do with the registrations it was meant to measure, and the obvious reading — "see,
 131 failures, the note was right" — would have been wrong.
+
+## 2026-08-25 — the benchmark "regressions" were mostly measurement, and one of them was real
+
+The 0.12.0 harness run listed `spawn` +35%, `loop` +22%, `regex` +22%, `fib` +15% against 0.3.11.
+Chasing them produced a more useful result than a culprit commit: **most of that list is
+measurement, and what remains is one real effect nobody had named.**
+
+**Old binaries cannot run today's rows.** `os/getenv` did not exist at `d5572d61`, so a bisect
+across this range is structurally impossible without help. Two ways round it, both used: neutral
+microbenchmarks in the stable subset, and mechanically down-migrated copies of the real programs
+(`io/puts`→`println`, `string/->number`→`string->number`, `os/getenv`→`getenv`) so each binary
+runs the same algorithm in the spelling it understands.
+
+**Startup contaminates every row, and it is not evenly distributed.** `compute = wall − startup`,
+with one startup figure per language — but the startup row is `(io/puts 0)`, which loads `io` and
+not `os`/`string`, so it under-subtracts for every real row. Measured per binary with its own
+startup, the compute rows are flat or better: `loop` 23.1 → 24.4, `fib` 15.8 → 15.3,
+`spawn` 283.5 → 221.3 (**−22%**).
+
+**The real effect: loading modules taxes JIT'd code.** An identical, allocation-free 20M loop,
+timed by differencing two otherwise-identical programs so module-load cost cancels exactly:
+
+| modules required first | 0.3.11 | 0.12.0 |
+|---|---|---|
+| 0 | 24.7 ms | 26.3 ms |
+| 4 | 23.3 ms | 33.7 ms |
+| tax | **−5.8%** | **+27.9%** |
+
+JIT-only — `BROOD_NO_JIT=1` reads 942 → 939 ms, `BROOD_TIER=1` 949 → 949. The interpreter does
+not care. Filed as KI-63; the mechanism is not identified, and it is none of shared arms, the
+RUNTIME GC floor, or either inliner.
+
+**Two traps, either of which would have produced a confident wrong answer.**
+
+- *Pinning.* The same measurement reads **+68.2%** pinned against +27.9% unpinned, because the
+  background JIT compiler competes for the pinned core and loading modules increases compilation
+  volume. CLAUDE.md documents this for `make ab`; it applies to any hand-rolled measurement too.
+  Both sides inflate, so a pinned reading exaggerates the regression as well as the absolutes.
+- *Subtracting a startup row.* Differencing two programs is exact; subtracting a startup figure
+  measured on a different program is not, and the error is systematic rather than noise.
+
+And one suspect cleared by measurement rather than reasoning: `7bbf979d feat(stdimage)` sits in
+the middle of a startup regression and is **flat against its parent**. Its name is the only thing
+connecting it.
