@@ -40,7 +40,7 @@ pub(super) fn check_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
 /// `brood --check` CLI uses, with the file-globals accumulator threaded
 /// across top-level forms. The whole-file-at-once shape is what lets `(defn
 /// foo …)` at line 1 silence the unbound check on `(foo …)` at line 100. Used
-/// by `(check-project)` in `std/tool/project.blsp` for the `nest test` / `nest run`
+/// by `(check)` in `std/tool/project.blsp` for the `nest test` / `nest run`
 /// pre-flight.
 pub(super) fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "check-file", arg(args, 0))?;

@@ -21,7 +21,7 @@
 
 (describe "telemetry metrics: counter / sum / gauge"
   :isolated (test "counter tallies each emit of its event"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (counter :c [:http :req])
@@ -30,12 +30,12 @@
     (emit [:other] {})
     (sync)
     (let (got (metric :c))
-      (stop-telemetry)
+      (stop)
       (assert= (get got :count) 5)
       (assert= (get got :kind) :counter)))
 
   (test "sum adds a measurement across emits (float-safe)"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (sum :s [:pay] :amount)
@@ -44,11 +44,11 @@
     (emit [:pay] {:amount 0.25})
     (sync)
     (let (got (metric :s))
-      (stop-telemetry)
+      (stop)
       (assert= (get got :sum) 4.0)))
 
   (test "last-value keeps the latest measurement (a gauge)"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (last-value :g [:pool] :inflight)
@@ -57,23 +57,23 @@
     (emit [:pool] {:inflight 2})
     (sync)
     (let (got (metric :g))
-      (stop-telemetry)
+      (stop)
       (assert= (get got :value) 2)
       (assert= (get got :kind) :gauge)))
 
   (test "metric is nil before its event has fired"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (counter :never [:nope])
     (sync)
     (let (got (metric :never))
-      (stop-telemetry)
+      (stop)
       (is (nil? got)))))
 
 (describe "telemetry metrics: summary (running statistics)"
   :isolated (test "count / sum / min / max / mean / stddev over a fold"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (summary :lat [:http :req] :duration)
@@ -82,7 +82,7 @@
     (emit [:http :req] {:duration 30})
     (sync)
     (let (got (metric :lat))
-      (stop-telemetry)
+      (stop)
       (assert= (get got :count) 3)
       (assert= (get got :sum) 60)
       (assert= (get got :min) 10)
@@ -92,14 +92,14 @@
       (is (< (abs (- (get got :stddev) 8.16496580927726)) 0.0001))))
 
   (test "a single sample has stddev 0"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (summary :one [:e] :v)
     (emit [:e] {:v 42})
     (sync)
     (let (got (metric :one))
-      (stop-telemetry)
+      (stop)
       (assert= (get got :count) 1)
       (assert= (get got :mean) 42)
       (assert= (get got :stddev) 0.0))))
@@ -107,7 +107,7 @@
 ; nil for an unknown / non-distribution metric
 (describe "telemetry metrics: distribution (bucketed histogram)"
   :isolated (test "buckets by upper bound, with an overflow bucket"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (distribution :d [:http :req] :duration [10 50 100])
@@ -119,7 +119,7 @@
     (emit [:http :req] {:duration 200})
     (sync)
     (let (got (metric :d))
-      (stop-telemetry)
+      (stop)
       (assert= (get got :kind) :distribution)
       (assert= (get got :count) 5)
       (assert= (get got :sum) 320)
@@ -138,19 +138,19 @@
         (assert= (get (nth bs 3) :count) 1))))
 
   (test "unsorted buckets are normalized to ascending"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (distribution :d [:e] :v [100 10 50])
     (emit [:e] {:v 5})
     (sync)
     (let (bs (get (metric :d) :buckets))
-      (stop-telemetry)
+      (stop)
       (assert= (get (nth bs 0) :le) 10)
       (assert= (get (nth bs 0) :count) 1)))
 
   (test "metric-percentile estimates a quantile by bucket interpolation"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (distribution :d [:e] :v [10 20 30])
@@ -161,14 +161,14 @@
     (let (p50 (metric-percentile :d 0.5)
           p90 (metric-percentile :d 0.9)
           none (metric-percentile :nope 0.5))
-      (stop-telemetry)
+      (stop)
       ;; rank 5 lands at b0's top edge → 10; rank 9 is 4/5 into b1 [10,20] → 18
       (is (< (abs (- p50 10)) 0.0001))
       (is (< (abs (- p90 18)) 0.0001))
       (is (nil? none)))))
 (describe "telemetry metrics: snapshot & sampling"
   :isolated (test "metrics-snapshot returns every metric's reader value"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (counter :a [:e])
@@ -177,14 +177,14 @@
     (emit [:e] {:v 15})
     (sync)
     (let (snap (metrics-snapshot))
-      (stop-telemetry)
+      (stop)
       (assert= (into [] (sort (keys snap))) [:a :b])
       (assert= (get (get snap :a) :count) 2)
       (assert= (get (get snap :b) :mean) 10)))
 
   (test "sample-every folds only every nth event"
     (let (me (self))
-      (start-telemetry)
+      (start)
       (detach-all)
       (reset-metrics)
       ;; the wrapped handler forwards `:fired` only on every 3rd emit
@@ -193,7 +193,7 @@
       (tmm-emit-n [:hot] {} 10)
       (sync)
       (let (n (tmm-drain 0))
-        (stop-telemetry)
+        (stop)
         (assert= n 3)))))
 
 ;; Count `:fired` messages already in the mailbox (sync has flushed the
@@ -202,7 +202,7 @@
 
 (describe "telemetry metrics: across processes"
   :isolated (test "concurrent emitters aggregate into one counter (serial listener)"
-    (start-telemetry)
+    (start)
     (detach-all)
     (reset-metrics)
     (counter :total [:tick])
@@ -212,7 +212,7 @@
       (tmm-await 4))
     (sync)
     (let (got (metric :total))
-      (stop-telemetry)
+      (stop)
       (assert= (get got :count) 100))))
 
 (defn tmm-spawn-emitters (parent workers per)
@@ -240,7 +240,7 @@
     (assert= (into [] (telemetry/telemetry-absent '(:a :b) '(:a :c))) [:b]))
   (test "a membership change re-emits [:runtime :nodeup]/[:runtime :nodedown]"
     (let (me (self))
-      (start-telemetry)
+      (start)
       (detach-all)
       (attach :up [:runtime :nodeup] (fn (e m md) (send me [:up (get md :node)])))
       (attach :down [:runtime :nodedown] (fn (e m md) (send me [:down (get md :node)])))
@@ -256,12 +256,12 @@
         (emit [:runtime :nodedown] {} {:node n}))
       (sync)
       (let (got (into [] (tnode-drain '())))
-        (stop-telemetry)
+        (stop)
         (assert= got [[:up :b] [:down :b]]))))
 
   (test "watch-nodes starts and stops cleanly with no spurious events (single node)"
     (let (me (self))
-      (start-telemetry)
+      (start)
       (detach-all)
       (attach :any [:runtime :nodeup] (fn (e m md) (send me :spurious)))
       (let (w (watch-nodes 20))
@@ -271,7 +271,7 @@
         (stop-watch-nodes w))
       (sync)
       (let (spurious (receive (:spurious true) (after 100 false)))
-        (stop-telemetry)
+        (stop)
         (is (not spurious))))))
 
 ;; ---- defevent — typed emitter + declared schema (checker-validated) ----------
@@ -286,7 +286,7 @@
   :isolated (test "the emitter emits its event with the declared measurement/metadata maps"
     (reset-metrics)
     (detach-all)
-    (start-telemetry)
+    (start)
     (let (box (table/new))
       (attach :cap [:tmm :req :stop] (fn (e m md) (table/put box :got {:e e :m m :md md})))
       (tmm-req-stop 15 "/x")
@@ -296,7 +296,7 @@
         (assert= {:duration 15} (get got :m))
         (assert= {:path "/x"} (get got :md))))
     (detach-all)
-    (stop-telemetry)))
+    (stop)))
 
 (describe "defevent — the schema registry"
   (test "the schema is registered for introspection"
@@ -337,7 +337,7 @@
   (test "watch-vitals samples vitals onto the stream, foldable into a gauge"
     (reset-metrics)
     (detach-all)
-    (start-telemetry)
+    (start)
     (last-value :vproc [:runtime :vitals] :processes)
     (let (w (watch-vitals 15))
       (sleep 70)
@@ -347,7 +347,7 @@
         (is (not (nil? g)))
         (is (int? (get g :value)))))
     (detach-all)
-    (stop-telemetry)))
+    (stop)))
 
 ;; ---- remote tier: subscribe/forward protocol (ADR-053 shape) -----------------
 ;; Single-runtime protocol test: the target agent, the subscriber watcher and the local
@@ -358,7 +358,7 @@
   :isolated (test "a target emit is forwarded to a subscriber and re-emitted into the local stream"
     (reset-metrics)
     (detach-all)
-    (start-telemetry)
+    (start)
     (let (cap (table/new))
       (attach :remote-cap [:remote :hits] (fn (e m md) (table/put cap :got {:m m :md md})))
       (let (agent (spawn (telemetry/telemetry-serve-loop nil))
@@ -376,4 +376,4 @@
         (stop-subscribe-remote watcher)
         (stop-serve agent)))
     (detach-all)
-    (stop-telemetry)))
+    (stop)))

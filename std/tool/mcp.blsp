@@ -313,7 +313,7 @@ check after the first invocation."
   "`check` — advisory type-check the project. Returns
 `{:diagnostics [{:file :line :col :message} ...]}` (one entry per warning,
 position omitted when the checker can't supply one — ADR-024). Backed by
-`(check-project-structured *project-root*)` in `std/tool/project.blsp` (step 1c-a). `(or … [])`
+`(check-structured *project-root*)` in `std/tool/project.blsp` (step 1c-a). `(or … [])`
 so a clean project renders as `{:diagnostics []}` rather than `{:diagnostics
 null}` — agents shouldn't have to disambiguate \"no warnings\" from
 \"missing field\"."
@@ -325,19 +325,19 @@ null}` — agents shouldn't have to disambiguate \"no warnings\" from
     ;; made `check` the one tool that could disagree with the rest if the host process
     ;; ever moved. It also made the tool untestable without process-global state, which
     ;; is how its test came to type-check the whole brood repo (KI-46). Nil root keeps
-    ;; the old behaviour: `check-project-structured` falls back to `(file/cwd)` and reports
+    ;; the old behaviour: `check-structured` falls back to `(file/cwd)` and reports
     ;; "not in a Brood project" the same way.
-    {:diagnostics (or (check-project-structured *project-root*) [])}
+    {:diagnostics (or (check-structured *project-root*) [])}
     (catch e
       {:error (error-shape e)})))
 
 (defn run-tests-tool (args)
   "`run-tests` — run the project test suite. Returns the structured runner
-result from `(run-project-tests-structured)` — `{:total :passed :failed
+result from `(run-tests-structured)` — `{:total :passed :failed
 :failed-assertions :ms :results [{:group :name :passed :ms :failures ...}]}`.
 Outside a Brood project, returns `{:error msg}`."
   (try
-    (run-project-tests-structured)
+    (run-tests-structured)
     (catch e
       {:error (error-shape e)})))
 

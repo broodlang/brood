@@ -1,9 +1,9 @@
 //! End-to-end test for `nest run --main MODULE[/FN]` (the manifest `:main`
 //! override). Regression for the bug where `--main` was silently ignored:
-//! the override was set before `run-project`, but `run-project` calls
+//! the override was set before `run`, but `run` calls
 //! `project-setup`, which re-applies the manifest's `:main` into
 //! `*project-main*` — clobbering the override. The fix routes `--main` through
-//! a dedicated `*project-main-override*` slot that `run-project` prefers.
+//! a dedicated `*project-main-override*` slot that `run` prefers.
 //!
 //! Runs the real `nest` binary in a child process (so the global env it mutates
 //! is isolated per case — in-language tests share one runtime's global table).

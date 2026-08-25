@@ -13,7 +13,7 @@
     (url/parse-url \"https://example.com:8080/path?q=1#frag\")
     ;; => {:scheme \"https\" :host \"example.com\" :port 8080 :path \"/path\"
     ;;     :query \"q=1\" :fragment \"frag\"}
-    (url/build-url {:scheme \"https\" :host \"example.com\" :path \"/search\"
+    (url/build {:scheme \"https\" :host \"example.com\" :path \"/search\"
                     :query-params {:q \"hello world\"}})
     ;; => \"https://example.com/search?q=hello+world\"")
 
@@ -259,7 +259,7 @@ a bracketed IPv6 literal. `port-str` is nil when no `:port` is present."
   (auth)
   "Parse an RFC-3986 authority `[userinfo@]host[:port]` into `{:userinfo :host :port}`.
 `:host` keeps the brackets of an IPv6 literal (`\"[::1]\"`, which is what a Host
-header and a `build-url` round-trip both need); `:userinfo` is nil when absent and
+header and a `build` round-trip both need); `:userinfo` is nil when absent and
 `:port` is an int or nil. An unparseable port raises."
   (let (at (last-index-of auth "@")
         ;; the LAST `@` — userinfo may itself contain an encoded one
@@ -305,7 +305,7 @@ the `@`, or nil — it is **not** part of `:host`, so an allow-list or SSRF chec
 
 ;; ---- URL building -----------------------------------------------------------
 
-(defn build-url (parts)
+(defn build (parts)
   "Build a URL string from a map
 `{:scheme :userinfo :host :port :path :query-params :query :fragment}`.
 `:query-params` is a map encoded via `query-encode`; `:query` is a raw query string

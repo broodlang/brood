@@ -75,7 +75,7 @@ fn run_suite() {
     unsafe { std::env::set_var("BROOD_JDR_OF", "4") };
     if let Err(e) = interp.eval_str(
         "(require-one 'test) (def *test-timeout-ms* 600000) \
-         (project/run-project-tests)",
+         (project/run-tests)",
     ) {
         panic!("Brood test suite failed: {}", e);
     }

@@ -117,36 +117,36 @@
       (assert= nil (get u :host))
       (assert= "/foo/bar" (get u :path)))))
 
-;; ---- build-url --------------------------------------------------------------
+;; ---- build --------------------------------------------------------------
 
-(describe "build-url"
+(describe "build"
   (test "full URL from parts"
     (assert= "https://example.com:8080/path"
-      (url/build-url {:scheme "https" :host "example.com" :port 8080 :path "/path"})))
+      (url/build {:scheme "https" :host "example.com" :port 8080 :path "/path"})))
   (test "no port"
     (assert= "https://example.com/path"
-      (url/build-url {:scheme "https" :host "example.com" :path "/path"})))
+      (url/build {:scheme "https" :host "example.com" :path "/path"})))
   (test "with raw query"
     (assert= "https://x.com/s?q=1"
-      (url/build-url {:scheme "https" :host "x.com" :path "/s" :query "q=1"})))
+      (url/build {:scheme "https" :host "x.com" :path "/s" :query "q=1"})))
   (test "with query-params map"
     (assert= "https://x.com/s?q=hello+world"
-      (url/build-url {:scheme "https"
-                      :host "x.com"
-                      :path "/s"
-                      :query-params {"q" "hello world"}})))
+      (url/build {:scheme "https"
+                  :host "x.com"
+                  :path "/s"
+                  :query-params {"q" "hello world"}})))
   (test "with fragment"
     (assert= "https://x.com/page#top"
-      (url/build-url {:scheme "https" :host "x.com" :path "/page" :fragment "top"})))
+      (url/build {:scheme "https" :host "x.com" :path "/page" :fragment "top"})))
   (test "parse-build roundtrip"
     (let (original "https://example.com:8080/path?q=1")
       (let (parsed (url/parse-url original))
         (assert= original
-          (url/build-url {:scheme (get parsed :scheme)
-                          :host (get parsed :host)
-                          :port (get parsed :port)
-                          :path (get parsed :path)
-                          :query (get parsed :query)}))))))
+          (url/build {:scheme (get parsed :scheme)
+                      :host (get parsed :host)
+                      :port (get parsed :port)
+                      :path (get parsed :path)
+                      :query (get parsed :query)}))))))
 
 ;; ---- query values render through Display ------------------------------------
 
@@ -217,10 +217,10 @@
   (test "a normal port still parses"
     (assert= 8080 (get (url/parse-url "http://h:8080/p") :port))))
 
-(describe "build-url — userinfo round-trip"
+(describe "build — userinfo round-trip"
   (test "parse then build is lossless for a full authority"
     (assert= "https://u:p@h.com:8443/x"
-      (url/build-url (url/parse-url "https://u:p@h.com:8443/x"))))
+      (url/build (url/parse-url "https://u:p@h.com:8443/x"))))
   (test "an IPv6 authority round-trips"
     (assert= "http://[::1]:8080/p"
-      (url/build-url (url/parse-url "http://[::1]:8080/p")))))
+      (url/build (url/parse-url "http://[::1]:8080/p")))))

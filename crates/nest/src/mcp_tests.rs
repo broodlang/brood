@@ -830,7 +830,7 @@ fn run_tests_structured_returns_a_structured_summary() {
 
 #[test]
 fn std_check_tool_returns_structured_diagnostics_for_the_served_project() {
-    // `check` calls `(project/check-project-structured *project-root*)` and returns
+    // `check` calls `(project/check-structured *project-root*)` and returns
     // `{:diagnostics [...]}`, or `{:error msg}` when there is no project. What *must
     // not* be present is the old "not yet wired" stub marker.
     //
@@ -840,7 +840,7 @@ fn std_check_tool_returns_structured_diagnostics_for_the_served_project() {
     // brood repository and took **87 s in CI against a 120 s hard kill** (KI-46), a
     // margin that only ever shrinks as the repo grows. Naming the root is not a
     // shortcut around the work: the tool, the JSON-RPC round trip and the real
-    // `check-project-structured` all still run, over a project whose size this test
+    // `check-structured` all still run, over a project whose size this test
     // controls instead of one it inherits from wherever it happens to be run.
     let tmp = std::env::temp_dir().join(format!(
         "nest-mcp-check-{}-{}",
