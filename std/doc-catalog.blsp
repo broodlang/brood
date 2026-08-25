@@ -455,10 +455,10 @@
    "with-split-else" :control
    "zero?" :predicates
    "zip-acc" :collections
-      "hash-map" :maps
+   "hash-map" :maps
    "dissoc-in" :maps
    "zipmap" :maps
-;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
+   ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
    "but-last" :collections
    "drop-while" :collections
    "mapcat" :collections

@@ -21,8 +21,9 @@
   (test "a module's section names exactly what its source load defines"
     ;; `json` is a good probe: a plain namespaced module with no root globals.
     (require-one 'json)
-    (let (from-source (into #{} (filter (fn (s) (string/starts-with? (name s) "json/"))
-                                  (global-names))))
+    (let (from-source (into #{}
+                        (filter (fn (s) (string/starts-with? (name s) "json/"))
+                          (global-names))))
       (is (> (count from-source) 20))
       ;; the image path is only exercised when one exists for THIS binary
       (let (n (install))
