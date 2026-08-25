@@ -3532,6 +3532,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "Drop the monitor identified by mref (best-effort).",
         demonitor,
     );
+    // One-shot reply aliases (OTP 24's `{alias, demonitor}`): the kernel drops a
+    // message addressed to a ref its owner has deactivated, at DELIVERY — so a reply
+    // that misses its caller's deadline never enters the mailbox at all.
+    def(
+        heap,
+        "%ref-deactivate",
+        Arity::exact(1),
+        Sig::new(vec![ref_ty], nil_ty),
+        &["ref"],
+        "Deactivate ref as a one-shot reply alias on this process's mailbox: a later message addressed to it ([:tag ref ...]) is dropped at delivery and never queued. What gen/call-timeout uses so a reply posted after the deadline cannot pile up. Already-queued messages are untouched. Returns nil.",
+        ref_deactivate,
+    );
     // Links (ADR-077): symmetric failure coupling + `trap_exit`, the bidirectional
     // cousin of `monitor`. `link`/`unlink` couple the current process to a pid;
     // `trap-exit` turns a linked peer's death into a `[:EXIT pid reason]` message.

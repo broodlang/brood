@@ -54,8 +54,8 @@ mod timer;
 pub use timer::pending_timer_count;
 
 pub use mailbox::{
-    list_local_pids, mailbox_len, process_gc_runs, process_mem, process_reductions, process_status,
-    receive_match, send,
+    deactivate_alias, list_local_pids, mailbox_len, process_gc_runs, process_mem,
+    process_reductions, process_status, receive_match, send,
 };
 pub(crate) use message::{chunk_flush, chunk_payload, error_reason};
 pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};

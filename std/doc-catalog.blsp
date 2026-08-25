@@ -455,11 +455,11 @@
    "with-split-else" :control
    "zero?" :predicates
    "zip-acc" :collections
-      "hash-map" :maps
+   "hash-map" :maps
    "dissoc-in" :maps
    "zipmap" :maps
    "stdlib-id" :meta
-;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
+   ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
    "but-last" :collections
    "drop-while" :collections
    "mapcat" :collections
@@ -470,12 +470,10 @@
    "take-while" :collections
    "zip" :collections
    ;; ---- added so nothing falls into :other (every core name has a home) ----
-   "call" :processes
-   "call-timeout" :processes
-   "cast" :processes
-   "code-change" :processes
+   ;; (`gen`'s client API — call / cast / stop / spawn-server / defprocess — is NOT
+   ;; here: `gen` is an ordinary module, so those names are `gen/…` and catalogued
+   ;; with the module, exactly like `supervisor`'s and `agent`'s.)
    "defbehaviour" :meta
-   "defprocess" :processes
    "multimap?" :predicates
    "offload" :processes
    "ops" :meta
@@ -483,10 +481,6 @@
    "queue?" :predicates
    "register-protocol" :meta
    "reserved-package-name?" :meta
-   "spawn-server" :processes
-   "spawn-server-link" :processes
-   "spawn-server-named" :processes
-   "stop" :processes
    "tap" :control
    "then" :control})
 

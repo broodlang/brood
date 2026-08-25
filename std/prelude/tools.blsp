@@ -233,7 +233,8 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ;; `std/tool/project.blsp` did exactly that, so every imaged start restored the root section
 ;; and then loaded every module from source anyway. Nothing failed; the image was simply
 ;; never consulted. Install through here instead.
-(defn- set-image-source! (path sections)
+(defn- set-image-source!
+  (path sections)
   "Install `path`'s section directory `sections` (feature name → `[offset len]`) as a source
 of features, so `require` materialises an imaged module instead of loading its source.
 Returns the directory. Pass `{}` to stop consulting an image."
@@ -241,7 +242,8 @@ Returns the directory. Pass `{}` to stop consulting an image."
   (def *image-sections* sections)
   *image-sections*)
 
-(defn- add-image-source! (path sections)
+(defn- add-image-source!
+  (path sections)
   "Append `path`'s section directory as an ADDITIONAL feature source, consulted after the
 primary one. Use this for a second, independently-produced image — the stdlib image beside
 a project's — rather than `set-image-source!`, which replaces."
@@ -730,13 +732,13 @@ own, and whichever installs second must not erase the first."
         src (or direct (if alt (%builtin-module alt) nil))
         load-key (if direct key alt))
     (cond
-       ;; The IMAGE branch is tested FIRST — before the embedded-source branch below.
-       ;; Every baked-in std module has embedded source, so `src` matches for all of them
-       ;; and this branch was unreachable for exactly the modules a stdlib image exists to
-       ;; serve. Preferring it is safe on its own terms: an image is only ever installed
-       ;; after its fingerprint matched (the stdlib image keys on `build-id`, so it cannot
-       ;; outlive the binary whose source it snapshotted), and a module with no section
-       ;; still falls through to the source branch unchanged.
+      ;; The IMAGE branch is tested FIRST — before the embedded-source branch below.
+      ;; Every baked-in std module has embedded source, so `src` matches for all of them
+      ;; and this branch was unreachable for exactly the modules a stdlib image exists to
+      ;; serve. Preferring it is safe on its own terms: an image is only ever installed
+      ;; after its fingerprint matched (the stdlib image keys on `build-id`, so it cannot
+      ;; outlive the binary whose source it snapshotted), and a module with no section
+      ;; still falls through to the source branch unchanged.
       (not (nil? (image-section-for key)))
         (let ([img-path sec] (image-section-for key))
           (%image-load-section img-path (first sec) (second sec))

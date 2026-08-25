@@ -922,29 +922,6 @@ macro_rules! embedded_module {
 /// the `dev-tools` feature), so a `nest release` lean runtime
 /// (`--no-default-features`) carries no test/observer/tooling/REPL source
 /// (ADR-038, docs/release.md). `builtin_module` consults both.
-/// Module namespaces the **prelude** provides directly, rather than as an
-/// [`embedded_module!`] entry.
-///
-/// A prelude-bundled module is resolvable as `name/…` with no load-path — which is
-/// exactly what [`builtin_modules`] documents itself as reporting — but it is not in
-/// [`CORE_MODULES`], so it was invisible there. `gen` moved into the prelude in
-/// `7cb796f0` and silently fell out of the list, which quietly un-reserved it:
-/// `reserved-package-name?` (`std/prelude/tools.blsp`) derives the reserved set from
-/// `(builtin-modules)`, so a dependency or project could take the name `gen` and root
-/// its own modules onto the namespace the prelude already owns — the precise collision
-/// that guard exists to prevent. `supervisor` and `agent`, its siblings, stayed
-/// embedded and so stayed reserved; only `gen` was exposed.
-///
-/// Each entry is `(namespace, source path)`. The path is what keeps the list honest —
-/// `prelude_modules_are_bundled` asserts the file exists **and** that `lib.rs` really
-/// `include_str!`s it into the prelude bundle, so a module that later moves out cannot
-/// leave a phantom entry reserving a name nothing owns.
-///
-/// Note these modules define their functions **bare** (`call`, not `gen/call`), which is
-/// what "core, bare, in the prelude" means — so the reservation is about the *module
-/// name* a package could claim, not about a live `gen/…` global namespace.
-const PRELUDE_MODULES: &[(&str, &str)] = &[("gen", "std/proc/gen.blsp")];
-
 const CORE_MODULES: &[EmbeddedModule] = &[
     // Output ports: the redirectable sink behind print/println — a port is a 1-arg
     // string sink, with `process-port`/`fn-port` + `with-out`/`with-err`. Pairs
@@ -1011,11 +988,18 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // helpers. Opt-in.
     embedded_module!("sse", "std/net/sse.blsp"),
     // The process framework, bundled in the default install (ADR-085 amended —
-    // batteries-included, not externalized). NOTE: `gen` (the gen_server-style actor
-    // framework — `defprocess` / `spawn-server` / `call` / `cast` / `stop`) is CORE — it
-    // lives in the prelude (`std/proc/gen.blsp`, included by lib.rs), so those are bare and
-    // always available, not an on-`require` module here. `supervisor` is supervision —
-    // independent of `gen`, both over the same kernel primitives.
+    // batteries-included, not externalized). All three are ORDINARY modules with bare
+    // (single-segment) namespaces, so a qualified call is `gen/call`, `supervisor/start`,
+    // `agent/get`.
+    //
+    // `gen` — the gen_server-style actor framework (ADR-243: `defprocess` / `spawn-server` /
+    // `call` / `cast` / `stop`). It was briefly prelude-bundled and *bare* (`7cb796f0`),
+    // which seized ten very generic global names — `call`, `cast`, `stop`, … — into the
+    // un-redefinable reserved set (ADR-166), so `(def call …)` was refused outright. A
+    // framework, however core, does not get to own `call`: it is a module like every
+    // other, and its names live behind `gen/`.
+    embedded_module!("gen", "std/proc/gen.blsp"),
+    // Supervision — independent of `gen`, both over the same kernel primitives.
     embedded_module!("supervisor", "std/proc/supervisor.blsp"),
     // Process-backed state cell: start/get/update/get-and-update/cast/stop.
     // A thin Brood layer over spawn/send/receive for the common "stateful process" case.
@@ -1482,7 +1466,6 @@ pub(super) fn builtin_modules(_: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         .iter()
         .chain(DEV_MODULES.iter())
         .map(|module| module.key)
-        .chain(PRELUDE_MODULES.iter().map(|(name, _)| *name))
         .collect();
     names.sort_unstable();
     names.dedup();
@@ -1832,6 +1815,25 @@ pub(super) fn make_ref(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // exist when they were enqueued. One relaxed atomic load, no mailbox lock.
     heap.set_recv_mark(id, crate::process::self_mailbox_seq());
     Ok(Value::ref_(id))
+}
+
+/// `(%ref-deactivate r)` — deactivate `r` as a **one-shot reply alias**: from now on a
+/// message addressed to it (`[:tag r …]`) is dropped at delivery into this process's
+/// mailbox instead of queueing there forever.
+///
+/// The kernel half of OTP 24's process aliases. `gen/call-timeout` calls it on the
+/// deadline path, so a reply the server posts *after* the caller gave up is discarded
+/// by the runtime rather than accumulating in a mailbox nothing can ever match it out
+/// of (unbounded growth, plus a re-scan on every later selective receive). Only the
+/// process that owns the mailbox can deactivate a ref on it. Returns nil.
+pub(super) fn ref_deactivate(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Ref(id) => {
+            crate::process::deactivate_alias(id);
+            Ok(Value::nil())
+        }
+        other => Err(LispError::wrong_type(heap, "%ref-deactivate", "ref", other)),
+    }
 }
 
 // ----- distributed nodes -----------------------------------------------------
@@ -3286,52 +3288,7 @@ pub(super) fn coverage_reset(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispRes
 
 #[cfg(test)]
 mod tests {
-    use super::{CORE_MODULES, DEV_MODULES, PRELUDE_MODULES};
-
-    /// Every [`PRELUDE_MODULES`] entry must name a module the prelude really bundles,
-    /// and must not duplicate an [`embedded_module!`] key.
-    ///
-    /// The list exists because a prelude-bundled module is invisible to
-    /// `CORE_MODULES`, and its whole job is to keep such a module *reserved*
-    /// (`reserved-package-name?` derives the reserved set from `(builtin-modules)`).
-    /// A stale entry would silently reserve a name nothing owns; a missing one
-    /// silently un-reserves a name the standard library does own, which is exactly how
-    /// `gen` was exposed when it moved into the prelude. So verify against the source
-    /// of truth — `lib.rs`'s bundle — rather than trusting the list.
-    ///
-    /// It deliberately does **not** probe for a `name/…` global: these modules define
-    /// their functions bare, so there is no such namespace to find.
-    #[test]
-    fn prelude_modules_are_bundled() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|p| p.parent())
-            .expect("workspace root")
-            .to_path_buf();
-        let lib_rs =
-            std::fs::read_to_string(root.join("crates/lisp/src/lib.rs")).expect("read lib.rs");
-        for (name, path) in PRELUDE_MODULES {
-            assert!(
-                !CORE_MODULES
-                    .iter()
-                    .chain(DEV_MODULES.iter())
-                    .any(|m| m.key == *name),
-                "`{name}` is an embedded module — it does not belong in PRELUDE_MODULES too"
-            );
-            assert!(
-                root.join(path).is_file(),
-                "PRELUDE_MODULES lists `{name}` at `{path}`, which does not exist"
-            );
-            // The bundle is a list of `include_str!("../../../std/…")` entries.
-            let needle = path.strip_prefix("std/").unwrap_or(path);
-            assert!(
-                lib_rs.contains(needle),
-                "PRELUDE_MODULES lists `{name}` at `{path}`, but lib.rs does not bundle \
-                 it into the prelude — the module moved, so this entry is stale and is \
-                 reserving a name nothing owns"
-            );
-        }
-    }
+    use super::{CORE_MODULES, DEV_MODULES};
 
     /// A release bundle runs on the LEAN runtime, which compiles [`DEV_MODULES`] away
     /// entirely — and `run-bundle` loads every module the app ships, so one top-level

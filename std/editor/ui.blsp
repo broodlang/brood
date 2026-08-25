@@ -245,11 +245,14 @@ a far-future timer can't oversleep a responsive app."
         armed (get clock :armed)
         fired (get clock :fired)
         best (map/reduce-kv (fn (acc name spec)
-                          (let (d (ui-deadline spec (get armed name) (get fired name) last-input))
-                            (if (and (ui-timer-live? (get fired name) d)
-                                  (or (nil? acc) (< d acc)))
-                              d
-                              acc)))
+                              (let (d (ui-deadline spec
+                                        (get armed name)
+                                        (get fired name)
+                                        last-input))
+                                (if (and (ui-timer-live? (get fired name) d)
+                                      (or (nil? acc) (< d acc)))
+                                  d
+                                  acc)))
                nil timers))
     (if (nil? best)
       *ui-idle-cap*
@@ -266,12 +269,12 @@ Only one timer fires per call; simultaneous timers serialize over successive ite
         armed (get clock :armed)
         fired (get clock :fired)
         due (map/reduce-kv (fn (acc name spec)
-                         (let (d (ui-deadline spec (get armed name) (get fired name) last-input))
-                           (if (and (>= now d)
-                                 (ui-timer-live? (get fired name) d)
-                                 (or (nil? acc) (< d (second acc))))
-                             [name d]
-                             acc)))
+                             (let (d (ui-deadline spec (get armed name) (get fired name) last-input))
+                               (if (and (>= now d)
+                                     (ui-timer-live? (get fired name) d)
+                                     (or (nil? acc) (< d (second acc))))
+                                 [name d]
+                                 acc)))
               nil timers))
     (if (nil? due)
       [nil clock]

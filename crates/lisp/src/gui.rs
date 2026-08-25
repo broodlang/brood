@@ -3049,6 +3049,26 @@ pub(crate) mod backend {
     /// safely cover with a damage union (typical double/triple buffering is ≤ 3).
     const DAMAGE_HISTORY: usize = 8;
 
+    /// The furthest a `[:scroll-region …]` may shift its contents, in pixels. Any real
+    /// framebuffer is thousands of pixels tall, so 16.7 M is "fully scrolled away" many
+    /// times over in either direction — clamping there changes no frame anyone draws.
+    ///
+    /// It exists because a frame is ORDINARY BROOD DATA: `dy-frac` is whatever float the
+    /// app's own arithmetic produced, and every op's top is computed as
+    /// `oy + row*ch - scroll_dy`. `-1e30` saturates the `as isize` cast to `isize::MIN`,
+    /// and subtracting *that* overflows — `attempt to subtract with overflow` on the GUI
+    /// thread under debug-assertions, wrapped (wildly wrong) coordinates without. A GUI
+    /// thread panic takes the window's event loop with it and no Brood `try` is anywhere
+    /// on that stack, so this has to be impossible rather than unlikely.
+    const MAX_SCROLL_PX: isize = 1 << 24;
+
+    /// A region's `dy-frac` (in cell units) as a pixel offset that the coordinate math
+    /// can safely subtract. A non-finite `dy-frac` casts to 0 — no scroll — which is the
+    /// only defensible reading of "shift by NaN".
+    fn scroll_px(dy_frac: f32, ch: usize) -> isize {
+        ((dy_frac * ch as f32).round() as isize).clamp(-MAX_SCROLL_PX, MAX_SCROLL_PX)
+    }
+
     /// Render `ops` into `buf` with the given `scroll_dy` pixel shift (positive = content
     /// shifted upward). Called recursively for `ScrollRegion` — each region overrides the
     /// parent's `scroll_dy` with its own, then automatically restores on return.
@@ -3073,7 +3093,7 @@ pub(crate) mod backend {
                     }
                 }
                 Op::ScrollRegion { dy_frac, ops } => {
-                    let inner_dy = (*dy_frac * ch as f32).round() as isize;
+                    let inner_dy = scroll_px(*dy_frac, ch);
                     render_ops(ops, buf, fb_w, fb_h, r, ox, oy, cw, ch, bg0, inner_dy);
                 }
                 Op::Text { row, col, s, face } => {
@@ -3476,6 +3496,223 @@ pub(crate) mod backend {
                      body={body_ms}ms present={present_ms}ms"
                 );
             }
+        }
+    }
+
+    /// Frames are ORDINARY BROOD DATA an application builds, so every number in one is
+    /// whatever the app's own arithmetic produced — a scroll offset straight out of a
+    /// physics step, a rect sized from a division that hit zero. `render_ops` must
+    /// paint something, or nothing, for any of them and must never panic: it runs on
+    /// the GUI thread, where a panic takes the window's event loop with it and no
+    /// Brood `try` is anywhere on the stack to catch it.
+    ///
+    /// These run the REAL renderer, which `BROOD_GUI_HEADLESS=1` cannot: headless makes
+    /// every draw op a silent no-op, so an in-language headless GUI test proves exactly
+    /// nothing about this code. Hence a Rust test that calls `render_ops` directly.
+    #[cfg(test)]
+    mod render_robustness {
+        use super::*;
+        use crate::gui::{CursorStyle, Face, Op};
+
+        /// Render `ops` into a small framebuffer. Any panic — an arithmetic overflow
+        /// under debug-assertions, an out-of-bounds framebuffer write — fails the test.
+        fn render(ops: &[Op]) {
+            let mut r = Renderer::new(1.0, default_families(), 14.0);
+            let (cw, ch) = (r.cell_w.max(1), r.cell_h.max(1));
+            let (fb_w, fb_h) = (64usize, 48usize);
+            let mut buf = vec![0u32; fb_w * fb_h];
+            render_ops(ops, &mut buf, fb_w, fb_h, &mut r, 2, 2, cw, ch, 0, 0);
+        }
+
+        fn face_bg() -> Face {
+            Face {
+                bg: Some([10, 20, 30]),
+                ..Face::default()
+            }
+        }
+
+        /// `[:scroll-region dy …]` takes an unvalidated float, and the renderer turns it
+        /// into a pixel offset it SUBTRACTS from every inner op's top. A hugely negative
+        /// `dy` saturates the cast to `isize::MIN`, and `oy + row*ch - isize::MIN`
+        /// overflows — a debug-assertions panic on the GUI thread, wrapped garbage
+        /// coordinates without. Non-finite values reach the same cast.
+        #[test]
+        fn a_wild_scroll_offset_does_not_overflow_the_coordinate_math() {
+            for dy in [
+                -1e30f32,
+                1e30,
+                f32::MIN,
+                f32::MAX,
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                -0.5,
+                3.25,
+            ] {
+                render(&[Op::ScrollRegion {
+                    dy_frac: dy,
+                    ops: vec![
+                        Op::Rect {
+                            row: 1,
+                            col: 1,
+                            w: 4,
+                            h: 3,
+                            face: face_bg(),
+                            radius: 0.0,
+                        },
+                        Op::Rect {
+                            row: 1,
+                            col: 1,
+                            w: 4,
+                            h: 3,
+                            face: face_bg(),
+                            radius: 1.5,
+                        },
+                        Op::Cursor {
+                            row: 2,
+                            col: 2,
+                            style: CursorStyle::Block,
+                        },
+                        Op::Text {
+                            row: 1,
+                            col: 0,
+                            s: "hi".into(),
+                            face: face_bg(),
+                        },
+                    ],
+                }]);
+            }
+        }
+
+        /// Nested regions re-enter `render_ops`; each level's own `dy` must be as safe
+        /// as the outer one, and the offsets must not accumulate into an overflow.
+        #[test]
+        fn nested_scroll_regions_stay_in_range() {
+            let inner = Op::Rect {
+                row: 0,
+                col: 0,
+                w: 8,
+                h: 8,
+                face: face_bg(),
+                radius: 0.0,
+            };
+            let mut op = Op::ScrollRegion {
+                dy_frac: -1e30,
+                ops: vec![inner],
+            };
+            for _ in 0..16 {
+                op = Op::ScrollRegion {
+                    dy_frac: 1e30,
+                    ops: vec![op],
+                };
+            }
+            render(&[op]);
+        }
+
+        /// The largest extents the op parser can hand over (`clamp_u16` tops out at
+        /// `u16::MAX - 1`) at the largest position, so `left + w` / `top + h` are as big
+        /// as they can get. Both fills clip to the framebuffer, so this must be cheap
+        /// and in-bounds rather than a 4-billion-cell loop or an OOB write.
+        #[test]
+        fn a_maximal_rect_clips_instead_of_running_away() {
+            let big = u16::MAX - 1;
+            render(&[
+                Op::Rect {
+                    row: big,
+                    col: big,
+                    w: big,
+                    h: big,
+                    face: face_bg(),
+                    radius: 0.0,
+                },
+                Op::Rect {
+                    row: 0,
+                    col: 0,
+                    w: big,
+                    h: big,
+                    face: face_bg(),
+                    radius: 4.0,
+                },
+                Op::Cursor {
+                    row: big,
+                    col: big,
+                    style: CursorStyle::Bar,
+                },
+            ]);
+        }
+
+        /// `FRect` is the sub-cell op: its geometry is floats all the way down, so NaN
+        /// and infinity reach the anti-aliased filler's loop bounds directly.
+        #[test]
+        fn a_non_finite_frect_paints_nothing_rather_than_hanging() {
+            let wild = [
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                -1e30,
+                1e30,
+                0.0,
+                -3.5,
+            ];
+            for v in wild {
+                render(&[Op::FRect {
+                    x: v,
+                    y: v,
+                    w: v,
+                    h: v,
+                    face: face_bg(),
+                    opacity: v,
+                    radius: v,
+                }]);
+                render(&[Op::FRect {
+                    x: 1.0,
+                    y: 1.0,
+                    w: 6.0,
+                    h: 4.0,
+                    face: face_bg(),
+                    opacity: v,
+                    radius: v,
+                }]);
+            }
+        }
+
+        /// The batch ops index a caller-supplied bit/byte buffer with a caller-supplied
+        /// stride. A zero stride, a zero aspect and an all-ones buffer are the three
+        /// degenerate inputs (`% 0` is a panic, not a wrong pixel).
+        #[test]
+        fn the_batch_ops_survive_degenerate_strides() {
+            for w in [0u32, 1, 3, u32::MAX] {
+                for aspect in [0u16, 1, u16::MAX] {
+                    render(&[
+                        Op::Cells {
+                            row0: 0,
+                            col0: 0,
+                            w,
+                            aspect,
+                            bytes: vec![0xff; 64],
+                            color: Some([1, 2, 3]),
+                        },
+                        Op::CellsRgb {
+                            row0: 0,
+                            col0: 0,
+                            w,
+                            aspect,
+                            bytes: vec![0xff; 64],
+                            colors: std::collections::HashMap::new(),
+                            default: [4, 5, 6],
+                        },
+                    ]);
+                }
+            }
+            // Vertical spans: many maximal segments, so the running `y` climbs as far
+            // as the op vocabulary allows.
+            let segs: Vec<(u16, Option<[u8; 3]>)> =
+                (0..64).map(|_| (u16::MAX - 1, Some([7, 8, 9]))).collect();
+            render(&[Op::VSpans {
+                row0: u16::MAX - 1,
+                col0: u16::MAX - 1,
+                cols: vec![segs; 4],
+            }]);
         }
     }
 }

@@ -23,8 +23,8 @@
 (def N (let (e (os/getenv "N")) (if e (string->number e) 3000000)))
 
 (defn ns-per (f k)
-  (let (t0 (now-ns) _ (f))
-    (quot (- (now-ns) t0) k)))
+  (let (t0 (os/now-ns) _ (f))
+    (quot (- (os/now-ns) t0) k)))
 
 ;; The step function under test: a plain 2-arg user closure, NOT a passthrough, so a
 ;; cached `(arm, env)` is exactly what an IC would hold for it.
@@ -82,7 +82,7 @@
 ;; reports only one; run this alongside `row` across a sweep of N and watch whether the
 ;; GAP between the arms moves, not just whether each arm gets faster.
 (defn row-cold (label f)
-  (let (t0 (now-ns) v (f) ns (quot (- (now-ns) t0) N))
+  (let (t0 (os/now-ns) v (f) ns (quot (- (os/now-ns) t0) N))
     (println (str label " " ns " ns/call   (cold, single pass, acc=" v ")"))))
 
 (println (str "N=" N " jit=" (if (nil? (os/getenv "BROOD_NO_JIT")) "on" "off")))

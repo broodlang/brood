@@ -88,12 +88,12 @@
 
 ;; The accumulator is printed beside the timing deliberately: a loop the compiler
 ;; managed to delete would still print a time, but not the right sum.
-(def t0 (now-ns))
+(def t0 (os/now-ns))
 (def r
   (cond
     (%eq pat "vec") (loop-vec 0 0)
     (%eq pat "bind") (loop-bind 0 0)
     (%eq pat "intlit") (loop-intlit 0 0)
     else (loop-any 0 0)))
-(def dt (quot (- (now-ns) t0) 1000000))
+(def dt (quot (- (os/now-ns) t0) 1000000))
 (println (str "pat=" pat " n=" n "  " dt " ms   " (quot (* dt 1000000) n) " ns/iter   acc=" r))

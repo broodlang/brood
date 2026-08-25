@@ -37,9 +37,9 @@
 (defn bench-tcp-read-until (sock)
   (do
     (drip sock chunks)
-    (let (t0 (now-ns)
+    (let (t0 (os/now-ns)
           r (read-until sock sep)
-          us (quot (- (now-ns) t0) 1000))
+          us (quot (- (os/now-ns) t0) 1000))
       (do
         (if (not (= (string/bytes-> (nth r 1)) "TRAILER"))
           (do (println "ERROR: wrong remainder") (%halt 1))
@@ -55,9 +55,9 @@
 (defn bench-tcp-read-n (sock)
   (do
     (drip sock chunks)
-    (let (t0 (now-ns)
+    (let (t0 (os/now-ns)
           r (read-n sock (* size (+ chunks 1)))
-          us (quot (- (now-ns) t0) 1000))
+          us (quot (- (os/now-ns) t0) 1000))
       us)))
 
 ;; Control 2: the harness floor — receive the same messages and do nothing with them.
@@ -69,9 +69,9 @@
 (defn bench-floor (sock)
   (do
     (drip sock chunks)
-    (let (t0 (now-ns)
+    (let (t0 (os/now-ns)
           r (sink sock (+ chunks 1))
-          us (quot (- (now-ns) t0) 1000))
+          us (quot (- (os/now-ns) t0) 1000))
       us)))
 
 (defn report (what us)

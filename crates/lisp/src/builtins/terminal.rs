@@ -862,8 +862,20 @@ pub(super) fn gui_icon(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     // backend reads `w * h * 4` bytes out of `rgba`, so a dimension that doesn't match
     // the pixel count is a malformed icon at best. A caller mistake must be a clean
     // catchable error, never a cast that lies about the size.
+    // `checked_mul`, not `*`: `w * h * 4` at u64 still overflows for two dimensions near
+    // `u32::MAX` (their product fits, the ×4 does not), and an overflow in the *check* is a
+    // debug-assertions panic on whatever thread this runs on — the exact class of
+    // uncatchable failure this validation was added to prevent. An overflow is `None`,
+    // which can never equal `Some(len)`, so it rejects.
     let (w, h) = match (u32::try_from(w_i), u32::try_from(h_i)) {
-        (Ok(w), Ok(h)) if (w as u64) * (h as u64) * 4 == rgba.len() as u64 => (w, h),
+        (Ok(w), Ok(h))
+            if (w as u64)
+                .checked_mul(h as u64)
+                .and_then(|px| px.checked_mul(4))
+                == Some(rgba.len() as u64) =>
+        {
+            (w, h)
+        }
         _ => {
             return Err(LispError::runtime(format!(
                 "gui-icon!: w*h*4 must equal the rgba byte count (w={w_i}, h={h_i}, {} bytes)",

@@ -4552,3 +4552,39 @@ fn arg_ty_at_misses_degrade_to_none() {
     let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
     assert!(arg_ty_at(&mut interp.heap, &forms, 99, 1, 1).is_none());
 }
+
+// ---- `(:use M)` module loading: the checker's "already loaded?" test ----
+
+/// [`feature_loaded`] must answer from the `*features*` registry — the same record
+/// the runtime's `require-one` consults — in BOTH directions. It replaced a test
+/// that asked "does any `M/…` global exist", which reported *loaded* for a module
+/// sharing its namespace with kernel primitives (`file/slurp` & co. exist with
+/// `std/file.blsp` unread), so `(:use file)` imported the primitives and left every
+/// Brood-level name in it unbound on the single-file `brood --check` path.
+#[test]
+fn feature_loaded_reads_the_feature_registry_not_the_namespace() {
+    let mut interp = crate::Interp::new();
+    // `string` is required during boot → genuinely loaded.
+    assert!(
+        feature_loaded(&mut interp.heap, "string"),
+        "a boot-loaded module must read as loaded"
+    );
+    // `file` has 18 `file/…` kernel primitives but its .blsp is not loaded yet — the
+    // exact shape that fooled the old namespace-presence test.
+    assert!(
+        !interp.heap.module_public_exports("file/").is_empty(),
+        "precondition: file/ primitives exist without the module loaded"
+    );
+    assert!(
+        !feature_loaded(&mut interp.heap, "file"),
+        "primitives in a namespace must not read as the module being loaded"
+    );
+    // A name no module has is not loaded either (and doesn't panic).
+    assert!(!feature_loaded(&mut interp.heap, "no-such-module-zzz"));
+    // After a real require it flips.
+    interp.eval_str("(require-one 'file)").expect("require");
+    assert!(
+        feature_loaded(&mut interp.heap, "file"),
+        "a required module must read as loaded"
+    );
+}

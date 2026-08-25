@@ -1,0 +1,108 @@
+;;; Robustness of the *windowed* frame primitives against hostile arguments — the
+;;; `gui-*` sibling of `builtin_robustness_test.blsp`'s `%term-draw` extent cases.
+;;;
+;;; These run in EVERY build, with and without `--features gui`. `%gui-draw` and
+;;; `%gui-icon!` are registered unconditionally and do their argument parsing —
+;;; including every clamp and validation below — *before* handing off to the backend,
+;;; which is the part that errors with "gui backend not compiled in" on a default
+;;; build. So the code under test here executes either way; only the painting doesn't.
+;;;
+;;; No window is ever opened. The draw cases pass a window id that cannot exist, so
+;;; the op parsing runs in full and the backend then declines — deliberate, because
+;;; `nest test` runs on a real desktop and a test that opened a window would flash one
+;;; across the screen on every run (the same reasoning as `gui_test.blsp`).
+;;;
+;;; As in the `%term-draw` file: a Rust panic or an allocator abort is not a
+;;; `LispError` — `try` cannot see either, a panic kills the scheduler worker and an
+;;; abort takes the whole process down with exit 134 and no crash dump. So "the
+;;; assertion ran at all" is a real part of what each case proves.
+
+(defmodule gui-robustness-test (:use test))
+
+;;
+;; --- %gui-draw: :cells / :cells-rgb extents ---------------------------------
+;;
+
+(describe "%gui-draw: hostile cell-grid extents"
+
+  ;; Was: `w: w_i.max(1) as u32` — the `.max(1)` guarded the i64 and the `as u32`
+  ;; then TRUNCATED it, so 4294967296 (2^32) came through the guard as 0 and 2^32+1
+  ;; as 1. The clamp now happens before the narrowing cast. Nothing observable from
+  ;; Brood distinguishes the two widths (a headless/absent backend never rasterises,
+  ;; and the renderer re-applies its own `.max(1)`), so what this pins is the weaker
+  ;; but still real property: the parse completes, raises a clean catchable error
+  ;; from the backend, and does not abort the runtime.
+  (test "a :cells width past u32 is a clean error, not a truncated cast"
+    (assert-error (%gui-draw 999999 [[:cells 0 0 4294967296 1 "abcd" :red]])))
+
+  (test "a :cells width at i64::MAX is a clean error"
+    (assert-error (%gui-draw 999999 [[:cells 0 0 9223372036854775807 1 "abcd" :red]])))
+
+  (test "a :cells-rgb width past u32 is a clean error, not a truncated cast"
+    (assert-error (%gui-draw 999999 [[:cells-rgb 0 0 4294967296 1 "abcd" {}]])))
+
+  (test "a negative :cells width is a clean error"
+    (assert-error (%gui-draw 999999 [[:cells 0 0 -9223372036854775808 1 "abcd" :red]])))
+
+  ;; The row/col/aspect fields go through `clamp_u16` / `clamp_extent` on the same
+  ;; path; a value at the i64 ceiling in each must not overflow the narrowing.
+  (test "cell coordinates and aspect at the i64 ceiling do not overflow"
+    (assert-error (%gui-draw 999999
+                    [[:cells
+                       9223372036854775807 9223372036854775807 4096 9223372036854775807 "abcd" :red]])))
+
+  ;; The GUI `[:rect …]` op shares the extent vocabulary the terminal frontend's
+  ;; already-covered `:rect` uses; parsing must survive the same hostile numbers.
+  (test "a huge :rect extent parses cleanly on the GUI path too"
+    (assert-error (%gui-draw 999999 [[:rect 0 0 1125899906842624 1125899906842624 {}]]))))
+
+;;
+;; --- %gui-icon!: the pixel buffer must match the declared size ---------------
+;;
+
+(describe "%gui-icon!: declared size vs the buffer we were handed"
+
+  ;; Was: `expect_int(..)? as u32` for both w and h, with NO check against the pixel
+  ;; count — the backend then reads `w * h * 4` bytes out of `rgba`. A dimension that
+  ;; doesn't match the buffer is a malformed icon at best; a *truncated* one
+  ;; (4294967296 arriving as 0) is a size that silently lies. Both are now a clean
+  ;; catchable error, and the message names the constraint, so these cases pin the
+  ;; validation itself rather than merely "something errored".
+  (test "a mismatched buffer length is rejected, naming the w*h*4 rule"
+    (let (msg (try (%gui-icon! 999999 [0 0 0 0] 4 4) :no-error (catch e (error-message e))))
+      (is (includes? msg "w*h*4"))
+      ;; The message reports what we were actually handed (4 bytes for a 4×4 icon's
+      ;; declared 64), so a caller can see the size of the mismatch, not just that
+      ;; there was one.
+      (is (includes? msg "4 bytes"))))
+
+  (test "a width past u32 is rejected before the narrowing cast"
+    ;; Pre-fix this truncated to w = 0, h = 0 and went to the backend as a
+    ;; zero-by-zero icon; `u32::try_from` now refuses it outright.
+    (let (msg (try (%gui-icon! 999999 [0 0 0 0] 4294967296 0) :no-error (catch e (error-message e))))
+      (is (includes? msg "w*h*4"))
+      (is (includes? msg "4294967296"))))
+
+  (test "a negative dimension is rejected"
+    (let (msg (try (%gui-icon! 999999 [0 0 0 0] -1 -1) :no-error (catch e (error-message e))))
+      (is (includes? msg "w*h*4"))))
+
+  ;; w*h overflowing u64 would make the product wrap to something that *matches* a
+  ;; small buffer if the multiply were done at u32/usize width; it is done at u64.
+  (test "dimensions whose product overflows do not wrap into a false match"
+    (let (msg (try
+                (%gui-icon! 999999 [0 0 0 0] 4294967295 4294967295)
+                :no-error
+                (catch e (error-message e))))
+      (is (includes? msg "w*h*4"))))
+
+  (test "a non-vector rgba is a type error, not a silent empty icon"
+    (assert-error (%gui-icon! 999999 "not-a-vector" 1 1)))
+
+  ;; The one shape that must NOT be rejected here: a buffer that genuinely matches.
+  ;; It gets past the validation and fails at the backend instead (no such window /
+  ;; no gui feature), which is a different error — so this pins that the new check
+  ;; is not simply refusing everything.
+  (test "a correctly-sized buffer passes validation and reaches the backend"
+    (let (msg (try (%gui-icon! 999999 [1 2 3 4] 1 1) :no-error (catch e (error-message e))))
+      (is (not (includes? msg "w*h*4"))))))

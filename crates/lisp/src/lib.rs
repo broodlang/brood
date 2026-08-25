@@ -569,11 +569,6 @@ pub const PRELUDE: &str = concat!(
     // Behaviour contracts are CORE (defbehaviour / register-protocol / ops / *protocols*).
     // After tools.blsp, which defines the `swap-registry!` macro protocol uses.
     include_str!("../../../std/protocol.blsp"),
-    // The gen_server actor framework is CORE (spawn-server / call / cast / stop /
-    // defprocess). After process.blsp (spawn/send/receive) and match.blsp (defprocess
-    // expands to receive/match). It only DEFINES the macro here — nothing in the prelude
-    // expands it, so no lambda stranding at freeze.
-    include_str!("../../../std/proc/gen.blsp"),
 );
 
 /// Materialize the embedded prelude to a stable, read-only-ish cache file and
@@ -716,7 +711,6 @@ mod prelude_hygiene {
                 include_str!("../../../std/prelude/tools.blsp"),
             ),
             ("protocol.blsp", include_str!("../../../std/protocol.blsp")),
-            ("gen.blsp", include_str!("../../../std/proc/gen.blsp")),
         ];
         let primitives = registered_primitives();
         let mut heap = Heap::new();

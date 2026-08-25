@@ -379,6 +379,12 @@ fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
     if ctx.is_local(s) || is_globally_bound(heap, s) || curated_sig(s).is_some() {
         return false;
     }
+    // A name the enclosing top-level form tests with `(bound? 'name)` is *meant* to be
+    // absent from some images — the guard is the handling. Warning there would flag
+    // correct code (`std/prelude/tools.blsp`'s `impl-app?` reading the project ambients).
+    if ctx.is_bound_guarded(s) {
+        return false;
+    }
     // An ambiguous `(:use …)` import (ADR-235) is not "unbound" — it has candidate
     // bindings, just no single one. The compile pass already reports the precise
     // ambiguity ("imported from more than one module"), so don't double-flag it as unbound.

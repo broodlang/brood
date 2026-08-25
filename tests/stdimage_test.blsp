@@ -21,8 +21,9 @@
   (test "a module's section names exactly what its source load defines"
     ;; `json` is a good probe: a plain namespaced module with no root globals.
     (require-one 'json)
-    (let (from-source (into #{} (filter (fn (s) (string/starts-with? (name s) "json/"))
-                                  (global-names))))
+    (let (from-source (into #{}
+                        (filter (fn (s) (string/starts-with? (name s) "json/"))
+                          (global-names))))
       (is (> (count from-source) 20))
       ;; the image path is only exercised when one exists for THIS binary
       (let (n (install))
@@ -48,13 +49,13 @@
   ;; module in isolation and takes the SMALLEST introduced set containing the name.
   (test "a root global is attributed to the module that defines it, not to a dependent"
     (let (own (%isolate (fn ()
-                (let (before (into #{} (global-names))
-                      _ (require-one 'editor/lineedit))
-                  (into #{} (filter (fn (s) (not (contains? before s))) (global-names))))))
+                          (let (before (into #{} (global-names))
+                                _ (require-one 'editor/lineedit))
+                            (into #{} (filter (fn (s) (not (contains? before s))) (global-names))))))
           via (%isolate (fn ()
-                (let (before (into #{} (global-names))
-                      _ (require-one 'repl))
-                  (into #{} (filter (fn (s) (not (contains? before s))) (global-names)))))))
+                          (let (before (into #{} (global-names))
+                                _ (require-one 'repl))
+                            (into #{} (filter (fn (s) (not (contains? before s))) (global-names)))))))
       ;; both see the name; the definer's set is the smaller one, which is what build picks
       (is (contains? own '*lineedit-keymap*))
       (is (contains? via '*lineedit-keymap*))

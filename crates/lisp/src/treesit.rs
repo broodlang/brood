@@ -216,21 +216,33 @@ fn compute_edit(old: &str, new: &str) -> Option<tree_sitter::InputEdit> {
     while start > 0 && !new.is_char_boundary(start) {
         start -= 1; // boundaries coincide in the shared prefix
     }
-    // Common suffix; old_end/new_end snapped back together (the suffix is shared,
-    // so decrementing both keeps them aligned) and not past `start`.
+    // Common suffix, then snapped back to a char boundary on BOTH sides by
+    // SHRINKING the shared suffix — which only ever widens the edit, and widening
+    // is always sound (tree-sitter re-scans more, never less).
+    //
+    // The obvious alternative — walk `old_end`/`new_end` down together, stopping
+    // at `start` — is wrong, and was the bug here: when the walk hits `start` on
+    // one side it stops with the OTHER side still mid-character, and the edit then
+    // lies about which bytes are unchanged. `"\u{FEFF}"` → `"\u{10FFFF}"` produced
+    // `start=0, old_end=0, new_end=1`, i.e. "one byte was inserted and the rest is
+    // untouched" for two texts that share no byte but their last — a wrong tree,
+    // not merely a wasteful one. Bounding on `suf` instead cannot get stuck:
+    // `suf == 0` puts both ends at the texts' own lengths, which are boundaries by
+    // definition, so the walk always terminates somewhere valid.
     let mut suf = 0;
     let max_suf = max_pre - start;
     while suf < max_suf && ob[ob.len() - 1 - suf] == nb[nb.len() - 1 - suf] {
         suf += 1;
     }
-    let mut old_end = ob.len() - suf;
-    let mut new_end = nb.len() - suf;
-    while (old_end > start && new_end > start)
-        && (!old.is_char_boundary(old_end) || !new.is_char_boundary(new_end))
+    while suf > 0
+        && (!old.is_char_boundary(ob.len() - suf) || !new.is_char_boundary(nb.len() - suf))
     {
-        old_end -= 1;
-        new_end -= 1;
+        suf -= 1;
     }
+    // `suf <= max_suf <= min(ob.len(), nb.len()) - start`, and shrinking `suf` only
+    // grows these, so both ends stay at or after `start`.
+    let old_end = ob.len() - suf;
+    let new_end = nb.len() - suf;
     Some(tree_sitter::InputEdit {
         start_byte: start,
         old_end_byte: old_end,
@@ -352,4 +364,108 @@ pub fn parse_incremental(
 #[cfg(not(feature = "treesit"))]
 pub fn forget(_key: i64) -> i64 {
     0
+}
+
+#[cfg(all(test, feature = "treesit"))]
+mod tests {
+    use super::compute_edit;
+
+    /// The contract every `InputEdit` must satisfy, and the only thing that makes
+    /// `tree-sitter-reparse` equal to `tree-sitter-parse`: tree-sitter re-uses the
+    /// bytes BEFORE `start_byte` and the bytes FROM each `*_end_byte` onward
+    /// verbatim, so those regions must genuinely be identical in the two texts.
+    /// Every offset must also sit on a char boundary — the projection back to
+    /// character offsets and `point_at`'s column both assume it.
+    ///
+    /// Checked exhaustively over a multibyte-heavy alphabet below, because the
+    /// failing shapes are exactly the ones nobody writes by hand: the regression
+    /// this guards needed the shared suffix to begin *inside* a multi-byte
+    /// character with no shared prefix to fall back on.
+    fn assert_sound(old: &str, new: &str) {
+        let Some(e) = compute_edit(old, new) else {
+            assert_eq!(old, new, "compute_edit returned None for differing texts");
+            return;
+        };
+        let (ob, nb) = (old.as_bytes(), new.as_bytes());
+        assert!(
+            e.start_byte <= e.old_end_byte && e.start_byte <= e.new_end_byte,
+            "{old:?} -> {new:?}: end before start ({e:?})"
+        );
+        assert!(
+            e.old_end_byte <= ob.len() && e.new_end_byte <= nb.len(),
+            "{old:?} -> {new:?}: end past the text ({e:?})"
+        );
+        assert_eq!(
+            &ob[..e.start_byte],
+            &nb[..e.start_byte],
+            "{old:?} -> {new:?}: the edit claims an unchanged prefix that changed ({e:?})"
+        );
+        assert_eq!(
+            &ob[e.old_end_byte..],
+            &nb[e.new_end_byte..],
+            "{old:?} -> {new:?}: the edit claims an unchanged suffix that changed ({e:?})"
+        );
+        for (s, o) in [
+            (old, e.start_byte),
+            (new, e.start_byte),
+            (old, e.old_end_byte),
+            (new, e.new_end_byte),
+        ] {
+            assert!(
+                s.is_char_boundary(o),
+                "{old:?} -> {new:?}: offset {o} splits a character in {s:?} ({e:?})"
+            );
+        }
+    }
+
+    /// The exact pair the old suffix-snapping walk got wrong: the shared suffix is
+    /// one byte, that byte is interior to a character in BOTH texts, and there is no
+    /// shared prefix — so walking `old_end`/`new_end` down together hit `start` with
+    /// `new_end` still mid-character and reported `(0, 0, 1)`, an edit asserting the
+    /// two texts share everything but a one-byte insertion.
+    #[test]
+    fn suffix_snapping_never_reports_a_suffix_the_texts_do_not_share() {
+        assert_sound("\u{FEFF}", "\u{10FFFF}");
+        assert_sound("\u{FEFF}x", "\u{10FFFF}x");
+        assert_sound("\u{10FFFF}", "\u{FEFF}");
+    }
+
+    #[test]
+    fn every_short_multibyte_edit_produces_a_sound_input_edit() {
+        // A 1-, 2-, 3- and 4-byte character plus two ASCII, so a shared prefix or
+        // suffix can land on any byte of any encoding width.
+        const ALPHABET: [&str; 6] = ["a", "b", "é", "\u{FEFF}", "\u{10FFFF}", "☃"];
+        let mut texts: Vec<String> = vec![String::new()];
+        for _ in 0..2 {
+            let mut next = Vec::new();
+            for t in &texts {
+                for c in ALPHABET {
+                    next.push(format!("{t}{c}"));
+                }
+            }
+            texts.extend(next);
+        }
+        for old in &texts {
+            for new in &texts {
+                assert_sound(old, new);
+            }
+        }
+    }
+
+    #[test]
+    fn an_unchanged_text_needs_no_edit() {
+        assert!(compute_edit("", "").is_none());
+        assert!(compute_edit("héllo ☃", "héllo ☃").is_none());
+    }
+
+    #[test]
+    fn insertion_and_deletion_at_the_ends_stay_minimal() {
+        // The common editor cases must not be widened by the boundary snapping.
+        let e = compute_edit("hello", "hello!").unwrap();
+        assert_eq!((e.start_byte, e.old_end_byte, e.new_end_byte), (5, 5, 6));
+        let e = compute_edit("hello", "Xhello").unwrap();
+        assert_eq!((e.start_byte, e.old_end_byte, e.new_end_byte), (0, 0, 1));
+        let e = compute_edit("abcdef", "abXef").unwrap();
+        assert_eq!((e.start_byte, e.old_end_byte, e.new_end_byte), (2, 4, 3));
+    }
 }

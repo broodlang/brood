@@ -16140,3 +16140,166 @@ from Rust (renaming them broke dispatch instantly, now fixed with `kw::` constan
 ADR-240), `introspect.rs` builds `(source-location 'name)` as a string, and `nest run`
 builds `(check-file …)`. `scripts/stale-names.sh` is the tool for that, and it earned its
 place: it also found 13 `scripts/fuzz/stress/*.blsp` no wave had ever touched.
+
+## ADR-243 — A framework's client API is a module; `gen` is `gen/*`, not bare prelude
+
+**Context.** `7cb796f0` made the gen_server framework "core and bare": `std/proc/gen.blsp`
+was concatenated into the `PRELUDE` bundle in `lib.rs`, so its client verbs became bare
+global names. A prelude name is *reserved* (ADR-166) — un-redefinable, by design — so that
+single move seized ten of the most generic identifiers in the language into the reserved
+set: `call`, `cast`, `stop`, `call-timeout`, `code-change`, `spawn-server`,
+`spawn-server-link`, `spawn-server-named`, `gen-clause`, `defprocess`.
+
+The bill came due the same day. `(def call …)` was refused outright, which broke
+`basic::spawned_process_picks_up_redefinition`; `gen` dropped out of `(builtin-modules)`,
+un-reserving the *package* name `gen` and failing `namespace_test`; and the file was
+bundled without being declared, failing `prelude_manifest` (KI-54). ADR-241 was then written
+under the new premise and had to audit fourteen ecosystem exports that "clashed with core",
+renaming `changeset/cast` and `accounts/register` — clashes that only existed because a
+framework had taken the words.
+
+**Decision.** `gen` is an **ordinary `embedded_module!`**, like its siblings `supervisor`
+and `agent`: `gen/spawn-server`, `gen/call`, `gen/cast`, `gen/stop`, `gen/defprocess`, or
+bare inside a module that writes `(:use gen)`. Nothing is aliased or shimmed — every caller
+in the tree was updated (this repo is pre-1.0 and prefers the right structure to
+compatibility).
+
+The general rule: **being core does not entitle a framework to a bare global name.** The
+prelude is the language — `map`, `first`, `send`, `receive`, `spawn` — and adding to it
+takes a name away from every program forever. A framework's *client API* is a vocabulary
+for talking to one kind of process, however central that kind is; it belongs behind a
+namespace. `call`/`cast`/`stop` are the clearest possible case: three of the most ordinary
+verbs in programming, none of which mean "gen_server" outside this framework.
+
+**Consequences.** `(def call …)` is a user's again, and so are `cast` and `stop`. The
+`PRELUDE_MODULES` table (and its `prelude_modules_are_bundled` honesty test) existed only to
+re-reserve a package name the prelude-bundling had orphaned; with `gen` back in
+`CORE_MODULES` the reservation is automatic, so both are deleted. `EXTRA_PRELUDE_FILES` is
+back to one entry. ADR-241's clash audit stands on its own merits, but the specific pressure
+that produced it — a framework owning `call`/`cast`/`stop` — is gone; `supervisor/stop`
+stays deleted because `(gen/stop sup)` is still the same message. Guard:
+`tests/reserved_names_test.blsp` asserts the ten names are *free* while `gen/call` and
+friends *are* reserved, and that `gen` remains a reserved package name.
+
+## ADR-244 — One-shot reply aliases: a ref its owner deactivated is dropped at delivery
+
+**Context.** `gen/call-timeout` gives up at a deadline and flushes anything already queued
+for its reply `ref`. That is only half the problem. A reply the server posts *strictly
+after* the deadline cannot be flushed — it has not been sent yet — so it arrives carrying an
+unforgeable token no `receive` of that process will ever match again. It is unreachable
+garbage: never consumed, growing the mailbox without bound over a retry loop, and re-scanned
+by every later *selective* receive. A caller that keeps timing out against a slow-but-live
+server leaks a message per attempt.
+
+Erlang had the same problem and answered it twice. Through OTP 23 the caller simply **exits**
+on a `gen_server:call` timeout, which makes a late reply moot. OTP 24 added **process
+aliases**: `call` monitors with `{alias, demonitor}`, the reply is addressed to a one-shot
+alias rather than the pid, and once the alias is deactivated the VM *drops* later replies
+addressed to it — they never enter the mailbox.
+
+**Decision.** Take OTP 24's answer, as a kernel mechanism rather than a library workaround
+(CLAUDE.md's "build the language up, not around it"). A **`ref` can be deactivated by the
+process that minted it**, via `(%ref-deactivate r)`; after that, a message *addressed to*
+that ref is dropped **at delivery** — before it is queued, not filtered at receive time.
+
+No new `Value` kind: a Brood `ref` is already the unforgeable per-request token a reply
+carries, so deactivating the ref *is* the alias. "Addressed to" is the request/reply idiom's
+own shape — a **keyword-led vector whose second element is the ref** (`[:reply r v]`,
+`[:down mref pid reason]`) — which keeps the check O(1) and keeps a deactivated alias from
+swallowing anything unrelated: the ref was minted by the deactivating process and handed out
+only as that call's reply token. (Refs are node-qualified only by a random per-runtime
+prefix, KI-53, so requiring both the tag and the exact position is deliberate.)
+
+**Bounded, by construction.** The set is a fixed eight `u64`s stored inline in
+`MailboxState` — it cannot allocate and cannot grow. An entry only has to outlive the *one*
+in-flight reply its alias was minted for, so the common case reclaims itself: the late reply
+arrives, is dropped, and the entry is forgotten in the same step. Capacity only matters for
+a caller timing out repeatedly against a server that never answers at all, and overflowing
+it evicts the *oldest* — which restores exactly the pre-alias behaviour for one
+long-abandoned ref rather than dropping anything wrong.
+
+**Free when unused.** Both delivery paths already hold the mailbox lock; the check is
+`dead_aliases.is_empty()` on a field of a struct they have just touched, and it is empty for
+every ordinary process. Measured on `pingpong` / `ring` / `spawn` / `spawn-live` (best-of-11,
+pinned, against each row's own noise floor): every row within noise, none slower.
+
+**Consequences.** A timed-out `gen/call` leaves an *empty* mailbox, not merely a
+flushed-so-far one, and the same holds on the server-died path. `%ref-deactivate` is
+deliberately delivery-only — already-queued messages are untouched, like `demonitor` without
+`flush` — so the flush and the alias compose rather than overlap. Guard:
+`tests/ref_alias_test.blsp` (both delivery paths sabotage-verified separately, plus the
+eviction boundary and the end-to-end late-reply case).
+
+## ADR-245 — The L1 local-send copy is bounded, not relocated
+
+**Context.** The L1 fast path (`try_deliver_local`) copies a message straight from the
+sender's heap into a **parked** receiver's, skipping the `Value → Message → Value` round
+trip. It does that copy while holding the receiver's mailbox mutex, and that is not an
+oversight: the lock is what hands us the parked receiver's `Box<Process>`, and therefore
+the exclusive `&mut` on its heap that makes the copy sound at all. The same quiescence
+`trim_parked` relies on.
+
+So the lock hold is proportional to the message. KI-56 measured what that costs an
+*unrelated* operation on the same mailbox — a `%mailbox-size` probe, which is a pure
+lock-acquire with zero message work, so any stall it sees can only be lock wait:
+
+| payload | L1 p50 | L1 p99 | wire p50 | wire p99 |
+|---|---|---|---|---|
+| ~8 KB | 4.8 µs | 11 µs | 4.4 µs | 7.5 µs |
+| ~80 KB | 4.9 µs | **1 106 µs** | 4.9 µs | 8.7 µs |
+| ~1.6 MB | **5 011 µs** | 13 994 µs | 7.3 µs | 15.0 µs |
+
+The wire arm is flat across a 500× payload range, because its heavy work — `to_message` —
+happens *outside* the lock.
+
+**The rejected fix.** Move the copy out of the lock: take the waiter, release, copy,
+re-acquire. This is unsound and was already rejected once on that ground —
+`shutdown_runtime_parked` reaps parked waiters, and during the window the process is in
+neither place, so shutdown would skip it. Any repair means changing what `st.waiter` means,
+which is load-bearing for the whole fast path.
+
+**Decision.** Leave the copy where it is and **bound it**. `copy_cross_heap` takes a budget
+in work units — one heap node is one unit — decremented as it walks, declining (`None`) the
+moment it goes negative. A decline falls through to the wire path, which already handles
+large messages well and does its work outside the lock. `BROOD_L1_BUDGET=<units>` overrides
+the default; `0` means unlimited (the pre-cap behaviour, for A/B and bisect).
+
+Counting nodes is sufficient only because no single node carries an unbounded payload: a
+string at or above `SHARED_BLOB_THRESHOLD` (256 B) is an `Arc<SharedBlob>` and crosses **by
+handle**, so the only string ever memcpy'd is a sub-threshold one. That coupling is not left
+implicit — a `const _` assertion fails the build if the threshold is raised past what a
+node-counting budget can bound.
+
+**Charging per node is not, by itself, a bound** — and this is the part that only a measurement
+would have caught. Every container arm *materialised before descending*: `to_vec()` for a vector,
+`map_entries` / `set_elems` / `list_to_vec` for the rest. So a 100k-element vector still paid its
+full O(n) copy under the lock and only then declined, measuring p99 **243 µs** where the wire path
+read 5.4. Each kind therefore declines **before materialising** — `len()` for a vector, `map_size`
+for a map (doubled, for key and value) and a set, `range_len` for a range, and a bounded spine
+walk for a cons list, which is the one kind with no O(1) length. With that, the capped arm is
+indistinguishable from the wire arm at every payload size measured.
+
+An early-out returns before spending anything, so it sets the budget negative explicitly
+(`over_budget`) — otherwise the sign, which is how the caller attributes the decline, would say
+"uncopyable value kind" for what is really the cap.
+
+**Why this is the right shape.** The stall is a *tail* problem, not a throughput one. L1 is
+cheaper than the wire path at every size measured (1.09× tiny to 2.58× at 100k elements),
+so the cap is not buying throughput back — it is trading the fast path away on the rare
+large send in exchange for bounding what that send does to everyone else. The budget sits
+between "no measurable effect" (~8 KB) and "p99 blow-up" (~80 KB), so every ordinary
+message — a request, a reply, a tagged tuple, a record — keeps the fast path untouched.
+
+Crucially, it does not touch the `st.waiter` invariant at all, so the soundness objection
+that killed the relocation does not apply to it.
+
+**Consequences.** A decline is now attributable: the *sign* of the budget distinguishes
+"too big" from "a value kind the copier does not handle", and `BROOD_L1_STATS=1` reports
+them separately (`over-budget` vs `value-declined`). A workload that sends multi-MB
+messages between local processes gives up L1 and runs at wire-path speed, which is the
+speed it had before L1 existed.
+
+**Not fixed here.** KI-56 names a second instance of the same pattern on the *receive*
+side: the selective-receive peek-in-place branch calls `from_message` under the lock, so a
+scan that has skipped the head holds the mutex across a deep rebuild per candidate. Same
+shape, unmeasured, left open rather than fixed blind.

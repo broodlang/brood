@@ -465,10 +465,6 @@ fn source_positions_survive_a_cross_node_send() {
 
     let server = format!(
         r#"
-;; The shipped closure's body references `reflect/form-pos`, and auto-require runs on
-;; the node that COMPILES a form — never on the node that merely *receives* an already
-;; compiled closure. So the receiver has to load the module itself.
-(require-one 'reflect)
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (register :probe (self))
 (defn serve ()
@@ -523,6 +519,84 @@ fn source_positions_survive_a_cross_node_send() {
     assert!(
         stdout.contains("GOT: [7 "),
         "expected `[7 col]` from the remote (the client-side line of the quoted list survived the wire), got:\n{stdout}"
+    );
+}
+
+/// A shipped closure's **namespaced** references resolve on the receiver (KI-55).
+///
+/// Auto-require (ADR-227/229) fires when a form is *compiled*, and a closure that
+/// crosses the wire arrives already expanded and resolved — so nothing on the receiver
+/// ever infers `math`/`json` from the body, and before this the call died with a bare
+/// `unbound symbol: math/sqrt`. The sender now names the modules its body references
+/// (`ClosureMsg::modules`, encoded in the `M_CLOSURE` record) and the receiver weaves a
+/// `(if (bound? 'probe) nil (require-one 'module))` guard into the rebuilt body for each
+/// one it lacks, so the load happens at the closure's own call site.
+///
+/// Node A deliberately loads **neither** module: it starts, registers, and parks. Two
+/// modules in one body, so the dedup/multi path is exercised too, and the quoted
+/// `'math/not-a-real-name` proves quoted data does *not* drag a module along (it would
+/// otherwise be indistinguishable from a reference).
+#[test]
+fn a_shipped_closure_requires_its_modules_on_the_receiver() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-mods-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // A: no `require`, no qualified reference of its own — a node that has never heard
+    // of `math` or `json`. It asserts that before the closure arrives.
+    let server = format!(
+        r#"
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(when (bound? 'math/sqrt) (throw "node A already had math loaded — the test proves nothing"))
+(when (bound? 'json/encode) (throw "node A already had json loaded — the test proves nothing"))
+(register :calc (self))
+(defn serve ()
+  (receive
+    ([:run f x reply] (do (send reply [:result (f x)]) (serve)))
+    (_ (serve))))
+(serve)
+"#
+    );
+
+    // B: ship a closure whose body calls into two modules B has (and A does not).
+    let client = format!(
+        r#"
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
+(send {{:name :calc :node :a@127.0.0.1}}
+  [:run (fn (x) (str (math/sqrt x) " " (json/encode {{:q (quote math/not-a-real-name)}}))) 144 (self)])
+(receive
+  ([:result r] (println (str "GOT: " r)))
+  (after 30000 (throw "no reply from calc")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let mut a_err = String::new();
+    if let Some(mut e) = a.stderr.take() {
+        let _ = e.read_to_string(&mut a_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "client did not finish cleanly.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
+    );
+    assert!(
+        stdout.contains(r#"GOT: 12.0 {"q":"math/not-a-real-name"}"#),
+        "expected the remote to run the closure against modules it loaded on demand, got:\n\
+         --- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
     );
 }
 

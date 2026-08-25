@@ -97,7 +97,7 @@
       (park-batched (%sub remaining k)))))
 
 (defn ms (f)
-  (let (t0 (now-ns) _ (f)) (quot (- (now-ns) t0) 1000000)))
+  (let (t0 (os/now-ns) _ (f)) (quot (- (os/now-ns) t0) 1000000)))
 
 ;; ns/unit as a plain integer — a hand-rolled fixed-point µs print silently dropped the
 ;; leading zero of its fraction (5.050 rendered as "5.50", i.e. 10x wrong).

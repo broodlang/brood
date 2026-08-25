@@ -1235,8 +1235,10 @@ mentioning length" is true of an unbound warning too, so it proved nothing.
 symbol: sqrt` and `json` with the dropped `json-` prefix: ADR-227's migration sweep covered
 `breakage/`, `examples/`, `stress/`, `std/` and `crates/` but could not see `brood-benchmarks`,
 a separate repo. A published harness run would have failed outright. Both fixed by qualifying the reference (which loads the module by
-inference) and verified against the other ports' checksums (`nbody` −169063618
-= node = python; `json` 364568836 = node), not merely "it runs now". The structural cause — that
+inference) and verified against the other ports' checksums, not merely "it runs now".
+(Those two figures — `nbody` −169063618, `json` 364568836 — turned out to be **stale**;
+see the warning in KI-44. `nbody`'s checksum is N-dependent, so quoting one without its
+`BENCH_N` is meaningless. `results/results.json` is canonical.) The structural cause — that
 nothing runs those programs for *correctness*, only for timing, by hand, over tens of minutes —
 is fixed by `bench/smoke.py`: every row at the harness's own quick sizes, exit status only,
 about a minute, sabotage-verified — and it immediately paid for itself: ADR-229's `require`
@@ -2679,3 +2681,229 @@ at a user call site, invisible to `nest check`.
 
 Also: `%defseq` (the definer behind map/filter/mapcat) is now unpublished scaffolding, and
 the `string->utf8-bytes` pair retired in favour of the `string/->bytes` pair it duplicated.
+
+## 2026-08-25 — `brood --check` resolved `(:use M)` against the namespace, not the module
+
+A single-file `brood --check` reported `unbound symbol: walk-files` for a file whose header
+says `(defmodule codemod (:use file))` — and then, for good measure, `unused :use import: file`.
+Both false; `walk-files` resolves at run time. The whole-project path (`nest check`) was clean,
+which is what localised it.
+
+**Root cause.** `types::check::setup_check_imports`' `ensure_loaded` asked "is this module already
+loaded?" by testing whether *any* `M/…` global exists. `file` shares its namespace with 18 kernel
+primitives (`file/slurp`, `file/ls`, …), so the answer was yes before `std/file.blsp` had ever been
+read: the `(:use file)` imported the primitives and none of the module's own `defn`s
+(`walk-files`, `read-lines`, `regular?`, `list-files`, `list-dirs`, `write-lines`). A whole-project
+check never hit it because `project-ensure-loaded` loads every module first. `file` is the only
+namespace a fresh image shares between primitives and an *unloaded* module (the other prefixes
+present at boot — `map`, `seq`, `string` — are all loaded features), which is why it stayed hidden.
+
+The test is now the **feature registry** (`*features*`), i.e. exactly what the runtime's
+`require-one` consults, read from Rust with no eval. Erring toward "not loaded" is free —
+`require-one` is idempotent — while erring toward "loaded" is what produced the false positives.
+
+**The second warning was the dangerous one.** "Unbound name" and "this import contributes nothing"
+are contradictory advice, and the second would have the reader delete an import their program
+needs. The unused-`:use` lint now stands down whenever the unbound diagnostic fired on a bare
+name: an import table that failed to resolve something the file references cannot prove any
+import unused. It stays fully live for a file that resolves cleanly.
+
+**Also fixed, different cause.** `std/prelude/tools.blsp`'s `impl-app?` reads `*project-name*` /
+`*ns-package*` — ambients `defdyn`'d by `std/tool/project.blsp`, absent under a bare
+`brood script.blsp` — behind `(bound? '…)` guards. The checker flagged them, i.e. warned on
+correct code. A `(bound? 'name)` test in a top-level form now exempts that name for that form
+(scoped per form, so a probe in one function can't silence a typo in another).
+
+`brood --check` over all 104 `std/*.blsp` files: **zero warnings** (was 4). Regression coverage in
+`crates/lisp/tests/check_use_imports.rs` (9 cases, including both "a real typo still warns" and
+"a genuinely unused import still warns" — verified by sabotage: reverting the loader test fails
+the two `file` cases) plus a `feature_loaded` unit test pinning both directions. Both engines
+1025/1025.
+
+
+## 2026-08-25 — KI-55: a shipped closure now brings its modules with it
+
+Auto-require (ADR-227/229) fires when a form is **compiled**. A closure that crosses a node
+boundary arrives already expanded and resolved, so nothing on the receiver ever inferred its
+imports and `(fn () (reflect/form-pos …))` died there with `unbound symbol: reflect/form-pos`.
+Before the v0.9.0/v0.10.0 namespacing waves those were bare prelude names, bound on every node by
+construction — the guarantee moved without anyone noticing.
+
+**The sender names them; the receiver loads them at the call site.** `closure_to_message` walks
+the arms' forms it is already deep-copying, collects each *qualified* symbol outside a
+`quote`/`quasiquote` subtree, and resolves the **distinct** ones through
+`derive::module_to_require`, keeping only those bound as globals here — the filter that separates
+a real reference from a qualified-looking symbol, and the reason an unloadable module on the far
+side is a genuine error. The result is a `(module, probe)` pair per module in
+`ClosureMsg::modules`, appended to the wire's `M_CLOSURE` record (protocol `BRD\x05` → `BRD\x06`;
+a v5 peer would have read the count as the start of `captured`). On arrival, each module this
+runtime lacks gets a guard woven into the rebuilt body —
+`(if (bound? 'math/sqrt) nil (%try (fn () (require-one 'math)) (fn (e) (throw …))))` — built from
+primitives and core special forms only, because a rebuilt body is never macroexpanded here.
+
+**Not at deserialize time**, which is where it obviously belongs and is wrong twice: `from_message`
+holds half-built values in unrooted Rust locals (the KI-51 shape), and the selective-`receive` scan
+calls it **while holding the mailbox lock**, where `require-one`'s wait-for-another-loader `sleep`
+— itself a `receive` — deadlocks. At the call site the load is ordinary evaluation, and its failure
+is a catchable error naming the module, the reference, and the fact that the closure was shipped.
+
+Cost, best-of-5 on a deliberately reference-dense closure (8 forms, 10 qualified refs, 20 000
+serialisations): **51 → 75 ms**, +1.2 µs per closure, and zero for a same-runtime send (skipped
+outright). Resolving once per distinct symbol instead of per occurrence is worth 4× here.
+
+`source_positions_survive_a_cross_node_send` lost its `(require-one 'reflect)` workaround; a new
+`a_shipped_closure_requires_its_modules_on_the_receiver` ships a body calling two modules node A
+has never heard of (and a quoted `'math/not-a-real-name`, proving quoted data drags nothing
+along). Both sabotage-verified against the original unbound errors. Suite 1026/1026.
+
+## 2026-08-25 — ADR-243: a framework's client API is a module, not ten bare names
+
+`7cb796f0` made the gen_server framework "core and bare" by concatenating `std/proc/gen.blsp`
+into the `PRELUDE` bundle. A prelude name is *reserved* (ADR-166), so that one move seized ten
+of the most generic identifiers in the language — `call`, `cast`, `stop`, `call-timeout`,
+`code-change`, `spawn-server`, `spawn-server-link`, `spawn-server-named`, `gen-clause`,
+`defprocess` — into the un-redefinable set.
+
+The bill arrived the same day, as KI-54: `(def call …)` was refused outright (breaking
+`basic::spawned_process_picks_up_redefinition`), `gen` dropped out of `(builtin-modules)` and
+un-reserved the *package* name (failing `namespace_test`), and the file was bundled without being
+declared (failing `prelude_manifest`). Worse, it propagated: ADR-241 was written under the new
+premise and audited fourteen ecosystem exports for "clashes with core", renaming
+`changeset/cast` and `accounts/register` — clashes that existed only because a framework had
+taken the words.
+
+`gen` is now an ordinary `embedded_module!` like its siblings `supervisor` and `agent`:
+`gen/call`, `gen/cast`, `gen/spawn-server`, or bare inside a module that writes `(:use gen)`.
+Nothing aliased, nothing shimmed — every caller in the tree updated.
+
+The rule worth keeping: **being core does not entitle a framework to a bare global name.** The
+prelude is the language (`map`, `first`, `send`, `spawn`); a framework's client API is a
+vocabulary for talking to one kind of process, however central that kind is. `call`/`cast`/`stop`
+are the clearest case — three of the most ordinary verbs in programming, none of which mean
+"gen_server" outside this framework.
+
+`PRELUDE_MODULES` and its `prelude_modules_are_bundled` honesty test existed only to re-reserve a
+package name the bundling had orphaned; with `gen` back in `CORE_MODULES` the reservation is
+automatic, so both are deleted and `EXTRA_PRELUDE_FILES` is back to one entry. Guard:
+`tests/reserved_names_test.blsp` asserts the ten names are *free* while `gen/call` and friends
+are reserved, and that `gen` is still a reserved package name.
+
+## 2026-08-25 — ADR-244: a late reply now dies at the door, not in the mailbox
+
+`gen/call-timeout` flushes anything already queued for its reply `ref` when it gives up. That is
+only half the problem, and the missing half leaks. A reply the server posts *strictly after* the
+deadline cannot be flushed — it has not been sent yet — so it lands carrying an unforgeable token
+no `receive` of that process will ever match again: never consumed, growing the mailbox without
+bound across a retry loop, and re-scanned by every later selective receive. A caller timing out
+repeatedly against a slow-but-live server leaks one message per attempt.
+
+Erlang answered this twice. Through OTP 23 the caller simply **exits** on a `gen_server:call`
+timeout, which makes a late reply moot. OTP 24 added **process aliases**: the reply is addressed
+to a one-shot alias, and once deactivated the VM drops later replies before they enter the
+mailbox. We take OTP 24's answer, as a kernel mechanism rather than a library workaround.
+
+**No new `Value` kind was needed** — which is the part worth internalising. A Brood `ref` is
+already the unforgeable per-request token a reply carries, so deactivating the ref *is* the alias:
+`(%ref-deactivate r)`, after which a message addressed to that ref is dropped **at delivery**,
+before queueing, rather than filtered at receive time. "Addressed to" is the request/reply idiom's
+own shape — a keyword-led vector whose second element is the ref (`[:reply r v]`,
+`[:down mref pid reason]`) — which keeps the check O(1) and keeps a deactivated alias from
+swallowing anything unrelated.
+
+**Bounded by construction, free when unused.** The set is a fixed eight `u64`s stored inline in
+`MailboxState`: it cannot allocate and cannot grow. An entry only has to outlive the one in-flight
+reply its alias was minted for, so the common case reclaims itself — the late reply arrives, is
+dropped, and the entry is forgotten in the same step. Overflow evicts the *oldest*, restoring
+exactly the pre-alias behaviour for one long-abandoned ref rather than dropping anything wrong.
+Both delivery paths already hold the mailbox lock, so the check is `dead_aliases.is_empty()` on a
+field they have just touched: `pingpong` / `ring` / `spawn` / `spawn-live`, best-of-11 and pinned,
+every row within its own noise floor.
+
+A timed-out `gen/call` now leaves an *empty* mailbox rather than a flushed-so-far one, and the
+same holds on the server-died path. `%ref-deactivate` is deliberately delivery-only — queued
+messages are untouched, like `demonitor` without `flush` — so the flush and the alias compose
+rather than overlap. Guard: `tests/ref_alias_test.blsp`, with both delivery paths
+sabotage-verified separately, plus the eviction boundary and the end-to-end late-reply case.
+
+## 2026-08-25 — KI-56: bounding the L1 copy, and why counting nodes was not a bound
+
+The L1 local-send fast path copies a message straight into a **parked** receiver's heap while
+holding that receiver's mailbox mutex. The lock is not incidental to the copy — it is what hands
+us the parked process and therefore the exclusive `&mut` on its heap — so the hold is proportional
+to the message, and a large one stalls every unrelated operation on that mailbox. Measured with a
+`%mailbox-size` probe (a pure lock-acquire, zero message work, so a stall can only be lock wait):
+p99 **1 106 µs at ~80 KB** and p50 **5 011 µs at ~1.6 MB**, against a wire path flat at 4–10 µs
+across a 500× payload range, because its heavy work happens outside the lock.
+
+ADR-245 takes the fix that leaves the lock discipline alone: **bound the copy** and decline past
+the bound, falling through to the wire path. Moving the copy out of the lock was already rejected
+on soundness — `shutdown_runtime_parked` reaps parked waiters, and during the window the process
+is in neither place.
+
+**The first cut was wrong in an instructive way.** Charging one unit per heap node as the walk
+visits it *looks* like a bound, and it measured p99 **243 µs** at ~1.6 MB — 26× better than
+uncapped, and still 45× worse than the wire path it was supposed to match. The reason is that
+every container arm materialises before it descends: `src.vector(id).to_vec()` copies the entire
+element array, and `map_entries` / `set_elems` / `list_to_vec` do the same. The O(n) cost was paid
+under the lock and only *then* declined. A per-node charge bounds the recursion, not the work.
+
+Each kind now declines **before** materialising — `len()` for a vector, `map_size` for a map
+(doubled, for key and value) and a set, `range_len` for a range, and a bounded spine walk for a
+cons list, the one kind with no O(1) length. That is worth 45× on its own:
+
+| payload | uncapped p99 | per-node only | + early-out | wire p99 |
+|---|---|---|---|---|
+| ~78 KB | 89.7 µs | 23.1 µs | **3.2 µs** | 3.0 µs |
+| ~1.6 MB | 1 875 µs | 242.5 µs | **5.4 µs** | 7.7 µs |
+| ~3.9 MB | 13 029 µs | 576.7 µs | **5.7 µs** | 7.7 µs |
+
+The ~8 KB row does not move at all, which is the point — below the budget nothing happens. The
+A/B is unusually clean: `BROOD_L1_BUDGET` is a runtime flag, so both arms are the *same binary*
+and nothing but the cap can differ.
+
+On throughput the honest answer is **no resolvable difference**: capped read +2.9 % and +9.0 % at
+10- and 100-element payloads (best-of-9, 4 clients), against a same-config base-vs-base spread of
+6.4–9.4 % and 2.8–14.5 % on the same box. Neither clears `max(5 %, 2 × floor)`, so this is not
+evidence of a cost and not evidence of none.
+
+Two details worth keeping. An early-out returns before spending anything, so it marks the budget
+negative explicitly — the *sign* is how `try_deliver_local` tells "too big" from "a value kind the
+copier does not handle", and `BROOD_L1_STATS=1` now reports them separately. And the budget counts
+nodes only because no node carries an unbounded payload: a string at or above
+`SHARED_BLOB_THRESHOLD` crosses by handle, never memcpy'd, so only a sub-threshold string is ever
+copied — a `const _` assertion fails the build if that threshold is ever raised out from under the
+assumption. Writing the test is what found that the string-payload charge I had first added was
+**dead code**.
+
+KI-56's second instance — selective-receive's peek-in-place branch calling `from_message` under
+the lock — stays open and unmeasured. This entry exists because a plausible claim about the send
+side turned out half wrong; fixing the receive side blind would repeat the mistake.
+
+## 2026-08-25 — the overflow check that overflowed, and 17 guards CI never ran
+
+Two findings from finishing the GUI robustness sweep, both of the same shape: a guard that does
+not guard.
+
+**`%gui-icon!`'s overflow validation panicked on the case it was written for.** The check reads
+`(w as u64) * (h as u64) * 4 == rgba.len() as u64`. For `w = h = 4294967295` the product fits u64
+(1.8446744065e19) and the `× 4` does not — so under debug-assertions the *validation* panics with
+`attempt to multiply with overflow`, on whatever thread it runs on, which for a GUI call is
+exactly the uncatchable failure the validation existed to prevent. `checked_mul` throughout: an
+overflow is `None`, which can never equal `Some(len)`, so it rejects. The test that caught it was
+already in the tree — `dimensions whose product overflows do not wrap into a false match` — and
+was failing the suite, killed rather than asserted.
+
+**The `gui` renderer tests were never executed by CI.** `src/gui.rs`'s `render_robustness` cases —
+the ones pinning that a wild `:scroll-region` offset cannot overflow the coordinate math — are
+behind `--features gui`, which is opt-in. CI's clippy step builds `--all-features` and so
+*compiles* them; the nextest step builds the default surface plus grammars and so runs everything
+except them. Compiled by one step, executed by none. A dedicated CI step now runs
+`cargo test -p brood --features gui,gui-gpu --lib gui` (17 cases); the system deps were already
+installed in that job for clippy.
+
+The GPU painter's cull got its guard the same way: the predicate was inline in a closure that
+needs a live GL context, so it was extracted to `quad_visible` and tested directly. Writing those
+cases corrected the change — an infinite *width* anchored on screen is not garbage to be culled,
+it genuinely covers the viewport, costs one quad, and GL clips it. What must be culled is NaN
+(every comparison false, which is why the predicate is phrased positively) and an infinity that
+puts the quad off-screen.

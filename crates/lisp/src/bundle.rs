@@ -139,7 +139,12 @@ fn footer(bytes: &[u8]) -> Option<(usize, usize)> {
         return None;
     }
     let foot: &[u8; FOOTER_LEN] = bytes[bytes.len() - FOOTER_LEN..].try_into().ok()?;
-    let alen = decode_footer(foot)? as usize;
+    // `try_from`, not `as`: the footer's archive-len is a `u64` read out of untrusted
+    // file bytes, and `as usize` TRUNCATES on a 32-bit target (wasm32 builds this
+    // module). A crafted `alen` of `2^32 + 30` would narrow to 30, sail past the
+    // `bytes.len() < total` guard, and report a bogus archive window — the guard has to
+    // see the value the footer actually claimed. On 64-bit this conversion never fails.
+    let alen = usize::try_from(decode_footer(foot)?).ok()?;
     let total = FOOTER_LEN.checked_add(alen)?;
     if bytes.len() < total {
         return None;
@@ -180,7 +185,9 @@ pub fn mounted() -> &'static Option<Bundle> {
         }
         // Real bundle — read just the archive bytes (not the base binary).
         f.seek(SeekFrom::Start(len - total)).ok()?;
-        let mut archive = vec![0u8; alen as usize];
+        // `try_from` for the same reason as in `footer()`: `as usize` would truncate a
+        // >4 GiB claim on a 32-bit target and read the wrong window instead of bailing.
+        let mut archive = vec![0u8; usize::try_from(alen).ok()?];
         f.read_exact(&mut archive).ok()?;
         parse_archive(&archive)
     })
