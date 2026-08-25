@@ -3366,3 +3366,38 @@ per *language*, which warms the boot cache — but each row runs in a fresh proc
 program's own functions tier from cold every measured run. For rows in the tens of milliseconds
 that is a large, variable share of the published number, and it is not subtracted by
 `compute = wall − startup` because the `startup` row has no hot function to tier.
+
+## 2026-08-25 — the stdimage boot-install premise, re-measured rather than inherited
+
+KI-61's fix is to stop loading `string` and `seq` from source at boot. The mechanism for that
+already exists — the stdlib image — and the reason it is not installed at boot was recorded
+months ago as "the suite fails 131 of 4873". Two relevant things landed since (the `%std-edges`
+edge replay, and the root-global attribution fix), and a third was found today (KI-62: the image
+poisoned `require` outright on a lean build), so the figure was worth re-taking rather than
+building against.
+
+**Re-measured: 150 failures of 4920, and the recorded diagnosis is right.** Every failure is
+registration-shaped — `port? is true for a fn port`, `a port record prints as itself`, `every
+sealed member satisfies`, `a backend prints as`, `responses are records with a Response impl`.
+Materialising a module really does define its bindings and skip every registration its load
+would have performed.
+
+Worth recording that an earlier probe of mine pointed the other way and was wrong: requiring
+`queue` after an explicit `stdimage/install` showed `Seqable`, `Display`, `Conjable` and
+`Inspect` all satisfied, identical to a source load. That looked like evidence the losses had
+been fixed. It was not — one module surviving says nothing about the 28 that register, and I
+should have run the suite before drawing a conclusion from a single probe.
+
+**The prize is now measured, not estimated:** installing the image before the two boot requires
+takes a debug-build startup from **286.9 → 180.1 ms, −37%**.
+
+**A second blocker, solved:** `stdimage/install` cannot run that early — it reaches `os/getenv`,
+`path/join` and `file/exists?` through `os`/`path`/`file`, none of which are loaded yet, so it
+dies with `unbound symbol: os/getenv`. A prelude-only twin using `%getenv`, `str` and the
+`file/exists?` *native* (all bound at that point) boots cleanly. That half works today; only the
+150 registration failures make it unshippable.
+
+So the remaining work is the replay, now sized: 56 `impl`, 24 `defability` and 35 `defrecord`
+forms across std. Record the **forms**, not the values — symbols and lists image cleanly, where
+a value snapshot cannot round-trip the closures an `impl` holds — and evaluate them on
+materialise, exactly as `%std-edges` already replays require-edges.

@@ -376,7 +376,33 @@ materialise rebuilds the closure *and* performs the registration. Bounded: 56 `i
 across 13 files, 24 `defability`, 35 `defrecord`; `*record-ids*` (plain symbols) already
 restores correctly.
 
-The scoping question to answer before writing it: are the 131 failures all ability dispatch?
+**The scoping question is now answered with current data, and the recorded premise holds.**
+Measured 2026-08-25 by actually installing the image at boot and running the suite:
+**150 failures of 4920** (the note's figure was 131 of 4873, taken before the `%std-edges` replay
+and the root-global attribution fix — so those changed nothing here). Every failure is
+registration-shaped:
+
+```
+10  io: ports are Port impls › port? is true for a fn port
+ 8  io: ports are Port impls › a port record prints as itself
+ 6  the temporal types are records › every sealed member satisfies …
+ 6  log: the stock backend is a record › a backend prints as …
+ 6  http: responses are records with a Response impl
+```
+
+**And the prize is measured, not estimated.** Installing the image before the two boot requires
+takes a debug-build startup from **286.9 → 180.1 ms (−37%)**. Doing it needs one more thing
+besides replay: `stdimage/install` reaches for `os/getenv`, `path/join` and `file/exists?`
+through `os`/`path`/`file`, none of which are loaded that early, so it dies with
+`unbound symbol: os/getenv`. A prelude-only twin using `%getenv` + `str` + the `file/exists?`
+native (all bound at that point) boots fine — that part is done and works; it is only the 150
+registration failures that make it unshippable.
+
+So the remaining work is exactly the replay, and it is now sized: record each module's
+registration **forms** at image-build time (56 `impl`, 24 `defability`, 35 `defrecord` across
+std), store them as data — symbols and lists image cleanly, unlike the closures a value snapshot
+would need — and evaluate them when the module materialises, the way `%std-edges` already
+replays require-edges.
 
 ---
 
