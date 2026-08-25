@@ -10,7 +10,7 @@ image.
 > see the tool table below). Recorded as
 > [ADR-036](decisions.md#adr-036--nest-mcp-a-per-project-model-context-protocol-server-tools-surface-in-brood).
 > The full catalogue is live (including the once-stubbed `check` / `run-tests` /
-> `processes`, and the 2026-07-30 ability/type trio `abilities` / `ability` /
+> `proc/list`, and the 2026-07-30 ability/type trio `abilities` / `ability` /
 > `check-source`), with the three Tier-1 niceties in place (project-defined tool
 > discovery, `prompts/get`, `.mcp.json` scaffolded by `nest new`). The remaining
 > piece is the **`*out*` dynvar / `with-out-str` work**
@@ -37,7 +37,7 @@ image.
 > **(3) `std/tool/mcp.blsp` — done (2026-05-28; eight tool `defn`s + `(mcp-tools)`
 > registry; six live (`eval`, `load`, `lookup`, `macroexpand`, `format`, and
 > dispatch for any project-defined tools), three documented stubs (`check`,
-> `run-tests`, `processes`); added to `EMBEDDED_MODULES` so `(require 'mcp)`
+> `run-tests`, `proc/list`); added to `EMBEDDED_MODULES` so `(require 'mcp)`
 > finds it without a load-path)**;
 > **(4) `nest new` scaffolds `.mcp.json` — done (2026-05-28; the scaffolder
 > writes `foo/.mcp.json` pointing at `nest mcp`, so `cd foo && claude`
@@ -49,7 +49,7 @@ image.
 > `(run-project-tests-structured)` in `std/tool/project.blsp` — done; `run-tests`
 > MCP tool now returns `{:total :passed :failed :failed-assertions :ms
 > :results [...]}` instead of the stub**;
-> **(1c-d) `(list-processes)` Rust primitive — done; `processes` MCP tool
+> **(1c-d) `(list-processes)` Rust primitive — done; `proc/list` MCP tool
 > now returns `{:processes [{:$type :pid :node :id} ...]}` (an empty array,
 > not nil/null, when nothing is registered)**;
 > **(5a) `prompts/get` with `brood-task` — done (a single orientation
@@ -180,8 +180,8 @@ Claude Code already has those:
 | `run-tests`   | `{file?, name?}`            | `[{name, status, output}]`             | Structured, not GNU-line parsing |
 | `check`       | `{file?}`                   | `[{file, line, col, message}]`         | Advisory type-check, structured |
 | `format`      | `{file?, source?}`          | `{formatted}`                          | Idempotent reformatter |
-| `processes`   | `{}`                        | `{processes: [{id, status, mailbox, memory, reductions, ...}]}` | After `spawn`, snapshot every live green process with its full `process-info` stats — the observer's per-process view (mailbox backlog, reductions/work counter, heap, monitors) |
-| `process-info`| `{id}`                      | `{id, status, mailbox, reductions, ...}` or `{error}` | Drill into one process by the numeric id from `processes` |
+| `proc/list`   | `{}`                        | `{processes: [{id, status, mailbox, memory, reductions, ...}]}` | After `spawn`, snapshot every live green process with its full `proc/info` stats — the observer's per-process view (mailbox backlog, reductions/work counter, heap, monitors) |
+| `proc/info`| `{id}`                      | `{id, status, mailbox, reductions, ...}` or `{error}` | Drill into one process by the numeric id from `proc/list` |
 | `node`        | `{}`                        | `{node, workers, peak-threads, spawned, process-count, mem-bytes, mem-peak, peers}` | Runtime-wide stats — the observer's header; "is the runtime healthy/busy?" |
 | `watch-runtime`| `{ms?, filter?}`           | `{events: [{kind, pid, detail}], count, ms}` | Watch the kernel runtime-event **stream** for `ms` (default 500, capped 5000) — GC pauses (`:gc`), spawn/exit churn (`:spawn`/`:exit`), JIT deopts (`:deopt`) — a *trace*, not a snapshot. `filter` selects kinds (e.g. `{gc: true, exit: true}`). |
 | `callers`     | `{name}`                    | `{references: [{file, line, col}]}`    | Cross-file find-references — the *use* sites of a global (complements `lookup`'s def site) |

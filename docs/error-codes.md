@@ -59,7 +59,7 @@ Codes are grouped by [`ErrorKind`]:
 | `E0044` | `:runtime` | evaluation used more stack than the byte budget (runaway *non-tail* recursion); raised before the coroutine stack overflows into an uncatchable SIGSEGV. Tune via `BROOD_STACK_BUDGET` | `(defn boom (n) (+ 1 (boom (+ n 1)))) (boom 0)` |
 | `E0050` | `:runtime` | file IO (`load`, `file/slurp`, `file/spit`, `file/mkdir`, `file/ls`, `file/cwd`, `check-file`, `check-file-structured`) | `(file/slurp "/no/such/file")` |
 | `E0051` | `:runtime` | `run-process` couldn't start the subprocess (with a `:hint` about PATH) | `(run-process "nope" [])` |
-| `E0060` | `:runtime` | distribution layer: `node-start` / `connect` failed | `(connect "bad@host")` |
+| `E0060` | `:runtime` | distribution layer: `node/start` / `connect` failed | `(connect "bad@host")` |
 | `E0070` | `:runtime` | `send` saw a message value nested past `MAX_MESSAGE_DEPTH` (with a `:hint` about chunking) | a recursively self-referential structure |
 | `E0099` | `:runtime` | `LispError::runtime(...)` (catch-all) | uncoded runtime raises |
 

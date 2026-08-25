@@ -3701,7 +3701,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "%node-listen",
         Arity::exact(3),
         // The node name may be a symbol OR a keyword — `expect_node_name` accepts both, and
-        // the prelude's `node-start` passes the computed `:name@host` keyword (matching
+        // the prelude's `node/start` passes the computed `:name@host` keyword (matching
         // `%node-connect`). Returns the qualified node name, always a keyword.
         Sig::new(vec![sym.union(kw), string, string], kw),
         &[],
@@ -3823,14 +3823,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &["name"],
         "The local pid registered under `name`, or nil. Strictly local — does not query other nodes.",
         whereis_name);
-    // `node-name` is the keyword `:nonode` until `node-start` sets it to a symbol.
+    // `node/name` is the keyword `:nonode` until `node/start` sets it to a symbol.
     def(
         heap,
         "%node-name",
         Arity::exact(0),
         Sig::nullary(sym.union(kw)),
         &[],
-        "This runtime's node name (:nonode until node-start).",
+        "This runtime's node name (:nonode until node/start).",
         node_name,
     );
     def(
@@ -3860,7 +3860,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![sym.union(kw)], nil_ty),
         &["name"],
-        "Cancel this process's node monitor for node `name` (undo monitor-node); a no-op if none is registered. Returns nil.",
+        "Cancel this process's node monitor for node `name` (undo node/monitor); a no-op if none is registered. Returns nil.",
         demonitor_node);
     def(
         heap,

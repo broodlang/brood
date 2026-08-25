@@ -54,7 +54,7 @@
 > stale handle held across a flip trips a precise debug tripwire.
 >
 > **The one thing a program author must never do is think about GC** — there is no
-> `while`, no manual collect, and the old `(hibernate)` primitive (which forced a
+> `while`, no manual collect, and the old `(proc/hibernate)` primitive (which forced a
 > flush) was **removed** once automatic collection landed. The only requirement,
 > met by the runtime not the user, is that a program runs at the depth-1 safepoint:
 > top-level forms (`brood`/`nest run` via `eval_source`), the bodies of spawned
@@ -75,7 +75,7 @@
 >    short-lived processes because the whole heap drops on process exit.
 > 2. **Shared code regions** (PRELUDE + RUNTIME) — immutable / append-only,
 >    `Arc`-shared. No GC needed; closures live forever.
-> 3. **Arena flip on `(hibernate fn & args)`** — long-running processes
+> 3. **Arena flip on `(proc/hibernate fn & args)`** — long-running processes
 >    opt in: hibernate raises an uncatchable `LispError::Hibernate` that
 >    unwinds back to the process's run loop, which calls
 >    `Heap::flush(&mut roots)` (deep-copy callee + args into fresh `Slabs`,
