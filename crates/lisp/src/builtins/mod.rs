@@ -3652,6 +3652,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         build_id);
     def(
         heap,
+        "stdlib-id",
+        Arity::exact(0),
+        Sig::nullary(string),
+        &[],
+        "This build's STANDARD LIBRARY identity as \"<version>+<git-sha>+<content-hash>\" — like build-id, but hashing what is baked in rather than this executable's mtime. Every binary built from one tree (brood, nest, brood-lsp) reports the SAME stdlib-id, so they can share one cache of anything derived from std/ — the stdlib startup image is keyed on it. Use build-id for a cache of something binary-specific, and this for a cache of something the standard library determines. It changes on any edit to any `.blsp`, committed or not.",
+        stdlib_id);
+    def(
+        heap,
         "brood-version",
         Arity::exact(0),
         Sig::nullary(string),
