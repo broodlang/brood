@@ -19,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-63 | **loading std modules now taxes subsequent JIT'd hot loops ~28%; on 0.3.11 it cost nothing.** An identical, allocation-free, natively-compiled 20M-iteration loop, timed by differencing two otherwise-identical programs so module-load time cancels exactly: with 4 modules required first, **0.3.11 −5.8% (no tax), 0.12.0 +27.9%** (unpinned, best-of-9). JIT-only — under `BROOD_NO_JIT=1`/`BROOD_TIER=1` the effect is 0.0%. Every program loads modules after the namespacing, so this is on the common path | 🔧 **measured 2026-08-25, mechanism not identified.** Not shared arms, not the RUNTIME GC floor, not the inliners (`BROOD_NO_SHARED_ARMS` / `BROOD_RT_GC_FLOOR` / `BROOD_NO_INLINE` / `BROOD_NO_LEAF_INLINE` each leave it). `perf_event_paranoid=4` on this box, so a profile needs root |
+| KI-63 | **loading std modules taxes subsequent JIT'd hot loops, and the tax roughly DOUBLED since 0.3.11.** An identical, allocation-free, natively-compiled 20M-iteration loop with 4 modules required first, timed **in-process** (so module-load time is outside the measurement), unpinned. Direction is stable across samples; magnitude is not — 25 runs: **0.3.11 −4.3% min / +13.0% median, 0.12.0 +12.0% min / +26.9% median**, and the tail is worse still (p90 30 ms vs 50 ms). JIT-only — `BROOD_NO_JIT=1`/`BROOD_TIER=1` read 0.0%. Every program loads modules after the namespacing, so this is the common path | 🔧 **measured 2026-08-25, mechanism not identified.** Not shared arms, not the RUNTIME GC floor, not the inliners (`BROOD_NO_SHARED_ARMS` / `BROOD_RT_GC_FLOOR` / `BROOD_NO_INLINE` / `BROOD_NO_LEAF_INLINE` each leave it). `perf_event_paranoid=4` on this box, so a profile needs root |
 | KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
 | KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | 🔧 **diagnosed 2026-08-25, not fixed.** The fix is not to revert a wave — it is to make a module load cheap at boot, which is what the std image already does (4-33x) and why it is *not* installed at boot: materialising defines bindings and evaluates NOTHING, so registrations are skipped (131/4873 fail). See the replay note below |
 | KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl Port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl Port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
@@ -189,15 +189,22 @@ repetition, the usual flake defence, does not help. The missing dimension is a *
 most of the value, because two different traps nearly produced two different wrong answers.
 
 **What.** The same allocation-free 20M-iteration loop, natively compiled, runs measurably slower
-if std modules were loaded first — and the penalty grew by ~5x since 0.3.11:
+if std modules were loaded first, and the penalty roughly **doubled** since 0.3.11. Timed
+**in-process** — `os/now-ns` either side of the loop — so module-load time is outside the
+measurement entirely. Unpinned, 25 runs:
 
-| modules required first | 0.3.11 | 0.12.0 |
+| | 0.3.11 | 0.12.0 |
 |---|---|---|
-| 0 | 24.7 ms | 26.3 ms |
-| 4 (`json format datetime csv`) | 23.3 ms | 33.7 ms |
-| **tax** | **−5.8%** | **+27.9%** |
+| 0 modules | min 23, med 23, p90 23 | min 25, med 26, p90 29 |
+| 4 modules (`json format datetime csv`) | min 22, med 26, p90 30 | min 28, med 33, p90 50 |
+| **tax** | **−4.3% min / +13.0% med** | **+12.0% min / +26.9% med** |
 
-Unpinned, best-of-9. It is **JIT-only**: under `BROOD_NO_JIT=1` or `BROOD_TIER=1` the same
+**Read the direction, not a single number.** Three samples of the same comparison gave a 0.12.0
+tax of +27.9%, +25.0% and +12.0% on min, against a 0.3.11 tax of −5.8%, +0.0% and −4.3%. The
+*ratio* is consistently about 2x and the sign is consistent; the magnitude is not stable enough
+to quote one figure, and the p90 gap (30 vs 50 ms) says the distribution is what moved most.
+
+It is **JIT-only**: under `BROOD_NO_JIT=1` or `BROOD_TIER=1` the same
 comparison reads 942 → 939 ms and 949 → 949 ms, i.e. 0.0%. The interpreter does not care; native
 code does.
 
@@ -206,11 +213,15 @@ modules — `io/puts` alone pulls `io`.
 
 **Method, because the naive versions are both wrong.**
 
-1. **Difference two programs, do not subtract a startup row.** Loop time here is
-   `wall(file with the loop) − wall(the identical file without it)`, so the module-load cost
-   cancels *exactly*. Subtracting the harness's `startup` row instead does not: the startup row
-   is `(io/puts 0)`, which loads `io` but not `os`/`string`, so it under-subtracts for every
-   real row.
+1. **Time in-process; differencing two programs is not reliable enough here.** Loop time is
+   `os/now-ns` either side of the loop. The obvious alternative — `wall(file with the loop) −
+   wall(the identical file without it)` — cancels module-load cost in principle, and it is what
+   this entry first used, but it fails once the non-loop part is large and variable: with 2000
+   `defn`s in both files it reported the loop taking **4 ms**, and it manufactured a "+64% at
+   2000 functions" threshold that in-process timing shows does not exist (flat 24–26 ms from 0
+   to 4000 extra functions). Subtracting the harness's `startup` row is worse again: that row is
+   `(io/puts 0)`, which loads `io` but not `os`/`string`, so it under-subtracts for every real
+   row.
 2. **Do not pin.** Pinned to one core the same measurement reads **+68.2%** rather than +27.9%,
    because the background JIT compiler competes for that core and loading modules increases
    compilation volume — precisely the trap CLAUDE.md documents for `make ab`. The 0.3.11 side
