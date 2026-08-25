@@ -4,6 +4,47 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.12.0 — 2026-08-25
+
+**BREAKING — output moves to `io/`, and the bare core drops from 317 to ~280.**
+
+- **`io/print` / `io/puts`** replace `print`/`println`/`eprint`/`eprintln`, beside the
+  `Port` ability they write through. `io/write` was already taken by the right thing —
+  `Port`'s one-string seam, `(io/write port s)` — so these are the convenience layer over
+  it. The destination is a trailing **`:to <port>`**, which keeps printing variadic; a
+  leading port would make `(io/puts p)` ambiguous (write it, or target it?). It must be
+  both `:to` and something `port?` accepts, so `(io/puts :to 3)` prints `:to 3`.
+  Stderr is `:to *err*` — the dynamic var, not `(io/stderr-port)`, so `with-err-str`
+  still captures. `inspectln` is deleted (no callers); bare `inspect` stays, since it is
+  the `Inspect` ability op and returns a string.
+- **`timer/`** — `timer/send-after`, `timer/send-interval`, `timer/cancel`, one family in
+  one namespace instead of split across the prelude and `proc/`. **`sleep` stays bare**:
+  it parks the current process (a peer of `receive`), and the module loader itself sleeps
+  between polls, so rooting it in a module would have the loader require one mid-require.
+- **`string/->number` / `string/->symbol`** — the scalar bridges apply the module-rooted
+  rule the reference already documents (`string/->bytes`). Both moved together.
+- **`span-runs` → `%span-runs`** — one caller (the editor highlighter), so it is
+  mechanism, not vocabulary. The Rust `print`/`eprint` become `%print`/`%eprint`.
+- **The registries are private.** `*impls*`, `*record-ids*`, `*methods*`, `*abilities*`
+  and ~20 more were published API under an "Other" heading; they are `def-` now and the
+  heading is gone. This needed a kernel fix: `%registry-update!` reused `env_define`,
+  which clears the private mark on every global definition — right for a real `def`,
+  wrong for an in-place registry write, so privacy silently undid itself on first use.
+- **`disj` is NOT moved.** It looked orphaned in a "Sets" group of one, but its pair is
+  `conj` and both are deliberately core and polymorphic. The orphan was a categorisation
+  bug, now fixed.
+
+**Fixed**
+
+- The formatter split a keyword argument from its value (`:to` on its own line). A
+  keyword and the form after it are one unit now — 134 files, a net 377 fewer lines.
+- The playground reported `version()` as `0.1.0`, the wasm shim's own crate version,
+  rather than the Brood it runs.
+- Reference docs named functions the renames had moved, including two runtime error
+  messages (`proc/flag` reported "process-flag: unknown flag").
+- Two concurrency tests timed their races instead of observing them, and went red on a
+  loaded CI box for no defect.
+
 ## v0.11.0 — 2026-08-24
 
 **BREAKING — the bare core drops from 337 to 291.** Subsystems keep moving out of the

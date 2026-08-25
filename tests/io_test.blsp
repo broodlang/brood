@@ -103,3 +103,25 @@
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "[2] xy")))
   (test "a value with no Port impl raises the named ability error"
     (assert-error (write 42 "nope"))))
+
+;; The DEFAULT `*out*`/`*err*` are the primitives `%write-out`/`%write-err`, whose
+;; `type-of` is `:native` — not `:fn`. `Port` only had a `:fn` impl, so `io/port?` was
+;; false for the two ports the language ships with, `(io/puts … :to *err*)` declined the
+;; target, and the port leaked into the output as `:to #<native %write-err>`.
+;;
+;; Every existing test passed through it: `with-err-str` rebinds `*err*` to a Brood
+;; closure, which IS `:fn`. The default was the broken case and nothing exercised it.
+(describe "the shipped ports are ports"
+
+  (test "the default *out* and *err* satisfy Port"
+    (is (io/port? *out*))
+    (is (io/port? *err*)))
+
+  (test "a native port is a valid :to target, and does not leak into the output"
+    ;; Routed through a capture so the assertion sees what a real stderr write would say.
+    (let (captured (with-err-str (io/puts "routed" :to *err*)))
+      (is (includes? captured "routed"))
+      (is (not (includes? captured ":to")))))
+
+  (test "a Brood closure port still works — the case that always passed"
+    (is (io/port? (fn (s) s)))))
