@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
 | KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | 🔧 **diagnosed 2026-08-25, not fixed.** The fix is not to revert a wave — it is to make a module load cheap at boot, which is what the std image already does (4-33x) and why it is *not* installed at boot: materialising defines bindings and evaluates NOTHING, so registrations are skipped (131/4873 fail). See the replay note below |
 | KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl Port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl Port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
 | KI-59 | **`nest run --for` reported failure for a program that succeeded.** The wrapper was `(%spawn …)` then `(monitor p)` — two steps. A program that finished before the monitor attached fired a synthetic `:noproc`, `(= :noproc :normal)` was false, and the run exited 1 after printing its output correctly. Worst in the mode documented as the CI-friendly way to exercise an app | ✅ **fixed 2026-08-25** — `%spawn-link` + `trap-exit`, atomic by construction: the kernel already names this race on `%spawn-link` itself ("no spawn->link :noproc race", ADR-067). Reproduced ~1 run in 6 under load, 0/20 after. Reading `:noproc` as success would be wrong the other way — a program that *crashed* before the monitor attached is indistinguishable |
@@ -178,6 +179,53 @@ activation, and no `std` suite tests a large input. It is invisible below ~10⁵
 loop that calls the same function eleven times at increasing sizes stays correct throughout — so
 repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-62 — the stdlib image was unusable on the shipped build ✅ FIXED 2026-08-25
+
+**Status:** ✅ fixed. Guard: `stdlib image: fidelity › a replayed edge naming a module this
+binary lacks does not break require`, sabotage-verified.
+
+**What.** Installing the stdlib image made the *next* `require` fail:
+
+```
+error: require: cannot find module 'test'
+```
+
+The image is keyed on `stdlib-id`, a hash of the stdlib's **content**, and that is deliberate:
+`brood`, `nest` and `brood-lsp` built from one tree report the same id so they share one ~2 MB
+image instead of writing three. But sharing a key across binaries assumes they can load the same
+things, and they cannot — a **lean** runtime (what `nest release` and
+`make install INSTALL_FEATURES=RUN_FEATURES` produce, i.e. what actually ships) bakes in 88
+modules with **no dev-tools**, and `std/tool/project.blsp`'s recorded require-edges name `test`:
+
+```
+project -> (sexp coverage test hash reflect dev package version io os path file seq string)
+```
+
+`stdimage/install` replays those edges — correctly, and for a good reason: a restored module
+defines its bindings and evaluates nothing, so without the edges `url` comes back with no
+`path`. But replaying an edge to a module this binary has no source for poisons `require`
+outright.
+
+**So the image's headline number has never been available on the build users run.** Measured on
+release, once the edge is filtered:
+
+| | from source | from image | |
+|---|---|---|---|
+| `require format` | 62.0 ms | **12.8 ms** | 4.8x |
+| `require datetime` | 3.3 ms | **0.39 ms** | ~9x |
+
+**Fixed at install, not at build**, and the distinction is load-bearing: the image may have been
+written by a different binary from the one reading it — that is the entire point of sharing the
+key — so the *reader* is the only party that knows which modules it can load. Filtering at build
+time would produce an image correct for its writer and wrong for its readers.
+
+**Why it went unnoticed.** The image is built by `make install` and by `nest stdimage`, but it is
+not installed at boot (see KI-61), so nothing in the normal path ever replays those edges. It is
+dead code until someone calls `stdimage/install` — which is exactly what a boot-install
+experiment does, and what this was found by.
 
 ---
 

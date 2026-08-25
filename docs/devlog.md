@@ -3212,3 +3212,37 @@ nothing tested.
 That is the generalisable bit. A test that installs its own double to observe an effect is not
 testing the default path, and for `*out*`/`*err*` the default path is the entire product. Both
 comments are now in `std/io.blsp`; neither alone tells you to go look at the default.
+
+## 2026-08-25 — the startup image did not work on the build that ships
+
+Chasing KI-61's fix — make a boot module load cheap, which is what the stdlib image is for — the
+first probe that actually *installed* the image found it broken:
+
+```
+error: require: cannot find module 'test'
+```
+
+The image is keyed on `stdlib-id`, the stdlib's content hash, so `brood`, `nest` and
+`brood-lsp` from one tree share a single copy rather than writing three. That is right. What it
+misses is that a shared key does not imply a shared *module set*: a lean runtime — `nest
+release`, `make install INSTALL_FEATURES=RUN_FEATURES`, i.e. what ships — bakes in 88 modules
+and no dev-tools, while `std/tool/project.blsp`'s recorded edges name `test`. `install` replays
+those edges (it must: a restored module evaluates nothing, so without them `url` comes back
+with no `path`), and replaying an edge to a module with no source poisons `require` for
+everything after it.
+
+Fixed by dropping, at install, any dep this binary cannot load. At **install** rather than at
+build because the image may have been written by a different binary from the one reading it —
+which is the whole point of sharing the key, so the reader is the only party that knows.
+
+The number this unlocks was already claimed in the docstring and had simply never been reachable
+on a shipping build. Release, best of 3: `require format` **62.0 → 12.8 ms** and `require
+datetime` **3.3 → 0.39 ms**.
+
+Two things worth keeping. First, it went unnoticed because the image is *built* by `make install`
+but never *installed* — dead until something calls `stdimage/install`, which nothing in the
+normal path does. A feature that is constructed and never exercised is not covered by "the suite
+is green". Second, it would have wrecked the KI-61 replay investigation had it not surfaced
+first: a boot-install experiment on a lean build would have produced a pile of failures with
+nothing to do with the registrations it was meant to measure, and the obvious reading — "see,
+131 failures, the note was right" — would have been wrong.
