@@ -398,38 +398,38 @@
 
 (describe "format (printf-style)"
   (test "a format string with no specifiers is returned unchanged"
-    (assert= (format "") "")
-    (assert= (format "hello, world") "hello, world"))
+    (assert= (string/format "") "")
+    (assert= (string/format "hello, world") "hello, world"))
   (test "%% renders a literal %"
-    (assert= (format "100%%") "100%")
-    (assert= (format "%%done") "%done"))
+    (assert= (string/format "100%%") "100%")
+    (assert= (string/format "%%done") "%done"))
   (test "%s renders any value via str"
-    (assert= (format "got: %s" "x") "got: x")
-    (assert= (format "got: %s" 42) "got: 42")
-    (assert= (format "got: %s" :foo) "got: :foo")
-    (assert= (format "got: %s" nil) "got: nil")
-    (assert= (format "got: %s" [1 2 3]) "got: [1 2 3]"))
+    (assert= (string/format "got: %s" "x") "got: x")
+    (assert= (string/format "got: %s" 42) "got: 42")
+    (assert= (string/format "got: %s" :foo) "got: :foo")
+    (assert= (string/format "got: %s" nil) "got: nil")
+    (assert= (string/format "got: %s" [1 2 3]) "got: [1 2 3]"))
   (test "%d renders a number"
-    (assert= (format "n=%d" 42) "n=42")
-    (assert= (format "n=%d" -7) "n=-7"))
+    (assert= (string/format "n=%d" 42) "n=42")
+    (assert= (string/format "n=%d" -7) "n=-7"))
   (test "%f renders a float with 6 fractional digits (C default)"
-    (assert= (format "pi=%f" 3.141592653589793) "pi=3.141593"))
+    (assert= (string/format "pi=%f" 3.141592653589793) "pi=3.141593"))
   (test "%.Nf renders a float with N fractional digits"
-    (assert= (format "pi=%.2f" 3.14159) "pi=3.14")
-    (assert= (format "%.0f" 3.7) "4")
-    (assert= (format "%.4f" 0.015873015873) "0.0159"))
+    (assert= (string/format "pi=%.2f" 3.14159) "pi=3.14")
+    (assert= (string/format "%.0f" 3.7) "4")
+    (assert= (string/format "%.4f" 0.015873015873) "0.0159"))
   (test "mixed specifiers consume args left-to-right"
-    (assert= (format "x = %d, y = %.2f" 42 3.14159) "x = 42, y = 3.14")
-    (assert= (format "%s/%s" "a" "b") "a/b"))
+    (assert= (string/format "x = %d, y = %.2f" 42 3.14159) "x = 42, y = 3.14")
+    (assert= (string/format "%s/%s" "a" "b") "a/b"))
   (test "extra args are ignored; missing args render as nil"
-    (assert= (format "one") "one")
-    (assert= (format "%s" "a" "b" "c") "a")
-    (assert= (format "%s %s" "a") "a nil"))
+    (assert= (string/format "one") "one")
+    (assert= (string/format "%s" "a" "b" "c") "a")
+    (assert= (string/format "%s %s" "a") "a nil"))
   (test "rejects an unknown specifier or a truncated one"
-    (assert-error (format "what is %q" 1))
-    (assert-error (format "ends in %"))
-    (assert-error (format "ends in %.2"))
-    (assert-error (format "%.xf" 1.0))))
+    (assert-error (string/format "what is %q" 1))
+    (assert-error (string/format "ends in %"))
+    (assert-error (string/format "ends in %.2"))
+    (assert-error (string/format "%.xf" 1.0))))
 
 ;; ---- across processes -------------------------------------------------------
 ;; Each worker builds a padded string from data and sends it back (deep copy

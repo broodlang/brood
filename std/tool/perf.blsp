@@ -32,7 +32,7 @@ were measurements."
   (x)
   "`x` as a percentage rounded to one decimal — for prose only. The map keeps full
   precision, because a consumer may want it and rounding is a display choice."
-  (format "%.1f%%" (* 100.0 x)))
+  (string/format "%.1f%%" (* 100.0 x)))
 
 (defn- dp2
   (x)

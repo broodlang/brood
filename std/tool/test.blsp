@@ -898,7 +898,7 @@ the test rather than hanging the run."
   ;; `--formatter` (whose output must stay parseable — no stray dots).
   (unless (or *test-trace* *test-formatter*)
     (fold (fn (_ r)
-            (io/print (cond
+            (io/write (cond
                         (r-skipped? r) (test-orange "○")
                         (r-failed? r) (test-red "F")
                         else (test-green "."))))

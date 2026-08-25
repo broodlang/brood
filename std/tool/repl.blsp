@@ -275,7 +275,7 @@ forms into the eval rather than fail cleanly."
   (repl-call (fn ()
                (try
                  (io/puts (str "\e[33m" (type-of (eval-string expr)) "\e[0m"))
-                 (catch e (io/print (str (repl-error-message e) "\n") :to *err*))))))
+                 (catch e (io/write (str (repl-error-message e) "\n") :to *err*))))))
 
 (defn- repl-meta-time
   (expr)
@@ -289,7 +289,7 @@ forms into the eval rather than fail cleanly."
           ; timing, as before) — and bounded, like any printed result
           (when (os/stdout-tty?) (io/puts (repl-colorize (pr-str-bounded v))))
           (io/puts (str "\e[90m; " ms " ms\e[0m")))
-        (catch e (io/print (str (repl-error-message e) "\n") :to *err*))))))
+        (catch e (io/write (str (repl-error-message e) "\n") :to *err*))))))
 
 ;; `apropos` / `doc-search` have been in the prelude all along; the only thing missing
 ;; was a way to reach them without breaking your typing rhythm. `,apropos` searches
@@ -342,7 +342,7 @@ form that is unreadable on one line."
                    (do (string/trim (format/source (pr-str out))))
                    (catch _ (pr-str out))))
         (io/puts (if (os/stdout-tty?) (repl-colorize text) text)))
-      (catch e (io/print (str (repl-error-message e) "\n") :to *err*)))))
+      (catch e (io/write (str (repl-error-message e) "\n") :to *err*)))))
 
 (defn- repl-run-meta
   (line)
@@ -374,7 +374,7 @@ Returns nil; the loop just continues to the next prompt."
 (register-repl-command {:names '("clear")
                         :usage ",clear"
                         :summary "clear the screen"
-                        :handler (fn (rest) (io/print "\e[2J\e[H"))})
+                        :handler (fn (rest) (io/write "\e[2J\e[H"))})
 (register-repl-command {:names '("apropos")
                         :usage ",apropos <pat>"
                         :summary "globals whose NAME contains <pat>"
@@ -483,7 +483,7 @@ against the live image), or nil. Nil on incomplete input — there is nothing to
   (src)
   "Print `src`'s advisory type-check warnings to stderr — yellow on a TTY, plain on a pipe."
   (for (w (repl-check-warnings src))
-    (io/print (if (os/stdout-tty?)
+    (io/write (if (os/stdout-tty?)
                 (str "\e[33mwarning:\e[0m " w "\n")
                 (str "warning: " w "\n"))
       :to *err*)))
@@ -510,7 +510,7 @@ reporting a real error. Never lets an error escape the loop."
       (if (repl-incomplete? e)
         :more (do
           (repl-remember-error e)
-          (io/print (str (repl-error-message e) "\n") :to *err*)
+          (io/write (str (repl-error-message e) "\n") :to *err*)
           :error)))))
 
 ;; ---- interruptible evaluation ------------------------------------------------
@@ -626,7 +626,7 @@ loop. Returns `:ok` normally, `:interrupted` when we killed it."
           ;; The kill didn't land — a native builtin that never reaches a reduction
           ;; tick. Don't pretend to be interruptible; give the user their Unix Ctrl-C.
           (do
-            (io/print "\n; evaluation is not yielding — halting\n" :to *err*)
+            (io/write "\n; evaluation is not yielding — halting\n" :to *err*)
             (%halt 130))
           (do (exit child :kill) (repl-await-child child ref true)))
         (repl-await-child child ref killed)))))
@@ -754,13 +754,13 @@ ends input; Ctrl-C drops the form and re-prompts."
   "Piped/redirected read: accumulate physical lines (no editor) until the form is
 complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplete form."
   (do
-    (when (os/stdout-tty?) (io/print (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
+    (when (os/stdout-tty?) (io/write (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
     (let (line (read-line))
       (cond
         (nil? line)
           (do
             (when (and (not (= acc "")) (= (repl-eval-print acc) :more))
-              (io/print "error: incomplete input at end of input\n" :to *err*))
+              (io/write "error: incomplete input at end of input\n" :to *err*))
             {:eof true :history history})
         (and (= acc "") (repl-meta? line)) (do (repl-run-meta line) {:eof false :history history})
         (and (= acc "") (not (repl-content? line 0 (string/length line) false)))
@@ -789,7 +789,7 @@ body); `interactive` and `history` stay live as rooted tail-call arguments.
 Returns (and the process exits) at end of input."
   (let (r (repl-read-eval interactive "" history))
     (if (get r :eof)
-      (when (os/stdout-tty?) (io/print "\n"))
+      (when (os/stdout-tty?) (io/write "\n"))
       (repl-loop interactive (get r :history)))))
 
 (defn- repl-await
@@ -845,7 +845,7 @@ the loop spawns so its `def`s are in place for the first prompt."
               (try
                 (load path)
                 (catch e
-                  (io/print (str "\e[33mwarning:\e[0m "
+                  (io/write (str "\e[33mwarning:\e[0m "
                               path
                               ": "
                               (repl-error-message e)
@@ -903,7 +903,7 @@ by the outermost invocation only."
         prompt *repl-prompt*
         cont-prompt *repl-cont-prompt*
         history (if interactive (repl-load-history) '()))
-    (when (os/stdout-tty?) (io/print (str *repl-banner* "\n") :to *err*))
+    (when (os/stdout-tty?) (io/write (str *repl-banner* "\n") :to *err*))
     ;; `%in-ns` must run in the LOOP process (its persistent `compile_ns` is what each
     ;; `eval-string` inherits), not the parent — and only there does it see the ambient
     ;; package context that roots the module name. A no-op when `*repl-start-ns*` is nil

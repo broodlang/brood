@@ -1132,8 +1132,8 @@ fn a_curated_sig_does_not_mask_the_unbound_lint_for_a_moved_name() {
 
 #[test]
 fn curated_output_and_numeric_sigs() {
-    // io/puts and io/print return nil — feeding to a numeric sink is caught.
-    for f in ["io/puts", "io/print"] {
+    // io/puts and io/write return nil — feeding to a numeric sink is caught.
+    for f in ["io/puts", "io/write"] {
         let w = warnings(&format!("(+ 1 ({f} \"hi\"))"));
         assert!(
             w.iter().any(|s| s.contains('+') && s.contains("nil")),
@@ -1305,11 +1305,11 @@ fn curated_equality_and_string_sigs() {
     assert!(warnings("(string/repeat 3 5)")
         .iter()
         .any(|w| w.contains("string/repeat") && w.contains("string")));
-    assert!(warnings("(format 5 \"extra\")")
+    assert!(warnings("(string/format 5 \"extra\")")
         .iter()
         .any(|w| w.contains("format") && w.contains("string")));
     // format returns a string.
-    assert!(warnings("(string/length (format \"hi %s\" x))").is_empty());
+    assert!(warnings("(string/length (string/format \"hi %s\" x))").is_empty());
     // index-of/index-where/last-index-of return int — safe to add.
     assert!(warnings("(+ 1 (index-of coll x))").is_empty());
     assert!(warnings("(+ 1 (last-index-of s needle))").is_empty());

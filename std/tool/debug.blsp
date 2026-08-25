@@ -442,7 +442,7 @@ causal tree, and the hottest traced forms by hit count. The one-call overview."
 ;; ---- live terminal view -----------------------------------------------------
 (defn- debug-watch-loop
   (dbg frames)
-  (io/print (str (ansi-clear) (ansi-home)))
+  (io/write (str (ansi-clear) (ansi-home)))
   (io/puts "── watch  (Ctrl-C to exit) ──")
   (report dbg)
   (if (= frames 1)
@@ -462,10 +462,10 @@ tree grow as a workload runs; drive resume from another session or a timer."
   (dbg)
   ;; In raw mode `\n` moves down but NOT to column 0, so a `io/puts` frame staircases.
   ;; Clear, then place every line absolutely at (row, col 1) with `ansi-cursor`.
-  (io/print (ansi-clear))
+  (io/write (ansi-clear))
   (letrec (place (fn (lines row)
                    (when (not (empty? lines))
-                     (io/print (str (ansi-cursor row 1) (first lines)))
+                     (io/write (str (ansi-cursor row 1) (first lines)))
                      (place (rest lines) (inc row)))))
     (place (cons "── attach    [r] resume all parked    [q] quit ──"
              (debug-report-lines dbg))
@@ -613,7 +613,7 @@ no raw-terminal setup and works when piped."
     (io/puts "── parked processes ──")
     (doseq (line (debug-numbered entries)) (io/puts line))
     (doseq (line (cons "── causal tree ──" (causal-lines (causal-tree dbg) 0))) (io/puts line))
-    (io/print "debug> ")
+    (io/write "debug> ")
     (let (raw (read-line))
       (if (nil? raw)
         :done (let (line (string/trim raw) parts (string/split line " ") cmd (first parts))
