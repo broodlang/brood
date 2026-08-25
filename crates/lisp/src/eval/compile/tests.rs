@@ -1889,6 +1889,61 @@ fn resolving_a_closure_arm_twice_reuses_one_memoized_handle() {
     );
 }
 
+/// The 3-arg `table-put` call-site inline survives the namespacing that turned it into a
+/// `std/table.blsp` wrapper. `resolve_prim3` used to accept only a *direct* native binding,
+/// on the stated grounds that `table-put` "has no prelude wrapper to follow" — true when it
+/// was written, false once the head became `table/put`. Nothing errored; the call just
+/// stopped inlining and became an ordinary `Call` in the hot arm, worth **11.6× on `sieve`**
+/// with no failing test anywhere. This is that missing test.
+///
+/// The second half is the miscompile guard, and it is the reason the identity map is
+/// *required* rather than applied: `Node::Prim3` carries no argument permutation (unlike
+/// `Node::Prim2`'s `map`), so a wrapper that reorders its parameters must decline. Inlining
+/// one would silently store the value under the wrong key.
+#[test]
+fn table_put_call_site_inline_recognizes_the_namespaced_wrapper() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(require-one 'table)")
+        .expect("load std/table");
+    assert_eq!(
+        resolve_prim3(&interp.heap, value::intern("table/put")),
+        Some(PrimOp3::TablePut),
+        "the canonical table/put wrapper must inline to PrimOp3::TablePut — if this fails,          std/table's put was reworded out of the recognized shape and sieve is ~11x slower"
+    );
+    // The underlying native still resolves directly, as it always did.
+    assert_eq!(
+        resolve_prim3(&interp.heap, value::intern("%table-put")),
+        Some(PrimOp3::TablePut)
+    );
+    // A 3-arg wrapper that forwards to something else entirely must not inline.
+    interp
+        .eval_str("(defmodule ut) (defn ut/put (t k v) (list t k v))")
+        .expect("define a user ut/put");
+    assert!(
+        matches!(
+            interp
+                .eval_str("ut/put")
+                .expect("read ut/put back")
+                .unpack(),
+            ValueRef::Fn(_)
+        ),
+        "ut/put must be a bound closure, or the None below passes for the wrong reason"
+    );
+    assert_eq!(resolve_prim3(&interp.heap, value::intern("ut/put")), None);
+    // The miscompile guard: a wrapper that PERMUTES its parameters before forwarding must
+    // decline, because `Node::Prim3` would compile the arguments in the caller's order and
+    // store the value under the wrong key.
+    interp
+        .eval_str("(defmodule up) (defn up/put (t k v) (%table-put t v k))")
+        .expect("define a permuting wrapper");
+    assert_eq!(
+        resolve_prim3(&interp.heap, value::intern("up/put")),
+        None,
+        "a wrapper that swaps k and v must not inline — Prim3 has no permutation to apply"
+    );
+}
+
 /// KI-44: the `sqrt` call-site inline survives its move out of the prelude (ADR-227). The head
 /// is now the qualified `math/sqrt`, a RUNTIME closure, so `resolve_prim1` identifies the
 /// canonical wrapper STRUCTURALLY rather than by the old sealed-PRELUDE identity. This guards

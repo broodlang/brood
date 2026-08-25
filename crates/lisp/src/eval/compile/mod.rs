@@ -1196,7 +1196,8 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                     }
                 }
                 // 3-arg inlinable primitive (`table-put`): same guard discipline as the
-                // 2-arg prims; only a direct-native head qualifies (no wrapper to follow).
+                // 2-arg prims, and the same thin-wrapper following — `head` stays the
+                // ORIGINAL head, so a deopt dispatches the real wrapper unchanged.
                 if items.len() == 4 && scope.lookup(h).is_none() {
                     if let Some(op3) = resolve_prim3(heap, h) {
                         let a = compile_node(heap, items[1], scope, false)?;
@@ -2739,14 +2740,41 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
     }
 }
 
-/// Resolve a 3-arg call head to an inlinable [`PrimOp3`]. Only a **direct** native
-/// binding qualifies (its one member, `table-put`, has no prelude wrapper to follow).
-/// Read against the live global env — a redefined head simply doesn't match.
+/// Resolve a 3-arg call head to an inlinable [`PrimOp3`], following a **thin wrapper**
+/// exactly as the 2-ary [`resolve_prim`] does. Read against the live global env — a
+/// redefined head simply doesn't match.
+///
+/// This used to accept only a *direct* native binding, on the stated grounds that its one
+/// member `table-put` "has no prelude wrapper to follow". The namespacing waves made that
+/// premise false: the head is now `table/put`, a `std/table.blsp` closure whose whole body
+/// is `(%table-put t k v)`. Nothing errored — the call simply stopped inlining and became
+/// an ordinary `Call` inside the hot arm, which is what put `sieve` **11.6× slower**
+/// (34 → 394 ms) with no failing test anywhere. The 2-ary path kept following its wrapper,
+/// so `table/has?` went on inlining beside it and the asymmetry was invisible.
+///
+/// The identity map is required rather than applied: `Node::Prim3` has no argument
+/// permutation (unlike `Node::Prim2`'s `map`), so a wrapper that reorders its parameters
+/// must decline rather than silently compile the arguments in the wrong order.
 fn resolve_prim3(heap: &Heap, h: Symbol) -> Option<PrimOp3> {
-    match heap.env_get(heap.global(), h)?.unpack() {
-        ValueRef::Native(id) => PrimOp3::from_native_name(&heap.native(id).name),
-        _ => None,
-    }
+    let nid = match heap.env_get(heap.global(), h)?.unpack() {
+        ValueRef::Native(id) => id,
+        ValueRef::Fn(id) => {
+            let (inner_head, map) = crate::eval::passthrough_arm(heap, id, 3)?;
+            if map[..] != [0, 1, 2] {
+                return None;
+            }
+            let inner = match inner_head.unpack() {
+                ValueRef::Sym(s) => heap.env_get(heap.global(), s)?,
+                _ => inner_head,
+            };
+            match inner.unpack() {
+                ValueRef::Native(id) => id,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    PrimOp3::from_native_name(&heap.native(nid).name)
 }
 
 /// If `form` is `(def name rhs)` (name a symbol, exactly one value), return `(name, rhs)`

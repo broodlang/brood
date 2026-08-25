@@ -3017,3 +3017,62 @@ Two things about that gate are worth keeping, because both were nearly got wrong
   possibly dying), and it reproduced only 1 run in 3. Reconstructing the actual pre-fix code gave
   9 in 10 and a deterministic red through the gate. When a sabotage under-reproduces, suspect the
   sabotage before concluding the gate works.
+
+## 2026-08-25 — the first cross-language run on 0.11.0, and the inline a rename had retired
+
+Installed the lean build and ran the full seven-language harness for the first time since
+0.3.11 (2026-08-14). Same machine, so the columns are comparable. Brood's compute, 0.3.11 →
+0.11.0: `sort` −28%, `pingpong` −22%, `spawn-live` −21%, `base64` −15%, `persistent-map` −14%,
+`pipeline` −10%, `json` −9% — and **`sieve` +1055%**.
+
+`sieve`'s program changed only `(table)` → `(table/new)`. Same algorithm. So the 11.6× was the
+runtime, and the cause was a comment that had quietly become false:
+
+> `resolve_prim3` — *"Only a **direct** native binding qualifies (its one member, `table-put`,
+> has no prelude wrapper to follow)."*
+
+True when it was written. The v0.9/v0.10 waves moved the table API into `std/table.blsp`, so
+the head is now `table/put`, a closure whose whole body is `(%table-put t k v)`. The resolver
+stopped matching and the call compiled to an ordinary `Call` in the hot arm — no
+`PrimOp3::TablePut`, on the row that exists to benchmark it. Nothing errored, no test failed,
+and `nest check` was clean, because the program was still *correct*.
+
+What hid it is worth more than the fix. The **2-ary** `resolve_prim` already follows its
+wrapper through `passthrough_arm`, so `table/has?` in the very same loop kept inlining. One IR
+dump of `mark` shows both states at once — a `Prim2` and a `Call` three instructions apart:
+
+```
+before:  … GlobalIc Local Const Call  Pop Local Prim2SlotSlot SelfCall
+after:   … GlobalIc Local Const Prim3 Pop Local Prim2SlotSlot SelfCall
+```
+
+The arm lowered to native either way, which is why none of the standing diagnostics fired: no
+`[jit-bail]`, and the JIT-vs-no-JIT ratio check (the one that exposed nbody's silent bail)
+sees a native loop in both cases. It was native; it just called out per element.
+
+The fix mirrors the 2-ary wrapper-following into `resolve_prim3`, and inherits its safety
+rather than adding any: `head` stays the original call head so a deopt dispatches the real
+wrapper with bit-identical errors, and the existing epoch `guard` re-validates on every
+`global_epoch` change. The identity argument map is **required, not applied** — `Node::Prim3`
+has no permutation field, unlike `Node::Prim2`'s `map`, so a wrapper that reorders its
+parameters must decline; inlining one would store the value under the wrong key. That is the
+second half of the guard test.
+
+`make ab` best-of-7 against the parent: **457 → 68 ms, −85.1%**, 29 other rows noise.
+
+**The sweep's one flag was not real, and the way it dissolved is the reusable part.**
+`spawn-live` read +5.4% against a 2.0% floor, which clears the gate. But that row executes no
+table code at all — the only `std` user of `table/put` is `telemetry`, which it never loads —
+so the change cannot reach it. A fixed-baseline control then showed why: base-vs-base on that
+row measured a **7.5% floor**, and simply *reversing the order the arms ran in* moved the
+verdict from "+8.9%, regressed" to "+4.5%, noise", with the new binary landing between the two
+base samples. Running the arms in a fixed order puts every within-rep thermal trend on the last
+one. FRONTIER already says a `spawn-live` movement is not a result without a fixed-baseline
+A/B; the order effect is the mechanism behind that rule.
+
+**The class is the finding.** This is the third rename to silently retire an inline — KI-44 was
+the same shape on `sqrt`, and its own fix note names the requirement it broke ("a **bare** head
+resolving to a **PRELUDE** closure"). An inline keyed on how a name is *spelled*, or on which
+region it is *bound* in, is a performance cliff no test, checker or CI job can see, because the
+program remains correct. The structural, wrapper-following resolutions survive a rename; the
+direct-binding checks do not. Worth auditing the remaining ones before the next wave.
