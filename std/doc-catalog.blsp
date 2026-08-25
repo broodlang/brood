@@ -28,6 +28,15 @@
 (def *catalog*
   {"*" :math
    "*err*" :io
+   "*features*" :meta
+   "*load-path*" :meta
+   "*print-length*" :io
+   "*print-level*" :io
+   "*print-string-length*" :io
+   "*protocols*" :meta
+   "*reload-diagnostics*" :meta
+   "*require-parent*" :meta
+   "*spy-sink*" :io
    "*out*" :io
    "*show*" :meta
    "+" :math
@@ -155,7 +164,7 @@
    "denominator" :math
    "deprecation-warning" :meta
    "file/dir?" :filesystem
-   "disj" :sets
+   "disj" :collections
    "display-width" :strings
    "dissoc" :maps
    "distinct-step" :collections
@@ -172,8 +181,6 @@
    "dynamic?" :meta
    "empty?" :predicates
    "string/ends-with?" :predicates
-   "eprint" :io
-   "eprintln" :io
    "error" :errors
    "error-message" :errors
    "eval" :meta
@@ -229,7 +236,6 @@
    "index-of-seq-from" :strings
    "infinite?" :predicates
    "inspect" :io
-   "inspectln" :io
    "int->char" :strings
    "int?" :predicates
    "into" :collections
@@ -303,8 +309,6 @@
    "pr-safely" :io
    "pr-str" :io
    "pr-str-bounded" :io
-   "print" :io
-   "println" :io
    "private?" :meta
    "provide" :meta
    "quot" :math
@@ -359,8 +363,6 @@
    "second" :collections
    "self" :processes
    "send" :processes
-   "send-after" :processes
-   "send-interval" :processes
    "seq" :collections
    "seqview?" :predicates
    "set-load-path!" :meta
@@ -377,7 +379,6 @@
    "some->>" :control
    "some-thread-build" :control
    "sort" :collections
-   "span-runs" :strings
    "spawn" :processes
    "spawn-body-thunk" :processes
    "spawn-link" :processes
@@ -405,8 +406,6 @@
    "string/->codepoints" :strings
    "string/->graphemes" :strings
    "string/->list" :strings
-   "string->number" :convert
-   "string->symbol" :strings
    "string/length" :strings
    "string/normalize" :strings
    "string/repeat" :strings

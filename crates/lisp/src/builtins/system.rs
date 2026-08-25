@@ -1171,6 +1171,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("table", "std/table.blsp"),
     // Non-mainstream process surface (introspection/control + OS subprocesses) → `proc/*`.
     embedded_module!("proc", "std/proc.blsp"),
+    embedded_module!("timer", "std/timer.blsp"),
     embedded_module!("dev", "std/dev.blsp"),
     embedded_module!("reflect", "std/reflect.blsp"),
     embedded_module!("bytes", "std/bytes.blsp"),

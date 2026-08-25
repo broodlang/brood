@@ -40,8 +40,8 @@ the `nest mcp` tools of the same names.")
             :example "(defn greet (name &optional (greeting \"hi\")) …)  ; greet takes 1 or 2"}
    "E0030" {:summary "Type mismatch — a value of the wrong type reached an operation."
             :causes "Passing a string where a number is wanted (`=` does NOT coerce: `(= 1 1.0)` is false); a nil from a failed `get`; mixing int/float in strict `=`."
-            :fix "Convert explicitly (`string->number`, `str`); for numeric compares across int/float use `<`/`<=`, not `=`. The finding names the argument position and expected type."
-            :example "(+ 1 (string->number \"2\"))   ; not (+ 1 \"2\")"}
+            :fix "Convert explicitly (`string/->number`, `str`); for numeric compares across int/float use `<`/`<=`, not `=`. The finding names the argument position and expected type."
+            :example "(+ 1 (string/->number \"2\"))   ; not (+ 1 \"2\")"}
    "E0040" {:summary "Division (or remainder) by zero."
             :causes "`(/ x 0)` or `(rem x 0)` where the divisor turned out to be 0 (often a nil defaulted to 0, or an empty-collection count)."
             :fix "Guard the divisor: `(if (zero? d) fallback (/ n d))`."

@@ -1,4 +1,4 @@
-;; The string library: kernel primitives `upper`/`lower`/`string->number` (Rust)
+;; The string library: kernel primitives `upper`/`lower`/`string/->number` (Rust)
 ;; plus the Brood layer over `substring`/`str` (char-at, string->list, index-of,
 ;; join, string-split, replace, trim, …). Register-only — discovered and run by
 ;; `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
@@ -16,27 +16,27 @@
 
 (describe "string <-> number"
   (test "integers parse to ints"
-    (assert= (string->number "42") 42)
-    (assert= (string->number "-7") -7))
+    (assert= (string/->number "42") 42)
+    (assert= (string/->number "-7") -7))
   (test "floats parse to floats"
-    (assert= (string->number "3.5") 3.5)
-    (assert= (string->number "-0.25") -0.25))
+    (assert= (string/->number "3.5") 3.5)
+    (assert= (string/->number "-0.25") -0.25))
   (test "non-numbers and partial matches are nil"
-    (assert= (string->number "x") nil)
-    (assert= (string->number "3abc") nil)
-    (assert= (string->number "") nil)
-    (assert= (string->number " 5") nil))
-  (test "str is string->number's inverse"
+    (assert= (string/->number "x") nil)
+    (assert= (string/->number "3abc") nil)
+    (assert= (string/->number "") nil)
+    (assert= (string/->number " 5") nil))
+  (test "str is string/->number's inverse"
     (assert= (str 42) "42")
     (assert= (str 3.5) "3.5")
-    (assert= (string->number (str 99)) 99))
+    (assert= (string/->number (str 99)) 99))
   (test "integers past i64 parse to bignums, not lossy floats"
-    (assert= (string->number "98765432109876543210987654321")
+    (assert= (string/->number "98765432109876543210987654321")
       98765432109876543210987654321)
-    (assert= (string->number "-98765432109876543210987654321")
+    (assert= (string/->number "-98765432109876543210987654321")
       -98765432109876543210987654321)
     ;; the round-trip that used to silently round through f64
-    (assert= (string->number (str 98765432109876543210987654321))
+    (assert= (string/->number (str 98765432109876543210987654321))
       98765432109876543210987654321)))
 
 (describe "characters & lists"
@@ -443,8 +443,7 @@
   (if (= got total) acc (str-collect (+ got 1) total (receive ([:p i s] (assoc acc i s))))))
 
 (describe "string formatting across processes"
-  :isolated
-  (test "padded strings round-trip through 20 workers unchanged"
+  :isolated (test "padded strings round-trip through 20 workers unchanged"
     (str-spawn-padders (self) 20)
     (let (merged (str-collect 0 20 {}))
       (assert= (count merged) 20)
@@ -572,10 +571,8 @@
       (spawn (send me
                [:idx
                  (index-of mb-text "🙂" 400)
-                 :sub
-                 (string/substring mb-text 400 405)
-                 :last
-                 (last-index-of mb-text "漢")]))
+                 :sub (string/substring mb-text 400 405)
+                 :last (last-index-of mb-text "漢")]))
       (receive
         ([:idx i :sub s :last l] (do
                                    (assert= i 403)

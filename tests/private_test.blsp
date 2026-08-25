@@ -30,15 +30,13 @@
   ;; `require: cannot find module 'priv-vault2'` that failed the whole in-language
   ;; suite roughly one run in five. Same reason `suite_test.blsp`'s macro blocks are
   ;; serial: module registration, not just a `defn`.
-  :serial
-  (test "a cross-module reference to a loaded module's private fails the load, catchably"
+  :serial (test "a cross-module reference to a loaded module's private fails the load, catchably"
     (%load-string "(defmodule priv-vault) (defn- secret () 41)")
     (is (= (try
              (%load-string "(defmodule priv-thief) (defn steal () (priv-vault/secret))")
              (catch e
                (if (includes? (str (get e :message)) "module-private")
-                 :blocked
-                 [:other e])))
+                 :blocked [:other e])))
           :blocked)))
   (test "a reference into a NEVER-LOADED module is not a privacy error — it degrades to unbound"
     ;; The record can't answer for a module it has never seen, so this loads (the

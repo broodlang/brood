@@ -129,8 +129,7 @@
     (send parent (get (first r) :log))))
 
 (describe "layers across processes"
-  :isolated
-  (test "activate + dispatch resolve and run inside a spawned process"
+  :isolated (test "activate + dispatch resolve and run inside a spawned process"
     (let (me (self))
       (spawn (lt-worker me))
       (assert= (receive) "[a-on]X"))))
@@ -139,9 +138,7 @@
 ;; :isolated so register-* (which rebinds the global registries) can't leak into
 ;; other test files; unique :type keys keep tests independent within the block too.
 (describe "buffer-type binding"
-  :isolated
-
-  (test "register-type-layers / layers-for-type round-trip"
+  :isolated (test "register-type-layers / layers-for-type round-trip"
     (register-type-layers :t-rt (list 'layers-test/layer-a 'layers-test/layer-b))
     (assert= (layers-for-type :t-rt) (list 'layers-test/layer-a 'layers-test/layer-b))
     (is (empty? (layers-for-type :t-missing))))
@@ -288,8 +285,7 @@
   {:name 'async :hooks {:on-focus '(layers-test/demo-start) :on-close '(layers-test/demo-stop)}})
 
 (describe "layers async lifecycle across processes"
-  :isolated
-  (test "an :on-focus-spawned worker is torn down by :on-close"
+  :isolated (test "an :on-focus-spawned worker is torn down by :on-close"
     (let (me (self)
           ctx (activate-layer {:parent me} 'layers-test/layer-async)
           ; spawns the worker, pid in :worker
@@ -301,8 +297,7 @@
 
 ;; ---- active-layers + always-on system layers --------------------------------
 (describe "system layers & active-layers"
-  :isolated
-  (test "active-layers resolves refs to maps, highest precedence first"
+  :isolated (test "active-layers resolves refs to maps, highest precedence first"
     (let (ctx (push-layer (push-layer {} 'layers-test/layer-a) 'layers-test/layer-hi))
       (assert= (map (fn (l) (get l :name)) (active-layers ctx)) (list 'hi 'a))))
   (test "system layers are appended (lowest precedence) to every buffer"

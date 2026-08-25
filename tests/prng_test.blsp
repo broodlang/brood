@@ -109,9 +109,7 @@
     (prng-collect (+ got 1) total (receive ([:r seed draws] (assoc acc seed draws))))))
 
 (describe "prng across processes"
-  :isolated
-
-  (test "a worker's stream for seed K matches the parent's stream for seed K"
+  :isolated (test "a worker's stream for seed K matches the parent's stream for seed K"
     ; 10 workers, seeds 1..10
     (prng-spawn (self) (range 1 11))
     (let (m (prng-collect 0 10 {}))

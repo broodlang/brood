@@ -1,0 +1,58 @@
+;; scripts/fmt-probe.blsp — show what `format/source` does to a set of tricky forms.
+;;
+;; The formatter is judged by eye, so the loop that feeds it has to be trivial to read and
+;; trivial to extend: add a case to `*cases*`, run the script, look at the output. Written
+;; in Brood rather than as a shell/python harness because the formatter is Brood and this
+;; is the language's own tooling exercising itself — the same reason `nest format` is not a
+;; wrapper around an external pretty-printer.
+;;
+;;   brood scripts/fmt-probe.blsp
+
+(require-one 'io)
+(require-one 'format)
+(require-one 'string)
+(require-one 'seq)
+
+(def *cases*
+  [["keyword arg, short value"
+     "(io/puts (str \"warning: no test found at \" (first entry) \":\" (second entry) \" — addresses nothing\") :to *err*)"]
+    ["keyword arg, call value"
+      "(io/puts (str \"warning: no test found at \" (first entry) \":\" (second entry) \" — addresses nothing\") :to (io/stderr-port))"]
+    ["nested call chain"
+      "(defn f (x) (reduce + 0 (map (fn (y) (* y y)) (filter (fn (y) (> y 0)) (range 0 100)))))"]
+    ["let with several bindings"
+      "(let (alpha (compute-one input) beta (compute-two input) gamma (compute-three input)) (combine alpha beta gamma))"]
+    ["cond with long branches"
+      "(cond (< x 0) (handle-negative x context) (> x 0) (handle-positive x context) else (handle-zero x context))"]
+    ["map literal over width"
+      "(def config {:host \"localhost\" :port 8080 :timeout-ms 30000 :retries 5 :backoff :exponential})"]
+    ["vector of vectors"
+      "(def rows [[\"alpha\" 1 :one] [\"beta\" 2 :two] [\"gamma\" 3 :three] [\"delta\" 4 :four]])"]
+    ["threading macro"
+      "(->> (range 0 1000) (filter (fn (n) (= 0 (rem n 3)))) (map (fn (n) (* n n))) (reduce + 0))"]
+    ["defn with docstring and body"
+      "(defn tally (items) \"Count each distinct item, returning a map of item to count.\" (fold (fn (acc x) (map-assoc acc x (inc (map-get acc x 0)))) {} items))"]
+    ["receive with clauses"
+      "(receive ([:ping from] (do (send from :pong) (loop-again state))) ([:stop] nil) (after 5000 (timeout-handler state)))"]])
+
+(defn- show
+  (name src)
+  (io/puts "── " name)
+  (io/puts (format/source src))
+  (io/puts ""))
+
+(io/puts "formatter probe — " (count *cases*) " case(s), width " format/*width*)
+(io/puts "")
+(doseq (c *cases*) (show (first c) (second c)))
+
+;; Idempotency is the formatter's stated contract: `(= (source (source s)) (source s))`.
+;; Checked here rather than assumed, because a layout rule that joins two items is exactly
+;; the kind that can oscillate — join on pass 1, re-split on pass 2.
+(io/puts "── idempotency")
+(let (bad (filter (fn (c)
+                    (let (once (format/source (second c)))
+                      (not (= once (format/source once)))))
+            *cases*))
+  (if (empty? bad)
+    (io/puts "  all " (count *cases*) " cases stable under a second pass")
+    (doseq (c bad) (io/puts "  UNSTABLE: " (first c)))))

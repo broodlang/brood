@@ -70,14 +70,14 @@ fn a_second_run_loads_modules_from_the_image_not_from_source() {
         &dir,
         "src/lib.blsp",
         "(defmodule lib)\n\
-         (println \"SOURCE-LOAD: lib\")\n\
+         (io/puts \"SOURCE-LOAD: lib\")\n\
          (defn twice (x) (* 2 x))\n",
     );
     write(
         &dir,
         "src/app.blsp",
         "(defmodule app (:use lib))\n\
-         (defn main () (println (str \"ANSWER: \" (twice 21))))\n",
+         (defn main () (io/puts (str \"ANSWER: \" (twice 21))))\n",
     );
 
     let cold = nest_run(&dir);
@@ -113,7 +113,7 @@ fn an_edited_source_file_invalidates_the_image() {
     write(
         &dir,
         "src/app.blsp",
-        "(defmodule app)\n(defn main () (println \"ANSWER: 1\"))\n",
+        "(defmodule app)\n(defn main () (io/puts \"ANSWER: 1\"))\n",
     );
     assert!(nest_run(&dir).contains("ANSWER: 1"));
 
@@ -121,7 +121,7 @@ fn an_edited_source_file_invalidates_the_image() {
     write(
         &dir,
         "src/app.blsp",
-        "(defmodule app)\n(defn main () (println \"ANSWER: 2\"))\n",
+        "(defmodule app)\n(defn main () (io/puts \"ANSWER: 2\"))\n",
     );
     let after = nest_run(&dir);
     assert!(
@@ -148,7 +148,7 @@ fn a_path_dependency_is_imaged_and_its_edits_invalidate() {
         &dep,
         "src/util.blsp",
         "(defmodule util)\n\
-         (println \"SOURCE-LOAD: libdep/util\")\n\
+         (io/puts \"SOURCE-LOAD: libdep/util\")\n\
          (defn double (x) (* 2 x))\n",
     );
     // `:path` is resolved against the project root, so it has to be relative — both scratch
@@ -165,7 +165,7 @@ fn a_path_dependency_is_imaged_and_its_edits_invalidate() {
         &dir,
         "src/app.blsp",
         "(defmodule app (:use libdep/util))\n\
-         (defn main () (println (str \"ANSWER: \" (double 21))))\n",
+         (defn main () (io/puts (str \"ANSWER: \" (double 21))))\n",
     );
 
     let cold = nest_run(&dir);
@@ -184,7 +184,7 @@ fn a_path_dependency_is_imaged_and_its_edits_invalidate() {
         &dep,
         "src/util.blsp",
         "(defmodule util)\n\
-         (println \"SOURCE-LOAD: libdep/util\")\n\
+         (io/puts \"SOURCE-LOAD: libdep/util\")\n\
          (defn double (x) (* 3 x))\n",
     );
     let edited = nest_run(&dir);
@@ -222,7 +222,7 @@ fn an_imaged_start_keeps_what_loading_registered() {
         &dir,
         "src/shapes.blsp",
         "(defmodule shapes \"Docstring for the module registry.\")\n\
-         (println \"SOURCE-LOAD: shapes\")\n\
+         (io/puts \"SOURCE-LOAD: shapes\")\n\
          (defmulti combine)\n\
          (defmethod combine [:int :int] (a b) (+ a b))\n\
          (defability Sized (size [self] :-> int))\n\
@@ -237,10 +237,10 @@ fn an_imaged_start_keeps_what_loading_registered() {
         "src/app.blsp",
         "(defmodule app (:use shapes))\n\
          (defn main ()\n\
-        \x20 (println (str \"multi: \" (combine 2 3)))\n\
-        \x20 (println (str \"ability: \" (size (box 3 4))))\n\
-        \x20 (println (str \"provenance: \" (count *method-from*)))\n\
-        \x20 (println (str \"docs: \" (contains? *module-docs* \"demo/shapes\"))))\n",
+        \x20 (io/puts (str \"multi: \" (combine 2 3)))\n\
+        \x20 (io/puts (str \"ability: \" (size (box 3 4))))\n\
+        \x20 (io/puts (str \"provenance: \" (count *method-from*)))\n\
+        \x20 (io/puts (str \"docs: \" (contains? *module-docs* \"demo/shapes\"))))\n",
     );
 
     let cold = nest_run(&dir);
@@ -290,14 +290,14 @@ fn an_imaged_start_follows_transitive_require_edges() {
         &dep,
         "src/helper.blsp",
         "(defmodule helper)\n\
-         (println \"SOURCE-LOAD: libdep/helper\")\n\
+         (io/puts \"SOURCE-LOAD: libdep/helper\")\n\
          (defn triple (x) (* 3 x))\n",
     );
     write(
         &dep,
         "src/util.blsp",
         "(defmodule util (:use libdep/helper))\n\
-         (println \"SOURCE-LOAD: libdep/util\")\n\
+         (io/puts \"SOURCE-LOAD: libdep/util\")\n\
          (defn double-tripled (x) (* 2 (triple x)))\n",
     );
     write(
@@ -312,7 +312,7 @@ fn an_imaged_start_follows_transitive_require_edges() {
         &dir,
         "src/app.blsp",
         "(defmodule app (:use libdep/util))\n\
-         (defn main () (println (str \"ANSWER: \" (double-tripled 7))))\n",
+         (defn main () (io/puts (str \"ANSWER: \" (double-tripled 7))))\n",
     );
 
     let cold = nest_run(&dir);
@@ -352,7 +352,7 @@ fn an_imaged_start_follows_a_headerless_files_require_edges() {
         &dir,
         "src/geom.blsp",
         "(defmodule geom)\n\
-         (println \"SOURCE-LOAD: geom\")\n\
+         (io/puts \"SOURCE-LOAD: geom\")\n\
          (defn square (x) (* x x))\n",
     );
     // No `defmodule`: `helpers` defines a ROOT global and requires `geom` at top level.
@@ -366,7 +366,7 @@ fn an_imaged_start_follows_a_headerless_files_require_edges() {
         &dir,
         "src/app.blsp",
         "(defmodule app)\n\
-         (defn main () (println (str \"ANSWER: \" (helper-area 7))))\n",
+         (defn main () (io/puts (str \"ANSWER: \" (helper-area 7))))\n",
     );
 
     let cold = nest_run(&dir);
@@ -418,7 +418,7 @@ fn an_imaged_start_terminates_on_a_require_cycle() {
         &dir,
         "src/app.blsp",
         "(defmodule app (:use cyc/a))\n\
-         (defn main () (println (str \"ANSWER: \" (ay))))\n",
+         (defn main () (io/puts (str \"ANSWER: \" (ay))))\n",
     );
 
     let cold = nest_run(&dir);

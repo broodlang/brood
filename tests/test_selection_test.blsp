@@ -211,8 +211,7 @@
 ;; The usual causes are a typo'd selector and a stale `--failed` record naming
 ;; tests that have since been deleted (which is exactly how this was found).
 (describe "test selection: detecting a filter that matched nothing"
-  :isolated
-  (test "no filter at all does not count as narrowing"
+  :isolated (test "no filter at all does not count as narrowing"
     (def *test-filter* nil)
     (refute (test/test-filter-narrows?)))
   (test "an empty spec does not count as narrowing"
@@ -298,8 +297,7 @@
 (defn- selection-worker (from spec units) (send from [:echo (test/test-select-units units spec)]))
 
 (describe "test selection: specs across processes"
-  :isolated
-  (test "a filter spec round-trips through a worker unchanged"
+  :isolated (test "a filter spec round-trips through a worker unchanged"
     (let (worker (spawn (selection-echo)))
       (send worker [:spec (self) selection-shared-spec])
       (assert= (first (selection-collect 1 nil)) selection-shared-spec)))

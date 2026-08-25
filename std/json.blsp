@@ -102,12 +102,12 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
         i))
     i))
 
-;; Strict JSON number validation (RFC 8259): `string->number` is lenient (it accepts
+;; Strict JSON number validation (RFC 8259): `string/->number` is lenient (it accepts
 ;; a leading `+` and leading zeros — `+5`, `01`), which JSON forbids. We munch the
 ;; token loosely with `num-end`, then validate it against the grammar
 ;;   number = [-] int [frac] [exp],  int = 0 | [1-9] digit*
 ;;   frac = . digit+,  exp = [eE] [+-]? digit+
-;; before handing it to `string->number`. The validators walk the same code vector
+;; before handing it to `string/->number`. The validators walk the same code vector
 ;; over the token's [i, end) range — no token string is built unless it parses.
 (defn- digits-run
   (s i n)
@@ -164,7 +164,7 @@ leading zeros)."
   (s i n)
   (let (end (num-end s i n))
     (if (strict-number? s i end)
-      [(string->number (json-slice s i end)) end]
+      [(string/->number (json-slice s i end)) end]
       (error "json: invalid number '" (json-slice s i end) "' at index " i))))
 
 ;; -- strings --

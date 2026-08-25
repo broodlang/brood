@@ -31,8 +31,7 @@
 
 ;; ---- delivery + formatting --------------------------------------------------
 (describe "log: delivery and levels"
-  :isolated
-  (test "a log call delivers a formatted line to a backend"
+  :isolated (test "a log call delivers a formatted line to a backend"
     (let (me (self))
       (start-logger {:level :debug :backends [(lt-collect me)]})
       (info "hello")
@@ -101,8 +100,7 @@
 
 ;; ---- lifecycle --------------------------------------------------------------
 (describe "log: lifecycle"
-  :isolated
-  (test "add-backend routes subsequent logs to the new backend"
+  :isolated (test "add-backend routes subsequent logs to the new backend"
     (let (me (self))
       (start-logger {:level :debug :backends []})
       (add-backend (lt-collect me))
@@ -137,8 +135,7 @@
     nil))
 
 (describe "log: a third-party LogBackend"
-  :isolated
-  (test "a custom backend record receives records instead of formatted lines"
+  :isolated (test "a custom backend record receives records instead of formatted lines"
     (let (me (self))
       (start-logger {:level :debug :backends [(raw-backend me :debug nil)]})
       (info "structured" {:category :lsp})
@@ -192,8 +189,7 @@
 
 ;; ---- concurrency ------------------------------------------------------------
 (describe "log: safe under concurrency"
-  :isolated
-  (test "N processes each log once; every line arrives, none lost or interleaved"
+  :isolated (test "N processes each log once; every line arrives, none lost or interleaved"
     (let (me (self) n 40)
       (start-logger {:level :debug :backends [(lt-collect me)]})
       (fold (fn (acc i) (spawn (info (str "w" i))) acc) nil (lt-upto n))

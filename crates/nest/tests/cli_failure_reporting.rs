@@ -29,7 +29,7 @@ fn scratch(tag: &str) -> std::path::PathBuf {
 fn run_for_exits_nonzero_when_the_program_dies() {
     let dir = scratch("for");
     let file = dir.join("boom.blsp");
-    std::fs::write(&file, "(println \"starting\")\n(error \"boom\")\n").unwrap();
+    std::fs::write(&file, "(io/puts \"starting\")\n(error \"boom\")\n").unwrap();
 
     let out = nest()
         .current_dir(&dir)
@@ -49,7 +49,7 @@ fn run_for_exits_nonzero_when_the_program_dies() {
 
     // The other half of the contract: a program that finishes, and one stopped by the
     // cap itself, are both successes.
-    std::fs::write(dir.join("ok.blsp"), "(println \"fine\")\n").unwrap();
+    std::fs::write(dir.join("ok.blsp"), "(io/puts \"fine\")\n").unwrap();
     let out = nest()
         .current_dir(&dir)
         .args(["run", "--for", "5s", "ok.blsp"])
@@ -142,7 +142,7 @@ fn release_refuses_a_traversing_default_output_name() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("src/main.blsp"),
-        "(defn main () (println \"x\"))\n",
+        "(defn main () (io/puts \"x\"))\n",
     )
     .unwrap();
     std::fs::write(

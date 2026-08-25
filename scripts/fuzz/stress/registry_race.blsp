@@ -19,8 +19,7 @@
 ;; operation under test is %register-impl itself
 (defn decl (i)
   (if (>= i n)
-    :ok
-    (do
+    :ok (do
       (eval (list 'defability
               (symbol (str "A" i))
               (list (symbol (str "op" i)) ['self] :-> 'any)))

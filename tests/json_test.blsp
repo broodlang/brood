@@ -32,7 +32,7 @@
     (assert= (parse "123") 123)
     (assert= (parse "1E+3") 1000.0)
     (assert= (parse "1.5e-2") 0.015))
-  (test "a leading + is rejected (string->number would accept it)"
+  (test "a leading + is rejected (string/->number would accept it)"
     (is (json-errs? "+5"))
     (is (json-errs? "+.5")))
   (test "leading zeros are rejected"
@@ -198,8 +198,7 @@
 ;; maps/vectors are deep-copied across per-process heaps on `send`, proving they
 ;; round-trip through to_message/from_message + promote under the scheduler.
 (describe "json across processes"
-  :isolated
-  (test "workers parse the same payload; results agree after crossing heaps"
+  :isolated (test "workers parse the same payload; results agree after crossing heaps"
     (let (me (self)
           src "{\"id\":7,\"tags\":[\"a\",\"b\"],\"ok\":true}")
       (doseq (i (range 8))

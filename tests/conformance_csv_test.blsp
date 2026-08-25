@@ -60,8 +60,7 @@
           (if (= got want) bad (cons [stem want got] bad))))))
 
 (describe "csv-spectrum: RFC 4180 edge cases"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the corpus is present, csv and json sides paired"
     (is (corpus-present? "csv"))
@@ -77,8 +76,7 @@
 ;; The rules the corpus exists to pin, spelled out inline — a reader can check these
 ;; by eye, and they say what "RFC 4180 compliant" actually buys you.
 (describe "csv: the quoting rules"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   ;; `parse` yields a LIST of row vectors (rows stream, fields are indexed), so
   ;; the expectations are lists of vectors, not vectors of vectors.

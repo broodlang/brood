@@ -21,8 +21,7 @@
 
 ; and it carries a failure record
 (describe "runner reaps a dead worker"
-  :isolated
-  (test "a worker that dies before reporting becomes a failure, not a hang"
+  :isolated (test "a worker that dies before reporting becomes a failure, not a hang"
     ;; If reaping is broken this `collect-units` never returns and the whole
     ;; suite hangs (which `cargo test`/`nest test` would surface as a timeout).
     (let (results (collect-units (spawn-units (list %crashing-unit) (self)) nil)

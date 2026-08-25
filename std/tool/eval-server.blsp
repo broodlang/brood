@@ -206,8 +206,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
                      (do
                        (table/put acc :n (inc n))
                        (table/put acc
-                         :entries
-                         (cons (eval-server-spy-entry e)
+                         :entries (cons (eval-server-spy-entry e)
                            (or (table/get acc :entries) '())))
                        ;; the entry that FILLS the budget already answers stop: nothing
                        ;; after it would be kept, so nothing after it should be paid for
@@ -303,7 +302,7 @@ process died without answering."
       ; nil = EOF: the parent closed stdin — done
       (let (req (evsrv-decode-request line))
         (when req
-          (println (evsrv-encode-reply (answer req)))))
+          (io/puts (evsrv-encode-reply (answer req)))))
       (eval-server-loop))))
 
 (defn run ()
@@ -311,5 +310,5 @@ process died without answering."
 per stdin line until EOF. This is the child's whole program — a client spawns
 `nest run <script>` where the script references `eval-server/…`
 `(run)`, and drives it over stdin/stdout."
-  (println (evsrv-encode-reply {:ready true}))
+  (io/puts (evsrv-encode-reply {:ready true}))
   (eval-server-loop))

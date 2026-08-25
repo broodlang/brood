@@ -18,8 +18,7 @@
     (is (try (await (fn () (receive (:never x))) 30) false (catch e true)))))
 
 (describe "task (asynchronous)"
-  :isolated
-  (test "delivers [:task-done handle value] to the caller"
+  :isolated (test "delivers [:task-done handle value] to the caller"
     (let (h (task (fn () (* 6 7))))
       (assert= (receive ([:task-done t v] (when (= t h) v))) 42)))
   (test "delivers [:task-error handle message] when the thunk throws"

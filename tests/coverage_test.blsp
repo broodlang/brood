@@ -96,8 +96,7 @@
   (if (= n 0) acc (coverage-test-recursive (- n 1) (+ acc n))))
 
 (describe "coverage: instrumentation records hits"
-  :isolated
-  (test "a wrapped function records a hit and still returns correctly"
+  :isolated (test "a wrapped function records a hit and still returns correctly"
     (def *reload-diagnostics* false)
     (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-fixed hits)
@@ -121,8 +120,7 @@
 ;; function — an arity-preserving shim built from it would silently break the
 ;; arities it never saw. These pin that every calling shape still works wrapped.
 (describe "coverage: instrumentation preserves calling shapes"
-  :isolated
-  (test "a variadic function still receives its rest args"
+  :isolated (test "a variadic function still receives its rest args"
     (def *reload-diagnostics* false)
     (let (hits (table/new))
       (coverage/coverage-instrument! 'coverage-test/coverage-test-variadic hits)
@@ -159,8 +157,7 @@
       (assert= (coverage-test-recursive 4 0) 10))))
 
 (describe "coverage: begin! with nothing to instrument"
-  :isolated
-  (test "a source dir with no project functions yields no targets"
+  :isolated (test "a source dir with no project functions yields no targets"
     (coverage/begin! (list "/nonexistent-coverage-dir"))
     (assert= (coverage/results) nil))
   (test "reporting an empty run is 100%, not a failure"

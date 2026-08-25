@@ -97,8 +97,7 @@
   (receive ([:drew t] (if (= t want) :ok (wait-drew want))) (after *test-wait-ms* :timeout)))
 
 (describe "editor/serve — attach-display-local (the host's own window)"
-  :isolated
-  (test "the operator attaches a local display to the session it serves in the same runtime"
+  :isolated (test "the operator attaches a local display to the session it serves in the same runtime"
     ;; No node link: attach-display-local handshakes with the local manager (whereis serve-name)
     ;; and runs the unified loop, so a served daemon can also show the host a live window.
     (let (report (self))

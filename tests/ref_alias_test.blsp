@@ -12,9 +12,7 @@
 (defmodule ref-alias-test (:use test))
 
 (describe "%ref-deactivate: a message addressed to a deactivated ref is dropped"
-  :isolated
-
-  (test "a self-send tagged with a deactivated ref never enters the mailbox"
+  :isolated (test "a self-send tagged with a deactivated ref never enters the mailbox"
     ;; The sender is RUNNING (not parked), so this exercises the wire/`deliver_envelope`
     ;; path rather than the L1 parked-receiver fast path.
     (let (r (ref) before (proc/mailbox-size (self)))

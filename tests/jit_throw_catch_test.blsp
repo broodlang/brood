@@ -78,8 +78,7 @@
     (dohammer (- i 1) (+ acc (try (do-throw 30 i) (catch e e))))))
 
 (describe "throw from the unboxed register worker (i64/f64 recursion)"
-  :serial
-  (test "int payload survives the native unwind, every iteration"
+  :serial (test "int payload survives the native unwind, every iteration"
     ;; sum of (rem i 100) for i=1..2000 = 20 * (0+1+...+99) = 99000
     (assert= (hammer4 2000 0) 99000))
   ; 100 × (1.5*2.0)

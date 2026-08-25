@@ -92,8 +92,7 @@
   (test "dimensions whose product overflows do not wrap into a false match"
     (let (msg (try
                 (%gui-icon! 999999 [0 0 0 0] 4294967295 4294967295)
-                :no-error
-                (catch e (error-message e))))
+                :no-error (catch e (error-message e))))
       (is (includes? msg "w*h*4"))))
 
   (test "a non-vector rgba is a type error, not a silent empty icon"

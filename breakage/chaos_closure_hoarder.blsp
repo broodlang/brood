@@ -13,7 +13,7 @@
 ;;;   - Higher-order: closures returning closures returning closures (currying chain)
 ;;;   - Closure with a captured BigInt (tests that the BigInt is deep-copied on send)
 
-(println "--- deeply nested let: 1000 captured variables ---")
+(io/puts "--- deeply nested let: 1000 captured variables ---")
 
 ;; Build a closure capturing a 1000-level deep env chain.
 ;; Use fold to build the string iteratively (avoids non-tail recursion).
@@ -35,18 +35,18 @@
 ;; nesting limit when passed to eval-string. The reader rejects it with a parse
 ;; error rather than panicking — a clean defense, but the limit is surprisingly
 ;; low. 200 levels are safe; 256 is the hard ceiling.
-(println "SKIP: 1000-deep nested-let source exceeds reader's 256-level nesting limit")
+(io/puts "SKIP: 1000-deep nested-let source exceeds reader's 256-level nesting limit")
 
 ;; 200 levels work fine:
 (def nested-let-src (build-nested-let-src 200))
 (def nested-let-fn (eval-string nested-let-src))
 ;; Call it: result is sum of i^2 for i in [0, 200)
 (def nested-result (nested-let-fn))
-(println "200-deep nested-let result:" nested-result)
-(println "expected (sum of i^2 for 0..199):" (fold (fn (acc i) (+ acc (* i i))) 0 (range 200)))
-(println "match?" (= nested-result (fold (fn (acc i) (+ acc (* i i))) 0 (range 200))))
+(io/puts "200-deep nested-let result:" nested-result)
+(io/puts "expected (sum of i^2 for 0..199):" (fold (fn (acc i) (+ acc (* i i))) 0 (range 200)))
+(io/puts "match?" (= nested-result (fold (fn (acc i) (+ acc (* i i))) 0 (range 200))))
 
-(println "--- accumulator-closure: fold builds a closure-of-closures ---")
+(io/puts "--- accumulator-closure: fold builds a closure-of-closures ---")
 
 ;; Build a function by folding: each step wraps the previous function
 ;; f0 = (fn (x) x)
@@ -58,33 +58,33 @@
   (fold (fn (f i) (fn (x) (f (+ x i)))) (fn (x) x) (range 1 (+ n 1))))
 
 (def chain-500 (build-chain 500))
-(println "closure-chain-500(0):" (chain-500 0))
-(println "expected 125250:" (= 125250 (chain-500 0)))
+(io/puts "closure-chain-500(0):" (chain-500 0))
+(io/puts "expected 125250:" (= 125250 (chain-500 0)))
 
 ;; Deeper chain
 (def chain-2000 (build-chain 2000))
-(println "closure-chain-2000(0):" (chain-2000 0))
-(println "expected 2001000:" (= 2001000 (chain-2000 0)))
+(io/puts "closure-chain-2000(0):" (chain-2000 0))
+(io/puts "expected 2001000:" (= 2001000 (chain-2000 0)))
 
-(println "--- vector of 10000 closures, all called ---")
+(io/puts "--- vector of 10000 closures, all called ---")
 
 ;; Each closure closes over its index
 (def closure-vec
   (into [] (map (fn (i) (fn () (* i i))) (range 10000))))
 
-(println "closure-vec count:" (count closure-vec))
+(io/puts "closure-vec count:" (count closure-vec))
 ;; Call a few to verify they captured their respective `i`
-(println "closure[0]():" ((get closure-vec 0)))
-(println "closure[1]():" ((get closure-vec 1)))
-(println "closure[9999]():" ((get closure-vec 9999)))
+(io/puts "closure[0]():" ((get closure-vec 0)))
+(io/puts "closure[1]():" ((get closure-vec 1)))
+(io/puts "closure[9999]():" ((get closure-vec 9999)))
 ;; Sum them all: Σ i^2 for i in [0, 10000)
 (def closure-sum (reduce (fn (acc f) (+ acc (f))) 0 closure-vec))
-(println "closure-vec sum:" closure-sum)
+(io/puts "closure-vec sum:" closure-sum)
 (def expected-sum (fold (fn (acc i) (+ acc (* i i))) 0 (range 10000)))
-(println "expected:" expected-sum)
-(println "match?" (= closure-sum expected-sum))
+(io/puts "expected:" expected-sum)
+(io/puts "match?" (= closure-sum expected-sum))
 
-(println "--- closure shipped across process heap ---")
+(io/puts "--- closure shipped across process heap ---")
 
 ;; Capture a BigInt inside the closure, send it to a worker, get it back
 ; ~10^24, BigInt territory
@@ -95,11 +95,11 @@
   (spawn (let (result (big-fn 1))
            (send me [:result result])))
   (let (result (receive ([:result r] r)))
-    (println "cross-process big-fn(1) result:" result)
-    (println "expected:" (+ big-captured 1))
-    (println "match?" (= result (+ big-captured 1)))))
+    (io/puts "cross-process big-fn(1) result:" result)
+    (io/puts "expected:" (+ big-captured 1))
+    (io/puts "match?" (= result (+ big-captured 1)))))
 
-(println "--- currying chain: 10-deep curried adder ---")
+(io/puts "--- currying chain: 10-deep curried adder ---")
 
 ;; (((... (add10 a) b) c) ...) = a+b+c+...+j
 (defn curry-add (n)
@@ -114,23 +114,23 @@
 
 (def curried-10 (curry-add 10))
 (def result (apply-curry curried-10 (list 1 2 3 4 5 6 7 8 9 10)))
-(println "10-deep curry(1..10):" result)
-(println "expected 55:" (= 55 result))
+(io/puts "10-deep curry(1..10):" result)
+(io/puts "expected 55:" (= 55 result))
 
-(println "--- map of closures: 5000 entries, each closure captures key ---")
+(io/puts "--- map of closures: 5000 entries, each closure captures key ---")
 (def closure-map
   (fold (fn (m i)
           (assoc m i (fn (x) (* i x))))
     {}
     (range 5000)))
 
-(println "closure-map count:" (count closure-map))
+(io/puts "closure-map count:" (count closure-map))
 ; 0*5 = 0
-(println "closure-map[0](5):" ((get closure-map 0) 5))
+(io/puts "closure-map[0](5):" ((get closure-map 0) 5))
 ; 1*5 = 5
-(println "closure-map[1](5):" ((get closure-map 1) 5))
+(io/puts "closure-map[1](5):" ((get closure-map 1) 5))
 ; 4999*5 = 24995
-(println "closure-map[4999](5):" ((get closure-map 4999) 5))
+(io/puts "closure-map[4999](5):" ((get closure-map 4999) 5))
 ;; Ship the whole map across a process heap via message
 (let (me (self))
   ; 100*7 = 700
@@ -142,11 +142,11 @@
           ; 42*10 = 420
           ((get local-map 100) 7)])))
   (receive
-    ([:map-result a b] (println "shipped map[42](10):" a)
-      (println "shipped map[100](7):" b)
-      (println "correct?" (and (= 420 a) (= 700 b))))))
+    ([:map-result a b] (io/puts "shipped map[42](10):" a)
+      (io/puts "shipped map[100](7):" b)
+      (io/puts "correct?" (and (= 420 a) (= 700 b))))))
 
-(println "--- memoizing closure: captures a mutable cache-map via process ---")
+(io/puts "--- memoizing closure: captures a mutable cache-map via process ---")
 
 ;; Since Brood is immutable, "mutation" means spawning a gen-server-style process
 ;; that holds the cache state and answers queries
@@ -154,6 +154,6 @@
   (if (< n 2) n (+ (fib-cached (- n 1)) (fib-cached (- n 2)))))
 
 ;; Brute-force fib(35) — verifies the closed-over recursion works through deep stacks
-(println "fib-cached(35):" (fib-cached 35))
+(io/puts "fib-cached(35):" (fib-cached 35))
 
-(println "--- DONE ---")
+(io/puts "--- DONE ---")

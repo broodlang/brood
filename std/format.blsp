@@ -799,6 +799,15 @@ retired the `comment-on-own-line?` distinction this used to need."
     (and (not (trivia? (seq/vector-ref kids i))) (container? (seq/vector-ref kids i))) true
     else (body-has-container?-at kids (inc i) n)))
 
+;; The index of the value that belongs to the keyword argument at `i`, or nil when
+;; `kids[i]` is not a keyword or no FORM follows it (end of body, or a comment next —
+;; pairing across a comment would step over and drop it).
+(defn- keyword-value-at
+  (kids i n)
+  (when (= (node-kind (seq/vector-ref kids i)) :keyword)
+    (let (j (kids-next-nonws kids (inc i) n))
+      (when (and (< j n) (not (comment? (seq/vector-ref kids j)))) j))))
+
 (defn- render-body
   (kids start-idx body-ind fill?)
   ;; Walk kids from start-idx, emitting each structural form (and each comment) at
@@ -844,7 +853,30 @@ retired the `comment-on-own-line?` distinction this used to need."
             nil)
         else
           (let (ind (indent-of body-ind)
-                form-rendr (render c body-ind)
+                ;; A KEYWORD ARGUMENT and the value after it are one unit, so they are
+                ;; rendered together and never split across lines. Without this,
+                ;; `(io/puts "…" :to (io/stderr-port))` broke as
+                ;;
+                ;;     (io/puts "…"
+                ;;       :to
+                ;;       (io/stderr-port))
+                ;;
+                ;; which reads as two unrelated arguments rather than one named one. It
+                ;; only showed when filling was off — a body containing a container breaks
+                ;; linearly — so the short-value form `:to *err*` looked fine and hid it.
+                ;;
+                ;; Only when a FORM is what follows: pairing across a comment would step
+                ;; over and drop it (the trap `render-body-pairs-at` documents), and a
+                ;; trailing keyword with nothing after it is an ordinary argument.
+                kw-val-idx (keyword-value-at kids i n)
+                form-rendr (if kw-val-idx
+                             (str (node-text c)
+                               " "
+                               (render (seq/vector-ref kids kw-val-idx) body-ind))
+                             (render c body-ind))
+                ;; Skip past the value too when the pair was emitted as one.
+                i (if kw-val-idx kw-val-idx i)
+                c (if kw-val-idx (seq/vector-ref kids kw-val-idx) c)
                 tc-idx (trailing-comment-at kids (inc i) n)
                 single (not (includes? form-rendr "\n"))
                 w (string/length form-rendr)
@@ -1091,8 +1123,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   "Format the file at `path` in place. Returns `:unchanged`, `:rewrote`, or `:unparseable` — a file that does not parse is left untouched, since there is no program to re-lay-out and the tolerant CST would restructure it."
   (let (src (file/slurp path))
     (if (not (format-parses? src))
-      :unparseable
-      (let (out (source src))
+      :unparseable (let (out (source src))
         (if (= src out) :unchanged (do (file/spit path out) :rewrote))))))
 
 (defn project ()
@@ -1103,7 +1134,7 @@ that does not parse is reported and skipped, never rewritten."
     (let (counts (format-apply files 0 0)
           rewrote (first counts)
           skipped (second counts))
-      (println (str "format: "
+      (io/puts (str "format: "
                  (count files)
                  " file"
                  (if (= (count files) 1) "" "s")
@@ -1123,8 +1154,8 @@ that does not parse is reported and skipped, never rewritten."
     (list rewrote skipped)
     (let (path (first files)
           r (file path))
-      (when (= r :rewrote) (println (str "  rewrote " path)))
-      (when (= r :unparseable) (println (str "  skipped (does not parse): " path)))
+      (when (= r :rewrote) (io/puts (str "  rewrote " path)))
+      (when (= r :unparseable) (io/puts (str "  skipped (does not parse): " path)))
       (format-apply (rest files)
         (if (= r :rewrote) (inc rewrote) rewrote)
         (if (= r :unparseable) (inc skipped) skipped)))))
@@ -1143,8 +1174,7 @@ that does not parse is reported and skipped, never rewritten."
   (root)
   (let (changed (%git-changed-files root))
     (if (= changed :not-a-repo)
-      :not-a-repo
-      (let (project (format-set-of (format-every-blsp root)))
+      :not-a-repo (let (project (format-set-of (format-every-blsp root)))
         (filter (fn (p) (contains? project p))
           (filter (fn (p) (string/ends-with? p ".blsp")) changed))))))
 
@@ -1156,12 +1186,12 @@ number of files rewritten."
   (let (root (format-require-root) changed (format-changed-blsp root))
     (if (= changed :not-a-repo)
       (do
-        (println "format: not a git repository — formatting the whole project.")
+        (io/puts "format: not a git repository — formatting the whole project.")
         (project))
       (let (counts (format-apply changed 0 0)
             rewrote (first counts)
             skipped (second counts))
-        (println (str "format: "
+        (io/puts (str "format: "
                    (count changed)
                    " changed file"
                    (if (= (count changed) 1) "" "s")
@@ -1180,7 +1210,7 @@ number of files rewritten."
       (cond
         (nil? changed)
           (do
-            (println (str "format: "
+            (io/puts (str "format: "
                        (count files)
                        " file"
                        (if (= (count files) 1) "" "s")
@@ -1189,7 +1219,7 @@ number of files rewritten."
         else
           (do
             (fold (fn (_ entry)
-                    (println (if (= (seq/vector-ref entry 1) :unparseable)
+                    (io/puts (if (= (seq/vector-ref entry 1) :unparseable)
                                (str "  does not parse: " (seq/vector-ref entry 0))
                                (str "  needs formatting: " (seq/vector-ref entry 0)))))
               nil changed)

@@ -8,7 +8,7 @@ This is deliberately *not* the structured display protocol: when you want a
 render-op vocabulary, a frame buffer, or an in-place editor, use `std/display`
 (`term/draw` / `term/emit`) instead. Every name here is a **zero-arg function you
 call** — it *returns* the escape string, it is not the string itself. Print the
-call, never the bare symbol: `(print (ansi-clear))`, not `(print ansi-clear)`
+call, never the bare symbol: `(io/print (ansi-clear))`, not `(io/print ansi-clear)`
 (which prints `#<fn ansi-clear>` and emits no escape).
 
 Each name is `ansi-` prefixed because the unprefixed `clear` / `cursor` belong to
@@ -26,7 +26,7 @@ separate flush step. The ESC byte is the `\\e` string escape.")
   "\e[H")
 
 (defn ansi-clear ()
-  "Erase the screen and move the cursor home — the per-frame reset for an animation loop. `(print (ansi-clear) frame)` redraws cleanly without scrolling."
+  "Erase the screen and move the cursor home — the per-frame reset for an animation loop. `(io/print (ansi-clear) frame)` redraws cleanly without scrolling."
   (str (ansi-clear-screen) (ansi-home)))
 
 (defn ansi-cursor (row col)

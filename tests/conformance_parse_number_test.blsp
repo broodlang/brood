@@ -10,7 +10,7 @@
 ;; different values (`-0.0` = `0.0`), and a NaN is equal to nothing at all — so
 ;; `float->bits` is the only comparison that actually pins the parse down.
 ;;
-;; What is under test is `string->number`, i.e. Brood's whole numeral-text path, not
+;; What is under test is `string/->number`, i.e. Brood's whole numeral-text path, not
 ;; just its strtod: an input with no `.`/`e` parses as an Int (or a BigInt when it
 ;; is wide enough), and `float->bits` then routes it through integer->f64. That is
 ;; deliberate — the user-visible property is "this text becomes exactly this float",
@@ -30,7 +30,7 @@
     nil
     (let (input (pn-input line)
           want (pn-expected line)
-          n (string->number input))
+          n (string/->number input))
       (cond
         (nil? n) [input (string/substring line 14 30) "unparseable"]
         (= (float->bits n) want) nil
@@ -59,8 +59,7 @@
   (pn-scan-files (corpus-files "parse-number") 0 nil))
 
 (describe "parse-number-fxx: decimal text -> binary64 is bit-exact"
-  :tags
-  [:conformance :slow]
+  :tags [:conformance :slow]
 
   (test "the corpus is present"
     (is (corpus-present? "parse-number"))
@@ -79,43 +78,43 @@
 ;; The cases worth naming: each of these broke a shipped implementation. They are
 ;; in the corpus too, but spelled out here they document what the sweep protects.
 (describe "parse-number-fxx: the historically fatal inputs"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the denormal that hung PHP's and Java's strtod"
-    (assert= (float->bits (string->number "2.2250738585072011e-308"))
+    (assert= (float->bits (string/->number "2.2250738585072011e-308"))
       (hex->int "000FFFFFFFFFFFFF"))
-    (assert= (float->bits (string->number "2.2250738585072012e-308"))
+    (assert= (float->bits (string/->number "2.2250738585072012e-308"))
       (hex->int "0010000000000000")))
 
   (test "exponents past every integer width clamp to zero or infinity"
-    (assert= (float->bits (string->number "1e-9223372036854775809")) (hex->int "0000000000000000"))
-    (assert= (float->bits (string->number "1e-2147483648")) (hex->int "0000000000000000"))
-    (assert= (float->bits (string->number "1e9223372036854775808")) (hex->int "7FF0000000000000"))
-    (assert= (float->bits (string->number "1e2147483647")) (hex->int "7FF0000000000000")))
+    (assert= (float->bits (string/->number "1e-9223372036854775809")) (hex->int "0000000000000000"))
+    (assert= (float->bits (string/->number "1e-2147483648")) (hex->int "0000000000000000"))
+    (assert= (float->bits (string/->number "1e9223372036854775808")) (hex->int "7FF0000000000000"))
+    (assert= (float->bits (string/->number "1e2147483647")) (hex->int "7FF0000000000000")))
 
   (test "half-way ties round to even"
     ;; 1 + 2^-53 sits exactly between 1.0 and the next double: ties-to-even -> 1.0.
-    (assert= (float->bits (string->number "1.00000000000000011102230246251565404236316680908203125"))
+    (assert= (float->bits (string/->number "1.00000000000000011102230246251565404236316680908203125"))
       (hex->int "3FF0000000000000"))
     ;; A hair above the tie must step up.
-    (assert= (float->bits (string->number "1.00000000000000011102230246251565404236316680908203126"))
+    (assert= (float->bits (string/->number "1.00000000000000011102230246251565404236316680908203126"))
       (hex->int "3FF0000000000001")))
 
   (test "the subnormal boundary"
-    (assert= (float->bits (string->number "5e-324")) (hex->int "0000000000000001"))
-    (assert= (float->bits (string->number "2.4703282292062327e-324")) (hex->int "0000000000000000"))
-    (assert= (float->bits (string->number "2.4703282292062328e-324")) (hex->int "0000000000000001")))
+    (assert= (float->bits (string/->number "5e-324")) (hex->int "0000000000000001"))
+    (assert= (float->bits (string/->number "2.4703282292062327e-324"))
+      (hex->int "0000000000000000"))
+    (assert= (float->bits (string/->number "2.4703282292062328e-324"))
+      (hex->int "0000000000000001")))
 
   (test "the largest finite double and the step past it"
-    (assert= (float->bits (string->number "1.7976931348623157e308")) (hex->int "7FEFFFFFFFFFFFFF"))
-    (assert= (float->bits (string->number "1.7976931348623159e308")) (hex->int "7FF0000000000000"))))
+    (assert= (float->bits (string/->number "1.7976931348623157e308")) (hex->int "7FEFFFFFFFFFFFFF"))
+    (assert= (float->bits (string/->number "1.7976931348623159e308")) (hex->int "7FF0000000000000"))))
 
 ;; float->bits is new kernel surface (it is what makes the sweep above possible), so
 ;; it gets its own coverage rather than being trusted implicitly.
 (describe "float->bits / bits->float"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "round-trips every kind of double"
     (dolist (b ["0000000000000000"

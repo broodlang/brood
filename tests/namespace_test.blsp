@@ -16,9 +16,7 @@
 (defn ns-echo (parent) (send parent (receive)))
 
 (describe "namespaces: definition + resolution"
-  :isolated
-
-  (test "definitions are qualified under the namespace; bare name is unbound"
+  :isolated (test "definitions are qualified under the namespace; bare name is unbound"
     (%load-string "(defmodule nsA) (defn greet () 42)")
     (is (bound? 'nsA/greet))
     (is (not (bound? 'greet)))
@@ -71,9 +69,7 @@
     (is (not (bound? 'located)))))
 
 (describe "namespaces across processes"
-  :isolated
-
-  (test "a qualified symbol round-trips through send (re-intern by name)"
+  :isolated (test "a qualified symbol round-trips through send (re-intern by name)"
     (let (me (self) w (spawn (ns-echo me)))
       (send w {:sym 'some-ns/some-fn :n 1})
       (let (back (receive))
@@ -88,9 +84,7 @@
       (is (= (receive) {:tag 'nsP/make :data (list 1 2 3)})))))
 
 (describe "namespaces: (:use …) imports"
-  :isolated
-
-  (test "(:use mod) refers all of a module's public names bare"
+  :isolated (test "(:use mod) refers all of a module's public names bare"
     (%load-string "(defmodule ilibA) (defn pub-x () :x) (defn pub-y () :y)")
     (%load-string "(defmodule iappA (:use ilibA)) (defn run () (list (pub-x) (pub-y)))")
     (is (= (iappA/run) (list :x :y))))
@@ -141,9 +135,7 @@
 ;;; cross-process round-trip all reuse the flat-table machinery (a qualified name
 ;;; is one interned symbol), so these mirror the flat cases above one level deeper.
 (describe "namespaces: hierarchical module names (ADR-085)"
-  :isolated
-
-  (test "a hierarchical module qualifies its defs on the last `/`"
+  :isolated (test "a hierarchical module qualifies its defs on the last `/`"
     (%load-string "(defmodule gui/window) (defn draw () :drawn)")
     (is (bound? 'gui/window/draw))
     (is (not (bound? 'window/draw)))
@@ -216,8 +208,7 @@
 ;;; prelude namespace, so a module that shadows a prelude name can still reach the
 ;;; original — `/map` is prelude's `map` even where the module defined its own.
 (describe "namespaces: the /name root escape"
-  :isolated
-  (test "a module shadowing a prelude name reaches the original via /name"
+  :isolated (test "a module shadowing a prelude name reaches the original via /name"
     (%load-string (str "(defmodule nsroot1)"
                     " (defn map (x) (list :mine x))" " (defn mine (x) (map x))"
                     " (defn orig () (/map (fn (x) (* x x)) (list 1 2 3)))"))
@@ -236,8 +227,7 @@
 ;;; misqualify to `mod/name` and fail with a confusing "unbound `mod/name`" even
 ;;; though the name was plainly defined. The scan now starts at the first `defmodule`.
 (describe "namespaces: a pre-module def stays at root"
-  :isolated
-  (test "a bare reference to a def written before defmodule resolves to root"
+  :isolated (test "a bare reference to a def written before defmodule resolves to root"
     (%load-string (str "(def pre-cfg 7)"
                     " (defmodule nspre) (defn read-it () pre-cfg)"))
     (is (bound? 'pre-cfg)) ; defined at root, not nspre/pre-cfg
@@ -256,9 +246,7 @@
 ;;; region. `%in-ns` switches the active region at run time; the checker mirrors the
 ;;; switch. The runtime is unchanged — still flat interned symbols, one per qualified name.
 (describe "namespaces: multiple modules per file (ADR-223)"
-  :isolated
-
-  (test "two modules in one file each qualify their own same-named def"
+  :isolated (test "two modules in one file each qualify their own same-named def"
     (%load-string (str "(defmodule mm-a) (defn val () :a)"
                     " (defmodule mm-b) (defn val () :b)"))
     (is (= (mm-a/val) :a))
@@ -316,9 +304,7 @@
   (try (do (%load-string src) "") (catch e (str (error-message e)))))
 
 (describe "namespaces: `(:use …)` clashes resolve lazily (ADR-235)"
-  :isolated
-
-  (test "importing two modules that share a name is fine when the name is not used bare"
+  :isolated (test "importing two modules that share a name is fine when the name is not used bare"
     ;; `up` is sexp-only and `forward` (shared) is never referenced — no error.
     (is (ns-loads? "(defmodule lz-ok (:use sexp) (:use telemetry)) (defn f (x) (up x))")))
 
@@ -343,9 +329,7 @@
 ;; `require`'s refusal of a module rooted under a reserved prefix — the layer that
 ;; catches a `:path`/`:git` dependency that never touched the registry.
 (describe "namespaces: standard-library names are reserved (ADR-070/166)"
-  :isolated
-
-  (test "reserved-package-name? is true for a baked-in module (flat and group prefixes)"
+  :isolated (test "reserved-package-name? is true for a baked-in module (flat and group prefixes)"
     (is (reserved-package-name? 'json))
     (is (reserved-package-name? "set"))
     (is (reserved-package-name? 'http)) ; a flat net module (was net/http)
@@ -378,8 +362,7 @@
 ;; has no such registry, so `require` scans `*load-path*` for the declaring file. `:isolated`
 ;; so each test's `set-load-path!` mutation stays on its private globals copy.
 (describe "require: co-located module by name (nameless project / bare run, ADR-223)"
-  :isolated
-  (test "a module in a file whose name it does not share is require-able by name"
+  :isolated (test "a module in a file whose name it does not share is require-able by name"
     (let (dir (path/temp "brood-coloc-req-"))
       (file/mkdir dir)
       (file/spit (path/join dir "combined.blsp")

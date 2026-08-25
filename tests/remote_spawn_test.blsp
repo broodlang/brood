@@ -17,9 +17,7 @@
 (defmodule remote-spawn-test (:use test))
 
 (describe "remote-spawn against the local node"
-  :isolated
-
-  (test "a bare-expression body runs on the remote (always worked)"
+  :isolated (test "a bare-expression body runs on the remote (always worked)"
     (node/serve-spawns)
     (let (parent (self))
       (node/spawn (node/name) (send parent [:expr-ran 7]))

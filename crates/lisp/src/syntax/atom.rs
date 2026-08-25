@@ -108,7 +108,7 @@ pub fn reserved_numeric_hint(token: &str) -> &'static str {
     }
     if lower.starts_with("0x") || lower.starts_with("0b") || lower.starts_with("0o") {
         return "Brood has no radix literals — `0x1F` / `0b1010` / `0o17` are reserved \
-                syntax, not names. Parse at runtime with `(string->number \"1F\" 16)`, \
+                syntax, not names. Parse at runtime with `(string/->number \"1F\" 16)`, \
                 or write the value in decimal.";
     }
     if token.contains('_') {

@@ -120,8 +120,8 @@ test discovery, lints, release, config)."
     "  ;;   (add-backend (process-backend buffer-pid))\n"
     "  ;; To redirect plain `println` the same way, reference `io/with-out` — a\n"
     "  ;; qualified name loads its module, so there is nothing to require:\n"
-    "  ;;   (io/with-out (process-port buffer-pid) (println \"…\")).\n"
-    "  (println (greeting)))\n"))
+    "  ;;   (io/with-out (process-port buffer-pid) (io/puts \"…\")).\n"
+    "  (io/puts (greeting)))\n"))
 
 (defn- project-hello-template
   (nm)
@@ -176,7 +176,7 @@ test discovery, lints, release, config)."
     ";; calls itself in tail position, so it runs in O(1) stack — no mutation, no\n"
     ";; `while`. (Brood has proper tail calls, so recursion *is* the loop; for a loop\n"
     ";; local to one function, `letrec` binds one inline instead.)\n"
-    "(defn animate (pos dir width)\n" "  (println (render pos width))\n" "  (sleep 80)\n"
+    "(defn animate (pos dir width)\n" "  (io/puts (render pos width))\n" "  (sleep 80)\n"
     "  (let ([p d] (step pos dir width))\n" "    (animate p d width)))\n" "\n" "(defn main ()\n"
     "  \"Entry point: animate a bouncing marker.\"\n" "  (animate 0 1 20))\n"))
 
@@ -204,7 +204,7 @@ test discovery, lints, release, config)."
     "  (call :value [n n]))\n" "\n" "(defn main ()\n"
     "  \"Entry point: start a counter, drive it, read the result.\"\n"
     "  (let (c (spawn-server counter 0))\n" "    (cast c :inc)\n" "    (cast c :inc)\n"
-    "    (cast c [:add 10])\n" "    (println \"counter =\" (call c :value))))\n"))
+    "    (cast c [:add 10])\n" "    (io/puts \"counter =\" (call c :value))))\n"))
 
 (defn- project-gen-test-template
   (nm)
@@ -505,7 +505,7 @@ test discovery, lints, release, config)."
     "  \"Create the app database if absent, then run schema migrations.\n"
     "  Run with: `nest run --main db-setup`\"\n" "  (:alias pg)\n" "  (:alias db))\n" "\n"
     "(defn main ()\n" "  (let (o (pg/opts-from-env \"" nm "\"))\n" "    (pg/create-database o)\n"
-    "    (db/start o)\n" "    (println \"Done. Run `nest run` to start the server.\")))\n"))
+    "    (db/start o)\n" "    (io/puts \"Done. Run `nest run` to start the server.\")))\n"))
 
 (defn- project-hatch-endpoint-template
   (_nm)
@@ -522,7 +522,7 @@ test discovery, lints, release, config)."
     "      ([:task-error ^h _msg] (errors/error-response 500))\n"
     "      ([:task-timeout ^h] (errors/error-response 504)))))\n" "\n" "(defn port ()\n"
     "  \"Serve on $HATCH_PORT if set and numeric, else 5000.\"\n"
-    "  (or (string->number (or (os/getenv \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
+    "  (or (string/->number (or (os/getenv \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
     "  \"Start the HTTP listener on `(port)`.\"\n"
     "  (server/start (port) adapter (live/live-dispatcher) {}))\n"))
 
@@ -724,7 +724,7 @@ test discovery, lints, release, config)."
     "      ([:task-error ^h _msg] (error-json 500 \"internal server error\"))\n"
     "      ([:task-timeout ^h] (error-json 504 \"request timed out\")))))\n" "\n" "(defn port ()\n"
     "  \"Serve on $HATCH_PORT if set and numeric, else 5000.\"\n"
-    "  (or (string->number (or (os/getenv \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
+    "  (or (string/->number (or (os/getenv \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
     "  \"Start the HTTP listener on `(port)` — no ws-handler, so no live layer.\"\n"
     "  (server/start (port) adapter))\n"))
 
@@ -948,7 +948,7 @@ test discovery, lints, release, config)."
       (file/spit (path/join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
       (let (code-files (project-write-template tmpl nm src-dir tests-dir actual-name)
             _ (scaffold-format-generated! (cons (path/join nm "project.blsp") code-files)))
-        (println (str "Created Brood project '"
+        (io/puts (str "Created Brood project '"
                    actual-name
                    "'"
                    (if (= tmpl "default") "" (str " [" tmpl " template]"))
@@ -956,18 +956,18 @@ test discovery, lints, release, config)."
                      in-place " (in-place — files in current directory overwritten)"
                      reusing-dir " (existing files overwritten)"
                      else "")))
-        (println (str "  " nm "/project.blsp"))
-        (println (str "  " nm "/.gitignore"))
-        (println (str "  " nm "/.gitattributes"))
-        (println (str "  " nm "/CLAUDE.md"))
-        (println (str "  " nm "/.mcp.json"))
-        (println (str "  " nm "/docs/brood-for-claude.md"))
-        (println (str "  " nm "/.claude/skills/writing-brood/SKILL.md"))
-        (dolist (f code-files) (println (str "  " f))))
+        (io/puts (str "  " nm "/project.blsp"))
+        (io/puts (str "  " nm "/.gitignore"))
+        (io/puts (str "  " nm "/.gitattributes"))
+        (io/puts (str "  " nm "/CLAUDE.md"))
+        (io/puts (str "  " nm "/.mcp.json"))
+        (io/puts (str "  " nm "/docs/brood-for-claude.md"))
+        (io/puts (str "  " nm "/.claude/skills/writing-brood/SKILL.md"))
+        (dolist (f code-files) (io/puts (str "  " f))))
       (when *config-git-init*
         (if (= 0 (os/run-process "git" (list "init" "-q" nm)))
-          (println "  initialized a git repository")
-          (println "  (git init failed)")))
+          (io/puts "  initialized a git repository")
+          (io/puts "  (git init failed)")))
       (scaffold-print-next-steps tmpl nm in-place)
       nm)))
 
@@ -989,9 +989,9 @@ test discovery, lints, release, config)."
     (file/mkdir skill-dir)
     (file/spit (path/join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
     (file/spit (path/join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
-    (println "Refreshed AI tooling from this brood build:")
-    (println (str "  " (path/join docs-dir "brood-for-claude.md")))
-    (println (str "  " (path/join skill-dir "SKILL.md")))))
+    (io/puts "Refreshed AI tooling from this brood build:")
+    (io/puts (str "  " (path/join docs-dir "brood-for-claude.md")))
+    (io/puts (str "  " (path/join skill-dir "SKILL.md")))))
 
 ;; Templates whose manifest declares `:path` dependencies on SIBLING checkouts,
 ;; mapped to what has to be present for the project to resolve.
@@ -1008,13 +1008,13 @@ test discovery, lints, release, config)."
   (let (siblings (get *scaffold-sibling-deps* tmpl)
         enter (if in-place "" (str "cd " nm " && ")))
     (if (nil? siblings)
-      (println (str "Next:  " enter "nest test && nest run"))
+      (io/puts (str "Next:  " enter "nest test && nest run"))
       (do
-        (println (str "This template depends on "
+        (io/puts (str "This template depends on "
                    (string/join " and " (map (fn (d) (str "../" d)) siblings))
                    (if (= (count siblings) 1) " as a sibling path dep," " as sibling path deps,")))
-        (println (str "so `nest` commands will fail until "
+        (io/puts (str "so `nest` commands will fail until "
                    (if (= (count siblings) 1) "it is" "they are")
                    " checked out beside this project"))
-        (println "(or the manifest's :dependencies are repointed at :git sources).")
-        (println (str "Next:  " enter "nest fetch   # once the dependencies are in place"))))))
+        (io/puts "(or the manifest's :dependencies are repointed at :git sources).")
+        (io/puts (str "Next:  " enter "nest fetch   # once the dependencies are in place"))))))

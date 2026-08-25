@@ -155,16 +155,13 @@
     ;; an ordinary tail call — 20k deep must not grow the stack.
     (defn drain-loop (k)
       (if (= k 0)
-        :done
-        (do (send (self) [:x k]) (receive ([:x v] (drain-loop (- v 1)))))))
+        :done (do (send (self) [:x k]) (receive ([:x v] (drain-loop (- v 1)))))))
     (assert= (drain-loop 20000) :done)))
 
 ;; ---- liveness at scale (full preemption proof is the Rust test) --------------
 
 (describe "concurrency: scheduling"
-  :isolated
-
-  (test "many processes all make progress (no deadlock / lost message)"
+  :isolated (test "many processes all make progress (no deadlock / lost message)"
     ;; Spawn a batch of processes that each report back, and collect every reply.
     ;; This is a liveness check — every spawned process must complete and its
     ;; message arrive — across the worker pool. (Observable preemption needs a
@@ -239,8 +236,7 @@
 ;; `(monitor pid)` returns a ref; a `[:down <ref> <pid> <reason>]` message arrives
 ;; when `pid` dies. The one kernel mechanism a supervisor is built from.
 (describe "monitor: death notification"
-  :isolated
-  (test "monitor returns a ref distinct from a plain (ref)"
+  :isolated (test "monitor returns a ref distinct from a plain (ref)"
     (let (w (spawn (receive (:go nil))) mr (monitor w))
       (send w :go)
       ; let it finish (drain the down)
@@ -350,9 +346,7 @@
   (if (= :waiting (get (proc/info p) :status)) :ok (wait-parked p)))
 
 (describe "selective receive: a skipped local message keeps its value"
-  :isolated
-
-  (test "a non-matching local message, skipped then matched, still carries its value"
+  :isolated (test "a non-matching local message, skipped then matched, still carries its value"
     (let (main (self)
           p (spawn
               (fn ()

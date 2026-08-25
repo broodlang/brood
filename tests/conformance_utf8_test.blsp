@@ -34,8 +34,7 @@
 (defn- u8-file () (first (corpus-files "utf8")))
 
 (describe "UTF-8 stress: the corpus file itself"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "the corpus is present"
     (is (corpus-present? "utf8"))
@@ -54,8 +53,7 @@
       (assert= (count bs) 22781))))
 
 (describe "UTF-8 stress: Kuhn's catalogue"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   ;; §2 — boundary conditions. The first and last code point of each encoded length,
   ;; which is where an off-by-one in a hand-written decoder shows up.

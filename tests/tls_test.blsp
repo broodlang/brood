@@ -27,8 +27,7 @@
     (receive ([:ready port cert] [port cert]) (after *test-wait-ms* :timeout))))
 
 (describe "tls: loopback round trip (self-signed + ca-pem trust)"
-  :isolated
-  (test "handshake, request, response, close — full exchange"
+  :isolated (test "handshake, request, response, close — full exchange"
     (let (pc (tls-serve-one "secret reply")
           port (first pc)
           cert (second pc))

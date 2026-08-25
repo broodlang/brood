@@ -102,10 +102,10 @@ as a keyword. Mirrors the LSP's SPECIAL_FORMS list."
 (defn- hl-number?
   (tok)
   "True if `tok` reads as a number (so it colours as one rather than a symbol). A cheap
-first-char gate skips the `string->number` parse for the common case — an identifier
+first-char gate skips the `string/->number` parse for the common case — an identifier
 that can't begin a number — since this runs on every atom on the fontify hot path."
   (and (includes? "+-.0123456789" (string/char-at tok 0))
-    (not (nil? (string->number tok)))))
+    (not (nil? (string/->number tok)))))
 
 ;; ---- scanning primitives (shared by lexer + matchers) -----------------------
 
@@ -251,9 +251,9 @@ covering `ranges` (`[lo hi face]`) face merged on top, and a new run starts wher
 that face changes. The shared run-length tiler — callers turn runs into display ops
 or HTML; `()` for empty `text`. `spans` must be ascending + non-overlapping (the
 `highlight-spans` shape); `ranges` may overlap and be unordered (merged later-wins).
-The whole tile + overlay-merge is the native `span-runs` (it runs per visible line every
+The whole tile + overlay-merge is the native `%span-runs` (it runs per visible line every
 frame, including a region/isearch overlay during a drag-select), so this is a thin call."
-  (span-runs text base spans ranges))
+  (%span-runs text base spans ranges))
 
 (defn highlight-chunks (full base line overrides)
   "Return `[substring face]` chunks that tile `line` — the visible region starting

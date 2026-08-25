@@ -43,8 +43,7 @@
 (defn mcpt-burst (n) (when (> n 0) (spawn (+ 1 1)) (mcpt-burst (- n 1))))
 
 (describe "mcp watch-runtime tool"
-  :isolated
-  (test "collects spawn/exit runtime events over a window"
+  :isolated (test "collects spawn/exit runtime events over a window"
     ;; a burst of trivial short-lived processes, from a helper process (so the
     ;; watcher — this test process — sees their :spawn/:exit, not its own)
     (spawn (do (sleep 20) (mcpt-burst 12)))

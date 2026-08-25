@@ -80,16 +80,19 @@ Values print through `pr-str-bounded`, not `pr-str`: this is a display protocol,
 one traced call carrying a megabyte string must not paint a megabyte to stderr. Lift
 the bound for a run with `(binding (*print-string-length* nil) …)`."
   (case (:spy entry)
-    :enter (eprintln (str "spy: " (pr-str-bounded (:form entry))))
+    :enter (%write-err (str (str "spy: " (pr-str-bounded (:form entry))) "\n"))
     :node
-      (eprintln (str "  "
-                  (spy-indent (:depth entry))
-                  (pr-str-bounded (:form entry))
-                  " => "
-                  (pr-str-bounded (:value entry))))
-    :exit (eprintln (str "=> " (pr-str-bounded (:value entry))))
-    :call (eprintln (str "trace: " (pr-str-bounded (cons (:fn entry) (:args entry)))))
-    :return (eprintln (str "trace: " (pr-str (:fn entry)) " => " (pr-str-bounded (:value entry))))
+      (%write-err (str (str "  "
+                         (spy-indent (:depth entry))
+                         (pr-str-bounded (:form entry))
+                         " => "
+                         (pr-str-bounded (:value entry)))
+                    "\n"))
+    :exit (%write-err (str (str "=> " (pr-str-bounded (:value entry))) "\n"))
+    :call (%write-err (str (str "trace: " (pr-str-bounded (cons (:fn entry) (:args entry)))) "\n"))
+    :return
+      (%write-err (str (str "trace: " (pr-str (:fn entry)) " => " (pr-str-bounded (:value entry)))
+                    "\n"))
     nil))
 (defn- spy-emit (entry) ((or *spy-sink* spy-default-sink) entry))
 (defn- spy-node
@@ -183,8 +186,8 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ;; `require` consults it just before falling back to the load-path, so an imaged module
 ;; is materialised on first require rather than at startup. Policy — which image, when it
 ;; is stale, what goes in it — lives in `std/tool/project.blsp`.
-(def *image-sections* {})
-(def *image-path* nil)
+(def- *image-sections* {})
+(def- *image-path* nil)
 
 ;; ADDITIONAL image sources, consulted in order AFTER `*image-sections*` — a list of
 ;; `[path sections]` pairs. There are two independent producers of images and they must
@@ -196,7 +199,7 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ;;
 ;; Order is precedence: the project's own section for a name wins over the stdlib's, which
 ;; is what lets a project shadow a stdlib module name if it ever needs to.
-(def *image-sources* (list))
+(def- *image-sources* (list))
 
 ;; feature name -> [feature name …] : the modules each module required WHILE ITS BODY
 ;; LOADED — its `(:use …)` clauses and any top-level `(require …)`.
@@ -219,7 +222,7 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ;; A spurious edge — a runtime `require` that happens to run while some other module loads,
 ;; and is attributed to it by dynamic scope — costs one extra materialisation and nothing
 ;; else. The error direction is one-sided on purpose.
-(def *require-edges* {})
+(def- *require-edges* {})
 
 ;; The feature whose body is currently being evaluated, or nil. `require-one` attributes
 ;; each edge to it. Dynamic (not a parameter) because the edge is discovered arbitrarily
@@ -290,8 +293,8 @@ The primary source is consulted first, then `*image-sources*` in install order."
 ;;   *package-modules-of*   : a package's local name (string, `"foo"`) → the list of
 ;;     SHORT module-name symbols it provides — the set that tells `%root-module-name`
 ;;     which references in `foo`'s files are intra-package (root them) vs external.
-(def *module-files* {})
-(def *package-modules-of* {})
+(def- *module-files* {})
+(def- *package-modules-of* {})
 
 ;; The rooted-key setters (root code, like `set-load-path!`): the package manager
 ;; calls these to register a dependency's modules before its first `require`.
@@ -303,7 +306,7 @@ The primary source is consulted first, then `*image-sources*` in install order."
   "Record package `prefix`'s SHORT module names (a list of symbols) — the intra-package set."
   (%registry-update! '*package-modules-of* :assoc [prefix] short-modules)
   prefix)
-(def *features-loading* {})
+(def- *features-loading* {})
 ; feature key → loader pid for loads IN FLIGHT. Set before a load begins so (a) a
 ; CIRCULAR require inside that same load returns immediately (the contract
 ; `defmodule`'s top-of-file provide used to supply), and (b) a CONCURRENT require
@@ -358,7 +361,7 @@ would name a registry that does not exist."
 ;; A module declares itself at the top with `defmodule`: its name, an optional
 ;; docstring, and (implicitly) `provide`. The canonical module header — it replaces
 ;; the old bare-leading-string docstring *and* a trailing `(provide 'name)`.
-(def *module-docs* {})
+(def- *module-docs* {})
 ; module name (string) -> its docstring (or nil)
 
 ;; Called from `defmodule`'s expansion, which runs inside the *consumer's* module —
@@ -382,13 +385,13 @@ would name a registry that does not exist."
 ;; primitive: print a message to stderr ONCE per key (so a re-required module or a
 ;; hot loop doesn't spam), then stay silent. A macro calls it from its expansion
 ;; when it lowers a deprecated form.
-(def *deprecation-seen* nil)
+(def- *deprecation-seen* nil)
 (defn deprecation-warning (key message)
   "Print `message` to stderr once per `key` (deduplicated); returns nil. The
 deprecation primitive — emit it from a macro's expansion to flag a deprecated use."
   (unless (includes? *deprecation-seen* key)
     (%registry-update! '*deprecation-seen* :cons-new nil key)
-    (eprintln "deprecation: " message))
+    (%write-err (str "deprecation: " message "\n")))
   nil)
 
 ;; The `(require …)`+`(%refer …)` forms for one `(:use mod [:only|:exclude [a b]])`
@@ -613,7 +616,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 ;; genuinely new edge pays for the atomic update. `%swap-registry!` rather than a plain `def`
 ;; because loads run concurrently and a read-modify-write over a whole map silently loses
 ;; ~40% of its updates under contention (KI-22).
-(def *std-require-edges* nil)
+(def- *std-require-edges* nil)
 
 (defn- set-std-require-edges!
   (edges)
@@ -985,16 +988,16 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ; ---- registries -------------------------------------------------------------
 
 ; ability-name → op specs (introspection / checker / LSP)
-(def *abilities* {})
+(def- *abilities* {})
 ; ability-name → the namespace that `defability`'d it (its OWNER, ADR-172): one input to
 ; an impl's precedence tier — an impl from this ns is the ability-owner tier, and only this
 ; ns may impl the ability for a built-in id (`:int`, `:default`).
-(def *ability-owner* {})
+(def- *ability-owner* {})
 ; [ability op] → {id → fn} (runtime dispatch — the fn stored directly, no wrapper)
-(def *impls* {})
+(def- *impls* {})
 ; [ability op id] → registering ns (provenance for conflict detection; read only at
 ; registration, never on dispatch — keeps the dispatch value a bare fn)
-(def *impl-from* {})
+(def- *impl-from* {})
 ; qualified-op-fn-symbol → the ability that declared it. An ability op becomes a global
 ; `defn` named after the op (qualified to the declaring ns), so two abilities in the SAME
 ; ns declaring the same op name would have the second silently clobber the first's op
@@ -1002,7 +1005,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ; an op silently (ADR-172; the checker can't see a same-ns clobber either). Keyed by the
 ; QUALIFIED symbol (`<ns>/op` or bare `op` at root) so cross-module same-name ops — which
 ; get distinct globals and never clash — do not false-warn.
-(def *op-ability* {})
+(def- *op-ability* {})
 
 (defn- ability-qualify-op
   (owner op-name)
@@ -1030,13 +1033,14 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         ; `%register-ability` that never defines a generic fn (crafted precedence fixtures) is
         ; harmless and stays quiet.
         (when (and prev (not (= prev aname)) (bound? qsym))
-          (println "warning: ability "
-            aname
-            " declares op `"
-            (first spec)
-            "` already owned by ability "
-            prev
-            " — its generic function will be shadowed (rename one op)"))
+          (%write-out (str "warning: ability "
+                        aname
+                        " declares op `"
+                        (first spec)
+                        "` already owned by ability "
+                        prev
+                        " — its generic function will be shadowed (rename one op)"
+                        "\n")))
         (%registry-update! '*op-ability* :assoc [qsym] aname))))
   nil)
 
@@ -1055,7 +1059,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ; clause calls it at EXPANSION and splices the result into an `(impl <ability> <record> …)`,
 ; so the derived methods are ordinary, statically-checkable impls. The per-ability recipe is
 ; the Elixir `@derive` / Rust `#[derive]` model: each ability decides how it derives itself.
-(def *ability-derives* {})
+(def- *ability-derives* {})
 
 (defn %register-ability-derive (aname recipe)
   "Record ability `aname`'s `:derive-record` recipe (the fn `defrecord`'s `:derives` runs to
@@ -1069,7 +1073,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   (get *ability-derives* aname))
 
 ; ability-name → its SEALED member ids (a closed set), or absent if open
-(def *sealed* {})
+(def- *sealed* {})
 
 (defn %register-sealed (aname members)
   "Record ability `aname`'s SEALED member ids — the closed set of identities it is meant
@@ -1085,7 +1089,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ; ability-name → its REQUIRED (super-)abilities (ADR-193): a list of ability names that any id
 ; implementing this ability must ALSO implement. A declared conformance contract like `:sealed`
 ; — checker-only, advisory (late binding means it can't gate); runtime dispatch is unaffected.
-(def *ability-requires* {})
+(def- *ability-requires* {})
 
 (defn %register-ability-requires (aname reqs)
   "Record that ability `aname` REQUIRES abilities `reqs` (a list of names) — an implementor of
@@ -1218,14 +1222,15 @@ it waits for that load to finish (a half-evaluated module is never observable)."
             fixed (nth shape 0)
             variadic (nth shape 1))
         (when (if variadic (> fixed op-arity) (not (= fixed op-arity)))
-          (println "warning: ability "
-            aname
-            "/"
-            op
-            " expects "
-            op-arity
-            " arg(s), but this impl takes "
-            (if variadic (str fixed "+") fixed)))))))
+          (%write-out (str "warning: ability "
+                        aname
+                        "/"
+                        op
+                        " expects "
+                        op-arity
+                        " arg(s), but this impl takes "
+                        (if variadic (str fixed "+") fixed)
+                        "\n")))))))
 
 (defn %register-impl (aname op key f from)
   "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the registering
@@ -1247,9 +1252,9 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         ; recompute the incumbent's tier from its recorded `from` — no extra registry.
         old-rank (if has-prev (%impl-rank aname key prev-from) 0))
     (when (and has-prev (= new-rank old-rank) (not (= prev-from from)))
-      (println "warning: ability "
-        aname "/" op " for " key " — same-tier impl from " prev-from " overridden by " from
-        " (last wins)"))
+      (%write-out (str "warning: ability "
+                    aname "/" op " for " key " — same-tier impl from " prev-from " overridden by "
+                    from " (last wins)" "\n")))
     ; Store the winner only when the new impl's tier is >= the incumbent's — so a higher tier
     ; always holds the slot and order can't decide it. A strictly lower tier is dropped (its
     ; owner already has a stronger claim). The fn is stored DIRECTLY so dispatch (`%impl-for`)
@@ -1265,7 +1270,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   (let (methods (get *impls* op-key))
     (or (get methods key) (get methods :default))))
 
-(def *substrate-abilities* ['Display 'Inspect 'Seqable 'Conjable])
+(def- *substrate-abilities* ['Display 'Inspect 'Seqable 'Conjable])
 ;; The abilities the LANGUAGE ITSELF dispatches on. Their `:default` impls are the fallback
 ;; every value relies on — `Display`'s is what `print`/`println`/`str` reach for — so they are
 ;; substrate, not policy, and `%unregister-impl` refuses to retract them: `(%unimpl Display
@@ -1508,8 +1513,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
                                       (list (list '%register-impl
                                               (list 'quote aname)
                                               (list 'quote (first op))
-                                              :default
-                                              (cons 'fn (cons arg-syms body))
+                                              :default (cons 'fn (cons arg-syms body))
                                               (list 'current-ns))))))))
                         nil ops)
         op-defs (map
@@ -1613,9 +1617,9 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; method's mirror, so a binary operator is authored as the upper triangle of its type matrix.
 ;; The single-dispatch seam is still `defability`/`impl`; this is its multi-arg sibling.
 
-(def *methods* {}) ; multimethod name → { [id …] → fn, :default → fn }
-(def *multi-algebra* {}) ; multimethod name → :commutative | :antisymmetric | nil (declared)
-(def *method-from* {}) ; [mname key] → registering ns, for cross-module conflict detection
+(def- *methods* {}) ; multimethod name → { [id …] → fn, :default → fn }
+(def- *multi-algebra* {}) ; multimethod name → :commutative | :antisymmetric | nil (declared)
+(def- *method-from* {}) ; [mname key] → registering ns, for cross-module conflict detection
 (defn %register-multi (mname algebra)
   "Declare multimethod `mname` with optional closure `algebra` (nil, :commutative, or
   :antisymmetric). Records the algebra so `%register-method` can derive each mirror."
@@ -1669,8 +1673,9 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         has-prev (contains? *method-from* prov)
         prev-from (get *method-from* prov))
     (when (and has-prev (not (= prev-from from)))
-      (println "warning: multimethod "
-        mname " method for " key " — redefined from " prev-from " by " from " (last wins)"))
+      (%write-out (str "warning: multimethod "
+                    mname " method for " key " — redefined from " prev-from " by " from
+                    " (last wins)" "\n")))
     (register-method-store mname key f)
     (%registry-update! '*method-from* :assoc [prov] from))
   (let (algebra (get *multi-algebra* mname))
@@ -1749,8 +1754,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
     (= pattern :default)
       (list '%register-method
         (list 'quote mname)
-        :default
-        (cons 'fn (cons arglist body))
+        :default (cons 'fn (cons arglist body))
         (list 'current-ns))
     (vector? pattern)
       (do
@@ -1805,11 +1809,10 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 
 (impl Inspect :default (inspect [x] (pr-str x)))
 
-(defn inspectln (x)
-  "Print `x`'s debug form (`inspect`) followed by a newline — the `IO.inspect` move,
-  for tracing. Returns `x`, so it drops into a pipeline: `(-> v f inspectln g)`."
-  (println (inspect x))
-  x)
+;; `inspectln` (print the debug form, return the value) is gone: it had no call site in
+;; the tree, and the pipeline it existed for is `(-> v f (io/puts (inspect …)) g)` or just
+;; `inspect` plus `io/puts`. `inspect` itself stays — it is the `Inspect` ability op and
+;; returns a STRING, so it belongs with `pr-str`, not with the printers.
 
 ;; Seqable — a value's list/seq view: the seam `seq` (and thus `map`/`filter`/`fold`/
 ;; `for`/`into`, plus `count`/`keys`/`vals`) consults for a RECORD. The default is the
@@ -1832,8 +1835,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   "Add element `x` to collection `self`, returning a fresh collection."
   (-conj [self x] :-> any))
 (impl Conjable
-  :default
-  (-conj [coll x]
+  :default (-conj [coll x]
     (cond
       (map? x) (merge coll x)
       (and (vector? x) (%eq (count x) 2)) (assoc coll (nth x 0) (nth x 1))

@@ -580,7 +580,7 @@ mod tests {
         // `frobnicate` here is an argument, not a call head — no stub offered.
         let titles = unbound_action_titles(
             &mut interp,
-            "(println frobnicate)",
+            "(io/puts frobnicate)",
             "frobnicate",
             "frobnicate",
         );

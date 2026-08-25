@@ -47,15 +47,13 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
 (defn pop (q)
   "Return `[front-value new-queue]`, or `:empty` if the queue is empty."
   (if (empty? q)
-    :empty
-    (let (front (get q :front))
+    :empty (let (front (get q :front))
       [(first front) (balance (rest front) (get q :back) (- (get q :size) 1))])))
 
 (defn peek (q)
   "Return the front value without removing it, or `:empty` if empty."
   (if (empty? q)
-    :empty
-    (first (get q :front))))
+    :empty (first (get q :front))))
 
 ;; The queue joins the collection protocol (ADR-172 §7): `Seqable` gives it the generic
 ;; `seq`/`count`/`map`/`filter`/`fold`/`for` and `into`-from-a-queue; `Conjable` gives it

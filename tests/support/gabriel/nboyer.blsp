@@ -500,8 +500,7 @@ oracle is the rewrite count published in upstream's own source header; see
 (defn- nboyer-lookup
   (var subst)
   (if (nil? subst)
-    :none
-    (let ([v term] (first subst))
+    :none (let ([v term] (first subst))
       (if (= v var) term (nboyer-lookup var (rest subst))))))
 
 (check-allow :non-tail-recursion
@@ -549,8 +548,7 @@ oracle is the rewrite count published in upstream's own source header; see
       else
         (let (extended (nboyer-unify1 (first lst1) (first lst2) subst))
           (if (= extended :fail)
-            :fail
-            (nboyer-unify1-lst (rest lst1) (rest lst2) extended))))))
+            :fail (nboyer-unify1-lst (rest lst1) (rest lst2) extended))))))
 
 ;; ---- rewriting ---------------------------------------------------------------
 ;; Each of these returns `[value rewrite-count]`. The count is bumped on ENTRY to

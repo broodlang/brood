@@ -26,5 +26,5 @@
   (sleep 1000)
   (ticker (inc n)))
 
-(println "[main] ticker starting (Ctrl-C to stop; edit greeter.blsp to swap output)")
+(io/puts "[main] ticker starting (Ctrl-C to stop; edit greeter.blsp to swap output)")
 (ticker 0)

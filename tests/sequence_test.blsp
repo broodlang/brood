@@ -241,8 +241,7 @@
     (assert= (enumerate (list :a :b :c)) (list [0 :a] [1 :b] [2 :c]))))
 
 (describe "doseq"
-  :isolated
-  (test "runs its body for each item (in order) and returns nil"
+  :isolated (test "runs its body for each item (in order) and returns nil"
     (assert= (doseq (x (range 3)) (send (self) [:saw x])) nil)
     ;; the three sends arrived, in order
     (assert= (list (receive ([:saw v] v)) (receive ([:saw v] v)) (receive ([:saw v] v)))
@@ -335,9 +334,7 @@
   (when (> n 0) (spawn (seq-view-reader parent n)) (seq-spawn-view-readers parent (- n 1))))
 
 (describe "sequences across processes"
-  :isolated
-
-  (test "a sorted list round-trips through a worker unchanged (deep copy)"
+  :isolated (test "a sorted list round-trips through a worker unchanged (deep copy)"
     (let (me (self) _w (spawn (seq-emit me 5))) (assert= (receive ([:r n xs] xs)) (list 1 2 3 4 5))))
 
   (test "fan-out / fan-in: each worker builds+sorts a list, parent folds a map"
@@ -422,12 +419,12 @@
     ;; test-runner rely on `(map require-one …)` / `(map run-test …)` for effect).
     ;; A lazy view must NOT run its fn until something realises it.
     ; eager → runs now
-    (assert= (with-out-str (map print (range 5))) "01234")
+    (assert= (with-out-str (map io/print (range 5))) "01234")
     ; view built, not realised → nothing
-    (assert= (with-out-str (lmap print (range 5))) "")
+    (assert= (with-out-str (lmap io/print (range 5))) "")
     ; seq realises → runs
-    (assert= (with-out-str (seq (lmap print (range 5)))) "01234")
-    (assert= (with-out-str (reduce (fn (a _) a) nil (lmap print (range 5)))) "01234")))
+    (assert= (with-out-str (seq (lmap io/print (range 5)))) "01234")
+    (assert= (with-out-str (reduce (fn (a _) a) nil (lmap io/print (range 5)))) "01234")))
 
 ;; ---- views across processes / network / hot-reload --------------------------
 ;; A view is heap-local: `send` REFUSES to ship one (it references the sender's
@@ -438,9 +435,7 @@
 
 ; fold realises
 (describe "lazy seq-views across processes and reload"
-  :isolated
-
-  (test "a raw view cannot be sent — it must be realised first (heap-local guard)"
+  :isolated (test "a raw view cannot be sent — it must be realised first (heap-local guard)"
     (assert-error (send (self) [:v (lmap inc [1 2 3])])))
 
   (test "a realised view round-trips through a worker as a deep-copied list"

@@ -212,16 +212,14 @@ UTF-8 form."
   (s vals)
   (let (body (encoding-b64-strip-padding s))
     (if (nil? body)
-      :invalid
-      (let (
+      :invalid (let (
             ; codepoint vector: O(1) nth, int lookups
             s (string/->codepoints body)
             n (count s)
             tail (rem n 4))
         (if (= tail 1)
           ; 1 leftover char is always invalid
-          :invalid
-          (encoding-b64-dec-loop s 0 n vals nil))))))
+          :invalid (encoding-b64-dec-loop s 0 n vals nil))))))
 
 (defn- encoding-b64-dec-loop
   (s i n vals acc)
@@ -231,20 +229,17 @@ UTF-8 form."
           v1 (get vals (nth s i))
           v2 (if (>= remaining 2) (get vals (nth s (+ i 1))) nil))
       (if (not (and v1 v2))
-        :invalid
-        (let (acc (cons (+ (* v1 4) (quot v2 16)) acc))
+        :invalid (let (acc (cons (+ (* v1 4) (quot v2 16)) acc))
           (if (= remaining 2)
             (reverse acc)
             (let (v3 (get vals (nth s (+ i 2))))
               (if (not v3)
-                :invalid
-                (let (acc (cons (+ (* (rem v2 16) 16) (quot v3 4)) acc))
+                :invalid (let (acc (cons (+ (* (rem v2 16) 16) (quot v3 4)) acc))
                   (if (= remaining 3)
                     (reverse acc)
                     (let (v4 (get vals (nth s (+ i 3))))
                       (if (not v4)
-                        :invalid
-                        (let (acc (cons (+ (* (rem v3 4) 64) v4) acc))
+                        :invalid (let (acc (cons (+ (* (rem v3 4) 64) v4) acc))
                           (encoding-b64-dec-loop s (+ i 4) n vals acc))))))))))))))
 
 (defn base64-decode (s)

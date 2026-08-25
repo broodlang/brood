@@ -39,23 +39,23 @@
 
 (defn- list-repos
   ()
-  (for (dir (brood-repos)) (println (repo-name dir))))
+  (for (dir (brood-repos)) (io/puts (repo-name dir))))
 
 (defn- status
   ()
   (for (dir (brood-repos))
     (let (d (dirty-count dir) a (ahead-count dir))
       (when (or (> d 0) (not (= a "0")))
-        (println (repo-name dir) "  uncommitted=" d " unpushed=" a)))))
+        (io/puts (repo-name dir) "  uncommitted=" d " unpushed=" a)))))
 
 (defn- check
   ()
   (for (dir (brood-repos))
     (when (file/exists? (str dir "/project.blsp"))
-      (println "=== " (repo-name dir) " ===")
+      (io/puts "=== " (repo-name dir) " ===")
       ;; `nest check` reads the project in its own dir, so run it there (via the shell's cd).
       (when (not (= 0 (os/run-process "sh" (list "-c" (str "cd " dir " && nest check")))))
-        (println "  CHECK FAILED: " (repo-name dir))))))
+        (io/puts "  CHECK FAILED: " (repo-name dir))))))
 
 (defn- commit
   (message)
@@ -63,14 +63,14 @@
     (when (> (dirty-count dir) 0)
       (git-run dir (list "add" "-A"))
       (when (= 0 (git-run dir (list "commit" "-q" "-m" message)))
-        (println "committed: " (repo-name dir))))))
+        (io/puts "committed: " (repo-name dir))))))
 
 (defn- push
   ()
   (for (dir (brood-repos))
     (when (not (= (ahead-count dir) "0"))
       (when (= 0 (git-run dir (list "push")))
-        (println "pushed: " (repo-name dir))))))
+        (io/puts "pushed: " (repo-name dir))))))
 
 (defn run (action message)
   "Dispatch for `nest ws <action> [message]`."
@@ -80,7 +80,7 @@
     (= action "check") (check)
     (= action "commit")
       (if (nil? message)
-        (println "nest ws commit needs a message")
+        (io/puts "nest ws commit needs a message")
         (commit message))
     (= action "push") (push)
-    else (println "nest ws: unknown action '" action "' (list|status|check|commit|push)")))
+    else (io/puts "nest ws: unknown action '" action "' (list|status|check|commit|push)")))

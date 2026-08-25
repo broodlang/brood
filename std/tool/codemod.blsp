@@ -71,8 +71,8 @@
   changed file and returns the count."
   (let (changed (filter (fn (f) (not (nil? f)))
                   (map (fn (f) (rewrite-file pairs f)) (project-blsp))))
-    (for (f changed) (println "  changed: " f))
-    (println (count changed) " file(s) changed")
+    (for (f changed) (io/puts "  changed: " f))
+    (io/puts (count changed) " file(s) changed")
     (count changed)))
 
 (defn rename-from-file (path)
@@ -236,8 +236,8 @@ counterpart to `rename`. Prints each changed file and returns the count."
                                after (cst-rename-text before old new mode))
                            (if (= before after) nil (do (file/spit f after) f))))
                     (project-blsp))))
-    (for (f changed) (println "  changed: " f))
-    (println (count changed) " file(s) changed")
+    (for (f changed) (io/puts "  changed: " f))
+    (io/puts (count changed) " file(s) changed")
     (count changed)))
 
 ;; ---- 2-arg swap (for a reversed-args rename like member? -> includes?) --------
@@ -336,5 +336,5 @@ counterpart to `rename`. Prints each changed file and returns the count."
                                after (apply str (reverse (swap-loop before old new 0 nil))))
                            (if (= before after) nil (do (file/spit f after) f))))
                     (project-blsp))))
-    (for (f changed) (println "  swapped: " f))
-    (println (count changed) " file(s) changed")))
+    (for (f changed) (io/puts "  swapped: " f))
+    (io/puts (count changed) " file(s) changed")))

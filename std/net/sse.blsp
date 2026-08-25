@@ -106,7 +106,7 @@ the type to `\"message\"` and the data to `\"\"` (the SSE spec's defaults). Pure
   "The numeric status from an HTTP response `head` (its first line), or 0."
   (let (line (first (string/split head "\n"))
         parts (string/split line " ")
-        n (string->number (nth parts 1 "0")))
+        n (string/->number (nth parts 1 "0")))
     (if (nil? n) 0 n)))
 
 ;; ---- server-side framing (the inverse of the parser above) ------------------

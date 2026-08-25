@@ -137,8 +137,7 @@
 ;; Cross-process: a record deep-copies on `send` and keeps its `:__id__`, so a queue
 ;; built in a worker is still a queue here — identity survives the heap crossing.
 (describe "queue across processes"
-  :isolated
-  (test "queues built in workers arrive as queues and pop in order"
+  :isolated (test "queues built in workers arrive as queues and pop in order"
     (let (me (self))
       (doseq (i (range 4))
         (spawn (send me [:q (queue/list-> (list i (+ i 10)))])))

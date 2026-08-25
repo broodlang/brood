@@ -62,8 +62,7 @@
     (let (m (assoc {} #b"k" 42))
       (is (= (get m (bytes 107)) 42)))))
 (describe "bytes: GC survival"
-  :isolated
-  (test "LOCAL bytes survive forced collections with content intact"
+  :isolated (test "LOCAL bytes survive forced collections with content intact"
     (let (mk (fn (i) (bytes (mod i 256) (mod (* i 3) 256) 255))
           xs (into [] (map mk (range 1000))))
       (dev/gc-collect)

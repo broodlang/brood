@@ -256,7 +256,7 @@
 ;; default here overwrote the wrapper's 16 back to 1, the sweep stayed full, and the
 ;; wrapper went on timing out. The environment is read at the same moment, by the code
 ;; that needs it, so there is no ordering to get wrong.
-(def- nt-part1-of (max 1 (or (string->number (or (os/getenv "BROOD_UCD_PART1_OF") "")) 1)))
+(def- nt-part1-of (max 1 (or (string/->number (or (os/getenv "BROOD_UCD_PART1_OF") "")) 1)))
 
 ;; Every `*ucd-part1-of*`-th case of the pre-collected Part1 list, from offset `k`.
 (defn- nt-slice-scan
@@ -273,8 +273,7 @@
 ;; ---- the suite ---------------------------------------------------------------
 
 (describe "UCD: grapheme cluster boundaries (UAX #29)"
-  :tags
-  [:conformance :slow]
+  :tags [:conformance :slow]
 
   (test "the corpus is present and matches the crates' Unicode version"
     (is (corpus-present? "ucd"))
@@ -296,8 +295,7 @@
 ;; whole. Each part asserts its own case count, so a parsing change that silently stops
 ;; testing a section fails instead of reading as a pass.
 (describe "UCD: normalization (UAX #15)"
-  :tags
-  [:conformance :slow]
+  :tags [:conformance :slow]
 
   (test "Part0 — specific cases"
     (let ([ran bad] (nt-part-scan "Part0"))
@@ -335,8 +333,7 @@
 ;; The properties worth naming: what these primitives are FOR, in cases a reader can
 ;; check by eye without decoding hex.
 (describe "graphemes and normalization: the properties that matter"
-  :tags
-  [:conformance]
+  :tags [:conformance]
 
   (test "a cluster is what a human calls a character"
     ;; "e" + COMBINING ACUTE is one grapheme, two code points. Spelled with escapes

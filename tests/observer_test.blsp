@@ -331,8 +331,7 @@
               60
               12
               false
-              :id
-              :ok
+              :id :ok
               {:mode :command :edit edit :msg nil})
           ;; text ops on the minibuffer row (rows-1 = 11) carrying an :fg face — the
           ;; coloured tokens (e.g. the numbers / the operator)
@@ -351,8 +350,7 @@
               60
               12
               false
-              :id
-              :ok
+              :id :ok
               {:msg "=> 42"}))
       (is (includes? (nth (nth f (- (count f) 2)) 3) "=> 42")))))
 
@@ -434,8 +432,7 @@
               60
               12
               false
-              :id
-              :ok
+              :id :ok
               {:confirm {:id 1 :name :a}}))
       (is (includes? (nth (last f) 3) "kill pid 1"))
       (is (includes? (nth (last f) 3) "y/n"))
@@ -455,9 +452,7 @@
 ;; Cross-process coverage: drive `proc/info` + `observer/observe-snapshot` against a
 ;; live runtime (each :isolated test runs alone).
 (describe "proc/info over live processes"
-  :isolated
-
-  (test "a parked receiver reports :waiting + its mailbox backlog"
+  :isolated (test "a parked receiver reports :waiting + its mailbox backlog"
     ;; Only handles [:work _], so other messages pile up and it stays parked.
     (let (w (spawn (receive ([:work _] :done))))
       (send w :a)

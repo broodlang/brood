@@ -23,14 +23,14 @@ fn scaffold(dir: &Path) {
     .unwrap();
     std::fs::write(
         src.join("app.blsp"),
-        "(defmodule app)\n(defn main () (println \"RAN: app/main\"))\n",
+        "(defmodule app)\n(defn main () (io/puts \"RAN: app/main\"))\n",
     )
     .unwrap();
     std::fs::write(
         src.join("scratch.blsp"),
         "(defmodule scratch)\n\
-         (defn main () (println \"RAN: scratch/main\"))\n\
-         (defn other () (println \"RAN: scratch/other\"))\n",
+         (defn main () (io/puts \"RAN: scratch/main\"))\n\
+         (defn other () (io/puts \"RAN: scratch/other\"))\n",
     )
     .unwrap();
 }

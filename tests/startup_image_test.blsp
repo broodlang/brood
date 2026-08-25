@@ -37,9 +37,7 @@
     (keys idx)))
 
 (describe "startup image: write and restore"
-  :isolated
-
-  (test "a written image restores the values it captured"
+  :isolated (test "a written image restores the values it captured"
     (def si-a 41)
     (def si-f (fn (x) (+ x 1)))
     (let (p (img-tmp "basic"))
@@ -164,9 +162,7 @@
 ;; (found via bedit: `std/editor/ui`'s `*term-display*` is a map of `term-*` prims, and a
 ;; `#b"…"` literal sits in a function body). Guarded here at the primitive level.
 (describe "startup image: builtins by name, bytes inline"
-  :isolated
-
-  (test "a global bound to a builtin restores as the callable primitive"
+  :isolated (test "a global bound to a builtin restores as the callable primitive"
     (def si-prim string/length) ; :native — no portable data form
     (let (p (img-tmp "prim"))
       (%image-write p [["" ['startup-image-test/si-prim]]] "fp-prim")
@@ -209,9 +205,7 @@
 ;; CONTENTS and rebuilds a fresh table on restore. What has to hold: the global is bound
 ;; to a live, writable table, and whatever load-time code put in it is still there.
 (describe "startup image: table globals"
-  :isolated
-
-  (test "a table global restores as a live, writable table"
+  :isolated (test "a table global restores as a live, writable table"
     (def si-tab (table/new))
     (let (p (img-tmp "table"))
       (%image-write p [["" ['startup-image-test/si-tab]]] "fp-table")

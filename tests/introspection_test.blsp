@@ -115,8 +115,7 @@
   ;; landing between them fails it. Found by a repeat-until-failure baseline (2026-08-05):
   ;; it failed on iteration 2 at two seeds, which is the timing shift, not a re-run bug.
   (test "all-globals lists every global and includes the prelude"
-    :isolated
-    (let (g (global-names))
+    :isolated (let (g (global-names))
       (is (> (count g) 100))
       (is (includes? g 'map))
       (is (includes? g 'rand/int))

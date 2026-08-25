@@ -217,7 +217,7 @@ your code will read like the standard library.
 ```
 foo?         ; predicate — returns a boolean (int? empty? starts-with?)
 *foo*         ; dynamic var or module-level config/state (defdyn *log-level*)
-foo->bar      ; conversion (string->number, int->char); a module-rooted
+foo->bar      ; conversion (string/->number, int->char); a module-rooted
               ; conversion drops the source: string/->bytes, string/bytes->
 ```
 
@@ -957,7 +957,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `string/starts-with?` `string/ends-with?` `string/->list` `string/list->`
   `string/->bytes` `string/bytes->`.
   **Bare (core, not in the module):** `str` `pr-str` `index-of` `includes?`
-  `string->number` `->string` (the polymorphic Display op) `name`.
+  `string/->number` `->string` (the polymorphic Display op) `name`.
   There is no `symbol->string`/`number->string` — use `str`, `->string` or `name`
   (ADR-239 removed both as redundant).
 - **unicode**: `string/->graphemes` (extended grapheme clusters as a vector of

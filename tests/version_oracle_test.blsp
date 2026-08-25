@@ -93,12 +93,12 @@
     (cond
       (not (= expected actual))
         (do
-          (println "ORACLE MISMATCH: v="
+          (io/puts "ORACLE MISMATCH: v="
             vs " constraint=\"" cstr "\" reference=" expected " version.blsp=" actual)
           false)
       (not (= actual via-compiled))
         (do
-          (println "COMPILE INCONSISTENCY: v="
+          (io/puts "COMPILE INCONSISTENCY: v="
             vs " constraint=\"" cstr "\" satisfies?=" actual " match?=" via-compiled)
           false)
       else true)))

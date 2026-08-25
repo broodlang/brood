@@ -5,8 +5,7 @@
 (defmodule gen-test (:use test) (:use gen))
 
 (describe "gen: cast and call"
-  :isolated
-  (defprocess counter
+  :isolated (defprocess counter
     (n)
     (cast :inc (+ n 1))
     (cast [:add m] (+ n m))
@@ -38,8 +37,7 @@
       (assert= (call c :value) 3))))
 
 (describe "gen: sleep"
-  :isolated
-  (test "sleep waits roughly the requested time"
+  :isolated (test "sleep waits roughly the requested time"
     (let (t (os/now)) (sleep 30) (is (>= (- (os/now) t) 25))))
   ; allow scheduler slack
   (test "sleep does not consume queued messages"
@@ -48,8 +46,7 @@
     (assert= (receive (:keep :present) (after 0 :eaten)) :present)))
 
 (describe "gen: concurrent servers don't cross wires"
-  :isolated
-  (defprocess echo (state) (call [:double x] [(* x 2) state]))
+  :isolated (defprocess echo (state) (call [:double x] [(* x 2) state]))
 
   (test "two gen-calls to two servers get their own replies"
     (let (a (spawn-server echo nil) b (spawn-server echo nil))
@@ -129,8 +126,7 @@
       (assert= (call s :last) :normal))))
 
 (describe "gen: init runs once"
-  :isolated
-  (defprocess doubler
+  :isolated (defprocess doubler
     (n)
     (init (* n 2))
     ; transform the seed, once
@@ -147,8 +143,7 @@
 ; 20+1+1, not re-doubled
 
 (describe "gen: terminate runs on stop"
-  :isolated
-  (defprocess closer
+  :isolated (defprocess closer
     (owner)
     (query :ping :pong)
     (terminate reason (send owner [:closed reason])))
@@ -200,8 +195,7 @@
       (assert= (call-timeout s :ping 2000) :pong))))
 
 (describe "gen: named and linked spawn"
-  :isolated
-  (defprocess echo2 (s) (query [:echo x] x))
+  :isolated (defprocess echo2 (s) (query [:echo x] x))
 
   (test "spawn-server-named registers the server for whereis"
     (let (p (spawn-server-named :echo-srv echo2 nil))
