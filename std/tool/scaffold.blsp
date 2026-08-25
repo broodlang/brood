@@ -196,20 +196,23 @@ test discovery, lints, release, config)."
 (defn- project-gen-main-template
   (nm)
   (str "(defmodule main \""
-    nm " — a stateful process built with the gen framework.\"\n" ")\n" "\n"
-    ";; A counter server. State `n` is the process's; messages drive it.\n" "(defprocess counter\n"
-    "  (n)\n" "  ;; async: bump the count\n" "  (cast :inc (+ n 1))\n" "  ;; async: add m\n"
-    "  (cast [:add m] (+ n m))\n" "  ;; sync: reply n, state unchanged\n" "  (call :value [n n]))\n"
-    "\n" "(defn main ()\n" "  \"Entry point: start a counter, drive it, read the result.\"\n"
+    nm " — a stateful process built with the gen framework.\"\n"
+    "  ;; `(:use gen)` refers defprocess / spawn-server / cast / call bare.\n" "  (:use gen))\n"
+    "\n" ";; A counter server. State `n` is the process's; messages drive it.\n"
+    "(defprocess counter\n" "  (n)\n" "  ;; async: bump the count\n" "  (cast :inc (+ n 1))\n"
+    "  ;; async: add m\n" "  (cast [:add m] (+ n m))\n" "  ;; sync: reply n, state unchanged\n"
+    "  (call :value [n n]))\n" "\n" "(defn main ()\n"
+    "  \"Entry point: start a counter, drive it, read the result.\"\n"
     "  (let (c (spawn-server counter 0))\n" "    (cast c :inc)\n" "    (cast c :inc)\n"
     "    (cast c [:add 10])\n" "    (println \"counter =\" (call c :value))))\n"))
 
 (defn- project-gen-test-template
   (nm)
-  (str ";; `(:use main)` brings `counter`; `` the `cast`/`call` API;\n"
+  (str ";; `(:use main)` brings `counter`; `(:use gen)` the `cast`/`call` API;\n"
     ";; `(:use test)` the macros. :isolated — these spawn processes.\n"
-    "(defmodule main-test (:use main) (:use test))\n" "\n" "(describe \"counter\"\n" "  :isolated\n"
-    "  (test \"casts thread state; a call reads it\"\n" "    (let (c (spawn-server counter 0))\n"
+    "(defmodule main-test (:use main) (:use gen) (:use test))\n" "\n" "(describe \"counter\"\n"
+    "  :isolated\n" "  (test \"casts thread state; a call reads it\"\n"
+    "    (let (c (spawn-server counter 0))\n"
     "      (cast c :inc) (cast c :inc) (cast c [:add 10])\n"
     "      (assert= (call c :value) 12))))\n"))
 

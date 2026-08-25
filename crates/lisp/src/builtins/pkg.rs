@@ -11,6 +11,33 @@ use crate::error::{error_codes, LispError, LispResult};
 
 use super::numeric::{arg, expect_int, expect_string};
 
+/// Reject a git *operand* (a URL, ref, or commit) that git's own option parser
+/// would read as an OPTION rather than a value.
+///
+/// These strings arrive from a manifest's `:git` dependency — including a
+/// **transitive** dependency's manifest, which the user never reads — and land in
+/// argv positions git parses itself. A dependency URL of
+/// `--upload-pack=touch /tmp/pwned; git-upload-pack` makes `git ls-remote` run that
+/// shell command, so `nest fetch` alone (no package code executed, no build script)
+/// is arbitrary code execution. Verified: the file appeared.
+///
+/// Nothing legitimate is lost by refusing the class outright — git refuses to
+/// *create* a ref whose name starts with `-`, and no transport URL does either. The
+/// check lives here, in the mechanism that spawns the process, rather than in the
+/// Brood policy layer: every caller of `git` goes through these primitives, so this
+/// is the one place it cannot be forgotten.
+fn reject_option_like(prim: &str, what: &str, value: &str) -> Result<(), LispError> {
+    if value.starts_with('-') {
+        return Err(LispError::runtime(format!(
+            "{prim}: refusing the {what} {value:?} — it starts with '-', which git would \
+             parse as an option, not a value"
+        ))
+        .with_code(error_codes::SUBPROCESS_FAILED)
+        .with_hint("a git URL or ref never starts with '-'; check the manifest that declares it"));
+    }
+    Ok(())
+}
+
 /// Run `git` with `args` (optionally in `cwd`), capturing stdout+stderr. The
 /// shared mechanism behind the package manager's git primitives (ADR-037).
 pub(super) fn run_git(args: &[&str], cwd: Option<&str>) -> Result<std::process::Output, LispError> {
@@ -51,6 +78,8 @@ pub(super) fn git_or_err(args: &[&str], cwd: Option<&str>) -> Result<(), LispErr
 pub(super) fn git_resolve_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let url = expect_string(heap, "%git-resolve-ref", arg(args, 0))?;
     let r = expect_string(heap, "%git-resolve-ref", arg(args, 1))?;
+    reject_option_like("%git-resolve-ref", "URL", &url)?;
+    reject_option_like("%git-resolve-ref", "ref", &r)?;
     let out = run_git(&["ls-remote", &url, &r], None)?;
     if !out.status.success() {
         return Err(LispError::runtime(format!(
@@ -93,6 +122,7 @@ pub(super) fn git_resolve_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 /// which tag a range picks is Brood policy in `std/tool/package.blsp`.
 pub(super) fn git_list_tags(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let url = expect_string(heap, "%git-list-tags", arg(args, 0))?;
+    reject_option_like("%git-list-tags", "URL", &url)?;
     let out = run_git(&["ls-remote", "--tags", "--refs", &url], None)?;
     if !out.status.success() {
         return Err(LispError::runtime(format!(
@@ -174,6 +204,11 @@ pub(super) fn git_clone(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     let dest = expect_string(heap, "%git-clone", arg(args, 1))?;
     let gref = expect_string(heap, "%git-clone", arg(args, 2))?;
     let commit = expect_string(heap, "%git-clone", arg(args, 3))?;
+    // Every one of these lands in an argv slot git parses; see `reject_option_like`.
+    reject_option_like("%git-clone", "URL", &url)?;
+    reject_option_like("%git-clone", "destination", &dest)?;
+    reject_option_like("%git-clone", "ref", &gref)?;
+    reject_option_like("%git-clone", "commit", &commit)?;
 
     if let Some(parent) = std::path::Path::new(&dest).parent() {
         if !parent.as_os_str().is_empty() {

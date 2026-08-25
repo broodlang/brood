@@ -42,17 +42,18 @@ use lsp_types::request::{
 };
 use lsp_types::{
     CodeActionParams, CodeActionProviderCapability, CompletionItem, CompletionOptions,
-    CompletionParams, Diagnostic, DiagnosticSeverity, DocumentFormattingParams,
+    CompletionParams, Diagnostic, DiagnosticSeverity, DocumentChanges, DocumentFormattingParams,
     DocumentHighlightParams, DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams,
     FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams, HoverParams,
-    HoverProviderCapability, InlayHintParams, OneOf, Position, PositionEncodingKind,
-    PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions,
-    RenameParams, SelectionRangeParams, SelectionRangeProviderCapability,
+    HoverProviderCapability, InlayHintParams, OneOf, OptionalVersionedTextDocumentIdentifier,
+    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
+    RenameOptions, RenameParams, SelectionRangeParams, SelectionRangeProviderCapability,
     SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
     SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
-    SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    SignatureHelpParams, TextDocumentEdit, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 
 use brood::core::value::Value;
@@ -170,31 +171,75 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         ..Default::default()
     };
 
-    // The initialize/initialized handshake. We read one client capability:
-    // whether it understands snippet syntax in completion items (`$0`, `${1:…}`),
-    // so the `(impl …)` op-completion sends a fillable skeleton only when the
-    // editor can navigate it — and a plain skeleton otherwise, never literal `$`.
+    // The initialize/initialized handshake, from which we read the two client
+    // capabilities that change what we may send back (see [`ClientCaps`]).
     let init = connection.initialize(serde_json::to_value(capabilities)?)?;
-    let snippet_support = serde_json::from_value::<lsp_types::InitializeParams>(init)
-        .ok()
-        .and_then(|params| {
-            params
-                .capabilities
-                .text_document?
-                .completion?
-                .completion_item?
-                .snippet_support
-        })
-        .unwrap_or(false);
+    let caps = ClientCaps::from_initialize(init);
     // Run the loop, then drop `connection` *before* the join: its `Sender` keeps
     // the stdout writer thread alive, so the thread only sees its channel close
     // (and exits, letting `io_threads.join()` return) once this drop happens.
     // Skipping the drop would deadlock the join.
-    main_loop(&connection, snippet_support)?;
+    let clean = main_loop(&connection, caps)?;
     drop(connection);
 
     io_threads.join()?;
+    // The spec: a server that receives `exit` *without* a preceding `shutdown`
+    // exits with code 1. It's how a supervising editor tells an orderly stop
+    // from one it had to force — reporting 0 for both makes a forced kill look
+    // like a clean handshake.
+    if !clean {
+        std::process::exit(1);
+    }
     Ok(())
+}
+
+/// The client capabilities that change what the server is allowed to send back.
+/// Both default to `false`, the conservative reading for a client that declared
+/// nothing.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ClientCaps {
+    /// The editor understands snippet syntax in completion items (`$0`,
+    /// `${1:…}`), so the `(impl …)` op-completion may send a fillable skeleton.
+    /// Without it we send a plain skeleton rather than literal `$`s.
+    snippet: bool,
+    /// The editor understands `WorkspaceEdit.documentChanges` — the *versioned*
+    /// edit shape. It matters for rename: a bare `changes` map carries no
+    /// document version, so a client applies it blind, and an edit computed
+    /// against version N lands on a buffer at version N+k that the user kept
+    /// typing into. With `documentChanges` each file's edits carry the version
+    /// they were computed against and a stale one is rejected instead of
+    /// corrupting the file.
+    document_changes: bool,
+}
+
+impl ClientCaps {
+    fn from_initialize(init: serde_json::Value) -> Self {
+        let Ok(params) = serde_json::from_value::<lsp_types::InitializeParams>(init) else {
+            return ClientCaps::default();
+        };
+        let snippet = params
+            .capabilities
+            .text_document
+            .as_ref()
+            .and_then(|td| {
+                td.completion
+                    .as_ref()?
+                    .completion_item
+                    .as_ref()?
+                    .snippet_support
+            })
+            .unwrap_or(false);
+        let document_changes = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|w| w.workspace_edit.as_ref()?.document_changes)
+            .unwrap_or(false);
+        ClientCaps {
+            snippet,
+            document_changes,
+        }
+    }
 }
 
 /// Per-open-document state: the source text plus its cached [`Analysis`]. The
@@ -225,10 +270,38 @@ pub(crate) struct Analysis {
     pub(crate) line_index: LineIndex,
 }
 
+/// Run `f`, containing a panic instead of letting it kill the process.
+///
+/// The server is a long-lived host for a lot of analysis it doesn't own — the
+/// CST walkers, the advisory checker, the Brood formatter — and it speaks over
+/// stdio, so an unwind out of `main_loop` doesn't fail one request, it takes the
+/// editor's entire language support down with no diagnostic beyond a line on a
+/// stderr nobody reads. Same reasoning (and same shape) as the checker's own
+/// containment in `types::check` — advisory work must not be able to tear down
+/// its host. `AssertUnwindSafe` because `Interp`/`Documents` are `&mut`; the
+/// state a panic could leave inconsistent is the interpreter's, and `check_file`
+/// restores its own (roots, compile-ns, imports) on the panic path.
+fn contain_panic<T>(what: &str, f: impl FnOnce() -> T) -> Option<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => Some(v),
+        Err(_) => {
+            // The default hook has already printed the payload + location.
+            eprintln!(
+                "brood-lsp: internal error handling `{what}` — request abandoned, server continues"
+            );
+            None
+        }
+    }
+}
+
+/// Run the request loop until the client stops us. `Ok(true)` for an orderly
+/// end (the `shutdown`/`exit` handshake, or the stream simply closing);
+/// `Ok(false)` when `exit` arrived with no preceding `shutdown`, which the
+/// caller reports as a nonzero exit status.
 fn main_loop(
     connection: &Connection,
-    snippet_support: bool,
-) -> Result<(), Box<dyn Error + Sync + Send>> {
+    caps: ClientCaps,
+) -> Result<bool, Box<dyn Error + Sync + Send>> {
     let mut docs: Documents = HashMap::new();
     // One interpreter, loaded with the prelude + builtins, answers introspection
     // queries (completion candidates, hover signatures) and runs the advisory
@@ -246,18 +319,43 @@ fn main_loop(
                 // `handle_shutdown` performs the shutdown/exit handshake and
                 // returns true when it was that request, at which point we stop.
                 if connection.handle_shutdown(&req)? {
-                    return Ok(());
+                    return Ok(true);
                 }
-                let resp = handle_request(&docs, &mut interp, snippet_support, req);
+                // A request MUST be answered even when the handler blows up —
+                // an editor that never sees a response just wedges that feature.
+                let (id, method) = (req.id.clone(), req.method.clone());
+                let resp = contain_panic(&method, || handle_request(&docs, &mut interp, caps, req))
+                    .unwrap_or_else(|| {
+                        Response::new_err(
+                            id,
+                            ErrorCode::InternalError as i32,
+                            format!("internal error handling {method}"),
+                        )
+                    });
                 connection.sender.send(Message::Response(resp))?;
             }
             Message::Response(_) => {} // we issue no server→client requests yet
+            // `exit` reaching the loop means it arrived on its own: a `shutdown`
+            // first would have had `handle_shutdown` swallow the pair above.
+            Message::Notification(not) if not.method == lsp_types::notification::Exit::METHOD => {
+                return Ok(false);
+            }
             Message::Notification(not) => {
-                handle_notification(connection, &mut docs, &mut interp, &mut bootstrapped, not)?;
+                // A notification has no reply to salvage; contain and carry on,
+                // so one poisonous buffer doesn't end the session. The `send`
+                // failure inside still propagates (the client is gone).
+                let method = not.method.clone();
+                if let Some(res) = contain_panic(&method, || {
+                    handle_notification(connection, &mut docs, &mut interp, &mut bootstrapped, not)
+                }) {
+                    res?;
+                }
             }
         }
     }
-    Ok(())
+    // The stream closed under us (the editor went away) — not our doing, but
+    // not an error either.
+    Ok(true)
 }
 
 /// Build the analysis of a document — its CST, scope tree, and line index.
@@ -282,17 +380,22 @@ fn analyze(text: &str) -> Analysis {
 /// offsets through a fresh [`LineIndex`] over the *current* `text` — edits within
 /// one batch compound, so each must see the text the prior edit produced (rebuild
 /// is a single byte scan, cheap). `LineIndex::offset` already clamps a past-EOF
-/// position; the extra `min(len)` + `start <= end` guard keeps the splice
-/// panic-free on any degenerate range a client might send.
+/// position, so the splice is panic-free on any degenerate range a client sends.
+///
+/// A range whose **end precedes its start** is normalized by swapping rather
+/// than dropped. Dropping is the worse failure: the client believes the edit
+/// landed, so our mirror silently diverges from the real buffer and *every*
+/// later position — every hover, every rename range — is computed against text
+/// the user isn't looking at. Splicing the span the client described, in the
+/// order it makes sense, at least keeps the two in step.
 fn apply_content_change(text: &mut String, change: &lsp_types::TextDocumentContentChangeEvent) {
     match change.range {
         Some(range) => {
             let idx = LineIndex::new(text);
-            let start = (idx.offset(text, range.start) as usize).min(text.len());
-            let end = (idx.offset(text, range.end) as usize).min(text.len());
-            if start <= end {
-                text.replace_range(start..end, &change.text);
-            }
+            let a = idx.offset(text, range.start) as usize;
+            let b = idx.offset(text, range.end) as usize;
+            let (start, end) = (a.min(b), a.max(b));
+            text.replace_range(start..end, &change.text);
         }
         None => text.clone_from(&change.text),
     }
@@ -319,7 +422,7 @@ fn extract<P: serde::de::DeserializeOwned>(req: Request) -> Result<(RequestId, P
 fn handle_request(
     docs: &Documents,
     interp: &mut Interp,
-    snippet_support: bool,
+    caps: ClientCaps,
     req: Request,
 ) -> Response {
     match req.method.as_str() {
@@ -345,14 +448,7 @@ fn handle_request(
             let result = docs.get(&pos.text_document.uri).map(|doc| {
                 let a = &doc.analysis;
                 let offset = a.line_index.offset(&doc.text, pos.position);
-                completion::completions(
-                    interp,
-                    &a.scope,
-                    &a.cst,
-                    &doc.text,
-                    offset,
-                    snippet_support,
-                )
+                completion::completions(interp, &a.scope, &a.cst, &doc.text, offset, caps.snippet)
             });
             Response::new_ok(id, result)
         }
@@ -510,6 +606,9 @@ fn handle_request(
             let pos = p.text_document_position;
             let uri = pos.text_document.uri;
             // Local → single-file edit; global → a project-wide `WorkspaceEdit`.
+            // Whatever comes back is sanitized + version-stamped before it goes
+            // on the wire (see `finish_workspace_edit`) — a rename is the one
+            // request whose result rewrites the user's files.
             let result = match docs.get(&uri) {
                 Some(doc) => {
                     let a = &doc.analysis;
@@ -541,7 +640,7 @@ fn handle_request(
                 }
                 None => None,
             };
-            Response::new_ok(id, result)
+            Response::new_ok(id, result.map(|e| finish_workspace_edit(docs, caps, e)))
         }
         SemanticTokensFullRequest::METHOD => {
             let (id, p) = match extract::<SemanticTokensParams>(req) {
@@ -674,6 +773,103 @@ fn handle_request(
             format!("unsupported request: {}", req.method),
         ),
     }
+}
+
+/// Make a [`WorkspaceEdit`] safe to hand an editor: sort each file's edits,
+/// drop exact duplicates and any that would **overlap** a kept one, and — when
+/// the client understands it — restamp the result as versioned
+/// `documentChanges`.
+///
+/// Both halves guard against silent file corruption, which is the failure mode
+/// a rename has and no other request does:
+///
+/// * **Overlap.** The spec says the edits for one document must not overlap, and
+///   leaves the behaviour undefined when they do; clients variously apply both
+///   (duplicating text), apply one, or reject the lot. Our cross-file rename
+///   unions several independent scans — the qualified pass, the bare pass, and
+///   one accessor cascade per record field — each deduping only within itself,
+///   so two passes agreeing on a span is a shape the type system doesn't rule
+///   out. Dropping the loser is always safe: the text it wanted to write is
+///   already being written by the edit it overlaps.
+/// * **Version.** A bare `changes` map says nothing about which document version
+///   the ranges were computed against, so a client applies it to whatever the
+///   buffer holds *now* — and a rename over a big project can easily take longer
+///   than the user's next keystroke. `documentChanges` carries each file's
+///   version (an unopened file gets `None`, which correctly means "don't
+///   check"), so a stale edit is refused instead of landing on shifted text.
+fn finish_workspace_edit(docs: &Documents, caps: ClientCaps, edit: WorkspaceEdit) -> WorkspaceEdit {
+    let Some(changes) = edit.changes else {
+        return edit;
+    };
+    let cleaned: HashMap<Uri, Vec<TextEdit>> = changes
+        .into_iter()
+        .map(|(uri, edits)| {
+            let n = edits.len();
+            let kept = non_overlapping(edits);
+            if kept.len() != n {
+                eprintln!(
+                    "brood-lsp: dropped {} overlapping/duplicate edit(s) for {}",
+                    n - kept.len(),
+                    uri.as_str()
+                );
+            }
+            (uri, kept)
+        })
+        .collect();
+    if !caps.document_changes {
+        return WorkspaceEdit {
+            changes: Some(cleaned),
+            ..edit
+        };
+    }
+    let mut edits: Vec<TextDocumentEdit> = cleaned
+        .into_iter()
+        .map(|(uri, edits)| TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                version: docs.get(&uri).map(|d| d.version),
+                uri,
+            },
+            edits: edits.into_iter().map(OneOf::Left).collect(),
+        })
+        .collect();
+    // A stable order so the same rename produces the same payload twice.
+    edits.sort_by(|a, b| {
+        a.text_document
+            .uri
+            .as_str()
+            .cmp(b.text_document.uri.as_str())
+    });
+    WorkspaceEdit {
+        changes: None,
+        document_changes: Some(DocumentChanges::Edits(edits)),
+        ..edit
+    }
+}
+
+/// Sort `edits` by position and keep only a non-overlapping, duplicate-free
+/// prefix-closed subset (first writer wins at any given span).
+fn non_overlapping(mut edits: Vec<TextEdit>) -> Vec<TextEdit> {
+    let key = |r: &Range| (r.start.line, r.start.character, r.end.line, r.end.character);
+    edits.sort_by_key(|e| key(&e.range));
+    let mut out: Vec<TextEdit> = Vec::with_capacity(edits.len());
+    for e in edits {
+        // An inverted range is not something we ever build; refuse to emit one.
+        if (e.range.start.line, e.range.start.character) > (e.range.end.line, e.range.end.character)
+        {
+            continue;
+        }
+        let overlaps = out.last().is_some_and(|prev| {
+            let (pl, pc) = (prev.range.end.line, prev.range.end.character);
+            let (sl, sc) = (e.range.start.line, e.range.start.character);
+            // Touching end-to-start is fine; strictly inside the previous edit
+            // (or an exact repeat of a zero-width insert) is not.
+            (sl, sc) < (pl, pc) || (prev.range == e.range)
+        });
+        if !overlaps {
+            out.push(e);
+        }
+    }
+    out
 }
 
 fn handle_notification(
@@ -929,17 +1125,25 @@ fn typecheck_diagnostics(
         let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
         for (pos_opt, msg) in check_file(&mut interp.heap, &forms) {
             if let Some(pos) = pos_opt {
-                // `Pos` is 1-based; LSP `Position` is 0-based. Refine the range
-                // from the form start to the *offending token* where we can read
-                // it off the CST (the named symbol in an "unbound symbol: X", or
-                // a call's operator) — else fall back to a 1-char marker the
-                // editor widens. `saturating_*` keeps the edges panic-free.
-                let line = pos.line.saturating_sub(1);
-                let col = pos.col.saturating_sub(1);
-                let range = refine_diagnostic_range(cst_root, text, index, line, col, &msg)
+                // The checker reports a reader `Pos`: 1-based line, 1-based
+                // **character** column. LSP wants 0-based line + UTF-16 column,
+                // so the projection goes `Pos → byte offset → Position` through
+                // the `LineIndex` — never `Pos.col` used *as* a `character`,
+                // which drifts by one per astral char ahead of the column and
+                // put both the squiggle and the quick-fix edit anchored to it on
+                // the wrong text (an emoji in a string earlier on the line was
+                // enough).
+                let off = index.offset_of_char_pos(text, pos);
+                // Refine from the form start to the *offending token* where we
+                // can read it off the CST (the named symbol in an "unbound
+                // symbol: X", or a call's operator) — else fall back to a
+                // one-character marker the editor widens.
+                let range = refine_diagnostic_range(cst_root, text, index, off, &msg)
                     .unwrap_or_else(|| {
-                        let start = Position::new(line, col);
-                        Range::new(start, Position::new(line, col.saturating_add(1)))
+                        Range::new(
+                            index.position(text, off),
+                            index.position(text, index.next_char(text, off)),
+                        )
                     });
                 let mut diag = Diagnostic::new_simple(range, msg);
                 diag.severity = Some(DiagnosticSeverity::WARNING);
@@ -956,15 +1160,15 @@ fn typecheck_diagnostics(
 /// really about. For `unbound symbol: NAME`, the first matching symbol token in
 /// the form; otherwise the form's operator (arity / type-misuse are about the
 /// call head). `None` if neither is found — the caller uses a 1-char marker.
+/// `off` is the finding's **byte** offset (the caller projected the reader `Pos`
+/// through the line index), so this never re-does column arithmetic.
 fn refine_diagnostic_range(
     root: &cst::Node,
     text: &str,
     index: &LineIndex,
-    line: u32,
-    col: u32,
+    off: u32,
     msg: &str,
 ) -> Option<Range> {
-    let off = index.offset(text, Position::new(line, col));
     let form = root.node_at(off)?;
     let span = if let Some(name) = msg.strip_prefix("unbound symbol: ") {
         find_symbol(form, text, name.trim())?
@@ -1005,3 +1209,9 @@ fn send_diagnostics(
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod server_tests;
+
+/// Robustness regressions: the protocol/position failures that are fatal or
+/// silent rather than merely wrong. See the module docs.
+#[cfg(test)]
+#[path = "robustness_tests.rs"]
+mod robustness_tests;

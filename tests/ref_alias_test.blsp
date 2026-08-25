@@ -1,0 +1,152 @@
+;; One-shot reply aliases — `%ref-deactivate` (OTP 24's `{alias, demonitor}`).
+;;
+;; A `ref` is the unforgeable token a request/reply pair is matched by. Deactivating one
+;; makes the KERNEL drop any later message addressed to it — `[:tag <ref> …]` — at
+;; DELIVERY, so it never enters the mailbox and no later selective receive ever re-scans
+;; it. That is what stops a reply posted after `gen/call-timeout`'s deadline from
+;; accumulating in the caller's mailbox forever.
+;;
+;; :isolated throughout — every case measures the *test process's own* mailbox, which
+;; only works if nothing else is sending to it.
+
+(defmodule ref-alias-test (:use test))
+
+(describe "%ref-deactivate: a message addressed to a deactivated ref is dropped"
+  :isolated
+
+  (test "a self-send tagged with a deactivated ref never enters the mailbox"
+    ;; The sender is RUNNING (not parked), so this exercises the wire/`deliver_envelope`
+    ;; path rather than the L1 parked-receiver fast path.
+    (let (r (ref) before (proc/mailbox-size (self)))
+      (%ref-deactivate r)
+      (send (self) [:reply r :late])
+      (sleep 30)
+      (assert= (proc/mailbox-size (self)) before)))
+
+  (test "an UNRELATED ref still arrives — deactivation is per-ref, not a mute switch"
+    (let (dead (ref) live (ref))
+      (%ref-deactivate dead)
+      (send (self) [:reply dead :dropped])
+      (send (self) [:reply live :kept])
+      (assert= (receive ([:reply ^live v] v) (after *test-wait-ms* :nothing)) :kept)
+      ;; and the dropped one is not merely *behind* it — it was never queued
+      (assert= (receive ([:reply ^dead v] v) (after 30 :never-arrived)) :never-arrived)))
+
+  (test "deactivation only affects what arrives NEXT — already-queued stays queued"
+    ;; Deliberately `demonitor`-without-flush semantics: the primitive is about
+    ;; delivery, and `gen/call-timeout` pairs it with an explicit flush.
+    (let (r (ref))
+      (send (self) [:reply r :already-here])
+      (sleep 20)
+      (%ref-deactivate r)
+      (assert= (receive ([:reply ^r v] v) (after *test-wait-ms* :nothing)) :already-here)))
+
+  (test "the ref must be in the reply-token position of a keyword-tagged vector"
+    ;; The check is O(1) precisely because it looks in one place. A ref somewhere else
+    ;; is not an alias address, so the message is delivered normally.
+    (let (r (ref))
+      (%ref-deactivate r)
+      (send (self) [:reply :not-here r])
+      (assert= (receive ([:reply :not-here x] (= x r)) (after *test-wait-ms* :nothing))
+        true)))
+
+  (test "a deactivated alias is ONE-shot: the second message with that ref arrives"
+    ;; The entry is forgotten the moment it swallows a reply — which is what keeps the
+    ;; per-mailbox set at zero in steady state instead of at its cap.
+    (let (r (ref))
+      (%ref-deactivate r)
+      (send (self) [:reply r :first])
+      (sleep 20)
+      (send (self) [:reply r :second])
+      (assert= (receive ([:reply ^r v] v) (after *test-wait-ms* :nothing)) :second)))
+
+  (test "a PARKED receiver drops it too — the L1 local-send fast path checks as well"
+    ;; The two delivery paths are separate code: a local send to a **parked** receiver
+    ;; copies heap-to-heap (`try_deliver_local`) and never builds a wire `Message`, so
+    ;; it needs its own check. The receiver has to be a plain spawned process sitting in
+    ;; a bare `receive` — a test body's own receive blocks rather than parking (the
+    ;; native-nested carve-out), so sending to `(self)` only ever exercises the wire
+    ;; path. Verified with BROOD_L1_STATS=1: this send is an L1 hit.
+    (let (me (self)
+          p (spawn
+              (let (r (ref))
+                (%ref-deactivate r)
+                (send me [:armed r])
+                ;; parked here when the aliased message is delivered
+                (receive ([:go from] (send from [:mbox (proc/mailbox-size (self))]))))))
+      (let (r (receive ([:armed r] r) (after *test-wait-ms* :no-arm)))
+        (send p [:reply r :late])
+        (send p [:go me])
+        (assert= (receive ([:mbox n] n) (after *test-wait-ms* :no-report)) 0))))
+
+  (test "a monitor's [:down] is dropped too — the wire delivery path checks as well"
+    ;; A `[:down <mref> pid reason]` is built by the KERNEL and handed to `deliver`
+    ;; directly (`monitor::fire_down`), never through the local-send path — so it is
+    ;; what exercises the wire-format check. It also happens to be the shape OTP's own
+    ;; alias rides on (`{alias, demonitor}`): the monitor ref *is* the alias there.
+    (let (p (spawn (sleep 10))
+          m (monitor p))
+      (%ref-deactivate m)
+      (assert= (receive ([:down ^m _ _] :arrived) (after 200 :never-arrived))
+        :never-arrived)))
+
+  (test "%ref-deactivate rejects a non-ref"
+    (is (includes? (error-of (%ref-deactivate 7)) "ref")))
+
+  (test "deactivating twice is idempotent"
+    (let (r (ref) before (proc/mailbox-size (self)))
+      (%ref-deactivate r)
+      (%ref-deactivate r)
+      (send (self) [:reply r :late])
+      (sleep 30)
+      (assert= (proc/mailbox-size (self)) before))))
+
+(describe "%ref-deactivate: the set is bounded, and overflowing it fails gracefully"
+  :isolated
+
+  ;; The per-mailbox set is a fixed 8-entry array — it cannot grow, so a process that
+  ;; times out endlessly against a server that never answers cannot leak. Past the cap
+  ;; the OLDEST entry is evicted, which restores exactly the pre-alias behaviour for
+  ;; that one abandoned ref (its reply, if it ever comes, queues as it always did).
+  ;; Never a wrong drop.
+  (test "the 8 most recent deactivations are honoured; the 9th evicts the oldest"
+    (let (refs (mapv (fn (_) (ref)) (range 0 9)))
+      (doseq (r refs) (%ref-deactivate r))
+      ;; the oldest (index 0) was evicted by the 9th — its message is delivered
+      (send (self) [:reply (nth refs 0) :evicted])
+      ;; every one still in the set is dropped
+      (doseq (r (rest refs)) (send (self) [:reply r :dropped]))
+      (sleep 40)
+      (assert= (proc/mailbox-size (self)) 1)
+      (assert= (receive ([:reply _ v] v) (after *test-wait-ms* :nothing)) :evicted))))
+
+(describe "gen/call-timeout: a reply posted after the deadline never lands"
+  :isolated
+
+  ;; The end-to-end shape the mechanism exists for: a slow-but-LIVE server that answers
+  ;; strictly after the caller gave up. Flushing at the deadline cannot help here —
+  ;; the reply has not been sent yet — so without the alias it queues forever.
+  (gen/defprocess laggard
+    (s)
+    (call [:slow ms] (do (sleep ms) [:late s])))
+
+  (test "the caller's mailbox is EMPTY after the late reply is posted"
+    (let (srv (gen/spawn-server laggard nil)
+          me (self)
+          _ (spawn
+              (let (outcome (try
+                              (gen/call-timeout srv [:slow 250] 30)
+                              (catch e :timed-out)))
+                ;; well past the server's reply, so it has certainly been sent
+                (sleep 400)
+                (send me [:probe outcome (proc/mailbox-size (self))]))))
+      (assert= (receive ([:probe outcome n] [outcome n]) (after 8000 :no-report))
+        [:timed-out 0])
+      (gen/stop srv)))
+
+  (test "a normal call still works — the alias only fires on the give-up path"
+    (let (srv (gen/spawn-server laggard nil))
+      (assert= (gen/call-timeout srv [:slow 0] 3000) :late)
+      ;; and again, on the same server, after a real reply
+      (assert= (gen/call-timeout srv [:slow 5] 3000) :late)
+      (gen/stop srv))))

@@ -158,6 +158,30 @@ pub struct ClosureMsg {
     /// (and possibly unsendable) siblings don't ride along, and a closure capturing a
     /// sibling closure can't form a serialisation cycle through its defining frame.
     pub(crate) captured: Vec<(Symbol, Message)>,
+    /// Modules the receiving runtime must load before this closure's body can run
+    /// (KI-55). Auto-require (ADR-227/229) fires on the node that **compiles** a form;
+    /// a shipped closure arrives already expanded and resolved, so nothing on the
+    /// receiver triggers the load and a body calling `reflect/form-pos` dies with a bare
+    /// `unbound symbol` far from the cause. The sender — which *does* have the module
+    /// loaded, or the reference would not resolve for it either — names them here, and
+    /// the receiver weaves a load for each one it lacks into the rebuilt body (see
+    /// [`guard_form`]). Almost always empty (a bare-name body) or one element. See
+    /// [`ModuleNeed`].
+    pub(crate) modules: Vec<ModuleNeed>,
+}
+
+/// One module a shipped closure's body needs on the receiver (KI-55).
+///
+/// Two symbols, because the receiver has two different jobs: `probe` answers "is this
+/// already satisfied here?" with a single allocation-free global lookup (it is one
+/// qualified name the body actually references, so it is bound exactly when the module
+/// is loaded), and `module` is what gets `require-one`d when it is not. Deriving the
+/// module on the *sender* also keeps the receiver from having to re-resolve an alias or
+/// an intra-package root against its own tables.
+#[derive(Clone)]
+pub struct ModuleNeed {
+    pub(crate) module: Symbol,
+    pub(crate) probe: Symbol,
 }
 
 /// One arity clause of a [`ClosureMsg`] — the sendable (deep-copied) form of a
@@ -549,12 +573,40 @@ fn closure_to_message(
         });
     }
 
+    // Which modules the receiver must load first (KI-55). Skipped entirely for a
+    // destination inside THIS runtime — its processes share our globals, so every module
+    // this body references is loaded there by construction — and for the startup image,
+    // which restores into the runtime it was written from. What is left is exactly the
+    // case auto-require cannot reach: a closure crossing to another runtime (a node, or a
+    // second `Interp` in this process), where the receiver never compiles the body and so
+    // never infers its imports.
+    let modules =
+        if dest_runtime == Some(heap.runtime_tag()) || IMAGE_NATIVE_BY_NAME.with(|f| f.get()) {
+            Vec::new()
+        } else {
+            let mut candidates = Vec::new();
+            for arm in cl.arms.iter() {
+                for &form in &arm.body {
+                    collect_qualified_syms(heap, form, &mut candidates);
+                }
+                for &(_, d) in &arm.optionals {
+                    collect_qualified_syms(heap, d, &mut candidates);
+                }
+            }
+            if candidates.is_empty() {
+                Vec::new()
+            } else {
+                resolve_module_needs(heap, &candidates)
+            }
+        };
+
     visited.pop();
     Ok(ClosureMsg {
         name: cl.name,
         arms,
         doc: cl.doc.clone(),
         captured,
+        modules,
     })
 }
 
@@ -594,6 +646,117 @@ fn collect_symbols(heap: &Heap, form: Value, out: &mut std::collections::HashSet
         }
         _ => {}
     }
+}
+
+/// Is `name` a module name we are willing to hand to the loader? (KI-55.)
+///
+/// The list rides in from another node, and `require-one` resolves a module name to a
+/// **file path**. Cross-node closure shipping is authenticated (a cookie holder already
+/// has remote eval by design), so triggering a load is inside the threat model — but a
+/// name that can climb out of the module roots is not, so this admits only what a real
+/// module name looks like: slash-separated segments of `[A-Za-z0-9_.+*<>=!?-]`, no empty
+/// segment, no `.`/`..` segment, no leading/trailing slash, and a length cap.
+fn safe_module_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 200 {
+        return false;
+    }
+    name.split('/').all(|seg| {
+        !seg.is_empty()
+            && seg != "."
+            && seg != ".."
+            && seg
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.+*<>=!?-".contains(&b))
+    })
+}
+
+/// Collect every **qualified symbol** that appears in the closure-body form `form` as
+/// code, into `out` (KI-55) — the candidates [`resolve_module_needs`] then turns into the
+/// module list the receiver must load.
+///
+/// Two things this walk deliberately does *not* do, and one it does:
+///   - a `(quote …)` / `(quasiquote …)` subtree is data, not code, so it is skipped —
+///     `'json/x` must not drag `json` onto the receiver;
+///   - it resolves nothing: the only work per symbol is a name lookup, a `/` scan and a
+///     dedup against a handful of candidates, so the pass stays proportional to the
+///     deep-copy this rides alongside;
+///   - it dedups by symbol, so a body naming `math/sqrt` five times resolves it once.
+///
+/// The spine walk is iterative so a long body list can't overflow the stack.
+fn collect_qualified_syms(heap: &Heap, form: Value, out: &mut Vec<Symbol>) {
+    match form {
+        Value::Sym(s) => {
+            if value::symbol_name_ref(s).contains('/') && !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        Value::Pair(_) => {
+            // `(quote x)` / `(quasiquote x)` is data — skip the whole subtree.
+            if let Value::Pair(id) = form {
+                if let Value::Sym(h) = heap.pair(id).0 {
+                    if value::symbol_is(h, crate::core::keywords::QUOTE)
+                        || value::symbol_is(h, crate::core::keywords::QUASIQUOTE)
+                    {
+                        return;
+                    }
+                }
+            }
+            let mut cur = form;
+            while let Value::Pair(id) = cur {
+                let (car, cdr) = heap.pair(id);
+                collect_qualified_syms(heap, car, out);
+                cur = cdr;
+            }
+            collect_qualified_syms(heap, cur, out);
+        }
+        Value::Vector(id) => {
+            for item in heap.vector(id).to_vec() {
+                collect_qualified_syms(heap, item, out);
+            }
+        }
+        Value::Map(id) => {
+            for (k, v) in heap.map_entries(id) {
+                collect_qualified_syms(heap, k, out);
+                collect_qualified_syms(heap, v, out);
+            }
+        }
+        Value::Set(id) => {
+            for e in heap.set_elems(id) {
+                collect_qualified_syms(heap, e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Turn the qualified symbols a closure body mentions into the modules the receiver has to
+/// load (KI-55), deduped by module — normally zero or one entry.
+///
+/// A candidate is kept only when it is **bound as a global here**, which is what tells a
+/// genuine reference (auto-require loaded its module when this body was compiled) from a
+/// qualified-looking symbol that merely sits in the body. That filter is also what makes an
+/// unresolvable module on the receiver a real error rather than a false alarm: we only ever
+/// name modules we ourselves have. This is the resolving half, run once per *distinct*
+/// symbol — `module_to_require` interns and consults the import table, so it must not sit
+/// inside the walk.
+fn resolve_module_needs(heap: &Heap, candidates: &[Symbol]) -> Vec<ModuleNeed> {
+    let mut out: Vec<ModuleNeed> = Vec::new();
+    for &s in candidates {
+        if heap.env_get(EnvId::GLOBAL, s).is_none() {
+            continue; // not a resolved reference here — nothing to ask the receiver for
+        }
+        let Some(module) = crate::eval::derive::module_to_require(heap, s) else {
+            continue; // alias prefix, root-escape, or the bare `/` operator
+        };
+        if !safe_module_name(value::symbol_name_ref(module)) {
+            continue;
+        }
+        if out.iter().any(|n| n.module == module) {
+            continue;
+        }
+        out.push(ModuleNeed { module, probe: s });
+    }
+    out
 }
 
 /// Look `sym` up in the local frame chain rooted at `env`, stopping *before* the
@@ -719,12 +882,110 @@ fn from_message_timed(heap: &mut Heap, m: &Message) -> Value {
     }
 }
 
+/// Wrap `form` so the modules in `missing` are loaded **before it runs** (KI-55), or hand
+/// `form` back untouched when there are none — the overwhelmingly common case, and one
+/// that allocates nothing.
+///
+/// The load is woven into the closure's own body rather than run here, at rebuild time,
+/// for two reasons and they are both hard:
+///
+///   1. **`from_message` is not a place where Brood code may run.** It rebuilds a value
+///      graph whose half-built lists/vectors/maps live in unrooted Rust locals, and the
+///      selective-`receive` scan calls it **while holding the mailbox lock** (the
+///      peek-in-place branch of `mailbox::scan`). A module load evaluates arbitrary
+///      top-level code — it can collect, and `require-one` can `sleep` waiting out another
+///      process's in-flight load of the same feature, which under that lock is a deadlock.
+///   2. **A call site is where the error belongs.** Woven in, a module this node cannot
+///      load raises an ordinary Brood error naming the module, the reference, and the fact
+///      that the closure was shipped — from the call that needed it, instead of a bare
+///      `unbound symbol` at whatever line happens to touch the name first.
+///
+/// The emitted guard is built from **primitives and core special forms only** (`if`, `do`,
+/// `quote`, `fn`, `%try`) — a rebuilt body is never macroexpanded on the receiver, so
+/// `unless`/`try` would survive to the compiler as unexpanded calls:
+///
+/// ```text
+/// (do (if (bound? 'math/sqrt)
+///       nil
+///       (%try (fn () (require-one 'math))
+///             (fn (e) (throw (str "…needs module `math`…: " (if (map? e) (get e :message) e))))))
+///     <form>)
+/// ```
+///
+/// The `bound?` test makes it idempotent and self-retiring: once the module is loaded the
+/// guard is one primitive call per invocation, and a closure whose modules were already
+/// present here never got a guard in the first place.
+fn guard_form(heap: &mut Heap, missing: &[&ModuleNeed], form: Value) -> Value {
+    if missing.is_empty() {
+        return form;
+    }
+    let sym = |s: &str| Value::symbol(value::intern(s));
+    let mut out: Vec<Value> = Vec::with_capacity(missing.len() + 2);
+    out.push(sym("do"));
+    for need in missing {
+        let module = value::symbol_name_ref(need.module);
+        let probe = value::symbol_name_ref(need.probe);
+        if !safe_module_name(module) {
+            // The list arrived over a socket and a module name drives a filesystem path.
+            // Refuse to emit a load for it at all; the reference then fails as an ordinary
+            // unbound symbol, with this line to say why.
+            eprintln!(
+                "[shipped-closure] refusing to load module `{module}` (referenced as \
+                 `{probe}` by a closure shipped from another runtime): not a valid module name"
+            );
+            continue;
+        }
+        // (fn () (require-one 'module))
+        let q = heap.list(vec![sym("quote"), Value::symbol(need.module)]);
+        let load = heap.list(vec![sym("require-one"), q]);
+        let load_thunk = heap.list(vec![sym("fn"), Value::nil(), load]);
+        // (fn (e) (throw (str "…" (get e :message))))
+        let msg = heap.alloc_string(&format!(
+            "this closure was shipped from another runtime and needs module `{module}` \
+             (its body references `{probe}`), which this node cannot load: "
+        ));
+        // `(if (map? e) (get e :message) e)` — a structured error is a map, but a plain
+        // `(throw "…")` (which is what a missing module raises) binds the string itself.
+        let get_msg = heap.list(vec![
+            sym("get"),
+            sym("e"),
+            Value::keyword(value::intern("message")),
+        ]);
+        let is_map = heap.list(vec![sym("map?"), sym("e")]);
+        let reason = heap.list(vec![sym("if"), is_map, get_msg, sym("e")]);
+        let text = heap.list(vec![sym("str"), msg, reason]);
+        let throw = heap.list(vec![sym("throw"), text]);
+        let params = heap.list(vec![sym("e")]);
+        let handler = heap.list(vec![sym("fn"), params, throw]);
+        let try_load = heap.list(vec![sym("%try"), load_thunk, handler]);
+        // (if (bound? 'probe) nil <try_load>)
+        let q = heap.list(vec![sym("quote"), Value::symbol(need.probe)]);
+        let bound = heap.list(vec![sym("bound?"), q]);
+        let guard = heap.list(vec![sym("if"), bound, Value::nil(), try_load]);
+        out.push(guard);
+    }
+    if out.len() == 1 {
+        return form; // every need was refused — nothing to guard with
+    }
+    out.push(form);
+    heap.list(out)
+}
+
 /// Rebuild a serialised closure into `heap`. Body/optional-default forms are
 /// reconstructed as local data; captured frames are recreated (outermost first)
 /// and chained onto this process's global scope, so the closure's free globals
 /// resolve here. The result is a fresh, independent copy — a later redefinition
 /// of *this* function won't reach it, but globals it *references* still do.
 fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
+    // The modules this body needs that this runtime does NOT already have (KI-55). The
+    // probe check is one global lookup and no allocation, so a closure arriving into a
+    // runtime that already has its modules — every same-runtime send, every table read,
+    // and any node that has loaded them once — costs exactly that and nothing else.
+    let missing: Vec<&ModuleNeed> = c
+        .modules
+        .iter()
+        .filter(|need| heap.env_get(EnvId::GLOBAL, need.probe).is_none())
+        .collect();
     // Rebuild every arm's optional-default forms and body as local data.
     let arms = c
         .arms
@@ -733,9 +994,17 @@ fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
             let optionals = arm
                 .optionals
                 .iter()
-                .map(|(s, d)| (*s, from_message(heap, d)))
+                .map(|(s, d)| {
+                    let d = from_message(heap, d);
+                    // A default is evaluated at frame setup, *before* the body — so a
+                    // module a default needs has to be loaded ahead of it too.
+                    (*s, guard_form(heap, &missing, d))
+                })
                 .collect();
-            let body = arm.body.iter().map(|f| from_message(heap, f)).collect();
+            let mut body: Vec<Value> = arm.body.iter().map(|f| from_message(heap, f)).collect();
+            if let Some(first) = body.first().copied() {
+                body[0] = guard_form(heap, &missing, first);
+            }
             value::ClosureArm {
                 params: arm.params.clone(),
                 optionals,
@@ -1090,5 +1359,57 @@ mod chunk_tests {
         assert_eq!(text(chunk_flush(&mut carry)).as_deref(), Some("\u{fffd}"));
         assert!(carry.is_empty());
         assert!(chunk_flush(&mut carry).is_none()); // nothing left
+    }
+}
+
+#[cfg(test)]
+mod shipped_module_tests {
+    use super::safe_module_name;
+
+    /// What a real module name looks like — the curated stdlib, an intra-package
+    /// module, and the punctuation Brood allows in a name.
+    #[test]
+    fn real_module_names_are_accepted() {
+        for name in [
+            "math",
+            "reflect",
+            "json",
+            "editor/buffer",
+            "std/tool/project",
+            "my-app/http-client",
+            "a1_b2",
+            "vec+",
+            "ok?",
+        ] {
+            assert!(safe_module_name(name), "should accept `{name}`");
+        }
+    }
+
+    /// The list rides in over a socket and a module name resolves to a FILE PATH, so
+    /// anything that could climb out of the module roots — or is simply not a name —
+    /// is refused before the loader ever sees it. Authenticated peers get remote eval
+    /// by design; that is not a reason to hand them a path.
+    #[test]
+    fn path_escapes_and_junk_are_refused() {
+        for name in [
+            "",
+            "..",
+            "../etc/passwd",
+            "a/../../b",
+            "/etc/passwd",
+            "a//b",
+            "a/",
+            "with space",
+            "quote'd",
+            "semi;colon",
+            "tilde~",
+            "back\\slash",
+            "new\nline",
+            "nul\0byte",
+        ] {
+            assert!(!safe_module_name(name), "should refuse `{name}`");
+        }
+        // And a name no sane module has, so a hostile peer can't drive a huge lookup.
+        assert!(!safe_module_name(&"a".repeat(201)));
     }
 }

@@ -675,7 +675,7 @@
       (log/info "server up")
       (log/warn "disk low")
       ; the logger has now dispatched both casts → bp
-      (call lg :config)
+      (gen/call lg :config)
       (let (txt (buffer-query bp buffer-text))
         (is (includes? txt "server up"))
         (is (includes? txt "disk low")))
