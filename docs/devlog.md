@@ -2966,3 +2966,54 @@ including that the walk is bounded rather than exhaustive.
 cap pushes a large local message onto the wire path, i.e. from a `Payload::Local` (which the scan
 peeks for free) to a `Payload::Wire` (which it must rebuild). Fixing only the send side would
 have moved the stall from the sender to the receiver's own scan rather than removing it.
+
+## 2026-08-25 — KI-57: the suite was 1061/1061 green with a use-after-GC in it
+
+The GC-stress pass after ADR-245's receive-side work was meant to be a formality — the repo's
+rule that one green run is not evidence for scheduler/mailbox code. It found a real one, on the
+very tree that was about to be pushed:
+
+```
+use-after-GC: vector handle (nursery slot 3) is from epoch 12, but that generation is now
+epoch 13 — a handle held across a collection without being re-rooted
+  Heap::vector <- mailbox::collect_receive_tags <- scan_mailbox <- receive_match
+```
+
+`scan_mailbox` took the `receive` clauses' leading-keyword vector as a bare `Value` and decoded
+it **lazily** — the decode sits inside the scan loop, skipped on a one-message mailbox. That
+laziness is the whole bug: on any iteration after the first, the decode runs *after* a matcher
+`apply`, which can collect at any eval depth (ADR-061) and relocate the vector. Handle captured
+before, dereferenced after.
+
+The fix was already written down eight lines above, for the value beside it. `matcher` is pushed
+to the roots stack at `rbase+0` and re-read on every candidate, with a comment spelling out that
+`apply` can collect and relocate it. `tags` needed exactly the same treatment and was passed
+unrooted. It is now at `rbase+1`, re-read at the decode. Two lines, and the surrounding comment
+had been describing the requirement the whole time.
+
+In release there is no tripwire to fire: the decode reads whatever occupies the old slot, and
+the tag filter then rejects a message it should have matched — a selective receive that silently
+misses what it was waiting for.
+
+**The more useful finding is why nothing caught it.** Collections are threshold-driven, so a
+handle held across one is only caught if a collection happens to land inside the window. Nothing
+in CI changes that — the breakage job arms the per-deref tripwire but still collects on a
+threshold — and `BROOD_GC_STRESS=1`, which collects at *every* safepoint and makes the window a
+certainty, had never run in CI at all. It was a thing you did by hand, during an investigation,
+if you thought to.
+
+So `make gcstress` runs the twelve process/mailbox-heavy test files under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, and CI's breakage job runs it. Under a minute.
+
+Two things about that gate are worth keeping, because both were nearly got wrong:
+
+- **It is a DEBUG build, and that was verified rather than assumed.** The first version reused
+  the breakage suite's `--release` + `-C debug-assertions=on`, which *sounds* strictly stronger.
+  Run against the faithful pre-fix code it reported **all clean** — optimisation moves where
+  allocations and safepoints land, and the collection stops falling inside the window. The debug
+  build catches it every run. A gate that cannot fail on the bug it was written for is not a gate.
+- **It was checked by reverting the real fix, not by a stand-in.** The first sabotage kept `tags`
+  rooted and captured a stale copy of the handle — a *weaker* bug (the vector moves rather than
+  possibly dying), and it reproduced only 1 run in 3. Reconstructing the actual pre-fix code gave
+  9 in 10 and a deterministic red through the gate. When a sabotage under-reproduces, suspect the
+  sabotage before concluding the gate works.

@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-57 | **a use-after-GC on every selective receive with a backlog.** `scan_mailbox` took the clauses' leading-keyword vector as a bare `Value` and decoded it **lazily, inside the scan loop** — so on any iteration after the first the decode dereferenced a handle held across a matcher `apply`, which can collect at any eval depth (ADR-061). The `matcher` beside it is rooted at `rbase+0` and re-read per candidate for exactly this reason; `tags` was not | ✅ **fixed 2026-08-25** — `tags` is rooted at `rbase+1` and re-read at the decode, like `matcher`. Found by running `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` by hand while verifying ADR-245: `use-after-GC: vector handle … is from epoch 12, but that generation is now epoch 13` out of `collect_receive_tags`. **No CI job could have caught it** — every one collects on a threshold, so the collection has to land inside the window by luck; the new `make gcstress` step closes that, and is verified red on the pre-fix code and green on the fix |
 | KI-56 | **a large L1 send head-of-line-blocks unrelated mailbox operations**, linear in payload: an unrelated `mailbox-size` probe sits at **p50 ~5 ms** for a 1.6 MB send and 7–13 ms at 4 MB, against a wire path flat at **4–10 µs** across a 500× payload range. Onset between 8 KB (nothing) and 80 KB (p90 ~25×). Needs a *parked* receiver, so it is the synchronous request/reply shape, not fan-in | ✅ **fixed 2026-08-25** (ADR-245) — a **work budget** on the L1 copy (one heap node = one unit, default 4096, `BROOD_L1_BUDGET=0` to uncap): past it the copy declines and takes the wire path, whose heavy work is already outside the lock. The `st.waiter` invariant is untouched. Every container kind also declines *before materialising* — the first cut checked only per node, so a 100k vector still paid `to_vec` under the lock and measured p99 243 µs; with the early-out it is 5.4 µs. Same probe as the measurement below: **p99 1 875 → 5.4 µs at ~1.6 MB, p50 2 360 → 3.9 µs at ~3.9 MB**, indistinguishable from the wire arm at every size. **The second site (selective-receive's peek-in-place rebuild) is fixed too** — same budget on the wire form, p50 1 252 → 0.8 µs and p99 5 569 → 11.2 µs at a backlog of 8 × 40k |
 | KI-55 | **closure-shipping across nodes broke for every namespaced std name.** Auto-require runs on the node that *compiles* a form, never on the node that *receives* an already-compiled closure — so a shipped closure whose body calls `reflect/form-pos`, `seq/…`, `dev/…` raises `unbound symbol` on the receiver. Before the v0.9.0/v0.10.0 namespacing these were bare prelude names and always bound, so closure-shipping "just worked" | ✅ **fixed 2026-08-25** — the **sender** names the modules its closure's body references (`ClosureMsg::modules`, a `(module, probe)` pair per module, encoded in the wire's `M_CLOSURE` record — protocol `BRD\x06`), and the receiver weaves a `(if (bound? 'probe) nil (require-one 'module))` guard into the rebuilt body for each module it lacks, so the load runs at the closure's own **call site** — where errors are catchable and no mailbox lock is held. A module this node cannot load now raises `this closure was shipped from another runtime and needs module \`zz\`…`, not a bare `unbound symbol`. Guards: `cli::distribution::a_shipped_closure_requires_its_modules_on_the_receiver` (new) + `source_positions_survive_a_cross_node_send` with its `(require-one 'reflect)` workaround removed; both sabotage-verified |
 | KI-54 | **`main` was already red**: making the gen_server framework core-and-**bare** in the prelude (`7cb796f0`) seized ten generic global names — including `call`, `cast` and `stop` — into the *reserved* set, breaking `basic::spawned_process_picks_up_redefinition` (`(def call …)` is now refused); the same move dropped `gen` out of `(builtin-modules)`, failing `namespace_test`, and bundled `gen.blsp` without declaring it, failing `prelude_manifest` | ✅ **both fixed 2026-08-24** — `PRELUDE_MODULES` restores the reservation (with a bundle-checked honesty test); the `basic.rs` helper renamed `call` → `ask`. ⚠ **the name seizure itself is left as-is** — it follows from ADR-166 and the deliberate "bare" decision, but see the note below |
@@ -93,7 +94,9 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**No open items.** **KI-56** (a large message blocked unrelated mailbox operations) was
+**No open items.** **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
+**KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
 selective-receive peek-in-place rebuild. **KI-55** (a shipped
 closure could not call a namespaced std name on the receiving node) was **fixed 2026-08-25** — the closure now carries the modules its body references and the
@@ -171,6 +174,56 @@ activation, and no `std` suite tests a large input. It is invisible below ~10⁵
 loop that calls the same function eleven times at increasing sizes stays correct throughout — so
 repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-57 — a stale `tags` handle in the selective-receive scan ✅ FIXED 2026-08-25
+
+**Status:** ✅ fixed. Guard: `make gcstress` (new), verified **red on the faithful pre-fix code
+and green on the fix**, twice each. Wired into CI's breakage job.
+
+**What.** `scan_mailbox` received the `receive` clauses' leading-keyword vector as a bare
+`Value` and decoded it **lazily** — the decode sits *inside* the scan loop, guarded by
+`st.queue.len() > 1 && ntags.is_none()`, so it does not run on a one-message mailbox. That
+laziness is the bug: on any iteration after the first, the decode runs *after* a matcher
+`apply`, which can collect at any eval depth (ADR-061) and relocate the LOCAL vector. The
+handle was captured before that collection and dereferenced after it.
+
+```
+use-after-GC: vector handle (nursery slot 3) is from epoch 12, but that generation is now
+epoch 13 — a handle held across a collection without being re-rooted (handle 0xc00000003)
+  Heap::vector <- mailbox::collect_receive_tags <- scan_mailbox <- receive_match
+```
+
+The galling part is that the fix was already written down eight lines above, for the value
+next to it: `matcher` is pushed to the roots stack at `rbase+0` and **re-read each
+candidate**, with a comment explaining that `apply` can collect and relocate it. `tags` needed
+identical treatment and was passed unrooted instead. It now sits at `rbase+1` and is re-read
+at the decode.
+
+**Blast radius.** Any selective receive whose mailbox has more than one message — i.e. the
+ordinary backlogged case, on a user-reachable path with no unsafe code in sight. Under
+debug-assertions it aborts the worker at the bad deref (what we saw). In release there is no
+tripwire: the decode reads whatever now occupies the old slot, and the tag filter then
+silently rejects a message it should have matched — a receive that misses a message it was
+waiting for, which `BROOD_NO_RECV_MARK`'s comment calls the hardest failure mode to attribute.
+
+**Why every green run missed it, and the real finding.** Collections are threshold-driven, so
+a handle held across one is only caught when a collection happens to land inside the window.
+Nothing in CI changes that: the breakage job arms the per-deref tripwire but still collects on
+a threshold. `BROOD_GC_STRESS=1` collects at *every* safepoint, which turns the window into a
+certainty — and it had never been run in CI at all, only by hand during an investigation.
+
+`make gcstress` now runs the twelve process/mailbox-heavy test files under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, and CI runs it. It is a **debug** build deliberately,
+and that was verified rather than assumed: `--release` with `-C debug-assertions=on` (what the
+breakage step beside it uses) reports the faithful pre-fix code **clean**, because optimisation
+moves where allocations and safepoints land and the collection stops falling inside the window.
+A gate that cannot fail on the bug it was written for is not a gate.
+
+**Found while verifying something else.** This came out of the post-ADR-245 GC-stress pass, not
+from a failing suite — the full suite was 1061/1061 green with the bug present, on the very
+tree that was about to be pushed.
 
 ---
 
