@@ -29,8 +29,7 @@
   ;; arguments untouched when none is installed (the default fast path).
   (if *show* (map *show* xs) xs))
 ; The printing functions live in `std/io.blsp` as `io/write` / `io/puts` / `io/inspect`,
-; beside the
-; `Port` ability they write through. `*out*`/`*err*` stay here: they are the dynamic
+; beside the `Port` ability they write through. `*out*`/`*err*` stay here: they are the dynamic
 ; vars a port is installed into, and the kernel's own diagnostics reach them without
 ; loading a module. The prelude itself never calls `io/…` on a path that can run while
 ; a module is loading — it writes with `%write-err` directly (see `spy`/`deprecation`),
@@ -56,7 +55,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 
 ;; The stderr counterpart of `with-out-str`. It works differently, and has to:
 ;; stdout capture is a kernel buffer (`%capture-begin`), while a write targeting `*err*`
-;; write through the `*err*` PORT — so this rebinds that port to a collecting sink
+;; goes through the `*err*` PORT — so this rebinds that port to a collecting sink
 ;; instead. Consequences worth knowing: it captures only what goes through `*err*`
 ;; (a Rust-side `eprintln!`, e.g. a kernel reload diagnostic, is NOT interceptable
 ;; this way), and it does not follow into spawned processes the way `with-out-str`
@@ -219,7 +218,12 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; ---- error handling ----
 ;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything
 ;; user-facing — `error`, `try`/`catch` — is written here in Brood.
-(defn last (xs) "The last item of `xs`." (first (reverse xs)))
+(defn last (xs)
+  "The last item of `xs`.
+
+    (last [1 2 3])   → 3
+    (last nil)       → nil"
+  (first (reverse xs)))
 
 (defn error (& parts)
   "Raise an error whose message is the concatenated display forms of `parts`."
