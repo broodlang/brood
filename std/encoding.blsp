@@ -169,18 +169,30 @@ UTF-8 form."
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as URL-safe Base64."
   (encoding-b64-encode bytes encoding-b64-url-codes))
 
-;; Reverse lookup map: base64 char CODEPOINT → 6-bit value (int keys — the
-;; decode loop walks a `string->codepoints` vector, so each lookup hashes an int,
-;; not a fresh 1-char string per char).
-(defn- encoding-b64-val-map
+;; Reverse lookup: base64 char CODEPOINT → 6-bit value, as a **dense 128-entry vector
+;; indexed by the codepoint itself**, nil at every non-alphabet slot.
+;;
+;; This was a CHAMP map keyed by the int codepoint. 128 entries covers all of ASCII, which
+;; is every character either alphabet uses (`+` 43, `-` 45, `/` 47, `0`–`9` 48–57, `A`–`Z`
+;; 65–90, `_` 95, `a`–`z` 97–122), so a codepoint at or above 128 is invalid input and must
+;; not index the vector at all — every lookup site guards with `(< c 128)`, inlined rather
+;; than wrapped in a helper because a call per character would give back what the probe
+;; cost. (Measured: wrapping the *encoder*'s byte check in a one-line helper cost that
+;; direction 4×. A per-element call in one of these loops is not a small thing.)
+;;
+;; Note `0` is a legitimate value — it is `A` — and only nil/false are falsy in Brood, so
+;; the loop's `(not (and v1 v2))` validity test reads a real 0 as present, exactly as it did
+;; with the map.
+(defn- encoding-b64-val-vec
   (alpha)
-  (let (cs (string/->codepoints alpha))
-    (fold (fn (m i) (assoc m (nth cs i) i))
-      {}
+  (let (cs (string/->codepoints alpha)
+        empty-128 (apply vector (map (fn (_) nil) (range 128))))
+    (fold (fn (v i) (%vector-assoc v (nth cs i) i))
+      empty-128
       (range 64))))
 
-(def- encoding-b64-std-vals (encoding-b64-val-map encoding-b64-std))
-(def- encoding-b64-url-vals (encoding-b64-val-map encoding-b64-url))
+(def- encoding-b64-std-vals (encoding-b64-val-vec encoding-b64-std))
+(def- encoding-b64-url-vals (encoding-b64-val-vec encoding-b64-url))
 
 ;; Decode base64 `s` to a list of byte ints, or the `:invalid` sentinel on bad
 ;; input. As with hex, `:invalid` (not nil) keeps an empty valid input distinct
@@ -221,23 +233,35 @@ UTF-8 form."
           ; 1 leftover char is always invalid
           :invalid (encoding-b64-dec-loop s 0 n vals nil))))))
 
+;; `%vector-ref` on both vectors, not `nth`. `nth`'s 2-arity arm is a closure that
+;; re-checks `int?`, `vector?` and the length before it reaches `%vector-ref`, and this loop
+;; reads eight per output triple — four alphabet lookups and four codepoints — so those
+;; checks *were* the loop. Every index here is already proven in range: `i` and its
+;; +1/+2/+3 by the `remaining` tests against `n`, and an alphabet index by the `< 128` guard
+;; against a vector that is exactly 128 long. Measured on the `base64` benchmark's
+;; 50 000-byte payload, warm best-of-5 in one process: **29.4 ms → 15.5 ms**. The dense
+;; vector alone was worth ~7%; the rest is not calling `nth`.
 (defn- encoding-b64-dec-loop
   (s i n vals acc)
   (if (>= i n)
     (reverse acc)
     (let (remaining (- n i)
-          v1 (get vals (nth s i))
-          v2 (if (>= remaining 2) (get vals (nth s (+ i 1))) nil))
+          c1 (%vector-ref s i)
+          v1 (if (< c1 128) (%vector-ref vals c1) nil)
+          c2 (if (>= remaining 2) (%vector-ref s (+ i 1)) 128)
+          v2 (if (< c2 128) (%vector-ref vals c2) nil))
       (if (not (and v1 v2))
         :invalid (let (acc (cons (+ (* v1 4) (quot v2 16)) acc))
           (if (= remaining 2)
             (reverse acc)
-            (let (v3 (get vals (nth s (+ i 2))))
+            (let (c3 (%vector-ref s (+ i 2))
+                  v3 (if (< c3 128) (%vector-ref vals c3) nil))
               (if (not v3)
                 :invalid (let (acc (cons (+ (* (rem v2 16) 16) (quot v3 4)) acc))
                   (if (= remaining 3)
                     (reverse acc)
-                    (let (v4 (get vals (nth s (+ i 3))))
+                    (let (c4 (%vector-ref s (+ i 3))
+                          v4 (if (< c4 128) (%vector-ref vals c4) nil))
                       (if (not v4)
                         :invalid (let (acc (cons (+ (* (rem v3 4) 64) v4) acc))
                           (encoding-b64-dec-loop s (+ i 4) n vals acc))))))))))))))
