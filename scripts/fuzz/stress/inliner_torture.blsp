@@ -44,4 +44,4 @@
   (defn spawn-k (j) (when (> j 0) (spawn (worker me 40)) (spawn-k (- j 1))))
   (spawn-k k)
   (churn 120)
-  (println "torture result:" (collect 0 k)))
+  (io/puts "torture result:" (collect 0 k)))

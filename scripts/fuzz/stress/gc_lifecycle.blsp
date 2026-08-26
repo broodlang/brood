@@ -7,15 +7,15 @@
 (defn ck (nm v)
   (if (and (= v (hold-across-gc v)) (= v (send-rt v)) (= v (table-rt v)))
     0
-    (do (println "BAD" nm) 1)))
+    (do (io/puts "BAD" nm) 1)))
 ;; rope: not sendable/Table-storable by design; verify it survives a forced GC held live
-(defn ck-hold (nm v) (if (= v (hold-across-gc v)) 0 (do (println "BAD-hold" nm) 1)))
+(defn ck-hold (nm v) (if (= v (hold-across-gc v)) 0 (do (io/puts "BAD-hold" nm) 1)))
 ;; closures compare by identity → verify BEHAVIOR survives each round-trip
 (defn ck-closure ()
   (let (f (fn (x) (* x 7)))
     (if (and (= 35 ((hold-across-gc f) 5)) (= 35 ((send-rt f) 5)) (= 35 ((table-rt f) 5)))
       0
-      (do (println "BAD closure") 1))))
+      (do (io/puts "BAD closure") 1))))
 (let (bad (+ (ck "int" 42)
             (ck "bignum" 99999999999999999999)
             (ck "decimal"
@@ -32,4 +32,4 @@
             (ck "map" {:a 1 :b [2 3] :c {:d 4 :e "x"}})
             (ck-hold "rope" (text/from-string "rope content\nline two"))
             (ck-closure)))
-  (println "TOTAL-BAD:" bad))
+  (io/puts "TOTAL-BAD:" bad))

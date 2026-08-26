@@ -53,11 +53,11 @@
 
 (io/puts "--- round-trip string conversion ---")
 ;; Convert to string, parse back, check equality — exercises `string->number` on a huge input
-(def reparsed (string->number monster-str))
+(def reparsed (string/->number monster-str))
 (io/puts "round-trip equal?" (= reparsed monster))
 ;; Substring of the digit string, parsed as a number
 (def chunk (string/substring monster-str 0 18))
-(io/puts "first 18 digits as int:" (string->number chunk))
+(io/puts "first 18 digits as int:" (string/->number chunk))
 
 (io/puts "--- GCD stress: gcd(monster, monster+1) must be 1 ---")
 ;; Euclidean algorithm in Brood — deeply tests BigInt subtraction / mod at huge sizes

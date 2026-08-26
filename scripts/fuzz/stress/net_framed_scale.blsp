@@ -20,8 +20,8 @@
 
 (defmodule net-framed-scale (:use tcp))
 
-(def chunks (let (e (os/getenv "CHUNKS")) (if e (string->number e) 2000)))
-(def size (let (e (os/getenv "SIZE")) (if e (string->number e) 64)))
+(def chunks (let (e (os/getenv "CHUNKS")) (if e (string/->number e) 2000)))
+(def size (let (e (os/getenv "SIZE")) (if e (string/->number e) 64)))
 
 (def sep "\r\n\r\n")
 (def filler (bytes/concat (string/repeat "x" size)))
@@ -42,10 +42,10 @@
           us (quot (- (os/now-ns) t0) 1000))
       (do
         (if (not (= (string/bytes-> (nth r 1)) "TRAILER"))
-          (do (println "ERROR: wrong remainder") (%halt 1))
+          (do (io/puts "ERROR: wrong remainder") (%halt 1))
           nil)
         (if (not (= (count (nth r 0)) (+ (* size (+ chunks 1)) (count sep))))
-          (do (println (str "ERROR: wrong frame length " (count (nth r 0)))) (%halt 1))
+          (do (io/puts (str "ERROR: wrong frame length " (count (nth r 0)))) (%halt 1))
           nil)
         us))))
 
@@ -75,7 +75,7 @@
       us)))
 
 (defn report (what us)
-  (println (str (string/pad-right what 16)
+  (io/puts (str (string/pad-right what 16)
              " chunks="
              chunks
              " size="

@@ -2,8 +2,8 @@
 ;; make earlier or later uses warn (the reload contract, ADR-123..126).
 (def cfg 42)
 (defn show () (str cfg))
-(println (show))
+(io/puts (show))
 (def cfg "now a string")
-(println (show))
+(io/puts (show))
 (def cfg {:a 1})
-(println (get cfg :a))
+(io/puts (get cfg :a))

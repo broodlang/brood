@@ -32,9 +32,9 @@
 (defmodule decay (:use supervisor))
 
 (def mode (let (e (os/getenv "MODE")) (if e e "alloc")))
-(def secs (let (e (os/getenv "SECS")) (if e (string->number e) 180)))
-(def window (let (e (os/getenv "WINDOW")) (if e (string->number e) 20000)))
-(def maxsecs (let (e (os/getenv "MAXSECS")) (if e (string->number e) 60)))
+(def secs (let (e (os/getenv "SECS")) (if e (string/->number e) 180)))
+(def window (let (e (os/getenv "WINDOW")) (if e (string/->number e) 20000)))
+(def maxsecs (let (e (os/getenv "MAXSECS")) (if e (string/->number e) 60)))
 
 (defn rss-kb ()
   (let (txt (file/slurp "/proc/self/status") i (index-of txt "VmRSS:"))
@@ -43,7 +43,7 @@
       (let (chunk (string/substring txt (+ i 6) (+ i 32))
             d0 (string/span-until chunk 0 "0123456789")
             d1 (string/span chunk d0 "0123456789"))
-        (if (>= d0 d1) 0 (string->number (string/substring chunk d0 d1)))))))
+        (if (>= d0 d1) 0 (string/->number (string/substring chunk d0 d1)))))))
 
 ;; ---- the units of work -------------------------------------------------------
 (def srv
@@ -111,7 +111,7 @@
 (defn report (w n t0)
   (let (dt (max 1 (- (os/now) t0))
         g (dev/gc-stats))
-    (println (str "w="
+    (io/puts (str "w="
                w
                " ops="
                n
@@ -135,10 +135,10 @@
       (do
         (report w window wstart)
         (if (> (os/now) deadline)
-          (println (str "done mode=" mode " total_ops=" (+ n 1) " rss_kb=" (rss-kb)))
+          (io/puts (str "done mode=" mode " total_ops=" (+ n 1) " rss_kb=" (rss-kb)))
           (run (+ n 1) (+ w 1) (os/now))))
       (run (+ n 1) w wstart))))
 
 (trap-exit true)
-(println (str "mode=" mode " window=" window " secs=" secs))
+(io/puts (str "mode=" mode " window=" window " secs=" secs))
 (run 0 0 (os/now))
