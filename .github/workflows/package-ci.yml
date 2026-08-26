@@ -27,6 +27,14 @@ on:
         type: boolean
         required: false
         default: true
+      postgres:
+        description: >-
+          Start a Postgres 16 container and export the PG* env its suite reads.
+          For an adaptor whose tests need a real server — the alternative was
+          `run-tests: false`, i.e. a driver whose driving is never exercised.
+        type: boolean
+        required: false
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -88,8 +96,31 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           nest format --check
 
+      # Started as a plain container rather than a job-level `services:` block, because a
+      # `services:` mapping cannot be made conditional — every caller would pay for a
+      # Postgres it does not use.
+      - name: Start Postgres
+        if: inputs.postgres
+        run: |
+          docker run -d --name ci-postgres \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
+            -p 5432:5432 postgres:16-alpine
+          # The container is up long before the server accepts connections; poll rather
+          # than sleep a guessed interval.
+          for i in $(seq 1 60); do
+            docker exec ci-postgres pg_isready -U postgres -q && break
+            sleep 1
+          done
+          docker exec ci-postgres pg_isready -U postgres
+
       - name: nest test
         if: inputs.run-tests
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: postgres
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           nest test
