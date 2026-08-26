@@ -192,12 +192,9 @@ pub(crate) fn blockarg_spill_window(
 /// The deepest operand stack at any block leader — an upper bound on how many operands
 /// can cross a block boundary at once, and so on the block-argument spill slots
 /// [`jit_spill_reserve`] must provide. Uses the same `block_analysis` the lowering does,
-/// so the two cannot disagree about where leaders are.
-#[cfg(feature = "jit")]
-pub(crate) fn max_leader_depth_pub(code: &[Inst]) -> usize {
-    max_leader_depth(code)
-}
-
+/// so the two cannot disagree about where leaders are. Private: the lowering asks
+/// [`blockarg_spill_window`] for the window rather than re-deriving it from this, which is
+/// what keeps the clamp in one place (KI-64).
 /// `0` without a backend: `jit_lower` (and its `prepass`) do not exist in that build, and
 /// the reserve's contract is that a `--without-jit` build's frames are unchanged.
 #[cfg(not(feature = "jit"))]
