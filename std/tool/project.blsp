@@ -64,7 +64,7 @@ the `nest new` scaffolder."
 (defdyn *project-description* nil)
 (defdyn *project-repository* nil)
 ;; `:brood` — the runtime-version constraint this project needs (a `std/version` string,
-;; e.g. `">= 0.2"`, `"^0.1"`). Checked at `setup` against `(brood-version)`; an
+;; e.g. `">= 0.2"`, `"^0.1"`). Checked at `setup` against `(system/brood-version)`; an
 ;; unmet constraint is a hard, clear error (ADR-209), the way `mix.exs`'s `elixir:`
 ;; requirement refuses an incompatible Elixir. Absent = runs on any runtime.
 (defdyn *project-brood* nil)
@@ -344,7 +344,7 @@ than being fetched into `_deps/<name>/`."
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(system/brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'apply …)`) so α qualifies `apply`
   ;; to `project/apply-config` at this macro's definition (ADR-065 §7).
   `(apply-config (quote ~opts)))
@@ -698,7 +698,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; so the source-tree walk alone cannot see one change, and an imaged start would go on
   ;; serving the old code. They come from `*module-files*`, which `setup`
   ;; populates before any fingerprint is taken, on the cold and warm paths alike.
-  (str (build-id)
+  (str (system/build-id)
     "\n"
     (string/join "\n"
       (map (fn (f) (str f ":" (file/size f) ":" (file/mtime f)))
@@ -1115,18 +1115,18 @@ rules merged in declaration order, then this project's own `:format-headers` on 
 ;; The `:brood` runtime gate (ADR-209): if the manifest names a constraint and this
 ;; runtime doesn't satisfy it, stop with a clear error rather than failing obscurely
 ;; deeper in on whatever newer feature the project assumed. Policy in Brood; the only
-;; kernel input is the `(brood-version)` primitive.
+;; kernel input is the `(system/brood-version)` primitive.
 (defn- project-check-brood-version
   ()
   (when *project-brood*
     (when (not (string? *project-brood*))
       (error "project: :brood must be a version-constraint string (e.g. \">= 0.2\"), got "
         (pr-str *project-brood*)))
-    (when (not (version/satisfies? (brood-version) *project-brood*))
+    (when (not (version/satisfies? (system/brood-version) *project-brood*))
       (error "project: this project requires Brood "
         (pr-str *project-brood*)
         " but you are running "
-        (brood-version)
+        (system/brood-version)
         " — upgrade brood, or relax the :brood constraint in project.blsp"))))
 
 (defn setup (root)
@@ -1990,12 +1990,12 @@ resolve in the advisory checker. Returns the project root."
 ;; change in one file correctly shifts another's verdict via the always-recomputed
 ;; aggregate. Sound with mtime alone; the advisory contract (types.md #5, never
 ;; rejects a runnable program) makes mtime's rare imprecision harmless. The whole
-;; cache carries a `(build-id)`+version stamp and is dropped on mismatch (the
+;; cache carries a `(system/build-id)`+version stamp and is dropped on mismatch (the
 ;; extract depends on the Rust `parse-source`, so it isn't portable across binaries).
 ;; Opt out with `BROOD_NO_CHECK_CACHE=1`.
 ; v2: check-result entries gained a 5th field, the KI-17 require-closure (ADR-189).
 (def *check-cache-version* "v2")
-(defn- project-cache-stamp () (str (build-id) "|" *check-cache-version*))
+(defn- project-cache-stamp () (str (system/build-id) "|" *check-cache-version*))
 (defn- project-cache-off? () (= (os/getenv "BROOD_NO_CHECK_CACHE") "1"))
 
 ;; The cache directory for `root` (created if absent), or nil if no cache base is

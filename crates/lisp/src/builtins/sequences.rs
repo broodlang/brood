@@ -1078,7 +1078,7 @@ pub(super) fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     }
 }
 
-/// `(display-width s)` — how many terminal/grid *cells* `s` occupies, counting
+/// `(string/display-width s)` — how many terminal/grid *cells* `s` occupies, counting
 /// grapheme clusters (an emoji / flag / CJK char is 2, a combining mark 0). The
 /// width-aware counterpart to `string-length` (which counts codepoints) — the
 /// editor's column / cursor math uses it so a wide glyph advances two columns. The
@@ -1089,7 +1089,7 @@ pub(super) fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
         Value::Str(id) => Ok(Value::int(
             crate::text_width::display_width(&heap.string(id)) as i64,
         )),
-        _ => Err(LispError::wrong_type(heap, "display-width", "string", v)),
+        _ => Err(LispError::wrong_type(heap, "string/display-width", "string", v)),
     }
 }
 
@@ -1535,7 +1535,7 @@ pub(super) fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// codepoints**, one O(n) pass. The random-access text-scanning primitive:
 /// parsers (std/regex, std/json, std/encoding) index code points with O(1)
 /// `nth` and compare them as ints. Building the same vector in Brood —
-/// `(apply vector (map char->int (string/->list s)))` — costs a 1-char string
+/// `(apply vector (map string/char->int (string/->list s)))` — costs a 1-char string
 /// allocation per char plus a closure call per char, and measured ~40 % of the
 /// whole regex benchmark. Like `string-split`/`string-span`, this is text-access
 /// *mechanism*; the parsers themselves stay in Brood.
@@ -1556,12 +1556,12 @@ pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) ->
 /// motion, column arithmetic and truncation in `std/editor/*` all want this unit —
 /// stepping a cursor by code point splits a cluster and corrupts the text. Not
 /// bootstrappable: the boundary rules are UAX #29 tables, not a rule Brood can
-/// express. `display-width` already segments the same way internally.
+/// express. `string/display-width` already segments the same way internally.
 pub(super) fn string_to_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_segmentation::UnicodeSegmentation;
     let s = expect_string(heap, "string/->graphemes", arg(args, 0))?;
     // `true` = *extended* grapheme clusters (UAX #29's recommended default, and
-    // what the renderer and `display-width` use).
+    // what the renderer and `string/display-width` use).
     let parts: Vec<String> = s.graphemes(true).map(|g| g.to_string()).collect();
     let vals: Vec<Value> = parts.iter().map(|g| heap.alloc_string(g)).collect();
     Ok(heap.alloc_vector(vals))
@@ -1714,15 +1714,15 @@ pub(super) fn lower(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 pub(super) fn char_to_int(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "char->int", arg(args, 0))?;
+    let s = expect_string(heap, "string/char->int", arg(args, 0))?;
     match s.chars().next() {
         Some(c) => Ok(Value::int(c as i64)),
-        None => Err(LispError::runtime("char->int: empty string")),
+        None => Err(LispError::runtime("string/char->int: empty string")),
     }
 }
 
 pub(super) fn int_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let n = expect_int(heap, "int->char", arg(args, 0))?;
+    let n = expect_int(heap, "string/int->char", arg(args, 0))?;
     // Guard the u32 range *before* the cast: `n as u32` would silently truncate a
     // value outside [0, u32::MAX] and could alias a valid codepoint (returning the
     // wrong char) instead of erroring.
@@ -1730,7 +1730,7 @@ pub(super) fn int_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         .ok()
         .and_then(char::from_u32)
         .ok_or_else(|| {
-            LispError::runtime(format!("int->char: {} is not a valid Unicode codepoint", n))
+            LispError::runtime(format!("string/int->char: {} is not a valid Unicode codepoint", n))
         })?;
     let mut buf = [0u8; 4];
     Ok(heap.alloc_string(c.encode_utf8(&mut buf)))

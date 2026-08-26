@@ -136,7 +136,7 @@ its monitor fire and closes cleanly. Tail-recursive."
 closes) and end the manager — `mgr`, or the one registered under `serve-name`.
 Returns the number of sessions ended, nil when nothing was serving, `:no-reply` on a
 wedged manager. The counterpart of `serve`."
-  (let (pid (or mgr (whereis serve-name)))
+  (let (pid (or mgr (proc/whereis serve-name)))
     (if (nil? pid)
       nil
       (let (r (ref))
@@ -151,7 +151,7 @@ its pid (non-blocking) — a daemon's `main` typically calls `(serve …)` then 
 (`nest run --name N` brings the node up). Each `(attach …)` / `nest attach` then gets
 its own session. The program must already be a node (`node-start` / `nest run --name`).
 Opt-in, like Erlang's `-name`: a runtime serves nothing unless it calls `serve`."
-  (register serve-name (spawn (serve-manager make-model view update))))
+  (proc/register serve-name (spawn (serve-manager make-model view update))))
 
 ;; ---- client side (the thin frontend) -----------------------------------------
 
@@ -296,8 +296,8 @@ on exit."
     (try
       (let ([cols rows] ((get display :size)))
         (if (and (map? opts) (not (empty? opts)))
-          (send (whereis serve-name) [:attach (self) cols rows opts])
-          (send (whereis serve-name) [:attach (self) cols rows]))
+          (send (proc/whereis serve-name) [:attach (self) cols rows opts])
+          (send (proc/whereis serve-name) [:attach (self) cols rows]))
         (let (session (receive
                         ([:attached s] s)
                         (after 5000
@@ -406,4 +406,4 @@ All clients share ONE cursor this slice; see the module note for the per-partici
 deferral. Returns the manager pid."
   (let (hub (spawn (shared-hub () nil [80 24]))
         session (spawn (ui-run model view update (shared-display hub))))
-    (register serve-name (spawn (serve-shared-manager session hub)))))
+    (proc/register serve-name (spawn (serve-shared-manager session hub)))))

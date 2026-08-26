@@ -51,7 +51,7 @@
     (is (= (string/bytes-> #b"\xc3\xa9") "é"))
     (is (= (string/bytes-> (string/->bytes "round-trip ✓")) "round-trip ✓")))
   (test "bytes->list"
-    (is (= (bytes/->list (bytes 1 2 3)) (list 1 2 3)))))
+    (is (= (seq (bytes 1 2 3)) (list 1 2 3)))))
 
 ; #b"k" and (bytes 107) are equal keys
 (describe "bytes: equality + hashing"

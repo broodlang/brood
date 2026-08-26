@@ -35,7 +35,7 @@
   (let (i (index-of line "#"))
     (string/replace (if (< i 0) line (string/substring line 0 i)) "\t" " ")))
 
-(defn- ucd-codes->string (codes) (apply str (map int->char codes)))
+(defn- ucd-codes->string (codes) (apply str (map string/int->char codes)))
 
 ;; ---- GraphemeBreakTest -------------------------------------------------------
 

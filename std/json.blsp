@@ -81,7 +81,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 (defn- json-slice
   (s i end)
   "The code points [i, end) of `s`, joined back into a string."
-  (apply str (map int->char (seq/subvec s i end))))
+  (apply str (map string/int->char (seq/subvec s i end))))
 
 (defn- ws? (c) (or (= c 32) (= c 9) (= c 10) (= c 13)))
 
@@ -212,8 +212,8 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
                 [(+ 65536 (* 1024 (- hi 55296)) (- lo 56320)) (+ i 10)]))
             (error "json: lone high surrogate at index " i))
         ; DC00..DFFF: a low surrogate with no high half before it is equally invalid —
-        ; it used to fall through to `int->char`, which raised the KERNEL's message
-        ; ("int->char: 56320 is not a valid Unicode codepoint") instead of a json one.
+        ; it used to fall through to `string/int->char`, which raised the KERNEL's message
+        ; ("string/int->char: 56320 is not a valid Unicode codepoint") instead of a json one.
         (and (>= hi 56320) (<= hi 57343)) (error "json: lone low surrogate at index " i)
         else [hi (+ i 4)]))))
 
@@ -249,7 +249,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
   (let (c (json-at s i n))
     (cond
       (= c -1) (error "json: unterminated string")
-      (= c 34) [(apply str (map int->char (reverse acc))) (+ i 1)]
+      (= c 34) [(apply str (map string/int->char (reverse acc))) (+ i 1)]
       (= c 92) (let ([cp j] (json-escape s (+ i 1) n)) (string-acc s j n (cons cp acc)))
       ;; RFC 8259 §7: U+0000–U+001F MUST be escaped inside a string. A raw newline
       ;; or tab in a string body is malformed JSON, not content — accepting it made

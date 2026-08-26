@@ -92,3 +92,12 @@ unknown/closed."
 
 ;; ---- timers ----------------------------------------------------------------
 ;; Cancellation moved to `timer/cancel`, beside the two functions that create a timer.
+
+;; ---- naming ------------------------------------------------------------------
+;; `proc/register` / `proc/whereis` / `proc/unregister` / `proc/alive?` are kernel
+;; primitives registered under this module (the `bit/*` pattern). They were bare
+;; (`register`, `whereis`) until 2026-08-26 — process naming is process business, and
+;; it reads better beside `proc/info` and `proc/list` than loose in the global namespace.
+;; `unregister` and `alive?` are new: `register` had no inverse, so a name could only be
+;; released by its process dying, and liveness had to be asked for by allocating a whole
+;; `proc/info` snapshot and testing it for nil.

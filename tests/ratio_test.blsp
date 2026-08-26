@@ -56,7 +56,7 @@
   (test "ratio + float is float contagion"
     (assert= (+ 1/2 1.5) 2.0)
     (assert= (type-of (+ 1/2 1.5)) :float))
-  (test "ratio + decimal is exact (decimal promotes losslessly)"
+  (test "ratio + decimal is exact (decimal/of promotes losslessly)"
     (assert= (+ 1/2 0.5M) 1)
     (assert= (+ 1/4 0.25M) 1/2)))
 
@@ -74,10 +74,10 @@
     (assert= (denominator 3/4) 4)
     (assert= (numerator 5) 5)
     (assert= (denominator 5) 1))
-  (test "->float and ->decimal escape hatches"
+  (test "->float and decimal/number-> escape hatches"
     (assert= (->float 1/2) 0.5)
     (assert= (->float 3/4) 0.75)
-    (assert= (->decimal 1/2) 0.5M)
+    (assert= (decimal/number-> 1/2) 0.5M)
     (assert= (rational 3 6) 1/2)))
 
 ;; ---- across processes -------------------------------------------------------

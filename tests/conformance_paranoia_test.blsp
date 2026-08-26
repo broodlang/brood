@@ -32,16 +32,16 @@
 
 ;; Infinity and NaN have to be MADE, not computed. Brood deliberately **raises** on
 ;; division by zero (error E0040, with a hint) rather than returning IEEE 754's infinity,
-;; so `(/ 1.0 0.0)` is not available as a constructor here. `bits->float` is — which is
+;; so `(/ 1.0 0.0)` is not available as a constructor here. `bit/->float` is — which is
 ;; one of the things that primitive is for. Pinned as a deviation below.
 ; 7FF0000000000000
-(defn- pa-inf () (bits->float 9218868437227405312))
+(defn- pa-inf () (bit/->float 9218868437227405312))
 ; FFF0000000000000
-(defn- pa-neg-inf () (bits->float 18442240474082181120))
+(defn- pa-neg-inf () (bit/->float 18442240474082181120))
 ; 7FF8000000000000
-(defn- pa-qnan () (bits->float 9221120237041090560))
+(defn- pa-qnan () (bit/->float 9221120237041090560))
 ; 7FEFFFFFFFFFFFFF
-(defn- pa-max-finite () (bits->float 9218868437227405311))
+(defn- pa-max-finite () (bit/->float 9218868437227405311))
 ;; ---- deriving the machine's properties, Paranoia-style ------------------------
 ;; The point of deriving rather than hardcoding: the derivation itself is the test. If
 ;; `radix` came back 10, or `precision` 24, the arithmetic would not be the binary64 the
@@ -122,7 +122,7 @@
   (test "epsilon agrees with the bit pattern"
     ;; independent confirmation via reinterpretation: 1.0's successor minus 1.0
     (assert= (pa-epsilon)
-      (- (bits->float (+ (float->bits 1.0) 1)) 1.0))))
+      (- (bit/->float (+ (bit/float-> 1.0) 1)) 1.0))))
 
 (describe "Paranoia: guard digits and rounding"
   :tags [:conformance]
@@ -188,7 +188,7 @@
   ;; 2^-1022 instead, which is exactly what this derivation is for.
   (test "the exponent floor derives as the smallest subnormal"
     (assert= (pa-smallest-positive) (pow 2.0 -1074))
-    (assert= (float->bits (pa-smallest-positive)) 1)
+    (assert= (bit/float-> (pa-smallest-positive)) 1)
     ;; and it is genuinely the floor
     (assert= (/ (pa-smallest-positive) 2.0) 0.0))
 
@@ -200,13 +200,13 @@
       (refute (= smallest-sub 0.0))
       (assert= (/ smallest-sub 2.0) 0.0)
       ;; and it really is the smallest subnormal: significand 1, exponent field 0
-      (assert= (float->bits smallest-sub) 1)))
+      (assert= (bit/float-> smallest-sub) 1)))
 
   (test "the smallest normal and the largest subnormal are adjacent"
     (let (min-normal (pow 2.0 -1022)
           max-sub (- min-normal (pow 2.0 -1074)))
-      (assert= (float->bits min-normal) (bit-shift-left 1 52))
-      (assert= (float->bits max-sub) (- (bit-shift-left 1 52) 1))))
+      (assert= (bit/float-> min-normal) (bit/shift-left 1 52))
+      (assert= (bit/float-> max-sub) (- (bit/shift-left 1 52) 1))))
 
   (test "multiplication overflows to infinity, not to a wrapped value"
     (let (huge (pow 2.0 1023))
@@ -217,7 +217,7 @@
   (test "the largest finite double is what its bits say"
     (assert= (pa-max-finite) 1.7976931348623157e308)
     ;; and one step past it is infinity
-    (assert= (bits->float (+ (float->bits (pa-max-finite)) 1)) (pa-inf))))
+    (assert= (bit/->float (+ (bit/float-> (pa-max-finite)) 1)) (pa-inf))))
 
 (describe "Paranoia: square root"
   :tags [:conformance]
@@ -238,7 +238,7 @@
     (is (< (sqrt 0.25) (sqrt 0.5)))
     ;; sqrt of the smallest subnormal is a normal number, not zero
     (is (> (sqrt (pow 2.0 -1074)) 0.0))
-    (assert= (sqrt (pow 2.0 -1074)) (sqrt (bits->float 1)))))
+    (assert= (sqrt (pow 2.0 -1074)) (sqrt (bit/->float 1)))))
 
 (describe "Paranoia: comparison and sign laws"
   :tags [:conformance]
@@ -253,13 +253,13 @@
         (is (>= hi lo)))))
 
   (test "zero has two signs that compare equal but differ in bits"
-    ;; `=` deliberately collapses them; `float->bits` is how you tell them apart
+    ;; `=` deliberately collapses them; `bit/float->` is how you tell them apart
     (assert= (* -1.0 0.0) 0.0)
-    (refute (= (float->bits (* -1.0 0.0)) (float->bits 0.0)))
-    (assert= (float->bits (* -1.0 0.0)) 9223372036854775808)
+    (refute (= (bit/float-> (* -1.0 0.0)) (bit/float-> 0.0)))
+    (assert= (bit/float-> (* -1.0 0.0)) 9223372036854775808)
     ;; and the sign propagates through multiplication, the observable consequence
-    (assert= (float->bits (* (* -1.0 0.0) 1.0)) 9223372036854775808)
-    (assert= (float->bits (* (* -1.0 0.0) -1.0)) 0))
+    (assert= (bit/float-> (* (* -1.0 0.0) 1.0)) 9223372036854775808)
+    (assert= (bit/float-> (* (* -1.0 0.0) -1.0)) 0))
 
   (test "negation and abs are exact, never rounding"
     (dolist (x [1.0 -1.0 1.0e300 (pow 2.0 -1074) 3.14159])
@@ -282,8 +282,8 @@
       (refute (> q 1.0))
       (refute (<= q 1.0))
       (refute (>= q 1.0))
-      ;; but its BITS are perfectly comparable, which is why float->bits exists
-      (assert= (float->bits q) 9221120237041090560)
+      ;; but its BITS are perfectly comparable, which is why bit/float-> exists
+      (assert= (bit/float-> q) 9221120237041090560)
       ;; arithmetic propagates it
       (refute (= (+ q 1.0) (+ q 1.0)))))
 

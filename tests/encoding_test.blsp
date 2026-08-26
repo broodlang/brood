@@ -2,20 +2,20 @@
 
 (defmodule encoding-test (:use test))
 
-;; ---- char->int / int->char / utf8 primitives --------------------------------
+;; ---- string/char->int / string/int->char / utf8 primitives --------------------------------
 
-(describe "char->int / int->char"
+(describe "string/char->int / string/int->char"
   (test "ASCII roundtrip"
-    (assert= 65 (char->int "A"))
-    (assert= 97 (char->int "a"))
-    (assert= 48 (char->int "0"))
-    (assert= "A" (int->char 65))
-    (assert= "a" (int->char 97)))
-  (test "char->int uses first char only"
-    (assert= 72 (char->int "Hello")))
+    (assert= 65 (string/char->int "A"))
+    (assert= 97 (string/char->int "a"))
+    (assert= 48 (string/char->int "0"))
+    (assert= "A" (string/int->char 65))
+    (assert= "a" (string/int->char 97)))
+  (test "string/char->int uses first char only"
+    (assert= 72 (string/char->int "Hello")))
   (test "non-ASCII codepoint"
-    (assert= 233 (char->int "é"))
-    (assert= "é" (int->char 233))))
+    (assert= 233 (string/char->int "é"))
+    (assert= "é" (string/int->char 233))))
 
 (describe "string->utf8-bytes / utf8-bytes->string"
   (test "ASCII roundtrip"
@@ -38,15 +38,15 @@
   (test "simple ASCII"
     (assert= "48656c6c6f" (encoding/hex-encode "Hello")))
   (test "single null byte"
-    (assert= "00" (encoding/hex-encode (int->char 0))))
+    (assert= "00" (encoding/hex-encode (string/int->char 0))))
   (test "all hex digits present"
     (assert= "0a0b0c0d0e0f"
-      (encoding/hex-encode (str (int->char 10)
-                             (int->char 11)
-                             (int->char 12)
-                             (int->char 13)
-                             (int->char 14)
-                             (int->char 15))))))
+      (encoding/hex-encode (str (string/int->char 10)
+                             (string/int->char 11)
+                             (string/int->char 12)
+                             (string/int->char 13)
+                             (string/int->char 14)
+                             (string/int->char 15))))))
 
 (describe "hex-encode-upper"
   (test "uppercase output"
@@ -86,7 +86,7 @@
   (test "Hello"
     (assert= "SGVsbG8=" (encoding/base64-encode "Hello")))
   (test "uses + and / for standard alphabet"
-    (let (s (int->char 251))
+    (let (s (string/int->char 251))
       ; byte 0xFB → encodes to chars needing +/
       (is (string? (encoding/base64-encode s))))))
 
@@ -120,7 +120,7 @@
       (assert= s (encoding/base64-url-decode (encoding/base64-url-encode s)))))
   (test "standard and url-safe differ for bytes that map to position 63"
     ;; bytes [0 0 63] → v4 = rem(63,64) = 63 → '/' in std, '_' in url-safe
-    (let (bytes (str (int->char 0) (int->char 0) (int->char 63)))
+    (let (bytes (str (string/int->char 0) (string/int->char 0) (string/int->char 63)))
       (assert= "AAA/" (encoding/base64-encode bytes))
       (assert= "AAA_" (encoding/base64-url-encode bytes)))))
 

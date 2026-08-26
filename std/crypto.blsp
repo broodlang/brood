@@ -107,7 +107,7 @@ Returns true if `a` and `b` are identical, false otherwise."
   (and (= (count a) (count b))
     (= 0
       (fold (fn (acc pair)
-              (bit-or acc (bit-xor (first pair) (second pair))))
+              (bit/or acc (bit/xor (first pair) (second pair))))
         0
         (zip (seq a) (seq b))))))
 

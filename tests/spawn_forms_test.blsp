@@ -14,11 +14,11 @@
 ;; name. Reports that it actually ran.
 (defn- spawn-forms-report-bare
   ()
-  (send (whereis :spawn-forms-bare-parent) :ran-bare))
+  (send (proc/whereis :spawn-forms-bare-parent) :ran-bare))
 
 (describe "spawn: every body shape runs its body (no silent no-op)"
   (test "(spawn fn-name) — a bare function name is CALLED, not yielded-and-discarded"
-    (register :spawn-forms-bare-parent (self))
+    (proc/register :spawn-forms-bare-parent (self))
     (spawn spawn-forms-report-bare)
     (assert= (receive (m m) (after *test-wait-ms* :NEVER-RAN)) :ran-bare))
 
@@ -33,7 +33,7 @@
     (assert= (receive (m m) (after *test-wait-ms* :NEVER-RAN)) :ran-thunk))
 
   (test "(spawn name fn-name) — the named form also calls a bare function name"
-    (register :spawn-forms-named-parent (self))
+    (proc/register :spawn-forms-named-parent (self))
     (spawn :spawn-forms-worker spawn-forms-report-named)
     (assert= (receive (m m) (after *test-wait-ms* :NEVER-RAN)) :ran-named)))
 
@@ -41,4 +41,4 @@
 ;; global resolves at call time).
 (defn- spawn-forms-report-named
   ()
-  (send (whereis :spawn-forms-named-parent) :ran-named))
+  (send (proc/whereis :spawn-forms-named-parent) :ran-named))

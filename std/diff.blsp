@@ -81,7 +81,9 @@
 
 (defn seq (a b)
   "Diff two sequences (lists or vectors) by value equality. Returns a list of
-`[:keep v]`, `[:delete v]`, and `[:insert v]` operations that transform `a` into `b`."
+`[:keep v]`, `[:delete v]`, and `[:insert v]` operations that transform `a` into `b`.
+
+    (diff/seq [1 2 3] [1 3])   → ([:keep 1] [:delete 2] [:keep 3])"
   (let (av (into [] (/seq a))
         bv (into [] (/seq b))
         m (count av)
@@ -114,7 +116,9 @@ Returns `{:keeps n :deletes n :inserts n}`."
 (defn patch (a ops)
   "Apply diff `ops` to sequence `a`, producing sequence `b`. `a` is provided
 only for verification (`:delete` and `:keep` ops are expected to match `a` in
-order); the output is built from `:keep` and `:insert` ops."
+order); the output is built from `:keep` and `:insert` ops.
+
+    (diff/patch [1 2 3] (diff/seq [1 2 3] [1 3]))   → (1 3)"
   (map second (filter (fn (op) (not= (first op) :delete)) ops)))
 
 (defn unified (ops context-lines)

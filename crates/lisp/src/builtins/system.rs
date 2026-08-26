@@ -1030,7 +1030,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Date and time utilities (UTC): epoch↔datetime conversion, ISO 8601
     // format/parse, arithmetic, calendar predicates. Pure Brood over `now`.
     embedded_module!("datetime", "std/datetime.blsp"),
-    // Hex and Base64 encoding/decoding. Pure Brood over `char->int` /
+    // Hex and Base64 encoding/decoding. Pure Brood over `string/char->int` /
     // `string->utf8-bytes` / `utf8-bytes->string`. Opt-in, never in the prelude.
     embedded_module!("encoding", "std/encoding.blsp"),
     // Descriptive statistics over numeric sequences: mean, median, stddev,
@@ -1097,6 +1097,15 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // derived math over the bare arithmetic core (operators, quot/mod/rem stay in the
     // prelude). `(:use math)` for bare access, or call qualified.
     embedded_module!("math", "std/math.blsp"),
+    // Bitwise ops on integers + the IEEE-754 float/bit reinterpretations. The operations
+    // are kernel primitives registered as `bit/*` (the `string/length` pattern); this
+    // module declares the namespace they live in. Bare until 2026-08-26 — ten names for
+    // one idea is what a namespace is for, and bare is the scarce resource.
+    embedded_module!("bit", "std/bit.blsp"),
+    // Exact base-10 decimals — the `bit` story again: kernel primitives registered as
+    // `decimal/*`, this module declares the namespace. `decimal?` stays bare with the
+    // other type predicates. Bare until 2026-08-26.
+    embedded_module!("decimal", "std/decimal.blsp"),
     // OS/process interface: env vars, argv, subprocess execution, OS type, halt.
     // Wraps the %env-all/%argv/%os-cmd/%os-type/%halt primitives with a clean API.
     embedded_module!("system", "std/system.blsp"),
@@ -1728,7 +1737,7 @@ pub(super) fn monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             crate::dist::monitor_remote(node, id, watcher, mref);
             Ok(Value::ref_(mref))
         }
-        // `{:name n :node node}` address: resolve to a pid via `whereis` and
+        // `{:name n :node node}` address: resolve to a pid via `proc/whereis` and
         // monitor that pid. Only the local-node case is supported — a remote
         // `{:name :node}` address has no protocol to resolve the name on the
         // far side at monitor time, so we redirect the user to ship the pid
@@ -1949,7 +1958,7 @@ pub(super) fn spit_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(Value::nil())
 }
 
-/// `(register name pid)` — bind a local name so peers can address this process by
+/// `(proc/register name pid)` — bind a local name so peers can address this process by
 /// `{:name name :node this-node}` before they hold its pid. Returns the pid.
 pub(super) fn register_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_node_name(heap, "register", arg(args, 0))?;
@@ -1967,18 +1976,40 @@ pub(super) fn register_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     }
 }
 
+/// `(proc/unregister name)` — release a registered name; true if one was bound.
+pub(super) fn unregister_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_node_name(heap, "proc/unregister", arg(args, 0))?;
+    Ok(Value::boolean(crate::dist::unregister(name)))
+}
+
+/// `(proc/alive? pid)` — is `pid` a live process on THIS node?
+///
+/// `(proc/info pid)` already answered this by returning nil, but it assembles a whole
+/// snapshot map — several lock acquisitions and an allocation — to produce a boolean.
+/// A remote pid is `false`: liveness is not knowable locally, and claiming otherwise
+/// would be a guess.
+pub(super) fn process_alive(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            Ok(Value::boolean(crate::process::is_alive(id)))
+        }
+        Value::Pid { .. } => Ok(Value::boolean(false)),
+        other => Err(LispError::wrong_type(heap, "proc/alive?", "pid", other)),
+    }
+}
+
 /// `(node-name)` — this runtime's node name (`:nonode` until `node-start`).
 pub(super) fn node_name(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::keyword(crate::dist::local_node()))
 }
 
-/// `(whereis name)` — the **local** pid registered under `name`, or `nil`.
+/// `(proc/whereis name)` — the **local** pid registered under `name`, or `nil`.
 /// Lets idempotent bootstrap shapes test for "is this server already running
 /// here?" before re-`spawn`ing — see `remote-spawn` in `std/prelude.blsp`.
 /// A remote-side registration isn't visible here; this is a strictly local
 /// lookup over the `NAMES` table.
 pub(super) fn whereis_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let name = expect_node_name(heap, "whereis", arg(args, 0))?;
+    let name = expect_node_name(heap, "proc/whereis", arg(args, 0))?;
     match crate::dist::whereis(name) {
         Some(id) => Ok(Value::pid(crate::dist::local_node(), id)),
         None => Ok(Value::nil()),
@@ -2253,7 +2284,7 @@ pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
     Ok(sysmon_config_map(heap, prev))
 }
 
-/// `(build-id)` — this `brood` build's identity, `"<version>+<git-sha>+<binary-
+/// `(system/build-id)` — this `brood` build's identity, `"<version>+<git-sha>+<binary-
 /// stamp>"` (e.g. `"0.1.0+dcab7ca+18f2e1a9b3c4d5e6"`). The correct staleness
 /// stamp for an on-disk cache of anything the kernel computes (the checker's
 /// own logic is Rust, so its results are not portable across binaries).
@@ -2274,24 +2305,24 @@ pub(super) fn build_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&id))
 }
 
-/// `(stdlib-id)` — the embedded standard library's content identity. See
+/// `(system/stdlib-id)` — the embedded standard library's content identity. See
 /// [`stdlib_id_string`]: same for every binary built from one tree, which is what lets them
 /// share a stdlib startup image.
 pub(super) fn stdlib_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&stdlib_id_string()))
 }
 
-/// `(brood-version)` — this runtime's semantic version (`CARGO_PKG_VERSION`,
+/// `(system/brood-version)` — this runtime's semantic version (`CARGO_PKG_VERSION`,
 /// e.g. `"0.1.0"`): the string a project's `:brood` manifest constraint is
 /// checked against (ADR-209). Just the semver — the git-sha and binary-stamp
-/// live in `build-id`. The kernel is the only place this value exists, so it is
+/// live in `system/build-id`. The kernel is the only place this value exists, so it is
 /// a primitive; the policy that reads a `:brood` constraint and refuses an
 /// incompatible runtime is Brood (`std/tool/project.blsp`).
 pub(super) fn brood_version(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(env!("CARGO_PKG_VERSION")))
 }
 
-/// The `(build-id)` string as plain Rust — shared with the boot cache
+/// The `(system/build-id)` string as plain Rust — shared with the boot cache
 /// (`lib.rs`), which uses it as the staleness key for the expanded-prelude
 /// cache (the prelude is `include_str!`'d, so any binary change covers it).
 /// A **content** id for the embedded standard library: version + git sha + a hash of every

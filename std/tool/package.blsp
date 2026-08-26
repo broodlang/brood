@@ -302,7 +302,7 @@ land in a later slice."
   (let (constraint (get release :brood))
     (or (nil? constraint)
       (= constraint "")
-      (version/satisfies? (brood-version) constraint))))
+      (version/satisfies? (system/brood-version) constraint))))
 
 ;; Guard: raise a CLEAR, brood-specific error if any package in the closure has releases but
 ;; NONE the running brood can satisfy. Without this the resolver reports an opaque "no version
@@ -322,7 +322,7 @@ land in a later slice."
           (error "package: no published release of "
             (name nm)
             " is compatible with the brood you are running ("
-            (brood-version)
+            (system/brood-version)
             "). "
             (name nm)
             "'s releases require Brood "
@@ -1925,10 +1925,10 @@ metadata is immutable, correcting that meant re-publishing nine packages rather 
 editing nine lines. The derived value cannot go stale that way: it is whatever runtime
 just built and tested the thing being published.
 
-A declared constraint is returned untouched; nil derives `\">= \"` plus `(brood-version)`.
+A declared constraint is returned untouched; nil derives `\">= \"` plus `(system/brood-version)`.
 
     (package/publish-brood-constraint \">= 0.9\") → \">= 0.9\""
-  (or declared (str ">= " (brood-version))))
+  (or declared (str ">= " (system/brood-version))))
 
 (defn- report-brood-constraint
   (declared)
@@ -1938,7 +1938,7 @@ notices is wrong."
   (if declared
     (io/puts (str "package: requires brood " declared " (declared in project.blsp)"))
     (io/puts (str "package: requires brood >= "
-               (brood-version)
+               (system/brood-version)
                " (derived — this is the brood that built and tested it; declare :brood in "
                "project.blsp to widen it)"))))
 

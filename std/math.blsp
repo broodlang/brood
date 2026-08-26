@@ -27,14 +27,18 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 
     (math/abs -3)    → 3
     (math/abs 3)     → 3
-    (math/abs -2.5)  → 2.5"
+    (math/abs -2.5)  → 2.5
+
+    (math/abs -3)          → 3"
   (if (< n 0) (- n) n))
 (defn even? (n)
   "True if integer `n` is even.
 
     (math/even? 4)   → true
     (math/even? 3)   → false
-    (math/even? 0)   → true"
+    (math/even? 0)   → true
+
+    (math/even? 4)         → true"
   (= (rem n 2) 0))
 (defn odd? (n) "True if integer `n` is odd." (not (even? n)))
 
@@ -43,7 +47,9 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
   "The sum of the numbers in `xs`.
 
     (math/sum [1 2 3])  → 6
-    (math/sum [])       → 0"
+    (math/sum [])       → 0
+
+    (math/sum [1 2 3])     → 6"
   (fold %add 0 xs))
 (defn product (xs) "The product of the numbers in `xs`." (fold %mul 1 xs))
 
@@ -53,7 +59,9 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 (defn ceil (x) "Round `x` toward positive infinity to an integer." (- (floor (- x))))
 ;; round half away from zero: floor(x+0.5) for x>=0, mirrored for x<0.
 (defn round (x)
-  "Round `x` to the nearest integer (halves away from zero)."
+  "Round `x` to the nearest integer (halves away from zero).
+
+    (math/round 2.5)       → 3"
   (if (< x 0) (- (floor (+ (- x) 0.5))) (floor (+ x 0.5))))
 
 ;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
@@ -70,7 +78,9 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 
 (defn pow (base exp)
   "`base` raised to integer `exp`. A negative exponent gives the reciprocal — **exact**
-(a ratio) for an exact `base`, a float for a float `base`."
+(a ratio) for an exact `base`, a float for a float `base`.
+
+    (math/pow 2 10)        → 1024"
   (cond
     (not (int? exp)) (error "pow: exponent must be an integer (use sqrt for roots), got " exp)
     (< exp 0) (pow-reciprocal base exp)
@@ -105,7 +115,9 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 ;; exactly representable, so it may round the way its nearest f64 actually lies.
 (defn round-to (x places)
   "Round `x` to `places` decimal places (halves away from zero); returns a number —
-a float for a float `x` unless the rounded value is an integer, exact for an exact `x`."
+a float for a float `x` unless the rounded value is an integer, exact for an exact `x`.
+
+    (math/round-to 3.14159 2)   → 3.14"
   ;; The final `/` is `round`'s int result over the int scale, so since ADR-196 made
   ;; integer `/` exact it yields a RATIO whenever it doesn't divide evenly, and
   ;; `(round-to 3.14159 2)` came back `157/50` instead of `3.14`. Rounding recovers no
@@ -120,7 +132,9 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 ;; (sqrt n) — delegates to `%f64-sqrt` (f64::sqrt) for IEEE 754 correctness on all
 ;; inputs including subnormals. Always returns a Float; a negative argument raises.
 (defn sqrt (n)
-  "The square root of `n` (IEEE 754; always a float). Negative `n` raises."
+  "The square root of `n` (IEEE 754; always a float). Negative `n` raises.
+
+    (math/sqrt 9)          → 3.0"
   (cond (< n 0) (error "sqrt: negative argument " n) (<= n 0) 0.0 else (%f64-sqrt n)))
 
 (defn clamp (x lo hi)
@@ -128,7 +142,10 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 
     (math/clamp 5 0 10)   → 5
     (math/clamp -1 0 10)  → 0
-    (math/clamp 99 0 10)  → 10"
+    (math/clamp 99 0 10)  → 10
+
+    (math/clamp 12 0 10)   → 10
+    (math/clamp -1 0 10)   → 0"
   (max lo (min hi x)))
 
 ;; ---- transcendental functions -----------------------------------------------

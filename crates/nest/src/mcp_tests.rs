@@ -206,27 +206,27 @@ fn bignum_step_churn_via_mcp_does_not_corrupt_heap() {
             (defn ms (f) (f))
             (defn wstep (b w h mask board col0 high)
               (let (wm1 (- w 1) hm1w (* (- h 1) w)
-                    l (bit-or (bit-and (bit-shift-left b 1) (bit-xor col0 board)) (bit-shift-right (bit-and b high) wm1))
-                    r (bit-or (bit-and (bit-shift-right b 1) (bit-xor high board)) (bit-shift-left (bit-and b col0) wm1))
-                    up (fn (f) (bit-or (bit-and (bit-shift-left f w) board) (bit-shift-right f hm1w)))
-                    dn (fn (f) (bit-or (bit-shift-right f w) (bit-shift-left (bit-and f mask) hm1w)))
+                    l (bit/or (bit/and (bit/shift-left b 1) (bit/xor col0 board)) (bit/shift-right (bit/and b high) wm1))
+                    r (bit/or (bit/and (bit/shift-right b 1) (bit/xor high board)) (bit/shift-left (bit/and b col0) wm1))
+                    up (fn (f) (bit/or (bit/and (bit/shift-left f w) board) (bit/shift-right f hm1w)))
+                    dn (fn (f) (bit/or (bit/shift-right f w) (bit/shift-left (bit/and f mask) hm1w)))
                     ns [(up l) (up b) (up r) l r (dn l) (dn b) (dn r)]
                     planes (reduce (fn ([s0 s1 s2 s3] m)
-                                     (let (c (bit-and s0 m) s0b (bit-xor s0 m) c2 (bit-and s1 c) s1b (bit-xor s1 c)
-                                           c3 (bit-and s2 c2) s2b (bit-xor s2 c2) s3b (bit-or s3 c3))
+                                     (let (c (bit/and s0 m) s0b (bit/xor s0 m) c2 (bit/and s1 c) s1b (bit/xor s1 c)
+                                           c3 (bit/and s2 c2) s2b (bit/xor s2 c2) s3b (bit/or s3 c3))
                                        [s0b s1b s2b s3b]))
                              [0 0 0 0] ns)
                     s0 (vector-ref planes 0) s1 (vector-ref planes 1) s2 (vector-ref planes 2) s3 (vector-ref planes 3))
-                (bit-and (bit-and s1 (bit-and (bit-xor s2 board) (bit-xor s3 board))) (bit-or s0 b)))))"#;
+                (bit/and (bit/and s1 (bit/and (bit/xor s2 board) (bit/xor s3 board))) (bit/or s0 b)))))"#;
     // each call builds the wide masks as LOCAL lets, captured by the closures
     // passed to `ms` and `reduce` (exactly the prototype that crashed).
     let churn = r#"(let (w 200 h 120
-                            mask (- (bit-shift-left 1 w) 1)
-                            board (- (bit-shift-left 1 (* w h)) 1)
+                            mask (- (bit/shift-left 1 w) 1)
+                            board (- (bit/shift-left 1 (* w h)) 1)
                             col0 (quot board mask)
-                            high (bit-shift-left col0 (- w 1))
-                            st (bit-and board (bit-shift-left (- (bit-shift-left 1 100) 1) 5000)))
-                        (ms (fn () (bit-count (reduce (fn (b _) (wstep b w h mask board col0 high)) st (range 30))))))"#;
+                            high (bit/shift-left col0 (- w 1))
+                            st (bit/and board (bit/shift-left (- (bit/shift-left 1 100) 1) 5000)))
+                        (ms (fn () (bit/count (reduce (fn (b _) (wstep b w h mask board col0 high)) st (range 30))))))"#;
     let mut reqs = vec![
         req(1, "initialize", json!({})),
         req(

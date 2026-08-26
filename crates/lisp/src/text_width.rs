@@ -1,6 +1,6 @@
 //! Display-cell width of text — how many terminal/grid columns a string occupies.
 //!
-//! Shared by the `display-width` builtin (so Brood code — the editor's column /
+//! Shared by the `string/display-width` builtin (so Brood code — the editor's column /
 //! cursor math — can ask) and the GUI renderer (`gui.rs`, which advances the cell
 //! grid one *cluster* at a time, not one codepoint). One definition, so the two can
 //! never disagree about where a wide glyph ends.
@@ -26,7 +26,7 @@ pub fn cluster_cells(cluster: &str) -> usize {
 }
 
 /// The display width, in cells, of `s`: the sum of its grapheme clusters' widths.
-/// `(display-width "a😀b")` is 4 — `a` and `b` one cell each, the emoji two.
+/// `(string/display-width "a😀b")` is 4 — `a` and `b` one cell each, the emoji two.
 pub fn display_width(s: &str) -> usize {
     s.graphemes(true).map(cluster_cells).sum()
 }

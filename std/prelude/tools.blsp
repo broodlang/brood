@@ -3,12 +3,31 @@
 ;; global table, on top of the `global-names`/`doc` primitives. The first thing
 ;; to reach for when exploring rather than guessing names one at a time.
 
+;; The candidate set for name-based discovery: every global MINUS the plumbing. A `%`
+;; name is a kernel primitive or a prelude internal (ADR-249 moved 203 of the latter
+;; behind the prefix, taking `%` globals from 313 to 521) and a `defn-` name is
+;; module-private. Neither is something a user should be offered, and before this
+;; `(apropos "sort")` answered `(%sort-asc %sort-cmp %merge-sort %merge-sort-n sort
+;; sort-by)` — four of six results were internals. `bound?` guards the `private?`
+;; probe against a name in the table with no value yet.
+(defn- %discoverable-names
+  ()
+  "Every global worth OFFERING to a human: no `%` plumbing, no module-private names."
+  (filter (fn (s)
+            (and (not (string/starts-with? (name s) "%"))
+              (not (private? s))))
+    (global-names)))
+
 (defn apropos (pattern)
-  "Every global whose name contains `pattern` (a string, symbol, or keyword), as a sorted list of symbols — e.g. `(apropos \"rand\")`."
+  "Every PUBLIC global whose name contains `pattern` (a string, symbol, or keyword), as a
+sorted list of symbols. `%`-prefixed plumbing and module-private names are excluded — they
+are not callable vocabulary, and they used to bury the answer.
+
+    (apropos \"zipm\")   → (zipmap)"
   ;; `name` (not `str`) so a keyword pattern drops its leading colon, matching
   ;; the bare global names; a string passes through unchanged.
   (let (needle (if (string? pattern) pattern (name pattern)))
-    (filter (fn (s) (includes? (name s) needle)) (global-names))))
+    (filter (fn (s) (includes? (name s) needle)) (%discoverable-names))))
 
 ;; Whitespace-split a query into lowercased terms (blanks dropped) — the unit
 ;; doc-search ranks by. A single-word query yields one term, so it degrades to
@@ -36,7 +55,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
                           (let (hay (string/lower (str s " " d))
                                 hits (count (filter (fn (t) (includes? hay t)) terms)))
                             (when (> hits 0) [hits s d])))))
-            (global-names)))))))
+            (%discoverable-names)))))))
 
 ;; ---- spy: homoiconic tree-tracing debug (ADR-173) ---------------------------
 ;; `(spy expr)` evaluates `expr`, traces every evaluated subexpression's value in
@@ -638,7 +657,7 @@ NOTHING, so the requires its header would have run are replayed from these edges
 that carries no edges restores `url` without `path`, and its first `path/join` is unbound.
 Merging rather than replacing because a project image and the stdlib image each carry their
 own, and whichever installs second must not erase the first."
-  ;; Drop a dep this binary cannot load. An image is keyed on `stdlib-id` — the stdlib's
+  ;; Drop a dep this binary cannot load. An image is keyed on `system/stdlib-id` — the stdlib's
   ;; CONTENT — which is deliberately the same for `brood`, `nest` and `brood-lsp` from one
   ;; tree, so one image is shared. But those binaries do not bake in the same MODULES: a
   ;; lean runtime (what `nest release` and `make install INSTALL_FEATURES=RUN_FEATURES`
@@ -754,7 +773,7 @@ own, and whichever installs second must not erase the first."
       ;; Every baked-in std module has embedded source, so `src` matches for all of them
       ;; and this branch was unreachable for exactly the modules a stdlib image exists to
       ;; serve. Preferring it is safe on its own terms: an image is only ever installed
-      ;; after its fingerprint matched (the stdlib image keys on `build-id`, so it cannot
+      ;; after its fingerprint matched (the stdlib image keys on `system/build-id`, so it cannot
       ;; outlive the binary whose source it snapshotted), and a module with no section
       ;; still falls through to the source branch unchanged.
       (not (nil? (%image-section-for key)))

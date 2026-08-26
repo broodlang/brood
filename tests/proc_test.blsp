@@ -60,7 +60,7 @@
         (proc/send p sent)
         (let (got (receive ([:proc ^p d] d) (after *test-wait-ms* :timeout)))
           (assert= got sent)
-          (assert= (into [] (bytes/->list got)) [0 255 128 65])
+          (assert= (into [] (seq got)) [0 255 128 65])
           (proc/close p)))))
 
   (test "a string leaf is its UTF-8 bytes even in binary mode (ADR-141)"

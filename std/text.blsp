@@ -4,27 +4,39 @@
 (defmodule text)
 
 (defn insert (r idx s)
-  "A fresh rope with string s inserted at character index idx."
+  "A fresh rope with string s inserted at character index idx.
+
+    (text/->string (text/insert (text/from-string \"ac\") 1 \"b\"))   → \"abc\""
   (%rope-insert r idx s))
 
 (defn delete (r start end)
-  "A fresh rope with characters [start, end) removed."
+  "A fresh rope with characters [start, end) removed.
+
+    (text/->string (text/delete (text/from-string \"abc\") 1 2))   → \"ac\""
   (%rope-delete r start end))
 
 (defn slice (r start end)
-  "The text of characters [start, end) of rope r, as a string."
+  "The text of characters [start, end) of rope r, as a string.
+
+    (text/slice (text/from-string \"abcd\") 1 3)   → \"bc\""
   (%rope-slice r start end))
 
 (defn length (r)
-  "The number of characters in rope r."
+  "The number of characters in rope r.
+
+    (text/length (text/from-string \"hi\"))   → 2"
   (%rope-length r))
 
 (defn line (r n)
-  "The text of line n (0-based) of rope r, including any trailing newline."
+  "The text of line n (0-based) of rope r, including any trailing newline.
+
+    (text/line (text/from-string \"a\nb\") 1)   → \"b\""
   (%rope-line r n))
 
 (defn line-count (r)
-  "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line)."
+  "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line).
+
+    (text/line-count (text/from-string \"a\nb\"))   → 2"
   (%rope-line-count r))
 
 (defn char->line (r idx)

@@ -790,9 +790,9 @@ shows named processes (most live processes are anonymous and render `-`). Return
 nil."
   (do
     (doseq (i (range n))
-      (register (keyword (str "idle-" (inc i))) (spawn (observe-idle-worker))))
+      (proc/register (keyword (str "idle-" (inc i))) (spawn (observe-idle-worker))))
     (let (w (spawn (observe-backlog-worker)))
-      (register :backlog w)
+      (proc/register :backlog w)
       (seq/repeatedly 4 (fn () (send w :idle))))
     nil))
 
@@ -863,7 +863,7 @@ For a modal terminal observer instead, call `(observe-attach *term-display*)`."
   ;; the front. Otherwise spawn fresh; `(gui-display)` (opening the window) runs only
   ;; in that branch. `send` to a just-died pid is a harmless no-op (race-safe).
   (let (nm (observe-window-key key)
-        live (whereis nm))
+        live (proc/whereis nm))
     (if (nil? live)
       (spawn nm (observe-attach (gui-display)))
       (do (send live :focus) live))))
@@ -905,7 +905,7 @@ unless it opens itself up."
   (if (= (node/name) :nonode)
     (error "observe-serve: call (node/start name addr cookie) first")
     (let (agent (spawn (observe-agent-loop)))
-      (register :observe agent)
+      (proc/register :observe agent)
       agent)))
 
 (defn- observe-gen-node-name

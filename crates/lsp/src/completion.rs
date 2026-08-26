@@ -129,6 +129,14 @@ pub fn completions(
     // Then the interpreter's globals (prelude + builtins + every `mod/name` for
     // explicit qualified completion).
     for name in introspect::global_names(interp) {
+        // `%`-prefixed names are the kernel primitives and the prelude's internals
+        // (ADR-249 moved 203 of the latter behind the prefix, taking `%` globals from
+        // 313 to 521). They are not vocabulary a user should be offered — half the
+        // completion list would be plumbing — and `apropos`/`doc-search` filter them
+        // for the same reason.
+        if name.starts_with('%') {
+            continue;
+        }
         if seen.insert(name.clone()) {
             items.push(item(name, CompletionItemKind::FUNCTION));
         }

@@ -28,7 +28,7 @@ fn two_nodes_connect_and_message() {
     let server = format!(
         r#"
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(register :echo (self))
+(proc/register :echo (self))
 (defn serve ()
   (receive
     ([:hi from]   (do (send from [:pong (self)]) (serve)))
@@ -253,7 +253,7 @@ fn two_unix_nodes_connect_by_name_and_message() {
 
     let server = r#"
 (node/start :ua)
-(register :echo (self))
+(proc/register :echo (self))
 (defn serve ()
   (receive
     ([:hi from] (do (send from [:pong (self)]) (serve)))
@@ -315,7 +315,7 @@ fn wrong_cookie_rejected_over_unix() {
 
     let server = r#"
 (node/start :uc)
-(register :echo (self))
+(proc/register :echo (self))
 (defn serve () (receive (_ (serve))))
 (serve)
 "#;
@@ -401,7 +401,7 @@ fn lambda_ships_across_nodes_and_runs() {
     let server = format!(
         r#"
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(register :worker (self))
+(proc/register :worker (self))
 (defn serve ()
   (receive
     ([:run f x reply] (do (send reply [:result (f x)]) (serve)))
@@ -466,7 +466,7 @@ fn source_positions_survive_a_cross_node_send() {
     let server = format!(
         r#"
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(register :probe (self))
+(proc/register :probe (self))
 (defn serve ()
   (receive
     ([:run f reply] (do (send reply [:pos (f)]) (serve)))
@@ -552,7 +552,7 @@ fn a_shipped_closure_requires_its_modules_on_the_receiver() {
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (when (bound? 'math/sqrt) (throw "node A already had math loaded — the test proves nothing"))
 (when (bound? 'json/encode) (throw "node A already had json loaded — the test proves nothing"))
-(register :calc (self))
+(proc/register :calc (self))
 (defn serve ()
   (receive
     ([:run f x reply] (do (send reply [:result (f x)]) (serve)))
@@ -686,7 +686,7 @@ fn cross_node_pid_monitor_fires_down() {
 (defn worker (parent)
   (do (send parent [:my-pid (self)])
       (receive (:stop nil) (_ nil))))
-(register :work-bootstrap (self))
+(proc/register :work-bootstrap (self))
 (receive
   ([:hello from] (spawn (worker from)))
   (after 10000 nil))
@@ -755,7 +755,7 @@ fn remote_monitor_fires_noconnection_on_node_down() {
 (defn worker (parent)
   (do (send parent [:my-pid (self)])
       (receive (after 60000 nil))))
-(register :work-bootstrap (self))
+(proc/register :work-bootstrap (self))
 (receive
   ([:hello from] (spawn (worker from)))
   (after 10000 nil))
@@ -853,7 +853,7 @@ fn ensure_link_reconnects_across_a_node_restart() {
     let server_src = format!(
         r#"
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(register :probe (self))
+(proc/register :probe (self))
 (defn serve ()
   (receive
     ([:ping from] (do (send from [:pong (self)]) (serve)))
@@ -1010,7 +1010,7 @@ fn mismatched_cookie_is_rejected() {
     let server = format!(
         r#"
 (node/start :a "127.0.0.1:{port_a}" "right-cookie-test-16+")
-(register :echo (self))
+(proc/register :echo (self))
 (defn serve () (receive ([:hi from] (do (send from [:pong (self)]) (serve))) (_ (serve))))
 (serve)
 "#
@@ -1049,7 +1049,7 @@ fn echo_server_src(port: u16) -> String {
     format!(
         r#"
 (node/start :a "127.0.0.1:{port}" "secret-test-cookie-16+")
-(register :echo (self))
+(proc/register :echo (self))
 (defn serve ()
   (receive
     ([:hi from]  (do (send from [:welcome]) (serve)))
@@ -1349,7 +1349,7 @@ fn remote_link_death_delivers_exit_to_a_trapping_peer() {
     ([:whoami from] (do (send from [:iam (self)]) (worker-loop)))
     ([:die-now] (error "boom"))
     (_ (worker-loop))))
-(register :worker (spawn (worker-loop)))
+(proc/register :worker (spawn (worker-loop)))
 (receive (:never :x))
 "#
     );
@@ -1404,7 +1404,7 @@ fn remote_exit_kills_a_worker() {
   (receive
     ([:whoami from] (do (send from [:iam (self)]) (worker-loop)))
     (_ (worker-loop))))    ; parks; only an external exit can stop it
-(register :worker (spawn (worker-loop)))
+(proc/register :worker (spawn (worker-loop)))
 (receive (:never :x))      ; main parks so the node outlives the worker's kill
 "#
     );
@@ -1464,7 +1464,7 @@ fn supervisor_restarts_a_remote_child() {
   (receive
     ([:make reply obs] (do (send reply [:made (spawn (worker-loop obs))]) (factory)))
     (_ (factory))))
-(register :factory (spawn (factory)))
+(proc/register :factory (spawn (factory)))
 (receive (:never :x))
 "#
     );
@@ -1608,7 +1608,7 @@ fn dual_listen_serves_tcp_and_unix_at_once() {
         r#"
 (node/start :ed@127.0.0.1 "127.0.0.1:{port}")
 (node/also-listen)                       ; + the local Unix socket "ed"
-(register :echo (self))
+(proc/register :echo (self))
 (defn serve () (receive ([:hi from] (do (send from [:pong (self)]) (serve))) (_ (serve))))
 (serve)
 "#
@@ -1659,7 +1659,7 @@ fn monitor_node_fires_on_every_reconnect_cycle() {
     let server_src = format!(
         r#"
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(register :probe (self))
+(proc/register :probe (self))
 (defn serve ()
   (receive
     ([:ping from] (do (send from [:pong]) (serve)))
@@ -2111,7 +2111,7 @@ fn reconnect_watcher_heals_a_fallen_link() {
     let b_round2 = format!(
         r#"
 (let (echoer (spawn (receive ([:ping from] (send from [:pong])))))
-  (register :echo echoer)
+  (proc/register :echo echoer)
   (node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
   (sleep 30000))
 "#
