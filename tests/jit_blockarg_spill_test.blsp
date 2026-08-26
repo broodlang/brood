@@ -1,0 +1,90 @@
+;;; Regression guard: block-argument spill slots must fit inside the frame they were
+;;; reserved in — KI-64.
+;;;
+;;; A JIT'd arm's frame is `[locals | spill slots | checkpoint journal]`. The spill area
+;;; has two independent halves: **call-result** spills (a heap handle left live below a
+;;; later call — the `fib` shape) and **block-argument** spills (an operand crossing a
+;;; block boundary that is not a profiled `Int`, KI-49). `jit_spill_reserve` sizes both,
+;;; and it opened with `if non_tail_call_count(code) < 2 { return 0 }` — a gate that is
+;;; right for the call-result half and wrong for the other one. Block-argument slots are
+;;; needed whenever the operand stack is deep where a block boundary falls, which happens
+;;; with a *single* non-tail call as soon as an `if` sits inside that call's argument
+;;; list — `(walk (rest xs) (step (first xs) (if first? acc (cons "," acc))) false)`.
+;;;
+;;; Those arms then reserved nothing, and the lowering's `blockarg_spill_base` is a
+;;; *clamped* subtraction: with a zero reserve it collapses onto `spill_base`, which for a
+;;; journalling arm **is the checkpoint slot**. So the native wrote block arguments over
+;;; the deopt journal, and a later block-argument read returned the packed journal word
+;;; `(resume_ip << 16 | depth)` as if it were a live value. `17 << 16 | 2` = 1114114, and
+;;; the failure surfaced far away as `empty?: expected collection, got int (1114114)` —
+;;; a list-walker receiving an integer it was never passed. Arms with no journal were
+;;; worse: they wrote past the frame top entirely (one prelude arm wanted 11 such slots
+;;; against a 10-slot frame).
+;;;
+;;; Found as a `json/encode` failure under sustained load in a real service (every request
+;;; after roughly the sixtieth returned 500, and a restart "fixed" it), but neither JSON
+;;; nor load nor concurrency is required: the shape is a mutually-recursive walker over a
+;;; lazy sequence of containers, and it fails in a single process on the fourth call.
+;;;
+;;; These cases need enough iterations for the arm to tier to native, which is why they
+;;; run a thousand elements several times rather than once. They pass on every tier;
+;;; before the fix the default build failed and `BROOD_TIER=1` / `BROOD_NO_JIT=1` /
+;;; `BROOD_NO_DEOPT_RESUME=1` passed.
+
+(defmodule jit-blockarg-spill-test (:use test))
+
+;; The canonical shape. Note the `if` INSIDE the argument list of the non-tail `step`
+;; call: that is what puts operands on the stack across a block boundary, and `walk-list`
+;; has only the one non-tail call, so it took the bad gate.
+(defn- walk-list
+  (xs acc first?)
+  (if (empty? xs)
+    acc
+    (walk-list (rest xs) (step (first xs) (if first? acc (cons "," acc))) false)))
+
+(defn- walk-items
+  (xs i n acc)
+  (if (>= i n) acc (walk-items xs (+ i 1) n (step (nth xs i) acc))))
+
+;; Mutual recursion back into the walkers is what makes the corrupted slot flow into a
+;; parameter position, where it is finally noticed.
+(defn- step
+  (v acc)
+  (cond
+    (int? v) (cons (str v) acc)
+    (vector? v) (cons "]" (walk-items v 0 (count v) (cons "[" acc)))
+    (list? v) (cons "]" (walk-list v (cons "[" acc) true))
+    else (cons "?" acc)))
+
+;; A lazy seq-view (not a vector) of containers: `emit`/`step` reaches its `list?` arm,
+;; which is the one that walks with `first`/`rest`.
+(defn- lazy-rows (n) (map (fn (i) [i]) (range n)))
+
+;; Each fragment count is deterministic: the outer `[`/`]`, then per row `[`, the int and
+;; `]`, plus a comma between rows — `4n + 1`.
+(defn- fragments (n) (count (step (lazy-rows n) nil)))
+
+(describe "block-argument spills stay inside their frame"
+  (test "a walker over a lazy sequence of containers is correct once tiered"
+    ;; Ten calls: the first few run interpreted, the rest native. Before the fix the
+    ;; fourth raised `empty?: expected collection, got int (1114114)`.
+    (is (= (list 4001 4001 4001 4001 4001 4001 4001 4001 4001 4001)
+          (map (fn (_) (fragments 1000)) (range 10)))))
+
+  (test "the count does not depend on how many times the walker has run"
+    ;; A sweep, because the corruption needed the arm to be hot: every length must agree
+    ;; with the closed form no matter where the background compile landed.
+    (is (= (list 41 401 4001 40001)
+          (map (fn (n) (fragments n)) (list 10 100 1000 10000)))))
+
+  (test "json/encode of the same shape round-trips"
+    ;; The original report. `json/encode` is this shape (`emit-list` <-> `emit`), and its
+    ;; own `emit-list` arm is the one that took the bad gate.
+    (let (rows (map (fn (i) {:n i}) (range 500)))
+      (is (= (list 500 500 500 500 500)
+            (map (fn (_) (count (json/parse (json/encode rows)))) (range 5))))))
+
+  (test "a walker whose elements are maps, so the pair emitter recurses too"
+    (let (rows (map (fn (i) {:a i :b [i i]}) (range 400)))
+      (is (= (list 400 400 400 400 400)
+            (map (fn (_) (count (json/parse (json/encode rows)))) (range 5)))))))

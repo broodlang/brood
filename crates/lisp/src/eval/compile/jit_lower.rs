@@ -488,10 +488,12 @@ fn jit_lower_arm_inner(
     };
     // KI-49: the reserve is [call-result spills | block-argument spills]. The block-arg
     // half is indexed by operand-stack POSITION (so predecessors agree), so it gets its own
-    // base rather than sharing `spill_next`'s monotonic counter.
-    let blockarg_spill_len = crate::eval::compile::jit_plan::max_leader_depth_pub(code);
+    // base rather than sharing `spill_next`'s monotonic counter. The window — and the clamp
+    // that keeps it off the checkpoint journal (KI-64) — is
+    // `jit_plan::blockarg_spill_window`, with the rest of the frame-layout decisions.
     let spill_base = frame_top_for_spills - reserve;
-    let blockarg_spill_base = spill_base + reserve.saturating_sub(blockarg_spill_len);
+    let (blockarg_spill_base, blockarg_spill_len) =
+        crate::eval::compile::jit_plan::blockarg_spill_window(code, reserve, frame_top_for_spills);
     let mut spill_next = 0usize;
     // Return-via-roots writes/reads the result at `roots[base]` (slot 0), and the VM hooks
     // read it back the same way — both require slot 0 to exist. A 0-slot arm (a 0-arg,
@@ -511,6 +513,18 @@ fn jit_lower_arm_inner(
     // fire on real compiled code.
     if !chunk_in_jit_subset(code) {
         return trace_lower_bail(arm, "chunk-outside-jit-subset");
+    }
+
+    // KI-64 backstop, checked AFTER the subset pre-bail so it only judges arms that can
+    // actually lower. The spill area must FIT under the checkpoint — or under the frame
+    // top when this lowering does not journal — because a block-argument write landing on
+    // the journal makes a later read return the packed journal word as a live value, and
+    // one landing past the frame top corrupts whatever is above it. The clamp above makes
+    // this unreachable by construction; it stays because *nothing* checked before KI-64,
+    // which is why a two-line arithmetic slip cost a production service months of
+    // "restart it and it comes back". Bail rather than corrupt: the arm runs on the VM.
+    if blockarg_spill_base + blockarg_spill_len > frame_top_for_spills {
+        return trace_lower_bail(arm, "spill-area-exceeds-frame");
     }
 
     // ---- Body-weight gate for arms ending in a tail call (jit-tier2.md §6.2). ----
