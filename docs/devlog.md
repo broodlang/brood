@@ -715,6 +715,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-24** — a library name may shadow core only when used qualified (ADR-241)
 - **2026-08-24** — the bare core: 613 published names down to 337 (ADR-242)
 - **2026-08-24** — the namespace waves: 337 bare core names down to 291
+- **2026-08-26** — KI-61 fixed: the prelude autoloads instead of force-loading; boot 22.8 -> 11.6 ms (ADR-246/247)
 
 ---
 
@@ -3468,3 +3469,54 @@ nothing else in the tree evaluates prose.
 `scripts/stdlib-audit.blsp` is the standing report, and both it and the example harness are
 Brood — the library being audited is Brood, so the audit is a program in it rather than a script
 parsing it from outside.
+
+## 2026-08-26 — KI-61: the boot cost the namespacing waves left behind
+
+Two changes, one measurement. Warm prelude boot **22.8 -> 11.6 ms**, base RSS **55.6 -> 50.7 MB**,
+`startup` **-28.9%** (`scripts/ab-bench.sh -b HEAD -n 9 --floor`), and every other row ~11-13 ms
+faster in absolute wall time — `fib` -10.5%, `loop` -10.2%, `reduce` -22.2%, `strings` -34.7%. That
+last list is the point: the cost was on every invocation of `brood`/`nest`/`brood-lsp`, so the win
+is not a row, it is the runtime.
+
+**Where the time actually was.** `BROOD_BOOT_TRACE` reported one number for the cache-hit path — a
+total — so the first thing was to break it into `parse`/`eval`/`freeze` (kept; the trace could not
+previously say whether a boot regression was in reading the cache, evaluating the prelude, or one
+`require` inside it). It read: builtins 0.8, raw positioned read of the prelude 3.5, cached-expansion
+read 3.9, eval 15.7 (**of which 12.1 was two `require-one` forms**), freeze 1.9. So 15.6 of 26 ms was
+two things, and neither was the interpreter.
+
+**KI-61 (12.1 ms), fixed the other way round.** The entry's recorded fix was to make a module load
+cheap at boot — the std image — blocked on a registration replay it had sized at 56 `impl` + 24
+`defability` + 35 `defrecord` forms. The cheaper fix is to not load them at boot: the prelude's
+references into `string`/`seq` become **autoload stubs** that load their module on first call
+(ADR-246). A bare boot now loads *no* features at all. It also ends the per-wave tax structurally —
+the next wave costs one declaration.
+
+The declaration carries the arity, which is drift-prone, so both halves are guarded. The
+`prelude_hygiene` lint that used to allow any reference into an `ALLOWED_MODULES` allowlist now
+demands the name be a kernel primitive, a prelude definition, or an autoload declaration; a second
+test asserts each declared arity still matches its module. **That test earned itself on its first
+run**: `string/->number` is a *native*, so the stub I had written for it would have shadowed an
+always-bound primitive with one that loads a module and forwards to itself. The re-entry guard in
+`autoload-call` would have caught it at runtime, which is exactly the wrong place.
+
+One prelude helper had to move off the module: `impl-id-owner` (the tier-ladder lookup on every
+`impl` registration, the prelude's own `Display`/`Inspect` impls included) called `string/split` +
+`string/join` to cut a keyword at its last `/`. Rewritten on `%str-last-index-of` +
+`string/substring`, both natives — the same answer, no intermediate list, and no module.
+
+**The unrecorded 3.5 ms.** The warm boot read the prelude *twice*: the cached expansions, and the raw
+`PRELUDE` text positioned, purely so `note_definition` could record where each prelude `def` was
+written (`M-.` into stdlib, ADR-031). It built the whole prelude AST on the heap to produce a
+`Symbol -> (file, line, col)` map. Those names are now recorded at cache-*write* time, where the raw
+forms are already in hand, and carried in the cache line (`line:col:name,... <form>`, header `v2`)
+— ADR-247. The recording goes through `note_definition_recording`, i.e. `note_definition` with an
+out-parameter, so `def_form_name` stays the single definition of what a form binds and the reader
+cannot disagree with the writer. Def-sites are byte-identical, including the `%defseq map` case where
+the name is only recoverable from the *expansion*. Not building that AST is also where the 4.6 MB of
+RSS went.
+
+**A measurement note.** Two intermediate readings were pure noise from a `make test` running beside
+the timer (boot "31 ms", then "55 ms" on an *empty* program). On this machine nothing sub-10 ms is
+measurable while the suite runs; the numbers above are all from an idle box through `ab-bench`, which
+builds both sides through the same `make release-brood`.

@@ -16337,3 +16337,91 @@ reconstructs code (arms, captured env, KI-55's woven module guards), which does 
 under a mailbox lock at any size.
 
 `BROOD_L1_BUDGET` governs both sites, so one lever A/Bs or disables the whole ADR.
+
+## ADR-246 — The prelude's references into library modules are autoload stubs, not force-loads
+
+**Context.** A qualified name inside a function body is late-bound: `(defn fmt (s) … (string/join
+"/" parts) …)` resolves `string/join` when `fmt` is *called*, not when it is defined. That is what
+lets the prelude reference names that live in `std/string.blsp` and `std/seq.blsp` at all. But
+boot's namespace-resolve is a no-op for the root prelude, so unlike a module file's reference,
+the prelude's never auto-required its module — the module had to be *force-loaded* at the bottom
+of `std/prelude/tools.blsp` before any such helper could run.
+
+That cost **12.1 ms of a 26 ms warm boot** (`string` 4.0, `seq` 7.5), paid by every `brood`,
+`nest` and `brood-lsp` invocation whether or not the program ever called one of those helpers.
+Worse, it was a **per-wave tax**: the core has gone 613 → ~280 published names across the
+namespacing refactors, and each wave that moves prelude names into a module leaves another
+force-load behind, forever (KI-61).
+
+**Decision.** Bind each referenced name to a **stub** that loads its module on first call and
+forwards to the real definition the module's own `defn` then binds:
+
+```lisp
+(%autoload string (char-at 2) (blank? 1) (ends-with? 2) (join 2) (->list 1))
+(%autoload seq (find 2) (keep 2) (remove 2) (distinct 1) (split-at 2) (vector-ref 2))
+```
+
+Boot loads nothing; the first caller that actually needs the module pays for it, once, and every
+later call reaches the real function directly. A future wave costs one declaration, not another
+few milliseconds on every invocation.
+
+**Why the arity is declared rather than discovered.** The stub must have the *same* arity as the
+function it stands in for. A variadic `(fn (& args))` placeholder would report a caller's arity
+error from inside the stub, and — because `def` warns when a rebind changes arity — would print
+`[reload] arity changed` on every module load. Declaring it is drift-prone, so both halves of the
+declaration are guarded by tests in `lib.rs`'s `prelude_hygiene`: that a declaration exists for
+every qualified reference the prelude makes into a lazily-loaded module (the check that used to be
+an `ALLOWED_MODULES` allowlist, now precise: primitive, prelude definition, or %autoload), and that
+each declared arity still matches its module's actual definition. The second test caught a real
+error on its first run — `string/->number` is a *native*, so the stub would have shadowed an
+always-bound primitive with one that forwards to itself.
+
+**This is not the autoload ADR-206 rejected.** That decision refused *reference-driven* autoload as
+a language feature — any bare `mod/name` reference loading its module on first sight, which would
+couple symbol resolution to filesystem side effects and make a module's dependency set implicit. The
+stubs here are the opposite shape: a fixed, hand-declared, build-checked list of names *inside the
+prelude*, which is the one region where a qualified reference cannot auto-require at compile time
+(that is the whole bug). No user code, no resolver change, no implicit dependency — the prelude's
+dependency on `string` and `seq` is stated more explicitly than the bare `require-one` stated it, and
+`nest check` sees a declaration rather than a filesystem probe.
+
+**Re-entry raises rather than loops.** `autoload-call` binds `*autoloading*` around the load *and*
+the forward, so a stub re-entered for the same name — meaning the module loaded without defining
+what the declaration promised — reports the drift instead of recursing forever.
+
+**Why not the stdlib image.** KI-61 recorded the alternative: install the std image at boot, which
+makes a module load 4–33× cheaper. It stays unshipped for the reason recorded with it —
+materialising a module defines its bindings and evaluates *nothing*, so every registration its load
+would have performed is silently skipped (150 suite failures, all registration-shaped, and each one
+type-checks clean). Closing that needs a registration **replay**. Lazy loading needs none of it:
+the module is loaded from its own source, exactly as before, only later. The image remains the
+right answer for making that later load fast, and the two compose.
+
+**Consequences.** Warm boot 22.8 → 11.6 ms; the `startup` row −28.9% and every compute row ~11–13 ms
+faster in absolute wall time. Base RSS 55.6 → 50.7 MB. One behavioural change: `*features*` no
+longer contains `string` or `seq` after a bare boot. See ADR-247 for the other half of the boot win.
+
+## ADR-247 — Prelude def-sites travel in the boot cache, not in a second read of the prelude
+
+**Context.** The warm boot reads the prelude **twice**: once as the cached expansions that drive
+evaluation, and once as the raw `PRELUDE` text via `read_all_positioned`, purely so
+`note_definition` can record where each prelude `def` was written (`M-.` into the standard library,
+ADR-031). The second read built the whole prelude AST on the heap to extract, in the end, a
+`Symbol → (file, line, col)` map — 3.5 ms of a 26 ms boot, and the AST's allocation on top.
+
+**Decision.** Record the names at cache-*write* time, where the raw forms are already in hand, and
+carry them in the cache file. Each line is now `line:col:name,… <printed form>`, and the reader
+records those def-sites directly (`Heap::record_def_site`) before evaluating the expansion. The
+positioned read is gone; the boot-cache header is `v2`, so an older cache is simply stale.
+
+The names come from `note_definition_recording`, which is `note_definition` with an out-parameter,
+so `def_form_name` stays the single definition of "what does this form bind" — the reader does not
+re-derive it and cannot disagree with the writer.
+
+**Consequences.** Warm boot −2.7 ms and base RSS −4.6 MB (the raw AST is never built). Definition
+sites are byte-identical: `(%source-location 'fold)` and friends still point at the materialised
+prelude, including the `%defseq map` case where the name is only recoverable from the *expansion*.
+`BROOD_BOOT_TRACE` now also breaks the cache-hit path into `parse`/`eval`/`freeze`, which it never
+did — its only number was a total, which cannot say whether a boot regression is in reading the
+cache, evaluating the prelude, or one `require` inside it.
+

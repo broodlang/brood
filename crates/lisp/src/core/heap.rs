@@ -4146,6 +4146,83 @@ impl Heap {
     /// goto-definition on a record constructor or ability op finds nothing (ADR-031).
     ///
     /// [`current_file`]: Self::current_file
+    /// Like [`note_definition`], but also returns the names it recorded — the
+    /// boot-cache writer's hook. The cache-hit boot no longer reads the raw prelude
+    /// (that positioned read cost 3.5 ms of a 26 ms boot and produced nothing but
+    /// these names), so the names the *un-expanded* form would have contributed are
+    /// captured here, once, on the cold source boot and stored in the cache file.
+    /// Returning them rather than re-deriving them on read keeps [`def_form_name`]
+    /// the single definition of "what name does this form bind".
+    ///
+    /// [`note_definition`]: Self::note_definition
+    pub fn note_definition_recording(
+        &mut self,
+        form: Value,
+        pos: crate::error::Pos,
+    ) -> Vec<Symbol> {
+        let before = self.runtime.def_sites_read().len();
+        let mut names = Vec::new();
+        let Some(file) = self.cold().and_then(|c| c.current_file.clone()) else {
+            return names;
+        };
+        self.collect_definitions(form, &file, pos, &mut names);
+        debug_assert!(self.runtime.def_sites_read().len() >= before);
+        names
+    }
+
+    /// [`note_definition_with_file`] with an out-parameter for the names recorded.
+    ///
+    /// [`note_definition_with_file`]: Self::note_definition_with_file
+    fn collect_definitions(
+        &mut self,
+        form: Value,
+        file: &str,
+        pos: crate::error::Pos,
+        names: &mut Vec<Symbol>,
+    ) {
+        if let Some(name) = self.def_form_name(form) {
+            self.runtime.def_sites_write().insert(
+                name,
+                SourceLoc {
+                    file: file.to_string(),
+                    pos,
+                },
+            );
+            names.push(name);
+            return;
+        }
+        let ValueRef::Pair(p) = form.unpack() else {
+            return;
+        };
+        let ValueRef::Sym(head) = self.car(p).unpack() else {
+            return;
+        };
+        if !crate::core::value::symbol_is(head, kw::DO) {
+            return;
+        }
+        let mut rest = self.cdr(p);
+        while let ValueRef::Pair(cell) = rest.unpack() {
+            self.collect_definitions(self.car(cell), file, pos, names);
+            rest = self.cdr(cell);
+        }
+    }
+
+    /// Record `name`'s definition site directly, without a form to read it from —
+    /// the boot-cache reader's counterpart to [`note_definition_recording`]. Uses
+    /// [`current_file`], so it is a no-op when no file is set, exactly like
+    /// [`note_definition`].
+    ///
+    /// [`current_file`]: Self::current_file
+    /// [`note_definition`]: Self::note_definition
+    pub fn record_def_site(&mut self, name: Symbol, pos: crate::error::Pos) {
+        let Some(file) = self.cold().and_then(|c| c.current_file.clone()) else {
+            return;
+        };
+        self.runtime
+            .def_sites_write()
+            .insert(name, SourceLoc { file, pos });
+    }
+
     pub fn note_definition(&mut self, form: Value, pos: crate::error::Pos) {
         let Some(file) = self.cold().and_then(|c| c.current_file.clone()) else {
             return;
