@@ -316,7 +316,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
           (let ([v j2] (json-value s (skip-ws s (+ j1 1) n) n)
                 j3 (skip-ws s j2 n)
                 ; JSON keys → keywords (acc is always a map)
-                acc2 (map-assoc acc (keyword k) v)
+                acc2 (%map-assoc acc (keyword k) v)
                 c (json-at s j3 n))
             (cond
               (= c 44) (object-acc s (+ j3 1) n acc2)
@@ -481,7 +481,7 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
   (let (custom (custom v))
     (if custom
       (emit (custom v) acc)
-      (cons "}" (emit-pairs (map-pairs (fields v)) (cons "{" acc) true)))))
+      (cons "}" (emit-pairs (%map-pairs (fields v)) (cons "{" acc) true)))))
 
 (defn- emit
   (v acc)
@@ -508,7 +508,7 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
     (keyword? v) (cons (enc-string (name v)) acc)
     (symbol? v) (cons (enc-string (name v)) acc)
     (record? v) (emit-record v acc)
-    (map? v) (cons "}" (emit-pairs (map-pairs v) (cons "{" acc) true))
+    (map? v) (cons "}" (emit-pairs (%map-pairs v) (cons "{" acc) true))
     (vector? v) (cons "]" (emit-items v 0 (count v) (cons "[" acc)))
     (list? v) (cons "]" (emit-list v (cons "[" acc) true))
     else

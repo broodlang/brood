@@ -242,10 +242,10 @@ function stops being traced too."
         ;; original back (so no later call even builds an entry) and delegate in TAIL
         ;; position — no post-call emit, no frame — so a traced tail loop is a tail loop
         ;; again for the rest of its run.
-        (if (= :spy-stop (spy-emit {:spy :call :fn sym :args args}))
+        (if (= :spy-stop (%spy-emit {:spy :call :fn sym :args args}))
           (do (debug-rebind sym orig) (apply orig args))
           (let (value (apply orig args))
-            (spy-emit {:spy :return :fn sym :value value})
+            (%spy-emit {:spy :return :fn sym :value value})
             value))))
     (%swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))
     sym))

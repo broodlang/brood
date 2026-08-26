@@ -1,11 +1,11 @@
 //! CHAMP map operations (child of heap).
 use super::*;
 
-/// `map-int-add` past the i64 range. Deliberately the same sentence as
+/// `%map-int-add` past the i64 range. Deliberately the same sentence as
 /// [`crate::core::table::incr`]'s: the linear-map optimizer rewrites one into the
 /// other, so the two must fail the same way (see [`Heap::map_int_add`]).
 fn int_add_range_err() -> LispError {
-    LispError::runtime("map-int-add: incrementing would exceed the ±2^63 range")
+    LispError::runtime("%map-int-add: incrementing would exceed the ±2^63 range")
 }
 
 impl Heap {
@@ -77,7 +77,7 @@ impl Heap {
     /// The one place the equivalence stops is the i64 boundary: `+` promotes to a
     /// bignum, this **errors** (`incrementing would exceed the ±2^63 range`), exactly
     /// as [`crate::core::table::incr`] does. That is deliberate, and it is why this
-    /// returns a `Result` — the linear-map optimizer rewrites `map-int-add` on a
+    /// returns a `Result` — the linear-map optimizer rewrites `%map-int-add` on a
     /// provably-linear accumulator into `table-incr` (`eval/compile/inline.rs`), so a
     /// promoting map path would make the rewrite *observable*: the same program
     /// returned a bignum with `BROOD_LINMAP=0` and raised with it on. Counters agree

@@ -74,10 +74,10 @@ pub const TABLE_DROP: &str = "%table-drop";
 // The immutable-map ops the linmap rewrite recognizes on the SOURCE side (compile/inline.rs
 // + eval/macros.rs) and rewrites into the Table ops above. Shared so a map-op rename stays
 // in step with the rewrite that pattern-matches it.
-pub const MAP_GET: &str = "map-get";
-pub const MAP_COUNT: &str = "map-count";
-pub const MAP_INT_ADD: &str = "map-int-add";
-pub const MAP_DISSOC: &str = "map-dissoc";
+pub const MAP_GET: &str = "%map-get";
+pub const MAP_COUNT: &str = "%map-count";
+pub const MAP_INT_ADD: &str = "%map-int-add";
+pub const MAP_DISSOC: &str = "%map-dissoc";
 
 // The ability / multimethod registry (ADR-241 §3, ADR-240's constant rule). These are
 // prelude functions the `defability`/`impl`/`defmulti`/`defrecord` expansions EMIT, and the

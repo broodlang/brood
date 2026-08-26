@@ -333,10 +333,10 @@
         (let (files [fa fb]
               extracts (fold (fn (m p)
                                (let ([c pr dn] (project/project-scan-file-entry p))
-                                 (map-assoc m p [0 c pr dn])))
+                                 (%map-assoc m p [0 c pr dn])))
                          {}
                          files)
-              source-set (fold (fn (m p) (map-assoc m p true)) {} files))
+              source-set (fold (fn (m p) (%map-assoc m p true)) {} files))
           ;; duplicate-defs: extract path == sequential path
           (assert= (sort (project/project-duplicate-def-warnings extracts source-set))
             (sort (project/project-duplicate-def-warnings-seq files)))
@@ -691,7 +691,7 @@
   "A temp project root with a `_deps/` of manifests — `layout` maps dep-name → the
 `:enhances …` clause text (\"\" for a plain dep). Returns the root."
   (let (root (temp-dir "brood-enhancer-"))
-    (doseq (kv (map-pairs layout))
+    (doseq (kv (%map-pairs layout))
       (let ([dep-name enhances] kv
             ;; `(str dep-name)` — the keys are symbols, and `path/join` takes strings
             ;; (the prelude's old 2-arg `path-join` stringified implicitly).

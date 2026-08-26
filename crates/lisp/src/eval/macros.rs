@@ -2103,7 +2103,7 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     // IR, where an unquote's contents are ordinary code, so an `acc` use inside one counts
     // toward the linearity proof — but `linmap_rewrite_form` cannot safely rewrite inside a
     // quasiquote (it would have to distinguish quoted structure from unquoted code), and
-    // leaving it alone would let a `map-get` reach the in-place `Table`. Plain `quote` needs
+    // leaving it alone would let a `%map-get` reach the in-place `Table`. Plain `quote` needs
     // no gate: it is inert data the probe sees as a `Const`, and the rewriter now passes it
     // through untouched.
     if body.iter().any(|&f| form_has_quasiquote(heap, f, 0)) {
@@ -2133,7 +2133,7 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     let inner_call = heap.list(call);
     // Snapshot the loop's result back to an immutable map **only when it is the table**.
     // The accumulator is what the linearity proof licenses rewriting in place, but the base
-    // case is free to return something else entirely — `(map-count acc)`, `(map-get acc :a)`,
+    // case is free to return something else entirely — `(%map-count acc)`, `(%map-get acc :a)`,
     // or a plain constant — and an unconditional `table-snapshot` then failed on a value it
     // was never given: `table-snapshot: expected table, got int (3)`. `linmap_linear` admits
     // those returns deliberately (a whitelisted *read* of the accumulator, or a `Const`), so
@@ -2233,7 +2233,7 @@ fn linmap_rewrite_form(
             return heap.list(c);
         }
         // `(quote …)` is inert DATA, never evaluated — rewriting inside it corrupts the
-        // datum instead of the program. `(io/puts '(map-get acc 1))` printed
+        // datum instead of the program. `(io/puts '(%map-get acc 1))` printed
         // `(table-get acc 1)`. The probe cannot catch this: a quoted form compiles to a
         // single `Node::Const`, so the linearity analysis sees no `acc` use at all and
         // passes, while the source rewrite walks straight through the quote.

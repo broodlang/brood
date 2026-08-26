@@ -12,7 +12,7 @@
 ;;;      wrapper had to account for what it allows.
 ;;;
 ;;;   2. The source rewrite descended into `(quote …)`, turning inert DATA into table ops:
-;;;      `(io/puts '(map-get acc 1))` printed `(table/get acc 1)`. The probe cannot catch
+;;;      `(io/puts '(%map-get acc 1))` printed `(table/get acc 1)`. The probe cannot catch
 ;;;      this — a quoted form compiles to one `Node::Const`, so the analysis sees no
 ;;;      accumulator use at all and passes while the rewrite walks straight through it.
 ;;;
@@ -25,28 +25,28 @@
 ;; Base case returns a *derived scalar*, not the accumulator.
 (defn lm-count-uniq (xs acc)
   (if (empty? xs)
-    (map-count acc)
-    (lm-count-uniq (rest xs) (map-int-add acc (first xs) 1))))
+    (%map-count acc)
+    (lm-count-uniq (rest xs) (%map-int-add acc (first xs) 1))))
 
 ;; Base case returns a whitelisted *read* of the accumulator.
 (defn lm-hits (xs acc)
   (if (empty? xs)
-    (map-get acc :a)
-    (lm-hits (rest xs) (map-int-add acc (first xs) 1))))
+    (%map-get acc :a)
+    (lm-hits (rest xs) (%map-int-add acc (first xs) 1))))
 
 ;; Base case returns a plain constant — the accumulator is never returned at all.
 (defn lm-done (xs acc)
-  (if (empty? xs) :done (lm-done (rest xs) (map-int-add acc (first xs) 1))))
+  (if (empty? xs) :done (lm-done (rest xs) (%map-int-add acc (first xs) 1))))
 
 ;; Base case returns the accumulator itself — the shape the optimisation is for.
 (defn lm-tally (xs acc)
-  (if (empty? xs) acc (lm-tally (rest xs) (map-int-add acc (first xs) 1))))
+  (if (empty? xs) acc (lm-tally (rest xs) (%map-int-add acc (first xs) 1))))
 
 ;; Quoted data alongside a qualifying accumulator fold.
 (defn lm-quoted (xs acc)
   (if (empty? xs)
-    (list acc '(map-get acc 1))
-    (lm-quoted (rest xs) (map-int-add acc (first xs) 1))))
+    (list acc '(%map-get acc 1))
+    (lm-quoted (rest xs) (%map-int-add acc (first xs) 1))))
 
 (describe "LINMAP wrapper-split soundness"
   (test "a base case returning a derived scalar"
@@ -60,13 +60,13 @@
 
   (test "a base case returning the accumulator is still an immutable map"
     (let (out (lm-tally '(:a :b :a) {}))
-      (assert= 2 (map-get out :a))
-      (assert= 1 (map-get out :b))
+      (assert= 2 (%map-get out :a))
+      (assert= 1 (%map-get out :b))
       ;; It must come back as a map, not leak the in-place table.
       (assert= :map (type-of out))))
 
   (test "quoted data is left alone by the source rewrite"
     (let (out (lm-quoted '(:a) {}))
-      (assert= 1 (map-get (first out) :a))
-      ;; The datum must still be `(map-get acc 1)` — not rewritten to a table op.
-      (assert= 'map-get (first (first (rest out)))))))
+      (assert= 1 (%map-get (first out) :a))
+      ;; The datum must still be `(%map-get acc 1)` — not rewritten to a table op.
+      (assert= '%map-get (first (first (rest out)))))))

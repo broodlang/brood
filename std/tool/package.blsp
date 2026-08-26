@@ -48,10 +48,10 @@ land in a later slice."
         acc
         (let (full (path/join dir entry)
               rel (if (= prefix "") entry (str prefix "/" entry)))
-          ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
+          ;; `cons`/`%append-two` (share the accumulator tail) not `(append acc …)`
           ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
           (if (file/dir? full)
-            (append-two (package-tree-files-walk full rel) acc)
+            (%append-two (package-tree-files-walk full rel) acc)
             (cons rel acc)))))
     nil
     (file/ls dir)))
@@ -232,7 +232,7 @@ land in a later slice."
            (project/dep-registry (first kv) (second kv))
            (get lock-index (first kv))
            base))
-    (map-pairs solution)))
+    (%map-pairs solution)))
 
 ;; --- the registry pre-fetch (ADR-209) -------------------------------------------
 ;; Walk the registry closure from `names` into `{name → [{:version V :dependencies
@@ -312,7 +312,7 @@ land in a later slice."
 ;; ones. This makes the resolver care about the brood version, not just the root-project setup gate.
 (defn- package-check-brood-compat
   (fetched)
-  (dolist (kv (map-pairs fetched))
+  (dolist (kv (%map-pairs fetched))
     (let (nm (first kv)
           releases (second kv))
       (when (and (not (empty? releases))
@@ -1172,7 +1172,7 @@ sha256 pin still holds."
 
 ;; Every `.blsp` file at or under `dir`, recursively (full paths). A hierarchical
 ;; module `(defmodule gui/window)` lives at `gui/window.blsp` in a SUBdirectory
-;; (that's how `require-find` locates it), so the collision scan must recurse —
+;; (that's how `%require-find` locates it), so the collision scan must recurse —
 ;; a top-level-only listing would never open it and two providers of the same
 ;; nested namespace would collide undetected (ADR-070).
 (defn- package-blsp-files
@@ -1200,7 +1200,7 @@ sha256 pin still holds."
 ;; `[module-symbol file-path]` for each MODULE the dir provides (recursively) —
 ;; every `(defmodule …)` paired with the file it lives in. Package-rooting
 ;; (ADR-070) needs the FILE, not just the name: a dep module `foo/b` maps to that
-;; dep's `b.blsp`, and `require-force` loads it from there under `foo`'s context. A
+;; dep's `b.blsp`, and `%require-force` loads it from there under `foo`'s context. A
 ;; file declaring more than one module contributes one pair per module (ADR-223), so
 ;; a co-located secondary module is registered and thus `require`able across files.
 ;; PUBLIC (no `--`): the project loader (`project-root-project-rooting`) also scans
@@ -1350,7 +1350,7 @@ sha256 pin still holds."
 
 ;; Register each dependency's modules as PACKAGE-ROOTED (ADR-070): a dep `foo`
 ;; providing `b.blsp` (`(defmodule b)`) becomes the global namespace `foo/b`, so two
-;; deps can both provide a `parser` with no collision. `require-force` loads the file
+;; deps can both provide a `parser` with no collision. `%require-force` loads the file
 ;; under `foo`'s package context (its `%in-ns`/`(:use …)` root); the root project's own
 ;; modules are NOT registered here, so they stay short (the asymmetry ADR-070 records —
 ;; the Elixir-style uniform root-project rooting is the recorded next step).
@@ -1839,7 +1839,7 @@ registry indexes these names to answer \"which packages plug into X\". `{}` for 
 ordinary library, which the server stores as \"nothing\"."
   (fold (fn (acc kv) (let ([nm constraint] kv) (assoc acc (name nm) constraint)))
     {}
-    (map-pairs *project-enhances*)))
+    (%map-pairs *project-enhances*)))
 
 ;; --- package signing (ADR-212): sign a release's checksum, TOFU-verify on install ------
 ;; The publisher's ed25519 key lives at `<config>/brood/signing-key.blsp` (private stored 0600).

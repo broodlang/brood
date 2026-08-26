@@ -82,7 +82,7 @@ If no values remain under `k`, the key is dropped."
   (letrec (go (fn (acc xs)
                 (cond
                   (nil? xs) (reverse acc)
-                  (= (first xs) v) (reverse-onto acc (rest xs))
+                  (= (first xs) v) (%reverse-onto acc (rest xs))
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil lst)))
 
@@ -102,7 +102,7 @@ If no values remain under `k`, the key is dropped."
   multimap/multimap
   (->seq [mm]
     (mapcat (fn (pair) (map (fn (v) [(first pair) v]) (reverse (second pair))))
-      (map-pairs (/get mm :entries)))))
+      (%map-pairs (/get mm :entries)))))
 
 (defn map-vals (mm f)
   "Return a multimap where each value list has been transformed by `(f key values-list)`."
@@ -111,14 +111,14 @@ If no values remain under `k`, the key is dropped."
                           vs (second pair))
                       (/assoc m k (f k vs))))
               {}
-              (map-pairs (/get mm :entries)))))
+              (%map-pairs (/get mm :entries)))))
 
 (defn ->map (mm)
   "Flatten the multimap to a plain map from key → list-of-values (insertion order)."
   (fold (fn (m pair)
           (/assoc m (first pair) (reverse (second pair))))
     {}
-    (map-pairs (/get mm :entries))))
+    (%map-pairs (/get mm :entries))))
 
 ;; `Display` is the O(1) summary (how many keys, how many pairs); `Inspect` shows the
 ;; whole thing — the plain-map view, so a log line reads as data rather than a wrapper.

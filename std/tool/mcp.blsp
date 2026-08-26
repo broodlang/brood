@@ -78,7 +78,7 @@ process's OS user can; that process is the trust boundary."
         (let (defined (project-file-def-names file)
               srcs (source-files root)
               extracts (project-gather-extracts srcs)
-              source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
+              source-set (fold (fn (m p) (%map-assoc m p true)) {} srcs))
           (filter (fn (w) (any? (fn (nm) (includes? w (str "'" nm "'"))) defined))
             (project-duplicate-def-warnings extracts source-set)))))
     (catch _ nil)))

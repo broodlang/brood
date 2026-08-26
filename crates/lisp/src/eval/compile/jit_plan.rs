@@ -795,7 +795,7 @@ pub(super) mod codegen {
         // `CompiledArm`) bails one that type-thrashes after 16 consecutive deopts, so a bad
         // closure shape self-heals instead of needing this static guess. Named defns keep the
         // gate verbatim: they are name-called from everywhere — including the per-process
-        // compile machinery (macro expansion runs prelude Brood like `match-count-sym`, `seq`,
+        // compile machinery (macro expansion runs prelude Brood like `%match-count-sym`, `seq`,
         // `fold`) — and admitting those regressed `spawn` 0.08 → 0.3–1.3 s erratic (contention
         // around per-process compile + shared-install under 10k-process fan-out) for zero row
         // wins.

@@ -72,12 +72,12 @@ primitives. The kernel also provides the always-available file primitives
   "Every file path under `dir`, recursively (full paths, depth-first). nil if `dir` is not a directory."
   (if (not (file/dir? dir))
     nil
-    ;; `cons` a file (O(1)); `append-two` a subdir's list (copies the small list, SHARES
+    ;; `cons` a file (O(1)); `%append-two` a subdir's list (copies the small list, SHARES
     ;; `acc`). A plain `(append acc …)` recopies the growing accumulator per entry → O(files²)
     ;; on a large tree. Order is reversed (prepend) — fine for an unordered file set.
     (fold (fn (acc e)
             (let (p (path/join dir e))
-              (if (file/dir? p) (append-two (walk-files p) acc) (cons p acc))))
+              (if (file/dir? p) (%append-two (walk-files p) acc) (cons p acc))))
       nil
       (file/ls dir))))
 (sig walk-files (string -> (list string)))

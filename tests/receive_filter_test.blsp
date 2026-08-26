@@ -1,4 +1,4 @@
-;; The leading-keyword filter (`receive-tags` + `%receive`'s tag argument) lets a
+;; The leading-keyword filter (`%receive-tags` + `%receive`'s tag argument) lets a
 ;; selective receive reject a queued message by peeking its tag, without rebuilding it
 ;; into the heap. It is a PURE FILTER: these cases pin that it never changes which
 ;; clause runs — only how fast a non-match is rejected.
@@ -18,7 +18,7 @@
       (assert= (receive ([:junk n] n)) 3)))
 
   (test "a catch-all clause disables the filter — everything still matches"
-    ;; A bare-symbol pattern is not tag-led, so `receive-tags` answers nil and the
+    ;; A bare-symbol pattern is not tag-led, so `%receive-tags` answers nil and the
     ;; scan must examine every message rather than skipping on tag.
     (let (me (self))
       (send me [:anything 7])

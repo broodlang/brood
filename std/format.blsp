@@ -1046,10 +1046,10 @@ retired the `comment-on-own-line?` distinction this used to need."
       (fn (acc entry)
         (let (p (path/join dir entry))
           (cond
-            ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
+            ;; `cons`/`%append-two` (share the accumulator tail) not `(append acc …)`
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
             (file/dir? p)
-              (if (format-ignored-dir? entry) acc (append-two (format-collect-blsp p) acc))
+              (if (format-ignored-dir? entry) acc (%append-two (format-collect-blsp p) acc))
             ;; Skip generated lock files (`project.lock.blsp`): they're machine-
             ;; written ("do not edit by hand") and re-serialized by `nest fetch` on
             ;; every setup, so formatting them just fights the resolver.
@@ -1094,7 +1094,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   ;; plus each whitelisted tree. `distinct` because the whitelists can overlap
   ;; (`:format-paths ["."]`, or a test path nested inside a source path).
   (seq/distinct (append (format-root-files root)
-                  (fold (fn (acc dir) (append-two (format-collect-blsp dir) acc))
+                  (fold (fn (acc dir) (%append-two (format-collect-blsp dir) acc))
                     nil
                     (format-roots root)))))
 

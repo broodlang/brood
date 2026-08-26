@@ -1196,7 +1196,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // registry provider that fetches for real lives in `std/tool/package`; keeping the
     // search pure here is what makes it exhaustively testable offline.
     embedded_module!("resolver", "std/resolver.blsp"),
-    // NOTE: behaviour contracts (`defbehaviour` / `register-protocol` / `ops` /
+    // NOTE: behaviour contracts (`defbehaviour` / `%register-protocol` / `ops` /
     // `*protocols*`) are CORE — they live in the prelude (`std/protocol.blsp`, included by
     // lib.rs), so they are bare and always available, not an on-`require` module here.
     // Unified generic functions with NOMINAL dispatch (the value-polymorphism successor):
