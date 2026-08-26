@@ -3564,3 +3564,37 @@ it. Fixed in the template, with a test beside the `_deps/` one that should have 
 "0.13.x only" without an upper bound that would block users the day a compatible 0.14 ships. A
 floor that needs re-publishing across nine packages on every language release is a treadmill, not
 a fix; what would actually settle it is the stdlib surface stabilising.
+
+## 2026-08-26 — a search box that was never wired to anything
+
+Reported as "search on hive really does not work". Every server-side check said otherwise:
+the routes resolve, `/api/v1/packages?q=` and `/packages?q=` return correct results, matching
+is case-insensitive and covers descriptions as well as names, 60 sequential and 40 concurrent
+requests all return 200, and the form markup is a correct `GET /packages` with `name="q"`.
+
+That was all true and all beside the point. The broken search was the **`Filter…` box on
+`/reference`**, and it was not failing — it was never connected. `docsite/render` with
+`:wrap? false` emits the content fragment and leaves the page chrome to the host; its
+docstring says "the CSS/script are the caller's job". Only half of that hand-off was
+reachable. `render-css` was public; the script was a private `filter-script`. So the host
+inlined the stylesheet, had no way to ask for the JS, and shipped an input wired to nothing.
+
+**The reason it lasted.** Nothing about the response is wrong. It is a 200 with complete,
+correct HTML; the input is present in the markup, so a test asserting the box is there
+passes. No status, header, or content check can see it. It fails only if a person types
+into it — which is why "is search working?" got answered "yes" from a `curl` that returned
+the right rows.
+
+`docsite/render-js` is the missing counterpart. Grepping for the pattern rather than the
+symptom then found the second site immediately: `/packages/:name/docs` embeds docsite the
+same way, so every published package's docs page had it too.
+
+**The framework guard.** `docsite` is framework-agnostic std, so it cannot call into hatch —
+an asset-registration API would not have caught this. What catches it is a check on the
+rendered page, so hatch grew `web/audit/inert-controls`: a control does something if it
+submits a form, if an inline `on…=` fires, or if page script reaches it, and one with none
+of the three provably cannot act. `web/page/page` runs it in dev and warns. Each rule
+declines to judge what it cannot prove — a fragment, a page with an external `<script src>`,
+an id-less control that script might select by tag or class — because a lint that cries wolf
+is a lint people stop reading. Validated against the live site rather than fixtures alone:
+one finding on the 315 KB page that shipped broken, zero across ten hive pages that work.
