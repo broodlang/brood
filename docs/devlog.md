@@ -716,6 +716,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-24** — the bare core: 613 published names down to 337 (ADR-242)
 - **2026-08-24** — the namespace waves: 337 bare core names down to 291
 - **2026-08-26** — KI-61 fixed: the prelude autoloads instead of force-loading; boot 22.8 -> 11.6 ms (ADR-246/247)
+- **2026-08-26** — KI-64 fixed: a JIT block-argument spill was landing on the deopt journal (ADR-248)
 
 ---
 
@@ -3520,3 +3521,52 @@ RSS went.
 the timer (boot "31 ms", then "55 ms" on an *empty* program). On this machine nothing sub-10 ms is
 measurable while the suite runs; the numbers above are all from an idle box through `ab-bench`, which
 builds both sides through the same `make release-brood`.
+
+## 2026-08-26 (second session) — KI-64: the `1114114` was a journal word
+
+A JIT'd arm was writing block-argument spills onto its own deopt checkpoint, and a later read
+of that slot returned the packed journal word `(resume_ip << 16 | depth)` as a live value.
+`17 << 16 | 2` is 1114114, which is why the error never varied with the payload — the entry
+had read it as "a codepoint counter leaking", one past `0x10FFFF`, which is a coincidence.
+
+**The reproduction is where the time went, and every early inference was wrong.** The entry
+suspected shared compiled code across processes, and the evidence looked strong:
+`BROOD_NO_SHARED_ARMS=1` made it clean, it needed ~60 requests to appear, and 20 000 encodes
+in one process had been measured clean. All three were misleading. Shrinking the payload
+first (`seq-view of maps` fails, `vector of maps` is clean, `seq of ints` is clean) pointed at
+the mutual recursion rather than at JSON; dropping JSON entirely gave a 30-line walker with
+the identical value; and then **sequential** spawning failed *harder* than concurrent (0/40 vs
+11/40), which killed the race theory. One process, no `spawn`, fails on call 4.
+
+At that point `BROOD_NO_SHARED_ARMS=1` **still failed** — it had only been changing when the
+arm got hot. The flag that actually named the machinery was `BROOD_NO_DEOPT_RESUME=1`, the
+only one in the matrix that names a mechanism rather than a policy. The lesson worth keeping:
+**a flag that "fixes" a bug is evidence about scheduling until the repro is minimal**, and
+`--all`-style flag matrices invite exactly that mistake.
+
+The second lesson: **decode the bad value before theorising about how it travelled.** One
+`eprintln` at the failing `empty?` gave `raw=[0x2,0x110002,…]` — a well-formed `Int` whose
+payload is a packed journal word, not a plausible datum. That is a one-line experiment that
+would have skipped the entire shared-code detour.
+
+**Root cause** in `jit_spill_reserve`: `if non_tail_call_count(code) < 2 { return 0 }` gated
+the *whole* spill reserve, but the reserve has two halves and block-argument slots (KI-49) do
+not depend on the call count — they depend on how deep the operand stack is at a block leader,
+which a single non-tail call reaches as soon as an `if` sits inside its argument list. The
+affected arms were ordinary: `fold-loop`, `index-of-seq-from`, `json/emit-list`, `any?`, most
+`match-*` predicates. Arms without a journal wrote *past the frame top* instead —
+`register-impl-check-arity` wanted 11 such slots against a 10-slot frame.
+
+**The fix took three attempts, and the middle one is why ADR-248 exists.** Removing the bad
+gate (giving every lowerable arm the slots it wants) is correct and costs **+2 to +7% on
+nearly every row** — `max_leader_depth` counts int/bool merges that need no slot, so every
+small predicate grows by a slot `push_frame` nil-inits and the JIT never writes. Bailing
+instead is also correct and free, but withdraws native code from exactly those hot small arms.
+The shipped form clamps the window to the reserve, so the ≥2-call shape KI-49 measured is
+bit-identical and everything else deopts at the boundary as it did before KI-49. Flat across
+`ab-bench --all`; `supervisor` read +17.2% then −13.5% on two runs with a 12–17% base-vs-base
+floor, which is simply unresolvable and claimed as neither.
+
+The backstop bail stays although the clamp makes it unreachable, and the invariant lives in
+two `jit_plan` tests rather than only in the behavioural one — because the backstop alone
+turns this class of slip into *silently lost JIT coverage*, which no output test can see.

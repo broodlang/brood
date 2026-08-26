@@ -51,10 +51,20 @@ use super::*;
 /// identically at arm construction (to size the frame) and in `jit_lower_arm` (to place
 /// spills); if the predicate ever under-counts, the lowering bails safely rather than
 /// corrupting. `0` under `--without-jit`, so that build's frames are unchanged.
+///
+/// The reserve has **two independent halves**, and they are gated differently (KI-64):
+/// call-result spills need ≥2 non-tail calls to be possible at all, while
+/// block-argument spills ([`max_leader_depth`]) depend only on how deep the operand
+/// stack is where a block boundary falls — an arm with a *single* non-tail call still
+/// needs them if an `if` sits inside that call's argument list. Returning 0 for the
+/// whole reserve on the `<2 calls` test therefore under-provisioned exactly those arms,
+/// and the lowering does not bail on an under-count here: it clamps
+/// `blockarg_spill_base` to `spill_base`, which for a journalling arm *is* the
+/// checkpoint slot. `walk-list`-shaped arms then wrote block arguments straight onto
+/// the deopt journal, and a later block-argument read returned the journal word
+/// `(resume_ip << 16 | depth)` as a live value — the `1114114` in KI-64. Arms without a
+/// journal were worse: they wrote past the frame top entirely.
 pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
-    if non_tail_call_count(code) < 2 {
-        return 0;
-    }
     // Reserve **only** for arms that are actually JIT-lowerable — every opcode in the
     // integer subset `jit_lower_arm` accepts. The reserve adds a frame slot that the VM
     // nil-inits on every activation, so reserving for an arm that never lowers (a prelude
@@ -136,7 +146,47 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
     // cost is already on record — blanket-reserving regressed `spawn` ~1.9x — which is why
     // it stays behind the `chunk_in_jit_subset` gate above and why the change was measured
     // (spawn / fib / collatz / pingpong) rather than reasoned about.
+    if non_tail_call_count(code) < 2 {
+        return 0;
+    }
     producers.saturating_sub(1) + max_leader_depth(code)
+}
+
+/// Where a lowering's **block-argument spill** slots live: `(base, len)`, as frame slot
+/// indices. `reserve` is what [`jit_spill_reserve`] gave this arm's frame and
+/// `frame_top_for_spills` is the first slot the spill area may NOT touch — the checkpoint
+/// journal for a journalling lowering, the frame top otherwise.
+///
+/// The clamp is the whole point (KI-64). [`max_leader_depth`] is how many block-argument
+/// slots the chunk could *want*, and it is computed under a different gate from the reserve:
+/// `jit_spill_reserve` returns 0 for an arm with a single non-tail call, which still wants
+/// block-argument slots as soon as an `if` sits inside that call's argument list
+/// (`(w (rest xs) (step (first xs) (if first? acc (cons "," acc))) false)`). Honouring the
+/// unclamped want slid the window down onto the journal, and a later block-argument read
+/// then returned the packed journal word `(resume_ip << 16 | depth)` as a live value — the
+/// `1114114` a JSON-encoding service saw as `empty?: expected collection, got int`. An arm
+/// with no journal wrote past the frame top instead.
+///
+/// So the window is always the TOP `len` slots of the reserve, and `len` never exceeds it.
+/// Where the reserve exists (the ≥2-non-tail-call shape KI-49 measured) `reserve >= want`
+/// and this is exactly what KI-49 shipped. Where it does not, `len` is 0 and a `Handle`
+/// crossing a boundary falls through to `ParamRepr::Int` — the pre-KI-49 behaviour, which
+/// tag-checks and *deopts* rather than corrupting. Growing every frame instead was measured
+/// and rejected: it costs +2–7% on nearly every benchmark row, because `max_leader_depth`
+/// counts int/bool merges that need no slot at all (`not`, `int?`, `inc`).
+pub(crate) fn blockarg_spill_window(
+    code: &[Inst],
+    reserve: usize,
+    frame_top_for_spills: usize,
+) -> (usize, usize) {
+    let len = max_leader_depth(code).min(reserve);
+    let base = frame_top_for_spills - len;
+    debug_assert!(
+        base + len <= frame_top_for_spills,
+        "block-argument spill window [{base}, {}) reaches frame_top {frame_top_for_spills}",
+        base + len
+    );
+    (base, len)
 }
 
 /// The deepest operand stack at any block leader — an upper bound on how many operands
@@ -828,5 +878,126 @@ pub(super) mod codegen {
             eprintln!("[jit-bail] arm={name} reason={}", reason.as_str());
         }
         reason
+    }
+}
+
+/// The frame-layout invariant KI-64 broke, asserted on the arithmetic rather than on a
+/// program's output.
+///
+/// The behavioural guard (`tests/jit_blockarg_spill_test.blsp`) can only fail when *both*
+/// the clamp in `jit_lower_arm` and its `spill-area-exceeds-frame` backstop are gone — the
+/// backstop alone keeps a mis-sized arm off the native path, so it would hide the slip
+/// instead of corrupting. That is the right runtime behaviour and the wrong test behaviour.
+/// So reproduce the lowering's slot arithmetic here and assert the area lands where the
+/// frame layout says it may: strictly below the checkpoint journal, or below the frame top
+/// for an arm that does not journal.
+#[cfg(all(test, feature = "jit"))]
+mod tests {
+    use super::*;
+    use crate::Interp;
+
+    /// For every arm a real boot compiles: the block-argument spill area must not reach the
+    /// deopt journal. `max_leader_depth` is what the chunk *wants* and `jit_spill_reserve`
+    /// is what the frame *has*; the two are gated differently, so the lowering must clamp
+    /// the want to the reserve. Before KI-64 it did not, and `fold-loop`,
+    /// `index-of-seq-from`, `json/emit-list` and every `walk-list`-shaped arm wrote block
+    /// arguments straight onto their journal slot.
+    #[test]
+    fn block_argument_spills_never_reach_the_deopt_journal() {
+        let mut interp = Interp::new();
+        // Exercise the shapes: a walker with an `if` inside a call's argument list is the
+        // one that regressed, and `json/encode` is the same shape in the standard library.
+        interp
+            .eval_str(
+                r#"(do
+                     (defn- w (xs acc first?)
+                       (if (empty? xs) acc
+                         (w (rest xs) (str (first xs) (if first? acc "x")) false)))
+                     (w (map (fn (i) i) (range 50)) "" true)
+                     (json/encode (map (fn (i) {:a i}) (range 50))))"#,
+            )
+            .expect("warm the compiler over the offending shapes");
+        let mut checked = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for arm in interp.heap.dbg_compiled_arms() {
+            let Some(chunk) = arm.chunk.as_ref() else {
+                continue;
+            };
+            let code = &chunk.code;
+            if !chunk_in_jit_subset(code) {
+                continue; // reserves nothing and never lowers
+            }
+            checked += 1;
+            // The same window `jit_lower_arm` uses, for the small (non-spliced) layout —
+            // the shared function, so removing its clamp fails this test rather than
+            // silently re-corrupting frames.
+            let reserve = jit_spill_reserve(code);
+            let frame_top = if arm.ckpt_slot != u32::MAX {
+                arm.ckpt_slot as usize
+            } else {
+                arm.nslots
+            };
+            let (base, len) = blockarg_spill_window(code, reserve, frame_top);
+            if base + len > frame_top {
+                let name = arm
+                    .dbg_name
+                    .map(crate::core::value::symbol_name)
+                    .unwrap_or_else(|| "<anon>".to_string());
+                bad.push(format!(
+                    "{name}: block-arg area [{base}, {}) reaches frame_top {frame_top} \
+                     (reserve {reserve}, wants {})",
+                    base + len,
+                    max_leader_depth(code)
+                ));
+            }
+        }
+        assert!(
+            checked > 20,
+            "only {checked} lowerable chunks inspected — the probe found nothing to check, \
+             so a green result would mean nothing"
+        );
+        assert!(
+            bad.is_empty(),
+            "a block-argument spill slot reaches the deopt journal (or the frame top), so a \
+             later read of it returns the packed journal word as a live value (KI-64):\n  {}",
+            bad.join("\n  ")
+        );
+    }
+
+    /// The clamp itself, stated separately: the lowering may never plan more
+    /// block-argument slots than the frame reserved. This is the line that broke.
+    #[test]
+    fn the_block_argument_want_is_clamped_to_the_reserve() {
+        let mut interp = Interp::new();
+        interp
+            .eval_str(
+                r#"(defn- w (xs acc first?)
+                     (if (empty? xs) acc
+                       (w (rest xs) (str (first xs) (if first? acc "x")) false)))"#,
+            )
+            .expect("compile the offending shape");
+        interp
+            .eval_str(r#"(w (map (fn (i) i) (range 50)) "" true)"#)
+            .expect("run it");
+        let mut saw_a_clamped_arm = false;
+        for arm in interp.heap.dbg_compiled_arms() {
+            let Some(chunk) = arm.chunk.as_ref() else {
+                continue;
+            };
+            let code = &chunk.code;
+            if !chunk_in_jit_subset(code) {
+                continue;
+            }
+            let reserve = jit_spill_reserve(code);
+            if max_leader_depth(code) > reserve {
+                saw_a_clamped_arm = true;
+            }
+        }
+        assert!(
+            saw_a_clamped_arm,
+            "no arm wants more block-argument slots than it reserved, so the clamp this test \
+             guards is not being exercised — the corpus has drifted and a green result here \
+             would mean nothing"
+        );
     }
 }

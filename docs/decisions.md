@@ -16425,3 +16425,56 @@ prelude, including the `%defseq map` case where the name is only recoverable fro
 did — its only number was a total, which cannot say whether a boot regression is in reading the
 cache, evaluating the prelude, or one `require` inside it.
 
+## ADR-248 — A block-argument spill window is clamped to its reserve, not given one
+
+**Context.** A JIT'd frame is `[locals | spill slots | checkpoint journal]`. Two independent
+things spill into the middle region: call-result handles that must survive a later call's
+safepoint (the `fib` shape), and **block arguments** — an operand crossing a block boundary
+that is not a profiled `Int` (KI-49). `jit_spill_reserve` sizes the region, and it gated the
+*whole* reserve on `non_tail_call_count(code) >= 2`. That is the right gate for call-result
+spills and the wrong one for block arguments, which are needed whenever the operand stack is
+deep where a block boundary falls — including with a single non-tail call, as soon as an `if`
+sits inside that call's argument list.
+
+Under-provisioned arms did not fail loudly. The lowering's `blockarg_spill_base` was a
+clamped subtraction that collapsed onto `spill_base`, which for a journalling arm *is* the
+checkpoint slot, so the native wrote block arguments over the deopt journal and a later read
+returned the packed journal word `(resume_ip << 16 | depth)` as a live value. That was KI-64:
+a production service returning 500s after ~60 requests, diagnosed for months as flaky
+infrastructure.
+
+**Decision.** Clamp the window to what the frame actually has —
+`len = max_leader_depth(code).min(reserve)`, placed as the **top** `len` slots of the reserve
+(`jit_plan::blockarg_spill_window`). Where the reserve exists, `reserve >= want` and the
+result is bit-identical to what KI-49 shipped. Where it does not, `len` is 0 and a `Handle`
+crossing a boundary falls through to `ParamRepr::Int`, which tag-checks and **deopts** — the
+pre-KI-49 behaviour: correct, and slower only for the arms that never had the slots.
+
+**Rejected: give every arm the reserve it wants.** The obvious fix — drop the bad gate and add
+`max_leader_depth` to every lowerable arm's frame — is correct and costs **+2 to +7% on nearly
+every benchmark row** (`errors-deep` +7.5, `primes` +6.8, `loop` +6.1, `spawn` +5.3, `fib`
++3.1). The reason is that `max_leader_depth` counts *every* operand crossing a boundary, while
+only a `Handle` needs a slot: `not`, `int?`, `inc`, `dec` and every small type predicate merge
+a bool or an int and would each grow by a slot the JIT never writes, paid by `push_frame`'s
+nil-init on every activation. This is the same shape as the measurement already on record —
+blanket-reserving once regressed `spawn` ~1.9×. The clamped form measures flat across the full
+sweep.
+
+**Also rejected: bail instead of clamp.** Letting `jit_lower_arm` refuse any arm whose want
+exceeds its reserve is equally correct and equally free of frame growth, but it withdraws
+native code from `fold-loop`, `any?`, `int?`, `not`, `inc`, `dec`, `json/emit-list` and most
+`match-*` predicates — the small hot arms leaf inlining exists for. Clamping keeps them
+native and pays only where a handle genuinely crosses.
+
+**A better reserve is the open follow-up.** Counting only *handle-producing* block arguments
+would let the genuinely-affected arms (`walk-list`-shaped, `fold-loop`, `json/emit-list`) keep
+their block-argument carry without taxing the predicates. It needs a static approximation of
+which operands can be handles, and the reserve is computed before any type profile exists.
+Until then those arms deopt at the boundary, which is the pre-KI-49 status quo for them.
+
+**Consequences.** The `spill-area-exceeds-frame` bail in `jit_lower_arm` stays as a backstop
+even though the clamp makes it unreachable — the whole cost of KI-64 was that *nothing*
+checked this arithmetic. Two invariant tests in `jit_plan` assert the window against the arm's
+real `ckpt_slot` over every chunk a boot compiles, because the behavioural test
+(`tests/jit_blockarg_spill_test.blsp`) can only fail when the clamp *and* the backstop are both
+gone — the backstop alone converts the corruption into silently lost JIT coverage.
