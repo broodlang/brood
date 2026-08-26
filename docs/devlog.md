@@ -716,6 +716,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-24** — the bare core: 613 published names down to 337 (ADR-242)
 - **2026-08-24** — the namespace waves: 337 bare core names down to 291
 - **2026-08-26** — KI-61 fixed: the prelude autoloads instead of force-loading; boot 22.8 -> 11.6 ms (ADR-246/247)
+- **2026-08-26** — every package's `:brood` floor was a lie; the ecosystem release train that fixed it
 
 ---
 
@@ -3520,3 +3521,46 @@ RSS went.
 the timer (boot "31 ms", then "55 ms" on an *empty* program). On this machine nothing sub-10 ms is
 measurable while the suite runs; the numbers above are all from an idle box through `ab-bench`, which
 builds both sides through the same `make release-brood`.
+
+## 2026-08-26 — every package's `:brood` floor was a lie
+
+Eighteen repos, and sixteen of them declared `:brood ">= 0.5.0"`. That constraint (ADR-209) is
+checked at project setup, and it exists to stop a user installing a package their runtime cannot
+run. It stopped being true at **0.10.0**, and four consecutive releases have broken it since: the
+namespacing waves (`path/`, `bytes/`, `seq/`, `rand/`, `os/`), the `io/write`/`io/puts`/`io/inspect`
+output trio, and the `string/interp`-vs-`string/format` split. `bedit` alone uses eleven names that
+did not exist at the floor it advertised.
+
+Nothing caught it because nothing *can*: CI builds every package against brood `main`, so the only
+version any of them is ever tested at is the newest one. A floor is a claim about the versions you
+**don't** test.
+
+**The correction has to be a new release, not an edit.** A published release's metadata is
+immutable, so `hatch 0.4.12` will go on claiming `>= 0.5.0` forever. Raising the floor narrows the
+supported runtime range, which is a minor bump: `store`/`s3`/`store-postgres` -> 0.3.0, `hatch` ->
+0.5.0, `bedit` -> 0.3.0, the four themes -> 0.2.0. The themes' `:enhances` narrowed from
+`bedit >= 0.1` to `>= 0.3` for a related reason — with a brood floor of 0.13.0, bedit 0.1 and 0.2
+cannot host them at all, so the old range described a combination that could not exist.
+
+Publishing had to run in dependency order (`store` before `store-postgres` and `hatch`), because
+the intermediate state is genuinely broken: the moment `hatch`'s pin moved to `store ^0.3.0`, it
+could not resolve at all until that version existed.
+
+**Two things the stale pins had been hiding.** `store-postgres` pinned `store` at an exact `0.2.5`
+— a release predating the renames — and three of its tests failed on it; on `^0.3.0` the suite is
+44/44. `hatch-demo` pinned `hatch 0.4.9`, and once that moved, `nest check` could finally resolve
+far enough to report six unfixed renames (`getenv`, `now-ns`, `random-token`, `tls-self-signed`,
+`string->number`, and `!` -> the gen `cast`). A dependency too stale to resolve is a dependency
+that hides every error behind it.
+
+**Two repo-hygiene bugs found on the way.** This repo's own `project.blsp` said `:version "0.1.0"`
+at Cargo's `0.13.0` — twelve releases of drift in a field nothing derives, so there is a test now.
+And `nest new`'s `.gitignore` template never listed `.brood/`, the startup-image cache, so every
+scaffolded project committed that binary and re-dirtied it on each check; eight repos were carrying
+it. Fixed in the template, with a test beside the `_deps/` one that should have caught it.
+
+**What is still not solved.** The floor is accurate *today* and will be wrong again the moment
+0.14.0 renames something, because the constraint language takes one term — there is no way to say
+"0.13.x only" without an upper bound that would block users the day a compatible 0.14 ships. A
+floor that needs re-publishing across nine packages on every language release is a treadmill, not
+a fix; what would actually settle it is the stdlib surface stabilising.
