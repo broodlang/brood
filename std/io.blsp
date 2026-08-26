@@ -148,13 +148,23 @@ it does not."
   ;; resolves to `io/inspect` below and recurses until the stack guard fires.
   (fold (fn (acc v) (let (s (/inspect v)) (if (= acc "") s (str acc " " s)))) "" xs))
 
+(defn- render-display
+  (& xs)
+  ;; The DISPLAY renderer: each value through the installed `*show*` transform (which is
+  ;; what honors `Display` for a record), then the kernel's space-joined `%render`.
+  ;; `*show*` lives HERE rather than in `send-text` because it is a display transform: on
+  ;; the inspect path it would flatten a record to its `Display` string BEFORE
+  ;; `inspect-render` could ask the `Inspect` ability, so a custom `inspect` impl could
+  ;; never be seen (`#money<$5>` printed as `"$5"`).
+  (apply %render (shown xs)))
+
 (defn- send-text
   (xs suffix render)
   ;; The shared body of the three writers: split off a trailing `:to <port>`, render the
   ;; remaining values with `render`, append `suffix`, and `emit` it — to the named port, or
-  ;; to `*out*` when none was named.
+  ;; to `*out*` when none was named. Each `render` applies its own value transform.
   (let ([vals port] (split-target xs)
-        text (str (apply render (shown vals)) suffix))
+        text (str (apply render vals) suffix))
     (if port (emit port text) (*out* text))
     nil))
 
@@ -164,7 +174,7 @@ named by a trailing `:to <port>`. Returns nil.
 
     (io/write \"working\")
     (io/write \"progress: \" n :to *err*)"
-  (send-text xs "" %render))
+  (send-text xs "" render-display))
 
 (defn puts (& xs)
   "Write the display forms of `xs` followed by a newline, to `*out*` — or to the port named
@@ -174,7 +184,7 @@ by a trailing `:to <port>`. Returns nil. The everyday output function.
     (io/puts \"count = \" n)
     (io/puts \"boom\" :to *err*)
     (io/puts \"entry\" :to (io/file-port \"log.txt\"))"
-  (send-text xs "\n" %render))
+  (send-text xs "\n" render-display))
 
 (defn inspect (& xs)
   "Write the RE-READABLE forms of `xs` — strings quoted, escapes shown — followed by a
