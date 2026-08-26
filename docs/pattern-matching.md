@@ -403,7 +403,7 @@ would let the printed line be a bare sentence; not needed for v1.
 ## `receive` (implemented — selective)
 
 `receive` is the fourth surface over the pattern compiler. It is a macro
-(`std/prelude.blsp`) that reuses **`match-build-from`** with the no-match
+(`std/prelude.blsp`) that reuses **`%match-build-from`** with the no-match
 continuation set to `nil` (instead of the structured throw), wrapping each clause
 body in a thunk. The result is a *matcher* function — given a message it returns
 the body-as-a-thunk on a match, or `nil` otherwise — which the `%receive`

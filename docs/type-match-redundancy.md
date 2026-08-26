@@ -50,7 +50,7 @@ the exact point that function already recognizes a literal `%eq` guard.
   itself `(if (%eq sym lit2) then2 else2)` for the *same* `sym`, compare
   `lit2` to `lit`; a match returns that `if` form (the duplicate clause).
   Stops silently the moment `form` isn't itself another same-symbol `%eq`-if
-  (a catch-all body, a `match-no-match` throw, or a divergent hand-written
+  (a catch-all body, a `%match-no-match` throw, or a divergent hand-written
   `if`) — nothing more to reason about there.
 - `render_literal_pattern` (already built for exhaustiveness) renders the
   duplicate literal for the warning message.

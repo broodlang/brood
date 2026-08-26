@@ -69,7 +69,7 @@ node links are, per `dist.rs` / `dist/*`:
    fresh immutable `Bytes`** — never a mutable value the language can observe
    (immutability invariant, ADR-026).
 3. **Registry + `:global` + `:pg`.** Only a flat unique-name table today
-   (`register`/`whereis`, no `unregister`, local-only). Missing: keyed Registry
+   (`proc/register`/`proc/whereis`, no `unregister`, local-only). Missing: keyed Registry
    (name→many pids + dispatch, `:via` tuples), a cluster-global registry with
    conflict resolution, and process groups. Blocks "name a dynamic pool of
    processes" and most real distributed patterns.
@@ -98,7 +98,7 @@ node links are, per `dist.rs` / `dist/*`:
   (`language.md`); maps cover options today.
 - **Grapheme-correct string API** — strings are **codepoint-indexed** (Rust
   `chars()`), not grapheme-indexed like Elixir's `String`. `unicode-segmentation`
-  is already a dependency (wired only to `display-width`), so a `graphemes`
+  is already a dependency (wired only to `string/display-width`), so a `graphemes`
   primitive is cheap.
 - **Application behaviour** — start/stop lifecycle + env/config + tree root;
   ADR-011 defers it to a real consumer (the editor app may be it).
