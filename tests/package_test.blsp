@@ -1391,3 +1391,21 @@
   (test "a name merely containing main is not exempt"
     (and (refute (package/package-entry-module? 'main-lib))
       (refute (package/package-entry-module? 'domain)))))
+
+;; A published release's metadata is immutable, so a `:brood` floor that is wrong when it
+;; ships stays wrong forever — correcting the ecosystem's `>= 0.5.0` (untrue from 0.10.0)
+;; meant re-publishing nine packages rather than editing nine lines. Recording an EMPTY
+;; constraint is the worst version of that: empty means "no constraint", i.e. a claim to
+;; run on every brood ever released, which the resolver believes.
+(describe "package: the :brood constraint a publish records"
+  (test "a declared constraint is recorded untouched"
+    (assert= (package/publish-brood-constraint ">= 0.9") ">= 0.9"))
+  (test "a declared constraint may be narrower or wider than the running brood"
+    (assert= (package/publish-brood-constraint "~> 0.13") "~> 0.13"))
+  (test "declaring nothing derives the running brood rather than recording no constraint"
+    (assert= (package/publish-brood-constraint nil) (str ">= " (brood-version))))
+  (test "the derived constraint is satisfied by the brood that derived it"
+    (is (version/satisfies? (brood-version) (package/publish-brood-constraint nil))))
+  ;; The bug this replaces: "" is not "unknown", it is "runs anywhere".
+  (test "the derived constraint is never empty"
+    (refute (= (package/publish-brood-constraint nil) ""))))

@@ -6,6 +6,12 @@
 
 (defmodule io-test (:use test) (:use io :exclude [inspect]))
 
+;; A record with BOTH a Display and an Inspect impl — the pair the writers must keep
+;; distinct (`puts` shows the display form, `inspect` the debug form).
+(defrecord money (amount))
+(impl Display money (->string [m] (str "$" (get m :amount))))
+(impl Inspect money (inspect [m] (str "#money<$" (get m :amount) ">")))
+
 (describe "io: ports reroute print/println"
   ;; These send to (self) and receive — no globals, no spawn — so they can run in
   ;; parallel with the rest of the suite.
@@ -143,6 +149,14 @@
     ;; `puts` and as its source form through `inspect`.
     (assert= "a\nb\n" (with-out-str (io/puts "a\nb")))
     (assert= "\"a\\nb\"\n" (with-out-str (io/inspect "a\nb"))))
+
+  ;; `*show*` is a DISPLAY transform (it renders a record through `Display`), so it must
+  ;; not run on the inspect path: applying it first flattened the record to its `Display`
+  ;; string before `inspect-render` could ask the `Inspect` ability, and a custom `inspect`
+  ;; impl could never be seen — `#money<$5>` came out as `"$5"`. Guards that ordering.
+  (test "inspect honors an Inspect impl, and puts still honors Display"
+    (assert= "#money<$5>\n" (with-out-str (io/inspect (io-test/money 5))))
+    (assert= "$5\n" (with-out-str (io/puts (io-test/money 5)))))
 
   (test "all three take a :to port"
     (let (buf (with-err-str (io/write "w" :to *err*)

@@ -717,6 +717,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-24** — the namespace waves: 337 bare core names down to 291
 - **2026-08-26** — KI-61 fixed: the prelude autoloads instead of force-loading; boot 22.8 -> 11.6 ms (ADR-246/247)
 - **2026-08-26** — KI-64 fixed: a JIT block-argument spill was landing on the deopt journal (ADR-248)
+- **2026-08-26** — every package's `:brood` floor was a lie; the ecosystem release train that fixed it
 
 ---
 
@@ -3570,3 +3571,124 @@ floor, which is simply unresolvable and claimed as neither.
 The backstop bail stays although the clamp makes it unreachable, and the invariant lives in
 two `jit_plan` tests rather than only in the behavioural one — because the backstop alone
 turns this class of slip into *silently lost JIT coverage*, which no output test can see.
+## 2026-08-26 — every package's `:brood` floor was a lie
+
+Eighteen repos, and sixteen of them declared `:brood ">= 0.5.0"`. That constraint (ADR-209) is
+checked at project setup, and it exists to stop a user installing a package their runtime cannot
+run. It stopped being true at **0.10.0**, and four consecutive releases have broken it since: the
+namespacing waves (`path/`, `bytes/`, `seq/`, `rand/`, `os/`), the `io/write`/`io/puts`/`io/inspect`
+output trio, and the `string/interp`-vs-`string/format` split. `bedit` alone uses eleven names that
+did not exist at the floor it advertised.
+
+Nothing caught it because nothing *can*: CI builds every package against brood `main`, so the only
+version any of them is ever tested at is the newest one. A floor is a claim about the versions you
+**don't** test.
+
+**The correction has to be a new release, not an edit.** A published release's metadata is
+immutable, so `hatch 0.4.12` will go on claiming `>= 0.5.0` forever. Raising the floor narrows the
+supported runtime range, which is a minor bump: `store`/`s3`/`store-postgres` -> 0.3.0, `hatch` ->
+0.5.0, `bedit` -> 0.3.0, the four themes -> 0.2.0. The themes' `:enhances` narrowed from
+`bedit >= 0.1` to `>= 0.3` for a related reason — with a brood floor of 0.13.0, bedit 0.1 and 0.2
+cannot host them at all, so the old range described a combination that could not exist.
+
+Publishing had to run in dependency order (`store` before `store-postgres` and `hatch`), because
+the intermediate state is genuinely broken: the moment `hatch`'s pin moved to `store ^0.3.0`, it
+could not resolve at all until that version existed.
+
+**Two things the stale pins had been hiding.** `store-postgres` pinned `store` at an exact `0.2.5`
+— a release predating the renames — and three of its tests failed on it; on `^0.3.0` the suite is
+44/44. `hatch-demo` pinned `hatch 0.4.9`, and once that moved, `nest check` could finally resolve
+far enough to report six unfixed renames (`getenv`, `now-ns`, `random-token`, `tls-self-signed`,
+`string->number`, and `!` -> the gen `cast`). A dependency too stale to resolve is a dependency
+that hides every error behind it.
+
+**Two repo-hygiene bugs found on the way.** This repo's own `project.blsp` said `:version "0.1.0"`
+at Cargo's `0.13.0` — twelve releases of drift in a field nothing derives, so there is a test now.
+And `nest new`'s `.gitignore` template never listed `.brood/`, the startup-image cache, so every
+scaffolded project committed that binary and re-dirtied it on each check; eight repos were carrying
+it. Fixed in the template, with a test beside the `_deps/` one that should have caught it.
+
+**What is still not solved.** The floor is accurate *today* and will be wrong again the moment
+0.14.0 renames something, because the constraint language takes one term — there is no way to say
+"0.13.x only" without an upper bound that would block users the day a compatible 0.14 ships. A
+floor that needs re-publishing across nine packages on every language release is a treadmill, not
+a fix; what would actually settle it is the stdlib surface stabilising.
+
+## 2026-08-26 — a search box that was never wired to anything
+
+Reported as "search on hive really does not work". Every server-side check said otherwise:
+the routes resolve, `/api/v1/packages?q=` and `/packages?q=` return correct results, matching
+is case-insensitive and covers descriptions as well as names, 60 sequential and 40 concurrent
+requests all return 200, and the form markup is a correct `GET /packages` with `name="q"`.
+
+That was all true and all beside the point. The broken search was the **`Filter…` box on
+`/reference`**, and it was not failing — it was never connected. `docsite/render` with
+`:wrap? false` emits the content fragment and leaves the page chrome to the host; its
+docstring says "the CSS/script are the caller's job". Only half of that hand-off was
+reachable. `render-css` was public; the script was a private `filter-script`. So the host
+inlined the stylesheet, had no way to ask for the JS, and shipped an input wired to nothing.
+
+**The reason it lasted.** Nothing about the response is wrong. It is a 200 with complete,
+correct HTML; the input is present in the markup, so a test asserting the box is there
+passes. No status, header, or content check can see it. It fails only if a person types
+into it — which is why "is search working?" got answered "yes" from a `curl` that returned
+the right rows.
+
+`docsite/render-js` is the missing counterpart. Grepping for the pattern rather than the
+symptom then found the second site immediately: `/packages/:name/docs` embeds docsite the
+same way, so every published package's docs page had it too.
+
+**The framework guard.** `docsite` is framework-agnostic std, so it cannot call into hatch —
+an asset-registration API would not have caught this. What catches it is a check on the
+rendered page, so hatch grew `web/audit/inert-controls`: a control does something if it
+submits a form, if an inline `on…=` fires, or if page script reaches it, and one with none
+of the three provably cannot act. `web/page/page` runs it in dev and warns. Each rule
+declines to judge what it cannot prove — a fragment, a page with an external `<script src>`,
+an id-less control that script might select by tag or class — because a lint that cries wolf
+is a lint people stop reading. Validated against the live site rather than fixtures alone:
+one finding on the 315 KB page that shipped broken, zero across ten hive pages that work.
+
+## 2026-08-26 — making the release train cheap enough to run often
+
+Four hand-kept invariants, each of which had already drifted at least once, replaced with
+mechanism. The common shape: something true today that a person had to keep true, with no
+signal when it stopped being true.
+
+**The `:brood` floor is derived, not declared.** A manifest naming no `:brood` published an
+EMPTY constraint, and empty means *no constraint* — a claim to run on every brood ever
+released, which the resolver believes. Absent now derives `>= (brood-version)`, the runtime
+that just built and tested the release. That is the only version anyone has evidence for,
+and it cannot go stale the way a hand-written floor does: every package here sat at
+`>= 0.5.0` long after 0.10.0 broke it, and because release metadata is immutable, fixing it
+cost nine re-publishes rather than nine edits.
+
+**The playground wasm is built at deploy time.** The site's reference page is introspected
+from the pinned runtime and the playground runs the wasm, so the two must be the same brood
+or the site documents one language and executes another. That was enforced by a comment
+asking a human to remember, beside a 7 MB binary in git rebuilt by hand — and it drifted;
+this session hit it while shipping the reference fix and had to write a KNOWN DRIFT note
+into the Dockerfile. hive's toolchain stage now builds `crates/playground` from the same
+checkout it builds brood from, so there is no second thing to keep in step. The wasm-bindgen
+version is READ from the crate rather than written again in the Dockerfile: two copies of a
+version is the same class of bug one layer down.
+
+**One command for the ecosystem.** `scripts/release-ecosystem.blsp` fetches, checks and
+tests fifteen repos in dependency order — which is not optional, since the moment hatch asks
+for `store ^0.3.0` it cannot resolve at all until that version exists. Publishing is opt-in
+(`PUBLISH=1`) because a released version is immutable; the default is a rehearsal, and it
+exits nonzero, so it works as a gate. It stops at the first failure and refuses a dirty
+tree — `nest publish` packages the working directory, so a dirty one ships bytes in no
+commit.
+
+**Examples are executed, not just rendered.** The playground snippets and the nine runnable
+examples on /docs are Brood source held as strings; nothing evaluated them, so
+`even?` → `math/even?` left the front page's "Map / filter" button raising `unbound symbol`.
+Both sets now run in hive's suite against the brood the wasm is built from. The /docs
+examples are inline `(runnable "…")` arguments rather than a data list, so the test reads
+the view as data and walks it — the reader owns the escaping, where a regex would
+reimplement it and drift.
+
+**A gap left open.** `brood` takes every trailing argument as a FILE, so a script cannot
+accept flags (`-- --publish` tries to open a file by that name); the release script is
+configured by environment instead. And hive itself is private and has no CI, so its 101
+tests — including both example guards — run only when someone runs them.

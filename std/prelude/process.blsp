@@ -55,6 +55,10 @@
 ;;     works or raises a loud "not callable", never a silent no-op;
 ;;   - anything else is the body expression → `(fn () expr)`.
 (defn spawn-body-thunk (form)
+  "Normalise a `spawn`/`spawn-link` body `form` into the 0-arg thunk the kernel wants: an
+explicit `(fn () …)` passes through, a bare symbol becomes `(fn () (sym))` so `(spawn worker)`
+CALLS the named function, and anything else is wrapped as the body expression. Expansion-time
+plumbing for the `spawn` special forms."
   (cond
     (spawn-thunk-form? form) form
     (symbol? form) `(fn () (~form))

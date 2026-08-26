@@ -387,3 +387,16 @@
   that inlines it once. Every rule is namespaced under `.docsite`, so it never touches the
   host's own styles; the host supplies its page chrome, this styles the doc content."
   (component-css))
+
+(defn render-js ()
+  "The `<script>` the `Filter…` box needs, for a host embedding a `:wrap? false` fragment —
+  the script half of the hand-off [[render-css]] already does for styles. A `:wrap? true`
+  page inlines this itself.
+
+  Without it a host renders the filter input (it is part of the fragment) and nothing wires
+  it up, so the box accepts typing and does nothing. Nothing looks wrong from the server's
+  side — the page is complete, correct HTML — which is how the hosted reference came to
+  ship an inert search box: `render-css` existed to be called and this had no counterpart.
+
+      (includes? (docsite/render-js) \"docsite-filter\") → true"
+  (filter-script))
