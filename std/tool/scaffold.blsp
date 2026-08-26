@@ -431,14 +431,8 @@ test discovery, lints, release, config)."
 (defn- project-gitignore-template
   ()
   (str "# Brood package cache — regenerable from project.lock.blsp (which is committed)\n"
-    "_deps/\n"
-    "\n"
-    "# Startup-image cache — a build artifact, rebuilt on demand\n"
-    ".brood/\n"
-    "\n"
-    "# Editor / OS cruft\n"
-    "*.swp\n"
-    ".DS_Store\n"))
+    "_deps/\n" "\n" "# Startup-image cache — a build artifact, rebuilt on demand\n" ".brood/\n" "\n"
+    "# Editor / OS cruft\n" "*.swp\n" ".DS_Store\n"))
 
 ;; The scaffolded .gitattributes: GitHub's Linguist doesn't know the `.blsp`
 ;; extension, so it renders Brood source as plain text. Until Brood is its own
