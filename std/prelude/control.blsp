@@ -16,14 +16,14 @@
 (def *err* %write-err)
 ;; `*show*` — a late-bound per-argument display transform for the SCREEN printers
 ;; (the `io/` writers). Declared here; the Display protocol (core,
-;; defined at the end of this prelude) sets it to `show-print-hook`, which routes a
+;; defined at the end of this prelude) sets it to `%show-print-hook`, which routes a
 ;; *record* through the `Display` ability's `->string` op so a record can define how it
 ;; prints (Elixir's `String.Chars` model) while built-ins keep the fast native render.
 ;; An ordinary dynamic var, so `(binding (*show* nil) …)` disables the transform for a
 ;; scope. Only the screen printers consult it; `str`/`pr-str`/`fmt` stay native.
 (%declare-dynamic '*show*)
 (def *show* nil)
-(defn- show-args
+(defn- %show-args
   (xs)
   ;; Each print argument, run through the installed `*show*` transform — or the
   ;; arguments untouched when none is installed (the default fast path).
@@ -77,17 +77,17 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
 ;; (->> x (f a) (g b)) =>  (g b (f a x))   ; thread as LAST argument
-(defn- thread-first-step
+(defn- %thread-first-step
   (acc form)
   (if (pair? form) (cons (first form) (cons acc (rest form))) (list form acc)))
 (defmacro -> (x & forms)
   "Thread `x` through the forms as each one's *first* argument: `(-> x (f a) (g b))` is `(g (f x a) b)`."
-  (reduce thread-first-step x forms))
+  (reduce %thread-first-step x forms))
 
-(defn- thread-last-step (acc form) (if (pair? form) (append form (list acc)) (list form acc)))
+(defn- %thread-last-step (acc form) (if (pair? form) (append form (list acc)) (list form acc)))
 (defmacro ->> (x & forms)
   "Thread `x` through the forms as each one's *last* argument: `(->> x (f a) (g b))` is `(g b (f a x))`."
-  (reduce thread-last-step x forms))
+  (reduce %thread-last-step x forms))
 
 ;; (as-> x name (f a name) (g name b)) — thread `x` as `name`, in ANY position.
 ;; Brood's `let` is sequential and re-binds a repeated name, so this is one `let`:
@@ -100,45 +100,45 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; ---- conditional threading & short-circuit threading ------------------------
 ;; `some->`/`some->>` thread like `->`/`->>` but stop and yield `nil` the moment a
 ;; step produces `nil`; `cond->`/`cond->>` thread `x` only through the forms whose
-;; guard is truthy. Both build on the `thread-first-step`/`thread-last-step`
+;; guard is truthy. Both build on the `%thread-first-step`/`%thread-last-step`
 ;; placement helpers above, so "where does the value go" is defined once.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- some-thread-build
+  (defn- %some-thread-build
     (place forms step)
     (if (empty? forms)
       place
       `(if (nil? ~place)
          nil
          (let (~place ~(step place (first forms)))
-           ~(some-thread-build place (rest forms) step))))))
+           ~(%some-thread-build place (rest forms) step))))))
 (defmacro some-> (x & forms)
   "Thread `x` through `forms` as each one's *first* argument (like `->`), but short-circuit to `nil` as soon as any step yields `nil`."
-  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread-build v forms thread-first-step))))
+  (let (v (gensym "v")) `(let (~v ~x) ~(%some-thread-build v forms %thread-first-step))))
 (defmacro some->> (x & forms)
   "Thread `x` through `forms` as each one's *last* argument (like `->>`), but short-circuit to `nil` as soon as any step yields `nil`."
-  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread-build v forms thread-last-step))))
+  (let (v (gensym "v")) `(let (~v ~x) ~(%some-thread-build v forms %thread-last-step))))
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- cond-thread-build
+  (defn- %cond-thread-build
     (place clauses step)
     (if (empty? clauses)
       place
       `(let (~place (if ~(first clauses) ~(step place (second clauses)) ~place))
-         ~(cond-thread-build place (rest (rest clauses)) step)))))
+         ~(%cond-thread-build place (rest (rest clauses)) step)))))
 (defmacro cond-> (x & clauses)
   "Thread `x` through the `test form` clause pairs, applying each `form` (as its *first* argument, like `->`) only when its `test` is truthy: `(cond-> {} add-a? (assoc :a 1))`."
-  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread-build v clauses thread-first-step))))
+  (let (v (gensym "v")) `(let (~v ~x) ~(%cond-thread-build v clauses %thread-first-step))))
 (defmacro cond->> (x & clauses)
   "Thread `x` through the `test form` clause pairs, applying each `form` (as its *last* argument, like `->>`) only when its `test` is truthy."
-  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread-build v clauses thread-last-step))))
+  (let (v (gensym "v")) `(let (~v ~x) ~(%cond-thread-build v clauses %thread-last-step))))
 
 (defmacro doto (x & forms)
   "Evaluate `x` once, run each `form` with it spliced in as the *first* argument (for side effects), then return `x`: `(doto (table/new) (table/put :a 1) (table/put :b 2))`."
   (let (v (gensym "v"))
     `(let (~v ~x)
-       ~@(map (fn (form) (thread-first-step v form)) forms)
+       ~@(map (fn (form) (%thread-first-step v form)) forms)
        ~v)))
 
 ;; `tap`/`then` — the single-function pipe helpers (Elixir's `Kernel.tap`/`then`).
@@ -173,16 +173,16 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; section (its own `match` clauses) runs the short-circuited value through them;
 ;; with no `:else`, the value that failed to match falls straight through as the
 ;; result — so an `[:error …]` becomes the answer untouched.
-(defn- with-split-else
+(defn- %with-split-else
   (forms before)
   ;; [happy-forms else-clauses] — split `forms` at the first bare `:else` keyword.
   (cond
     (empty? forms) [(reverse before) nil]
     (= (first forms) :else) [(reverse before) (rest forms)]
-    else (with-split-else (rest forms) (cons (first forms) before))))
+    else (%with-split-else (rest forms) (cons (first forms) before))))
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- with-build
+  (defn- %with-build
     (bindings body else-clauses)
     (if (empty? bindings)
       `(do ~@body)
@@ -191,12 +191,12 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
             more (rest (rest bindings))
             miss (gensym "miss"))
         `(match ~expr
-           (~pattern ~(with-build more body else-clauses))
+           (~pattern ~(%with-build more body else-clauses))
            (~miss ~(if (empty? else-clauses) miss `(match ~miss ~@else-clauses))))))))
 (defmacro with (bindings & body)
   "Sequentially match each `pattern expr` pair in `bindings`; the first value that fails its pattern short-circuits, else `body` runs (returning its last form) with every binding in scope. A trailing `:else` section of `match` clauses handles the short-circuited value; without one it is returned as-is. Brood's flat `with`, like Elixir's."
-  (let ([happy else-clauses] (with-split-else body []))
-    (with-build bindings happy else-clauses)))
+  (let ([happy else-clauses] (%with-split-else body []))
+    (%with-build bindings happy else-clauses)))
 
 ;; ---- local loops: just use `letrec` -----------------------------------------
 ;; Brood has no `loop`/`recur` macro. A self-contained *local* loop is a `letrec`-
@@ -238,7 +238,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; binder whose handler *starts* with a bare symbol and has more forms after it.
 ;; There is no legitimate reading to protect — a leading bare symbol followed by
 ;; more body is dead code in every case — so this is a zero-false-positive guard.
-(defn- try-class-catch?
+(defn- %try-class-catch?
   (clause)
   (let (handler (rest (rest clause)))
     (and (symbol? (second clause))
@@ -252,7 +252,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   (let (clause (last body))
     (if (and (pair? clause) (= (first clause) 'catch))
       (let (init (but-last body) evar (second clause) handler (rest (rest clause)))
-        (if (try-class-catch? clause)
+        (if (%try-class-catch? clause)
           (error "try: `(catch "
             (str evar)
             " "
@@ -322,10 +322,10 @@ its printed form."
 ;; expansion time (like the threading-macro helpers above).
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- binding-names (b) (if (nil? b) nil (cons (first b) (binding-names (rest (rest b)))))))
+  (defn- %binding-names (b) (if (nil? b) nil (cons (first b) (%binding-names (rest (rest b)))))))
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- binding-vals (b) (if (nil? b) nil (cons (second b) (binding-vals (rest (rest b)))))))
+  (defn- %binding-vals (b) (if (nil? b) nil (cons (second b) (%binding-vals (rest (rest b)))))))
 
 ;; (binding (*a* 1 *b* 2) body...) => (%binding '(*a* *b*) [1 2] (fn () body...))
 ;; The names go out as a quoted list and the values as a vector literal — both
@@ -338,4 +338,4 @@ its printed form."
       " Brood is lists-for-code, vectors-for-data (unlike Clojure).")
     (if (= 1 (rem (count bindings) 2))
       (error "binding: bindings must be name/value pairs, got " bindings)
-      `(%binding (quote ~(binding-names bindings)) [~@(binding-vals bindings)] (fn () ~@body)))))
+      `(%binding (quote ~(%binding-names bindings)) [~@(%binding-vals bindings)] (fn () ~@body)))))

@@ -32,27 +32,27 @@ access, or call qualified (`map/update-vals`).")
 
 (defn update-vals (m f)
   "A map like `m` with `f` applied to every value."
-  (into {} (map (fn (p) [(first p) (f (second p))]) (map-pairs m))))
+  (into {} (map (fn (p) [(first p) (f (second p))]) (%map-pairs m))))
 (defn update-keys (m f)
   "A map like `m` with `f` applied to every key (later keys win on a collision)."
-  (into {} (map (fn (p) [(f (first p)) (second p)]) (map-pairs m))))
+  (into {} (map (fn (p) [(f (first p)) (second p)]) (%map-pairs m))))
 
 (defn select-keys (m ks)
   "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped)."
-  ;; One `map-get` per key — which also yields the value — rather than
+  ;; One `%map-get` per key — which also yields the value — rather than
   ;; `contains?` (its own probe) plus a separate `get`. A present key returns its
   ;; stored value (used directly); only when that value happens to equal the
   ;; first sentinel do we disambiguate present-vs-absent with a second sentinel,
   ;; so a key stored with `nil`/`false` is still kept (contains?'s guarantee).
   (into {}
     (seq/keep (fn (k)
-                (let (v (map-get m k :%select-miss-a))
+                (let (v (%map-get m k :%select-miss-a))
                   (if (= v :%select-miss-a)
-                    (let (v2 (map-get m k :%select-miss-b))
+                    (let (v2 (%map-get m k :%select-miss-b))
                       (if (= v2 :%select-miss-b) nil [k v2]))
                     [k v])))
       ks)))
 
 (defn reduce-kv (f init m)
   "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
-  (fold (fn (acc p) (f acc (first p) (second p))) init (map-pairs m)))
+  (fold (fn (acc p) (f acc (first p) (second p))) init (%map-pairs m)))

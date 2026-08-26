@@ -6,7 +6,7 @@
 ;;
 ;; `sleep` deliberately does NOT live here. It parks the CURRENT process rather than
 ;; scheduling a message — a peer of `receive`, not of these — and it is load-bearing inside
-;; the module loader itself (`require-await` sleeps between polls). Rooting it here would
+;; the module loader itself (`%require-await` sleeps between polls). Rooting it here would
 ;; mean the loader auto-requires `timer` while a require is already in flight.
 
 (defmodule timer

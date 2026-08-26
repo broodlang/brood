@@ -52,6 +52,7 @@ use terminal::*;
 use tooling::*;
 
 pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_captured_stdout};
+pub use os::set_script_args;
 pub use terminal::{restore_raw, restore_terminal, restore_terminal_on_exit};
 pub use tooling::SPECIAL_FORMS;
 
@@ -622,7 +623,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
 
     // map — the *minimal* kernel: construct, read, two producers, and one
-    // enumerator (`map-pairs` → [k v] vectors). `keys`/`vals`/`contains?`/
+    // enumerator (`%map-pairs` → [k v] vectors). `keys`/`vals`/`contains?`/
     // `reduce-kv` and the `get`/`assoc`/`dissoc` surface (variadic + defaults) are
     // all Brood over these (std/prelude.blsp). Maps are immutable: each op returns
     // a fresh map.
@@ -637,7 +638,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "map-get",
+        "%map-get",
         Arity::range(2, 3),
         Sig::with_rest(vec![map_ty, any], any, any),
         &["m", "k", "default"],
@@ -646,7 +647,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "map-assoc",
+        "%map-assoc",
         Arity::exact(3),
         Sig::new(vec![map_ty, any, any], map_ty),
         &["m", "k", "v"],
@@ -655,7 +656,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "map-int-add",
+        "%map-int-add",
         Arity::exact(3),
         Sig::new(vec![map_ty, any, int], map_ty),
         &["m", "k", "delta"],
@@ -663,7 +664,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         map_int_add);
     def(
         heap,
-        "map-dissoc",
+        "%map-dissoc",
         Arity::exact(2),
         Sig::new(vec![map_ty, any], map_ty),
         &["m", "k"],
@@ -672,7 +673,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "map-pairs",
+        "%map-pairs",
         Arity::exact(1),
         Sig::new(vec![map_ty], list_ty),
         &["m"],
@@ -681,7 +682,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "map-count",
+        "%map-count",
         Arity::exact(1),
         Sig::new(vec![map_ty], int),
         &["m"],
@@ -2876,6 +2877,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &[],
         "Command-line arguments as a vector of strings (including argv[0]).",
         argv_builtin,
+    );
+    def(
+        heap,
+        "%script-args",
+        Arity::exact(0),
+        Sig::nullary(seq),
+        &[],
+        "Arguments meant for this program, without the host CLI's own — everything after \
+         `--` in `brood file.blsp -- a b`. For a bundled app (no host CLI), everything \
+         after argv[0].",
+        script_args_builtin,
     );
     def(
         heap,

@@ -268,7 +268,7 @@
       ;; the root reaches the whole chain (each p_i links to p_{i-1}), so all N resolve,
       ;; each to the newest that fits (2.0.0)
       (assert= n (count (keys solution)))
-      (is (every? (fn (kv) (= (nth kv 1) "2.0.0")) (map-pairs solution))))))
+      (is (every? (fn (kv) (= (nth kv 1) "2.0.0")) (%map-pairs solution))))))
 
 (describe "resolver: determinism"
   (test "the same universe resolves to the same solution every time"

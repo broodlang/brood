@@ -39,8 +39,8 @@ falsy collection, so `(if pq …)` used to take the else branch on an empty queu
   ;; keeping ties in insertion order (FIFO) rather than popping newest-first.
   (letrec (go (fn (acc xs)
                 (cond
-                  (nil? xs) (reverse-onto acc (list [pri val]))
-                  (< pri (first (first xs))) (reverse-onto acc (cons [pri val] xs))
+                  (nil? xs) (%reverse-onto acc (list [pri val]))
+                  (< pri (first (first xs))) (%reverse-onto acc (cons [pri val] xs))
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil entries)))
 

@@ -32,7 +32,7 @@
   (test "a Rust builtin cannot be redefined"
     (is (rn-refused? "(def cons (fn (a b) nil))"))
     (is (rn-refused? "(def type-of (fn (x) :shadowed))"))
-    (is (rn-refused? "(def map-get (fn (m k d) nil))")))
+    (is (rn-refused? "(def %map-get (fn (m k d) nil))")))
   (test "a prelude MACRO cannot be redefined"
     (is (rn-refused? "(defmacro when (c & b) nil)"))
     (is (rn-refused? "(defmacro -> (x & f) x)")))
