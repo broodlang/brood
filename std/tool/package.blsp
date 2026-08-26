@@ -1906,6 +1906,42 @@ to overwrite an existing key unless `:force true`. Backs `nest key gen`."
                                       *project-version* checksum)))
         (get key :public)])))
 
+(defn publish-brood-constraint (declared)
+  "The `:brood` runtime constraint to record for a release whose manifest declared
+`declared` (nil when it declared nothing).
+
+A manifest that declares one wins. When it declares nothing the constraint is DERIVED as
+`>= <the brood running this publish>`, rather than recorded as empty.
+
+Empty does not mean unknown, it means *no constraint* — a claim that the release runs on
+every brood ever published. For a pre-1.0 language that has renamed the standard library
+in four consecutive minors, that claim is never true, and it is not a harmless one: the
+resolver believes it, so a user on an old runtime installs the package and meets unbound
+symbols instead of a clear refusal.
+
+Deriving it also removes the only reason to hand-maintain a floor. Every package in this
+ecosystem sat at `>= 0.5.0` long after 0.10.0 broke it, and because a published release's
+metadata is immutable, correcting that meant re-publishing nine packages rather than
+editing nine lines. The derived value cannot go stale that way: it is whatever runtime
+just built and tested the thing being published.
+
+A declared constraint is returned untouched; nil derives `\">= \"` plus `(brood-version)`.
+
+    (package/publish-brood-constraint \">= 0.9\") → \">= 0.9\""
+  (or declared (str ">= " (brood-version))))
+
+(defn- report-brood-constraint
+  (declared)
+  "Say which runtime constraint this release will carry, and where it came from. A derived
+floor is a decision made on the publisher's behalf, and one made silently is one nobody
+notices is wrong."
+  (if declared
+    (io/puts (str "package: requires brood " declared " (declared in project.blsp)"))
+    (io/puts (str "package: requires brood >= "
+               (brood-version)
+               " (derived — this is the brood that built and tested it; declare :brood in "
+               "project.blsp to widen it)"))))
+
 (defn- registry-publish-metadata
   (checksum source-url signature pubkey)
   "The publish metadata envelope, base64-encoded for the `X-Brood-Publish` header. The
@@ -1920,7 +1956,7 @@ the bytes live (ADR-211); pass nil for a hosted publish. When the release is sig
               ;; the runtime-version constraint this release needs (ADR-209): the registry
               ;; stores it per release so the RESOLVER can exclude a release the running
               ;; brood can't satisfy, instead of it only being caught at setup on the root.
-              :brood (or *project-brood* "")
+              :brood (publish-brood-constraint *project-brood*)
               :dependencies (registry-publishable-deps)
               ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it
               ;; and can filter on its names, without knowing what any of them are
@@ -1972,6 +2008,7 @@ published is refused. Backs `nest publish`."
         checksum (hash/sha256-bytes bytes)
         sig (package-sign-checksum checksum))
     (file/rm archive)
+    (report-brood-constraint *project-brood*)
     (io/puts (str "package: publishing "
                *project-name*
                " "
@@ -1992,6 +2029,7 @@ published is refused. Backs `nest publish`."
   (let (bytes (package-fetch-bytes source-url)
         checksum (hash/sha256-bytes bytes)
         sig (package-sign-checksum checksum))
+    (report-brood-constraint *project-brood*)
     (io/puts (str "package: publishing "
                *project-name*
                " "

@@ -73,6 +73,12 @@
 ;; (partition n coll) -> consecutive n-sized chunks; a trailing partial chunk is
 ;; dropped (Clojure `partition` semantics). `has-at-least?` avoids re-counting.
 (defn has-at-least? (n coll)
+  "True when `coll` has at least `n` items, walking only that far — the O(n) test that lets
+`partition` and friends check a chunk without counting the whole (possibly long) sequence.
+Always true for `n` <= 0.
+
+    (has-at-least? 2 (list 1 2 3))   → true
+    (has-at-least? 4 (list 1 2 3))   → false"
   (cond (<= n 0) true (empty? coll) false else (has-at-least? (- n 1) (rest coll))))
 (defn- partition-acc
   (n coll acc)
@@ -448,12 +454,20 @@ for a higher-order op that wants a fixed answer."
 ;; are plumbing: the public surface is `lmap`/`lfilter`/`lkeep`/`lremove`, not
 ;; raw transducers. Fixed-arity (no rest-list) so they keep the fast call path.
 (defn %xmap (f)
+  "The stateless `map` TRANSDUCER stage: `(rf) -> rf'` applying `f` to each item. Plumbing
+behind `lmap` — compose stages with `comp` and run them with `transduce`."
   (fn (rf) (fn (acc x) (rf acc (f x)))))
 (defn %xfilter (pred)
+  "The stateless `filter` TRANSDUCER stage: keeps items for which `(pred x)` is truthy.
+Plumbing behind `lfilter`."
   (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
 (defn %xremove (pred)
+  "The stateless `remove` TRANSDUCER stage: drops items for which `(pred x)` is truthy —
+the complement of `%xfilter`. Plumbing behind `lremove`."
   (fn (rf) (fn (acc x) (if (pred x) acc (rf acc x)))))
 (defn %xkeep (f)
+  "The stateless `keep` TRANSDUCER stage: map and filter fused, dropping a nil result of
+`(f x)`. Plumbing behind `lkeep`."
   (fn (rf) (fn (acc x) (let (y (f x)) (if (nil? y) acc (rf acc y))))))
 
 ;; ---- transducers, as public surface (ADR-161) -------------------------------

@@ -398,5 +398,5 @@
   side — the page is complete, correct HTML — which is how the hosted reference came to
   ship an inert search box: `render-css` existed to be called and this had no counterpart.
 
-      (includes? (render-js) \"docsite-filter\") → true"
+      (includes? (docsite/render-js) \"docsite-filter\") → true"
   (filter-script))

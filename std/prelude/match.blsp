@@ -90,6 +90,13 @@
 ;; The variables a pattern binds. Threaded as `bound` through the compiler so a
 ;; variable that recurs becomes an equality check (non-linear patterns).
 (defn pattern-vars (pat)
+  "The variables the pattern `pat` binds, as a list of symbols. Threaded through the pattern
+compiler as `bound` so a variable that recurs becomes an equality check — which is how
+NON-LINEAR patterns (the same name twice) work.
+
+    (pattern-vars '[a b])     → (a b)
+    (pattern-vars '[a a])     → (a a)
+    (pattern-vars '_)         → nil"
   (cond
     (match-wildcard? pat) nil
     (match-bind-sym? pat) (list pat)
@@ -703,6 +710,10 @@
 ;; name) is embedded in the failure. `match` is the value-dispatch surface; the
 ;; `let` and `fn` special forms target match* directly with their own context.
 (defmacro match* (context expr & clauses)
+  "The shared pattern-matching ENGINE behind `match`, `case`, and the destructuring `let`
+and `fn` forms. `context` (a keyword like `:match`/`:let`, or a function name) is embedded
+in the no-match failure so the error names the form that failed. Prefer `match` — this is
+the surface the special forms target directly when they need their own context."
   (let (v (gensym "m")) `(let (~v ~expr) ~(match-build clauses v context))))
 
 ;; (match expr (pattern [:when guard] body...) ...) — match `expr` against each
