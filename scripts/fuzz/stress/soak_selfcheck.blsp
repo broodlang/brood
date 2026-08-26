@@ -23,9 +23,9 @@
 ;;   * a burst of spawns                                               (placement spill)
 (defmodule soak (:use supervisor))
 
-(def secs (let (e (os/getenv "SOAK_SECS")) (if e (string->number e) 3600)))
-(def backlog (let (e (os/getenv "SOAK_BACKLOG")) (if e (string->number e) 64)))
-(def report-every (let (e (os/getenv "SOAK_REPORT")) (if e (string->number e) 30000)))
+(def secs (let (e (os/getenv "SOAK_SECS")) (if e (string/->number e) 3600)))
+(def backlog (let (e (os/getenv "SOAK_BACKLOG")) (if e (string/->number e) 64)))
+(def report-every (let (e (os/getenv "SOAK_REPORT")) (if e (string/->number e) 30000)))
 
 (def reload-target 2)
 (defn shared-thunk () (* reload-target 21)) ; no captures -> shared handle
@@ -42,7 +42,7 @@
       (let (chunk (string/substring txt (+ i 6) (+ i 32))
             d0 (string/span-until chunk 0 "0123456789")
             d1 (string/span chunk d0 "0123456789"))
-        (if (>= d0 d1) 0 (string->number (string/substring chunk d0 d1)))))))
+        (if (>= d0 d1) 0 (string/->number (string/substring chunk d0 d1)))))))
 
 ;; --- invariant helpers -------------------------------------------------------
 (defn stuff (k) (if (= k 0) :ok (do (send (self) [:junk k]) (stuff (- k 1)))))
@@ -72,7 +72,7 @@
 (def deadline (+ t-start (* secs 1000)))
 
 (defn fail (what n)
-  (do (println (str "ERROR at iteration " n ": " what)) (%halt 1)))
+  (do (io/puts (str "ERROR at iteration " n ": " what)) (%halt 1)))
 
 (defn loop-once (n reloads)
   (do
@@ -97,7 +97,7 @@
     (burst 32)
     ;; heartbeat
     (when (= 0 (mod n report-every))
-      (println (str "t="
+      (io/puts (str "t="
                  (quot (- (os/now) t-start) 1000)
                  "s iter="
                  n
@@ -113,7 +113,7 @@
       ;; the benchmarks and `nest release` use). Reaching for it unguarded made the harness
       ;; die on its very last line with `unbound symbol: gc-stats`, throwing away the summary
       ;; after a clean two-hour run. Report what this build can see.
-      (println (str "OK soak complete: "
+      (io/puts (str "OK soak complete: "
                  n
                  " iterations, rss_kb="
                  (rss-kb)

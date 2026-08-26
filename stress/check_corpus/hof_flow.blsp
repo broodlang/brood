@@ -1,7 +1,7 @@
 ;; higher-order flows: closures over locals, fns as values, parametric results.
 (defn twice (f x) (f (f x)))
-(println (twice inc 5) (twice (fn (s) (str s "-")) "a"))
+(io/puts (twice inc 5) (twice (fn (s) (str s "-")) "a"))
 (def ops [(fn (x) (+ x 1)) (fn (x) (* x 2))])
-(println (fold (fn (acc f) (f acc)) 10 ops))
+(io/puts (fold (fn (acc f) (f acc)) 10 ops))
 (defn make-adder (n) (fn (x) (+ x n)))
-(println ((make-adder 3) 4))
+(io/puts ((make-adder 3) 4))

@@ -143,7 +143,7 @@
   (:use editor/buffer)
   (:use sexp :only [point-forward]))
 
-(def n (let (e (os/getenv "N")) (if e (string->number e) 2000)))
+(def n (let (e (os/getenv "N")) (if e (string/->number e) 2000)))
 
 ;; UTF8=1 re-runs every string row with a NON-ASCII lead, which is a different complexity
 ;; regime, not a cosmetic variation: a char index is a byte offset only for pure-ASCII text,
@@ -171,7 +171,7 @@
   (let (t1 (ms (fn () (f base)))
         t4 (ms (fn () (f (* 4 base))))
         ratio (if (= t1 0) 0 (quot (* 100 t4) t1)))
-    (println (str label
+    (io/puts (str label
                " N="
                base
                ": "
@@ -252,7 +252,7 @@
 
 (defn colored-of (k)
   (str utf8-lead (apply str (repeat k "\e[32mok\e[0m  some test name here\r\n"))))
-(defn ansi-strip (k) (ansi/strip-ansi (colored-of k)))
+(defn ansi-strip (k) (ansi/strip (colored-of k)))
 
 ;; ---- stream-lines: k lines arriving in ONE chunk ----------------------------
 ;; The drip case (many small chunks) was always linear; this is the shape that was not.
@@ -284,7 +284,7 @@
 
 ;; ---- run -------------------------------------------------------------------
 
-(println "std/ scale sweep — linear ~4x, quadratic ~16x")
+(io/puts "std/ scale sweep — linear ~4x, quadratic ~16x")
 (def- sweep-src-line
   "(defn compute-thing (alpha beta) (if (< alpha beta) (+ alpha 1) (str \"x\" beta)))\n")
 (defn- sweep-src

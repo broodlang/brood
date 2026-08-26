@@ -22,4 +22,4 @@
         (digest (+ k 1) n cnt skv sk)
         (digest (+ k 1) n (+ cnt 1) (+ skv (* k v)) (+ sk k))))))
 (let ([cnt skv sk] (digest 0 4096 0 0 0))
-  (println "digest" cnt skv sk (table/count t)))
+  (io/puts "digest" cnt skv sk (table/count t)))

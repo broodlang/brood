@@ -5,6 +5,6 @@
     ([:a x] x)
     ([:b s] (str s "!"))
     (_ nil)))
-(println (shape [:a 1]) (shape [:b "hi"]) (shape 9))
+(io/puts (shape [:a 1]) (shape [:b "hi"]) (shape 9))
 (defn use-it (v) (let (r (shape v)) (if (int? r) (+ r 1) (str r))))
-(println (use-it [:a 1]) (use-it [:b "x"]))
+(io/puts (use-it [:a 1]) (use-it [:b "x"]))

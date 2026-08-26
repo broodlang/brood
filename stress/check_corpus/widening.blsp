@@ -1,6 +1,6 @@
 ;; int-or-float widening: `/` on ints is exact-or-float — the checker must NOT
 ;; pin it to int (the "merely-wider residue" stays unflagged, ADR-011).
 (defn half (x) (/ x 2))
-(println (half 4) (half 5))
+(io/puts (half 4) (half 5))
 (defn mixed (a b) (if (> a b) (* a 2) (* b 1.5)))
-(println (mixed 3 4) (mixed 4 3))
+(io/puts (mixed 3 4) (mixed 4 3))

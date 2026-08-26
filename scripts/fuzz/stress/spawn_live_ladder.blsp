@@ -40,7 +40,7 @@
 ;; `spawn-live` with a 20.6% noise floor (handoff.md §6). Use:
 ;;   /usr/bin/time -f '%U user %S sys %e wall' brood … ladder.blsp
 
-(def n (let (e (os/getenv "N")) (if e (string->number e) 100000)))
+(def n (let (e (os/getenv "N")) (if e (string/->number e) 100000)))
 (def mode (let (e (os/getenv "MODE")) (if e e "all")))
 (def payload (into [] (range 16)))
 (def me (self))
@@ -81,7 +81,7 @@
 ;;
 ;;   park − park-batched  = what coexistence costs
 ;;   park-batched − nopark = what suspend/resume costs
-(def batch (let (e (os/getenv "BATCH")) (if e (string->number e) 100)))
+(def batch (let (e (os/getenv "BATCH")) (if e (string/->number e) 100)))
 
 (defn spawn-k (f i k acc) (if (%eq i k) acc (spawn-k f (%add i 1) k (cons (spawn (f)) acc))))
 (defn collect-k (got k acc)
@@ -103,7 +103,7 @@
 ;; leading zero of its fraction (5.050 rendered as "5.50", i.e. 10x wrong).
 (defn rung (label f)
   (let (t (ms f))
-    (println (str label "  " t " ms   " (quot (* t 1000000) n) " ns/unit"))))
+    (io/puts (str label "  " t " ms   " (quot (* t 1000000) n) " ns/unit"))))
 
 (defn run-spawn () (drain (spawn-n unit-spawn 0 nil)))
 (defn run-send () (release (spawn-n unit-send 0 nil) [:go]))
@@ -113,7 +113,7 @@
 
 (defn want (m) (or (%eq mode "all") (%eq mode m)))
 
-(println (str "N=" n " mode=" mode))
+(io/puts (str "N=" n " mode=" mode))
 (if (want "spawn") (rung "spawn   (spawn + exit)      " run-spawn) nil)
 (if (want "send") (rung "send    (+ unread message)  " run-send) nil)
 (if (want "nopark") (rung "nopark  (+ receive, no park)" run-nopark) nil)
