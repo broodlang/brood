@@ -951,45 +951,92 @@ it waits for that load to finish (a half-evaluated module is never observable)."
         (%registry-update! '*features-loading* :dissoc [key] nil)
         key))))
 
-;; ---- load the string library ------------------------------------------------
-;; std/string.blsp (ADR-230) holds every op whose subject is a string. The prelude's
-;; own `get`/`path-*`/`fmt`/`doc-search` helpers reference `string/char-at`,
-;; `string/ends-with?`, `string/blank?`, … by late binding, so the module must be
-;; loaded before any of them runs — boot's namespace-resolve is a no-op for the root
-;; prelude, so the qualified refs don't auto-require. It stays an ordinary embedded
-;; module (doc tooling sees the file; a project may `(:use string)`); loading it here
-;; just makes it always-present, like the abilities below.
-;; The stdlib image is built (`nest stdimage`, `make install`) but is NOT installed here.
-;; Installing it at BOOT is not yet correct, and the reason is sharper than "some effects
-;; are missed" — it was measured, so it is recorded rather than left to be rediscovered.
+;; ---- lazily-loaded library names the PRELUDE itself references ---------------
+;; The prelude's own helpers call a handful of names that live in `std/string.blsp` and
+;; `std/seq.blsp` (`string/join`, `seq/find`, …). Those calls are LATE-BOUND — a qualified
+;; name in a function body resolves when the function is called — but boot's
+;; namespace-resolve is a no-op for the root prelude, so the refs never auto-require the
+;; way a module file's would. Both modules therefore used to be force-loaded right here,
+;; which cost **12.1 ms of a 26 ms boot** (`string` 4.0, `seq` 7.5) on every single
+;; `brood`/`nest`/`brood-lsp` invocation, whether or not the program ever called one of
+;; those helpers — and it was a PER-WAVE tax: each refactor that moved prelude names into
+;; a module added another force-load, forever (KI-61).
 ;;
-;; Materialising a module defines its bindings and evaluates NOTHING. That is the whole win
-;; and the whole trap: every registration the module's load would have performed is skipped,
-;; while all its bindings are present — so the failure type-checks perfectly clean and shows
-;; up only as a record that lost its identity or an ability op that stopped dispatching. With
-;; boot install on, the suite fails 131 of 4873.
+;; So bind each referenced name to a stub that loads its module on FIRST CALL instead. The
+;; module's own `defn` then rebinds the name to the real function, so the stub runs once
+;; and the cost is paid by the first caller that actually needs it — zero at boot, and a
+;; future namespacing wave costs nothing here but one more declaration.
 ;;
-;; A SNAPSHOT of those registries does not fix it. `%image-write` does not round-trip a
-;; closure nested inside a snapshotted value: `*record-ids*` (symbols) restores exactly, but
-;; `*impls*` — `[ability op]` -> `{id -> fn}` — comes back holding only its `:default` entry,
-;; because that fn lives in the prelude region and the module impls do not survive. Tried and
-;; reverted; `%std-edges` works only because an edge is data all the way down.
-;;
-;; Excluding the modules that register does not fix it either: 28 of the 95 do, and they are
-;; `format`, `json`, `http`, `datetime` — precisely the ones the 124 ms -> 27 ms measurement
-;; came from. What is left after excluding them is not worth having.
-;;
-;; So the remaining work is a REPLAY, not a snapshot: record the registration calls a module
-;; makes at load and re-run them when it materialises. That is a real design change, not
-;; another special case here.
+;; This is the fix for KI-61's boot half. The alternative recorded there — installing the
+;; stdlib image at boot — remains unshipped for the reason recorded with it: materialising
+;; a module defines its bindings and evaluates NOTHING, so every registration its load
+;; would have performed is silently skipped (150 suite failures, all registration-shaped),
+;; and fixing that needs a registration REPLAY. Lazy loading needs none of it: the module
+;; is loaded, by its own source, exactly as before — only later.
 
-(require-one 'string)
+;; The name an autoload stub is currently resolving, so a stub re-entered for the SAME name
+;; raises instead of recursing forever. Re-entry means the module loaded without defining
+;; the name the stub promised — a declaration that has drifted from its module.
+(defdyn *autoloading* nil)
 
-;; Same reason, same mechanism: the prelude's own helpers reference `seq/find`,
-;; `seq/vector-ref`, `zip`, … by late binding — a qualified name inside a function
-;; BODY resolves when that function is called, not when it is defined — so the module
-;; only has to be loaded before any of them runs. Nothing calls them during boot.
-(require-one 'seq)
+(defn- autoload-call
+  (mod nm args)
+  "Load `mod`, then forward `args` to the real `nm` its load defines. The body of every
+stub `%autoload` binds; see there. Raises if loading `mod` leaves `nm` still a stub."
+  (if (= *autoloading* nm)
+    (error (str "autoload: module '" mod "' does not define '" nm "'"))
+    ;; The guard covers the forward as well as the load, so a re-entrant call from
+    ;; anywhere in the module's own load path reports the drift rather than looping.
+    (binding (*autoloading* nm)
+      (do (require-one mod)
+        (apply (eval nm) args)))))
+
+(defmacro %autoload (mod & specs)
+  "Bind each `(name arity)` of module `mod` to a stub that loads `mod` on its first call
+and forwards to the real definition. `arity` is the definition's fixed parameter count,
+declared rather than discovered so the stub has the SAME arity as the function it stands
+in for: a variadic placeholder would report every arity error as an argument-count
+mismatch inside the stub, and would make `def`'s reload check announce an arity change on
+every module load.
+
+  (%autoload string (join 2) (blank? 1))
+
+Both halves are guarded by the `prelude_hygiene` tests in `crates/lisp/src/lib.rs`: that
+every qualified reference the prelude makes into a lazily-loaded module is declared here,
+and that every declared arity still matches its module's actual definition."
+  (cons 'do
+    (map
+      (fn (spec)
+        (let (nm (symbol (str (name mod) "/" (name (first spec))))
+              params (map (fn (i) (symbol (str "a" i))) (range 0 (second spec))))
+          (list 'def nm
+            (list 'fn params
+              (list 'autoload-call
+                (list 'quote mod)
+                (list 'quote nm)
+                (cons 'list params))))))
+      specs)))
+
+;; std/string.blsp (ADR-230) holds every op whose subject is a string. Only the names the
+;; PRELUDE itself references need a stub — the rest of the module's surface is reached from
+;; user code, where a qualified reference auto-requires on its own. The natives
+;; (`string/length`, `string/split`, `string/substring`, `string/lower`, …) are registered
+;; by the Rust kernel and need nothing.
+(%autoload string
+  (char-at 2)
+  (blank? 1)
+  (ends-with? 2)
+  (join 2)
+  (->list 1))
+
+;; Same for std/seq.blsp.
+(%autoload seq
+  (find 2)
+  (keep 2)
+  (remove 2)
+  (distinct 1)
+  (split-at 2)
+  (vector-ref 2))
 
 ;; ═══ Abilities + the Display protocol (core) ════════════════════════════════
 ;; Open generic functions with nominal dispatch — Brood's unified polymorphism seam
@@ -1175,13 +1222,18 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ; the module is everything BEFORE the last `/` — a nested module keeps all its segments
 ; (`:editor/display/frame` → `editor/display`, not `editor`). Used to place an impl in the
 ; tier ladder: an impl whose registering ns equals this owns the type.
+;
+; Written on the two NATIVE string ops rather than `string/split` + `string/join`: this
+; runs on every `impl` registration, the prelude's own `Display`/`Inspect` impls included,
+; so it is the one boot-time caller of the `string` module — and the module now loads
+; LAZILY (see `%autoload` below). Cutting at the last `/` is also what the docstring above
+; describes, without building the intermediate list to rejoin all but its last element.
 (defn- impl-id-owner
   (key)
   (if (keyword? key)
-    (let (parts (string/split (name key) "/"))
-      (if (> (count parts) 1)
-        (string/join "/" (take (- (count parts) 1) parts))
-        nil))
+    (let (nm (name key)
+          cut (%str-last-index-of nm "/"))
+      (if (< cut 0) nil (string/substring nm 0 cut)))
     nil))
 
 ; True if module `from` belongs to the current project's OWN package (ADR-172): its

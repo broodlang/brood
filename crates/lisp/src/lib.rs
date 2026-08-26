@@ -181,7 +181,7 @@ fn boot_cache_prune(dir: &std::path::Path, keep: &std::path::Path) {
 /// cache whose header doesn't match byte-for-byte is stale and ignored.
 fn boot_cache_header_prefix() -> String {
     format!(
-        ";; brood-boot-cache v1 {} gensym=",
+        ";; brood-boot-cache v2 {} gensym=",
         builtins::build_id_string()
     )
 }
@@ -189,9 +189,11 @@ fn boot_cache_header_prefix() -> String {
 /// Boot the shared bundle from the expanded-prelude cache. `None` (fall back
 /// to [`boot_from_source`]) if the cache is absent, stale, or fails ANY step —
 /// a failing cache file is deleted so the source boot's rewrite starts clean.
-/// The raw prelude is still read (positioned) for `note_definition`, so LSP
-/// stdlib navigation is identical on both paths; only the ~27 ms compile pass
-/// is skipped.
+/// Each cached line carries its form's source position and the def-names the
+/// *un-expanded* form contributed, so LSP stdlib navigation is identical on both
+/// paths without re-reading the prelude: that positioned read was 3.5 ms of a
+/// 26 ms warm boot and produced nothing else. Only the ~27 ms compile pass and
+/// that read are skipped.
 fn boot_from_cache() -> Option<SharedBundle> {
     let t_start = web_time::Instant::now();
     let path = boot_cache_path()?;
@@ -210,25 +212,58 @@ fn boot_from_cache() -> Option<SharedBundle> {
         heap.set_global(root);
         builtins::register(&mut heap, root);
         heap.set_current_file(prelude_source_path());
-        // Raw positioned read for definition sites only (M-. parity with the
-        // source boot); the cached forms drive evaluation. 1:1 by construction
-        // (compile never splits a top-level form) — any drift is a stale file.
-        let raw = syntax::reader::read_all_positioned(&mut heap, PRELUDE).ok()?;
-        let cached = syntax::reader::read_all(&mut heap, body).ok()?;
-        if raw.len() != cached.len() {
+        // Each line is `<line>:<col>:<def-name,…> <printed form>` — the position and
+        // the un-expanded form's def-names, recorded by the source boot that wrote
+        // this file, then the expansion that drives evaluation.
+        let mut meta = Vec::new();
+        // One bulk read of the expansions, not one per line: the reader amortises
+        // its scanner across a single buffer, and splitting it per form measured
+        // +1 ms on a 23 ms boot.
+        let mut source = String::with_capacity(body.len());
+        for line in body.lines().filter(|l| !l.is_empty()) {
+            let (head, printed) = line.split_once(' ')?;
+            let mut parts = head.splitn(3, ':');
+            let l: u32 = parts.next()?.parse().ok()?;
+            let c: u32 = parts.next()?.parse().ok()?;
+            meta.push((crate::error::Pos { line: l, col: c }, parts.next()?));
+            source.push_str(printed);
+            source.push('\n');
+        }
+        let cached = syntax::reader::read_all(&mut heap, &source).ok()?;
+        // 1:1 by construction (one printed form per line) — any drift is a torn file.
+        if cached.len() != meta.len() {
             return None;
         }
         // The cached expansions embed gensyms minted up to `gensym_max` in the
         // caching boot; floor the counter so runtime gensyms can't collide.
         core::value::gensym_floor(gensym_max);
-        for ((raw_form, pos), form) in raw.into_iter().zip(cached) {
-            heap.note_definition(raw_form, pos);
+        let t_read = t_start.elapsed();
+        for ((pos, names), form) in meta.into_iter().zip(cached) {
+            // The un-expanded form's def-names, recorded by the boot that wrote this
+            // file — the raw prelude is not read here.
+            for name in names.split(',').filter(|n| !n.is_empty()) {
+                heap.record_def_site(core::value::intern(name), pos);
+            }
             heap.note_definition(form, pos);
             eval::eval(&mut heap, form, root).ok()?;
         }
+        let t_eval = t_start.elapsed();
         heap.set_current_file(None);
         let private = heap.private_names_snapshot();
+        let t_pre_freeze = t_start.elapsed();
         let (code, bindings) = heap.freeze_as_shared_code(root);
+        if std::env::var_os("BROOD_BOOT_TRACE").is_some() {
+            // The cache-hit phase breakdown, the counterpart of the source boot's
+            // line below. Without it the only number this path reported was its
+            // total, which cannot say whether a boot regression is in reading the
+            // cache, in evaluating the prelude, or in one `require` inside it.
+            eprintln!(
+                "[boot] parse={:?} eval={:?} freeze={:?}",
+                t_read,
+                t_eval - t_read,
+                t_start.elapsed() - t_pre_freeze
+            );
+        }
         Some(SharedBundle {
             code: Arc::new(code),
             bindings,
@@ -284,7 +319,10 @@ fn boot_from_source() -> SharedBundle {
         // `def`/`defn`/`defmacro` but whose expansion IS a `defn` still get
         // their call-site position recorded. Both calls are no-ops when the
         // form isn't recognisably a definition, or no file is set.
-        heap.note_definition(form, pos);
+        // Recording variant: the cache-hit boot does not read the raw prelude, so
+        // the names this *un-expanded* form contributes are captured here and
+        // written into the cache line below.
+        let raw_names = heap.note_definition_recording(form, pos);
         // Compile pass (expand macros, then namespace-resolve — a no-op here since
         // the prelude is the root namespace), then evaluate. Form-by-form so a
         // macro defined by one form is visible to the next.
@@ -300,7 +338,20 @@ fn boot_from_source() -> SharedBundle {
             let printed = syntax::printer::print(&heap, form);
             match syntax::reader::read_all(&mut heap, &printed) {
                 Ok(v) if v.len() == 1 && syntax::printer::print(&heap, v[0]) == printed => {
-                    printed_forms.push(printed);
+                    let names: Vec<&str> = raw_names
+                        .iter()
+                        .map(|&n| core::value::symbol_name_ref(n))
+                        .collect();
+                    // A printed form never contains a newline (the printer emits one
+                    // line) and a symbol never contains a space, so `line:col:names `
+                    // is unambiguous against the form that follows it.
+                    printed_forms.push(format!(
+                        "{}:{}:{} {}",
+                        pos.line,
+                        pos.col,
+                        names.join(","),
+                        printed
+                    ));
                 }
                 _ => cache_ok = false,
             }
@@ -621,14 +672,13 @@ mod prelude_hygiene {
     use super::*;
     use crate::core::value::{self, ValueRef};
 
-    // Modules the prelude force-loads before use (so a qualified reference resolves at
-    // boot). `string` is `(require-one 'string)`-ed in tools.blsp. Add a module here only
-    // when the prelude genuinely loads it up front.
-    //
-    // Note this is only consulted for names that are NOT registered primitives: a good
-    // many kernel primitives are themselves *named* with a slash (`file/slurp`,
-    // `string/split`), and those are always bound with no module load at all.
-    const ALLOWED_MODULES: &[&str] = &["string", "seq"];
+    // There is no allowed-module list any more. The prelude used to force-load `string`
+    // and `seq` at boot, which made every `string/…` / `seq/…` reference resolve and cost
+    // 12.1 ms of a 26 ms boot on every invocation (KI-61); those modules now load lazily,
+    // so a qualified reference is only safe when something binds the name up front. The
+    // three things that do are checked by name below — a registered primitive, a prelude
+    // definition, or an `%autoload` declaration — which is stricter than a module allowlist
+    // and needs no editing when a namespacing wave moves another name out of the prelude.
 
     /// Every name `builtins::register` binds — the always-available set, slash-named
     /// primitives included.
@@ -687,6 +737,80 @@ mod prelude_hygiene {
         }
     }
 
+    /// Every global a prelude form defines: the head symbol of a `def`-family form
+    /// (including the `%defseq` and `defability`/`defrecord` definers, whose expansions
+    /// bind their first argument). Qualified prelude names like `string/format` — defined
+    /// in `std/prelude/string.blsp`, not in the `string` MODULE — land here.
+    fn prelude_definitions(heap: &Heap, forms: &[Value]) -> std::collections::HashSet<String> {
+        const DEFINERS: &[&str] = &[
+            "def",
+            "def-",
+            "defn",
+            "defn-",
+            "defmacro",
+            "%defseq",
+            "defdyn",
+            "defability",
+            "defrecord",
+        ];
+        let mut out = std::collections::HashSet::new();
+        for &form in forms {
+            let ValueRef::Pair(p) = form.unpack() else {
+                continue;
+            };
+            let (car, cdr) = heap.pair(p);
+            let ValueRef::Sym(head) = car.unpack() else {
+                continue;
+            };
+            if !DEFINERS.contains(&value::symbol_name(head).as_str()) {
+                continue;
+            }
+            let ValueRef::Pair(rest) = cdr.unpack() else {
+                continue;
+            };
+            if let ValueRef::Sym(name) = heap.pair(rest).0.unpack() {
+                out.insert(value::symbol_name(name));
+            }
+        }
+        out
+    }
+
+    /// The `(%autoload mod (name arity) …)` declarations in a prelude file, as
+    /// `(mod/name, arity)`. Read out of the source rather than out of a live image so the
+    /// two tests below can check the declaration itself: that one exists for every
+    /// reference, and that its arity still matches the module.
+    fn autoload_declarations(heap: &Heap, forms: &[Value]) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        for &form in forms {
+            let Ok(items) = heap.list_to_vec(form) else {
+                continue;
+            };
+            let Some(&head) = items.first() else { continue };
+            let ValueRef::Sym(h) = head.unpack() else {
+                continue;
+            };
+            if value::symbol_name(h) != "%autoload" {
+                continue;
+            }
+            let ValueRef::Sym(module) = items[1].unpack() else {
+                continue;
+            };
+            let module = value::symbol_name(module);
+            for &spec in &items[2..] {
+                let Ok(pair) = heap.list_to_vec(spec) else {
+                    continue;
+                };
+                let (Some(&name), Some(&arity)) = (pair.first(), pair.get(1)) else {
+                    continue;
+                };
+                if let (ValueRef::Sym(n), Value::Int(a)) = (name.unpack(), arity) {
+                    out.push((format!("{module}/{}", value::symbol_name(n)), a as usize));
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn prelude_code_references_no_unloaded_module_wrapper() {
         const FILES: &[(&str, &str)] = &[
@@ -721,22 +845,41 @@ mod prelude_hygiene {
         ];
         let primitives = registered_primitives();
         let mut heap = Heap::new();
+        // Two passes: the whole prelude's definitions and autoload declarations have to be
+        // known before any file's references can be judged, since a reference in `core.blsp`
+        // may name something `tools.blsp` declares.
+        let read: Vec<(&str, Vec<Value>)> = FILES
+            .iter()
+            .map(|(fname, src)| {
+                let forms = syntax::reader::read_all(&mut heap, src)
+                    .unwrap_or_else(|e| panic!("read {fname}: {e:?}"));
+                (*fname, forms)
+            })
+            .collect();
+        let mut defined = std::collections::HashSet::new();
+        let mut autoloaded = std::collections::HashSet::new();
+        for (_, forms) in &read {
+            defined.extend(prelude_definitions(&heap, forms));
+            autoloaded.extend(
+                autoload_declarations(&heap, forms)
+                    .into_iter()
+                    .map(|(q, _)| q),
+            );
+        }
         let mut violations: Vec<String> = Vec::new();
-        for (fname, src) in FILES {
-            let forms = syntax::reader::read_all(&mut heap, src)
-                .unwrap_or_else(|e| panic!("read {fname}: {e:?}"));
-            for form in forms {
+        for (fname, forms) in &read {
+            for &form in forms {
                 let mut found = Vec::new();
                 collect_qualified(&heap, form, &mut found);
                 for q in found {
-                    // A slash-named kernel primitive (`file/slurp`) is always bound.
-                    if primitives.contains(&q) {
+                    // Three ways a qualified name is bound with no module load: a
+                    // slash-named kernel primitive (`file/slurp`, `string/split`), a
+                    // prelude definition (`string/format` lives in the prelude, not in
+                    // the `string` module), and an `%autoload` stub.
+                    if primitives.contains(&q) || defined.contains(&q) || autoloaded.contains(&q) {
                         continue;
                     }
-                    let module = &q[..q.find('/').unwrap()];
-                    if !ALLOWED_MODULES.contains(&module) {
-                        violations.push(format!("{fname}: {q}"));
-                    }
+                    violations.push(format!("{fname}: {q}"));
                 }
             }
         }
@@ -744,9 +887,77 @@ mod prelude_hygiene {
         violations.dedup();
         assert!(
             violations.is_empty(),
-            "prelude code references a module wrapper that is not loaded at boot — use the \
-             `%`-primitive instead (or add the module to ALLOWED_MODULES if it is force-loaded):\n  {}",
+            "prelude code references a name nothing binds at boot. The modules the prelude \
+             once force-loaded now load lazily (KI-61), so reach for the `%`-primitive, or \
+             declare the name in the `%autoload` list in std/prelude/tools.blsp:\n  {}",
             violations.join("\n  ")
+        );
+    }
+
+    /// The other half of the autoload contract: a declared arity that has drifted from its
+    /// module would make `def`'s reload check announce an arity change on every load of that
+    /// module, and would report a caller's arity error from inside the stub. A declared name
+    /// the module does not define at all would loop until `autoload-call`'s re-entry guard
+    /// raised — a runtime failure this catches at build.
+    ///
+    /// Checks both: the loaded arity matches the declaration, and the loaded arglist is not
+    /// still the stub's own generated `(a0 a1 …)` parameters (which would mean the module
+    /// loaded without defining the name, and the count alone would agree).
+    #[test]
+    fn every_autoload_declaration_matches_its_module() {
+        let mut heap = Heap::new();
+        let src = include_str!("../../../std/prelude/tools.blsp");
+        let forms = syntax::reader::read_all(&mut heap, src).expect("read tools.blsp");
+        let declared = autoload_declarations(&heap, &forms);
+        assert!(
+            !declared.is_empty(),
+            "no `%autoload` declarations found — the scanner has drifted from the macro's shape"
+        );
+        // A declaration that shadows a slash-named kernel primitive is the worst case:
+        // the stub REPLACES an always-bound native with one that loads a module and
+        // forwards to itself. Caught here rather than at the first call site.
+        let primitives = registered_primitives();
+        let mut interp = Interp::new();
+        let mut problems: Vec<String> = Vec::new();
+        for (qualified, arity) in declared {
+            if primitives.contains(&qualified) {
+                problems.push(format!(
+                    "{qualified}: already a kernel primitive — the stub shadows it; drop the \
+                     declaration"
+                ));
+                continue;
+            }
+            let module = &qualified[..qualified.find('/').unwrap()];
+            interp
+                .eval_str(&format!("(require-one '{module})"))
+                .unwrap_or_else(|e| panic!("require {module}: {e:?}"));
+            let arglist = interp
+                .eval_str(&format!("(arglist {qualified})"))
+                .map(|v| interp.print(v))
+                .unwrap_or_else(|e| format!("<error: {}>", e.message));
+            let stub_params = format!(
+                "({})",
+                (0..arity)
+                    .map(|i| format!("a{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let count = arglist.split_whitespace().count();
+            if arglist == stub_params {
+                problems.push(format!(
+                    "{qualified}: still the autoload stub after loading `{module}` — \
+                     the module does not define it"
+                ));
+            } else if count != arity {
+                problems.push(format!(
+                    "{qualified}: declared arity {arity}, module defines {arglist}"
+                ));
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "autoload declarations in std/prelude/tools.blsp have drifted:\n  {}",
+            problems.join("\n  ")
         );
     }
 }

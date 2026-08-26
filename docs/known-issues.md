@@ -21,7 +21,7 @@ ADRs / topic docs.
 |---|---|---|
 | KI-63 | ~~loading std modules taxes JIT'd hot loops~~ — **RETRACTED 2026-08-25, the effect does not exist.** After a discarded warm-up run in-process, a 20M loop is 23-24 ms whether or not `format` is loaded. Every earlier figure measured the FIRST run, i.e. JIT warm-up, which is variable and shape-sensitive — the same loop read 25 ms in one file and 40-51 ms in another differing only by having three call sites | ☑️ **retracted** — no bug. What is real, and is the reusable part: a whole-process benchmark of a short row measures tiering, not steady state |
 | KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
-| KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | 🔧 **diagnosed 2026-08-25, not fixed.** The fix is not to revert a wave — it is to make a module load cheap at boot, which is what the std image already does (4-33x) and why it is *not* installed at boot: materialising defines bindings and evaluates NOTHING, so registrations are skipped (131/4873 fail). See the replay note below |
+| KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | ✅ **fixed 2026-08-26** — by not loading the modules at boot at all: the prelude's `string/`/`seq/` references are autoload stubs that load on first call (ADR-246), and prelude def-sites now travel in the boot cache instead of a second positioned read of the prelude (ADR-247). Warm boot 22.8 -> 11.6 ms, base RSS 55.6 -> 50.7 MB, `startup` -28.9%, every other row ~11-13 ms faster in absolute wall. The std image + registration replay is still the right way to make the *lazy* load fast; the two compose |
 | KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl Port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl Port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
 | KI-59 | **`nest run --for` reported failure for a program that succeeded.** The wrapper was `(%spawn …)` then `(monitor p)` — two steps. A program that finished before the monitor attached fired a synthetic `:noproc`, `(= :noproc :normal)` was false, and the run exited 1 after printing its output correctly. Worst in the mode documented as the CI-friendly way to exercise an app | ✅ **fixed 2026-08-25** — `%spawn-link` + `trap-exit`, atomic by construction: the kernel already names this race on `%spawn-link` itself ("no spawn->link :noproc race", ADR-067). Reproduced ~1 run in 6 under load, 0/20 after. Reading `:noproc` as success would be wrong the other way — a program that *crashed* before the monitor attached is indistinguishable |
 | KI-58 | **the namespacing silently killed the `table-put` call-site inline — `sieve` 11.6× slower.** `resolve_prim3` accepted only a *direct* native head, on the stated grounds that `table-put` "has no prelude wrapper to follow"; the v0.9/v0.10 waves made the head `table/put`, a `std/table.blsp` wrapper, so the call stopped inlining and became an ordinary `Call` in the hot arm. The **2-ary** `resolve_prim` follows its wrapper, so `table/has?` went on inlining beside it — the asymmetry is visible in one IR dump | ✅ **fixed 2026-08-25** — `resolve_prim3` follows a thin wrapper like the 2-ary path, requiring the identity argument map (`Node::Prim3` has no permutation field, so a reordering wrapper must decline rather than store under the wrong key). `make ab`: **457 → 68 ms, −85.1%**. Guards: `table_put_call_site_inline_recognizes_the_namespaced_wrapper` (sabotage-verified) and the new `every_inlinable_head_still_reaches_its_primitive`, which caught a **second** dead inline on its first run — `table/get`, whose `&optional` head is not a thin wrapper; fixed in `std/table.blsp` with two arity clauses |
@@ -100,7 +100,7 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**Open: KI-61** (startup +82%, a per-wave namespacing tax; diagnosed, fix is the stdimage replay). **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**KI-61** (startup +82%, a per-wave namespacing tax) is **fixed 2026-08-26** — by making the prelude's library references autoload lazily rather than force-loading at boot (ADR-246), plus moving prelude def-sites into the boot cache (ADR-247): warm boot 22.8 → 11.6 ms, base RSS 55.6 → 50.7 MB, `startup` −28.9%. No open items. **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
 **fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
 **KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
@@ -317,9 +317,38 @@ experiment does, and what this was found by.
 
 ---
 
-## KI-61 — startup is a per-wave namespacing tax 🔧 DIAGNOSED 2026-08-25
+## KI-61 — startup is a per-wave namespacing tax ✅ FIXED 2026-08-26
 
-**Status:** 🔧 diagnosed, not fixed. Every figure below is best-of-15, `taskset`-pinned, on an
+**Status:** ✅ **fixed** — and not the way this entry predicted. The recorded fix was "make a
+module load cheap at boot" (the std image + a registration replay). The actual fix was to **not
+load the modules at boot at all**: the prelude's references into `string`/`seq` are now
+**autoload stubs** that load their module on first call (ADR-246), so boot loads nothing and a
+future namespacing wave costs one declaration instead of a few more milliseconds on every
+invocation, forever. A second, unrecorded half went with it — the warm boot also read the
+prelude a *second* time, positioned, purely to recover def-sites for `M-.`; those now travel in
+the boot cache (ADR-247).
+
+Measured, warm, `taskset`-pinned, best-of-9 through `scripts/ab-bench.sh` against `7bf57f52`:
+
+| | before | after |
+|---|---|---|
+| prelude boot (`BROOD_BOOT_TRACE`) | 22.8 ms | **11.6 ms** |
+| — of which the two `require-one`s | 12.1 ms | 0 |
+| — of which the raw positioned read | 3.5 ms | 0 |
+| `startup` row | 45 ms | **32 ms** (−28.9%) |
+| base RSS, bare program | 55.6 MB | **50.7 MB** |
+| bare `brood empty.blsp` | ~26 ms | **~15 ms** |
+
+Every other row moved by the same absolute ~11–13 ms (`fib` −10.5%, `loop` −10.2%, `reduce`
+−22.2%, `strings` −34.7%), which is the point: this was a cost on every invocation, not on a
+benchmark. The std image remains the right way to make the *lazy* load fast when it happens, and
+the registration-replay design recorded below is still the work that would let it be installed at
+boot — the two compose. What follows is the original diagnosis, kept because the measurement
+traps in it are the reason the fix landed on the second try.
+
+---
+
+**Original diagnosis (2026-08-25).** Every figure below is best-of-15, `taskset`-pinned, on an
 empty program, with **each binary warmed first** — the boot cache is keyed on build-id *and the
 executable's mtime*, so a freshly copied binary's first run measures cache population (~1.2 s
 cold against ~0.11 s warm) and would have made the whole sweep meaningless.

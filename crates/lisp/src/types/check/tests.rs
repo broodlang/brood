@@ -4564,27 +4564,34 @@ fn arg_ty_at_misses_degrade_to_none() {
 #[test]
 fn feature_loaded_reads_the_feature_registry_not_the_namespace() {
     let mut interp = crate::Interp::new();
-    // `string` is required during boot → genuinely loaded.
-    assert!(
-        feature_loaded(&mut interp.heap, "string"),
-        "a boot-loaded module must read as loaded"
-    );
     // `file` has 18 `file/…` kernel primitives but its .blsp is not loaded yet — the
-    // exact shape that fooled the old namespace-presence test.
-    assert!(
-        !interp.heap.module_public_exports("file/").is_empty(),
-        "precondition: file/ primitives exist without the module loaded"
-    );
-    assert!(
-        !feature_loaded(&mut interp.heap, "file"),
-        "primitives in a namespace must not read as the module being loaded"
-    );
+    // exact shape that fooled the old namespace-presence test. `string` is the same
+    // shape twice over since ADR-246: its `.blsp` no longer loads at boot, while
+    // `string/split`, `string/length`, … are kernel primitives AND the prelude binds
+    // `string/join` and friends to autoload stubs. Neither may read as the module.
+    for module in ["file", "string"] {
+        assert!(
+            !interp
+                .heap
+                .module_public_exports(&format!("{module}/"))
+                .is_empty(),
+            "precondition: {module}/ primitives exist without the module loaded"
+        );
+        assert!(
+            !feature_loaded(&mut interp.heap, module),
+            "primitives in a namespace must not read as the module being loaded"
+        );
+    }
     // A name no module has is not loaded either (and doesn't panic).
     assert!(!feature_loaded(&mut interp.heap, "no-such-module-zzz"));
-    // After a real require it flips.
-    interp.eval_str("(require-one 'file)").expect("require");
-    assert!(
-        feature_loaded(&mut interp.heap, "file"),
-        "a required module must read as loaded"
-    );
+    // After a real require each flips.
+    for module in ["file", "string"] {
+        interp
+            .eval_str(&format!("(require-one '{module})"))
+            .expect("require");
+        assert!(
+            feature_loaded(&mut interp.heap, module),
+            "a required module must read as loaded"
+        );
+    }
 }
