@@ -638,10 +638,25 @@ NOTHING, so the requires its header would have run are replayed from these edges
 that carries no edges restores `url` without `path`, and its first `path/join` is unbound.
 Merging rather than replacing because a project image and the stdlib image each carry their
 own, and whichever installs second must not erase the first."
-  (doseq (kv (map-pairs edges))
-    (let ([k deps] kv)
-      (when (not (contains? *require-edges* k))
-        (%registry-update! '*require-edges* :assoc [k] deps))))
+  ;; Drop a dep this binary cannot load. An image is keyed on `stdlib-id` — the stdlib's
+  ;; CONTENT — which is deliberately the same for `brood`, `nest` and `brood-lsp` from one
+  ;; tree, so one image is shared. But those binaries do not bake in the same MODULES: a
+  ;; lean runtime (what `nest release` and `make install INSTALL_FEATURES=RUN_FEATURES`
+  ;; produce, i.e. what ships) has no dev-tools, and `project`'s recorded edges name `test`.
+  ;; Replaying that edge made the very next `require` die with `cannot find module 'test'`,
+  ;; so installing the image BROKE `require` on the shipped build — which is why its 4-33x
+  ;; module-load win has never actually been available there (`require format` measured
+  ;; 64 ms from source).
+  ;;
+  ;; Filtered here rather than at build time on purpose: the image may have been written by
+  ;; a different binary from the one reading it, which is the whole point of sharing the key.
+  (let (have (into #{} (map name (builtin-modules))))
+    (doseq (kv (map-pairs edges))
+      (let ([k deps] kv)
+        (when (not (contains? *require-edges* k))
+          (%registry-update! '*require-edges*
+            :assoc [k]
+            (filter (fn (d) (contains? have (name d))) deps))))))
   *require-edges*)
 
 (defn- require-record-edge!
