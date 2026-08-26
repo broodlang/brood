@@ -16506,3 +16506,55 @@ checked this arithmetic. Two invariant tests in `jit_plan` assert the window aga
 real `ckpt_slot` over every chunk a boot compiles, because the behavioural test
 (`tests/jit_blockarg_spill_test.blsp`) can only fail when the clamp *and* the backstop are both
 gone — the backstop alone converts the corruption into silently lost JIT coverage.
+
+## ADR-249 — `string/->codepoints` gets a native inverse
+
+**Context.** ADR-006 says Rust provides mechanism and Brood provides policy, and the bar for
+a new primitive is deliberately high: it must improve *overall* language performance and
+build up a capability, not move one slow function into Rust. `string/->codepoints` is a
+native — an O(n) pass to the indexable code vector every text parser in `std/` wants — and
+it had **no native inverse**. `string/codepoints->` was:
+
+```lisp
+(apply str (map int->char cs))
+```
+
+a seq view, a closure call per code point to allocate a **one-character string**, and then
+an N-way variadic concat. Every parser that used the native to take a string apart paid that
+to put one back together: `std/json`'s per-string, per-key and per-number-slice assembly,
+`std/string`'s own `codepoints->`, and the same shape open-coded in more than one place.
+
+**Decision.** Add `%codepoints->string` — one pass into a `String`, accepting a vector, list
+or `bytes` value — and point `string/codepoints->` at it.
+
+This clears the ADR-006 bar on both counts rather than one. It is *mechanism*: UTF-8-encoding
+a sequence of code points is not a rule Brood can express cheaply, any more than the forward
+direction was, and the asymmetry of having one half native was the accident. And it pays off
+broadly rather than at a call site: it is the inverse of a primitive whose whole purpose is
+that parsers use it, so every parser gets it. The dogfooding rule's worked example — variadic
+`+` as a Rust builtin — is the opposite shape: a fast path for one call site that teaches the
+language nothing. This is the shape the rule *asks* for, a missing primitive that dogfooding
+surfaced.
+
+**Consequences.** `json` parse ~85 ms → ~45 ms, row **−20.8%** against a 0.7% floor — the
+worst row in the suite against a native library. `base64` −4.9% (inside its floor, but the
+right sign for a shared helper); `regex` unchanged, because its hot path is a memoised DFA
+whose steady state is one `table/get`, not string assembly.
+
+A non-int or non-scalar code point is a clean error naming the offender. That matters more
+than it looks: a surrogate (D800–DFFF) is not a `char`, so accepting one would either panic
+or silently substitute U+FFFD, and `json` relies on the error to reject `"\ud800"`.
+
+**It also moved a map's print order**, which is worth recording because the mechanism is
+non-obvious. Adding a primitive adds a name to the symbol interner, which shifts symbol ids,
+which shifts keyword hashing, which shifts CHAMP trie order — so a *printed* map changes.
+`tests/doc_examples_test.blsp` compared documented results as text and duly failed on
+`(seq/frequencies [:a :b :a])`, whose docstring recorded the equally-correct `{:b 1, :a 2}`.
+The harness now compares as a **value** when the documented side reads as one. Any docstring
+example whose result is a map or set was fragile the same way; this retires the class.
+
+**Not done: the encoders.** The symmetric change on the *encode* side of `std/encoding` needs
+the byte range proven before indexing the alphabet, and wrapping that check in a one-line
+helper — a call per element — cost that direction **4×**. Measured and reverted. The general
+lesson is recorded in the source: in a per-element loop in this library, a function call is
+not a small thing, which is also why the decoder's bounds guards are inlined at each site.

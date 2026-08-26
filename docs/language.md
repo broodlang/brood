@@ -2558,7 +2558,11 @@ another type, so they are **not** string-library ops:
 - `string/->codepoints` gives the chars as a **vector of integer codepoints** in
   one O(n) native pass — the random-access form text parsers index with `nth`
   and compare as ints (`std/regex`/`std/json`/`std/encoding` all scan it);
-  `string/codepoints->` is its inverse.
+  `string/codepoints->` is its inverse, and native too (`%codepoints->string`).
+  It had no native form until 2026-08-26, so every one of those parsers rebuilt
+  its result with `(apply str (map int->char cs))` — a one-character string and a
+  closure call per code point, then an N-way concat. Building a string from code
+  points is the normal way back, so reach for `string/codepoints->`.
 - **A code point is not a character — a grapheme cluster is.**
   `string/->graphemes` gives the extended grapheme clusters (UAX #29) as a vector of
   strings: `"e"` + U+0301 is *two* code points but *one* cluster, and a flag emoji is

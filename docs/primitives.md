@@ -48,7 +48,8 @@ arg silently becoming `nil`.
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
 | | `lower` | 1 | `s` lower-cased (Unicode-aware) |
 | | `string/->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
-| | `string->codepoints` | 1 | the characters of `s` as a vector of integer Unicode codepoints, one O(n) pass — the random-access form text parsers index with `nth` and compare as ints (`codepoints->string` is its Brood inverse) |
+| | `string->codepoints` | 1 | the characters of `s` as a vector of integer Unicode codepoints, one O(n) pass — the random-access form text parsers index with `nth` and compare as ints |
+| | `%codepoints->string` | 1 | its **inverse**: a string from a vector, list or `bytes` of codepoint ints, one O(n) pass. Backs `string/codepoints->`, which was `(apply str (map int->char cs))` — a seq view, a closure call and a one-character string per code point, then an N-way variadic concat. That shape was every text parser's way back from the code vector, and removing it took `json` parse 1.8× (row −20.8%). Errors on a non-int or a non-Unicode-scalar (negative, > U+10FFFF, or a surrogate) |
 | | `string-span` | 3 | `(string-span s start chars)` → the char index just past the maximal run of chars in the set `chars` (a string) starting at char `start` — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native |
 | | `string-span-until` | 3 | the char index of the first char of `s` in the set `chars` at or after `start`, or `(string-length s)` if none — the maximal run of chars *not* in the set, for scanning up to a delimiter. The complement of `string-span` |
 | | `string-split` | 2 | Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters. |
