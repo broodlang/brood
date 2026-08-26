@@ -3213,6 +3213,221 @@ That is the generalisable bit. A test that installs its own double to observe an
 testing the default path, and for `*out*`/`*err*` the default path is the entire product. Both
 comments are now in `std/io.blsp`; neither alone tells you to go look at the default.
 
+## 2026-08-25 — the startup image did not work on the build that ships
+
+Chasing KI-61's fix — make a boot module load cheap, which is what the stdlib image is for — the
+first probe that actually *installed* the image found it broken:
+
+```
+error: require: cannot find module 'test'
+```
+
+The image is keyed on `stdlib-id`, the stdlib's content hash, so `brood`, `nest` and
+`brood-lsp` from one tree share a single copy rather than writing three. That is right. What it
+misses is that a shared key does not imply a shared *module set*: a lean runtime — `nest
+release`, `make install INSTALL_FEATURES=RUN_FEATURES`, i.e. what ships — bakes in 88 modules
+and no dev-tools, while `std/tool/project.blsp`'s recorded edges name `test`. `install` replays
+those edges (it must: a restored module evaluates nothing, so without them `url` comes back
+with no `path`), and replaying an edge to a module with no source poisons `require` for
+everything after it.
+
+Fixed by dropping, at install, any dep this binary cannot load. At **install** rather than at
+build because the image may have been written by a different binary from the one reading it —
+which is the whole point of sharing the key, so the reader is the only party that knows.
+
+The number this unlocks was already claimed in the docstring and had simply never been reachable
+on a shipping build. Release, best of 3: `require format` **62.0 → 12.8 ms** and `require
+datetime` **3.3 → 0.39 ms**.
+
+Two things worth keeping. First, it went unnoticed because the image is *built* by `make install`
+but never *installed* — dead until something calls `stdimage/install`, which nothing in the
+normal path does. A feature that is constructed and never exercised is not covered by "the suite
+is green". Second, it would have wrecked the KI-61 replay investigation had it not surfaced
+first: a boot-install experiment on a lean build would have produced a pile of failures with
+nothing to do with the registrations it was meant to measure, and the obvious reading — "see,
+131 failures, the note was right" — would have been wrong.
+
+## 2026-08-25 — the benchmark "regressions" were mostly measurement, and one of them was real
+
+The 0.12.0 harness run listed `spawn` +35%, `loop` +22%, `regex` +22%, `fib` +15% against 0.3.11.
+Chasing them produced a more useful result than a culprit commit: **most of that list is
+measurement, and what remains is one real effect nobody had named.**
+
+**Old binaries cannot run today's rows.** `os/getenv` did not exist at `d5572d61`, so a bisect
+across this range is structurally impossible without help. Two ways round it, both used: neutral
+microbenchmarks in the stable subset, and mechanically down-migrated copies of the real programs
+(`io/puts`→`println`, `string/->number`→`string->number`, `os/getenv`→`getenv`) so each binary
+runs the same algorithm in the spelling it understands.
+
+**Startup contaminates every row, and it is not evenly distributed.** `compute = wall − startup`,
+with one startup figure per language — but the startup row is `(io/puts 0)`, which loads `io` and
+not `os`/`string`, so it under-subtracts for every real row. Measured per binary with its own
+startup, the compute rows are flat or better: `loop` 23.1 → 24.4, `fib` 15.8 → 15.3,
+`spawn` 283.5 → 221.3 (**−22%**).
+
+**The real effect: loading modules taxes JIT'd code.** An identical, allocation-free 20M loop,
+timed by differencing two otherwise-identical programs so module-load cost cancels exactly:
+
+| modules required first | 0.3.11 | 0.12.0 |
+|---|---|---|
+| 0 | 24.7 ms | 26.3 ms |
+| 4 | 23.3 ms | 33.7 ms |
+| tax | **−5.8%** | **+27.9%** |
+
+JIT-only — `BROOD_NO_JIT=1` reads 942 → 939 ms, `BROOD_TIER=1` 949 → 949. The interpreter does
+not care. Filed as KI-63; the mechanism is not identified, and it is none of shared arms, the
+RUNTIME GC floor, or either inliner.
+
+**Two traps, either of which would have produced a confident wrong answer.**
+
+- *Pinning.* The same measurement reads **+68.2%** pinned against +27.9% unpinned, because the
+  background JIT compiler competes for the pinned core and loading modules increases compilation
+  volume. CLAUDE.md documents this for `make ab`; it applies to any hand-rolled measurement too.
+  Both sides inflate, so a pinned reading exaggerates the regression as well as the absolutes.
+- *Subtracting a startup row.* Differencing two programs is exact; subtracting a startup figure
+  measured on a different program is not, and the error is systematic rather than noise.
+
+And one suspect cleared by measurement rather than reasoning: `7bbf979d feat(stdimage)` sits in
+the middle of a startup regression and is **flat against its parent**. Its name is the only thing
+connecting it.
+
+## 2026-08-25 — correcting KI-63, and the measurement method that manufactured a threshold
+
+KI-63 went out with "0.3.11 −5.8% (no tax), 0.12.0 +27.9%". The direction holds; the single
+numbers do not, and the method that produced them is unsound in a way worth recording.
+
+**The method that failed.** Loop time as `wall(file with the loop) − wall(the identical file
+without it)`. It cancels module-load cost exactly, which is why it looked right — and it is fine
+while the non-loop part is small and stable. It is not fine otherwise: chasing the mechanism I
+generated files with N extra `defn`s, and at 2000 the subtraction reported the loop taking
+**4 ms** (the two walls are both dominated by compiling 2000 functions, and their difference is
+noise). Worse, it manufactured a clean-looking **threshold** — "+0.3% at 800 functions, +64.4%
+at 2000" — which in-process timing shows is not there at all: flat 24–26 ms from 0 to 4000 extra
+functions. A fabricated threshold is more dangerous than a fabricated number, because a threshold
+suggests a mechanism and sends you looking for it.
+
+**What in-process timing says**, 25 runs, unpinned, `os/now-ns` either side of the loop:
+
+| | 0.3.11 | 0.12.0 |
+|---|---|---|
+| 0 modules | min 23, med 23, p90 23 | min 25, med 26, p90 29 |
+| 4 modules | min 22, med 26, p90 30 | min 28, med 33, p90 50 |
+| tax | −4.3% min / +13.0% med | +12.0% min / +26.9% med |
+
+Three samples of the same comparison gave a 0.12.0 tax of +27.9%, +25.0% and +12.0% on min. So
+the honest claim is the **ratio** — 0.12.0's module tax is about double 0.3.11's — plus the
+observation that the p90 moved most (30 → 50 ms), i.e. the distribution degraded more than the
+best case. Quoting one figure would be quoting a sample.
+
+**What is ruled out.** Not the global table: 5000 extra integer globals cost +7.5%, against
++27% for four modules. Not closure count: 4000 extra functions cost nothing. Not shared arms,
+the RUNTIME GC floor, or either inliner. So it is something a *module load* does that neither
+defining globals nor defining functions does — which is where the next session should start,
+with `perf` and root, since `perf_event_paranoid=4` blocks profiling here.
+
+## 2026-08-25 — KI-63 retracted: three methods, three confident numbers, no effect
+
+KI-63 claimed loading std modules taxes JIT'd hot loops. It does not. The refutation is one
+line of experiment: run the loop once and throw it away, then time a second run in the same
+process.
+
+| | 20M loop, after a discarded warm-up |
+|---|---|
+| no module | min 23, med 24, max 25 ms |
+| `format` loaded first | min 23, med 24, max 26 ms |
+
+Identical. Three runs in one process makes it obvious — with `format` 50 / 24 / 24 ms, without
+`format` 51 / 24 / 24 ms. **The first run is slow either way.** Everything I measured was JIT
+tiering, not steady-state execution.
+
+Worth writing down how three separate methods each produced a confident wrong answer:
+
+1. **Differencing two programs** (`wall(with loop) − wall(without)`). Cancels module-load cost
+   exactly — and collapses when the non-loop part is large: at 2000 `defn`s it reported the loop
+   taking 4 ms, and manufactured a clean "+0.3% at 800 functions, +64.4% at 2000" threshold that
+   does not exist.
+2. **Pinning.** `taskset` charged the loop for background JIT compilation, reading +68% where
+   unpinned read +28% — the trap CLAUDE.md documents for `make ab`, which applies to any
+   hand-rolled measurement.
+3. **First-run in-process timing.** Looked rigorous — `os/now-ns` either side of the loop, 25
+   runs, min and median, unpinned. Still wrong, because it timed a cold arm. And it is not even
+   stable against program shape: the identical loop read a median of 25 ms as the only statement
+   in a file and 40–51 ms as the first of three call sites. That shape sensitivity is what
+   produced "`format` costs +92%" — `format` was never the variable.
+
+The pattern in all three: each method was *sound in principle* and violated an assumption I had
+not checked — that the non-loop part is small, that one core is representative, that the first
+run is the steady state. Each produced tight spreads and plausible mechanisms, which is exactly
+what makes them convincing. Tight spreads measure repeatability, not validity.
+
+**What is real, and is the useful residue:** a whole-process benchmark of a short row measures
+tiering as much as it measures the code under test. The harness does one discarded warm-up run
+per *language*, which warms the boot cache — but each row runs in a fresh process, so the
+program's own functions tier from cold every measured run. For rows in the tens of milliseconds
+that is a large, variable share of the published number, and it is not subtracted by
+`compute = wall − startup` because the `startup` row has no hot function to tier.
+
+## 2026-08-25 — the stdimage boot-install premise, re-measured rather than inherited
+
+KI-61's fix is to stop loading `string` and `seq` from source at boot. The mechanism for that
+already exists — the stdlib image — and the reason it is not installed at boot was recorded
+months ago as "the suite fails 131 of 4873". Two relevant things landed since (the `%std-edges`
+edge replay, and the root-global attribution fix), and a third was found today (KI-62: the image
+poisoned `require` outright on a lean build), so the figure was worth re-taking rather than
+building against.
+
+**Re-measured: 150 failures of 4920, and the recorded diagnosis is right.** Every failure is
+registration-shaped — `port? is true for a fn port`, `a port record prints as itself`, `every
+sealed member satisfies`, `a backend prints as`, `responses are records with a Response impl`.
+Materialising a module really does define its bindings and skip every registration its load
+would have performed.
+
+Worth recording that an earlier probe of mine pointed the other way and was wrong: requiring
+`queue` after an explicit `stdimage/install` showed `Seqable`, `Display`, `Conjable` and
+`Inspect` all satisfied, identical to a source load. That looked like evidence the losses had
+been fixed. It was not — one module surviving says nothing about the 28 that register, and I
+should have run the suite before drawing a conclusion from a single probe.
+
+**The prize is now measured, not estimated:** installing the image before the two boot requires
+takes a debug-build startup from **286.9 → 180.1 ms, −37%**.
+
+**A second blocker, solved:** `stdimage/install` cannot run that early — it reaches `os/getenv`,
+`path/join` and `file/exists?` through `os`/`path`/`file`, none of which are loaded yet, so it
+dies with `unbound symbol: os/getenv`. A prelude-only twin using `%getenv`, `str` and the
+`file/exists?` *native* (all bound at that point) boots cleanly. That half works today; only the
+150 registration failures make it unshippable.
+
+So the remaining work is the replay, now sized: 56 `impl`, 24 `defability` and 35 `defrecord`
+forms across std. Record the **forms**, not the values — symbols and lists image cleanly, where
+a value snapshot cannot round-trip the closures an `impl` holds — and evaluate them on
+materialise, exactly as `%std-edges` already replays require-edges.
+
+## 2026-08-25 — why every probe said the image was fine while the suite said 150 failures
+
+A note for whoever writes the stdimage replay, because it cost several rounds here.
+
+Post-boot probes of materialisation do not work, and they fail in the direction that looks like
+success. The shape is: install the image, `require` a module, check its registrations. Three
+attempts — `queue`, `io`, `datetime` — all reported every `satisfies?` green, against a suite
+that reports 150 failures with the image installed at boot.
+
+The reason is auto-require. A qualified name resolves its module **at compile time**, so every
+module the probe file mentions is loaded from source before the probe's first line runs. The
+probe then inspects a source-loaded module and finds it perfect. `io` is worse still: the prelude
+itself loads it, so it can never materialise in any post-boot test.
+
+Routing through `eval` does not rescue it — the `eval`'d forms are read at runtime, but the
+enclosing file still names the module somewhere, and that is enough. Nor does installing the
+image earlier in the file.
+
+So: the only measurement that means anything for this work is the full suite with the image
+installed at boot. That costs a build and a suite run, and there is no cheap proxy. Budget for it
+rather than trying to shortcut it, and treat a green probe as evidence of nothing.
+
+The corollary is a small design observation: the same auto-require behaviour is why the prelude
+must force-load `string` and `seq` explicitly (KI-61) — boot's namespace-resolve is a no-op for
+the root prelude, so *there* the mechanism does not fire, while everywhere else it fires so
+eagerly that it defeats measurement.
 ### Auditing the standard library's surface — and what "document everything" actually costs
 
 A sweep over all 1707 public names, asking three things of each: can it be namespaced, is it

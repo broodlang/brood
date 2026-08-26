@@ -19,6 +19,9 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-63 | ~~loading std modules taxes JIT'd hot loops~~ — **RETRACTED 2026-08-25, the effect does not exist.** After a discarded warm-up run in-process, a 20M loop is 23-24 ms whether or not `format` is loaded. Every earlier figure measured the FIRST run, i.e. JIT warm-up, which is variable and shape-sensitive — the same loop read 25 ms in one file and 40-51 ms in another differing only by having three call sites | ☑️ **retracted** — no bug. What is real, and is the reusable part: a whole-process benchmark of a short row measures tiering, not steady state |
+| KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
+| KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | 🔧 **diagnosed 2026-08-25, not fixed.** The fix is not to revert a wave — it is to make a module load cheap at boot, which is what the std image already does (4-33x) and why it is *not* installed at boot: materialising defines bindings and evaluates NOTHING, so registrations are skipped (131/4873 fail). See the replay note below |
 | KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl Port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl Port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
 | KI-59 | **`nest run --for` reported failure for a program that succeeded.** The wrapper was `(%spawn …)` then `(monitor p)` — two steps. A program that finished before the monitor attached fired a synthetic `:noproc`, `(= :noproc :normal)` was false, and the run exited 1 after printing its output correctly. Worst in the mode documented as the CI-friendly way to exercise an app | ✅ **fixed 2026-08-25** — `%spawn-link` + `trap-exit`, atomic by construction: the kernel already names this race on `%spawn-link` itself ("no spawn->link :noproc race", ADR-067). Reproduced ~1 run in 6 under load, 0/20 after. Reading `:noproc` as success would be wrong the other way — a program that *crashed* before the monitor attached is indistinguishable |
 | KI-58 | **the namespacing silently killed the `table-put` call-site inline — `sieve` 11.6× slower.** `resolve_prim3` accepted only a *direct* native head, on the stated grounds that `table-put` "has no prelude wrapper to follow"; the v0.9/v0.10 waves made the head `table/put`, a `std/table.blsp` wrapper, so the call stopped inlining and became an ordinary `Call` in the hot arm. The **2-ary** `resolve_prim` follows its wrapper, so `table/has?` went on inlining beside it — the asymmetry is visible in one IR dump | ✅ **fixed 2026-08-25** — `resolve_prim3` follows a thin wrapper like the 2-ary path, requiring the identity argument map (`Node::Prim3` has no permutation field, so a reordering wrapper must decline rather than store under the wrong key). `make ab`: **457 → 68 ms, −85.1%**. Guards: `table_put_call_site_inline_recognizes_the_namespaced_wrapper` (sabotage-verified) and the new `every_inlinable_head_still_reaches_its_primitive`, which caught a **second** dead inline on its first run — `table/get`, whose `&optional` head is not a thin wrapper; fixed in `std/table.blsp` with two arity clauses |
@@ -97,7 +100,7 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**No open items.** **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**Open: KI-61** (startup +82%, a per-wave namespacing tax; diagnosed, fix is the stdimage replay). **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
 **fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
 **KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
@@ -177,6 +180,239 @@ activation, and no `std` suite tests a large input. It is invisible below ~10⁵
 loop that calls the same function eleven times at increasing sizes stays correct throughout — so
 repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-63 — loading modules taxes JIT'd hot loops ☑️ RETRACTED 2026-08-25 (no such effect)
+
+**Status:** ☑️ **RETRACTED — there is no such effect.** Kept in full because the way it was
+wrong is worth more than the claim was: three successive measurement methods each produced a
+confident number, and each was an artifact.
+
+**The refutation, first.** Run the loop once and discard it, then time a second run in the same
+process:
+
+| | 20M loop, after a discarded warm-up |
+|---|---|
+| no module loaded | min 23, med 24, max 25 ms |
+| `format` loaded first | min 23, med 24, max 26 ms |
+
+Identical. Every figure below measured the **first** run of the loop — i.e. JIT tiering — not
+steady-state execution. Running the loop three times in one process shows it plainly: with
+`format`, 50 / 24 / 24 ms; without `format`, 51 / 24 / 24 ms. The first run is slow either way.
+
+**And first-run timing is not even stable against program shape.** The identical loop measured a
+median of 25 ms as the only statement in a file, and 40-51 ms as the first of three call sites in
+another — same code, same binary. That sensitivity is what produced the "`format` costs +92%"
+result: `format` was never the variable, the file's shape was.
+
+**What is actually true, and worth keeping:** a whole-process benchmark of a short row measures
+tiering as much as it measures the code. The harness does one discarded warm-up run *per
+language*, which warms the boot cache — but every row runs in a fresh process, so the program's
+own functions tier from cold on every measured run. For rows in the tens of milliseconds that is
+a large and variable share of the number.
+
+Everything below is the retracted investigation, kept for the traps it documents.
+
+
+
+**What.** The same allocation-free 20M-iteration loop, natively compiled, runs measurably slower
+if std modules were loaded first, and the penalty roughly **doubled** since 0.3.11. Timed
+**in-process** — `os/now-ns` either side of the loop — so module-load time is outside the
+measurement entirely. Unpinned, 25 runs:
+
+| | 0.3.11 | 0.12.0 |
+|---|---|---|
+| 0 modules | min 23, med 23, p90 23 | min 25, med 26, p90 29 |
+| 4 modules (`json format datetime csv`) | min 22, med 26, p90 30 | min 28, med 33, p90 50 |
+| **tax** | **−4.3% min / +13.0% med** | **+12.0% min / +26.9% med** |
+
+**Read the direction, not a single number.** Three samples of the same comparison gave a 0.12.0
+tax of +27.9%, +25.0% and +12.0% on min, against a 0.3.11 tax of −5.8%, +0.0% and −4.3%. The
+*ratio* is consistently about 2x and the sign is consistent; the magnitude is not stable enough
+to quote one figure, and the p90 gap (30 vs 50 ms) says the distribution is what moved most.
+
+It is **JIT-only**: under `BROOD_NO_JIT=1` or `BROOD_TIER=1` the same
+comparison reads 942 → 939 ms and 949 → 949 ms, i.e. 0.0%. The interpreter does not care; native
+code does.
+
+This is on the common path, not a corner: after the namespacing waves *every* program loads
+modules — `io/puts` alone pulls `io`.
+
+**Method, because the naive versions are both wrong.**
+
+1. **Time in-process; differencing two programs is not reliable enough here.** Loop time is
+   `os/now-ns` either side of the loop. The obvious alternative — `wall(file with the loop) −
+   wall(the identical file without it)` — cancels module-load cost in principle, and it is what
+   this entry first used, but it fails once the non-loop part is large and variable: with 2000
+   `defn`s in both files it reported the loop taking **4 ms**, and it manufactured a "+64% at
+   2000 functions" threshold that in-process timing shows does not exist (flat 24–26 ms from 0
+   to 4000 extra functions). Subtracting the harness's `startup` row is worse again: that row is
+   `(io/puts 0)`, which loads `io` but not `os`/`string`, so it under-subtracts for every real
+   row.
+2. **Do not pin.** Pinned to one core the same measurement reads **+68.2%** rather than +27.9%,
+   because the background JIT compiler competes for that core and loading modules increases
+   compilation volume — precisely the trap CLAUDE.md documents for `make ab`. The 0.3.11 side
+   inflates too (+27.1% pinned vs −5.8% unpinned), so a pinned reading exaggerates *both* sides
+   and the regression as well.
+
+**What it is not.** Each of these leaves the tax in place, so none is the cause:
+`BROOD_NO_SHARED_ARMS=1` (75.5%), `BROOD_RT_GC_FLOOR=99999999` (73.4%), `BROOD_NO_INLINE=1`
+(87.4%), `BROOD_NO_LEAF_INLINE=1` (78.4%) — pinned figures, compared against 87.1% pinned
+default.
+
+**Reproducer.** Two files per point, `N` modules `require-one`'d at the top, then
+`(defn- go (i acc) (if (>= i 20000000) acc (go (+ i 1) (+ acc i)))) (go 0 0)`; the paired file
+has the same requires and no loop. Difference the walls.
+
+**Why it matters more than 28%.** It compounds with KI-61: the namespacing both forces more
+modules to be loaded *and* makes each loaded module tax the code that runs afterwards.
+
+---
+
+## KI-62 — the stdlib image was unusable on the shipped build ✅ FIXED 2026-08-25
+
+**Status:** ✅ fixed. Guard: `stdlib image: fidelity › a replayed edge naming a module this
+binary lacks does not break require`, sabotage-verified.
+
+**What.** Installing the stdlib image made the *next* `require` fail:
+
+```
+error: require: cannot find module 'test'
+```
+
+The image is keyed on `stdlib-id`, a hash of the stdlib's **content**, and that is deliberate:
+`brood`, `nest` and `brood-lsp` built from one tree report the same id so they share one ~2 MB
+image instead of writing three. But sharing a key across binaries assumes they can load the same
+things, and they cannot — a **lean** runtime (what `nest release` and
+`make install INSTALL_FEATURES=RUN_FEATURES` produce, i.e. what actually ships) bakes in 88
+modules with **no dev-tools**, and `std/tool/project.blsp`'s recorded require-edges name `test`:
+
+```
+project -> (sexp coverage test hash reflect dev package version io os path file seq string)
+```
+
+`stdimage/install` replays those edges — correctly, and for a good reason: a restored module
+defines its bindings and evaluates nothing, so without the edges `url` comes back with no
+`path`. But replaying an edge to a module this binary has no source for poisons `require`
+outright.
+
+**So the image's headline number has never been available on the build users run.** Measured on
+release, once the edge is filtered:
+
+| | from source | from image | |
+|---|---|---|---|
+| `require format` | 62.0 ms | **12.8 ms** | 4.8x |
+| `require datetime` | 3.3 ms | **0.39 ms** | ~9x |
+
+**Fixed at install, not at build**, and the distinction is load-bearing: the image may have been
+written by a different binary from the one reading it — that is the entire point of sharing the
+key — so the *reader* is the only party that knows which modules it can load. Filtering at build
+time would produce an image correct for its writer and wrong for its readers.
+
+**Why it went unnoticed.** The image is built by `make install` and by `nest stdimage`, but it is
+not installed at boot (see KI-61), so nothing in the normal path ever replays those edges. It is
+dead code until someone calls `stdimage/install` — which is exactly what a boot-install
+experiment does, and what this was found by.
+
+---
+
+## KI-61 — startup is a per-wave namespacing tax 🔧 DIAGNOSED 2026-08-25
+
+**Status:** 🔧 diagnosed, not fixed. Every figure below is best-of-15, `taskset`-pinned, on an
+empty program, with **each binary warmed first** — the boot cache is keyed on build-id *and the
+executable's mtime*, so a freshly copied binary's first run measures cache population (~1.2 s
+cold against ~0.11 s warm) and would have made the whole sweep meaningless.
+
+**What.** The first cross-language run on 0.12.0 read `startup` at **29.9 ms** against 0.3.11's
+16.5. A sweep of 8 points across the 244 commits shows two clean **steps**, not a ramp — which
+is what makes this bisectable at all, unlike the `primes` hunt FRONTIER records:
+
+```
+d5572d61  13.9      07538dea  13.5      3d734516  17.5
+4fb903ce  13.5      cf97b1d4  17.6 <-   0f326ead  24.8 <-
+                    7505e44a  17.5      c39ca87c  24.8
+```
+
+Both steps are the same mechanism, and it is not a bug in either commit:
+
+| step | commit | cause | cost |
+|---|---|---|---|
+| 1 | `1f613d23` "move the string surface into a `string` library module" | `(require-one 'string)` | **+4.0 ms** |
+| 2 | the v0.10.0/v0.11.0 waves | `(require-one 'seq)` | **+7.5 ms** |
+
+Step 2 was proven by deleting the single line and rebuilding: **24.3 -> 16.8 ms, -30.8%**.
+
+**Why the load is there.** A prelude helper referencing `seq/find` or `string/char-at` is
+late-bound — a qualified name in a function *body* resolves when the function is called — but
+boot's namespace-resolve is a no-op for the root prelude, so those refs never auto-require. The
+module therefore has to be force-loaded before anything can call such a helper.
+
+**Why this matters more than 11 ms.** It is a **per-wave tax**. The core has gone 613 -> ~280
+published names across these refactors, each tranche leaving another module the prelude must
+force-load, and each costs a few ms of *every* `brood` invocation forever. It also deflates
+every other published benchmark row: `compute = wall - startup`, so a bigger startup makes each
+row's reported compute *smaller* than its wall-clock regression.
+
+**A suspect that measurement cleared.** `7bbf979d feat(stdimage): a startup image for the
+standard library` sits inside step 2's range and is **flat against its parent**. A startup
+regression in a window containing a commit named "startup image" is exactly the coincidence one
+would bank without checking.
+
+**The fix is not to revert a wave.** It is to make a module load cheap at boot — which is
+precisely what the std image does (4-33x) and precisely why it is not installed at boot:
+materialising a module defines its bindings and evaluates nothing, so every registration its
+load would have performed is skipped, and the suite fails 131 of 4873 with errors that
+type-check perfectly clean.
+
+**The recorded blocker is narrower than it reads, and there is a precedent in the same file.**
+The note rules out *snapshotting* `*impls*` — correct, since a closure nested in a snapshotted
+value does not round-trip. But `stdimage/install` **already replays** `*require-edges*` through
+a `%std-edges` section, for exactly this reason ("a restored module defines its bindings but
+evaluates nothing, so without them `url` comes back with no `path`"). The extension is to record
+the registration **forms** — `(impl Port :fn (write [f s] (f s)))` — rather than the resulting
+values: a form is symbols and lists all the way down, so it images cleanly, and evaluating it on
+materialise rebuilds the closure *and* performs the registration. Bounded: 56 `impl` forms
+across 13 files, 24 `defability`, 35 `defrecord`; `*record-ids*` (plain symbols) already
+restores correctly.
+
+**The scoping question is now answered with current data, and the recorded premise holds.**
+Measured 2026-08-25 by actually installing the image at boot and running the suite:
+**150 failures of 4920** (the note's figure was 131 of 4873, taken before the `%std-edges` replay
+and the root-global attribution fix — so those changed nothing here). Every failure is
+registration-shaped:
+
+```
+10  io: ports are Port impls › port? is true for a fn port
+ 8  io: ports are Port impls › a port record prints as itself
+ 6  the temporal types are records › every sealed member satisfies …
+ 6  log: the stock backend is a record › a backend prints as …
+ 6  http: responses are records with a Response impl
+```
+
+**And the prize is measured, not estimated.** Installing the image before the two boot requires
+takes a debug-build startup from **286.9 → 180.1 ms (−37%)**. Doing it needs one more thing
+besides replay: `stdimage/install` reaches for `os/getenv`, `path/join` and `file/exists?`
+through `os`/`path`/`file`, none of which are loaded that early, so it dies with
+`unbound symbol: os/getenv`. A prelude-only twin using `%getenv` + `str` + the `file/exists?`
+native (all bound at that point) boots fine — that part is done and works; it is only the 150
+registration failures that make it unshippable.
+
+So the remaining work is exactly the replay, and it is now sized: record each module's
+registration **forms** at image-build time (56 `impl`, 24 `defability`, 35 `defrecord` across
+std), store them as data — symbols and lists image cleanly, unlike the closures a value snapshot
+would need — and evaluate them when the module materialises. The hook is the image branch of
+`require-one` in `std/prelude/tools.blsp`, immediately after the `*require-edges*` fold that
+already replays the header's requires for the same reason.
+
+**Do not try to validate this with a post-boot probe — it cannot work, and it will tell you the
+bug is fixed.** A qualified name auto-requires *at compile time*, so every module a probe
+mentions is loaded from source before its first line executes; the probe then measures a
+source-loaded module and reports every `satisfies?` green. Routing through `eval` does not help
+(the `eval`'d forms are read at runtime but the enclosing file still names the module), and
+neither does installing the image first. Three separate probes here — `queue`, `io`, `datetime`
+— all reported "no registrations lost" while the suite under boot-install reported 150 failures.
+The only measurement that means anything is the suite with the image installed at boot.
 
 ---
 
