@@ -58,7 +58,7 @@ I had to:
 
 - Read `std/prelude.blsp` end-to-end to find `apply`, `gensym`, `for`,
   `quot`, `char-at`, `string-length`, `pr-str`, `enumerate`,
-  `iterate-times`, `partition`, `frequencies`.
+  `%iterate-times`, `partition`, `frequencies`.
 - Read `std/hatch.blsp` to learn `defprocess`/`cast`/`call`/`!`/
   `gen-call`/`hatch`/`sleep` — none of these appear in the quick-ref.
 - Read `crates/lisp/src/builtins/mod.rs` to discover `now` (no other doc
@@ -188,7 +188,7 @@ would have saved me 20 minutes.
 ### 3.4 Process death messages don't tell you which process
 
 `process 6 died: unbound error: …` — process 6 is opaque. If processes
-were `(register …)`'d with a name, surface the name. Stack trace of
+were `(proc/register …)`'d with a name, surface the name. Stack trace of
 where it died would be even better.
 
 ---

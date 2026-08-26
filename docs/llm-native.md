@@ -248,7 +248,7 @@ free.
   (= xs (reverse (reverse xs))))
 
 (prop "match-and-rebuild" (m map?)
-  (let ([k v] (first (map-pairs m)))
+  (let ([k v] (first (%map-pairs m)))
     (= (get (assoc m k v) k) v)))
 ```
 

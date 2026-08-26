@@ -31,16 +31,16 @@ arg silently becoming `nil`.
 | **Vector** (data type, O(1)) | `vector` | n | construct a vector |
 | | `vector-ref` | 2 | index |
 | | `vector-length` | 1 | length |
-| | `vector-assoc` | 3 | a fresh vector with index `i` (in `[0, len)`) replaced — the vector counterpart of `map-assoc`; the polymorphic `assoc`/`update` are Brood over it |
+| | `vector-assoc` | 3 | a fresh vector with index `i` (in `[0, len)`) replaced — the vector counterpart of `%map-assoc`; the polymorphic `assoc`/`update` are Brood over it |
 | | `subvec` | 2–3 | a fresh vector slice `[start, end)`; `end` defaults to the length — the vector-preserving counterpart of the list-returning `take`/`drop`; `remove-nth` is Brood over it |
 | **Ordering** | `compare` | 2 | `(compare a b)` → `-1`/`0`/`1` by the structural total order (numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by stable tag rank). The binary form of `sort`'s order — `sort-by` and custom comparators build on it |
 | **Map** (immutable; data type) | `hash-map` | n | construct a map from `k v k v …` args (the `{ }` literal's programmatic form); last-wins on dup keys |
-| | `map-get` | 2–3 | value at a key, or the optional default (else nil) |
-| | `map-assoc` | 3 | a fresh map with `key`→`val` added/updated |
-| | `map-dissoc` | 2 | a fresh map with a key removed |
-| | `map-pairs` | 1 | entries as a list of `[k v]` vectors, insertion order, one O(n) pass — the sole enumerator; `keys`/`vals`/`contains?`/`reduce-kv` are all Brood over it |
-| | `map-count` | 1 | the number of entries in a map — O(1) (the CHAMP root tracks its size) |
-| | `map-int-add` | 3 | `(map-int-add m k delta)` → a fresh map with key `k`'s integer value incremented by `delta` (inserts `delta` when `k` is absent) — a single trie traversal, equivalent to `(assoc m k (+ (get m k 0) delta))` without the extra walk |
+| | `%map-get` | 2–3 | value at a key, or the optional default (else nil) |
+| | `%map-assoc` | 3 | a fresh map with `key`→`val` added/updated |
+| | `%map-dissoc` | 2 | a fresh map with a key removed |
+| | `%map-pairs` | 1 | entries as a list of `[k v]` vectors, insertion order, one O(n) pass — the sole enumerator; `keys`/`vals`/`contains?`/`reduce-kv` are all Brood over it |
+| | `%map-count` | 1 | the number of entries in a map — O(1) (the CHAMP root tracks its size) |
+| | `%map-int-add` | 3 | `(%map-int-add m k delta)` → a fresh map with key `k`'s integer value incremented by `delta` (inserts `delta` when `k` is absent) — a single trie traversal, equivalent to `(assoc m k (+ (get m k 0) delta))` without the extra walk |
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 2-3 | characters `[start, end)`, char-indexed; `end` defaults to `(string-length s)` |
 | | `%str-index-of` | 2-3 | char index of the first occurrence of a substring at or after the optional start (or -1; empty needle → the start). Linear (byte-level `find` → char index) — the search counterpart of `substring`, needed in Rust because Brood has no O(1) char access (a pure-Brood scan is O(n²)). `index-of` / `includes?` ride on it. The start offset is taken here rather than by slicing in Brood: `(index-of s needle from)` used to search `(substring s from n)`, copying the suffix on every call |
@@ -173,7 +173,7 @@ arg silently becoming `nil`.
 | | `dynamic?` | 1 | whether a symbol names a dynamic variable (declared via `defdyn`) → bool |
 | | `builtin-modules` | 0 | The names of every module baked into this binary, as a sorted list of strings — what `(require 'name)` resolves without a load-path. Backs `nest` shell completion and lets a name be validated before requiring it. |
 | | `references-in-source` | 2 | Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded. |
-| | `build-id` | 0 | This brood build's identity as "<version>+<git-sha>+<binary-stamp>" (e.g. "0.1.0+dcab7ca+18f2e1a9b3c4d5e6") — the correct staleness stamp for an on-disk cache of anything the kernel computes. |
+| | `system/build-id` | 0 | This brood build's identity as "<version>+<git-sha>+<binary-stamp>" (e.g. "0.1.0+dcab7ca+18f2e1a9b3c4d5e6") — the correct staleness stamp for an on-disk cache of anything the kernel computes. |
 | **Errors / control** | `throw` | 1 | raise a value as an error (non-local exit) |
 | | `%try` | 2 | call a thunk; on raise, call the handler with the caught value |
 | | `%isolate` | 1 | call a thunk against a private copy of the globals; roll back its `def`s afterward (used by `:isolated` tests) |
@@ -186,8 +186,8 @@ arg silently becoming `nil`.
 | | `monitor` | 1 | watch a pid (local or remote); returns a monitor ref. Delivers `[:down ref pid reason]` on death (`:noproc` if already dead; `:noconnection` if a remote peer's link drops) |
 | | `demonitor` | 1 | drop a monitor by its ref (best-effort; remote demonitor is fanned out to the holding peer) |
 | | `exit` | 2 | `(exit pid reason)` — send an exit signal to a local process (Erlang `exit/2`). `:kill` is the untrappable hard kill (dies at its next reduction tick, or now if parked); any other reason is the soft signal (dies at its next `receive`). Monitors fire `[:down ref pid reason]`. No-op for a dead/unknown pid (ADR-063) |
-| | `register` | 2 | bind a local name → pid so peers can address it via `{:name n :node this-node}`. Returns the pid |
-| | `whereis` | 1 | the local pid registered under `name`, or nil. Strictly local — does not query other nodes |
+| | `proc/register` | 2 | bind a local name → pid so peers can address it via `{:name n :node this-node}`. Returns the pid |
+| | `proc/whereis` | 1 | the local pid registered under `name`, or nil. Strictly local — does not query other nodes |
 | | `spawn-count` | 0 | green processes spawned since program start |
 | | `peak-threads` | 0 | high-water mark of spawned threads running concurrently (bounded by the CLI's `-j`) |
 | | `worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
@@ -213,22 +213,22 @@ the whole sequence library
 (`range`/`take`/`drop`/`take-while`/`drop-while`/`any?`/`every?`/`find`/`zip`/
 `partition`/`sort`/`sort-by` — a Brood merge sort), `empty?` (type dispatch over
 the length primitives), `println` (over `print`), and the map surface
-`get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?`/`reduce-kv` (over `map-get`/
-`map-assoc`/`map-dissoc`/`map-pairs`). Of the math library only **`floor`** (the Float→Int crossing) and
+`get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?`/`reduce-kv` (over `%map-get`/
+`%map-assoc`/`%map-dissoc`/`%map-pairs`). Of the math library only **`floor`** (the Float→Int crossing) and
 **`rem`** (exact integer remainder) need Rust — everything else is Brood over
 them. The map literal `{ }` is read by the reader and evaluated like a vector
 literal — no constructor call.
 
-| **Bitwise** (integers, two's-complement) | `bit-and` | 2 | Bitwise AND of integers a and b. |
-|  | `bit-or` | 2 | Bitwise (inclusive) OR of integers a and b. |
-|  | `bit-xor` | 2 | Bitwise exclusive-OR of integers a and b. |
-|  | `bit-not` | 1 | Bitwise complement of integer a (two's-complement, so (bit-not n) = (- (- n) 1)). |
-|  | `bit-shift-left` | 2 | Shift integer a left by n bits (0 <= n < 64); bits shifted past bit 63 are discarded. |
-|  | `bit-shift-right` | 2 | Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64). |
-|  | `bit-count` | 1 | Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit-count -1) = 64). For a bignum it is the popcount of the magnitude. |
-|  | `bit-positions` | 1 | A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit-positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit-shift-left 1 i); handy for enumerating the set bits of an integer. |
-| **Float bit-level** | `float->bits` | 1 | The IEEE 754 binary64 bit pattern of x, as a non-negative integer (a bignum when the sign bit is set). Reinterpretation, not conversion — the only exact float comparison there is: it separates -0.0 from 0.0 and distinguishes NaN payloads, both of which = collapses. The inverse of bits->float. |
-|  | `bits->float` | 1 | The binary64 float whose bit pattern is n (0 <= n < 2^64). The inverse of float->bits. |
+| **Bitwise** (integers, two's-complement) | `bit/and` | 2 | Bitwise AND of integers a and b. |
+|  | `bit/or` | 2 | Bitwise (inclusive) OR of integers a and b. |
+|  | `bit/xor` | 2 | Bitwise exclusive-OR of integers a and b. |
+|  | `bit/not` | 1 | Bitwise complement of integer a (two's-complement, so (bit/not n) = (- (- n) 1)). |
+|  | `bit/shift-left` | 2 | Shift integer a left by n bits (0 <= n < 64); bits shifted past bit 63 are discarded. |
+|  | `bit/shift-right` | 2 | Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64). |
+|  | `bit/count` | 1 | Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit/count -1) = 64). For a bignum it is the popcount of the magnitude. |
+|  | `bit/positions` | 1 | A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit/positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit/shift-left 1 i); handy for enumerating the set bits of an integer. |
+| **Float bit-level** | `bit/float->` | 1 | The IEEE 754 binary64 bit pattern of x, as a non-negative integer (a bignum when the sign bit is set). Reinterpretation, not conversion — the only exact float comparison there is: it separates -0.0 from 0.0 and distinguishes NaN payloads, both of which = collapses. The inverse of bits->float. |
+|  | `bit/->float` | 1 | The binary64 float whose bit pattern is n (0 <= n < 2^64). The inverse of float->bits. |
 |  | `%f64-sqrt` | 1 | The IEEE 754 square root of x (f64::sqrt). x must be non-negative; raises otherwise. Handles subnormals and ±0 correctly. |
 | **Math** (transcendental — all return floats) | `sin` | 1 | The sine of x (radians). Returns a float. |
 |  | `cos` | 1 | The cosine of x (radians). Returns a float. |
@@ -241,22 +241,22 @@ literal — no constructor call.
 |  | `ln` | 1 | The natural logarithm of x. x must be positive; raises otherwise. |
 |  | `log2` | 1 | The base-2 logarithm of x. x must be positive; raises otherwise. |
 |  | `log10` | 1 | The base-10 logarithm of x. x must be positive; raises otherwise. |
-| **Decimal** (exact base-10 for money — the `1.50M` literal) | `decimal` | 1 | Construct an exact arbitrary-precision base-10 decimal from x: a string ("1.50"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M. |
-|  | `decimal->string` | 1 | The canonical decimal string of decimal d (no M suffix). |
-|  | `decimal->float` | 1 | Decimal d as an (inexact) float. |
+| **Decimal** (exact base-10 for money — the `1.50M` literal) | `decimal/of` | 1 | Construct an exact arbitrary-precision base-10 decimal from x: a string ("1.50"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M. |
+|  | `decimal/->string` | 1 | The canonical decimal string of decimal d (no M suffix). |
+|  | `decimal/->float` | 1 | Decimal d as an (inexact) float. |
 |  | `->fixed` | 2 | Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0. |
 | **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `numerator` | 1 | The numerator of a ratio (`(numerator 3/4)` → 3), or an integer itself. |
 |  | `denominator` | 1 | The positive denominator of a ratio (`(denominator 3/4)` → 4), or 1 for an integer. |
-|  | `->decimal` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `rational` are prelude functions.) |
+|  | `decimal/number->` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `rational` are prelude functions.) |
 | **Set** (`#{…}`; CHAMP-backed. `%`-internal — `std/set.blsp` is the library) | `%set` | any | Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `set` library's constructor is Brood over this. |
 |  | `%set-add` | 2 | A fresh set like s with element x added (a set already holding x is returned unchanged). O(log n). |
 |  | `%set-remove` | 2 | A fresh set like s with element x removed (absent → unchanged). O(log n). |
 |  | `%set-has?` | 2 | Is x an element of set s? O(log n). |
 |  | `%set-count` | 1 | The number of elements in set s. O(1) — the CHAMP root tracks its size. |
-| **Unicode / text width** | `display-width` | 1 | How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length. |
+| **Unicode / text width** | `string/display-width` | 1 | How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length. |
 |  | `string-normalize` | 2 | s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; |
-|  | `char->int` | 1 | Unicode codepoint of the first character of string s (identical to the byte value for ASCII). |
-|  | `int->char` | 1 | A 1-char string for Unicode codepoint n. Errors on an invalid codepoint. |
+|  | `string/char->int` | 1 | Unicode codepoint of the first character of string s (identical to the byte value for ASCII). |
+|  | `string/int->char` | 1 | A 1-char string for Unicode codepoint n. Errors on an invalid codepoint. |
 |  | `string->utf8-bytes` | 1 | The UTF-8 encoding of s as a bytes value. |
 |  | `utf8-bytes->string` | 1 | Decode UTF-8 bytes (a bytes value, vector, or list of ints 0–255) into a string. Errors on invalid UTF-8. |
 | **Networking** (thin non-blocking socket mechanism, ADR-062; `std/net/*` is the Brood library) | `tcp-listen` | 2 | Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket. |

@@ -195,6 +195,11 @@ crates/lsp/src/main.rs   the `brood-lsp` binary — language server (ADR-025, do
 crates/playground/src/   the `brood-playground` cdylib — a wasm-bindgen shim exposing
                          a Brood `eval()` to the browser (the in-browser playground)
 std/                     standard library written in Brood, grouped (ADR-085):
+                         NOTE: `bit`, `decimal` and `proc` also namespace KERNEL
+                         primitives (ADR-250) — the `.blsp` file declares the module
+                         and documents the surface; the ops are Rust, registered as
+                         `bit/and`, `decimal/of`, `proc/register`, the way
+                         `string/length` always has been.
                          prelude/ (split across ~9 bare-root files (core, predicates, map, …), concatenated in the order lib.rs lists) + ~30 bare-core modules (io, file, set, regex,
                          json, format, task, log, version, resolver, crypto, hash, csv,
                          datetime, encoding, url, uuid, template, stream, …); the
@@ -258,7 +263,8 @@ make ab BASE=<ref>                # A/B the working tree vs a git ref on the ben
 **Reading where the time goes: `make perf-brood`, then `(perf/summary)`.** The counters are a
 cargo feature, so an ordinary (or installed) binary cannot attribute at all — `make perf-brood`
 is that build, with `release-brood`'s exact flags plus `perf-stats` so it cannot drift from what
-you compare it against. `(require 'perf)` then gives `(perf/report)` (a map), `(perf/summary)`
+you compare it against. A qualified call then loads it — `require` is not a bound name; a `mod/name`
+reference infers the load — so `(perf/report)` gives a map, `(perf/summary)`
 (printed), and **`(perf/measure thunk)`** — use the last one for anything narrower than a whole
 process: the counters are cumulative from process start, and boot is expansion-heavy, so the
 same program read an **84% tree-walker defer rate on a cold boot cache and 0.8% on a warm one**.
@@ -584,9 +590,10 @@ co-author trailer, overriding any default that would append one.
 2. Add tests — an `(assert= …)`/`(is …)` inside a `(test …)` within a `describe`
    block in a `tests/*_test.blsp` file (in-language, via the `std/tool/test.blsp`
    framework: open the file with `(defmodule foo-test (:use test) (:use foo))`
-   so the test macros and the module under test refer bare — post-ADR-065 a bare
-   `(require 'test)` only loads it and leaves `describe`/`test`/`assert=`
-   qualified), and/or a Rust case in `crates/lisp/tests/`.
+   so the test macros and the module under test refer bare — the header is how you get them bare —
+   a qualified reference like `test/run` merely LOADS the module and leaves
+   `describe`/`test`/`assert=` qualified; there is no bound `require`, and
+   `require-one` is the function underneath), and/or a Rust case in `crates/lisp/tests/`.
    **Every language feature must also be tested across multiple cores**, not just
    single-threaded. The in-language suite already helps here — `std/tool/test.blsp`
    runs each test in its own green process on the ≈`nproc` worker pool, so a plain

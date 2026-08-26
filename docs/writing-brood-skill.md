@@ -83,7 +83,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 11. **`fn` only — there is no `lambda`** (ADR-162 retired the alias). Other names
    with a one-word replacement, all now unbound with a hint: `car`→`first`,
    `cdr`→`rest`, `concat`→`append`, `length`→`count`, `some?`→`any?`,
-   `entries`→`map-pairs`, `flat-map`→`mapcat`.
+   `entries`→`%map-pairs`, `flat-map`→`mapcat`.
 
 12. **Never `def` a name Brood ships** — the prelude, builtins and embedded std
    modules are RESERVED (ADR-166), so `(defn map …)` / `(def get …)` are errors. Check

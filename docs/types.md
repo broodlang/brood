@@ -290,7 +290,7 @@ never a false positive.
   callee's `Arity` — `NativeFn.arity` for primitives, derived from
   `Closure.{params, optionals, rest}` for Brood closures (in the heap; the
   inferred-sig path applies too). `(first)` → "expected 1, got 0"; `(rem 1 2
-  3)` → "expected 2, got 3"; `(map-get {})` → "expected 2 to 3"; `(apply f)`
+  3)` → "expected 2, got 3"; `(%map-get {})` → "expected 2 to 3"; `(apply f)`
   → "expected 2 or more". Independent of the type check (which still runs
   for the args that *are* present), so a 1-arg `(first 5)` still says `first:
   argument 1 expects nil | pair | vector, got int (5)`.
@@ -530,7 +530,7 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
   via `every?` (one line); `parse_type` in `annot.rs` produces `Ty::intersect` for
   the static checker. See [`docs/type-intersections.md`](type-intersections.md).
 - ✅ **Map key/value types** `(map K V)` — fully shipped: `type-matches?` walks
-  `map-pairs` for runtime contracts; `Ty::map_of` carries `map_kv` refinement in
+  `%map-pairs` for runtime contracts; `Ty::map_of` carries `map_kv` refinement in
   the checker; `get`/`keys`/`vals`/`assoc` derive precise result types.
   See [`docs/type-map-kv.md`](type-map-kv.md).
 - ✅ **Type variables** `?A` — fully shipped: grammar (`parse_type`), runtime
