@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-64 | **the JIT miscompiles `json/encode` under sustained load** — hive's `/api/v1/packages*` returns 500 after ~60 requests and then fails until the machine restarts, while `/health` and every web page keep serving. The error is `empty?: expected collection, got int (1114114)` inside `emit-pairs`/`emit-list`, i.e. an int where the recursion expects a list; 1114114 is one past the Unicode maximum (0x10FFFF). `BROOD_NO_JIT=1` makes it 120/120 clean | ⚠️ **open (2026-08-26)** — mitigated in hive by shipping `BROOD_NO_JIT=1`; not fixed |
 | KI-63 | ~~loading std modules taxes JIT'd hot loops~~ — **RETRACTED 2026-08-25, the effect does not exist.** After a discarded warm-up run in-process, a 20M loop is 23-24 ms whether or not `format` is loaded. Every earlier figure measured the FIRST run, i.e. JIT warm-up, which is variable and shape-sensitive — the same loop read 25 ms in one file and 40-51 ms in another differing only by having three call sites | ☑️ **retracted** — no bug. What is real, and is the reusable part: a whole-process benchmark of a short row measures tiering, not steady state |
 | KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
 | KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | ✅ **fixed 2026-08-26** — by not loading the modules at boot at all: the prelude's `string/`/`seq/` references are autoload stubs that load on first call (ADR-246), and prelude def-sites now travel in the boot cache instead of a second positioned read of the prelude (ADR-247). Warm boot 22.8 -> 11.6 ms, base RSS 55.6 -> 50.7 MB, `startup` -28.9%, every other row ~11-13 ms faster in absolute wall. The std image + registration replay is still the right way to make the *lazy* load fast; the two compose |
@@ -182,6 +183,58 @@ repetition, the usual flake defence, does not help. The missing dimension is a *
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
 
 ---
+
+## KI-64 — the JIT miscompiles `json/encode` under sustained load (open)
+
+**Status:** ⚠️ **open (2026-08-26)** — root-caused to the JIT, mitigated in hive with
+`BROOD_NO_JIT=1`, not fixed.
+
+**What it looks like from outside.** hive's package API returns 500 while the site looks
+healthy: `/health` answers, every web page renders, the database is fine. A machine restart
+fixes it, for a while. This is what "hive hangs silently and recovers on restart" has meant
+for months — it was read as flaky infrastructure and it is a compiler bug.
+
+**Measured** (locally, against a real Postgres with the production data shape):
+
+| | with JIT | `BROOD_NO_JIT=1` |
+|---|---|---|
+| 40 sequential API requests | 8 ok, 32 failed | — |
+| 40 concurrent API requests | 0 ok, 40 failed | — |
+| 120 sequential API requests | — | **120 ok, 0 failed** |
+| 40 sequential WEB requests (same rows, same `registry/search`) | 40 ok, 0 failed | — |
+
+The first ~60 requests succeed; after that it is permanent until restart. That shape — fine
+while interpreted, broken once hot, sticky thereafter — is the tiering signature.
+
+**The error**, from instrumenting the handler (the server logs nothing on a 500, which is
+its own gap):
+
+    empty?: expected collection, got int (1114114)
+
+`emit-pairs` and `emit-list` in `std/json.blsp` recurse on a list and call `empty?` on it.
+An `int` arriving there means the argument slot held a non-list. **1114114 is 0x110002 —
+one past the Unicode maximum (0x10FFFF)**, which points at a codepoint counter leaking into
+the slot rather than an arbitrary garbage value.
+
+**Ruled out by measurement, not argument:**
+
+- *the connection pool* — Postgres reports 5 idle connections throughout; the pool is size 5
+  and healthy while the API is failing;
+- *the database, the query, `ilike`* — the WEB path reads the same rows through the same
+  `registry/search` and is 40/40 clean while the API is failing;
+- *`json/encode` itself* — `/health` encodes JSON on every request and never fails;
+- *hive's own code* — the only difference on the failing path is that it JSON-encodes the
+  package rows.
+
+**Not yet reproduced standalone.** 20 000 `json/encode` calls of the same payload in ONE
+process (including the multi-byte em dash two package descriptions carry) stay identical.
+hive reproduces it in about sixty requests, so the multi-PROCESS dimension looks load-bearing
+— each request runs in its own green process against shared compiled code (ADR-175/215).
+That is where to look next: a shared arm compiled in one process and adopted by another.
+
+**Next step.** Run hive's API under `BROOD_JIT_DUMP_IR=1` and `BROOD_DEOPT_TRACE=1` to name
+the arm, then `BROOD_NO_SHARED_ARMS=1` to test the shared-code hypothesis directly — if that
+makes it clean, the fault is in adoption rather than in lowering.
 
 ## KI-63 — loading modules taxes JIT'd hot loops ☑️ RETRACTED 2026-08-25 (no such effect)
 
