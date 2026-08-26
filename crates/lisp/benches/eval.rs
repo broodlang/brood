@@ -195,7 +195,7 @@ fn cons_build(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 }
 
 /// End-to-end Brood `(sort < …)` — the workload that motivated the campaign.
-/// Forces the in-language `merge-sort` path (custom comparator), not the Rust
+/// Forces the in-language `%merge-sort` path (custom comparator), not the Rust
 /// `%sort-asc` fast-path, so it reflects interpreter dispatch over list-walking.
 /// Data is built in-language (xorshift) so parsing stays out of the hot region.
 #[divan::bench(args = engine_grid![1_000, 5_000])]

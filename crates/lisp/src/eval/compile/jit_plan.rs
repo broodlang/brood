@@ -845,7 +845,7 @@ pub(super) mod codegen {
         // `CompiledArm`) bails one that type-thrashes after 16 consecutive deopts, so a bad
         // closure shape self-heals instead of needing this static guess. Named defns keep the
         // gate verbatim: they are name-called from everywhere — including the per-process
-        // compile machinery (macro expansion runs prelude Brood like `match-count-sym`, `seq`,
+        // compile machinery (macro expansion runs prelude Brood like `%match-count-sym`, `seq`,
         // `fold`) — and admitting those regressed `spawn` 0.08 → 0.3–1.3 s erratic (contention
         // around per-process compile + shared-install under 10k-process fan-out) for zero row
         // wins.
@@ -899,8 +899,8 @@ mod tests {
     /// For every arm a real boot compiles: the block-argument spill area must not reach the
     /// deopt journal. `max_leader_depth` is what the chunk *wants* and `jit_spill_reserve`
     /// is what the frame *has*; the two are gated differently, so the lowering must clamp
-    /// the want to the reserve. Before KI-64 it did not, and `fold-loop`,
-    /// `index-of-seq-from`, `json/emit-list` and every `walk-list`-shaped arm wrote block
+    /// the want to the reserve. Before KI-64 it did not, and `%fold-loop`,
+    /// `%index-of-seq-from`, `json/emit-list` and every `walk-list`-shaped arm wrote block
     /// arguments straight onto their journal slot.
     #[test]
     fn block_argument_spills_never_reach_the_deopt_journal() {

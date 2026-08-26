@@ -6,7 +6,7 @@
 ;; (get coll k) -> value or nil if absent; (get coll k default) -> value or default.
 ;; The fixed-arity 2- and 3-arg arms are the hot paths: exact arity → VM-eligible,
 ;; so the body compiles to bytecode and the common `(get m k d)` map case goes
-;; straight to the `map-get` kernel op — no variadic-rest dispatch, no `(first
+;; straight to the `%map-get` kernel op — no variadic-rest dispatch, no `(first
 ;; default)`, and no extra call hop. The cond is repeated per arm (rather than
 ;; factored into a helper) precisely to avoid that extra call on the hot path.
 ;; A `get` that cannot be answered — the cold path, factored out so the hot arms
@@ -19,7 +19,7 @@
 ;; typo'd accessor produced a plausible-looking absent value. The `default` argument
 ;; deliberately does NOT suppress these: a default means "the key is absent", not
 ;; "the key is the wrong type".
-(defn- get-unanswerable
+(defn- %get-unanswerable
   (coll k)
   (if (or (pair? coll) (vector? coll) (bytes? coll) (string? coll))
     (error (str "get: expected an integer index, got "
@@ -63,17 +63,17 @@ a wrong-typed one.
   ;; entry check showing up through this call (an inlining-boundary effect, not
   ;; instruction cost — `nth` measured standalone is identical either way).
   ((coll k) (cond
-              (map? coll) (map-get coll k nil)
+              (map? coll) (%map-get coll k nil)
               (set? coll) (if (%set-has? coll k) k nil)
               (nil? coll) nil
               (string? coll)
                 (if (int? k)
                   (if (and (>= k 0) (< k (string/length coll))) (string/char-at coll k) nil)
-                  (get-unanswerable coll k))
+                  (%get-unanswerable coll k))
               (int? k) (nth coll k nil)
-              else (get-unanswerable coll k)))
+              else (%get-unanswerable coll k)))
   ((coll k default) (cond
-                      (map? coll) (map-get coll k default)
+                      (map? coll) (%map-get coll k default)
                       (set? coll) (if (%set-has? coll k) k default)
                       (nil? coll) default
                       (string? coll)
@@ -81,11 +81,11 @@ a wrong-typed one.
                           (if (and (>= k 0) (< k (string/length coll)))
                             (string/char-at coll k)
                             default)
-                          (get-unanswerable coll k))
+                          (%get-unanswerable coll k))
                       (int? k) (nth coll k default)
-                      else (get-unanswerable coll k)))
+                      else (%get-unanswerable coll k)))
   ((coll k & default) (cond
-                        (map? coll) (map-get coll k (first default))
+                        (map? coll) (%map-get coll k (first default))
                         (set? coll) (if (%set-has? coll k) k (first default))
                         (nil? coll) (first default)
                         (string? coll)
@@ -93,22 +93,24 @@ a wrong-typed one.
                             (if (and (>= k 0) (< k (string/length coll)))
                               (string/char-at coll k)
                               (first default))
-                            (get-unanswerable coll k))
+                            (%get-unanswerable coll k))
                         (int? k) (nth coll k (first default))
-                        else (get-unanswerable coll k))))
+                        else (%get-unanswerable coll k))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
-;; Multi-pair builders, split by collection kind so the kernel op (`map-assoc` /
+;; Multi-pair builders, split by collection kind so the kernel op (`%map-assoc` /
 ;; `vector-assoc`) is a **direct free-global call**, not a computed-head call through a
 ;; passed-in `set` function value. The computed-head form `(set m k v)` mis-compiles under
 ;; the JIT — a map accumulator held across the loop's safepoints goes stale (use-after-GC);
 ;; the direct call avoids that path (and is faster: no per-step function-value dispatch).
-(defn- assoc-map-pairs
+(defn- %assoc-map-pairs
   (m kvs)
-  (if (empty? kvs) m (assoc-map-pairs (map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
-(defn- assoc-vec-pairs
+  (if (empty? kvs) m (%assoc-map-pairs (%map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
+(defn- %assoc-vec-pairs
   (v kvs)
-  (if (empty? kvs) v (assoc-vec-pairs (%vector-assoc v (first kvs) (second kvs)) (rest (rest kvs)))))
+  (if (empty? kvs)
+    v
+    (%assoc-vec-pairs (%vector-assoc v (first kvs) (second kvs)) (rest (rest kvs)))))
 (defn assoc "A fresh collection like `coll` with each `key value` pair added or updated.
 For a map, keys are added or replaced; for a vector, integer indices in
 `[0, count)` are replaced (an out-of-range index is an error — appending is via
@@ -122,8 +124,8 @@ A multi-key result prints in the map's internal order, not the order given."
   ;; The single-pair `(assoc coll k v)` arm is the hot case (it's what `update`,
   ;; tallies, and most call sites use): exact arity → VM-eligible, and it skips the
   ;; `& kvs` rest-list + the multi-pair loop, going straight to the kernel op.
-  ((coll k v) (if (vector? coll) (%vector-assoc coll k v) (map-assoc coll k v)))
-  ((coll & kvs) (if (vector? coll) (assoc-vec-pairs coll kvs) (assoc-map-pairs coll kvs))))
+  ((coll k v) (if (vector? coll) (%vector-assoc coll k v) (%map-assoc coll k v)))
+  ((coll & kvs) (if (vector? coll) (%assoc-vec-pairs coll kvs) (%assoc-map-pairs coll kvs))))
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks)
@@ -131,13 +133,13 @@ A multi-key result prints in the map's internal order, not the order given."
 
     (dissoc {:a 1 :b 2} :b)   → {:a 1}
     (dissoc {:a 1} :zz)       → {:a 1}   ; absent key is a no-op"
-  (fold map-dissoc m ks))
+  (fold %map-dissoc m ks))
 
-;; `map-pairs` (kernel) is the single map enumerator: the entries as a list of
+;; `%map-pairs` (kernel) is the single map enumerator: the entries as a list of
 ;; [k v] vectors, in one O(n) pass. `keys`/`vals`/`contains?`/`reduce-kv` are all
 ;; Brood over it — no per-key `get`, so no O(n²) (this replaced the old `map-keys`
 ;; primitive + get-per-key `vals`).
-;; `seq` (not `map-pairs`) so a record's keys/vals are its fields — no internal `:__id__`.
+;; `seq` (not `%map-pairs`) so a record's keys/vals are its fields — no internal `:__id__`.
 (defn keys (m)
   "The keys of map `m` (a record's are its fields, id-free).
 
@@ -155,7 +157,7 @@ Order matches [[keys]] — the map's internal order, not insertion order."
   (map second (seq m)))
 (defn contains? (m k)
   "True if map `m` has key `k` (distinguishes a stored `nil`/`false` from
-absence). O(1) via the CHAMP hash path (`map-get`), not an O(n) key scan: probe
+absence). O(1) via the CHAMP hash path (`%map-get`), not an O(n) key scan: probe
 with two distinct sentinels — a present key returns its stored value both times;
 an absent key returns each sentinel, and those differ. (One sentinel can't tell
 absence from a key whose *stored value* happens to equal it; two distinct ones
@@ -166,15 +168,15 @@ can.)
     (contains? {:a 1} :zz)     → false"
   (if (set? m)
     (%set-has? m k)
-    (let (a (map-get m k :%contains-miss-a))
+    (let (a (%map-get m k :%contains-miss-a))
       (if (= a :%contains-miss-a)
-        (not (= (map-get m k :%contains-miss-b) :%contains-miss-b))
+        (not (= (%map-get m k :%contains-miss-b) :%contains-miss-b))
         true))))
 
 ;; ---- map: merge / update / nested access -----------------------------------
-;; All Brood over the kernel ops (`map-assoc`/`map-pairs`) and the surface above
+;; All Brood over the kernel ops (`%map-assoc`/`%map-pairs`) and the surface above
 ;; (`reduce-kv`/`contains?`/`get`). Every one returns a fresh map — maps are
-;; immutable (ADR-026). The builders fold with the 3-arg kernel `map-assoc` (no
+;; immutable (ADR-026). The builders fold with the 3-arg kernel `%map-assoc` (no
 ;; per-step rest-list, unlike variadic `assoc`).
 
 ;; `into` bulk-builds through the kernel's GC-quiet CHAMP builder (`%map-into`):
@@ -203,17 +205,18 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
 ;; Nested-map access along a `path` (a sequence of keys). `get-in` walks; missing
 ;; key → default. `assoc-in` rebuilds, coercing a non-map node to `{}` so it can
 ;; create intermediate maps; `update-in` is `get-in` then `assoc-in`.
-(defn- get-in-walk
+(defn- %get-in-walk
   (m path default)
   (cond
     (empty? path) m
-    (and (map? m) (contains? m (first path))) (get-in-walk (get m (first path))
-                                                (rest path)
-                                                default)
+    (and (map? m) (contains? m (first path)))
+      (%get-in-walk (get m (first path))
+        (rest path)
+        default)
     else default))
 (defn get-in (m path & default)
   "The value in nested maps `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. `(get-in m ())` is `m`."
-  (get-in-walk m path (first default)))
+  (%get-in-walk m path (first default)))
 
 ;; check-allow: deliberately non-tail — depth = (count path) — a few keys, never data scale.
 (check-allow :non-tail-recursion

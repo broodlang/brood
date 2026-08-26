@@ -126,7 +126,7 @@ fn unbound_and_unused_import_are_never_reported_together() {
 /// A `(bound? 'name)`-guarded reference to an ambient another module defines
 /// (`*project-name*` / `*ns-package*`, `defdyn`'d by `std/tool/project.blsp` and
 /// absent under a bare `brood script.blsp`) is correct code *because* of the guard
-/// — `std/prelude/tools.blsp`'s `impl-app?` is the in-tree instance.
+/// — `std/prelude/tools.blsp`'s `%impl-app?` is the in-tree instance.
 #[test]
 fn a_bound_guarded_ambient_is_not_unbound() {
     let ws = warnings(

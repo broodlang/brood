@@ -21,27 +21,27 @@
 ;; `def`/`fn`, no backtick, no quasiquote dependency). The full seq-generic,
 ;; tail-recursive `list`/`append` further down simply `def`-rebind these.
 (def list (fn (& xs) "A list of the given arguments." xs))
-(def append-empty?
+(def %append-empty?
   (fn (x)
     (if (%eq (type-of x) :nil)
       true
       (if (%eq (type-of x) :vector) (%eq (%vector-length x) 0) false))))
-(def append-rev
+(def %append-rev
   (fn (src acc)
     ;; Reverse seq `src` (a list or vector) onto list `acc`. Tail-recursive.
-    (if (append-empty? src) acc (append-rev (rest src) (cons (first src) acc)))))
-(def append-2
+    (if (%append-empty? src) acc (%append-rev (rest src) (cons (first src) acc)))))
+(def %append-2
   (fn (a b)
     ;; Cons every element of seq `a` (a list or vector) onto list `b` — via a
     ;; double reverse, so even the bootstrap builder is O(1) stack like the full
     ;; `append` below that rebinds it (`check-allow` doesn't exist yet up here).
-    (append-rev (append-rev a nil) b)))
+    (%append-rev (%append-rev a nil) b)))
 (def append
   (fn (& lists)
     ;; Concatenate any number of sequences into one list, left to right.
-    (if (append-empty? lists)
+    (if (%append-empty? lists)
       nil
-      (append-2 (first lists) (apply append (rest lists))))))
+      (%append-2 (first lists) (apply append (rest lists))))))
 
 ;; `defmacro` itself — a macro, not a core special form. A macro is just a `fn`
 ;; the expander calls on the *unexpanded* argument forms; `%make-macro` (the one
@@ -79,9 +79,9 @@
 ;; marked private here instead — the same `%mark-private` fact `def-` records, just stated
 ;; once the macro layer is up. Without this they were published as core vocabulary: three
 ;; internal list builders nobody can meaningfully call.
-(%mark-private 'append-empty?)
-(%mark-private 'append-rev)
-(%mark-private 'append-2)
+(%mark-private '%append-empty?)
+(%mark-private '%append-rev)
+(%mark-private '%append-2)
 
 ;; ---- logic ----
 (defn not (x)
@@ -90,7 +90,7 @@
 
 ;; `empty?` — true for the empty value of any collection. Defined here, before
 ;; `fold`/`reduce` use it, so it's written with the raw kernel ops (`%eq`,
-;; `type-of`, `string-length`, `vector-length`, `map-count`) rather than the type
+;; `type-of`, `string-length`, `vector-length`, `%map-count`) rather than the type
 ;; predicates / `cond`, which are defined further down. (Not a Rust primitive: the
 ;; empty list is `nil`, and every other collection's emptiness is a length the
 ;; kernel already exposes.)
@@ -99,9 +99,9 @@
 ;; ---- universal list view ----
 ;; `seq` is what lets every list-shaped op (map/filter/fold/reduce/…) walk a
 ;; *map* without callers reaching for `(zip (keys m) (vals m))`: a map becomes
-;; its `[k v]` pairs in one O(n) `map-pairs` pass; lists, vectors, strings, and
+;; its `[k v]` pairs in one O(n) `%map-pairs` pass; lists, vectors, strings, and
 ;; `nil` pass through unchanged. Defined here with raw kernel ops (`%eq`,
-;; `type-of`, `map-pairs`) because `fold` calls it before the `map?` predicate /
+;; `type-of`, `%map-pairs`) because `fold` calls it before the `map?` predicate /
 ;; `cond` macro are available.
 (defn seq (coll)
   "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; a bytes value becomes its list of ints; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
@@ -119,14 +119,14 @@
           ;; id-free, by default — so it never leaks `:__id__` into map/fold/keys and a
           ;; custom collection can define its own iteration. `->seq` is only reached for
           ;; records (never at boot, which has none), so its late definition is fine.
-          (if (map-get coll :__id__ nil)
+          (if (%map-get coll :__id__ nil)
             (->seq coll)
-            (map-pairs coll))
+            (%map-pairs coll))
           (if (%eq t :bytes) (%bytes->list coll) coll))))))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
-;; The public entry coerces once via `seq`; the inner `fold-loop` then stays in
-;; list form for the recursion, so a map costs one extra `map-pairs` pass total
+;; The public entry coerces once via `seq`; the inner `%fold-loop` then stays in
+;; list form for the recursion, so a map costs one extra `%map-pairs` pass total
 ;; rather than O(n) per step.
 (defn fold (f acc coll)
   "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no intermediate lists.
@@ -154,29 +154,29 @@
       (%range-reduce f acc coll)
       (if (seqview? coll)
         ;; Fuse: `(xform f)` is the wrapped reducer; fold it over the source (a
-        ;; range → counted loop, a list → fold-loop, a nested view → fuses again).
+        ;; range → counted loop, a list → %fold-loop, a nested view → fuses again).
         ;; Raw kernel ops (`if`/`let`/`vector-ref`) only — `fold` is defined before
         ;; `cond`/`second`.
         (let (parts (%seqview-parts coll))
           (fold ((%vector-ref parts 1) f) acc (%vector-ref parts 0)))
-        (fold-loop f acc (seq coll))))))
-(defn- fold-loop
+        (%fold-loop f acc (seq coll))))))
+(defn- %fold-loop
   (f acc coll)
-  (if (empty? coll) acc (fold-loop f (f acc (first coll)) (rest coll))))
+  (if (empty? coll) acc (%fold-loop f (f acc (first coll)) (rest coll))))
 
 ;; `cons` with its arguments flipped — the workhorse passed to `fold` to build a
 ;; list in reverse (then reversed once at the end). Hoisted to the top level so
 ;; the list builders that reverse-accumulate don't each allocate a fresh closure
 ;; on every call.
-(defn- flip-cons (acc x) (cons x acc))
+(defn- %flip-cons (acc x) (cons x acc))
 
-;; A dedicated loop, not `(fold flip-cons …)`: `reverse` is the final pass of
+;; A dedicated loop, not `(fold %flip-cons …)`: `reverse` is the final pass of
 ;; nearly every sequence builder (`map`/`filter`/`take`/`zip`/`range`/…), so
-;; dropping the per-element `flip-cons` `apply` frame here pays off across the
+;; dropping the per-element `%flip-cons` `apply` frame here pays off across the
 ;; whole library. Coerce a map to its pairs once via `seq`, as `fold` did.
-(defn- reverse-acc
+(defn- %reverse-acc
   (coll acc)
-  (if (empty? coll) acc (reverse-acc (rest coll) (cons (first coll) acc))))
+  (if (empty? coll) acc (%reverse-acc (rest coll) (cons (first coll) acc))))
 (defn reverse (coll)
   "The items of `coll` in reverse order, as a list.
 
@@ -184,11 +184,11 @@
     (reverse nil)      → nil
 
 A string is not a sequence here — reverse its `string/->list` if you need that."
-  (reverse-acc (seq coll) nil))
+  (%reverse-acc (seq coll) nil))
 
-(defn- reverse-onto
+(defn- %reverse-onto
   (coll tail)
-  "The items of `coll` reversed, prepended onto `tail`. `(reverse-onto xs ys)` is
+  "The items of `coll` reversed, prepended onto `tail`. `(%reverse-onto xs ys)` is
 `(append (reverse xs) ys)` — but it walks `xs` **once**, so it is the spelling to
 reach for when a tail-recursive loop has accumulated a reversed prefix and wants to
 splice it back in front of the remainder."
@@ -198,14 +198,14 @@ splice it back in front of the remainder."
   ;; `append` folds both lists onto nil and reverses the result — and the checker's
   ;; non-tail-recursion advice produces more of these every time it is followed. So
   ;; the idiom gets a name and one pass. Measured, 20k splices of a 500-element
-  ;; prefix: `(append (reverse acc) tail)` 2739 ms, `(fold flip-cons tail acc)`
+  ;; prefix: `(append (reverse acc) tail)` 2739 ms, `(fold %flip-cons tail acc)`
   ;; 1674 ms, this 601 ms (4.6x). The `fold` form loses because of the per-element
-  ;; `flip-cons` apply frame, which is exactly why `reverse-acc` is a dedicated loop.
-  (reverse-acc (seq coll) tail))
+  ;; `%flip-cons` apply frame, which is exactly why `%reverse-acc` is a dedicated loop.
+  (%reverse-acc (seq coll) tail))
 
 ;; Realise a lazy seq-view to a concrete list by running its transducer. Folding
-;; `flip-cons` over the view hits `fold`'s seq-view branch, which wraps the
-;; transducer around `flip-cons` and folds over the source — producing the
+;; `%flip-cons` over the view hits `fold`'s seq-view branch, which wraps the
+;; transducer around `%flip-cons` and folds over the source — producing the
 ;; transduced items in reverse, so one `reverse` puts them in order. The kernel
 ;; `first`/`rest`/`apply` builtins call this (by name) for a view that escapes the
 ;; fusing path; `seq` calls it to coerce. No intermediate list beyond the result.
@@ -213,7 +213,7 @@ splice it back in front of the remainder."
   "Realise the lazy seq-view `sv` to a concrete list by running its transducer. Internal:
 the kernel `first`/`rest`/`apply` builtins call this by name for a view that escapes the
 fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own code."
-  (reverse (fold flip-cons nil sv)))
+  (reverse (fold %flip-cons nil sv)))
 
 ;; reduce supports both (reduce f init coll) and (reduce f coll). The 2-arg
 ;; form must seq-coerce `x` itself before splitting head/tail, because the bare
@@ -256,50 +256,50 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
 (defn dec (n) "Return `n` - 1." (%sub n 1))
 
 ;; ---- comparison & equality (variadic chains over %lt / %eq) ----
-;; chain? checks a predicate holds for every adjacent pair: (chain? < (1 2 3)).
-(defn chain? (pred xs)
+;; %chain? checks a predicate holds for every adjacent pair: (%chain? < (1 2 3)).
+(defn %chain? (pred xs)
   "True when `pred` holds for every ADJACENT pair of `xs` — the engine behind the variadic
-comparison chains, so `(< 1 2 3)` is `(chain? < (1 2 3))`. Vacuously true for a sequence of
+comparison chains, so `(< 1 2 3)` is `(%chain? < (1 2 3))`. Vacuously true for a sequence of
 fewer than two items.
 
-    (chain? < (list 1 2 3))    → true
-    (chain? < (list 1 3 2))    → false
-    (chain? = (list 7))        → true"
+    (%chain? < (list 1 2 3))    → true
+    (%chain? < (list 1 3 2))    → false
+    (%chain? = (list 7))        → true"
   (if (empty? xs)
     true
     (if (empty? (rest xs))
       true
-      (if (pred (first xs) (first (rest xs))) (chain? pred (rest xs)) false))))
+      (if (pred (first xs) (first (rest xs))) (%chain? pred (rest xs)) false))))
 
 ;; Binary comparison kernels, hoisted to the top level so the variadic chains
-;; below pass an *existing* function to `chain?` rather than allocating a fresh
+;; below pass an *existing* function to `%chain?` rather than allocating a fresh
 ;; closure on every call. `<` and `=` reuse the `%lt`/`%eq` primitives directly;
 ;; the swapped/negated ones get a named Brood helper (still policy in Brood).
-(defn- cmp-gt (a b) (%lt b a))
-(defn- cmp-le (a b) (not (%lt b a)))
-(defn- cmp-ge (a b) (not (%lt a b)))
+(defn- %cmp-gt (a b) (%lt b a))
+(defn- %cmp-le (a b) (not (%lt b a)))
+(defn- %cmp-ge (a b) (not (%lt a b)))
 
 ;; Multi-arity like arithmetic above: a direct 2-argument clause (the common
 ;; case — `(< a b)`, `(= a b)`) calls the primitive with one env frame; the
 ;; variadic clause chains over adjacent pairs for 3+ (or 0/1, trivially true).
 (defn < "True if the arguments are in strictly increasing order."
   ((a b) (%lt a b))
-  ((& xs) (chain? %lt xs)))
+  ((& xs) (%chain? %lt xs)))
 (defn > "True if the arguments are in strictly decreasing order."
   ((a b) (%lt b a))
-  ((& xs) (chain? cmp-gt xs)))
+  ((& xs) (%chain? %cmp-gt xs)))
 (defn <= "True if the arguments are in non-decreasing order."
   ;; 2-arg body is a direct primitive call (a <= b) so the ADR-069 thin-wrapper
   ;; elision reaches it — the old `(not (%lt b a))` was a nested call it couldn't.
   ((a b) (%le a b))
-  ((& xs) (chain? cmp-le xs)))
+  ((& xs) (%chain? %cmp-le xs)))
 (defn >= "True if the arguments are in non-increasing order."
   ;; a >= b  ==  b <= a — still a single passthrough (%le with args swapped).
   ((a b) (%le b a))
-  ((& xs) (chain? cmp-ge xs)))
+  ((& xs) (%chain? %cmp-ge xs)))
 (defn = "True if all arguments are structurally equal."
   ((a b) (%eq a b))
-  ((& xs) (chain? %eq xs)))
+  ((& xs) (%chain? %eq xs)))
 (defn not= "True if the arguments are not all equal."
   ((a b) (not (%eq a b)))
   ((& xs) (not (apply = xs))))
@@ -337,7 +337,7 @@ fewer than two items.
 ;; binding, and re-def every reload — the bug this fixes). Computed at LOAD time, where
 ;; `current-ns` is the module being loaded; a bare/root context (no current-ns) or an
 ;; already-qualified name passes through, matching `def`.
-(defn- defonce-qualified-name
+(defn- %defonce-qualified-name
   (sym)
   (let (ns (current-ns))
     (if (or (nil? ns) (includes? (str sym) "/"))
@@ -348,9 +348,9 @@ fewer than two items.
   "Bind `name` to `val` only if it isn't already bound, so the value survives
 hot-reload (cf. Emacs `defvar`). Once bound, re-evaluating is a no-op; restart
 or re-`def` to force re-init. Works for a module-level name: the bound? check is
-resolved against the LOADING module's namespace (`defonce-qualified-name`), the same
+resolved against the LOADING module's namespace (`%defonce-qualified-name`), the same
 binding `def` writes — a bare `(bound? '~name)` would read at root and miss it."
-  `(unless (bound? (defonce-qualified-name '~name)) (def ~name ~val)))
+  `(unless (bound? (%defonce-qualified-name '~name)) (def ~name ~val)))
 
 ;; `(comment …)` — the dev-scratch block every Lisp has. Its body is read (so it
 ;; must still be balanced sexps) but never evaluated, which is the point: a
@@ -465,7 +465,7 @@ names accept anything, so a contract never throws on a type it can't interpret."
                   (every? (fn (kv)
                             (and (type-matches? ktype (first kv))
                               (type-matches? vtype (second kv))))
-                    (map-pairs v)))))
+                    (%map-pairs v)))))
           (%eq h 'record)
           ;; A field's type may be wrapped `(optional T)` — allowed to
           ;; be absent/nil. Every other field is required: `(get v k)`
@@ -517,7 +517,7 @@ names accept anything, so a contract never throws on a type it can't interpret."
     (%eq t 'list) (list? v)
     (%eq t 'vector) (vector? v)
     else true))
-(defn- contract-check-args
+(defn- %contract-check-args
   (name ptypes args i)
   "Throw if any argument fails its declared type. Pairwise over the overlap —
 arity itself is the static checker's job."
@@ -533,9 +533,9 @@ arity itself is the static checker's job."
                " ("
                (pr-str (first args))
                ")")))
-    (contract-check-args name (rest ptypes) (rest args) (inc i))))
+    (%contract-check-args name (rest ptypes) (rest args) (inc i))))
 
-(defn- contract-check-rest
+(defn- %contract-check-rest
   (name rtype args)
   "Throw if any rest argument fails its declared rest type."
   (when (pair? args)
@@ -548,16 +548,16 @@ arity itself is the static checker's job."
                " ("
                (pr-str (first args))
                ")")))
-    (contract-check-rest name rtype (rest args))))
+    (%contract-check-rest name rtype (rest args))))
 
-(defn- sig-pos
+(defn- %sig-pos
   (xs x n)
   "Position of `x` in the list `xs` (from index `n`), or -1. Expansion-time helper
 for `sig!` that predates `index-of` in the prelude's own load order."
   (cond
     (nil? xs) -1
     (%eq (first xs) x) n
-    else (sig-pos (rest xs) x (%add n 1))))
+    else (%sig-pos (rest xs) x (%add n 1))))
 
 (defmacro sig! (name type)
   "Like `(sig …)` but also installs a *runtime* contract: each argument and the
@@ -571,13 +571,13 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   ;; contract. The `(do …)` keeps both effects at top level.
   `(do
      (%register-sig '~name '~type)
-     ~(let (i (sig-pos type '-> 0))
+     ~(let (i (%sig-pos type '-> 0))
         (if (< i 0)
           ; not a (… -> …) type — nothing to enforce
           nil
           (let (ptypes (take i type)
                 rtype (nth type (inc i))
-                amp-pos (sig-pos ptypes '& 0))
+                amp-pos (%sig-pos ptypes '& 0))
             (if (< amp-pos 0)
               ;; fixed arity
               (let (params (map (fn (_) (gensym "arg")) (range (count ptypes)))
@@ -586,7 +586,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                 `(def ~name
                    (let (~orig ~name)
                      (fn (~@params)
-                       (contract-check-args '~name '~ptypes (list ~@params) 1)
+                       (%contract-check-args '~name '~ptypes (list ~@params) 1)
                        (let (~r (~orig ~@params))
                          (unless (type-matches? '~rtype ~r)
                            (throw (str '~name
@@ -608,8 +608,8 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                 `(def ~name
                    (let (~orig ~name)
                      (fn (~@fixed-params & ~rest-param)
-                       (contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
-                       (contract-check-rest '~name '~rest-ptype ~rest-param)
+                       (%contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
+                       (%contract-check-rest '~name '~rest-ptype ~rest-param)
                        (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
                          (unless (type-matches? '~rtype ~r)
                            (throw (str '~name
@@ -652,17 +652,17 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 ;; the orphan last element when count is odd, nil when even. Uses only
 ;; `if`/`empty?`/`first`/`rest` — all kernel primitives — so it's safe to call
 ;; during prelude loading before `odd?`/`count`/`last` are defined.
-(defn- cond-orphan
+(defn- %cond-orphan
   (clauses)
   (if (empty? clauses)
     nil
     (if (empty? (rest clauses))
       (first clauses)
-      (cond-orphan (rest (rest clauses))))))
+      (%cond-orphan (rest (rest clauses))))))
 
 (defmacro cond (& clauses)
   "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` test always matches; `nil` if none do."
-  (let (orphan (cond-orphan clauses))
+  (let (orphan (%cond-orphan clauses))
     (if (and (not (nil? orphan)) (not (%eq orphan 'else)))
       (error "cond: odd number of clauses — expected test/expression pairs. "
         "Did you forget an expression for '"
@@ -686,16 +686,16 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 ;; Bounded (kernel audit): a macro that forever expands to another macro call
 ;; would otherwise spin here. Mirrors the kernel expander's own cap
 ;; (`MAX_EXPAND_ROUNDS` in eval/macros.rs) — keep the two in step.
-(def- macroexpand-max-rounds 256)
+(def- %macroexpand-max-rounds 256)
 
-(defn- macroexpand-loop
+(defn- %macroexpand-loop
   (form n)
   (if (= n 0)
     (error "macroexpand: no fixpoint after "
-      macroexpand-max-rounds " rounds (a macro that expands to itself?)")
+      %macroexpand-max-rounds " rounds (a macro that expands to itself?)")
     (let (stepped (macroexpand-1 form))
-      (if (= stepped form) form (macroexpand-loop stepped (- n 1))))))
+      (if (= stepped form) form (%macroexpand-loop stepped (- n 1))))))
 
 (defn macroexpand (form)
   "Repeatedly expand `form`'s head macro until the head is no longer a macro call."
-  (macroexpand-loop form macroexpand-max-rounds))
+  (%macroexpand-loop form %macroexpand-max-rounds))

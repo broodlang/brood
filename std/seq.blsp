@@ -40,9 +40,9 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
     (seq/frequencies [:a :b :a])   → {:b 1, :a 2}
     (seq/frequencies [])           → {}"
   ;; The map accumulator is always a map, so hit the 3-arg kernel ops
-  ;; (`map-assoc`/`map-get`) directly — variadic `assoc` would build a rest-list
+  ;; (`%map-assoc`/`%map-get`) directly — variadic `assoc` would build a rest-list
   ;; and `get` a `cond` dispatch on every one of the n elements.
-  (fold (fn (m x) (map-assoc m x (%add (map-get m x 0) 1))) {} coll))
+  (fold (fn (m x) (%map-assoc m x (%add (%map-get m x 0) 1))) {} coll))
 
 ;; dedupe: collapse only *consecutive* runs of equal items (no "seen" set needed).
 (defn- dedupe-acc
@@ -59,14 +59,14 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 
 ;; distinct-by: like the bare `distinct`, but dedup by a key function — keep the
 ;; first item for each distinct `(f item)`. A map carried alongside the result is
-;; the "seen" set of keys (stores only `true`, so one `map-get` distinguishes it).
+;; the "seen" set of keys (stores only `true`, so one `%map-get` distinguishes it).
 (defn distinct-by (f coll)
   "The items of `coll` with duplicates removed by key: keeps the first item for each distinct `(f item)`, order-preserving. `(distinct-by :id users)` keeps one user per id (≈ `Enum.uniq_by`)."
   (reverse (nth (fold (fn (state x)
                         (let (k (f x))
-                          (if (map-get (nth state 0) k false)
+                          (if (%map-get (nth state 0) k false)
                             state
-                            [(map-assoc (nth state 0) k true) (cons x (nth state 1))])))
+                            [(%map-assoc (nth state 0) k true) (cons x (nth state 1))])))
                   [{} nil]
                   coll)
              1)))
@@ -77,8 +77,8 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
     (seq/group-by math/even? [1 2 3 4])   → {false (1 3), true (2 4)}
     (seq/group-by count [\"a\" \"bb\"])       → {1 (\"a\"), 2 (\"bb\")}"
   ;; Prepend per group (O(1)) then reverse every group's list once at the end.
-  ;; Direct kernel `map-assoc`/`map-get` — the accumulator is always a map.
-  (map/update-vals (fold (fn (m x) (let (k (f x)) (map-assoc m k (cons x (map-get m k nil)))))
+  ;; Direct kernel `%map-assoc`/`%map-get` — the accumulator is always a map.
+  (map/update-vals (fold (fn (m x) (let (k (f x)) (%map-assoc m k (cons x (%map-get m k nil)))))
                      {}
                      coll)
     reverse))
@@ -230,18 +230,18 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
 
 (defn distinct (coll)
   "The items of `coll` with duplicates removed, keeping the first occurrence of each (order-preserving)."
-  (reverse (nth (fold distinct-step [{} nil] coll) 1)))
+  (reverse (nth (fold %distinct-step [{} nil] coll) 1)))
 
 (defn flatten (coll)
   "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves.
 
     (seq/flatten '(1 (2 (3))))   → (1 2 3)
     (seq/flatten '(1 [2 3]))     → (1 [2 3])   ; a vector is a LEAF, not descended into"
-  (reverse (flatten-acc coll nil)))
+  (reverse (%flatten-acc coll nil)))
 
 (defn split-at (n coll)
   "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`."
-  (split-at-acc n coll nil))
+  (%split-at-acc n coll nil))
 
 (defn take-last (n coll)
   "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0)."
@@ -259,7 +259,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
 
 (defn repeatedly (n f)
   "A list of `n` successive calls to the zero-argument function `f` (in call order)."
-  (repeatedly-acc n f nil))
+  (%repeatedly-acc n f nil))
 
 (defn sample (seed coll)
   "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."

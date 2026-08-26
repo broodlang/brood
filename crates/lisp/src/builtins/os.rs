@@ -72,6 +72,44 @@ pub(super) fn argv_builtin(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(heap.alloc_vector(vals))
 }
 
+/// The arguments a host CLI decided belong to the program, not to itself.
+///
+/// `brood file.blsp -- --verbose x` has to route `--verbose x` somewhere: they are not
+/// files to run, and a script reading raw `%argv` would have to know where its host's
+/// own arguments stop — i.e. reimplement the host's parser to find the `--`. The host
+/// already knows, so it says.
+///
+/// Unset means nobody told us, which is the honest state for a **bundled** app
+/// (`nest release`, ADR-038): it boots before any CLI parsing and owns its whole argv.
+/// `script_args_builtin` falls back to everything after argv[0] there.
+static SCRIPT_ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Record the arguments intended for the program being run, for `(%script-args)`.
+///
+/// Called once by a host CLI before it runs anything. Later calls are ignored rather
+/// than an error: the value is a fact about this process's invocation, so the first
+/// writer — the one that parsed the real argv — is the authority.
+pub fn set_script_args(args: Vec<String>) {
+    let _ = SCRIPT_ARGS.set(args);
+}
+
+/// `(%script-args)` — the arguments meant for this program, without the host CLI's own.
+///
+/// For `brood file.blsp -- a b` that is `["a" "b"]`. When no host recorded anything (a
+/// bundled app, which boots before any CLI), it is everything after argv[0], so a bundled
+/// program and a script see the same shape.
+pub(super) fn script_args_builtin(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let args: Vec<String> = match SCRIPT_ARGS.get() {
+        Some(recorded) => recorded.clone(),
+        None => std::env::args_os()
+            .skip(1)
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect(),
+    };
+    let vals: Vec<Value> = args.iter().map(|a| heap.alloc_string(a)).collect();
+    Ok(heap.alloc_vector(vals))
+}
+
 /// `(%os-type)` — the current OS as a keyword: `:linux`, `:macos`, or `:windows`.
 pub(super) fn os_type_builtin(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
     #[cfg(target_os = "linux")]

@@ -35,7 +35,7 @@
   "Copy the immutable map `m` into a fresh mutable table. Internal: used only by the
 compiler's linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed its
 private table, and never surfaced to user code — reach for `table/new` instead."
-  (reduce (fn (t kv) (%table-put t (first kv) (second kv))) (%table) (map-pairs m)))
+  (reduce (fn (t kv) (%table-put t (first kv) (second kv))) (%table) (%map-pairs m)))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
   "True if `x` is callable (a closure or a primitive)."
@@ -109,21 +109,21 @@ and a set its elements, as everywhere else `seq` applies.
     (vec nil)        → []"
   (into [] coll))
 
-(defn- append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
+(defn- %append-two (a b) "Concatenate two lists (`a` before `b`)." (fold %flip-cons b (reverse a)))
 
 ;; Prepend every element of `lst` onto `acc` (so `acc` collects all elements in
 ;; reverse); `append` folds this over the lists, then reverses once. Argument order
 ;; is fold's (`acc` first), which is why this exists at all rather than callers
-;; using `reverse-onto` directly — it is that function with the arguments flipped.
-(defn- append-onto (acc lst) (reverse-onto lst acc))
+;; using `%reverse-onto` directly — it is that function with the arguments flipped.
+(defn- %append-onto (acc lst) (%reverse-onto lst acc))
 (defn append (& lists)
   "Concatenate any number of lists into one, left to right."
   ;; O(total length) and fully tail-recursive — so `mapcat` (via `apply append`)
-  ;; stays stack-safe on many/long lists. The previous left fold of `append-two`
+  ;; stays stack-safe on many/long lists. The previous left fold of `%append-two`
   ;; re-reversed the growing accumulator each step, making it O(lists²).
-  (reverse (fold append-onto nil lists)))
+  (reverse (fold %append-onto nil lists)))
 
-(defn- count-acc (coll n) (if (empty? coll) n (count-acc (rest coll) (%add n 1))))
+(defn- %count-acc (coll n) (if (empty? coll) n (%count-acc (rest coll) (%add n 1))))
 (defn count (coll)
   "The number of items in `coll` (a list, vector, string, or map).
 
@@ -131,8 +131,8 @@ and a set its elements, as everywhere else `seq` applies.
     (count \"hello\")      → 5
     (count {:a 1 :b 2})  → 2
     (count nil)          → 0"
-  ;; `vector?`/`map?` short-circuit to the O(1) `vector-length`/`map-count`
-  ;; kernels (both were O(n) — a fold walk / a `map-pairs` allocation); lists
+  ;; `vector?`/`map?` short-circuit to the O(1) `vector-length`/`%map-count`
+  ;; kernels (both were O(n) — a fold walk / a `%map-pairs` allocation); lists
   ;; and nil go through a dedicated tail loop, not a per-element counting closure.
   (cond
     (range? coll) (%range-count coll)
@@ -143,14 +143,14 @@ and a set its elements, as everywhere else `seq` applies.
     (vector? coll) (%vector-length coll)
     (bytes? coll) (%byte-length coll)
     ;; a record counts as its `Seqable` view (its fields, id-free, by default) — not the
-    ;; raw map, which would include the internal `:__id__`. `map-get` distinguishes it.
-    (map? coll) (if (map-get coll :__id__ nil) (count (->seq coll)) (map-count coll))
+    ;; raw map, which would include the internal `:__id__`. `%map-get` distinguishes it.
+    (map? coll) (if (%map-get coll :__id__ nil) (count (->seq coll)) (%map-count coll))
     (set? coll) (%set-count coll)
-    else (count-acc coll 0)))
+    else (%count-acc coll 0)))
 
-(defn- nth-list
+(defn- %nth-list
   (coll i d)
-  (cond (empty? coll) d (= i 0) (first coll) else (nth-list (rest coll) (- i 1) d)))
+  (cond (empty? coll) d (= i 0) (first coll) else (%nth-list (rest coll) (- i 1) d)))
 
 ;; A non-integer index is a type error that must name `nth`. Before this it fell
 ;; through to the guards and the list walk, where `(>= i 0)` / `(- i 1)` raised
@@ -158,7 +158,7 @@ and a set its elements, as everywhere else `seq` applies.
 ;; naming an arithmetic helper the caller never wrote, in violation of the
 ;; self-identifying-type-error promise in docs/language.md. `(nth v :k)` is a real
 ;; mistake (usually a map/sequence mix-up), so it must say so.
-(defn- nth-bad-index
+(defn- %nth-bad-index
   (coll i)
   (error (str "nth: expected an integer index, got "
            (name (type-of i))
@@ -167,15 +167,15 @@ and a set its elements, as everywhere else `seq` applies.
            ")"
            " — a vector, list, string or bytes is indexed by position, not by key")))
 ;; The list arm is also where a NON-collection lands (`(nth 5 0)`), which used to
-;; surface as `empty?: expected collection, got int (5)` — an internal `nth-list`
+;; surface as `empty?: expected collection, got int (5)` — an internal `%nth-list`
 ;; walks through, not the op the caller wrote. Checked once per `nth`, not per step:
 ;; the vector/bytes arms never reach it, and a list walk is already O(n).
-(defn- nth-seq-or-fail
+(defn- %nth-seq-or-fail
   (coll i d)
   (cond
-    (or (pair? coll) (nil? coll)) (nth-list coll i d)
+    (or (pair? coll) (nil? coll)) (%nth-list coll i d)
     ;; a record indexes through its `Seqable` view (a custom collection or its fields)
-    (record? coll) (nth-list (seq coll) i d)
+    (record? coll) (%nth-list (seq coll) i d)
     else
       (error (str "nth: expected a collection to index, got "
                (name (type-of coll))
@@ -194,13 +194,13 @@ and a set its elements, as everywhere else `seq` applies.
   ;; whole thing to the tree-walker. The `& default` arm keeps the explicit-default
   ;; behaviour for the rarer 3-arg call.
   ((coll i) (cond
-              (not (int? i)) (nth-bad-index coll i)
+              (not (int? i)) (%nth-bad-index coll i)
               (vector? coll)
                 (if (and (>= i 0) (< i (%vector-length coll))) (%vector-ref coll i) nil)
               (bytes? coll) (if (and (>= i 0) (< i (%byte-length coll))) (%byte-at coll i) nil)
-              else (nth-seq-or-fail coll i nil)))
+              else (%nth-seq-or-fail coll i nil)))
   ((coll i & default) (cond
-                        (not (int? i)) (nth-bad-index coll i)
+                        (not (int? i)) (%nth-bad-index coll i)
                         (vector? coll)
                           (if (and (>= i 0) (< i (%vector-length coll)))
                             (%vector-ref coll i)
@@ -209,6 +209,6 @@ and a set its elements, as everywhere else `seq` applies.
                           (if (and (>= i 0) (< i (%byte-length coll)))
                             (%byte-at coll i)
                             (first default))
-                        else (nth-seq-or-fail coll i (first default)))))
+                        else (%nth-seq-or-fail coll i (first default)))))
 
 ;; ---- numeric helpers ----

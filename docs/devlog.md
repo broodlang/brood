@@ -3692,3 +3692,67 @@ reimplement it and drift.
 accept flags (`-- --publish` tries to open a file by that name); the release script is
 configured by environment instead. And hive itself is private and has no CI, so its 101
 tests — including both example guards — run only when someone runs them.
+
+## 2026-08-26 — the bare namespace was 510 names, and 203 of them were nobody's business
+
+An audit of every public function in `std/` and the prelude — 1,374 of them across 106 files
+— against six questions: right module, no duplication, documented with an example, named
+consistently with its neighbours, in the spirit of the language, and complete against the
+process model. A seventh was added part-way: where one bare ability op could replace a
+family of per-type functions, prefer it, because that *shrinks* the surface twice over.
+
+**The finding that mattered.** Module namespacing was never the problem — a `defn` inside a
+`defmodule` leaks no bare global and cannot shadow the prelude's internals; that was tested,
+not assumed. The cost sat in root-level code (a script, a test file, the REPL), which shares
+one flat global table with the prelude. Every shipped function is reserved there, so
+`(def merge-sort …)` in a script failed with "it ships with Brood and cannot be redefined" —
+and **203 of the 510 reserved words were private helpers**: `flip-cons`, `reverse-onto`,
+`with-build`, `for-fold`, `take-acc`, `pr-limit`, `path-last-slash`. Un-callable in any
+meaningful sense, absent from `doc`, and still holding the word.
+
+The fix was the convention already written down and applied to 313 kernel names: the `%`
+prefix. Three waves — the 53 `match-*` pattern-compiler helpers, the remaining 142 private
+ones, then 16 that were public by accident (the raw CHAMP primitives `map-get`/`map-assoc`/
+`map-dissoc`/`map-count`/`map-pairs`/`map-int-add`, and expander leftovers like
+`spawn-body-thunk`, `pattern-vars`, `defmodule-clause-heads`). 1,126 occurrences, 93 files.
+**Bare names 510 → 298; names reserved against a script 470 → 261.**
+
+The rename matched on Lisp token boundaries and was unit-tested on nine cases first, because
+`merge-sort` must not touch `merge-sort-n`. It found one live site the `.blsp` suite
+structurally cannot see: Brood source held in a Rust string literal (`introspect.rs`
+evaluating `(%require-find …)`). `scripts/stale-names.sh` is the check that closes that gap.
+
+**ADR-161 was not in effect.** `xmap`/`xfilter`/`xremove`/`xkeep` were declared *private*
+while their `%`-prefixed internals were *public* — two names for one job, with the wrong one
+exposed. The four pass-through wrappers are gone; the stages are the published names.
+`lmap`/`lfilter`/`lkeep`/`lremove` had the same inversion while being documented as "the
+public surface" and named in a kernel error hint. Both sets are public and catalogued now.
+
+**`ops` is gone from bare.** `(defn ops …)` in `protocol.blsp` owned one of the most
+collision-prone words in the language to read a registry nothing in production called —
+while five files in `std/` already bind `ops` as a `let`. It is `reflect/behaviour-ops`,
+where registry-reading belongs.
+
+**`io/inspect` could never see an `Inspect` impl.** `*show*` renders a record through
+`Display`, and `send-text` applied it to all three writers — so on the inspect path the
+record arrived already flattened to a string and `inspect-render` only got to `pr-str` that:
+a record with a custom `inspect` printed `"$5"` where `#money<$5>` was intended. The
+transform belongs to the display renderer, and now lives there.
+
+**A flake, chased rather than re-run.** `release_bundle` failed roughly one run in five with
+`ETXTBSY`. Its four tests are parallel threads of one process, each writing then exec'ing its
+own bundle; a fork taken while another thread still holds its binary open for writing leaves
+the child holding that write fd, and Linux refuses to exec a file any process has open for
+writing. Retried on that errno — 12/12 clean after, against two reproductions before.
+
+**Left specified, not started.** `bit-*` is the next ten bare names and obviously one
+namespace (Rust already registers `string/length`, so the shape exists). Scoping it turned up
+the hazard worth recording: `eval/compile/ir.rs` maps the bare strings `"bit-and"`/`"bit-or"`/
+`"bit-xor"` to `PrimOp::BitAnd` for JIT inlining, so a rename that misses that line does not
+fail a test — it silently stops inlining bit ops in the crypto and hash hot loops. 347 call
+sites, and it wants an `make ab` gate, so it gets its own pass.
+
+Documentation stands at 100% docstring coverage (the last 13 were written; in every case the
+explanation already sat two lines above as a comment) and **4.7% example coverage** — which
+is the real remaining gap, since `tests/doc_examples_test.blsp` *executes* every example, so
+each one written is a test gained. It caught two of this session's own mistakes.

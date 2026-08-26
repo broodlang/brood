@@ -13,6 +13,17 @@
 ;; the code rather than as a call into a tool.
 (defmodule reflect)
 
+(defn behaviour-ops (bname)
+  "The op specs `defbehaviour` recorded for behaviour `bname`, or nil — which ops a module
+claiming `(:implements bname)` must define, and at what arities. The checker and the LSP
+read the same registry.
+
+    (reflect/behaviour-ops 'No-Such-Behaviour)   → nil
+
+after `(defbehaviour Renderable (render [x]))`, `(reflect/behaviour-ops 'Renderable)`
+answers `((render [x]))`."
+  (get *protocols* bname))
+
 (defn check (form)
   "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."
   (%check form))

@@ -48,6 +48,15 @@ struct Cli {
     #[arg(value_name = "FILE")]
     files: Vec<String>,
 
+    /// Arguments for the program, after `--`. Read with `(system/script-args)`.
+    ///
+    /// Without this every trailing argument parsed as another FILE, so
+    /// `brood run.blsp -- --verbose` tried to open a file named `--verbose` and
+    /// died. A script therefore could not take options at all, and the workaround
+    /// was to configure it through the environment.
+    #[arg(last = true, value_name = "ARG", allow_hyphen_values = true)]
+    script_args: Vec<String>,
+
     /// Run the file(s) as a single in-language test suite (registers each
     /// `deftest`, then calls `(test/run-tests)` once). For project-wide discovery
     /// use `nest test`.
@@ -119,6 +128,10 @@ fn run(cli: Cli) {
     if let Some(n) = cli.max_parallel {
         brood::process::set_max_parallel(n);
     }
+    // Hand the post-`--` arguments to the runtime before anything runs: only this
+    // parser knows where brood's own arguments stop, so a script asking `%argv`
+    // would otherwise have to re-derive it.
+    brood::builtins::set_script_args(cli.script_args.clone());
     // Honour BROOD_MEM_LIMIT / BROOD_MEM_SOFT_LIMIT for every mode; plain runs
     // and the REPL stay unlimited unless the user opts in (ADR-043). `--test`
     // additionally defaults a ceiling on (see run_test_files).

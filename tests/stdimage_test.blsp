@@ -75,7 +75,7 @@
   ;; there. `require format` measured 62 ms from source against 12.8 ms restored.
   :isolated (test "a replayed edge naming a module this binary lacks does not break require"
     (let (fake {"somemod" ['definitely-not-a-real-module 'string]}
-          _ (merge-require-edges! fake)
+          _ (%merge-require-edges! fake)
           deps (get *require-edges* "somemod"))
       ;; the unloadable dep is dropped, the real one kept
       (is (nil? (seq/find (fn (d) (= (name d) "definitely-not-a-real-module")) deps)))

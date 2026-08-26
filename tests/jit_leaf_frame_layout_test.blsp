@@ -68,7 +68,7 @@
           (map (fn (n) (sum-down n 0)) (list 1000 10000 100000 200000)))))
 
   (test "std/repeat, which is this shape, builds the full sequence"
-    ;; `repeat-acc` in std/prelude/seq.blsp is `(repeat-acc (dec n) x (cons x acc))` —
+    ;; `%repeat-acc` in std/prelude/seq.blsp is `(%repeat-acc (dec n) x (cons x acc))` —
     ;; the same spliced-leaf self-tail loop. It returned 28033 of 200000 elements.
     (is (= 200000 (count (repeat 200000 :a))))
     (is (= 200000 (string/length (apply str (repeat 200000 "x")))))))

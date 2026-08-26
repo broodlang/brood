@@ -356,7 +356,7 @@ pub(super) fn seqview_pred(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispRe
 
 /// Realise a lazy seq-view to a concrete list. The realisation runs the view's
 /// transducer over its source, which means applying a Brood closure — so it is
-/// delegated to the prelude `%seqview-realize` (`(reverse (fold flip-cons nil
+/// delegated to the prelude `%seqview-realize` (`(reverse (fold %flip-cons nil
 /// sv))`, which fuses through `fold`'s seq-view branch). Resolved against the
 /// live global env so a user redefinition is honoured. The kernel uses this from
 /// the hot `first`/`rest` builtins; every other consumer realises in the prelude
@@ -595,7 +595,7 @@ pub(super) fn range_reduce_slow(
 
 /// `(%sort-asc coll)` — stable ascending sort of a numeric collection by `<`.
 /// The fast path behind `(sort coll)` when no custom comparator is given;
-/// the all-Brood `merge-sort` in `std/prelude.blsp` still handles
+/// the all-Brood `%merge-sort` in `std/prelude.blsp` still handles
 /// `(sort less? coll)`. ~50× faster than the in-Brood mergesort on 10 000
 /// items because every comparison is a Rust `match` instead of an
 /// `eval::apply` round-trip.
@@ -736,7 +736,7 @@ pub(super) fn vector_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 }
 
 /// `(vector-assoc v i x)` — a fresh vector like `v` with index `i` set to `x`.
-/// The vector counterpart of `map-assoc`; O(n) copy (vectors are flat), one
+/// The vector counterpart of `%map-assoc`; O(n) copy (vectors are flat), one
 /// allocation, no cons churn. `i` must be in `[0, len)` (append-at-end is a
 /// deferred power feature, ADR-011). No GC safepoint runs inside a builtin, so
 /// the cloned handles stay valid across `alloc_vector`.
@@ -969,42 +969,42 @@ pub(super) fn registry_names(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(heap.list(names))
 }
 
-/// `(map-get m k [default])` — the value `k` maps to, or `default` (nil if
+/// `(%map-get m k [default])` — the value `k` maps to, or `default` (nil if
 /// omitted) when absent.
 pub(super) fn map_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "map-get", arg(args, 0))?;
+    let id = expect_map(heap, "%map-get", arg(args, 0))?;
     Ok(heap
         .map_get(id, arg(args, 1))
         .unwrap_or_else(|| arg(args, 2)))
 }
 
-/// `(map-assoc m k v)` — a fresh map with `k` bound to `v`.
+/// `(%map-assoc m k v)` — a fresh map with `k` bound to `v`.
 pub(super) fn map_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "map-assoc", arg(args, 0))?;
+    let id = expect_map(heap, "%map-assoc", arg(args, 0))?;
     Ok(heap.map_assoc(id, arg(args, 1), arg(args, 2)))
 }
 
-/// `(map-int-add m k delta)` — a fresh map with `k`'s integer value incremented
+/// `(%map-int-add m k delta)` — a fresh map with `k`'s integer value incremented
 /// by `delta` (inserts `delta` when `k` is absent). Single trie traversal. Raises
 /// past the i64 range, like `table-incr` — which the linear-map optimizer rewrites
 /// this into, so the two agree (see [`Heap::map_int_add`]).
 pub(super) fn map_int_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "map-int-add", arg(args, 0))?;
-    let delta = expect_int(heap, "map-int-add", arg(args, 2))?;
+    let id = expect_map(heap, "%map-int-add", arg(args, 0))?;
+    let delta = expect_int(heap, "%map-int-add", arg(args, 2))?;
     heap.map_int_add(id, arg(args, 1), delta)
 }
 
-/// `(map-dissoc m k)` — a fresh map with `k` removed.
+/// `(%map-dissoc m k)` — a fresh map with `k` removed.
 pub(super) fn map_dissoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "map-dissoc", arg(args, 0))?;
+    let id = expect_map(heap, "%map-dissoc", arg(args, 0))?;
     Ok(heap.map_dissoc(id, arg(args, 1)))
 }
 
-/// `(map-pairs m)` — the entries as a list of `[k v]` vectors, in insertion
+/// `(%map-pairs m)` — the entries as a list of `[k v]` vectors, in insertion
 /// order, in one O(n) pass. The *single* map enumerator: `keys`/`vals`/
 /// `contains?`/`reduce-kv` are all Brood over it (std/prelude.blsp).
 pub(super) fn map_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "map-pairs", arg(args, 0))?;
+    let id = expect_map(heap, "%map-pairs", arg(args, 0))?;
     let entries = heap.map_entries(id); // copy out, releasing the borrow before we alloc
     let pairs: Vec<Value> = entries
         .into_iter()
@@ -1013,11 +1013,11 @@ pub(super) fn map_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(heap.list(pairs))
 }
 
-/// `(map-count m)` — the number of entries, O(1). The CHAMP root node tracks
+/// `(%map-count m)` — the number of entries, O(1). The CHAMP root node tracks
 /// its subtree size, so this never walks (or allocates) the entries; it's what
-/// `count`/`empty?` on a map use instead of materialising `map-pairs`.
+/// `count`/`empty?` on a map use instead of materialising `%map-pairs`.
 pub(super) fn map_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "map-count", arg(args, 0))?;
+    let id = expect_map(heap, "%map-count", arg(args, 0))?;
     Ok(Value::int(heap.map_size(id) as i64))
 }
 

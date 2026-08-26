@@ -624,7 +624,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../../../std/prelude/seq.blsp"),
     include_str!("../../../std/prelude/string.blsp"),
     include_str!("../../../std/prelude/tools.blsp"),
-    // Behaviour contracts are CORE (defbehaviour / register-protocol / ops / *protocols*).
+    // Behaviour contracts are CORE (defbehaviour / %register-protocol / ops / *protocols*).
     // After tools.blsp, which defines the `swap-registry!` macro protocol uses.
     include_str!("../../../std/protocol.blsp"),
 );
@@ -897,7 +897,7 @@ mod prelude_hygiene {
     /// The other half of the autoload contract: a declared arity that has drifted from its
     /// module would make `def`'s reload check announce an arity change on every load of that
     /// module, and would report a caller's arity error from inside the stub. A declared name
-    /// the module does not define at all would loop until `autoload-call`'s re-entry guard
+    /// the module does not define at all would loop until `%autoload-call`'s re-entry guard
     /// raised — a runtime failure this catches at build.
     ///
     /// Checks both: the loaded arity matches the declaration, and the loaded arglist is not

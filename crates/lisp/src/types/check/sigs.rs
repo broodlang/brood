@@ -55,7 +55,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     const any: Ty = Ty::ANY;
     #[allow(non_upper_case_globals)]
     const nil_ty: Ty = Ty::of(Tag::Nil);
-    // Maps are seqable in the stdlib (`seq`/`fold` coerce them via `map-pairs`),
+    // Maps are seqable in the stdlib (`seq`/`fold` coerce them via `%map-pairs`),
     // so the higher-order combinators accept maps too — without this the
     // checker would warn on `(map f some-map)` even though it runs fine. `bytes`
     // is likewise seqable — `count`/`first`/`rest`/`map`/`every?` all iterate its

@@ -39,6 +39,28 @@ fn write_app(
     (app, run_cwd)
 }
 
+/// Run a freshly written bundle, retrying `ETXTBSY`.
+///
+/// The four tests here run as parallel threads of ONE process, and each writes its own
+/// `app` binary and then execs it. `Command` forks, and a fork taken while another
+/// thread still holds its `app` open for writing leaves the child holding that write fd
+/// until it execs — and Linux refuses to exec a file any process has open for writing
+/// (`ETXTBSY`). The window is microseconds, which is why this failed roughly one run in
+/// five rather than every time. Nothing here is wrong with the bundle: the same binary
+/// runs on the next attempt, so retry it rather than serialising the whole file.
+fn run_bundle(cmd: &mut Command) -> std::process::Output {
+    for attempt in 0..50 {
+        match cmd.output() {
+            Ok(out) => return out,
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+            }
+            Err(e) => panic!("run bundled app: {e:?}"),
+        }
+    }
+    panic!("run bundled app: still ETXTBSY after 50 attempts");
+}
+
 #[test]
 fn bundled_brood_boots_embedded_main_with_cross_module_use() {
     let (app, cwd) = write_app(
@@ -57,7 +79,7 @@ fn bundled_brood_boots_embedded_main_with_cross_module_use() {
     let mut cmd = Command::new(&app);
     cmd.current_dir(&cwd);
     support::dies_with_parent(&mut cmd);
-    let out = cmd.output().expect("run bundled app");
+    let out = run_bundle(&mut cmd);
     assert!(
         out.status.success(),
         "exit: {:?}\nstderr: {}",
@@ -101,7 +123,7 @@ fn bundled_deps_with_same_module_name_coexist_rooted() {
     let mut cmd = Command::new(&app);
     cmd.current_dir(&cwd);
     support::dies_with_parent(&mut cmd);
-    let out = cmd.output().expect("run bundled app");
+    let out = run_bundle(&mut cmd);
     assert!(
         out.status.success(),
         "exit: {:?}\nstderr: {}",
@@ -128,7 +150,7 @@ fn bundled_app_receives_argv() {
     let mut cmd = Command::new(&app);
     cmd.args(["alpha", "beta"]).current_dir(&cwd);
     support::dies_with_parent(&mut cmd);
-    let out = cmd.output().expect("run bundled app");
+    let out = run_bundle(&mut cmd);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -167,7 +189,7 @@ fn bundled_bare_reference_to_unique_dep_module_resolves() {
     let mut cmd = Command::new(&app);
     cmd.current_dir(&cwd);
     support::dies_with_parent(&mut cmd);
-    let out = cmd.output().expect("run bundled app");
+    let out = run_bundle(&mut cmd);
     assert!(
         out.status.success(),
         "exit: {:?}\nstderr: {}",

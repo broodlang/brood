@@ -247,7 +247,7 @@ all). NONE never matches — a version constraint is about a selected version."
   (state ctx ic)
   ;; :satisfied (all terms hold → conflict), :contradicted (some term can't hold → moot),
   ;; [:almost pkg] (all but one hold; that one is the unit), or :inconclusive.
-  (pg-ic-rel-go state ctx (map-pairs (get ic :terms)) :none))
+  (pg-ic-rel-go state ctx (%map-pairs (get ic :terms)) :none))
 
 (defn- pg-ic-rel-go
   (state ctx terms unresolved)
@@ -415,7 +415,7 @@ all). NONE never matches — a version constraint is about a selected version."
                                  (pg-intersect (get terms p) s)
                                  s)))))
                  (dissoc (get ic :terms) pkg)
-                 (map-pairs (get cause :terms)))
+                 (%map-pairs (get cause :terms)))
         merged (if (empty? difference)
                  others
                  (assoc others pkg (pg-complement ctx pkg difference))))
@@ -572,7 +572,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
   ;; it as "P must be <every version>" is both wrong and unbounded; such a term can arise as an
   ;; empty-intersection resolvent on the spine).
   (let (reals (filter (fn (kv) (and (not (= (nth kv 0) pg-root-pkg)) (not (empty? (nth kv 1)))))
-                (map-pairs (get ic :terms))))
+                (%map-pairs (get ic :terms))))
     (cond
       (empty? reals) "version solving failed"
       (= 1 (count reals))

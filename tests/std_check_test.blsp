@@ -20,7 +20,7 @@
 
 (defmodule std-check-test (:use test))
 
-;; Every `.blsp` under `dir`, recursively. `cons` + `append-two` (not `append`) so the
+;; Every `.blsp` under `dir`, recursively. `cons` + `%append-two` (not `append`) so the
 ;; walk stays linear in the file count.
 (defn- std-check-files
   (dir)
@@ -28,7 +28,7 @@
     (fold (fn (acc entry)
             (let (p (path/join dir entry))
               (cond
-                (file/dir? p) (append-two (std-check-files p) acc)
+                (file/dir? p) (%append-two (std-check-files p) acc)
                 (string/ends-with? entry ".blsp") (cons p acc)
                 else acc)))
       nil

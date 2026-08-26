@@ -16,18 +16,15 @@
 
 ; ---- the behaviour/interface registry (read by the checker + LSP) ------------
 
-; interface-name → its declared op specs, as DATA
+; interface-name → its declared op specs, as DATA. Read it with `reflect/behaviour-ops`
+; rather than a bare accessor: `ops` is far too common a local name to own as a global
+; (five files in std/ already bind it as a `let`), and reading a registry is tooling.
 (defonce *protocols* {})
 
-(defn register-protocol (pname specs)
+(defn %register-protocol (pname specs)
   "Record interface `pname`'s declared op specs (raw forms) for the checker / LSP."
   (%swap-registry! *protocols* (fn (m) (assoc m pname specs)))
   nil)
-
-(defn ops (pname)
-  "The op specs declared for interface `pname` (or nil) — which ops a module claiming
-  `(:implements pname)` must define, and at what arities."
-  (get *protocols* pname))
 
 ; ---- the behaviour macro ----------------------------------------------------
 
@@ -42,4 +39,4 @@
       (render [model])
       (handle-event [name params model]))"
   (let (ops (filter (fn (s) (pair? s)) specs))
-    (list 'register-protocol (list 'quote bname) (list 'quote ops))))
+    (list '%register-protocol (list 'quote bname) (list 'quote ops))))

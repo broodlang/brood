@@ -65,7 +65,7 @@ fn every_prelude_file_is_included_in_the_concat() {
 /// adding one has to be a decision, not a drift.
 ///
 /// `std/protocol.blsp` joined on 2026-08-21 — behaviour contracts (`defbehaviour`,
-/// `register-protocol`, `ops`, `*protocols*`) are core, so the prelude carries them.
+/// `%register-protocol`, `ops`, `*protocols*`) are core, so the prelude carries them.
 ///
 /// `std/proc/gen.blsp` was briefly listed here (`7cb796f0`, 2026-08-21) and is **not**
 /// any more: the gen_server framework is an ordinary `embedded_module!` again, so its

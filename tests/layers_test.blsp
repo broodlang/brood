@@ -152,7 +152,7 @@
     (register-type-layers :t-reload (list 'layers-test/layer-a))
     (register-file-type ".reload-ext" :t-reload-ext)
     (is (not (empty? (layers-for-type :t-reload))))
-    ;; Re-run editor/layers's ACTUAL embedded source — exactly what `require-force-in`
+    ;; Re-run editor/layers's ACTUAL embedded source — exactly what `%require-force-in`
     ;; does for an imaged `(:use editor/layers)`. With `def` this reset the registries to
     ;; empty; the assertions below fail unless the defs are `defonce`.
     (%load-module-source (%builtin-module "editor/layers") (%builtin-module-file "editor/layers"))

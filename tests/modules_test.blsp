@@ -125,7 +125,7 @@
 
 ;; `:implements` is read by the type checker (types/check/protocol.rs), which pulls the
 ;; clause out of the header source; the loader only has to tolerate it. It was left out
-;; of `defmodule-clause-heads` when unrecognised clauses became a hard error, so every
+;; of `%defmodule-clause-heads` when unrecognised clauses became a hard error, so every
 ;; module claiming a protocol failed to load — caught by a downstream app (willem) whose
 ;; suite stopped loading entirely.
 (describe "defmodule: the (:implements …) checker annotation"
