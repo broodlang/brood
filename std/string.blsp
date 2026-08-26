@@ -204,3 +204,134 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
   ;; `repeat`, which this name would shadow inside the `string` namespace), then
   ;; concatenate in one `apply str` pass.
   (apply str (map (fn (_) s) (range (max 0 n)))))
+
+;; ---- interpolation and printf ------------------------------------------------
+;; Moved here from the prelude 2026-08-26. They were defined in `std/prelude/string.blsp`
+;; with qualified names, which WORKS — a qualified `defn` in a bare-root file defines that
+;; global — but the doc pipeline documents a module from its OWN source file, so neither
+;; appeared on the hosted reference at all. Living beside the rest of `string/` is also
+;; simply where a reader looks for them.
+;;
+;; Nothing in the prelude calls either, and `string` is force-loaded at boot, so the move
+;; costs no availability. `string/interp` is a MACRO: it expands at its call site, which is
+;; fine from a module (`test/describe` proves the pattern) as long as nothing needs it
+;; during the prelude's own expansion — nothing does.
+
+;; `(string/interp "…{expr}…")` builds a string from a template, splicing the value of each
+;; `{expr}` hole — any Brood expression, read at macro-expansion time — between the
+;; literal chunks. `{{` / `}}` are literal braces; braces *inside* a hole nest, so
+;; `{ {:a 1} }` reads a map. It expands to a plain `(str chunk expr …)`, so there is
+;; zero runtime machinery — it is exactly the hand-written `str` call, minus the
+;; quote-chopping. Reach for it wherever a message interleaves text and values:
+;; `(error (string/interp "json: bad number '{tok}' at index {i}"))`.
+(defn- interp-flush
+  (buf parts)
+  ;; push the accumulated literal chunk (reversed chars) onto `parts`, if non-empty
+  (if (empty? buf) parts (cons (apply str (reverse buf)) parts)))
+(defn- interp-hole
+  (chars expr depth parts)
+  ;; inside a {…} hole: accumulate the expression text until the matching `}`, then
+  ;; `read-string` it into a form. Braces nest by `depth` (a map/set literal inside).
+  (cond
+    (empty? chars) (error "string/interp: unterminated '{' in template")
+    (and (= (first chars) "}") (= depth 0))
+      (interp-lit (rest chars)
+        nil
+        (cons (read-string expr) parts))
+    (= (first chars) "{") (interp-hole (rest chars) (str expr "{") (inc depth) parts)
+    (= (first chars) "}") (interp-hole (rest chars) (str expr "}") (dec depth) parts)
+    else (interp-hole (rest chars) (str expr (first chars)) depth parts)))
+(defn- interp-lit
+  (chars buf parts)
+  ;; scanning literal text: `buf` = reversed literal chars, `parts` = reversed forms
+  (cond
+    (empty? chars) (reverse (interp-flush buf parts))
+    (and (= (first chars) "{") (= (second chars) "{"))
+      (interp-lit (rest (rest chars))
+        (cons "{" buf)
+        parts)
+    (and (= (first chars) "}") (= (second chars) "}"))
+      (interp-lit (rest (rest chars))
+        (cons "}" buf)
+        parts)
+    (= (first chars) "{") (interp-hole (rest chars) "" 0 (interp-flush buf parts))
+    else (interp-lit (rest chars) (cons (first chars) buf) parts)))
+(defmacro string/interp (template)
+  "Build a string from a template, splicing each `{expr}` hole's value between the literal text: `(string/interp \"x={x} sum={(+ a b)}\")`. `{{`/`}}` are literal braces; braces nest inside a hole. Expands to a plain `(str …)`."
+  (if (string? template)
+    (cons 'str (interp-lit (string/->list template) nil nil))
+    (error "string/interp: template must be a string literal, got " (pr-str template))))
+
+;; ---- string formatting ------------------------------------------------------
+;; A small `printf`-style helper for inline rendering. The supported specifiers
+;; are a deliberate subset — the common cases for demos and tooling output:
+;;   %s    any value, rendered via `str`
+;;   %d    integer (any number; the type tag is a hint for the reader, not a
+;;         converter — float in / float out, same as %s)
+;;   %f    float with 6 fractional digits (matches the C/Java default)
+;;   %.Nf  float with N fractional digits, rounded — uses `->fixed`
+;;   %%    a literal `%`
+;; Width / justification aren't built in — `pad-left` / `pad-right` cover those
+;; explicitly. Hex/octal/etc. aren't here; add them on demand. Errors on an
+;; unknown spec or a format string that ends inside one; a missing arg renders
+;; as `nil` (debuggable), extra args are ignored.
+(defn string/format (template & args)
+  "Render `template`, replacing each %-specifier with the next of `args`. Supports `%s` `%d` `%f` `%.Nf` `%%`; use `pad-left`/`pad-right` for width.
+
+The runtime half of the pair with [[string/interp]], which is a MACRO: `(string/interp \"x={x}\")` reads its
+values from the surrounding scope and expands to a plain `(str …)` at compile time, so its
+template must be a literal. This one parses at CALL time, so its template can be a value —
+a config string, a translated message — with the arguments passed separately. Neither
+subsumes the other.
+
+Module-rooted rather than bare `format` because that name is also the source FORMATTER
+(`std/format.blsp`, the 81 names behind `nest format`), and one word meaning two unrelated
+things in the same image is a name worth spending to fix."
+  (format-loop template 0 (string/length template) args ""))
+
+(defn- format-loop
+  (template i n args acc)
+  (cond
+    (>= i n) acc
+    (= (string/char-at template i) "%") (format-spec template (inc i) n args acc)
+    else (format-loop template (inc i) n args (str acc (string/char-at template i)))))
+
+(defn- format-spec
+  (template i n args acc)
+  ;; called with `i` pointing one past the `%`
+  (cond
+    (>= i n) (error "string/format: unterminated specifier (lone '%' at end of format string)")
+    (= (string/char-at template i) "%") (format-loop template (inc i) n args (str acc "%"))
+    (= (string/char-at template i) "s")
+      (format-loop template (inc i) n (rest args) (str acc (str (first args))))
+    (= (string/char-at template i) "d")
+      (format-loop template (inc i) n (rest args) (str acc (str (first args))))
+    (= (string/char-at template i) "f")
+      (format-loop template
+        (inc i)
+        n
+        (rest args)
+        (str acc (->fixed (first args) 6)))
+    (= (string/char-at template i) ".") (format-prec template (inc i) n args acc 0)
+    else
+      (error (str "format: unrecognized specifier '%" (string/char-at template i) "' at column " i))))
+
+(defn- format-prec
+  (template i n args acc p)
+  ;; called with `i` pointing one past the `.`, accumulating precision in `p`
+  (cond
+    (>= i n) (error "format: unterminated %.Nf specifier")
+    (= (string/char-at template i) "f")
+      (format-loop template
+        (inc i)
+        n
+        (rest args)
+        (str acc (->fixed (first args) p)))
+    else
+      (let (d (string/->number (string/char-at template i)))
+        (if (and (int? d) (>= d 0) (<= d 9))
+          (format-prec template (inc i) n args acc (+ (* p 10) d))
+          (error (str "format: expected digit or 'f' after '.' in specifier, got '"
+                   (string/char-at template i)
+                   "' at column "
+                   i))))))
