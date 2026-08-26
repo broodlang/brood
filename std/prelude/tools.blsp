@@ -988,7 +988,8 @@ stub `%autoload` binds; see there. Raises if loading `mod` leaves `nm` still a s
     ;; The guard covers the forward as well as the load, so a re-entrant call from
     ;; anywhere in the module's own load path reports the drift rather than looping.
     (binding (*autoloading* nm)
-      (do (require-one mod)
+      (do
+        (require-one mod)
         (apply (eval nm) args)))))
 
 (defmacro %autoload (mod & specs)
@@ -1005,16 +1006,17 @@ Both halves are guarded by the `prelude_hygiene` tests in `crates/lisp/src/lib.r
 every qualified reference the prelude makes into a lazily-loaded module is declared here,
 and that every declared arity still matches its module's actual definition."
   (cons 'do
-    (map
-      (fn (spec)
-        (let (nm (symbol (str (name mod) "/" (name (first spec))))
-              params (map (fn (i) (symbol (str "a" i))) (range 0 (second spec))))
-          (list 'def nm
-            (list 'fn params
-              (list 'autoload-call
-                (list 'quote mod)
-                (list 'quote nm)
-                (cons 'list params))))))
+    (map (fn (spec)
+           (let (nm (symbol (str (name mod) "/" (name (first spec))))
+                 params (map (fn (i) (symbol (str "a" i))) (range 0 (second spec))))
+             (list 'def
+               nm
+               (list 'fn
+                 params
+                 (list 'autoload-call
+                   (list 'quote mod)
+                   (list 'quote nm)
+                   (cons 'list params))))))
       specs)))
 
 ;; std/string.blsp (ADR-230) holds every op whose subject is a string. Only the names the
