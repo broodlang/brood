@@ -19,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-64 | **the JIT miscompiles `json/encode` under sustained load** — hive's `/api/v1/packages*` returns 500 after ~60 requests and then fails until the machine restarts, while `/health` and every web page keep serving. The error is `empty?: expected collection, got int (1114114)` inside `emit-pairs`/`emit-list`, i.e. an int where the recursion expects a list; 1114114 is one past the Unicode maximum (0x10FFFF). `BROOD_NO_JIT=1` makes it 120/120 clean | ⚠️ **open (2026-08-26)** — mitigated in hive by shipping `BROOD_NO_JIT=1`; not fixed |
+| KI-64 | **the JIT miscompiles `json/encode` under sustained load** — hive's `/api/v1/packages*` returns 500 after ~60 requests and then fails until the machine restarts, while `/health` and every web page keep serving. The error is `empty?: expected collection, got int (1114114)` inside `emit-pairs`/`emit-list`, i.e. an int where the recursion expects a list; 1114114 is NOT a codepoint (that reading was a coincidence) — it is a packed deopt-journal word, `17 << 16 \| 2`. `BROOD_NO_JIT=1` makes it 120/120 clean | ✅ **fixed 2026-08-26** — a block-argument spill slot was landing on the deopt checkpoint, because `jit_spill_reserve` gated the WHOLE reserve on having ≥2 non-tail calls while block-argument slots depend only on the operand depth at a block leader. Not shared code, not concurrency, not load: it reproduces in one process on the fourth call. Fixed by clamping the spill window to its reserve (ADR-248); `BROOD_NO_JIT=1` is no longer needed in hive |
 | KI-63 | ~~loading std modules taxes JIT'd hot loops~~ — **RETRACTED 2026-08-25, the effect does not exist.** After a discarded warm-up run in-process, a 20M loop is 23-24 ms whether or not `format` is loaded. Every earlier figure measured the FIRST run, i.e. JIT warm-up, which is variable and shape-sensitive — the same loop read 25 ms in one file and 40-51 ms in another differing only by having three call sites | ☑️ **retracted** — no bug. What is real, and is the reusable part: a whole-process benchmark of a short row measures tiering, not steady state |
 | KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
 | KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | ✅ **fixed 2026-08-26** — by not loading the modules at boot at all: the prelude's `string/`/`seq/` references are autoload stubs that load on first call (ADR-246), and prelude def-sites now travel in the boot cache instead of a second positioned read of the prelude (ADR-247). Warm boot 22.8 -> 11.6 ms, base RSS 55.6 -> 50.7 MB, `startup` -28.9%, every other row ~11-13 ms faster in absolute wall. The std image + registration replay is still the right way to make the *lazy* load fast; the two compose |
@@ -101,7 +101,7 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**KI-61** (startup +82%, a per-wave namespacing tax) is **fixed 2026-08-26** — by making the prelude's library references autoload lazily rather than force-loading at boot (ADR-246), plus moving prelude def-sites into the boot cache (ADR-247): warm boot 22.8 → 11.6 ms, base RSS 55.6 → 50.7 MB, `startup` −28.9%. No open items. **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**KI-64** (a JIT block-argument spill landed on the deopt journal, surfacing as `json/encode` failing under load) is **fixed 2026-08-26** — the cause was neither shared code nor concurrency, which the entry had inferred: it reproduces in one process on the fourth call. **KI-61** (startup +82%, a per-wave namespacing tax) is **fixed 2026-08-26** — by making the prelude's library references autoload lazily rather than force-loading at boot (ADR-246), plus moving prelude def-sites into the boot cache (ADR-247): warm boot 22.8 → 11.6 ms, base RSS 55.6 → 50.7 MB, `startup` −28.9%. No open items. **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
 **fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
 **KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
@@ -184,10 +184,82 @@ repetition, the usual flake defence, does not help. The missing dimension is a *
 
 ---
 
-## KI-64 — the JIT miscompiles `json/encode` under sustained load (open)
+## KI-64 — a JIT block-argument spill landed on the deopt journal ✅ FIXED 2026-08-26
 
-**Status:** ⚠️ **open (2026-08-26)** — root-caused to the JIT, mitigated in hive with
-`BROOD_NO_JIT=1`, not fixed.
+**Status:** ✅ **fixed** — and the mechanism is *not* the one this entry inferred. It is
+neither shared code nor multi-process nor load: it reproduces in **one process, on the
+fourth call**, with no `spawn` and no JSON. `BROOD_NO_JIT=1` is no longer needed in hive.
+
+**Root cause.** A JIT'd arm's frame is `[locals | spill slots | checkpoint journal]`, and the
+spill area has two independent halves — **call-result** spills (a heap handle left live below
+a later call, the `fib` shape) and **block-argument** spills (an operand crossing a block
+boundary that is not a profiled `Int`, ADR/KI-49). `jit_spill_reserve` sizes both and opened
+with:
+
+```rust
+if non_tail_call_count(code) < 2 { return 0; }
+```
+
+which is right for the call-result half and wrong for the other one. Block-argument slots are
+needed whenever the operand stack is deep where a block boundary falls, and that happens with
+a **single** non-tail call as soon as an `if` sits inside that call's argument list:
+
+```lisp
+(walk-list (rest xs) (step (first xs) (if first? acc (cons "," acc))) false)
+```
+
+Those arms reserved nothing, and the lowering's `blockarg_spill_base` was a *clamped*
+subtraction — with a zero reserve it collapsed onto `spill_base`, which for a journalling arm
+**is the checkpoint slot**. The native then wrote block arguments over the deopt journal, and
+a later block-argument read returned the packed journal word `(resume_ip << 16 | depth)` as
+if it were a live value. `17 << 16 | 2` = **1114114** — the number in the error, and the
+reason it never varied with the payload. Arms with no journal were worse: they wrote past the
+frame top entirely (`register-impl-check-arity` wanted 11 such slots against a 10-slot frame).
+
+Affected arms were not exotic: `fold-loop`, `index-of-seq-from`, `json/emit-list`,
+`json/emit-items`, `any?`, and most of the `match-*` predicates.
+
+**The fix** is `jit_plan::blockarg_spill_window` — the window is the *top* `len` slots of the
+reserve and `len = max_leader_depth.min(reserve)`, so it can never reach the journal. Where
+the reserve exists (the ≥2-non-tail-call shape KI-49 measured) `reserve >= want` and nothing
+changes; where it does not, `len` is 0 and a `Handle` crossing a boundary falls through to
+`ParamRepr::Int`, which tag-checks and **deopts** rather than corrupting — the pre-KI-49
+behaviour, correct but slower. A `spill-area-exceeds-frame` bail in `jit_lower_arm` backstops
+it; it is unreachable by construction and stays because *nothing* checked before this.
+
+**Growing the frame instead was measured and rejected.** Reserving `max_leader_depth` for
+every lowerable arm is the obvious fix and costs **+2 to +7% on nearly every benchmark row**
+(`errors-deep` +7.5, `primes` +6.8, `loop` +6.1, `spawn` +5.3, `collatz` +4.4, `fib` +3.1),
+because `max_leader_depth` counts int/bool merges that need no slot at all — `not`, `int?`,
+`inc`, `dec` and every small type predicate. The clamped form measures flat: full
+`ab-bench --all`, every row inside its own floor (`reduce` +2.8% vs a 5.6% floor, `pingpong`
++0.9% vs 0.4%, `ring` +0.8% vs 1.8%). `supervisor` read +17.2% then −13.5% across two runs
+with a 12–17% base-vs-base floor, i.e. **not resolvable** on that row — no claim either way.
+
+**Guarded by** `tests/jit_blockarg_spill_test.blsp` (the behavioural end-to-end case, which
+fails only if the clamp *and* the backstop are both removed — verified by sabotaging both) and
+two invariant tests in `jit_plan` that fail on the clamp alone, naming the arms.
+
+**What this entry got wrong, and why.** Every inference in the original diagnosis pointed at
+shared compiled code, and each was reasonable and wrong:
+
+- *"the multi-PROCESS dimension looks load-bearing"* — it is not. `spawn` merely got the arm
+  hot faster. The single-process repro fails on call 4.
+- *`BROOD_NO_SHARED_ARMS=1` made it clean* — a timing accident, and the most expensive false
+  signal here. With the reproduction narrowed to one process the same flag **still fails**.
+  A flag that fixes a bug is evidence about *scheduling*, not about mechanism, until the
+  repro is minimal.
+- *"the first ~60 requests succeed, then permanent"* — read as a load threshold; it is just
+  the tier-up point, and the sticky part is `BAILED` deopt feedback.
+
+The thing that actually localised it was **`BROOD_NO_DEOPT_RESUME=1`**, the one flag in the
+matrix that names the machinery rather than a policy — and then one `eprintln` at the failing
+`empty?` showing `raw=[0x2,0x110002,…]`, i.e. a *packed journal word* rather than a plausible
+datum. Decode the bad value before theorising about how it travelled.
+
+---
+
+**Original report (superseded above).**
 
 **What it looks like from outside.** hive's package API returns 500 while the site looks
 healthy: `/health` answers, every web page renders, the database is fine. A machine restart

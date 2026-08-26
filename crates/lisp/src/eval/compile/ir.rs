@@ -800,6 +800,13 @@ impl CompiledClosure {
     /// resolve to the later arm (Rust's `max_by_key`, same as eval). Returns the
     /// winner's compiled body iff it was
     /// VM-eligible — otherwise `None`, so the tree-walker runs the *same* arm.
+    /// **Test-only.** Every compiled arm of this closure, for invariant tests that need
+    /// a corpus of real chunks rather than the one arm a given argc selects.
+    #[cfg(test)]
+    pub(crate) fn dbg_arms(&self) -> impl Iterator<Item = &Arc<CompiledArm>> {
+        self.arms.iter().filter_map(|a| a.compiled.as_ref())
+    }
+
     pub(crate) fn arm_for(&self, argc: usize) -> Option<&Arc<CompiledArm>> {
         // Fast path: a single-arity closure (the common case) — skip the filter +
         // `max_by_key` scan, one per VM call. Identical result for one arm.

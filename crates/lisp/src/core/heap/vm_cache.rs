@@ -404,6 +404,25 @@ impl Heap {
         (base, gbase)
     }
 
+    /// **Test-only.** Every compiled arm currently in this process's VM body cache — the
+    /// corpus a frame-layout invariant test needs, since the shapes that matter live in
+    /// the standard library rather than in a hand-written chunk. Returns the arms rather
+    /// than their code so nothing has to clone `Inst` (a hot type, deliberately not
+    /// `Clone`).
+    #[cfg(test)]
+    pub fn dbg_compiled_arms(&self) -> Vec<std::sync::Arc<crate::eval::compile::CompiledArm>> {
+        let mut out = Vec::new();
+        for entry in self.vm_cache.borrow().values() {
+            let Some(cc) = entry.cc.as_ref() else {
+                continue;
+            };
+            for arm in cc.dbg_arms() {
+                out.push(arm.clone());
+            }
+        }
+        out
+    }
+
     /// The current activation's IC block bases — set by the drivers at every arm
     /// transition (call/tail/return/resume/native entry), read by every site-indexed
     /// method below. Returns the previous pair, for save/restore around a transition.
