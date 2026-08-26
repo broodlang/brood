@@ -1,0 +1,68 @@
+;; scripts/suggest-renames.blsp — map a project's unbound symbols to their new names.
+;;
+;; After a namespacing wave, a dependent repo fails with a list of `unbound symbol: X`.
+;; Nearly always X did not disappear, it MOVED: there is now exactly one `mod/X` in the
+;; image. That is a mechanical lookup, and doing it by hand across nine repos is how names
+;; get missed — `nest check` reports one file's worth at a time, so the tail is long.
+;;
+;; Reads unbound names on stdin (one per line) and prints `OLD NEW` for each one it can
+;; resolve UNAMBIGUOUSLY. A name with two candidates (`send` is `proc/send` and `tcp/send`)
+;; prints as a comment instead: a wrong guess there is a silent behaviour change, so it is
+;; left for a person.
+;;
+;;   nest check 2>&1 | grep -o 'unbound symbol: .*' | sed 's/.*: //' | sort -u \
+;;     | brood scripts/suggest-renames.blsp
+
+(require-one 'io)
+(require-one 'string)
+(require-one 'seq)
+
+(doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))
+
+(defn- candidates
+  (n)
+  "Every public global whose LOCAL part is exactly `n` — i.e. the places `n` could have
+moved to. A `%`-prefixed primitive counts: several names became mechanism rather than
+vocabulary, and the caller still needs to know."
+  (sort (map name
+          (filter (fn (s)
+                    (let (full (name s)
+                          i (index-of full "/"))
+                      (and i (> i 0) (= (string/substring full (inc i) (count full)) n))))
+            (global-names)))))
+
+(defn- split-candidate
+  (n)
+  "`mod/rest` when the bare name `n` is `mod-rest` and that qualified name exists.
+
+The dominant shape of this ecosystem's renames: a bare `gui-size` became `gui/size`,
+`rand-int` became `rand/int`. [[candidates]] cannot see those, because it matches on the
+LOCAL part and `gui-size` is not the local part of anything — the hyphen was the namespace
+all along. Tries each hyphen left to right, so `editor-buffer-put` finds `editor/buffer-put`
+before giving up."
+  (let (parts (string/split n "-"))
+    (when (> (count parts) 1)
+      (first (filter (fn (q) (bound? (string/->symbol q)))
+               (map (fn (i)
+                      (str (reduce (fn (a b) (if (= a "") b (str a "-" b))) "" (take i parts))
+                        "/"
+                        (reduce (fn (a b) (if (= a "") b (str a "-" b))) "" (drop i parts))))
+                 (range 1 (count parts))))))))
+
+(defn- stdin-lines
+  (acc)
+  ;; `read-line` is the only stdin door (there is no bulk reader); nil marks EOF.
+  (let (l (read-line)) (if (nil? l) (reverse acc) (stdin-lines (cons l acc)))))
+
+(let (lines (filter (fn (l) (not (= (string/trim l) ""))) (stdin-lines nil)))
+  (doseq (raw lines)
+    (let (n (string/trim raw)
+          cs (candidates n))
+      (cond
+        ;; already fine — the checker's complaint was about something else
+        (bound? (string/->symbol n)) (io/puts "# " n " is bound; not a rename")
+        (= 1 (count cs)) (io/puts n " " (first cs))
+        ;; `gui-size` → `gui/size`: the hyphen was the namespace.
+        (and (empty? cs) (split-candidate n)) (io/puts n " " (split-candidate n))
+        (empty? cs) (io/puts "# " n " — no candidate; removed or renamed outright")
+        else (io/puts "# " n " — AMBIGUOUS: " (reduce (fn (a b) (str a " " b)) "" cs))))))
