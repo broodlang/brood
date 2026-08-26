@@ -42,6 +42,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - The formatter split a keyword argument from its value (`:to` alone on a line) —
   134 files, a net 377 fewer lines once rejoined.
 - Three concurrency tests that timed their races instead of observing them.
+- **`docsite/render-js`** — a `:wrap? false` render hands page chrome to the host, but only
+  half that hand-off existed: `render-css` was public and the filter script was private, so
+  an embedding host could recover the stylesheet and had no way to recover the JS. The
+  fragment carries the `Filter…` input, so every embedder shipped a search box that focuses,
+  accepts typing and does nothing — correct HTML, 200 OK, no server-side symptom. Both of
+  brood.fly.dev's embedders (the language reference and every package's docs page) had it.
 - `nest new`'s `.gitignore` never ignored `.brood/`, the startup-image cache, so every
   scaffolded project committed a build artifact and re-committed it on each `nest check`.
   Eight ecosystem repos were carrying the churning binary.
