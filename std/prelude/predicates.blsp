@@ -32,6 +32,9 @@
 ;; linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed the
 ;; private table from the accumulator's input map; never surfaced to user code.
 (defn %table-from-map (m)
+  "Copy the immutable map `m` into a fresh mutable table. Internal: used only by the
+compiler's linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed its
+private table, and never surfaced to user code — reach for `table/new` instead."
   (reduce (fn (t kv) (%table-put t (first kv) (second kv))) (%table) (map-pairs m)))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
