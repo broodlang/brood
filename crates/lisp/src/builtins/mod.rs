@@ -900,8 +900,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(int)),
         &["s"],
-        "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes)).",
+        "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse is (%codepoints->string codes), i.e. string/codepoints->.",
         string_to_codepoints);
+    // The inverse. It had none until 2026-08-26, so every text parser in std/ rebuilt its
+    // result with `(apply str (map int->char cs))` — a seq view, a closure per code point
+    // making a one-character string, then an N-way variadic concat. Mechanism, not policy:
+    // encoding a code point sequence as UTF-8 is not a rule Brood can express cheaply.
+    def(
+        heap,
+        "%codepoints->string",
+        Arity::exact(1),
+        Sig::new(vec![seqable], string),
+        &["codes"],
+        "A string from a vector, list or bytes of integer Unicode codepoints — the inverse of string/->codepoints, in one O(n) pass. Errors on a non-int or a value that is not a Unicode scalar.",
+        codepoints_to_string);
     // Grapheme clusters + normalisation: UAX #29 / UAX #15 table lookups, not rules
     // Brood can express. The cluster is the unit a human calls "a character", so it
     // is what editor cursor motion steps by; normalisation is what makes text that

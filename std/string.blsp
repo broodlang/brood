@@ -70,7 +70,11 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
 (defn codepoints-> (cs)
   "Build a string from a list (or vector) of Unicode codepoint integers — the
 inverse of the `string/->codepoints` primitive."
-  (apply str (map int->char cs)))
+  ;; One native O(n) pass. This was `(apply str (map int->char cs))`, which allocated a
+  ;; seq view, called a closure per code point to make a ONE-CHARACTER string, and then
+  ;; concatenated N of those variadically — for a shape every text parser in std/ uses to
+  ;; get back from the code vector `string/->codepoints` handed it.
+  (%codepoints->string cs))
 
 (defn ->bytes (s)
   "Encode string `s` as a bytes value — its UTF-8 bytes. Inverse of `string/bytes->`."
