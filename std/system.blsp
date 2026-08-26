@@ -29,8 +29,26 @@
 ;; ---- process identity -------------------------------------------------------
 
 (defn argv ()
-  "Command-line arguments as a vector of strings, including `argv[0]` (the binary)."
+  "Command-line arguments as a vector of strings, including `argv[0]` (the binary).
+
+  This is the RAW invocation, host CLI and all — for `brood run.blsp -- --verbose` it is
+  `[\"brood\" \"run.blsp\" \"--\" \"--verbose\"]`. A script wanting its own options wants
+  [[script-args]] instead; finding them here means knowing where brood's arguments stop,
+  which is knowing brood's parser."
   (%argv))
+
+(defn script-args ()
+  "The arguments meant for this program, without the host CLI's own — everything after
+  `--`, so `brood run.blsp -- --verbose x` gives `[\"--verbose\" \"x\"]`.
+
+  A script could not take options at all before this: every trailing argument parsed as
+  another FILE to run, so `-- --verbose` made brood try to open a file by that name and
+  die. The workaround was to configure scripts through the environment.
+
+  For a bundled app (`nest release`), which boots before any CLI parsing and owns its whole
+  argv, this is everything after `argv[0]` — so a bundled program and a script see the same
+  shape."
+  (%script-args))
 
 (defn os-type ()
   "The current OS as a keyword: `:linux`, `:macos`, or `:windows`."

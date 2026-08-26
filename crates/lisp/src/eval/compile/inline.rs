@@ -141,7 +141,7 @@ pub(crate) fn linmap_read_op(sym: Symbol) -> Option<&'static str> {
 
 /// Whitelisted map UPDATE ops (return the new map — must be consumed at a sink) → Table op.
 /// Only ops that provably store serializable values (integers, removals) are whitelisted;
-/// `map-assoc` stores arbitrary `Value`s including ropes, which `table-put`/`table-snapshot`
+/// `%map-assoc` stores arbitrary `Value`s including ropes, which `table-put`/`table-snapshot`
 /// cannot serialize — so it is excluded until the Table can hold non-serializable values.
 pub(crate) fn linmap_update_op(sym: Symbol) -> Option<&'static str> {
     match value::symbol_name_opt(sym)? {

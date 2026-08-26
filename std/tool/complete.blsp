@@ -65,7 +65,7 @@ suggestions\", never to an error on the user's command line."
 
 ;; Every path under `dir` (recursively) whose filename ends in `suffix`.
 ;;
-;; `cons` a file (O(1)); splice a subdirectory's list with `append-two`, which copies
+;; `cons` a file (O(1)); splice a subdirectory's list with `%append-two`, which copies
 ;; only that small list and SHARES `acc`. A plain `(append acc …)` recopies the
 ;; growing accumulator once per entry — O(files²), which is quadratic on a large
 ;; project. `project` learned that the hard way; don't reintroduce it here. Order is
@@ -76,7 +76,7 @@ suggestions\", never to an error on the user's command line."
     (fold (fn (acc entry)
             (let (p (path/join dir entry))
               (cond
-                (file/dir? p) (append-two (complete-under p suffix) acc)
+                (file/dir? p) (%append-two (complete-under p suffix) acc)
                 (string/ends-with? entry suffix) (cons p acc)
                 else acc)))
       nil

@@ -1,7 +1,7 @@
 ;; codemod — identifier-aware whole-token rewrites over a project's Brood sources.
 ;;
 ;; Drives `nest rename`. A plain text replace corrupts substrings (`map/get` sits inside
-;; `multimap/get`, `map-pairs` inside `assoc-map-pairs`); this rewrites only whole Brood
+;; `multimap/get`, `%map-pairs` inside `%assoc-map-pairs`); this rewrites only whole Brood
 ;; identifiers, using the Brood identifier character set for the word boundary, so those are
 ;; never touched. Pure Brood over `file/slurp` / `file/spit` / `file/walk-files`.
 (defmodule codemod
@@ -9,7 +9,7 @@
 
 ;; The Brood identifier boundary set — letters, digits, and the symbol chars a name may
 ;; contain, but NOT ":" or "/" (so `name:` and `mod/name` boundaries match), while letters
-;; and `-` protect a longer identifier (`multimap-`, `assoc-map-pairs`).
+;; and `-` protect a longer identifier (`multimap-`, `%assoc-map-pairs`).
 (def- *ident*
   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_?!*<>=+.%&~^-")
 

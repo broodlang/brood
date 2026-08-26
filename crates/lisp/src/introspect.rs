@@ -396,7 +396,7 @@ pub fn project_files(interp: &mut Interp) -> Vec<String> {
 }
 
 /// The on-disk file a `require`able feature resolves to, found the same way
-/// `require` itself does: `require-find` over the live `*load-path*` (which
+/// `require` itself does: `%require-find` over the live `*load-path*` (which
 /// `bootstrap_project` extends with the project's source dirs). Powers
 /// goto-definition on the module name in `(require-one 'foo)`. `None` for a baked-in
 /// std module (it has no file — it's `%builtin-module` source) or a feature not
@@ -404,7 +404,7 @@ pub fn project_files(interp: &mut Interp) -> Vec<String> {
 pub fn module_file(interp: &mut Interp, feature: &str) -> Option<String> {
     let cp = interp.heap.checkpoint();
     let expr = format!(
-        "(require-find \"{}.blsp\" *load-path*)",
+        "(%require-find \"{}.blsp\" *load-path*)",
         escape_brood_string(feature)
     );
     let out = match interp.eval_str(&expr) {

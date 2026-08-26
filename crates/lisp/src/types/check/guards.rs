@@ -445,7 +445,7 @@ fn literal_eq_guard(a: Value, b: Value) -> Option<(Symbol, Ty)> {
 ///
 /// `match` compiles `(match expr clause…)` to a `let`+`if`+`%eq` chain whose
 /// innermost failure is `(throw [:match-error 'context target 'patterns])`
-/// (`match-no-match`, `std/prelude.blsp`) — and that exact shape is only
+/// (`%match-no-match`, `std/prelude.blsp`) — and that exact shape is only
 /// present in the compiled tree when the match has **no catch-all clause**
 /// (an irrefutable wildcard/bind clause compiles to its body directly, no
 /// further `if`, so the throw never gets generated). So finding this shape
@@ -651,7 +651,7 @@ fn literal_values_equal(heap: &Heap, a: Value, b: Value) -> bool {
 /// against `lit` — which would make that clause unreachable (an earlier
 /// occurrence in the chain always wins). Returns the duplicate `if` form, if
 /// found. Stops silently as soon as `form` isn't itself another same-symbol
-/// `%eq`-guarded `if` (a catch-all body, a `match-no-match` throw, or a
+/// `%eq`-guarded `if` (a catch-all body, a `%match-no-match` throw, or a
 /// divergent hand-written `if`) — nothing more to reason about.
 pub(super) fn find_redundant_clause(
     heap: &Heap,

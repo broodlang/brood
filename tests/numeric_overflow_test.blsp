@@ -28,7 +28,7 @@
 (defn lm-overflow-tally (xs acc)
   (if (empty? xs)
     acc
-    (lm-overflow-tally (rest xs) (map-int-add acc (first xs) 4611686018427387904))))
+    (lm-overflow-tally (rest xs) (%map-int-add acc (first xs) 4611686018427387904))))
 
 ;; ---------------------------------------------------------------------------
 ;; 1. `rest` on a Range stepped past i64::MAX
@@ -60,7 +60,7 @@
     (assert= (rest (%range 0 1 1)) nil)))
 
 ;; ---------------------------------------------------------------------------
-;; 2. `map-int-add` past i64::MAX
+;; 2. `%map-int-add` past i64::MAX
 ;;
 ;; The fused read-modify-write used an unchecked `+`: a debug panic, and in release
 ;; a large NEGATIVE count — the classic silently-corrupt counter. It now raises,
@@ -71,32 +71,32 @@
 ;; operator name in the message differs) — the last test below pins that, since it
 ;; is the reason the error was chosen over promotion.
 ;; ---------------------------------------------------------------------------
-(describe "map-int-add raises rather than wrapping"
+(describe "%map-int-add raises rather than wrapping"
   (test "MAX + 1 raises a catchable error"
-    (assert-error (map-int-add {:a I64-MAX} :a 1))
-    (is (includes? (error-of (map-int-add {:a I64-MAX} :a 1)) "±2^63")))
+    (assert-error (%map-int-add {:a I64-MAX} :a 1))
+    (is (includes? (error-of (%map-int-add {:a I64-MAX} :a 1)) "±2^63")))
   (test "MIN - 1 raises in the other direction too"
-    (assert-error (map-int-add {:a I64-MIN} :a -1)))
+    (assert-error (%map-int-add {:a I64-MIN} :a -1)))
   (test "a bigint already stored under the key is out of range, not read as 0"
     ;; It can only have got there via `assoc`; the old `as_int().unwrap_or(0)`
     ;; silently restarted the count from `delta` instead.
-    (assert-error (map-int-add {:a 9223372036854775808} :a 1)))
+    (assert-error (%map-int-add {:a 9223372036854775808} :a 1)))
   (test "deep in the trie, not just at the root"
     ;; 64 keys forces real CHAMP nodes, so the check is exercised on the branch
     ;; path rather than only on a root data slot.
     (let (m (fold (fn (acc i) (assoc acc i I64-MAX)) {} (%range->list (%range 0 64 1))))
-      (assert-error (map-int-add m 63 1))
-      (assert-error (map-int-add m 0 2))
-      (assert= (get (map-int-add m 63 -1) 63) (- I64-MAX 1))))
+      (assert-error (%map-int-add m 63 1))
+      (assert-error (%map-int-add m 0 2))
+      (assert= (get (%map-int-add m 63 -1) 63) (- I64-MAX 1))))
   (test "the linear-map rewrite is unobservable at the boundary"
     ;; A tail-recursive tally over a map accumulator is exactly the shape the
     ;; optimizer rewrites into `table-incr`. Both arms must raise; before this,
     ;; the rewritten one raised and the plain one wrapped.
     (assert-error (lm-overflow-tally (list :a :a :a) {})))
   (test "the ordinary path is unchanged"
-    (assert= (map-int-add {:a 1} :a 2) {:a 3})
-    (assert= (map-int-add {} :a 5) {:a 5})
-    (assert= (map-int-add {:a 1 :b 2} :b -2) {:a 1 :b 0})))
+    (assert= (%map-int-add {:a 1} :a 2) {:a 3})
+    (assert= (%map-int-add {} :a 5) {:a 5})
+    (assert= (%map-int-add {:a 1 :b 2} :b -2) {:a 1 :b 0})))
 
 ;; ---------------------------------------------------------------------------
 ;; 3. A Decimal meeting a Ratio: bounded scale, checked exponent

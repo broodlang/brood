@@ -82,7 +82,7 @@ behind a long-lived loop has changed since it started."
 ;; Re-loading a DEPENDENCY file must re-establish its package context, or its
 ;; `(defmodule b)` would drop from the rooted `foo/b` to a bare `b` on every reload
 ;; (the flat model had no such hazard; rooting introduces it). We bracket the context
-;; in Brood here — the same pattern the loader's `require-force-package` uses — so the
+;; in Brood here — the same pattern the loader's `%require-force-package` uses — so the
 ;; Rust reload primitive stays package-agnostic. A root-project / std / loose file has
 ;; no registered key and reloads exactly as before.
 (defn- reload-package-key
@@ -149,9 +149,9 @@ behind a long-lived loop has changed since it started."
       (fn (acc entry)
         (let (p (path/join dir entry))
           (cond
-            ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
+            ;; `cons`/`%append-two` (share the accumulator tail) not `(append acc …)`
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
-            (file/dir? p) (append-two (reload-collect-blsp p) acc)
+            (file/dir? p) (%append-two (reload-collect-blsp p) acc)
             (string/ends-with? entry ".blsp") (cons p acc)
             else acc)))
       nil

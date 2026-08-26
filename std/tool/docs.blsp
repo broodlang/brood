@@ -30,7 +30,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   (let (embedded (%builtin-module key))
     (if embedded
       embedded
-      (let (path (require-find (str key ".blsp") *load-path*)) (when path (file/slurp path))))))
+      (let (path (%require-find (str key ".blsp") *load-path*)) (when path (file/slurp path))))))
 
 ;; The module docstring: a module's first top-level form, when it is a string
 ;; literal (mirrors the function-docstring rule). nil if there's no leading
@@ -50,7 +50,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; The bare module title from a file path: "a/b/foo.blsp" -> "foo".
 (defn- docs-basename
   (path)
-  (let (i (path-last-slash path (dec (string/length path)))
+  (let (i (%path-last-slash path (dec (string/length path)))
         file (if (< i 0) path (string/substring path (inc i) (string/length path))))
     (if (string/ends-with? file ".blsp") (string/substring file 0 (- (string/length file) 5)) file)))
 

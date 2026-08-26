@@ -2,7 +2,7 @@
 ;; module-level one. The bug it regressed: `defonce` expanded to `(bound? '*x*)`, and a bare
 ;; quoted symbol is not rewritten to the module namespace, so the check read at ROOT (always
 ;; unbound) and re-`def`d every time. Fixed by resolving the name against the loading module
-;; (`defonce-qualified-name`). This regressed real registries wiped on an imaged start (ADR-218).
+;; (`%defonce-qualified-name`). This regressed real registries wiped on an imaged start (ADR-218).
 
 (defmodule defonce-test (:use test))
 
@@ -20,8 +20,8 @@
     (assert= *dx* :first)) ; not :second — the second defonce saw *dx* already bound
   (test "…whereas a plain def overwrites (the contrast)"
     (assert= *dy* :second))
-  (test "defonce-qualified-name prefixes the current module, passes bare/qualified through"
+  (test "%defonce-qualified-name prefixes the current module, passes bare/qualified through"
     ;; at runtime current-ns is nil, so a bare name passes through unchanged…
-    (assert= (defonce-qualified-name '*z*) '*z*)
+    (assert= (%defonce-qualified-name '*z*) '*z*)
     ;; …and an already-qualified one is never doubled
-    (assert= (defonce-qualified-name 'foo/*z*) 'foo/*z*)))
+    (assert= (%defonce-qualified-name 'foo/*z*) 'foo/*z*)))

@@ -443,14 +443,14 @@ after EOF is emitted as a last line (for streams without a trailing newline)."
 (defn fold (f init s)
   "Reduce stream `s` with `f` (a `(fn (acc v) → new-acc)`) starting from `init`.
 Raises on a stream error."
-  (fold-loop f init s))
+  (%fold-loop f init s))
 
-(defn- fold-loop
+(defn- %fold-loop
   (f acc s)
   (let (item (next s))
     (cond
       (= item :done) acc
-      (= (first item) :ok) (fold-loop f (f acc (second item)) s)
+      (= (first item) :ok) (%fold-loop f (f acc (second item)) s)
       else (error "fold: " (second item)))))
 
 (defn ->list (s)

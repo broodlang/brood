@@ -168,7 +168,7 @@
     (let (cols (csv-wide-header 400 nil)
           header (string/join "," cols)
           row (string/join "," (map (fn (c) (str "v" c)) cols))
-          ms (map-pairs (first (csv/parse-maps (str header "\n" row)))))
+          ms (%map-pairs (first (csv/parse-maps (str header "\n" row)))))
       (assert= 400 (count ms))
       (assert= "vc1" (get (first (csv/parse-maps (str header "\n" row))) "c1"))
       (assert= "vc400" (get (first (csv/parse-maps (str header "\n" row))) "c400")))))

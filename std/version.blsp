@@ -371,7 +371,7 @@ The shape a plugin manifest's `:enhances` map is checked with:
                (let ([nm constraint] kv
                      have (get versions nm))
                  (or (nil? have) (not (satisfies? have constraint)))))
-         (map-pairs constraints))))
+         (%map-pairs constraints))))
 
 (defn unsatisfied (versions constraints)
   "The `constraints` entries `versions` does NOT satisfy, as a list of
@@ -382,4 +382,4 @@ the user when it declines a plugin, instead of a bare false."
                     have (get versions nm))
                 (when (or (nil? have) (not (satisfies? have constraint)))
                   [nm constraint have])))
-    (map-pairs constraints)))
+    (%map-pairs constraints)))

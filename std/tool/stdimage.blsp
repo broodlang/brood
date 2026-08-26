@@ -9,7 +9,7 @@
 ;; function still enforces its own arity).
 ;;
 ;; It is the same mechanism `std/tool/project.blsp` already uses, pointed at a different set
-;; of modules, and the two coexist through `add-image-source!` — the prelude consults the
+;; of modules, and the two coexist through `%add-image-source!` — the prelude consults the
 ;; project's sections first, then any additional source, so a project can still shadow a
 ;; stdlib module name.
 ;;
@@ -76,7 +76,7 @@ since the prelude is always present."
             _ (when (not (file/dir? dir)) (file/mkdir dir))
             names (or modules (builtin-modules))
             probed (fold (fn (acc m)
-                           (map-assoc acc
+                           (%map-assoc acc
                              (name m)
                              (%isolate (fn ()
                                          (let (before (into #{} (global-names))
@@ -91,11 +91,11 @@ since the prelude is always present."
             ;; The edges every restored module needs replayed, held in a ROOT global so the
             ;; section that carries them belongs to no module — named `stdimage/…` it made
             ;; `stdimage` look already-loaded at boot, and its source then never loaded.
-            _ (set-std-require-edges! *require-edges*)
+            _ (%set-std-require-edges! *require-edges*)
             roots (filter (fn (s) (not (prefixed-by-any? (name s) names))) (global-names))
             owner-of (fold (fn (acc g)
                              (let (best (fold (fn (winner m)
-                                                (let (probe (map-get probed (name m) nil))
+                                                (let (probe (%map-get probed (name m) nil))
                                                   (if (and probe
                                                         (contains? probe g)
                                                         (or (nil? winner)
@@ -103,7 +103,7 @@ since the prelude is always present."
                                                     [m (count probe)]
                                                     winner)))
                                           nil names))
-                               (if best (map-assoc acc g (name (first best))) acc)))
+                               (if best (%map-assoc acc g (name (first best))) acc)))
                        {}
                        roots)
             sections (append [["%std-edges" ['*std-require-edges*]]]
@@ -113,7 +113,7 @@ since the prelude is always present."
                                  pfx (str mn "/")
                                  owned (filter (fn (s) (string/starts-with? (name s) pfx))
                                          (global-names))
-                                 mine (filter (fn (g) (= (map-get owner-of g nil) mn)) roots)
+                                 mine (filter (fn (g) (= (%map-get owner-of g nil) mn)) roots)
                                  syms (apply vector (append owned mine)))
                              ;; A module contributing nothing would image as materialisable-but-empty,
                              ;; and a later require would restore no bindings rather than fall back.
@@ -135,8 +135,8 @@ case `require` keeps loading stdlib modules from source exactly as before."
           (let (sec (get idx "%std-edges"))
             (when sec
               (%image-load-section path (first sec) (second sec))
-              (merge-require-edges! *std-require-edges*)))
-          (add-image-source! path (dissoc idx "%std-edges"))
+              (%merge-require-edges! *std-require-edges*)))
+          (%add-image-source! path (dissoc idx "%std-edges"))
           (count (keys idx)))))))
 
 (defn ensure ()

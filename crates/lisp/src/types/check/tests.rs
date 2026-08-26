@@ -2727,10 +2727,10 @@ fn flags_too_many_arguments() {
 
 #[test]
 fn arity_message_handles_range_and_variadic() {
-    // `map-get` is `range(2, 3)` → "expected 2 to 3".
-    assert!(warnings("(map-get {})")
+    // `%map-get` is `range(2, 3)` → "expected 2 to 3".
+    assert!(warnings("(%map-get {})")
         .iter()
-        .any(|w| w.contains("map-get") && w.contains("2 to 3")));
+        .any(|w| w.contains("%map-get") && w.contains("2 to 3")));
     // `apply` is `at_least(2)` → "expected 2 or more"; 1 is too few.
     assert!(warnings("(apply f)")
         .iter()

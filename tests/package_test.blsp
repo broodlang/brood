@@ -749,7 +749,7 @@
                  (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}"))
                    (get (second kv) :deps)))
                "]}"))
-        (map-pairs releases)))
+        (%map-pairs releases)))
     "]}"))
 
 (defn rr-release-json (version checksum deps)

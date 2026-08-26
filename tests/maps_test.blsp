@@ -81,31 +81,31 @@
     ;; Both `keys` and `vals` walk the trie identically, so the i-th key
     ;; corresponds to the i-th value — that's the invariant we test.
     (let (m {:a 1 :b 2 :c 3})
-      (assert= (map-pairs m)
+      (assert= (%map-pairs m)
         (map (fn (k) [k (get m k)]) (keys m)))))
   (test "count and empty? on a populated map"
     (assert= (count {:a 1 :b 2 :c 3}) 3)
     (refute (empty? {:a 1})))
-  (test "map-count is the O(1) kernel count that count/empty? ride on"
-    (assert= (map-count {}) 0)
-    (assert= (map-count {:a 1 :b 2 :c 3}) 3)
+  (test "%map-count is the O(1) kernel count that count/empty? ride on"
+    (assert= (%map-count {}) 0)
+    (assert= (%map-count {:a 1 :b 2 :c 3}) 3)
     ;; survives assoc/dissoc (the CHAMP root size updates on the path back up)
-    (assert= (map-count (dissoc (assoc {:a 1} :b 2 :c 3) :a)) 2)
+    (assert= (%map-count (dissoc (assoc {:a 1} :b 2 :c 3) :a)) 2)
     ;; agrees with the generic count + the pair enumeration
     (let (m (into {} (map (fn (i) [i (* i i)]) (range 50))))
-      (assert= (map-count m) 50)
-      (assert= (map-count m) (count m))
-      (assert= (map-count m) (count (map-pairs m))))))
+      (assert= (%map-count m) 50)
+      (assert= (%map-count m) (count m))
+      (assert= (%map-count m) (count (%map-pairs m))))))
 
-(describe "map-pairs & reduce-kv"
-  (test "map-pairs returns one [k v] vector per entry; empty for {}"
-    (let (ps (map-pairs {:a 1 :b 2 :c 3}))
+(describe "%map-pairs & reduce-kv"
+  (test "%map-pairs returns one [k v] vector per entry; empty for {}"
+    (let (ps (%map-pairs {:a 1 :b 2 :c 3}))
       (assert= (count ps) 3)
       ;; Round-trip through reduce + assoc recovers the original — proves
       ;; every entry is present without depending on iteration order.
       (assert= (reduce (fn (m kv) (assoc m (first kv) (last kv))) {} ps)
         {:a 1 :b 2 :c 3}))
-    (assert= (map-pairs {}) nil))
+    (assert= (%map-pairs {}) nil))
   (test "keys and vals enumerate every entry (incl. falsy) — set, not order"
     ;; CHAMP iteration isn't insertion order; assert content via maps.
     (let (m {:a nil :b false :c 0})

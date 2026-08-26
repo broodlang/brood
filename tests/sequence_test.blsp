@@ -146,27 +146,27 @@
     (assert= (sort nil) nil)
     (assert= (sort []) nil)))
 
-;; `reverse-onto` is the one-pass spelling of `(append (reverse xs) ys)` — the shape
+;; `%reverse-onto` is the one-pass spelling of `(append (reverse xs) ys)` — the shape
 ;; every tail-recursive accumulator loop ends in. The equivalence to the long form is
 ;; the property that matters, so each case asserts it directly.
-(describe "reverse-onto"
+(describe "%reverse-onto"
   (test "reverses the prefix onto the tail"
-    (assert= (reverse-onto (list 3 2 1) (list 4 5)) (list 1 2 3 4 5)))
+    (assert= (%reverse-onto (list 3 2 1) (list 4 5)) (list 1 2 3 4 5)))
   (test "agrees with (append (reverse xs) ys)"
     (let (xs (list 5 4 3 2 1) ys (list 6 7))
-      (assert= (reverse-onto xs ys) (append (reverse xs) ys)))
-    (assert= (reverse-onto (range 20 0 -1) (list 21)) (append (reverse (range 20 0 -1)) (list 21))))
+      (assert= (%reverse-onto xs ys) (append (reverse xs) ys)))
+    (assert= (%reverse-onto (range 20 0 -1) (list 21)) (append (reverse (range 20 0 -1)) (list 21))))
   (test "either side may be empty"
-    (assert= (reverse-onto nil (list 4 5)) (list 4 5))
-    (assert= (reverse-onto (list 3 2 1) nil) (list 1 2 3))
-    (assert= (reverse-onto nil nil) nil))
+    (assert= (%reverse-onto nil (list 4 5)) (list 4 5))
+    (assert= (%reverse-onto (list 3 2 1) nil) (list 1 2 3))
+    (assert= (%reverse-onto nil nil) nil))
   (test "the prefix reads as a sequence, like reverse"
-    (assert= (reverse-onto [3 2 1] (list 4)) (list 1 2 3 4))
-    (assert= (reverse-onto #{1} (list 4)) (list 1 4)))
+    (assert= (%reverse-onto [3 2 1] (list 4)) (list 1 2 3 4))
+    (assert= (%reverse-onto #{1} (list 4)) (list 1 4)))
   (test "the tail is shared, not copied — a long tail costs nothing"
     ;; Splicing onto a 10k-element tail returns in O(prefix); this would be O(tail)
     ;; if the tail were rebuilt, and the identity check pins it.
-    (let (tail (range 10000) out (reverse-onto (list 2 1) tail))
+    (let (tail (range 10000) out (%reverse-onto (list 2 1) tail))
       (assert= (count out) 10002)
       (assert= (rest (rest out)) tail))))
 
@@ -196,10 +196,10 @@
       (assert= (reduce + 0 (map second m)) 6)
       (assert= (frequencies (filter (fn ([_ v]) (> v 1)) m)) {[:b 2] 1 [:c 3] 1})
       (assert= (frequencies (mapcat (fn ([k v]) (list k v)) m)) {:a 1 :b 1 :c 1 1 1 2 1 3 1})))
-  (test "seq coerces a map to its pairs; entries is an alias for map-pairs"
+  (test "seq coerces a map to its pairs; entries is an alias for %map-pairs"
     (let (m {:x 1 :y 2})
       (assert= (frequencies (seq m)) {[:x 1] 1 [:y 2] 1})
-      (assert= (map-pairs m) (map-pairs m))))
+      (assert= (%map-pairs m) (%map-pairs m))))
   (test "frequencies tallies occurrences into a map"
     (assert= (frequencies (list :a :b :a :a :b)) {:a 3 :b 2})
     (assert= (frequencies nil) {})
@@ -212,7 +212,7 @@
     (assert= (for (x (range 2) y (range 2)) [x y]) (list [0 0] [0 1] [1 0] [1 1])))
   (test "destructuring a binding"
     ;; ADR-040: map iteration order is hash-driven; compare as a frequency map.
-    (assert= (frequencies (for ([k v] (map-pairs {:a 1 :b 2})) [v k]))
+    (assert= (frequencies (for ([k v] (%map-pairs {:a 1 :b 2})) [v k]))
       {[1 :a] 1 [2 :b] 1}))
   (test "build a map with into {}"
     (assert= (into {} (for (x (range 3)) [x (* x x)])) {0 0 1 1 2 4}))
@@ -223,7 +223,7 @@
     (assert= (for (x (range 3) y (range 3) :when (not (= x y))) [x y])
       (list [0 1] [0 2] [1 0] [1 2] [2 0] [2 1]))))
 
-(describe "into / times / iterate-times / enumerate / doseq"
+(describe "into / times / %iterate-times / enumerate / doseq"
   (test "into a map assocs [k v] pairs; into a list appends"
     (assert= (into {:a 1} (list [:b 2] [:c 3])) {:a 1 :b 2 :c 3})
     (assert= (into (list 1 2) (list 3 4)) (list 1 2 3 4)))
@@ -235,8 +235,8 @@
     (assert= (frequencies (into [] {:a 1 :b 2})) {[:a 1] 1 [:b 2] 1})
     (assert= (into {} {:a 1 :b 2}) {:a 1 :b 2}))
   (test "times applies f n times" (assert= (seq/times 5 inc 0) 5) (assert= (seq/times 0 inc 9) 9))
-  (test "iterate-times yields n+1 successive states"
-    (assert= (iterate-times (fn (n) (* n 2)) 1 4) (list 1 2 4 8 16)))
+  (test "%iterate-times yields n+1 successive states"
+    (assert= (%iterate-times (fn (n) (* n 2)) 1 4) (list 1 2 4 8 16)))
   (test "enumerate pairs items with indices"
     (assert= (enumerate (list :a :b :c)) (list [0 :a] [1 :b] [2 :c]))))
 
@@ -487,7 +487,7 @@
       ;; `-` is order-sensitive: a reversed or reordered walk shows up here
       (assert= (fold - 100 v) (fold - 100 (apply list v)))
       ;; and so does a builder, which records the visit order outright
-      (assert= (fold flip-cons nil v) (fold flip-cons nil (apply list v)))))
+      (assert= (fold %flip-cons nil v) (fold %flip-cons nil (apply list v)))))
   (test "the initial accumulator is returned untouched for an empty vector"
     (assert= (fold + 7 []) 7)
     (assert= (fold str "seed" []) "seed"))

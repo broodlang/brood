@@ -106,7 +106,7 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
         (url-pct-decode-loop s
           (+ i 1)
           n
-          (reverse-onto (string/->bytes c) acc))))))
+          (%reverse-onto (string/->bytes c) acc))))))
 
 (defn percent-decode (s)
   "Decode percent-encoded sequences in `s`, returning the original string.
@@ -160,7 +160,7 @@ defines rather than as its field map."
                                    (name (first kv))
                                    (str (first kv)))
                              (->string (second kv))))
-                      (map-pairs params))))
+                      (%map-pairs params))))
     (apply str (reverse (url-pairs->query pairs nil true)))))
 
 ;; ---- query string decoding --------------------------------------------------
