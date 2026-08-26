@@ -13,7 +13,9 @@ fn manifest_version() -> String {
         .split_once(":version")
         .expect("project.blsp declares :version")
         .1;
-    let opening_quote = after_key.find('"').expect(":version is followed by a string");
+    let opening_quote = after_key
+        .find('"')
+        .expect(":version is followed by a string");
     let rest = &after_key[opening_quote + 1..];
     let closing_quote = rest.find('"').expect(":version's string is terminated");
     rest[..closing_quote].to_string()
