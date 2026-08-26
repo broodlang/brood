@@ -101,7 +101,7 @@ operation that can collect (KI-51, the bug-#2 / KI-48 class), a root set that on
 about and another does not (KI-52), and an identity that is unique per node but not across nodes
 (KI-53).
 
-**KI-61** (startup +82%, a per-wave namespacing tax) is **fixed 2026-08-26** — by making the prelude's library references autoload lazily rather than force-loading at boot (ADR-246), plus moving prelude def-sites into the boot cache (ADR-247): warm boot 22.8 → 11.6 ms, base RSS 55.6 → 50.7 MB, `startup` −28.9%. No open items. **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
+**KI-64** (a JIT block-argument spill landed on the deopt journal, surfacing as `json/encode` failing under load) is **fixed 2026-08-26** — the cause was neither shared code nor concurrency, which the entry had inferred: it reproduces in one process on the fourth call. **KI-61** (startup +82%, a per-wave namespacing tax) is **fixed 2026-08-26** — by making the prelude's library references autoload lazily rather than force-loading at boot (ADR-246), plus moving prelude def-sites into the boot cache (ADR-247): warm boot 22.8 → 11.6 ms, base RSS 55.6 → 50.7 MB, `startup` −28.9%. No open items. **KI-60** (the stdlib lost stderr) and **KI-59** (a successful `nest run --for` could exit 1) and **KI-58** (the namespacing killed the `table-put` inline; `sieve` 11.6×) was found by the first cross-language harness run on 0.11.0 and **fixed 2026-08-25**. **KI-57** (a use-after-GC in the selective-receive scan) was found and
 **fixed 2026-08-25**, along with the CI gap that let it survive — see `make gcstress`.
 **KI-56** (a large message blocked unrelated mailbox operations) was
 **fixed 2026-08-25** — ADR-245's budget, at **both** sites: the L1 send-side copy and the
@@ -184,10 +184,82 @@ repetition, the usual flake defence, does not help. The missing dimension is a *
 
 ---
 
-## KI-64 — the JIT miscompiles `json/encode` under sustained load (open)
+## KI-64 — a JIT block-argument spill landed on the deopt journal ✅ FIXED 2026-08-26
 
-**Status:** ⚠️ **open (2026-08-26)** — root-caused to the JIT, mitigated in hive with
-`BROOD_NO_JIT=1`, not fixed.
+**Status:** ✅ **fixed** — and the mechanism is *not* the one this entry inferred. It is
+neither shared code nor multi-process nor load: it reproduces in **one process, on the
+fourth call**, with no `spawn` and no JSON. `BROOD_NO_JIT=1` is no longer needed in hive.
+
+**Root cause.** A JIT'd arm's frame is `[locals | spill slots | checkpoint journal]`, and the
+spill area has two independent halves — **call-result** spills (a heap handle left live below
+a later call, the `fib` shape) and **block-argument** spills (an operand crossing a block
+boundary that is not a profiled `Int`, ADR/KI-49). `jit_spill_reserve` sizes both and opened
+with:
+
+```rust
+if non_tail_call_count(code) < 2 { return 0; }
+```
+
+which is right for the call-result half and wrong for the other one. Block-argument slots are
+needed whenever the operand stack is deep where a block boundary falls, and that happens with
+a **single** non-tail call as soon as an `if` sits inside that call's argument list:
+
+```lisp
+(walk-list (rest xs) (step (first xs) (if first? acc (cons "," acc))) false)
+```
+
+Those arms reserved nothing, and the lowering's `blockarg_spill_base` was a *clamped*
+subtraction — with a zero reserve it collapsed onto `spill_base`, which for a journalling arm
+**is the checkpoint slot**. The native then wrote block arguments over the deopt journal, and
+a later block-argument read returned the packed journal word `(resume_ip << 16 | depth)` as
+if it were a live value. `17 << 16 | 2` = **1114114** — the number in the error, and the
+reason it never varied with the payload. Arms with no journal were worse: they wrote past the
+frame top entirely (`register-impl-check-arity` wanted 11 such slots against a 10-slot frame).
+
+Affected arms were not exotic: `fold-loop`, `index-of-seq-from`, `json/emit-list`,
+`json/emit-items`, `any?`, and most of the `match-*` predicates.
+
+**The fix** is `jit_plan::blockarg_spill_window` — the window is the *top* `len` slots of the
+reserve and `len = max_leader_depth.min(reserve)`, so it can never reach the journal. Where
+the reserve exists (the ≥2-non-tail-call shape KI-49 measured) `reserve >= want` and nothing
+changes; where it does not, `len` is 0 and a `Handle` crossing a boundary falls through to
+`ParamRepr::Int`, which tag-checks and **deopts** rather than corrupting — the pre-KI-49
+behaviour, correct but slower. A `spill-area-exceeds-frame` bail in `jit_lower_arm` backstops
+it; it is unreachable by construction and stays because *nothing* checked before this.
+
+**Growing the frame instead was measured and rejected.** Reserving `max_leader_depth` for
+every lowerable arm is the obvious fix and costs **+2 to +7% on nearly every benchmark row**
+(`errors-deep` +7.5, `primes` +6.8, `loop` +6.1, `spawn` +5.3, `collatz` +4.4, `fib` +3.1),
+because `max_leader_depth` counts int/bool merges that need no slot at all — `not`, `int?`,
+`inc`, `dec` and every small type predicate. The clamped form measures flat: full
+`ab-bench --all`, every row inside its own floor (`reduce` +2.8% vs a 5.6% floor, `pingpong`
++0.9% vs 0.4%, `ring` +0.8% vs 1.8%). `supervisor` read +17.2% then −13.5% across two runs
+with a 12–17% base-vs-base floor, i.e. **not resolvable** on that row — no claim either way.
+
+**Guarded by** `tests/jit_blockarg_spill_test.blsp` (the behavioural end-to-end case, which
+fails only if the clamp *and* the backstop are both removed — verified by sabotaging both) and
+two invariant tests in `jit_plan` that fail on the clamp alone, naming the arms.
+
+**What this entry got wrong, and why.** Every inference in the original diagnosis pointed at
+shared compiled code, and each was reasonable and wrong:
+
+- *"the multi-PROCESS dimension looks load-bearing"* — it is not. `spawn` merely got the arm
+  hot faster. The single-process repro fails on call 4.
+- *`BROOD_NO_SHARED_ARMS=1` made it clean* — a timing accident, and the most expensive false
+  signal here. With the reproduction narrowed to one process the same flag **still fails**.
+  A flag that fixes a bug is evidence about *scheduling*, not about mechanism, until the
+  repro is minimal.
+- *"the first ~60 requests succeed, then permanent"* — read as a load threshold; it is just
+  the tier-up point, and the sticky part is `BAILED` deopt feedback.
+
+The thing that actually localised it was **`BROOD_NO_DEOPT_RESUME=1`**, the one flag in the
+matrix that names the machinery rather than a policy — and then one `eprintln` at the failing
+`empty?` showing `raw=[0x2,0x110002,…]`, i.e. a *packed journal word* rather than a plausible
+datum. Decode the bad value before theorising about how it travelled.
+
+---
+
+**Original report (superseded above).**
 
 **What it looks like from outside.** hive's package API returns 500 while the site looks
 healthy: `/health` answers, every web page renders, the database is fine. A machine restart
