@@ -343,6 +343,14 @@ Both steps are the same mechanism, and it is not a bug in either commit:
 
 Step 2 was proven by deleting the single line and rebuilding: **24.3 -> 16.8 ms, -30.8%**.
 
+**Corroborated by the published harness, 2026-08-26.** The first full cross-language run on
+0.13.0 reads `startup` at **31.2 ms** (5th of eight, behind .NET) — consistent with the sweep and
+still climbing. It also names a **second symptom this entry had not recorded: base RSS is 56.1 MB**
+(6th of eight, heavier than Node's 42.9), against ~19-22 MB at 0.3.11. Same cause: the force-loaded
+modules are materialised into every boot. Both figures are warm — the boot cache is populated, so
+this is not the cold/warm bimodality `../brood-benchmarks/BENCHMARKS.md` warns about. It also
+deflates every other published row, since `compute = wall - startup`.
+
 **Why the load is there.** A prelude helper referencing `seq/find` or `string/char-at` is
 late-bound — a qualified name in a function *body* resolves when the function is called — but
 boot's namespace-resolve is a no-op for the root prelude, so those refs never auto-require. The
