@@ -899,8 +899,8 @@ mod tests {
     /// For every arm a real boot compiles: the block-argument spill area must not reach the
     /// deopt journal. `max_leader_depth` is what the chunk *wants* and `jit_spill_reserve`
     /// is what the frame *has*; the two are gated differently, so the lowering must clamp
-    /// the want to the reserve. Before KI-64 it did not, and `fold-loop`,
-    /// `index-of-seq-from`, `json/emit-list` and every `walk-list`-shaped arm wrote block
+    /// the want to the reserve. Before KI-64 it did not, and `%fold-loop`,
+    /// `%index-of-seq-from`, `json/emit-list` and every `walk-list`-shaped arm wrote block
     /// arguments straight onto their journal slot.
     #[test]
     fn block_argument_spills_never_reach_the_deopt_journal() {
