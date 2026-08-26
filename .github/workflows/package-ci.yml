@@ -1,0 +1,91 @@
+name: Brood package CI
+
+# The ONE definition of what a Brood package's CI does, called by every package repo
+# (see `.github/workflows/ci.yml` in each) rather than copied into it. Eleven copies of
+# this file meant the next change to the gate was eleven edits, and they would drift —
+# which is exactly how a gate stops meaning the same thing everywhere.
+#
+# Why it exists at all: there was no CI on any package in this org, and the cost was
+# concrete. hatch was broken from brood 0.11.0 — `(/stop sup)` reaching for a root `stop`
+# that had become `gen/stop` — and nothing noticed for two releases, until a hive deploy
+# crash-looped in production on a different stale name. Its first run here found a second
+# one: `server/start` returned before its listener was accepting.
+#
+# brood is built from source and tracks `main` deliberately: that makes this an early
+# warning for the whole ecosystem rather than a check against a frozen toolchain.
+
+on:
+  workflow_call:
+    inputs:
+      brood-ref:
+        description: "Which brood to build against. Defaults to main — the early-warning behaviour."
+        type: string
+        required: false
+        default: main
+      run-tests:
+        description: "Set false for a repo whose suite needs services CI does not have."
+        type: boolean
+        required: false
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: check + format + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The toolchain is the expensive part, so it is cached on the brood commit it
+      # was built from — a brood push invalidates it, which is exactly when a rebuild
+      # is wanted.
+      - name: Resolve brood HEAD
+        id: brood
+        run: echo "sha=$(git ls-remote https://github.com/broodlang/brood.git "${{ inputs.brood-ref }}"  | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the brood toolchain
+        id: cache-brood
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin
+          key: brood-bin-${{ runner.os }}-${{ steps.brood.outputs.sha }}
+
+      - name: Build brood
+        if: steps.cache-brood.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${{ inputs.brood-ref }}" https://github.com/broodlang/brood.git /tmp/brood
+          cd /tmp/brood
+          # `cargo build` rather than `make install`: the default cargo features already
+          # include `dev-tools`, which is what carries `nest test` — the lean
+          # `RUN_FEATURES` build does NOT have it, so a package's suite could not run.
+          # Going through cargo also skips ./configure and the gui/audio system-library
+          # question entirely, which a bare runner does not have.
+          cargo build --release --bin brood --bin nest
+          mkdir -p "$HOME/.local/bin"
+          cp target/release/brood target/release/nest "$HOME/.local/bin/"
+
+      - name: Resolve dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          [ -f project.blsp ] && nest fetch || echo "no project.blsp — nothing to fetch"
+
+      - name: nest check
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          nest check
+
+      - name: nest format --check
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          nest format --check
+
+      - name: nest test
+        if: inputs.run-tests
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          nest test
