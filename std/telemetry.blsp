@@ -8,7 +8,7 @@
 ;;    process). The only process a buggy handler can take down is the listener — and a
 ;;    *throwing* handler doesn't even do that (the listener catches it and detaches the
 ;;    handler). An UNCATCHABLE handler fault (a stack overflow, `(exit … :kill)`) kills
-;;    only the listener; supervise it (see `start-telemetry`) and it restarts with the
+;;    only the listener; supervise it (see `start`) and it restarts with the
 ;;    handler table intact. This is the deliberate trade-off vs. Erlang's inline
 ;;    dispatch: we accept one listener as a serialization point in exchange for total
 ;;    emitter isolation. Keep handlers cheap, or `forward` heavy work to your own
@@ -29,7 +29,7 @@ that event runs on each emit. Crucially, handlers run in a dedicated LISTENER pr
 reached by a fire-and-forget `send` — so a handler can never crash, hang, or slow the
 emitting process; the only thing a buggy handler can take down is the listener (and a
 *throwing* handler is merely caught and detached). Start the listener once
-(`start-telemetry`) and supervise it; the handler table is a shared global that
+(`start`) and supervise it; the handler table is a shared global that
 survives a restart. To run slow handler work off the listener too, `forward` to a
 process you own."
   (:use math))
@@ -96,7 +96,7 @@ handler fault kills only this process."
 
 ;; ---- lifecycle --------------------------------------------------------------
 
-(defn start-telemetry ()
+(defn start ()
   "Spawn the telemetry listener, register it as `:telemetry`, and return its pid. Call
 once at startup. Supervise the returned pid (e.g. as a `:permanent` child) so it
 restarts on an uncatchable handler fault — the handler table is a separate global, so
@@ -110,9 +110,9 @@ listener."
   "The listener pid, or nil if telemetry isn't started."
   (whereis :telemetry))
 
-(defn stop-telemetry ()
+(defn stop ()
   "Stop the listener if running. Returns nil. (Handlers stay registered in the global;
-a later `start-telemetry` reuses them.)"
+a later `start` reuses them.)"
   (let (pid (pid)) (when pid (send pid :stop)) nil))
 
 (defn sync ()

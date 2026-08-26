@@ -1261,7 +1261,7 @@
           "two different git URLs"))))
 
 ;; The `fetch`/`tree` verbs themselves are cwd-driven (they walk from `(file/cwd)` to a
-;; project root), so — like `run-project` — they can't be isolated from the brood
+;; project root), so — like `run` — they can't be isolated from the brood
 ;; repo the suite runs inside. The hand check is `nest fetch`/`nest tree` in a
 ;; scaffolded project. Here we cover their pure, cwd-free helpers.
 (describe "package: tree helpers"

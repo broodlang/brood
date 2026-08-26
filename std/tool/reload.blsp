@@ -213,7 +213,7 @@ use yet)."
     ;; Two-step setup for a directory:
     ;;   1. spawn a per-file watcher for every .blsp currently in the tree
     ;;      (silently — no "+" line; these files were already loaded by the
-    ;;      caller, typically `nest run`'s `run-project` walk);
+    ;;      caller, typically `nest run`'s `run` walk);
     ;;   2. spawn the dir watcher with `known` pre-seeded to that set, so
     ;;      it only fires on files that appear *after* startup, and does
     ;;      `load` + per-file watcher for each.

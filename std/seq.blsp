@@ -35,7 +35,10 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
   (reduce-while-loop f init (seq coll)))
 
 (defn frequencies (coll)
-  "A map from each distinct element of `coll` to how many times it occurs."
+  "A map from each distinct element of `coll` to how many times it occurs.
+
+    (seq/frequencies [:a :b :a])   → {:b 1, :a 2}
+    (seq/frequencies [])           → {}"
   ;; The map accumulator is always a map, so hit the 3-arg kernel ops
   ;; (`map-assoc`/`map-get`) directly — variadic `assoc` would build a rest-list
   ;; and `get` a `cond` dispatch on every one of the n elements.
@@ -69,7 +72,10 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
              1)))
 
 (defn group-by (f coll)
-  "A map from each `(f x)` to the list of items of `coll` that produced it, each list in original order."
+  "A map from each `(f x)` to the list of items of `coll` that produced it, each list in original order.
+
+    (seq/group-by math/even? [1 2 3 4])   → {false (1 3), true (2 4)}
+    (seq/group-by count [\"a\" \"bb\"])       → {1 (\"a\"), 2 (\"bb\")}"
   ;; Prepend per group (O(1)) then reverse every group's list once at the end.
   ;; Direct kernel `map-assoc`/`map-get` — the accumulator is always a map.
   (map/update-vals (fold (fn (m x) (let (k (f x)) (map-assoc m k (cons x (map-get m k nil)))))
@@ -213,7 +219,13 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
 
 ;; (find pred coll) -> the first element satisfying pred, or nil.
 (defn find (pred coll)
-  "The first item of `coll` for which `(pred x)` holds, or `nil`."
+  "The first item of `coll` for which `(pred x)` holds, or `nil`.
+
+    (seq/find (fn (n) (> n 2)) [1 2 3 4])   → 3
+    (seq/find (fn (n) (> n 9)) [1 2])       → nil
+
+`nil` for \"not found\" is indistinguishable from finding a stored `nil` — use
+`seq/index-of` when that matters."
   (cond (empty? coll) nil (pred (first coll)) (first coll) else (seq/find pred (rest coll))))
 
 (defn distinct (coll)
@@ -221,7 +233,10 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
   (reverse (nth (fold distinct-step [{} nil] coll) 1)))
 
 (defn flatten (coll)
-  "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves."
+  "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves.
+
+    (seq/flatten '(1 (2 (3))))   → (1 2 3)
+    (seq/flatten '(1 [2 3]))     → (1 [2 3])   ; a vector is a LEAF, not descended into"
   (reverse (flatten-acc coll nil)))
 
 (defn split-at (n coll)

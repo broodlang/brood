@@ -1,5 +1,5 @@
 ;; std/task — run a thunk off the current process with timeout + cancel.
-;; `(:use task)` brings `task`/`cancel-task`/`await` in bare. These tests are
+;; `(:use task)` brings `task`/`cancel`/`await` in bare. These tests are
 ;; inherently concurrent (every case spawns worker + coordinator processes), and
 ;; the suite runs each test in its own green process on top of that.
 ;; Register-only — discovered and run by `nest test`.
@@ -47,16 +47,16 @@
               (and (= (first a) h2) (= (second a) :two))))
         (is (or (and (= (first b) h1) (= (second b) :one))
               (and (= (first b) h2) (= (second b) :two)))))))
-  (test "cancel-task stops a long task and sends no reply"
+  (test "cancel stops a long task and sends no reply"
     (let (h (task (fn () (receive (:never x))) {:timeout 5000}))
-      (cancel-task h)
+      (cancel h)
       ;; nothing should arrive; a short selective wait falls through to :clear
       (assert= (receive ([:task-done t v] :got) ([:task-timeout t] :got) (after 60 :clear))
         :clear)))
-  (test "cancel-task on an already-finished task is a harmless no-op"
+  (test "cancel on an already-finished task is a harmless no-op"
     (let (h (task (fn () 1)))
       (assert= (receive ([:task-done t v] v)) 1)
-      (cancel-task h)
+      (cancel h)
       :ok))
   (test "latest supersedes the prior job: only the new reply arrives"
     ;; a slow prior job, then supersede it — the prior's reply is cancelled, and only

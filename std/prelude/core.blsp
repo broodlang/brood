@@ -129,7 +129,11 @@
 ;; list form for the recursion, so a map costs one extra `map-pairs` pass total
 ;; rather than O(n) per step.
 (defn fold (f acc coll)
-  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no intermediate lists."
+  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no intermediate lists.
+
+    (fold + 0 [1 2 3 4])                      → 10
+    (fold (fn (a x) (cons x a)) nil [1 2 3])  → (3 2 1)
+    (fold max 0 [3 9 4])                      → 9"
   ;; DISPATCH ORDER IS LOAD-BEARING. A vector is tested first, with the one-call
   ;; `vector?` predicate rather than `type-of` + `%eq` from the bottom of the chain.
   ;; The branches are disjoint (`type-of` is `:vector` for a vector and `:pair` for a
@@ -174,7 +178,12 @@
   (coll acc)
   (if (empty? coll) acc (reverse-acc (rest coll) (cons (first coll) acc))))
 (defn reverse (coll)
-  "The items of `coll` in reverse order, as a list."
+  "The items of `coll` in reverse order, as a list.
+
+    (reverse [1 2 3])  → (3 2 1)
+    (reverse nil)      → nil
+
+A string is not a sequence here — reverse its `string/->list` if you need that."
   (reverse-acc (seq coll) nil))
 
 (defn- reverse-onto

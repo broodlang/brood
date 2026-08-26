@@ -45,7 +45,12 @@ to degrade rather than fail asks the build."
   "The 0-based index of `x` in `coll` at or after `from` (default 0), or -1 if absent.
 For a string, `x` is a substring (multi-char ok; the empty string matches at `from`);
 for a list or vector, `x` is an element compared structurally. The `from` offset is
-what incremental search rides on (formerly the separate `index-of`)."
+what incremental search rides on (formerly the separate `index-of`).
+
+    (index-of \"hello\" \"ll\")     → 2
+    (index-of \"hello\" \"zz\")     → -1
+    (index-of [:a :b :c] :b)     → 1
+    (index-of \"abab\" \"ab\" 1)    → 2   ; search resumes at `from`"
   (let (start (or from 0))
     (cond
       ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood
@@ -77,7 +82,12 @@ incremental search rides on."
   (%str-last-index-of s needle (or before (string/length s))))
 
 (defn includes? (coll x)
-  "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), and maps (membership among values — use `contains?` for keys)."
+  "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), and maps (membership among values — use `contains?` for keys).
+
+    (includes? [1 2 3] 2)         → true
+    (includes? \"hello\" \"ell\")     → true
+    (includes? {:a 1} 1)          → true    ; VALUES, not keys
+    (includes? {:a 1} :a)         → false   ; use contains? for that"
   (cond
     (map? coll) (includes? (vals coll) x)
     else (>= (index-of coll x) 0)))

@@ -99,7 +99,11 @@ current element and `acc` is the current accumulator."
 
 (defn vec (coll)
   "`coll` as a VECTOR (`(into [] coll)`, named). A map becomes its `[k v]` pairs
-and a set its elements, as everywhere else `seq` applies."
+and a set its elements, as everywhere else `seq` applies.
+
+    (vec '(1 2 3))   → [1 2 3]
+    (vec {:a 1})     → [[:a 1]]
+    (vec nil)        → []"
   (into [] coll))
 
 (defn- append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
@@ -118,7 +122,12 @@ and a set its elements, as everywhere else `seq` applies."
 
 (defn- count-acc (coll n) (if (empty? coll) n (count-acc (rest coll) (%add n 1))))
 (defn count (coll)
-  "The number of items in `coll` (a list, vector, string, or map)."
+  "The number of items in `coll` (a list, vector, string, or map).
+
+    (count [1 2 3])      → 3
+    (count \"hello\")      → 5
+    (count {:a 1 :b 2})  → 2
+    (count nil)          → 0"
   ;; `vector?`/`map?` short-circuit to the O(1) `vector-length`/`map-count`
   ;; kernels (both were O(n) — a fold walk / a `map-pairs` allocation); lists
   ;; and nil go through a dedicated tail loop, not a per-element counting closure.
@@ -171,7 +180,11 @@ and a set its elements, as everywhere else `seq` applies."
                (pr-str coll)
                ")"))))
 
-(defn nth "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range."
+(defn nth "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range.
+
+    (nth [10 20 30] 1)        → 20
+    (nth [10 20] 9)           → nil
+    (nth [10 20] 9 :missing)  → :missing"
   ;; The fixed 2-arity arm is the hot path (`(nth v i)`): it is VM-eligible
   ;; (exact arity), so its body compiles to bytecode and the inner `vector-ref`
   ;; inlines to a slab read — whereas the variadic-only definition deferred the

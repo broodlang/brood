@@ -7,7 +7,12 @@
 
 ;; (range hi) -> 0..hi-1 ; (range lo hi) -> lo..hi-1 ; (range lo hi step).
 (defn range (a & more)
-  "A range of integers: `(range hi)` is 0..hi-1, `(range lo hi)` is lo..hi-1, `(range lo hi step)` strides by `step`. The result is a *lazy* range — `fold`/`reduce`/`sum`/`count` walk it without building a list (O(1) memory); every other op treats it as the list of those integers. Empty ranges are `nil`."
+  "A range of integers: `(range hi)` is 0..hi-1, `(range lo hi)` is lo..hi-1, `(range lo hi step)` strides by `step`. The result is a *lazy* range — `fold`/`reduce`/`sum`/`count` walk it without building a list (O(1) memory); every other op treats it as the list of those integers. Empty ranges are `nil`.
+
+    (range 4)        → (0 1 2 3)
+    (range 2 5)      → (2 3 4)
+    (range 0 10 3)   → (0 3 6 9)
+    (range 0)        → nil"
   (cond
     (empty? more) (%range 0 a 1)
     (empty? (rest more)) (%range a (first more) 1)
@@ -15,7 +20,11 @@
 
 ;; (take n coll) -> the first n elements (fewer if coll is shorter).
 (defn take (n coll)
-  "The first `n` items of `coll` (fewer if it is shorter), as a list."
+  "The first `n` items of `coll` (fewer if it is shorter), as a list.
+
+    (take 2 [1 2 3 4])  → (1 2)
+    (take 9 [1 2])      → (1 2)
+    (take 0 [1 2])      → nil"
   (take-acc n coll nil))
 (defn- take-acc
   (n coll acc)
@@ -25,7 +34,10 @@
 
 ;; (drop n coll) -> coll without its first n elements.
 (defn drop (n coll)
-  "`coll` without its first `n` items."
+  "`coll` without its first `n` items.
+
+    (drop 2 [1 2 3 4])  → (3 4)
+    (drop 9 [1 2])      → nil"
   (if (or (<= n 0) (empty? coll)) coll (drop (- n 1) (rest coll))))
 
 ;; (take-while pred coll) / (drop-while pred coll) split on the first failure.
@@ -82,7 +94,11 @@
 ;; `(number? (first a))` is one tag-of compare. Empty coll → empty list.
 ;; Custom-comparator `(sort less? coll)` stays on the Brood-side `merge-sort`.
 (defn sort (a & more)
-  "Sort a collection (stable). `(sort coll)` is ascending by `<` for numbers, or by structural order (lexicographic on vectors/lists, text order on strings/symbols/keywords) for anything else. `(sort less? coll)` uses a strict less-than predicate."
+  "Sort a collection (stable). `(sort coll)` is ascending by `<` for numbers, or by structural order (lexicographic on vectors/lists, text order on strings/symbols/keywords) for anything else. `(sort less? coll)` uses a strict less-than predicate.
+
+    (sort [3 1 2])              → (1 2 3)
+    (sort [\"b\" \"a\"])            → (\"a\" \"b\")
+    (sort > [3 1 2])            → (3 2 1)"
   (cond
     (not (empty? more)) (merge-sort a (first more))
     (empty? a) nil
@@ -137,7 +153,13 @@
 ;; intermediate list-of-sublists nor spread it through `apply append`.
 
 (defn into (to from)
-  "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a **set**, items are added and duplicates collapse (set result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work."
+  "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a **set**, items are added and duplicates collapse (set result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work.
+
+    (into [] '(1 2 3))        → [1 2 3]
+    (into [1] [2 3])          → [1 2 3]
+    (into #{} [1 1 2])        → #{1 2}
+    (into {} [[:a 1]])        → {:a 1}
+    (into [] {:a 1})          → [[:a 1]]"
   (cond
     ;; Map target: build via the kernel's GC-quiet CHAMP builder (`%map-into`) —
     ;; an implementation detail of *constructing* a fresh immutable map (it writes
@@ -362,7 +384,10 @@ and it must be loaded before this `defrecord`.
 
 (defn- repeat-acc (n x acc) (if (<= n 0) acc (repeat-acc (dec n) x (cons x acc))))
 (defn repeat (n x)
-  "A list of `x` repeated `n` times (empty if `n` <= 0)."
+  "A list of `x` repeated `n` times (empty if `n` <= 0).
+
+    (repeat 3 :a)   → (:a :a :a)
+    (repeat 0 :a)   → nil"
   (repeat-acc n x nil))
 
 (defn- repeatedly-acc
@@ -371,7 +396,7 @@ and it must be loaded before this `defrecord`.
 
 ;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
 ;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
-;; running them for side effects (`(map require-one mods)`, `(map run-test ts)`)
+;; running them for side effects (`(map require-one mods)`, `(map run ts)`)
 ;; works as it always has. Fusion is **opt-in**, via `lmap`/`lfilter`/`lkeep`/
 ;; `lremove` composed with `->>`. Each returns a lazy seq-view (`%seqview`): a
 ;; non-materialising value carrying a transducer over a source. Chaining
@@ -624,11 +649,18 @@ iterating for side effects."
 
 (defn mapv (f coll)
   "A VECTOR of `(f x)` for each `x` in `coll` — `map` when the caller needs
-indexed access or a vector literal shape (`(into [] (map f coll))`, named)."
+indexed access or a vector literal shape (`(into [] (map f coll))`, named).
+
+    (mapv inc [1 2 3])   → [2 3 4]
+    (map inc [1 2 3])    → (2 3 4)   ; the list-returning sibling"
   (into [] (map f coll)))
 
 (defn partition (n coll)
-  "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped."
+  "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped.
+
+    (partition 2 [1 2 3 4])    → ((1 2) (3 4))
+    (partition 2 [1 2 3])      → ((1 2))          ; the odd 3 is dropped
+    (partition 5 [1 2])        → nil"
   (partition-acc n coll nil))
 
 (defn sort-by (key-fn coll)

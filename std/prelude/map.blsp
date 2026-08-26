@@ -42,7 +42,13 @@ positional index; vectors, lists, strings and bytes index by integer position, w
 an out-of-range index yields the default. `nil` is an empty collection (`(get nil k)`
 is the default). A **non-integer key on an integer-indexed collection**, or any
 non-collection, is a type error naming `get` — the default covers an absent key, not
-a wrong-typed one."
+a wrong-typed one.
+
+    (get {:a 1} :a)          → 1
+    (get {:a 1} :zz)         → nil
+    (get {:a 1} :zz :none)   → :none
+    (get [10 20 30] 1)       → 20
+    (get #{:x} :x)           → :x     ; a set looks up by membership"
   ;; Branch order is load-bearing, not stylistic: map (much the most common), then
   ;; set, then the two cheap `nil?`/`string?` prim checks, then ONE fallthrough to
   ;; `nth` for every integer-indexed kind — the shape the pre-2026-07-26 version had.
@@ -106,7 +112,13 @@ a wrong-typed one."
 (defn assoc "A fresh collection like `coll` with each `key value` pair added or updated.
 For a map, keys are added or replaced; for a vector, integer indices in
 `[0, count)` are replaced (an out-of-range index is an error — appending is via
-`conj`, not `assoc`)."
+`conj`, not `assoc`).
+
+    (assoc {} :a 1)            → {:a 1}
+    (assoc {:a 1} :a 9)        → {:a 9}
+    (assoc [10 20 30] 1 99)    → [10 99 30]
+
+A multi-key result prints in the map's internal order, not the order given."
   ;; The single-pair `(assoc coll k v)` arm is the hot case (it's what `update`,
   ;; tallies, and most call sites use): exact arity → VM-eligible, and it skips the
   ;; `& kvs` rest-list + the multi-pair loop, going straight to the kernel op.
@@ -115,7 +127,10 @@ For a map, keys are added or replaced; for a vector, integer indices in
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks)
-  "A fresh map like `m` with each of the given keys removed."
+  "A fresh map like `m` with each of the given keys removed.
+
+    (dissoc {:a 1 :b 2} :b)   → {:a 1}
+    (dissoc {:a 1} :zz)       → {:a 1}   ; absent key is a no-op"
   (fold map-dissoc m ks))
 
 ;; `map-pairs` (kernel) is the single map enumerator: the entries as a list of
@@ -123,15 +138,32 @@ For a map, keys are added or replaced; for a vector, integer indices in
 ;; Brood over it — no per-key `get`, so no O(n²) (this replaced the old `map-keys`
 ;; primitive + get-per-key `vals`).
 ;; `seq` (not `map-pairs`) so a record's keys/vals are its fields — no internal `:__id__`.
-(defn keys (m) "The keys of map `m` (a record's are its fields, id-free)." (map first (seq m)))
-(defn vals (m) "The values of map `m` (a record's are its fields, id-free)." (map second (seq m)))
+(defn keys (m)
+  "The keys of map `m` (a record's are its fields, id-free).
+
+    (keys {:a 1})  → (:a)
+
+Order is the map's internal (hash) order, NOT insertion order — sort if you need a
+stable one."
+  (map first (seq m)))
+(defn vals (m)
+  "The values of map `m` (a record's are its fields, id-free).
+
+    (vals {:a 1})  → (1)
+
+Order matches [[keys]] — the map's internal order, not insertion order."
+  (map second (seq m)))
 (defn contains? (m k)
   "True if map `m` has key `k` (distinguishes a stored `nil`/`false` from
 absence). O(1) via the CHAMP hash path (`map-get`), not an O(n) key scan: probe
 with two distinct sentinels — a present key returns its stored value both times;
 an absent key returns each sentinel, and those differ. (One sentinel can't tell
 absence from a key whose *stored value* happens to equal it; two distinct ones
-can.)"
+can.)
+
+    (contains? {:a 1} :a)      → true
+    (contains? {:a nil} :a)    → true    ; a stored nil is still present
+    (contains? {:a 1} :zz)     → false"
   (if (set? m)
     (%set-has? m k)
     (let (a (map-get m k :%contains-miss-a))
@@ -150,13 +182,22 @@ can.)"
 ;; ever mutable, no path-copy per entry), so the merge family rides it for speed
 ;; while staying fully immutable.
 (defn merge (& maps)
-  "A single map combining the given maps left to right; on a duplicate key the rightmost map wins. `nil` maps are skipped, so `(merge)` is `{}`."
+  "A single map combining the given maps left to right; on a duplicate key the rightmost map wins. `nil` maps are skipped, so `(merge)` is `{}`.
+
+    (merge {:a 1} {:a 9})        → {:a 9}    ; rightmost wins
+    (merge {:a 1} nil)           → {:a 1}    ; nil maps are skipped
+    (merge)                      → {}"
   (reduce (fn (acc m) (if (nil? m) acc (into acc m))) {} maps))
 
 (defn update (coll k f & args)
   "A collection like `coll` with the value at key/index `k` replaced by
 `(apply f current args)`, where `current` is the existing value (`nil` if absent).
-Works on maps (by key) and vectors (by integer index, which must be in range)."
+Works on maps (by key) and vectors (by integer index, which must be in range).
+
+    (update {:n 1} :n inc)       → {:n 2}
+    (update {:n 1} :n + 10)      → {:n 11}
+    (update {} :n (fn (v) 1))    → {:n 1}   ; absent value arrives as nil
+    (update [1 2 3] 0 inc)       → [2 2 3]"
   (assoc coll k (apply f (get coll k) args)))
 
 ;; Nested-map access along a `path` (a sequence of keys). `get-in` walks; missing

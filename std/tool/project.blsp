@@ -1,7 +1,7 @@
 ;; std/tool/project.blsp — the project model + test runner (ADR-020), in Brood.
 ;;
 ;;   project/…                ; loaded on demand; baked into the binary
-;;   (run-project-tests)      ; find project.blsp, discover tests, run them once
+;;   (run-tests)      ; find project.blsp, discover tests, run them once
 ;;
 ;; This is the policy behind `nest test`. Convention over configuration: `src/`
 ;; holds the project's source (added to *load-path*), `tests/` holds tests
@@ -19,7 +19,7 @@ the `nest new` scaffolder."
   ;; NOT `(:use test)`: that would load `test` at *load* time, so a lean
   ;; release runtime (which strips the test framework, ADR-038) couldn't even
   ;; load `project` to boot a bundle. The test runner needs test only when it
-  ;; actually runs — `run-project-tests` loads `test` itself and qualifies it.
+  ;; actually runs — `run-tests` loads `test` itself and qualifies it.
 )
 
 ;; --- the project, as set by the manifest -------------------------------------
@@ -96,7 +96,7 @@ the `nest new` scaffolder."
 (defdyn *project-main-override* nil)
 ; (module fn) or nil — a `nest run --main` override that wins over the manifest.
 ; A separate slot (not `*project-main*`) because the manifest is re-applied
-; inside `run-project` (via `setup`), which would otherwise clobber an
+; inside `run` (via `setup`), which would otherwise clobber an
 ; override set before the run.
 (defdyn *project-dependencies* nil)
 ; list of dep records from the manifest's :dependencies (ADR-037)
@@ -165,7 +165,7 @@ the `nest new` scaffolder."
       else (error "nest run --main: expected \"module\" or \"module/fn\", got " spec))))
 
 (defn set-project-main (spec)
-  "Override the `nest run` entry point from a CLI spec string (`\"module\"` or `\"module/fn\"`), without editing the manifest's `:main`. Sets a dedicated override slot that wins over the manifest even though `run-project` re-applies the manifest internally. Backs `nest run --main`."
+  "Override the `nest run` entry point from a CLI spec string (`\"module\"` or `\"module/fn\"`), without editing the manifest's `:main`. Sets a dedicated override slot that wins over the manifest even though `run` re-applies the manifest internally. Backs `nest run --main`."
   (def *project-main-override* (project-parse-main-spec spec)))
 
 ;; --- dependency manifest parsing (ADR-037, packages.md) ----------------------
@@ -1249,7 +1249,7 @@ resolve in the advisory checker. Returns the project root."
       (set-load-path! (append *load-path* (package/ensure-deps root deps))))))
 
 ;; Every .blsp file the project owns — its source files plus its test files.
-;; The set the advisory type-checker walks for `(check-project)`.
+;; The set the advisory type-checker walks for `(check)`.
 (defn- project-all-files
   (root)
   (let (src-dirs (abs-paths root *project-source-paths*)
@@ -1324,11 +1324,11 @@ resolve in the advisory checker. Returns the project root."
   (files closures)
   (map (fn (f) [f (map-get closures f nil)]) files))
 
-;; (check-project) — advisory pre-flight: run `check-file` over every source +
+;; (check) — advisory pre-flight: run `check-file` over every source +
 ;; test file in the project, printing each warning to stderr as a GNU
 ;; `FILE:LINE:COL: warning: …` line (editor-parseable, matches `brood --check`).
 ;; Returns the total warning count. Advisory only — never raises, never stops a
-;; run. Called by `run-project-tests` and `run-project` before they hand off to
+;; run. Called by `run-tests` and `run` before they hand off to
 ;; the test runner / entry-point, so users see type-misuse / arity / unbound
 ;; diagnostics without an extra command (`docs/types.md` — Step 4 auto-run).
 ;;
@@ -1569,7 +1569,7 @@ resolve in the advisory checker. Returns the project root."
     0 chunk))
 
 ;; The same pass for the case where every file shares ONE reachability set, which is what
-;; `check-project-run-closure` has: the loaded features are the closure, identically for all
+;; `check-run-closure` has: the loaded features are the closure, identically for all
 ;; of them. The chunk is `(closure file …)` rather than a list of `[file closure]` pairs, so
 ;; the set crosses to the worker ONCE instead of once per file.
 ;;
@@ -1684,22 +1684,22 @@ resolve in the advisory checker. Returns the project root."
 ;; Make sure the project is set up and all its sources are loaded — the
 ;; precondition for the checker to resolve cross-file names through the
 ;; heap's globals. Loads with `:skip-loaded`, so a module already on
-;; `*features*` (loaded by the `run-project`/`run-project-tests` that called the
+;; `*features*` (loaded by the `run`/`run-tests` that called the
 ;; check pre-flight, or by a prior require) is NOT re-evaluated — which would
 ;; re-run its `defmacro`s and trip the hot-reload "macro redefined" warning.
-;; Standalone callers (`nest check`, an interactive `(check-project)`) start from
+;; Standalone callers (`nest check`, an interactive `(check)`) start from
 ;; an image with nothing loaded, so this still loads every source.
 (defn- project-ensure-loaded
   (root)
   (setup root)
   (load-sources-cached root :skip-loaded))
 
-;; Structured analogue of `check-project` — returns a flat list of
+;; Structured analogue of `check` — returns a flat list of
 ;; `{:file :line :col :message}` maps instead of printing GNU lines + a
 ;; count. Backs the `nest mcp` `check` tool (`std/tool/mcp.blsp`, step 1c-a).
-;; Honors `BROOD_NO_CHECK=1` the same way `check-project` does: returns
+;; Honors `BROOD_NO_CHECK=1` the same way `check` does: returns
 ;; an empty list under the flag.
-(defn check-project-structured (&optional from)
+(defn check-structured (&optional from)
   "Advisory type-check a project, returning a list of `{:file :line :col :message}` diagnostic maps (one per warning) instead of printing. Returns nil under `BROOD_NO_CHECK=1`. `from` is the directory to find the project from — it defaults to `(file/cwd)`, and naming one lets a caller check a project other than the ambient one. Errors if there is no project there. Backs the `nest mcp` `check` tool."
   ;; `from` exists because cwd was the ONLY way in, which made this function
   ;; untestable without process-global state: the case covering the `check` MCP tool
@@ -1710,7 +1710,7 @@ resolve in the advisory checker. Returns the project root."
   ;; that names its root needs neither.
   (let (root (find-root (or from (file/cwd))))
     (when (nil? root)
-      (error "check-project-structured: not in a Brood project (no project.blsp found from "
+      (error "check-structured: not in a Brood project (no project.blsp found from "
         (or from (file/cwd))
         ")"))
     (project-ensure-loaded root)
@@ -1854,7 +1854,7 @@ resolve in the advisory checker. Returns the project root."
 
 ;; Print the duplicate-def warnings to stderr and return the count. Advisory
 ;; (never raises, never stops a run) and honors `BROOD_NO_CHECK=1` like the
-;; type-check pre-flight. Shared by `check-project` / `check-project-sources`.
+;; type-check pre-flight. Shared by `check` / `check-sources`.
 (defn- project-check-duplicate-defs
   (extracts source-set)
   (if (= (os/getenv "BROOD_NO_CHECK") "1")
@@ -2190,11 +2190,11 @@ resolve in the advisory checker. Returns the project root."
       0
       (project-unused-private-warnings extracts))))
 
-(defn check-project ()
+(defn check ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
   (let (root (find-root (file/cwd)))
     (when (nil? root)
-      (error "check-project: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
+      (error "check: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project-ensure-loaded root)
     (let (files (project-all-files root)
           ;; Phase 1 (unused-private + duplicate-defs): native parallel scan every
@@ -2209,7 +2209,7 @@ resolve in the advisory checker. Returns the project root."
 
 ;; (check-files paths) — advisory-check a specific list of files, the entry
 ;; behind `nest check FILE…`. Loads the project image *first* (same
-;; `project-ensure-loaded` as `check-project`) so cross-module / namespace
+;; `project-ensure-loaded` as `check`) so cross-module / namespace
 ;; imports resolve through the heap's globals exactly as in a whole-project
 ;; check — without it a single-file check of a namespaced file false-flags every
 ;; `:use`d / qualified name as unbound. Then runs the *same* per-file walk
@@ -2218,21 +2218,21 @@ resolve in the advisory checker. Returns the project root."
 ;; Outside a project (no project.blsp) it skips loading and checks each file
 ;; against the prelude alone — the standalone-file behaviour.
 (defn check-files (paths)
-  "Advisory type-check the listed files with the project image loaded first (so cross-module/namespace imports resolve), printing GNU `FILE:LINE:COL:` warnings to stderr and returning the total count. The entry behind `nest check FILE…`; shares its loader and per-file walk with `check-project`. Outside a project, checks against the prelude alone."
+  "Advisory type-check the listed files with the project image loaded first (so cross-module/namespace imports resolve), printing GNU `FILE:LINE:COL:` warnings to stderr and returning the total count. The entry behind `nest check FILE…`; shares its loader and per-file walk with `check`. Outside a project, checks against the prelude alone."
   (let (root (find-root (file/cwd)))
     (when root (project-ensure-loaded root))
     (project-check-files paths root)))
 
-;; Sources-only variant for `run-project`'s auto pre-flight: skip `tests/`,
+;; Sources-only variant for `run`'s auto pre-flight: skip `tests/`,
 ;; because test files depend on the test-framework macros (`describe`/`test`/
 ;; `assert=`/`is`) loaded with the `test` module, which `nest run` doesn't
 ;; do — so checking them there would emit spurious "unbound symbol" warnings.
-;; `nest test` keeps using `check-project` (full coverage; `test` is loaded).
-(defn check-project-sources ()
-  "Like `check-project`, but checks only the project's source paths (skips `tests/`, whose files reference test-framework macros). Used by `nest run`'s pre-flight."
+;; `nest test` keeps using `check` (full coverage; `test` is loaded).
+(defn check-sources ()
+  "Like `check`, but checks only the project's source paths (skips `tests/`, whose files reference test-framework macros). Used by `nest run`'s pre-flight."
   (let (root (find-root (file/cwd)))
     (when (nil? root)
-      (error "check-project-sources: not in a Brood project (no project.blsp found from "
+      (error "check-sources: not in a Brood project (no project.blsp found from "
         (file/cwd)
         ")"))
     (project-ensure-loaded root)
@@ -2311,14 +2311,14 @@ and the pre-flight would 'check' the manifest and warn on it."
                               (conj files p))))))))))
     (go [(name entry)] #{} #{})))
 
-(defn check-project-run-closure (entry)
+(defn check-run-closure (entry)
   "Advisory pre-flight over the entry point's require-closure — the modules the program is
 about to run actually reaches, walked from module `entry` through the require graph.
 Returns the warning count. A module the program never reaches is `nest check`/`nest test`'s
 business."
   (let (root (find-root (file/cwd)))
     (when (nil? root)
-      (error "check-project-run-closure: not in a Brood project (no project.blsp found from "
+      (error "check-run-closure: not in a Brood project (no project.blsp found from "
         (file/cwd)
         ")"))
     (let ([want reach] (project-entry-closure entry
@@ -2336,12 +2336,12 @@ business."
       (project-check-duplicate-defs extracts source-set)
       (project-check-files-shared want reach))))
 
-;; (run-project-tests & opts) — find the project from the cwd, set it up, load
+;; (run-tests & opts) — find the project from the cwd, set it up, load
 ;; every <name>_test.blsp under its test paths (which only REGISTER tests via the
 ;; test framework), then run the whole suite once. opts pass through to run-tests
 ;; (e.g. :trace / :slow). Raises if there's no project here, or if any test fails.
 ;;
-;; A `(check-project)` advisory pre-flight runs after all loads but before
+;; A `(check)` advisory pre-flight runs after all loads but before
 ;; `(run-tests)`, so the checker sees every source + test file once
 ;; cross-module names are resolvable through the loaded heap.
 ;; --- the `--failed` set (mix test --failed) -----------------------------------
@@ -2492,11 +2492,11 @@ as unchanged (only when some were)."
           spec)
       else (assoc (or spec {}) :names failed))))
 
-(defn run-project-tests (& opts)
-  "Discover, load (register-only), and run the project's whole test suite once, from the cwd. `opts` pass through to `run-tests` (e.g. `:slow`). Runs an advisory `check-project` pre-flight. Errors if not in a project or if any test fails. Backs `nest test`."
+(defn run-tests (& opts)
+  "Discover, load (register-only), and run the project's whole test suite once, from the cwd. `opts` pass through to `run-tests` (e.g. `:slow`). Runs an advisory `check` pre-flight. Errors if not in a project or if any test fails. Backs `nest test`."
   (let (root (find-root (file/cwd)))
     (when (nil? root)
-      (error "run-project-tests: not in a Brood project (no project.blsp found from "
+      (error "run-tests: not in a Brood project (no project.blsp found from "
         (file/cwd)
         ")"))
     (setup root)
@@ -2515,14 +2515,14 @@ as unchanged (only when some were)."
           files (if (test/opt? :stale opts)
                   (project-stale-run-set root files-all)
                   files-all))
-      ;; Advisory type-check (warnings to stderr). Run it INSIDE `%isolate`: `check-project`
+      ;; Advisory type-check (warnings to stderr). Run it INSIDE `%isolate`: `check`
       ;; loads every source + test file into the image for cross-file checking, which would
       ;; otherwise leave all N test modules bound in the global table — and the scoped run
       ;; below `snapshot-globals`-clones that table once PER FILE, so an O(N) baseline makes
       ;; the run O(N²). Rolling the check's loads back keeps the run's baseline small (just
       ;; prelude + src + the test framework), so each file's snapshot is O(1) → linear.
       ;; (Warnings are stderr I/O, unaffected by the global rollback.)
-      (%isolate (fn () (check-project)))
+      (%isolate (fn () (check)))
       ;; Run file-by-file, each in its own rolled-back global scope, so a large
       ;; suite's promoted code + top-level defs are reclaimed per file instead of
       ;; accumulating every file's code in one image (the shared-RUNTIME test-runner
@@ -2531,7 +2531,7 @@ as unchanged (only when some were)."
       ;; `BROOD_TEST_NO_SCOPE` reverts to the legacy load-all-then-run-all path (the
       ;; escape hatch, e.g. for a suite that relies on cross-file top-level defs).
       ;; Instrument for coverage BEFORE the suite and AFTER the sources are loaded
-      ;; (and after `check-project`, whose `%isolate` would roll the rebindings
+      ;; (and after `check`, whose `%isolate` would roll the rebindings
       ;; back). Opt-in: `:cover` in the option plist, from `nest test --cover`.
       (when (test/opt? :cover opts) (project-coverage-begin! root))
       ;; The line/branch tiers' pre-pass, same timing and for the same reason: it must
@@ -2650,16 +2650,16 @@ as unchanged (only when some were)."
       (/apply test/run-tests opts))
     (/apply test/run-tests-scoped (map (fn (f) (fn () (load f))) files) opts)))
 
-;; Structured analogue of `run-project-tests` — same bootstrap (discovery,
+;; Structured analogue of `run-tests` — same bootstrap (discovery,
 ;; load, type-check pre-flight) but `(run-tests-structured)` at the end, so
 ;; the caller gets `{:total :passed :failed :ms :results [...]}` instead of
 ;; printed output + a throw on failure. Backs the `nest mcp` `run-tests`
 ;; tool (step 1c-b).
-(defn run-project-tests-structured (& opts)
-  "Like `run-project-tests`, but returns the structured result `{:total :passed :failed :ms :results [...]}` instead of printing and raising on failure. Backs the `nest mcp` `run-tests` tool."
+(defn run-tests-structured (& opts)
+  "Like `run-tests`, but returns the structured result `{:total :passed :failed :ms :results [...]}` instead of printing and raising on failure. Backs the `nest mcp` `run-tests` tool."
   (let (root (find-root (file/cwd)))
     (when (nil? root)
-      (error "run-project-tests-structured: not in a Brood project (no project.blsp found from "
+      (error "run-tests-structured: not in a Brood project (no project.blsp found from "
         (file/cwd)
         ")"))
     (setup root)
@@ -2669,7 +2669,7 @@ as unchanged (only when some were)."
     ; (each `load` re-registers, ADR-013) counts each test once, not N times
     (let (dirs (abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project-collect-tests d))) nil dirs))
-      ;; Per-file scoped run (see `run-project-tests`) — matters most here: `nest mcp`
+      ;; Per-file scoped run (see `run-tests`) — matters most here: `nest mcp`
       ;; is a long-lived hot-reload image, so a load-all-then-run would accumulate every
       ;; file's promoted code on EVERY run-tests call. `BROOD_TEST_NO_SCOPE` reverts.
       (if (os/getenv "BROOD_TEST_NO_SCOPE")
@@ -2678,17 +2678,17 @@ as unchanged (only when some were)."
           (/apply test/run-tests-structured opts))
         (/apply test/run-tests-scoped-structured (map (fn (f) (fn () (load f))) files) opts)))))
 
-;; (run-project args) — find the project from the cwd, set it up (which may
+;; (run args) — find the project from the cwd, set it up (which may
 ;; override *project-main* via the manifest), `require` the entry module, and
 ;; call its entry fn with `args` (a list of strings from the CLI). The default
 ;; entry is `(main main)` — module `main`, fn `main` — so most projects ship a
 ;; bare manifest and a `(defn main () ...)` in src/main.blsp. Errors if there's
 ;; no project here, or if the entry fn isn't defined or callable.
-(defn run-project (args)
+(defn run (args)
   "Run the project's entry point (default module `main`, fn `main`; overridable via the manifest's `:main`), passing `args` (a list of CLI string arguments). Runs an advisory sources-only pre-flight. Errors if not in a project or the entry fn is missing/uncallable. Backs `nest run`."
   (let (root (find-root (file/cwd)))
     (when (nil? root)
-      (error "run-project: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
+      (error "run: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (setup root)
     ;; A `--main` override (set via `set-project-main`) wins over the manifest's
     ;; `:main`, which `setup` just re-applied into `*project-main*`.
@@ -2713,7 +2713,7 @@ as unchanged (only when some were)."
       (let (qual (symbol (str (name modname) "/" (name fname))))
         (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
           (when (nil? target)
-            (error "run-project: entry fn '" fname "' is not defined (module '" modname "')"))
+            (error "run: entry fn '" fname "' is not defined (module '" modname "')"))
           ;; Advisory pre-flight over the entry point's REQUIRE-CLOSURE, not the whole
           ;; tree: warnings for the code about to execute. Checking is ~3.7 ms/file and
           ;; verdicts are deliberately not cached, so whole-project checking is ~60-120 s
@@ -2724,11 +2724,11 @@ as unchanged (only when some were)."
           ;; just loaded every module to build the image — checks the same files a warm
           ;; one does. Warnings go to stderr so they don't pollute the entry point's own
           ;; stdout; after `require` so cross-module names see the heap's globals (see
-          ;; `check-project`).
-          (check-project-run-closure modname)
+          ;; `check`).
+          (check-run-closure modname)
           (let (f (eval target))
             (unless (fn? f)
-              (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))
+              (error "run: entry '" fname "' is not callable (" (type-of f) ")"))
             (/apply f args)))))))
 
 ;; --- single-binary release (ADR-038) -----------------------------------------
@@ -2949,7 +2949,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; (run-bundle args) — boot an embedded release bundle. The `brood` binary,
 ;; detecting its appended archive, calls this instead of starting a REPL. No
 ;; disk/cwd: every module comes from the embedded archive via `%builtin-module`
-;; (which `require-one` consults). Mirrors `run-project`'s entry resolution minus
+;; (which `require-one` consults). Mirrors `run`'s entry resolution minus
 ;; the project walk and the advisory checker (a shipped app isn't a dev image).
 (defn run-bundle (args)
   "Run an embedded release bundle's entry point, passing `args` (a list of CLI

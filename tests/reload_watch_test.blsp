@@ -2,7 +2,7 @@
 ;; live-session trigger for `nest run --watch`, docs/type-soundness-reload.md):
 ;; a 1-ary fn invoked after each successful reload/load, with its own errors
 ;; caught so a broken callback (e.g. a checker hiccup) can never take the
-;; watcher down. `nest run --watch` wires `project/check-project-sources` in
+;; watcher down. `nest run --watch` wires `project/check-sources` in
 ;; as this callback inside a project; these tests exercise the callback
 ;; contract directly, independent of `nest`/the checker.
 (defmodule reload-watch-test (:use test) (:use reload))
