@@ -22,12 +22,29 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 ;; ---- sign & parity ----------------------------------------------------------
 (defn positive? (n) "True if `n` is greater than zero." (> n 0))
 (defn negative? (n) "True if `n` is less than zero." (< n 0))
-(defn abs (n) "The absolute value of `n`." (if (< n 0) (- n) n))
-(defn even? (n) "True if integer `n` is even." (= (rem n 2) 0))
+(defn abs (n)
+  "The absolute value of `n`.
+
+    (math/abs -3)    → 3
+    (math/abs 3)     → 3
+    (math/abs -2.5)  → 2.5"
+  (if (< n 0) (- n) n))
+(defn even? (n)
+  "True if integer `n` is even.
+
+    (math/even? 4)   → true
+    (math/even? 3)   → false
+    (math/even? 0)   → true"
+  (= (rem n 2) 0))
 (defn odd? (n) "True if integer `n` is odd." (not (even? n)))
 
 ;; ---- aggregation ------------------------------------------------------------
-(defn sum (xs) "The sum of the numbers in `xs`." (fold %add 0 xs))
+(defn sum (xs)
+  "The sum of the numbers in `xs`.
+
+    (math/sum [1 2 3])  → 6
+    (math/sum [])       → 0"
+  (fold %add 0 xs))
 (defn product (xs) "The product of the numbers in `xs`." (fold %mul 1 xs))
 
 ;; Rounding & roots, all Brood over the one Float->Int primitive `floor` (toward
@@ -107,7 +124,11 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
   (cond (< n 0) (error "sqrt: negative argument " n) (<= n 0) 0.0 else (%f64-sqrt n)))
 
 (defn clamp (x lo hi)
-  "Constrain `x` to the closed range [`lo`, `hi`]: `lo` if `x` is below it, `hi` if above, else `x`."
+  "Constrain `x` to the closed range [`lo`, `hi`]: `lo` if `x` is below it, `hi` if above, else `x`.
+
+    (math/clamp 5 0 10)   → 5
+    (math/clamp -1 0 10)  → 0
+    (math/clamp 99 0 10)  → 10"
   (max lo (min hi x)))
 
 ;; ---- transcendental functions -----------------------------------------------

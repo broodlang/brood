@@ -2,7 +2,7 @@
 ;; `:main` parser and the default entry. Register-only — discovered and run by
 ;; `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 ;;
-;; `run-project` itself is not exercised in-language: it walks from `cwd` to a
+;; `run` itself is not exercised in-language: it walks from `cwd` to a
 ;; project.blsp, which the brood-repo suite already sits inside, so we can't
 ;; isolate it from here without changing the working directory. The hand-run
 ;; equivalent — `nest new foo && cd foo && nest run` — is the integration check.

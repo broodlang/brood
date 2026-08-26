@@ -88,7 +88,11 @@ inverse of the `string/->codepoints` primitive."
   (sep coll acc)
   (if (empty? coll) acc (join-parts sep (rest coll) (cons (first coll) (cons sep acc)))))
 (defn join (sep coll)
-  "Concatenate the strings in `coll` with `sep` between adjacent elements."
+  "Concatenate the strings in `coll` with `sep` between adjacent elements.
+
+    (string/join \", \" [\"a\" \"b\" \"c\"])   → \"a, b, c\"
+    (string/join \"-\" [\"solo\"])         → \"solo\"
+    (string/join \",\" [])               → \"\""
   ;; For the common case — a string separator over a list/vector/range — the
   ;; native `%string-join` walks `coll` once into one buffer (no intermediate
   ;; parts list, no reverse). The all-Brood path stays as a fallback for an
@@ -109,16 +113,27 @@ inverse of the `string/->codepoints` primitive."
 
 (defn replace (s old new)
   "Return `s` with every occurrence of `old` replaced by `new`. An empty `old`
-leaves `s` unchanged."
+leaves `s` unchanged.
+
+    (string/replace \"a-b-c\" \"-\" \"+\")   → \"a+b+c\"
+    (string/replace \"aaa\" \"aa\" \"b\")    → \"ba\"    ; left to right, no rescan
+    (string/replace \"abc\" \"zz\" \"!\")    → \"abc\""
   (if (= old "") s (join new (string/split s old))))
 
 (defn starts-with? (s prefix)
-  "Does string `s` begin with `prefix`?"
+  "Does string `s` begin with `prefix`?
+
+    (string/starts-with? \"hello\" \"he\")   → true
+    (string/starts-with? \"hello\" \"lo\")   → false
+    (string/starts-with? \"hello\" \"\")     → true"
   (let (n (string/length prefix))
     (and (>= (string/length s) n) (= (string/substring s 0 n) prefix))))
 
 (defn ends-with? (s suffix)
-  "Does string `s` end with `suffix`?"
+  "Does string `s` end with `suffix`?
+
+    (string/ends-with? \"hello\" \"lo\")   → true
+    (string/ends-with? \"hello\" \"he\")   → false"
   (let (sl (string/length s) ql (string/length suffix))
     (and (>= sl ql) (= (string/substring s (- sl ql) sl) suffix))))
 

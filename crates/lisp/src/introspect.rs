@@ -296,11 +296,11 @@ pub fn file_imports(interp: &mut Interp, src: &str) -> Vec<(String, String)> {
 // long-running session does not leak a fresh list per call).
 //
 // **Two MCP tools are not yet wrappable here** and are deliberately deferred:
-//   * `check_project` — the Brood-side `(check-project)` is print-oriented
+//   * `check_project` — the Brood-side `(check)` is print-oriented
 //     (GNU lines to stdout + an `Int` count). A structured variant in
 //     `std/tool/project.blsp` (returning `[file line col message]` tuples) is the
 //     right shape and lands with step 2 of the MCP plan, not here.
-//   * `run_tests`     — same issue: `(run-project-tests)` prints per-test
+//   * `run_tests`     — same issue: `(run-tests)` prints per-test
 //     GNU output and raises on failure. Needs a structured runner result.
 // A future `EvalResult.stdout` field on `eval_in_session` similarly needs a
 // `with-out-str` facility (an `*out*` dynvar + a Rust capture primitive),
@@ -369,7 +369,7 @@ pub fn source_location(interp: &mut Interp, name: &str) -> Option<SourceLoc> {
 
 /// Every `.blsp` file the bootstrapped project owns — its sources plus its
 /// tests — by asking the Brood side `(project/project-all-files *project-root*)` (the
-/// same set `check-project` walks). Empty when no project has been set up (e.g.
+/// same set `check` walks). Empty when no project has been set up (e.g.
 /// a bare buffer outside a project, where `*project-root*` is unbound). Feeds
 /// the cross-file reference / rename sweep (ADR-031 §Cross-file): under the flat
 /// module model these files are the whole search space for a global.

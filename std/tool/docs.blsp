@@ -3,8 +3,8 @@
   "Generate Markdown documentation for a module by loading it and introspecting
 the definitions it adds to the global table.
 
-`(generate-docs)` documents the whole project (every source file under it);
-`(generate-docs name)` documents a single module — a baked-in std module, or one
+`(generate)` documents the whole project (every source file under it);
+`(generate name)` documents a single module — a baked-in std module, or one
 found as <name>.blsp on `*load-path*`. This is policy built on the introspection
 primitives (`doc` / `arglist` / `global-names`), `file/slurp`, and the project model
 in `std/tool/project.blsp`; Rust supplies only that mechanism (ADR-006).
@@ -572,6 +572,6 @@ module's namespace-rooted globals (ADR-070) back to it."
     (project/load-sources-cached root)
     (doctest-report (collect-doctests (str *project-name* "/")))))
 
-(defn generate-docs (& args)
+(defn generate (& args)
   "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`."
   (if (empty? args) (io/puts (document-project)) (io/puts (document-module (first args)))))

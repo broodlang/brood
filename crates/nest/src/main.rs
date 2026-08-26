@@ -1174,14 +1174,14 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     if files.is_empty() {
         // Whole-project discovery via std/tool/project.blsp. Raises on failure,
         // so a non-zero exit falls out of the eval error.
-        // `test` is required up front, not left to `run-project-tests`: the option
+        // `test` is required up front, not left to `run-tests`: the option
         // plist can contain a `(test/test-make-filter …)` call, and arguments are
         // evaluated before the callee runs its own `require`.
         run_expecting_failure_signal(
             interp,
             &format!(
                 "(require-one 'test) (project/load-config) \
-                 (project/run-project-tests {plist})"
+                 (project/run-tests {plist})"
             ),
             TEST_FAILURE_SIGNALS,
         );
@@ -1234,7 +1234,7 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
     // breakage the `.brood-skip-blsp-check` migration hatch was added for). Both
     // forms now return a warning count; non-zero → exit 1.
     let code = if files.is_empty() {
-        "(project/load-config) (require-one 'test) (project/check-project)".to_string()
+        "(project/load-config) (require-one 'test) (project/check)".to_string()
     } else {
         let list = files
             .iter()
@@ -1368,7 +1368,7 @@ fn cmd_run(
 
     // Inside a project, `--watch` also re-checks on every successful reload —
     // the live-session trigger for ADR-123's soundness-under-reload design
-    // (docs/type-soundness-reload.md): re-running `check-project-sources`
+    // (docs/type-soundness-reload.md): re-running `check-sources`
     // reuses ADR-119 Phase 2's incremental cache, so only the changed file and
     // whatever depended on it actually get re-checked; everything else is a
     // cheap fingerprint compare. Its own errors are swallowed by
@@ -1383,7 +1383,7 @@ fn cmd_run(
         String::new()
     } else {
         let on_reload = if in_project() {
-            "(fn (_p) (project/check-project-sources))"
+            "(fn (_p) (project/check-sources))"
         } else {
             "nil"
         };
@@ -1422,7 +1422,7 @@ fn cmd_run(
     let wrap = !watch.is_empty() || timed.is_some();
     let run_form: String = match file {
         // No FILE: run the project's :main via std/tool/project.blsp.
-        None => format!("(project/run-project (list {}))", escaped_args),
+        None => format!("(project/run (list {}))", escaped_args),
         // FILE: run that file. Inside a project, set up the project so its
         // `src/` is on `*load-path*` (the file can `(require-one 'foo)` other
         // project modules), but *don't* eager-load every source — otherwise a
@@ -1530,8 +1530,8 @@ fn cmd_run(
         None => String::new(),
     };
     // Advisory pre-flight for an explicit FILE run, so *every* `nest run` path
-    // checks first: `nest run` (:main) already checks via `check-project-sources`
-    // (in `run-project`), and `brood <file>` pre-checks too — this closes the gap
+    // checks first: `nest run` (:main) already checks via `check-sources`
+    // (in `run`), and `brood <file>` pre-checks too — this closes the gap
     // for `nest run FILE.blsp`, which loads the file directly. `check-file` returns
     // GNU `path:line:col: warning:` strings; print to stderr and run regardless
     // (advisory, never gates). `BROOD_NO_CHECK=1` opts out — the flag the rest of
@@ -1656,9 +1656,9 @@ fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
         match module {
             Some(name) => format!(
                 "(require-one 'docs) {}",
-                brood::introspect::call_form("docs/generate-docs", &[name])
+                brood::introspect::call_form("docs/generate", &[name])
             ),
-            None => "(docs/generate-docs)".to_string(),
+            None => "(docs/generate)".to_string(),
         }
     };
     run(interp, &code);
@@ -2014,12 +2014,12 @@ fn is_plain_filename(s: &str) -> bool {
 const TEST_FAILURE_SIGNALS: &[&str] = &["test(s) failed", "coverage below minimum"];
 
 /// Like `run`, but for a command whose Brood side signals "the work failed" by
-/// RAISING — `run-project-tests` raises `N test(s) failed` so that `cargo test` and
+/// RAISING — `run-tests` raises `N test(s) failed` so that `cargo test` and
 /// `brood --test` see a non-zero exit.
 ///
 /// For `nest test` that raise is not an error to report: the failures have already
 /// been printed, in detail, by the runner. Reporting it again appended
-/// `1337:13: error: 2 test(s) failed` plus `at project/run-project-tests` and a
+/// `1337:13: error: 2 test(s) failed` plus `at project/run-tests` and a
 /// version banner to the end of an otherwise clean report — three lines of internals
 /// after the part the user actually reads. Exit non-zero silently instead, and only
 /// fall back to the normal error report for a genuine failure (a broken manifest, an
@@ -2371,7 +2371,7 @@ fn require_terminal(command: &str) {
 ///
 /// Without this, running one outside a project surfaced a raw Brood `error`: a
 /// bogus source position pointing into the bootstrap string (`1:58`), an internal
-/// function name (`project/run-project-tests`), and an internal line number — for
+/// function name (`project/run-tests`), and an internal line number — for
 /// what is only a wrong-directory mistake. Compare `cargo`: "could not find
 /// `Cargo.toml` in /x or any parent directory". `hint` names the file-scoped
 /// alternative when the command has one, so the error also teaches the way out.

@@ -4,6 +4,45 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.13.0 — 2026-08-26
+
+**BREAKING — the output trio settles, and the two string builders stop sharing a name.**
+
+- **`io/write` / `io/puts` / `io/inspect`.** `io/print` (which existed only in 0.12.0)
+  is `io/write`; `io/inspect` is new and writes the RE-READABLE form, so
+  `(io/puts "a\nb")` prints two lines where `(io/inspect "a\nb")` prints `"a\nb"`.
+  The `Port` ability's op moved off `write` to **`emit`** to free the name: a caller
+  reaches for `io/write` constantly, an implementor writes `(emit [p s] …)` once.
+- **`string/interp` and `string/format`.** `fmt` was an abbreviation of "format"
+  attached to the thing that is *not* format. They are one namespace apart now and
+  share no root: `(string/interp "x={x}")` is the macro that reads values from scope,
+  `(string/format "%.2f" x)` is the function whose template can be a runtime value.
+  Neither subsumes the other.
+- **De-stuttered:** `ansi/strip-ansi` → `ansi/strip`, `docs/generate-docs` →
+  `docs/generate`, `project/check-project` → `project/check`, `project/run-project` →
+  `project/run`, `task/cancel-task` → `task/cancel`, `telemetry/start-telemetry` →
+  `telemetry/start`, `telemetry/stop-telemetry` → `telemetry/stop`, `url/build-url` →
+  `url/build`, `test/run-test` → `test/run`.
+
+**Added**
+
+- `tests/doc_examples_test.blsp` — every indented `form → result` line in every public
+  docstring is now EXECUTED and compared. Of the first 27 examples written against it,
+  seven were wrong (map results in insertion order; `(reverse "abc")` raises).
+- `scripts/stdlib-audit.blsp` — the standing surface report: stutters, docstrings,
+  examples, and which names are bare.
+
+**Fixed**
+
+- `io/port?` was false for the default `*out*`/`*err*` (they are `:native`, and `Port`
+  had only a `:fn` impl), so `:to *err*` leaked `#<native %write-err>` into its own
+  message. Every test passed because `with-err-str` rebinds `*err*` to a closure.
+- A registry write silently re-published a private global: `%registry-update!` reused
+  `env_define`, which clears the private mark, and nothing re-marked it.
+- The formatter split a keyword argument from its value (`:to` alone on a line) —
+  134 files, a net 377 fewer lines once rejoined.
+- Three concurrency tests that timed their races instead of observing them.
+
 ## v0.12.0 — 2026-08-25
 
 **BREAKING — output moves to `io/`, and the bare core drops from 317 to ~280.**
