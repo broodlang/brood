@@ -423,11 +423,22 @@ test discovery, lints, release, config)."
     "      \"args\": [\"mcp\"]\n" "    }\n" "  }\n" "}\n"))
 
 ;; The scaffolded .gitignore: the package cache is regenerable from the lock
-;; file (which IS committed), so it's ignored (ADR-037).
+;; file (which IS committed), so it's ignored (ADR-037). So is `.brood/`, the
+;; startup-image cache (ADR-218) — it is a build artifact, rebuilt by any `nest`
+;; command that loads the project. Omitting it here meant every scaffolded project
+;; committed `.brood/image.bin` and then re-committed it on every check: eight
+;; ecosystem repos carried a churning binary before this line existed.
 (defn- project-gitignore-template
   ()
   (str "# Brood package cache — regenerable from project.lock.blsp (which is committed)\n"
-    "_deps/\n" "\n" "# Editor / OS cruft\n" "*.swp\n" ".DS_Store\n"))
+    "_deps/\n"
+    "\n"
+    "# Startup-image cache — a build artifact, rebuilt on demand\n"
+    ".brood/\n"
+    "\n"
+    "# Editor / OS cruft\n"
+    "*.swp\n"
+    ".DS_Store\n"))
 
 ;; The scaffolded .gitattributes: GitHub's Linguist doesn't know the `.blsp`
 ;; extension, so it renders Brood source as plain text. Until Brood is its own
