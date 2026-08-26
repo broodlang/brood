@@ -3598,3 +3598,48 @@ declines to judge what it cannot prove — a fragment, a page with an external `
 an id-less control that script might select by tag or class — because a lint that cries wolf
 is a lint people stop reading. Validated against the live site rather than fixtures alone:
 one finding on the 315 KB page that shipped broken, zero across ten hive pages that work.
+
+## 2026-08-26 — making the release train cheap enough to run often
+
+Four hand-kept invariants, each of which had already drifted at least once, replaced with
+mechanism. The common shape: something true today that a person had to keep true, with no
+signal when it stopped being true.
+
+**The `:brood` floor is derived, not declared.** A manifest naming no `:brood` published an
+EMPTY constraint, and empty means *no constraint* — a claim to run on every brood ever
+released, which the resolver believes. Absent now derives `>= (brood-version)`, the runtime
+that just built and tested the release. That is the only version anyone has evidence for,
+and it cannot go stale the way a hand-written floor does: every package here sat at
+`>= 0.5.0` long after 0.10.0 broke it, and because release metadata is immutable, fixing it
+cost nine re-publishes rather than nine edits.
+
+**The playground wasm is built at deploy time.** The site's reference page is introspected
+from the pinned runtime and the playground runs the wasm, so the two must be the same brood
+or the site documents one language and executes another. That was enforced by a comment
+asking a human to remember, beside a 7 MB binary in git rebuilt by hand — and it drifted;
+this session hit it while shipping the reference fix and had to write a KNOWN DRIFT note
+into the Dockerfile. hive's toolchain stage now builds `crates/playground` from the same
+checkout it builds brood from, so there is no second thing to keep in step. The wasm-bindgen
+version is READ from the crate rather than written again in the Dockerfile: two copies of a
+version is the same class of bug one layer down.
+
+**One command for the ecosystem.** `scripts/release-ecosystem.blsp` fetches, checks and
+tests fifteen repos in dependency order — which is not optional, since the moment hatch asks
+for `store ^0.3.0` it cannot resolve at all until that version exists. Publishing is opt-in
+(`PUBLISH=1`) because a released version is immutable; the default is a rehearsal, and it
+exits nonzero, so it works as a gate. It stops at the first failure and refuses a dirty
+tree — `nest publish` packages the working directory, so a dirty one ships bytes in no
+commit.
+
+**Examples are executed, not just rendered.** The playground snippets and the nine runnable
+examples on /docs are Brood source held as strings; nothing evaluated them, so
+`even?` → `math/even?` left the front page's "Map / filter" button raising `unbound symbol`.
+Both sets now run in hive's suite against the brood the wasm is built from. The /docs
+examples are inline `(runnable "…")` arguments rather than a data list, so the test reads
+the view as data and walks it — the reader owns the escaping, where a regex would
+reimplement it and drift.
+
+**A gap left open.** `brood` takes every trailing argument as a FILE, so a script cannot
+accept flags (`-- --publish` tries to open a file by that name); the release script is
+configured by environment instead. And hive itself is private and has no CI, so its 101
+tests — including both example guards — run only when someone runs them.
