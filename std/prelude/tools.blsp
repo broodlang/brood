@@ -1251,6 +1251,9 @@ and that every declared arity still matches its module's actual definition."
     (= (get *ns-package* from) *project-name*)))
 
 (defn %impl-rank (aname key from)
+  "The ability-impl precedence TIER for an impl of `aname`/`key` declared by module `from` —
+higher wins: app 4, type-owner 3, ability-owner 2, other 1 (ADR-172 §3). Internal to impl
+resolution; `%impl-for` is what picks the winner."
   ;; Precedence tier (ADR-172 §3), higher wins: **app (4) > type-owner (3) > ability-owner
   ;; (2) > other (1)**. `from` = nil is the root/REPL — the user IS the app, so app tier; a
   ;; module whose package is the project's own is likewise the app. Otherwise `from` owns the
@@ -1927,6 +1930,10 @@ and that every declared arity still matches its module's actual definition."
 ;; `sort`/`sort-by` use, so an `Ord` record type orders itself while built-ins keep the native
 ;; path.
 (defn ord-compare (a b)
+  "Record-aware three-way comparison returning -1 / 0 / 1: a record defers to its `compare-to`
+`Ord` method, everything else to the kernel `compare`. This is the comparator `sort`/`sort-by`
+use, so an `Ord` record type orders itself while built-ins keep the native path. A record type
+with no `compare-to` method is a loud `%no-method` error — never a silent order by map layout."
   (if (record? a) (compare-to a b) (compare a b)))
 
 ;; Num — arithmetic for a RECORD (a money value, complex number, 2-D vector, bignum), as

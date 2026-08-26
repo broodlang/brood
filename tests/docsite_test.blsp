@@ -67,6 +67,22 @@
       (is (includes? fragment "<div class=\"docsite\">"))))
   (test "the fragment stylesheet is namespaced under .docsite"
     (is (includes? (docsite/render-css) ".docsite .def{")))
+  ;; The fragment carries the Filter box but not the script that drives it, so an
+  ;; embedding host needs both hand-offs. Only `render-css` existed, so the hosted
+  ;; reference shipped a search box that accepted typing and did nothing — correct
+  ;; HTML, no server-side symptom, invisible to every check but using it.
+  (test "an unwrapped fragment ships the filter input, and render-js wires it up"
+    (let (fragment (docsite/render sample-model {:wrap? false}))
+      (is (includes? fragment "id=\"docsite-filter\""))
+      (refute (includes? fragment "<script"))
+      (let (js (docsite/render-js))
+        (is (includes? js "<script"))
+        (is (includes? js "docsite-filter"))
+        (is (includes? js "addEventListener")))))
+  (test "a wrapped page needs no separate render-js — it inlines the same script"
+    (let (html (docsite/render sample-model {}))
+      (is (includes? html "id=\"docsite-filter\""))
+      (is (includes? html "<script"))))
   (test "an explicit :title overrides the model name"
     (is (includes? (docsite/render sample-model {:title "Custom"}) "<title>Custom</title>"))))
 

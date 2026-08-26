@@ -42,6 +42,23 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - The formatter split a keyword argument from its value (`:to` alone on a line) —
   134 files, a net 377 fewer lines once rejoined.
 - Three concurrency tests that timed their races instead of observing them.
+- **`docsite/render-js`** — a `:wrap? false` render hands page chrome to the host, but only
+  half that hand-off existed: `render-css` was public and the filter script was private, so
+  an embedding host could recover the stylesheet and had no way to recover the JS. The
+  fragment carries the `Filter…` input, so every embedder shipped a search box that focuses,
+  accepts typing and does nothing — correct HTML, 200 OK, no server-side symptom. Both of
+  brood.fly.dev's embedders (the language reference and every package's docs page) had it.
+- `nest new`'s `.gitignore` never ignored `.brood/`, the startup-image cache, so every
+  scaffolded project committed a build artifact and re-committed it on each `nest check`.
+  Eight ecosystem repos were carrying the churning binary.
+- This repo's own `project.blsp` said `:version "0.1.0"` at Cargo's `0.13.0` — it had not
+  moved since the first release. A test now asserts the two agree.
+- **Every ecosystem package declared a `:brood` floor of `>= 0.5.0`**, which stopped being
+  true at 0.10.0: four consecutive releases renamed the stdlib out from under them, so a
+  user on 0.5.0 would resolve a package, install it, and hit unbound symbols. Since a
+  published release's metadata is immutable, correcting this meant new releases —
+  `store`/`s3`/`store-postgres` 0.3.0, `hatch` 0.5.0, `bedit` 0.3.0, the four themes 0.2.0,
+  each now naming the version CI actually proves.
 
 ## v0.12.0 — 2026-08-25
 

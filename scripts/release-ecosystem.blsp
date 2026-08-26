@@ -1,0 +1,140 @@
+;; scripts/release-ecosystem.blsp — verify (and optionally publish) the whole ecosystem
+;; in dependency order.
+;;
+;; A brood release ripples outward through about a dozen sibling repos, and the order is
+;; not optional: the moment `hatch` asks for `store ^0.3.0`, it cannot resolve AT ALL until
+;; that version exists on the registry. Doing this by hand means holding a dependency graph
+;; in your head while running the same four commands per repo, and the failure mode is a
+;; half-published train — some packages on the new floor, some not, and `nest check` broken
+;; in between.
+;;
+;;   brood scripts/release-ecosystem.blsp             ; verify only (default)
+;;   PUBLISH=1 brood scripts/release-ecosystem.blsp   ; verify, then publish each package
+;;   ROOT=/path brood scripts/release-ecosystem.blsp  ; where the sibling repos live (default ..)
+;;
+;; Configured by environment rather than flags because `brood` takes every trailing argument
+;; as a FILE to run — there is no script-argument convention, so `-- --publish` makes it try
+;; to open a file called `--publish`.
+;;
+;; Verify-only is the default deliberately: publishing is irreversible (a released version
+;; is immutable and cannot be replaced), so it is opt-in, and everything up to it is a
+;; rehearsal you can run as often as you like.
+;;
+;; It stops at the first failure. A release train that keeps going past a red repo publishes
+;; a package whose dependents are already broken.
+
+(require-one 'io)
+(require-one 'file)
+(require-one 'os)
+(require-one 'system)
+(require-one 'string)
+(require-one 'seq)
+
+;; Dependency order, not alphabetical: a package must be published before anything that
+;; names it. `store` and `s3` are leaves; `store-postgres` and `hatch` both take `store`;
+;; the themes declare `:enhances bedit`, which the registry checks against a bedit that has
+;; to exist first. The apps at the end are verified and never published — nothing resolves
+;; against them, and hive pins its deps by git commit on purpose ("hive never uses hive").
+(def *repos*
+  [{:dir "store" :publish? true}
+    {:dir "s3" :publish? true}
+    {:dir "store-postgres" :publish? true}
+    {:dir "hatch" :publish? true}
+    {:dir "bedit" :publish? true}
+    {:dir "bedit-theme-dracula" :publish? true}
+    {:dir "bedit-theme-monokai" :publish? true}
+    {:dir "bedit-theme-rose-pine" :publish? true}
+    {:dir "bedit-theme-solarized-light" :publish? true}
+    {:dir "hatch-demo" :publish? false}
+    {:dir "hive" :publish? false}
+    {:dir "pong" :publish? false}
+    {:dir "brood-chat" :publish? false}
+    {:dir "brood-life" :publish? false}
+    {:dir "brood-terminal" :publish? false}])
+
+(defn- env-flag?
+  (name)
+  "Whether environment variable `name` is set to anything but the empty string."
+  (let (v (os/getenv name)) (and v (not (= v "")))))
+
+(defn- sh
+  (directory command)
+  "Run `command` in `directory` through a shell; returns its exit code."
+  (os/run-process "sh" ["-c" (str "cd " directory " && " command)]))
+
+(defn- step
+  (directory label command)
+  "Run one step, printing a heading first. Returns true when it succeeded."
+  (io/puts (str "  → " label))
+  (= 0 (sh directory command)))
+
+(defn- dirty?
+  (directory)
+  "Whether the repo has uncommitted changes. A publish packages the WORKING TREE, so a
+dirty one ships bytes that are in no commit — untraceable afterwards to anything."
+  (not (= 0 (sh directory "git diff --quiet && git diff --cached --quiet"))))
+
+(defn- process-repo
+  (root entry publish?)
+  "Verify one repo, and publish it when asked. Returns a result map."
+  (let (directory (path/join root (get entry :dir))
+        name (get entry :dir))
+    (io/puts (str "\n=== " name))
+    (cond
+      (not (file/exists? (path/join directory "project.blsp"))) {:repo name :status :missing}
+      (and publish? (get entry :publish?) (dirty? directory)) {:repo name :status :dirty}
+      else
+        (cond
+          (not (step directory "nest fetch" "nest fetch")) {:repo name :status :fetch-failed}
+          (not (step directory "nest check" "nest check")) {:repo name :status :check-failed}
+          (not (step directory "nest test" "nest test")) {:repo name :status :test-failed}
+          (and publish? (get entry :publish?))
+            (if (step directory "nest publish" "nest publish")
+              {:repo name :status :published}
+              {:repo name :status :publish-failed})
+          else {:repo name :status :verified}))))
+
+;; Listed explicitly rather than matched on the name containing "failed", which quietly let
+;; `:missing` and `:dirty` through as successes — the two statuses that most need to stop a
+;; release: a repo that is not there means the train is incomplete, and a dirty tree would
+;; publish bytes that exist in no commit.
+(def- *fatal* [:missing :dirty :fetch-failed :check-failed :test-failed :publish-failed])
+
+(defn- failure? (result) (>= (index-of *fatal* (get result :status)) 0))
+
+;; Walk the list in order, stopping at the first failure — see the header: continuing past
+;; a red repo is how a train ends up half-published.
+(defn- run-all
+  (root publish? remaining acc)
+  (if (empty? remaining)
+    (reverse acc)
+    (let (result (process-repo root (first remaining) publish?))
+      (if (failure? result)
+        (reverse (cons result acc))
+        (run-all root publish? (rest remaining) (cons result acc))))))
+
+(let (root (or (os/getenv "ROOT") "..")
+      publish? (env-flag? "PUBLISH"))
+  (io/puts (str "brood "
+             (brood-version)
+             " — ecosystem "
+             (if publish? "RELEASE (publishing)" "verification (no publish)")
+             "\nroot: "
+             root
+             "\n"))
+  (let (results (run-all root publish? *repos* nil)
+        failed (filter failure? results))
+    (io/puts "\n=== summary")
+    (doseq (r results) (io/puts (str "  " (get r :repo) ": " (name (get r :status)))))
+    (let (skipped (- (count *repos*) (count results)))
+      (when (> skipped 0)
+        (io/puts (str "  (" skipped " not reached — stopped at the first failure)"))))
+    (if (empty? failed)
+      (io/puts (str "\nall "
+                 (count results)
+                 " repos "
+                 (if publish? "released" "verified")
+                 (if publish? "" " — re-run with PUBLISH=1 to release")))
+      (do
+        (io/puts (str "\nFAILED: " (get (first failed) :repo)))
+        (system/halt 1)))))

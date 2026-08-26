@@ -237,6 +237,10 @@
 (describe "project: scaffold templates (ADR-037)"
   (test "the .gitignore template ignores the package cache"
     (is (includes? (scaffold/project-gitignore-template) "_deps/")))
+  ;; `.brood/` was missing here, so every scaffolded project committed its startup
+  ;; image and re-committed it on every `nest check`.
+  (test "the .gitignore template ignores the startup-image cache"
+    (is (includes? (scaffold/project-gitignore-template) ".brood/")))
   (test "the .gitattributes template maps .blsp to Clojure but keeps it out of the language stats"
     (let (a (scaffold/project-gitattributes-template))
       (is (includes? a "*.blsp"))
