@@ -206,9 +206,6 @@
    "for" :control
    "for-check-binds" :control
    "for-fold" :control
-   "format-loop" :strings
-   "format-prec" :strings
-   "format-spec" :strings
    "gensym" :meta
    "get" :maps
    "get-in" :maps
