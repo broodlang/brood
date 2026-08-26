@@ -19,14 +19,14 @@
 (defn sub-lets (p) (- (let (a 300) a) (let (b 5) b)))
 
 ;; The exact fuzzer shape: bit ops + an inner `if`/`let`, both operands binding.
-(defn f5 (p) (bit-xor (let (t8 (if (<= p p) -347 p)) t8) (* (let (_t9 0) 0) p)))
+(defn f5 (p) (bit/xor (let (t8 (if (<= p p) -347 p)) t8) (* (let (_t9 0) 0) p)))
 
 ;; A driver that consumes each result (so f5's arm is JIT'd in a consuming
 ;; context) and accumulates — the value diverged at odd iteration counts.
 (defn drive (f i n acc)
   (if (>= i n)
     acc
-    (drive f (+ i 1) n (bit-xor acc (bit-and (f i) 268435455)))))
+    (drive f (+ i 1) n (bit/xor acc (bit/and (f i) 268435455)))))
 
 ;; Warm a 1-arg fn past the tier threshold, then return its value at `x`.
 (defn warm (f i x) (if (>= i 400) (f x) (do (f i) (warm f (+ i 1) x))))
@@ -38,7 +38,7 @@
   (test "the fuzzer's f5 arm yields -347, not 0"
     (assert= (warm f5 0 3) -347))
 
-  ;; drive xors an odd number of copies of (bit-and -347 mask) = 268435109;
+  ;; drive xors an odd number of copies of (bit/and -347 mask) = 268435109;
   ;; the miscompiled arm returned 0 every iteration → acc stayed 0.
   (test "accumulating drive over f5 matches the interpreter (odd n)"
     (assert= (drive f5 0 4001 0) 268435109))

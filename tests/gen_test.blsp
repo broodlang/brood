@@ -197,10 +197,10 @@
 (describe "gen: named and linked spawn"
   :isolated (defprocess echo2 (s) (query [:echo x] x))
 
-  (test "spawn-server-named registers the server for whereis"
+  (test "spawn-server-named registers the server for proc/whereis"
     (let (p (spawn-server-named :echo-srv echo2 nil))
-      (assert= (whereis :echo-srv) p)
-      (assert= (call (whereis :echo-srv) [:echo 99]) 99)
+      (assert= (proc/whereis :echo-srv) p)
+      (assert= (call (proc/whereis :echo-srv) [:echo 99]) 99)
       (stop p)))
 
   (test "spawn-server-link links the server but a normal stop won't take us down"

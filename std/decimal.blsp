@@ -1,0 +1,29 @@
+;; std/decimal.blsp — exact, arbitrary-precision base-10 decimals.
+;;
+;; The operations are kernel primitives (`crates/lisp/src/builtins/numeric.rs`), registered
+;; under this module's name the way `string/length` and `bit/and` are: Rust supplies the
+;; mechanism, the namespace is Brood's. This file declares the namespace.
+;;
+;; They were bare (`decimal`, `->decimal`, `decimal->string`, `decimal->float`) until
+;; 2026-08-26. `decimal?` stays bare, with every other type predicate — a predicate belongs
+;; beside `int?`/`float?`/`ratio?`, not behind a prefix.
+;;
+;; Names follow the conversion idiom the rest of the library uses: inside module `M`,
+;; `M/->x` reads "M to x" and `M/x->` reads "x to M". So `decimal/->string` is a decimal to
+;; a string, and `decimal/number->` is a number to a decimal.
+
+(defmodule decimal
+  "Exact arbitrary-precision base-10 decimals — for money and anything else a float
+cannot hold exactly (`0.1 + 0.2` is `0.30000000000000004` in binary floating point).
+
+    (decimal/of \"1.50\")             → 1.50M
+    (decimal/of 3)                  → 3M
+    (decimal/->string (decimal/of \"1.50\"))   → \"1.50\"
+    (decimal/number-> 1/2)          → 0.5M
+    (decimal? (decimal/of \"1\"))     → true
+
+The literal form is a trailing `M` — `1.50M` — so most code never calls `decimal/of` at
+all. `decimal/of` takes a string, an int, a bignum, or a float; `decimal/number->` takes a
+number and is exact for an integer or a terminating ratio. `decimal/->float` crosses back
+to an inexact float, and `decimal/->string` renders the exact value, trailing zeros and
+all. Arithmetic uses the ordinary operators: a decimal operand keeps the result exact.")

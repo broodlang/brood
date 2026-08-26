@@ -35,7 +35,9 @@ them at that core (npm/Cargo rule). `+build` metadata never affects order or mat
 `-prerelease` / `+build` suffix. A missing or non-numeric segment reads as 0, so
 `\"1.2\"` is `(1 2)` and `\"1.x\"` is `(1 0)` — lenient, because this is used to
 compare what a human typed in a manifest, not to validate it (that is
-`valid?`)."
+`valid?`).
+
+    (version/core \"1.2.3-rc1\")   → (1 2 3)"
   (let (core (first (string/split (first (string/split v "+")) "-")))
     (map (fn (p) (or (string/->number p) 0)) (string/split core "."))))
 
@@ -49,7 +51,9 @@ compare what a human typed in a manifest, not to validate it (that is
   "Whether `v` is a full `MAJOR.MINOR.PATCH` version — three segments, each a run of
 ASCII digits — ignoring any `-prerelease` / `+build` suffix. The check a registry
 applies on publish; `satisfies?` is deliberately more forgiving, since a
-CONSTRAINT is usually written short (`\">= 0.3\"`)."
+CONSTRAINT is usually written short (`\">= 0.3\"`).
+
+    (version/valid? \"1.2.3\")   → true"
   (and (string? v)
     (let (core (first (string/split (first (string/split v "+")) "-"))
           parts (string/split core "."))
@@ -63,7 +67,9 @@ CONSTRAINT is usually written short (`\">= 0.3\"`)."
 smaller — `\"1.2\"` and `\"1.2.0\"` compare equal). When the cores tie, PRE-RELEASE precedence
 decides (semver §11): a pre-release is LESS than its release (`1.0.0-rc.1 < 1.0.0`), and two
 pre-releases compare identifier-by-identifier (numeric numerically and below alphanumeric;
-more identifiers outrank a prefix). `+build` metadata never affects order."
+more identifiers outrank a prefix). `+build` metadata never affects order.
+
+    (version/compare \"1.2.0\" \"1.10.0\")   → -1"
   (let (c (compare-parts (core a) (core b)))
     (if (= c 0)
       (compare-prerelease (prerelease a) (prerelease b))
@@ -72,7 +78,9 @@ more identifiers outrank a prefix). `+build` metadata never affects order."
 (defn prerelease (v)
   "The pre-release identifiers of version string `v` (`\"1.0.0-rc.1\"` → `(\"rc\" \"1\")`), or
 nil when there is none. Everything after the first `-` (and before any `+build`), split on
-`.`. A `+build` suffix is dropped first — build metadata is not part of precedence."
+`.`. A `+build` suffix is dropped first — build metadata is not part of precedence.
+
+    (version/prerelease \"1.0.0-rc1\")   → (\"rc1\")"
   (let (no-build (first (string/split v "+"))
         dash (index-of-str no-build "-"))
     (if (nil? dash)
@@ -137,7 +145,9 @@ resolver sorts and filters thousands of candidates this way."
 
 (defn newer? (a b)
   "Whether version `a` is strictly newer than `b`. The empty string is older than
-everything (the \"no release yet\" placeholder a registry starts from)."
+everything (the \"no release yet\" placeholder a registry starts from).
+
+    (version/newer? \"1.1.0\" \"1.0.9\")   → true"
   (cond
     (= b "") (not (= a ""))
     (= a "") false
@@ -356,7 +366,9 @@ without pinning a version is legal (`{bedit \"\"}`).
 An operator this module does not implement, or a term with no version after it,
 **raises** rather than answering a confident `false` — a dependency refused for a
 reason nobody wrote down is worse than a loud one. (For repeated checks against one
-constraint, `compile` it once and use `match?`.)"
+constraint, `compile` it once and use `match?`.)
+
+    (version/satisfies? \"1.2.3\" \"^1.0\")   → true"
   (match? (compile constraint) v))
 
 (defn satisfies-all? (versions constraints)

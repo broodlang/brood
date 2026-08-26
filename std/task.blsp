@@ -96,14 +96,36 @@ handle and pass it back as `prev` on the next trigger."
   (when (not (nil? prev)) (cancel prev))
   (apply task thunk opts))
 
-(defn await (thunk timeout-ms)
-  "Run 0-arg `thunk` in a child process and block the current process until it
-finishes or `timeout-ms` elapses. Returns the thunk's value; throws if it threw
-(re-raising the message) or if it timed out. The synchronous counterpart of
-`task` — use it in a script or test; use `task` to keep an interactive loop live."
-  (let (me (self)
-        w (spawn (send me [:await--reply (try [:ok (thunk)] (catch e [:err (error-message e)]))])))
-    (receive
-      ([:await--reply [:ok v]] v)
-      ([:await--reply [:err m]] (error m))
-      (after timeout-ms (do (exit w :kill) (error "await: timed out after " timeout-ms "ms"))))))
+(defn await (thunk-or-handle timeout-ms)
+  "Block the current process for a task's value, up to `timeout-ms`. Returns the value;
+throws if the work threw (re-raising the message) or if the deadline passed.
+
+Takes EITHER a 0-arg thunk — run it in a child process and wait — or a handle from
+`task`, so the asynchronous and synchronous halves compose:
+
+    (await (fn () (heavy)) 2000)          ; start and wait
+    (await (task (fn () (heavy))) 2000)   ; start now, wait later
+
+Awaiting a handle only works from the process the task replies to (`:reply-to`,
+which defaults to whoever called `task`) — the reply is a message, and only its
+addressee can receive it. Use it in a script or test; use `task` plus a `receive`
+to keep an interactive loop live."
+  (if (pid? thunk-or-handle)
+    (await-handle thunk-or-handle timeout-ms)
+    (let (me (self)
+          w (spawn (send me [:await--reply (try [:ok (thunk-or-handle)] (catch e [:err (error-message e)]))])))
+      (receive
+        ([:await--reply [:ok v]] v)
+        ([:await--reply [:err m]] (error m))
+        (after timeout-ms (do (exit w :kill) (error "await: timed out after " timeout-ms "ms")))))))
+
+(defn- await-handle
+  (handle timeout-ms)
+  "Block for the outcome of an already-started `task`. Matches on the handle, so a
+stale reply from an earlier task cannot be mistaken for this one; on our own deadline
+the task is cancelled, so nothing is left running behind us."
+  (receive
+    ([:task-done ^handle v] v)
+    ([:task-error ^handle m] (error m))
+    ([:task-timeout ^handle] (error "await: the task timed out"))
+    (after timeout-ms (do (cancel handle) (error "await: timed out after " timeout-ms "ms")))))

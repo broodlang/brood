@@ -61,7 +61,7 @@ fn assert_parity(src: &str) {
 
 #[test]
 fn type_error_format_matches_across_engines() {
-    assert_parity("(defn boom (x) (bit-and x 0.25))\n(io/puts (boom 5))\n");
+    assert_parity("(defn boom (x) (bit/and x 0.25))\n(io/puts (boom 5))\n");
 }
 
 #[test]

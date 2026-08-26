@@ -1403,9 +1403,9 @@
   (test "a declared constraint may be narrower or wider than the running brood"
     (assert= (package/publish-brood-constraint "~> 0.13") "~> 0.13"))
   (test "declaring nothing derives the running brood rather than recording no constraint"
-    (assert= (package/publish-brood-constraint nil) (str ">= " (brood-version))))
+    (assert= (package/publish-brood-constraint nil) (str ">= " (system/brood-version))))
   (test "the derived constraint is satisfied by the brood that derived it"
-    (is (version/satisfies? (brood-version) (package/publish-brood-constraint nil))))
+    (is (version/satisfies? (system/brood-version) (package/publish-brood-constraint nil))))
   ;; The bug this replaces: "" is not "unknown", it is "runs anywhere".
   (test "the derived constraint is never empty"
     (refute (= (package/publish-brood-constraint nil) ""))))

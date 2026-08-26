@@ -17,7 +17,7 @@
 //!   - a user global → its DEFINING FILE's mtime (a body/arity/sig change ⟺ that
 //!     file changed) PLUS its declared-sig value (which may live in another file),
 //!   - a prelude/builtin global → its kind (stable within a build; the whole cache
-//!     is stamped with `(build-id)`, so a rebuild drops it),
+//!     is stamped with `(system/build-id)`, so a rebuild drops it),
 //!   - an unbound name → "U" (so it invalidates the day something defines it),
 //!   - a known-ns prefix → whether it is currently known,
 //!   - a `:use`d module → its current export SET,
@@ -246,7 +246,7 @@ pub(super) fn fingerprint(heap: &Heap, dep_keys: Value) -> String {
     }
     // Compact the (possibly large) fact string to a 64-bit FNV-1a hex stamp.
     // FNV-1a is fixed-constant → deterministic within a build; the cache carries a
-    // (build-id) stamp so cross-build reuse can't happen anyway.
+    // (system/build-id) stamp so cross-build reuse can't happen anyway.
     format!("{:016x}", fnv1a(&buf))
 }
 

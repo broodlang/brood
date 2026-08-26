@@ -48,8 +48,8 @@
 
 (defn serve-spawns ()
   "Idempotently start + register the local `:remote-spawn` server so peers can `(node/spawn this-node …)` against this node. Safe to call multiple times — only the first call spawns a server. Typically called once at startup, after `(node/start …)`."
-  (when (nil? (whereis :remote-spawn))
-    (register :remote-spawn (/spawn (remote-spawn-server))))
+  (when (nil? (proc/whereis :remote-spawn))
+    (proc/register :remote-spawn (/spawn (remote-spawn-server))))
   nil)
 
 (defmacro spawn (node expr)

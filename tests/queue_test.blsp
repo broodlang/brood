@@ -2,7 +2,7 @@
 
 (describe "FIFO queue"
   (test "new queue is empty"
-    (is (queue/empty? (queue/empty))))
+    (is (empty? (queue/empty))))
   (test "size 0 when empty"
     (assert= 0 (count (queue/empty))))
   (test "push increases size"
@@ -22,18 +22,18 @@
         (assert= 1 (first r1))
         (assert= 2 (first r2))
         (assert= 3 (first r3))
-        (is (queue/empty? (second r3))))))
+        (is (empty? (second r3))))))
   (test "peek does not remove"
     (let (q (queue/push (queue/empty) :x))
       (assert= :x (queue/peek q))
       (assert= :x (queue/peek q))
       (assert= 1 (count q))))
-  (test "queue/->list preserves order"
+  (test "seq preserves order"
     (let (q (-> (queue/empty)
               (queue/push :a)
               (queue/push :b)
               (queue/push :c)))
-      (assert= [:a :b :c] (into [] (queue/->list q)))))
+      (assert= [:a :b :c] (into [] (seq q)))))
   (test "queue/list->"
     (let (q (queue/list-> [10 20 30]))
       (assert= 10 (queue/peek q))
@@ -62,7 +62,7 @@
 
 (describe "min-priority queue"
   (test "new pq is empty"
-    (is (pq/empty? (pq/empty))))
+    (is (empty? (pq/empty))))
   (test "size 0"
     (assert= 0 (count (pq/empty))))
   (test "pop empty returns :empty"
@@ -81,13 +81,13 @@
         (assert= :high (first r1))
         (assert= :med (first r2))
         (assert= :low (first r3))
-        (is (pq/empty? (second r3))))))
-  (test "pq/->list in priority order"
+        (is (empty? (second r3))))))
+  (test "seq in priority order"
     (let (pq (-> (pq/empty)
                (pq/insert 5 :e)
                (pq/insert 1 :a)
                (pq/insert 3 :c)))
-      (assert= [:a :c :e] (into [] (pq/->list pq)))))
+      (assert= [:a :c :e] (into [] (seq pq)))))
   (test "equal priorities"
     (let (pq (-> (pq/empty)
                (pq/insert 1 :x)
@@ -98,7 +98,7 @@
                (pq/insert 1 :a)
                (pq/insert 1 :b)
                (pq/insert 1 :c)))
-      (assert= [:a :b :c] (into [] (pq/->list pq))))))
+      (assert= [:a :b :c] (into [] (seq pq))))))
 
 ;; Both structures are records, so each has a nominal identity rather than being "a map
 ;; with the right keys" / "a list of pairs". That is what `queue?`/`pq?` test, what keeps
@@ -122,7 +122,7 @@
   ;; Brood — so `(if pq …)` took the else branch on an empty queue. A record is truthy.
   (test "an empty pq is truthy, unlike the bare list it used to be"
     (is (if (pq/empty) true false))
-    (is (pq/empty? (pq/empty))))
+    (is (empty? (pq/empty))))
   (test "a queue displays as a summary and inspects as its contents"
     (assert= (->string (queue/empty)) "#<queue empty>")
     (let (q (queue/list-> (list 1 2 3)))
@@ -152,4 +152,4 @@
       (spawn (send me [:pq pq]))
       (let (back (receive ([:pq p] p) (after *test-wait-ms* :timeout)))
         (is (pq? back))
-        (assert= (into [] (pq/->list back)) [:a :c])))))
+        (assert= (into [] (seq back)) [:a :c])))))

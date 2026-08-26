@@ -269,7 +269,7 @@
             ;; echo the body's bytes back as text so the client can verify
             (serve-loop ls
               (fn (req)
-                (text-response (pr-str (into [] (bytes/->list (get req :body))))))))))
+                (text-response (pr-str (into [] (seq (get req :body))))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp/connect "127.0.0.1" port))
           ;; raw body bytes 0xFF 0x80 0x41 ride as a `bytes` leaf in the request
@@ -463,7 +463,7 @@
                  (send me [:port (tcp/local-port ls)])
                  (serve-loop ls
                    (fn (req)
-                     (text-response (pr-str (into [] (bytes/->list (get req :body))))))))))
+                     (text-response (pr-str (into [] (seq (get req :body))))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (post (str "http://127.0.0.1:" port "/up") (bytes 0 255 7)))
           (assert= (get resp :status) 200)

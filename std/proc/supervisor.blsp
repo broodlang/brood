@@ -47,7 +47,7 @@ the child already exited, yielding `:noproc` (an *abnormal* reason) — which wo
 spuriously restart a `:transient` child that actually exited `:normal`.
 
 A `:name` (keyword) registers the child's pid so callers address it by a **stable
-name** (`(whereis :worker)`) that survives restarts. Without `:name`, a pid held
+name** (`(proc/whereis :worker)`) that survives restarts. Without `:name`, a pid held
 across a restart is a dead reference.
 
 **Prefer a `:start` thunk that captures no locals** — `(fn () (spawn-link (worker)))`,
@@ -122,7 +122,7 @@ address the child by a stable name even though its pid changes across restarts."
         pid ") — it should end in (spawn …) / (node/spawn …) / (start …)"))
     ; local or remote (ADR-067) — `link` routes by node
     (link pid)
-    (when (get spec :name) (register (get spec :name) pid))
+    (when (get spec :name) (proc/register (get spec :name) pid))
     (assoc spec :pid pid)))
 
 ;; ---- the children collection ------------------------------------------------

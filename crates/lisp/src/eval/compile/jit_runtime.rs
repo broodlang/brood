@@ -1089,7 +1089,7 @@ pub(crate) fn jit_dispatch_call(
         // invoke the native fn pointer, park any error. This is the native-callee
         // fast path: no `env_get`, no `dispatch` (passthrough loop + `apply`
         // unfold + arity re-checks) — the ~55–75 ns/call protocol every `str`/
-        // `char->int`/`string-length` from JIT'd code used to pay. `apply` itself
+        // `string/char->int`/`string-length` from JIT'd code used to pay. `apply` itself
         // has a real native body (`apply_builtin`), so direct invocation is exact.
         macro_rules! call_native_direct {
             ($nid:expr) => {{

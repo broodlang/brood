@@ -69,15 +69,15 @@
 
 (describe "bitwise / shift edges"
   (test "left shift past 63 bits promotes to bigint"
-    (assert= (bit-shift-left 1 70) 1180591620717411303424))
+    (assert= (bit/shift-left 1 70) 1180591620717411303424))
   (test "a negative shift amount raises"
-    (assert-error (bit-shift-left 1 -1)))
+    (assert-error (bit/shift-left 1 -1)))
   (test "arithmetic right shift of -1 stays -1; plain shifts divide/multiply by 2^n"
-    (assert= (bit-shift-right -1 70) -1)
-    (assert= (bit-shift-right 1024 3) 128))
-  (test "bit-and / bit-not on negatives"
-    (assert= (bit-and -1 255) 255)
-    (assert= (bit-not 0) -1)))
+    (assert= (bit/shift-right -1 70) -1)
+    (assert= (bit/shift-right 1024 3) 128))
+  (test "bit/and / bit/not on negatives"
+    (assert= (bit/and -1 255) 255)
+    (assert= (bit/not 0) -1)))
 
 (describe "division-family zero and sign edges (errors are clean, not crashes)"
   (test "integer/quot/rem/mod by zero each raise"
@@ -104,12 +104,12 @@
   (test "materialising a range near MAX terminates cleanly"
     (assert= (into [] (range (- I64-MAX 2) I64-MAX 1)) [(- I64-MAX 2) (- I64-MAX 1)])))
 
-(describe "int->char guards the codepoint range (no silent truncation)"
+(describe "string/int->char guards the codepoint range (no silent truncation)"
   (test "a valid codepoint round-trips"
-    (assert= (int->char 65) "A"))
+    (assert= (string/int->char 65) "A"))
   (test "a value above u32::MAX raises instead of truncating to an aliased char"
-    (assert-error (int->char (+ 65 4294967296))))
+    (assert-error (string/int->char (+ 65 4294967296))))
   (test "a value above the Unicode max raises"
-    (assert-error (int->char 1114112)))
+    (assert-error (string/int->char 1114112)))
   (test "a negative codepoint raises"
-    (assert-error (int->char -1))))
+    (assert-error (string/int->char -1))))

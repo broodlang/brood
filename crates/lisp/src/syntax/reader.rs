@@ -227,7 +227,7 @@ impl<'a> Parser<'a> {
                 .err("`\\c` is a Clojure/Scheme character literal, which Brood does not have")
                 .with_hint(
                     "Brood has no character type — a character is just a 1-char string. \
-                 Write `\"c\"` (or `(int->char 99)` from a codepoint).",
+                 Write `\"c\"` (or `(string/int->char 99)` from a codepoint).",
                 )),
             _ => self.read_atom(),
         }

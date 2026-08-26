@@ -275,7 +275,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "->decimal",
+        "decimal/number->",
         Arity::exact(1),
         Sig::new(vec![num], decimal_ty),
         &["x"],
@@ -297,7 +297,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // on these); they were a noted gap (docs/feedback-retro-game-of-life.md).
     def(
         heap,
-        "bit-and",
+        "bit/and",
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "b"],
@@ -306,7 +306,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "bit-or",
+        "bit/or",
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "b"],
@@ -315,7 +315,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "bit-xor",
+        "bit/xor",
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "b"],
@@ -324,16 +324,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "bit-not",
+        "bit/not",
         Arity::exact(1),
         Sig::new(vec![int], int),
         &["a"],
-        "Bitwise complement of integer a (two's-complement, so (bit-not n) = (- (- n) 1)).",
+        "Bitwise complement of integer a (two's-complement, so (bit/not n) = (- (- n) 1)).",
         bit_not,
     );
     def(
         heap,
-        "bit-shift-left",
+        "bit/shift-left",
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "n"],
@@ -342,7 +342,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "bit-shift-right",
+        "bit/shift-right",
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "n"],
@@ -351,26 +351,26 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "bit-count",
+        "bit/count",
         Arity::exact(1),
         Sig::new(vec![int], int),
         &["a"],
-        "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit-count -1) = 64). For a bignum it is the popcount of the magnitude.",
+        "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit/count -1) = 64). For a bignum it is the popcount of the magnitude.",
         bit_count);
     def(
         heap,
-        "bit-positions",
+        "bit/positions",
         Arity::exact(1),
         Sig::new(vec![int], vec_ty),
         &["a"],
-        "A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit-positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit-shift-left 1 i); handy for enumerating the set bits of an integer.",
+        "A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit/positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit/shift-left 1 i); handy for enumerating the set bits of an integer.",
         bit_positions);
     // Bit-level reinterpretation of a binary64 — not expressible over the other
     // primitives (no bitcast, no frexp), and the only way to compare two floats
     // *exactly* (`-0.0` vs `0.0`, NaN payloads). Used by the conformance corpora.
     def(
         heap,
-        "float->bits",
+        "bit/float->",
         Arity::exact(1),
         Sig::new(vec![num], int),
         &["x"],
@@ -378,7 +378,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         float_to_bits);
     def(
         heap,
-        "bits->float",
+        "bit/->float",
         Arity::exact(1),
         Sig::new(vec![int], float),
         &["n"],
@@ -843,7 +843,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         string_span_until);
     def(
         heap,
-        "display-width",
+        "string/display-width",
         Arity::exact(1),
         Sig::new(vec![string], int),
         &["s"],
@@ -892,7 +892,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         string_split);
     // Codepoint access needs Rust for the same reason as split/search: char
     // indexing into UTF-8 is O(index), and the pure-Brood construction
-    // (`map char->int` over `string->list`) pays a 1-char string + a closure
+    // (`map string/char->int` over `string->list`) pays a 1-char string + a closure
     // call per char. One O(n) pass to the vector the text parsers index.
     def(
         heap,
@@ -900,7 +900,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(int)),
         &["s"],
-        "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes)).",
+        "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map string/int->char codes)).",
         string_to_codepoints);
     // Grapheme clusters + normalisation: UAX #29 / UAX #15 table lookups, not rules
     // Brood can express. The cluster is the unit a human calls "a character", so it
@@ -987,7 +987,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // modules need that can't be written in Brood over `substring` alone.
     def(
         heap,
-        "char->int",
+        "string/char->int",
         Arity::exact(1),
         Sig::new(vec![string], int),
         &["s"],
@@ -995,7 +995,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         char_to_int);
     def(
         heap,
-        "int->char",
+        "string/int->char",
         Arity::exact(1),
         Sig::new(vec![int], string),
         &["n"],
@@ -1096,7 +1096,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // int (3), or a float (inexact source — uses its shortest round-trip form).
     def(
         heap,
-        "decimal",
+        "decimal/of",
         Arity::exact(1),
         Sig::new(vec![string.union(num)], decimal_ty),
         &["x"],
@@ -1104,7 +1104,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         numeric::prim_decimal);
     def(
         heap,
-        "decimal->string",
+        "decimal/->string",
         Arity::exact(1),
         Sig::new(vec![decimal_ty], string),
         &["d"],
@@ -1113,7 +1113,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "decimal->float",
+        "decimal/->float",
         Arity::exact(1),
         Sig::new(vec![decimal_ty], float),
         &["d"],
@@ -3668,7 +3668,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         features);
     def(
         heap,
-        "build-id",
+        "system/build-id",
         Arity::exact(0),
         Sig::nullary(string),
         &[],
@@ -3676,19 +3676,19 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         build_id);
     def(
         heap,
-        "stdlib-id",
+        "system/stdlib-id",
         Arity::exact(0),
         Sig::nullary(string),
         &[],
-        "This build's STANDARD LIBRARY identity as \"<version>+<git-sha>+<content-hash>\" — like build-id, but hashing what is baked in rather than this executable's mtime. Every binary built from one tree (brood, nest, brood-lsp) reports the SAME stdlib-id, so they can share one cache of anything derived from std/ — the stdlib startup image is keyed on it. Use build-id for a cache of something binary-specific, and this for a cache of something the standard library determines. It changes on any edit to any `.blsp`, committed or not.",
+        "This build's STANDARD LIBRARY identity as \"<version>+<git-sha>+<content-hash>\" — like system/build-id, but hashing what is baked in rather than this executable's mtime. Every binary built from one tree (brood, nest, brood-lsp) reports the SAME system/stdlib-id, so they can share one cache of anything derived from std/ — the stdlib startup image is keyed on it. Use system/build-id for a cache of something binary-specific, and this for a cache of something the standard library determines. It changes on any edit to any `.blsp`, committed or not.",
         stdlib_id);
     def(
         heap,
-        "brood-version",
+        "system/brood-version",
         Arity::exact(0),
         Sig::nullary(string),
         &[],
-        "This runtime's semantic version as a string (e.g. \"0.1.0\") — just the semver, without the git-sha/binary-stamp that `build-id` carries. What a project's `:brood` manifest constraint is checked against (a project can require `:brood \">= 0.2\"` and `nest` refuses an older runtime with a clear message).",
+        "This runtime's semantic version as a string (e.g. \"0.1.0\") — just the semver, without the git-sha/binary-stamp that `system/build-id` carries. What a project's `:brood` manifest constraint is checked against (a project can require `:brood \">= 0.2\"` and `nest` refuses an older runtime with a clear message).",
         brood_version);
     def(
         heap,
@@ -3735,7 +3735,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         // The peer name may be a symbol OR a keyword — `expect_node_name` accepts
         // both, and the prelude's `connect` passes the computed `:name@host`
-        // keyword (matches `register`/`whereis`/`monitor-node`). Returns the
+        // keyword (matches `register`/`proc/whereis`/`monitor-node`). Returns the
         // authoritative peer name, always as a keyword (`Value::keyword`).
         Sig::new(vec![sym.union(kw), string], kw),
         &[],
@@ -3819,7 +3819,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         spit_private);
     def(
         heap,
-        "register",
+        "proc/register",
         Arity::exact(2),
         // A name may be a symbol OR a keyword — `expect_node_name` accepts both, and
         // `:name` lookups in `send`/`node-name` use keywords, so the sig must too.
@@ -3829,12 +3829,28 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         register_name);
     def(
         heap,
-        "whereis",
+        "proc/whereis",
         Arity::exact(1),
         Sig::new(vec![sym.union(kw)], pid_ty.union(nil_ty)),
         &["name"],
         "The local pid registered under `name`, or nil. Strictly local — does not query other nodes.",
         whereis_name);
+    def(
+        heap,
+        "proc/unregister",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(kw)], bool_ty),
+        &["name"],
+        "Release the name `name`, so nothing is registered under it; true if a process was bound to it, false if it was already free. The inverse of `proc/register`, which had none — a name could only be released by its process dying, so a service could not hand its name to a replacement or step down without exiting. Strictly local.",
+        unregister_name);
+    def(
+        heap,
+        "proc/alive?",
+        Arity::exact(1),
+        Sig::new(vec![pid_ty], bool_ty),
+        &["pid"],
+        "Is `pid` a live process on this node? False for a dead pid, and false for a remote one (liveness is not knowable locally). Cheaper than the `(proc/info pid)` snapshot, which answered the same question by allocating a whole map.",
+        process_alive);
     // `node/name` is the keyword `:nonode` until `node/start` sets it to a symbol.
     def(
         heap,
@@ -3860,7 +3876,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         // A node name may be a symbol OR a keyword — `node-name`/`connect` return
         // the authoritative `:name@host` as a keyword, so monitoring it must not
-        // warn (matches `register`/`whereis`; `expect_node_name` accepts both).
+        // warn (matches `register`/`proc/whereis`; `expect_node_name` accepts both).
         Sig::new(vec![sym.union(kw)], ref_ty),
         &["name"],
         "Get [:nodedown name] when the link to node `name` goes down (heartbeat timeout or close).",

@@ -536,7 +536,7 @@ mod queue {
                    (if (= k 0) q \
                      (fill (queue/push q k) (- k 1)))) \
                  (defn drain (q acc) \
-                   (if (queue/empty? q) acc \
+                   (if (empty? q) acc \
                      (let (r (queue/pop q)) \
                        (drain (second r) (+ acc (first r)))))) \
                  (drain (fill (queue/new) {n}) 0)"
@@ -571,7 +571,7 @@ mod pq {
                    (if (= k 0) q \
                      (fill (pq/insert q k k) (- k 1)))) \
                  (defn drain (q acc) \
-                   (if (pq/empty? q) acc \
+                   (if (empty? q) acc \
                      (let (r (pq/pop q)) \
                        (drain (second r) (+ acc (first r)))))) \
                  (drain (fill (pq/new) {n}) 0)"

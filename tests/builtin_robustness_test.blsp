@@ -92,12 +92,12 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
     ;; whatever `make gcstress` / `make breakagetests` last left there, which can be
     ;; arbitrarily old — on 2026-08-25 it was five hours and a stdlib rename stale, so the
     ;; child ran a runtime with no `io/write` and the case failed with `unbound symbol`
-    ;; while the code under test was fine. `stdlib-id` is documented as identical for every
+    ;; while the code under test was fine. `system/stdlib-id` is documented as identical for every
     ;; binary built from one tree, so it is exactly the "same build" question.
-    (let (this-build (stdlib-id)
+    (let (this-build (system/stdlib-id)
           same-build? (fn (bin)
                         (let (p (str "/tmp/brood-bid-" (os-pid) ".blsp")
-                              _ (file/spit p "(io/write (stdlib-id))")
+                              _ (file/spit p "(io/write (system/stdlib-id))")
                               r (%os-cmd bin [p])
                               _ (file/rm p))
                           (= (get r :stdout) this-build)))

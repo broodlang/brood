@@ -3756,3 +3756,77 @@ Documentation stands at 100% docstring coverage (the last 13 were written; in ev
 explanation already sat two lines above as a comment) and **4.7% example coverage** — which
 is the real remaining gap, since `tests/doc_examples_test.blsp` *executes* every example, so
 each one written is a test gained. It caught two of this session's own mistakes.
+
+## 2026-08-26 — the rest of the audit: `bit/`, `decimal/`, `proc/`, and the deferred reply
+
+Follow-on to the namespace pass earlier today, working the audit's remaining list top to
+bottom. **Bare names 510 → 268.**
+
+**Three more namespaces, on the `string/length` pattern** — kernel primitives registered
+under a module name, with a `.blsp` file declaring the namespace:
+
+- **`bit/`** (10 names): `bit-and` → `bit/and`, `float->bits` → `bit/float->`, and the rest.
+  347 call sites. The hazard worth recording: `eval/compile/ir.rs` maps the bare strings
+  `"bit-and"`/`"bit-or"`/`"bit-xor"` to `PrimOp::BitAnd` for JIT inlining, so a rename that
+  misses that line does not fail a test — it silently stops inlining bit ops in the crypto
+  and hash hot loops. `eval::compile::tests`' `resolve_prim` assertion is the gate; it
+  passes. A check confirmed no OTHER PrimOp-keyed name was renamed in any wave.
+- **`decimal/`** (4 names), following the conversion idiom: `decimal/->string` is a decimal
+  to a string, `decimal/number->` a number to a decimal. `decimal?` stays bare — a type
+  predicate belongs beside `int?`/`float?`/`ratio?`, not behind a prefix.
+- **`proc/`** for process naming: `register`/`whereis` moved in beside `proc/info`, and the
+  two missing halves added — **`proc/unregister`** (a name could previously only be released
+  by its process dying, so a service could not hand its name over or step down) and
+  **`proc/alive?`** (liveness had to be asked for by allocating a whole `proc/info` map).
+
+Also `brood-version`/`build-id`/`stdlib-id` → `system/*`, and `char->int`/`int->char`/
+`display-width` → `string/*`.
+
+**Two renaming hazards this pass, both caught by the suite rather than by review.** A
+token-boundary matcher is safe for hyphenated names — they cannot be Rust identifiers — but
+`whereis` has no hyphen, so it renamed `pub(crate) fn whereis` in `dist.rs` to something
+unparseable. And `decimal` and `register` are ordinary English words: a blanket rename
+rewrote them inside prose and, for `register`, inside 12 Rust sites where `"decimal"` is the
+*type* name. Both were handled by matching CALL POSITION only (`(name `) and hand-editing the
+single registration line. Error messages that named the old function (`bits->float: …`,
+`int->char: …`) were updated too — an error naming a function that no longer exists is worse
+than the rename.
+
+**`gen` can defer a reply.** A `call` clause had to produce `[reply next-state]`
+synchronously, so a server could not hand work off without blocking its own loop — the one
+gap that limited what could be *built* rather than what was convenient. New `defer` clause:
+the body returns the next state (like a cast) and binds `reply`, an opaque token, so the
+answer can be sent from anywhere once it exists. `(gen/reply token value)` delivers it.
+Verified end to end: with a deferred call outstanding, the loop still served two casts and a
+query, and the answer arrived from a spawned worker.
+
+**`task` and `await` compose.** `(task/await (task/task f) ms)` was meaningless — `await`
+took a *thunk* and started a fresh process. It now takes either.
+
+**`pq` and `multimap` get `Conjable`.** Both had declined it on the reasoning that "conj's
+single element can't carry a key/priority" — but the default impl already answers that with
+the `[k v]` pair convention, and without an impl `(conj q 3)` failed with "adding to a RECORD
+takes a [k v] pair or a map": an error about records, raised for a priority queue.
+
+**A correction to the audit.** `supervisor/delete-child` is not missing — `terminate-child`
+already drops the child from supervision. Adding it would have been duplication.
+
+**Documented examples: 65 → ~170 executed cases**, across `path`, `queue`, `pq`, `set`,
+`math`, `encoding`, `url`, `uuid`, `version`, `text`, `multimap`, `seq`, `bytes`, `stats`,
+`rand`, `diff`, `fuzzy`. Four modules are now at 100%. Writing them found two documentation
+bugs the prose had asserted for a long time:
+
+- `multimap/keys` claimed "insertion order". It returns the CHAMP trie's order, which is not
+  insertion order and **not even stable across processes** — it follows keyword interning, so
+  the same two keys come back in either order depending on what else the process has loaded.
+  The example failed in the suite and passed standalone, which is how it surfaced. Now
+  documented as unspecified, with the example sorted.
+- An example inserter that did not escape quotes terminated a docstring early and leaked the
+  rest into the function BODY — `path/basename` compiled fine and raised `unbound symbol:
+  a/b/c.txt` when called. It went unnoticed because only `doc_examples_test` was re-run after
+  that batch, not the suite. The repair pass then over-corrected, escaping the docstrings'
+  own closing quotes and four real code lines whose *strings* contain a `→`. Both were caught
+  by the full suite, which is the argument for running it rather than the targeted subset.
+
+Still open: ~1,150 public functions carry no example. That is a campaign, not a pass — but
+each one written becomes an executed test, so it pays for itself.

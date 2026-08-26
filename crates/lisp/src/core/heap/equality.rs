@@ -62,7 +62,7 @@ fn ratio_cmp_float(r: &num_rational::BigRational, f: f64) -> std::cmp::Ordering 
 ///
 /// The exponent is converted with `try_from`, never `as u32`: an `as` cast silently
 /// truncates, and a scale of `4294967297` wrapped to `1` — so a decimal that is
-/// effectively zero was compared as `1/10`, and `(< (decimal "1e-4294967297") 1/10)`
+/// effectively zero was compared as `1/10`, and `(< (decimal/of "1e-4294967297") 1/10)`
 /// answered **false**. Callers must screen the magnitude first
 /// ([`ratio_cmp_bigdecimal`]): `10ˢᶜᵃˡᵉ` is a `scale`-digit bignum, so a large scale
 /// is an unbounded allocation even when it does fit a `u32`.
@@ -92,7 +92,7 @@ fn log10_bounds(x: &num_bigint::BigInt) -> (i128, i128) {
 /// Order a `BigRational` against a `BigDecimal` — the ratio-vs-decimal `value_cmp`
 /// arms. Exact, but **without materialising `10ˢᶜᵃˡᵉ` when the two are orders of
 /// magnitude apart**. That power is a `scale`-digit bignum, so the naive conversion
-/// made `(< 1/2 (decimal "1e-1000000000"))` allocate without bound (190MB and still
+/// made `(< 1/2 (decimal/of "1e-1000000000"))` allocate without bound (190MB and still
 /// climbing after 20s, never finishing) — and unlike the arithmetic path, an
 /// ordering has no error channel to raise on, so the fix has to be to *not need*
 /// the power.

@@ -111,7 +111,9 @@ shorter candidate, then lexicographic). An empty `query` returns `cands` unchang
 Lowers `query` **once** (not once per candidate), and sorts by a **precomputed** key —
 decorate-sort-undecorate — so `sort-by`'s key-fn is an O(1) field read rather than a
 per-comparison rebuild of `[(-score) len text]` (a vector alloc + map lookup + length).
-That rebuild dominated ranking large candidate sets (thousands of project files)."
+That rebuild dominated ranking large candidate sets (thousands of project files).
+
+    (fuzzy/filter \"ab\" [\"axb\" \"zz\"])   → (\"axb\")"
   (if (= query "")
     cands
     (let (qlow (string/lower query)

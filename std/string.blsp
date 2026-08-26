@@ -70,7 +70,7 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
 (defn codepoints-> (cs)
   "Build a string from a list (or vector) of Unicode codepoint integers — the
 inverse of the `string/->codepoints` primitive."
-  (apply str (map int->char cs)))
+  (apply str (map string/int->char cs)))
 
 (defn ->bytes (s)
   "Encode string `s` as a bytes value — its UTF-8 bytes. Inverse of `string/bytes->`."

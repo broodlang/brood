@@ -252,7 +252,7 @@ A 6-slot VECTOR, not a map — the per-call `table/get` clone of a small vector
 is a flat copy (a CHAMP map rebuilds nodes), and the entry glue reads it with
 `nth`, not keyword lookups. Slots:
   0 m          the state count;
-  1 matchbit   the accept state's bit (accept tests are plain `bit-and`);
+  1 matchbit   the accept state's bit (accept tests are plain `bit/and`);
   2 startfull  the full eps-closure of {start} at position 0 for a NON-empty
                input (`^` fires, `$` doesn't — position-independent for n > 0);
   3 startmid   the split-only closure of {start} (the search loop's injection);
@@ -266,9 +266,9 @@ object's per-call clone-out stays a few words — see the cache note above."
             states (get nfa :states)
             start (get nfa :start)
             m (count states)
-            startbit (bit-shift-left 1 start)
+            startbit (bit/shift-left 1 start)
             obj [m
-                  (bit-shift-left 1 (get nfa :match))
+                  (bit/shift-left 1 (get nfa :match))
                   (regex-eps-close states startbit 0 1 m)
                   (regex-eps-close-mid states startbit m)
                   (table/new)
@@ -280,7 +280,7 @@ object's per-call clone-out stays a few words — see the cache note above."
 
 ;; ---- simulate: closure-free Thompson NFA over integer-bitset state sets ------
 ;; A "state set" is a Brood integer used as a bitset: bit s set ⇔ NFA state s is
-;; live. `bit-or` unions, `bit-shift-left` makes a singleton, `bit-positions` lists
+;; live. `bit/or` unions, `bit/shift-left` makes a singleton, `bit/positions` lists
 ;; the live states. No per-step allocation beyond the bitset ints.
 
 (defn- regex-letter?
@@ -308,20 +308,20 @@ object's per-call clone-out stays a few words — see the cache note above."
       (= k :class) (regex-class-match? (get test :k) c)
       else false)))
 
-(defn- regex-bit? (s i) (not (= 0 (bit-and s (bit-shift-left 1 i)))))
+(defn- regex-bit? (s i) (not (= 0 (bit/and s (bit/shift-left 1 i)))))
 
 (defn- regex-eps-targets
   (states s i n)
   "Epsilon successors of state `s` valid at position `i` (a bitset; 0 for none)."
   (let (st (nth states s) t (get st :t))
     (cond
-      (= t :split) (bit-or (bit-shift-left 1 (get st :a)) (bit-shift-left 1 (get st :b)))
-      (= t :bol) (if (= i 0) (bit-shift-left 1 (get st :next)) 0)
-      (= t :eol) (if (= i n) (bit-shift-left 1 (get st :next)) 0)
+      (= t :split) (bit/or (bit/shift-left 1 (get st :a)) (bit/shift-left 1 (get st :b)))
+      (= t :bol) (if (= i 0) (bit/shift-left 1 (get st :next)) 0)
+      (= t :eol) (if (= i n) (bit/shift-left 1 (get st :next)) 0)
       else 0)))
 
 ;; The inner loops walk state indices 0..m with top-level recursive helpers — NOT
-;; `reduce` over `(bit-positions set)`, which would allocate a fresh lambda AND a
+;; `reduce` over `(bit/positions set)`, which would allocate a fresh lambda AND a
 ;; positions vector on every character. A `defn` helper is a global (no per-call
 ;; closure), so the whole per-char simulation allocates nothing but the bitset ints.
 
@@ -336,7 +336,7 @@ object's per-call clone-out stays a few words — see the cache note above."
       n
       (inc j)
       m
-      (if (regex-bit? set j) (bit-or acc (regex-eps-targets states j i n)) acc))))
+      (if (regex-bit? set j) (bit/or acc (regex-eps-targets states j i n)) acc))))
 
 (defn- regex-eps-close
   (states set i n m)
@@ -360,7 +360,7 @@ object's per-call clone-out stays a few words — see the cache note above."
       (if (regex-bit? set j)
         (let (st (nth states j))
           (if (= (get st :t) :split)
-            (bit-or acc (bit-or (bit-shift-left 1 (get st :a)) (bit-shift-left 1 (get st :b))))
+            (bit/or acc (bit/or (bit/shift-left 1 (get st :a)) (bit/shift-left 1 (get st :b))))
             acc))
         acc))))
 
@@ -383,7 +383,7 @@ object's per-call clone-out stays a few words — see the cache note above."
       (if (regex-bit? set j)
         (let (st (nth states j))
           (if (if (= (get st :t) :char) (regex-char-test? (get st :test) c) false)
-            (bit-or acc (bit-shift-left 1 (get st :next)))
+            (bit/or acc (bit/shift-left 1 (get st :next)))
             acc))
         acc))))
 
@@ -391,13 +391,13 @@ object's per-call clone-out stays a few words — see the cache note above."
 ;; so the per-char loop below is pure integer/prim work: `(nth codes i)` (a
 ;; vector-ref prim), the packed memo key `(+ (* set 2097152) code)` (int arith),
 ;; `table/get` (a table prim), and the self tail call. No per-char Brood→Brood
-;; call and no `char->int` call — which is what lets the whole loop JIT-tier.
+;; call and no `string/char->int` call — which is what lets the whole loop JIT-tier.
 (defn- regex-delta-slow
   (states memo m set code)
   "The DFA-transition MISS path: compute the split-closed successor of `set` on
 char-code `code` (an NFA step + closure over the char), memoise it, return it.
 Runs once per distinct (set, char) — every repeat is the loop's one `table/get`."
-  (let (c (int->char code)
+  (let (c (string/int->char code)
         nxt (regex-eps-close-mid states (regex-step states set c 0 m 0) m))
     (table/put memo (+ (* set 2097152) code) nxt)
     nxt))
@@ -409,7 +409,7 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
 ;; fire and `:bol` not — exactly what (i=1, n=1) reproduces.
 (defn- regex-exit-slow
   (states exitmemo m matchbit set)
-  (let (r (not (= 0 (bit-and (regex-eps-close states set 1 1 m) matchbit))))
+  (let (r (not (= 0 (bit/and (regex-eps-close states set 1 1 m) matchbit))))
     (table/put exitmemo set r)
     r))
 
@@ -456,7 +456,7 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
 ;; (position 0), `$` only in the exit closure at position n.
 (defn- regex-run-search-loop
   (pattern exitmemo memo m startmid matchbit codes n i set)
-  (if (not (= 0 (bit-and set matchbit)))
+  (if (not (= 0 (bit/and set matchbit)))
     true
     (if (>= i n)
       (regex-exit pattern exitmemo m matchbit set)
@@ -473,7 +473,7 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
           codes
           n
           (+ i 1)
-          (bit-or nxt2 startmid))))))
+          (bit/or nxt2 startmid))))))
 
 ;; ---- public entry points ----------------------------------------------------
 ;; The n == 0 edge (empty input) is the one case where the precomputed closures
@@ -485,8 +485,8 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
   (let (sobj (table/get regex-states-cache pattern)
         states (get sobj :states)
         m (count states)
-        set (regex-eps-close states (bit-shift-left 1 (get sobj :start)) 0 0 m))
-    (not (= 0 (bit-and set matchbit)))))
+        set (regex-eps-close states (bit/shift-left 1 (get sobj :start)) 0 0 m))
+    (not (= 0 (bit/and set matchbit)))))
 
 (defn match? (pattern s)
   "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the

@@ -103,12 +103,12 @@ restarts on an uncatchable handler fault — the handler table is a separate glo
 handlers survive the restart. A second call replaces the registration with a fresh
 listener."
   (let (pid (spawn (telemetry-listen)))
-    (register :telemetry pid)
+    (proc/register :telemetry pid)
     pid))
 
 (defn pid ()
   "The listener pid, or nil if telemetry isn't started."
-  (whereis :telemetry))
+  (proc/whereis :telemetry))
 
 (defn stop ()
   "Stop the listener if running. Returns nil. (Handlers stay registered in the global;
@@ -488,7 +488,7 @@ pid; `stop-serve` (or killing it) tears down every remote subscription."
   (if (= (node/name) :nonode)
     (error "serve: call (node/start name addr cookie) first")
     (let (agent (spawn (telemetry-serve-loop nil)))
-      (register :telemetry-remote agent)
+      (proc/register :telemetry-remote agent)
       agent)))
 
 (defn stop-serve (agent)

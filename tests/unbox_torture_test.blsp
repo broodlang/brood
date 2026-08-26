@@ -28,7 +28,7 @@
       (+ n 1)
       (if (< n 1) (ut-ack (- m 1) 1) (ut-ack (- m 1) (ut-ack m (- n 1))))))
   (defn ut-digsum (n) (if (< n 1) 0 (+ (rem n 10) (ut-digsum (quot n 10)))))
-  (defn ut-xor (n) (if (< n 1) 0 (bit-xor n (ut-xor (- n 1)))))
+  (defn ut-xor (n) (if (< n 1) 0 (bit/xor n (ut-xor (- n 1)))))
   (defn ut-let (n) (if (< n 2) n (let (h (quot n 2)) (+ (ut-let (- n 1)) (ut-let (- n 2)) h))))
   ; ÷0 at n=0
   (defn ut-div0 (n) (if (< n 0) 0 (+ (rem 10 n) (ut-div0 (- n 1)))))

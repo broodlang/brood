@@ -351,7 +351,7 @@ static NODES: LazyLock<RwLock<HashMap<Symbol, Conn>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Locally registered name → local process id, so a peer can address a process by
-/// a stable name before anyone holds its pid (`(register :echo (self))`).
+/// a stable name before anyone holds its pid (`(proc/register :echo (self))`).
 static NAMES: LazyLock<RwLock<HashMap<Symbol, u64>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -399,16 +399,25 @@ fn advertised_addr() -> String {
         .unwrap_or_default()
 }
 
-/// `(register name pid)` — bind a local name to a local process id.
+/// `(proc/register name pid)` — bind a local name to a local process id.
 pub(crate) fn register(name: Symbol, id: u64) {
     crate::core::sync::write(&NAMES).insert(name, id);
 }
 
-/// `(whereis name)` — the local pid registered under `name`, or `None`. Lets
+/// `(proc/whereis name)` — the local pid registered under `name`, or `None`. Lets
 /// callers test for an existing registration before re-`spawn`ing a server
 /// they're about to register (idempotent bootstrap; used by `remote-spawn`).
 pub(crate) fn whereis(name: Symbol) -> Option<u64> {
     crate::core::sync::read(&NAMES).get(&name).copied()
+}
+
+/// `(proc/unregister name)` — drop `name`'s binding, returning whether one existed.
+///
+/// The inverse of [`register`], which had none: a name could be bound to a pid and never
+/// released except by that process dying. A service that wants to hand its name to a
+/// replacement, or step down without exiting, needs this.
+pub(crate) fn unregister(name: Symbol) -> bool {
+    crate::core::sync::write(&NAMES).remove(&name).is_some()
 }
 
 /// The name `pid` is registered under, if any — the reverse of [`whereis`].
@@ -424,7 +433,7 @@ pub(crate) fn name_for_pid(pid: u64) -> Option<Symbol> {
 
 /// Remove every `NAMES` entry pointing at `pid` — called from
 /// `process::deregister` when a process dies, so a name registered under it
-/// doesn't go stale. Without this, `(whereis :foo)` could return a dead pid
+/// doesn't go stale. Without this, `(proc/whereis :foo)` could return a dead pid
 /// and `(spawn :foo …)` (named-spawn) would mistake the stale entry for
 /// "already running" and never re-spawn the worker. Erlang's `register`
 /// semantics: a name lives only as long as its process does.

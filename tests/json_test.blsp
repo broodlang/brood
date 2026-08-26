@@ -235,7 +235,7 @@
 ;; ---- surrogate escapes -------------------------------------------------------
 ;; A `\uXXXX` escape in the D800..DFFF range is half of a pair, never a codepoint.
 ;; The lone-HIGH case was already caught; the other two were not: a lone LOW
-;; surrogate leaked the KERNEL's `int->char: 56320 is not a valid Unicode codepoint`,
+;; surrogate leaked the KERNEL's `string/int->char: 56320 is not a valid Unicode codepoint`,
 ;; and a high surrogate followed by a non-low `\u` escape was silently MIS-DECODED
 ;; (`"\uD800\u0041"` returned "⑁") — a wrong value, which is worse than an error.
 
@@ -244,7 +244,7 @@
     (assert= "\u{1D11E}" (parse "\"\\uD834\\uDD1E\"")))
   (test "a lone high surrogate is a json error"
     (is (json-errs? "\"\\uD800\"")))
-  (test "a lone LOW surrogate is a json error, not a kernel int->char error"
+  (test "a lone LOW surrogate is a json error, not a kernel string/int->char error"
     (is (json-errs? "\"\\uDC00\""))
     (is (json-errs? "\"\\uDFFF\"")))
   (test "a high surrogate followed by a NON-low escape errors instead of mis-decoding"
