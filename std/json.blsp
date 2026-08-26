@@ -81,7 +81,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 (defn- json-slice
   (s i end)
   "The code points [i, end) of `s`, joined back into a string."
-  (apply str (map int->char (seq/subvec s i end))))
+  (%codepoints->string (seq/subvec s i end)))
 
 (defn- ws? (c) (or (= c 32) (= c 9) (= c 10) (= c 13)))
 
@@ -249,7 +249,10 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
   (let (c (json-at s i n))
     (cond
       (= c -1) (error "json: unterminated string")
-      (= c 34) [(apply str (map int->char (reverse acc))) (+ i 1)]
+      ;; `%codepoints->string`, not `(apply str (map int->char …))`: one native pass
+      ;; instead of a one-character string plus a closure call per code point, then an
+      ;; N-way variadic concat. This runs once per string and key in the document.
+      (= c 34) [(%codepoints->string (reverse acc)) (+ i 1)]
       (= c 92) (let ([cp j] (json-escape s (+ i 1) n)) (string-acc s j n (cons cp acc)))
       ;; RFC 8259 §7: U+0000–U+001F MUST be escaped inside a string. A raw newline
       ;; or tab in a string body is malformed JSON, not content — accepting it made
