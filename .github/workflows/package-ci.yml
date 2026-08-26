@@ -65,7 +65,11 @@ jobs:
           # `RUN_FEATURES` build does NOT have it, so a package's suite could not run.
           # Going through cargo also skips ./configure and the gui/audio system-library
           # question entirely, which a bare runner does not have.
-          cargo build --release --bin brood --bin nest
+          # `treesit-grammars` links the bundled tree-sitter grammars (ruby, elixir).
+          # They are opt-in, and without them a package with language modes fails only
+          # in CI — bedit's ruby-mode/elixir-mode tests passed locally, where the
+          # installed brood was built with them, and failed here.
+          cargo build --release --features brood/treesit-grammars --bin brood --bin nest
           mkdir -p "$HOME/.local/bin"
           cp target/release/brood target/release/nest "$HOME/.local/bin/"
 
