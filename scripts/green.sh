@@ -31,12 +31,17 @@ set -u
 
 do_local=1
 do_remote=1
-case "${1:-}" in
-  --local)  do_remote=0 ;;
-  --remote) do_local=0 ;;
-  "")       ;;
-  *) echo "usage: $0 [--local | --remote]" >&2; exit 2 ;;
-esac
+do_clippy=0
+for arg in "$@"; do
+  case "$arg" in
+    --local)  do_remote=0 ;;
+    --remote) do_local=0 ;;
+    # Off by default because it is a full --all-features build (minutes, not seconds) and
+    # every other check here is seconds. On in `make green-all`.
+    --clippy) do_clippy=1 ;;
+    *) echo "usage: $0 [--local | --remote] [--clippy]" >&2; exit 2 ;;
+  esac
+done
 
 # The workflow that actually gates the tree. `Release` also runs here and only builds
 # binaries; it succeeds on commits whose CI failed, so it must never be read as green.
@@ -135,14 +140,34 @@ if [ "$do_local" = 1 ]; then
   if cargo fmt --all --check >/dev/null 2>&1; then ok "cargo fmt --all --check"
   else red "cargo fmt --all --check  →  run \`make fmt\`"; fi
 
+  # `--all-features` is the load-bearing half, not a thoroughness flourish: without it the
+  # lint set is smaller, and a plain `cargo clippy --all-targets` passes on code CI rejects.
+  # That is not hypothetical — it happened twice on 2026-08-27, once to a locally-verified
+  # commit and once to the boot-cache prune (`unnecessary_sort_by`), where the Clippy step
+  # failing SKIPPED every step behind it, so the tests and the checker gate never ran at all.
+  if [ "$do_clippy" = 1 ]; then
+    if cargo clippy --all-targets --all-features -- -D warnings >/dev/null 2>&1; then
+      ok "cargo clippy --all-targets --all-features -- -D warnings"
+    else
+      red "cargo clippy (CI flags)"
+      cargo clippy --all-targets --all-features -- -D warnings 2>&1 |
+        grep -E "^error" | head -5 | sed 's/^/       /'
+    fi
+  fi
+
   # Cheap and catches a whole class: a KI/ADR cited with no entry, or two entries claiming one
   # number (which happened on 2026-08-27 and was invisible because `defined()` used a set).
   if cargo test -q -p brood --test doc_refs >/dev/null 2>&1; then ok "doc_refs (KI/ADR references + no duplicate numbers)"
   else red "doc_refs  →  cargo test -p brood --test doc_refs"; fi
 
   echo
-  note "not run here (slow — CI or an explicit run): make test, make check-examples, make check-stress,"
-  note "the breakage suite, and the tree-walker differential. \`make green-all\` runs the .blsp ones."
+  if [ "$do_clippy" = 0 ]; then
+    note "clippy NOT run (add --clippy, or use \`make green-all\`). CI's exact invocation is"
+    note "  cargo clippy --all-targets --all-features -- -D warnings"
+    note "and a plain \`cargo clippy --all-targets\` does NOT catch what it catches."
+  fi
+  note "not run here (slow — CI or an explicit run): make test, the breakage suite, and the"
+  note "tree-walker differential. \`make green-all\` adds clippy, examples and stress."
   echo
 fi
 

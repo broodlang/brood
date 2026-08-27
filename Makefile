@@ -298,8 +298,9 @@ green: ## Answer one question honestly: is this tree green? (completed CI runs +
 	# `--local` skips the CI half, `--remote` skips the local half.
 	@./scripts/green.sh $(ARGS)
 
-green-all: green check-examples check-stress ## `make green` plus the two slow .blsp corpus gates
-	@echo "green-all: the .blsp gates passed too. Still not run: make test, breakage, tree-walker differential."
+green-all: check-examples check-stress ## `make green` plus clippy (CI's flags) and the two slow .blsp corpus gates
+	@./scripts/green.sh --clippy
+	@echo "green-all: clippy and the .blsp gates passed too. Still not run: make test, breakage, tree-walker differential."
 
 doctor: ## Report the things that make a measurement or a gate lie (build drift, strays, boot cache, litter)
 	# Read this BEFORE trusting a benchmark delta or a green gate. Every check maps to a

@@ -259,7 +259,7 @@ cargo run -p nest -- test         # discover + run the project's test suite
 cargo run -p nest -- new foo      # scaffold a new project
 make ab BASE=<ref>                # A/B the working tree vs a git ref on the benchmark rows
 make green                        # IS THE TREE GREEN? completed CI runs + the gates `make check` skips
-make green-all                    # …plus the examples and stress corpus gates
+make green-all                    # …plus clippy on CI's flags, and the examples/stress gates
 ```
 
 **`make green` is the answer to "is the tree green?" — do not hand-read the run list.** It
@@ -273,6 +273,14 @@ and the stress gate; v0.14.0 was tagged and pushed with `nest format --check` re
 that reason. `make green` reports the completed runs of the **CI workflow specifically** (the
 `Release` workflow goes green on commits whose CI failed) and runs the local gates `make check`
 omits; it prints **"no verdict"** rather than "green" when CI has concluded nothing recent.
+
+> **Clippy: `--all-features` is load-bearing, not thoroughness.** CI runs
+> `cargo clippy --all-targets --all-features -- -D warnings`; **a plain
+> `cargo clippy --all-targets` passes on code CI rejects**, because the smaller feature set
+> arms fewer lints. That cost two commits on 2026-08-27, and the second was expensive out of
+> proportion: the `Clippy` step failing **skips every step behind it**, so the tests, the
+> doctests and the checker gate never ran on that commit at all. `make green` says clippy was
+> not run and prints the exact invocation; `make green-all` runs it.
 
 **Reading where the time goes: `make perf-brood`, then `(perf/summary)`.** The counters are a
 cargo feature, so an ordinary (or installed) binary cannot attribute at all — `make perf-brood`
