@@ -20,7 +20,7 @@ ADRs / topic docs.
 | # | What | Status |
 |---|---|---|
 | KI-67 | **`nest check` is silent about unbound symbols inside a `try` body**, so a rename can leave a call site dead and every gate stays green. `hatch`'s spool write was `(try (bytes/append path piece) (catch e …))`; brood renamed that to `file/spit-bytes-append`, `nest check` reported nothing, and the repo shipped with every spooled upload broken — visible only as four tests timing out with no error to read. The skip is deliberate (`skips_error_testing_forms`, so a test that deliberately calls an unbound name is not flagged), but it costs exactly the case a rename wave produces | ⚠️ **open (2026-08-27)** — narrowing candidates: flag an unbound symbol in a `try` whose `catch` does not itself reference it, or a `--strict` that reports them separately. Found the hard way twice this session |
-| KI-66 | **nothing verifies that a project still BOOTS.** `nest check` resolves names and `nest test` runs the suite, but neither loads `main` — and module-load is exactly where a stale dependency dies. hive went down twice on the same shape: `unbound symbol: int->char` and then `unbound symbol: os/getenv`, both raised on the first line of `main`, both after a clean check and a green suite. The runtime built fine; the BUNDLE could not start | ⚠️ **open (2026-08-27)** — the fix is small: a `nest release --smoke` (or `nest run --check-boot`) that loads the bundle's modules and exits nonzero on failure. Today the only way to learn this is to deploy |
+| KI-66 | **nothing in the default gate verifies that a project still BOOTS.** `nest check` resolves names and `nest test` runs the suite, but neither evaluates `main` — and that is exactly where a stale dependency dies. hive went down twice on the same shape: `unbound symbol: int->char` and then `unbound symbol: os/getenv`, both raised on the first line of `main`, both after a clean check and a green suite | ☑️ **not a missing capability (2026-08-27)** — `nest run --for 6s` ALREADY does it: exit 1 with the error if the entry point raises, exit 0 if it survives the window. Verified on a fixture both ways. So the gap is wiring, not tooling: nothing tells you to run it and no gate does. Wired into hive's `bin/ci`; the open part is whether the shared package-ci workflow should too (it must not: `bedit`/`pong` need a GUI, so it has to be opt-in per repo) |
 | KI-64 | **the JIT miscompiles `json/encode` under sustained load** — hive's `/api/v1/packages*` returns 500 after ~60 requests and then fails until the machine restarts, while `/health` and every web page keep serving. The error is `empty?: expected collection, got int (1114114)` inside `emit-pairs`/`emit-list`, i.e. an int where the recursion expects a list; 1114114 is NOT a codepoint (that reading was a coincidence) — it is a packed deopt-journal word, `17 << 16 \| 2`. `BROOD_NO_JIT=1` makes it 120/120 clean | ✅ **fixed 2026-08-26** — a block-argument spill slot was landing on the deopt checkpoint, because `jit_spill_reserve` gated the WHOLE reserve on having ≥2 non-tail calls while block-argument slots depend only on the operand depth at a block leader. Not shared code, not concurrency, not load: it reproduces in one process on the fourth call. Fixed by clamping the spill window to its reserve (ADR-248); `BROOD_NO_JIT=1` is no longer needed in hive |
 | KI-63 | ~~loading std modules taxes JIT'd hot loops~~ — **RETRACTED 2026-08-25, the effect does not exist.** After a discarded warm-up run in-process, a 20M loop is 23-24 ms whether or not `format` is loaded. Every earlier figure measured the FIRST run, i.e. JIT warm-up, which is variable and shape-sensitive — the same loop read 25 ms in one file and 40-51 ms in another differing only by having three call sites | ☑️ **retracted** — no bug. What is real, and is the reusable part: a whole-process benchmark of a short row measures tiering, not steady state |
 | KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
@@ -243,9 +243,22 @@ pinned dependency that the local working tree did not match, and because a suite
 executes the entry point. The Rust runtime built fine — it is the BUNDLE that could not
 start, which is a different artifact from anything the gates look at.
 
-**The fix is small.** A `nest release --smoke`, or `nest run --check-boot`: load the
-bundle's modules, run nothing, exit nonzero on failure. Seconds to run, and it converts
-both of those outages into a failed command on the machine that produced them.
+**The tool already exists.** `nest run --for <DURATION>` — documented for exercising a TUI
+or animation loop in CI — is exactly a boot check, and was verified on a fixture:
+
+| entry point | `nest run --for 1s` |
+|---|---|
+| `(defn main () (this-name-does-not-exist))` | **exit 1**, with `unbound symbol: …` |
+| `(defn main () (io/puts "booted") (sleep 60000))` | **exit 0**, having printed `booted` |
+
+So this is not a tooling gap, it is a wiring one: nothing suggests running it and no gate
+does. Note what it catches that a module-load check would NOT — the second outage raised
+inside `default-logger-opts`, called from `main`'s body, so loading the module was never
+going to be enough. You have to actually run the thing.
+
+**Wired into hive's `bin/ci`.** The open question is the shared package-ci workflow. It
+cannot simply be enabled everywhere: `bedit` and `pong` need a GUI, and a library has no
+`:main` at all. It wants an opt-in input, the way `postgres: true` is.
 
 **Related, and cheap alongside it:** a bundled app cannot say what it is. Answering "which
 brood built this, with which features" required `grep -ac cranelift` on the binary over SSH,
