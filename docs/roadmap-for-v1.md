@@ -249,7 +249,7 @@ All purely additive — deferring costs a version number and nothing else.
   Brood-first prototype proved the four *kernel-only* properties (the `1/2` literal, `=` with an
   integer, numeric-tower ordering/contagion, `pr-str` round-trip) were load-bearing, ratios were
   promoted to `Value::Ratio`. `1/2` is a reader literal, `/` on integers is **exact** (`(/ 1 2)`
-  → `1/2`, `(/ 6 3)` → `2`), `->float`/`->decimal` are the escape hatches. This **supersedes**
+  → `1/2`, `(/ 6 3)` → `2`), `->float`/`decimal/number->` are the escape hatches. This **supersedes**
   the two freeze rows below (ratios-refused, `(/ 1 2)`-is-float) — a *relaxation*, which the
   freeze explicitly leaves open (ADR-170).
 - ⬜ **A rope-level grapheme cursor.** ADR-159's three accessors unblock correctness

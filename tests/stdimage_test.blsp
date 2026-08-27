@@ -30,15 +30,15 @@
           ;; already-loaded, so this asserts the section is present, not that it reloads
           (is (contains? (into #{} (map name (global-names))) "json/->json"))))))
 
-  (test "the image is keyed on stdlib-id — content, not the executable"
-    ;; Deliberately NOT `build-id`: that embeds the running executable's mtime, so `brood`,
+  (test "the image is keyed on system/stdlib-id — content, not the executable"
+    ;; Deliberately NOT `system/build-id`: that embeds the running executable's mtime, so `brood`,
     ;; `nest` and `brood-lsp` from one tree would each write their own ~2 MB copy of an
-    ;; identical image. `stdlib-id` hashes what is baked in, so they share one — and it
+    ;; identical image. `system/stdlib-id` hashes what is baked in, so they share one — and it
     ;; still changes on any `.blsp` edit, committed or not, so a stale image is never read.
     (let (p (image-path))
       (when p
-        (is (includes? p (stdlib-id)))
-        (is (not (includes? p (build-id))))
+        (is (includes? p (system/stdlib-id)))
+        (is (not (includes? p (system/build-id))))
         (is (includes? p "std-image-")))))
 
   ;; Root globals — the ones carrying no `mod/` prefix — used to be credited to whichever
@@ -65,7 +65,7 @@
   (test "the edges the image carries live in a global no module owns"
     (is (not (includes? (name '*std-require-edges*) "/"))))
 
-  ;; The image is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately the same for
+  ;; The image is keyed on `system/stdlib-id` — the stdlib's CONTENT — deliberately the same for
   ;; `brood`, `nest` and `brood-lsp` from one tree so they share one copy. But those binaries
   ;; do NOT bake in the same modules: a lean runtime (what `nest release` and
   ;; `make install INSTALL_FEATURES=RUN_FEATURES` produce — what ships) has no dev-tools, and

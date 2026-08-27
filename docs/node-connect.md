@@ -62,7 +62,7 @@ Three frictions, all incidental to the share-nothing model:
 ```lisp
 ;; same machine — name is the whole address, secret is implicit
 (node/start :server)            ; listen on a per-user Unix socket; cookie auto-loaded
-(register :echo (self))
+(proc/register :echo (self))
 
 (node/start :client)
 (connect "server")              ; dial the local node named "server"
@@ -176,7 +176,7 @@ is deferred per ADR-011 until the editor needs it.
 
 Add `--name NAME` to the `Run` command (`nest/src/main.rs:86`). Before running the
 user's file, nest evals `(node/start 'NAME)`. Pure CLI→Brood glue — no new policy
-in Rust; the app file becomes just `(register :echo (self))` + logic.
+in Rust; the app file becomes just `(proc/register :echo (self))` + logic.
 `nest observe --connect foobar` (bare name) gains Unix support and the cookie-file
 fallback for free.
 

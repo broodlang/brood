@@ -24,12 +24,10 @@ falsy collection, so `(if pq …)` used to take the else branch on an empty queu
 ;; The bare `pq?` type predicate lives in the prelude alongside `set?`/`map?` (ADR-236).
 
 (defn empty ()
-  "An empty min-priority queue."
-  (pq nil))
+  "An empty min-priority queue.
 
-(defn empty? (q)
-  "True if the priority queue has no elements."
-  (/empty? (get q :entries)))
+    (count (pq/empty))   → 0"
+  (pq nil))
 
 (defn- sorted-insert
   (entries pri val)
@@ -46,33 +44,49 @@ falsy collection, so `(if pq …)` used to take the else branch on an empty queu
 
 (defn insert (q priority value)
   "Return a priority queue with `[priority value]` inserted (min priority at front).
-Stable: among equal priorities, earlier inserts pop first (FIFO)."
+Stable: among equal priorities, earlier inserts pop first (FIFO).
+
+    (seq (pq/insert (pq/insert (pq/empty) 2 :b) 1 :a))   → (:a :b)"
   (pq (sorted-insert (get q :entries) priority value)))
 
 (defn pop (q)
-  "Return `[min-value new-pq]`, or `:empty` if the queue is empty."
+  "Return `[min-value new-pq]`, or `:empty` if the queue is empty.
+
+    (first (pq/pop (pq/insert (pq/empty) 1 :a)))   → :a"
   (if (empty? q)
     :empty (let (entries (get q :entries))
       [(second (first entries)) (pq (rest entries))])))
 
 (defn peek (q)
-  "Return the minimum-priority value without removing it, or `:empty` if empty."
+  "Return the minimum-priority value without removing it, or `:empty` if empty.
+
+    (pq/peek (pq/insert (pq/insert (pq/empty) 2 :b) 1 :a))   → :a"
   (if (empty? q)
     :empty (second (first (get q :entries)))))
 
 (defn peek-priority (q)
-  "Return the minimum priority (the key), or `:empty` if empty."
+  "Return the minimum priority (the key), or `:empty` if empty.
+
+    (pq/peek-priority (pq/insert (pq/empty) 7 :x))   → 7"
   (if (empty? q)
     :empty (first (first (get q :entries)))))
 
 ;; The pq joins the collection protocol too: `Seqable` yields its values in priority order,
-;; so `seq`/`count`/`map`/`fold`/`for`/`into`-from work on a pq. (No `Conjable`: inserting
-;; needs a priority, which `conj`'s single element can't carry — use `pq/insert`.)
+;; so `seq`/`count`/`map`/`fold`/`for`/`into`-from work on a pq.
+;;
+;; `Conjable` takes a `[priority value]` PAIR. It was left unimplemented on the reasoning
+;; that "inserting needs a priority, which `conj`'s single element can't carry" — but the
+;; default impl already answers that: `conj` on a map takes a `[k v]` pair, so a pair is
+;; the established way to carry two things through one element. Without this, `(conj q 3)`
+;; fell through to that default and failed with "adding to a RECORD takes a [k v] pair or
+;; a map" — an error about records, raised for a priority queue.
 (impl Seqable pq/pq (->seq [q] (map second (get q :entries))))
-
-(defn ->list (q)
-  "All values in priority order (min first) as a list — the pq's `Seqable` view (`(seq q)`)."
-  (seq q))
+(impl Conjable pq/pq
+  (-conj [q x]
+    (if (and (vector? x) (= (count x) 2))
+      (insert q (nth x 0) (nth x 1))
+      (error "conj: adding to a priority queue takes a [priority value] pair, got "
+        (pr-str x)))))
 
 (impl Display
   pq/pq

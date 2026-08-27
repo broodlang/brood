@@ -43,7 +43,7 @@
    "-" :math
    "->" :control
    "->>" :control
-   "->decimal" :convert
+   "decimal/number->" :convert
    "->float" :convert
    "-conj" :meta
    "/" :math
@@ -71,20 +71,20 @@
    "binding" :meta
    "%binding-names" :meta
    "%binding-vals" :meta
-   "bit-and" :math
-   "bit-count" :math
-   "bit-not" :math
-   "bit-or" :math
-   "bit-positions" :math
-   "bit-shift-left" :math
-   "bit-shift-right" :math
-   "bit-xor" :math
-   "bits->float" :convert
+   "bit/and" :math
+   "bit/count" :math
+   "bit/not" :math
+   "bit/or" :math
+   "bit/positions" :math
+   "bit/shift-left" :math
+   "bit/shift-right" :math
+   "bit/xor" :math
+   "bit/->float" :convert
    "string/blank?" :predicates
    "bool?" :predicates
    "bound?" :meta
-   "brood-version" :meta
-   "build-id" :meta
+   "system/brood-version" :meta
+   "system/build-id" :meta
    "builtin-modules" :meta
    "bytes" :bytes
    "bytes?" :predicates
@@ -93,7 +93,7 @@
    "%case-check-test" :control
    "%case-clauses" :control
    "%chain?" :predicates
-   "char->int" :strings
+   "string/char->int" :strings
    "string/char-at" :strings
    "check-allow" :meta
    "%cmp-ge" :math
@@ -124,9 +124,9 @@
    "current-ns" :meta
    "file/cwd" :filesystem
    "dec" :math
-   "decimal" :convert
-   "decimal->float" :convert
-   "decimal->string" :convert
+   "decimal/of" :convert
+   "decimal/->float" :convert
+   "decimal/->string" :convert
    "decimal?" :predicates
    "def-" :control
    "defability" :meta
@@ -165,7 +165,7 @@
    "%deprecation-warning" :meta
    "file/dir?" :filesystem
    "disj" :collections
-   "display-width" :strings
+   "string/display-width" :strings
    "dissoc" :maps
    "%distinct-step" :collections
    "doc" :meta
@@ -187,8 +187,8 @@
    "eval-string" :meta
    "every?" :predicates
    "exit" :processes
-   "feature?" :predicates
-   "features" :meta
+   "system/feature?" :predicates
+   "system/features" :meta
    "fields" :maps
    "file/exists?" :filesystem
    "file/mtime" :filesystem
@@ -197,7 +197,7 @@
    "filter" :collections
    "first" :collections
    "%flatten-acc" :collections
-   "float->bits" :convert
+   "bit/float->" :convert
    "float?" :predicates
    "floor" :math
    "fn?" :predicates
@@ -228,7 +228,7 @@
    "%index-of-seq-from" :strings
    "infinite?" :predicates
    "inspect" :io
-   "int->char" :strings
+   "string/int->char" :strings
    "int?" :predicates
    "into" :collections
    "lfilter" :collections
@@ -335,7 +335,9 @@
    "reduce" :collections
    "ref" :processes
    "ref?" :predicates
-   "register" :processes
+   "proc/register" :processes
+   "proc/unregister" :processes
+   "proc/alive?" :processes
    "%register-impl-check-arity" :meta
    "%register-method-derive" :meta
    "%register-method-store" :meta
@@ -442,7 +444,7 @@
    "vector?" :predicates
    "when" :control
    "when-let" :control
-   "whereis" :processes
+   "proc/whereis" :processes
    "with" :control
    "%with-build" :control
    "with-err-str" :io
@@ -457,7 +459,7 @@
    "xmap" :collections
    "xremove" :collections
    "zipmap" :maps
-   "stdlib-id" :meta
+   "system/stdlib-id" :meta
    ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
    "but-last" :collections
    "drop-while" :collections

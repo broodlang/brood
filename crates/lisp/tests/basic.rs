@@ -1253,31 +1253,31 @@ fn integer_overflow_does_not_panic() {
     assert_eq!(run("(rem -7 3)"), "-1");
 }
 
-/// `bit-count` (population count) over the two's-complement bit pattern.
+/// `bit/count` (population count) over the two's-complement bit pattern.
 #[test]
 fn bit_count_counts_set_bits() {
-    assert_eq!(run("(bit-count 0)"), "0");
-    assert_eq!(run("(bit-count 7)"), "3");
-    assert_eq!(run("(bit-count 255)"), "8");
-    assert_eq!(run("(bit-count (bit-shift-left 1 40))"), "1");
+    assert_eq!(run("(bit/count 0)"), "0");
+    assert_eq!(run("(bit/count 7)"), "3");
+    assert_eq!(run("(bit/count 255)"), "8");
+    assert_eq!(run("(bit/count (bit/shift-left 1 40))"), "1");
     // A negative integer counts its sign bits: -1 is all 64 bits set.
-    assert_eq!(run("(bit-count -1)"), "64");
+    assert_eq!(run("(bit/count -1)"), "64");
 }
 
-/// `bit-positions` — the ascending 0-based indices of set bits, O(popcount),
+/// `bit/positions` — the ascending 0-based indices of set bits, O(popcount),
 /// across i64 and bignum.
 #[test]
 fn bit_positions_lists_set_bits() {
-    assert_eq!(run("(bit-positions 0)"), "[]");
-    assert_eq!(run("(bit-positions 6)"), "[1 2]");
-    assert_eq!(run("(bit-positions 255)"), "[0 1 2 3 4 5 6 7]");
+    assert_eq!(run("(bit/positions 0)"), "[]");
+    assert_eq!(run("(bit/positions 6)"), "[1 2]");
+    assert_eq!(run("(bit/positions 255)"), "[0 1 2 3 4 5 6 7]");
     // Bignum: a bit set past the i64 range is found at its true index.
     assert_eq!(
-        run("(bit-positions (bit-or (bit-shift-left 1 200) (bit-shift-left 1 5)))"),
+        run("(bit/positions (bit/or (bit/shift-left 1 200) (bit/shift-left 1 5)))"),
         "[5 200]"
     );
     // Inverse of bit-count: same number of positions as set bits.
-    assert_eq!(run("(count (bit-positions (bit-shift-left 1 200)))"), "1");
+    assert_eq!(run("(count (bit/positions (bit/shift-left 1 200)))"), "1");
 }
 
 /// `=` on floats uses IEEE value equality, not bitwise: `-0.0 = 0.0` is true.
@@ -1495,8 +1495,8 @@ fn named_spawn_respawns_after_death() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let reaped = loop {
         let where_ = interp
-            .eval_str("(whereis :named-spawn-respawn-test)")
-            .expect("whereis");
+            .eval_str("(proc/whereis :named-spawn-respawn-test)")
+            .expect("proc/whereis");
         let printed = interp.print(where_);
         if printed == "nil" {
             break printed;
@@ -1506,7 +1506,7 @@ fn named_spawn_respawns_after_death() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    // The name has been reaped — `whereis` returns nil.
+    // The name has been reaped — `proc/whereis` returns nil.
     assert_eq!(
         reaped, "nil",
         "name should be reaped after process death (waited 10 s)"
@@ -1637,7 +1637,7 @@ fn bignum_demotes_when_result_fits() {
     );
     // 2^100 / 2^100 demotes to 1.
     assert_eq!(
-        run("(quot (bit-shift-left 1 100) (bit-shift-left 1 100))"),
+        run("(quot (bit/shift-left 1 100) (bit/shift-left 1 100))"),
         "1"
     );
 }
@@ -1657,38 +1657,38 @@ fn bignum_literal_roundtrips() {
 
 #[test]
 fn bignum_shifts_unbounded() {
-    // (bit-shift-left 1 200) is 1 followed by zeros — a 61-digit number.
-    let s = run("(bit-shift-left 1 200)");
+    // (bit/shift-left 1 200) is 1 followed by zeros — a 61-digit number.
+    let s = run("(bit/shift-left 1 200)");
     assert_eq!(
         s,
         "1606938044258990275541962092341162602522202993782792835301376"
     );
-    assert_eq!(run("(bit-count (bit-shift-left 1 200))"), "1");
-    assert_eq!(run("(int? (bit-shift-left 1 200))"), "true");
+    assert_eq!(run("(bit/count (bit/shift-left 1 200))"), "1");
+    assert_eq!(run("(int? (bit/shift-left 1 200))"), "true");
     // A right shift undoes it.
-    assert_eq!(run("(bit-shift-right (bit-shift-left 1 200) 200)"), "1");
+    assert_eq!(run("(bit/shift-right (bit/shift-left 1 200) 200)"), "1");
     assert_eq!(
-        run("(bit-shift-right (bit-shift-left 1 200) 100)"),
-        run("(bit-shift-left 1 100)")
+        run("(bit/shift-right (bit/shift-left 1 200) 100)"),
+        run("(bit/shift-left 1 100)")
     );
     // Negative shift is still an error.
-    assert!(fresh_interp().eval_str("(bit-shift-left 1 -1)").is_err());
+    assert!(fresh_interp().eval_str("(bit/shift-left 1 -1)").is_err());
 }
 
 #[test]
 fn bignum_bitwise() {
     // AND of a value with itself round-trips.
     assert_eq!(
-        run("(bit-and (bit-shift-left 1 200) (bit-shift-left 1 200))"),
-        run("(bit-shift-left 1 200)")
+        run("(bit/and (bit/shift-left 1 200) (bit/shift-left 1 200))"),
+        run("(bit/shift-left 1 200)")
     );
     // OR/XOR of disjoint high bits.
     assert_eq!(
-        run("(= (bit-or (bit-shift-left 1 200) (bit-shift-left 1 100)) (+ (bit-shift-left 1 200) (bit-shift-left 1 100)))"),
+        run("(= (bit/or (bit/shift-left 1 200) (bit/shift-left 1 100)) (+ (bit/shift-left 1 200) (bit/shift-left 1 100)))"),
         "true"
     );
     assert_eq!(
-        run("(bit-xor (bit-shift-left 1 200) (bit-shift-left 1 200))"),
+        run("(bit/xor (bit/shift-left 1 200) (bit/shift-left 1 200))"),
         "0"
     );
 }
@@ -1697,17 +1697,17 @@ fn bignum_bitwise() {
 fn bignum_quot_rem_mod() {
     // (quot 2^200 2^100) == 2^100.
     assert_eq!(
-        run("(quot (bit-shift-left 1 200) (bit-shift-left 1 100))"),
-        run("(bit-shift-left 1 100)")
+        run("(quot (bit/shift-left 1 200) (bit/shift-left 1 100))"),
+        run("(bit/shift-left 1 100)")
     );
     // rem divides evenly here.
     assert_eq!(
-        run("(rem (bit-shift-left 1 200) (bit-shift-left 1 100))"),
+        run("(rem (bit/shift-left 1 200) (bit/shift-left 1 100))"),
         "0"
     );
     // mod composes (prelude) over rem/+/-.
     assert_eq!(
-        run("(mod (+ (bit-shift-left 1 200) 7) (bit-shift-left 1 100))"),
+        run("(mod (+ (bit/shift-left 1 200) 7) (bit/shift-left 1 100))"),
         "7"
     );
 }
@@ -1716,27 +1716,27 @@ fn bignum_quot_rem_mod() {
 fn bignum_comparisons() {
     // BigInt vs Int: a big positive is greater than any i64.
     assert_eq!(
-        run("(> (bit-shift-left 1 200) 9223372036854775807)"),
+        run("(> (bit/shift-left 1 200) 9223372036854775807)"),
         "true"
     );
     assert_eq!(
-        run("(< (- 0 (bit-shift-left 1 200)) -9223372036854775808)"),
+        run("(< (- 0 (bit/shift-left 1 200)) -9223372036854775808)"),
         "true"
     );
     // BigInt vs BigInt.
     assert_eq!(
-        run("(< (bit-shift-left 1 100) (bit-shift-left 1 200))"),
+        run("(< (bit/shift-left 1 100) (bit/shift-left 1 200))"),
         "true"
     );
     assert_eq!(
-        run("(= (bit-shift-left 1 200) (bit-shift-left 1 200))"),
+        run("(= (bit/shift-left 1 200) (bit/shift-left 1 200))"),
         "true"
     );
     // Int and BigInt are never equal (disjoint ranges).
-    assert_eq!(run("(= 1 (bit-shift-left 1 200))"), "false");
+    assert_eq!(run("(= 1 (bit/shift-left 1 200))"), "false");
     // <= boundary.
     assert_eq!(
-        run("(<= (bit-shift-left 1 200) (bit-shift-left 1 200))"),
+        run("(<= (bit/shift-left 1 200) (bit/shift-left 1 200))"),
         "true"
     );
 }
@@ -1754,8 +1754,8 @@ fn bignum_equal_as_map_key() {
 #[test]
 fn bignum_mixed_float() {
     // A float operand keeps the float path; the bignum coerces.
-    assert_eq!(run("(int? (+ (bit-shift-left 1 200) 0.0))"), "false");
-    assert_eq!(run("(> (+ (bit-shift-left 1 200) 0.0) 1.0)"), "true");
+    assert_eq!(run("(int? (+ (bit/shift-left 1 200) 0.0))"), "false");
+    assert_eq!(run("(> (+ (bit/shift-left 1 200) 0.0) 1.0)"), "true");
 }
 
 // ----- ADR-096: VM inline caches (call-site / global-read / prim guards) -----

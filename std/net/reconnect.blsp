@@ -113,7 +113,7 @@ runtime must already be a node (`node-start`)."
   "Register the current process with `spec`'s watcher (start it with `watch`
 first): you'll receive `[:nodeup name]` when a reconnect lands and
 `[:nodedown name]` when the link falls. Returns the caller's pid."
-  (let (pid (whereis (reconnect-proc-name spec)))
+  (let (pid (proc/whereis (reconnect-proc-name spec)))
     (when (nil? pid)
       (error "reconnect: no watcher for " spec " — call watch first"))
     (send pid [:reconnect-subscribe (self)])
@@ -122,6 +122,6 @@ first): you'll receive `[:nodeup name]` when a reconnect lands and
 (defn unwatch (spec)
   "Stop watching `spec` (the watcher process exits; subscribers get nothing
 further). Returns nil."
-  (let (pid (whereis (reconnect-proc-name spec)))
+  (let (pid (proc/whereis (reconnect-proc-name spec)))
     (when pid (send pid [:reconnect-stop]))
     nil))

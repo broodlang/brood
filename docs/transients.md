@@ -31,7 +31,7 @@ user-facing surface *was* subsequently added: `transient` / `assoc!` / `dissoc!`
 `alloc_transient`/`transient_assoc`/…), with `get`/`count`/`contains?` dispatching
 to it for live reads. The prelude's multi-assoc combinators (`merge`,
 `merge-with`, `select-keys`, `update-vals`, `update-keys`) build through it
-instead of folding immutable `map-assoc` (measured ~1.4–1.6× on large inputs).
+instead of folding immutable `%map-assoc` (measured ~1.4–1.6× on large inputs).
 Unlike the internal builder, a `Value::Transient` **can be held across a
 safepoint**, so the "GC cannot fire mid-build" simplification below does *not*
 apply to it. Two mechanisms keep it correct:
@@ -61,7 +61,7 @@ each node from root to the touched leaf — cloning the node's `data`/`children`
 `SmallVec`s and pushing a fresh `MapNode` into the `maps` slab per level
 (`alloc_map_node`, `heap.rs:1749`). At N entries that is ≈ N × depth fresh
 nodes plus the matching GC churn. This is the dominant cost in `map_from_pairs`
-(`heap.rs:1676`) and in every prelude builder that folds `map-assoc`/`assoc`
+(`heap.rs:1676`) and in every prelude builder that folds `%map-assoc`/`assoc`
 (`into`, `zipmap`, `frequencies`, `merge`, `update-vals`, `group-by`,
 `distinct`, `select-keys` — all in `std/prelude.blsp`).
 
@@ -310,7 +310,7 @@ it — the global-immutability simplicity is worth a lot.
    - **Differential** (`crates/lisp/tests/differential.rs`): for random pair
      lists (incl. duplicate keys, hash-collision keys, and `into <existing>`),
      assert the transient build is `equal` to the fold-of-`map_assoc` result
-     **and** has identical `map-pairs` iteration order (the CHAMP shape must
+     **and** has identical `%map-pairs` iteration order (the CHAMP shape must
      match, not just the entries).
    - **Concurrency** (in-language, per the CLAUDE.md feature checklist): build
      maps via the new path in many `spawn`ed processes, `send` them across

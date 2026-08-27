@@ -13,7 +13,7 @@
 ```lisp
 ;; --- node A (same machine) ------------------------------------------------
 (node/start :a)                               ; local Unix-socket node, by name
-(register :echo (self))                       ; expose this process by name
+(proc/register :echo (self))                       ; expose this process by name
 (defn serve ()
   (receive
     ([:hi from]   (do (send from [:pong (self)]) (serve)))
@@ -62,7 +62,7 @@ binding, or `(node/list)`), not a bare literal.
 | `(remote-spawn-sync node expr)` | Like `remote-spawn` but returns the child's (node-tagged) pid — `monitor`/`link`-able. |
 | `(node-cookie)` | The shared link secret: `$BROOD_COOKIE` → `~/.config/brood/cookie` → freshly minted. |
 | `(hostname)` | This machine's short hostname (used to qualify a local node name). |
-| `(register name pid)` | Bind a local name so peers can address this process. Returns the pid. |
+| `(proc/register name pid)` | Bind a local name so peers can address this process. Returns the pid. |
 | `(node/name)` | This runtime's node name (`:nonode` until `node/start`). |
 | `(node/list)` | A list of currently connected peer node names. |
 | `(node/monitor name)` | Deliver `[:nodedown name]` to the caller when the link to `name` goes down (clean close or heartbeat timeout). Persistent. |
@@ -94,7 +94,7 @@ silent either way.
 You can't know a remote pid before someone tells you one. So a process is reached
 two ways:
 
-1. **By registered name** — `(register :echo (self))` on the peer, then
+1. **By registered name** — `(proc/register :echo (self))` on the peer, then
    `(send {:name :echo :node :a} msg)`. The bootstrap handle.
 2. **By pid** — once a reply carries `(self)`, every later `send` targets that
    remote pid directly. This is the payoff: no special-casing "remote" at the call
@@ -112,10 +112,10 @@ right ones — the name may legitimately be gone).
 ```brood
 ;; wrong — the listener is open before :echo exists
 (node/start :b "127.0.0.1:9001" cookie)
-(register :echo (spawn (serve)))
+(proc/register :echo (spawn (serve)))
 
 ;; right — the name is live before anyone can reach the node
-(register :echo (spawn (serve)))
+(proc/register :echo (spawn (serve)))
 (node/start :b "127.0.0.1:9001" cookie)
 ```
 

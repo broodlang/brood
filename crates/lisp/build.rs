@@ -12,7 +12,7 @@ fn main() {
     println!("cargo:rustc-env=BROOD_GIT_SHA={sha}");
 
     // A CONTENT hash of the embedded standard library — every `std/**/*.blsp` plus the
-    // prelude. `build-id` cannot serve here: it embeds the executable's own mtime, so
+    // prelude. `system/build-id` cannot serve here: it embeds the executable's own mtime, so
     // `brood`, `nest` and `brood-lsp` from one tree get three different ids and each would
     // write its own ~2 MB stdlib startup image. This id depends only on what is baked in,
     // so they share one. Computed here rather than as a `const fn` because const-eval hits

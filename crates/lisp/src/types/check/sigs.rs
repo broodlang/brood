@@ -256,7 +256,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // String/list conversions: recursive helpers or `apply`.
     //   string->list        — (string/split s "").
     //   list->string        — (apply str cs).
-    //   codepoints->string  — (apply str (map int->char cs)).
+    //   codepoints->string  — (apply str (map string/int->char cs)).
     // (string/->codepoints is a primitive now — its sig rides on the NativeFn.)
     put("string/->list", Sig::new(vec![str_ty], Ty::LIST));
     put("string/list->", Sig::new(vec![seq], str_ty));

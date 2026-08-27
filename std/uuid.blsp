@@ -52,7 +52,7 @@ always — useful for content-based IDs and idempotent generation.")
 (defn- hex-nibble
   (c)
   "Parse a lowercase hex char into 0–15."
-  (let (cp (char->int c))
+  (let (cp (string/char->int c))
     (if (and (>= cp 48) (<= cp 57))
       (- cp 48)
       (+ (- cp 97) 10))))
@@ -63,7 +63,9 @@ always — useful for content-based IDs and idempotent generation.")
   (string/char-at variant-chars (rem (hex-nibble raw-hex-char) 4)))
 
 (defn v4 ()
-  "Generate a random RFC 4122 version 4 UUID string."
+  "Generate a random RFC 4122 version 4 UUID string.
+
+    (count (uuid/v4))   → 36"
   (let (raw (rand/token 16)
         ;; raw is 32 lowercase hex chars; inject version (pos 12) and variant (pos 16)
         p0 (string/substring raw 0 8)
@@ -74,7 +76,9 @@ always — useful for content-based IDs and idempotent generation.")
     (str p0 "-" p1 "-" p2 "-" p3 "-" p4)))
 
 (defn nil-uuid ()
-  "The nil UUID: all zeros."
+  "The nil UUID: all zeros.
+
+    (uuid/nil-uuid)   → \"00000000-0000-0000-0000-000000000000\""
   "00000000-0000-0000-0000-000000000000")
 
 ;; ---- UUID v7 ----------------------------------------------------------------
@@ -112,7 +116,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
 
 (defn- hex?
   (c)
-  (let (cp (char->int c))
+  (let (cp (string/char->int c))
     (or (and (>= cp 48) (<= cp 57))
       (and (>= cp 97) (<= cp 102))
       (and (>= cp 65) (<= cp 70)))))
@@ -131,7 +135,10 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
       false)))
 
 (defn valid? (s)
-  "True if `s` is a well-formed UUID string (8-4-4-4-12 hex, any case, with dashes)."
+  "True if `s` is a well-formed UUID string (8-4-4-4-12 hex, any case, with dashes).
+
+    (uuid/valid? (uuid/v4))   → true
+    (uuid/valid? \"nope\")      → false"
   (and (= (string/length s) 36)
     (= (string/char-at s 8) "-")
     (= (string/char-at s 13) "-")
@@ -181,9 +188,9 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
   "Format 16 byte ints as a UUID string, setting version nibble and variant bits."
   (let (bv (into [] bytes)
         ;; Set version in byte 6: high nibble = version, low nibble kept
-        b6 (bit-or (* version-nibble 16) (bit-and (nth bv 6) 15))
+        b6 (bit/or (* version-nibble 16) (bit/and (nth bv 6) 15))
         ;; Set variant in byte 8: high 2 bits = 10, rest kept
-        b8 (bit-or 128 (bit-and (nth bv 8) 63))
+        b8 (bit/or 128 (bit/and (nth bv 8) 63))
         ;; Build hex
         hex (fold (fn (acc i)
                     (let (b (if (= i 6) b6 (if (= i 8) b8 (nth bv i))))

@@ -104,7 +104,7 @@
 ;; `(+ 1/2 <decimal>)` promotes the decimal exactly, as `mantissa / 10^scale` —
 ;; and `10^scale` is a `scale`-digit bignum. With no bound that is an unbounded
 ;; NATIVE allocation, invisible to the `BROOD_MEM_LIMIT` soft cap: measured,
-;; `(+ 1/2 (decimal "1e-1000000000"))` climbed past 400MB and never finished.
+;; `(+ 1/2 (decimal/of "1e-1000000000"))` climbed past 400MB and never finished.
 ;; Worse, the exponent was cast with `as u32`, which silently truncates: a scale of
 ;; 4294967297 wrapped to 1, so the addend was read as 1/10 and the sum printed
 ;; `3/5` — a wrong answer, no error, no warning.
@@ -112,24 +112,24 @@
 (describe "ratio + decimal: an out-of-range scale is a clean error, never a wrong answer"
   (test "a scale past 2^32 raises rather than truncating to a wrong answer"
     ;; The pre-fix release build answered 3/5 here.
-    (assert-error (+ 1/2 (decimal "1e-4294967297")))
-    (refute (= (error-of (+ 1/2 (decimal "1e-4294967297"))) nil)))
+    (assert-error (+ 1/2 (decimal/of "1e-4294967297")))
+    (refute (= (error-of (+ 1/2 (decimal/of "1e-4294967297"))) nil)))
   (test "a huge-but-representable scale raises instead of allocating unboundedly"
-    (assert-error (+ 1/2 (decimal "1e-1000000000")))
-    (assert-error (- 1/2 (decimal "1e-1000000000")))
-    (assert-error (* 1/2 (decimal "1e-1000000000")))
-    (assert-error (/ 1/2 (decimal "1e-1000000000"))))
+    (assert-error (+ 1/2 (decimal/of "1e-1000000000")))
+    (assert-error (- 1/2 (decimal/of "1e-1000000000")))
+    (assert-error (* 1/2 (decimal/of "1e-1000000000")))
+    (assert-error (/ 1/2 (decimal/of "1e-1000000000"))))
   (test "a huge POSITIVE exponent is bounded the same way"
-    (assert-error (+ 1/2 (decimal "1e1000000000"))))
+    (assert-error (+ 1/2 (decimal/of "1e1000000000"))))
   (test "the error is catchable and names the operator"
-    (let (msg (error-of (+ 1/2 (decimal "1e-4294967297"))))
+    (let (msg (error-of (+ 1/2 (decimal/of "1e-4294967297"))))
       (is (string? msg))
       (is (includes? msg "decimal scale"))))
   (test "ordinary ratio/decimal arithmetic still works exactly"
-    (assert= (+ 1/2 (decimal "0.25")) 3/4)
-    (assert= (- 1/2 (decimal "0.25")) 1/4)
-    (assert= (* 1/2 (decimal "0.25")) 1/8)
-    (assert= (/ 1/2 (decimal "0.25")) 2)
+    (assert= (+ 1/2 (decimal/of "0.25")) 3/4)
+    (assert= (- 1/2 (decimal/of "0.25")) 1/4)
+    (assert= (* 1/2 (decimal/of "0.25")) 1/8)
+    (assert= (/ 1/2 (decimal/of "0.25")) 2)
     ;; a decimal that reduces the ratio away demotes back to an int
     (assert= (+ 1/2 0.5M) 1)))
 
@@ -143,18 +143,18 @@
 ;; ---------------------------------------------------------------------------
 (describe "decimal *: the summed scale is checked"
   (test "two enormous scales raise instead of wrapping"
-    (let (d (decimal "1e-5000000000000000000"))
+    (let (d (decimal/of "1e-5000000000000000000"))
       (assert-error (* d d))))
   (test "the same for the negative (large-exponent) direction"
-    (let (d (decimal "1e5000000000000000000"))
+    (let (d (decimal/of "1e5000000000000000000"))
       (assert-error (* d d))))
   (test "a product whose scale is merely large is still bounded"
-    (assert-error (* (decimal "1e-999999") (decimal "1e-999999"))))
+    (assert-error (* (decimal/of "1e-999999") (decimal/of "1e-999999"))))
   (test "ordinary decimal arithmetic keeps its significance"
-    (assert= (decimal->string (* 1.50M 2.0M)) "3.000")
-    (assert= (decimal->string (+ 1.50M 2.0M)) "3.50")
-    (assert= (decimal->string (- 1.50M 2.0M)) "-0.50")
-    (assert= (decimal->string (* 1.00M -1M)) "-1.00")))
+    (assert= (decimal/->string (* 1.50M 2.0M)) "3.000")
+    (assert= (decimal/->string (+ 1.50M 2.0M)) "3.50")
+    (assert= (decimal/->string (- 1.50M 2.0M)) "-0.50")
+    (assert= (decimal/->string (* 1.00M -1M)) "-1.00")))
 
 ;; ---------------------------------------------------------------------------
 ;; 5. A Range compared against its own list form near i64::MAX
@@ -196,41 +196,41 @@
 ;; 6. ORDERING a ratio against a decimal (`<`, `sort`)
 ;;
 ;; The same `10^scale` conversion as §3, on a path with no error channel: an
-;; ordering cannot raise, so the fix is to not need the power. `(< 1/2 (decimal
+;; ordering cannot raise, so the fix is to not need the power. `(< 1/2 (decimal/of
 ;; "1e-1000000000"))` used to allocate without bound (190MB and climbing after 20s,
 ;; never finishing), and the `as u32` truncation made the comparison read a
-;; different number entirely — `(< (decimal "1e-4294967297") 1/10)` answered
+;; different number entirely — `(< (decimal/of "1e-4294967297") 1/10)` answered
 ;; **false** about a value that is effectively zero. Signs and an O(1) bit-length
 ;; magnitude screen now decide the extremes; comparable magnitudes still compare
 ;; exactly.
 ;; ---------------------------------------------------------------------------
 (describe "ratio vs decimal ordering at absurd scales"
   (test "a vanishingly small decimal is below every positive ratio"
-    (is (< (decimal "1e-4294967297") 1/10)) ; answered false pre-fix
-    (is (> 1/10 (decimal "1e-4294967297")))
-    (is (< (decimal "1e-1000000000") 1/2)) ; hung pre-fix
-    (refute (> (decimal "1e-1000000000") 1/2)))
+    (is (< (decimal/of "1e-4294967297") 1/10)) ; answered false pre-fix
+    (is (> 1/10 (decimal/of "1e-4294967297")))
+    (is (< (decimal/of "1e-1000000000") 1/2)) ; hung pre-fix
+    (refute (> (decimal/of "1e-1000000000") 1/2)))
   (test "and an enormous one is above it"
-    (is (> (decimal "1e1000000000") 1/2))
-    (is (< 1/2 (decimal "1e1000000000"))))
+    (is (> (decimal/of "1e1000000000") 1/2))
+    (is (< 1/2 (decimal/of "1e1000000000"))))
   (test "signs are respected at those scales"
-    (is (< (decimal "-1e-1000000000") 1/2))
-    (is (> (decimal "-1e-1000000000") (- 1/2)))
-    (is (< (decimal "-1e1000000000") (- 1/2))))
+    (is (< (decimal/of "-1e-1000000000") 1/2))
+    (is (> (decimal/of "-1e-1000000000") (- 1/2)))
+    (is (< (decimal/of "-1e1000000000") (- 1/2))))
   (test "sorting a mixed list terminates and orders correctly"
-    (assert= (sort (list 1/10 (decimal "1e-4294967297") 1/2))
-      (list (decimal "1e-4294967297") 1/10 1/2)))
+    (assert= (sort (list 1/10 (decimal/of "1e-4294967297") 1/2))
+      (list (decimal/of "1e-4294967297") 1/10 1/2)))
   (test "ordinary ratio/decimal ordering is untouched"
-    (is (< 1/2 (decimal "0.6")))
-    (refute (< (decimal "0.6") 1/2))
+    (is (< 1/2 (decimal/of "0.6")))
+    (refute (< (decimal/of "0.6") 1/2))
     ;; numerically equal ⇒ neither less nor greater
-    (refute (< 1/2 (decimal "0.5")))
-    (refute (> 1/2 (decimal "0.5")))
-    (is (< 1/3 (decimal "0.4")))
-    (is (> 1/3 (decimal "0.3333333333")))
-    (is (< (- 1/3) (decimal "-0.3")))
-    (assert= (sort (list 1/2 (decimal "0.25") 1/3 (decimal "0.4") (- 1/8) (decimal "-0.5")))
-      (list (decimal "-0.5") (- 1/8) (decimal "0.25") 1/3 (decimal "0.4") 1/2)))
+    (refute (< 1/2 (decimal/of "0.5")))
+    (refute (> 1/2 (decimal/of "0.5")))
+    (is (< 1/3 (decimal/of "0.4")))
+    (is (> 1/3 (decimal/of "0.3333333333")))
+    (is (< (- 1/3) (decimal/of "-0.3")))
+    (assert= (sort (list 1/2 (decimal/of "0.25") 1/3 (decimal/of "0.4") (- 1/8) (decimal/of "-0.5")))
+      (list (decimal/of "-0.5") (- 1/8) (decimal/of "0.25") 1/3 (decimal/of "0.4") 1/2)))
   (test "differential: `<` agrees with subtracting and comparing to zero"
     ;; `-` promotes both operands through the arithmetic path (a different
     ;; conversion from the comparison's magnitude screen), so it is an independent

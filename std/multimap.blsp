@@ -2,7 +2,9 @@
 ;;
 ;; A multimap is a map from keys to lists of values, wrapped in a `multimap` RECORD.
 ;; Values are prepended on insert, so `get` returns them in reverse insertion
-;; order; use `get-all` to get insertion order (at the cost of a reverse).
+;; order; use `get-all` to get insertion order (at the cost of a reverse). Across KEYS the
+;; order is UNSPECIFIED — the CHAMP trie's, which follows keyword interning and so is not
+;; even stable across processes. `keys`/`values`/`->seq` all inherit it; sort if it matters.
 ;;
 ;; The record wraps the inner map rather than *being* it: a record carries its identity
 ;; in a reserved `:__id__` field, which `keys`/`count` would see — so a bare-map
@@ -35,7 +37,9 @@ look-alike map, and it prints as `#<multimap …>` (`->map` is the plain-map vie
   (multimap {}))
 
 (defn empty? (mm)
-  "True if the multimap has no entries."
+  "True if the multimap has no entries.
+
+    (multimap/empty? (multimap/empty))   → true"
   (= (count (/get mm :entries)) 0))
 
 (defn assoc (mm k v)
@@ -48,15 +52,24 @@ look-alike map, and it prints as `#<multimap …>` (`->map` is the plain-map vie
   (fold (fn (m v) (assoc m k v)) mm vs))
 
 (defn get (mm k)
-  "All values for key `k` in reverse insertion order, or nil if absent."
+  "All values for key `k` in reverse insertion order, or nil if absent.
+
+Always reach for this rather than the bare `get`: a multimap is a record, so `(get mm k)`
+takes the record-FIELD path and silently answers nil for a key that holds values.
+
+    (multimap/get (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2) :k)   → (2 1)"
   (/get (/get mm :entries) k nil))
 
 (defn get-all (mm k)
-  "All values for key `k` in insertion order (oldest first), or nil if absent."
+  "All values for key `k` in insertion order (oldest first), or nil if absent.
+
+    (multimap/get-all (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2) :k)   → (1 2)"
   (reverse (get mm k)))
 
 (defn contains? (mm k)
-  "True if `k` has at least one value in the multimap."
+  "True if `k` has at least one value in the multimap.
+
+    (multimap/contains? (multimap/assoc (multimap/empty) :k 1) :k)   → true"
   (not (nil? (get mm k))))
 
 (defn dissoc (mm k)
@@ -87,17 +100,52 @@ If no values remain under `k`, the key is dropped."
     (go nil lst)))
 
 (defn keys (mm)
-  "All keys in the multimap (insertion order)."
+  "The DISTINCT keys in the multimap, in UNSPECIFIED order — sort them if you need
+stability. The order is the underlying CHAMP trie's, which is neither insertion order nor
+even stable across processes: it follows keyword interning order, so the same two keys can
+come back in either order depending on what else the process has loaded. (`values` and the
+`Seqable` view inherit the same across-key order; the values *within* one key are
+insertion-ordered and stable.)
+
+Bare `keys` also resolves — the `Seqable` view puts it over the flattened associations —
+but answers one key per value, so `(keys mm)` and `(multimap/keys mm)` disagree by design.
+This is the one you want.
+
+    (sort (multimap/keys (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :j 3)))   → (:j :k)"
   (/keys (/get mm :entries)))
 
 (defn values (mm)
-  "All values across all keys as a flat list (insertion order within each key)."
+  "All values across all keys as a flat list — insertion order WITHIN each key; across keys
+the order is unspecified and not stable across processes (see `keys`).
+
+    (multimap/values (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2))   → (1 2)"
   (fold (fn (acc vs) (append acc (reverse vs))) [] (vals (/get mm :entries))))
 
 ;; A multimap joins the collection protocol (ADR-172 §7): its `Seqable` view is its
 ;; flattened `[k v]` associations (insertion order), so `count`/`map`/`filter`/`fold`/
-;; `for`/`into`-from work over the associations directly. (No `Conjable`: an association
-;; needs a key, which `conj`'s single element can't carry — use `assoc`.)
+;; `for`/`into`-from work over the associations directly. `Conjable` takes a `[k v]` PAIR
+;; (or a map), exactly as `conj` on a plain map does — the pair convention is how one
+;; element carries two things, so the earlier "an association needs a key, which conj's
+;; single element can't carry" reasoning does not actually rule it out.
+;;
+;; CAUTION — the bare vocabulary is not all safe here. Joining `Seqable` makes every bare
+;; collection op *resolve* on a multimap, including the two whose meaning does not survive
+;; the trip:
+;;
+;;   (get mm k)   -> nil        while (multimap/get mm k)   -> the values
+;;   (keys mm)    -> per-entry  while (multimap/keys mm)    -> distinct
+;;
+;; A multimap is a record, so bare `get` takes the record-FIELD path and silently answers
+;; nil for a key that holds values — the worst shape a wrong answer can take. There is no
+;; ability seam for `get`, so the only honest fix available is to say so: reach for
+;; `multimap/get` and `multimap/keys`, never the bare ones.
+(impl Conjable multimap/multimap
+  (-conj [mm x]
+    (cond
+      (and (vector? x) (= (count x) 2)) (assoc mm (nth x 0) (nth x 1))
+      (map? x) (fold (fn (m kv) (assoc m (nth kv 0) (nth kv 1))) mm (seq x))
+      else (error "conj: adding to a multimap takes a [key value] pair or a map, got "
+             (pr-str x)))))
 (impl Seqable
   multimap/multimap
   (->seq [mm]

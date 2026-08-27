@@ -30,5 +30,7 @@
 
 ;; Not part of the deterministic seeded PRNG above — a one-shot draw from the OS CSPRNG.
 (defn token (n)
-  "`n` cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2·n-char string."
+  "`n` cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2·n-char string.
+
+    (count (rand/token 8))   → 16   ; hex, two chars per byte"
   (%random-token n))

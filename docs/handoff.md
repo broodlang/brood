@@ -15,7 +15,7 @@ fixed this day.
 - **KI-36** (the last watch item, unreproduced since 2026-08-07 across 25 idle and 14 loaded runs)
   reproduced in run 3 of a repeated-run gate and is fixed at the root. It was never the nodedown
   stall its entry inferred — B2 opened its dist listener *before* registering `:echo`, so A's
-  ping-on-nodeup landed on a name that did not exist yet and was **silently dropped**. `register`
+  ping-on-nodeup landed on a name that did not exist yet and was **silently dropped**. `proc/register`
   now precedes `node-start`. Verified by sabotage in both directions.
 - **ADR-232** closes the diagnosability gap under it: a message dropped for a registered name no
   process holds now **warns once per name**, at the receiving node — the only party that knows.
@@ -389,9 +389,9 @@ armed for the next person. See §6.
 section and loaded every module from source anyway. Nothing failed — an imaged start behaved
 exactly like a cold one, because it *was* one. Two independent defects, either sufficient:
 `project-install-image` ran `(def *image-sections* …)` inside module `project` (binding
-`project/*image-sections*` while `require-force`, root code, read the empty root one), and
-`require-force` tested the ADR-070 package branch *before* the image branch — which always
-matches, because a project roots its own modules too. Both fixed; `set-image-source!` is the root
+`project/*image-sections*` while `%require-force`, root code, read the empty root one), and
+`%require-force` tested the ADR-070 package branch *before* the image branch — which always
+matches, because a project roots its own modules too. Both fixed; `%set-image-source!` is the root
 setter, and the image branch now comes first.
 
 **The registry set is derived, not named** (KI-35, same commit). The list of "globals loading
@@ -537,11 +537,11 @@ The original list follows, corrected in place:
    reach of anything on this list — every message-passing row pays it (`latency`, `pingpong`,
    `supervisor`), not just HOF loops — but the mechanism is not the one this item named.
 
-   **The premise was wrong.** `receive` is a *macro*: `match-build-from` lowers the clause set
+   **The premise was wrong.** `receive` is a *macro*: `%match-build-from` lowers the clause set
    at macro-expansion time into a literal `(fn (msg) …)` whose body is a fully inlined
    `vector?`/`vector-length`/`vector-ref`/`%eq` if-tree. Dump it —
    `(println (macroexpand '(receive ([:go v] 1))))` — and there is no clause compiler left to
-   run. `match-compile-clause` executes **once per site, at load**, never per message; the ~20
+   run. `%match-compile-clause` executes **once per site, at load**, never per message; the ~20
    `match-*`/`receive-*` arms seen tiering during the ladder are that expansion work, not
    per-message work. So there is no ADR-215-shaped cache to add here. Compiles are already flat
    (`BROOD_TRACE_COMPILE`: 169 vs 179 across rungs at N=2000), and `nopark` adds **no**

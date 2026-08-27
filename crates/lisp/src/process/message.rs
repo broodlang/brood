@@ -132,7 +132,7 @@ pub enum Message {
     /// writer ([`to_message_image`]): the image restores global bindings in the same runtime,
     /// where a builtin is a stable, registered primitive, so it travels by name and
     /// [`from_message`] re-resolves it. A cross-process / cross-node *message* still refuses a
-    /// builtin — the image is binary-keyed (build-id in its fingerprint), so the name is
+    /// builtin — the image is binary-keyed (system/build-id in its fingerprint), so the name is
     /// guaranteed to resolve to the same primitive on read; a plain message has no such
     /// guarantee. The wire codec encodes it like any other by-name symbol.
     Native(Symbol),
@@ -879,7 +879,7 @@ fn from_message_timed(heap: &mut Heap, m: &Message) -> Value {
         Message::Keyword(s) => Value::keyword(*s),
         Message::Native(s) => {
             // Re-resolve the builtin by the name it was imaged under. The image is binary-keyed
-            // (build-id in its fingerprint), so the same primitive is registered under this name
+            // (system/build-id in its fingerprint), so the same primitive is registered under this name
             // on read. Defensive fallback to nil if a stale image ever slipped through — a
             // missing binding, never a wrong one. Only the image produces this variant.
             match heap.env_get(heap.global(), *s) {

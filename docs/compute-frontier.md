@@ -170,8 +170,8 @@
 > - **Standings (full 7-language `brood-benchmarks` run, single-thread aggregate compute vs the
 >   fastest):** .NET 1.0× · Node 2.7× · Elixir 3.5× · **Brood 6.0× (4th of 7)** · Ruby 11.9× ·
 >   Clojure 18.2× · Python 27.3×. Brood wins `strings` + `http`; ~18 MB base RSS; ~26 ms startup.
-> - **SHIPPED 2026-06-19 — `map-int-add` + JIT GC safepoint:** `wordcount` 810→**470 ms** (~42%).
->   `(map-int-add m k delta)` fuses `(assoc m k (+ (get m k 0) delta))` into one CHAMP trie walk.
+> - **SHIPPED 2026-06-19 — `%map-int-add` + JIT GC safepoint:** `wordcount` 810→**470 ms** (~42%).
+>   `(%map-int-add m k delta)` fuses `(assoc m k (+ (get m k 0) delta))` into one CHAMP trie walk.
 >   Added GC safepoint in `jit_dispatch_call`'s slow-path `Ok(v)` arm — roots `v` before
 >   `heap.collect`, fixing the 1770 MB RSS regression that plagued the JIT path for native callees.
 >   wordcount gap: ~31× → ~13× off the fastest.
@@ -222,8 +222,8 @@
 >   so slot ranges are disjoint. Guard: after level-1 `node_count(body) > SELF_INLINE_MAX_BODY`
 >   prevents level-2 for already-large bodies. `node_touches_heap` keeps bintree/sort-walk at
 >   level-1 (no regression). Debug: `BROOD_INLINE_DBG=1` → `new_max=7 inline_nslots=14` for fib(35).
-> - **SHIPPED 2026-06-20 — `bit-and`/`bit-or`/`bit-xor` as PrimOp2:** sort 238→**209 ms** (−12%).
->   sort's `gen` function used `bit-and` in a self-tail loop; that emitted `brood_rt_call_slow`
+> - **SHIPPED 2026-06-20 — `bit/and`/`bit/or`/`bit/xor` as PrimOp2:** sort 238→**209 ms** (−12%).
+>   sort's `gen` function used `bit/and` in a self-tail loop; that emitted `brood_rt_call_slow`
 >   (~150 ns/call) AND blocked int register-carry for gen's loop variables. Making them PrimOps
 >   eliminates the Call, re-enables carry, and removes ~56 ms per sort run (N=375K). Same 7-location
 >   PrimOp pipeline: enum, `from_native_name`, `prim2_int_fast`, `prim_apply`, `prim_apply_float`
@@ -256,7 +256,7 @@
 >    never-taken). When init is `Int` and prim resolves, the tight path runs; overflow or
 >    non-Int init falls through to `range_reduce_slow` (the old root_scope path). Result:
 >    5M iters in ~3ms (~0.6ns/iter, 2 CPU cycles), down from ~112ms. Startup dominates (25ms).
-> 3. ~~**sort list-walk** (§3g)~~ **PARTIALLY ADDRESSED 2026-06-20** — `bit-and` PrimOp removes
+> 3. ~~**sort list-walk** (§3g)~~ **PARTIALLY ADDRESSED 2026-06-20** — `bit/and` PrimOp removes
 >    ~12% overhead from gen's loop; residual cost is `list_with_tail` O(n) pair allocs (structural,
 >    needs mutable-sort or `sort-vec` variant). **209 ms** on N=375K.
 > 4. ~~**fib call inlining** (§3h)~~ **SHIPPED 2026-06-20** via Brood-level 2-level inline —
@@ -401,9 +401,9 @@ structures (lists/vectors/maps) would cut both the copy cost and the peak RSS. S
 because the value can't be mutated out from under a sharer. Entry: `process/message.rs`
 (`to_message`/`StrShared`), `core/heap.rs` (the shared RUNTIME region + `promote`). See §6.
 
-### 3d. `wordcount` (~13×) — **persistent map build; `map-int-add` shipped**
+### 3d. `wordcount` (~13×) — **persistent map build; `%map-int-add` shipped**
 
-**SHIPPED 2026-06-19:** `map-int-add` (single-pass CHAMP fused get+add+assoc) + JIT GC
+**SHIPPED 2026-06-19:** `%map-int-add` (single-pass CHAMP fused get+add+assoc) + JIT GC
 safepoint in `jit_dispatch_call`. wordcount 810 → **422 ms** compute; gap vs fastest
 (Node ~33ms) **~31× → ~13×**; gap vs Elixir **4.5× → 2.5×**.
 
@@ -560,7 +560,7 @@ Priority if/when this is picked up:
    deep-copying across processes; attacks the `strings` ~180 MB outlier and `spawn`/`pfib`
    message cost. Also opens **lazy combinators** as the eager-list fix.
 3. **`bintree` allocation** — GC/nursery tuning; diffuse.
-4. **`wordcount`** — **SHIPPED 2026-06-19** (`map-int-add` + JIT GC safepoint, 810→422ms,
+4. **`wordcount`** — **SHIPPED 2026-06-19** (`%map-int-add` + JIT GC safepoint, 810→422ms,
    gap ~31×→~13×). Residual: transient-map `into` for the final 13× → ~4× if wanted.
 5. **inline `first`/`rest`** (§3e) — `brood_rt_pair_bases` + CLIF inline loads for LOCAL
    pairs; bintree/nqueens/sort-walk. Medium effort, 20–30% on affected benchmarks.

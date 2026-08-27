@@ -216,7 +216,7 @@ pub enum Op {
     /// integer in which set bit `y*w + x` means cell `(x, y)` is live; each live
     /// cell is filled as an `aspect`×1 screen-cell rectangle in `color`, anchored
     /// at screen cell `(row0, col0)`. Enumerating the set bits and expanding them
-    /// to rects happens here in Rust (O(live), like `bit-positions`), so a frame
+    /// to rects happens here in Rust (O(live), like `bit/positions`), so a frame
     /// of thousands of live cells costs the Brood side ONE op instead of one
     /// op-per-cell. GUI-only — the terminal ignores it, like `:vspans`.
     Cells {
@@ -2211,7 +2211,7 @@ pub(crate) mod backend {
     // ---- rasterising the cell grid ------------------------------------------
 
     /// A rasterised grapheme cluster, baked into a small RGBA canvas sized to its
-    /// cell span (`width`×`height` px, the cluster's `display-width` cells wide). For
+    /// cell span (`width`×`height` px, the cluster's `string/display-width` cells wide). For
     /// a `color` cluster (emoji) the RGBA is the glyph's own colors; for a monochrome
     /// cluster the RGB is white and only the alpha carries coverage, so the caller
     /// recolors it with the face `fg` at blit time (syntax colors vary per op).
@@ -2567,7 +2567,7 @@ pub(crate) mod backend {
         /// Blit grapheme cluster `g` into the framebuffer at cell-pixel `(left, top)`,
         /// alpha-compositing over the cell background. A color cluster (emoji) draws in
         /// its own colors; a monochrome one is recolored with the face `fg`. The cluster
-        /// occupies `display-width` cells (the caller advances the cursor to match).
+        /// occupies `string/display-width` cells (the caller advances the cursor to match).
         #[allow(clippy::too_many_arguments)]
         fn draw_cluster(
             &mut self,
@@ -3117,7 +3117,7 @@ pub(crate) mod backend {
                     // of base cells anchored at this op's (row, col); positions stay
                     // in base-cell units, so a scaled cell advances `scale` columns.
                     // We walk *grapheme clusters* (not codepoints), so a ZWJ emoji /
-                    // flag / accented char is one unit, advancing its `display-width`
+                    // flag / accented char is one unit, advancing its `string/display-width`
                     // cells — a wide glyph (emoji, CJK) takes two.
                     let scale = face.scale.max(1) as usize;
                     let ch_s = ch * scale;

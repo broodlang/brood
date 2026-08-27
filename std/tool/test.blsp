@@ -722,10 +722,10 @@ the test rather than hanging the run."
 
 (defn- test-label-hash
   (s)
-  (let (h (fold (fn (acc c) (bit-and (* (bit-xor acc c) 16777619) test-fnv-mask))
+  (let (h (fold (fn (acc c) (bit/and (* (bit/xor acc c) 16777619) test-fnv-mask))
             2166136261
             (string/->codepoints s)))
-    (bit-and (bit-xor h (bit-shift-right h 15)) test-fnv-mask)))
+    (bit/and (bit/xor h (bit/shift-right h 15)) test-fnv-mask)))
 
 ;; Keep only the tests belonging to shard `index` of `count` (0-based) — the
 ;; `mix test --partitions` analogue, for splitting a suite across CI machines.

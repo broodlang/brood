@@ -32,12 +32,12 @@
     ; different types
     (refute (= 1.5M
               1.5))
-    (is (= (decimal->float 1.5M)
+    (is (= (decimal/->float 1.5M)
           1.5)))
-  (test "decimal->string / decimal->float"
-    (is (= (decimal->string 1.50M)
+  (test "decimal/->string / decimal/->float"
+    (is (= (decimal/->string 1.50M)
           "1.50"))
-    (is (= (decimal->float 0.25M)
+    (is (= (decimal/->float 0.25M)
           0.25))))
 
 (describe "decimal: exact arithmetic"
@@ -109,18 +109,18 @@
           1M))))
 
 (describe "decimal: construction"
-  (test "(decimal x) from string / int / float"
-    (is (= (decimal "1.50")
+  (test "(decimal/of x) from string / int / float"
+    (is (= (decimal/of "1.50")
           1.50M))
-    (is (= (decimal 3)
+    (is (= (decimal/of 3)
           3M))
-    (is (= (decimal 0.25)
+    (is (= (decimal/of 0.25)
           0.25M)))
-  (test "(decimal d) on a decimal is identity"
-    (is (= (decimal 1.5M)
+  (test "(decimal/of d) on a decimal is identity"
+    (is (= (decimal/of 1.5M)
           1.5M)))
   (test "a malformed decimal string errors"
-    (is (= (first (try (decimal "not-a-number") (catch _ [:error]))) :error))))
+    (is (= (first (try (decimal/of "not-a-number") (catch _ [:error]))) :error))))
 
 (describe "decimal: normalized equality + hashing"
   (test "1.5M == 1.50M (numerically equal regardless of scale)"
@@ -156,14 +156,14 @@
   :isolated (test "LOCAL decimals survive forced collections with value intact"
     (let (xs (into []
                (map (fn (i)
-                      (* (decimal i)
+                      (* (decimal/of i)
                         0.01M))
                  (range 1000))))
       (dev/gc-collect)
       ;; churn: 30k throwaway decimals to force tenuring + a major collection
       (count (into []
                (map (fn (i)
-                      (* (decimal i)
+                      (* (decimal/of i)
                         0.5M))
                  (range 30000))))
       (dev/gc-collect)

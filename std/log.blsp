@@ -36,7 +36,7 @@ process serialises writes (no interleaving) and isolates a crashing backend.
     (add-backend (process-backend editor-pid))  ; → an editor's *Messages*
 
 Levels are `:debug` < `:info` < `:warn` < `:error`. The default logger is
-registered as `:logger`; `(log …)` finds it via `whereis` and falls back to
+registered as `:logger`; `(log …)` finds it via `proc/whereis` and falls back to
 stderr if none is running, so a log is never silently lost.
 
 A *backend* is any value implementing the **`LogBackend`** ability (one op,
@@ -179,12 +179,12 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
         level (or (get o :level) :info)
         backends (or (get o :backends) [(stdout-backend)])
         pid (spawn-server server {:level level :backends backends}))
-    (register :logger pid)
+    (proc/register :logger pid)
     pid))
 
 (defn logger ()
   "The pid of the running default logger (registered `:logger`), or nil."
-  (whereis :logger))
+  (proc/whereis :logger))
 
 (defn stop-logger ()
   "Stop the running default logger, if any. Returns nil."

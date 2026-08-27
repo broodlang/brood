@@ -1,0 +1,30 @@
+;; std/bit.blsp — bitwise operations on integers.
+;;
+;; The operations themselves are kernel primitives (`crates/lisp/src/builtins/numeric.rs`),
+;; registered under this module's name the way `string/length` and `file/spit-private` are:
+;; Rust supplies the mechanism, the namespace is Brood's. This file is the module the
+;; qualified names belong to — it declares the namespace and documents the surface.
+;;
+;; They were bare (`bit-and`, `bit-shift-left`, `float->bits`, …) until 2026-08-26. Ten
+;; names for one coherent idea is exactly what a namespace is for, and the bare namespace
+;; is the scarce resource — every name in it is one a user's own top-level `def` cannot
+;; have. `(:use bit)` brings them back bare inside one module if you want them there.
+;;
+;; `bit/and`, `bit/or` and `bit/xor` are lowered to native instructions by the compiler
+;; (`PrimOp::BitAnd` and friends in eval/compile/ir.rs), which keys on these exact names —
+;; so renaming one means renaming it there too, or it silently stops being inlined.
+
+(defmodule bit
+  "Bitwise operations on integers, plus the IEEE-754 float/bit reinterpretations.
+
+    (bit/and 12 10)          → 8
+    (bit/or 12 10)           → 14
+    (bit/xor 12 10)          → 6
+    (bit/shift-left 1 10)    → 1024
+    (bit/shift-right 1024 3) → 128
+    (bit/count 255)          → 8
+    (bit/positions 10)       → [1 3]
+
+`bit/float->` and `bit/->float` reinterpret the bits of an IEEE-754 double (they do not
+convert the value): `(bit/->float (bit/float-> 1.5))` → `1.5`. Widths follow the operand —
+the shifts and `bit/not` promote to bignum rather than wrapping at 64 bits.")

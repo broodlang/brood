@@ -48,7 +48,7 @@ the `nest mcp` tools of the same names.")
             :example "(if (zero? n) 0 (/ total n))"}
    "E0041" {:summary "Integer overflow (legacy) — arithmetic past the i64 range."
             :causes "Historically raised on overflow; ints now auto-widen to big integers, so this is rare. Seen only on ops that predate widening."
-            :fix "Usually nothing — the result widens automatically. If you need a fixed width, mask with `bit-and`."
+            :fix "Usually nothing — the result widens automatically. If you need a fixed width, mask with `bit/and`."
             :example "(* 9223372036854775807 2)   ; => a big integer, no error"}
    "E0042" {:summary "Index out of range — a sequence access past its bounds."
             :causes "`(vector-ref v i)` / `(nth …)` / `(string/substring …)` / `(byte-at …)` with `i` ≥ length or negative."
@@ -73,7 +73,7 @@ the `nest mcp` tools of the same names.")
    "E0051" {:summary "Subprocess failed to start — the program couldn't be spawned."
             :causes "The program isn't on PATH; a wrong executable name."
             :fix "Confirm the binary is installed and on PATH; pass an absolute path if needed."
-            :example "(proc/spawn \"git\" [\"status\"])"}
+            :example "(os/spawn \"git\" [\"status\"])"}
    "E0060" {:summary "Distribution-layer failure — a node/connect/send operation failed."
             :causes "A wrong `name@host`; the peer not listening; a cookie mismatch; a dropped link (E0060 noconnection when `:send-errors` is on)."
             :fix "Confirm both nodes ran `node-start` with the SAME cookie and reachable addresses; `std/net/reconnect` auto-heals a dropped link."
@@ -184,8 +184,8 @@ the `nest mcp` tools of the same names.")
      :see "docs/language.md §Maps"}
     {:intent "a character / single-char literal"
      :keywords ["char" "character" "backslash" "\\newline" "\\space" "codepoint" "letter"]
-     :idiom "There is no `\\c` char literal (`\\newline`/`\\a` read as a symbol, silently). A character is a 1-char string `\"a\"`, or `(int->char 97)` from a codepoint; iterate a string's codepoints with `string->codepoints`."
-     :example "(int->char 10)   ; a newline string; NOT \\newline"
+     :idiom "There is no `\\c` char literal (`\\newline`/`\\a` read as a symbol, silently). A character is a 1-char string `\"a\"`, or `(string/int->char 97)` from a codepoint; iterate a string's codepoints with `string->codepoints`."
+     :example "(string/int->char 10)   ; a newline string; NOT \\newline"
      :see "docs/language.md §Strings"}
     {:intent "comment out / discard a form"
      :keywords ["comment" "discard" "#_" "ignore form" "disable code"]
