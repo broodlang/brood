@@ -59,8 +59,7 @@
 (describe "reserved: a FRAMEWORK's client API does not seize generic global names"
   (test "call / cast / stop / start / defprocess are the user's to define"
     (doseq (nm ["call"
-                 "cast" "stop" "call-timeout" "code-change" "start" "start-link"
-                 "start-named"])
+                 "cast" "stop" "call-timeout" "code-change" "start" "start-link" "start-named"])
       (assert= :allowed (rn-try (str "(def " nm " (fn (& a) :mine))"))))
     (assert= :allowed (rn-try "(defmacro defprocess (n p & c) nil)"))
     (assert= :allowed (rn-try "(defn gen-clause (a b c d e f) nil)")))
