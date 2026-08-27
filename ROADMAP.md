@@ -56,6 +56,54 @@ and **observability**. See "What's next — by area".
 
 ## Active work — dated findings & backlogs
 
+### Toolchain gaps a downstream migration exposed (2026-08-27)
+
+Migrating hive and its whole dependency closure (hatch, store-postgres, store, s3) across the
+namespacing waves took the registry down **twice**. Neither outage was a language bug — both
+were gaps in what the toolchain can tell you before you ship. Recorded as KI-66 and KI-67;
+the roadmap items are what would remove the class.
+
+**1. A boot check.** `nest check` resolves names, `nest test` runs the suite, and neither
+loads `main` — which is exactly where a stale dependency dies (`unbound symbol: int->char`
+during `require`; `unbound symbol: os/getenv` on `main`'s first line). A
+`nest release --smoke` / `nest run --check-boot` that loads the bundle's modules, runs
+nothing, and exits nonzero would have caught both on the machine that produced them. Small,
+and the highest-value item here. (KI-66)
+
+**2. `nest check` inside a `try`.** The checker deliberately skips unbound symbols in a `try`
+body, which is where I/O lives, which is where the renamed primitives live. hatch shipped a
+dead spool write for exactly this reason. Narrowing candidate: flag one whose `catch` does
+not itself mention the name. (KI-67)
+
+**3. A bundle should say what it is.** Answering "which brood built this, with which
+features" meant grepping the binary over SSH — and the first attempt used `strings`, absent
+from `debian:bookworm-slim`, which reported 0 and read exactly like "no JIT". A
+`--build-info` (brood commit, features, module count) on a `nest release` bundle removes the
+guesswork.
+
+**4. A migration aid for a rename wave.** Each wave breaks every downstream repo, and the
+recovery is a manual loop: `nest check`, read one hint, `nest rename`, repeat — a dozen
+rounds per repo. Two things would make it a command:
+
+- the checker already emits the answer (``\`int->char\` is defined as \`string/int->char\```),
+  so a `nest check --fix-renames` could apply the unambiguous ones and list the rest;
+- the hint only exists for PUBLIC moves. A name that went behind `%` (`map-pairs` →
+  `%map-pairs`) has no hint at all, so those were guesswork against `std/`.
+
+Note the hazard that cost a revert: **`nest rename` is not scope-aware**. Renaming `register`
+in hive also renamed hive's OWN sign-up handler, producing `(defn proc/register …)` — a
+reserved name, so the module stopped defining. Any `--fix-renames` must skip a name the
+project itself defines.
+
+**5. `docsite/render-css` has no theming counterpart.** A `:wrap? false` host embeds a
+fragment whose stylesheet hard-codes a light palette; `component-dark-css` exists but is
+emitted only by the wrapped path and is gated on `prefers-color-scheme`, i.e. the reader's
+OS rather than the host's theme. hive had to override ~30 selectors by hand to put the
+reference on a dark page. `render-css` should emit CSS variables the host can redefine —
+the same shape hive's own stylesheet uses. This is the second incomplete hand-off in that
+API; `render-js` was the first, fixed 2026-08-26.
+
+
 ### Standard-library surface audit — the bare namespace (2026-08-26)
 
 **Status: the reduction landed; examples and three structural items remain.** Every public
