@@ -366,6 +366,25 @@ and the first attempt used `strings`, which is absent from `debian:bookworm-slim
 reported 0 for *command not found* — indistinguishable from "no JIT". A `--build-info` on
 the bundle (brood commit, features, module count) removes that guesswork entirely.
 
+**Both follow-throughs landed 2026-08-27 ([ADR-257](decisions.md)).**
+
+- **`--build-info` shipped** as `myapp --brood-build-info` — brood version, build-id,
+  features, app name/version, module count. The `--brood-` argv prefix is **reserved by
+  the runtime** (two names, first position only) so the bundle's "argv belongs to the app"
+  contract survives intact, and it reads only the manifest and module directory — loading
+  no module, so it still answers on a bundle whose modules are broken, which is when it
+  is asked.
+- **A first-class boot check shipped too**, `nest run --check-boot` and `nest release
+  --smoke`, alongside the `nest run --for` wiring recorded above. The distinction between
+  them is the useful part of this entry and is now written down as a table in ADR-257:
+  `--check-boot` loads every module and resolves `:main` **without invoking it**, so it
+  catches the v130 class (raised during `require`) and *not* the v134 class (reached from
+  `main`'s body) — exactly the point this entry made. In exchange it is always safe to
+  run: no window, no port, no side effects, and valid for a library with no runnable
+  `:main`, which is precisely why `package-ci.yml`'s `boot-check` had to default to false.
+  `--smoke` additionally runs the **artifact**, which carries a dependency snapshot no
+  source-tree check can see.
+
 ---
 
 ## KI-64 — a JIT block-argument spill landed on the deopt journal ✅ FIXED 2026-08-26
