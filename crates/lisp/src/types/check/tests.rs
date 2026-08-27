@@ -1933,8 +1933,12 @@ fn match_redundancy_fires_on_a_hand_written_eq_chain_too() {
 #[test]
 fn covers_the_other_signed_primitives() {
     assert!(warnings("(math/mod 7 3)").is_empty());
-    assert!(warnings("(math/mod 7 \"x\")").iter().any(|w| w.contains("mod")));
-    assert!(warnings("(math/rem :a 3)").iter().any(|w| w.contains("rem")));
+    assert!(warnings("(math/mod 7 \"x\")")
+        .iter()
+        .any(|w| w.contains("mod")));
+    assert!(warnings("(math/rem :a 3)")
+        .iter()
+        .any(|w| w.contains("rem")));
     assert!(warnings("(%vector-length 5)")
         .iter()
         .any(|w| w.contains("vector-length")));
