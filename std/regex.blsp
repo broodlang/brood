@@ -490,7 +490,9 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
 
 (defn match? (pattern s)
   "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the
-start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a suffix."
+start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a suffix.
+
+    (regex/match? \"^a\" \"abc\")   → true"
   (let (obj (regex-compile pattern)
         codes (string/->codepoints s)
         n (count codes))
@@ -508,7 +510,9 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
         (nth obj 2)))))
 
 (defn matches? (pattern s)
-  "True if `pattern` matches the **entire** string `s` (anchored both ends)."
+  "True if `pattern` matches the **entire** string `s` (anchored both ends).
+
+    (regex/matches? \"[0-9]+\" \"a1b22\")   → false   ; the WHOLE string must match"
   (let (obj (regex-compile pattern)
         codes (string/->codepoints s)
         n (count codes))

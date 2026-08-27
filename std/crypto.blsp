@@ -28,7 +28,9 @@ cryptographically secure random bytes.
 ;; ---- random bytes -----------------------------------------------------------
 
 (defn random-bytes (n)
-  "Return `n` cryptographically secure random bytes as a bytes value."
+  "Return `n` cryptographically secure random bytes as a bytes value.
+
+    (count (crypto/random-bytes 8))   → 8"
   (%random-bytes n))
 
 (defn random-key ()
