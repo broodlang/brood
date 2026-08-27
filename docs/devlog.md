@@ -4096,3 +4096,46 @@ off the boot chain; every assertion it makes is unchanged.
 Worth knowing rather than fixing: loading `math` costs microseconds, so this is not a startup
 regression — but `string` is on everyone's path, and a future wave that moves something
 heavier under it would be.
+
+## 2026-08-27 — the checker looks inside a `try` (KI-67), and it found two dead call sites
+
+`try`/`%try`/`error-of`/`assert-error` were `SpecialHead::SkipBody`: the checker returned
+without descending. The reason was sound — `(error-of (first 5))` deliberately misuses
+`first`, and flagging it would make the test suite unlintable — but it threw out a whole
+diagnostic class with it. An **unbound symbol** inside a `try` is not the failure under
+test; it is a dead call site, and it is exactly what a rename wave produces. hive shipped
+`(try (bytes/append path piece) (catch e …))` after `bytes/append` became
+`file/spit-bytes-append`, with `nest check` clean and the suite green.
+
+Now those four heads route through a new `ErrorTesting` arm that descends and keeps only
+the unbound diagnostic.
+
+**Two attempts, and the first one is the lesson.** Gating each lint on a `SUPPRESS_*` bit
+looked natural — the bitmask and the `(check-allow :category …)` machinery already existed.
+It was wrong within one run: exhaustiveness and `*: no num-mul method` have no bit, so
+`nest check` went 0 → 6 warnings, four of them false positives on tests that misuse things
+on purpose. Adding a bit per lint is a treadmill, and every future lint starts out wrong.
+
+The second attempt filters **at the collection point** — walk into a scratch `Vec`, retain
+only messages starting with `UNBOUND_PREFIX`. One place, and a lint added later is
+suppressed inside these forms by default, which is the correct default for a form whose
+purpose is to exercise failure. `nest check` back to 0.
+
+**What it caught immediately**, both invisible to every existing gate:
+
+- `tests/http_test.blsp` called `bytes-concat`; the name is `bytes/concat`. Wrapped in
+  `assert-error`, so the test *passed* — on the unbound error, never on the CRLF-injection
+  refusal it claimed to verify. A test asserting a failure will happily accept the wrong
+  failure.
+- `std/tool/mcp.blsp`'s `shadows-for` called four `project-*` helpers that are `defn-`
+  (module-private), inside `(catch _ nil)`. So the MCP per-file shadow report has been
+  returning nil unconditionally. Fixed by adding a public `project/file-shadow-warnings`
+  where the private helpers live, rather than widening four names.
+
+Guarded by `unbound_inside_an_error_testing_form_is_still_flagged` and
+`only_unbound_survives_an_error_testing_form`, sabotage-verified.
+
+**KI-66 closed the same day** — not a missing capability. `nest run --for <d>` already exits
+nonzero with the raised error if the entry point dies, so it always was the boot check; the
+gap was that nothing ran it. `package-ci.yml` now takes an opt-in `boot-check` input
+(default off — a library has no `:main`, `bedit`/`pong` need a GUI).

@@ -64,7 +64,7 @@ process's OS user can; that process is the trust boundary."
         {:error (error-shape e)}))))
 
 ;; Cross-file shadow warnings involving `file`: the *qualified* names
-;; (`ns/name`, per `project-file-def-names`) this file defines that another
+;; (`ns/name`) this file defines that another
 ;; project source file also defines. Namespace-sound (ADR-065) — a short name
 ;; reused across distinct namespaces is not a collision, only a same-namespace
 ;; (or ambient/root) rebinding is. Empty (and silent) outside a project.
@@ -73,14 +73,7 @@ process's OS user can; that process is the trust boundary."
   (file)
   (try
     (let (root (project/find-root (file/cwd)))
-      (if (nil? root)
-        nil
-        (let (defined (project-file-def-names file)
-              srcs (source-files root)
-              extracts (project-gather-extracts srcs)
-              source-set (fold (fn (m p) (%map-assoc m p true)) {} srcs))
-          (filter (fn (w) (any? (fn (nm) (includes? w (str "'" nm "'"))) defined))
-            (project-duplicate-def-warnings extracts source-set)))))
+      (if (nil? root) nil (project/file-shadow-warnings file root)))
     (catch _ nil)))
 
 (defn- load-checked

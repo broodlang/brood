@@ -1341,6 +1341,57 @@ fn skips_error_testing_forms() {
     assert!(!warnings("(do (first 5) (try (first 6) (catch e e)))").is_empty());
 }
 
+/// KI-67. An error-testing form suppresses *misuse* — that is what it is for —
+/// but an **unbound symbol** inside one is a dead call site, not the failure
+/// under test. Skipping the body outright let a rename wave ship a broken `try`
+/// with every gate green: hive's spool write was
+/// `(try (bytes/append path piece) (catch e …))`, the callee was renamed to
+/// `file/spit-bytes-append`, `nest check` said nothing, and every upload broke.
+#[test]
+fn unbound_inside_an_error_testing_form_is_still_flagged() {
+    for src in [
+        "(try (definitely-not-bound 1) (catch e e))",
+        "(error-of (definitely-not-bound 1))",
+        "(assert-error (definitely-not-bound 1))",
+        // nested one level down, not just in head position
+        "(try (first (definitely-not-bound 1)) (catch e e))",
+    ] {
+        let w = warnings(src);
+        assert!(
+            w.iter()
+                .any(|m| m.contains("unbound symbol: definitely-not-bound")),
+            "{src} should flag the unbound name, got {w:?}"
+        );
+    }
+}
+
+/// The other half of KI-67: everything that is *not* an unbound symbol stays
+/// suppressed inside an error-testing form. Filtering happens at the collection
+/// point, so a lint added later is suppressed here by default — which is the
+/// right default for a form whose purpose is to exercise a failure.
+#[test]
+fn only_unbound_survives_an_error_testing_form() {
+    for src in [
+        "(error-of (cons 1))",              // arity
+        "(try (first 5) (catch e e))",      // type misuse
+        "(assert-error (string/length 5))", // sig mismatch
+    ] {
+        assert!(
+            warnings(src).is_empty(),
+            "{src} should stay silent, got {:?}",
+            warnings(src)
+        );
+    }
+}
+
+/// A test that really does assert on an unbound name opts out explicitly.
+#[test]
+fn check_allow_unbound_still_silences_an_error_testing_body() {
+    assert!(
+        warnings("(check-allow :unbound (try (definitely-not-bound 1) (catch e e)))").is_empty()
+    );
+}
+
 #[test]
 fn map_kv_refinement_flows_through_checker() {
     // (sig f ((map keyword int) -> int)): the get result is int | nil.
