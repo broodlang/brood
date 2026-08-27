@@ -25,6 +25,7 @@
 //! shape for hot reload (docs/shared-code.md), and `nest` is where the
 //! daily-driver workflow lives.
 
+use brood::bundle::{BUNDLE_BOOT_CHECK_ARG, BUNDLE_BUILD_INFO_ARG};
 use brood::cli_support::{report_error, run_on_main_stack, RawTermGuard};
 use brood::Interp;
 use clap::Parser;
@@ -118,7 +119,7 @@ fn main() {
         // than in a library the app calls: the moment they are the app's responsibility,
         // a broken app can no longer tell you what it is — and "what is this?" is asked
         // exactly when something is broken.
-        match args.first().map(String::as_str) {
+        match brood::bundle::reserved_command(&args) {
             Some(BUNDLE_BUILD_INFO_ARG) => {
                 run_on_main_stack("brood-main", || {
                     run_bundle_meta("(project/build-info-report)")
@@ -206,8 +207,6 @@ fn run(cli: Cli) {
         std::process::exit(1);
     }
 }
-
-use brood::bundle::{BUNDLE_BOOT_CHECK_ARG, BUNDLE_BUILD_INFO_ARG};
 
 /// Run one of the reserved bundle meta-commands: evaluate `code` in a fresh interp
 /// and exit non-zero if it raises. Deliberately does **not** go through
