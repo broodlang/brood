@@ -24,7 +24,7 @@
 ;; the thing being measured (the leaf's call protocol) under the residual call's own cost,
 ;; which is how you accidentally measure nothing and conclude the mechanism is dead.
 
-(def n (let (e (os/getenv "N")) (if e (string/->number e) 2000000)))
+(def n (let (e (os/env "N")) (if e (string/->number e) 2000000)))
 
 ;; spliceable: small, calls-free, non-capturing, fixed arity
 (defn sq (x) (* x x))
@@ -38,5 +38,5 @@
 
 (def t0 (os/now-ns))
 (def result (hot 0 0))
-(def ms (quot (- (os/now-ns) t0) 1000000))
+(def ms (math/quot (- (os/now-ns) t0) 1000000))
 (io/puts (str "n=" n " ms=" ms " result=" result))

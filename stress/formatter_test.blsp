@@ -16,7 +16,7 @@
       ;; arithmetic_edge_test) never equals itself, so structural `=` reports a
       ;; phantom diff on byte-identical parses. Printing renders both sides
       ;; canonically and still exposes any real change.
-      (assert= (pr-str (read-all fmt)) (pr-str (read-all src)))
+      (assert= (pr-str (reflect/read-all fmt)) (pr-str (reflect/read-all src)))
       ;; idempotency: a second pass changes nothing
       (assert= (source fmt) fmt)
       true)))
@@ -41,7 +41,7 @@
 
 (defn check-src! (src)
   (do
-    (assert= (pr-str (read-all (source src))) (pr-str (read-all src)))
+    (assert= (pr-str (reflect/read-all (source src))) (pr-str (reflect/read-all src)))
     (assert= (source (source src)) (source src))
     true))
 

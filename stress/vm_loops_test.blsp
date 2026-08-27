@@ -34,7 +34,7 @@
 (defn collatz-len (n steps)
   (if (= n 1)
     steps
-    (collatz-len (if (= (rem n 2) 0) (quot n 2) (+ (* 3 n) 1)) (+ steps 1))))
+    (collatz-len (if (= (math/rem n 2) 0) (math/quot n 2) (+ (* 3 n) 1)) (+ steps 1))))
 (defn collatz-sum (i n acc)
   (if (> i n) acc (collatz-sum (+ i 1) n (+ acc (collatz-len i 0)))))
 

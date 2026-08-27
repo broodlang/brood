@@ -29,7 +29,7 @@ these are the ones to unlearn:
 
 | Clojure habit | Brood reality | What you get if you guess wrong |
 |---|---|---|
-| `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | A clean error naming the fix. (It used to bind the *class name* as the variable and evaluate `e` as a statement — and since the prelude defines `e`, `(catch Exception e (println "caught" e))` silently printed 2.718…, a wrong program with no diagnostic.) |
+| `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | A clean error naming the fix. (It used to bind the *class name* as the variable and evaluate `e` as a statement — and since the prelude defines `e`, `(catch Exception e (io/puts "caught" e))` silently printed 2.718…, a wrong program with no diagnostic.) |
 | Multi-arity `(fn ((x) …) ((x y) …))` | **Supported** (ADR-047) — dispatch by argument count, like Clojure. But param lists are **lists** `(x)`, not vectors `[x]`, and a clause head may *also* be a same-arity **pattern** (Erlang-style; see [Pattern matching](#pattern-matching)). | A **clean error** with a hint: vector-headed clauses `([x] …) ([x y] …)` are rejected. (They used to read as one 2-parameter pattern clause with an empty body — a completely different function, diagnosed only later as a misleading arity error at the call site.) |
 | `{:a 1}` map literal | **Supported.** Immutable; `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?` (see [Maps](#maps)). Iteration order is **hash-derived, not insertion order** (unlike Clojure's array-map — see [Maps](#maps)). | Works as you'd expect, except don't rely on key order. |
 | `{:keys [a b]}` / `:or` map destructuring | **Supported** — a map literal in pattern position binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default): `(let ({:keys [a b] :or {b 0}} m) …)`, works in `let`/`fn`/`match`. General `{:key subpattern}` nesting and `:as` are deferred (ADR-011). | Works as in Clojure for the `:keys`/`:or` subset. |
@@ -664,8 +664,8 @@ ability when third-party or later code must be able to add a case.
 
 The `Display` ability — Elixir's `String.Chars` for Brood (ADR-171/172) — is **core
 and always on**. Its op **`(->string x)`** turns a value into its display string; the
-`:default` impl is the native `str`. The **screen printers** (`print` / `println` /
-`eprint` / `eprintln`) route a *record* through its `Display` impl out of the box — no
+`:default` impl is the native `str`. The **screen writers** (`io/write` / `io/puts` /
+`io/inspect`) route a *record* through its `Display` impl out of the box — no
 import, no activation step. Built-ins are unchanged and pay no dispatch cost.
 
 ```clojure
@@ -674,7 +674,7 @@ import, no activation step. Built-ins are unchanged and pay no dispatch cost.
 (impl Display usd
   (->string [m] (str "$" (math/->fixed (/ (get m :cents) 100.0) 2))))
 
-(println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
+(io/puts (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
 (->string (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
 ```
 
@@ -968,9 +968,9 @@ iterate and will not overflow the stack:
 For purely side-effecting iteration, two prelude macros wrap the common patterns:
 
 ```clojure
-(dotimes (i 3) (print i " "))    ; prints "0 1 2 "
+(dotimes (i 3) (io/write i " "))    ; prints "0 1 2 "
 (dolist (x (list :a :b))         ; runs the body for each element
-  (println (name x)))            ; prints "a" then "b"
+  (io/puts (name x)))            ; prints "a" then "b"
 ```
 
 Both are tail-recursive and return `nil` (they're for effects). `doseq` (over
@@ -1005,7 +1005,7 @@ evaluated in its place. Templates are written with quasiquote: `` `x `` quotes,
 
 ;; your own:
 (defmacro unless2 (c & body) `(if ~c nil (do ~@body)))
-(unless2 false (println "ran"))
+(unless2 false (io/puts "ran"))
 
 ;; inspect an expansion without running it:
 (macroexpand-1 '(defn f (x) x))   ;=> (def f (fn (x) x))
@@ -1070,7 +1070,7 @@ The **conditional / short-circuit threading** macros build on those, plus `doto`
 ```
 
 `some->>`/`cond->>` are the thread-*last* variants; `run!` applies a function to
-each item for effect (`(run! println xs)`, the function form of `doseq`).
+each item for effect (`(run! io/puts xs)`, the function form of `doseq`).
 
 `tap` and `then` are the single-**function** pipe helpers (Elixir's `Kernel.tap`/`then`),
 where `doto`/`->` splice *forms*: `(tap x f)` calls `(f x)` for its side effects and returns
@@ -1295,7 +1295,7 @@ Clauses are **wrapped** `(pattern [:when guard] body…)`; the first whose patte
 
 ```clojure
 (match msg
-  ([:say text]      (println text))
+  ([:say text]      (io/puts text))
   ([:add a b]       (+ a b))
   ((x & xs)         (str "head " x ", rest " xs))
   (n :when (int? n) (handle-int n))
@@ -1480,7 +1480,7 @@ Raise with `throw` (any value) or `error` (a formatted message), and handle with
 (try
   (risky)
   (catch e
-    (println "failed:" e)
+    (io/puts "failed:" e)
     :recovered))
 
 (throw :boom)                       ; raise an arbitrary value
@@ -1590,11 +1590,11 @@ crashes mid-`binding` takes its binding stack down with it and disturbs no one.
 
 ## Output ports and logging
 
-`print`/`println` don't write to stdout directly — they write to the **current
+`io/write`/`io/puts` don't write to stdout directly — they write to the **current
 output port**. A *port* is just a one-argument function `(fn (s) …)` that consumes
 a ready string; the dynamic variables `*out*` and `*err*` hold the current
 stdout/stderr ports. The defaults write to the real streams (and `*out*` honours
-the `with-out-str` capture), so out of the box `print` behaves exactly as you'd
+the `with-out-str` capture), so out of the box `io/puts` behaves exactly as you'd
 expect. The point is that you can **redirect** it.
 
 `std/io.blsp` gives the port toolkit — constructors and the `with-out`/`with-err`
@@ -1606,10 +1606,10 @@ module but leaves the names qualified:
 (defmodule my-app (:use io))
 
 (with-out (fn-port (fn (s) (collect s)))   ; route output to a callback
-  (println "captured by collect"))
+  (io/puts "captured by collect"))
 
 (with-out (process-port editor)            ; route output to another process …
-  (println "sent as [:io-write \"…\\n\"]"))
+  (io/puts "sent as [:io-write \"…\\n\"]"))
 ```
 
 A **`process-port`** sends each string to a process as `[:io-write s]`. That is
@@ -1624,8 +1624,8 @@ A port is any value implementing the **`Port`** ability, whose one op is `io-wri
 a bare 1-arg fn is a port (that is the `:fn` impl), and so is a port *record* that
 carries its target and prints as itself (`#<port stdout>`, `#<port file /tmp/app.log>`).
 `port?` tests it, and your own type joins with `defrecord` + `impl Port`. `*out*`/`*err*`
-still hold a plain fn, which the prelude's `print` calls directly — so printing pays no
-dispatch cost, `print` gains no special cases, and `with-out-str` is unaffected;
+still hold a plain fn, which the writers call directly — so printing pays no
+dispatch cost, `io/write` gains no special cases, and `with-out-str` is unaffected;
 `with-out`/`with-err` adapt a record port at that boundary for you (`port-fn`).
 
 ### Logging
@@ -1669,7 +1669,7 @@ takes it unchanged, and `backend-passes?` gives you the same `:min-level`/`:filt
 every stock backend honours.
 
 Both `io` and `log` are written in Brood over the process primitives — Rust only
-supplies the render/write split behind `print` (`%render`, `%write-out`,
+supplies the render/write split behind the writers (`%render`, `%write-out`,
 `%write-err`). See `std/io.blsp` and `std/log.blsp`.
 
 ## Type annotations
@@ -1843,7 +1843,7 @@ blocking). Clauses may carry a `:when` guard.
 
 ```clojure
 (receive
-  ([:say text]      (println text))     ; clause = (pattern [:when guard] body...)
+  ([:say text]      (io/puts text))     ; clause = (pattern [:when guard] body...)
   ([:add a b]       (+ a b))
   (n :when (int? n) (handle-int n)))
 ```
@@ -1955,17 +1955,17 @@ seized `call`, `cast` and `stop` as un-redefinable global names, which a framewo
 does not get to own. `(def call …)` is yours again.)
 
 ```clojure
-(defmodule my-app (:use gen))   ;; refers defprocess / spawn-server / call / cast / stop bare
+(defmodule my-app (:use gen))   ;; refers defprocess / start / call / cast / stop bare
 
 (defprocess counter (n)
-  (init  (do (println "up") n))            ; runs once at startup; returns the initial state
+  (init  (do (io/puts "up") n))            ; runs once at startup; returns the initial state
   (cast  :inc            (+ n 1))          ; fire-and-forget; body = next state
   (call  :value          [n n])            ; synchronous; body = [reply next-state]
   (query :double         (* n 2))          ; synchronous read-only; body = the reply, state unchanged
   (info  [:down _ p r]   (do (log p r) n)) ; a non-envelope message (monitor/link/timer/raw send)
-  (terminate reason (println "down: " reason)))  ; runs on (stop); body for cleanup
+  (terminate reason (io/puts "down: " reason)))  ; runs on (stop); body for cleanup
 
-(def c (spawn-server counter 0))
+(def c (start counter 0))
 (cast c :inc)              ; fire-and-forget
 (call c :value)            ; => 1  (synchronous, 5 s default timeout)
 (stop c)                   ; graceful shutdown — runs terminate, then ends the loop
@@ -2232,13 +2232,17 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 > caller's point of view they're all just functions.
 
 ### Arithmetic
-`+`  `-`  `*`  `/`  `mod`  `rem`  `quot`  `inc`  `dec`  `floor`  `min`  `max`  `zero?`  `nan?`  `infinite?`
+Bare in the prelude: `+`  `-`  `*`  `/`  `inc`  `dec`  `zero?`  `nan?`  `infinite?`
+
+In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/min`  `math/max`
 
 > **The `math` namespace (ADR-227).** The derived math *library* lives in the `math`
 > module: `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`,
 > the sign/parity predicates (`positive?`, `negative?`, `even?`, `odd?`), and the
-> constants `pi`/`e`. Core arithmetic above (operators, `quot`/`mod`/`rem`, `floor`,
-> `min`/`max`) stays bare. Reach the library with `(:use math)` or qualify (`math/sqrt`).
+> constants `pi`/`e` — **and the non-operator arithmetic above**: `quot`/`mod`/`rem`,
+> `floor`, `min`/`max` are derived too, so they moved here with the rest. Only the
+> operators and `inc`/`dec` stay bare. Reach the library with `(:use math)`, which
+> brings them back bare inside that module, or qualify (`math/sqrt`, `math/rem`).
 
 - Integer-only arguments give an integer result (`/` stays integer only when it
   divides evenly; otherwise it returns a float). Any float argument makes the
@@ -2644,12 +2648,15 @@ O(index), and a `string/char-at` loop or an `index-of` scan with a rising `from`
 linear on any text.
 
 ### I/O
-`print`  `println`  `eprint`  `eprintln`  `with-out-str`  `with-err-str`
+`io/write`  `io/puts`  `io/inspect`  `with-out-str`  `with-err-str`
 
-- `print` writes the display forms of its arguments to stdout (space-separated);
-  `println` adds a trailing newline. Both **flush stdout on every call**, so an
-  animation frame paints immediately — there is no separate flush primitive (and
-  none is needed).
+- `io/write` writes the display forms of its arguments to stdout (space-separated);
+  `io/puts` adds a trailing newline and is the everyday one; `io/inspect` writes the
+  **re-readable** form (strings quoted) plus a newline, for debugging. Each takes an
+  optional trailing `:to <port>` — `(io/puts "boom" :to *err*)` is how stderr is
+  written, so there is no separate `eprint`/`eprintln` family. All **flush stdout on
+  every call**, so an animation frame paints immediately — there is no separate flush
+  primitive (and none is needed).
 - `(with-out-str body...)` evaluates `body` with stdout **captured** and returns
   everything it printed as a string (`""` if nothing), discarding `body`'s own
   value. Capture is process-scoped *and* inherited by any process `body` spawns,
@@ -2659,7 +2666,7 @@ linear on any text.
   only its own output. The buffer is released even if `body` throws (the error
   re-raises). Built on the `%capture-begin`/`%capture-take` kernel primitives.
 - `(with-err-str body...)` is the stderr counterpart, and works differently
-  because stderr does: `eprint`/`eprintln` write through the **`*err*` port**, so
+  because stderr does: `:to *err*` writes through the **`*err*` port**, so
   this rebinds that port to a collecting sink rather than using the kernel capture
   buffer. Two consequences follow — it captures only what goes through `*err*` (a
   diagnostic the *kernel* writes, e.g. `[reload] arity changed`, is not
@@ -2668,7 +2675,7 @@ linear on any text.
   **assert on a warning**, and to keep an expected warning out of a test run's
   output.
 - For simple raw-terminal control, `(:use editor/ansi)` provides escape *strings*
-  to `print`: `ansi-clear` (erase + home — the per-frame reset), `ansi-cursor`,
+  to `io/write`: `ansi-clear` (erase + home — the per-frame reset), `ansi-cursor`,
   `ansi-home`, `ansi-hide-cursor`/`ansi-show-cursor`. The ESC byte is the `\e`
   string escape. For a structured render-op frame buffer instead, use
   `std/display` (`term/draw`/`term/emit`).
@@ -3012,11 +3019,11 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | Module | name | What it provides |
 |--------|---------------|-----------------|
 | `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `regular?`, `list-files`, `list-dirs`, `walk-files`. Pure path-string ops (`extension`, `stem`, …) live in `path` (ADR-234). All Brood (ADR-006), no new Rust |
-| `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
+| `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of a fixed stdout. Also the writers themselves: `io/write`, `io/puts`, `io/inspect`, each taking an optional trailing `:to <port>` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
 | `std/enum.blsp` | `'enum` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. The core ops (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stay bare in the prelude; `(:use seq)` for bare access or call qualified |
 | `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `merge-with`, `update-vals`, `update-keys`, `select-keys`. The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
-| `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Core arithmetic (operators, `quot`/`mod`/`rem`/`floor`/`min`/`max`) stays bare in the prelude; `(:use math)` for bare access or call qualified |
+| `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Only the **operators** (`+` `-` `*` `/` `<` `=` …) and `inc`/`dec` stay bare in the prelude — `quot`/`mod`/`rem`/`floor`/`min`/`max` are derived arithmetic and live here too, so they are `math/quot`, `math/min`, … unless `(:use math)` brings them back bare |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
 | `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |

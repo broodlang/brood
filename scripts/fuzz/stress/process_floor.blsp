@@ -28,7 +28,7 @@
 ;; allocator retention) — but check rather than assume, because on churny workloads the same
 ;; flag is worth 2.3x.
 
-(def n (let (e (os/getenv "N")) (if e (string/->number e) 20000)))
+(def n (let (e (os/env "N")) (if e (string/->number e) 20000)))
 
 (defn rss-kb ()
   (let (txt (file/slurp "/proc/self/status") i (index-of txt "VmRSS:"))
@@ -63,6 +63,6 @@
            " rss_kb="
            rss
            " per_proc_b="
-           (quot (* (- rss base-kb) 1024) n)
+           (math/quot (* (- rss base-kb) 1024) n)
            " live="
            live))

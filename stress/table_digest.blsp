@@ -2,9 +2,9 @@
 ;; digest. stress/table_oracle.py runs the IDENTICAL sequence against a python
 ;; dict; run.sh compares the two outputs. Idempotent ops only (see xfail note).
 (def t (table/new))
-(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+(defn lcg (s) (math/rem (+ (* s 1103515245) 12345) 2147483648))
 (defn one (s)
-  (let (s1 (lcg s) c (rem s1 10) k (rem s1 4096) v (rem s1 100000))
+  (let (s1 (lcg s) c (math/rem s1 10) k (math/rem s1 4096) v (math/rem s1 100000))
     (do
       (cond
         (< c 6) (table/put t k v)

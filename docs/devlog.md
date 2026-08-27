@@ -4140,6 +4140,72 @@ nonzero with the raised error if the entry point dies, so it always was the boot
 gap was that nothing ran it. `package-ci.yml` now takes an opt-in `boot-check` input
 (default off — a library has no `:main`, `bedit`/`pong` need a GUI).
 
+## 2026-08-27 (fourth session) — v0.14.0: three gates that had stopped gating
+
+**Asked to look at outstanding issues.** `known-issues.md` showed no open bug and the
+working tree was clean, so the tree looked green. It was not: **every completed CI run since
+2026-08-26 14:12 had failed**, and everything after was `cancelled` by the next push, so the
+run list showed no red — only a wall of cancellations with an `in_progress` at the top. Two
+jobs were red on all three completed runs.
+
+**KI-69 — `differential (tree-walker)`.** KI-64's two new `jit_plan` guards assert on
+VM-compiled arms; the job runs `BROOD_VM=0`, so `dbg_compiled_arms()` yields nothing. Both
+guards *refuse to pass vacuously* (`only {checked} lowerable chunks inspected — a green
+result would mean nothing`), which is exactly right and is why they failed instead of lying.
+The fix is the pin `compile/tests.rs` has carried since ADR-222 made the tier ceiling
+coherent: `set_forced_ceiling(Some(Tier::Native))`. Reproduced locally under `BROOD_VM=0`
+before and after.
+
+**`examples + stress still run` — 22 harnesses, three rename waves deep.** `examples/life`
+called `map-pairs` (the enumerator is `seq` now), `examples/node_server` a bare `register`
+(`proc/register`). `stress/` and `scripts/fuzz/stress/` named `os/getenv`, `rem`, `quot`,
+`mod`, `min`, `max`, `string-length`, `read-all`, `read-string`, `gen/spawn-server`. One
+genuine opt-out: `eval_forward_ref.blsp`'s two names are defined by `eval`, and that
+invisibility to the checker is the thing the harness exists to prove (KI-24), so it takes
+`(check-allow :unbound …)` rather than a rewrite.
+
+**KI-68 — and then the fuzz-differential gate turned out to be hollow.** Fixing the corpus
+surfaced it: `python3 stress/fuzz_programs.py --seeds 20` printed `seed N ok (exit=1)` twenty
+times and concluded `all configs agree`. The generator writes Brood from **Python** string
+literals, and the waves had retired every name in it — `(table)`, `rem`, `bit-and`, the
+`table-*` family, `println`, the linear-map whitelist. Every program died on `(def t (table))`
+**identically in all four configs**, and a differential reads identical death as agreement.
+
+Three gaps, each sufficient alone: the generator is `.py`, so `nest check`, the `.blsp` suite,
+`make check-stress` and `stale-names.sh` all miss it (the same class as Rust-embedded Brood);
+`run_one` captured **stdout only**, discarding the `unbound symbol` on stderr before the
+comparison saw it; and the `ok` line prints the compared value's last line, which for a dead
+program is the literal string `exit=1` — on screen twenty times a run, reading as success.
+
+The names are fixed (60 seeds, 0 unbound, real digests, all configs agree), but the durable
+half is the assertion: **an `unbound symbol` in a generated program is now a hard failure**
+naming the dead names, and under it a run where *not one seed* reached a clean exit fails as
+`the corpus is dead, not the engines agreeing`. Sabotage-verified in the original shape —
+reverting `(table/new)` to `(table)` gives `DEAD PROGRAM seed=1 … : table` where it used to
+give `ok`. The two arms are complementary: a dead name in an *untaken branch* still exits 0,
+and `check_soundness` catches that one instead.
+
+> **The reusable lesson.** A differential gate proves N engines *agree*; it proves nothing
+> about whether they agreed on anything. Any harness whose pass condition is "the sides
+> match" needs a separate assertion that the sides did real work — the shape of KI-39's
+> silent annotate step and KI-62's image that installed nothing. When the corpus is
+> *generated* rather than checked in, that assertion belongs in the generator.
+
+**Doc drift, in the two docs that are actually load-bearing.** `docs/language.md` and
+`docs/brood-for-claude.md` still taught `print`/`println`/`eprint`/`eprintln` (retired when
+the `io/` trio landed in 0.13.0) across 24 sites, `spawn-server` (now `gen/start`), and an
+arithmetic reference asserting `quot`/`mod`/`rem`/`floor`/`min`/`max` are bare when they
+moved to `math`. Every replacement was probed against the running binary first, and the
+`gen` example re-run end to end. `brood-for-claude.md` is baked into the binary and dropped
+into every scaffolded project, so a dead name there propagates to every assistant that reads
+it — which is also why the next step is `nest update-tooling` in each downstream repo.
+
+Care in the other direction too: the previous session fixed four *prose corruptions* where a
+rename turned an English word into a function name, so ordinary uses of "print", "printing"
+and "a print depth" were left alone here.
+
+**Cut as v0.14.0.** No language change — the release is the tree going green.
+
 ## 2026-08-27 (third session) — a 79% deopt rate that is not a cost, and the build that faked it
 
 Went looking for the next perf lever with the attribution build. `perf/measure` on a

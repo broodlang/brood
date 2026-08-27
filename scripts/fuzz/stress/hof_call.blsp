@@ -20,11 +20,11 @@
 ;; Every loop is tail-recursive (O(1) stack) and returns a value that depends on every
 ;; iteration, so nothing can be folded away.
 
-(def N (let (e (os/getenv "N")) (if e (string/->number e) 3000000)))
+(def N (let (e (os/env "N")) (if e (string/->number e) 3000000)))
 
 (defn ns-per (f k)
   (let (t0 (os/now-ns) _ (f))
-    (quot (- (os/now-ns) t0) k)))
+    (math/quot (- (os/now-ns) t0) k)))
 
 ;; The step function under test: a plain 2-arg user closure, NOT a passthrough, so a
 ;; cached `(arm, env)` is exactly what an IC would hold for it.
@@ -74,18 +74,25 @@
 ;; its work optimised away, and the ns/call figure is then measuring nothing. Also prints
 ;; the accumulator, so a loop cannot be dead-code-eliminated unobserved.
 (defn row (label f)
-  (let (v (f) a (ns-per f N) b (ns-per f N) best (min a b))
-    (io/puts (str label " " best " ns/call   (" (quot (* best N) 1000000) " ms total, acc=" v ")"))))
+  (let (v (f) a (ns-per f N) b (ns-per f N) best (math/min a b))
+    (io/puts (str label
+               " "
+               best
+               " ns/call   ("
+               (math/quot (* best N) 1000000)
+               " ms total, acc="
+               v
+               ")"))))
 
 ;; COLD variant: no warm-up pass and a single reading, so the figure includes whatever
 ;; tiering happens during it. A tiered runtime has two steady states and a micro-benchmark
 ;; reports only one; run this alongside `row` across a sweep of N and watch whether the
 ;; GAP between the arms moves, not just whether each arm gets faster.
 (defn row-cold (label f)
-  (let (t0 (os/now-ns) v (f) ns (quot (- (os/now-ns) t0) N))
+  (let (t0 (os/now-ns) v (f) ns (math/quot (- (os/now-ns) t0) N))
     (io/puts (str label " " ns " ns/call   (cold, single pass, acc=" v ")"))))
 
-(io/puts (str "N=" N " jit=" (if (nil? (os/getenv "BROOD_NO_JIT")) "on" "off")))
+(io/puts (str "N=" N " jit=" (if (nil? (os/env "BROOD_NO_JIT")) "on" "off")))
 (row "inline    (no call)     " (fn () (loop-inline N 0)))
 (row "global    leaf step     " (fn () (loop-global N 0)))
 (row "computed  leaf step     " (fn () (loop-computed step N 0)))

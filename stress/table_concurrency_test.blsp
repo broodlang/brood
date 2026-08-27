@@ -52,7 +52,7 @@
 (defn poke (t me n oks errs)
   (if (= n 0)
     (send me [:done oks errs])
-    (let (r (try (do (table/put t (rem n 100) n) :ok) (catch e :err)))
+    (let (r (try (do (table/put t (math/rem n 100) n) :ok) (catch e :err)))
       (poke t me (- n 1) (if (= r :ok) (+ oks 1) oks) (if (= r :err) (+ errs 1) errs)))))
 
 (defn await-pairs (n oks errs)

@@ -19,6 +19,8 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-69 | **two `jit_plan` guards failed on every `main` push**, so the `differential (tree-walker)` job had been red since KI-64's fix landed. `block_argument_spills_never_reach_the_deopt_journal` and `the_block_argument_want_is_clamped_to_the_reserve` assert on VM-compiled arms, and the job runs `BROOD_VM=0` — nothing compiles, so the first inspected 0 chunks and the second saw no arm to clamp. Both fail loudly by design (a vacuous green would mean nothing), which is why they failed rather than passing hollowly | ✅ **fixed 2026-08-27** — both pin `set_forced_ceiling(Some(Tier::Native))`, the fix `compile/tests.rs` already documents for its two native tests since ADR-222 made the ceiling coherent. The guards are new (2026-08-26) and simply missed the pin |
+| KI-68 | **the fuzz-differential gate was HOLLOW — it had been comparing dead programs.** `stress/fuzz_programs.py` writes Brood source itself, and the rename waves retired every name it emitted (`table`, `rem`, `bit-and`, `bit-xor`, `table-get`/`put`/`incr`/`count`, `quot`, `min`/`max`, `println`, `map-get`/`map-count`/`map-dissoc`/`map-int-add`). Every engine died identically on `unbound symbol` at line 1, so all four configs *agreed*, every seed printed `ok`, and the run ended "all configs agree". The generator is Python, so `nest check` and the `.blsp` suite could never see it | ✅ **fixed 2026-08-27** — names updated (60 seeds, 0 unbound, all configs agree with real digests) **and the shape gated**: an `unbound symbol` on stderr from a GENERATED program is now a hard failure naming the dead names, and a run where not one seed reached a clean exit fails as "the corpus is dead, not the engines agreeing". Sabotage-verified in the exact original shape — reverting `(table/new)` to `(table)` prints `DEAD PROGRAM seed=1 … : table` instead of `ok` |
 | KI-67 | **`nest check` was silent about unbound symbols inside a `try` body**, so a rename could leave a call site dead and every gate stayed green. `hatch`'s spool write was `(try (bytes/append path piece) (catch e …))`; brood renamed that to `file/spit-bytes-append`, `nest check` reported nothing, and the repo shipped with every spooled upload broken — visible only as four tests timing out with no error to read | ✅ **fixed 2026-08-27** — `try`/`%try`/`error-of`/`assert-error` now DESCEND, keeping only the unbound-symbol diagnostic and dropping every other lint. Filtering happens at the collection point, not lint-by-lint, so a lint added later is suppressed here by default. Opt out with `(check-allow :unbound …)`. Found two real dead call sites on the first run: `bytes-concat` in `http_test` and four module-private `project-*` names in `std/tool/mcp.blsp` |
 | KI-66 | **nothing in the default gate verified that a project still BOOTS.** `nest check` resolves names and `nest test` runs the suite, but neither evaluates `main` — and that is exactly where a stale dependency dies. hive went down twice on the same shape: `unbound symbol: int->char` and then `unbound symbol: os/getenv`, both raised on the first line of `main`, both after a clean check and a green suite | ✅ **closed 2026-08-27** — never a missing capability: `nest run --for 6s` already does it (exit 1 with the error if the entry point raises, exit 0 if it survives). The gap was wiring, now wired: hive's `bin/ci` runs it, and the shared `package-ci` workflow takes an opt-in `boot-check` input with `boot-seconds` (2b51de93). Off by default on purpose — a library has no `:main`, and `bedit`/`pong` need a GUI a runner has not got |
 | KI-64 | **the JIT miscompiles `json/encode` under sustained load** — hive's `/api/v1/packages*` returns 500 after ~60 requests and then fails until the machine restarts, while `/health` and every web page keep serving. The error is `empty?: expected collection, got int (1114114)` inside `emit-pairs`/`emit-list`, i.e. an int where the recursion expects a list; 1114114 is NOT a codepoint (that reading was a coincidence) — it is a packed deopt-journal word, `17 << 16 \| 2`. `BROOD_NO_JIT=1` makes it 120/120 clean | ✅ **fixed 2026-08-26** — a block-argument spill slot was landing on the deopt checkpoint, because `jit_spill_reserve` gated the WHOLE reserve on having ≥2 non-tail calls while block-argument slots depend only on the operand depth at a block leader. Not shared code, not concurrency, not load: it reproduces in one process on the fourth call. Fixed by clamping the spill window to its reserve (ADR-248); `BROOD_NO_JIT=1` is no longer needed in hive |
@@ -4251,3 +4253,85 @@ and writing one puts a second pair of eyes on behaviour nothing else was checkin
 **Fix.** `pair?` → `empty?` in both guards. A string now raises a clear `first: expected
 list, vector, set, map or bytes` rather than answering wrongly. `drop-while` returns `coll`
 itself when nothing is dropped, matching `(drop 0 [1 2 3])` → `[1 2 3]`.
+
+## KI-69 — two `jit_plan` guards failed on every `main` push ✅ FIXED 2026-08-27
+
+**Symptom.** The `differential (tree-walker)` CI job had been red on every completed run since
+KI-64's fix landed, and the run list did not show it: each push cancelled the previous run, so
+the page was a wall of `cancelled` with one `in_progress` on top and no visible red.
+
+**Cause.** KI-64's fix added two guards —
+`block_argument_spills_never_reach_the_deopt_journal` and
+`the_block_argument_want_is_clamped_to_the_reserve` — and both assert over **VM-compiled**
+arms via `dbg_compiled_arms()`. That job runs `BROOD_VM=0`, the tree-walker, where nothing is
+compiled at all: the first guard inspected 0 chunks and the second found no arm to clamp.
+
+**Why they failed rather than passing hollowly.** By design, and it is the reason this was
+findable. Both refuse a vacuous green — `only {checked} lowerable chunks inspected — a green
+result would mean nothing` — instead of reporting success over an empty set. A guard that
+passes when it examined nothing is the failure mode [[KI-68]] is entirely about; these two
+took the opposite choice and were loud.
+
+**Fix.** Pin the tier: `set_forced_ceiling(Some(Tier::Native))`, which is what
+`compile/tests.rs` has carried for its two native tests since ADR-222 made the ceiling
+coherent (`BROOD_VM=0` and `BROOD_NO_JIT=1` are aliases for ceilings 0 and 1). The guards are
+new — 2026-08-26 — and simply missed the pin every other tier-sensitive test already had.
+Reproduced locally under `BROOD_VM=0` before and after.
+
+**Guard.** The two tests themselves, now that they run at a ceiling where there is something
+to inspect; their own anti-vacuity assertions are what make that meaningful.
+
+## KI-68 — the fuzz-differential gate was comparing dead programs ✅ FIXED 2026-08-27
+
+**Symptom.** None, which is the point. `python3 stress/fuzz_programs.py --seeds 20` printed
+`seed N ok (exit=1)` twenty times and then `---- fuzz: 20 seeds, all configs agree`, exit 0.
+The gate CLAUDE.md prescribes as part of proving the tree green had not compared a working
+program in weeks.
+
+**Cause.** The generator emits Brood source from Python string literals. The v0.9–v0.13
+namespacing waves retired essentially every name it wrote — `(table)`, `rem`, `quot`,
+`min`/`max`, `bit-and`/`bit-or`/`bit-xor`, `table-get`/`table-put`/`table-incr`/`table-count`,
+`println`, and the linear-map whitelist `map-int-add`/`map-get`/`map-count`/`map-dissoc`.
+The first form of every generated program is `(def t (table))`, so every program died on
+line 1 — **identically in all four configs**. The differential compares config against
+config, so identical death reads as agreement.
+
+**Why nothing caught it.** Three independent gaps, each sufficient on its own:
+
+1. The generator is **Python**. `nest check`, the `.blsp` suite, `make check-stress` and
+   `scripts/stale-names.sh` all look at `.blsp` files; none of them reads a `.py` that
+   *emits* Brood. This is the same class as the Rust-embedded Brood in
+   `crates/lisp/tests/*.rs` — see [[rename-wave-checklist]].
+2. `run_one` captured **stdout only**. `unbound symbol` goes to stderr, so the diagnostic
+   that named the problem was discarded before the comparison ever saw it.
+3. The `ok` line prints the last line of the compared value, which for a dead program is
+   the string `exit=1`. It was on screen, twenty times per run, and reads as success.
+
+**Fix.** Two parts, and the second is the durable one:
+
+- The names are updated to the current spellings, verified by running the generated corpus:
+  60 seeds produce 0 unbound diagnostics and every config agrees on real digests.
+- **Liveness is now asserted.** `run_one_full` returns stderr beside the comparison string.
+  An `unbound symbol` in a *generated* program is a hard failure — the generator writes the
+  calls itself, so an unbound name there is never legitimate — and it reports the dead names
+  rather than the seed alone. Beneath that, a run in which **not one seed** reached a clean
+  exit fails as `NOT ONE ran to a clean exit — the corpus is dead, not the engines agreeing`.
+
+**Sabotage-verified in the original shape.** Reverting `(table/new)` to `(table)`:
+
+```
+DEAD PROGRAM seed=1 (stress/fuzz_out/fuzz_1.blsp kept): the generator emits names this
+build does not bind: table
+---- fuzz: 3/3 seeds DIVERGED
+```
+
+versus `---- fuzz: 3 seeds, all configs agree (3 ran clean)` on the fix. Reverting
+`"math/rem"` to `"rem"` is caught too, by the *other* arm — a program whose dead name sits
+in an untaken branch still exits 0, and `check_soundness` flags it as a checker false
+positive. The two checks are complementary, not redundant.
+
+**The reusable lesson.** A differential gate proves that N engines *agree*; it proves nothing
+about whether they agreed on anything. Any harness whose pass condition is "the sides match"
+needs a separate assertion that the sides did real work — the same shape as KI-39's silent
+annotate step and KI-62's image that installed nothing. When a corpus is generated rather
+than checked in, that assertion has to live in the generator.

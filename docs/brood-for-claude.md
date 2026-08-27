@@ -398,7 +398,7 @@ Other things worth knowing:
 ### The abilities `std/` already ships (ADR-177)
 
 `impl` one of these for your own record and that library accepts your type — you don't
-edit the library. Beyond the core `Display` (`->string`, what `println` shows) and `Inspect`
+edit the library. Beyond the core `Display` (`->string`, what `io/puts` shows) and `Inspect`
 (`inspect`, the debug form):
 
 | `impl` this | to get |
@@ -675,7 +675,7 @@ and registers the new pid. The name is auto-reaped on death.
     (receive
       ([:down ^ref _ :normal] :ok)
       ([:down ^ref _ reason]
-        (println "child died: " (pr-str reason) " — restarting")
+        (io/puts "child died: " (pr-str reason) " — restarting")
         (supervise worker-fn)))))
 ```
 
@@ -716,7 +716,7 @@ a node link (ADR-073). The whole model in one example:
 ;; --- on node "bob" -----------------------------------------------------------
 (node/start "bob")
 (proc/register :inbox (self))
-(receive ([:hi from] (println "hi from " from)))       ; => hi from :alice@host
+(receive ([:hi from] (io/puts "hi from " from)))       ; => hi from :alice@host
 ```
 
 The three pieces and how they relate:
@@ -755,7 +755,7 @@ kinds:
   Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
-;; `gen` is an ordinary module: `(:use gen)` refers defprocess / spawn-server /
+;; `gen` is an ordinary module: `(:use gen)` refers defprocess / start /
 ;; cast / call / stop bare. Without it, qualify: `gen/start`, `gen/call`, …
 ;; (`call`/`cast`/`stop` are NOT global names — `(def call …)` is yours.)
 (defmodule my-counter "…" (:use gen))
@@ -763,11 +763,11 @@ kinds:
 (defprocess counter (n)                 ; n is the state
   (cast  :inc       (+ n 1))            ; new state = n+1
   (cast  [:add k]   (+ n k))            ; payloads can carry data (pattern binds k)
-  (cast  :ping      (do (println "pong") n))  ; side effect, state unchanged
+  (cast  :ping      (do (io/puts "pong") n))  ; side effect, state unchanged
   (call  :value     [n n])              ; reply n, keep state n
   (query :double    (* n 2)))           ; reply n*2; state untouched
 
-(def c (spawn-server counter 0))        ; spawn with initial state 0 → pid
+(def c (start counter 0))        ; spawn with initial state 0 → pid
 (cast c :inc)                           ; cast (returns immediately)
 (cast c [:add 10])
 (call c :value)                         ; => 11  (synchronous; blocks for reply)
@@ -860,7 +860,7 @@ Writing a live script: just write a normal Brood file. The
 ```lisp
 ;; live.blsp — run with: nest run --watch live.blsp
 (defn my-loop (n)
-  (do (println "iter:" n) (sleep 1000) (my-loop (+ n 1))))
+  (do (io/puts "iter:" n) (sleep 1000) (my-loop (+ n 1))))
 
 (my-loop 0)
 ```
@@ -913,7 +913,7 @@ To run a one-off entry point without editing the manifest's `:main`, pass
 (try
   (work)
   (catch e
-    (println "failed: " e)))
+    (io/puts "failed: " e)))
 
 (throw [:my-error :reason])              ; throwable values are arbitrary
 (error "x out of range: " x)             ; convenience: throw with a built string
@@ -1027,20 +1027,23 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   probing names one at a time.
 - **timing**: `now` (ms since epoch) `now-ns` (ns since epoch) `bench`
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
-- **I/O**: `print` `println` `file/slurp` `file/spit` `load` `eval-string` `reflect/read-string`.
-  `print`/`println` **space-join** their args (Python-style, via `%render`) —
+- **I/O**: `io/write` `io/puts` `io/inspect` `file/slurp` `file/spit` `load` `eval-string`
+  `reflect/read-string`. `io/puts` is the everyday one (newline); `io/write` omits it and
+  `io/inspect` prints the re-readable form. Each takes an optional trailing `:to <port>`
+  (`(io/puts "boom" :to *err*)`), which is how stderr is written — there is no separate
+  `eprint` family. They **space-join** their args (Python-style, via `%render`) —
   distinct from `str`, which concatenates. A **record** defines how it prints on screen
   (Elixir's `String.Chars`) via the core, always-on `Display` ability: just
   `(impl Display my/rec (->string [r] …))` and the screen printers honor it — no import,
   no activation step; built-ins unchanged (ADR-171/172).
-  `print`/`println` **flush stdout every call** — there's no separate flush, so
+  These **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the
   full display protocol, `(:use editor/ansi)` in your `defmodule` header (or a
   qualified `editor/ansi/ansi-clear`, which auto-loads) gives
   `(ansi-clear)`/`(ansi-home)`/
   `(ansi-cursor r c)`/`(ansi-hide-cursor)` — **zero-arg functions you call**, each
-  *returning* an escape string. Call them: `(print (ansi-clear))`, **never**
-  `(print ansi-clear)` (a bare symbol prints `#<fn …>` and emits no escape). The
+  *returning* an escape string. Call them: `(io/write (ansi-clear))`, **never**
+  `(io/write ansi-clear)` (a bare symbol prints `#<fn …>` and emits no escape). The
   ESC byte is the `\e` string escape. (For a render-op frame buffer, use
   `std/display`.)
 - **Filesystem (stat-class)**: `file/exists?` `file/dir?` `file/ls` `file/mtime` `file/stat`
@@ -1059,8 +1062,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `fold` / `map` / `filter` / `reduce`.
 - **Calls are `(f x)`, never `f(x)`.** Brood has no C-style call syntax: `f(x)`
   reads as *two* forms — `f`, then `(x)` — so the `(x)` tries to *call the value
-  of* `x` and you get `cannot call non-function`. Write `(println "hi")`, not
-  `println("hi")`. (The evaluator now hints this when the mis-called head is a
+  of* `x` and you get `cannot call non-function`. Write `(io/puts "hi")`, not
+  `io/puts("hi")`. (The evaluator now hints this when the mis-called head is a
   literal.)
 - **Bare symbols in patterns *bind*.** Match a literal symbol with `'foo`;
   match a runtime value with `~expr`.
@@ -1148,7 +1151,7 @@ apps* above; needs a `--features gui` build).
 
 (defn main ()
   "Entry point: print the project's greeting."
-  (println (greeting)))
+  (io/puts (greeting)))
 ```
 
 ```lisp
