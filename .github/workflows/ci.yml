@@ -63,17 +63,16 @@ jobs:
 
   # Clippy runs ALONE, in parallel with the test job, and that is the point.
   #
-  # It lints `--all-features` (gui/gui-gpu/audio/system-alloc/loom-model); the tests build
-  # `brood/treesit-grammars`. Cargo compiles the entire dependency graph once PER FEATURE
-  # SET, so while these shared a job, clippy's build was thrown away before nextest started
-  # its own — the job paid for two full compilations back to back, and every step behind
-  # clippy waited for it. Measured 2026-08-27 at `opt-level = 2`: 118 s of clippy build,
-  # then ~390 s rebuilding the same crates under different flags.
+  # The reason is SERIALISATION, not shared artifacts. `cargo clippy` runs `clippy-driver`
+  # and its outputs cannot be reused by a real build — so clippy's work was never going to
+  # feed nextest's, whatever features either names (verified 2026-08-27: matching the sets
+  # exactly, the next `cargo test` still recompiled the whole graph). While they shared a
+  # job, that unshareable ~120-140 s sat in front of every test step, in series.
   #
-  # Splitting costs one more runner and a second cache restore; it buys `max(lint, test)`
-  # instead of `lint + test`, and full `--all-features` lint coverage is kept exactly as it
-  # was — narrowing clippy to the test features would have been the cheaper fix and would
-  # have stopped linting every gui/audio/sanitizer path.
+  # Split, it runs concurrently instead: `max(lint, test)` rather than `lint + test`. Full
+  # `--all-features` lint coverage is kept exactly as it was — narrowing clippy to the test
+  # features would have bought nothing, for the reason above, and would have stopped linting
+  # every gui/audio/sanitizer path.
   lint:
     name: clippy (all features)
     runs-on: ubuntu-latest
@@ -97,10 +96,19 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # Lives HERE, not in the test job, purely for artifact reuse: `--all-features` above
-      # already compiled `gui,gui-gpu`, so this costs the run of the test. In the test job
-      # it was a fourth distinct feature set — a full rebuild of the graph to exercise one
-      # `--lib gui` target.
+      # Lives HERE for LOAD BALANCING, not for artifact reuse — an earlier version of this
+      # comment claimed reuse and was simply wrong. `cargo clippy` runs `clippy-driver`, and
+      # its outputs are not reusable by a real build, so a test step placed after clippy
+      # recompiles from scratch **no matter what features it names**. Verified directly:
+      # with the feature set matched exactly to `--all-features`, the very next
+      # `cargo test` still printed `Compiling …` for the whole graph.
+      #
+      # Given that no placement can share, the only question is which job absorbs the cost.
+      # This job is the short one (~143 s of clippy) and the test job is the long one
+      # (~600 s), and jobs run in parallel — so the gui build lands in the slack here and
+      # costs zero wall clock, where in the test job it would add to the critical path.
+      # Features stay NARROW (`gui,gui-gpu`) for the same reason: with sharing impossible,
+      # `--all-features` would only build more (audio, system-alloc, loom-model) for nothing.
       - name: Test (gui renderer — feature-gated, not covered by the nextest run)
         run: cargo test -p brood --features gui,gui-gpu --lib gui
 
