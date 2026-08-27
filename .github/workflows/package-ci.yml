@@ -27,6 +27,20 @@ on:
         type: boolean
         required: false
         default: true
+      boot-check:
+        description: >-
+          Also run `nest run --for`, before the suite, so a project that checks
+          green but cannot START fails fast rather than on deploy. Off by
+          default: a library has no `:main`, and bedit/pong need a GUI a runner has
+          not got. See KI-66 — hive went down twice on exactly this.
+        type: boolean
+        required: false
+        default: false
+      boot-seconds:
+        description: "How long the boot check waits before calling it a success."
+        type: string
+        required: false
+        default: "6s"
       postgres:
         description: >-
           Start a Postgres 16 container and export the PG* env its suite reads.
@@ -112,6 +126,21 @@ jobs:
             sleep 1
           done
           docker exec ci-postgres pg_isready -U postgres
+
+      - name: Boot check
+        if: inputs.boot-check
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: postgres
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # Exits nonzero with the raised error if the entry point dies; exits 0 if it
+          # survives the window. This is the gate `nest check` and `nest test` cannot be:
+          # neither evaluates `main`, and that is where a stale dependency actually fails.
+          nest run --for "${{ inputs.boot-seconds }}"
 
       - name: nest test
         if: inputs.run-tests
