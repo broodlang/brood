@@ -4,21 +4,29 @@
 ;; variadic comparison, and it can't be shadowed by a local `=`.)
 ;; `nil?` and `pair?` are native builtins (builtins.rs) — they compile to
 ;; PrimOp1::IsNil / IsPair inline instructions, eliminating call overhead.
-(defn int? (x) "True if `x` is an integer.
+(defn int? (x)
+  "True if `x` is an integer.
 
     (int? 1)     → true
-    (int? 1.0)   → false   ; a float is not an int" (%eq (type-of x) :int))
-(defn float? (x) "True if `x` is a float.
+    (int? 1.0)   → false   ; a float is not an int"
+  (%eq (type-of x) :int))
+(defn float? (x)
+  "True if `x` is a float.
 
     (float? 1.5) → true
-    (float? 1)   → false" (%eq (type-of x) :float))
-(defn bool? (x) "True if `x` is a boolean.
+    (float? 1)   → false"
+  (%eq (type-of x) :float))
+(defn bool? (x)
+  "True if `x` is a boolean.
 
-    (bool? true)   → true" (%eq (type-of x) :bool))
-(defn string? (x) "True if `x` is a string.
+    (bool? true)   → true"
+  (%eq (type-of x) :bool))
+(defn string? (x)
+  "True if `x` is a string.
 
     (string? \"a\")   → true
-    (string? :a)    → false" (%eq (type-of x) :string))
+    (string? :a)    → false"
+  (%eq (type-of x) :string))
 (defn bytes? (x) "True if `x` is a bytes value." (%eq (type-of x) :bytes))
 (defn decimal? (x)
   "True if `x` is an exact base-10 decimal (e.g. `1.50M`)."
@@ -28,22 +36,32 @@
 
     (ratio? 1/2)   → true"
   (%eq (type-of x) :ratio))
-(defn symbol? (x) "True if `x` is a symbol.
+(defn symbol? (x)
+  "True if `x` is a symbol.
 
-    (symbol? 'a)   → true" (%eq (type-of x) :symbol))
-(defn keyword? (x) "True if `x` is a keyword.
+    (symbol? 'a)   → true"
+  (%eq (type-of x) :symbol))
+(defn keyword? (x)
+  "True if `x` is a keyword.
 
-    (keyword? :a)  → true" (%eq (type-of x) :keyword))
-(defn vector? (x) "True if `x` is a vector.
+    (keyword? :a)  → true"
+  (%eq (type-of x) :keyword))
+(defn vector? (x)
+  "True if `x` is a vector.
 
-    (vector? [1])   → true" (%eq (type-of x) :vector))
-(defn map? (x) "True if `x` is a map.
+    (vector? [1])   → true"
+  (%eq (type-of x) :vector))
+(defn map? (x)
+  "True if `x` is a map.
 
     (map? {:a 1})   → true
-    (map? #{1})     → false   ; that is a SET" (%eq (type-of x) :map))
-(defn set? (x) "True if `x` is a set (a `#{…}` value).
+    (map? #{1})     → false   ; that is a SET"
+  (%eq (type-of x) :map))
+(defn set? (x)
+  "True if `x` is a set (a `#{…}` value).
 
-    (set? #{1})    → true" (%eq (type-of x) :set))
+    (set? #{1})    → true"
+  (%eq (type-of x) :set))
 (defn ref? (x) "True if `x` is a `(ref)` token (a unique reference)." (%eq (type-of x) :ref))
 (defn pid? (x) "True if `x` is a process id (from `self`/`spawn`)." (%eq (type-of x) :pid))
 (defn rope? (x)
@@ -79,18 +97,22 @@ private table, and never surfaced to user code — reach for `table/new` instead
   "The number `x` as an (inexact) float — the escape hatch from an exact ratio or
 decimal to fast float math (`(->float 1/2)` → `0.5`)."
   (* 1.0 x))
-(defn list? (x) "True if `x` is a proper list (`nil` or a pair).
+(defn list? (x)
+  "True if `x` is a proper list (`nil` or a pair).
 
     (list? (list 1))  → true
     (list? [1])       → false   ; a vector is not a list
-    (list? nil)       → true    ; the empty list IS nil" (or (nil? x) (pair? x)))
+    (list? nil)       → true    ; the empty list IS nil"
+  (or (nil? x) (pair? x)))
 
 ;; ---- list accessors ----
 (defn list (& xs) "A list of the given arguments." xs)
-(defn second (coll) "The second item of `coll`.
+(defn second (coll)
+  "The second item of `coll`.
 
     (second [1 2 3])     → 2
-    (second (list 1))    → nil" (first (rest coll)))
+    (second (list 1))    → nil"
+  (first (rest coll)))
 
 ;; ---- sequence operations ----
 ;; Many eager seq ops share one structure: reverse-accumulate over `(seq coll)`,

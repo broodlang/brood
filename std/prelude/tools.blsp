@@ -651,6 +651,106 @@ module, so restoring it cannot half-load one."
   (def *std-require-edges* edges)
   *std-require-edges*)
 
+(def- *std-image-sections* nil)
+
+(defn- %std-image-tables!
+  ()
+  "Load the image's three bookkeeping sections — require-edges, ability impls, other
+registrations — the first time a module actually materialises, and clear the stash so later
+materialises pay nothing. Returns nil.
+
+Lazy because `%std-image-install` runs at BOOT, before anything knows whether this program
+will require a single module: a `brood one-liner.blsp` should not read 94 KB of tables it
+will never consult."
+  (when *std-image-sections*
+    (let (path (get *std-image-sections* "path"))
+      (doseq (k ["%std-edges" "%std-impls" "%std-regs"])
+        (let (sec (get *std-image-sections* k))
+          (when sec (%image-load-section path (first sec) (second sec)))))
+      (def *std-image-sections* nil))))
+
+(defn- %std-edges-for
+  (key)
+  "Module `key`'s recorded require-edges: the live registry\'s if a source load already put
+them there, else the image\'s record.
+
+Read per module rather than merged into `*require-edges*` wholesale at install, which is
+where 2.9 ms of boot used to go. The dep filter is the same one the merge applied and for
+the same reason: an image is keyed on the stdlib\'s CONTENT, deliberately shared by `brood`,
+`nest` and `brood-lsp`, but those binaries do not bake in the same MODULES — a lean runtime
+has no dev-tools, and `project`\'s edges name `test`. Following an edge to a module this
+binary cannot load would fail the require outright."
+  (let (live (get *require-edges* key))
+    (if live
+      live
+      (let (rec (get (or *std-require-edges* {}) key))
+        (when rec
+          (let (have (into #{} (map name (builtin-modules))))
+            (filter (fn (d) (contains? have (name d))) rec)))))))
+
+(def- *std-impls* nil)
+
+(defn- %set-std-impls!
+  (by-module)
+  "Record `by-module` (module name → vector of `[ability op key f from]`) in the ROOT global
+the stdlib image carries ability registrations in, and return it. A root global for the same
+reason `*std-require-edges*` is one: named inside `stdimage` it would half-load that module.
+
+Why registrations travel as VALUES rather than as forms to re-evaluate: the design recorded
+against KI-61 assumed a value snapshot could not carry them, because \"a closure nested in a
+snapshotted value does not round-trip\". Measured 2026-08-27, it does — a `{[A op] {:int (fn
+…)}}` written to an image restores and the impl calls correctly. Forms would have needed the
+defining module's namespace re-established to resolve their bodies\' bare names; values need
+nothing, and replaying them through `%register-impl` reproduces tiering and provenance
+exactly rather than approximating it."
+  (def *std-impls* by-module)
+  *std-impls*)
+
+(defn- %replay-std-impls!
+  (key)
+  "Re-register the ability impls module `key`'s load performed, from the image's record.
+Returns the number replayed.
+
+Materialising a module defines its bindings and evaluates NOTHING, so every `impl` form in
+its source — a top-level call, not a definition — is skipped. That is invisible until a
+dispatch: `(json/encode r)` does not fail to load, it fails to find an impl. Measured with a
+boot-installed image and the require race already fixed, 97 of the suite\'s 167 failures were
+exactly this, `ability Response/send-response: no impl for :http/response` and its kind."
+  (let (regs (or (get (or *std-impls* {}) key) []))
+    (doseq (r regs) (%register-impl (get r 0) (get r 1) (get r 2) (get r 3) (get r 4)))
+    (count regs)))
+
+(def- *std-regs* nil)
+
+(defn- %set-std-regs!
+  (by-module)
+  "Record `by-module` (module name → vector of `[registry-symbol key-path value]`) in the
+ROOT global the stdlib image carries a load's non-impl REGISTRATIONS in, and return it.
+
+The registries a module load writes are enumerable — every one is reached through
+`%registry-update!` — and apart from `*impls*` they hold plain data keyed by an ability
+name, a record id, a multimethod name or a module name. Each of those keys names its owner,
+so a registration can be attributed to the module that made it exactly, rather than by
+watching what a probe load happened to introduce.
+
+Impls travel separately (`*std-impls*`): they alone have a PRECEDENCE tier, so they are
+replayed through `%register-impl` rather than assoc\'d back, and an app-tier impl a program
+registered before the module materialised still holds its slot."
+  (def *std-regs* by-module)
+  *std-regs*)
+
+(defn- %replay-std-regs!
+  (key)
+  "Re-apply the registrations module `key`'s load performed, from the image's record.
+Returns the number replayed.
+
+Without this a materialised `datetime` is bound and its impls dispatch, but `Temporal` is
+not declared: `satisfies?` answers no, `%sealed-members` answers nil, and an ability op
+resolves against an ability the runtime has never heard of."
+  (let (regs (or (get (or *std-regs* {}) key) []))
+    (doseq (r regs) (%registry-update! (get r 0) :assoc (get r 1) (get r 2)))
+    (count regs)))
+
 (defn- %merge-require-edges!
   (edges)
   "MERGE `edges` (feature name → [dep …]) into `*require-edges*`, keeping any edge already
@@ -679,6 +779,67 @@ own, and whichever installs second must not erase the first."
             :assoc [k]
             (filter (fn (d) (contains? have (name d))) deps))))))
   *require-edges*)
+
+;; --- the stdlib image, from the prelude --------------------------------------
+;;
+;; `std/tool/stdimage.blsp` owns BUILDING the image and documents the whole mechanism.
+;; The path and the install live here instead, for a reason that is structural rather than
+;; stylistic: an image exists to make `require` cheap, so it has to be installed before the
+;; first `require` — and `stdimage` is itself a module, reachable only by requiring it and
+;; its dependency tree from source. By the time the module's own `install` can run, every
+;; module the image serves has already loaded the slow way. Measured: with `stdimage/install`
+;; called from a program, the whole 4917-test suite materialises **zero** modules from the
+;; image while reporting 99 sections installed.
+;;
+;; So `stdimage/image-path` and `stdimage/install` are one-line calls into these — one
+;; definition, reachable from both ends.
+;;
+;; Prelude-only vocabulary on purpose: `os/env`, `path/join` and the `file` module do not
+;; exist yet. `%getenv` and `str` stand in; `path/join` on components of this shape is
+;; exactly a `/` between them, and `file/exists?` is a native, bound from the start.
+
+(defn- %std-image-path
+  ()
+  "Where this binary's stdlib image lives, or nil when there is no cache directory
+(`$XDG_CACHE_HOME/brood`, else `~/.cache/brood`).
+
+Named by `system/stdlib-id` — a hash of what is BAKED IN, not of this executable.
+Deliberately NOT `system/build-id`, which embeds the running binary's mtime: that would give
+`brood`, `nest` and `brood-lsp` three different keys for one identical stdlib, and three
+~2 MB images."
+  (let (xdg (%getenv "XDG_CACHE_HOME")
+        home (%getenv "HOME")
+        base (cond
+               (and xdg (not (= xdg ""))) xdg
+               (and home (not (= home ""))) (str home "/.cache")
+               else nil))
+    (when base (str base "/brood/std-image-" (system/stdlib-id) ".bin"))))
+
+(defn- %std-image-install
+  ()
+  "Install this binary's stdlib image as an additional feature source, if one exists and is
+current. Returns the section count, or nil on a miss (absent, stale, unreadable) — in which
+case `require` keeps loading stdlib modules from source exactly as before."
+  (let (path (%std-image-path))
+    (when (and path (file/exists? path))
+      (let (idx (try (%image-index path (system/stdlib-id)) (catch _ nil)))
+        (when idx
+          ;; Stash the three bookkeeping sections' coordinates and load NONE of them. This
+          ;; runs at boot on every single `brood` invocation, so it must cost almost nothing
+          ;; for a program that never requires anything: the whole install is one index read
+          ;; (~90 µs). Loading the tables eagerly cost 6.8 ms of a 20 ms boot — 2.9 ms of it
+          ;; merging every module's require-edges into the live registry under a lock, work a
+          ;; program that requires two modules has no use for. They load on the first
+          ;; materialise instead (`%std-image-tables!`), and a run that materialises nothing
+          ;; never pays at all.
+          (def *std-image-sections*
+            {"path" path
+             "%std-edges" (get idx "%std-edges")
+             "%std-impls" (get idx "%std-impls")
+             "%std-regs" (get idx "%std-regs")})
+          (%add-image-source! path
+            (dissoc (dissoc (dissoc idx "%std-edges") "%std-impls") "%std-regs"))
+          (count (keys idx)))))))
 
 (defn- %require-record-edge!
   (key)
@@ -780,21 +941,45 @@ own, and whichever installs second must not erase the first."
       ;; still falls through to the source branch unchanged.
       (not (nil? (%image-section-for key)))
         (let ([img-path sec] (%image-section-for key))
-          (%image-load-section img-path (first sec) (second sec))
-          ;; `provide` BEFORE following the edges, mirroring the source path (`defmodule`
-          ;; expands to `%defmodule-provide` and only then to its `(:use …)` requires). A
-          ;; require CYCLE terminates either way — `require-one`'s `*features-loading*`
-          ;; marker already returns immediately for this process's own in-flight load, and
-          ;; reordering these two lines was measured not to break the cycle case — so this
-          ;; is agreement with the source path, not a load-bearing ordering.
-          (provide key)
+          ;; `src` non-nil means this key is an EMBEDDED module — the same condition under
+          ;; which the source branch below reaches `%load-module-source`, which is what makes
+          ;; a std module's functions reserved (ADR-166). A project's own image must not
+          ;; reserve its functions: the program is allowed to redefine those.
+          (%image-load-section img-path (first sec) (second sec) (not (nil? src)))
+          (when (%getenv "BROOD_IMAGE_TRACE") (%eprint (str "[image] " (name key) "\n")))
           ;; Materialising defines this module's bindings but evaluates nothing, so the
-          ;; requires its header would have run have to be replayed from the edges the
+          ;; requires its load would have run have to be replayed from the edges the
           ;; original load recorded. Without this an imaged start built a heap with holes
           ;; and the program died on the first call across a missing edge — and it looked
           ;; like it worked, because `nest run`'s advisory pre-flight incidentally requires
           ;; each checked file's header deps, which propped up exactly one level.
-          (fold (fn (_ d) (require-one d)) nil (or (get *require-edges* key) nil))
+          ;;
+          ;; The edges are followed BEFORE `provide`, and that ordering is load-bearing under
+          ;; CONCURRENCY. `provide` is what makes `require-one` return immediately for every
+          ;; other process, so providing first publishes a module whose dependencies are not
+          ;; loaded yet: a racing process calls `uuid/v7` and dies on `unbound symbol:
+          ;; rand/token` while this one is still replaying. That is the true source-path
+          ;; order, which the earlier note here read off the macro expansion and got backwards
+          ;; — `defmodule` does expand to `%defmodule-provide` first, but the source path
+          ;; COMPILES the whole file before evaluating any of it, and a qualified reference
+          ;; auto-requires its module at compile time. Every dependency is therefore in place
+          ;; before `provide` runs, body references included, not just the header's `(:use …)`.
+          ;; A require CYCLE still terminates: `require-one` returns immediately for this
+          ;; process's own in-flight load (the `*features-loading*` marker is already set by
+          ;; the caller). Measured: 60 of the 157 suite failures under a boot-installed image
+          ;; were this race, and they are concurrency-only — every one of those files passes
+          ;; when run alone.
+          (%std-image-tables!)
+          (fold (fn (_ d) (require-one d)) nil (or (%std-edges-for key) nil))
+          ;; …and the ability impls its `impl` forms would have registered — also before
+          ;; `provide`, and for the same reason: a racing process that sees the module as
+          ;; loaded must find it fully dispatchable, not merely bound.
+          ;; Declarations first, impls second: `%impl-rank` reads `*ability-owner*` to decide
+          ;; an impl's precedence tier, so replaying impls against an undeclared ability
+          ;; would tier every one of them as "other".
+          (%replay-std-regs! key)
+          (%replay-std-impls! key)
+          (provide key)
           key)
       ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
       ;; manager mapped to a file. Load it under `foo`'s package context so its
@@ -2034,3 +2219,28 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; Wire the screen printers to honor `Display` for records, by default (ADR-172 §8).
 ;; `(binding (*show* nil) …)` disables it for a scope.
 (def *show* %show-print-hook)
+
+;; --- boot-time stdlib image install (opt-in) ---------------------------------
+;;
+;; The last thing the prelude does, because it must happen before the first `require` and
+;; there is nothing after this. This placement is not a convenience: installing the image
+;; from a PROGRAM materialises nothing at all — a qualified name auto-requires its module at
+;; compile time, so anything the program mentions has already loaded from source — and three
+;; separate published failure counts were measured that way before anyone checked (ADR-256).
+;;
+;; Opt-in (`BROOD_STDIMAGE=1`). The suite passes 4917/4917 either way; the default stays off
+;; because turning it on changes every program's load path, which is its own decision on its
+;; own evidence. With no image built, or one built from different stdlib content, `install`
+;; returns nil and `require` reads source exactly as before.
+;;
+;; The traced arm times the install. It is here because an earlier version of it cost 6.8 ms
+;; of a 20 ms boot and made `startup` 20% WORSE while making module loads faster — a
+;; regression that only a measurement at this exact point can see.
+(when (%getenv "BROOD_STDIMAGE")
+  (if (%getenv "BROOD_IMAGE_TRACE")
+    (let (t0 (%now-ns) n (%std-image-install) t1 (%now-ns))
+      ;; nanoseconds, not microseconds: this runs during PRELUDE evaluation, where a
+      ;; qualified `math/quot` is not resolvable yet — the autoload stubs are not usable
+      ;; this early — and dividing is not worth requiring a module at boot to do.
+      (%eprint (str "[image] install: " n " sections, " (- t1 t0) " ns\n")))
+    (%std-image-install)))

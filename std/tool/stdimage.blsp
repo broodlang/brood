@@ -41,15 +41,124 @@
   "Where this binary's stdlib image lives, or nil if there is no cache directory.
 Named by `system/stdlib-id` — a hash of what is BAKED IN, not of this executable. `system/build-id`
 embeds the binary's own mtime, so `brood`, `nest` and `brood-lsp` from one tree would each
-write their own ~2 MB copy of an identical image; keyed this way they share one."
-  (let (dir (cache-dir))
-    (when dir (path/join dir (str "std-image-" (system/stdlib-id) ".bin")))))
+write their own ~2 MB copy of an identical image; keyed this way they share one.
+
+The computation lives in the PRELUDE (`%std-image-path`), not here: an image has to be
+installed before the first `require`, and this module is itself reached BY a require. One
+definition, called from both ends."
+  (%std-image-path))
 
 (defn- prefixed-by-any?
   (nm names)
   "Whether global `nm` is qualified by ANY module in `names` — i.e. some module already
 claims it by prefix."
   (not (empty? (filter (fn (m) (string/starts-with? nm (str m "/"))) names))))
+
+(defn- %owner-prefix
+  (nm)
+  "The module a qualified name belongs to: everything before its LAST `/`, or nil when it
+carries none. `:datetime/date` → `\"datetime\"`; a record declared in a nested module keeps
+the whole path (`editor/keymap/km` → `\"editor/keymap\"`)."
+  (let (parts (string/split nm "/"))
+    (when (> (count parts) 1)
+      (string/join "/" (take (- (count parts) 1) parts)))))
+
+(defn- %reg-entries
+  (reg pairs owner-fn)
+  "Group `pairs` (a registry's `[key value]` list) by owning module, as
+`[registry-symbol [key] value]` triples ready for `%registry-update!`. `owner-fn` maps a
+`[key value]` pair to its module name, or nil to drop the entry — which is what a
+registration made at the root/REPL gets, since nothing materialises it back."
+  (fold (fn (acc kv)
+          (let ([k _v] kv
+                m (owner-fn kv))
+            (if (nil? m)
+              acc
+              (%map-assoc acc
+                m
+                (append (or (%map-get acc m nil) []) [[reg [k] (second kv)]])))))
+    {}
+    pairs))
+
+(defn- %merge-by-module
+  (a b)
+  "Concatenate two module→entries maps."
+  (fold (fn (acc kv)
+          (let ([m es] kv)
+            (%map-assoc acc m (append (or (%map-get acc m nil) []) es))))
+    a
+    (%map-pairs b)))
+
+(defn- %std-regs-by-module
+  ()
+  "Every non-impl registration a std module load performs, grouped by the module that
+performed it — `[registry-symbol key-path value]` triples.
+
+The list is the enumerable set of registries reached through `%registry-update!` during a
+load, minus the ones that are runtime state rather than registration (`*features-loading*`,
+`*deprecation-seen*`) and minus `*module-files*`, which maps a PACKAGE's modules to disk
+paths and so never describes baked-in std. Ability declarations are attributed through
+`*ability-owner*`, multimethods through `*method-from*`, and record ids / op names /
+multimethod names by their own qualifier — each key names its owner, so none of this guesses."
+  (let (ability-owner (fn (kv)
+                        (let (o (%map-get *ability-owner* (first kv) nil))
+                          (when o (name o))))
+        by-qualifier (fn (kv) (%owner-prefix (name (first kv))))
+        method-owner (fn (kv)
+                       (let (o (%map-get *method-from* (first kv) nil))
+                         (when o (name o))))
+        one (fn (acc spec)
+              (let ([reg pairs owner-fn] spec)
+                (%merge-by-module acc (%reg-entries reg pairs owner-fn))))
+        two (fn (acc spec)
+              ;; a two-level registry (`{k1 {k2 v}}`) flattened to `[reg [k1 k2] v]`
+              (let ([reg outer owner-fn] spec)
+                (fold (fn (a kv)
+                        (let ([k1 inner] kv)
+                          (fold (fn (a2 kv2)
+                                  (let ([k2 v] kv2
+                                        m (owner-fn [[k1 k2] v]))
+                                    (if (nil? m)
+                                      a2
+                                      (%merge-by-module a2 {m [[reg [k1 k2] v]]}))))
+                            a
+                            (%map-pairs inner))))
+                  acc
+                  (%map-pairs outer)))))
+    (fold two
+      (fold one
+        {}
+        [['*abilities* (%map-pairs *abilities*) ability-owner]
+          ['*ability-owner* (%map-pairs *ability-owner*) (fn (kv) (name (second kv)))]
+          ['*sealed* (%map-pairs *sealed*) ability-owner]
+          ['*ability-derives* (%map-pairs *ability-derives*) ability-owner]
+          ['*ability-requires* (%map-pairs *ability-requires*) ability-owner]
+          ['*op-ability* (%map-pairs *op-ability*) by-qualifier]
+          ['*record-ids* (%map-pairs *record-ids*) by-qualifier]
+          ['*multi-algebra* (%map-pairs *multi-algebra*) by-qualifier]
+          ['*module-docs* (%map-pairs *module-docs*) (fn (kv) (first kv))]
+          ;; single-level despite its PAIR key `[multimethod id-vector]`
+          ['*method-from* (%map-pairs *method-from*) (fn (kv) (name (second kv)))]])
+      [['*methods* *methods* method-owner]])))
+
+(defn %std-impls-by-module ()
+  "The live ability registrations, grouped by the module that declared each: module name →
+vector of `[ability op key f from]`, the exact argument list `%register-impl` takes.
+
+`*impl-from*` maps `[ability op key]` → the declaring namespace, which is what makes
+per-module attribution exact — there is no need to guess from the ability's or the id's
+owner. A registration whose `from` is nil came from the root/REPL and belongs to no module;
+it is dropped, since nothing materialises it back."
+  (fold (fn (acc kv)
+          (let ([prov from] kv
+                [aname op key] prov
+                f (get (get *impls* [aname op]) key))
+            (if (or (nil? from) (nil? f))
+              acc
+              (let (mn (name from))
+                (%map-assoc acc mn (append (or (%map-get acc mn nil) []) [[aname op key f from]]))))))
+    {}
+    (%map-pairs *impl-from*)))
 
 (defn build (&optional modules)
   "Build (or rebuild) this binary's stdlib image and return `[path entry-count]`, or nil
@@ -92,6 +201,13 @@ since the prelude is always present."
             ;; section that carries them belongs to no module — named `stdimage/…` it made
             ;; `stdimage` look already-loaded at boot, and its source then never loaded.
             _ (%set-std-require-edges! *require-edges*)
+            ;; …and the ability registrations, partitioned by the module that DECLARED each
+            ;; (`*impl-from*`'s tag), so a materialised module replays its own and only its
+            ;; own. An `impl` form is a top-level CALL: materialising defines bindings and
+            ;; evaluates nothing, so without this a restored `http` is bound but not
+            ;; dispatchable, and the failure surfaces at `(send-response r)`, not at load.
+            _ (%set-std-impls! (%std-impls-by-module))
+            _ (%set-std-regs! (%std-regs-by-module))
             roots (filter (fn (s) (not (prefixed-by-any? (name s) names))) (global-names))
             owner-of (fold (fn (acc g)
                              (let (best (fold (fn (winner m)
@@ -106,7 +222,9 @@ since the prelude is always present."
                                (if best (%map-assoc acc g (name (first best))) acc)))
                        {}
                        roots)
-            sections (append [["%std-edges" ['*std-require-edges*]]]
+            sections (append [["%std-edges" ['*std-require-edges*]]
+                               ["%std-impls" ['*std-impls*]]
+                               ["%std-regs" ['*std-regs*]]]
                        (seq/keep
                          (fn (m)
                            (let (mn (name m)
@@ -124,20 +242,14 @@ since the prelude is always present."
 (defn install ()
   "Install this binary's stdlib image as an additional feature source, if one exists and is
 current. Returns the section count, or nil on a miss (absent, stale, unreadable) — in which
-case `require` keeps loading stdlib modules from source exactly as before."
-  (let (path (image-path))
-    (when (and path (file/exists? path))
-      (let (idx (try (%image-index path (system/stdlib-id)) (catch _ nil)))
-        (when idx
-          ;; Replay the recorded edges FIRST: a restored module defines its bindings but
-          ;; evaluates nothing, so without them `url` comes back with no `path` and its
-          ;; first `path/join` is unbound.
-          (let (sec (get idx "%std-edges"))
-            (when sec
-              (%image-load-section path (first sec) (second sec))
-              (%merge-require-edges! *std-require-edges*)))
-          (%add-image-source! path (dissoc idx "%std-edges"))
-          (count (keys idx)))))))
+case `require` keeps loading stdlib modules from source exactly as before.
+
+The body is the prelude's `%std-image-install`, for the reason `image-path` records. Note
+what calling it from HERE can and cannot do: requiring this module has already loaded its
+dependency tree from source, so an install at this point serves only modules not yet
+touched. The boot install (`BROOD_STDIMAGE=1`, the last line of the prelude) is the one that
+serves everything."
+  (%std-image-install))
 
 (defn ensure ()
   "Install the stdlib image, building it first if this binary has none yet. Returns the

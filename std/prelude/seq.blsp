@@ -662,9 +662,11 @@ iterating for side effects.
 ;; `but-last`, `defrecord` uses `mapcat`, `defmethod` uses `mapv`, and those pull in
 ;; the rest transitively. Everything else in the sequence library moved to `seq/`.
 
-(defn but-last (xs) "All but the last item of `xs`, as a list.
+(defn but-last (xs)
+  "All but the last item of `xs`, as a list.
 
-    (but-last [1 2 3])   → (1 2)" (reverse (rest (reverse xs))))
+    (but-last [1 2 3])   → (1 2)"
+  (reverse (rest (reverse xs))))
 
 (defn drop-while (pred coll)
   "`coll` with its leading items for which `(pred x)` holds removed. Returns `coll` itself

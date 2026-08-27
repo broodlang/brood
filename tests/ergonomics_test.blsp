@@ -210,7 +210,8 @@
 
 (describe "transduce — transducers as public surface (ADR-161)"
   (test "a composed stage stack reduces in one pass"
-    (assert= 165 (seq/transduce (comp (seq/xfilter odd?) (seq/xmap (fn (n) (* n n)))) + 0 (range 10)))
+    (assert= 165
+      (seq/transduce (comp (seq/xfilter odd?) (seq/xmap (fn (n) (* n n)))) + 0 (range 10)))
     (assert= [2 3 4] (seq/transduce (seq/xmap inc) conj [] (list 1 2 3))))
   (test "stages compose LEFT to right in data-flow order"
     ;; filter-then-map keeps the odds (1,3) then increments → [2 4];
