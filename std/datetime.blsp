@@ -315,18 +315,26 @@ nil. Hour 0–23, minute and second 0–59; anything else is nil."
 
 ;; ---- duration helpers -------------------------------------------------------
 
-(defn seconds (n) "Milliseconds in `n` seconds.
+(defn seconds (n)
+  "Milliseconds in `n` seconds.
 
-    (datetime/seconds 2)   → 2000" (* n 1000))
-(defn minutes (n) "Milliseconds in `n` minutes.
+    (datetime/seconds 2)   → 2000"
+  (* n 1000))
+(defn minutes (n)
+  "Milliseconds in `n` minutes.
 
-    (datetime/minutes 1)   → 60000" (* n 60000))
-(defn hours (n) "Milliseconds in `n` hours.
+    (datetime/minutes 1)   → 60000"
+  (* n 60000))
+(defn hours (n)
+  "Milliseconds in `n` hours.
 
-    (datetime/hours 1)     → 3600000" (* n 3600000))
-(defn days (n) "Milliseconds in `n` days.
+    (datetime/hours 1)     → 3600000"
+  (* n 3600000))
+(defn days (n)
+  "Milliseconds in `n` days.
 
-    (datetime/days 1)      → 86400000" (* n 86400000))
+    (datetime/days 1)      → 86400000"
+  (* n 86400000))
 
 ;; ---- arithmetic -------------------------------------------------------------
 
