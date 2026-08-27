@@ -99,6 +99,54 @@
   (test "an explicit :title overrides the model name"
     (is (includes? (docsite/render sample-model {:title "Custom"}) "<title>Custom</title>"))))
 
+;; The theming hand-off — the sibling of the `render-js` gap above, and the same shape of
+;; failure. `render-css` emitted a hard-coded LIGHT palette and the dark styles were
+;; reachable only from the wrapped page, so a `:wrap? false` host could take the light
+;; palette or override ~30 selectors by hand. hive did the latter, to put the reference on
+;; a dark page. What makes this fixed is not that dark values exist somewhere but that no
+;; rule names a colour any more, so redefining a variable cannot be out-voted by a rule.
+(describe "docsite: the fragment stylesheet is themeable"
+  (test "render-css declares its palette as custom properties on .docsite"
+    (let (css (docsite/render-css))
+      (is (includes? css ".docsite{--docsite-fg:"))
+      (is (includes? css "--docsite-accent:#2563eb"))
+      (is (includes? css "--docsite-surface:#f8fafc"))))
+  (test "every rule reads a variable rather than a literal"
+    (let (css (docsite/render-css))
+      (is (includes? css "color:var(--docsite-accent)"))
+      (is (includes? css "background:var(--docsite-surface)"))
+      (is (includes? css "border:1px solid var(--docsite-border)"))))
+  ;; The load-bearing one. A host redefining `--docsite-accent` gets nothing if a rule
+  ;; still says `#2563eb`, so the absence of the literal IS the feature — assert it
+  ;; directly rather than trusting that the rewrite was complete.
+  (test "no colour literal survives in the rules, only in the declarations"
+    (let (css (docsite/render-css)
+          decls (string/substring css 0 (index-of css "}"))
+          rules (string/substring css (+ 1 (index-of css "}"))))
+      (is (includes? decls "#2563eb"))
+      (refute (includes? rules "#2563eb"))
+      (refute (includes? rules "#f8fafc"))
+      (refute (includes? rules "#1f2933"))))
+  ;; `prefers-color-scheme` is the viewer's OS, which is not the embedding host's theme —
+  ;; conflating the two is exactly what painted dark-mode grey onto hive's white page.
+  (test "render-css-dark redefines the same names and imposes no media query"
+    (let (dark (docsite/render-css-dark))
+      (is (includes? dark ".docsite{"))
+      (is (includes? dark "--docsite-surface:#12161c"))
+      (is (includes? dark "--docsite-fg:#e4e7eb"))
+      (refute (includes? dark "prefers-color-scheme"))))
+  ;; The standalone page owns its whole background, so it MAY follow the OS — and now does
+  ;; it by swapping variables, not by carrying a second copy of the rules that can drift.
+  (test "a wrapped page still opts into OS dark, via the variables"
+    (let (html (docsite/render sample-model {}))
+      (is (includes? html "@media (prefers-color-scheme:dark){.docsite{--docsite-fg:"))))
+  ;; Regression: the guide headings were a hard `#1f2933` that the dark block never
+  ;; overrode, so a dark standalone page drew near-black headings on a near-black
+  ;; background. Routing them through `--docsite-fg` fixes it; this pins that.
+  (test "guide headings follow the foreground variable, so OS dark reaches them"
+    (is (includes? (docsite/render-css)
+          ".docsite .guide-body h1{font-size:1.5rem;margin:1rem 0 .5rem;color:var(--docsite-fg)}"))))
+
 (describe "docsite: guides"
   (test "a guide renders as a section (raw HTML) with a sidebar link"
     (let (html (docsite/render {:name "g" :guides [{:title "Intro" :html "<p>hi</p>"}] :modules []}
