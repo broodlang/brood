@@ -940,7 +940,7 @@ struct Slabs {
     decimals: Vec<bigdecimal::BigDecimal>,
     /// Exact rationals (mirrors `decimals`). One `num_rational::BigRational` per live
     /// `Value::Ratio`; immutable, holds no `Value` children. Always reduced with a
-    /// positive math/denominator; a math/denominator of 1 is demoted to `Int` at construction
+    /// positive denominator; a denominator of 1 is demoted to `Int` at construction
     /// (`Heap::alloc_ratio`), so no entry here is ever integer-valued.
     ratios: Vec<num_rational::BigRational>,
     /// **Raw bytes** — byte-clean immutable leaves, one `Arc<SharedBlob>` per live

@@ -47,7 +47,7 @@
                (if (odd? index)
                  (str "<code>" (escape segment) "</code>")
                  (escape segment))))
-        (zip (range (count parts)) parts)))))
+        (seq/zip (range (count parts)) parts)))))
 
 (defn- leading-space-count
   (line i)

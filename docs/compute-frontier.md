@@ -233,7 +233,7 @@
 >   native builtin (`prim_max`/`prim_min`: Int fast-path → BigInt exact → float coerce,
 >   `Arity::at_least(1)`) and a JIT-inlined `icmp(SGE/SLE)` + `select` pair. The old definition
 >   allocated ~2 heap cells per 2-arg call (one cons for the `xs` rest arg, one closure for the
->   fold lambda); collatz's inner `(max best (steps k 0))` ran 250K times = ~500K allocs/run.
+>   fold lambda); collatz's inner `(math/max best (steps k 0))` ran 250K times = ~500K allocs/run.
 >   `PrimOp::Max`/`Min` added to the full PrimOp pipeline: `from_native_name`, `prim2_int_fast`,
 >   `prim_apply`, `prim_apply_float`, `chunk_in_jit_subset`, `emit_arith`. No overflow guard needed
 >   (max/min are branchless). Aggregate: **5.9× → ~5.8×** (collatz now comparable to Node's 182ms).
@@ -555,7 +555,7 @@ Priority if/when this is picked up:
    "parity-unsound" worry is solved by the guard). Isolated read ~7.8 → ~1.2 ns; `matmul`
    compute ~241 → ~171 ms, now beating both interpreters. The one residual read is the
    **per-`k` row** (varies — not hoistable), so the gap stays the suite's largest (~30×,
-   noise-sensitive math/denominator) — bounded ultimately by the boxed 24-byte `Value`.
+   noise-sensitive denominator) — bounded ultimately by the boxed 24-byte `Value`.
 2. **zero-copy message passing** (§3c, §6) — share immutable structures by handle instead of
    deep-copying across processes; attacks the `strings` ~180 MB outlier and `spawn`/`pfib`
    message cost. Also opens **lazy combinators** as the eager-list fix.

@@ -241,8 +241,8 @@
     ;; single-entry case (one possible layout).
     (assert= (pr-str {:a 1}) "{:a 1}")
     (assert= (pr-str {}) "{}"))
-  (test "a map round-trips through read-string + eval"
-    (let (m {:a 1 :b [2 3] :c "x"}) (assert= (eval (read-string (pr-str m))) m)))
+  (test "a map round-trips through reflect/read-string + eval"
+    (let (m {:a 1 :b [2 3] :c "x"}) (assert= (eval (reflect/read-string (pr-str m))) m)))
   (test "str uses the display form of values" (assert= (str {:a "hi"}) "{:a hi}")))
 
 (describe "maps at scale"

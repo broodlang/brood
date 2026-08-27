@@ -32,13 +32,13 @@ pub enum AtomKind {
     /// as a decimal — the reader turns it into a parse error, the CST an `Error` node
     /// (mirrors [`AtomKind::IntOverflow`]).
     DecimalInvalid,
-    /// An exact **rational** literal: `num/den` — a signed integer math/numerator over a
-    /// positive nonzero integer math/denominator (`1/2`, `-3/4`, `10/20`). The reader
+    /// An exact **rational** literal: `num/den` — a signed integer numerator over a
+    /// positive nonzero integer denominator (`1/2`, `-3/4`, `10/20`). The reader
     /// parses it into a reduced `num_rational::BigRational`. Additive: this token was
     /// reserved (a reader error) before the kernel ratio type.
     Ratio,
     /// A ratio-shaped token (digit-led, containing `/`) that isn't a valid ratio —
-    /// `1/0` (zero math/denominator), `1/-2` (signed math/denominator), `1/2/3` (two slashes).
+    /// `1/0` (zero denominator), `1/-2` (signed denominator), `1/2/3` (two slashes).
     /// The reader turns it into a parse error, the CST an `Error` node.
     RatioInvalid,
     /// A float-shaped token (number-shaped, with a `.`/`e`/`E`) that does not parse
@@ -202,7 +202,7 @@ pub fn classify(token: &str) -> AtomKind {
 }
 
 /// Classify a digit-led token containing `/` as `Ratio` or `RatioInvalid`. A valid
-/// ratio is exactly one `/` splitting an integer math/numerator (optional leading sign)
+/// ratio is exactly one `/` splitting an integer numerator (optional leading sign)
 /// from a positive nonzero integer denominator. Numerator/denominator may exceed
 /// `i64` (parsed as `BigInt`); the reader reduces the result.
 fn classify_ratio(token: &str) -> AtomKind {

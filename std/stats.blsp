@@ -27,7 +27,9 @@ Empty sequences raise unless documented otherwise.
 
 (defn variance (xs)
   "The population variance (divided by n) of `xs`. Raises on an empty sequence;
-a 1-element sequence has population variance 0.0."
+a 1-element sequence has population variance 0.0.
+
+    (stats/variance [2 2 2])   → 0.0"
   (let (n (count xs))
     (when (< n 1) (error "stats/variance: empty sequence"))
     (let (m (mean xs))
@@ -60,8 +62,8 @@ For an even-length sequence, returns the mean of the two middle values.
   (let (n (count xs))
     (when (= n 0) (error "stats/median: empty sequence"))
     (let (sorted (sort xs)
-          mid (quot n 2))
-      (if (= (rem n 2) 1)
+          mid (math/quot n 2))
+      (if (= (math/rem n 2) 1)
         (nth sorted mid)
         (/ (+ (nth sorted (- mid 1)) (nth sorted mid)) 2)))))
 
@@ -75,12 +77,14 @@ For an even-length sequence, returns the mean of the two middle values.
     (when (or (< p 0) (> p 100))
       (error "stats/percentile: p must be in [0, 100], got " p))
     (let (sorted (sort xs)
-          rank (/max 1 (ceil (* (/ p 100.0) n)))
-          idx (/min (- n 1) (- rank 1)))
+          rank (math/max 1 (ceil (* (/ p 100.0) n)))
+          idx (math/min (- n 1) (- rank 1)))
       (nth sorted idx))))
 
 (defn quantile (xs q)
-  "The `q`-th quantile (0.0–1.0) of `xs` using the nearest-rank method."
+  "The `q`-th quantile (0.0–1.0) of `xs` using the nearest-rank method.
+
+    (stats/quantile [1 2 3 4] 0.5)   → 2"
   (percentile xs (* q 100)))
 
 ;; ---- range and spread --------------------------------------------------------
@@ -90,20 +94,22 @@ For an even-length sequence, returns the mean of the two middle values.
 
     (stats/min [3 1 2])      → 1"
   (when (empty? xs) (error "stats/min: empty sequence"))
-  (reduce /min xs))
+  (reduce math/min xs))
 
 (defn max (xs)
   "The largest value in `xs`. Raises on an empty sequence.
 
     (stats/max [3 1 2])      → 3"
   (when (empty? xs) (error "stats/max: empty sequence"))
-  (reduce /max xs))
+  (reduce math/max xs))
 
 (defn range-of (xs)
-  "The range (/max − min) of `xs`. Raises on an empty sequence.
+  "The range (max − min) of `xs`. Raises on an empty sequence.
 
     (stats/range-of [3 1 2]) → 2"
-  (- (max xs) (min xs)))
+  ;; Qualified: `max` is now defined in BOTH `math` (variadic over arguments) and here
+  ;; (over a collection), so bare is ambiguous inside this module and the compiler says so.
+  (- (stats/max xs) (stats/min xs)))
 
 ;; ---- frequency ---------------------------------------------------------------
 ;; `mode` uses the `seq` library's `frequencies` (a general sequence op, ADR-227);

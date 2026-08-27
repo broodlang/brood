@@ -1,5 +1,5 @@
 ;; A worked example / prototype: locale-aware display, the Elixir-`Money` shape.
-;; Shows how `Display`/`Inspect` (std/show.blsp) compose with an app-defined
+;; Shows how `display`/`inspectable` (std/show.blsp) compose with an app-defined
 ;; `Localize` ability + a `*locale*` dynamic var so even a plain `(io/puts money)`
 ;; localizes — the reusable half of an i18n story. Register-only; run by `nest test`.
 ;;
@@ -22,7 +22,7 @@
 ;; symbol). Deliberately tiny — a real one would use a CLDR table.
 (defn- money-render
   (m locale)
-  (let (n (->fixed (get m :amount) 2)
+  (let (n (math/->fixed (get m :amount) 2)
         symbol (money-symbol (get m :currency)))
     (case locale
       :de (str (string/replace n "." ",") " " symbol)
@@ -35,20 +35,20 @@
   show-localize-test/money
   (localize [m locale] (money-render m locale)))
 
-;; `Display` reads the AMBIENT locale, so plain `(io/puts money)` localizes — the op
+;; `display` reads the AMBIENT locale, so plain `(io/puts money)` localizes — the op
 ;; stays 1-arg; the locale flows through the dynamic var, not an extra parameter.
-(impl Display
+(impl display
   show-localize-test/money
   (->string [m] (localize m *locale*)))
 
-;; `Inspect` — the debug form is locale-independent and self-describing.
-(impl Inspect
+;; `inspectable` — the debug form is locale-independent and self-describing.
+(impl inspectable
   show-localize-test/money
   (inspect [m] (str "#money<" (get m :amount) " " (name (get m :currency)) ">")))
 
-;; Display is core and always on (ADR-172 §8) — no activation step.
+;; display is core and always on (ADR-172 §8) — no activation step.
 
-(describe "locale-aware Display via *locale*"
+(describe "locale-aware display via *locale*"
   (test "the ambient default locale (:en)"
     (assert= (->string (money 10.5 :usd)) "$10.50")
     (assert= (with-out-str (io/puts (money 10.5 :usd))) "$10.50\n"))
@@ -60,7 +60,7 @@
     (assert= (localize (money 3 :gbp) :en) "£3.00")
     (assert= (localize (money 3 :gbp) :de) "3,00 £")))
 
-(describe "Inspect is a distinct, locale-independent debug form"
+(describe "inspectable is a distinct, locale-independent debug form"
   (test "inspect vs display"
     (assert= (inspect (money 10.5 :usd)) "#money<10.5 usd>")
     ;; inspect ignores *locale*; display honors it

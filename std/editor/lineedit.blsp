@@ -159,7 +159,7 @@ when `p` is already on the first line."
       (let (col (- p ls)
             prev-start (lineedit-line-start text (dec ls)))
         ; (dec ls) is the prior "\n"
-        (min (+ prev-start col) (dec ls))))))
+        (math/min (+ prev-start col) (dec ls))))))
 
 (defn- lineedit-down-point
   (text p)
@@ -170,11 +170,11 @@ the last line."
       nil
       (let (col (- p (lineedit-line-start text p))
             next-start (inc le))
-        (min (+ next-start col) (lineedit-line-end text next-start))))))
+        (math/min (+ next-start col) (lineedit-line-end text next-start))))))
 
 ;; ---- pure edit operations ---------------------------------------------------
 
-(defn- lineedit-clamp (text p) (max 0 (min (string/length text) p)))
+(defn- lineedit-clamp (text p) (math/max 0 (math/min (string/length text) p)))
 
 (defn- lineedit-move
   (state p)
@@ -264,7 +264,7 @@ end of line, swaps the last two. No-op on a line shorter than 2 or at column 0."
             b (string/char-at text q))
         (assoc state
           :text (str (string/substring text 0 (dec q)) b a (string/substring text (inc q) n))
-          :point (min n (inc q))
+          :point (math/min n (inc q))
           :hist-idx -1)))))
 
 (defn- lineedit-yank-impl
@@ -281,7 +281,7 @@ first time, so ↓ can restore it."
   (let (hist (get state :hist) idx (get state :hist-idx) n (count hist))
     (if (= n 0)
       state
-      (let (ni (min (dec n) (inc idx))
+      (let (ni (math/min (dec n) (inc idx))
             saved (if (= idx -1) (get state :text) (get state :saved))
             entry (nth hist ni))
         (assoc state :hist-idx ni :saved saved :text entry :point (string/length entry))))))
@@ -331,7 +331,7 @@ as a substring, or -1. An empty query matches the newest entry."
   "Set the search query to `query` and select the nearest match at or after index
 `from`; on no match, keep the current line but record the (failing) query."
   (let (s (get state :search)
-        found (lineedit-search-find (get state :hist) query (max 0 from)))
+        found (lineedit-search-find (get state :hist) query (math/max 0 from)))
     (if (< found 0)
       (assoc state :search (assoc s :query query))
       (let (entry (nth (get state :hist) found))
@@ -421,11 +421,11 @@ across in equal columns (row-major, as bash lists), capped at
 `*lineedit-completion-max-rows*` rows with a trailing `… +N more` when they don't all
 fit. Each row is truncated to `width - 1` columns so it can never wrap (a wrapped row
 would desync the `[:up n]` cursor restore)."
-  (let (room (max 1 (- width 1))
-        colw (+ 2 (fold (fn (w c) (max w (string/length c))) 0 cands))
-        ncols (max 1 (quot room colw))
+  (let (room (math/max 1 (- width 1))
+        colw (+ 2 (fold (fn (w c) (math/max w (string/length c))) 0 cands))
+        ncols (math/max 1 (math/quot room colw))
         total (count cands)
-        shown (min total (* ncols *lineedit-completion-max-rows*))
+        shown (math/min total (* ncols *lineedit-completion-max-rows*))
         more (- total shown)
         rows (map (fn (row)
                     (let (line (string/trimr (apply str
@@ -596,7 +596,7 @@ completes it: mid-typing, `(defn f (x` came back as `(defn f (x ) )`, silently c
 brackets the user had not closed yet. Comparing the parsed forms rejects that (and any
 future rewrite that changes structure) while correctly ignoring comment and whitespace
 changes, which is exactly the difference a formatter is allowed to make."
-  (try (= (read-all a) (read-all b)) (catch _ false)))
+  (try (= (reflect/read-all a) (reflect/read-all b)) (catch _ false)))
 
 (defn lineedit-reformat (state _)
   "M-q: reformat the whole form in place with `std/format.blsp`, leaving point at the
@@ -718,7 +718,7 @@ a rebound key or a user's own command can't leave a stale listing on screen."
   "The arglist of the function/macro named by string `callee` (resolved in the live
 image), or nil if it isn't a bound symbol. A bare-symbol `eval` is just a lookup."
   (try
-    (let (sym (read-string callee))
+    (let (sym (reflect/read-string callee))
       (if (and (symbol? sym) (bound? sym)) (arglist (eval sym)) nil))
     (catch e nil)))
 
@@ -801,7 +801,7 @@ terminal multiplexer), which is the same reason `lineedit-init` is public."
 available text columns, and prompt width for rendering."
   (let (width (lineedit-cols)
         promptw (string/length (lineedit-display-prompt state))
-        avail (max 1 (- width promptw))
+        avail (math/max 1 (- width promptw))
         point (get state :point)
         hs (get state :hscroll)
         hs2 (cond
@@ -832,7 +832,7 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
         base (string/length prefix)
         full (str prefix text)
         len (string/length text)
-        vis (string/substring text hs (min len (+ hs avail)))
+        vis (string/substring text hs (math/min len (+ hs avail)))
         cursorpos (+ base point)
         overrides (lineedit-overrides full cursorpos)
         chunks (highlight-chunks full (+ base hs) vis overrides)

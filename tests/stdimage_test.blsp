@@ -100,7 +100,7 @@
       (is (>= (count *image-sources*) before)))))
 
 ;; ---------------------------------------------------------------------------
-;; What a materialised module owes beyond its bindings (ADR-255).
+;; What a materialised module owes beyond its bindings (ADR-256).
 ;;
 ;; These cover the four faults that made the image unshippable, three of which the
 ;; recorded design did not name. The first is the important one to keep: it is a RACE,

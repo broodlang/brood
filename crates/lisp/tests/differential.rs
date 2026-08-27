@@ -82,8 +82,8 @@ const CORPUS: &[&str] = &[
     // 5/24 (the regression this guards). The exact case stays inline; both must agree.
     "(defn d (x) (/ 24 x)) (d 5)",
     "(defn d (x) (/ 24 x)) (d 4)",
-    "(defn q (x) (quot 17 x)) (q 5)",
-    "(defn r (x) (rem 17 x)) (r 5)",
+    "(defn q (x) (math/quot 17 x)) (q 5)",
+    "(defn r (x) (math/rem 17 x)) (r 5)",
     "(defn sub (x) (- 3 x)) (sub 10)",
     // float semantics the VM must NOT shortcut away from the native (the
     // reference). `=` is structural: a Float is never equal to an Int — the VM's
@@ -96,11 +96,11 @@ const CORPUS: &[&str] = &[
     // `max`/`min`: the native selects via `>`/`<` and returns the *original*
     // operand, so it keeps a NaN operand and preserves int-ness when the int wins.
     // The VM must not inline these to Rust's NaN-discarding `f64::max`/`min`.
-    "(max 5 3.0)",
-    "(min 5 3.0)",
-    "(max 3.0 5)",
-    "(defn mx (a b) (max a b)) (mx (- (* 1e308 1e308) (* 1e308 1e308)) 2.0)",
-    "(defn mn (a b) (min a b)) (mn (- (* 1e308 1e308) (* 1e308 1e308)) 2.0)",
+    "(math/max 5 3.0)",
+    "(math/min 5 3.0)",
+    "(math/max 3.0 5)",
+    "(defn mx (a b) (math/max a b)) (mx (- (* 1e308 1e308) (* 1e308 1e308)) 2.0)",
+    "(defn mn (a b) (math/min a b)) (mn (- (* 1e308 1e308) (* 1e308 1e308)) 2.0)",
     // let (sequential) / letrec / cond / when
     "(let (a 1 b 2) (+ a b))",
     "(let (a 1 b (+ a 10)) (* a b))",

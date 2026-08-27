@@ -223,7 +223,7 @@
         ;; strings, so parsing every case and then discarding 15 of 16 made the sample cost
         ;; the same as the full sweep — the whole point of sampling was lost.
         ;; `idx` advances over test lines only, so the slices stay balanced.
-        (not (= (rem idx n) k)) (nt-scan-chunk want k n (rest lines) here (inc idx) ran bad)
+        (not (= (math/rem idx n) k)) (nt-scan-chunk want k n (rest lines) here (inc idx) ran bad)
         else
           (let (w (nt-wrong (nt-case line)))
             (nt-scan-chunk want
@@ -256,14 +256,14 @@
 ;; default here overwrote the wrapper's 16 back to 1, the sweep stayed full, and the
 ;; wrapper went on timing out. The environment is read at the same moment, by the code
 ;; that needs it, so there is no ordering to get wrong.
-(def- nt-part1-of (max 1 (or (string/->number (or (os/env "BROOD_UCD_PART1_OF") "")) 1)))
+(def- nt-part1-of (math/max 1 (or (string/->number (or (os/env "BROOD_UCD_PART1_OF") "")) 1)))
 
 ;; Every `*ucd-part1-of*`-th case of the pre-collected Part1 list, from offset `k`.
 (defn- nt-slice-scan
   (lines k n idx ran bad)
   (if (nil? lines)
     [ran (reverse bad)]
-    (if (= (rem idx n) k)
+    (if (= (math/rem idx n) k)
       (let (w (nt-wrong (nt-case (first lines))))
         (nt-slice-scan (rest lines) k n (inc idx) (inc ran) (if w (cons w bad) bad)))
       (nt-slice-scan (rest lines) k n (inc idx) ran bad))))
@@ -307,7 +307,7 @@
       ;; Scaled to the sample so BOTH contexts assert real coverage: ~16,000 cases at the
       ;; default, ~1,000 under the debug wrapper's 1-in-16. A sampling change that guts
       ;; the coverage fails rather than reading as a pass.
-      (is (> ran (quot 16000 nt-part1-of)))
+      (is (> ran (math/quot 16000 nt-part1-of)))
       (assert= (take 3 bad) ())))
 
   (test "Part2 — canonical order"

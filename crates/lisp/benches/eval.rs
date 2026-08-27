@@ -206,7 +206,7 @@ fn sort_brood(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
              (let (x (bit/xor seed (bit/shift-left seed 13)) \
                    y (bit/xor x (bit/shift-right x 7)) \
                    z (bit/xor y (bit/shift-left y 17))) \
-               (gen (- n 1) z (cons (rem (bit/and z 1048575) 1000000) acc)))))) \
+               (gen (- n 1) z (cons (math/rem (bit/and z 1048575) 1000000) acc)))))) \
          (def data (gen {n} 123456789 nil)) \
          (count (sort < data))"
     );

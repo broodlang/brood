@@ -41,7 +41,7 @@ fn fanout_with_concurrent_global_rebind_matches_serial() {
         ;; `def`), but it only perturbs the map's *values* — the key set is 0..n-1,
         ;; so the count is exactly n regardless of how the rebind race interleaves.
         (defn tally (n)
-          (reduce (fn (a x) (assoc a x (mod (+ x *spin*) 7))) {} (range n)))
+          (reduce (fn (a x) (assoc a x (math/mod (+ x *spin*) 7))) {} (range n)))
 
         ;; The writer: churn the shared global table concurrently with the workers.
         (defn churn (n)

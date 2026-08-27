@@ -165,7 +165,8 @@
   (test "the result is re-readable (not just CST-parseable)"
     ;; parse-source is lenient on unclosed lists; the real reader is not — pin it.
     (let (out (source "(describe \"x\"\n  (test \"a\")\n  ;; note\n  )"))
-      (is (= (read-string (str "(do " out ")")) (read-string "(do (describe \"x\" (test \"a\")))")))))
+      (is (= (reflect/read-string (str "(do " out ")"))
+            (reflect/read-string "(do (describe \"x\" (test \"a\")))")))))
   (test "idempotent with a trailing comment"
     (let (out (source "(foo\n  (bar)\n  ;; note\n  )"))
       (assert= out (source out))))

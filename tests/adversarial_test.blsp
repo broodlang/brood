@@ -18,15 +18,15 @@
 (describe "adversarial: reader / parser"
   :isolated (test "deeply nested parens are rejected cleanly (reader depth bound)"
     ;; Construct (((((... 1000 deep ...))))). The reader should error out,
-    ;; not blow the host stack. `read-string` evaluates to a value or throws.
+    ;; not blow the host stack. `reflect/read-string` evaluates to a value or throws.
     (let (src (str (string/repeat "(" 1000) "x" (string/repeat ")" 1000)))
-      (assert-error (read-string src))))
+      (assert-error (reflect/read-string src))))
 
   (test "a very long atom is fine"
     ;; A bare 3000-char token reads as a *symbol* (not a string), so compare its
     ;; spelling — `(= a-string a-symbol)` is always false (different types).
     (let (long (string/repeat "abc" 1000)
-          parsed (read-string long))
+          parsed (reflect/read-string long))
       (is (symbol? parsed))
       (assert= long (str parsed)))))
 

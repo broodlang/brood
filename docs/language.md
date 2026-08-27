@@ -63,7 +63,7 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 | Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. A result out of `i64` range promotes to an arbitrary-precision **bignum** rather than wrapping, and demotes back when it fits again — so the integer type is unbounded in practice. |
 | Float | `3.14`, `-0.5`, `1e3`, `inf`, `nan` | 64-bit. **`inf`, `-inf` and `nan` are reader literals** — those three bare tokens are floats, not symbols, so they can't be used as names (the digit-required rule below has these three exceptions). Test them with `infinite?` / `nan?`; `=` reports NaN as equal to nothing, per IEEE. |
 | Decimal | `1.50M`, `0M`, `-3.14M` | Exact arbitrary-precision base-10, for money and Postgres `numeric` — values a float can't hold (`(+ 0.1M 0.2M)` *is* `0.3M`). The literal is a trailing `M`; `(decimal/of x)` builds one from a string, int, bignum or float. Scale is significant in arithmetic (see [Arithmetic](#arithmetic)) but **not** in `=`, which compares values (`1.5M` = `1.50M`). |
-| Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive math/denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a math/denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`decimal/number->` convert out; `math/numerator`/`math/denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
+| Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`decimal/number->` convert out; `math/numerator`/`math/denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
 | String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control), `\xHH` (two-hex-digit byte), `\u{H..H}` (1–6-hex-digit Unicode codepoint). A malformed `\x`/`\u{}` is a read error, and so is an unknown **alphabetic** escape (`\d`, `\w`, `\s`, …) — that's almost always a regex class written in a plain string, where dropping the backslash would silently break the pattern, so write `\\d`. A `\X` escape of punctuation or a digit (`\.`, `\/`, `\1`) is literal `X` (how you write a literal metacharacter in a regex string). Readable printing is the inverse: it re-escapes `\n \t \r \e \0 \\ \"` by name and any other control char as `\u{H..H}`, so a printed string always re-reads to the same value. |
 | Symbol | `foo`, `+`, `my-fn`, `empty?`, `++`, `...` | Names; interned. **A token that leads with a digit — or a sign/dot immediately followed by a digit — must be a number** (ADR-169): if it isn't one Brood has (`0x1F`, `1_000`, `1N`, `1+`, `12-34`; but `1/2` *is* a ratio now — ADR-196) it's a *reader error*, never a symbol, so those tokens stay reserved for future numeric syntax. A sign or dot with **no** digit behind it is not digit-led and stays a symbol — `+`, `-`, `...`, `.foo`, `foo.`, `--5`, `++`. A symbol whose name isn't a clean token — one built via `(symbol "a b")` with whitespace, delimiters, an empty name, or a spelling that would read as a number/keyword (including a reserved one, `(symbol "1+")`) — prints (readably) and reads back as a `\|…\|` **bar-quoted** symbol (`\|a b\|`, `\|1+\|`, `\|\|` for empty; `\|`/`\\` escape a literal bar/backslash), so every symbol round-trips through `pr-str`/`read`. |
 | Keyword | `:ok`, `:else`, `:\|a b\|` | Self-evaluating named constants. Like symbols, a keyword whose name isn't a clean token (e.g. `(keyword "a b")`, `(keyword "")`) prints and reads as `:\|…\|`. |
@@ -233,7 +233,7 @@ Maps are immutable — every operation returns a **fresh** map:
 | `(update m k f args…)` | a new map with `k`'s value replaced by `(f current args…)` (`current` is `nil` if absent; also works on a **vector** by integer index, which must be in range) |
 | `(map/update-vals m f)` / `(map/update-keys m f)` | a new map with `f` applied to every value / key — the `map` module |
 | `(map/select-keys m ks)` | a new map of just the entries whose key is in `ks` — the `map` module |
-| `(zipmap ks vs)` | a map pairing `ks` with `vs` positionally (stops at the shorter) |
+| `(map/zipmap ks vs)` | a map pairing `ks` with `vs` positionally (stops at the shorter) |
 | `(get-in m path)` / `(get-in m path default)` | the value at a nested key `path`, or `default`/`nil` |
 | `(assoc-in m path v)` | a nested copy with `v` stored at `path` (intermediate maps created) |
 | `(dissoc-in m path)` | a nested copy with `path` removed (a missing path is a no-op; empty branches are left in place) |
@@ -395,7 +395,7 @@ retracting what was never there is a quiet zero. `unregister-impl` is the functi
 underneath, for a caller holding names as values.
 
 Two things `unimpl` will not do: retract the language's own `:default` for an ability the
-runtime dispatches on itself (`Display`, `Inspect`, `Seqable`, `Conjable` — that one line
+runtime dispatches on itself (`display`, `inspectable`, `seqable`, `conjable` — that one line
 would leave every value unprintable, so it errors and points at `impl` for your own id), and
 touch any impl but the one named (retracting one id leaves its siblings, including `:default`,
 in place).
@@ -563,7 +563,7 @@ checker and LSP read.
 The id is held in a reserved `:__id__` field, reachable by direct `(get r :__id__)`,
 but the record's **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`
 — and `map`/`filter`/`fold`/`for`/`into`, which coerce through `seq` — see only the
-fields, so `(count (circle 2))` is `1`. This is the `Seqable` ability (op `->seq`,
+fields, so `(count (circle 2))` is `1`. This is the `seqable` ability (op `->seq`,
 default = the fields); a custom-collection record overrides it to define its own
 iteration. `(fields r)` gives the id-free map explicitly; nothing else should read
 `:__id__` directly (the stable seam a future hidden slot would swap behind).
@@ -614,7 +614,7 @@ provable mismatch; anything whose type isn't pinned down defers — sound, no fa
 
 **Any ability name is a type (ADR-186).** An *open* ability (no `:sealed`) has no finite
 member set, so it resolves to the permissive **`any`** — a `sig` mentioning it (`(sig render
-(Display -> string))`) still *checks* (the return and other params flow), the open-ability
+(display -> string))`) still *checks* (the return and other params flow), the open-ability
 parameter just accepts anything. That's the sound choice: an open ability's impls are late
 and may cover any value, so no argument can be rejected on the type — the "does this value
 implement it" safety is enforced at the op *call sites* instead. Sealed abilities keep their
@@ -646,7 +646,7 @@ type itself.
 > same registration as `impl` (no runtime substance), and the orphan rule guarded a
 > multi-third-party-library collision greenfield Brood doesn't have. Dispatch now runs
 > through a **polymorphic per-op inline cache** (`%dispatch`, 4-way) that deopts on
-> reload (a `def *impls*`/compaction bumps the epoch), and `Display` is always-on core.
+> reload (a `def *impls*`/compaction bumps the epoch), and `display` is always-on core.
 > Still ahead: `:sealed` abilities fully static, and JIT specialization of the dispatch
 > site. This section documents what is implemented today.
 
@@ -662,17 +662,17 @@ ability when third-party or later code must be able to add a case.
 
 #### The display protocol: customizing how a record prints
 
-The `Display` ability — Elixir's `String.Chars` for Brood (ADR-171/172) — is **core
+The `display` ability — Elixir's `String.Chars` for Brood (ADR-171/172) — is **core
 and always on**. Its op **`(->string x)`** turns a value into its display string; the
 `:default` impl is the native `str`. The **screen printers** (`print` / `println` /
-`eprint` / `eprintln`) route a *record* through its `Display` impl out of the box — no
+`eprint` / `eprintln`) route a *record* through its `display` impl out of the box — no
 import, no activation step. Built-ins are unchanged and pay no dispatch cost.
 
 ```clojure
 (defmodule money)             ; no (:use ability), no (:use show) — both are core
 (defrecord usd (cents))
-(impl Display usd
-  (->string [m] (str "$" (->fixed (/ (get m :cents) 100.0) 2))))
+(impl display usd
+  (->string [m] (str "$" (math/->fixed (/ (get m :cents) 100.0) 2))))
 
 (println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
 (->string (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
@@ -720,30 +720,30 @@ the specs as data.
 
 #### The abilities the standard library ships
 
-Beyond the core `Display`/`Inspect`, `std/` declares these (ADR-177). Each is the
+Beyond the core `display`/`inspectable`, `std/` declares these (ADR-177). Each is the
 extension point for its module: `impl` it for your own type and that module accepts the
 type with no change to it.
 
 | Ability | Op | Module | Sealed? | What impl'ing it buys |
 |---|---|---|---|---|
-| `JsonEncode` | `(->json x)` | `json` | open | `json-encode` accepts your type — a record picks its wire shape, and a kind JSON has no rule for (a pid, a datetime) stops erroring. No `:default`. |
-| `Port` | `(io-write port s)` | `io` | open | Your value is an output port: `io-write`, `with-out`/`with-err`, and every logger backend take it. A bare 1-arg fn is a port via the `:fn` impl. |
-| `LogBackend` | `(backend-emit b record)` | `log` | open | A backend that does something other than "format one line and write it" — batching, JSON lines, sampling. Reuse `backend-passes?` for the standard level/filter gate. |
-| `Response` | `(send-response r sock)` | `http` | open | A response kind with its own wire behaviour (sendfile, chunked, a 101 upgrade), including whether it closes the socket. |
-| `Dependency` | `dep-kind`, `dep-resolve`, `dep-check-compatible`, `dep-lock-vec`, `dep-entry-node` | `package` | **sealed** | A new manifest dependency kind. Sealed, so `nest check` reports any op you forget. |
-| `Temporal` | `(->iso x)` | `datetime` | **sealed** | ISO 8601 rendering for a calendar value. |
+| `json/encodable` | `(->json x)` | `json` | open | `json-encode` accepts your type — a record picks its wire shape, and a kind JSON has no rule for (a pid, a datetime) stops erroring. No `:default`. |
+| `io/port` | `(io-write port s)` | `io` | open | Your value is an output port: `io-write`, `with-out`/`with-err`, and every logger backend take it. A bare 1-arg fn is a port via the `:fn` impl. |
+| `log/backend` | `(backend-emit b record)` | `log` | open | A backend that does something other than "format one line and write it" — batching, JSON lines, sampling. Reuse `backend-passes?` for the standard level/filter gate. |
+| `http/response` | `(send-response r sock)` | `http` | open | A response kind with its own wire behaviour (sendfile, chunked, a 101 upgrade), including whether it closes the socket. |
+| `package/dependency` | `dep-kind`, `dep-resolve`, `dep-check-compatible`, `dep-lock-vec`, `dep-entry-node` | `package` | **sealed** | A new manifest dependency kind. Sealed, so `nest check` reports any op you forget. |
+| `datetime/temporal` | `(->iso x)` | `datetime` | **sealed** | ISO 8601 rendering for a calendar value. |
 
-Sealed vs open is a per-ability judgement: `Dependency` and `Temporal` cover genuinely
+Sealed vs open is a per-ability judgement: `package/dependency` and `datetime/temporal` cover genuinely
 closed sets and want exhaustiveness checking; the rest exist so a type the module has
 never heard of can join.
 
 `std/` also uses `defrecord` for the value types that were once plain maps told apart by
 their shape — `buffer`, `queue`, `pq`, `multimap`, `datetime`/`date`/`time-of-day`, and the
 four dependency kinds. Each has an identity-based predicate (`buffer?`, `queue?`, …) that a
-look-alike map can't satisfy, and a `Display` impl, so it prints as itself rather than as
+look-alike map can't satisfy, and a `display` impl, so it prints as itself rather than as
 its internals. Where a library renders a *user-supplied* value into text —
 `template/render`, `csv-emit`, `url/query-encode` — it goes through `->string`, so your
-record's `Display` impl decides how it appears there too.
+record's `display` impl decides how it appears there too.
 
 #### Polymorphism: multiple dispatch (`defmulti`)
 
@@ -1620,10 +1620,10 @@ value — which is exactly why it's safe. (Dynamic bindings don't
 reach a `spawn`ed child, so a child starts with the default `*out*`; hand it a
 port explicitly if it should redirect too.)
 
-A port is any value implementing the **`Port`** ability, whose one op is `io-write` — so
+A port is any value implementing the **`io/port`** ability, whose one op is `io-write` — so
 a bare 1-arg fn is a port (that is the `:fn` impl), and so is a port *record* that
 carries its target and prints as itself (`#<port stdout>`, `#<port file /tmp/app.log>`).
-`port?` tests it, and your own type joins with `defrecord` + `impl Port`. `*out*`/`*err*`
+`port?` tests it, and your own type joins with `defrecord` + `impl io/port`. `*out*`/`*err*`
 still hold a plain fn, which the prelude's `print` calls directly — so printing pays no
 dispatch cost, `print` gains no special cases, and `with-out-str` is unaffected;
 `with-out`/`with-err` adapt a record port at that boundary for you (`port-fn`).
@@ -1647,7 +1647,7 @@ takes down only that line, not the caller.
 ```
 
 Levels are `:debug` < `:info` < `:warn` < `:error`. A **backend** is any value
-implementing the **`LogBackend`** ability (one op, `backend-emit`, handed each record).
+implementing the **`log/backend`** ability (one op, `backend-emit`, handed each record).
 The stock one is an `io` port + a minimum level + a filter + a formatter, so the logger
 *reuses* ports rather than inventing its own sink; build it with `stdout-backend` /
 `stderr-backend` / `file-backend` / `fn-backend` / `process-backend`, and add it live:
@@ -1664,7 +1664,7 @@ registered under the name `:logger` (found via `proc/whereis`); `(log …)` fall
 stderr when none is running, so a log is never silently lost.
 
 For a backend that does something other than write one formatted line — batch records,
-emit JSON lines, sample — `defrecord` your own and `impl LogBackend` for it; the logger
+emit JSON lines, sample — `defrecord` your own and `impl log/backend` for it; the logger
 takes it unchanged, and `backend-passes?` gives you the same `:min-level`/`:filter` gate
 every stock backend honours.
 
@@ -2254,11 +2254,11 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   nature, so neither carries an ideal exponent. Pinned by the dectest conformance
   corpus (`tests/conformance_dectest_test.blsp`).
 - Integer arithmetic is overflow-checked: an operation that would overflow
-  (including `i64::MIN` cases like `(mod min -1)`) raises an error rather than
+  (including `i64::MIN` cases like `(math/mod min -1)`) raises an error rather than
   wrapping or panicking. `(/ min -1)` falls through to a float.
 - `rem` is the truncated remainder (sign of the dividend); `quot` is truncated
   integer division; `mod` is the euclidean remainder (always non-negative, in
-  `[0, |b|)` — so `(mod 7 -3)` is `1`, not the floored `-2`).
+  `[0, |b|)` — so `(math/mod 7 -3)` is `1`, not the floored `-2`).
 - `floor`/`ceil`/`round` return an **int** (an int passes through unchanged);
   `round` rounds half away from zero. `round-to` keeps a fixed number of
   decimal *places* but stays a **number** (`(round-to 3.14159 2)` → `3.14`); for
@@ -2466,7 +2466,7 @@ ordinary function composition — because each stage wraps the *next* one's redu
 
 ### Maps
 `hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`
-`merge`  `update`  `zipmap`  `get-in`  `assoc-in`  `dissoc-in`  `update-in`  `map?`
+`merge`  `update`  `get-in`  `assoc-in`  `dissoc-in`  `update-in`  `map?`
 
 The transformation helpers `merge-with`, `update-vals`, `update-keys`, and
 `select-keys` live in the **`map` module** (ADR-227) — `(:use map)` for bare
@@ -2600,7 +2600,7 @@ another type, so they are **not** string-library ops:
   `string/blank?` is true for an empty or all-whitespace string.
 - `string/repeat` concatenates n copies; `string/pad-left` / `string/pad-right` justify a
   string into a fixed-width field with spaces (never truncating). `->fixed`
-  renders a number with a fixed decimal count (`(->fixed 3.14159 2)` → `"3.14"`)
+  renders a number with a fixed decimal count (`(math/->fixed 3.14159 2)` → `"3.14"`)
   — the float→text op `str`/`pr-str` can't do, since they print the shortest
   round-tripping form. Together they handle tabular/console output. `->fixed` is
   a Rust primitive (Rust's float formatter); the rest are Brood.
@@ -2608,7 +2608,7 @@ another type, so they are **not** string-library ops:
   → `"x = 42, y = 3.14"`. Specifiers: `%s` (any, via `str`), `%d` (number),
   `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `->fixed`), `%%` (literal
   `%`). Width/justification isn't built in (compose with `string/pad-left`/`string/pad-right`).
-- `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(->fixed y 2)}")`
+- `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(math/->fixed y 2)}")`
   splices each `{expr}` hole's value between the literal text, lowering to a plain
   `(str …)` — zero runtime cost, so it is just a terser `str`. `{{`/`}}` are literal
   braces; braces nest inside a hole (`(fmt "m={ {:a 1} }")`). Prefer it over
@@ -2781,7 +2781,7 @@ iolist in memory.
   suffixes accepted).
 
 ### Metaprogramming / self-hosting
-`eval`  `read-string`  `read-all`  `eval-string`  `load`  `macroexpand`  `macroexpand-1`  `gensym`
+`eval`  `reflect/read-string`  `reflect/read-all`  `eval-string`  `load`  `macroexpand`  `macroexpand-1`  `gensym`
 
 There is **no user-facing `require` form** — you load an embedded standard-library
 module by *referencing* it. A qualified reference `name/foo` auto-loads `name` on
@@ -2792,13 +2792,13 @@ used by the `:use` machinery, the runtime bootstrap, and a few dynamic/cycle
 cases — not something you call directly.)
 
 ```clojure
-(eval (read-string "(+ 40 2)"))  ;=> 42
-(read-all "(a) (b) (c)")         ;=> ((a) (b) (c))  — every form, vs read-string's first
+(eval (reflect/read-string "(+ 40 2)"))  ;=> 42
+(reflect/read-all "(a) (b) (c)")         ;=> ((a) (b) (c))  — every form, vs reflect/read-string's first
 (eval-string "(def x 1) (+ x 1)");=> 2  — read+eval all forms, last value wins
 (load "some-file.blsp")          ; evaluate a file into the global environment
 ```
 
-`read-string` returns the *first* form in a string; `read-all` returns *all* of
+`reflect/read-string` returns the *first* form in a string; `reflect/read-all` returns *all* of
 them as a list (the read-half of `eval-string` without the eval) — the basis for
 form-by-form tooling, e.g. an editor evaluating the last sexp before point. Both
 raise on a malformed/incomplete form; `parse-source` is the lossless,
@@ -3012,10 +3012,10 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | Module | name | What it provides |
 |--------|---------------|-----------------|
 | `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `regular?`, `list-files`, `list-dirs`, `walk-files`. Pure path-string ops (`extension`, `stem`, …) live in `path` (ADR-234). All Brood (ADR-006), no new Rust |
-| `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
+| `std/io.blsp` | `'io` | Output **ports** — the `io/port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
 | `std/enum.blsp` | `'enum` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. The core ops (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stay bare in the prelude; `(:use seq)` for bare access or call qualified |
-| `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `merge-with`, `update-vals`, `update-keys`, `select-keys`. The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`/`zipmap`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
+| `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `merge-with`, `update-vals`, `update-keys`, `select-keys`. The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
 | `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Core arithmetic (operators, `quot`/`mod`/`rem`/`floor`/`min`/`max`) stays bare in the prelude; `(:use math)` for bare access or call qualified |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |

@@ -26,7 +26,7 @@ a small mechanical extension. It isn't, for two concrete reasons:
    own concretely-typed storage.
 2. **The existing `lit: Option<Arc<BTreeSet<Symbol>>>` is hardwired to one
    tag** (`KEYWORD_BIT`) at every one of its ~6 call sites (`union`,
-   `intersect`, `negate`, `is_subtype`, `is_disjoint`, `Display`). Supporting
+   `intersect`, `negate`, `is_subtype`, `is_disjoint`, `display`). Supporting
    `(or :ok 5)` — a keyword literal and an int literal at once — isn't free
    with a single field.
 
@@ -58,7 +58,7 @@ side widens), `intersect` (same `BTreeSet::intersection` + empty-clears-
 the-bit logic), `negate` (one line: keep `INT_BIT` if `lit_int.is_some()`),
 `is_subtype` (`is_subset`, mirrored), `is_disjoint` (a second precise
 exception: `shared == INT_BIT` alongside the existing `shared == KEYWORD_BIT`
-one), and `Display` (rendered together with any keyword literals present,
+one), and `display` (rendered together with any keyword literals present,
 since both can coexist — `:ok | 5`, sorted keywords first then numerically
 sorted ints, then any other open tags).
 

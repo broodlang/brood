@@ -11,7 +11,7 @@
   "Sequence helpers — the derived enumeration API over the bare collection protocol.
 
 The core ops (`map` `filter` `reduce` `fold` `into` `count` `take` `drop`
-`distinct` `take-while` `drop-while` `partition` `zip` `sort` …) stay bare in the
+`distinct` `take-while` `drop-while` `partition` `sort` …) stay bare in the
 prelude and need no import. This module adds the higher-level helpers: grouping
 (`group-by` `frequencies` `chunk-by` `chunk-every`), dedup-by-key (`distinct-by`),
 running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
@@ -67,7 +67,9 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 ;; first item for each distinct `(f item)`. A map carried alongside the result is
 ;; the "seen" set of keys (stores only `true`, so one `%map-get` distinguishes it).
 (defn distinct-by (f coll)
-  "The items of `coll` with duplicates removed by key: keeps the first item for each distinct `(f item)`, order-preserving. `(distinct-by :id users)` keeps one user per id (≈ `Enum.uniq_by`)."
+  "The items of `coll` with duplicates removed by key: keeps the first item for each distinct `(f item)`, order-preserving. `(distinct-by :id users)` keeps one user per id (≈ `Enum.uniq_by`).
+
+    (seq/distinct-by count [\"a\" \"b\" \"cc\"])   → (\"a\" \"cc\")"
   (reverse (nth (fold (fn (state x)
                         (let (k (f x))
                           (if (%map-get (nth state 0) k false)
@@ -135,7 +137,9 @@ trailing partial chunk is kept. `n` must be positive.
         (chunk-by-acc f (rest coll) k (list x) (cons (into [] (reverse curr)) acc))))))
 (defn chunk-by (f coll)
   "Split `coll` into consecutive vectors where `(f x)` returns the same value.
-A new chunk starts each time the return value of `f` changes."
+A new chunk starts each time the return value of `f` changes.
+
+    (seq/chunk-by math/even? [2 4 1])   → ([2 4] [1])"
   (let (s (seq coll))
     (if (empty? s)
       nil
@@ -207,7 +211,9 @@ equality); recover the item itself with `find`.
   (index-where-from pred coll 0))
 
 (defn subvec (v start & more)
-  "A fresh vector of v's elements in [start, end); end defaults to the length."
+  "A fresh vector of v's elements in [start, end); end defaults to the length.
+
+    (seq/subvec [1 2 3 4] 1 3)   → [2 3]"
   (if (empty? more) (%subvec v start) (%subvec v start (first more))))
 
 (defn vector-ref (v i)
@@ -220,7 +226,7 @@ equality); recover the item itself with `find`.
 
 (defn transduce (xform rf init coll)
   "Reduce `coll` with `rf`/`init` through the transducer `xform` — one pass, no
-intermediate collections. `(transduce (comp (xfilter odd?) (xmap sq)) + 0 (range 10))`
+intermediate collections. `(transduce (comp (seq/xfilter odd?) (seq/xmap sq)) + 0 (range 10))`
 sums the squares of the odd numbers, allocating nothing in between.
 
 `xform` is any `(rf) -> rf'` function, so a stage of your own is a plain `fn`:
@@ -292,7 +298,9 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
   (first (rest (rest coll))))
 
 (defn times (n f x)
-  "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`."
+  "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`.
+
+    (seq/times 3 inc 0)   → 3"
   (if (<= n 0) x (seq/times (dec n) f (f x))))
 
 (defn repeatedly (n f)
@@ -308,7 +316,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     (if (= n 0)
       (error "sample: cannot sample from an empty collection")
       (let (s (%rand-step (%rand-seed seed)))
-        [(nth items (rem s n)) s]))))
+        [(nth items (math/rem s n)) s]))))
 
 ;; Fisher–Yates, which is what the docstring always claimed — the implementation was
 ;; not it. The old `shuffle-acc` rebuilt the remaining collection on every step: two
@@ -334,7 +342,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     ; always advance, so a chained next-seed never stalls on a 0/1-element input
     [m (%rand-step state)]
     (let (s (%rand-step state)
-          j (rem s (+ i 1)))
+          j (math/rem s (+ i 1)))
       (shuffle-at (shuffle-swap m i j) (- i 1) s))))
 
 (defn- shuffle-drain
@@ -371,5 +379,43 @@ and this was the one function that broke it.
 
 (%defseq keep
   (f)
-  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `xkeep`)."
+  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `seq/xkeep`)."
   (let (y (f item)) (if (nil? y) acc (cons y acc))))
+
+;; ---- transducer stages (ADR-251) --------------------------------------------
+;; The four built-in stages, published here beside `transduce` — the only thing
+;; that runs them. The implementations are prelude `%x*` internals because the
+;; `l*` combinators build on them and the prelude cannot `require` a module.
+
+(defn zip (a b)
+  "A list of `[x y]` pairs from `a` and `b`, stopping at the shorter input.
+The pairwise sibling of `zip-with`, which combines instead of pairing.
+
+    (seq/zip [1 2] [:a :b])   → ([1 :a] [2 :b])"
+  (%zip a b))
+
+(defn xmap (f)
+  "The `map` stage as a transducer: `(f x)` for each input. Compose with `comp`, run
+with `transduce`, or reach for `lmap` when you just want a fusing pipeline.
+
+    (seq/transduce (comp (seq/xmap inc) (seq/xfilter math/even?)) + 0 [1 2 3])   → 6"
+  (%xmap f))
+
+(defn xfilter (pred)
+  "The `filter` stage as a transducer: keep inputs where `(pred x)` is truthy.
+
+    (seq/transduce (seq/xfilter math/odd?) conj [] [1 2 3])   → [1 3]"
+  (%xfilter pred))
+
+(defn xremove (pred)
+  "The `remove` stage as a transducer: drop inputs where `(pred x)` is truthy — the
+complement of `xfilter`.
+
+    (seq/transduce (seq/xremove math/odd?) conj [] [1 2 3])   → [2]"
+  (%xremove pred))
+
+(defn xkeep (f)
+  "The `keep` stage as a transducer: `(f x)` for each input, dropping `nil` results.
+
+    (seq/transduce (seq/xkeep (fn (n) (if (math/odd? n) n nil))) conj [] [1 2 3])   → [1 3]"
+  (%xkeep f))

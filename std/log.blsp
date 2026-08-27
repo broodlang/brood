@@ -7,7 +7,7 @@
 ;;  - One process owns every write, so lines never interleave and a backend that
 ;;    throws takes down only the log line, not the caller. That is the "safe".
 ;;
-;; A *backend* is any value implementing the **`LogBackend`** ability — one op,
+;; A *backend* is any value implementing the **`log/backend`** ability — one op,
 ;; `backend-emit`, which is handed a record and decides what happens to it. The stock
 ;; backend (`line-backend`, built by `backend` and its `stdout-`/`stderr-`/`process-`/
 ;; `file-`/`fn-` shorthands) is an `io` port (the redirectable string sink —
@@ -20,7 +20,7 @@
 ;; Because the backend is an ability rather than a fixed map shape, a backend that does
 ;; something other than "format one line and write it" — batch N records, emit JSON
 ;; lines, frame for syslog, drop everything but a sample — is a `defrecord` + an `impl
-;; LogBackend` in *your* module, with no change here. Reuse `backend-passes?` for the
+;; log/backend` in *your* module, with no change here. Reuse `backend-passes?` for the
 ;; standard level/filter gate.
 
 ; ports + write
@@ -39,14 +39,14 @@ Levels are `:debug` < `:info` < `:warn` < `:error`. The default logger is
 registered as `:logger`; `(log …)` finds it via `proc/whereis` and falls back to
 stderr if none is running, so a log is never silently lost.
 
-A *backend* is any value implementing the **`LogBackend`** ability (one op,
+A *backend* is any value implementing the **`log/backend`** ability (one op,
 `backend-emit`). The stock one is an `io` port + `:min-level` + `:filter` + `:format` —
 build it with `stdout-backend` / `stderr-backend` / `process-backend` / `file-backend` /
 `fn-backend`. For anything else (batching, JSON lines, sampling), `defrecord` your own
-and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
+and `impl log/backend` for it; reuse `backend-passes?` for the standard gate."
   ;; `gen` for defprocess / start / cast / stop; `io` for the port sinks.
   (:use gen)
-  ;; `:exclude [inspect]` — `io/inspect` WRITES, while the root `inspect` is the `Inspect`
+  ;; `:exclude [inspect]` — `io/inspect` WRITES, while the root `inspect` is the `inspectable`
   ;; ability op that RETURNS a string. Referring the writer bare here would shadow the op.
   (:use io :exclude [inspect]))
 ;; ---- levels -----------------------------------------------------------------
@@ -69,9 +69,9 @@ and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
     (get rec :msg)
     "\n"))
 
-;; ---- the LogBackend ability -------------------------------------------------
+;; ---- the log/backend ability -------------------------------------------------
 
-(defability LogBackend
+(defability log/backend
   "How a backend handles one log record. The logger calls `backend-emit` for each of its
   backends in turn; the backend decides whether and how the record is written."
   (backend-emit [self record] :-> nil))
@@ -79,7 +79,7 @@ and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
 (defn backend-passes? (b record)
   "True if `record` clears backend `b`'s standard gate: its `:min-level` severity floor
 *and* its `:filter` predicate (nil filter = accept all). The reusable half of the stock
-backend's policy — a custom `LogBackend` should call this so it honours the same
+backend's policy — a custom `log/backend` should call this so it honours the same
 `:min-level`/`:filter` options every other backend does."
   (let (predicate (get b :filter))
     (and (>= (log-rank (get record :level)) (log-rank (get b :min-level)))
@@ -90,14 +90,14 @@ backend's policy — a custom `LogBackend` should call this so it honours the sa
 (defrecord line-backend (sink min-level filter format))
 
 ;; The stock backend: gate the record, then write exactly one formatted line to the port.
-(impl LogBackend
+(impl log/backend
   log/line-backend
   (backend-emit [b record]
     (when (backend-passes? b record)
       (emit (get b :sink) ((get b :format) record)))
     nil))
 
-(impl Display
+(impl display
   log/line-backend
   (->string [b]
     (str "#<log-backend "
@@ -118,7 +118,7 @@ several backends on one logger can route by category/source (read off the record
 OTP-handler-filter / Elixir-metadata-filter idea.
 
 For a backend that does something other than write one line, `defrecord` your own and
-`impl LogBackend` for it — the logger accepts any value with an impl."
+`impl log/backend` for it — the logger accepts any value with an impl."
   (let (o (if (empty? opts) {} (first opts)))
     (line-backend sink
       (or (get o :min-level) :debug)

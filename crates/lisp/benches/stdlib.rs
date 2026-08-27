@@ -419,7 +419,7 @@ mod stats {
             bencher,
             format!(
                 "\
-                 (def xs (map (fn (x) (rem (* x 7919) {n})) (range {n}))) \
+                 (def xs (map (fn (x) (math/rem (* x 7919) {n})) (range {n}))) \
                  (stats/median xs)"
             ),
         );
@@ -490,7 +490,7 @@ mod diff {
             format!(
                 "\
                  (def a (range {n})) \
-                 (def b (filter (fn (x) (not= (rem x 10) 0)) (range {n}))) \
+                 (def b (filter (fn (x) (not= (math/rem x 10) 0)) (range {n}))) \
                  (diff/seq a b)"
             ),
         );
@@ -610,7 +610,7 @@ mod multimap {
             format!(
                 "\
                  (def mm (fold (fn (m i) \
-                                 (multimap/assoc m (rem i 10) i)) \
+                                 (multimap/assoc m (math/rem i 10) i)) \
                                (multimap/new) \
                                (range {n}))) \
                  (multimap/get mm 0)"

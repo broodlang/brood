@@ -41,7 +41,7 @@
     ;; Splicing into an unordered collection is ill-defined — the point is that it
     ;; says so instead of building something odd.
     (assert= :error
-      (try (eval (list 'quasiquote (read-string "#{~@xs}"))) (catch e :error))))
+      (try (eval (list 'quasiquote (reflect/read-string "#{~@xs}"))) (catch e :error))))
 
   (test "auto-gensym works inside a set template"
     ;; `has_autogensym` skipped sets, so a set template was expanded STATICALLY
@@ -59,22 +59,22 @@
     ;; a different value, with no error anywhere.
     (let (s (symbol "^foo"))
       (assert= "|^foo|" (pr-str s))
-      (assert= s (read-string (pr-str s)))))
+      (assert= s (reflect/read-string (pr-str s)))))
 
   (test "# is the dispatch character, so a symbol named #foo must print bar-quoted"
     (let (s (symbol "#foo"))
       (assert= "|#foo|" (pr-str s))
-      (assert= s (read-string (pr-str s)))))
+      (assert= s (reflect/read-string (pr-str s)))))
 
   (test "only the FIRST character dispatches — mid-atom ^ and # stay bare"
     (assert= "a^b" (pr-str (symbol "a^b")))
     (assert= "a#" (pr-str (symbol "a#")))
-    (assert= (symbol "a^b") (read-string (pr-str (symbol "a^b"))))
-    (assert= (symbol "a#") (read-string (pr-str (symbol "a#")))))
+    (assert= (symbol "a^b") (reflect/read-string (pr-str (symbol "a^b"))))
+    (assert= (symbol "a#") (reflect/read-string (pr-str (symbol "a#")))))
 
   (test "keywords are unaffected — the : has already committed the token"
     (assert= ":^k" (pr-str (keyword "^k")))
-    (assert= (keyword "^k") (read-string (pr-str (keyword "^k"))))))
+    (assert= (keyword "^k") (reflect/read-string (pr-str (keyword "^k"))))))
 
 (describe "reader and printer agree on nesting depth"
   (test "a form at the reader's MAXIMUM nesting depth still prints readably"
@@ -84,14 +84,14 @@
     ;; value with no error. (255 levels always round-tripped, which is what made
     ;; this an off-by-one rather than an obvious break.)
     (let (src (nest-str 256 "1")
-          v (read-string src))
+          v (reflect/read-string src))
       (assert= src (pr-str v))
-      (assert= v (read-string (pr-str v)))))
+      (assert= v (reflect/read-string (pr-str v)))))
 
   (test "one level past the cap is a clean reader error, not a crash"
     (assert= :parse-error
       (try
-        (do (read-string (nest-str 257 "1")) :read-ok)
+        (do (reflect/read-string (nest-str 257 "1")) :read-ok)
         (catch e :parse-error))))
 
   (test "a value deeper than the reader can parse prints UNreadably, not as a fake symbol"
@@ -101,7 +101,7 @@
     (let (deep (nest-list 400 1)
           p (pr-str deep))
       (is (not (nil? (index-of p "#<deep>"))))
-      (assert= :parse-error (try (do (read-string p) :read-ok) (catch e :parse-error)))))
+      (assert= :parse-error (try (do (reflect/read-string p) :read-ok) (catch e :parse-error)))))
 
   (test "the human (display) form keeps the compact ellipsis"
     (is (not (nil? (index-of (str (nest-list 400 1)) "…"))))))
@@ -149,24 +149,24 @@
     ;; A REPL/editor keys its continuation prompt off E0002; this path used to
     ;; return a plain parse error (with a message that described the wrong
     ;; problem — the form after `.` was given, the close was missing).
-    (let (e (try (read-string "(1 . 2") (catch e e)))
+    (let (e (try (reflect/read-string "(1 . 2") (catch e e)))
       (assert= "E0002" (get e :code)))
     ;; the same as every other unclosed delimiter
-    (assert= "E0002" (get (try (read-string "(1 2") (catch e e)) :code)))
+    (assert= "E0002" (get (try (reflect/read-string "(1 2") (catch e e)) :code)))
 
   (test "a genuinely malformed dotted list is still a hard error"
-    (assert= :error (try (do (read-string "(1 . 2 3)") :ok) (catch e :error))))
+    (assert= :error (try (do (reflect/read-string "(1 . 2 3)") :ok) (catch e :error))))
 
   (test "a lone . inside a vector/map/set literal is an error, not the symbol ."
     ;; `[1 . 2]` used to read as a THREE-element vector whose middle element was
     ;; the symbol `.`, with no diagnostic at all.
-    (assert= :error (try (do (read-string "[1 . 2]") :ok) (catch e :error)))
-    (assert= :error (try (do (read-string "{:a . 1}") :ok) (catch e :error)))
-    (assert= :error (try (do (read-string "#{1 . 2}") :ok) (catch e :error))))
+    (assert= :error (try (do (reflect/read-string "[1 . 2]") :ok) (catch e :error)))
+    (assert= :error (try (do (reflect/read-string "{:a . 1}") :ok) (catch e :error)))
+    (assert= :error (try (do (reflect/read-string "#{1 . 2}") :ok) (catch e :error))))
 
   (test "the symbol . itself is still writable, bar-quoted"
-    (assert= (symbol ".") (read-string "|.|"))
-    (assert= (symbol ".") (read-string (pr-str (symbol "."))))))
+    (assert= (symbol ".") (reflect/read-string "|.|"))
+    (assert= (symbol ".") (reflect/read-string (pr-str (symbol "."))))))
 
 ;; Worker fns for the cross-process block below. Distinct `sr-` names so the
 ;; isolated group's private globals copy can't collide with anything else.
@@ -194,7 +194,7 @@
     (let (all (sr-collect 0 20 '()))
       (assert= 20 (count all))
       (is (every? (fn (s) (contains? s 'a)) all))
-      (is (every? (fn (s) (= s (read-string (pr-str s)))) all)))))
+      (is (every? (fn (s) (= s (reflect/read-string (pr-str s)))) all)))))
 
 (describe "an improper argument list is reported like every other call-shape error"
   (test "it carries a source position and a hint"

@@ -47,7 +47,7 @@ fn driver(module: &str, input: &str, expr: &str) -> String {
     format!(
         "(def *load-path* (cons {support:?} *load-path*)) \
          (require-one '{module}) \
-         (let (f (read-all (file/slurp {input_path:?}))) {expr})",
+         (let (f (reflect/read-all (file/slurp {input_path:?}))) {expr})",
         support = support.to_str().expect("utf-8 path"),
         input_path = input_path.to_str().expect("utf-8 path"),
     )

@@ -4,7 +4,7 @@
 ;;; `(/ 6 3)` → `2`). Ratios are their own numeric type — `type-of` is `:ratio`,
 ;;; `number?` true, they do the full arithmetic tower with int/decimal/float
 ;;; contagion, order with `<`/`sort`, and are `=` by value (reduced). A ratio whose
-;;; math/denominator reduces to 1 is demoted to an integer (`2/1` IS `2`), so the question
+;;; denominator reduces to 1 is demoted to an integer (`2/1` IS `2`), so the question
 ;;; "is a ratio `=` to an equal integer?" never arises — an integral ratio is an int.
 
 (defmodule ratio-test (:use test) (:use seq))
@@ -14,12 +14,12 @@
     (assert= (->string 1/2) "1/2")
     (assert= (pr-str 1/2) "1/2")
     (is (ratio? 1/2))
-    (is (= 1/2 (read-string "1/2"))))
-  (test "literals reduce, carry a positive math/denominator, and demote when integral"
+    (is (= 1/2 (reflect/read-string "1/2"))))
+  (test "literals reduce, carry a positive denominator, and demote when integral"
     (assert= 2/4 1/2)
     (assert= 6/4 3/2)
-    (assert= (/ 1 -2) -1/2) ; sign normalized onto the math/numerator
-    (assert= 4/2 2) ; math/denominator 1 → an integer
+    (assert= (/ 1 -2) -1/2) ; sign normalized onto the numerator
+    (assert= 4/2 2) ; denominator 1 → an integer
     (is (int? 4/2))
     (is (ratio? 1/2)))
   (test "type-of and number?"
@@ -36,7 +36,7 @@
     (assert= (type-of (/ 6 3)) :int)
     (assert= (/ 100 3) 100/3)
     (assert= (/ 3 6) 1/2))
-  (test "a zero math/denominator still raises"
+  (test "a zero denominator still raises"
     (let (e (try (/ 1 0) (catch e (get e :code))))
       (assert= e "E0040"))))
 
@@ -69,7 +69,7 @@
   (test "= is by value; two reduced-equal ratios are equal and hash together"
     (is (= 1/2 2/4))
     (is (= (frequencies (list 1/2 2/4 1/2)) {1/2 3})))
-  (test "math/numerator / math/denominator"
+  (test "math/numerator / denominator"
     (assert= (math/numerator 3/4) 3)
     (assert= (math/denominator 3/4) 4)
     (assert= (math/numerator 5) 5)
@@ -78,7 +78,7 @@
     (assert= (->float 1/2) 0.5)
     (assert= (->float 3/4) 0.75)
     (assert= (decimal/number-> 1/2) 0.5M)
-    (assert= (rational 3 6) 1/2)))
+    (assert= (math/rational 3 6) 1/2)))
 
 ;; ---- across processes -------------------------------------------------------
 ;; A ratio is a heap leaf, so it deep-copies (re-parsed from its `num/den` string)

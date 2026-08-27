@@ -13,19 +13,19 @@
 (defmodule jit-throw-catch-test
   (:use test))
 
-;; div-by-zero in a hot non-recursive arm. Over i=N..1, (rem i 5)=0 floor(N/5) times.
-(defn risky (x) (quot 100 x))
+;; div-by-zero in a hot non-recursive arm. Over i=N..1, (math/rem i 5)=0 floor(N/5) times.
+(defn risky (x) (math/quot 100 x))
 (defn hammer (i caught)
   (if (= i 0)
     caught
-    (hammer (- i 1) (+ caught (try (do (risky (rem i 5)) 0) (catch e 1))))))
+    (hammer (- i 1) (+ caught (try (do (risky (math/rem i 5)) 0) (catch e 1))))))
 
 ;; explicit (error ...) in a hot non-recursive arm.
 (defn checked (x) (if (< x 0) (error "negative") (* x 2)))
 (defn hammer2 (i caught)
   (if (= i 0)
     caught
-    (hammer2 (- i 1) (+ caught (try (do (checked (- (rem i 3) 1)) 0) (catch e 1))))))
+    (hammer2 (- i 1) (+ caught (try (do (checked (- (math/rem i 3) 1)) 0) (catch e 1))))))
 
 ;; a throw deep inside warmed NON-TAIL recursion, caught at the top — the arm gets
 ;; self-inlined, and the thrown error must unwind without reading a freed const.
@@ -43,7 +43,7 @@
   ; multiples of 5 in 1..4000
   (test "div-by-zero in a hot arm is caught every time, runtime survives"
     (assert= (hammer 4000 0) 800))
-  ; (rem i 3)-1 < 0 ⇔ rem=0 ⇔ 1000 of 3000
+  ; (math/rem i 3)-1 < 0 ⇔ rem=0 ⇔ 1000 of 3000
   (test "explicit (error) in a hot arm is caught"
     (assert= (hammer2 3000 0) 1000))
   (test "throw from JIT-inlined non-tail recursion unwinds cleanly (was a UAF abort)"
@@ -57,7 +57,7 @@
 ;; (past the 32768 cap the arm switches to the boxed path and must still catch).
 (check-allow :non-tail-recursion
   (defn descend-throw (d i)
-    (if (= d 0) (throw (rem i 100)) (+ 1 (descend-throw (- d 1) i)))))
+    (if (= d 0) (throw (math/rem i 100)) (+ 1 (descend-throw (- d 1) i)))))
 (defn hammer4 (i acc)
   (if (= i 0)
     acc
@@ -79,7 +79,7 @@
 
 (describe "throw from the unboxed register worker (i64/f64 recursion)"
   :serial (test "int payload survives the native unwind, every iteration"
-    ;; sum of (rem i 100) for i=1..2000 = 20 * (0+1+...+99) = 99000
+    ;; sum of (math/rem i 100) for i=1..2000 = 20 * (0+1+...+99) = 99000
     (assert= (hammer4 2000 0) 99000))
   ; 100 × (1.5*2.0)
   (test "float worker boxes its thrown payload"

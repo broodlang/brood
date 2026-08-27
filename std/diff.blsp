@@ -48,7 +48,7 @@
           pj-1 (nth prev (- j 1))
           pj (nth prev j)
           cj-1 (first acc)
-          val (if (= ai bj) (+ pj-1 1) (max cj-1 pj)))
+          val (if (= ai bj) (+ pj-1 1) (math/max cj-1 pj)))
       (diff-build-row ai b n prev (+ j 1) (cons val acc)))))
 
 ;; ---- backtracking -----------------------------------------------------------
@@ -96,7 +96,9 @@
 
 (defn lines (a b)
   "Diff two strings line-by-line. `a` and `b` are split on `\\n` first.
-Returns a list of `[:keep line]`, `[:delete line]`, `[:insert line]` ops."
+Returns a list of `[:keep line]`, `[:delete line]`, `[:insert line]` ops.
+
+    (count (diff/lines \"a\nb\" \"a\nc\"))   → 3"
   (seq (string/split a "\n") (string/split b "\n")))
 
 ;; ---- utilities --------------------------------------------------------------

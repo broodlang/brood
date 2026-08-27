@@ -99,7 +99,7 @@ port. The oracle is upstream's own expected output in
 
 (defn- mazefun-next-random
   (current)
-  (rem (+ (* current 3581) 12751) 131072))
+  (math/rem (+ (* current 3581) 12751) 131072))
 
 ;; Non-tail (the `cons` wraps the recursion), matching upstream's `shuffle-aux`.
 (check-allow :non-tail-recursion
@@ -108,7 +108,7 @@ port. The oracle is upstream's own expected output in
     (if (nil? lst)
       nil
       (let (next (mazefun-next-random current)
-            i (rem next (count lst)))
+            i (math/rem next (count lst)))
         (cons (nth lst i)
           (mazefun-shuffle-acc (mazefun-list-remove-pos lst i) next))))))
 

@@ -17,7 +17,7 @@
 ;;    Encoding accepts those plus string keys (emitted as-is) and lists (as arrays).
 ;;  - **`\uXXXX` with no codepoint primitive:** pure Brood can't build a character
 ;;    from an integer — but the *reader* decodes `\u{H..H}` escapes, so we synthesize
-;;    the one-char Brood source `"\u{H..H}"` and `read-string` it. That makes the
+;;    the one-char Brood source `"\u{H..H}"` and `reflect/read-string` it. That makes the
 ;;    whole library Rust-free (the reader is the codepoint→char mechanism), including
 ;;    `\b`/`\f` and astral surrogate pairs.
 ;;  - Pure, opt-in (`require`), never in the prelude.
@@ -38,7 +38,7 @@ parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
 ;; ---- codepoint → char, via the reader (the one tricky bit) ------------------
 ;;
 ;; Pure Brood has no integer→char primitive, but the scanner decodes `\u{H..H}`
-;; string escapes — so `(read-string "\"\\u{41}\"")` reads the Brood string "A".
+;; string escapes — so `(reflect/read-string "\"\\u{41}\"")` reads the Brood string "A".
 ;; We build that source and read it. Used for `\uXXXX`, `\b`, `\f`.
 
 (def- json-hex-digits "0123456789abcdef")
@@ -47,7 +47,7 @@ parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
   (n acc)
   (if (= n 0)
     acc
-    (int->hex-acc (quot n 16) (str (string/char-at json-hex-digits (rem n 16)) acc))))
+    (int->hex-acc (math/quot n 16) (str (string/char-at json-hex-digits (math/rem n 16)) acc))))
 
 (defn- int->hex
   (n)
@@ -58,7 +58,7 @@ parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
   (cp)
   "The one-character string for Unicode code point `cp`, via a `\\u{…}` reader
 escape (the codepoint→char mechanism pure Brood otherwise lacks)."
-  (read-string (str "\"\\u{" (int->hex cp) "}\"")))
+  (reflect/read-string (str "\"\\u{" (int->hex cp) "}\"")))
 
 ;; ---- parse ------------------------------------------------------------------
 ;;
@@ -381,8 +381,8 @@ on malformed input or trailing content. Pure.
   (cp)
   "The `\\u00XX` escape for a control code point `cp` (< 0x20)."
   (str "\\u00"
-    (string/char-at json-hex-digits (quot cp 16))
-    (string/char-at json-hex-digits (rem cp 16))))
+    (string/char-at json-hex-digits (math/quot cp 16))
+    (string/char-at json-hex-digits (math/rem cp 16))))
 
 ;; `[raw escape]` for every control char the named escapes below don't cover —
 ;; strict JSON forbids any raw char < U+0020 in a string, named escape or not.
@@ -453,13 +453,13 @@ the named escapes + every C0 control) that would each find nothing."
       (emit (first xs) (if first? acc (cons "," acc)))
       false)))
 
-;; ---- JsonEncode: the extension seam for values JSON has no rule for ----------
+;; ---- json/encodable: the extension seam for values JSON has no rule for ----------
 ;;
 ;; The built-in rules below are CLOSED — the JSON data model is fixed, so nil/bool/
 ;; number/string/keyword/symbol/map/vector/list stay a plain `cond` (no dispatch cost
 ;; on the hot path). What is open is everything *else*: a `defrecord` that wants a wire
 ;; shape other than its fields, and the kinds `emit` can only `error` on today (a
-;; pid, a fn, a datetime record, a queue). `JsonEncode` is that seam — Brood's
+;; pid, a fn, a datetime record, a queue). `json/encodable` is that seam — Brood's
 ;; `Jason.Encoder`: one op returning a value the built-in rules DO cover, which
 ;; `emit` then encodes normally.
 ;;
@@ -467,7 +467,7 @@ the named escapes + every C0 control) that would each find nothing."
 ;; "encodable" and turn the loud error into an infinite recursion (a pid's default would
 ;; hand back the pid). With no `:default`, `custom` returning nil means exactly
 ;; "no rule for this identity", which is the question both call sites below ask.
-(defability JsonEncode
+(defability json/encodable
   "How a value converts to a JSON-encodable Brood value (nil / bool / number / string /
   keyword / map / vector / list). The seam `encode` consults for a record with a
   custom wire shape, and for any kind JSON has no built-in rule for."
@@ -475,13 +475,13 @@ the named escapes + every C0 control) that would each find nothing."
 
 (defn- custom
   (v)
-  "`v`'s own `JsonEncode/->json` impl, or nil when its identity has none. `JsonEncode`
+  "`v`'s own `json/encodable/->json` impl, or nil when its identity has none. `json/encodable`
 registers no `:default`, so nil here means \"no rule\" rather than \"the fallback\"."
-  (%impl-for '[JsonEncode ->json] (%identity-of v)))
+  (%impl-for '[json/encodable ->json] (%identity-of v)))
 
 (defn- emit-record
   (v acc)
-  "Emit record `v`. A custom `JsonEncode` impl decides the wire shape; otherwise the
+  "Emit record `v`. A custom `json/encodable` impl decides the wire shape; otherwise the
 default is its FIELDS — the internal `:__id__` identity must never reach the wire."
   (let (custom (custom v))
     (if custom
@@ -500,7 +500,7 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
     ;; which JSON has no syntax for either. All four used to be emitted verbatim,
     ;; producing output no parser on earth can read back — a silently corrupt
     ;; document rather than a loud failure. Ints and finite floats only; the rest
-    ;; fall through to the `else` branch's "give its type a JsonEncode impl" error,
+    ;; fall through to the `else` branch's "give its type a json/encodable impl" error,
     ;; which is the documented escape hatch (encode a decimal as a string, say).
     (int? v) (cons (str v) acc)
     (float? v)
@@ -524,15 +524,15 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
             v
             " (a "
             (type-of v)
-            ") — give its type a JsonEncode impl to encode it")))))
+            ") — give its type a json/encodable impl to encode it")))))
 
 (defn encode (v)
   "Encode Brood value `v` as JSON text: nil → null, true/false → bool, a number → a
 number, a string → a quoted string, a keyword/symbol → a string of its name, a map →
 an object (keyword keys become string keys), a vector or list → an array. A `defrecord`
 value encodes as its **fields** (its internal id never reaches the wire) unless its type
-has a `JsonEncode` impl, which then decides the wire shape. Any other kind (a pid, a fn)
-errors unless it has a `JsonEncode` impl. Pure.
+has a `json/encodable` impl, which then decides the wire shape. Any other kind (a pid, a fn)
+errors unless it has a `json/encodable` impl. Pure.
 
     (json/encode [1 2])   → \"[1,2]\""
   (apply str (reverse (emit v nil))))

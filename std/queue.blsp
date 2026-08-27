@@ -59,15 +59,15 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
   (if (empty? q)
     :empty (first (get q :front))))
 
-;; The queue joins the collection protocol (ADR-172 §7): `Seqable` gives it the generic
-;; `seq`/`count`/`map`/`filter`/`fold`/`for` and `into`-from-a-queue; `Conjable` gives it
+;; The queue joins the collection protocol (ADR-172 §7): `seqable` gives it the generic
+;; `seq`/`count`/`map`/`filter`/`fold`/`for` and `into`-from-a-queue; `conjable` gives it
 ;; `conj` and `into`-into-a-queue. So a queue is a first-class collection — the helpers
 ;; below are thin aliases over the protocol, not a parallel API.
-(impl Seqable
+(impl seqable
   queue/queue
   (->seq [q]
     (if (= (get q :size) 0) nil (append (get q :front) (reverse (get q :back))))))
-(impl Conjable queue/queue (-conj [q v] (push q v)))
+(impl conjable queue/queue (conj-onto [q v] (push q v)))
 
 (defn list-> (xs)
   "Build a queue from a list or vector, front → back — i.e. `(into (queue/empty) xs)`.
@@ -75,15 +75,15 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
     (seq (queue/list-> [1 2 3]))   → (1 2 3)"
   (into (empty) xs))
 
-;; A queue shows its shape, not its two-list representation: `Display` is the O(1) summary
-;; (size + the element that pops next), `Inspect` the full FIFO contents.
-(impl Display
+;; A queue shows its shape, not its two-list representation: `display` is the O(1) summary
+;; (size + the element that pops next), `inspectable` the full FIFO contents.
+(impl display
   queue/queue
   (->string [q]
     (if (empty? q)
       "#<queue empty>"
       (str "#<queue " (get q :size) " front=" (->string (peek q)) ">"))))
 
-(impl Inspect
+(impl inspectable
   queue/queue
   (inspect [q] (str "#<queue " (pr-str (seq q)) ">")))

@@ -113,7 +113,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
         put(n, Sig::variadic(num_or_record.clone(), Ty::of(Tag::Bool)));
     }
     // `mod` is Brood (over `rem`), but its types are fixed
-    put("mod", Sig::new(vec![int, int], int));
+    put("math/mod", Sig::new(vec![int, int], int));
     // Common helpers the checker can't infer (branchy / nested-param bodies),
     // hand-vetted against std/prelude.blsp — same soundness basis as the rest of
     // this table. Conservative on the domain (widest type the body accepts) so a
@@ -144,6 +144,25 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     put("math/abs", Sig::new(vec![num], num));
     put("not", Sig::new(vec![any], bool_ty));
     put("math/zero?", Sig::new(vec![any], bool_ty));
+    put("math/nan?", Sig::new(vec![any], bool_ty));
+    put("math/infinite?", Sig::new(vec![any], bool_ty));
+    // `min`/`max`/`rem`/`quot`/`mod`/`->fixed`/`floor` moved to `math` on 2026-08-27, and
+    // their kernel halves took the `%` prefix (`%max`, `%rem`, …) so the PRELUDE can do
+    // arithmetic without loading a module. The registered Sig therefore sits on the `%`
+    // name, which user code never writes — these entries put it back on the name that IS
+    // written, so `(math/min "a" 2)` is still flagged.
+    put("math/max", Sig::variadic(num, num));
+    put("math/min", Sig::variadic(num, num));
+    put("math/rem", Sig::new(vec![int, int], int));
+    put("math/quot", Sig::new(vec![int, int], int));
+    put("math/floor", Sig::new(vec![num], int));
+    put("math/->fixed", Sig::new(vec![num, int], str_ty));
+    put("math/numerator", Sig::new(vec![num], int));
+    put("math/denominator", Sig::new(vec![num], int));
+    put("math/rational", Sig::new(vec![num, num], num));
+    put("reflect/read-string", Sig::new(vec![str_ty], any));
+    put("reflect/read-all", Sig::new(vec![str_ty], any));
+    put("reflect/read-first", Sig::new(vec![str_ty], any));
     put("count", Sig::new(vec![countable], int));
     // NO `length` entry: there is no `length` function, and there never was. It was added
     // 2026-05-31 alongside `count` as if it were an alias ("each vetted against

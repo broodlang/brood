@@ -52,7 +52,7 @@ mod sequence {
     fn sort(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(count (sort (map (fn (x) (rem (* x 7919) {n})) (range {n}))))"),
+            format!("(count (sort (map (fn (x) (math/rem (* x 7919) {n})) (range {n}))))"),
         );
     }
 
@@ -118,7 +118,7 @@ mod maps {
     fn frequencies(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(do (count (seq/frequencies (map (fn (x) (rem x 7)) (range {n})))))"),
+            format!("(do (count (seq/frequencies (map (fn (x) (math/rem x 7)) (range {n})))))"),
         );
     }
 

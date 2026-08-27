@@ -17,8 +17,8 @@
   (:use test)
   (:use version))
 
-(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
-(defn pick (s lo hi) (+ lo (rem s (+ 1 (- hi lo))))) ; s → int in [lo, hi]
+(defn lcg (s) (math/rem (+ (* s 1103515245) 12345) 2147483648))
+(defn pick (s lo hi) (+ lo (math/rem s (+ 1 (- hi lo))))) ; s → int in [lo, hi]
 ;; --- the independent reference (int tuples only, no strings) -------------------------
 (defn ref-cmp (x y)
   ;; element-wise compare [a b c] vs [d e f] → -1 / 0 / 1
@@ -65,14 +65,14 @@
 (defn render-term (s op t)
   ;; version.blsp accepts optional whitespace, and a bare version means `=`; exercise
   ;; both. Returns the constraint-term string for `op`/`t`.
-  (let (sp (if (= (rem s 2) 0) " " ""))
+  (let (sp (if (= (math/rem s 2) 0) " " ""))
     (cond
-      (and (= op "=") (= (rem s 3) 0)) (tuple->str t) ; bare "1.2.3" = exact
+      (and (= op "=") (= (math/rem s 3) 0)) (tuple->str t) ; bare "1.2.3" = exact
       else (str op sp (tuple->str t)))))
 
 (defn gen-term (s)
   ;; → [op bound-tuple render-string]
-  (let (op (nth *ops* (rem s (count *ops*)))
+  (let (op (nth *ops* (math/rem s (count *ops*)))
         t (gen-tuple (lcg s))
         r (render-term (lcg (lcg s)) op t))
     [op t r]))
@@ -81,7 +81,7 @@
 (defn oracle-ok? (s)
   (let (v (gen-tuple s)
         vs (tuple->str v)
-        two (= (rem (lcg s) 2) 0)
+        two (= (math/rem (lcg s) 2) 0)
         t1 (gen-term (lcg (lcg s)))
         t2 (gen-term (lcg (lcg (lcg s))))
         terms (if two [t1 t2] [t1])
@@ -109,7 +109,7 @@
 ;; --- compare ordering laws (include pre-releases; no reference needed) --------
 (defn gen-ver-str (s)
   (let (core (tuple->str (gen-tuple s)))
-    (if (= (rem (lcg s) 3) 0) (str core "-rc." (pick (lcg (lcg s)) 0 3)) core)))
+    (if (= (math/rem (lcg s) 3) 0) (str core "-rc." (pick (lcg (lcg s)) 0 3)) core)))
 
 (defn cmp-laws-ok? (a b c)
   (and (= (compare a a) 0)

@@ -144,7 +144,7 @@ pub(super) fn is_decimal(v: Value) -> bool {
 }
 
 /// True iff `v` is an exact `Ratio` (its own type — not an integer, since a
-/// math/denominator of 1 is demoted to `Int` on construction).
+/// denominator of 1 is demoted to `Int` on construction).
 pub(super) fn is_ratio(v: Value) -> bool {
     matches!(v, Value::Ratio(_))
 }
@@ -209,8 +209,8 @@ fn to_bigrational(
     unreachable!("to_bigrational on a non-rationalizable value")
 }
 
-/// Is this `BigRational` zero? (Its math/numerator is zero.) The exact-division
-/// math/denominator check.
+/// Is this `BigRational` zero? (Its numerator is zero.) The exact-division
+/// denominator check.
 fn ratio_is_zero(r: &num_rational::BigRational) -> bool {
     use num_traits::Zero;
     r.is_zero()
@@ -281,7 +281,7 @@ pub(super) fn num_bin(
         }
         // A ratio operand, and the other is rationalizable-exact (Int/BigInt/Ratio/
         // Decimal): compute exactly in `BigRational` and return a reduced `Ratio`
-        // (demoted to `Int` when the math/denominator reduces to 1). A `Decimal` operand
+        // (demoted to `Int` when the denominator reduces to 1). A `Decimal` operand
         // promotes losslessly (so `(+ 1/2 0.5M)` is `1/1`). Checked before the decimal
         // arm so a ratio wins over a decimal; a `Float` operand falls to contagion.
         _ if (is_ratio(a) || is_ratio(b)) && is_rationalizable(a) && is_rationalizable(b) => {
@@ -454,7 +454,7 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     // `(/ 1 2)` → `1/2` (a reduced Ratio) rather than a float. Likewise any division
     // involving a `Ratio` (with the other operand rationalizable — Int/BigInt/Ratio/
     // Decimal, a Decimal promoting losslessly) is exact. `alloc_ratio` demotes a
-    // math/denominator of 1 back to an integer. Reach for `->float` for an inexact result.
+    // denominator of 1 back to an integer. Reach for `->float` for an inexact result.
     if (is_integer(a) && is_integer(b))
         || ((is_ratio(a) || is_ratio(b)) && is_rationalizable(a) && is_rationalizable(b))
     {
@@ -485,8 +485,8 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(Value::Float(num_to_f64(heap, "/", a)? / bf))
 }
 
-/// `(math/numerator x)` — the math/numerator of a ratio, or an integer itself (its
-/// math/numerator over 1). Errors on a non-rational number.
+/// `(math/numerator x)` — the numerator of a ratio, or an integer itself (its
+/// numerator over 1). Errors on a non-rational number.
 pub(super) fn prim_numerator(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let x = arg(args, 0);
     match x {
@@ -504,7 +504,7 @@ pub(super) fn prim_numerator(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
     }
 }
 
-/// `(math/denominator x)` — the (positive) math/denominator of a ratio, or `1` for an integer.
+/// `(math/denominator x)` — the (positive) denominator of a ratio, or `1` for an integer.
 pub(super) fn prim_denominator(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let x = arg(args, 0);
     match x {
@@ -697,7 +697,7 @@ pub(super) fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             Some(r) => Ok(Value::int(r)),
             None if y == 0 => Err(LispError::runtime("rem: division by zero")
                 .with_code(crate::error::error_codes::DIV_BY_ZERO)
-                .with_hint("guard the denominator: (when (not= y 0) (rem x y))")),
+                .with_hint("guard the denominator: (when (not= y 0) (math/rem x y))")),
             None => Ok(Value::int(0)), // i64::MIN % -1
         };
     }
@@ -705,7 +705,7 @@ pub(super) fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     if num_traits::Zero::is_zero(&y) {
         return Err(LispError::runtime("rem: division by zero")
             .with_code(crate::error::error_codes::DIV_BY_ZERO)
-            .with_hint("guard the denominator: (when (not= y 0) (rem x y))"));
+            .with_hint("guard the denominator: (when (not= y 0) (math/rem x y))"));
     }
     // `BigInt::%` truncates toward zero (matches i64 `%`), so the remainder has
     // the dividend's sign — the non-Euclidean `rem` the prelude `mod` builds on.
@@ -714,7 +714,7 @@ pub(super) fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 
 /// `(%quot a b)` — truncating integer division toward zero, the kernel `quot`
 /// passes through to. `checked_div` truncates toward zero (matching the old
-/// `(/ (- a (rem a b)) b)` integer result) and guards both `b == 0` and the lone
+/// `(/ (- a (math/rem a b)) b)` integer result) and guards both `b == 0` and the lone
 /// `i64::MIN / -1` overflow; that overflow promotes to BigInt.
 pub(super) fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "quot")?;
@@ -724,7 +724,7 @@ pub(super) fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             None if y == 0 => {
                 return Err(LispError::runtime("quot: division by zero")
                     .with_code(crate::error::error_codes::DIV_BY_ZERO)
-                    .with_hint("guard the denominator: (when (not= y 0) (quot x y))"))
+                    .with_hint("guard the denominator: (when (not= y 0) (math/quot x y))"))
             }
             None => {} // i64::MIN / -1 — promote and fall through
         }
@@ -733,7 +733,7 @@ pub(super) fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     if num_traits::Zero::is_zero(&y) {
         return Err(LispError::runtime("quot: division by zero")
             .with_code(crate::error::error_codes::DIV_BY_ZERO)
-            .with_hint("guard the denominator: (when (not= y 0) (quot x y))"));
+            .with_hint("guard the denominator: (when (not= y 0) (math/quot x y))"));
     }
     // `BigInt::/` truncates toward zero, matching i64 `checked_div`.
     Ok(heap.int_from_bigint(x / y))
@@ -904,7 +904,7 @@ pub(super) fn shift_amount(n: i64, who: &str) -> Result<usize, LispError> {
     const MAX_SHIFT: i64 = 1 << 27;
     if n > MAX_SHIFT {
         return Err(LispError::runtime(format!(
-            "{}: shift amount {} too large (max {})",
+            "{}: shift amount {} too large (math/max {})",
             who, n, MAX_SHIFT
         )));
     }

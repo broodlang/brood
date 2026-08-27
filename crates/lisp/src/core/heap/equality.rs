@@ -323,7 +323,7 @@ impl Heap {
             }
             ValueRef::Ratio(id) => {
                 // Distinct fresh tag byte (23). A `BigRational` is always reduced with
-                // a positive math/denominator, so its `num/den` string is canonical — equal
+                // a positive denominator, so its `num/den` string is canonical — equal
                 // ratios hash the same, and a ratio never collides with an int/decimal
                 // (each carries its own tag byte and a ratio is never integer-valued).
                 23u8.hash(h);
@@ -597,7 +597,7 @@ impl Heap {
                 self.decimal(x).normalized() == self.decimal(y).normalized()
             }
             // Two ratios are equal iff numerically equal — both are reduced with a
-            // positive math/denominator, so `==` is exact. A ratio is its own type (and is
+            // positive denominator, so `==` is exact. A ratio is its own type (and is
             // never integer-valued), so a Ratio vs anything else is `_ => false`.
             (Ratio(x), Ratio(y)) => self.ratio(x) == self.ratio(y),
             (Bytes(x), Bytes(y)) => self.bytes(x).as_bytes() == self.bytes(y).as_bytes(),

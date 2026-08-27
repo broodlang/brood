@@ -61,7 +61,7 @@ fn arithmetic() {
     // `/` on integers is exact (ADR-196): a ratio unless it divides evenly.
     assert_eq!(run("(/ 7 2)"), "7/2");
     assert_eq!(run("(->float (/ 7 2))"), "3.5");
-    assert_eq!(run("(mod 7 3)"), "1");
+    assert_eq!(run("(math/mod 7 3)"), "1");
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn maps_structural_keys_and_equality() {
 fn maps_round_trip_through_reader() {
     // pr-str's readable form reads + evals back to an equal map.
     let src = "(def m {:a 1 :b [2 3] :c \"x\" :d {:nested true}}) \
-               (= m (eval (read-string (pr-str m))))";
+               (= m (eval (reflect/read-string (pr-str m))))";
     assert_eq!(run(src), "true");
 }
 
@@ -205,7 +205,7 @@ fn higher_order() {
 fn prelude_helpers() {
     assert_eq!(run("(inc 41)"), "42");
     assert_eq!(run("(math/sum (list 1 2 3 4))"), "10");
-    assert_eq!(run("(max 3 7)"), "7");
+    assert_eq!(run("(math/max 3 7)"), "7");
     assert_eq!(run("(math/abs -9)"), "9");
 }
 
@@ -225,7 +225,7 @@ fn string_kernel() {
     assert_eq!(run("(string/upper \"ß\")"), "\"SS\""); // Unicode case folding
     assert_eq!(run("(string/->number \"42\")"), "42");
     assert_eq!(run("(string/->number \"3.5\")"), "3.5");
-    assert_eq!(run("(string/->number \"3abc\")"), "nil"); // strict parse, not read-string
+    assert_eq!(run("(string/->number \"3abc\")"), "nil"); // strict parse, not reflect/read-string
     assert_eq!(run("(string/->number \"\")"), "nil");
 }
 
@@ -343,10 +343,10 @@ fn unchanged_redefinition_is_deduped() {
     assert_eq!(interp.print(v), "12");
 }
 
-/// `eval` + `read-string` let the language run code it builds at runtime.
+/// `eval` + `reflect/read-string` let the language run code it builds at runtime.
 #[test]
 fn eval_and_read_string() {
-    assert_eq!(run("(eval (read-string \"(+ 40 2)\"))"), "42");
+    assert_eq!(run("(eval (reflect/read-string \"(+ 40 2)\"))"), "42");
 }
 
 #[test]
@@ -961,7 +961,7 @@ fn hints_name_only_features_that_exist() {
     assert!(l.contains("lmap") && l.contains("lfilter"), "{l}");
     // The reader owns every `#X` spelling (so the `#` arm above is a backstop). Its
     // `#_` hint predated `comment` and offered only `;`.
-    let d = run("(try (read-string \"(x #_1)\") (catch e (get e :hint)))");
+    let d = run("(try (reflect/read-string \"(x #_1)\") (catch e (get e :hint)))");
     assert!(d.contains("comment"), "{d}");
     // ADR-154 removals carry their replacement.
     assert!(hint("(car (list 1))").contains("first"));
@@ -1238,9 +1238,12 @@ fn integer_overflow_does_not_panic() {
     // The `i64::MIN op -1` edge cases no longer overflow-error: rem/mod are
     // mathematically 0, and quot promotes to the bignum `9223372036854775808`
     // (ADR bignums — integer arithmetic auto-promotes rather than trapping).
-    assert_eq!(run("(mod -9223372036854775808 -1)"), "0");
-    assert_eq!(run("(rem -9223372036854775808 -1)"), "0");
-    assert_eq!(run("(quot -9223372036854775808 -1)"), "9223372036854775808");
+    assert_eq!(run("(math/mod -9223372036854775808 -1)"), "0");
+    assert_eq!(run("(math/rem -9223372036854775808 -1)"), "0");
+    assert_eq!(
+        run("(math/quot -9223372036854775808 -1)"),
+        "9223372036854775808"
+    );
     // `i64::MIN / -1` used to overflow the i64 fast path and fall through to the float
     // path, giving an imprecise `Float`. Exact division (ADR-196) makes it the exact
     // bignum 2^63 instead — the quotient divides evenly, so it is an integer, not a
@@ -1249,8 +1252,8 @@ fn integer_overflow_does_not_panic() {
     // Ordinary integer division/modulo unaffected.
     assert_eq!(run("(/ 12 3)"), "4");
     assert_eq!(run("(/ 7 2)"), "7/2");
-    assert_eq!(run("(mod -7 3)"), "2");
-    assert_eq!(run("(rem -7 3)"), "-1");
+    assert_eq!(run("(math/mod -7 3)"), "2");
+    assert_eq!(run("(math/rem -7 3)"), "-1");
 }
 
 /// `bit/count` (population count) over the two's-complement bit pattern.
@@ -1322,15 +1325,21 @@ fn equal_on_long_lists_does_not_overflow() {
 fn dotted_pairs_round_trip() {
     assert_eq!(run(r#"(pr-str (cons 1 2))"#), r#""(1 . 2)""#);
     assert_eq!(run(r#"(pr-str (cons 1 (cons 2 3)))"#), r#""(1 2 . 3)""#);
-    assert_eq!(run(r#"(first (read-string "(1 2 . 3)"))"#), "1");
-    assert_eq!(run(r#"(rest (read-string "(1 . 2)"))"#), "2");
-    assert_eq!(run(r#"(read-string "(1 2 3)")"#), "(1 2 3)"); // proper list unaffected
+    assert_eq!(run(r#"(first (reflect/read-string "(1 2 . 3)"))"#), "1");
+    assert_eq!(run(r#"(rest (reflect/read-string "(1 . 2)"))"#), "2");
+    assert_eq!(run(r#"(reflect/read-string "(1 2 3)")"#), "(1 2 3)"); // proper list unaffected
     assert_eq!(run("(first (list .5 6))"), "0.5"); // `.5` is a float, not a separator
 
     let mut interp = Interp::new();
-    assert!(interp.eval_str(r#"(read-string "( . 3)")"#).is_err());
-    assert!(interp.eval_str(r#"(read-string "(1 . )")"#).is_err());
-    assert!(interp.eval_str(r#"(read-string "(1 . 2 3)")"#).is_err());
+    assert!(interp
+        .eval_str(r#"(reflect/read-string "( . 3)")"#)
+        .is_err());
+    assert!(interp
+        .eval_str(r#"(reflect/read-string "(1 . )")"#)
+        .is_err());
+    assert!(interp
+        .eval_str(r#"(reflect/read-string "(1 . 2 3)")"#)
+        .is_err());
 }
 
 /// Dynamic variables (`defdyn`/`binding`): default, dynamic shadowing through a
@@ -1637,7 +1646,7 @@ fn bignum_demotes_when_result_fits() {
     );
     // 2^100 / 2^100 demotes to 1.
     assert_eq!(
-        run("(quot (bit/shift-left 1 100) (bit/shift-left 1 100))"),
+        run("(math/quot (bit/shift-left 1 100) (bit/shift-left 1 100))"),
         "1"
     );
 }
@@ -1695,19 +1704,19 @@ fn bignum_bitwise() {
 
 #[test]
 fn bignum_quot_rem_mod() {
-    // (quot 2^200 2^100) == 2^100.
+    // (math/quot 2^200 2^100) == 2^100.
     assert_eq!(
-        run("(quot (bit/shift-left 1 200) (bit/shift-left 1 100))"),
+        run("(math/quot (bit/shift-left 1 200) (bit/shift-left 1 100))"),
         run("(bit/shift-left 1 100)")
     );
     // rem divides evenly here.
     assert_eq!(
-        run("(rem (bit/shift-left 1 200) (bit/shift-left 1 100))"),
+        run("(math/rem (bit/shift-left 1 200) (bit/shift-left 1 100))"),
         "0"
     );
     // mod composes (prelude) over rem/+/-.
     assert_eq!(
-        run("(mod (+ (bit/shift-left 1 200) 7) (bit/shift-left 1 100))"),
+        run("(math/mod (+ (bit/shift-left 1 200) 7) (bit/shift-left 1 100))"),
         "7"
     );
 }
