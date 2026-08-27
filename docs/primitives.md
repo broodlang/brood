@@ -119,7 +119,7 @@ arg silently becoming `nil`.
 | | `%builtin-module` | 1 | source of a baked-in std module by name, or nil (used by Brood `require`) |
 | | `apply` | ≥2 | call a function with a spliced argument list |
 | | `%run-program-file` | 1 | Run the program file at `path` as its own green process (ADR-135) and block until it finishes; nil, or raises if a top-level form did. |
-| | `reload-defs` | 1 | Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil. |
+| | `system/reload-defs` | 1 | Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil. |
 | | `%offload` | 2 | Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. |
 | **Symbols** | `name` | 1 | a symbol/keyword's spelling as a string (no leading `:`) |
 | | `symbol` | 1 | coerce a string / symbol / keyword to the matching symbol (intern as needed). Lenient inverse of `name`; strict `string/->symbol` is a Brood wrapper |

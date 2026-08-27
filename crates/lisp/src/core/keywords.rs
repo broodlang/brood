@@ -16,7 +16,7 @@
 //! Beyond the special forms and core macros, this module also holds a few
 //! *syntax-significant* head spellings that aren't themselves special forms —
 //! the `%try`/`%eq` primitives the macro pass emits as a contract, and the heads
-//! the advisory checker recognises (`not`/`spawn`/`case`/`module-doc`) so they
+//! the advisory checker recognises (`not`/`spawn`/`case`/`system/module-doc`) so they
 //! aren't mistaken for unbound symbols. They live here so the checker's
 //! recognition lists read uniformly (`kw::*` throughout, no interleaved bare
 //! strings) and a spelling still lives in exactly one place.
@@ -113,14 +113,14 @@ pub const THREAD_LAST: &str = "->>";
 // Heads that aren't special forms but are recognised by syntax-aware passes —
 // chiefly the advisory checker's `is_syntactic_keyword` list, so they read
 // uniformly alongside the special forms above. `not` is a boolean fn (also a
-// guard head, like `%eq`); `spawn` is a primitive; `module-doc` is the
+// guard head, like `%eq`); `spawn` is a primitive; `system/module-doc` is the
 // module-docstring marker form; `case` is the literal-dispatch macro (it was long
 // a deliberately-absent construct routed to a foreign-construct hint — it landed
 // 2026-07-26, and the checker already modelled its flat `test result` shape).
 pub const NOT: &str = "not";
 pub const SPAWN: &str = "spawn";
 pub const CASE: &str = "case";
-pub const MODULE_DOC: &str = "module-doc";
+pub const MODULE_DOC: &str = "system/module-doc";
 pub const COMMENT: &str = "comment";
 
 // Core macros (defined in std/prelude.blsp, *not* evaluator special forms) that

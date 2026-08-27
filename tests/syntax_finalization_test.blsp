@@ -186,8 +186,8 @@
     ;; naming an `encoding` export auto-loads the module, whose load is what
     ;; registers the docstring we then introspect
     (is (fn? encoding/base64-encode))
-    (is (string? (module-doc 'encoding)))
-    (is (> (string/length (module-doc 'encoding)) 100))))
+    (is (string? (system/module-doc 'encoding)))
+    (is (> (string/length (system/module-doc 'encoding)) 100))))
 
 (describe "ADR-152: a nested quasiquote is rejected"
   (test "a ` inside a ` template is an error, not an outer-level expansion"

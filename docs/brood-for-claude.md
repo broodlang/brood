@@ -868,7 +868,7 @@ Writing a live script: just write a normal Brood file. The
 What happens when you save:
 
 - `(defn my-loop …)` re-evaluates — the global rebinds.
-- `(my-loop 0)` is **not** re-run — `reload-defs` skips non-`def*` top-level
+- `(my-loop 0)` is **not** re-run — `system/reload-defs` skips non-`def*` top-level
   forms, so each save doesn't fork a duplicate loop.
 - The running process's next call to `my-loop` late-binds to the new
   closure, picks up your edit on the next iteration (ADR-013).

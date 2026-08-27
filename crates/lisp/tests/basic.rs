@@ -258,7 +258,7 @@ fn live_redefinition() {
 }
 
 /// `defonce` initialises a binding once; re-evaluating the same form — which is
-/// exactly what a hot reload (`reload-defs`/`load`) does on every save — is a
+/// exactly what a hot reload (`system/reload-defs`/`load`) does on every save — is a
 /// no-op, so top-level state and singletons survive the reload instead of being
 /// reset / re-created. (docs/live-editing.md Stage 1.)
 #[test]
@@ -280,7 +280,7 @@ fn defonce_preserves_state_across_reload() {
     assert_eq!(interp.print(v), "false");
 }
 
-/// `reload-defs` re-evaluates definitions but skips side-effecting top-level
+/// `system/reload-defs` re-evaluates definitions but skips side-effecting top-level
 /// calls — even a call whose name starts with "def" (it resolves to a `Fn`, not
 /// a definer macro). (docs/live-editing.md Stage 2.)
 #[test]
@@ -300,7 +300,7 @@ fn reload_defs_applies_definitions_and_skips_calls() {
     std::fs::write(&path, src).unwrap();
     let p = path.to_string_lossy().replace('\\', "\\\\");
     interp
-        .eval_str(&format!("(reload-defs \"{}\")", p))
+        .eval_str(&format!("(system/reload-defs \"{}\")", p))
         .unwrap();
 
     // Definitions applied:

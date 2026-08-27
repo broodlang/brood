@@ -270,7 +270,7 @@
    "%merge-sort-n" :collections
    "min" :math
    "mod" :math
-   "module-doc" :meta
+   "system/module-doc" :meta
    "monitor" :processes
    "name" :strings
    "nan?" :predicates
@@ -341,7 +341,7 @@
    "%register-impl-check-arity" :meta
    "%register-method-derive" :meta
    "%register-method-store" :meta
-   "reload-defs" :meta
+   "system/reload-defs" :meta
    "rem" :math
    "file/rename" :filesystem
    "%repeat-acc" :collections

@@ -2283,7 +2283,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         run_program_file);
     def(
         heap,
-        "reload-defs",
+        "system/reload-defs",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
         &["path"],

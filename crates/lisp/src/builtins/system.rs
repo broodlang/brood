@@ -448,7 +448,7 @@ pub(super) fn tree_sitter_forget(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     Ok(Value::int(crate::treesit::forget(key)))
 }
 
-/// `(reload-defs path)` — like `load`, but only re-evaluates **definitions**
+/// `(system/reload-defs path)` — like `load`, but only re-evaluates **definitions**
 /// (`def`/`defmacro` and `def…`-named macros: `defn`, `defmodule`, `defdyn`,
 /// `defonce`, user definers). All other top-level forms — `(require …)`,
 /// `(load …)`, a `(main-loop 0)` entry call — are silently skipped. Used by the
@@ -467,7 +467,7 @@ pub(super) fn tree_sitter_forget(args: &[Value], _: EnvId, heap: &mut Heap) -> L
 /// deferred (docs/live-editing.md Stage 2). Returns `nil`. ADR-013 hot reload's
 /// mechanism flowing through to the tool layer.
 pub(super) fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "reload-defs", arg(args, 0))?;
+    let path = expect_string(heap, "system/reload-defs", arg(args, 0))?;
     let src = std::fs::read_to_string(&path).map_err(|e| {
         LispError::runtime(format!("reload-defs: cannot read {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
