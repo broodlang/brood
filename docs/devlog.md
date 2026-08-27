@@ -3958,3 +3958,77 @@ position plus the one registration line — the same treatment `register` and `d
 `nest test` hung and the corpus suites looked like a 25× regression. CLAUDE.md warns that a
 stale binary "fails by agreeing with the baseline" — it also fails by disagreeing
 spectacularly. Rebuild both binaries, or check the mtime before believing a timing.
+
+## 2026-08-27 (second session) — the stdlib image, and three measurements that were measuring nothing
+
+Picked up the compile-parity thread the previous session was killed mid-way through (OOM,
+exit 137, in the middle of re-running the suite with the image installed). The question it
+was chasing: Brood is the only compiled benchmark column that recompiles its *libraries*
+every run, and the stdlib image is the fix, but it "cannot be switched on" because
+materialising a module skips its registrations.
+
+**Nobody had measured that.** Three figures were on record — 131 of 4873, 150 of 4920, 170
+of 4888 — and all three are artifacts of the same mistake, one that KI-61's own entry warns
+about two paragraphs above where the numbers are quoted. Installing the image from a
+*program* cannot exercise it: a qualified name auto-requires its module at compile time, so
+the test framework and its dependency tree load the whole library from source before the
+program's first line runs. Instrumented with a trace on the image branch, that configuration
+reports **99 sections installed and materialises exactly zero modules**. I nearly published
+the mirror-image error in the other direction: my first run of the same shape came back
+**4916/4917** and looked like the gap had closed on its own.
+
+The install had to move into the **prelude** — the only place that precedes the first
+`require`. `stdimage/image-path` and `stdimage/install` are now one-line calls into it, so
+there is one definition rather than a boot twin drifting from the shipped one. Measured that
+way: **157 failures of 4917**, in four independent faults, and the one on record was neither
+the largest nor correctly described (ADR-255).
+
+- **112 were a concurrency race**, not a registration gap. The image branch called `provide`
+  before following the module's require-edges, justified by a comment reading the `defmodule`
+  macro expansion. The macro is not the loader: the source path compiles the whole file
+  before evaluating any of it, and every qualified reference auto-requires during that
+  compile — so a source load has all its dependencies, *body* references included, before it
+  provides. Providing first publishes a module whose deps are missing; a racing process
+  called `uuid/v7` and died on `unbound symbol: rand/token`. **Every affected file passed
+  when run alone**, which is why this had never been seen: the suite runs test files
+  concurrently, and single-file reproduction — the first thing you reach for — hides it.
+- **97 were the ability impls** — the recorded gap, and real.
+- **The rest were ability declarations, records, multimethods and module docs**, plus
+  **reserved names** (ADR-166): a std module's functions reserve as its `def`s evaluate, and
+  materialising evaluates none, so `(def path/join …)` was accepted.
+
+**The recorded design's premise was false, and it was the expensive half.** It said
+registrations had to travel as FORMS because "a closure nested in a snapshotted value does
+not round-trip". Ten lines of probe: it round-trips and the impl calls correctly. Forms would
+have needed each defining module's namespace re-established to resolve their bodies' bare
+names. Registrations travel as values, partitioned by the owner tag each registry already
+records (`*impl-from*`, `*ability-owner*`, `*method-from*`, or the qualifier on a record id),
+so attribution is exact rather than inferred from a probe load.
+
+**Result: 4917/4917 with the image installed at boot**, against 4917/4917 without. `json`
+loads 6.5 → 1.7 ms, `http` 12.0 → 3.6 ms, `regex` 4.7 → 1.1 ms, `datetime` 3.2 → 1.0 ms; the
+`json` benchmark row −5.6% end to end.
+
+**A win that was a regression until it was measured from both ends.** The first working
+version made `startup` **20% worse** (20.4 → 24.4 ms) while making module loads faster. The
+install runs at boot on every invocation, and it was eagerly loading three bookkeeping
+sections — **6.8 ms of a 20 ms boot**, 2.9 ms of it merging *every* module's require-edges
+into the live registry under a lock, for modules the program would never load. That is
+precisely the trade `startup` exists to catch, and the module-load benchmark alone would
+have called it a win. The install now reads the index and stashes coordinates (**823 µs**,
+startup at parity); the tables load on the first materialise, and a run that materialises
+nothing never pays.
+
+Kept opt-in (`BROOD_STDIMAGE=1`). Flipping the default changes every program's load path,
+and one green suite run is not this repo's bar for that.
+
+**Also fixed:** `primitives_do_not_borrow_a_non_module_slash_namespace` was red on `main`
+from the morning's `math/` wave — `math/floor`, `math/numerator` and `math/denominator` are
+kernel primitives under a real module, so `math` joins the allowed prefixes beside `bit`,
+`decimal`, `proc` and `system`.
+
+**Two habits this session paid for, both already in CLAUDE.md.** Instrument before believing
+a pass — the trace that counted materialised modules is what separated a real green from a
+green that ran none of the code under test. And do not rebuild the binary while a
+verification runs: I did, mid-suite, and had to discard the batch and re-run against a frozen
+copy rather than argue that the change was harmless.

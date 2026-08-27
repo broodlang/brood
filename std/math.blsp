@@ -57,12 +57,12 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
     (math/infinite? 1.0)   → false"
   (nan? [self] :-> bool)
   (infinite? [self] :-> bool))
-(impl Numeric :float
-  (nan? [x] (not (= x x)))
+(impl Numeric
+  :float (nan? [x] (not (= x x)))
   (infinite? [x] (or (= x inf) (= x -inf))))
-(impl Numeric :int     (nan? [x] false) (infinite? [x] false))
+(impl Numeric :int (nan? [x] false) (infinite? [x] false))
 (impl Numeric :decimal (nan? [x] false) (infinite? [x] false))
-(impl Numeric :ratio   (nan? [x] false) (infinite? [x] false))
+(impl Numeric :ratio (nan? [x] false) (infinite? [x] false))
 
 (defability Zero
   "True when `self` is the additive identity of its own type — across the whole numeric
@@ -73,11 +73,10 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
     (zero? 0M)     → true
     (zero? 1/2)    → false"
   (zero? [self] :-> bool))
-(impl Zero :int     (zero? [n] (%eq n 0)))
-(impl Zero :float   (zero? [n] (%eq n 0.0)))
+(impl Zero :int (zero? [n] (%eq n 0)))
+(impl Zero :float (zero? [n] (%eq n 0.0)))
 (impl Zero :decimal (zero? [n] (%eq n 0M)))
-(impl Zero :ratio   (zero? [n] false))
-
+(impl Zero :ratio (zero? [n] false))
 
 (defn positive? (n) "True if `n` is greater than zero." (> n 0))
 (defn negative? (n) "True if `n` is less than zero." (< n 0))
