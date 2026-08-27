@@ -16708,3 +16708,24 @@ The `seq`/`count`/`conj` half remains open, and is harder for a reason the Displ
 not have: `Seqable`'s `:default` is `(map-pairs (fields x))`, which is meaningless for a rope,
 so a blanket fall-through would swap a clear "expected collection" error for a confusing one.
 That half needs an "is there an impl for this identity?" test, not just a reordering.
+
+**Update, 2026-08-27 — `seq` and `count` are done too, via `%impl-exact?`.** The test is a
+lookup that does NOT fall back to `:default` (which `%impl-for` does, and which every
+substrate ability has, so `%impl-for` can never answer "no impl for this kind"). Both seams
+consult it only after their native branches, so the hot paths measured **flat** — 298 vs 299
+ms best-of-5, pinned and interleaved, over a loop of `count`/`seq`/`map` on lists, vectors
+and maps. A kind with no impl keeps its old error, which is the honest one: `(count table)`
+still says `expected collection`.
+
+**`seq` cost three attempts, and the reason is worth keeping.** It sits at line 106 of the
+prelude, below almost everything, so the readable implementation is unavailable to it:
+
+- `get` and `%identity-of` both re-enter `seq` — `get` is built on the very protocol `seq`
+  provides — so the obvious version recurses until the stack budget trips.
+- `or` is a MACRO defined 550 lines further down. Used at line 106 it compiles as a call to
+  a not-yet-macro and recurses the same way.
+
+Both failures land as `prelude expand: recursion too deep` during `Interp::new`, with no
+indication of which function is responsible — the language cannot report a fault in the code
+that makes reporting possible. The working version uses `if`, `%eq`, `bound?` and `%map-get`
+and nothing else. Anything hooked into `seq` faces the same constraint.

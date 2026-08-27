@@ -122,7 +122,30 @@
           (if (%map-get coll :__id__ nil)
             (->seq coll)
             (%map-pairs coll))
-          (if (%eq t :bytes) (%bytes->list coll) coll))))))
+          (if (%eq t :bytes)
+            (%bytes->list coll)
+            ;; Lists and nil ARE their own seq view and take the hot path untouched. Any
+            ;; other kind reaching here is one `seq` has no native view of — a rope, a
+            ;; table — and used to be returned UNCHANGED, so `(seq rope)` silently answered
+            ;; the rope itself. Consult `Seqable`, but only where an impl exists for that
+            ;; kind SPECIFICALLY: its `:default` is a record's fields, meaningless here.
+            ;;
+            ;; ONLY what is available at line 106 of the prelude. `get` and `%identity-of`
+            ;; re-enter `seq` (they are built on the protocol `seq` provides), and `or` is a
+            ;; MACRO defined 550 lines further down — used here it compiles as a call to a
+            ;; not-yet-macro and recurses until the stack budget trips, during prelude
+            ;; expansion, before anything can report which function did it. So: `if`, `%eq`,
+            ;; `bound?` and `%map-get`, nothing else. (ADR-253)
+            (if (%eq t :pair)
+              coll
+              (if (%eq t :nil)
+                coll
+                (if (bound? (quote *impls*))
+                  (let (methods (%map-get *impls* (quote [Seqable ->seq]) nil))
+                    (if methods
+                      (if (%map-get methods t nil) (->seq coll) coll)
+                      coll))
+                  coll)))))))))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 ;; The public entry coerces once via `seq`; the inner `%fold-loop` then stays in
