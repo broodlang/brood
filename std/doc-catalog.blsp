@@ -187,8 +187,8 @@
    "eval-string" :meta
    "every?" :predicates
    "exit" :processes
-   "feature?" :predicates
-   "features" :meta
+   "system/feature?" :predicates
+   "system/features" :meta
    "fields" :maps
    "file/exists?" :filesystem
    "file/mtime" :filesystem

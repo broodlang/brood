@@ -1,7 +1,7 @@
 //! Persistent child processes (ADR-104), built on the blocking-IO → mailbox seam
 //! (ADR-059) — the same mechanism `crate::net` uses for sockets.
 //!
-//! `system/cmd` (`%os-cmd`) runs a child to completion and hands back its captured
+//! `os/cmd` (`%os-cmd`) runs a child to completion and hands back its captured
 //! `{:stdout :stderr :exit}`. That is the wrong shape for a long-lived co-process
 //! you talk to *continuously* — an LSP server, a REPL, a formatter daemon — where
 //! you write a request and read the reply, over and over, for the life of the
@@ -228,7 +228,7 @@ fn start_stdout_reader(
 
 // ---- the primitive operations ----
 
-/// `(proc/spawn prog args opts)` — spawn `prog` with `args`, piping its stdin/
+/// `(os/spawn prog args opts)` — spawn `prog` with `args`, piping its stdin/
 /// stdout/stderr. `cwd` (if set) is the child's working directory; otherwise it
 /// inherits ours. `env` entries are added on top of the inherited environment.
 /// The stdout/stderr readers deliver to `subscriber`. Returns the handle id.

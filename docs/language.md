@@ -2961,13 +2961,13 @@ two disagree. A builtin from a feature this binary lacks is still bound and stil
 raises when called, so ask the build instead (ADR-197):
 
 ```clojure
-(features)             ;=> [:gui :clipboard :jit :treesit :wasm :dev-tools]
-(feature? :gui)        ;=> true    ; can this binary open a window at all?
-(feature? :nonesuch)   ;=> false   ; unknown names are false, not an error
+(system/features)             ;=> [:gui :clipboard :jit :treesit :wasm :dev-tools]
+(system/feature? :gui)        ;=> true    ; can this binary open a window at all?
+(system/feature? :nonesuch)   ;=> false   ; unknown names are false, not an error
 (bound? 'gui-open)     ;=> true    ; …even on a build with no gui backend
 ```
 
-`features` reports what was **compiled in**, not what will work right now — a `gui`
+`system/features` reports what was **compiled in**, not what will work right now — a `gui`
 build still fails on a headless box. It buys you the distinction between "this binary
 lacks the feature" and "this feature failed", which is the one an app needs to decide
 whether to degrade or to report.

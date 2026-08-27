@@ -37,7 +37,7 @@
   ;; valid UTF-8, so `slurp` (read_to_string) throws on it but `slurp-bytes` reads
   ;; it faithfully.
   (defn sb-write-binary (path)
-    (let (p (proc/spawn "sh" ["-c" (str "printf '\\377\\200\\101' > " path)]))
+    (let (p (os/spawn "sh" ["-c" (str "printf '\\377\\200\\101' > " path)]))
       (receive ([:proc-closed ^p _] :done) (after *test-wait-ms* :timeout))))
 
   (test "slurp throws on a non-UTF-8 file but slurp-bytes reads its bytes"

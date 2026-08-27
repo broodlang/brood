@@ -229,7 +229,7 @@
   (test "a never-interned string name is nil, not an error"
     (assert= (reflect/type-signature "definitely-not-a-real-global-42") nil)))
 
-;; `features` / `feature?` — asking the BUILD what it can do.
+;; `system/features` / `system/feature?` — asking the BUILD what it can do.
 ;;
 ;; The gap this closes: a builtin from an absent optional feature is still bound
 ;; and still raises when called, so `bound?` answers yes on a runtime that cannot
@@ -237,13 +237,13 @@
 ;; prose, which breaks silently whenever the message is reworded.
 (describe "features"
   (test "returns a vector of keywords"
-    (let (fs (features))
+    (let (fs (system/features))
       (is (vector? fs))
       (assert= (count (filter (fn (f) (not (keyword? f))) fs)) 0)))
 
-  (test "the jit is on in a default build" (is (includes? (features) :jit)))
+  (test "the jit is on in a default build" (is (includes? (system/features) :jit)))
 
-  (test "the list is stable within a build" (assert= (features) (features))))
+  (test "the list is stable within a build" (assert= (system/features) (system/features))))
 
 (describe "os/exe-path — where this binary lives"
   (test "it answers an absolute path, or nil when the platform won't say"
@@ -263,14 +263,14 @@
   (test "it is stable within a process"
     (assert= (os/exe-path) (os/exe-path))))
 
-(describe "feature?"
-  (test "true for a feature this build has" (is (feature? :jit)))
+(describe "system/feature?"
+  (test "true for a feature this build has" (is (system/feature? :jit)))
   (test "false for one it does not have, rather than an error"
-    (refute (feature? :no-such-feature)))
+    (refute (system/feature? :no-such-feature)))
   (test "agrees with the list"
-    (assert= (feature? :jit) (includes? (features) :jit)))
+    (assert= (system/feature? :jit) (includes? (system/features) :jit)))
 
   ;; The whole reason this exists.
   (test "a bound builtin does not imply a working feature"
     (is (bound? 'gui/open))
-    (is (or (feature? :gui) (not (feature? :gui))))))
+    (is (or (system/feature? :gui) (not (system/feature? :gui))))))

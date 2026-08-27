@@ -24,16 +24,6 @@
 ;; 4k/16k/64k chars: ASCII 6/7/27 ms (ratios 1.16, 3.85) vs non-ASCII 2/21/242 ms (10.50,
 ;; 11.52). Either way the rope/buffer engine (M2) is still the home for large-text editing.
 
-(defn feature? (name)
-  "True if this runtime was built with the optional feature `name` (a keyword —
-`:gui`, `:jit`, `:audio`, `:treesit`, …). See `(features)` for the whole list.
-
-Reach for this instead of `bound?` when a capability is optional: a builtin from
-an absent feature is still **bound** and still raises when called, so `(bound?
-'gui/open)` answers yes on a runtime that cannot open a window. An app that wants
-to degrade rather than fail asks the build."
-  (includes? (features) name))
-
 (defn- %index-of-seq-from
   (coll x i from)
   ;; scan from the head; only start matching once the running index reaches `from`

@@ -73,9 +73,14 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
 - [x] `proc/register` / `proc/whereis` moved beside `proc/info`, plus the two missing halves:
       `proc/unregister` (`register` had no inverse) and `proc/alive?`
 - [x] `apropos`, `doc-search` and LSP completion no longer offer `%` plumbing
-- [ ] `os/spawn` — move the OS-subprocess half out of `proc/*`, which currently holds green
-      processes AND OS children in one module. **First** resolve `os` vs `system`: they are
-      two modules for one concern, and `system/env` is literally `(os/getenv name)`
+- [x] `os` vs `system` boundary redrawn (2026-08-27) — they were not two modules for one
+      concern but one boundary in the wrong place. **`os` is the operating system**
+      (`os/env`, `os/cmd`, `os/type`, `os/spawn`); **`system` is the Brood runtime**
+      (`system/argv`, `system/halt`, `system/brood-version`). `system/env` was literally
+      `(os/getenv name)` — one function, two names — and the CHILD-PROCESS half lived in
+      `proc`, so `proc/spawn` started an OS process while the bare `spawn` special form
+      started a green one. `spawn` cannot be namespaced (it is a special form), so the OS
+      half moved to `os/spawn` / `os/write` / `os/close` / `os/set-binary`
 - [ ] ~15 more bare names: the module-tooling group (`set-load-path!`, `reload-defs`,
       `builtin-modules`, `module-doc`, `reserved-package-name?`) belongs in `reflect`
 

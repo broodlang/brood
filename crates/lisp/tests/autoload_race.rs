@@ -60,10 +60,10 @@ fn race_first_call(module: &str, call: &str, expected: &str) {
         (defn uniq (xs)
           (reduce (fn (a x) (if (includes? a x) a (cons x a))) (list) xs))
 
-        ;; `%registry-member?` and not `feature?`: the load happened in a CHILD process,
+        ;; `%registry-member?` and not `system/feature?`: the load happened in a CHILD process,
         ;; and this process's inline cache of `*features*` can still be pre-`provide` —
         ;; the same staleness `require-one` bypasses with this primitive for the same
-        ;; reason. `feature?` reads false here, which is a cache read, not a lost load.
+        ;; reason. `system/feature?` reads false here, which is a cache read, not a lost load.
         (let (got (fan 24))
           [(uniq got) (%registry-member? '*features* "{module}")])
     "#

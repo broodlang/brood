@@ -152,7 +152,7 @@
   ;; silently empty. The loader must therefore decline the image under `BROOD_COVERAGE`.
   ;; Found by `nest::coverage_lines` failing, not by reasoning, which is why it is pinned.
   (test "an instrumented run declines the image"
-    (is (nil? (os/getenv "BROOD_COVERAGE")))
+    (is (nil? (os/env "BROOD_COVERAGE")))
     (is (project/image-usable?))))
 
 ;; Values a cross-process MESSAGE cannot carry — a builtin (a Rust primitive with no data

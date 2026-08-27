@@ -808,7 +808,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 (defn- registry-token
   ()
   "The publish auth token: `$HIVE_TOKEN`, else the `:registry-token` config."
-  (let (env (os/getenv "HIVE_TOKEN"))
+  (let (env (os/env "HIVE_TOKEN"))
     (if (or (nil? env) (= env "")) *config-registry-token* env)))
 
 (defn- registry-release-url
@@ -1849,8 +1849,8 @@ ordinary library, which the server stores as \"nothing\"."
 
 (defn- package-config-dir
   ()
-  (let (xdg (os/getenv "XDG_CONFIG_HOME"))
-    (path/join (if (nil? xdg) (path/join (os/getenv "HOME") ".config") xdg) "brood")))
+  (let (xdg (os/env "XDG_CONFIG_HOME"))
+    (path/join (if (nil? xdg) (path/join (os/env "HOME") ".config") xdg) "brood")))
 
 (defn- package-signing-key-path () (path/join (package-config-dir) "signing-key.blsp"))
 
