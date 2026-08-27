@@ -107,9 +107,22 @@ retries = 1
 # says, the guard that actually catches a hung *case* is the inner `*test-timeout-ms*`
 # (tests/suite.rs), and this outer cap is only the backstop. If it needs raising again, check the
 # engine ratio first: a tree-walker figure much past ~10× the VM's is a real finding.
+# Lowered 2700s -> 300s on 2026-08-27, and for the first time by fixing the cause rather
+# than raising the number. Every raise above was paying the same tax: `cargo test` built
+# opt-level 0, and this suite is an interpreter exercising itself — the workload an
+# unoptimized build punishes most. Measured on one commit: **933 s** here against **58 s**
+# for the identical cases on the release binary, a 16x profile tax with nothing to do with
+# the tests. `[profile.test]` is now `opt-level = 2` with `debug-assertions = true`, so this
+# wrapper runs at roughly release speed with every tripwire still armed, and the full,
+# UNSAMPLED suite measures **66 s** (against 933 s for the sampled one before).
+#
+# 300s = 5x headroom over that, which is the right shape for a 2-core runner sharing the box
+# with the rest of the workspace. If this ever goes red again, check the ENGINE ratio and the
+# profile before touching this number — the history above is a record of what happens
+# otherwise.
 [[profile.default.overrides]]
 filter = 'binary(suite)'
-slow-timeout = { period = "60s", terminate-after = 45 }
+slow-timeout = { period = "60s", terminate-after = 5 }
 # One retry, for the same reason `distribution`/`serve_attach` get one — and with a
 # sharper edge here. The in-language suite CONTAINS timing-sensitive cases that talk
 # to a local node (`tests/remote_spawn_test.blsp` does a `remote-spawn` round trip),

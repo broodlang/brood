@@ -54,18 +54,36 @@ concluded nothing recent. `make green-all` adds the examples and stress corpus g
 > gate goes red. Both KI-69 guards survived only because someone had already done this
 > (`only {checked} lowerable chunks inspected … a green result would mean nothing`).
 
-**Open, and worth doing next:**
+**All three ungated classes that session listed as open are now CLOSED** — by `5aa49463`,
+which landed after the paragraphs above were written:
 
-- **`nest check` has no gate over `examples/`, `stress/`, `scripts/fuzz/stress/` or
-  `breakage/`.** `make check-examples` / `make check-stress` run those programs and grep for
-  `unbound symbol`, which is weaker: it only catches a name on an executed path. This is why
-  the rot reached 22 harnesses.
-- **Brood embedded in non-`.blsp` files is ungated** — `stress/fuzz_programs.py` (KI-68) and
-  Brood inside `crates/lisp/tests/*.rs`. `scripts/stale-names.sh` and every `.blsp` gate walk
-  `.blsp` only.
-- **The reversed-args rename class has no gate at all** (KI-71): arity unchanged, nothing
-  unbound, the type warning advisory. `nest rename --swap` exists to *perform* one; nothing
-  detects a missed one.
+- The corpora are checked **statically**: `make check-corpora` / `scripts/check-corpora.sh`
+  runs `nest check` over `examples/`, `stress/`, `scripts/fuzz/stress/` and `breakage/` and
+  fails on any `unbound symbol`, per tree. The three runtime gates beside it
+  (`check-examples`, `check-stress`, `breakagetests`) only ever saw a name on an **executed**
+  path; with all three green, the static pass found **74** unresolvable names. Wired into CI
+  (`ci.yml`), ahead of the slow run-based gates.
+- Brood **embedded in non-`.blsp` files** is gated where it mattered — the docs' 123 code
+  blocks, via `tests/doc_snippets_test.blsp` (qualified call heads inside code blocks: 24,
+  all real). The other two surfaces were already covered (`scaffold_quality.rs` checks every
+  `nest new` template; the Python fuzz generator got its liveness assertion with KI-68).
+- The **reversed-args class** has its gate (KI-71).
+
+**Open, and worth doing next — the toolchain gaps a downstream migration exposed.** Migrating
+hive and its dependency closure across the namespacing waves took the registry down twice;
+neither outage was a language bug, both were gaps in what the toolchain can tell you before
+you ship. Recorded as KI-66/KI-67 and in `ROADMAP.md`'s Active section:
+
+1. **A boot check.** `nest check` resolves names and `nest test` runs the suite; neither loads
+   `main`, which is exactly where a stale dependency dies. Highest value here.
+2. **`nest check --fix-renames`.** The checker already emits the answer; apply the unambiguous
+   ones. Two constraints: `nest rename` is **not scope-aware** (renaming `register` in hive
+   also renamed hive's own handler, producing a reserved `proc/register` — that cost a
+   revert), and a name that went behind `%` has no hint at all.
+3. **A bundle should say what it is** — `--build-info` (brood commit, features, module count),
+   so answering "which brood built this" isn't `strings` over SSH.
+4. **`docsite/render-css` has no theming counterpart** — a `:wrap? false` host embeds a
+   fragment whose stylesheet hard-codes a light palette. It should emit CSS variables.
 
 **Previous session's entry follows.**
 
