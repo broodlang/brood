@@ -177,7 +177,7 @@ the `nest new` scaffolder."
 ;;
 ;; A dep's KIND is its record identity, not a `:kind` field: the package manager
 ;; dispatches every per-kind behaviour (resolve, lock entry, manifest entry,
-;; compatibility) through the `package/dependency` ability it declares over these four types,
+;; compatibility) through the `Dependency` ability it declares over these four types,
 ;; which is `:sealed` over exactly this set — so `nest check` flags a new kind that
 ;; forgets one of them. This module owns the *types* (it parses the manifest);
 ;; std/tool/package.blsp owns the *behaviour*. A resolved entry is one of these records with
@@ -196,17 +196,17 @@ the `nest new` scaffolder."
 
 ;; A dep's display form is its `nest tree` line — one place, so `(io/puts dep)` and the
 ;; tree agree. Registered here (the type owner) rather than in the package manager.
-(impl display
+(impl Display
   project/dep-path
   (->string [d] (str (get d :name) "  (path \"" (get d :path) "\")")))
-(impl display
+(impl Display
   project/dep-git
   (->string [d]
     (str (get d :name) "  (git " (get d :url) " @ " (or (get d :ref) (get d :version)) ")")))
-(impl display
+(impl Display
   project/dep-tarball
   (->string [d] (str (get d :name) "  (tarball " (get d :url) ")")))
-(impl display
+(impl Display
   project/dep-registry
   (->string [d] (str (get d :name) "  (registry v" (get d :version) ")")))
 

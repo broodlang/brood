@@ -65,7 +65,7 @@
 
 (describe "project: :dependencies parsing (ADR-037)"
   ;; A parsed dep is a RECORD, one per manifest kind — its identity *is* its kind, so
-  ;; the package manager dispatches the `package/dependency` ability on it instead of reading a
+  ;; the package manager dispatches the `Dependency` ability on it instead of reading a
   ;; `:kind` field. A record is never `=` to a bare map, so these compare constructors.
   (test "a :git entry normalises to a dep-git record"
     (assert= (project/parse-dep '[parser :git "https://example.com/p.git" :ref "v1.2.0"])

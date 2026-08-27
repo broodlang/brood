@@ -1,10 +1,10 @@
 ;; std/io.blsp — output ports: the redirectable sink behind `io/write` / `io/puts`.
 ;;
-;; A *port* is any value with a **`io/port` impl** — the ability whose one op, `emit`,
+;; A *port* is any value with a **`Port` impl** — the ability whose one op, `emit`,
 ;; is the single seam every output path goes through. Two shapes matter:
 ;;
 ;;   - a bare **1-arg fn** `(fn (s) …)` that consumes a ready string. This was the whole
-;;     definition of a port originally, and it still is one: `(impl io/port :fn …)` below is
+;;     definition of a port originally, and it still is one: `(impl Port :fn …)` below is
 ;;     what keeps `%write-out`, `fn-port`, and every hand-written sink working.
 ;;   - a **port record** — `standard-port` / `process-port` / `file-port` — which carries
 ;;     its target (a label, a pid, a path), prints as itself (`#<port stdout>`), and can
@@ -12,7 +12,7 @@
 ;;     `emit` is the seam for; the ability is what made it expressible
 ;;     without touching a single caller.
 ;;
-;; A third-party port needs nothing from this module: `defrecord` your own, `impl io/port`
+;; A third-party port needs nothing from this module: `defrecord` your own, `impl Port`
 ;; for it, and every `io/write` / `with-out` / logger backend accepts it.
 ;;
 ;; `*out*`/`*err*` (declared in the prelude) still hold a plain **1-arg fn** — the
@@ -27,7 +27,7 @@
 
 (defmodule io
   "Output ports — the redirectable sink the prelude's `io/write`/`io/puts` write to.
-A port is any value implementing the **`io/port`** ability: a 1-arg fn
+A port is any value implementing the **`Port`** ability: a 1-arg fn
 `(fn (s) …)` that consumes a ready string, or a port record. `*out*`/`*err*` (declared
 in the prelude) hold the current stdout/stderr ports.
 
@@ -42,12 +42,12 @@ output crosses process boundaries with no shared mutable state. (Dynamic binding
 do not reach a `spawn`ed child — a child starts from the default `*out*`; pass it
 a port explicitly if it should redirect too.)
 
-Your own port type is a `defrecord` plus an `impl io/port` for it — `io/write`,
+Your own port type is a `defrecord` plus an `impl Port` for it — `io/write`,
 `with-out`, and every logger backend then accept it with no change here.")
 
-;; ---- the io/port ability -------------------------------------------------------
+;; ---- the Port ability -------------------------------------------------------
 
-(defability io/port
+(defability Port
   "Where written output goes. `emit` is the one seam every output path passes through,
 so a port may be any value with an impl.
 
@@ -60,7 +60,7 @@ plainer name."
 ;; A bare 1-arg sink fn is a port — the original representation, still first-class.
 ;; This impl is what keeps `%write-out`, `fn-port`, and every hand-written `(fn (s) …)`
 ;; working unchanged.
-(impl io/port :fn (emit [f s] (f s)))
+(impl Port :fn (emit [f s] (f s)))
 ;; A NATIVE 1-arg sink is a port too. The prelude's default `*out*`/`*err*` are the
 ;; primitives `%write-out`/`%write-err`, whose `type-of` is `:native`, not `:fn` — so
 ;; without this `(io/port? *err*)` was false for the very ports the language ships with.
@@ -71,22 +71,22 @@ plainer name."
 ;; stdlib — `log`, the test runner, `supervisor`, `repl`, `telemetry`, `format` — wrote to
 ;; stdout with that suffix, which is how it surfaced (a checker test asserting on warnings
 ;; read from stderr saw none).
-(impl io/port :native (emit [f s] (f s)))
+(impl Port :native (emit [f s] (f s)))
 
 (defn port? (x)
-  "True if `x` can be written to — it has a `io/port` impl (a 1-arg sink fn, a port record,
+  "True if `x` can be written to — it has a `Port` impl (a 1-arg sink fn, a port record,
 or your own type). The check a function taking a port can branch on instead of letting
 `emit` raise.
 
     (io/port? (io/stdout-port))   → true"
-  (satisfies? 'io/port x))
+  (satisfies? 'Port x))
 
 ;; ---- port values ------------------------------------------------------------
 
 (defrecord standard-port (label write))
 
-(impl io/port io/standard-port (emit [p s] ((get p :write) s)))
-(impl display io/standard-port (->string [p] (str "#<port " (get p :label) ">")))
+(impl Port io/standard-port (emit [p s] ((get p :write) s)))
+(impl Display io/standard-port (->string [p] (str "#<port " (get p :label) ">")))
 
 (defn stdout-port ()
   "The default stdout port: writes to real stdout, honouring `with-out-str`
@@ -99,20 +99,20 @@ capture. (The prelude's default `*out*` is the bare `%write-out` fn this wraps.)
 
 (defn fn-port (f)
   "A port that hands each written string to the 1-arg callback `f` — which is to say,
-`f` itself: a bare fn is already a port (the `:fn` impl of `io/port`). The general adapter,
+`f` itself: a bare fn is already a port (the `:fn` impl of `Port`). The general adapter,
 kept as a name because it *documents* the intent at a call site; `f` may buffer, filter,
 count, or forward however it likes."
   f)
 
 (defrecord process-port (pid))
 
-(impl io/port io/process-port (emit [p s] (send (get p :pid) [:write s]) nil))
-(impl display io/process-port (->string [p] (str "#<port process " (get p :pid) ">")))
+(impl Port io/process-port (emit [p s] (send (get p :pid) [:write s]) nil))
+(impl Display io/process-port (->string [p] (str "#<port process " (get p :pid) ">")))
 
 (defrecord file-port (path))
 
-(impl io/port io/file-port (emit [p s] (file/spit-append (get p :path) s) nil))
-(impl display io/file-port (->string [p] (str "#<port file " (get p :path) ">")))
+(impl Port io/file-port (emit [p s] (file/spit-append (get p :path) s) nil))
+(impl Display io/file-port (->string [p] (str "#<port file " (get p :path) ">")))
 
 ;; ---- writing values ---------------------------------------------------------
 ;; `emit` above is the one-string seam every port implements. These three are the
@@ -143,7 +143,7 @@ it does not."
 (defn- inspect-render
   (& xs)
   ;; `%render`'s re-readable twin: the same space-joined shape, but each value through the
-  ;; `inspectable` ability (which defaults to `pr-str`) rather than its display form. Written
+  ;; `Inspect` ability (which defaults to `pr-str`) rather than its display form. Written
   ;; here rather than as a primitive because it is a fold over an ability call — the
   ;; language can already say it.
   ;; `/inspect` — the ROOT ability op — not bare `inspect`, which inside this module
@@ -153,10 +153,10 @@ it does not."
 (defn- render-display
   (& xs)
   ;; The DISPLAY renderer: each value through the installed `*show*` transform (which is
-  ;; what honors `display` for a record), then the kernel's space-joined `%render`.
+  ;; what honors `Display` for a record), then the kernel's space-joined `%render`.
   ;; `*show*` lives HERE rather than in `send-text` because it is a display transform: on
-  ;; the inspect path it would flatten a record to its `display` string BEFORE
-  ;; `inspect-render` could ask the `inspectable` ability, so a custom `inspect` impl could
+  ;; the inspect path it would flatten a record to its `Display` string BEFORE
+  ;; `inspect-render` could ask the `Inspect` ability, so a custom `inspect` impl could
   ;; never be seen (`#money<$5>` printed as `"$5"`).
   (apply %render (shown xs)))
 
@@ -195,7 +195,7 @@ newline, to `*out*` or to a trailing `:to <port>`. Returns nil.
 The debugging counterpart of [[puts]]: `(io/puts \"a\\nb\")` prints two lines, while
 `(io/inspect \"a\\nb\")` prints `\"a\\nb\"`, so you can see what the value actually is.
 
-Distinct from the bare `inspect`, which is the `inspectable` ability op and returns the string
+Distinct from the bare `inspect`, which is the `Inspect` ability op and returns the string
 rather than writing it — that one belongs with `pr-str`, this one with the writers."
   (send-text xs "\n" inspect-render))
 

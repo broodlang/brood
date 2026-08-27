@@ -25,7 +25,7 @@ ADRs / topic docs.
 | KI-63 | ~~loading std modules taxes JIT'd hot loops~~ — **RETRACTED 2026-08-25, the effect does not exist.** After a discarded warm-up run in-process, a 20M loop is 23-24 ms whether or not `format` is loaded. Every earlier figure measured the FIRST run, i.e. JIT warm-up, which is variable and shape-sensitive — the same loop read 25 ms in one file and 40-51 ms in another differing only by having three call sites | ☑️ **retracted** — no bug. What is real, and is the reusable part: a whole-process benchmark of a short row measures tiering, not steady state |
 | KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
 | KI-61 | **startup is +82% since 0.3.11 (13.6 -> 24.8 ms), and it is a per-wave tax, not a one-off.** Each namespacing wave that moves prelude names into a module forces that module to be force-loaded from source at every boot — the prelude's qualified refs are late-bound and boot's namespace-resolve does not auto-require for the root prelude. Two steps, both proven: `1f613d23` (`(require-one 'string)`) **+4.0 ms**, and the v0.11.0 wave (`(require-one 'seq)`) **+7.5 ms** — the latter measured by deleting the line and rebuilding (24.3 -> 16.8 ms). It also deflates every other published row, since `compute = wall - startup` | ✅ **fixed 2026-08-26** — by not loading the modules at boot at all: the prelude's `string/`/`seq/` references are autoload stubs that load on first call (ADR-246), and prelude def-sites now travel in the boot cache instead of a second positioned read of the prelude (ADR-247). Warm boot 22.8 -> 11.6 ms, base RSS 55.6 -> 50.7 MB, `startup` -28.9%, every other row ~11-13 ms faster in absolute wall. The std image + registration replay is still the right way to make the *lazy* load fast; the two compose |
-| KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl io/port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl io/port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
+| KI-60 | **every `:to *err*` in the stdlib wrote to stdout with ` :to #<native %write-err>` appended.** The `io/` wave (ADR-230-era) gave ports an ability with `(impl Port :fn …)`, but `*err*` and `*out*` are `%write-err`/`%write-out` — **natives**, whose `type-of` is `:native`, not `:fn`. So `port?` was false, `split-target` read the trailing `:to <port>` pair as ordinary values, and log / the test runner / supervisor / repl / telemetry all lost stderr | ✅ **fixed 2026-08-25** — `(impl Port :native …)` beside the `:fn` one. Found because `origin/main` was **red on three `nest` tests**; `declared_sig_is_authoritative_cross_module` reads warnings from stderr and got none. Attribution verified by reverting just this impl: that test fails, the other two pass |
 | KI-59 | **`nest run --for` reported failure for a program that succeeded.** The wrapper was `(%spawn …)` then `(monitor p)` — two steps. A program that finished before the monitor attached fired a synthetic `:noproc`, `(= :noproc :normal)` was false, and the run exited 1 after printing its output correctly. Worst in the mode documented as the CI-friendly way to exercise an app | ✅ **fixed 2026-08-25** — `%spawn-link` + `trap-exit`, atomic by construction: the kernel already names this race on `%spawn-link` itself ("no spawn->link :noproc race", ADR-067). Reproduced ~1 run in 6 under load, 0/20 after. Reading `:noproc` as success would be wrong the other way — a program that *crashed* before the monitor attached is indistinguishable |
 | KI-58 | **the namespacing silently killed the `table-put` call-site inline — `sieve` 11.6× slower.** `resolve_prim3` accepted only a *direct* native head, on the stated grounds that `table-put` "has no prelude wrapper to follow"; the v0.9/v0.10 waves made the head `table/put`, a `std/table.blsp` wrapper, so the call stopped inlining and became an ordinary `Call` in the hot arm. The **2-ary** `resolve_prim` follows its wrapper, so `table/has?` went on inlining beside it — the asymmetry is visible in one IR dump | ✅ **fixed 2026-08-25** — `resolve_prim3` follows a thin wrapper like the 2-ary path, requiring the identity argument map (`Node::Prim3` has no permutation field, so a reordering wrapper must decline rather than store under the wrong key). `make ab`: **457 → 68 ms, −85.1%**. Guards: `table_put_call_site_inline_recognizes_the_namespaced_wrapper` (sabotage-verified) and the new `every_inlinable_head_still_reaches_its_primitive`, which caught a **second** dead inline on its first run — `table/get`, whose `&optional` head is not a thin wrapper; fixed in `std/table.blsp` with two arity clauses |
 | KI-57 | **a use-after-GC on every selective receive with a backlog.** `scan_mailbox` took the clauses' leading-keyword vector as a bare `Value` and decoded it **lazily, inside the scan loop** — so on any iteration after the first the decode dereferenced a handle held across a matcher `apply`, which can collect at any eval depth (ADR-061). The `matcher` beside it is rooted at `rbase+0` and re-read per candidate for exactly this reason; `tags` was not | ✅ **fixed 2026-08-25** — `tags` is rooted at `rbase+1` and re-read at the decode, like `matcher`. Found by running `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` by hand while verifying ADR-245: `use-after-GC: vector handle … is from epoch 12, but that generation is now epoch 13` out of `collect_receive_tags`. **No CI job could have caught it** — every one collects on a threshold, so the collection has to land inside the window by luck; the new `make gcstress` step closes that, and is verified red on the pre-fix code and green on the fix |
@@ -616,7 +616,7 @@ The note rules out *snapshotting* `*impls*` — correct, since a closure nested 
 value does not round-trip. But `stdimage/install` **already replays** `*require-edges*` through
 a `%std-edges` section, for exactly this reason ("a restored module defines its bindings but
 evaluates nothing, so without them `url` comes back with no `path`"). The extension is to record
-the registration **forms** — `(impl io/port :fn (write [f s] (f s)))` — rather than the resulting
+the registration **forms** — `(impl Port :fn (write [f s] (f s)))` — rather than the resulting
 values: a form is symbols and lists all the way down, so it images cleanly, and evaluating it on
 materialise rebuilds the closure *and* performs the registration. Bounded: 56 `impl` forms
 across 13 files, 24 `defability`, 35 `defrecord`; `*record-ids*` (plain symbols) already
@@ -633,7 +633,7 @@ registration-shaped:
  8  io: ports are Port impls › a port record prints as itself
  6  the temporal types are records › every sealed member satisfies …
  6  log: the stock backend is a record › a backend prints as …
- 6  http: responses are records with a http/response impl
+ 6  http: responses are records with a Response impl
 ```
 
 **And the prize is measured, not estimated.** Installing the image before the two boot requires
@@ -662,7 +662,7 @@ The only measurement that means anything is the suite with the image installed a
 
 ---
 
-## KI-60 — the stdlib lost stderr: `io/port` was implemented for `:fn`, but `*err*` is a native ✅ FIXED 2026-08-25
+## KI-60 — the stdlib lost stderr: `Port` was implemented for `:fn`, but `*err*` is a native ✅ FIXED 2026-08-25
 
 **Status:** ✅ fixed — **independently and concurrently**, here and upstream in
 `2b6b1672 fix(io): the ports the language ships with were not ports`, with the identical
@@ -676,7 +676,7 @@ only ever exercised the working case and the *default* was the broken one.
 
 **What.** `io/print` and friends take their destination as a trailing `:to <port>` pair, and
 `split-target` only treats it as a destination when `(port? (nth xs (- n 1)))`. `port?` is
-`(satisfies? 'Port x)`, and the ability is implemented as `(impl io/port :fn (write [f s] (f s)))`
+`(satisfies? 'Port x)`, and the ability is implemented as `(impl Port :fn (write [f s] (f s)))`
 — "a bare 1-arg sink fn is a port".
 
 But `*err*` is not a `:fn`:
@@ -705,7 +705,7 @@ asserts on warnings read from **stderr** — with the diagnostics diverted to st
 That is a much better tripwire than the two that merely used a renamed `print`, and reverting
 only this impl confirms it: that test fails, the other two pass.
 
-**Fix.** `(impl io/port :native (write [f s] (f s)))` beside the `:fn` one. One line, in Brood.
+**Fix.** `(impl Port :native (write [f s] (f s)))` beside the `:fn` one. One line, in Brood.
 
 **The lesson is about ability dispatch, not about ports.** `impl` is keyed on *identity*, and
 `:fn` and `:native` are two identities for things that are both "callable with one argument".
@@ -2954,7 +2954,7 @@ and still lost one under load, and adding `sleep` exposed that a timed-out waite
 `env_root(env)`, which is **not** always `EnvId::GLOBAL`. During prelude load the root is a
 bootstrap env whose bindings later *seed* the shared runtime, so the first version of the
 primitive — which wrote straight to the globals table — had its writes silently discarded at
-seed time, and the prelude lost its own `display`/`inspectable` impls (`to-str` then failed with
+seed time, and the prelude lost its own `Display`/`Inspect` impls (`to-str` then failed with
 "no impl for :string"). A kernel primitive that stands in for `def` must read and write the
 same place `def` does.
 

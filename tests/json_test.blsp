@@ -141,7 +141,7 @@
   (test "a single-key object (order is deterministic for one key)"
     (assert= (encode {"a" 1}) "{\"a\":1}")
     (assert= (encode {:b [true nil]}) "{\"b\":[true,null]}"))
-  ;; A fn, not a pid: the json/encodable block below deliberately impls `:pid` to show a
+  ;; A fn, not a pid: the JsonEncode block below deliberately impls `:pid` to show a
   ;; built-in kind being opened, so the "no rule for this kind" case is a fn here.
   (test "cannot encode a non-JSON value"
     (is (try (do (encode (fn (x) x)) false) (catch e true)))))
@@ -154,17 +154,17 @@
   (test "string keys encode fine and parse back as keywords (encode accepts either)"
     (assert= (parse (encode {"repo" "brood" "stars" 3})) {:repo "brood" :stars 3})))
 
-;; ---- records + the json/encodable ability ---------------------------------------
+;; ---- records + the JsonEncode ability ---------------------------------------
 ;; A record encodes as its FIELDS by default (its `:__id__` identity must never reach
-;; the wire); a `json/encodable` impl overrides that wire shape. The ability registers no
+;; the wire); a `JsonEncode` impl overrides that wire shape. The ability registers no
 ;; `:default`, so a kind JSON has no rule for still errors loudly until impl'd.
 
 (defrecord point (x y))
 (defrecord usd (cents))
 (defrecord wrapped (inner))
 
-(impl json/encodable json-test/usd (->json [m] (str "$" (get m :cents))))
-(impl json/encodable :pid (->json [p] (str p)))
+(impl JsonEncode json-test/usd (->json [m] (str "$" (get m :cents))))
+(impl JsonEncode :pid (->json [p] (str p)))
 
 (describe "encoding records"
   (test "a record encodes as its fields, with the internal id omitted"
@@ -178,8 +178,8 @@
   (test "a plain map is unaffected — no id to strip"
     (assert= (encode {:x 1}) "{\"x\":1}")))
 
-(describe "the json/encodable ability"
-  (test "a json/encodable impl decides the wire shape instead of the fields"
+(describe "the JsonEncode ability"
+  (test "a JsonEncode impl decides the wire shape instead of the fields"
     (assert= (encode (usd 1050)) "\"$1050\"")
     (assert= (parse (encode (usd 25))) "$25"))
   (test "the impl applies wherever the record appears"
@@ -191,8 +191,8 @@
   (test "a kind with no impl still errors loudly"
     (assert-error (encode (fn (x) x))))
   (test "no :default is registered — nil means 'no rule', not 'the fallback'"
-    (is (nil? (%impl-for '[json/encodable ->json] :fn)))
-    (is (not (nil? (%impl-for '[json/encodable ->json] :json-test/usd))))))
+    (is (nil? (%impl-for '[JsonEncode ->json] :fn)))
+    (is (not (nil? (%impl-for '[JsonEncode ->json] :json-test/usd))))))
 
 ;; Cross-process: parse in spawned workers and fan the results back in — the parsed
 ;; maps/vectors are deep-copied across per-process heaps on `send`, proving they
@@ -218,7 +218,7 @@
   ;; `*impls*` is a global, so a spawned process sees the same registry; a record
   ;; deep-copies on `send` and keeps its `:__id__`, so it dispatches identically at
   ;; either end. Both directions are checked.
-  (test "a record's json/encodable impl applies in a spawned process too"
+  (test "a record's JsonEncode impl applies in a spawned process too"
     (let (me (self))
       (doseq (i (range 4)) (spawn (send me [:enc (encode (usd i))])))
       (let (results (map (fn (_) (receive ([:enc s] s) (after *test-wait-ms* :timeout)))

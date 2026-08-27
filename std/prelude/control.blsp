@@ -15,9 +15,9 @@
 (%declare-dynamic '*err*)
 (def *err* %write-err)
 ;; `*show*` — a late-bound per-argument display transform for the SCREEN printers
-;; (the `io/` writers). Declared here; the display protocol (core,
+;; (the `io/` writers). Declared here; the Display protocol (core,
 ;; defined at the end of this prelude) sets it to `%show-print-hook`, which routes a
-;; *record* through the `display` ability's `->string` op so a record can define how it
+;; *record* through the `Display` ability's `->string` op so a record can define how it
 ;; prints (Elixir's `String.Chars` model) while built-ins keep the fast native render.
 ;; An ordinary dynamic var, so `(binding (*show* nil) …)` disables the transform for a
 ;; scope. Only the screen printers consult it; `str`/`pr-str`/`fmt` stay native.
@@ -29,7 +29,7 @@
   ;; arguments untouched when none is installed (the default fast path).
   (if *show* (map *show* xs) xs))
 ; The printing functions live in `std/io.blsp` as `io/write` / `io/puts` / `io/inspect`,
-; beside the `io/port` ability they write through. `*out*`/`*err*` stay here: they are the dynamic
+; beside the `Port` ability they write through. `*out*`/`*err*` stay here: they are the dynamic
 ; vars a port is installed into, and the kernel's own diagnostics reach them without
 ; loading a module. The prelude itself never calls `io/…` on a path that can run while
 ; a module is loading — it writes with `%write-err` directly (see `spy`/`deprecation`),
