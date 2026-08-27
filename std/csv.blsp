@@ -198,7 +198,9 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
   "Parse a CSV string → a list of rows, where each row is a vector of strings.
 Handles quoted fields (which may contain commas and newlines), `\"\"` as an
 escaped quote inside a quoted field, and both `\\n` and `\\r\\n` line endings.
-An empty string returns an empty list."
+An empty string returns an empty list.
+
+    (csv/parse \"a,b\n1,2\")   → ([\"a\" \"b\"] [\"1\" \"2\"])"
   (if (= s "")
     nil
     (let (v (into [] (string/->list s)))
@@ -273,7 +275,9 @@ field map (or, as before `->string`, a type error out of the quoting scan)."
 is not a string is rendered with `->string` (so a number, keyword, or record emits its
 display form).
 Fields containing commas, quotes, or newlines are quoted; interior quotes are
-doubled. Rows are separated by `\\n`."
+doubled. Rows are separated by `\\n`.
+
+    (csv/emit [[\"a\" \"b\"]])   → \"a,b\""
   (if (or (nil? rows) (empty? rows))
     ""
     (csv-emit-rows (seq rows) nil)))

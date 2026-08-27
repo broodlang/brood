@@ -76,7 +76,9 @@ plainer name."
 (defn port? (x)
   "True if `x` can be written to — it has a `Port` impl (a 1-arg sink fn, a port record,
 or your own type). The check a function taking a port can branch on instead of letting
-`emit` raise."
+`emit` raise.
+
+    (io/port? (io/stdout-port))   → true"
   (satisfies? 'Port x))
 
 ;; ---- port values ------------------------------------------------------------
