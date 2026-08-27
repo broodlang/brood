@@ -250,7 +250,8 @@ runtime presence-check of a declared event.
         schema {:name (list 'quote fname)
                 :measurements (map/zipmap m-kws
                                 (map (fn (s) (list 'quote (telemetry-spec-type s))) meas))
-                :metadata (map/zipmap md-kws (map (fn (s) (list 'quote (telemetry-spec-type s))) meta))
+                :metadata (map/zipmap md-kws
+                            (map (fn (s) (list 'quote (telemetry-spec-type s))) meta))
                 :doc doc})
     `(do
        (register-event ~event ~schema)

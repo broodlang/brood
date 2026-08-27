@@ -37,8 +37,9 @@
           (= c 4) (list (rand-val (lcg s) (- depth 1))
                     (rand-val (lcg (lcg s)) (- depth 1)))
           (= c 5) [(rand-val (lcg s) (- depth 1)) (rand-val (lcg (lcg s)) (- depth 1))]
-          else {(math/rem s 10) (rand-val (lcg s) (- depth 1))
-                :k (rand-val (lcg (lcg s)) (- depth 1))})))))
+          else
+            {(math/rem s 10) (rand-val (lcg s) (- depth 1))
+             :k (rand-val (lcg (lcg s)) (- depth 1))})))))
 
 (defn check-rt (s n)
   (if (= n 0)

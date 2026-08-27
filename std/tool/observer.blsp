@@ -318,7 +318,9 @@ the observer's testable core; `observe-loop` feeds it live data."
         detail (cond
                  (get ui :msg) (str "  " (get ui :msg))
                  (empty? procs) "  (no live processes)"
-                 else (observe-detail (nth procs (math/min (math/max 0 (dec nprocs)) sel)) nprocs cap sel))
+                 else
+                   (observe-detail (nth procs (math/min (math/max 0 (dec nprocs)) sel))
+                     nprocs cap sel))
         footer (str (if paused "  PAUSED · space resume" "  space pause")
                  " · ↑/↓ select · t tree · s sort("
                  (name sort)

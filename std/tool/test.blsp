@@ -738,7 +738,8 @@ the test rather than hanging the run."
              (list (first unit)
                (second unit)
                (filter (fn (t)
-                         (= index (math/rem (test-label-hash (label (second unit) (first t))) total)))
+                         (= index
+                           (math/rem (test-label-hash (label (second unit) (first t))) total)))
                  (seq/third unit))))
         units))))
 

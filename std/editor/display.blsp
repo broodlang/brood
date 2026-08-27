@@ -154,7 +154,8 @@ shape `std/observer` draws by hand. Returns one `text` op.
     (cond
       (>= n cells) (string/substring s 0 cells)
       (= align :right) (string/pad-left s cells)
-      (= align :center) (string/pad-right (str (string/repeat " " (math/quot (- cells n) 2)) s) cells)
+      (= align :center)
+        (string/pad-right (str (string/repeat " " (math/quot (- cells n) 2)) s) cells)
       else (string/pad-right s cells))))
 
 (defn frame (& ops)

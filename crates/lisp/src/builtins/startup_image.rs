@@ -413,11 +413,18 @@ pub(super) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(heap.map_from_pairs(pairs))
 }
 
-/// `(%image-load-section path offset len)` — materialise one section's entries: define its
-/// globals (rebuilding macros as macros) and register its declared sigs. Returns how many
-/// entries were defined, or **nil** if the bytes could not be read or decoded.
+/// `(%image-load-section path offset len &optional reserve?)` — materialise one section's
+/// entries: define its globals (rebuilding macros as macros) and register its declared sigs.
+/// Returns how many entries were defined, or **nil** if the bytes could not be read or decoded.
 ///
 /// Seeks straight to the section, so loading one module never touches the rest of the image.
+///
+/// `reserve?` reproduces the source path's ADR-166 rule: while an embedded module loads, its
+/// FUNCTION-valued definitions join the reserved set (so a program cannot redefine
+/// `set/union`) while its data globals — its own registries — stay rebindable. Materialising
+/// evaluates no `def`, so without this a module restored from an image came back unreserved
+/// and `(def path/join …)` was accepted. The caller passes it, because only the caller knows
+/// whether this section is an embedded module (reserved) or a project's own (not).
 pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = need_str(heap, arg(args, 0), "%image-load-section")?;
     let off = match arg(args, 1) {
@@ -428,6 +435,7 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
         Value::Int(n) if n >= 0 => n as usize,
         v => return Err(LispError::wrong_type(heap, "%image-load-section", "int", v)),
     };
+    let reserve = crate::eval::truthy(arg(args, 3));
     let Some(bytes) = read_at(&path, off, len) else {
         return Ok(Value::Nil);
     };
@@ -481,6 +489,16 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
                 heap.env_define(global, sym, Value::Table(tid));
             }
             _ => heap.env_define(global, sym, v),
+        }
+        // Same predicate the `def` path uses under `in_module_load`: functions, macros and
+        // natives become reserved; data globals stay rebindable.
+        if reserve
+            && matches!(
+                v.unpack(),
+                value::ValueRef::Fn(_) | value::ValueRef::Macro(_) | value::ValueRef::Native(_)
+            )
+        {
+            heap.reserve_global(sym);
         }
         ns_define += t2.elapsed().as_nanos() as u64;
         done += 1;

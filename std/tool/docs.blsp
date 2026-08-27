@@ -376,7 +376,9 @@ module's namespace-rooted globals (ADR-070) back to it."
       (or (not (number? close-bracket)) (< close-bracket open-bracket))
         (cons (md-escape text) chunks)
       ;; `[text](url)` — a real link
-      (= (string/substring text (+ close-bracket 1) (math/min (+ close-bracket 2) (string/length text)))
+      (= (string/substring text
+           (+ close-bracket 1)
+           (math/min (+ close-bracket 2) (string/length text)))
         "(")
         (let (rest (string/substring text (+ close-bracket 2) (string/length text))
               close-paren (index-of rest ")"))
@@ -516,7 +518,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- run-one-doctest
   (expr-str expected-str)
   (try
-    (let (actual (eval (reflect/read-first expr-str)) expected (eval (reflect/read-first expected-str)))
+    (let (actual (eval (reflect/read-first expr-str))
+          expected (eval (reflect/read-first expected-str)))
       (if (= actual expected) [:ok] [:fail actual expected]))
     (catch e [:error (error-message e)])))
 

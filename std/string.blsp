@@ -168,18 +168,22 @@ leaves `s` unchanged.
 (defn- triml-from
   (s i n)
   (if (and (< i n) (whitespace? (char-at s i))) (triml-from s (inc i) n) (string/substring s i n)))
-(defn triml (s) "Remove leading whitespace from `s`.
+(defn triml (s)
+  "Remove leading whitespace from `s`.
 
-    (string/triml \"  a\")   → \"a\"" (triml-from s 0 (string/length s)))
+    (string/triml \"  a\")   → \"a\""
+  (triml-from s 0 (string/length s)))
 
 (defn- trimr-to
   (s n)
   (if (and (> n 0) (whitespace? (char-at s (dec n))))
     (trimr-to s (dec n))
     (string/substring s 0 n)))
-(defn trimr (s) "Remove trailing whitespace from `s`.
+(defn trimr (s)
+  "Remove trailing whitespace from `s`.
 
-    (string/trimr \"a  \")   → \"a\"" (trimr-to s (string/length s)))
+    (string/trimr \"a  \")   → \"a\""
+  (trimr-to s (string/length s)))
 
 (defn trim (s)
   "Remove leading and trailing whitespace from `s`.
