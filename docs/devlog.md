@@ -4257,3 +4257,29 @@ de-stuttered beside `project/source-files` — the remedy KI-67 already establis
 
 **Also caught:** v0.14.0 was pushed with three `.blsp` files failing `nest format --check` —
 the one gate in `bin/ci`'s sequence I had not run locally before pushing. Cut as v0.14.1.
+
+**Two follow-ups the same day, both about the record rather than the runtime.**
+
+`doc_refs::every_ki_reference_resolves_to_a_known_issue` went red: KI-69 had an index row and
+no `## KI-69` section. Written. And the session collided with a parallel one — **two
+different issues were both numbered KI-70** within minutes (the checker's literal-walk gap,
+and a note on reversed-args renames), because both sessions read the index rather than the
+headings. Renumbered the newer to KI-71; the older is cited in the CHANGELOG, the devlog, a
+hive test and the **v0.14.1 tag message**, which cannot be corrected — which is the whole
+argument for why a duplicate is worse than a dangling reference.
+
+Nothing caught it, and the reason is instructive: `doc_refs::defined()` collects headings
+into a `BTreeSet`, so two entries sharing a number collapse to one and every citation still
+"resolves". A third gate that could not fail, on the same day as three others. Added
+`no_two_entries_claim_the_same_number` (sabotage-verified: `KI-70 has 2 sections`).
+
+`known-issues.md`'s header was a paragraph of 2026-07-era trivia about KI-9/10/17-25, all of
+which the index already says. Replaced with the thing a contributor actually needs: how to
+take a number without colliding, the five questions an entry must answer (**"why it
+survived"** being the one most often skipped and most valuable — it is where the next bug is
+hiding), the requirement to sabotage-verify a guard *and record the red output*, what each
+status means, which document a finding belongs in, and how to tell the tree is green.
+
+`handoff.md` was replaced too — it had opened "As of 2026-08-19 … `main` is green on all five
+CI jobs" for eight days, which was false for the last two, in the one document whose job is
+to be read cold.

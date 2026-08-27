@@ -5,6 +5,70 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**As of 2026-08-27 (the dead-gates session, concluded).** Released **v0.14.0** and
+**v0.14.1**, both tagged and pushed. `known-issues.md` shows **no open bug and no watch
+item**. Three separate gates turned out to be passing without testing anything, and the
+theme of the day is that *all three failed the same way* — see the box at the end.
+
+**Read this first if you are about to judge whether the tree is green.** It was not, and the
+run list said it was. Every CI run after a failure is `cancelled` by the next push (the
+workflow's `concurrency` group cancels in-progress runs per ref), so `gh run list` showed a
+wall of cancellations with an `in_progress` at the top and no red anywhere — while the last
+three *completed* runs had all failed, for two days. **Filter to completed runs.** A
+cancelled run is not evidence of anything:
+
+    gh run list --limit 40 --json conclusion,headSha,displayTitle \
+      -q '.[] | select(.conclusion=="success" or .conclusion=="failure")'
+
+**What was wrong, and what now guards it:**
+
+- **KI-69** — `differential (tree-walker)` had been red since KI-64's fix. Its two new
+  `jit_plan` guards assert on VM-compiled arms and that job runs `BROOD_VM=0`, so nothing
+  compiles. Both *refuse to pass vacuously*, which is why they failed instead of lying.
+  Fixed with the `set_forced_ceiling(Some(Tier::Native))` pin `compile/tests.rs` has carried
+  since ADR-222.
+- **KI-68** — the fuzz-differential gate had been comparing **dead programs**.
+  `stress/fuzz_programs.py` writes Brood from Python and the rename waves retired every name
+  it emitted, so every generated program died on `(def t (table))` *identically in all four
+  configs* — and a differential reads identical death as agreement. 20 seeds of
+  `ok (exit=1)`, then "all configs agree". Names fixed **and liveness asserted**: an unbound
+  name in a generated program is now a hard failure, and a run where not one seed exits
+  cleanly fails as "the corpus is dead, not the engines agreeing".
+- **KI-70** — `nest check` **never walked a vector or map literal**. `check_into_inner`
+  opened with `let Value::Pair(_) = form else { return }`, so everything inside `[…]`/`{…}`
+  was unchecked by every lint — the entire Hiccup style (`std/editor/*`, every Brood web
+  layer). Found because hive's `/docs` renderer had called bare `max` for weeks with a green
+  `bin/ci`. Vectors and maps now descend; the first run over `std/` + `tests/` returned
+  exactly one warning and it was real (the fifth dead `project-*` call site — the MCP
+  `callers` tool, now `project/all-files`).
+- **22 harnesses of rename rot** in `examples/` and the stress corpus, and both live docs
+  (`language.md`, `brood-for-claude.md`) still teaching `print`/`println`/`eprint`/`eprintln`,
+  `spawn-server`, and bare `quot`/`mod`/`rem`/`floor`/`min`/`max`.
+
+> **The one lesson, stated once.** Every failure above is a gate that **could not fail**.
+> KI-68's differential compared two identical corpses; KI-70's walk returned before reaching
+> the code; the cancelled-run wall hid the reds. A gate whose pass condition can be satisfied
+> by doing nothing is worse than no gate, because it is *believed*. Whenever you add or touch
+> one, write the assertion that the gate did real work — a minimum count, a non-empty result,
+> a liveness check — and **sabotage-verify it**: break the thing on purpose and confirm the
+> gate goes red. Both KI-69 guards survived only because someone had already done this
+> (`only {checked} lowerable chunks inspected … a green result would mean nothing`).
+
+**Open, and worth doing next:**
+
+- **`nest check` has no gate over `examples/`, `stress/`, `scripts/fuzz/stress/` or
+  `breakage/`.** `make check-examples` / `make check-stress` run those programs and grep for
+  `unbound symbol`, which is weaker: it only catches a name on an executed path. This is why
+  the rot reached 22 harnesses.
+- **Brood embedded in non-`.blsp` files is ungated** — `stress/fuzz_programs.py` (KI-68) and
+  Brood inside `crates/lisp/tests/*.rs`. `scripts/stale-names.sh` and every `.blsp` gate walk
+  `.blsp` only.
+- **The reversed-args rename class has no gate at all** (KI-71): arity unchanged, nothing
+  unbound, the type warning advisory. `nest rename --swap` exists to *perform* one; nothing
+  detects a missed one.
+
+**Previous session's entry follows.**
+
 **As of 2026-08-19 (the green-the-tree session, concluded).** `main` is **green on all five CI
 jobs** at `c8dbf0ea` (run 32247618122) — the first fully green run since the ADR-230/231 namespacing
 merge. `known-issues.md` shows **no open bug and no watch item**: KI-36 and KI-47 were both found and
