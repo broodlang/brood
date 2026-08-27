@@ -63,45 +63,58 @@ namespacing waves took the registry down **twice**. Neither outage was a languag
 were gaps in what the toolchain can tell you before you ship. Recorded as KI-66 and KI-67;
 the roadmap items are what would remove the class.
 
-**1. A boot check.** `nest check` resolves names, `nest test` runs the suite, and neither
-loads `main` — which is exactly where a stale dependency dies (`unbound symbol: int->char`
-during `require`; `unbound symbol: os/getenv` on `main`'s first line). A
-`nest release --smoke` / `nest run --check-boot` that loads the bundle's modules, runs
-nothing, and exits nonzero would have caught both on the machine that produced them. Small,
-and the highest-value item here. (KI-66)
+**Status: all five are done (2026-08-27; items 1, 3, 4 and 5 are [ADR-257](docs/decisions.md);
+item 2 shipped with KI-67).** Three of them were a question the toolchain simply had no
+command for — *does it boot?*, *what is this binary?*, *what moved, and where to?*
 
-**2. `nest check` inside a `try`.** The checker deliberately skips unbound symbols in a `try`
-body, which is where I/O lives, which is where the renamed primitives live. hatch shipped a
-dead spool write for exactly this reason. Narrowing candidate: flag one whose `catch` does
-not itself mention the name. (KI-67)
-
-**3. A bundle should say what it is.** Answering "which brood built this, with which
-features" meant grepping the binary over SSH — and the first attempt used `strings`, absent
-from `debian:bookworm-slim`, which reported 0 and read exactly like "no JIT". A
-`--build-info` (brood commit, features, module count) on a `nest release` bundle removes the
-guesswork.
-
-**4. A migration aid for a rename wave.** Each wave breaks every downstream repo, and the
-recovery is a manual loop: `nest check`, read one hint, `nest rename`, repeat — a dozen
-rounds per repo. Two things would make it a command:
-
-- the checker already emits the answer (``\`int->char\` is defined as \`string/int->char\```),
-  so a `nest check --fix-renames` could apply the unambiguous ones and list the rest;
-- the hint only exists for PUBLIC moves. A name that went behind `%` (`map-pairs` →
-  `%map-pairs`) has no hint at all, so those were guesswork against `std/`.
-
-Note the hazard that cost a revert: **`nest rename` is not scope-aware**. Renaming `register`
-in hive also renamed hive's OWN sign-up handler, producing `(defn proc/register …)` — a
-reserved name, so the module stopped defining. Any `--fix-renames` must skip a name the
-project itself defines.
-
-**5. `docsite/render-css` has no theming counterpart.** A `:wrap? false` host embeds a
-fragment whose stylesheet hard-codes a light palette; `component-dark-css` exists but is
-emitted only by the wrapped path and is gated on `prefers-color-scheme`, i.e. the reader's
-OS rather than the host's theme. hive had to override ~30 selectors by hand to put the
-reference on a dark page. `render-css` should emit CSS variables the host can redefine —
-the same shape hive's own stylesheet uses. This is the second incomplete hand-off in that
-API; `render-js` was the first, fixed 2026-08-26.
+- [x] **1. A boot check** (KI-66). `nest check` resolves names, `nest test` runs the suite,
+      and neither loads `main` — which is where the first outage died (`unbound symbol:
+      int->char`, raised *during* `require`). **`nest run --check-boot`** loads every source
+      module the way a bundle does, resolves `:main`, and runs nothing; **`nest release
+      --smoke`** then does it to the binary just written — the artifact, not the tree that
+      produced it, which is the half a source check structurally cannot see.
+      `project/check-boot` / `project/check-bundle-boot`, sharing one entry resolver with
+      `run`/`run-bundle` so the check cannot drift from the boot it checks.
+      Sabotage-verified in both directions (`crates/nest/tests/boot_check_and_renames.rs`).
+      **It does not catch the second outage** — `os/getenv` was reached from inside a
+      function `main` calls, and resolving an entry without invoking it never executes that
+      line. That is the deliberate boundary: `nest check` covers an unbound name in a body,
+      and `nest run --for` (already wired into hive's `bin/ci` and `package-ci.yml`'s opt-in
+      `boot-check`) covers a name reached only when `main` runs. `--check-boot` is the member
+      of that set that is always safe to run — no window, no port, no side effects, valid for
+      a library with no runnable `:main`. See ADR-257 for the table.
+- [x] **2. `nest check` inside a `try`** (KI-67). The checker deliberately skipped unbound
+      symbols in a `try` body — which is where I/O lives, which is where the renamed
+      primitives live; hatch shipped a dead spool write for exactly this reason. Unbound
+      symbols now survive that filter while every other lint stays suppressed.
+- [x] **3. A bundle says what it is.** `myapp --brood-build-info` prints the brood version,
+      build-id, features, and the app + module count. Answering that meant grepping the
+      binary over SSH — and the first attempt used `strings`, absent from
+      `debian:bookworm-slim`, which reported 0 and read exactly like "no JIT". The
+      **`--brood-` argv prefix is reserved by the runtime** (two names, first position only)
+      so the bundle's "argv belongs to the app" contract costs the app nothing; it reads the
+      manifest and module directory only, never loading a module, so it answers on a bundle
+      that is broken — which is when it is asked.
+- [x] **4. A migration aid for a rename wave.** `nest check --fix-renames` (with
+      `--dry-run`) applies the unambiguous half: for each bare name reported unbound, the
+      single public `mod/name` that now defines it, rewritten into this project's
+      *references* via the CST — so a docstring or comment naming the same identifier comes
+      back byte-identical. It declines, with the reason printed, a name defined in several
+      namespaces, a name that moved behind `%` (`map-pairs` → `%map-pairs` has no hint
+      *because* it was withdrawn — naming the target ends the guesswork without rewriting
+      onto it), and — the hazard that cost a revert — **a name the project itself defines**:
+      `nest rename` is not scope-aware, and renaming `register` in hive also renamed hive's
+      OWN sign-up handler, producing the reserved `(defn proc/register …)` so the module
+      stopped defining at all.
+- [x] **5. `docsite/render-css` emits CSS variables.** A `:wrap? false` host embedded a
+      fragment whose stylesheet hard-coded a light palette; `component-dark-css` existed but
+      was emitted only by the wrapped path and gated on `prefers-color-scheme` — the
+      reader's OS, not the host's theme — so hive overrode ~30 selectors by hand. The sheet
+      now declares its palette as custom properties on `.docsite` and **no rule names a
+      colour**, which is what makes a host's redefinition impossible to out-vote;
+      `render-css-dark` hands over the dark set with no media query attached. Second
+      incomplete hand-off in that API (`render-js` was the first, fixed 2026-08-26); the
+      guide headings' undarkened `#1f2933` fell out as a fix.
 
 
 ### Standard-library surface audit — the bare namespace (2026-08-26)

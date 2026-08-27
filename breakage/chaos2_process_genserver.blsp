@@ -146,14 +146,14 @@
 (let (me (self))
   (let (worker (spawn :p46-test-worker
                  (do (receive (:die :ok) (after 10000 :ok)) (send me :dead))))
-    (let (found (whereis :p46-test-worker))
+    (let (found (proc/whereis :p46-test-worker))
       (io/puts "P46: found registered:" (pid? found))
       (io/puts "P46: same pid:" (= worker found)))
     (send worker :die)
     (receive (:dead :ok) (after 3000 :timeout))
     ;; Give scheduler time to reap the name
     (receive (_ :ok) (after 100 :ok))
-    (let (gone (whereis :p46-test-worker))
+    (let (gone (proc/whereis :p46-test-worker))
       (io/puts "P46: after death, whereis:" gone)
       (io/puts "P46-correct (nil after death):" (= nil gone)))))
 
@@ -178,7 +178,7 @@
 
   ;; 50 concurrent readers
   (dotimes (i 50)
-    (spawn (let (key (rem (* i 197) 10000))
+    (spawn (let (key (math/rem (* i 197) 10000))
              (send server [:get key (self)])
              (let (r (receive ([:val v] v) (after 5000 :timeout)))
                (send me [:p47 i key r])))))

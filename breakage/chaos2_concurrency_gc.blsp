@@ -51,7 +51,7 @@
                  (recv-and-alloc 100)))
     ;; Send 100 moderately large messages
     (doseq (i (range 100))
-      (send worker (into [] (range (rem (* i 17) 200)))))
+      (send worker (into [] (range (math/rem (* i 17) 200)))))
     (let (r (receive (:p69-done :ok) (after 30000 :timeout)))
       (io/puts "P69: completed:" (= :ok r)))))
 

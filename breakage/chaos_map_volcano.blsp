@@ -36,7 +36,7 @@
 
 (io/puts "--- filter: keep entries where value mod 7 == 0 ---")
 ;; `filter` on a map walks [k v] pairs
-(def mod7-map (into {} (filter (fn (kv) (= (rem (first (rest kv)) 7) 0)) big-map)))
+(def mod7-map (into {} (filter (fn (kv) (= (math/rem (first (rest kv)) 7) 0)) big-map)))
 (io/puts "entries divisible by 7:" (count mod7-map))
 
 (io/puts "--- map values: increment every value in a 100k-entry slice ---")
@@ -67,7 +67,7 @@
 
 (io/puts "--- fold: sum all values in big-map ---")
 ;; Sum of i^2 for i in [0, 1M) = (n-1)*n*(2n-1)/6 = 999999*1000000*1999999/6
-(def expected-sum (quot (* (* 999999 1000000) 1999999) 6))
+(def expected-sum (math/quot (* (* 999999 1000000) 1999999) 6))
 (def actual-sum (fold (fn (acc kv) (+ acc (first (rest kv)))) 0 big-map))
 (io/puts "expected sum:" expected-sum)
 (io/puts "actual sum:" actual-sum)
@@ -75,7 +75,7 @@
 
 (io/puts "--- frequencies: 1M items with 10 distinct values ---")
 ;; range(1M) → mod 10 → list of 0..9 each 100k times
-(def freq-input (map (fn (i) (rem i 10)) (range 1000000)))
+(def freq-input (map (fn (i) (math/rem i 10)) (range 1000000)))
 (def freqs (seq/frequencies freq-input))
 (io/puts "distinct values:" (count freqs))
 (io/puts "freq of 0:" (get freqs 0))
@@ -84,7 +84,7 @@
 (io/puts "--- map with vector keys (structural hashing stress) ---")
 ;; Keys are 2-vectors [i, i mod 100] — tests hash of non-primitive types
 (defn build-vec-key-map (n)
-  (fold (fn (m i) (assoc m [i (rem i 100)] (* i 2))) {} (range n)))
+  (fold (fn (m i) (assoc m [i (math/rem i 100)] (* i 2))) {} (range n)))
 
 (def vk-map (build-vec-key-map 100000))
 (io/puts "vec-key-map count:" (count vk-map))

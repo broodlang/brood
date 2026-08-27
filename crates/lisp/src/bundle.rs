@@ -26,6 +26,38 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+/// The `--brood-` argument namespace is **reserved by the runtime**: a bundle honours
+/// the two names below as its first argument and hands every other argument, including
+/// any other `--brood-…`, straight to the app's `:main`.
+///
+/// Reserving a prefix rather than the bare `--build-info` / `--boot-check` is the whole
+/// design: the bundle's contract is that argv belongs to the app, and an exception that
+/// costs the app a name it might want is an exception the app has to know about. This one
+/// costs it nothing.
+///
+/// Print the bundle's build identity — which brood, which features, which app — and exit
+/// 0. Answering that meant grepping the binary over SSH, and the first attempt used
+/// `strings`, absent from `debian:bookworm-slim`, which reported nothing and read exactly
+/// like "no JIT".
+pub const BUNDLE_BUILD_INFO_ARG: &str = "--brood-build-info";
+/// Load the bundle's embedded modules, resolve `:main`, run **nothing**, exit 0/1 — the
+/// boot check `nest release --smoke` runs against each binary it writes (KI-66).
+pub const BUNDLE_BOOT_CHECK_ARG: &str = "--brood-boot-check";
+
+/// Which reserved command, if any, `args` (a bundle's argv minus argv[0]) asks for.
+///
+/// The whole contract in one testable place: recognized **only as the first argument**,
+/// and **only** these two spellings. Anywhere else — second position, or any other
+/// `--brood-…` name — the argument belongs to the app and is passed through untouched,
+/// so a bundle can neither swallow an app's argument nor grow a second meaning for one.
+pub fn reserved_command(args: &[String]) -> Option<&'static str> {
+    match args.first().map(String::as_str) {
+        Some(BUNDLE_BUILD_INFO_ARG) => Some(BUNDLE_BUILD_INFO_ARG),
+        Some(BUNDLE_BOOT_CHECK_ARG) => Some(BUNDLE_BOOT_CHECK_ARG),
+        _ => None,
+    }
+}
+
 /// Footer magic — 8 bytes, the trailing digit doubling as the format version so
 /// a stale `nest` writing v1 against a `brood` expecting v2 is detectable.
 const MAGIC: &[u8; 8] = b"BRDBNDL1";
@@ -261,6 +293,39 @@ mod tests {
         assert_eq!(bundle.modules, modules);
         assert_eq!(bundle.module_src("util"), Some("(defn helper () 2)"));
         assert_eq!(bundle.module_src("absent"), None);
+    }
+
+    /// The reserved-argument contract: first position only, exact spelling only.
+    /// Everything else is the app's — that is the property the bundle's whole argv
+    /// design rests on, so it is asserted rather than assumed.
+    #[test]
+    fn reserved_commands_are_first_position_and_exact() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            reserved_command(&argv(&[BUNDLE_BUILD_INFO_ARG])),
+            Some(BUNDLE_BUILD_INFO_ARG)
+        );
+        assert_eq!(
+            reserved_command(&argv(&[BUNDLE_BOOT_CHECK_ARG, "ignored"])),
+            Some(BUNDLE_BOOT_CHECK_ARG)
+        );
+
+        // Not first → the app's.
+        assert_eq!(
+            reserved_command(&argv(&["serve", BUNDLE_BUILD_INFO_ARG])),
+            None
+        );
+        // No args at all → run the app.
+        assert_eq!(reserved_command(&[]), None);
+        // The app's own similarly-named flags are untouched: reserving the
+        // `--brood-` prefix is exactly what buys this.
+        assert_eq!(reserved_command(&argv(&["--build-info"])), None);
+        assert_eq!(reserved_command(&argv(&["--boot-check"])), None);
+        // An unrecognized `--brood-…` is passed through, not swallowed as a typo'd
+        // reserved word — the app may legitimately define it, and guessing would be
+        // the silent-wrong-behaviour failure mode.
+        assert_eq!(reserved_command(&argv(&["--brood-nonesuch"])), None);
     }
 
     #[test]

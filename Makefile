@@ -181,6 +181,15 @@ check-examples: ## Run every `examples/` program and fail on an unbound symbol �
 	# `font-zoom` wants --features gui) — but an unbound name is never environment noise.
 	@./scripts/check-examples.sh
 
+check-corpora: ## STATICALLY check examples/ stress/ fuzz-stress/ breakage/ for names that don't resolve — the paths a RUN never takes
+	# The three runtime gates beside this one (check-examples, check-stress, breakagetests) all
+	# work by RUNNING the programs, so they only ever catch a dead name on an EXECUTED path.
+	# With all three green on 2026-08-27, a static pass over the same files found 74 unresolvable
+	# names sitting on branches no run had taken. Bar is zero `unbound symbol`, not zero warnings
+	# — these corpora are adversarial on purpose; a genuinely dynamic global says so with
+	# `(check-allow :unbound …)`.
+	@./scripts/check-corpora.sh
+
 check-stress: ## Run every `stress/` + `scripts/fuzz/stress/` harness and fail on an unbound symbol — the gate the stress dirs never had
 	# Same rot, same counter, one directory over. `stress/` and `scripts/fuzz/stress/` sit
 	# outside `make test`, `nest check`, the breakage suite AND `check-examples`, so nothing
@@ -298,8 +307,9 @@ green: ## Answer one question honestly: is this tree green? (completed CI runs +
 	# `--local` skips the CI half, `--remote` skips the local half.
 	@./scripts/green.sh $(ARGS)
 
-green-all: green check-examples check-stress ## `make green` plus the two slow .blsp corpus gates
-	@echo "green-all: the .blsp gates passed too. Still not run: make test, breakage, tree-walker differential."
+green-all: check-examples check-stress ## `make green` plus clippy (CI's flags) and the two slow .blsp corpus gates
+	@./scripts/green.sh --clippy
+	@echo "green-all: clippy and the .blsp gates passed too. Still not run: make test, breakage, tree-walker differential."
 
 doctor: ## Report the things that make a measurement or a gate lie (build drift, strays, boot cache, litter)
 	# Read this BEFORE trusting a benchmark delta or a green gate. Every check maps to a

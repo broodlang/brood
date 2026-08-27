@@ -4363,7 +4363,183 @@ leaves all 40 seeded files and fails; reversing the sort so it keeps the *oldest
 which is the assertion that matters — a prune that keeps the wrong 16 costs a source boot on
 every binary in use, the exact cost it exists to avoid.
 
-## 2026-08-27 (fifth session) — the image becomes standard, and the trap in a shared key
+## 2026-08-27 (sixth session) — closing the three ungated classes
+
+The previous entry ended by naming three places a rename could land with no gate watching.
+All three are closed, and each turned out to be cheaper than expected once the actual
+mechanism was found rather than assumed.
+
+**1. The corpora were gated by RUNNING them.** `make check-examples`, `make check-stress` and
+`make breakagetests` all execute the programs and fail on `unbound symbol`, which only ever
+sees a name on a path a given run takes — and these files are full of branches a run does not
+take. With all three green, a static `nest check` over the same trees found **74**
+unresolvable names: 31 `rem`, 11 `quot`, `min`/`max`/`floor`/`->fixed`, `whereis`,
+`read-string`, and the whole `table-*` family in `stress/check_corpus/`. `make check-corpora`
+now runs that pass, in CI, ahead of the slow run-based gates. Nine of the 74 were genuinely
+dynamic — globals created by `eval` or `system/reload-defs` in `chaos_eval_wormhole.blsp` and
+`chaos2_hot_reload.blsp` — and now say so with `(check-allow :unbound …)` rather than leaving
+the gate to guess. Sabotage-verified with the shape that matters: a dead name behind
+`(if false …)`, which no run would ever reach.
+
+**2. Embedded Brood, narrowed to where it actually mattered.** Two of the three surfaces were
+already covered: `scaffold_quality.rs` runs `nest check` on every template `nest new` emits,
+and the Python fuzz generator got its liveness assertion with KI-68. The uncovered one was the
+**docs' code blocks** — 123 of them across `language.md` and `brood-for-claude.md`, evaluated
+by nothing, which is exactly how both came to teach `println` and `spawn-server`.
+
+A doc block is not a program: most are fragments over placeholders, so `doc_examples_test`'s
+approach (evaluate it, compare the result) does not transfer. Two rules are decidable, and
+measuring beat guessing at every step:
+
+- Checking *every* call head is unusable — 338 distinct heads, and the unresolved list is
+  `a`, `acc`, `bob`, `circle`, prose my regex caught (`ADR-146`, `Clojure-style`).
+- Qualified names over the raw markdown is also unusable — file paths (`docs/types.md`) and
+  prose slashes (`cast/call`, `conj/disj`) swamp it.
+- Qualified call heads **inside code blocks** is clean: 24 of them, all real.
+
+And a subtlety that would have made the gate lie: 9 of those 24 initially read as unresolved.
+They are fine — a qualified reference auto-requires at *compile* time, and nothing here
+compiles the block, so `bound?` must be preceded by loading the module. A gate reporting
+`node/start` as missing would have been worse than no gate.
+
+So: every qualified call head resolves, and no retired name appears — the second with an
+anti-vacuity assertion that each retired name is *genuinely unbound*, so the list cannot rot
+into checking for names that have since come back. It immediately found `table-put`,
+`table-get` and `(table)` still in the reference, which the by-hand pass two sessions ago had
+missed. Both arms sabotage-verified.
+
+**3. The reversed-args class had a gate all along — one declaration away.** KI-71 was recorded
+as a class with no possible gate: arity unchanged, nothing unbound, the type warning advisory.
+That is half right. The checker catches a reversal **precisely, per argument**, cross-module:
+
+    seq/remove-nth: argument 1 expects int, got (tuple 1, 2, 3)
+    seq/remove-nth: argument 2 expects seqable, got 1
+
+It was silent on `remove-nth` for one reason — the function had **no declared `sig`**. The
+index/collection functions now carry one, and CI's zero-warning gate turns the reversal into a
+hard failure. Argument types are precise because that is what catches the swap; the return
+stays `any` because a narrow return would false-positive at every call site and is not what
+this mistake gets wrong. Zero new warnings across std/ + tests/, and the correct order — plus
+a call over untyped locals — stays silent.
+
+> One trap worth recording: `std/*.blsp` is `include_str!`'d into the binary, so a new `sig`
+> does nothing until a rebuild. The first run after adding them showed only `take-last`
+> warning, from a curated Rust table, and read as "declared sigs don't work cross-module".
+> They do. The binary was stale — the same class `make doctor` exists for.
+
+## 2026-08-27 (seventh session) — the suite was never slow; the profile was
+
+"Why is the test so long? it is a bit unrealistic." It was, and the answer was not in the
+tests.
+
+`brood_suite_passes` is **933 s of the `clippy + test` job's 1131 s**; the next slowest test
+is 74 s. Two candidate causes were ruled out before the real one, because both would have
+pointed at the tests:
+
+- **Not the engine.** The `differential (tree-walker)` job runs the same wrapper at 1517 s
+  against the VM's 933 s — **1.63x**, where the tree-walker is ~10x slower by design. If
+  interpretation dominated, that ratio would be near 10. Solving for it puts ~90% of the time
+  outside execution either way.
+- **Not sleeps.** All 83 `(sleep …)` calls in `tests/` total 7.8 s.
+
+**It is the build profile.** `cargo test` builds `opt-level = 0`, and this suite is an
+interpreter exercising itself — precisely the workload an unoptimized build punishes most.
+Same commit, same 4931 cases: **933 s** in CI against **58 s** for the identical suite on the
+release binary. A **16x** tax with nothing to do with the tests.
+
+`.config/nextest.toml` turned out to be a written record of that tax being paid instead of
+fixed: the cap on this one wrapper went **300 → 600 → 1200 → 2700 s**, and its own comments
+quote the release path doing the same work in 88 s. It also held three *sampling knobs* —
+`BROOD_UCD_PART1_OF=16`, `BROOD_GABRIEL_NBOYER_MAX_N=1`, `BROOD_JDR_OF=4` — each cutting real
+cases out of the CI wrapper, each justified by the same debug penalty (670 s / 256 s / 210 s
+there against 3.6 s / 19.6 s / 2.7 s on release). So `make test` and `nest test` had quietly
+come to cover different things.
+
+`[profile.test]` and `[profile.dev]` are now `opt-level = 2` with `debug-assertions = true` —
+optimized *and* tripwires armed, which is the combination CLAUDE.md already recommends for
+manual runs, and the only thing this wrapper offers over the release path. Then the knobs
+came out. Measured:
+
+| | coverage | time |
+|---|---|---|
+| before (debug + 3 samplings) | reduced | **933 s** |
+| after (opt-2, unsampled) | full | **66 s** |
+
+Cost: a cold rebuild of the lib + suite binary is 20.8 s wall / 119 s CPU, so roughly 60-90 s
+on a 2-core runner — against 875 s saved. The nextest budget drops 2700 s → 300 s, the first
+time it has moved down.
+
+**On thinning the suite, which was the other half of the question: the arithmetic says no.**
+Measured per file: 4479 of the 4836 cases cost ~29 s *combined*, while 357 cases in twelve
+files cost 22.9 s. Deleting from the cheap 93% saves nothing measurable; the expensive twelve
+are expensive because they do work that is hard to reach any other way — real TCP sockets, a
+stdlib image build, a 19,000-case Unicode corpus, and `mailbox_order_test`, which is **one
+test costing 1.3 s** and is a sabotage-verified guard for a silent message-loss bug (ADR-195).
+
+Three structural audits found nothing to cut either: **10 of 4954** test blocks have no
+`is`/`refute`/`assert=`/`assert-error`, and all ten are legitimate (`check-property` raises on
+failure, `rt` asserts internally, one deliberate smoke test); the 85 duplicate test *names*
+are different modules testing different things (`"empty string"` in csv/encoding/hash/strings);
+and repeated assertion lines are shared idioms within a single file.
+
+> A methodology note, since it nearly produced a confident wrong answer: the first
+> assertion-free scan reported **3266 of 4954**. That was a bug in the scanner — `\\b` after
+> `assert=` can never match, because `=` is not a word character. The corrected scanner was
+> validated against four known-answer cases *before* its output was trusted. A gate that
+> cannot fail is the theme of this whole day, and writing one by accident while auditing for
+> them is the obvious way to get caught by it.
+
+## 2026-08-27 (eighth session) — the three questions the toolchain had no command for
+
+Closed all five toolchain gaps the hive migration exposed ([ADR-257](decisions.md);
+item 2 had already shipped with KI-67). The framing that made this cheap: three of them
+are not "a check that should be stricter" but **a question nothing could ask**.
+
+- **Does it boot?** `nest check` resolves names, `nest test` runs the suite, and neither
+  loads `:main` — where both registry outages actually died (`int->char` raised *during*
+  `require`, on no test's path; `os/getenv` on `main`'s first line). `nest run
+  --check-boot` loads every source module and resolves the entry, running nothing; `nest
+  release --smoke` then does it to the **binary just written**. That distinction is the
+  point: a bundle carries a *snapshot* of every dependency, so a dep updated on disk since
+  the last `nest fetch` is invisible to any source-tree check and fatal in the artifact.
+  All four entry paths (`run`, `run-bundle`, both checks) now share one entry resolver —
+  a check whose value is failing where the real boot fails must not have its own copy.
+- **What is this binary?** `myapp --brood-build-info`. Every fact was already in the
+  runtime (`system/brood-version` / `build-id` / `features`); nothing could ask the
+  *artifact*. Rather than break the bundle's "argv belongs to the app" contract, the
+  **`--brood-` prefix is reserved** — two names, first position only, everything else
+  passed through. It reads the manifest and module directory and loads no module, so it
+  answers on a broken bundle, which is when it is asked.
+- **What moved, and where to?** `nest check --fix-renames` (+ `--dry-run`) runs the manual
+  recovery loop. What makes it safe is what it refuses, each with its reason printed:
+  ambiguity, a `%`-withdrawn target (named, never applied), and — the revert-causing one —
+  **a name the project itself defines**, since `nest rename` is not scope-aware and
+  renaming `register` in hive also renamed hive's own handler into the reserved
+  `proc/register`. Rewrites go through the CST and `:refs-only`, so no `defn` head moves
+  and a docstring or comment naming the identifier comes back byte-identical.
+
+Plus `docsite/render-css`, the second incomplete hand-off in that API after `render-js`:
+the palette is now custom properties on `.docsite` and **no rule names a colour** — which
+is the actual fix, since dark values existing somewhere is worth nothing if a rule can
+out-vote the host's redefinition. `render-css-dark` carries no media query, because
+`prefers-color-scheme` is the viewer's OS and an embedded fragment must follow the page it
+sits in — conflating those is what painted dark grey onto hive's white page. The guide
+headings' hard `#1f2933`, which the old dark block never overrode (near-black on
+near-black), fell out as a fix.
+
+Every gate is sabotage-verified in both directions — a load-time unbound name, a missing
+entry fn, an entry that raises if called, a healthy-project negative control — per the
+previous session's lesson. Two bugs found while writing them, both worth naming because
+both are the class the tooling now guards: `string/join` takes its separator **first**
+(I wrote it reversed — exactly KI-71's shape), and `index-of`/`last-index-of` answer
+**-1**, not nil, so a `(nil? …)` guard sails through into an out-of-bounds substring.
+
+> Also corrected `handoff.md`, which still listed the previous session's three ungated
+> classes as open: `5aa49463` closed all three (`make check-corpora` is in CI), but the
+> handoff was written before that commit landed and nothing re-read it. A stale "open"
+> list is the mirror image of a stale green — same cost, opposite sign.
+
+## 2026-08-27 (ninth session) — the image does not become standard, and the three faults that says
 
 Asked to clean the disk and make the stdlib image standard for nest projects and for the
 benchmarks.

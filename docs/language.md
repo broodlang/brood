@@ -158,17 +158,17 @@ directly**, without routing every access through one owning process's mailbox. I
 a Rust-backed opaque handle (genuine mutable state, never a mutable `Value`):
 
 ```clojure
-(def t (table))                  ; create — returns an opaque handle
-(table-put t :hits 0)            ; store (overwrites); returns t
-(table-get t :hits)              ; => 0   (a fresh copy)
-(table-get t :missing :default)  ; => :default
-(table-has? t :hits)             ; => true
-(table-incr t :hits)             ; => 1   (atomic; default delta 1)
-(table-incr t :hits 10)          ; => 11
-(table-count t)                  ; => 1
-(table-snapshot t)               ; => {:hits 11}  (an immutable map)
-(table-delete t :hits)
-(table-drop t)                   ; free it (else it lives till runtime exit)
+(def t (table/new))               ; create — returns an opaque handle
+(table/put t :hits 0)             ; store (overwrites); returns t
+(table/get t :hits)               ; => 0   (a fresh copy)
+(table/get t :missing :default)   ; => :default
+(table/has? t :hits)              ; => true
+(table/incr t :hits)              ; => 1   (atomic; default delta 1)
+(table/incr t :hits 10)           ; => 11
+(table/count t)                   ; => 1
+(table/snapshot t)                ; => {:hits 11}  (an immutable map)
+(table/delete t :hits)
+(table/drop t)                    ; free it (else it lives till runtime exit)
 ```
 
 How it behaves, and why it's safe:
@@ -176,21 +176,21 @@ How it behaves, and why it's safe:
 - **Shared by identity, like a pid.** The handle can be `send`'d to (or captured by)
   other processes; every copy names the **same** store. `=` and `table?` compare by
   identity — two tables with equal contents are not `=`.
-- **Copy-in / copy-out.** `table-put` stores a **deep clone** of the key and value;
-  `table-get` returns a **fresh copy** into the caller. So no two processes ever alias
+- **Copy-in / copy-out.** `table/put` stores a **deep clone** of the key and value;
+  `table/get` returns a **fresh copy** into the caller. So no two processes ever alias
   a stored value (exactly ETS semantics), and the store is invisible to the garbage
   collector — it can't corrupt across a collection.
 - **Keys are structural**, identical to map keys (`[1 2]`, `:k`, `"s"`, `42` all
   work).
-- **`table-incr` is atomic** — a lock-held read-modify-write, so concurrent counters
+- **`table/incr` is atomic** — a lock-held read-modify-write, so concurrent counters
   never lose an update. (There is deliberately no closure-based `update`: running
   arbitrary code under the lock can't be made safely atomic. For other atomic needs,
   serialize through a process.)
-- **`table-snapshot`** is a consistent point-in-time map — unaffected by later
+- **`table/snapshot`** is a consistent point-in-time map — unaffected by later
   mutation — and your enumeration primitive: use ordinary map ops (`keys`, `vals`,
   `reduce`) on it.
 - **Local to the runtime.** A table can't cross a node link (send its
-  `table-snapshot` — a plain map — instead). It lives until `table-drop` or runtime
+  `table/snapshot` — a plain map — instead). It lives until `table/drop` or runtime
   exit (no owner-death cleanup yet).
 
 ## Maps
@@ -1066,7 +1066,7 @@ The **conditional / short-circuit threading** macros build on those, plus `doto`
 ```clojure
 (some-> {:a {:b 5}} (get :a) (get :b) inc)        ;=> 6      ; stop at the first nil step
 (cond-> {} true (assoc :a 1) false (assoc :b 2))  ;=> {:a 1} ; apply a step only when its guard holds
-(doto (table) (table-put :a 1) (table-put :b 2))  ; run forms for effect, return the value
+(doto (table/new) (table/put :a 1) (table/put :b 2))  ; run forms for effect, return the value
 ```
 
 `some->>`/`cond->>` are the thread-*last* variants; `run!` applies a function to

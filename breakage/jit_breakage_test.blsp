@@ -39,8 +39,8 @@
 ;; (`Inst::Call { tail: true }`, not `SelfCall`). Bodies are heavy (5 work ops:
 ;; `<`,`-`,`+`,`*`,`rem`) so they clear the JIT's tail-call body-weight gate and
 ;; actually tier; the driver reuses the frame (TCO) across hops.
-(defn jb-fa (n acc) (if (< n 1) acc (jb-fb (- n 1) (rem (+ acc (* n 7)) 1000000))))
-(defn jb-fb (n acc) (if (< n 1) acc (jb-fa (- n 1) (rem (+ acc (* n 3)) 1000000))))
+(defn jb-fa (n acc) (if (< n 1) acc (jb-fb (- n 1) (math/rem (+ acc (* n 7)) 1000000))))
+(defn jb-fb (n acc) (if (< n 1) acc (jb-fa (- n 1) (math/rem (+ acc (* n 3)) 1000000))))
 ;; Mutual recursion that conses a list across the hops — a HANDLE flows as a tail-call
 ;; arg, and the per-hop allocation is bounded by the driver-loop-top safepoint.
 (defn jb-tb-build (n acc) (if (< n 1) acc (jb-tb-grow (- n 1) (cons (* n n) acc))))
@@ -106,19 +106,19 @@
       (assert= 24/5 (d 5)))))
 (describe "jit breakage: division edge cases raise cleanly"
   (test "warmed rem then divide-by-zero raises, never traps"
-    (letrec (r (fn (a b) (rem a b))
+    (letrec (r (fn (a b) (math/rem a b))
              run (fn (k last) (if (< k 1) last (run (- k 1) (r 10 2)))))
       (run 20000 0)
       (assert-error (r 10 0))))
 
   (test "warmed quot then quot i64::MIN / -1 deopts to BigInt (no SIGFPE)"
-    (letrec (q (fn (a b) (quot a b))
+    (letrec (q (fn (a b) (math/quot a b))
              run (fn (k last) (if (< k 1) last (run (- k 1) (q 100 5)))))
       (run 20000 0)
       (assert= 9223372036854775808 (q -9223372036854775808 -1))))
 
   (test "warmed quot then divide-by-zero raises"
-    (letrec (q (fn (a b) (quot a b))
+    (letrec (q (fn (a b) (math/quot a b))
              run (fn (k last) (if (< k 1) last (run (- k 1) (q 7 3)))))
       (run 20000 0)
       (assert-error (q 7 0)))))
@@ -163,8 +163,8 @@
     (letrec (cstep (fn (n steps)
                      (if (= n 1)
                        steps
-                       (if (= (rem n 2) 0)
-                         (cstep (quot n 2) (+ steps 1))
+                       (if (= (math/rem n 2) 0)
+                         (cstep (math/quot n 2) (+ steps 1))
                          (cstep (+ (* 3 n) 1) (+ steps 1)))))
              run (fn (k last) (if (< k 1) last (run (- k 1) (cstep 27 0)))))
       (assert= 111 (run 20000 0))))

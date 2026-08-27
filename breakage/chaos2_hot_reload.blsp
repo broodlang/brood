@@ -57,16 +57,21 @@
 (def p31-printed false)
 ;; We can't easily capture stdout mid-test, so we verify via the def value
 (load p31-tmpfile)
-(io/puts "P31: after load, val:" p31-reloaded-val)
-(io/puts "P31: correct val:" (= 100 p31-reloaded-val))
+;; `p31-reloaded-val` is defined by LOADING the tempfile written above, so the checker
+;; cannot see it — that invisibility is what this case exercises. Same class as
+;; `scripts/fuzz/stress/eval_forward_ref.blsp`; opt out rather than "fix".
+(check-allow :unbound
+  (io/puts "P31: after load, val:" p31-reloaded-val)
+  (io/puts "P31: correct val:" (= 100 p31-reloaded-val)))
 
 ;; Now change the def value and use reload-defs — side effect should NOT re-run
 (file/spit p31-tmpfile
   "(def p31-reloaded-val 200)\n(io/puts \"SIDE-EFFECT-SHOULD-NOT-APPEAR\")\n")
 (io/puts "P31: reload-defs (should NOT print SIDE-EFFECT-SHOULD-NOT-APPEAR)...")
-(reload-defs p31-tmpfile)
-(io/puts "P31: after reload-defs, val:" p31-reloaded-val)
-(io/puts "P31-correct (200):" (= 200 p31-reloaded-val))
+(system/reload-defs p31-tmpfile)
+(check-allow :unbound
+  (io/puts "P31: after reload-defs, val:" p31-reloaded-val)
+  (io/puts "P31-correct (200):" (= 200 p31-reloaded-val)))
 
 ;;; ---- P32: hot-swap fn while it runs ----
 (io/puts "=== P32: hot-swap recursive fn via def ===")
