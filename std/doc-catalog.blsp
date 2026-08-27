@@ -47,6 +47,7 @@
    "->float" :convert
    "-conj" :meta
    "-get" :meta
+   "-keys" :meta
    "/" :math
    "<" :math
    "<=" :math

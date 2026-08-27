@@ -99,28 +99,6 @@ If no values remain under `k`, the key is dropped."
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil lst)))
 
-(defn keys (mm)
-  "The DISTINCT keys in the multimap, in UNSPECIFIED order — sort them if you need
-stability. The order is the underlying CHAMP trie's, which is neither insertion order nor
-even stable across processes: it follows keyword interning order, so the same two keys can
-come back in either order depending on what else the process has loaded. (`values` and the
-`Seqable` view inherit the same across-key order; the values *within* one key are
-insertion-ordered and stable.)
-
-Bare `keys` also resolves — the `Seqable` view puts it over the flattened associations —
-but answers one key per value, so `(keys mm)` and `(multimap/keys mm)` disagree by design.
-This is the one you want.
-
-    (sort (multimap/keys (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :j 3)))   → (:j :k)"
-  (/keys (/get mm :entries)))
-
-(defn values (mm)
-  "All values across all keys as a flat list — insertion order WITHIN each key; across keys
-the order is unspecified and not stable across processes (see `keys`).
-
-    (multimap/values (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2))   → (1 2)"
-  (fold (fn (acc vs) (append acc (reverse vs))) [] (vals (/get mm :entries))))
-
 ;; A multimap joins the collection protocol (ADR-172 §7): its `Seqable` view is its
 ;; flattened `[k v]` associations (insertion order), so `count`/`map`/`filter`/`fold`/
 ;; `for`/`into`-from work over the associations directly. `Conjable` takes a `[k v]` PAIR
@@ -137,13 +115,16 @@ the order is unspecified and not stable across processes (see `keys`).
 ;; consults the `Lookup` ability when a map lookup comes back empty, and this type
 ;; implements it, so `(get mm k)` and `(multimap/get-all mm k)` agree.
 ;;
-;; `keys` still differs, legitimately: bare `keys` reads the `Seqable` view — the flattened
-;; associations — so it answers one key per VALUE, while `multimap/keys` answers the
-;; DISTINCT keys. Both are right for the question asked; reach for the qualified one when
-;; you mean distinct.
+;; `keys` is fixed the same way, through `Lookup`'s `-keys`: it read the `Seqable` view and
+;; answered one key per VALUE. `keys` and `vals` are GONE with it — bare
+;; `keys` and `vals` now give the same answers they did, so keeping them would be two names
+;; for one function.
 (impl Lookup
   multimap/multimap
-  (-get [mm k] (get-all mm k)))
+  (-get [mm k] (get-all mm k))
+  ;; `/get`, not bare `get`: inside this module bare `get` is `multimap/get`, so it would
+  ;; look up a KEY named `:entries` in the contents and find nothing.
+  (-keys [mm] (/keys (/get mm :entries))))
 (impl Conjable
   multimap/multimap
   (-conj [mm x]

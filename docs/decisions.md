@@ -16795,6 +16795,22 @@ Two traps in the implementation, both the shape this ADR keeps meeting:
   `default` — otherwise a map storing `nil` under a key gets the default instead of the nil.
   `maps_test` guards exactly that, and caught it.
 
+**`keys` followed, and the duplicates went with it.** `keys` read the `Seqable` view, so a
+multimap answered one key per VALUE while `multimap/keys` answered the DISTINCT keys. That
+was documented as a legitimate difference; it is not one. Two names for the same question
+with two answers is the divergence this ADR is about, whichever answer you call correct.
+`Lookup` gained `-keys`, the type answers for itself, and **`multimap/keys` and
+`multimap/values` are deleted** — bare `keys` and `vals` now give exactly what they gave, so
+keeping them would be two names for one function.
+
+Unlike `get`, `keys` already walks the whole map and allocates, so its impl check sits up
+front rather than behind a miss — there is no hot path to protect.
+
+The bug in the first attempt is worth keeping: the impl read its own field with bare `get`,
+and inside module `multimap` bare `get` IS `multimap/get`, so it looked up a KEY named
+`:entries` in the contents and found nothing — silently returning nil, which the seam then
+read as "no impl". The rest of that module uses `/get` for exactly this reason.
+
 **Where this rule is not yet applied.** `Seqable` and `Conjable` keep `:default` impls (a
 record's fields; map-style conj). Those are real answers for a *record*, which is the only
 thing that reaches them — the collection seams gate on `%impl-exact?` before consulting the
