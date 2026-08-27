@@ -5,7 +5,7 @@
 ;; The FIFO queue is its sibling module `queue` (std/queue.blsp).
 
 (defmodule pq
-  "Purely functional min-priority queue (min priority pops first).
+  "Purely functional min-priority queue (math/min priority pops first).
 
     (let (q (-> (pq/empty)
                 (pq/insert 3 :low)
@@ -43,7 +43,7 @@ falsy collection, so `(if pq …)` used to take the else branch on an empty queu
     (go nil entries)))
 
 (defn insert (q priority value)
-  "Return a priority queue with `[priority value]` inserted (min priority at front).
+  "Return a priority queue with `[priority value]` inserted (math/min priority at front).
 Stable: among equal priorities, earlier inserts pop first (FIFO).
 
     (seq (pq/insert (pq/insert (pq/empty) 2 :b) 1 :a))   → (:a :b)"

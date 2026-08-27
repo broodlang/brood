@@ -206,7 +206,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     let num_or_record = num.union(map_ty);
     def(
         heap,
-        "max",
+        "%max",
         Arity::at_least(1),
         Sig::variadic(num_or_record.clone(), num_or_record.clone()),
         &["x", "&", "more"],
@@ -214,7 +214,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         prim_max);
     def(
         heap,
-        "min",
+        "%min",
         Arity::at_least(1),
         Sig::variadic(num_or_record.clone(), num_or_record),
         &["x", "&", "more"],
@@ -232,7 +232,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // `mod` is Brood over `rem` (std/prelude.blsp); only `rem` is primitive.
     def(
         heap,
-        "rem",
+        "%rem",
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "b"],
@@ -241,7 +241,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     // `%quot` — truncating integer division (toward zero), the kernel `quot`
     // passes through to so the VM inlines it as one op. (It used to be Brood over
-    // `(/ (- a (rem a b)) b)` — three dispatched calls per use, which made tight
+    // `(/ (- a (math/rem a b)) b)` — three dispatched calls per use, which made tight
     // integer loops like `collatz` pay rem+sub+div every step.)
     def(
         heap,
@@ -1137,7 +1137,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // form, i.e. full f64 precision). `round-to` (a *number*) is Brood over floor.
     def(
         heap,
-        "->fixed",
+        "%->fixed",
         Arity::exact(2),
         Sig::new(vec![num, int], string),
         &["x", "n"],

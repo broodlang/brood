@@ -68,7 +68,7 @@ buffer wants — the user should be able to see where they may type."
                           next-off
                           nil
                           (cons {:start (get open :start)
-                                 :end (max (get open
+                                 :end (math/max (get open
                                              :start)
                                         (dec off))
                                  :open-line (get open
@@ -82,7 +82,7 @@ buffer wants — the user should be able to see where they may type."
   "The single region from `start` to the end of `text` — the shape a prompt buffer
 wants (everything after the prompt is yours). A list of one, so it composes with
 the region functions below."
-  (list {:start (min start (string/length text)) :end (string/length text)}))
+  (list {:start (math/min start (string/length text)) :end (string/length text)}))
 
 ;; ---- region algebra -----------------------------------------------------------
 

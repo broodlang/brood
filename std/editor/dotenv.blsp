@@ -91,7 +91,7 @@ assignment spans (key / export / quoted value), else none."
 spans in reverse."
   (if (>= i n)
     (reverse acc)
-    (let (e (min n (string/span-until src i "\n"))
+    (let (e (math/min n (string/span-until src i "\n"))
           spans (env-line-spans (string/substring src i e) i))
       (env-lex src (inc e) n (fold (fn (a s) (cons s a)) acc spans)))))
 

@@ -22,7 +22,7 @@
 ;; symbol). Deliberately tiny — a real one would use a CLDR table.
 (defn- money-render
   (m locale)
-  (let (n (->fixed (get m :amount) 2)
+  (let (n (math/->fixed (get m :amount) 2)
         symbol (money-symbol (get m :currency)))
     (case locale
       :de (str (string/replace n "." ",") " " symbol)

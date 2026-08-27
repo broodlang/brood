@@ -63,15 +63,15 @@
     (assert= -5 (- 5))
     (assert= 5 (- -5)))
 
-  (test "(max n) and (min n) work with a single argument"
-    (assert= 99 (max 99))
-    (assert= 99 (min 99)))
+  (test "(math/max n) and (math/min n) work with a single argument"
+    (assert= 99 (math/max 99))
+    (assert= 99 (math/min 99)))
 
-  (test "(max) with no args raises arity error"
-    (assert-error (max)))
+  (test "(math/max) with no args raises arity error"
+    (assert-error (math/max)))
 
-  (test "(min) with no args raises arity error"
-    (assert-error (min)))
+  (test "(math/min) with no args raises arity error"
+    (assert-error (math/min)))
 
   (test "integer arithmetic auto-promotes to bigint on overflow — no wrapping"
     (assert= 9223372036854775808 (+ 9223372036854775807 1)))
@@ -89,7 +89,7 @@
     (assert-error (/ 1.0 0.0)))
 
   (test "mod by zero raises"
-    (assert-error (mod 7 0)))
+    (assert-error (math/mod 7 0)))
 
   (test "sqrt of negative number raises"
     (assert-error (sqrt -1.0)))

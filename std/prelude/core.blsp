@@ -159,7 +159,7 @@
 
     (fold + 0 [1 2 3 4])                      → 10
     (fold (fn (a x) (cons x a)) nil [1 2 3])  → (3 2 1)
-    (fold max 0 [3 9 4])                      → 9"
+    (fold math/max 0 [3 9 4])                 → 9"
   ;; DISPATCH ORDER IS LOAD-BEARING. A vector is tested first, with the one-call
   ;; `vector?` predicate rather than `type-of` + `%eq` from the bottom of the chain.
   ;; The branches are disjoint (`type-of` is `:vector` for a vector and `:pair` for a

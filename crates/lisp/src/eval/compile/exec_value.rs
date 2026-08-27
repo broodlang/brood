@@ -120,7 +120,7 @@ pub(crate) fn prim_apply_float(op: PrimOp, x: Value, y: Value) -> Option<Value> 
         // `max`/`min` are NOT inlined for floats: the native `prim_max`/`prim_min`
         // select via `>`/`<` and return the *original* operand, so they (a) keep a
         // NaN operand (`a > NaN` is false → the other is kept) and (b) preserve
-        // int-ness when the int operand wins (`(max 5 3.0)` → Int `5`). Rust's
+        // int-ness when the int operand wins (`(math/max 5 3.0)` → Int `5`). Rust's
         // `f64::max`/`min` discard NaN and this path would force a `Value::float`,
         // both diverging from the tree-walker (the reference). Defer to the native.
         // Bitwise ops are int-only; any float operand defers to the native (which errors).

@@ -38,7 +38,7 @@
 (defn- url-byte->pct
   (b)
   "Encode a single byte `b` as a %XX string (uppercase hex)."
-  (str "%" (string/char-at url-hex-upper (quot b 16)) (string/char-at url-hex-upper (rem b 16))))
+  (str "%" (string/char-at url-hex-upper (math/quot b 16)) (string/char-at url-hex-upper (math/rem b 16))))
 
 ;; `acc` is the emitted pieces in reverse; `percent-encode` joins once. `(str acc …)`
 ;; per byte rebuilt the whole accumulator each step — O(n^2) over a long input.

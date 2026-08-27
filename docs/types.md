@@ -289,7 +289,7 @@ never a false positive.
 - ✅ **Arity diagnostics.** Every call's argument count is checked against the
   callee's `Arity` — `NativeFn.arity` for primitives, derived from
   `Closure.{params, optionals, rest}` for Brood closures (in the heap; the
-  inferred-sig path applies too). `(first)` → "expected 1, got 0"; `(rem 1 2
+  inferred-sig path applies too). `(first)` → "expected 1, got 0"; `(math/rem 1 2
   3)` → "expected 2, got 3"; `(%map-get {})` → "expected 2 to 3"; `(apply f)`
   → "expected 2 or more". Independent of the type check (which still runs
   for the args that *are* present), so a 1-arg `(first 5)` still says `first:

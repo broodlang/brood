@@ -53,7 +53,7 @@ what incremental search rides on (formerly the separate `index-of`).
       ;; per query char per candidate, but making the scan cheap barely moved ranking —
       ;; see the note there before assuming this is anyone's bottleneck. The empty needle
       ;; still matches at `from`, and a `from` past the end still finds nothing.
-      (string? coll) (%str-index-of coll x (max 0 start))
+      (string? coll) (%str-index-of coll x (%max 0 start))
       else (%index-of-seq-from coll x 0 start))))
 
 (defn last-index-of (s needle &optional before)

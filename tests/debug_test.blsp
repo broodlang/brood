@@ -16,8 +16,8 @@
 (defn trace-count (state)
   (count (filter (fn (e) (= (get e :kind) :trace)) (get state :events))))
 
-;; A varying classification most workers agree on, a couple don't (mod 5 == 0).
-(defn classify (n) (if (= 0 (mod n 5)) :flag :ok))
+;; A varying classification most workers agree on, a couple don't (math/mod 5 == 0).
+(defn classify (n) (if (= 0 (math/mod n 5)) :flag :ok))
 
 ;; A long-lived server with NO debugger wiring — it should handle each request in the
 ;; sender's causal context, adopted transparently from the message (send-level).

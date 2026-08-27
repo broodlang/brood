@@ -233,7 +233,7 @@
 >   native builtin (`prim_max`/`prim_min`: Int fast-path → BigInt exact → float coerce,
 >   `Arity::at_least(1)`) and a JIT-inlined `icmp(SGE/SLE)` + `select` pair. The old definition
 >   allocated ~2 heap cells per 2-arg call (one cons for the `xs` rest arg, one closure for the
->   fold lambda); collatz's inner `(max best (steps k 0))` ran 250K times = ~500K allocs/run.
+>   fold lambda); collatz's inner `(math/max best (steps k 0))` ran 250K times = ~500K allocs/run.
 >   `PrimOp::Max`/`Min` added to the full PrimOp pipeline: `from_native_name`, `prim2_int_fast`,
 >   `prim_apply`, `prim_apply_float`, `chunk_in_jit_subset`, `emit_arith`. No overflow guard needed
 >   (max/min are branchless). Aggregate: **5.9× → ~5.8×** (collatz now comparable to Node's 182ms).

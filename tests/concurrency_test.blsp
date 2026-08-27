@@ -47,7 +47,7 @@
     ; odd  — pattern matches, guard fails
     (send (self) 8)
     ; even — taken
-    (assert= (receive (n :when (= 0 (mod n 2)) n)) 8)
+    (assert= (receive (n :when (= 0 (math/mod n 2)) n)) 8)
     (assert= (receive (n n)) 3))
   ; the odd one is still there
 

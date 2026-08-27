@@ -226,7 +226,7 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
   ;; Build the list of copies with the generic `range`/`map` (NOT the generic
   ;; `repeat`, which this name would shadow inside the `string` namespace), then
   ;; concatenate in one `apply str` pass.
-  (apply str (map (fn (_) s) (range (max 0 n)))))
+  (apply str (map (fn (_) s) (range (math/max 0 n)))))
 
 ;; ---- interpolation and printf ------------------------------------------------
 ;; Moved here from the prelude 2026-08-26. They were defined in `std/prelude/string.blsp`
@@ -334,7 +334,7 @@ things in the same image is a name worth spending to fix."
         (inc i)
         n
         (rest args)
-        (str acc (->fixed (first args) 6)))
+        (str acc (math/->fixed (first args) 6)))
     (= (string/char-at template i) ".") (format-prec template (inc i) n args acc 0)
     else
       (error (str "format: unrecognized specifier '%" (string/char-at template i) "' at column " i))))
@@ -349,7 +349,7 @@ things in the same image is a name worth spending to fix."
         (inc i)
         n
         (rest args)
-        (str acc (->fixed (first args) p)))
+        (str acc (math/->fixed (first args) p)))
     else
       (let (d (string/->number (string/char-at template i)))
         (if (and (int? d) (>= d 0) (<= d 9))

@@ -47,7 +47,7 @@ never the buffer itself. Drive it with `buffer-edit` / `buffer-query`."
 (defn- buffer-clamp
   (lo hi x)
   "Clamp `x` into the inclusive range [lo, hi]."
-  (max lo (min hi x)))
+  (math/max lo (math/min hi x)))
 
 (defn- buffer-line-end-col
   (buf line)
@@ -164,7 +164,7 @@ Unset/false on a fresh buffer (`make-buffer` builds freely)."
 or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
 `delete-region`/`buffer-region` act on."
   (let (m (get buf :mark))
-    (if (nil? m) nil (let (p (get buf :point)) [(min p m) (max p m)]))))
+    (if (nil? m) nil (let (p (get buf :point)) [(math/min p m) (math/max p m)]))))
 
 (defn buffer-region (buf)
   "The text between point and mark (in either order), or nil if no mark is set."
@@ -207,7 +207,7 @@ the target line is long enough. Clamps to the buffer's line range."
                  (dec (text/line-count rope))
                  (+ (text/char->line rope (get buf :point)) n))
         line-start (text/line->char rope target))
-    (goto-char buf (+ line-start (min col (buffer-line-end-col buf target))))))
+    (goto-char buf (+ line-start (math/min col (buffer-line-end-col buf target))))))
 
 (defn backward-line (buf &optional (n 1))
   "Point moved `n` lines backward (see `forward-line`)."
@@ -318,7 +318,7 @@ buffer if none) — Emacs `forward-paragraph` (M-})."
         ;; step back over blank lines directly above, then over the paragraph's lines.
         afterblank (buffer-scan-lines buf (dec line) n -1 true)
         start (buffer-scan-lines buf afterblank n -1 false))
-    (goto-char buf (text/line->char rope (max 0 (if (< start 0) 0 (inc start)))))))
+    (goto-char buf (text/line->char rope (math/max 0 (if (< start 0) 0 (inc start)))))))
 
 ;; ---- sentence motion (M-a / M-e) --------------------------------------------
 ;; A sentence ends at `.`/`?`/`!`, any closing quotes/brackets, then whitespace or the
@@ -355,7 +355,7 @@ paragraph's end); `limit` when the paragraph holds no further sentence end."
   (if (>= i limit)
     limit
     (let (e (buffer-sentence-end-at text i limit))
-      (if (nil? e) (buffer-scan-sentence-fwd text (inc i) limit) (min e limit)))))
+      (if (nil? e) (buffer-scan-sentence-fwd text (inc i) limit) (math/min e limit)))))
 
 (defn- buffer-sentence-start-before
   (text i limit best)
@@ -374,7 +374,7 @@ just past a sentence end with the whitespace after it skipped."
   "Point moved just past the end of the current sentence — the paragraph's end when it
 holds no further sentence terminator (Emacs `forward-sentence`, M-e)."
   (let (point (get buf :point)
-        limit (max point (get (forward-paragraph buf) :point)))
+        limit (math/max point (get (forward-paragraph buf) :point)))
     (goto-char buf (buffer-scan-sentence-fwd (buffer-text buf) point limit))))
 
 (defn backward-sentence (buf)
@@ -382,7 +382,7 @@ holds no further sentence terminator (Emacs `forward-sentence`, M-e)."
 point already sits at one, the paragraph's start when there is no earlier sentence
 (Emacs `backward-sentence`, M-a)."
   (let (point (get buf :point)
-        floor (min point (get (backward-paragraph buf) :point)))
+        floor (math/min point (get (backward-paragraph buf) :point)))
     (goto-char buf (buffer-sentence-start-before (buffer-text buf) floor point floor))))
 
 ;; ---- mark -------------------------------------------------------------------
@@ -616,7 +616,7 @@ the diff only ever runs over the span that actually changed."
       ;; nothing changed
       (and (= o-mid "") (= n-mid "")) new
       ;; too large to diff character-wise: treat the whole span as one change
-      (> (max (string/length o-mid) (string/length n-mid)) *undo-region-char-budget*)
+      (> (math/max (string/length o-mid) (string/length n-mid)) *undo-region-char-budget*)
         (if (and (< pre
                    hi)
               (> (+ pre
@@ -698,8 +698,8 @@ whole thing back."
               ;; top, so a plain `undo` still takes this step back while another region
               ;; undo continues backwards through the same lines.
               :undo (cons (assoc (first (get pushed :undo)) :region-undo true) tail)
-              :point (min (get buf :point) (text/length rope))
-              :mark (min (get buf :mark) (text/length rope)))))))))
+              :point (math/min (get buf :point) (text/length rope))
+              :mark (math/min (get buf :mark) (text/length rope)))))))))
 
 (defn undo (buf)
   "A standalone single undo: begin a fresh run and take one step. The editor's repeat

@@ -68,7 +68,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
     nil
     (receive
       ([:tcp ^sock d] (let (probe (bytes/concat tail d)
-                            k (max 0 (- (bytes/length marker) 1))
+                            k (math/max 0 (- (bytes/length marker) 1))
                             pn (bytes/length probe))
                         (if (>= (bytes/index-of probe marker) 0)
                           (apply bytes/concat (reverse (cons d chunks)))

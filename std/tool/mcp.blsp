@@ -416,7 +416,7 @@ WATCHES the runtime (GC pauses, spawn/exit churn, JIT deopts) over an interval,
 complementing the point-in-time `processes`/`node` snapshots."
   (let (
         ; self-cap the window at 5 s
-        ms (min (or (get args :ms) 500) 5000)
+        ms (math/min (or (get args :ms) 500) 5000)
         opt (get args :filter))
     ; e.g. {:gc true :gc-min-pause-us 1000}
     ;; One global monitor slot (last-wins); arm on ourselves, then clear on the way

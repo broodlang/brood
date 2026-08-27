@@ -404,7 +404,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
                         ;; Riding is a *call* affordance — `(head arg)` — only. (Maps
                         ;; are pair-broken elsewhere and never reach here.)
                         (not (= open "(")) 0
-                        (>= hdr-count 0) (min hdr-count (count args))
+                        (>= hdr-count 0) (math/min hdr-count (count args))
                         (nil? args) 0
                         (nil? (single-line (first args))) 0
                         ;; A comment sitting between the head and its first

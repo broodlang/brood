@@ -159,7 +159,7 @@ value — the buffer plus the top visible line (the viewport) — and render it:
 a status line, the visible buffer lines, and the cursor."
   (let (buf (get ed :buffer)
         top (get ed :top)
-        text-rows (max 1 (dec rows))             ; reserve the last row for status
+        text-rows (math/max 1 (dec rows))             ; reserve the last row for status
         body (map (fn (i) (render--line ed i (+ top i) cols))
                   (range text-rows))
         cur-row (- (buffer-current-line buf) top)
@@ -249,7 +249,7 @@ state — until a command returns `:quit`.
 (defn editor--loop (ed)
   "Render, wait for a key, dispatch, repeat — until a command returns :quit."
   (let ([cols rows] (term/size)
-        ed (assoc ed :height (max 1 (dec rows))))   ; keep height in state for scrolling
+        ed (assoc ed :height (math/max 1 (dec rows))))   ; keep height in state for scrolling
     (term/draw (render-frame ed cols rows))
     (let (key (term/poll 1000))
       (if (nil? key)

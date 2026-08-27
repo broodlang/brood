@@ -47,7 +47,7 @@ parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
   (n acc)
   (if (= n 0)
     acc
-    (int->hex-acc (quot n 16) (str (string/char-at json-hex-digits (rem n 16)) acc))))
+    (int->hex-acc (math/quot n 16) (str (string/char-at json-hex-digits (math/rem n 16)) acc))))
 
 (defn- int->hex
   (n)
@@ -381,8 +381,8 @@ on malformed input or trailing content. Pure.
   (cp)
   "The `\\u00XX` escape for a control code point `cp` (< 0x20)."
   (str "\\u00"
-    (string/char-at json-hex-digits (quot cp 16))
-    (string/char-at json-hex-digits (rem cp 16))))
+    (string/char-at json-hex-digits (math/quot cp 16))
+    (string/char-at json-hex-digits (math/rem cp 16))))
 
 ;; `[raw escape]` for every control char the named escapes below don't cover —
 ;; strict JSON forbids any raw char < U+0020 in a string, named escape or not.

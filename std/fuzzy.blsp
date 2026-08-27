@@ -74,7 +74,7 @@ camelCase hump (an upper preceded by a non-upper)."
         bonus (+ 1
                 (if (fuzzy-boundary? cand pos) 8 0)
                 (if contiguous 6 0)
-                (if (nil? prev) (- 0 (min 3 pos)) 0)))
+                (if (nil? prev) (- 0 (math/min 3 pos)) 0)))
     ; small leading-offset penalty, first match only
     {:score (+ (get st :score) bonus) :prev pos}))
 

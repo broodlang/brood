@@ -357,6 +357,6 @@ its printed form.
   (if (vector? bindings)
     (error "binding: bindings must be a list, not a vector: write (binding (*a* 1 *b* 2) …)."
       " Brood is lists-for-code, vectors-for-data (unlike Clojure).")
-    (if (= 1 (rem (count bindings) 2))
+    (if (= 1 (%rem (count bindings) 2))
       (error "binding: bindings must be name/value pairs, got " bindings)
       `(%binding (quote ~(%binding-names bindings)) [~@(%binding-vals bindings)] (fn () ~@body)))))
