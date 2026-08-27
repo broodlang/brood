@@ -45,9 +45,9 @@
    "->>" :control
    "decimal/number->" :convert
    "->float" :convert
-   "-conj" :meta
-   "-get" :meta
-   "-keys" :meta
+   "conj-onto" :meta
+   "lookup-get" :meta
+   "lookup-keys" :meta
    "/" :math
    "<" :math
    "<=" :math

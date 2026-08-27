@@ -98,7 +98,7 @@ on every builtin enforced at one gate (`eval::call_native`).
 ### Step 1 — the set-theoretic `Ty` lattice ✅
 `crates/lisp/src/types/mod.rs`: `Ty` as a set of tags with union/intersect/negate/
 difference, semantic subtyping, `NEVER`/`ANY`/`NUMBER`/`LIST`, `of_value` bridge,
-`Display`. Pure algebra; nothing in the language consumes it yet.
+`display`. Pure algebra; nothing in the language consumes it yet.
 **Done:** the algebra exists and is unit-tested in isolation.
 
 ### Step 2 — `dynamic()`, the gradual type ✅

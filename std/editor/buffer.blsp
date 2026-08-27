@@ -81,11 +81,11 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
 ;; A buffer's display form is a short identification — never its text: a buffer can hold
 ;; a megabyte of rope plus an undo history, and `io/puts`ing that (or seeing it in an
 ;; error message) is never what was wanted. `inspect` adds point/mark for debugging.
-(impl Display
+(impl display
   editor/buffer/buffer
   (->string [b] (str "#<buffer " (get b :name) " " (text/length (get b :rope)) " chars>")))
 
-(impl Inspect
+(impl inspectable
   editor/buffer/buffer
   (inspect [b]
     (str "#<buffer "

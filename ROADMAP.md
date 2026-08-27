@@ -136,7 +136,7 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
 
 - [x] `gen` can defer a reply — `defer` clause + `gen/reply`, so a server can hand work off
       without blocking its loop. The one gap that limited what could be *built*
-- [x] `task`/`await` compose; `pq`/`multimap` get `Conjable`
+- [x] `task`/`await` compose; `pq`/`multimap` get `conjable`
 
 **Still open:**
 
@@ -145,7 +145,7 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
       ~1,150 functions remain — a campaign, not a pass
 - [ ] **Ability seams do not reach built-in kinds** (ADR-253). Every seam tests `record?`
       first, so `rope` and `table` cannot join the bare vocabulary: `(count r)` raises,
-      `(seq r)` silently returns the rope, and `(impl Display :rope …)` registers, resolves
+      `(seq r)` silently returns the rope, and `(impl display :rope …)` registers, resolves
       when called directly, and is never consulted. The `record?` test is right on the fast
       path and wrong on the failure path, where falling through is free
 - [ ] **Naming seams:** five verbs for "start a process"; `task/task` and `set/set` stutter;
@@ -270,16 +270,16 @@ Shipped as ADRs:
   the ability system (`defability`/`impl`/`defrecord`, nominal dispatch), now **core
   in the prelude**. `defbehaviour` stays in `std/protocol.blsp`.
   - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first ability for
-    open-extension rendering: `Display`/`->string` (Elixir's `String.Chars`), with a
+    open-extension rendering: `display`/`->string` (Elixir's `String.Chars`), with a
     zero-cost prelude `*show*` hook so the screen printers let a record define how it
     prints. **Now core and always on** (slice 6 below): a record customizes printing
-    with just `(impl Display …)` — no `(require 'show)`, no activation step.
+    with just `(impl display …)` — no `(require 'show)`, no activation step.
   - ✅ **`std/` adopts abilities** ([ADR-177](docs/decisions.md), 2026-07-29) — a second,
     wider audit than ADR-171's (which found only two candidates by asking solely about
-    third-party extension). Shipped six abilities — `JsonEncode` (the ADR-171 follow-up),
-    `Dependency` (`:sealed`, replacing five scattered `:kind` cond chains in the package
-    manager — `nest check` now reports a missing op), `Port` (`std/io`'s documented
-    "richer port value" seam), `LogBackend`, `Response` (`std/net/http`), `Temporal`
+    third-party extension). Shipped six abilities — `json/encodable` (the ADR-171 follow-up),
+    `package/dependency` (`:sealed`, replacing five scattered `:kind` cond chains in the package
+    manager — `nest check` now reports a missing op), `io/port` (`std/io`'s documented
+    "richer port value" seam), `log/backend`, `http/response` (`std/net/http`), `datetime/temporal`
     (`:sealed`) — plus `defrecord` identities for five value types that were previously
     identified by structural sniffing (`buffer`, `queue`, `pq`, `multimap`, the temporal
     types). ADR-177 also records the **rejection list** (the prelude's collection
@@ -383,9 +383,9 @@ Shipped as ADRs:
       machinery — and it's invisible to the language (a pure memo of `impl-for`). Dispatch
       overhead vs a direct call roughly halved. Still ⬜: compile-time *static* resolution
       where the receiver type is known, and `:sealed` → a closed exhaustive switch.
-    - ✅ **Slice 6 — `Display` core, always on** (2026-07-28): the ability system +
-      `Display`/`Inspect` folded into the prelude; the prelude wires `*show*` on by
-      default. A record customizes printing with just `(impl Display …)` — no
+    - ✅ **Slice 6 — `display` core, always on** (2026-07-28): the ability system +
+      `display`/`inspectable` folded into the prelude; the prelude wires `*show*` on by
+      default. A record customizes printing with just `(impl display …)` — no
       `(require 'show)`, no `display-on`. `std/ability.blsp` + `std/show.blsp` deleted
       (their content is now prelude); the `Interp` needs no per-runtime load. **Records
       unified**: `defrecord`/`defrecord*` collapsed into one identity-carrying `defrecord`
@@ -442,24 +442,24 @@ What that review consciously left OPEN, with the reasoning:
   checker's `sig_of`, `defrecord`'s emitted sigs, `sig!`'s wrapping, and every `sig`
   in `std/`. Deferred with the reasoning in ADR-163, not dismissed. **[Brood]**
 - 🟡 **Re-host the seq protocol on abilities** (2026-07-29). The **read/iteration half
-  shipped**: a `Seqable` ability (op `->seq`, default = a record's fields id-free) that
+  shipped**: a `seqable` ability (op `->seq`, default = a record's fields id-free) that
   `seq` — and so `map`/`filter`/`fold`/`for`/`into`, plus `count`/`keys`/`vals` — consults
   for a RECORD, so a custom-collection record defines its own iteration and joins the
-  protocol. Hybrid, à la `Display`: built-ins keep their native fast path (the `Seqable`
+  protocol. Hybrid, à la `display`: built-ins keep their native fast path (the `seqable`
   branch fires only for a record, detected by one `:__id__` check, once per collection op,
   not per element), so zero cost to lists/vectors/maps. This also **fixed the `:__id__`
   leak** unified `defrecord` introduced — `(count r)`/`(keys r)`/`(seq r)` are now the
   field view, not the raw map (which included `:__id__`). The **build half** also shipped:
-  a `Conjable` ability so `conj`/`into` (both prelude defns) dispatch for a record —
+  a `conjable` ability so `conj`/`into` (both prelude defns) dispatch for a record —
   default is the map behaviour, a custom collection defines its own insertion. **Dogfooded
   onto std**: `std/queue` and `std/multimap` now impl the protocol, so a queue/multimap is
   a first-class collection (`count`/`seq`/`map`/`fold`/`for`/`conj`/`into` all work) and
   their bespoke `queue-to-list`/`queue-from-list`/`multimap-size` collapsed into one-liners
   over it. Still ⬜: the Prim1 accessors (`first`/`rest`/`empty?`/`nth`) don't route
-  through `Seqable` — they're JIT-inlined ops the hot `fold--loop` uses, so routing them
+  through `seqable` — they're JIT-inlined ops the hot `fold--loop` uses, so routing them
   needs kernel work (or raw `%first`/`%rest`); use `(first (seq c))` meanwhile — plus an
   optional `Counted` for O(1) `count`. **[Brood]**
-- ✅ **Numeric protocol — arithmetic for records (`Num`)** (2026-07-29). A money value,
+- ✅ **math/numeric protocol — arithmetic for records (`Num`)** (2026-07-29). A money value,
   complex number, 2-D vector, or bignum uses `+`/`-`/`*`/`/` via a `Num` ability
   (`num-add`/`num-sub`/`num-mul`/`num-div`). A Brood-side attempt (a `(record? a)` branch in
   `+`'s binary arm) was ❌ first — it defeats the JIT's arithmetic specialization, a **~195×

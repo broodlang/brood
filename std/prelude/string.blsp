@@ -1,6 +1,6 @@
 ;; ---- symbol / keyword conversions -------------------------------------------
 ;; `symbol` and `keyword` (Rust) are lenient — they take string/symbol/keyword.
-;; The symbol → string direction is the polymorphic `->string` (Display) op, or the
+;; The symbol → string direction is the polymorphic `->string` (display) op, or the
 ;; kernel `name`/`str`; only the strict string → symbol wrapper below is a named
 ;; conversion (it errors on the wrong input shape). Thin Brood wrapper, no new kernel.
 
@@ -168,7 +168,7 @@ incremental search rides on."
 ;; (the REPL's result highlighter does exactly that).
 ;;
 ;; Only *containers* are traversed; every leaf and every value this doesn't know
-;; about (records with an `impl Display`, ropes, tables, functions) is handed to
+;; about (records with an `impl display`, ropes, tables, functions) is handed to
 ;; `pr-str` unchanged, so custom printing keeps working and this stays small.
 
 (defdyn *print-length* 100)
@@ -176,7 +176,7 @@ incremental search rides on."
 ;; The third bound, and in practice the one that saves a display: a TEXT leaf's
 ;; length. Neither bound above touches a leaf, so a single 10 MB string sails past
 ;; both — `*print-length*` counts a collection's items and a string is one item.
-;; 4096 matches Elixir's `Inspect` `:printable_limit`, which exists for exactly this.
+;; 4096 matches Elixir's `inspectable` `:printable_limit`, which exists for exactly this.
 (defdyn *print-string-length* 4096)
 
 (defn- %pr-elide

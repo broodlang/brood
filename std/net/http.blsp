@@ -200,21 +200,21 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
    405 "Method Not Allowed"
    500 "Internal Server Error"})
 
-;; ---- responses: the Response ability ----------------------------------------
+;; ---- responses: the http/response ability ----------------------------------------
 ;;
 ;; A handler returns a response VALUE, and the server writes it to the connection. There
 ;; are two shapes with genuinely different wire behaviour — a plain response (render head
 ;; + body, then close) and a streaming one (render the head, then hand the live socket
 ;; over and DON'T close) — which the server used to tell apart by sniffing for a `:stream`
-;; key and branching. They are now two records with one `Response` ability between them,
+;; key and branching. They are now two records with one `http/response` ability between them,
 ;; so "how this response reaches the socket" lives with the response type.
 ;;
 ;; That is also the extension point: a response kind with different wire behaviour — a
 ;; sendfile, a chunked encoder, a 101 protocol upgrade — is a `defrecord` plus an `impl
-;; Response` in your own module, and `serve` handles it with no change here. The ability
+;; http/response` in your own module, and `serve` handles it with no change here. The ability
 ;; is deliberately NOT sealed for that reason.
 
-(defability Response
+(defability http/response
   "How a handler's return value is written to a connection: everything from the status
   line to who closes the socket."
   (send-response [self sock] :-> nil))
@@ -222,7 +222,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
 (defrecord response (status headers body))
 
 ;; A plain response owns the whole exchange: render head + body, then close.
-(impl Response
+(impl http/response
   http/response
   (send-response [resp sock]
     (tcp/send sock (render-response resp))
@@ -320,7 +320,7 @@ whose body is written incrementally over the socket afterwards (see
 
 ;; A streaming response sends only the head, then hands the socket to its `:stream` fn,
 ;; which owns it from there — so this impl must NOT close it.
-(impl Response
+(impl http/response
   http/stream-response
   (send-response [resp sock]
     (tcp/send sock (render-head (/get resp :status 200) (or (/get resp :headers) {})))
@@ -387,7 +387,7 @@ socket is registered *passive* (no reader until the worker calls
   (c handler)
   ;; Runs in the per-connection worker: take ownership so `c`'s reader starts
   ;; delivering `[:tcp …]` to *this* process, then read and hand the handler's response
-  ;; to `send-response` — the `Response` op that knows how that kind of response reaches
+  ;; to `send-response` — the `http/response` op that knows how that kind of response reaches
   ;; the wire (a plain one renders and closes; a `stream-response` sends only the head
   ;; and hands the socket to its `:stream` fn, which closes when done).
   ;;

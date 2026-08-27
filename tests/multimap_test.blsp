@@ -113,7 +113,7 @@
 
 ;; ADR-254: a type that dispatches must not answer WRONGLY. Bare `get` used to take the
 ;; record-FIELD path on a multimap and report "no such field" as "no such key" — nil for a
-;; key holding values. It consults the `Lookup` ability now, which this type implements.
+;; key holding values. It consults the `lookup` ability now, which this type implements.
 (describe "bare `get` agrees with the module (ADR-254)"
   (test "a key holding values is not reported absent"
     (let (mm (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2))
@@ -124,8 +124,8 @@
       (assert= (get mm :nope) nil)
       (assert= (get mm :nope :none) :none)))
   (test "bare `keys` gives the DISTINCT keys, and `vals` every value"
-    ;; `keys` read the `Seqable` view and answered one key per VALUE; it consults
-    ;; `Lookup`'s `-keys` now. `multimap/keys` and `multimap/values` are GONE — bare `keys`
+    ;; `keys` read the `seqable` view and answered one key per VALUE; it consults
+    ;; `lookup`'s `lookup-keys` now. `multimap/keys` and `multimap/values` are GONE — bare `keys`
     ;; and `vals` give exactly what they gave, so keeping them would be two names for one
     ;; function.
     (let (mm (multimap/assoc (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2) :j 9))

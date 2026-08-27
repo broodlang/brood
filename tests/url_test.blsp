@@ -148,10 +148,10 @@
                       :path (get parsed :path)
                       :query (get parsed :query)}))))))
 
-;; ---- query values render through Display ------------------------------------
+;; ---- query values render through display ------------------------------------
 
 (defrecord usd (cents))
-(impl Display url-test/usd (->string [m] (str "$" (get m :cents))))
+(impl display url-test/usd (->string [m] (str "$" (get m :cents))))
 
 (describe "query-encode renders values with ->string"
   (test "a record value encodes as its display string, not its field map"

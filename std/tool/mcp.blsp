@@ -677,7 +677,7 @@ Brood pattern, `std/tool/explain.blsp`)."
      :description "Describe an ability: its ops (each with params and whether it's a provided default), whether it's :sealed and its member types, what it :requires (super-abilities), its owner namespace, whether it's derivable (:derives), and which types implement it. Returns {:name :ops :sealed :members :requires :owner :derivable :impls}, or {:name :error} for an unknown name. Use it to understand a dispatch point before writing an `impl`."
      :schema {:type "object"
               :properties {:name {:type "string"
-                                  :description "The ability name (no leading quote), e.g. \"Display\""}}
+                                  :description "The ability name (no leading quote), e.g. \"display\""}}
               :required ["name"]}
      :handler ability-tool}
     {:name "check-source"
