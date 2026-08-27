@@ -1414,6 +1414,17 @@ fn parser_rejects_deeply_nested_input_instead_of_overflowing() {
         "expected a depth-cap parse error, got: {}",
         msg
     );
+    // Assert the WHOLE message, not just the stem. A loose `contains` let the
+    // `max` -> `math/max` rename wave rewrite the English word in this
+    // user-facing string ("(math/max 256 levels)") with every test still green:
+    // a corrupted message breaks nothing, the reader still raised. Any rename
+    // that touches an ordinary word needs the message pinned, not sampled.
+    assert!(
+        msg.contains(&format!("(max {} levels)", 256)),
+        "the depth-cap message must read `(max N levels)` — `max` here is English, \
+         not `math/max`; got: {}",
+        msg
+    );
 }
 
 /// `floor` on `NaN`/`±inf`/out-of-`i64`-range values is a runtime error,

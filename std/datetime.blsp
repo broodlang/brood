@@ -12,7 +12,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 
 (defn- dt-fdiv
   (a b)
-  ;; Integer division toward negative infinity (math/floor division).
+  ;; Integer division toward negative infinity (floor division).
   (let (q (math/quot a b) r (math/rem a b))
     (if (< r 0) (- q 1) q)))
 
