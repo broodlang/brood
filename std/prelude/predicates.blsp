@@ -146,6 +146,12 @@ and a set its elements, as everywhere else `seq` applies.
     ;; raw map, which would include the internal `:__id__`. `%map-get` distinguishes it.
     (map? coll) (if (%map-get coll :__id__ nil) (count (->seq coll)) (%map-count coll))
     (set? coll) (%set-count coll)
+    ;; Lists and nil are what `%count-acc` is for. Anything else reaching here has no
+    ;; native count — a rope, a table — and used to die inside `%count-acc` with
+    ;; `empty?: expected collection`. Consult `Seqable` where an impl exists for that
+    ;; identity; otherwise keep the old error, which is the honest one (ADR-253).
+    (or (pair? coll) (nil? coll)) (%count-acc coll 0)
+    (%impl-exact? '[Seqable ->seq] (%identity-of coll)) (count (->seq coll))
     else (%count-acc coll 0)))
 
 (defn- %nth-list

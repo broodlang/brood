@@ -292,6 +292,12 @@ The primary source is consulted first, then `*image-sources*` in install order."
 ;; is a declaration now, not an earmuff spelling — see `defdyn`). These two setters
 ;; are that root code, so project tooling and tests can extend the path from any
 ;; namespace without the loader losing track of it.
+
+;; These two STAY BARE, unlike `system/module-doc` and `system/reload-defs`, which moved to
+;; `system` on 2026-08-27. `set-load-path!` `def`s the bare global `*load-path*` that the
+;; loader reads, and a `def` inside a module defines the MODULE's name — `system/*load-path*`
+;; — not the root one. A module can READ a root global (`/*load-path*`), but it cannot rebind
+;; it, so this pair belongs where the variable does.
 (defn set-load-path! (dirs)
   "Replace the module search path with `dirs` (a list of directory strings); returns it."
   (def *load-path* dirs)
@@ -387,7 +393,7 @@ would name a registry that does not exist."
 ;; where a bare `(def *module-docs* …)` would define `mod/*module-docs*`. Defined
 ;; here at root, so the `def` below targets the one real registry.
 (defn %record-module-doc! (key doc)
-  "Record `doc` as module `key`'s docstring (the registry `module-doc` reads); returns doc."
+  "Record `doc` as module `key`'s docstring (the registry `system/module-doc` reads); returns doc."
   (%registry-update! '*module-docs* :assoc [key] doc)
   doc)
 
@@ -568,10 +574,6 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
        ~@(%defmodule-use-forms clauses)
        ~@(%defmodule-internals-forms clauses)
        ~@(%defmodule-alias-forms clauses))))
-
-(defn module-doc (mod)
-  "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."
-  (get *module-docs* (name mod)))
 
 ;; First existing <filename> across the load-path dirs, or nil.
 (defn- %require-find
@@ -1363,6 +1365,15 @@ resolution; `%impl-for` is what picks the winner."
   (let (methods (get *impls* op-key))
     (or (get methods key) (get methods :default))))
 
+(defn %impl-exact?
+  (op-key key)
+  "Is there an impl of op `op-key` registered for id `key` SPECIFICALLY — ignoring the
+`:default` that `%impl-for` falls back to? The question the collection seams ask before
+handing a built-in kind to an ability: `Seqable`'s `:default` is `(map-pairs (fields x))`,
+which is meaningless for a rope, so falling through unconditionally would swap a clear
+`expected collection` error for a confusing one (ADR-253)."
+  (not (nil? (get (get *impls* op-key) key))))
+
 (def- *substrate-abilities* ['Display 'Inspect 'Seqable 'Conjable])
 ;; The abilities the LANGUAGE ITSELF dispatches on. Their `:default` impls are the fallback
 ;; every value relies on — `Display`'s is what `io/write`/`io/puts`/`str` reach for — so they are
@@ -1978,7 +1989,27 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; with `(binding (*show* nil) …)`.
 (defn- %show-print-hook
   (x)
-  (if (record? x) (->string x) x))
+  ;; Which values the screen printers route through `Display`.
+  ;;
+  ;; The guard used to be `(if (record? x) …)`, which meant an `(impl Display :rope …)`
+  ;; REGISTERED, RESOLVED when called directly, and was then never consulted by any printer
+  ;; — a silently inert impl, worse than a refusal (ADR-253). Consulting `Display` for
+  ;; EVERYTHING fixes that and is behaviour-preserving (its `:default` is `(str x)`, and
+  ;; `%render` and `->string` agree on every built-in kind) but costs **+17%** on a
+  ;; print-heavy loop: 319 -> 374 ms over 40k `io/write` batches, best-of-7, pinned and
+  ;; interleaved. That is a real bill for printing, which the tests and the REPL pay
+  ;; constantly.
+  ;;
+  ;; So: the kinds `%render` already renders natively keep the old zero-cost path, and
+  ;; everything else consults the ability. A map is tested with `record?` exactly as before
+  ;; (a record IS a map, so the two cannot be told apart by `type-of`); rope, table, bytes,
+  ;; set, pid, ref and functions now reach `Display`, which is the point.
+  (let (t (type-of x))
+    (cond
+      (%eq t :map) (if (record? x) (->string x) x)
+      (or (%eq t :int) (%eq t :float) (%eq t :string) (%eq t :nil) (%eq t :bool)
+        (%eq t :keyword) (%eq t :symbol) (%eq t :vector) (%eq t :pair)) x
+      else (->string x))))
 
 ;; Wire the screen printers to honor `Display` for records, by default (ADR-172 §8).
 ;; `(binding (*show* nil) …)` disables it for a scope.

@@ -270,7 +270,7 @@
    "%merge-sort-n" :collections
    "min" :math
    "mod" :math
-   "module-doc" :meta
+   "system/module-doc" :meta
    "monitor" :processes
    "name" :strings
    "nan?" :predicates
@@ -341,7 +341,7 @@
    "%register-impl-check-arity" :meta
    "%register-method-derive" :meta
    "%register-method-store" :meta
-   "reload-defs" :meta
+   "system/reload-defs" :meta
    "rem" :math
    "file/rename" :filesystem
    "%repeat-acc" :collections
@@ -471,7 +471,7 @@
    "take-while" :collections
    "zip" :collections
    ;; ---- added so nothing falls into :other (every core name has a home) ----
-   ;; (`gen`'s client API — call / cast / stop / spawn-server / defprocess — is NOT
+   ;; (`gen`'s client API — call / cast / stop / start / defprocess — is NOT
    ;; here: `gen` is an ordinary module, so those names are `gen/…` and catalogued
    ;; with the module, exactly like `supervisor`'s and `agent`'s.)
    "defbehaviour" :meta

@@ -129,7 +129,7 @@
     (call [:slow ms] (do (sleep ms) [:late s])))
 
   (test "the caller's mailbox is EMPTY after the late reply is posted"
-    (let (srv (gen/spawn-server laggard nil)
+    (let (srv (gen/start laggard nil)
           me (self)
           _ (spawn
               (let (outcome (try
@@ -143,7 +143,7 @@
       (gen/stop srv)))
 
   (test "a normal call still works — the alias only fires on the give-up path"
-    (let (srv (gen/spawn-server laggard nil))
+    (let (srv (gen/start laggard nil))
       (assert= (gen/call-timeout srv [:slow 0] 3000) :late)
       ;; and again, on the same server, after a real reply
       (assert= (gen/call-timeout srv [:slow 5] 3000) :late)

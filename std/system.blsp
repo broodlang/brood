@@ -60,3 +60,15 @@ an absent feature is still **bound** and still raises when called, so `(bound?
 'gui/open)` answers yes on a runtime that cannot open a window. An app that wants
 to degrade rather than fail asks the build."
   (includes? (system/features) name))
+
+;; ---- module system -----------------------------------------------------------
+;; Where modules load from, and what the image knows about them. Runtime configuration,
+;; so it belongs here rather than bare.
+;;
+;; `builtin-modules` and `reserved-package-name?` deliberately did NOT come along: they are
+;; called from `%merge-require-edges!` and `%require-force-package` — the module-LOADING
+;; path itself — so moving them here would mean loading `system` requires `system`.
+
+(defn module-doc (mod)
+  "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."
+  (get *module-docs* (name mod)))
