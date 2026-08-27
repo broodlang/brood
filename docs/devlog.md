@@ -4426,3 +4426,65 @@ a call over untyped locals — stays silent.
 > does nothing until a rebuild. The first run after adding them showed only `take-last`
 > warning, from a curated Rust table, and read as "declared sigs don't work cross-module".
 > They do. The binary was stale — the same class `make doctor` exists for.
+
+## 2026-08-27 (seventh session) — the suite was never slow; the profile was
+
+"Why is the test so long? it is a bit unrealistic." It was, and the answer was not in the
+tests.
+
+`brood_suite_passes` is **933 s of the `clippy + test` job's 1131 s**; the next slowest test
+is 74 s. Two candidate causes were ruled out before the real one, because both would have
+pointed at the tests:
+
+- **Not the engine.** The `differential (tree-walker)` job runs the same wrapper at 1517 s
+  against the VM's 933 s — **1.63x**, where the tree-walker is ~10x slower by design. If
+  interpretation dominated, that ratio would be near 10. Solving for it puts ~90% of the time
+  outside execution either way.
+- **Not sleeps.** All 83 `(sleep …)` calls in `tests/` total 7.8 s.
+
+**It is the build profile.** `cargo test` builds `opt-level = 0`, and this suite is an
+interpreter exercising itself — precisely the workload an unoptimized build punishes most.
+Same commit, same 4931 cases: **933 s** in CI against **58 s** for the identical suite on the
+release binary. A **16x** tax with nothing to do with the tests.
+
+`.config/nextest.toml` turned out to be a written record of that tax being paid instead of
+fixed: the cap on this one wrapper went **300 → 600 → 1200 → 2700 s**, and its own comments
+quote the release path doing the same work in 88 s. It also held three *sampling knobs* —
+`BROOD_UCD_PART1_OF=16`, `BROOD_GABRIEL_NBOYER_MAX_N=1`, `BROOD_JDR_OF=4` — each cutting real
+cases out of the CI wrapper, each justified by the same debug penalty (670 s / 256 s / 210 s
+there against 3.6 s / 19.6 s / 2.7 s on release). So `make test` and `nest test` had quietly
+come to cover different things.
+
+`[profile.test]` and `[profile.dev]` are now `opt-level = 2` with `debug-assertions = true` —
+optimized *and* tripwires armed, which is the combination CLAUDE.md already recommends for
+manual runs, and the only thing this wrapper offers over the release path. Then the knobs
+came out. Measured:
+
+| | coverage | time |
+|---|---|---|
+| before (debug + 3 samplings) | reduced | **933 s** |
+| after (opt-2, unsampled) | full | **66 s** |
+
+Cost: a cold rebuild of the lib + suite binary is 20.8 s wall / 119 s CPU, so roughly 60-90 s
+on a 2-core runner — against 875 s saved. The nextest budget drops 2700 s → 300 s, the first
+time it has moved down.
+
+**On thinning the suite, which was the other half of the question: the arithmetic says no.**
+Measured per file: 4479 of the 4836 cases cost ~29 s *combined*, while 357 cases in twelve
+files cost 22.9 s. Deleting from the cheap 93% saves nothing measurable; the expensive twelve
+are expensive because they do work that is hard to reach any other way — real TCP sockets, a
+stdlib image build, a 19,000-case Unicode corpus, and `mailbox_order_test`, which is **one
+test costing 1.3 s** and is a sabotage-verified guard for a silent message-loss bug (ADR-195).
+
+Three structural audits found nothing to cut either: **10 of 4954** test blocks have no
+`is`/`refute`/`assert=`/`assert-error`, and all ten are legitimate (`check-property` raises on
+failure, `rt` asserts internally, one deliberate smoke test); the 85 duplicate test *names*
+are different modules testing different things (`"empty string"` in csv/encoding/hash/strings);
+and repeated assertion lines are shared idioms within a single file.
+
+> A methodology note, since it nearly produced a confident wrong answer: the first
+> assertion-free scan reported **3266 of 4954**. That was a bug in the scanner — `\\b` after
+> `assert=` can never match, because `=` is not a word character. The corrected scanner was
+> validated against four known-answer cases *before* its output was trusted. A gate that
+> cannot fail is the theme of this whole day, and writing one by accident while auditing for
+> them is the obvious way to get caught by it.

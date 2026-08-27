@@ -32,6 +32,24 @@ would notice.
   mistake, and a narrow return would false-positive at every call site. Zero new warnings
   across `std/` + `tests/`.
 
+**Changed**
+
+- **The test suite runs ~14x faster with MORE coverage.** `cargo test` built `opt-level = 0`,
+  and this suite is an interpreter exercising itself — the workload an unoptimized build
+  punishes most. Measured on one commit: **933 s** for the in-language suite in CI against
+  **58 s** for the identical cases on the release binary. `[profile.test]` and `[profile.dev]`
+  are now `opt-level = 2` with `debug-assertions = true`, so tests run at roughly release
+  speed with the GC tripwire and heap verifier still armed.
+- **Three sampling knobs are gone, restoring coverage** — `BROOD_UCD_PART1_OF=16`,
+  `BROOD_GABRIEL_NBOYER_MAX_N=1`, `BROOD_JDR_OF=4`. Each cut real cases out of the CI wrapper
+  (a 1-in-16 slice of the UCD normalisation sweep, the smaller nboyer size, a quarter of the
+  deep-recursion repetitions) and each was justified solely by the debug penalty. The full,
+  unsampled suite now measures **66 s** against **933 s** for the sampled one before, so
+  `make test` and `nest test` no longer cover different things.
+- `.config/nextest.toml`'s suite budget: **2700 s → 300 s**, the first time that number has
+  moved down. Its history (300 → 600 → 1200 → 2700) is a record of the profile tax being paid
+  rather than fixed.
+
 **Fixed**
 
 - `docs/language.md` still documented the `table-*` family under its pre-namespacing names.

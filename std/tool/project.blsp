@@ -2693,6 +2693,27 @@ as unchanged (only when some were)."
           (/apply test/run-tests-structured opts))
         (/apply test/run-tests-scoped-structured (map (fn (f) (fn () (load f))) files) opts)))))
 
+;; Resolve a project's entry point to the callable it names, or raise saying why
+;; not. A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
+;; module file with no `defmodule` header defines it bare — so prefer the
+;; qualified name and fall back to bare.
+;;
+;; Shared by all FOUR entry paths — `run`, `run-bundle`, and the two boot checks
+;; — deliberately. The boot check's whole value is that it fails exactly where the
+;; real boot would, so "is the entry there, and is it callable?" must have one
+;; implementation, not a copy per caller that can answer differently. `who` names
+;; the caller in the error text.
+(defn- project-entry-fn
+  (who modname fname)
+  (let (qual (symbol (str (name modname) "/" (name fname))))
+    (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
+      (when (nil? target)
+        (error who ": entry fn '" fname "' is not defined (module '" modname "')"))
+      (let (f (eval target))
+        (unless (fn? f)
+          (error who ": entry '" fname "' is not callable (" (type-of f) ")"))
+        f))))
+
 ;; (run args) — find the project from the cwd, set it up (which may
 ;; override *project-main* via the manifest), `require` the entry module, and
 ;; call its entry fn with `args` (a list of strings from the CLI). The default
@@ -2722,29 +2743,64 @@ as unchanged (only when some were)."
       (when (nil? (setup-lazy-image root))
         (load-sources-cached root))
       (require-one modname)
-      ;; A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
-      ;; module file with no `defmodule` header defines it bare. Prefer the
-      ;; qualified name, fall back to bare.
-      (let (qual (symbol (str (name modname) "/" (name fname))))
-        (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
-          (when (nil? target)
-            (error "run: entry fn '" fname "' is not defined (module '" modname "')"))
-          ;; Advisory pre-flight over the entry point's REQUIRE-CLOSURE, not the whole
-          ;; tree: warnings for the code about to execute. Checking is ~3.7 ms/file and
-          ;; verdicts are deliberately not cached, so whole-project checking is ~60-120 s
-          ;; on a 16 300-file project — against a 143 ms image-backed load, i.e. 99.9% of
-          ;; `nest run` was the advisory check. A module the program never reaches is
-          ;; `nest check`/`nest test`'s business. The closure is derived from `modname`'s
-          ;; requires graph rather than read off `*features*`, so a COLD run — which has
-          ;; just loaded every module to build the image — checks the same files a warm
-          ;; one does. Warnings go to stderr so they don't pollute the entry point's own
-          ;; stdout; after `require` so cross-module names see the heap's globals (see
-          ;; `check`).
-          (check-run-closure modname)
-          (let (f (eval target))
-            (unless (fn? f)
-              (error "run: entry '" fname "' is not callable (" (type-of f) ")"))
-            (/apply f args)))))))
+      ;; Advisory pre-flight over the entry point's REQUIRE-CLOSURE, not the whole
+      ;; tree: warnings for the code about to execute. Checking is ~3.7 ms/file and
+      ;; verdicts are deliberately not cached, so whole-project checking is ~60-120 s
+      ;; on a 16 300-file project — against a 143 ms image-backed load, i.e. 99.9% of
+      ;; `nest run` was the advisory check. A module the program never reaches is
+      ;; `nest check`/`nest test`'s business. The closure is derived from `modname`'s
+      ;; requires graph rather than read off `*features*`, so a COLD run — which has
+      ;; just loaded every module to build the image — checks the same files a warm
+      ;; one does. Warnings go to stderr so they don't pollute the entry point's own
+      ;; stdout; after `require` so cross-module names see the heap's globals (see
+      ;; `check`).
+      (check-run-closure modname)
+      (/apply (project-entry-fn "run" modname fname) args))))
+
+;; --- the boot check (KI-66) --------------------------------------------------
+;; `nest check` resolves names against the image and `nest test` runs the suite;
+;; NEITHER loads `main`. That is precisely where a stale dependency dies, and it
+;; took the registry down twice: `unbound symbol: int->char` raised *during*
+;; `require` (a top-level form in a dependency, on no test's path), and
+;; `unbound symbol: os/getenv` on `main`'s own first line. Both were reachable on
+;; the machine that built the artifact and neither gate looked.
+;;
+;; So this is the third question, and it is a different one: not "do the names
+;; resolve?" and not "do the tests pass?" but **"does it boot?"** — load every
+;; module the way the shipped artifact does, resolve the entry point, and then
+;; deliberately run NOTHING. Loading is the whole point: a module's top-level
+;; forms EVALUATE at load time, so this executes the code a static pass cannot
+;; see, without executing the program.
+;;
+;; Every module, not the entry's require-closure — unlike `run`, which is lazy
+;; (ADR-218) because it is optimising a hot dev loop. A gate optimising for
+;; latency is a gate that checks less than it claims to: `run-bundle` requires
+;; every embedded module, so a boot check that walked only the closure would go
+;; green on a dead module the bundle will still load. Slower and honest.
+
+(defn check-boot ()
+  "Load the project the way a shipped bundle does — every source module, then resolve the
+manifest's `:main` — and run nothing. Returns 0 on success; raises if a module fails to
+load, or if the entry point is missing or not callable. Backs `nest run --check-boot`.
+
+The gate between `nest check` (names resolve) and `nest test` (the suite passes): neither
+of those loads the entry point, which is where a stale dependency actually dies (KI-66)."
+  (let (root (find-root (file/cwd)))
+    (when (nil? root)
+      (error "check-boot: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
+    (setup root)
+    ;; No `setup-lazy-image`: materialising nothing is what `run` wants and the
+    ;; opposite of what a boot check wants. `load-sources-cached` evaluates every
+    ;; module's top-level forms, which is the half `nest check` cannot see.
+    (load-sources-cached root)
+    (let (entry (or *project-main-override* *project-main*)
+          modname (%root-module-name (first entry))
+          fname (second entry))
+      (require-one modname)
+      (project-entry-fn "check-boot" modname fname)
+      (io/puts "boot ok: " (name modname) "/" (name fname) " ("
+        (count (source-files root)) " source files loaded, nothing run)")
+      0)))
 
 ;; --- single-binary release (ADR-038) -----------------------------------------
 ;; `nest release` appends a project's source to a copy of the `brood` binary;
@@ -2961,16 +3017,13 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
       dep-names)
     nil))
 
-;; (run-bundle args) — boot an embedded release bundle. The `brood` binary,
-;; detecting its appended archive, calls this instead of starting a REPL. No
-;; disk/cwd: every module comes from the embedded archive via `%builtin-module`
-;; (which `require-one` consults). Mirrors `run`'s entry resolution minus
-;; the project walk and the advisory checker (a shipped app isn't a dev image).
-(defn run-bundle (args)
-  "Run an embedded release bundle's entry point, passing `args` (a list of CLI
-string arguments). The `brood` binary calls this when it detects it is a `nest
-release` bundle. Loads the embedded manifest + modules and invokes `:main`
-(default module `main`, fn `main`). Errors if the entry fn is missing/uncallable."
+;; The shared boot prefix of `run-bundle` and `check-bundle-boot`: apply the embedded
+;; manifest, restore the dependency package-rooting context, load every embedded module,
+;; and return the entry `[modname fname]`. Factored out so the check cannot boot the
+;; bundle differently from the way the bundle boots itself — the only property that makes
+;; a smoke test worth running.
+(defn- bundle-boot-load
+  ()
   (let (form (reflect/read-first (%bundle-manifest)))
     (when (and (pair? form) (= (first form) 'project)) (apply-config (rest form))))
   ;; Rebuild the package-rooting context for the embedded DEPENDENCY modules (ADR-070
@@ -2983,18 +3036,93 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
   ;; `:use`/`require` resolve through the same embedded table, and require is
   ;; idempotent — so a `(:use foo)` in the first module pulls `foo` on demand.
   (map require-one (%bundle-module-names))
-  (let (entry (or *project-main-override* *project-main*)
-        modname (first entry)
-        fname (second entry))
+  (let (entry (or *project-main-override* *project-main*))
+    ;; No `%root-module-name` here (unlike `run`): a bundle's own modules are embedded
+    ;; under their require-name and the rooting context is rebuilt above.
+    [(first entry) (second entry)]))
+
+;; (run-bundle args) — boot an embedded release bundle. The `brood` binary,
+;; detecting its appended archive, calls this instead of starting a REPL. No
+;; disk/cwd: every module comes from the embedded archive via `%builtin-module`
+;; (which `require-one` consults). Mirrors `run`'s entry resolution minus
+;; the project walk and the advisory checker (a shipped app isn't a dev image).
+(defn run-bundle (args)
+  "Run an embedded release bundle's entry point, passing `args` (a list of CLI
+string arguments). The `brood` binary calls this when it detects it is a `nest
+release` bundle. Loads the embedded manifest + modules and invokes `:main`
+(default module `main`, fn `main`). Errors if the entry fn is missing/uncallable."
+  (let ([modname fname] (bundle-boot-load))
     (require-one modname)
-    (let (qual (symbol (str (name modname) "/" (name fname))))
-      (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
-        (when (nil? target)
-          (error "run-bundle: entry fn '" fname "' is not defined (module '" modname "')"))
-        (let (f (eval target))
-          (unless (fn? f)
-            (error "run-bundle: entry '" fname "' is not callable (" (type-of f) ")"))
-          (/apply f args))))))
+    (/apply (project-entry-fn "run-bundle" modname fname) args)))
+
+;; The bundle half of the boot check (KI-66) — the one that matters, because it runs
+;; the ARTIFACT rather than the tree that produced it. Reached via the runtime-reserved
+;; `--brood-boot-check` argument (see `crates/cli/src/main.rs`), and by `nest release
+;; --smoke`, which spawns each freshly written binary this way before reporting success.
+;;
+;; Checking the dev tree and shipping a bundle are not the same act: the bundle carries
+;; a *snapshot* of every dependency's source, so a dependency updated on disk after the
+;; last `nest fetch`, a module missing from `:source-paths`, or a `:main` naming a module
+;; that was never collected are all invisible to `check-boot` and fatal here.
+(defn check-bundle-boot ()
+  "Load this release bundle's embedded modules and resolve its entry point, running
+nothing. Returns 0; raises if a module fails to load or the entry fn is missing or not
+callable. Reached by running a bundle with the reserved `--brood-boot-check` argument,
+which is what `nest release --smoke` does to the binary it just wrote."
+  (unless (%bundled?)
+    (error "check-bundle-boot: this executable is not a `nest release` bundle"))
+  (let ([modname fname] (bundle-boot-load))
+    (require-one modname)
+    (project-entry-fn "check-bundle-boot" modname fname)
+    (io/puts "boot ok: " (name modname) "/" (name fname) " ("
+      (count (%bundle-module-names)) " modules loaded, nothing run)")
+    0))
+
+;; --- what is this binary? (the `--brood-build-info` surface) -----------------
+;; Answering "which brood built this, with which features" meant grepping the binary
+;; over SSH — and the first attempt used `strings`, which `debian:bookworm-slim` does
+;; not ship, so it reported 0 matches and read exactly like "no JIT". Every fact below
+;; already existed in the runtime; nothing could ask the artifact for them.
+;;
+;; Deliberately reads only the manifest and the module *directory*, never loading a
+;; module: this has to answer on a bundle that is broken, since "is this even the right
+;; build?" is the first question asked when one is.
+
+(defn build-info ()
+  "A map describing THIS executable — `:brood-version`, `:build-id`, `:features` (the
+optional build features, so `:jit` present or absent is a fact rather than a guess), and
+`:bundled?`. For a `nest release` bundle it also carries the app it is shipping: `:app`,
+`:app-version` and `:module-count`.
+
+Loads no module, so it answers on a bundle whose modules are broken — which is when it is
+asked. See [[build-info-report]] for the printed form."
+  (let (base {:brood-version (system/brood-version)
+              :build-id (system/build-id)
+              :features (system/features)
+              :bundled? (%bundled?)})
+    (if (not (%bundled?))
+      base
+      (let (form (reflect/read-first (%bundle-manifest))
+            opts (if (and (pair? form) (= (first form) 'project)) (rest form) nil))
+        (assoc base
+          :app (plist-get opts :name)
+          :app-version (plist-get opts :version)
+          :module-count (count (%bundle-module-names)))))))
+
+(defn build-info-report ()
+  "Print [[build-info]] as aligned `key: value` lines and return 0. What a bundle run with
+the reserved `--brood-build-info` argument prints."
+  (let (info (build-info))
+    (when (get info :bundled?)
+      (io/puts "app:      " (or (get info :app) "(unnamed)")
+        (let (v (get info :app-version)) (if v (str " " v) "")))
+      (io/puts "modules:  " (get info :module-count)))
+    (io/puts "brood:    " (get info :brood-version))
+    (io/puts "build-id: " (get info :build-id))
+    (io/puts "features: "
+      (let (fs (get info :features))
+        (if (empty? fs) "(none)" (string/join " " (map name fs)))))
+    0))
 
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.

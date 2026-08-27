@@ -52,39 +52,29 @@ fn run_suite() {
     // Raise it for this context only, the same "the harness needs different limits"
     // reasoning as the memory ceiling above. The release path keeps the 120 s default, so
     // a genuinely hung test is still caught quickly where it matters.
-    // Sample the UCD Part1 sweep here, and only here. Its ~16,000 cases x 6 normalisations
-    // are ~670 s of DEBUG work — more than nextest's whole-binary cap for this suite (600 s),
-    // so the full sweep cannot fit in this wrapper however the inner budget is set. A
-    // 1-in-16 slice is ~42 s and still ~1,000 cases, and the release path (`nest test`,
-    // `make suite`) keeps sweeping all of Part1 in ~5 s. See the knob's comment in
-    // tests/conformance_ucd_test.blsp for why sampling only started working once the
-    // per-test 20,000-line walk was collected once instead.
-    // Set it in the ENVIRONMENT, not as a global in the program below: the test file reads
-    // this when it LOADS, which is after that `eval_str` would have `def`'d it, so the
-    // file's own default won and the sweep stayed full (which is how this was missed).
-    // SAFETY: single-threaded, before the interpreter loads any test file.
-    unsafe { std::env::set_var("BROOD_UCD_PART1_OF", "16") };
-    // Same treatment, same reason, for the heavier `nboyer` size in
-    // tests/conformance_gabriel_test.blsp. That one test measured **256 s here — a third
-    // of the entire `make test` wall** (715 s of in-language suite inside a 790 s run)
-    // against 19.6 s on the release path: upstream's scaling parameter roughly triples the
-    // rewrite count per step, so n=2's 1.8M rewrites dominate everything else in the suite
-    // put together. Capping at n=1 keeps 0.6M rewrites — still 6x the 95k baseline, so the
-    // sustained-allocation pressure the case exists for is still applied, and applied under
-    // debug-assertions, which is the only thing this wrapper offers that the release path
-    // does not. `nest test` / `make suite` keep running both sizes, and the *answer* is
-    // pinned independently by the small-size case against upstream's published table.
-    // SAFETY: as above.
-    unsafe { std::env::set_var("BROOD_GABRIEL_NBOYER_MAX_N", "1") };
-    // Same treatment, same reason, for tests/jit_deep_recursion_test.blsp (the KI-14
-    // guard-page regression). Those three cases are ~2.7 s release but ~210 s here — 38%
-    // of this wrapper — because the property under test is deep recursion and a debug
-    // frame is far heavier. The knob scales *repetition* only (warm-up passes, and how
-    // much of the 188-document corpus the third case re-scans); both deep documents are
-    // still parsed at full depth in a spawned process, so the regression stays guarded.
-    // Release (`nest test`, `make suite`) keeps the exhaustive form.
-    // SAFETY: as above — single-threaded, before any test file loads.
-    unsafe { std::env::set_var("BROOD_JDR_OF", "4") };
+    // ── The three sampling knobs that used to live here are gone (2026-08-27). ──
+    //
+    // `BROOD_UCD_PART1_OF=16`, `BROOD_GABRIEL_NBOYER_MAX_N=1` and `BROOD_JDR_OF=4` each cut
+    // real coverage out of THIS wrapper — a 1-in-16 slice of the UCD normalisation sweep, the
+    // smaller nboyer size, a quarter of the deep-recursion repetitions — and every one of them
+    // was justified by the same sentence: this is the one place the suite runs in a **debug**
+    // build, where a case costs roughly an order of magnitude more than on the release path.
+    // The recorded figures were 670 s / 256 s / 210 s here against 3.6 s / 19.6 s / 2.7 s for
+    // `nest test`.
+    //
+    // That premise no longer holds. `[profile.test]` is `opt-level = 2` with
+    // `debug-assertions = true` (see the workspace Cargo.toml), so this wrapper now runs at
+    // roughly release speed with every tripwire still armed — which was the only thing it
+    // offered over the release path, and the reason it must not simply be deleted.
+    //
+    // Measured on the same commit: the FULL, unsampled suite is **66 s** here, against **933 s**
+    // for the SAMPLED one under the old profile. More coverage, an order of magnitude less time,
+    // so there is nothing left for the knobs to buy. Each remains readable from the environment
+    // by its own test file, so a developer can still narrow a run by hand; this wrapper simply
+    // stops forcing them.
+    //
+    // If this wrapper ever needs shrinking again, re-read that paragraph first: sampling here
+    // is how coverage quietly diverged between `make test` and `nest test` in the first place.
     if let Err(e) = interp.eval_str(
         "(require-one 'test) (def *test-timeout-ms* 600000) \
          (project/run-tests)",
