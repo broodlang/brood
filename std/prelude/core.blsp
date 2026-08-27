@@ -85,7 +85,10 @@
 
 ;; ---- logic ----
 (defn not (x)
-  "Logical negation: `nil`/`false` become `true`, everything else `false`."
+  "Logical negation: `nil`/`false` become `true`, everything else `false`.
+
+    (not nil)     → true
+    (not 0)       → false   ; only nil and false are falsy"
   (if x false true))
 
 ;; `empty?` — true for the empty value of any collection. Defined here, before
@@ -242,7 +245,11 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
 ;; form must seq-coerce `x` itself before splitting head/tail, because the bare
 ;; `(first x)`/`(rest x)` calls bypass fold's coercion and a map would error.
 (defn reduce (f x & more)
-  "Reduce a collection with `f`. Either `(reduce f init coll)` or `(reduce f coll)` (using the first item as the initial value). Maps reduce as their `[k v]` pairs."
+  "Reduce a collection with `f`. Either `(reduce f init coll)` or `(reduce f coll)` (using the first item as the initial value). Maps reduce as their `[k v]` pairs.
+
+    (reduce + [1 2 3])    → 6
+    (reduce + 10 [1 2])   → 13   ; with an explicit start
+    (reduce + [])         → nil  ; no items and no start"
   (if (empty? more)
     (let (s (seq x)) (fold f (first s) (rest s)))
     (fold f x (first more))))
@@ -256,27 +263,43 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
 ;; is the dogfooding payoff: writing `+` in Brood surfaced the missing
 ;; multi-arity dispatch; we built that capability rather than moving `+` to Rust
 ;; — CLAUDE.md "dogfood first; optimize by building the language up".)
-(defn + "Sum of all arguments (0 with none)."
+(defn + "Sum of all arguments (0 with none).
+
+    (+ 1 2 3)   → 6
+    (+)         → 0   ; the identity"
   (() 0)
   ((a) a)
   ((a b) (%add a b))
   ((a b & more) (fold %add (%add a b) more)))
-(defn * "Product of all arguments (1 with none)."
+(defn * "Product of all arguments (1 with none).
+
+    (* 2 3 4)   → 24
+    (*)         → 1   ; the identity"
   (() 1)
   ((a) a)
   ((a b) (%mul a b))
   ((a b & more) (fold %mul (%mul a b) more)))
-(defn - "Subtract the rest from `x`; negate `x` if it's the only argument."
+(defn - "Subtract the rest from `x`; negate `x` if it's the only argument.
+
+    (- 10 3 2)  → 5
+    (- 5)       → -5"
   ((x) (%sub 0 x))
   ((a b) (%sub a b))
   ((x & xs) (fold %sub x xs)))
-(defn / "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero."
+(defn / "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero.
+
+    (/ 6 3)     → 2
+    (/ 1 2)     → 1/2   ; integer division is EXACT, not truncating"
   ((x) (%div 1 x))
   ((a b) (%div a b))
   ((x & xs) (fold %div x xs)))
 
-(defn inc (n) "Return `n` + 1." (%add n 1))
-(defn dec (n) "Return `n` - 1." (%sub n 1))
+(defn inc (n) "Return `n` + 1.
+
+    (inc 1)   → 2" (%add n 1))
+(defn dec (n) "Return `n` - 1.
+
+    (dec 1)   → 0" (%sub n 1))
 
 ;; ---- comparison & equality (variadic chains over %lt / %eq) ----
 ;; %chain? checks a predicate holds for every adjacent pair: (%chain? < (1 2 3)).
@@ -305,7 +328,10 @@ fewer than two items.
 ;; Multi-arity like arithmetic above: a direct 2-argument clause (the common
 ;; case — `(< a b)`, `(= a b)`) calls the primitive with one env frame; the
 ;; variadic clause chains over adjacent pairs for 3+ (or 0/1, trivially true).
-(defn < "True if the arguments are in strictly increasing order."
+(defn < "True if the arguments are in strictly increasing order.
+
+    (< 1 2 3)   → true
+    (< 1 1)     → false"
   ((a b) (%lt a b))
   ((& xs) (%chain? %lt xs)))
 (defn > "True if the arguments are in strictly decreasing order."
@@ -320,10 +346,15 @@ fewer than two items.
   ;; a >= b  ==  b <= a — still a single passthrough (%le with args swapped).
   ((a b) (%le b a))
   ((& xs) (%chain? %cmp-ge xs)))
-(defn = "True if all arguments are structurally equal."
+(defn = "True if all arguments are structurally equal.
+
+    (= 1 1 1)   → true
+    (= [1 2] [1 2])   → true   ; by value, not identity"
   ((a b) (%eq a b))
   ((& xs) (%chain? %eq xs)))
-(defn not= "True if the arguments are not all equal."
+(defn not= "True if the arguments are not all equal.
+
+    (not= 1 2)  → true"
   ((a b) (not (%eq a b)))
   ((& xs) (not (apply = xs))))
 
