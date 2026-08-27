@@ -48,9 +48,13 @@
   (%rope-line->char r n))
 
 (defn ->string (r)
-  "The full text of rope r as a string."
+  "The full text of rope r as a string.
+
+    (text/->string (text/from-string \"hi\"))   → \"hi\""
   (%rope->string r))
 
 (defn from-string (s)
-  "A rope (editor buffer text) holding the characters of string s."
+  "A rope (editor buffer text) holding the characters of string s.
+
+    (text/->string (text/from-string \"hi\"))   → \"hi\""
   (%string->rope s))

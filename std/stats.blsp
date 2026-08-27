@@ -27,7 +27,9 @@ Empty sequences raise unless documented otherwise.
 
 (defn variance (xs)
   "The population variance (divided by n) of `xs`. Raises on an empty sequence;
-a 1-element sequence has population variance 0.0."
+a 1-element sequence has population variance 0.0.
+
+    (stats/variance [2 2 2])   → 0.0"
   (let (n (count xs))
     (when (< n 1) (error "stats/variance: empty sequence"))
     (let (m (mean xs))
@@ -80,7 +82,9 @@ For an even-length sequence, returns the mean of the two middle values.
       (nth sorted idx))))
 
 (defn quantile (xs q)
-  "The `q`-th quantile (0.0–1.0) of `xs` using the nearest-rank method."
+  "The `q`-th quantile (0.0–1.0) of `xs` using the nearest-rank method.
+
+    (stats/quantile [1 2 3 4] 0.5)   → 2"
   (percentile xs (* q 100)))
 
 ;; ---- range and spread --------------------------------------------------------

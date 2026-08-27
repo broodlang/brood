@@ -54,7 +54,9 @@
       (bytes-acc-le bs off (+ off (- n 2)) (if (>= bt 128) (- bt 256) bt)))))
 
 (defn uint (bs off n)
-  "Read `n` bytes (1–8) of `bs` at `off` as a big-endian unsigned integer."
+  "Read `n` bytes (1–8) of `bs` at `off` as a big-endian unsigned integer.
+
+    (bytes/uint (bytes/int-> 258 2) 0 2)   → 258"
   (bytes-acc-be bs off (+ off (bytes-width-check "bytes-uint" n)) 0))
 
 (defn uint-le (bs off n)
@@ -69,7 +71,9 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 
 (defn int-le-> (v n)
   "Encode integer `v` as `n` bytes (1–8), little-endian two's complement
-(truncating, like int->bytes)."
+(truncating, like int->bytes).
+
+    (bytes/int-le-> 258 2)   → #b\"\x02\x01\""
   (bytes (reverse (int->bytes-be v (bytes-width-check "int->bytes-le" n) nil))))
 
 (defn- bytes-acc-be
