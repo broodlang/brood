@@ -42,7 +42,9 @@
 
 (defn md5 (s)
   "Lowercase hex MD5 of string `s`'s UTF-8 bytes. NOT collision-resistant;
-use sha256 for security-sensitive work. Useful for checksums, ETags, UUID v3."
+use sha256 for security-sensitive work. Useful for checksums, ETags, UUID v3.
+
+    (hash/md5 \"abc\")      → \"900150983cd24fb0d6963f7d28e17f72\""
   (bytes->hex (%digest :md5 (string/->bytes s))))
 
 (defn md5-bytes (bytes)
@@ -57,7 +59,9 @@ use sha256 for security-sensitive work. Useful for checksums, ETags, UUID v3."
 
 (defn sha1 (s)
   "Lowercase hex SHA-1 of string `s`'s UTF-8 bytes. NOT collision-resistant;
-use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
+use sha256 for security-sensitive work. Useful for UUID v5, Git hashes.
+
+    (hash/sha1 \"abc\")     → \"a9993e364706816aba3e25717850c26c9cd0d89d\""
   (bytes->hex (%digest :sha1 (string/->bytes s))))
 
 (defn sha1-bytes (bytes)
@@ -71,7 +75,9 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
 ;; ---- SHA-256 ----------------------------------------------------------------
 
 (defn sha256 (s)
-  "Lowercase hex SHA-256 of string `s`'s UTF-8 bytes."
+  "Lowercase hex SHA-256 of string `s`'s UTF-8 bytes.
+
+    (hash/sha256 \"abc\")   → \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\""
   (bytes->hex (%digest :sha256 (string/->bytes s))))
 
 (defn sha256-bytes (bytes)
@@ -101,7 +107,9 @@ value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. S
 ;; ---- SHA-512 ----------------------------------------------------------------
 
 (defn sha512 (s)
-  "Lowercase hex SHA-512 of string `s`'s UTF-8 bytes."
+  "Lowercase hex SHA-512 of string `s`'s UTF-8 bytes.
+
+    (count (hash/sha512 \"a\"))   → 128   ; 64 bytes as hex"
   (bytes->hex (%digest :sha512 (string/->bytes s))))
 
 (defn sha512-bytes (bytes)
@@ -119,7 +127,9 @@ value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. S
 ;; variants below.
 
 (defn hmac-sha256 (key message)
-  "HMAC-SHA256 of `message` using `key`. Both are strings; result is lowercase hex."
+  "HMAC-SHA256 of `message` using `key`. Both are strings; result is lowercase hex.
+
+    (hash/hmac-sha256 \"k\" \"m\")   → \"b60090e3052297aeb5a080889ce2fc4bca957e756faeb4df7d31800ca1e771ec\""
   (bytes->hex (%hmac :sha256 (string/->bytes key) (string/->bytes message))))
 
 (defn hmac-sha1 (key message)
