@@ -717,6 +717,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-24** — the namespace waves: 337 bare core names down to 291
 - **2026-08-26** — KI-61 fixed: the prelude autoloads instead of force-loading; boot 22.8 -> 11.6 ms (ADR-246/247)
 - **2026-08-26** — KI-64 fixed: a JIT block-argument spill was landing on the deopt journal (ADR-248)
+- **2026-08-26** — the codecs: `json` parse 1.8x (row -20.8%) and `base64` decode 1.8x (row -9.5%) (ADR-249)
 - **2026-08-26** — every package's `:brood` floor was a lie; the ecosystem release train that fixed it
 
 ---
@@ -3757,6 +3758,84 @@ explanation already sat two lines above as a comment) and **4.7% example coverag
 is the real remaining gap, since `tests/doc_examples_test.blsp` *executes* every example, so
 each one written is a test gained. It caught two of this session's own mistakes.
 
+## 2026-08-26 (third session) — the codecs, and two ways of being wrong about where time goes
+
+`json`, `regex` and `base64` are Brood's worst rows against native libraries, and FRONTIER
+named the lever as "a bytes/codepoint fast path shared by all three". Two of the three moved;
+the third turned out not to have the problem.
+
+**Split the row before optimising it.** Both codecs are two-directional and the halves are
+nowhere near equal. Warm, best-of-5 in one process: `base64` decode **29.4 ms** against encode
+**7.2 ms**; `json` parse **~85 ms** against encode **~36 ms**. Optimising the wrong half would
+have been invisible at the row level. (The *cold* single-shot numbers are ~2x the warm ones —
+16.5/40.2 for base64 — which is a different regime again; the row is cold, the micro-benchmark
+warm, and only `ab-bench` adjudicates.)
+
+**`json`: a missing primitive, not a slow loop (ADR-249).** `string/->codepoints` is a native
+with **no native inverse**, so every parser that used it to take a string apart rebuilt one
+with `(apply str (map int->char cs))` — a closure call and a one-character string per code
+point, then an N-way concat. `%codepoints->string` is that inverse. Parse ~85 -> ~45 ms, row
+**-20.8%** against a 0.7% floor.
+
+**`base64`: stop paying `nth` per character.** The decode loop read a CHAMP map for the reverse
+alphabet and indexed both vectors through `nth`, whose 2-arity arm is a closure that re-checks
+`int?`, `vector?` and the length before reaching `%vector-ref` — eight per output triple.
+A dense 128-entry codepoint-indexed vector plus direct `%vector-ref` took decode **29.4 -> 15.5
+ms**, row **-9.5%**. The dense vector was only ~7% of that: the rest was not calling `nth`.
+
+**`regex` has no such gap** — its hot path is a memoised DFA whose steady state is one
+`table/get`, and it measured noise on every attempt. Worth stating, because "shared by all
+three" implied otherwise.
+
+### Two wrong measurements, both instructive
+
+**A stale binary told me a story for twenty minutes.** `std/*.blsp` is `include_str!`'d, so
+editing a module and re-running the *existing* binary measures nothing — and it does not fail,
+it silently reports the old code. Three "results" (40.2 -> 37.5 -> 44.1 ms) were pure noise
+around an unchanged build. The check that settles it in one command: append garbage to the
+module and see whether the run still succeeds. It did.
+
+**`nth` -> `%vector-ref` in json's scanner measured -6% on a micro-benchmark and +0.4% (noise)
+on the row, so it was reverted.** Twelve sites converted, each a guard-correctness judgement,
+for nothing — json's cost was the per-string assembly, not the character peek. The same
+micro-optimisation was worth 1.8x on base64's tight decode loop. Same edit, same reasoning,
+opposite outcome: which one is right depends entirely on whether the loop is where the time is.
+
+### The follow-up from KI-64, measured and rejected (ADR-248)
+
+Reserving block-argument slots for any arm that *can produce a handle* — `producers > 0`, the
+predicate already in `jit_spill_reserve` — is the obvious repair for the arms KI-64's clamp
+leaves deopting. It is still a broad regression, because that gate is far too weak: a `first`,
+a `rest`, a `cons` or any non-tail call qualifies, i.e. nearly every arm. `spawn` **+9.7%**
+against a 1.4% floor, `errors-deep` +7.7% against 0.0%, `fib` +6.4% against 0.9% — and fib's
+own reserve is unchanged by the variant, so that is the prelude arms it calls. Reverted; only a
+per-operand handle analysis would work, and the deopt it would remove is not detectable
+(`reduce` and `pipeline`, the two rows most exposed, both +0.0%).
+
+### Two things found by accident
+
+- **`persistent-map` and `wordcount` were dead.** The 510->298 namespace wave renamed
+  `map-int-add` to `%map-int-add` and both benchmark rows died at compile. `persistent-map`
+  kept appearing in `ab-bench` sweeps with plausible times and plausible deltas the whole
+  while: **a row that errors fast looks exactly like a row that is fast.** Fixed in
+  brood-benchmarks; both now agree with the Python column.
+- **Adding a primitive changed a map's print order.** A new interned name shifts symbol ids,
+  which shifts keyword hashing, which shifts CHAMP trie order. `tests/doc_examples_test.blsp`
+  compared documented results as *text*, so `(seq/frequencies [:a :b :a])` failed against its
+  own correct docstring. It now compares as a value where the documented side reads as one —
+  verified by sabotage, `{:b 1, :a 3}` still fails. Every docstring example with a map or set
+  result was fragile this way.
+
+### Not attempted: the call protocol
+
+`bintree`'s own arms (`make`, `check-node`, `run`) all lower — every `call-mediated-boxed`
+bail on that row is a prelude arm — so its 3.6x against Elixir really is the call-convention
+cost *inside* generated code, the X-register redesign FRONTIER describes. Two things argued
+against starting it here: `perf_event_paranoid=4` on this box blocks sampling, so the 50%-call-
+plumbing profile could not be refreshed; and FRONTIER's own ruled-out list records that
+memoising the VM's half delivered -4.3%/-4.9% at ceiling 1 and **parity at the default
+ceiling**, i.e. interpreted-path call work is already covered by the JIT where the published
+numbers live. It needs a profiler and a session that can watch it.
 ## 2026-08-26 — the rest of the audit: `bit/`, `decimal/`, `proc/`, and the deferred reply
 
 Follow-on to the namespace pass earlier today, working the audit's remaining list top to
