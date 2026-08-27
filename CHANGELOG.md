@@ -4,6 +4,26 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.14.1 — 2026-08-27
+
+**BREAKING (tooling surface) — the checker looks inside a literal, and finds a fifth dead
+call site.**
+
+- **KI-70: `nest check` never walked a vector or map literal.** `check_into_inner` returned
+  for any form that was not a `Pair`, so every expression nested inside `[…]` or `{…}` was
+  invisible to every lint — which is the whole Hiccup style (`std/editor/*`, and every web
+  layer written in Brood). hive's `/docs` renderer carried `(str (max 2 …))` for weeks after
+  `max` moved to `math`, with `nest check`, `nest test` and the boot check all green; only
+  rendering the page raised it. Vectors and maps now descend (map **keys** too). No false
+  positives — the checker sees macroexpanded forms, so pattern vectors are already lowered,
+  and `quote`/`quasiquote` stop the walk before their data is reached.
+- **`project/all-files` is public, and `project-all-files` is gone.** The first run of the
+  fixed checker found the fifth dead `project-*` call in `std/tool/mcp.blsp` — the `callers`
+  MCP tool called a `defn-` from another module, inside a map literal, so it raised on every
+  invocation. Promoted and de-stuttered beside `project/source-files`, as KI-67 did for its
+  four.
+- **The v0.14.0 tree failed `nest format --check`** on three `.blsp` files. Formatted.
+
 ## v0.14.0 — 2026-08-27
 
 **The gates that had stopped gating.** No language change — this release is the CI tree

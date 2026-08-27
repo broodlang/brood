@@ -1365,6 +1365,51 @@ fn unbound_inside_an_error_testing_form_is_still_flagged() {
     }
 }
 
+/// KI-70 — the walk used to `return` for any form that was not a `Pair`, so every
+/// expression nested inside a vector or map LITERAL was invisible to every lint.
+/// Hiccup-shaped code is written entirely that way, which is how `(str (max 2 …))`
+/// survived in hive's `/docs` renderer long after `max` moved to `math`, with
+/// `nest check` green and only a page render raising it.
+#[test]
+fn unbound_inside_a_vector_or_map_literal_is_flagged() {
+    for src in [
+        "[:tag (definitely-not-bound 1)]",            // vector literal
+        "{:k (definitely-not-bound 1)}",              // map literal
+        "{(definitely-not-bound 1) :v}",              // map literal, KEY position
+        "[:tag {:k (definitely-not-bound 1)}]",       // map inside a vector
+        "[:tag {:k (str (definitely-not-bound 1))}]", // the shape found in the wild
+        "[[[(definitely-not-bound 1)]]]",             // nested vectors
+    ] {
+        let w = warnings(src);
+        assert!(
+            w.iter()
+                .any(|m| m.contains("unbound symbol: definitely-not-bound")),
+            "{src} should flag the unbound name, got {w:?}"
+        );
+    }
+}
+
+/// The false-positive half of KI-70. Descending into literals must not start
+/// reading DATA as code: `quote`/`quasiquote` stop the walk before their contents
+/// are ever handed down, and the checker runs on macroexpanded forms, so a `match`
+/// pattern vector has already become `let`/`if` binders by the time we get here.
+#[test]
+fn descending_into_a_literal_does_not_read_data_as_code() {
+    for src in [
+        "'[a b c]",                                   // quoted vector of bare symbols
+        "'{:k v}",                                    // quoted map
+        "(quote [definitely-not-bound])",             // explicit quote
+        "(match [1 2] ([a b] (+ a b)) (_ 0))",        // pattern binders, post-expansion
+        "(let (xs [1 2 3]) (map (fn (n) [n n]) xs))", // ordinary literal use
+    ] {
+        assert!(
+            warnings(src).is_empty(),
+            "{src} should stay silent, got {:?}",
+            warnings(src)
+        );
+    }
+}
+
 /// The other half of KI-67: everything that is *not* an unbound symbol stays
 /// suppressed inside an error-testing form. Filtering happens at the collection
 /// point, so a lint added later is suppressed here by default — which is the
