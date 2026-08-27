@@ -81,7 +81,8 @@ Stable: among equal priorities, earlier inserts pop first (FIFO).
 ;; fell through to that default and failed with "adding to a RECORD takes a [k v] pair or
 ;; a map" — an error about records, raised for a priority queue.
 (impl Seqable pq/pq (->seq [q] (map second (get q :entries))))
-(impl Conjable pq/pq
+(impl Conjable
+  pq/pq
   (-conj [q x]
     (if (and (vector? x) (= (count x) 2))
       (insert q (nth x 0) (nth x 1))

@@ -169,9 +169,11 @@ leaves `s` unchanged.
     (string/substring s 0 n)))
 (defn trimr (s) "Remove trailing whitespace from `s`." (trimr-to s (string/length s)))
 
-(defn trim (s) "Remove leading and trailing whitespace from `s`.
+(defn trim (s)
+  "Remove leading and trailing whitespace from `s`.
 
-    (string/trim \"  a \")   → \"a\"" (triml (trimr s)))
+    (string/trim \"  a \")   → \"a\""
+  (triml (trimr s)))
 
 ;; ---- padding & repetition ---------------------------------------------------
 ;; Column formatting for tabular/console output. `pad-*` left unchanged when the

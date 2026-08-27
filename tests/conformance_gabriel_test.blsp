@@ -142,6 +142,28 @@
       (let ([i want] p)
         (assert= (nqueens (+ i 1)) want)))))
 
+;; Both nboyer sizes run by default (`BROOD_GABRIEL_NBOYER_MAX_N` unset).
+;;
+;; The one context that cannot afford that is `brood_suite_passes`, the DEBUG-build wrapper
+;; that runs this suite under cargo, where this single test measured **256 s — a third of
+;; the whole `make test` wall** (715 s of in-language suite inside a 790 s run) against
+;; 19.6 s on the release path. `crates/lisp/tests/suite.rs` turns this knob down to 1 for
+;; that wrapper only, the same treatment it already gives UCD Part1 and the KI-14 deep
+;; recursion cases, and for the same reason.
+;;
+;; What the wrapper keeps: n=1 is 0.6M rewrites, still 6x the 95k baseline, so the
+;; sustained-allocation pressure this case exists for is exercised — under
+;; debug-assertions, which is the wrapper's actual purpose. What it gives up is the 1.8M
+;; step, and only there: `nest test` and `make suite` run both sizes in ~20 s, and the
+;; correctness answer is independently pinned by the small-size case above
+;; ("the rewrite count, upstream's own sanity check") against upstream's published table.
+;;
+;; Read from the ENVIRONMENT at load, not from a global the wrapper `def`s first — see the
+;; long note on `BROOD_UCD_PART1_OF` in tests/conformance_ucd_test.blsp for why a global
+;; default here would silently overwrite the wrapper's value and leave the knob inert.
+(def- gb-nboyer-max-n
+  (max 1 (or (string/->number (or (os/env "BROOD_GABRIEL_NBOYER_MAX_N") "")) 2)))
+
 ;; The two heavier sizes, kept out of the default budget. `:slow` raises the batch
 ;; timeout (a `:conformance` tag does too) rather than skipping them, so they really do
 ;; run — they are the cases that put sustained pressure on the rewriter and the GC.
@@ -154,7 +176,7 @@
     ;; sustained allocation — a GC or JIT-tiering bug rather than a logic one — shows up
     ;; at 1.8M rewrites and not at 95k.
     (let (db (setup-boyer))
-      (dolist (n [1 2])
+      (dolist (n (filter (fn (k) (<= k gb-nboyer-max-n)) [1 2]))
         (assert= (test-boyer nboyer-alist nboyer-term n db)
           (get gb-nboyer-rewrites n)))))
 
