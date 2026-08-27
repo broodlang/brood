@@ -119,6 +119,15 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
   (if (empty? coll)
     (reverse acc)
     (chunk-every-acc n (drop n coll) (cons (into [] (take n coll)) acc))))
+;; The index/count comes FIRST and the collection LAST throughout this module. A call
+;; that reverses the two is the one rename mistake nothing catches: the arity is unchanged
+;; and no name is unbound, so `nest check` is silent and the wrong answer surfaces somewhere
+;; else entirely (KI-71 — `remove-nth`'s own move to index-first read as seven unrelated
+;; buffer-lifecycle failures downstream). These `sig`s make that reversal a checker warning,
+;; which the CI gate turns into a hard failure. Argument types are precise because that is
+;; what catches the swap; the RETURN stays `any` because a too-narrow return would
+;; false-positive at call sites and is not what a reversed-args rename gets wrong.
+(sig chunk-every (int seqable -> any))
 (defn chunk-every (n coll)
   "Split `coll` into consecutive `n`-item vectors; unlike `partition`, a
 trailing partial chunk is kept. `n` must be positive.
@@ -216,6 +225,7 @@ equality); recover the item itself with `find`.
     (seq/subvec [1 2 3 4] 1 3)   → [2 3]"
   (if (empty? more) (%subvec v start) (%subvec v start (first more))))
 
+(sig vector-ref (vector int -> any))
 (defn vector-ref (v i)
   "The element at index i of vector v."
   (%vector-ref v i))
@@ -273,18 +283,21 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     (seq/flatten '(1 [2 3]))     → (1 [2 3])   ; a vector is a LEAF, not descended into"
   (reverse (%flatten-acc coll nil)))
 
+(sig split-at (int seqable -> any))
 (defn split-at (n coll)
   "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`.
 
     (seq/split-at 2 [1 2 3 4]) → [(1 2) (3 4)]"
   (%split-at-acc n coll nil))
 
+(sig take-last (int seqable -> any))
 (defn take-last (n coll)
   "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0).
 
     (seq/take-last 2 [1 2 3])  → (2 3)"
   (drop (- (count coll) n) coll))
 
+(sig drop-last (int seqable -> any))
 (defn drop-last (n coll)
   "`coll` without its last `n` items (`()` if `n` >= its length).
 
@@ -309,6 +322,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     (seq/repeatedly 3 (fn () 7))   → (7 7 7)"
   (%repeatedly-acc n f nil))
 
+(sig sample (int seqable -> any))
 (defn sample (seed coll)
   "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."
   (let (items (into [] coll)
@@ -350,6 +364,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
   ;; Read slots i…0 back out, building the result list front-to-back.
   (if (< i 0) acc (shuffle-drain m (- i 1) (cons (get m i) acc))))
 
+(sig shuffle (int seqable -> any))
 (defn shuffle (seed coll)
   "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
   (let (v (into [] coll)
@@ -358,6 +373,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
         [out state] (shuffle-at slots (- n 1) (%rand-seed seed)))
     [(shuffle-drain out (- n 1) nil) state]))
 
+(sig remove-nth (int seqable -> any))
 (defn remove-nth (i coll)
   "A fresh collection like `coll` with the element at index `i` removed. Returns
 a vector for a vector and a list for a list. `i` must be in `[0, count)`.

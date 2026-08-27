@@ -1,0 +1,156 @@
+(defmodule doc-snippets-test (:use test))
+
+;; The two docs that TEACH the language — `docs/language.md` (the reference) and
+;; `docs/brood-for-claude.md` (the AI pocket reference, which `%builtin-doc` bakes into the
+;; binary and `nest new` drops into every scaffolded project). Nothing evaluated their code
+;; blocks, so they drifted: on 2026-08-27 both were still teaching `println` / `print` /
+;; `eprint` / `eprintln` (retired when the `io/` trio landed in 0.13.0) across 24 sites,
+;; `spawn-server` (now `gen/start`), and an arithmetic reference claiming
+;; `quot`/`mod`/`rem`/`floor`/`min`/`max` are bare when they moved to `math`.
+;;
+;; A doc block is not a program — most are fragments over undefined placeholders (`my-fn`,
+;; `counter`, `acc`), so they cannot simply be evaluated the way `doc_examples_test.blsp`
+;; evaluates docstring examples. So this checks the two things that ARE decidable, and
+;; deliberately nothing else:
+;;
+;;   A. every QUALIFIED call head (`mod/name`) must resolve, once `mod` is loaded;
+;;   B. no RETIRED name may appear as a call head at all.
+;;
+;; Blocks are recovered by READING them as data, not by regex — the reader handles strings,
+;; comments and nesting, where a regex would have to reimplement all three and would drift
+;; (the same argument hive's `docs_examples_test.blsp` makes). A block that does not parse is
+;; a prose fragment and is skipped; the anti-vacuity tests below make sure "skipped" cannot
+;; quietly become "all of them".
+
+(def *docs* ["docs/language.md" "docs/brood-for-claude.md"])
+
+;; Fence tags that mean "this is Brood". `sh`/`bash`/`text` blocks are not.
+(def *brood-tags* #{"lisp" "clojure" "blsp" "brood"})
+
+;; Retired names, with what replaced each. Every one of these was live in these docs while
+;; every gate was green. The test asserts BOTH that no doc block still calls them AND that
+;; each is genuinely unbound — the second half is what stops this list rotting into a
+;; check of names that have since come back, which would pass while proving nothing.
+(def *retired*
+  {"println" "io/puts"
+   "print" "io/write"
+   "eprintln" "(io/puts … :to *err*)"
+   "eprint" "(io/write … :to *err*)"
+   "spawn-server" "gen/start"
+   "read-all" "reflect/read-all"
+   "read-string" "reflect/read-string"
+   "map-pairs" "seq"
+   "table-get" "table/get"
+   "table-put" "table/put"
+   "string-length" "string/length"
+   "os/getenv" "os/env"})
+
+(defn- fenced-blocks
+  (lines in-block acc cur)
+  "The Brood code blocks of `lines`, as a list of source strings. Tail-recursive: a `test`
+body runs in a green process with a bounded stack."
+  (if (empty? lines)
+    (reverse acc)
+    (let (line (first lines)
+          rest-lines (rest lines))
+      (if (string/starts-with? line "```")
+        (if in-block
+          (fenced-blocks rest-lines false (cons (string/join "\n" (reverse cur)) acc) nil)
+          ;; Opening fence: enter only for a Brood tag, so ```sh blocks never reach the reader.
+          (if (contains? *brood-tags* (string/trim (string/replace line "```" "")))
+            (fenced-blocks rest-lines true acc nil)
+            (fenced-blocks (drop-until-fence rest-lines) false acc nil)))
+        (if in-block
+          (fenced-blocks rest-lines true acc (cons line cur))
+          (fenced-blocks rest-lines false acc cur))))))
+
+(defn- drop-until-fence
+  (lines)
+  "Skip to just past the closing fence of a non-Brood block."
+  (if (empty? lines)
+    nil
+    (if (string/starts-with? (first lines) "```")
+      (rest lines)
+      (drop-until-fence (rest lines)))))
+
+(defn- blocks-in
+  (path)
+  (fenced-blocks (string/split (file/slurp path) "\n") false nil nil))
+
+(defn- call-heads
+  (form acc)
+  "Every symbol in call-head position within `form` — the first element of each list.
+Descends lists, vectors and maps, because a head can sit inside any of them (that is
+KI-70's whole point)."
+  (cond
+    (and (list? form) (not (empty? form)))
+      (let (h (first form)
+            acc2 (if (symbol? h) (cons h acc) acc))
+        (fold (fn (a child) (call-heads child a)) acc2 form))
+    (vector? form) (fold (fn (a child) (call-heads child a)) acc form)
+    (map? form) (fold (fn (a kv) (call-heads (second kv) (call-heads (first kv) a))) acc (seq form))
+    else acc))
+
+(defn- heads-of-block
+  (src)
+  "The call heads of `src`, or nil if it does not parse — a prose fragment, an elided
+`…`, a deliberately-malformed example. Skipping those is why the anti-vacuity tests below
+exist."
+  (let (forms (try (reflect/read-all src) (catch _ nil)))
+    (if (nil? forms) nil (fold (fn (a f) (call-heads f a)) nil forms))))
+
+(defn- all-heads
+  ()
+  (mapcat (fn (p) (mapcat heads-of-block (blocks-in p))) *docs*))
+
+(defn- qualified?
+  (sym)
+  (let (n (name sym))
+    (and (not (string/starts-with? n "%")) (contains-slash? n))))
+
+(defn- contains-slash?
+  (s)
+  (fold (fn (found c) (or found (= c "/"))) false (string/->list s)))
+
+(defn- module-of
+  (sym)
+  (first (string/split (name sym) "/")))
+
+(describe "the docs' code blocks"
+  ;; ---- anti-vacuity, first ----------------------------------------------------------
+  ;; Both checks below are "for every X, assert P". With no X they pass while proving
+  ;; nothing, which is the failure mode KI-68 is entirely about. So pin the corpus size.
+
+  (test "the extractor still finds Brood blocks in both docs"
+    (doseq (path *docs*)
+      (is (> (count (blocks-in path)) 10))))
+
+  (test "enough blocks still PARSE to make the head checks meaningful"
+    ;; If a reader or fence change made every block unparseable, the checks would go
+    ;; vacuously green. They are fragments, so this is a floor, not a total.
+    (is (> (count (filter (fn (b) (not (nil? (heads-of-block b))))
+                    (mapcat blocks-in *docs*)))
+          20)))
+
+  (test "the retired list still names names that are actually gone"
+    ;; Guards the guard the other way: if a retired name came back, checking for its
+    ;; absence would be wrong, not merely useless.
+    (doseq (kv (seq *retired*))
+      (is (not (bound? (symbol (first kv)))))))
+
+  ;; ---- the checks --------------------------------------------------------------------
+
+  (test "every qualified call head in a doc block resolves"
+    ;; `bound?` alone is not enough: a qualified reference auto-requires at COMPILE time,
+    ;; and nothing here compiles the block, so the module must be loaded first. Without
+    ;; this the check reports `node/start` and eight others as missing when they are fine.
+    (let (heads (seq/distinct (filter qualified? (all-heads))))
+      (doseq (h heads)
+        (try (require-one (symbol (module-of h))) (catch _ nil)))
+      (doseq (h heads)
+        (is (bound? h)))))
+
+  (test "no doc block calls a retired name"
+    (let (heads (into #{} (map name (all-heads))))
+      (doseq (kv (seq *retired*))
+        (is (not (contains? heads (first kv))))))))

@@ -39,13 +39,13 @@
 
 ;; Modular reduction: monster mod a small prime should be fast (single division)
 (def small-prime 999999893)
-(io/puts "monster mod small-prime:" (rem monster small-prime))
-(io/puts "big-product mod small-prime:" (rem big-product small-prime))
+(io/puts "monster mod small-prime:" (math/rem monster small-prime))
+(io/puts "big-product mod small-prime:" (math/rem big-product small-prime))
 
 ;; Quotient: divide the monster by a medium integer
 (def divisor 123456789012345678)
-(def q (quot monster divisor))
-(def r (rem monster divisor))
+(def q (math/quot monster divisor))
+(def r (math/rem monster divisor))
 (io/puts "quot digit count:" (string/length (str q)))
 (io/puts "remainder:" r)
 ;; Verify: q*divisor + r == monster
@@ -61,7 +61,7 @@
 
 (io/puts "--- GCD stress: gcd(monster, monster+1) must be 1 ---")
 ;; Euclidean algorithm in Brood — deeply tests BigInt subtraction / mod at huge sizes
-(defn gcd (a b) (if (= b 0) a (gcd b (rem a b))))
+(defn gcd (a b) (if (= b 0) a (gcd b (math/rem a b))))
 (io/puts "gcd(monster, monster+1):" (gcd monster monster+1))
 
 (io/puts "--- factorial of 1000 for good measure ---")
@@ -69,6 +69,6 @@
 (defn fac (n acc) (if (= n 0) acc (fac (- n 1) (* acc n))))
 (def fac1000 (fac 1000 1))
 (io/puts "1000! digit count:" (string/length (str fac1000)))
-(io/puts "1000! mod 1000000007:" (rem fac1000 1000000007))
+(io/puts "1000! mod 1000000007:" (math/rem fac1000 1000000007))
 
 (io/puts "--- DONE ---")

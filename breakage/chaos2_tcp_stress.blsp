@@ -170,7 +170,7 @@
 (io/puts "=== P40: 512KB payload integrity ===")
 
 (let (me (self)
-      big (string/repeat "BROOD" (quot 524288 5)))
+      big (string/repeat "BROOD" (math/quot 524288 5)))
   ; ~512KB
 
   ;; Server: owns the listener; receive all chunks, concatenate, report length

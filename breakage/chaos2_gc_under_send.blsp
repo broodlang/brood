@@ -90,7 +90,7 @@
                      (if (= n 0)
                        (send me [:p59 acc])
                        ;; Interleave allocation with receive
-                       (let (_ (range (rem n 100)))
+                       (let (_ (range (math/rem n 100)))
                          ; allocate a small list
                          (let (msg (receive
                                      ([:val v] v)
@@ -127,7 +127,7 @@
       (io/puts "P60: total sum:" r)
       ;; Each sender i sends (i+1) msgs-each times; sum = msgs-each * Σ(i+1) for i in [0,n-senders)
       ;;   = msgs-each * (1+2+...+n-senders) = msgs-each * n-senders*(n-senders+1)/2
-      (def expected-sum (* msgs-each (quot (* n-senders (+ n-senders 1)) 2)))
+      (def expected-sum (* msgs-each (math/quot (* n-senders (+ n-senders 1)) 2)))
       (io/puts "P60: expected:" expected-sum)
       (io/puts "P60-correct:" (= r expected-sum)))))
 
