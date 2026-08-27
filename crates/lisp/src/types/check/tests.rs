@@ -866,14 +866,19 @@ fn optional_sig_params_parse_and_check() {
         "a rest arg after an optional one must still be checked: {w:?}"
     );
 
-    // Malformed order (`&` before `&optional`) is rejected by the parser
-    // (dropped, not guessed) rather than misparsed into something
-    // incorrect — the sig is simply absent, so nothing about `k` is
-    // checked, but nothing crashes either.
+    // Malformed order (`&` before `&optional`) is still never *misparsed* into
+    // something incorrect — but since Pass 2.85 the author is told, rather than
+    // the declaration vanishing silently (an annotation that is ignored when
+    // wrong is a gate that cannot fail). Nothing about `k` itself is checked.
     let w = file_warnings("(sig k (int & number &optional string -> int))\n(defn k (a) a)");
     assert!(
-        w.iter().all(|m| !m.contains("k:")),
-        "a malformed marker order must drop the sig silently, not misparse: {w:?}"
+        w.iter()
+            .any(|m| m.contains("sig k: malformed function type")),
+        "a malformed marker order must be reported: {w:?}"
+    );
+    assert!(
+        w.iter().all(|m| !m.contains("k: argument")),
+        "…and must not be misparsed into an argument check: {w:?}"
     );
 }
 
@@ -4755,6 +4760,281 @@ fn feature_loaded_reads_the_feature_registry_not_the_namespace() {
         assert!(
             feature_loaded(&mut interp.heap, module),
             "a required module must read as loaded"
+        );
+    }
+}
+
+// ---- same-file arity (the def site is the authority) ----
+// The file being checked is never loaded, so `sigs::arity_of` (which reads the
+// global table) sees nothing for its own functions. Before `Ctx::file_arity`, that
+// meant a call to a function defined in the same file had NO arity check at all —
+// the cheapest check in the system, absent exactly where a fresh edit is.
+
+#[test]
+fn same_file_call_with_too_few_arguments_is_flagged() {
+    let ws = file_warnings("(defn f (x y) x)\n(defn g () (f 1))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("f: wrong number of arguments — expected 2, got 1")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn same_file_call_with_the_right_arity_is_silent() {
+    let ws = file_warnings("(defn f (x y) x)\n(defn g () (f 1 2))");
+    assert!(!ws.iter().any(|w| w.contains("wrong number")), "{ws:?}");
+}
+
+#[test]
+fn same_file_variadic_and_optional_arities_admit_their_range() {
+    // `&` collects a tail: 1-or-more. `&optional`: a range. Neither may false-flag.
+    let ws = file_warnings(
+        "(defn v (a & rest) a)\n\
+         (defn o (a &optional b) a)\n\
+         (defn use () (list (v 1) (v 1 2 3) (o 1) (o 1 2)))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("wrong number")), "{ws:?}");
+    // …but the arity floor still holds.
+    let ws = file_warnings("(defn v (a & rest) a)\n(defn use () (v))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("v: wrong number of arguments — expected 1 or more, got 0")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn same_file_multi_arity_admits_every_arm() {
+    let ws = file_warnings("(defn f ((x) x) ((x y) x))\n(defn g () (list (f 1) (f 1 2)))");
+    assert!(!ws.iter().any(|w| w.contains("wrong number")), "{ws:?}");
+    let ws = file_warnings("(defn f ((x) x) ((x y) x))\n(defn g () (f 1 2 3))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("f: wrong number of arguments — expected 1 to 2, got 3")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn the_definition_beats_a_disagreeing_sig_for_arity() {
+    // A `(sig …)` used to be the ONLY arity source for a same-file name, so a sig that
+    // disagreed with its `defn` silently made a wrong call look right — `nest check`
+    // passed a program that died on its first call.
+    let ws = file_warnings("(sig f (int -> int))\n(defn f (a b) a)\n(defn g () (f 5))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("f: wrong number of arguments — expected 2, got 1")),
+        "{ws:?}"
+    );
+}
+
+// ---- the declaration itself must be readable (Pass 2.85) ----
+// A `(sig …)` is read ahead of every other signature source, so a declaration the
+// parser silently drops is worse than none: the position widens to `any` and the
+// author is told nothing. All four shapes below used to exit 0 with no diagnostic.
+
+#[test]
+fn a_misspelled_type_name_in_a_sig_is_reported() {
+    let ws = file_warnings("(sig f (strng -> int))\n(defn f (s) 0)");
+    assert!(
+        ws.iter().any(|w| w.contains("sig f: unknown type `strng`")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_misspelled_type_constructor_in_a_sig_is_reported() {
+    let ws = file_warnings("(sig f ((tupel int) -> int))\n(defn f (t) 0)");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("sig f: unknown type constructor `tupel`")),
+        "{ws:?}"
+    );
+    // …and the innermost offender wins, not the enclosing constructor.
+    let ws = file_warnings("(sig f ((vector strng) -> int))\n(defn f (v) 0)");
+    assert!(
+        ws.iter().any(|w| w.contains("unknown type `strng`")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_sig_whose_arity_contradicts_the_definition_is_reported() {
+    let ws = file_warnings("(sig f (int -> int))\n(defn f (a b) a)");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("sig f: declares 1 argument(s) but the definition takes 2")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_sig_arity_that_merely_narrows_the_definition_is_silent() {
+    // A multi-arm `defn` annotated with one arm's arrow overlaps the definition's
+    // hull — not provably wrong, so it must stay silent (the no-false-positive rule).
+    let ws = file_warnings("(sig f (int -> int))\n(defn f ((a) a) ((a b) a))");
+    assert!(!ws.iter().any(|w| w.contains("sig f:")), "{ws:?}");
+    // A `&optional` definition against a fixed-arity sig, likewise.
+    let ws = file_warnings("(sig g (int -> int))\n(defn g (a &optional b) a)");
+    assert!(!ws.iter().any(|w| w.contains("sig g:")), "{ws:?}");
+}
+
+#[test]
+fn a_sig_for_a_name_that_is_never_defined_is_reported() {
+    let ws = file_warnings("(sig ghost (int -> int))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("sig ghost: nothing named `ghost` is defined here")),
+        "{ws:?}"
+    );
+    // Order doesn't matter — the def may follow the sig.
+    let ws = file_warnings("(sig f (int -> int))\n(defn f (a) a)");
+    assert!(!ws.iter().any(|w| w.contains("nothing named")), "{ws:?}");
+}
+
+#[test]
+fn a_capitalised_unknown_type_name_stays_silent() {
+    // An ability used as a type resolves by bare name (ADR-181/186), and a
+    // single-file check only knows the abilities the file itself declares — so an
+    // unknown *capitalised* name is assumed to be one, and never reported.
+    let ws = file_warnings("(sig f (Shape -> int))\n(defn f (s) 0)");
+    assert!(!ws.iter().any(|w| w.contains("unknown type")), "{ws:?}");
+}
+
+#[test]
+fn every_type_constructor_the_grammar_parses_is_known_to_the_validator() {
+    // `type_expr_problem` reports an unrecognised head, so a constructor added to
+    // `parse_type` and not to `TYPE_HEADS` would be reported as unknown — a lint that
+    // fires on correct code. Pin the two lists together: each head must parse.
+    let mut interp = crate::Interp::new();
+    for head in super::annot::TYPE_HEADS {
+        let src = match head {
+            "map" => "(map keyword int)".to_string(),
+            "record" => "(record :a int)".to_string(),
+            "tuple" => "(tuple int string)".to_string(),
+            "or" | "and" => format!("({head} int string)"),
+            _ => format!("({head} int)"),
+        };
+        let form = reader::read_one(&mut interp.heap, &src).expect("parse");
+        assert!(
+            super::annot::type_expr_problem(&interp.heap, form).is_none(),
+            "`{head}` is in TYPE_HEADS but `{src}` does not read as a type"
+        );
+    }
+}
+
+// ---- the walk is TOTAL (the reach gate) ----
+// KI-67 (`try` bodies) and KI-70 (vector/map literals) were the same bug at two
+// depths: a `return`-early line in the walk behind which no lint ran at all, and
+// which left no trace to grep for — a lint that is never *reached* is invisible in
+// a way a suppressed one is not. Both were found by accident. This is the gate that
+// makes a third one fail a test instead: every recognised special form, and every
+// container literal, gets a planted unresolvable name in each of its *code*
+// positions, and must report it. The two data-holding forms must stay silent.
+
+/// `(head, source with a planted `zzz-…` name, must the walk report it?)`.
+/// Every entry in `SPECIAL_HEAD` must appear here — see
+/// `every_special_form_is_covered_by_the_reach_gate`.
+const REACH_CASES: &[(&str, &str, bool)] = &[
+    // Data, not code — reporting here would flag a sketched or quoted name.
+    ("quote", "(defn f () (quote (zzz-q)))", false),
+    ("comment", "(defn f () (comment (zzz-c)))", false),
+    // A template is data, but its `~` escapes are code evaluated at expansion time.
+    ("quasiquote", "(defmacro m (x) `(a ~(zzz-qq x)))", true),
+    ("quasiquote", "(defmacro m (x) `(a zzz-quoted ~x))", false),
+    // Deliberate-failure forms: every other lint is suppressed inside them, but an
+    // unbound name is never the failure under test (KI-67).
+    ("try", "(defn f () (try (zzz-try) (catch e e)))", true),
+    (
+        "%try",
+        "(defn f () (%try (fn () (zzz-tp)) (fn (e) e)))",
+        true,
+    ),
+    ("error-of", "(defn f () (error-of (zzz-eo)))", true),
+    ("assert-error", "(defn f () (assert-error (zzz-ae)))", true),
+    // Ordinary code positions.
+    ("if", "(defn f (b) (if (zzz-test b) 1 2))", true),
+    ("if", "(defn f (b) (if b (zzz-then) 2))", true),
+    ("if", "(defn f (b) (if b 1 (zzz-else)))", true),
+    ("let", "(defn f () (let (a (zzz-rhs)) a))", true),
+    ("let", "(defn f () (let (a 1) (zzz-body a)))", true),
+    (
+        "letrec",
+        "(defn f () (letrec (g (fn () (zzz-lr))) (g)))",
+        true,
+    ),
+    ("fn", "(defn f () (fn () (zzz-fn)))", true),
+    ("def", "(def x (zzz-def))", true),
+    ("defn", "(defn f () (zzz-defn))", true),
+    ("defmacro", "(defmacro m (x) (zzz-dm x))", true),
+];
+
+/// Container literals — KI-70's class, kept beside the special forms because it is
+/// the same question ("does the walk go in?") for the other half of the syntax.
+const REACH_CONTAINER_CASES: &[(&str, bool)] = &[
+    ("(defn f (x) [:tag (zzz-vec x)])", true),
+    ("(defn f (x) {:k (zzz-mapval x)})", true),
+    ("(defn f (x) {(zzz-mapkey x) :v})", true),
+    ("(defn f (x) [:tag {:k (str (zzz-deep x))}])", true), // the hive shape (KI-70)
+    ("(defn f (x) (list [1 2] {:a 1}))", false),           // ordinary literals: silent
+];
+
+fn planted_name(src: &str) -> String {
+    let start = src
+        .find("zzz-")
+        .expect("every reach case plants a `zzz-…` name");
+    let rest = &src[start..];
+    let end = rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '-'))
+        .unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
+#[test]
+fn the_walk_reaches_every_code_position() {
+    for (head, src, must_report) in REACH_CASES {
+        let planted = planted_name(src);
+        let want = format!("unbound symbol: {planted}");
+        // Both walks, because they are different code paths reaching the same arm:
+        // `check_file` (what `nest check` runs, with whole-file facts) and
+        // `check_form` on the expanded fragment (what the REPL, the LSP and the MCP
+        // `check` tool run). A form skipped by one and covered by the other is how
+        // this gate's own first sabotage attempt passed — file mode caught the
+        // quasiquote escape through an unrelated whole-file pass while the arm under
+        // test was doing nothing.
+        for (mode, ws) in [
+            ("file", file_warnings(src)),
+            ("fragment", warnings_expanded(src)),
+        ] {
+            let reported = ws.contains(&want);
+            assert_eq!(
+                reported, *must_report,
+                "`{head}` ({mode}): expected report={must_report} for `{planted}` in `{src}` — got {ws:?}"
+            );
+        }
+    }
+    for (src, must_report) in REACH_CONTAINER_CASES {
+        let ws = file_warnings(src);
+        let reported = ws.iter().any(|w| w.starts_with("unbound symbol: zzz-"));
+        assert_eq!(
+            reported, *must_report,
+            "container reach: `{src}` — got {ws:?}"
+        );
+    }
+}
+
+#[test]
+fn every_special_form_is_covered_by_the_reach_gate() {
+    // The completeness half: a head added to `SPECIAL_HEAD` with no case here would
+    // otherwise inherit whatever reach it happened to get, unwatched — which is
+    // exactly how KI-67 and KI-70 survived. Adding a head now fails this test until
+    // someone says, in a case above, what the walk is supposed to do with its body.
+    for (&sym, _) in super::walk::SPECIAL_HEAD.iter() {
+        let name = crate::core::value::symbol_name(sym);
+        assert!(
+            REACH_CASES.iter().any(|(head, _, _)| *head == name),
+            "special form `{name}` has no reach-gate case in REACH_CASES"
         );
     }
 }

@@ -134,9 +134,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
-use crate::core::value::{self as value, Symbol, Value};
+use crate::core::value::{self as value, Arity, Symbol, Value};
 use crate::error::Pos;
-use crate::types::Ty;
+use crate::types::{Sig, Ty};
 
 use ctx::Ctx;
 use walk::{check_into, collect_all_syms, collect_def_names, list_items};
@@ -223,6 +223,84 @@ fn register_declared_sig(heap: &Heap, ctx: &mut Ctx, file_ns: Option<&str>, form
     if let Some((name, ty)) = annot::parse_value_sig_decl(heap, form) {
         let qn = qualify_decl_name(ctx, file_ns, name);
         ctx.add_declared_value_ty(qn, ty);
+    }
+}
+
+/// Do the two arities overlap — is there an argument count both admit? The
+/// question a sig-vs-definition mismatch turns on: only a *disjoint* pair is
+/// provably wrong (a multi-arm `defn` annotated with one arm's arrow overlaps,
+/// and must stay silent).
+fn arities_overlap(a: Arity, b: Arity) -> bool {
+    let a_max = a.max.unwrap_or(usize::MAX);
+    let b_max = b.max.unwrap_or(usize::MAX);
+    a.min <= b_max && b.min <= a_max
+}
+
+/// The arity an arrow signature admits — the same mapping the call-site arity check
+/// applies to a declared sig.
+fn sig_arity(sig: &Sig) -> Arity {
+    if sig.rest.is_some() {
+        Arity::at_least(sig.params.len())
+    } else if sig.optional.is_empty() {
+        Arity::exact(sig.params.len())
+    } else {
+        Arity::range(sig.params.len(), sig.params.len() + sig.optional.len())
+    }
+}
+
+/// Validate this file's hand-written `(sig …)` declarations (Pass 2.85) — see the
+/// call site for why an unreadable annotation is worse than no annotation.
+///
+/// Reads the *un-expanded* forms, which is where a hand-written declaration is
+/// legible; a macro-emitted sig (`defrecord`'s) is machine-built and deliberately
+/// not second-guessed here.
+fn check_sig_declarations(
+    heap: &Heap,
+    forms: &[Value],
+    file_ns: Option<&str>,
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    for &form in forms {
+        let Some((name, ty_form)) = annot::sig_decl_parts(heap, form) else {
+            continue;
+        };
+        let spelling = value::symbol_name(name);
+        let pos = heap.form_pos_only(form);
+        // 1. Is the type-expression readable at all?
+        if let Some(problem) = annot::type_expr_problem(heap, ty_form) {
+            out.push((pos, format!("sig {spelling}: {problem}")));
+            continue; // the rest reads the parsed sig, which doesn't exist
+        }
+        let qualified = qualify_decl_name(ctx, file_ns, name);
+        // 2. Does it annotate anything? A sig for a name this file never defines (and
+        //    that isn't bound anywhere in the image) annotates nothing — usually a
+        //    rename that moved the `defn` and left the declaration behind.
+        if walk::is_unbound(heap, ctx, name) && walk::is_unbound(heap, ctx, qualified) {
+            out.push((
+                pos,
+                format!("sig {spelling}: nothing named `{spelling}` is defined here"),
+            ));
+            continue;
+        }
+        // 3. Does its arity agree with the definition's? Only a *disjoint* pair is
+        //    provably wrong — see `arities_overlap`.
+        if let (Some((_, sig)), Some(def_arity)) = (
+            annot::parse_sig_decl(heap, form),
+            ctx.file_arity(qualified).or_else(|| ctx.file_arity(name)),
+        ) {
+            let declared = sig_arity(&sig);
+            if !arities_overlap(declared, def_arity) {
+                out.push((
+                    pos,
+                    format!(
+                        "sig {spelling}: declares {} argument(s) but the definition takes {}",
+                        sigs::arity_str(declared),
+                        sigs::arity_str(def_arity),
+                    ),
+                ));
+            }
+        }
     }
 }
 
@@ -1118,6 +1196,15 @@ pub fn check_file_ext(
                 }
             }
         }
+        // Pass 2.85: **the declaration must be readable, and it must match what it
+        // annotates.** A `(sig …)` is trusted ahead of every other signature source, so
+        // a declaration the parser silently drops is worse than none at all — the
+        // annotated position widens to `any` and the author is told nothing. Three ways
+        // that used to happen without a word: a misspelled type name or constructor
+        // (`strng`, `(tupel int)`); a sig whose parameter count contradicts its `defn`
+        // (which *suppressed* the correct arity check — the call then type-checked clean
+        // and died at run time); and a sig for a name the file never defines.
+        check_sig_declarations(heap, &forms, file_ns_name.as_deref(), &ctx, &mut out);
         // Pass 2.6: protocol/behaviour conformance. Model `(defprotocol …)` /
         // `(defbehaviour …)` (from the un-expanded forms + the runtime registry of
         // imported ones), then check that every `(defimpl …)` provides each declared op
