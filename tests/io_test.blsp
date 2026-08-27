@@ -6,11 +6,11 @@
 
 (defmodule io-test (:use test) (:use io :exclude [inspect]))
 
-;; A record with BOTH a Display and an Inspect impl — the pair the writers must keep
+;; A record with BOTH a display and an inspectable impl — the pair the writers must keep
 ;; distinct (`puts` shows the display form, `inspect` the debug form).
 (defrecord money (amount))
-(impl Display money (->string [m] (str "$" (get m :amount))))
-(impl Inspect money (inspect [m] (str "#money<$" (get m :amount) ">")))
+(impl display money (->string [m] (str "$" (get m :amount))))
+(impl inspectable money (inspect [m] (str "#money<$" (get m :amount) ">")))
 
 (describe "io: ports reroute print/println"
   ;; These send to (self) and receive — no globals, no spawn — so they can run in
@@ -55,12 +55,12 @@
       (try (with-out (process-port me) (throw "boom")) (catch e nil))
       (assert= (with-out-str (io/puts "after-throw")) "after-throw\n"))))
 
-;; ---- the Port ability -------------------------------------------------------
+;; ---- the io/port ability -------------------------------------------------------
 ;; `write` is an ability op, so a port is any value with an impl: a bare 1-arg fn
 ;; (the original representation, kept working by the `:fn` impl) or a record that
 ;; carries its target and prints as itself.
 
-(describe "io: ports are Port impls"
+(describe "io: ports are io/port impls"
   (test "a bare 1-arg fn is a port"
     (let (me (self))
       (emit (fn (s) (send me [:write s])) "raw fn")
@@ -95,24 +95,24 @@
 ;; A port defined *outside* std/io — the point of the ability. `counting-port` wraps
 ;; another port and rewrites what is written, with no change to io.blsp.
 (defrecord counting-port (target))
-(impl Port
+(impl io/port
   io-test/counting-port
   ;; The op is `emit` — `write` is the caller-facing function now.
   (emit [p s] (emit (get p :target) (str "[" (string/length s) "] " s))))
 
 (describe "io: a third-party port type"
-  (test "a record from another module is a port once it impls Port"
+  (test "a record from another module is a port once it impls io/port"
     (is (port? (counting-port (stdout-port))))
     (assert= (with-out-str (emit (counting-port (stdout-port)) "abc")) "[3] abc"))
   (test "with-out installs a third-party port like any other"
     (let (me (self))
       (with-out (counting-port (process-port me)) (io/write "xy"))
       (assert= (receive ([:write s] s) (after *test-wait-ms* :timeout)) "[2] xy")))
-  (test "a value with no Port impl raises the named ability error"
+  (test "a value with no io/port impl raises the named ability error"
     (assert-error (emit 42 "nope"))))
 
 ;; The DEFAULT `*out*`/`*err*` are the primitives `%write-out`/`%write-err`, whose
-;; `type-of` is `:native` — not `:fn`. `Port` only had a `:fn` impl, so `io/port?` was
+;; `type-of` is `:native` — not `:fn`. `io/port` only had a `:fn` impl, so `io/port?` was
 ;; false for the two ports the language ships with, `(io/puts … :to *err*)` declined the
 ;; target, and the port leaked into the output as `:to #<native %write-err>`.
 ;;
@@ -120,7 +120,7 @@
 ;; closure, which IS `:fn`. The default was the broken case and nothing exercised it.
 (describe "the shipped ports are ports"
 
-  (test "the default *out* and *err* satisfy Port"
+  (test "the default *out* and *err* satisfy io/port"
     (is (io/port? *out*))
     (is (io/port? *err*)))
 
@@ -150,11 +150,11 @@
     (assert= "a\nb\n" (with-out-str (io/puts "a\nb")))
     (assert= "\"a\\nb\"\n" (with-out-str (io/inspect "a\nb"))))
 
-  ;; `*show*` is a DISPLAY transform (it renders a record through `Display`), so it must
-  ;; not run on the inspect path: applying it first flattened the record to its `Display`
-  ;; string before `inspect-render` could ask the `Inspect` ability, and a custom `inspect`
+  ;; `*show*` is a DISPLAY transform (it renders a record through `display`), so it must
+  ;; not run on the inspect path: applying it first flattened the record to its `display`
+  ;; string before `inspect-render` could ask the `inspectable` ability, and a custom `inspect`
   ;; impl could never be seen — `#money<$5>` came out as `"$5"`. Guards that ordering.
-  (test "inspect honors an Inspect impl, and puts still honors Display"
+  (test "inspect honors an inspectable impl, and puts still honors display"
     (assert= "#money<$5>\n" (with-out-str (io/inspect (io-test/money 5))))
     (assert= "$5\n" (with-out-str (io/puts (io-test/money 5)))))
 

@@ -339,7 +339,7 @@ Everything except the loop is pure, so test it like any other Brood code:
 
 - Buffer API: [`std/editor/buffer.blsp`](../std/editor/buffer.blsp) (every function has a
   docstring; `nest doc buffer`).
-- Display protocol + terminal primitives: [`std/editor/display.blsp`](../std/editor/display.blsp),
+- display protocol + terminal primitives: [`std/editor/display.blsp`](../std/editor/display.blsp),
   [`primitives.md`](primitives.md) (the **Terminal** section), ADR-046 in
   [`decisions.md`](decisions.md).
 - A complete, smaller worked example on the same seam: the process observer,

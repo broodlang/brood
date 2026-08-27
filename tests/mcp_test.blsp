@@ -67,7 +67,7 @@
 ;; Ability/record introspection + snippet type-check + lookup :type (2026-07-30).
 (describe "mcp ability introspection tools"
   (test "abilities lists the core abilities"
-    (is (includes? (get (mcp/abilities-tool {}) :abilities) "Display")))
+    (is (includes? (get (mcp/abilities-tool {}) :abilities) "display")))
   (test "ability describes ops, sealed members, requires, and impls"
     (mcp/eval-tool {:source "(defrecord mcpt-circle (r)) (defability McptShape :sealed [mcpt-circle] (mcpt-area [self] :-> float) (mcpt-big? [self o] :-> bool (> (mcpt-area self) 0))) (impl McptShape mcpt-circle (mcpt-area [c] 1.0))"})
     (let (r (mcp/ability-tool {:name "McptShape"}))

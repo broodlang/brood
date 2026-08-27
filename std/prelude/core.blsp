@@ -118,7 +118,7 @@
         ;; all-but-the-first byte — O(n) per step, O(n^2) total (a 50k-byte reduce
         ;; spiked ~1.3 GB RSS). `bytes->list` is a single O(n) native pass.
         (if (%eq t :map)
-          ;; A record (a map carrying `:__id__`) takes its `Seqable` view — the fields,
+          ;; A record (a map carrying `:__id__`) takes its `seqable` view — the fields,
           ;; id-free, by default — so it never leaks `:__id__` into map/fold/keys and a
           ;; custom collection can define its own iteration. `->seq` is only reached for
           ;; records (never at boot, which has none), so its late definition is fine.
@@ -130,7 +130,7 @@
             ;; Lists and nil ARE their own seq view and take the hot path untouched. Any
             ;; other kind reaching here is one `seq` has no native view of — a rope, a
             ;; table — and used to be returned UNCHANGED, so `(seq rope)` silently answered
-            ;; the rope itself. Consult `Seqable`, but only where an impl exists for that
+            ;; the rope itself. Consult `seqable`, but only where an impl exists for that
             ;; kind SPECIFICALLY: its `:default` is a record's fields, meaningless here.
             ;;
             ;; ONLY what is available at line 106 of the prelude. `get` and `%identity-of`
@@ -144,7 +144,7 @@
               (if (%eq t :nil)
                 coll
                 (if (bound? (quote *impls*))
-                  (let (methods (%map-get *impls* (quote [Seqable ->seq]) nil))
+                  (let (methods (%map-get *impls* (quote [seqable ->seq]) nil))
                     (if methods
                       (if (%map-get methods t nil) (->seq coll) coll)
                       coll))

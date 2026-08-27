@@ -16818,3 +16818,80 @@ ability (ADR-253), so a built-in kind with no impl keeps its native error rather
 handed the record default. `Display`/`Inspect` keep theirs because `(str x)` genuinely
 answers for every value. The rule bites wherever a default would be a *guess*.
 
+
+## ADR-255 — An ability is named like a record: kebab-case, qualified by its owner
+
+**Context.** Abilities were the only CamelCase identifiers in Brood — `Display`, `Seqable`,
+`JsonEncode`, `LogBackend`. Everything else in the language is kebab-case, and the *other*
+operand of `impl` is a record id, which is kebab-case **and** namespaced. So a single form
+carried two conventions at once:
+
+```
+(impl Seqable pq/pq (->seq [q] …))   ; CamelCase bare | kebab-case qualified
+```
+
+The CamelCase was inherited from Rust traits / Clojure protocols, not derived from anything
+in Brood. It also hid the owner: `defability` already records the defining namespace in
+`*ability-owner*` (ADR-172) for impl precedence, but nothing in the source showed it.
+
+**Decision.** An ability is spelled like a record id — **kebab-case, qualified by the
+namespace that `defability`'d it**. This needs no new rule; it is the rule already in force
+one operand to the right.
+
+```
+Display Inspect Seqable Lookup Conjable  ->  display inspectable seqable lookup conjable
+Zero Numeric                             ->  math/zero math/numeric
+Port                                     ->  io/port
+Temporal                                 ->  datetime/temporal
+LogBackend                               ->  log/backend
+Response                                 ->  http/response
+Overlay                                  ->  ui/overlay
+Dependency                               ->  package/dependency
+JsonEncode                               ->  json/encodable
+```
+
+Three sub-rules fell out of doing it:
+
+- **The ability name never equals its op name.** `Inspect`'s op is `inspect`, so the ability
+  became `inspectable` rather than stuttering as `(impl inspect … (inspect [x] …))`. Where the
+  op is already distinct (`display`/`->string`, `lookup`/`lookup-get`), the plain noun stands.
+- **`-able` only where it is English.** `seqable`, `conjable`, `inspectable`, `encodable` read;
+  `portable`, `lookupable` do not. Name the capability otherwise.
+- **`json/encodable`, not `json/encode`** — `json/encode` is already a function.
+
+**The name is written qualified, not auto-qualified.** Unlike `defrecord` — which derives its
+`:module/name` id from `(current-ns)` — `defability` stores the name verbatim, so `math/zero`
+is spelled out at the `defability` and at every `impl`. Auto-qualifying would need a
+resolution rule (what a bare `zero` means inside `math` versus outside it), which is a
+mechanism change, not a rename. Deferred deliberately (ADR-011): explicit costs nothing and
+the registry key then matches what is written.
+
+**Ability names are not globals.** `(bound? 'display)` is false — they key `*abilities*` /
+`*impls*` / `*ability-owner*` / `*op-ability*`. So none of this spends the bare namespace
+ADR-250 established as scarce, and the qualification is for legibility and owner-visibility
+rather than collision avoidance.
+
+**The leading-dash ops go too.** `-get`, `-keys` and `-conj` were spelled with a leading dash
+purely to avoid clobbering the `get`/`keys`/`conj` generics that dispatch *to* them. That is a
+real constraint met with an ad-hoc marker; the rest of the library already meets it with a
+plain descriptive name (`->seq`, `->string`, `backend-emit`, `send-response`, `dep-kind`). So:
+
+```
+-get -keys  ->  lookup-get lookup-keys        ; ability-prefixed, as `dep-*`/`overlay-*` are
+-conj       ->  conj-onto                     ; verb + preposition, as `send-response` is
+```
+
+**Rule:** an ability op is a plain kebab-case name. Where the natural name is already a bare
+function, pick a distinct descriptive one — never decorate it with a sigil.
+
+**Consequence.** The dispatch-failure message changed separator, because `<ability>/<op>`
+doubles up once the ability is itself qualified:
+
+```
+ability Zero/zero?: no impl for :string          ; before
+ability math/zero, op zero?: no impl for :string ; after
+```
+
+**Not renamed:** the English words. `Zero the counters`, `Numeric-tower`, `Zero-copy`,
+`Dependency order`, and Rust's own `fmt::Display` are prose, and a blanket rename corrupts
+them — the trap this repo has hit on `register`, `features`, `floor` and `mod` before.

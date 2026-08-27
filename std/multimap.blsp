@@ -99,41 +99,41 @@ If no values remain under `k`, the key is dropped."
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil lst)))
 
-;; A multimap joins the collection protocol (ADR-172 §7): its `Seqable` view is its
+;; A multimap joins the collection protocol (ADR-172 §7): its `seqable` view is its
 ;; flattened `[k v]` associations (insertion order), so `count`/`map`/`filter`/`fold`/
-;; `for`/`into`-from work over the associations directly. `Conjable` takes a `[k v]` PAIR
+;; `for`/`into`-from work over the associations directly. `conjable` takes a `[k v]` PAIR
 ;; (or a map), exactly as `conj` on a plain map does — the pair convention is how one
 ;; element carries two things, so the earlier "an association needs a key, which conj's
 ;; single element can't carry" reasoning does not actually rule it out.
 ;;
-;; Joining `Seqable` makes every bare collection op resolve on a multimap. One of them used
+;; Joining `seqable` makes every bare collection op resolve on a multimap. One of them used
 ;; to answer WRONGLY and is now fixed; the other differs legitimately.
 ;;
 ;; `get` is FIXED (2026-08-27). It answered `nil` for a key holding values, because a
 ;; multimap is a record and bare `get` took the record-FIELD path — reporting "no such
 ;; field" as "no such key", a wrong value rather than an error (ADR-254). Bare `get` now
-;; consults the `Lookup` ability when a map lookup comes back empty, and this type
+;; consults the `lookup` ability when a map lookup comes back empty, and this type
 ;; implements it, so `(get mm k)` and `(multimap/get-all mm k)` agree.
 ;;
-;; `keys` is fixed the same way, through `Lookup`'s `-keys`: it read the `Seqable` view and
+;; `keys` is fixed the same way, through `lookup`'s `lookup-keys`: it read the `seqable` view and
 ;; answered one key per VALUE. `keys` and `vals` are GONE with it — bare
 ;; `keys` and `vals` now give the same answers they did, so keeping them would be two names
 ;; for one function.
-(impl Lookup
+(impl lookup
   multimap/multimap
-  (-get [mm k] (get-all mm k))
+  (lookup-get [mm k] (get-all mm k))
   ;; `/get`, not bare `get`: inside this module bare `get` is `multimap/get`, so it would
   ;; look up a KEY named `:entries` in the contents and find nothing.
-  (-keys [mm] (/keys (/get mm :entries))))
-(impl Conjable
+  (lookup-keys [mm] (/keys (/get mm :entries))))
+(impl conjable
   multimap/multimap
-  (-conj [mm x]
+  (conj-onto [mm x]
     (cond
       (and (vector? x) (= (count x) 2)) (assoc mm (nth x 0) (nth x 1))
       (map? x) (fold (fn (m kv) (assoc m (nth kv 0) (nth kv 1))) mm (seq x))
       else (error "conj: adding to a multimap takes a [key value] pair or a map, got "
              (pr-str x)))))
-(impl Seqable
+(impl seqable
   multimap/multimap
   (->seq [mm]
     (mapcat (fn (pair) (map (fn (v) [(first pair) v]) (reverse (second pair))))
@@ -155,9 +155,9 @@ If no values remain under `k`, the key is dropped."
     {}
     (%map-pairs (/get mm :entries))))
 
-;; `Display` is the O(1) summary (how many keys, how many pairs); `Inspect` shows the
+;; `display` is the O(1) summary (how many keys, how many pairs); `inspectable` shows the
 ;; whole thing — the plain-map view, so a log line reads as data rather than a wrapper.
-(impl Display
+(impl display
   multimap/multimap
   (->string [mm]
     (str "#<multimap "
@@ -166,6 +166,6 @@ If no values remain under `k`, the key is dropped."
       (count mm)
       " pairs>")))
 
-(impl Inspect
+(impl inspectable
   multimap/multimap
   (inspect [mm] (str "#<multimap " (pr-str (->map mm)) ">")))

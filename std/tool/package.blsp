@@ -101,7 +101,7 @@ land in a later slice."
 ;; can walk all of it from the API — the phase-1 walk never descends into a registry dep.
 
 (defn resolve-deps (root deps lock)
-  "Resolve `deps` (dep records from the manifest) and everything they transitively pull in, into a flat list of resolved entries — each its dep record with `:resolved-path`/`:sha256`/`:deps` (and `:commit`/`:version`) assoc'd on, so it keeps the dep's identity and dispatches through the same `Dependency` impls. `lock` is the prior project.lock.blsp :dependencies (or nil). `:path`/`:git`/`:tarball` deps resolve to their exact source (a matching lock entry reuses the pinned commit/sha, network-free); `:registry` deps carry a version RANGE resolved to a concrete version by the backtracking resolver (ADR-209) — a fully-covering lock reuses the prior solution network-free, so pass nil (or drop names via `nest update`) to force a re-solve."
+  "Resolve `deps` (dep records from the manifest) and everything they transitively pull in, into a flat list of resolved entries — each its dep record with `:resolved-path`/`:sha256`/`:deps` (and `:commit`/`:version`) assoc'd on, so it keeps the dep's identity and dispatches through the same `package/dependency` impls. `lock` is the prior project.lock.blsp :dependencies (or nil). `:path`/`:git`/`:tarball` deps resolve to their exact source (a matching lock entry reuses the pinned commit/sha, network-free); `:registry` deps carry a version RANGE resolved to a concrete version by the backtracking resolver (ADR-209) — a fully-covering lock reuses the prior solution network-free, so pass nil (or drop names via `nest update`) to force a re-solve."
   (let (lock-index (package-lock-index lock)
         ;; Direct git/path/tarball pins override a same-named *transitive* registry
         ;; request (ADR-238): a root that pins a dep to an exact source wins over any
@@ -366,7 +366,7 @@ land in a later slice."
               (and pinned (version/satisfies? pinned (get d :version)))))
     registry-reqs))
 
-;; --- the Dependency ability (ADR-172) ---------------------------------------
+;; --- the package/dependency ability (ADR-172) ---------------------------------------
 ;; A dependency's KIND is its record identity (`project/dep-path` / `-git` / `-tarball`
 ;; / `-registry`, defined by the manifest owner, std/tool/project.blsp), and every per-kind
 ;; behaviour is an op of this one ability rather than a `(get dep :kind)` `cond` repeated
@@ -381,7 +381,7 @@ land in a later slice."
 ;; A resolved *entry* is its dep record with the resolution fields assoc'd on, so it
 ;; carries the same identity and dispatches through the same impls (`dep-lock-vec`
 ;; below is called on entries, `dep-resolve` on deps).
-(defability Dependency
+(defability package/dependency
   "A project dependency: where its source comes from, and how it is resolved, locked,
   written back to the manifest, and reconciled with another request for the same name.
   Sealed over the four manifest kinds."
@@ -392,7 +392,7 @@ land in a later slice."
   (dep-lock-vec [self] :-> vector)
   (dep-entry-node [self] :-> vector))
 
-(impl Dependency
+(impl package/dependency
   project/dep-path
   (dep-kind [d] :path)
   (dep-resolve [d root locked] (package-resolve-path root d))
@@ -412,7 +412,7 @@ land in a later slice."
         [:keyword ":path"]
         [:str (package-str-lit (get d :path))])]))
 
-(impl Dependency
+(impl package/dependency
   project/dep-git
   (dep-kind [d] :git)
   (dep-resolve [d root locked] (package-resolve-git root d locked))
@@ -465,7 +465,7 @@ land in a later slice."
     (let (v (package-git-tag-version (get entry :ref)))
       (if (version/valid? v) v nil))))
 
-(impl Dependency
+(impl package/dependency
   project/dep-tarball
   (dep-kind [d] :tarball)
   (dep-resolve [d root locked] (package-resolve-tarball root d))
@@ -487,7 +487,7 @@ land in a later slice."
         [:keyword ":sha256"]
         [:str (package-str-lit (get d :sha256))])]))
 
-(impl Dependency
+(impl package/dependency
   project/dep-registry
   (dep-kind [d] :registry)
   (dep-resolve [d root locked] (package-resolve-registry root d locked nil))
@@ -533,7 +533,7 @@ land in a later slice."
     (if (nil? lock) nil (vec->list lock))))
 
 ;; A resolved entry is the DEP RECORD with the resolution fields assoc'd on — same
-;; identity, so it dispatches through the same `Dependency` impls (that is what lets one
+;; identity, so it dispatches through the same `package/dependency` impls (that is what lets one
 ;; ability serve both `dep-resolve` on a dep and `dep-lock-vec` on an entry).
 (defn- package-resolve-path
   (root dep)
@@ -1469,7 +1469,7 @@ sha256 pin still holds."
     (let (nm (get d :name)
           dup (includes? seen nm)
           entry (get index nm))
-      ;; a dep's tree label is its DISPLAY form (`impl Display` per kind, in
+      ;; a dep's tree label is its DISPLAY form (`impl display` per kind, in
       ;; std/tool/project.blsp beside the records), so this and `(io/puts dep)` can't drift
       (io/puts (str prefix "- " (->string d) (if dup " (already shown)" "")))
       (when (and entry (not dup) (not (empty? (get entry :deps))))

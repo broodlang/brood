@@ -191,7 +191,7 @@ Always true for `n` <= 0.
     ;; only build-local trie nodes inside one GC-quiet builtin; no `Value` is ever
     ;; mutable), so O(result-nodes) allocation, not O(n) fresh path-copies. A map
     ;; `from` is read as its entries first (`%map-into` takes a list/vector of `[k v]`).
-    ;; a record target conj's each item via `Conjable` (a custom collection defines how);
+    ;; a record target conj's each item via `conjable` (a custom collection defines how);
     ;; a plain map uses the GC-quiet CHAMP builder. `%map-get` tells them apart.
     (map? to)
       (if (%map-get to :__id__ nil)
@@ -213,23 +213,23 @@ Always true for `n` <= 0.
     (nil? coll) (list x)
     (vector? coll) (into coll [x])
     (set? coll) (%set-add coll x)
-    ;; a record dispatches to its `Conjable` impl (default: the map behaviour below); a
+    ;; a record dispatches to its `conjable` impl (default: the map behaviour below); a
     ;; custom-collection record defines its own insertion. `%map-get` distinguishes it from
-    ;; a plain map, and `-conj` is only reached for records, so its late definition is fine.
+    ;; a plain map, and `conj-onto` is only reached for records, so its late definition is fine.
     (map? coll)
       (if (%map-get coll :__id__ nil)
-        (-conj coll x)
+        (conj-onto coll x)
         (cond
           (map? x) (merge coll x)
           (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
           else (error "conj: adding to a map takes a [k v] pair or a map, got "
                  (pr-str x))))
     (pair? coll) (cons x coll)
-    ;; A built-in kind with a `Conjable` impl of its own — the third of the collection
+    ;; A built-in kind with a `conjable` impl of its own — the third of the collection
     ;; seams, matching `seq` and `count` (ADR-253). Gated on `%impl-exact?` so a kind
     ;; nobody has answered for keeps the clear error below rather than being handed
-    ;; `Conjable`'s `:default`, which is the MAP behaviour and means nothing here.
-    (%impl-exact? '[Conjable -conj] (%identity-of coll)) (-conj coll x)
+    ;; `conjable`'s `:default`, which is the MAP behaviour and means nothing here.
+    (%impl-exact? '[conjable conj-onto] (%identity-of coll)) (conj-onto coll x)
     else (error "conj: not a collection: " (pr-str coll))))
 
 (defn conj (coll & xs)

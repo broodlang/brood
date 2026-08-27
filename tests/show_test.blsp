@@ -1,17 +1,17 @@
-;; The display protocol (std/show.blsp): the `Display` ability + `->string`, and the
+;; The display protocol (std/show.blsp): the `display` ability + `->string`, and the
 ;; `*show*` hook that makes the screen printers let a record define how it prints
 ;; (Elixir's `String.Chars`). Register-only — discovered and run by `nest test`.
 (defmodule show-test (:use test))
 
 (defrecord usd (cents))
-(impl Display
+(impl display
   show-test/usd
   (->string [m] (str "$" (math/->fixed (/ (get m :cents) 100.0) 2))))
 
-; a record WITHOUT a custom Display impl
+; a record WITHOUT a custom display impl
 (defrecord plain (a))
 
-;; Display is core and always on (ADR-172 §8) — no activation step.
+;; display is core and always on (ADR-172 §8) — no activation step.
 
 (describe "->string — the protocol op"
   (test "built-ins fall to :default (native str)"
@@ -27,7 +27,7 @@
   (test "usable inside str/fmt — the Elixir to_string move"
     (assert= (str "total=" (->string (usd 999))) "total=$9.99")))
 
-(describe "screen printers honor Display"
+(describe "screen printers honor display"
   (test "println routes a record through ->string"
     (assert= (with-out-str (io/puts (usd 1050))) "$10.50\n"))
   (test "print, with mixed built-in + record args (space-joined, like print always is)"
@@ -53,7 +53,7 @@
 ;; builds a record and sends it home; the parent prints it through the protocol,
 ;; and a second worker prints one in its OWN process (captured via with-out-str,
 ;; which is inherited by spawned children).
-(describe "Display across processes"
+(describe "display across processes"
   :isolated (test "a record sent home prints via the protocol in the parent"
     (let (me (self))
       (spawn (send me [:price (usd 2500)]))

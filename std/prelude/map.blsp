@@ -37,7 +37,7 @@
 
 (defn- %lookup-miss
   (coll k fallback)
-  ;; Reached ONLY when a map lookup came back empty: consult `Lookup` for a record whose
+  ;; Reached ONLY when a map lookup came back empty: consult `lookup` for a record whose
   ;; contents are not its fields, else keep `fallback` — which is what `%map-get` ALREADY
   ;; answered, so a map storing `nil` under a key keeps that nil and does not fall to the
   ;; caller's default. (`(get {:a nil} :a 99)` is `nil`; `maps_test` guards it.) Split out of `get` deliberately —
@@ -52,9 +52,9 @@
   (if (bound? (quote *impls*))
     (let (id (%map-get coll (quote :__id__) nil))
       (if id
-        (let (methods (%map-get *impls* (quote [Lookup -get]) nil))
+        (let (methods (%map-get *impls* (quote [lookup lookup-get]) nil))
           (if methods
-            (if (%map-get methods id nil) (-get coll k) fallback)
+            (if (%map-get methods id nil) (lookup-get coll k) fallback)
             fallback))
         fallback))
     fallback))
@@ -169,7 +169,7 @@ A multi-key result prints in the map's internal order, not the order given."
 ;; `seq` (not `%map-pairs`) so a record's keys/vals are its fields — no internal `:__id__`.
 (defn keys (m)
   "The keys of map `m` (a record's are its fields, id-free). A record that stores its
-contents elsewhere answers for itself through the `Lookup` ability — a multimap gives its
+contents elsewhere answers for itself through the `lookup` ability — a multimap gives its
 DISTINCT keys, not one per value.
 
     (keys {:a 1})  → (:a)
@@ -183,15 +183,15 @@ stable one."
 
 (defn- %keys-via-lookup
   (m)
-  "This map's own `-keys`, or nil when it has no `Lookup` impl. Raw prims and a `bound?`
+  "This map's own `lookup-keys`, or nil when it has no `lookup` impl. Raw prims and a `bound?`
 guard, as in `seq`: this file loads six before `*impls*`, and `%identity-of` reads `:__id__`
 with bare `get`."
   (if (map? m)
     (if (bound? (quote *impls*))
       (let (id (%map-get m (quote :__id__) nil))
         (if id
-          (let (methods (%map-get *impls* (quote [Lookup -keys]) nil))
-            (if methods (if (%map-get methods id nil) (-keys m) nil) nil))
+          (let (methods (%map-get *impls* (quote [lookup lookup-keys]) nil))
+            (if methods (if (%map-get methods id nil) (lookup-keys m) nil) nil))
           nil))
       nil)
     nil))
@@ -305,14 +305,14 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
     (identity 5)   → 5"
   x)
 ;; `zero?` lives in tools.blsp now, beside `defability` — it dispatches on TYPE, and the
-;; ability machinery does not exist this early in the prelude. See the `Zero` ability.
+;; ability machinery does not exist this early in the prelude. See the `math/zero` ability.
 ;; `nan` is a reader-level float literal, so the language could *produce* a NaN
 ;; long before it could TEST for one: `=` reports NaN as equal to nothing (the
 ;; IEEE rule), which is simultaneously the only way to detect it. Naming that
 ;; removes the puzzle.
 ;; `nan?` / `infinite?` are `math/nan?` / `math/infinite?` now — float-domain questions
 ;; belong with `math/even?` and `math/positive?`, and each was `(and (float? x) …)`, which
-;; ANSWERED `false` for a string, a nil, a vector. See the `Numeric` ability (ADR-254).
+;; ANSWERED `false` for a string, a nil, a vector. See the `math/numeric` ability (ADR-254).
 ;; (math/quot a b) — truncated integer division (toward zero), the quotient partner to
 ;; `rem`. (a - (math/rem a b)) is exactly divisible by b, so `/` returns an exact int
 ;; (no float round-trip — correct even for large i64, unlike (math/floor (/ a b))).
