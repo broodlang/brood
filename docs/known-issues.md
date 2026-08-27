@@ -567,6 +567,28 @@ would need — and evaluate them when the module materialises. The hook is the i
 `require-one` in `std/prelude/tools.blsp`, immediately after the `*require-edges*` fold that
 already replays the header's requires for the same reason.
 
+> **Superseded 2026-08-27 — the replay is DONE, and the design sketched below was wrong on its
+> central point.** See **ADR-255**. Three things it got wrong, all worth knowing:
+>
+> - **The "150 of 4920" figure, and the later "170 of 4888", are both artifacts.** The warning
+>   two paragraphs down was right and applies to those numbers too: installing the image from a
+>   PROGRAM cannot work, because the framework and its dependency tree have already loaded the
+>   library from source. Instrumented, that configuration reports **99 sections installed and
+>   materialises zero modules**. Installed at BOOT — from the prelude, the only place early
+>   enough — the honest figure is **157 of 4917**.
+> - **Registrations did NOT have to travel as forms.** The claim below that a value snapshot
+>   cannot carry them, because "a closure nested in a snapshotted value does not round-trip", is
+>   measured false: it round-trips and the impl calls correctly. Forms would have needed each
+>   defining module's namespace re-established to resolve their bodies' bare names — the hard
+>   part of that design, and it was never needed.
+> - **The registration gap was not even the largest fault.** 112 of the 157 were a
+>   **concurrency race**: the image branch provided the module before following its
+>   require-edges, so a racing process saw it as loaded with its dependencies still missing.
+>   Every affected file passed when run alone.
+>
+> Result: **4917/4917 with the image installed at boot**, `json` loads 6.5 → 1.7 ms, `http`
+> 12.0 → 3.6 ms, the `json` benchmark row −5.6%. Opt-in as `BROOD_STDIMAGE=1`.
+
 **Do not try to validate this with a post-boot probe — it cannot work, and it will tell you the
 bug is fixed.** A qualified name auto-requires *at compile time*, so every module a probe
 mentions is loaded from source before its first line executes; the probe then measures a

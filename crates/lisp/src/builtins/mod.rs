@@ -2688,10 +2688,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "%image-load-section",
-        Arity::exact(3),
-        Sig::new(vec![any, any, any], any),
-        &["path", "offset", "len"],
-        "Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. Returns how many entries were defined, or nil if the bytes could not be read or decoded. Seeks straight to the section, so loading one module never reads the rest of the image (ADR-218).",
+        Arity::range(3, 4),
+        Sig::new(vec![any, any, any, any], any),
+        &["path", "offset", "len", "reserve?"],
+        "Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. Returns how many entries were defined, or nil if the bytes could not be read or decoded. Seeks straight to the section, so loading one module never reads the rest of the image (ADR-218). With `reserve?` truthy, function-valued globals join the reserved set as an embedded module's own defs do when it loads from source (ADR-166).",
         image_load_section);
     // Compression prims (the `flate2` crate) — a byte sequence in, `bytes` out, one
     // encode/decode pair per container format. The public names

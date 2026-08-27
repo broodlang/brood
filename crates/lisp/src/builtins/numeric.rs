@@ -495,7 +495,12 @@ pub(super) fn prim_numerator(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
             Ok(heap.int_from_bigint(n))
         }
         Value::Int(_) | Value::BigInt(_) => Ok(x),
-        _ => Err(LispError::wrong_type(heap, "math/numerator", "int or ratio", x)),
+        _ => Err(LispError::wrong_type(
+            heap,
+            "math/numerator",
+            "int or ratio",
+            x,
+        )),
     }
 }
 

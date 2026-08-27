@@ -252,9 +252,11 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
         (contains? m k) (assoc m k (dissoc-in (get m k) ks))
         else m))))
 
-(defn identity (x) "Return `x` unchanged.
+(defn identity (x)
+  "Return `x` unchanged.
 
-    (identity 5)   → 5" x)
+    (identity 5)   → 5"
+  x)
 ;; `zero?` lives in tools.blsp now, beside `defability` — it dispatches on TYPE, and the
 ;; ability machinery does not exist this early in the prelude. See the `Zero` ability.
 ;; `nan` is a reader-level float literal, so the language could *produce* a NaN

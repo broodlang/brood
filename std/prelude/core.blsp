@@ -294,12 +294,16 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
   ((a b) (%div a b))
   ((x & xs) (fold %div x xs)))
 
-(defn inc (n) "Return `n` + 1.
+(defn inc (n)
+  "Return `n` + 1.
 
-    (inc 1)   → 2" (%add n 1))
-(defn dec (n) "Return `n` - 1.
+    (inc 1)   → 2"
+  (%add n 1))
+(defn dec (n)
+  "Return `n` - 1.
 
-    (dec 1)   → 0" (%sub n 1))
+    (dec 1)   → 0"
+  (%sub n 1))
 
 ;; ---- comparison & equality (variadic chains over %lt / %eq) ----
 ;; %chain? checks a predicate holds for every adjacent pair: (%chain? < (1 2 3)).

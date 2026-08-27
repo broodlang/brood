@@ -98,3 +98,64 @@
       (install)
       ;; installing at most appends; it never replaces the primary project source
       (is (>= (count *image-sources*) before)))))
+
+;; ---------------------------------------------------------------------------
+;; What a materialised module owes beyond its bindings (ADR-255).
+;;
+;; These cover the four faults that made the image unshippable, three of which the
+;; recorded design did not name. The first is the important one to keep: it is a RACE,
+;; so every affected file passed when run alone — single-file reproduction, the first
+;; thing anyone reaches for, hides it completely.
+
+(describe "stdlib image: a materialised module is complete, not merely bound"
+  (test "the image carries the registration tables, not just bindings"
+    ;; `%std-impls` holds ability impls (an `impl` form is a top-level CALL, so
+    ;; materialising skips it); `%std-regs` holds the rest — ability declarations,
+    ;; record ids, multimethods, module docs. Without them a restored `datetime` is
+    ;; bound and dispatches nothing.
+    (let (p (image-path))
+      (when (and p (file/exists? p))
+        (let (idx (try (%image-index p (system/stdlib-id)) (catch _ nil)))
+          (when idx
+            (is (not (nil? (get idx "%std-edges"))))
+            (is (not (nil? (get idx "%std-impls"))))
+            (is (not (nil? (get idx "%std-regs")))))))))
+
+  (test "registrations are attributed to the module that declared them"
+    ;; Not to whichever module pulled the declarer in first — the same failure the root-global
+    ;; attribution test above guards, in the registry dimension. `*impl-from*` records the
+    ;; declaring namespace at registration, so this is exact rather than inferred.
+    (require-one 'datetime)
+    (let (by-mod (%std-impls-by-module)
+          mine (or (%map-get by-mod "datetime" nil) []))
+      (is (> (count mine) 0))
+      ;; every tuple this module claims really was declared by it
+      (is (empty? (filter (fn (r) (not (= (name (get r 4)) "datetime"))) mine)))))
+
+  :isolated (test "a module materialised under concurrency is never seen before its deps are"
+    ;; THE regression test for the race. The image branch used to `provide` before following
+    ;; the module's require-edges, so a process racing on the same first require saw the
+    ;; module as loaded with its dependencies still missing and died on `unbound symbol:
+    ;; rand/token` inside `uuid/v7`. 112 of the 157 failures under a boot-installed image were
+    ;; this shape, and NONE of them reproduce single-threaded.
+    ;;
+    ;; Run in a subprocess because only a BOOT install exercises materialisation: a qualified
+    ;; name auto-requires its module at compile time, so anything this file names has already
+    ;; loaded from source. `eval-string` defers that compile into the spawned process, which is
+    ;; what makes the requires race. Verified by sabotage — with `provide` moved back ahead of
+    ;; the edge replay, this fails.
+    (let (exe (os/exe-path)
+          prog (path/temp "stdimage-race-")
+          _ (file/spit prog
+              (string/join "\n"
+                ["(require-one 'stdimage) (stdimage/ensure)"
+                  "(let (me (self)" "      ps (map (fn (i)"
+                  "                (spawn (fn () (send me [:r (try [:ok (eval-string \"(uuid/v7)\")]"
+                  "                                                 (catch e [:err (get e :message)]))]))))"
+                  "           (range 0 24)))" "  (let (bad (fold (fn (acc _)"
+                  "                    (receive ([:r [tag v]] (if (= tag :err) (append acc [v]) acc))))"
+                  "              [] ps))" "    (when (> (count bad) 0)"
+                  "      (io/puts (str \"FAILED \" (count bad) \" of 24: \" (first bad)))"
+                  "      (system/halt 1))))"]))
+          code (os/run-process "env" ["BROOD_STDIMAGE=1" exe prog]))
+      (is (= code 0)))))

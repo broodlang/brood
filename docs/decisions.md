@@ -16775,3 +16775,81 @@ ability (ADR-253), so a built-in kind with no impl keeps its native error rather
 handed the record default. `Display`/`Inspect` keep theirs because `(str x)` genuinely
 answers for every value. The rule bites wherever a default would be a *guess*.
 
+
+## ADR-255 — A startup image restores a module's REGISTRATIONS, not only its bindings
+
+**Status:** accepted (2026-08-27). Supersedes the registration-replay design recorded
+against KI-61, whose central premise is measured false.
+
+**Context.** A stdlib module is `include_str!`'d source, so `(require 'json)` re-reads and
+re-evaluates it on every run. The startup image (ADR-218) exists to skip that: a module's
+globals restore from a section instead. It has never been switchable on, because
+materialising a module **defines its bindings and evaluates nothing** — so everything its
+load did by SIDE EFFECT is skipped, and the failure surfaces at the first dispatch rather
+than at load.
+
+The size of the gap had never actually been measured. Two figures were on record — 150
+failures of ~4900, then 170 of 4888 — and **both are artifacts**. Both were taken by calling
+`stdimage/install` from a program. A qualified name auto-requires its module at COMPILE
+time, so by the time such a program's first line runs, the test framework and its dependency
+tree have loaded the whole standard library from source. Instrumented: that configuration
+reports **99 sections installed and materialises exactly zero modules**. The suite it ran
+was measuring the source path.
+
+**Decision.** The image install moves into the PRELUDE (`%std-image-path` /
+`%std-image-install`, `BROOD_STDIMAGE=1`), which is the only place early enough to precede
+the first `require`; `stdimage/image-path` and `stdimage/install` are one-line calls into it,
+so there is one definition. Measured honestly that way, the gap is **157 failures of 4917**,
+and it decomposes into four independent faults, none of them the recorded one:
+
+1. **A concurrency race, not a registration gap (112 of them).** The image branch called
+   `provide` *before* following the module's require-edges, on a comment's reasoning that
+   `defmodule` expands to `%defmodule-provide` first. That reads the macro and misses the
+   loader: the source path COMPILES the whole file before evaluating any of it, and every
+   qualified reference auto-requires its module during that compile — so a source load has
+   all its dependencies, body references included, before it provides anything. `provide` is
+   what makes `require-one` return immediately for every other process, so providing first
+   publishes a module whose dependencies are still missing: a racing process called
+   `uuid/v7` and died on `unbound symbol: rand/token`. Every one of those files passed when
+   run alone, which is why the shape had never been seen. **Edges are now followed first.**
+2. **Ability impls (97).** These are the recorded gap, and they are real: an `impl` form is a
+   top-level CALL. They travel as **values** — `[ability op key f from]` tuples partitioned
+   by `*impl-from*`'s tag, replayed through `%register-impl` so tiering and provenance are
+   reproduced rather than approximated.
+3. **Ability declarations, records, multimethods, module docs.** `defability`, `defrecord`
+   and `defmethod` write registries too, so a restored `datetime` dispatched but was not
+   `satisfies?`-able and `%sealed-members` answered nil. Every registry a load writes is
+   reachable through `%registry-update!` and therefore enumerable; each key names its owner
+   (`*ability-owner*`, `*method-from*`, or the qualifier on a record id), so attribution is
+   exact rather than inferred from what a probe load happened to introduce.
+4. **Reserved names (ADR-166).** A std module's functions become reserved as its `def`s
+   evaluate. Materialising evaluates none, so `(def path/join …)` was accepted. The section
+   loader now applies the same predicate — functions, macros and natives reserve; data
+   globals stay rebindable — under a flag the caller sets, because only the caller knows
+   whether a section is an embedded module or a project's own.
+
+**The premise that was wrong.** The recorded design said registrations had to travel as
+FORMS to be re-evaluated, because "a closure nested in a snapshotted value does not
+round-trip". Measured: it does. A `{[A op] {:int (fn (n) (* n 3))}}` written to an image
+restores and the impl calls correctly. Forms would have needed each defining module's
+namespace re-established to resolve their bodies' bare names — the hard part of that design,
+and it was never necessary.
+
+**Consequences.** The suite is **4917/4917 with the image installed at boot**, against
+4917/4917 without. Module loads: `json` 6.5 → 1.7 ms, `http` 12.0 → 3.6 ms, `regex` 4.7 →
+1.1 ms, `datetime` 3.2 → 1.0 ms; the `json` benchmark row is −5.6% end to end.
+
+**The install is lazy, and that is load-bearing.** It runs at boot on every `brood`
+invocation, so it must cost nothing for a program that requires little. Loading the three
+bookkeeping sections eagerly cost **6.8 ms of a 20 ms boot** — 2.9 ms of it merging every
+module's require-edges into the live registry under a lock, for modules the program would
+never load — and made `startup` 20% WORSE while making module loads faster. That is the
+wrong trade for exactly the short-lived runs `startup` measures. The install now stashes
+section coordinates and reads the index only (**823 µs**, startup at parity); the tables
+load on the first materialise, and a run that materialises nothing never pays.
+
+**Opt-in for now.** `BROOD_STDIMAGE=1`, and the image must have been built (`nest stdimage`);
+absent or stale, `require` loads from source exactly as before, since the image is keyed on
+`system/stdlib-id` — a content hash — and cannot outlive what it snapshotted. Flipping the
+default is a separate decision on a separate day's evidence: it changes every program's load
+path, and one green suite run is not the bar this repo sets for that.

@@ -172,6 +172,16 @@ pub const FLAGS: &[DebugFlag] = &[
         "trace which arms qualify for self/leaf inlining (pairs with the two NO_*INLINE flags)",
     ),
     f(
+        "BROOD_STDIMAGE",
+        ENGINE,
+        "opt IN to the stdlib startup image: `require` materialises a module's bindings from          ~/.cache/brood instead of evaluating its source (json 6.5 -> 1.7 ms, http 12.0 -> 3.6 ms)",
+    ),
+    f(
+        "BROOD_IMAGE_TRACE",
+        ENGINE,
+        "name each module materialised from an image, and time the boot install — the only way          to tell a module that came from the image from one that loaded from source anyway",
+    ),
+    f(
         "BROOD_MONO",
         OPTOUT,
         "opt IN to ability-dispatch monomorphization (off by default — it trades late binding)",
