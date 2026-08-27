@@ -151,8 +151,9 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // arithmetic without loading a module. The registered Sig therefore sits on the `%`
     // name, which user code never writes — these entries put it back on the name that IS
     // written, so `(math/min "a" 2)` is still flagged.
-    put("math/max", Sig::variadic(num, num));
-    put("math/min", Sig::variadic(num, num));
+    // `math/max`/`math/min` are NOT here: they take the record-aware signature further
+    // down (they route through `compare-to`, ADR-179), and a duplicate `put` would just
+    // let source order decide which one the checker used.
     put("math/rem", Sig::new(vec![int, int], int));
     put("math/quot", Sig::new(vec![int, int], int));
     put("math/floor", Sig::new(vec![num], int));
@@ -178,7 +179,11 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // min/max: at least one number-or-`Ord`-record arg (fixed) plus a variadic rest of the
     // same → same domain (they route through `compare-to` for records, ADR-179).
     // Variadic via rest; infer_sig bails on rest-param closures, so curate.
-    for n in ["min", "max"] {
+    // Module-qualified since the math wave: bare `min`/`max` do not exist. Curating them
+    // under the old names made the checker vouch for names the runtime had moved, so
+    // `(max 1 2)` in ordinary code checked clean and raised at run time — which is how
+    // hive shipped a broken `clamp-limit`.
+    for n in ["math/min", "math/max"] {
         put(
             n,
             Sig::with_rest(
@@ -210,12 +215,14 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
         put(n, Sig::new(vec![any], bool_ty));
     }
     //   contains? — map-key probe (map or a live transient); bool result.
-    //   member?   — linear scan over a sequence; first arg is the needle.
+    // `member?` used to be curated here. It no longer exists — it became `includes?`,
+    // with the arguments the other way round — and the entry is NOT remapped, because a
+    // signature under a name nothing defines is worse than none: the checker treats a
+    // curated name as known, so it stopped reporting `member?` as unbound at all.
     put(
         "contains?",
         Sig::new(vec![Ty::of_tags(&[Tag::Map, Tag::Set]), any], bool_ty),
     );
-    put("member?", Sig::new(vec![any, seq], bool_ty));
     //   get — the polymorphic accessor, and it had NO signature at all: it is
     //   multi-arity (3 arms) and `infer_sig` bails on multi-arm closures, so its
     //   domain was unconstrained and `(get 5 :k)` went unwarned while `(count 5)` and
