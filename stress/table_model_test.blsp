@@ -117,7 +117,10 @@
     (let (t (table/new))
       (do
         ;; puts across the whole dense shape incl. nil/false values
-        (fold (fn (_ i) (table/put t i (if (= (math/rem i 3) 0) nil (if (= (math/rem i 3) 1) false (* i 7)))))
+        (fold (fn (_ i)
+                (table/put t
+                  i
+                  (if (= (math/rem i 3) 0) nil (if (= (math/rem i 3) 1) false (* i 7)))))
           nil
           (range 5000))
         (assert= (table/count t) 5000)

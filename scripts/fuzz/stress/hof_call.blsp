@@ -75,7 +75,14 @@
 ;; the accumulator, so a loop cannot be dead-code-eliminated unobserved.
 (defn row (label f)
   (let (v (f) a (ns-per f N) b (ns-per f N) best (math/min a b))
-    (io/puts (str label " " best " ns/call   (" (math/quot (* best N) 1000000) " ms total, acc=" v ")"))))
+    (io/puts (str label
+               " "
+               best
+               " ns/call   ("
+               (math/quot (* best N) 1000000)
+               " ms total, acc="
+               v
+               ")"))))
 
 ;; COLD variant: no warm-up pass and a single reading, so the figure includes whatever
 ;; tiering happens during it. A tiered runtime has two steady states and a micro-benchmark
