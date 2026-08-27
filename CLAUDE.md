@@ -274,6 +274,18 @@ counted while its allocations do not — a 200k-iteration loop measured `:alloc`
 `:vm-apply` 197), and it refuses to judge any rate resting on under 1000 samples (0 hits of 12
 IC probes is not a 0% hit rate). See `docs/backend-seams.md` §5.
 
+**`make perf-brood` OVERWRITES the binary `make release-brood` builds — same path.** Both
+write `$(RELEASE_DIR)/brood`, so the moment you profile something, `target/release-fast/brood`
+is the **counter-armed** build, and timing it against an `ab` worktree's clean build charges
+your change ~10% for atomics it never introduced. This needs no command-line slip: profile,
+then time, and the bias is there. It reads as a plausible regression — on 2026-08-27 it showed
+two *behaviourally identical* binaries (working tree reverted to HEAD) at 958 vs 1018 ms.
+**Rebuild with `make release-brood` before any timing**, and prove it with a base-vs-base
+control: identical inputs must measure identically before a delta means anything. Relatedly,
+timing whole `brood` invocations in a shell loop measures the COLD-tier path every time and
+never reaches the warm steady state — time rounds *inside* one process to see both arms (a
+JSON round-trip: round 1 ~300 ms, warm ~224 ms).
+
 **Measuring a perf change: use `make ab`** (`scripts/ab-bench.sh`), don't hand-roll
 it. Add **`--floor`** when a row moves by only a few percent: it runs the baseline twice and
 reports that row's own base-vs-base spread, and the `verdict` column then calls a regression

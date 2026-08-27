@@ -4313,45 +4313,32 @@ and writing one puts a second pair of eyes on behaviour nothing else was checkin
 list, vector, set, map or bytes` rather than answering wrongly. `drop-while` returns `coll`
 itself when nothing is dropped, matching `(drop 0 [1 2 3])` → `[1 2 3]`.
 
-## KI-69 — two `jit_plan` guards failed under `BROOD_VM=0` ✅ FIXED 2026-08-27
+## KI-69 — two `jit_plan` guards failed on every `main` push ✅ FIXED 2026-08-27
 
-**Symptom.** The `differential (tree-walker)` CI job went red on every `main` push from
-KI-64's fix onward, always the same two:
+**Symptom.** The `differential (tree-walker)` CI job had been red on every completed run since
+KI-64's fix landed, and the run list did not show it: each push cancelled the previous run, so
+the page was a wall of `cancelled` with one `in_progress` on top and no visible red.
 
-```
-FAIL ( 118/1075) brood eval::compile::jit_plan::tests::the_block_argument_want_is_clamped_to_the_reserve
-FAIL ( 120/1075) brood eval::compile::jit_plan::tests::block_argument_spills_never_reach_the_deopt_journal
-```
+**Cause.** KI-64's fix added two guards —
+`block_argument_spills_never_reach_the_deopt_journal` and
+`the_block_argument_want_is_clamped_to_the_reserve` — and both assert over **VM-compiled**
+arms via `dbg_compiled_arms()`. That job runs `BROOD_VM=0`, the tree-walker, where nothing is
+compiled at all: the first guard inspected 0 chunks and the second found no arm to clamp.
 
-with `only 0 lowerable chunks inspected — the probe found nothing to check, so a green
-result would mean nothing` and `no arm wants more block-argument slots than it reserved`.
+**Why they failed rather than passing hollowly.** By design, and it is the reason this was
+findable. Both refuse a vacuous green — `only {checked} lowerable chunks inspected — a green
+result would mean nothing` — instead of reporting success over an empty set. A guard that
+passes when it examined nothing is the failure mode [[KI-68]] is entirely about; these two
+took the opposite choice and were loud.
 
-**Cause.** Both guards build an `Interp`, run a warming program, and then assert on
-`interp.heap.dbg_compiled_arms()`. That job runs `BROOD_VM=0`, so the tier ceiling is
-`Tier::TreeWalk` and **nothing is ever compiled** — no chunks to inspect, no arm to clamp.
+**Fix.** Pin the tier: `set_forced_ceiling(Some(Tier::Native))`, which is what
+`compile/tests.rs` has carried for its two native tests since ADR-222 made the ceiling
+coherent (`BROOD_VM=0` and `BROOD_NO_JIT=1` are aliases for ceilings 0 and 1). The guards are
+new — 2026-08-26 — and simply missed the pin every other tier-sensitive test already had.
+Reproduced locally under `BROOD_VM=0` before and after.
 
-**They failed rather than passing hollowly, and that is the point.** Both carry an explicit
-"this probe found nothing, so a green result would mean nothing" assertion. Without it the
-job would have gone green on a vacuous run, and the KI-64 frame-layout invariant would have
-been unguarded on the one engine configuration that runs a whole extra suite. Compare KI-68,
-where the missing version of exactly this assertion cost weeks.
-
-**Fix.** Pin the ceiling, which is what `compile/tests.rs` has done since ADR-222 made the
-tier ceiling coherent (its comment records the same failure: "removing it is what made these
-two fail in the tree-walker half of `make test-both` until they were pinned"):
-
-```rust
-set_forced_ceiling(Some(Tier::Native));
-```
-
-The guards are new (2026-08-26, with KI-64's fix) and simply missed the pin. Verified under
-both `BROOD_VM=0` and the default engine.
-
-**Why it was not obvious from the run list.** Every CI run after the first failure was
-`cancelled` by the next push (the workflow's `concurrency` group cancels in-progress runs for
-a ref), so `gh run list` showed a wall of cancellations with an `in_progress` at the top and
-no red at all. The last three *completed* runs had all failed. When judging whether the tree
-is green, filter to completed runs — a cancelled run is not evidence of anything.
+**Guard.** The two tests themselves, now that they run at a ceiling where there is something
+to inspect; their own anti-vacuity assertions are what make that meaningful.
 
 ## KI-68 — the fuzz-differential gate was comparing dead programs ✅ FIXED 2026-08-27
 

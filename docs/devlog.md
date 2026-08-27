@@ -4283,3 +4283,43 @@ status means, which document a finding belongs in, and how to tell the tree is g
 `handoff.md` was replaced too — it had opened "As of 2026-08-19 … `main` is green on all five
 CI jobs" for eight days, which was false for the last two, in the one document whose job is
 to be read cold.
+## 2026-08-27 (third session) — a 79% deopt rate that is not a cost, and the build that faked it
+
+Went looking for the next perf lever with the attribution build. `perf/measure` on a
+JSON-encode workload reported **438 001 type-deopts against 552 030 native runs — a 79%
+deopt rate** — and `BROOD_DEOPT_TRACE` put 790 704 of them on one arm, `json/emit`, every one
+at `resume_ip=0 depth=0`: bailing at native entry having executed nothing.
+
+That looks exactly like the nbody/`advance-body` pathology deopt feedback exists to stop, and
+`json/emit` is not covered by it: `deopt_watch` is `chunk has a non-tail Call AND no
+SelfCall`, and `json/emit` is recursive, so it is never watched and never self-heals. The
+hypothesis was that the `SelfCall` exclusion — written for a self-tail LOOP arm, which deopts
+once at the end of many productive native iterations — is too broad for a recursive tree walk
+that deopts before doing any work at all.
+
+**Measured, it is a 15% REGRESSION, and the exclusion is right.** Dropping it takes the deopt
+count from 438 001 to **1** and makes the workload *slower*: warm rounds 224 → 258 ms, three
+interleaved pairs, ~1–2% base-vs-base floor. The reading is that `json/emit` is genuinely
+polymorphic, and the ~21% of activations that complete natively are worth more than the entry
++ deopt + VM-rerun the other 79% pay. **A deopt rate is not a cost; it is a ratio.** The
+opportunity here is not to stop entering native, it is to make more of those entries succeed
+(type-specialised variants), which is a much larger piece of work.
+
+**The methodology trap, and it invalidated the first version of this result.** `make
+perf-brood` and `make release-brood` write to the **same path**, `$(RELEASE_DIR)/brood` — so
+after profiling, `target/release-fast/brood` is the COUNTER-ARMED binary, and timing it
+against an `ab` worktree's clean build charges the working tree ~10% for atomics that are not
+in the change. It showed up as two "identical" binaries (working tree reverted to HEAD)
+measuring 958 vs 1018 ms. CLAUDE.md already says to confirm a winner counter-free; what it
+does not say, and now should, is that the counter build *replaces* the clean one at the same
+path, so the mistake needs no command-line slip to make.
+
+Rebuilt with `make release-brood` on both sides, the control came back clean (identical
+builds, ~222 ms each) and the experiment's verdict was unchanged — but nothing before that
+rebuild was evidence.
+
+**Also worth stating: cross-process best-of hides tiering.** Timing whole `brood` invocations
+measures the cold-tier path repeatedly and never reaches the warm steady state. Timing rounds
+*inside* one process shows both — round 1 at ~300 ms, warm at ~224 — and it is the warm
+number that moved here. The two-steady-state rule in CLAUDE.md is about call count within a
+run; a `for i in $(seq 9)` loop over the binary does not satisfy it.
