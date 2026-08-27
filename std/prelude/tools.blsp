@@ -1551,7 +1551,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   impl always beats `:default`). Write the required ops as bodyless specs and derive the
   rest — implement `compare-to`, get `lt`/`gt`/`min`/`max` free:
 
-    (defability Ord
+    (defability ord
       (compare-to [self other] :-> int)                          ; required
       (lt  [self other] :-> bool (< (compare-to self other) 0))   ; provided
       (gt  [self other] :-> bool (> (compare-to self other) 0)))  ; provided
@@ -1560,14 +1560,14 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   meant to cover; the checker then flags any member missing an impl of any *required* op
   (a provided op is satisfied by its default). An optional `:requires [A B …]` clause names
   prerequisite (super-)abilities: any id implementing this ability must also implement each of
-  them, which the checker enforces (`(defability Ord :requires [Eq] (compare-to …))`). A bare
+  them, which the checker enforces (`(defability ord :requires [eq] (compare-to …))`). A bare
   record symbol is qualified with the current ns. An optional `:derive-record <fn>` clause makes the ability derivable: `<fn>`
   maps a record's field names to a list of `impl` method forms, which `defrecord`'s
   `:derives` splices in (see `defrecord`).
 
-    (defability Size  (size [self] :-> int))
-    (defability Store (fetch [self k]) (put [self k v]))
-    (defability Shape :sealed [circle rect] (area [self] :-> float))"
+    (defability size  (size [self] :-> int))
+    (defability store (fetch [self k]) (put [self k v]))
+    (defability shape :sealed [circle rect] (area [self] :-> float))"
   ; An op spec is a pair whose second element is the `[args]` VECTOR; that excludes a
   ; `:derive-record` recipe `(fn (fields) …)` (its second is a `(fields)` *list*) and any
   ; keyword-clause value, so only real ops are collected.
@@ -1667,8 +1667,8 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   Open and late: from any module, any time. Each method is `(op [args…] body…)`; the
   registration is tagged with the current namespace for conflict detection.
 
-    (impl Size :int             (size [n] n))
-    (impl Size geometry/circle  (size [c] (get c :r)))"
+    (impl size :int             (size [n] n))
+    (impl size geometry/circle  (size [c] (get c :r)))"
   ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
   ; keyworded to match what `%identity-of` produces; a built-in id (`:int`) is already one.
   (let (id-kw (%ability-id-kw key))
@@ -1690,7 +1690,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
 (defmacro %unimpl (aname key & ops)
   "Retract ability `aname`'s implementations for dispatch id `key` — the named `ops`, or
   EVERY op the ability declares when none are named. The inverse of `impl`, and the same
-  shape: `(%unimpl Size geometry/circle)` undoes `(impl Size geometry/circle …)`.
+  shape: `(%unimpl Size geometry/circle)` undoes `(impl size geometry/circle …)`.
 
     (%unimpl Size geometry/circle)          ; every op
     (%unimpl Shape my/rect area)            ; just `area`
@@ -1969,14 +1969,14 @@ contents are not simply its fields."
 ;; → -1 / 0 / 1.
 (defmulti compare-to :antisymmetric)
 
-;; Record-aware compare: a record uses its `compare-to` (a type with no `Ord` method is a loud
+;; Record-aware compare: a record uses its `compare-to` (a type with no `ord` method is a loud
 ;; %no-method — strict), everything else the kernel `compare`. This is the comparator
-;; `sort`/`sort-by` use, so an `Ord` record type orders itself while built-ins keep the native
+;; `sort`/`sort-by` use, so an `ord` record type orders itself while built-ins keep the native
 ;; path.
 (defn %ord-compare (a b)
   "Record-aware three-way comparison returning -1 / 0 / 1: a record defers to its `compare-to`
-`Ord` method, everything else to the kernel `compare`. This is the comparator `sort`/`sort-by`
-use, so an `Ord` record type orders itself while built-ins keep the native path. A record type
+`ord` method, everything else to the kernel `compare`. This is the comparator `sort`/`sort-by`
+use, so an `ord` record type orders itself while built-ins keep the native path. A record type
 with no `compare-to` method is a loud `%no-method` error — never a silent order by map layout."
   (if (record? a) (compare-to a b) (compare a b)))
 
