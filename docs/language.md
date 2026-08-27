@@ -1949,7 +1949,7 @@ state value through a tail-recursive `receive` loop; `defprocess` declares how i
 handles each kind of message.
 
 `gen` is an **ordinary module** with a bare namespace, so its client API is
-`gen/spawn-server`, `gen/call`, `gen/cast`, `gen/stop`, `gen/defprocess` — or bare
+`gen/start`, `gen/call`, `gen/cast`, `gen/stop`, `gen/defprocess` — or bare
 after `(:use gen)`. (It was briefly prelude-bundled with those names bare; that
 seized `call`, `cast` and `stop` as un-redefinable global names, which a framework
 does not get to own. `(def call …)` is yours again.)
@@ -1990,9 +1990,9 @@ Client API: `(gen/cast pid payload)` casts; `(gen/call pid payload)` calls and
 blocks up to 5 s (it `monitor`s the server, so a *dead* server raises at once
 instead of hanging); `(gen/call-timeout pid payload ms)` sets a custom deadline;
 `(gen/stop pid)` ends the loop; `(gen/code-change pid)` asks a running server to
-migrate its state after a hot reload. Spawn with `gen/spawn-server`,
-`gen/spawn-server-link` (Erlang `start_link` — links the server to the caller), or
-`gen/spawn-server-named` (registers it for `proc/whereis`). A `defprocess` server
+migrate its state after a hot reload. Spawn with `gen/start`,
+`gen/start-link` (Erlang `start_link` — links the server to the caller), or
+`gen/start-named` (registers it for `proc/whereis`). A `defprocess` server
 composes directly under `supervisor` (see `std/proc/supervisor.blsp`).
 
 **A call that times out leaves nothing behind.** `gen/call-timeout` mints a fresh
@@ -2087,7 +2087,7 @@ failure only appears under load — exactly where a supervisor matters.
 
 **Use `spawn-link` for anything supervised.** `std/proc/supervisor.blsp`'s
 `:start` thunks do (`(fn () (spawn-link (worker …)))`), and `gen`'s
-`gen/spawn-server-link` is the same guarantee for a `defprocess` server. The prelude
+`gen/start-link` is the same guarantee for a `defprocess` server. The prelude
 macro expands to the `%spawn-link` primitive (ADR-067).
 
 ### Timers

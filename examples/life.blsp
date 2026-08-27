@@ -52,4 +52,4 @@ Redraws in place — each cell overwrites the last, so no clear and no flicker."
 
 (def glider {[1 0] true [2 1] true [0 2] true [1 2] true [2 2] true})
 
-(animate (spawn-server life-server glider) 45 26 16)
+(animate (start life-server glider) 45 26 16)
