@@ -141,6 +141,29 @@ multimethod names by their own qualifier — each key names its owner, so none o
           ['*method-from* (%map-pairs *method-from*) (fn (kv) (name (second kv)))]])
       [['*methods* *methods* method-owner]])))
 
+(defn- prune!
+  (dir keep)
+  "Delete all but the `max-keep` most recently modified `std-image-*.bin` under `dir`,
+never touching `keep`. Returns how many were removed.
+
+Bounded by COUNT rather than by age, for the reason the prelude boot cache learned the hard
+way (`boot_cache_prune`): the name carries `system/stdlib-id`, a content hash, so **every edit
+to any baked-in `.blsp` mints a new ~2 MB file**. On a machine that is editing the standard
+library — the only machine that builds these — nothing is ever old enough for an age rule to
+catch, and measured 2026-08-27 this directory held **35 images, 74 MB**, all of them from that
+day. Dropping a live one is harmless: its binary rebuilds the image, or loads from source."
+  (let (max-keep 4
+        mine (filter (fn (e)
+                       (and (string/starts-with? e "std-image-")
+                         (string/ends-with? e ".bin")
+                         (not (= (path/join dir e) keep))))
+               (file/ls dir))
+        ;; newest first, so everything past the cap is the tail
+        newest (sort-by (fn (e) (- 0 (or (file/mtime (path/join dir e)) 0))) mine)
+        doomed (drop max-keep newest))
+    (doseq (e doomed) (try (file/rm (path/join dir e)) (catch _ nil)))
+    (count doomed)))
+
 (defn %std-impls-by-module ()
   "The live ability registrations, grouped by the module that declared each: module name →
 vector of `[ability op key f from]`, the exact argument list `%register-impl` takes.
@@ -183,6 +206,8 @@ since the prelude is always present."
     (when path
       (let (dir (path/dirname path)
             _ (when (not (file/dir? dir)) (file/mkdir dir))
+            ;; Drop older images before writing this one — see `prune!`.
+            _ (prune! dir path)
             names (or modules (builtin-modules))
             probed (fold (fn (acc m)
                            (%map-assoc acc

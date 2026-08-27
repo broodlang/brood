@@ -144,16 +144,38 @@ fn boot_cache_path() -> Option<std::path::PathBuf> {
     )
 }
 
-/// Best-effort prune of OTHER builds' expanded-prelude caches: any
-/// `prelude-expanded-*.blsp` (except `keep`) not modified in ~7 days. Keeps a
-/// dev machine's rebuild churn from accumulating one ~90 KB file per binary
-/// per build forever, without deleting the caches other live binaries
-/// (`nest`, an older installed `brood`) are actively hitting.
+/// Best-effort prune of OTHER builds' expanded-prelude caches: keep the
+/// `MAX_KEEP` most recently modified `prelude-expanded-*.blsp` (plus `keep`)
+/// and delete the rest, and separately drop anything older than `MAX_AGE`.
+///
+/// **Bounded by COUNT, not only by age, because age does not bound anything.**
+/// The cache name hashes `system/build-id`, which embeds the binary's mtime, so
+/// every rebuild of every binary — `brood`, `nest`, `brood-lsp`, each test
+/// binary, each `target/ab/<sha>` worktree — mints a *new* ~190 KB file. The
+/// original 7-day rule then deletes nothing at all on a machine that rebuilds
+/// more than a handful of times a week: measured 2026-08-27 on this repo's own
+/// dev machine, **4192 files / 732 MB**, none of them week-old. Worse, the prune
+/// itself walks that directory and stats every entry on each cache-writing boot
+/// — **7.6 ms**, which is an entire warm boot (7.6 ms) spent tidying.
+///
+/// Deleting a *recent* file that another live binary is still hitting is safe:
+/// that binary pays one source boot and rewrites its own cache. The failure mode
+/// is a slower boot once, never a wrong one — so a count cap is the right shape,
+/// and the age rule stays as a floor for a directory that is under the cap but
+/// full of long-dead builds.
 fn boot_cache_prune(dir: &std::path::Path, keep: &std::path::Path) {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+    /// Enough for the binaries plausibly in play at once (`brood`, `nest`,
+    /// `brood-lsp`, a couple of test binaries, an `ab` worktree or two) — at
+    /// ~190 KB each this bounds the prelude cache at ~3 MB rather than at
+    /// whatever a week of rebuilding produces.
+    const MAX_KEEP: usize = 16;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    // (mtime, path) for every candidate but `keep`, which is this binary's own
+    // freshly-written file and is never a candidate.
+    let mut found: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
     for e in entries.flatten() {
         let p = e.path();
         if p == keep {
@@ -164,14 +186,20 @@ fn boot_cache_prune(dir: &std::path::Path, keep: &std::path::Path) {
         if !(name.starts_with("prelude-expanded-") && name.ends_with(".blsp")) {
             continue;
         }
-        let stale = e
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > MAX_AGE);
-        if stale {
+        let Ok(modified) = e.metadata().and_then(|m| m.modified()) else {
+            // Unreadable metadata: treat as ancient so it sorts to the drop end
+            // rather than occupying a keep slot it cannot justify.
             let _ = std::fs::remove_file(&p);
+            continue;
+        };
+        found.push((modified, p));
+    }
+    // Newest first, then everything past the cap goes, plus anything stale.
+    found.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    for (i, (modified, p)) in found.iter().enumerate() {
+        let stale = modified.elapsed().ok().is_some_and(|age| age > MAX_AGE);
+        if i >= MAX_KEEP || stale {
+            let _ = std::fs::remove_file(p);
         }
     }
 }
@@ -959,5 +987,104 @@ mod prelude_hygiene {
             "autoload declarations in std/prelude/tools.blsp have drifted:\n  {}",
             problems.join("\n  ")
         );
+    }
+}
+
+#[cfg(test)]
+mod boot_cache_prune_tests {
+    use super::boot_cache_prune;
+    use std::io::Write;
+
+    /// Create `n` `prelude-expanded-*.blsp` files with ascending mtimes and return their
+    /// paths oldest-first. Ascending mtimes are what makes "keeps the NEWEST" testable.
+    fn seed(dir: &std::path::Path, n: usize) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for i in 0..n {
+            let p = dir.join(format!("prelude-expanded-{i:016x}.blsp"));
+            let mut f = std::fs::File::create(&p).unwrap();
+            f.write_all(b"x").unwrap();
+            // Stamp mtimes explicitly rather than relying on creation order: the
+            // filesystem's timestamp granularity is coarse enough that files written in
+            // one loop can share an mtime, which would make the ordering assertion
+            // below pass or fail by luck.
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs((n - i) as u64);
+            set_mtime(&p, t);
+            out.push(p);
+        }
+        out
+    }
+
+    /// Stamp `p`'s mtime. `std::fs::FileTimes` rather than the `filetime` crate — this is
+    /// the only place in the workspace that needs it, and a dev-dependency for two tests
+    /// is not worth it.
+    fn set_mtime(p: &std::path::Path, t: std::time::SystemTime) {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(t))
+            .unwrap();
+    }
+
+    fn remaining(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                n.starts_with("prelude-expanded-") && n.ends_with(".blsp")
+            })
+            .count()
+    }
+
+    /// The regression this exists for. The prune used to bound by AGE ONLY, and the cache
+    /// name hashes `build-id` (which embeds the binary's mtime), so every rebuild minted a
+    /// new ~190 KB file and the 7-day rule deleted none of them: measured 4192 files /
+    /// 732 MB on a dev machine, with the prune's own directory walk costing 7.6 ms — a
+    /// whole warm boot — on every cache-writing boot.
+    #[test]
+    fn prune_bounds_the_cache_by_count_not_only_by_age() {
+        let dir = std::env::temp_dir().join(format!("brood-prune-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // All freshly stamped and none stale, so an age-only prune removes NOTHING here —
+        // which is exactly the bug. Sabotage-checked: reverting to the age-only body
+        // leaves all 40 and fails this assertion.
+        let files = seed(&dir, 40);
+        let keep = dir.join("prelude-expanded-keep.blsp");
+        std::fs::write(&keep, b"k").unwrap();
+
+        boot_cache_prune(&dir, &keep);
+
+        // 16 kept by the cap + `keep` itself, which is never a candidate.
+        assert_eq!(remaining(&dir), 17, "count cap did not bound the directory");
+        assert!(keep.exists(), "the caller's own fresh cache was deleted");
+        // …and it kept the NEWEST, not an arbitrary 16: the oldest must be gone and the
+        // newest must survive. A prune that keeps the wrong 16 costs a source boot on
+        // every binary in use, which is the cost it exists to avoid.
+        assert!(!files[0].exists(), "kept the oldest file");
+        assert!(files[files.len() - 1].exists(), "deleted the newest file");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The age rule is still a floor: under the count cap, a long-dead build goes anyway.
+    #[test]
+    fn prune_still_drops_a_stale_file_under_the_count_cap() {
+        let dir = std::env::temp_dir().join(format!("brood-prune-age-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fresh = dir.join("prelude-expanded-0000000000000001.blsp");
+        let old = dir.join("prelude-expanded-0000000000000002.blsp");
+        std::fs::write(&fresh, b"f").unwrap();
+        std::fs::write(&old, b"o").unwrap();
+        let ancient = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
+        set_mtime(&old, ancient);
+        let keep = dir.join("prelude-expanded-keep.blsp");
+        std::fs::write(&keep, b"k").unwrap();
+
+        boot_cache_prune(&dir, &keep);
+
+        assert!(fresh.exists(), "a fresh file under the cap was deleted");
+        assert!(!old.exists(), "a month-old build survived the age floor");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
