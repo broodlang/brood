@@ -16774,6 +16774,27 @@ op is `io/emit` and not bare `emit`; declaring `Zero` in `std/math.blsp` is all 
 dispatches on", whose `:default` impls everything relies on; a numeric predicate in a library
 module is not that, and claiming otherwise would make the list mean less.
 
+**`get` — the one seam where the cost had to be designed around (2026-08-27).** Bare `get`
+answered `nil` for a multimap key holding values: a multimap is a record, so `get` took the
+FIELD path and reported "no such field" as "no such key". A `Lookup` ability fixes it, but
+`get`'s map branch is the hottest path in the language — 4796 call sites, and its own
+comment records a 1.8x regression from an earlier refactor that moved its kind test behind a
+CALL.
+
+Measured, that warning was exact: consulting the ability through a helper on every map get
+cost **+27%**. Consulting it only after an EMPTY result costs **+3.9%** — a present key pays
+one `nil?` test, and a `Lookup` type is always in the empty case, so the check lands exactly
+where it is needed and nowhere else.
+
+Two traps in the implementation, both the shape this ADR keeps meeting:
+
+- `%identity-of` reads `:__id__` with bare `get`, so calling it from inside `get`'s own miss
+  path recurses forever. The value is already known to be a map, so read `:__id__` with the
+  prim.
+- the miss path must fall back to what `%map-get` ALREADY answered, not to the caller's
+  `default` — otherwise a map storing `nil` under a key gets the default instead of the nil.
+  `maps_test` guards exactly that, and caught it.
+
 **Where this rule is not yet applied.** `Seqable` and `Conjable` keep `:default` impls (a
 record's fields; map-style conj). Those are real answers for a *record*, which is the only
 thing that reaches them — the collection seams gate on `%impl-exact?` before consulting the

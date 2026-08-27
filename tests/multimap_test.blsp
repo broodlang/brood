@@ -110,3 +110,22 @@
         (is (multimap? back))
         (assert= (count back) 3)
         (assert= (into [] (multimap/get-all back :k)) [1 2 3])))))
+
+;; ADR-254: a type that dispatches must not answer WRONGLY. Bare `get` used to take the
+;; record-FIELD path on a multimap and report "no such field" as "no such key" — nil for a
+;; key holding values. It consults the `Lookup` ability now, which this type implements.
+(describe "bare `get` agrees with the module (ADR-254)"
+  (test "a key holding values is not reported absent"
+    (let (mm (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2))
+      (assert= (get mm :k) (multimap/get-all mm :k))
+      (assert= (get mm :k) (list 1 2))))
+  (test "an absent key still gives nil, and an explicit default still wins"
+    (let (mm (multimap/assoc (multimap/empty) :k 1))
+      (assert= (get mm :nope) nil)
+      (assert= (get mm :nope :none) :none)))
+  ;; The seam fires only when a map lookup comes back EMPTY, so a plain map storing a falsy
+  ;; value must keep it rather than fall through to the caller's default.
+  (test "a plain map storing nil or false is untouched by the seam"
+    (assert= (get {:a nil} :a 99) nil)
+    (assert= (get {:a false} :a 99) false)
+    (assert= (get {} :a 99) 99)))

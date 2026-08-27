@@ -46,6 +46,7 @@
    "decimal/number->" :convert
    "->float" :convert
    "-conj" :meta
+   "-get" :meta
    "/" :math
    "<" :math
    "<=" :math
