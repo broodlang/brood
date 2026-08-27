@@ -24,6 +24,19 @@ call site.**
   four.
 - **The v0.14.0 tree failed `nest format --check`** on three `.blsp` files. Formatted.
 
+**Docs**
+
+- `docs/known-issues.md` gained a **filing process** in place of a header of 2026-07 trivia:
+  how to take a number without colliding, the five questions an entry answers, the
+  requirement to sabotage-verify a guard and record its red output, what each status means,
+  and how to tell the tree is green (a *cancelled* CI run is not evidence — that is what hid
+  KI-68/KI-69 for two days).
+- `doc_refs::no_two_entries_claim_the_same_number` — two sessions numbered different issues
+  KI-70 minutes apart and nothing caught it, because `defined()` collected headings into a
+  set. The `seq/remove-nth` note is now **KI-71**.
+- `docs/handoff.md` replaced; it had claimed `main` was green on all five CI jobs since
+  2026-08-19.
+
 ## v0.14.0 — 2026-08-27
 
 **The gates that had stopped gating.** No language change — this release is the CI tree

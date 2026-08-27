@@ -17,7 +17,7 @@
 //! entries fixed the same day: a name that refers to something which does not exist, with
 //! nothing checking. Cheap to assert, so assert it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 fn workspace_root() -> PathBuf {
@@ -100,6 +100,64 @@ fn defined(root: &Path, files: &[&str], prefix: &str) -> BTreeSet<u32> {
         }
     }
     out
+}
+
+/// Every `## KI-N` / `## ADR-N` heading claims a DISTINCT number.
+///
+/// `defined()` collects into a set, so two entries sharing a number collapse into one and
+/// every reference to it still "resolves" — the collision is invisible to the two tests
+/// below. That is not hypothetical: on 2026-08-27 two sessions numbered different issues
+/// KI-70 within minutes of each other (the checker's literal-walk gap, and a note on
+/// reversed-args renames), and nothing caught it. A duplicate is worse than a dangling
+/// reference, because every later citation of that number is ambiguous forever — including
+/// in commit messages and release tags, which cannot be corrected.
+///
+/// Fix a collision by renumbering the NEWER entry to the next free number.
+#[test]
+fn no_two_entries_claim_the_same_number() {
+    let root = workspace_root();
+    for (files, prefix) in [
+        (&["docs/known-issues.md"][..], "KI-"),
+        (
+            &["docs/decisions.md", "docs/archive/decisions-superseded.md"][..],
+            "ADR-",
+        ),
+    ] {
+        let mut seen: BTreeMap<u32, usize> = BTreeMap::new();
+        for rel in files {
+            let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+                continue;
+            };
+            for line in text.lines() {
+                if let Some(rest) = line.trim_start().strip_prefix("## ") {
+                    if let Some(num) = rest.strip_prefix(prefix) {
+                        let digits: String =
+                            num.chars().take_while(|c| c.is_ascii_digit()).collect();
+                        if let Ok(n) = digits.parse::<u32>() {
+                            *seen.entry(n).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            seen.len() > 20,
+            "only {} {prefix} headings parsed — the format probably changed, which would \
+             make this test vacuous rather than passing",
+            seen.len()
+        );
+        let dupes: Vec<String> = seen
+            .iter()
+            .filter(|(_, &count)| count > 1)
+            .map(|(n, count)| format!("  {prefix}{n} has {count} sections"))
+            .collect();
+        assert!(
+            dupes.is_empty(),
+            "two entries claim the same number — renumber the NEWER one to the next free \
+             number, since every citation of a duplicated number is ambiguous forever:\n{}",
+            dupes.join("\n")
+        );
+    }
 }
 
 #[test]

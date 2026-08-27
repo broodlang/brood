@@ -1,25 +1,82 @@
 # Known issues
 
-KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
-present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
-records, not open bugs. **KI-17** (the checker reachability gap) is now **FIXED** (ADR-189).
-**KI-18** (effect duplication on a deopt) and **KI-19** (call-head evaluation order) are
-both now **FIXED**, as is **KI-20** (a fast link ran the callee against the caller's IC
-block — a cold cache, never a wrong answer), as is **KI-21** (`nest run --for` /
-`--watch` emitted a pre-ADR-150 `~p` pin and failed on every file). **KI-25** (five JIT/VM suites could not be re-run in one image, blocking
-`--repeat-until-failure`) is **FIXED** — see its entry for the two fixes and why its original
-diagnosis was wrong.
-This file is the condensed record — what each was, how it was fixed, and the regression
-test that guards it — so a recurrence is recognizable. For the narrative discovery
-writeup of the scheduler race, see
-[claude-demo-findings.md](claude-demo-findings.md); deeper rationale is in the cited
-ADRs / topic docs.
+The condensed record of every bug this runtime has had: what it was, how it was found, how
+it was fixed, and **which test now guards it** — so a recurrence is recognizable rather than
+rediscovered. Deeper rationale lives in the cited `## ADR-NNN`
+([decisions.md](decisions.md)) or topic doc; the day-by-day narrative is in
+[devlog.md](devlog.md); the scheduler race has a long-form writeup in
+[claude-demo-findings.md](claude-demo-findings.md).
+
+## Filing an entry
+
+**1. Take the next free number — check first.** Grep the headings, do not eyeball the index:
+
+```bash
+grep -oE '^## KI-[0-9]+' docs/known-issues.md | grep -oE '[0-9]+' | sort -n | tail -1
+```
+
+Two sessions numbered different issues **KI-70** within minutes on 2026-08-27 because both
+read the index instead. A duplicate is worse than a dangling reference: every later citation
+of that number is ambiguous *forever*, including in commit messages and release tags, which
+cannot be corrected. `doc_refs::no_two_entries_claim_the_same_number` now fails the build on
+a collision — if you hit it, **renumber the newer entry**, and check what already cites the
+older one (`grep -rn KI-N`).
+
+**2. Write both halves.** An index row *and* a `## KI-N — <one-line symptom> <status> <date>`
+section. The index row alone is not enough — the file's own header sends the reader to the
+section, and `doc_refs::every_ki_reference_resolves_to_a_known_issue` enforces it.
+
+**3. The section answers five questions, in this order.** They are the questions the next
+person actually has, and every entry that skipped one cost time later:
+
+| | | why it matters |
+|---|---|---|
+| **Symptom** | what was observed, verbatim — the error text, the failing test name, the wrong value | this is what a recurrence will look like; it is the only part that is greppable from a future failure |
+| **Cause** | the actual mechanism, not the layer | "a rename wave" is not a cause; "`check_into_inner` returned for any form that was not a `Pair`" is |
+| **Why it survived** | which gates were green while this was broken, and *why* each one could not see it | the most valuable section, and the one most often missing — it is where the *next* bug is hiding |
+| **Fix** | what changed, and any deliberate non-fix with its reason | a recorded non-fix stops the next person re-litigating it |
+| **Guard** | the test that now fails if this returns, **sabotage-verified** | an unverified guard is a guess; see below |
+
+**4. Sabotage-verify the guard, and say so in the entry.** Re-introduce the bug on purpose,
+confirm the new test goes red, restore, confirm green. Write the observed red output into the
+entry. This is not ceremony — KI-68's whole lesson is that a gate nobody broke on purpose may
+never have been able to fail. Guards recorded without this have been wrong before.
+
+**5. Statuses.** `✅ fixed <date>` · `☑️` for retracted / not-a-bug / no-longer-reproduces /
+superseded (keep the entry — a wrong diagnosis is worth recording) · `⚠️ watching` **only**
+when it genuinely cannot be reproduced on demand, and only with the diagnostic armed and
+named. Anything else is open, and per `CLAUDE.md` an open bug is the work — before any
+feature.
+
+## Where a finding goes
+
+- **A bug in the runtime, toolchain or stdlib** → here, plus a dated
+  [devlog.md](devlog.md) entry for the narrative.
+- **A design choice** → an ADR in [decisions.md](decisions.md); cite it from here.
+- **A trap in how to measure or verify something** → [handoff.md](handoff.md), which is
+  replaced each session and is what someone reads cold.
+- **A user-visible break** → [CHANGELOG.md](../CHANGELOG.md), under the release that ships it.
+
+## Before you call the tree green
+
+A **cancelled** CI run is not evidence of anything. Every run is cancelled by the next push
+to the same ref (the workflow's `concurrency` group), so a busy day shows a wall of
+cancellations with no red in it while the last several *completed* runs were all failures —
+which is exactly how KI-68/KI-69 stayed hidden for two days. Filter to completed:
+
+```bash
+gh run list --limit 40 --json conclusion,headSha,displayTitle \
+  -q '.[] | select(.conclusion=="success" or .conclusion=="failure")'
+```
+
+And per `CLAUDE.md`, "passed once" is not green for anything touching concurrency, the
+scheduler, dist, GC or the JIT — run it repeatedly.
 
 ## Index — status per issue (⌘F the `KI-N` to jump)
 
 | # | What | Status |
 |---|---|---|
-| KI-70 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right. Fixed downstream with `nest rename --swap`, which exists for exactly this. Recorded because the CLASS has no gate: a moved name gives the checker something to point at, a swapped one gives a plausible wrong answer somewhere else. Worth its own heading in release notes |
+| KI-71 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right. Fixed downstream with `nest rename --swap`, which exists for exactly this. Recorded because the CLASS has no gate: a moved name gives the checker something to point at, a swapped one gives a plausible wrong answer somewhere else. Worth its own heading in release notes |
 | KI-70 | **the checker never looked inside a vector or map literal**, so every expression in Hiccup-shaped code was unchecked. `check_into_inner` opened with `let Value::Pair(_) = form else { return }` — a `[…]` or `{…}` in value position ended the walk, though its contents are ordinary evaluated code. hive's `/docs` renderer carried `(str (max 2 …))` for weeks after `max` moved to `math`: `nest check` green, `nest test` green, and only rendering the page raised it. One level out from KI-67 — not a form that suppressed the lint, a form the walk never reached | ✅ **fixed 2026-08-27** — `Value::Vector` and `Value::Map` descend into their elements (map **keys** as well as values). No false positives: the checker runs on macroexpanded forms, so a `match` pattern vector is already lowered to `let`/`if` binders, and `quote`/`quasiquote` return at `SpecialHead::SkipBody` before their data is ever handed down. std/ + tests/ stayed at **zero warnings** apart from one real find — `std/tool/mcp.blsp`'s `callers` tool called the module-private `project-all-files` from inside a map literal, the **fifth** dead `project-*` call site and the one KI-67's sweep could not see. Guards `unbound_inside_a_vector_or_map_literal_is_flagged` + `descending_into_a_literal_does_not_read_data_as_code`, sabotage-verified |
 | KI-69 | **two `jit_plan` guards failed on every `main` push**, so the `differential (tree-walker)` job had been red since KI-64's fix landed. `block_argument_spills_never_reach_the_deopt_journal` and `the_block_argument_want_is_clamped_to_the_reserve` assert on VM-compiled arms, and the job runs `BROOD_VM=0` — nothing compiles, so the first inspected 0 chunks and the second saw no arm to clamp. Both fail loudly by design (a vacuous green would mean nothing), which is why they failed rather than passing hollowly | ✅ **fixed 2026-08-27** — both pin `set_forced_ceiling(Some(Tier::Native))`, the fix `compile/tests.rs` already documents for its two native tests since ADR-222 made the ceiling coherent. The guards are new (2026-08-26) and simply missed the pin |
 | KI-68 | **the fuzz-differential gate was HOLLOW — it had been comparing dead programs.** `stress/fuzz_programs.py` writes Brood source itself, and the rename waves retired every name it emitted (`table`, `rem`, `bit-and`, `bit-xor`, `table-get`/`put`/`incr`/`count`, `quot`, `min`/`max`, `println`, `map-get`/`map-count`/`map-dissoc`/`map-int-add`). Every engine died identically on `unbound symbol` at line 1, so all four configs *agreed*, every seed printed `ok`, and the run ended "all configs agree". The generator is Python, so `nest check` and the `.blsp` suite could never see it | ✅ **fixed 2026-08-27** — names updated (60 seeds, 0 unbound, all configs agree with real digests) **and the shape gated**: an `unbound symbol` on stderr from a GENERATED program is now a hard failure naming the dead names, and a run where not one seed reached a clean exit fails as "the corpus is dead, not the engines agreeing". Sabotage-verified in the exact original shape — reverting `(table/new)` to `(table)` prints `DEAD PROGRAM seed=1 … : table` instead of `ok` |
@@ -4256,6 +4313,46 @@ and writing one puts a second pair of eyes on behaviour nothing else was checkin
 list, vector, set, map or bytes` rather than answering wrongly. `drop-while` returns `coll`
 itself when nothing is dropped, matching `(drop 0 [1 2 3])` → `[1 2 3]`.
 
+## KI-69 — two `jit_plan` guards failed under `BROOD_VM=0` ✅ FIXED 2026-08-27
+
+**Symptom.** The `differential (tree-walker)` CI job went red on every `main` push from
+KI-64's fix onward, always the same two:
+
+```
+FAIL ( 118/1075) brood eval::compile::jit_plan::tests::the_block_argument_want_is_clamped_to_the_reserve
+FAIL ( 120/1075) brood eval::compile::jit_plan::tests::block_argument_spills_never_reach_the_deopt_journal
+```
+
+with `only 0 lowerable chunks inspected — the probe found nothing to check, so a green
+result would mean nothing` and `no arm wants more block-argument slots than it reserved`.
+
+**Cause.** Both guards build an `Interp`, run a warming program, and then assert on
+`interp.heap.dbg_compiled_arms()`. That job runs `BROOD_VM=0`, so the tier ceiling is
+`Tier::TreeWalk` and **nothing is ever compiled** — no chunks to inspect, no arm to clamp.
+
+**They failed rather than passing hollowly, and that is the point.** Both carry an explicit
+"this probe found nothing, so a green result would mean nothing" assertion. Without it the
+job would have gone green on a vacuous run, and the KI-64 frame-layout invariant would have
+been unguarded on the one engine configuration that runs a whole extra suite. Compare KI-68,
+where the missing version of exactly this assertion cost weeks.
+
+**Fix.** Pin the ceiling, which is what `compile/tests.rs` has done since ADR-222 made the
+tier ceiling coherent (its comment records the same failure: "removing it is what made these
+two fail in the tree-walker half of `make test-both` until they were pinned"):
+
+```rust
+set_forced_ceiling(Some(Tier::Native));
+```
+
+The guards are new (2026-08-26, with KI-64's fix) and simply missed the pin. Verified under
+both `BROOD_VM=0` and the default engine.
+
+**Why it was not obvious from the run list.** Every CI run after the first failure was
+`cancelled` by the next push (the workflow's `concurrency` group cancels in-progress runs for
+a ref), so `gh run list` showed a wall of cancellations with an `in_progress` at the top and
+no red at all. The last three *completed* runs had all failed. When judging whether the tree
+is green, filter to completed runs — a cancelled run is not evidence of anything.
+
 ## KI-68 — the fuzz-differential gate was comparing dead programs ✅ FIXED 2026-08-27
 
 **Symptom.** None, which is the point. `python3 stress/fuzz_programs.py --seeds 20` printed
@@ -4374,7 +4471,7 @@ boundary — and the shapes on the far side of it are exactly where nobody is lo
 
 ---
 
-## KI-70 — `seq/remove-nth`'s argument swap was invisible to every gate ☑️ NOT A BUG 2026-08-27
+## KI-71 — `seq/remove-nth`'s argument swap was invisible to every gate ☑️ NOT A BUG 2026-08-27
 
 Not a defect in brood — a note about the *class*, because this one cost the most time to
 find of anything in the downstream migration.
