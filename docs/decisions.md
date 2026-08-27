@@ -16466,11 +16466,39 @@ native code from `fold-loop`, `any?`, `int?`, `not`, `inc`, `dec`, `json/emit-li
 `match-*` predicates — the small hot arms leaf inlining exists for. Clamping keeps them
 native and pays only where a handle genuinely crosses.
 
-**A better reserve is the open follow-up.** Counting only *handle-producing* block arguments
-would let the genuinely-affected arms (`walk-list`-shaped, `fold-loop`, `json/emit-list`) keep
-their block-argument carry without taxing the predicates. It needs a static approximation of
-which operands can be handles, and the reserve is computed before any type profile exists.
-Until then those arms deopt at the boundary, which is the pre-KI-49 status quo for them.
+**Measured and rejected: gate the reserve on the arm having a handle producer.** The obvious
+refinement is to reserve `max_leader_depth` only for a chunk that can put a handle on the
+stack at all — `producers > 0`, the predicate already in `jit_spill_reserve` — so the small
+predicates keep a zero reserve while `walk-list`-shaped arms get their slots. Implemented and
+measured: it is **still a broad regression**, because `producers > 0` is far too weak a filter
+— a `first`, a `rest`, a `cons` or any non-tail call qualifies, which is nearly every arm in
+the image. `taskset`-pinned best-of-11 with each row's own base-vs-base floor:
+
+| row | delta | floor | verdict |
+|---|---|---|---|
+| `spawn` | **+9.7%** | 1.4% | regressed |
+| `errors-deep` | **+7.7%** | 0.0% | regressed |
+| `fib` | **+6.4%** | 0.9% | regressed |
+| `primes` | **+5.5%** | 0.0% | regressed |
+| `collatz` | +3.7% | 0.0% | noise |
+| `loop` | +3.3% | 1.1% | noise |
+
+`spawn` +9.7% is the same signature as the original ~1.9× blanket-reserve regression: 20 000
+processes paying bloated prelude frames. Note `fib`'s own reserve is *unchanged* by this
+variant (it has 2 non-tail calls, so it always reserved) — the +6.4% comes from the prelude
+arms it calls, which is what makes this a tax on everything rather than on the arms being
+helped. Reverted.
+
+**What would actually work, and why it is not obviously worth it.** Only a *per-operand*
+analysis — tracking, per abstract stack position at each block leader, whether the value there
+can be a `Handle` — separates `walk-list` (one live handle at its merge, the `cons` result;
+`acc` is already a `Slot` and needs no block-arg slot) from `int?`/`not`/`inc` (bools and ints,
+zero). That means extending `prepass::block_analysis` in the most delicate part of the JIT, and
+getting it wrong reintroduces exactly this bug class. Against that: the deopt the clamp causes
+is empirically cheap — `reduce` and `pipeline`, the two rows most exposed to `fold-loop` and
+`json/emit-list` deopting at a merge, both measured **+0.0%**. So the frame tax is real and
+measured while the deopt cost is not detectable, and the clamp is the right resting place until
+a row shows otherwise.
 
 **Consequences.** The `spill-area-exceeds-frame` bail in `jit_lower_arm` stays as a backstop
 even though the clamp makes it unreachable — the whole cost of KI-64 was that *nothing*
