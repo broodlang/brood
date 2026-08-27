@@ -1364,6 +1364,15 @@ resolution; `%impl-for` is what picks the winner."
   (let (methods (get *impls* op-key))
     (or (get methods key) (get methods :default))))
 
+(defn %impl-exact?
+  (op-key key)
+  "Is there an impl of op `op-key` registered for id `key` SPECIFICALLY — ignoring the
+`:default` that `%impl-for` falls back to? The question the collection seams ask before
+handing a built-in kind to an ability: `Seqable`'s `:default` is `(map-pairs (fields x))`,
+which is meaningless for a rope, so falling through unconditionally would swap a clear
+`expected collection` error for a confusing one (ADR-253)."
+  (not (nil? (get (get *impls* op-key) key))))
+
 (def- *substrate-abilities* ['Display 'Inspect 'Seqable 'Conjable])
 ;; The abilities the LANGUAGE ITSELF dispatches on. Their `:default` impls are the fallback
 ;; every value relies on — `Display`'s is what `io/write`/`io/puts`/`str` reach for — so they are
