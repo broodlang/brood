@@ -311,6 +311,17 @@ jobs:
       - name: Check .blsp formatting (nest format)
         run: ./target/release/nest format --check
 
+      # STATIC pass over the same trees, and it is not redundant with the two RUN-based gates
+      # below. Those execute the programs, so they only ever see a dead name on a path a run
+      # actually takes; this resolves every name in the file. With both of them green on
+      # 2026-08-27 this found 74 unresolvable names — 31 `rem`, 11 `quot`, the whole `table-*`
+      # family in `stress/check_corpus/` — all of them rename rot on branches nothing had run.
+      # Cheap (a few seconds) and it runs FIRST, so the fast, precise failure comes before the
+      # slow one.
+      - name: Check the corpora resolve (static)
+        shell: bash
+        run: make check-corpora
+
       - name: Check the examples
         shell: bash
         run: make check-examples 2>&1 | tee examples.log

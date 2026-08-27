@@ -7,7 +7,7 @@
 ;;;   - BigInt -> float conversion precision (exact for small BigInts)
 ;;;   - BigInt equality vs float equality at boundary values
 ;;;   - Mixed BigInt + float arithmetic chain
-;;;   - Near-zero BigInt rem (rem of huge number by 1 = 0)
+;;;   - Near-zero BigInt rem (math/rem of huge number by 1 = 0)
 ;;;   - BigInt bitwise ops (if supported)
 
 ; 2^63 - 1
@@ -31,7 +31,7 @@
 (io/puts "=== P9: i64::MIN rem -1 ===")
 (def p9-result
   (try
-    (rem i64-min -1)
+    (math/rem i64-min -1)
     (catch e (str "error: " (error-message e)))))
 ;; Truncated remainder: i64::MIN / -1 = 2^63, remainder = 0
 (io/puts "i64-min rem -1 =" p9-result)
@@ -42,10 +42,10 @@
 (def big-pos (* 999999999999999999 7))
 (def big-neg (- 0 big-pos))
 ;; Brood uses truncated rem: sign follows dividend
-(def r1 (rem big-pos 3))
-(def r2 (rem big-neg 3))
-(def r3 (rem big-pos -3))
-(def r4 (rem big-neg -3))
+(def r1 (math/rem big-pos 3))
+(def r2 (math/rem big-neg 3))
+(def r3 (math/rem big-pos -3))
+(def r4 (math/rem big-neg -3))
 (io/puts "rem(+big, +3) sign >= 0:" (>= r1 0))
 (io/puts "rem(-big, +3) sign <= 0:" (<= r2 0))
 (io/puts "rem(+big, -3) sign >= 0:" (>= r3 0))
@@ -73,7 +73,7 @@
 ;;; ---- PROGRAM 12: Near-zero BigInt rem ----
 (io/puts "=== P12: huge BigInt rem 1 = 0 ===")
 (def huge (* 123456789012345678 987654321098765432))
-(def p12-result (rem huge 1))
+(def p12-result (math/rem huge 1))
 (io/puts "huge rem 1 =" p12-result)
 (io/puts "expected 0:" (= 0 p12-result))
 
@@ -93,7 +93,7 @@
 ;;; ---- PROGRAM 14: BigInt GCD via subtraction (stress modular arithmetic) ----
 (io/puts "=== P14: BigInt GCD via Euclidean algorithm ===")
 (defn bigint-gcd (a b)
-  (if (= b 0) a (bigint-gcd b (rem a b))))
+  (if (= b 0) a (bigint-gcd b (math/rem a b))))
 
 ; large product
 (def a14 (* 123456789 987654321 9999999937))
@@ -102,7 +102,7 @@
 ;; GCD should be (* 987654321 9999999937) = 9876543197530864977
 (def p14-gcd (bigint-gcd a14 b14))
 (io/puts "gcd result:" p14-gcd)
-(io/puts "divides a:" (= 0 (rem a14 p14-gcd)))
-(io/puts "divides b:" (= 0 (rem b14 p14-gcd)))
+(io/puts "divides a:" (= 0 (math/rem a14 p14-gcd)))
+(io/puts "divides b:" (= 0 (math/rem b14 p14-gcd)))
 
 (io/puts "=== chaos2_bigint_edge DONE ===")

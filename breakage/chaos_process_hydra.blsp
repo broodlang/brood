@@ -23,7 +23,7 @@
 (defn tree-node (parent start end depth)
   (if (= depth 0)
     (tree-leaf parent start end)
-    (let (mid (+ start (quot (- end start) 2))
+    (let (mid (+ start (math/quot (- end start) 2))
           me (self)
           c1 (spawn (tree-node me start mid (- depth 1)))
           c2 (spawn (tree-node me mid end (- depth 1)))
@@ -40,7 +40,7 @@
   (spawn (tree-node me 0 n depth))
   (let (result (receive ([:leaf-result v] v)))
     ;; sum of i^2 for i in [0, 8192) = (8191 * 8192 * 16383) / 6
-    (def expected (quot (* (* 8191 8192) 16383) 6))
+    (def expected (math/quot (* (* 8191 8192) 16383) 6))
     (io/puts "tree result:" result)
     (io/puts "expected:" expected)
     (io/puts "tree correct?" (= result expected))))
@@ -52,7 +52,7 @@
   (let (n (get config :n)
         seed (get config :seed)
         ;; compute a pseudo-random sum (poor man's hash chain)
-        total (fold (fn (acc i) (rem (+ (* acc 1103515245) i seed) 2147483647))
+        total (fold (fn (acc i) (math/rem (+ (* acc 1103515245) i seed) 2147483647))
                 1
                 (range n)))
     (send parent {:id id :result total :config config})))
@@ -82,7 +82,7 @@
 (let (me (self)
       n 500
       refs (map (fn (i)
-                  (let (pid (spawn (if (= (rem i 3) 0)
+                  (let (pid (spawn (if (= (math/rem i 3) 0)
                                      (error "intentional crash")
                                      :normal-exit)))
                     (monitor pid)))

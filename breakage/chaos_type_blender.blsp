@@ -140,7 +140,7 @@
 ;; Concatenate pr-str of every element
 (def big-repr (reduce (fn (acc v) (str acc "|" (pr-str v))) "" soup))
 (io/puts "big-repr length:" (string/length big-repr))
-(io/puts "big-repr first 80:" (string/substring big-repr 0 (min 80 (string/length big-repr))))
+(io/puts "big-repr first 80:" (string/substring big-repr 0 (math/min 80 (string/length big-repr))))
 
 (io/puts "--- apply with wrong type args (should raise cleanly) ---")
 (let (result (try
@@ -202,7 +202,7 @@
 (io/puts "pr-str of deep-tree length:" (string/length tree-str))
 
 ;; Round-trip: read it back and check equality
-(def reparsed-tree (read-string tree-str))
+(def reparsed-tree (reflect/read-string tree-str))
 (io/puts "round-trip equal?" (= deep-tree reparsed-tree))
 
 (io/puts "--- DONE ---")

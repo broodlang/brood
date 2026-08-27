@@ -4362,3 +4362,67 @@ directory; the age floor still fires under the cap) and one Brood case. Revertin
 leaves all 40 seeded files and fails; reversing the sort so it keeps the *oldest* 16 also fails,
 which is the assertion that matters — a prune that keeps the wrong 16 costs a source boot on
 every binary in use, the exact cost it exists to avoid.
+
+## 2026-08-27 (sixth session) — closing the three ungated classes
+
+The previous entry ended by naming three places a rename could land with no gate watching.
+All three are closed, and each turned out to be cheaper than expected once the actual
+mechanism was found rather than assumed.
+
+**1. The corpora were gated by RUNNING them.** `make check-examples`, `make check-stress` and
+`make breakagetests` all execute the programs and fail on `unbound symbol`, which only ever
+sees a name on a path a given run takes — and these files are full of branches a run does not
+take. With all three green, a static `nest check` over the same trees found **74**
+unresolvable names: 31 `rem`, 11 `quot`, `min`/`max`/`floor`/`->fixed`, `whereis`,
+`read-string`, and the whole `table-*` family in `stress/check_corpus/`. `make check-corpora`
+now runs that pass, in CI, ahead of the slow run-based gates. Nine of the 74 were genuinely
+dynamic — globals created by `eval` or `system/reload-defs` in `chaos_eval_wormhole.blsp` and
+`chaos2_hot_reload.blsp` — and now say so with `(check-allow :unbound …)` rather than leaving
+the gate to guess. Sabotage-verified with the shape that matters: a dead name behind
+`(if false …)`, which no run would ever reach.
+
+**2. Embedded Brood, narrowed to where it actually mattered.** Two of the three surfaces were
+already covered: `scaffold_quality.rs` runs `nest check` on every template `nest new` emits,
+and the Python fuzz generator got its liveness assertion with KI-68. The uncovered one was the
+**docs' code blocks** — 123 of them across `language.md` and `brood-for-claude.md`, evaluated
+by nothing, which is exactly how both came to teach `println` and `spawn-server`.
+
+A doc block is not a program: most are fragments over placeholders, so `doc_examples_test`'s
+approach (evaluate it, compare the result) does not transfer. Two rules are decidable, and
+measuring beat guessing at every step:
+
+- Checking *every* call head is unusable — 338 distinct heads, and the unresolved list is
+  `a`, `acc`, `bob`, `circle`, prose my regex caught (`ADR-146`, `Clojure-style`).
+- Qualified names over the raw markdown is also unusable — file paths (`docs/types.md`) and
+  prose slashes (`cast/call`, `conj/disj`) swamp it.
+- Qualified call heads **inside code blocks** is clean: 24 of them, all real.
+
+And a subtlety that would have made the gate lie: 9 of those 24 initially read as unresolved.
+They are fine — a qualified reference auto-requires at *compile* time, and nothing here
+compiles the block, so `bound?` must be preceded by loading the module. A gate reporting
+`node/start` as missing would have been worse than no gate.
+
+So: every qualified call head resolves, and no retired name appears — the second with an
+anti-vacuity assertion that each retired name is *genuinely unbound*, so the list cannot rot
+into checking for names that have since come back. It immediately found `table-put`,
+`table-get` and `(table)` still in the reference, which the by-hand pass two sessions ago had
+missed. Both arms sabotage-verified.
+
+**3. The reversed-args class had a gate all along — one declaration away.** KI-71 was recorded
+as a class with no possible gate: arity unchanged, nothing unbound, the type warning advisory.
+That is half right. The checker catches a reversal **precisely, per argument**, cross-module:
+
+    seq/remove-nth: argument 1 expects int, got (tuple 1, 2, 3)
+    seq/remove-nth: argument 2 expects seqable, got 1
+
+It was silent on `remove-nth` for one reason — the function had **no declared `sig`**. The
+index/collection functions now carry one, and CI's zero-warning gate turns the reversal into a
+hard failure. Argument types are precise because that is what catches the swap; the return
+stays `any` because a narrow return would false-positive at every call site and is not what
+this mistake gets wrong. Zero new warnings across std/ + tests/, and the correct order — plus
+a call over untyped locals — stays silent.
+
+> One trap worth recording: `std/*.blsp` is `include_str!`'d into the binary, so a new `sig`
+> does nothing until a rebuild. The first run after adding them showed only `take-last`
+> warning, from a curated Rust table, and read as "declared sigs don't work cross-module".
+> They do. The binary was stale — the same class `make doctor` exists for.

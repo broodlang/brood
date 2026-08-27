@@ -19,10 +19,13 @@
   "(defn chaos-fib (n a b) (if (< n 1) a (chaos-fib (- n 1) b (+ a b))))")
 
 (eval-string fib-src)
-(io/puts "chaos-fib(0):" (chaos-fib 0 0 1))
-(io/puts "chaos-fib(10):" (chaos-fib 10 0 1))
-; 12586269025
-(io/puts "chaos-fib(50):" (chaos-fib 50 0 1))
+;; `chaos-fib` is defined by the `eval-string` above — invisible to the checker by
+;; construction, which is the point of this file. Opt out, do not rewrite.
+(check-allow :unbound
+  (io/puts "chaos-fib(0):" (chaos-fib 0 0 1))
+  (io/puts "chaos-fib(10):" (chaos-fib 10 0 1))
+  ; 12586269025
+  (io/puts "chaos-fib(50):" (chaos-fib 50 0 1)))
 (io/puts "--- quasiquote: build a fold-summing program for n terms ---")
 
 ;; Generate `(+ 1 (+ 2 (+ 3 ... (+ n 0) ...)))` as a data structure via quasiquote
@@ -79,14 +82,16 @@
 (io/puts "big-do-src length:" (string/length big-do-src))
 
 ;; Read it back as a value (s-expression)
-(def big-do-form (read-string big-do-src))
+(def big-do-form (reflect/read-string big-do-src))
 (io/puts "form is a pair?" (pair? big-do-form))
 (io/puts "first of form:" (first big-do-form))
 
 ;; Eval the form — defines 500 globals
 (eval big-do-form)
-(io/puts "chaos-var-0:" chaos-var-0)
-(io/puts "chaos-var-499:" chaos-var-499)
+;; The 500 `chaos-var-N` globals are created by the `eval` above.
+(check-allow :unbound
+  (io/puts "chaos-var-0:" chaos-var-0)
+  (io/puts "chaos-var-499:" chaos-var-499))
 
 (io/puts "--- recursive eval: an eval'd program that itself calls eval ---")
 
