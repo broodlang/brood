@@ -306,8 +306,23 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     put_u64(&mut body, dir_off);
 
     let t_io = std::time::Instant::now();
-    std::fs::write(&path, &body)
-        .map_err(|e| LispError::runtime(format!("%image-write: {path}: {e}")))?;
+    // ATOMIC: write a sibling temp file, then rename over the target. A plain
+    // `fs::write` truncates in place, so a reader that indexes the image while
+    // another process is rebuilding it sees a torn file — and images are now built
+    // by `nest`, which a test suite or a build script can easily run several of at
+    // once. `rename` within a directory is atomic on POSIX and replaces on Windows,
+    // so a reader observes either the old complete image or the new one, never half.
+    //
+    // The temp name carries the pid so two concurrent builders do not collide with
+    // each other either; last rename wins, and both wrote identical bytes anyway
+    // (the content is a pure function of `stdlib-id`, which is in the file name).
+    let tmp = format!("{path}.{}.tmp", std::process::id());
+    std::fs::write(&tmp, &body)
+        .map_err(|e| LispError::runtime(format!("%image-write: {tmp}: {e}")))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(LispError::runtime(format!("%image-write: {path}: {e}")));
+    }
     if trace() {
         eprintln!(
             "[image-write] {} entries in {} sections, {} MB — to_message {} ms, encode {} ms, write {} ms",

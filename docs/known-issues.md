@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-72 | **the stdlib image cannot be default-ON yet: it turns a latent require-stall into a reliable one.** Measured with 12 parallel copies of `autoload_race --test-threads=4` against a 90 s timeout: **12 of 12 exceed it with the image installed, 0 of 12 without**, and the same test passes 12/12 alone in 0.5 s. Not a deadlock — nothing hangs permanently. The edge replay must run BEFORE `provide` (or a racing process sees a module whose dependencies are missing — the 112-failure bug ADR-256 fixed), so a module stays unprovided while it recursively requires its whole edge set, and every process that wants it meanwhile enters `%require-await`'s **5 ms x 1000** poll before force-loading. The image makes many more modules take that path in a burst, so the stalls compound | ⚠️ **OPEN 2026-08-27** — image reverted to opt-in (`BROOD_STDIMAGE=1`) the day it was flipped; everything else from ADR-256 ships. The fix is the POLL, not the ordering: `%require-await` should wait on the loader finishing rather than sleep-and-recheck. Note the synthetic load stresses something pre-existing — at 12x4 parallelism the default (no image) still shows 4 of 12 — so a fix should be measured on both arms |
 | KI-71 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right. Fixed downstream with `nest rename --swap`, which exists for exactly this. Recorded because the CLASS has no gate: a moved name gives the checker something to point at, a swapped one gives a plausible wrong answer somewhere else. Worth its own heading in release notes |
 | KI-70 | **the checker never looked inside a vector or map literal**, so every expression in Hiccup-shaped code was unchecked. `check_into_inner` opened with `let Value::Pair(_) = form else { return }` — a `[…]` or `{…}` in value position ended the walk, though its contents are ordinary evaluated code. hive's `/docs` renderer carried `(str (max 2 …))` for weeks after `max` moved to `math`: `nest check` green, `nest test` green, and only rendering the page raised it. One level out from KI-67 — not a form that suppressed the lint, a form the walk never reached | ✅ **fixed 2026-08-27** — `Value::Vector` and `Value::Map` descend into their elements (map **keys** as well as values). No false positives: the checker runs on macroexpanded forms, so a `match` pattern vector is already lowered to `let`/`if` binders, and `quote`/`quasiquote` return at `SpecialHead::SkipBody` before their data is ever handed down. std/ + tests/ stayed at **zero warnings** apart from one real find — `std/tool/mcp.blsp`'s `callers` tool called the module-private `project-all-files` from inside a map literal, the **fifth** dead `project-*` call site and the one KI-67's sweep could not see. Guards `unbound_inside_a_vector_or_map_literal_is_flagged` + `descending_into_a_literal_does_not_read_data_as_code`, sabotage-verified |
 | KI-69 | **two `jit_plan` guards failed on every `main` push**, so the `differential (tree-walker)` job had been red since KI-64's fix landed. `block_argument_spills_never_reach_the_deopt_journal` and `the_block_argument_want_is_clamped_to_the_reserve` assert on VM-compiled arms, and the job runs `BROOD_VM=0` — nothing compiles, so the first inspected 0 chunks and the second saw no arm to clamp. Both fail loudly by design (a vacuous green would mean nothing), which is why they failed rather than passing hollowly | ✅ **fixed 2026-08-27** — both pin `set_forced_ceiling(Some(Tier::Native))`, the fix `compile/tests.rs` already documents for its two native tests since ADR-222 made the ceiling coherent. The guards are new (2026-08-26) and simply missed the pin |
@@ -4462,6 +4463,55 @@ for; a lint that is never *reached* leaves nothing at all. When a checker has a
 boundary — and the shapes on the far side of it are exactly where nobody is looking.
 
 ---
+
+## KI-72 — the stdlib image cannot be default-ON yet: a require-stall storm ⚠️ OPEN 2026-08-27
+
+**Symptom.** With the stdlib image installed at boot, `autoload_race::racing_the_first_call_into_string_is_sound`
+exceeds nextest's 120 s cap during `make test`. It passes **12/12 in 0.5 s** when run alone, and
+passes under `cargo nextest run --test autoload_race` alone — only the full parallel suite trips it.
+
+**Repro, and it is a clean one.** 12 parallel copies of the test binary at `--test-threads=4`,
+90 s timeout:
+
+```
+image ON  : 12 of 12 timed out
+image OFF :  0 of 12 timed out
+```
+
+**Cause (understood; the image is the amplifier, not the fault).** ADR-256 moved the image
+branch's `(provide key)` to run AFTER the module's require-edges are replayed. That ordering is
+required: providing first publishes a module whose dependencies are still missing, and a racing
+process then dies on `unbound symbol: rand/token` — 112 of the 157 failures ADR-256 fixed were
+exactly that. But it also means a module stays **unprovided** while it recursively requires its
+whole edge set, and any other process that wants it during that window takes this path:
+
+```lisp
+(contains? *features-loading* key) (%require-await key 1000)
+...
+(defn- %require-await (key n)
+  (cond (contains? *features* key) key
+        (> n 0) (do (sleep 5) (%require-await key (dec n)))
+        else    (%require-force key)))
+```
+
+— a **5 ms x 1000 poll**, i.e. up to 5 s, before giving up and force-loading. Nothing hangs
+permanently. But the image makes many more modules materialise in a burst, so more processes
+land in that window at once and the 5 s stalls compound past the cap.
+
+**Not fixed by reverting the ordering.** That trades this for the 112 unbound failures, which are
+wrong ANSWERS rather than slow ones. The fix is the poll: a waiter should block on the loader
+finishing (a completion signal) rather than sleep-and-recheck, so the wait costs the load's real
+duration instead of a 5 ms quantum.
+
+**Measure both arms.** The synthetic 12x4 load stresses something that pre-dates the image: at
+that parallelism the default (image off) still showed **4 of 12** over 90 s in one run. A fix
+should move both numbers, and a claim that the image is safe to default-on needs the image arm at
+parity with the no-image arm, not merely under the cap.
+
+**Status:** the image ships **opt-in** (`BROOD_STDIMAGE=1`), which is where it was before the flip.
+Everything else from ADR-256 is unaffected and shipped: the registration replay, the
+provide/edges ordering, the reserved-name rule, `%std-image-serves?`, the atomic `%image-write`,
+and the coverage stand-aside.
 
 ## KI-71 — `seq/remove-nth`'s argument swap was invisible to every gate ☑️ NOT A BUG 2026-08-27
 

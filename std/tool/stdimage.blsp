@@ -276,6 +276,24 @@ touched. The boot install (`BROOD_STDIMAGE=1`, the last line of the prelude) is 
 serves everything."
   (%std-image-install))
 
+(defn ensure-built ()
+  "Build this binary's stdlib image if there is not already a CURRENT one on disk, and say
+which happened: `:built`, `:present`, or nil when there is no cache directory.
+
+This is the \"make it standard\" entry point, and it is deliberately not `ensure`: by the time
+any module can call this, the prelude has already installed whatever image existed at boot, so
+re-installing would register a second source for the same file. What is left worth doing is
+the half a running process cannot do for itself — writing the image the NEXT process will boot
+with.
+
+`nest` calls it, because a project tool can afford ~1 s once per stdlib change and every later
+`brood` and `nest` invocation on that machine reads the result: the image is keyed on
+`system/stdlib-id`, the same for every binary built from one tree."
+  (let (path (image-path))
+    (when path
+      (if (try (not (nil? (%image-index path (system/stdlib-id)))) (catch _ false))
+        :present (do (build) :built)))))
+
 (defn ensure ()
   "Install the stdlib image, building it first if this binary has none yet. Returns the
 section count. The build cost is paid once per binary; every later process just indexes."

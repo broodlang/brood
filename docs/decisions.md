@@ -16986,8 +16986,47 @@ wrong trade for exactly the short-lived runs `startup` measures. The install now
 section coordinates and reads the index only (**823 µs**, startup at parity); the tables
 load on the first materialise, and a run that materialises nothing never pays.
 
-**Opt-in for now.** `BROOD_STDIMAGE=1`, and the image must have been built (`nest stdimage`);
-absent or stale, `require` loads from source exactly as before, since the image is keyed on
-`system/stdlib-id` — a content hash — and cannot outlive what it snapshotted. Flipping the
-default is a separate decision on a separate day's evidence: it changes every program's load
-path, and one green suite run is not the bar this repo sets for that.
+**Opt-in (`BROOD_STDIMAGE=1`), and the runtime never builds it.** It was made the default on
+2026-08-27 and reverted the same day: under parallel load the image turns a latent require-stall
+into a reliable one — 12 of 12 parallel `autoload_race` copies over a 90 s cap with it, 0 of 12
+without (**KI-72**). Not a fault in the image; the amplifier of one. The edge replay below must
+precede `provide`, which keeps a module unprovided while it requires its whole edge set, and a
+process that wants it meanwhile sits in `%require-await`'s 5 ms x 1000 poll. Fixing the poll is
+the work; the flip waits on it.
+
+Six green suite runs and `make green-all` did NOT catch this, and that is the lesson worth
+keeping: they were sequential-ish and the stall only compounds under the full parallel suite.
+The flip was gated by `make test`, which found it on the first try — as a 120 s timeout, not a
+failure, which is the shape a stall takes.
+
+The split of duties is the whole design:
+
+- **The runtime INSTALLS** an image when a current one exists — ~0.9 ms, and ~30 µs to find
+  none. It never builds: that costs ~1 s, and `brood app.blsp` is exactly the short-lived run
+  the cost would land on.
+- **`nest` WRITES** one when it is missing (`ensure_stdimage` → `stdimage/ensure-built`), because
+  a project tool can afford a second once per stdlib change. The key is `system/stdlib-id`, the
+  same for every binary from one tree, so `nest` building it also serves `brood` and `brood-lsp`.
+
+Safe by construction rather than by policy: the key is a content hash of every baked-in `.blsp`,
+so a stale image cannot be read, and with none present `require` reads source exactly as before.
+A run gets either a snapshot of the library *this binary* bakes in, or the source. No third state.
+
+**One hazard the shared key creates, and the check that closes it.** `stdlib-id` hashes every
+`std/**/*.blsp` **on disk**, regardless of features — deliberately, so three binaries share one
+~2 MB file. But they do not bake the same MODULES: `nest` carries the dev-tools (`test`,
+`project`, `mcp`); a lean runtime — what `nest release` and `make install
+INSTALL_FEATURES=RUN_FEATURES` produce, i.e. what ships — does not. Without a check, `nest`
+writing the image lets a lean `brood` beside it **materialise `test`**: a module that binary was
+built to exclude, present only because a developer tool once ran on that machine. It would then
+work on the dev box and fail in production, where no image exists.
+
+`%std-image-serves?` is the rule: a section from the stdlib image is usable only for a module
+this binary actually bakes (`%builtin-module` non-nil); a *project* image is unrestricted, since
+it is the only thing that has the project's own modules. So the image may only ever make a module
+this binary already has FASTER to load — never add one. Checked at materialise rather than by
+filtering the index at install: the filter is O(sections) of `%builtin-module` on the boot path
+and measured **+1.4 ms of a 20 ms boot**, against one comparison paid only by a module that
+actually materialises. Verified by sabotage against a real lean build (`make release-brood`) and
+an image written by the dev-tools binary — forced true, `(require-one 'test)` succeeds; as
+written it is refused while `json` still materialises from the same file.
