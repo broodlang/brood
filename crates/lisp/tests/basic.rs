@@ -1240,7 +1240,10 @@ fn integer_overflow_does_not_panic() {
     // (ADR bignums — integer arithmetic auto-promotes rather than trapping).
     assert_eq!(run("(math/mod -9223372036854775808 -1)"), "0");
     assert_eq!(run("(math/rem -9223372036854775808 -1)"), "0");
-    assert_eq!(run("(math/quot -9223372036854775808 -1)"), "9223372036854775808");
+    assert_eq!(
+        run("(math/quot -9223372036854775808 -1)"),
+        "9223372036854775808"
+    );
     // `i64::MIN / -1` used to overflow the i64 fast path and fall through to the float
     // path, giving an imprecise `Float`. Exact division (ADR-196) makes it the exact
     // bignum 2^63 instead — the quotient divides evenly, so it is an integer, not a
@@ -1328,9 +1331,15 @@ fn dotted_pairs_round_trip() {
     assert_eq!(run("(first (list .5 6))"), "0.5"); // `.5` is a float, not a separator
 
     let mut interp = Interp::new();
-    assert!(interp.eval_str(r#"(reflect/read-string "( . 3)")"#).is_err());
-    assert!(interp.eval_str(r#"(reflect/read-string "(1 . )")"#).is_err());
-    assert!(interp.eval_str(r#"(reflect/read-string "(1 . 2 3)")"#).is_err());
+    assert!(interp
+        .eval_str(r#"(reflect/read-string "( . 3)")"#)
+        .is_err());
+    assert!(interp
+        .eval_str(r#"(reflect/read-string "(1 . )")"#)
+        .is_err());
+    assert!(interp
+        .eval_str(r#"(reflect/read-string "(1 . 2 3)")"#)
+        .is_err());
 }
 
 /// Dynamic variables (`defdyn`/`binding`): default, dynamic shadowing through a
