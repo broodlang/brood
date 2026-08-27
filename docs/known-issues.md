@@ -4490,3 +4490,9 @@ exists for this and rewrites `(f a b)` to `(f b a)`.
 from a moved name. A moved name produces an unbound symbol the checker will point at; a
 swapped one produces a plausible wrong answer somewhere else entirely. Worth listing them
 explicitly in the release notes under their own heading, since no gate will.
+
+<!-- KI-70 addendum, 2026-08-27: a second call site of the same reversed-args change was
+     found in brood-terminal (`seq/remove-nth tabs i`), presenting as one unrelated-looking
+     test failure — "ctrl-d with two tabs closes one". Two repos, two different symptoms,
+     one rename. `grep -rn 'remove-nth'` across the ecosystem is what found it; nothing in
+     the toolchain would have. -->
