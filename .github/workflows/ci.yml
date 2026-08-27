@@ -91,7 +91,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # `cache-on-failure`: save the cache even when the job goes red. Default is false, and
+      # that default cost real time on 2026-08-27: a red or cancelled run saved nothing, so
+      # the next run started cold, and with several pushes in a row the cache was never once
+      # written — CI looked cached and rebuilt from scratch every time. Cargo revalidates
+      # fingerprints on restore, so a cache written by a failing build is not a stale-artifact
+      # risk; the worst case is it holds objects the next run rebuilds anyway.
+      #
+      # Budget note: a repo gets 10 GB and GitHub evicts LRU past it. These five CI caches are
+      # ~3.5 GB total, which fits — but only since the Release workflow was made restore-only
+      # (`save-if: false` there); its four cross-compile targets had grown to ~7 GB and were
+      # evicting these. If cold builds reappear, check `gh api .../actions/cache/usage` first.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       # Same invocation as `make clippy`: all targets, all features, warnings fatal.
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -138,6 +151,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: taiki-e/install-action@nextest
 
       # The no-JIT configuration (`BROOD_NO_JIT` has a build-level counterpart —
@@ -224,6 +239,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: taiki-e/install-action@nextest
 
       # No --all-features here: this job only needs the default surface (the
@@ -342,6 +359,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       # `nest` too: the example PROJECTS (examples/*/project.blsp) are checked with `nest test`.
       - name: Build brood + nest
@@ -422,6 +441,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       # `make breakagetests` builds `--release` with `-C debug-assertions=on`, so the
       # per-deref GC tripwire and heap verifier stay armed: a use-after-GC aborts at the bad

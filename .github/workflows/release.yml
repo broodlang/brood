@@ -90,9 +90,21 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Restore-only, deliberately. A repository gets **10 GB** of Actions cache and GitHub
+      # evicts least-recently-used entries past it; on 2026-08-27 this repo sat at 10.53 GB
+      # across 18 caches, of which **~6.4 GB was this workflow** — four cross-compile targets
+      # times several stale copies — against **2.7 GB** for the three CI caches that run on
+      # every push. So the tag-only workflow was evicting the per-push ones, and CI kept
+      # paying cold builds while appearing to be cached.
+      #
+      # `save-if: false` keeps the restore (a matching entry still helps) and stops this
+      # workflow claiming budget. It is the right side of the trade: releases are rare and
+      # already minutes of cross-compilation, while CI runs on every push and is where a cold
+      # build actually costs someone waiting.
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+          save-if: false
 
       # Lean default build (no gui/audio; jit + treesit + dev-tools) — the same set
       # `make install` ships. TARGET builds for the triple (native or cross), into
