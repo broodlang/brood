@@ -57,17 +57,17 @@
 ;; existing code the same day. The reservation rule is right; what was wrong was a
 ;; framework's client API being in the prelude at all. This is the guard that it stays out.
 (describe "reserved: a FRAMEWORK's client API does not seize generic global names"
-  (test "call / cast / stop / spawn-server / defprocess are the user's to define"
+  (test "call / cast / stop / start / defprocess are the user's to define"
     (doseq (nm ["call"
-                 "cast" "stop" "call-timeout" "code-change" "spawn-server" "spawn-server-link"
-                 "spawn-server-named"])
+                 "cast" "stop" "call-timeout" "code-change" "start" "start-link"
+                 "start-named"])
       (assert= :allowed (rn-try (str "(def " nm " (fn (& a) :mine))"))))
     (assert= :allowed (rn-try "(defmacro defprocess (n p & c) nil)"))
     (assert= :allowed (rn-try "(defn gen-clause (a b c d e f) nil)")))
   (test "…while the SAME names ARE reserved under the gen/ namespace"
     (is (bound? 'gen/call))
     (is (rn-refused? "(def gen/call (fn (p x) :hacked))"))
-    (is (rn-refused? "(def gen/spawn-server (fn (f s) :hacked))")))
+    (is (rn-refused? "(def gen/start (fn (f s) :hacked))")))
   (test "`gen` is still a reserved PACKAGE name — the namespace belongs to std"
     (is (reserved-package-name? 'gen))
     (is (includes? (builtin-modules) "gen"))))

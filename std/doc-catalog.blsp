@@ -471,7 +471,7 @@
    "take-while" :collections
    "zip" :collections
    ;; ---- added so nothing falls into :other (every core name has a home) ----
-   ;; (`gen`'s client API — call / cast / stop / spawn-server / defprocess — is NOT
+   ;; (`gen`'s client API — call / cast / stop / start / defprocess — is NOT
    ;; here: `gen` is an ordinary module, so those names are `gen/…` and catalogued
    ;; with the module, exactly like `supervisor`'s and `agent`'s.)
    "defbehaviour" :meta
