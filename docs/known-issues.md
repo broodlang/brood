@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-70 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right. Fixed downstream with `nest rename --swap`, which exists for exactly this. Recorded because the CLASS has no gate: a moved name gives the checker something to point at, a swapped one gives a plausible wrong answer somewhere else. Worth its own heading in release notes |
 | KI-70 | **the checker never looked inside a vector or map literal**, so every expression in Hiccup-shaped code was unchecked. `check_into_inner` opened with `let Value::Pair(_) = form else { return }` — a `[…]` or `{…}` in value position ended the walk, though its contents are ordinary evaluated code. hive's `/docs` renderer carried `(str (max 2 …))` for weeks after `max` moved to `math`: `nest check` green, `nest test` green, and only rendering the page raised it. One level out from KI-67 — not a form that suppressed the lint, a form the walk never reached | ✅ **fixed 2026-08-27** — `Value::Vector` and `Value::Map` descend into their elements (map **keys** as well as values). No false positives: the checker runs on macroexpanded forms, so a `match` pattern vector is already lowered to `let`/`if` binders, and `quote`/`quasiquote` return at `SpecialHead::SkipBody` before their data is ever handed down. std/ + tests/ stayed at **zero warnings** apart from one real find — `std/tool/mcp.blsp`'s `callers` tool called the module-private `project-all-files` from inside a map literal, the **fifth** dead `project-*` call site and the one KI-67's sweep could not see. Guards `unbound_inside_a_vector_or_map_literal_is_flagged` + `descending_into_a_literal_does_not_read_data_as_code`, sabotage-verified |
 | KI-69 | **two `jit_plan` guards failed on every `main` push**, so the `differential (tree-walker)` job had been red since KI-64's fix landed. `block_argument_spills_never_reach_the_deopt_journal` and `the_block_argument_want_is_clamped_to_the_reserve` assert on VM-compiled arms, and the job runs `BROOD_VM=0` — nothing compiles, so the first inspected 0 chunks and the second saw no arm to clamp. Both fail loudly by design (a vacuous green would mean nothing), which is why they failed rather than passing hollowly | ✅ **fixed 2026-08-27** — both pin `set_forced_ceiling(Some(Tier::Native))`, the fix `compile/tests.rs` already documents for its two native tests since ADR-222 made the ceiling coherent. The guards are new (2026-08-26) and simply missed the pin |
 | KI-68 | **the fuzz-differential gate was HOLLOW — it had been comparing dead programs.** `stress/fuzz_programs.py` writes Brood source itself, and the rename waves retired every name it emitted (`table`, `rem`, `bit-and`, `bit-xor`, `table-get`/`put`/`incr`/`count`, `quot`, `min`/`max`, `println`, `map-get`/`map-count`/`map-dissoc`/`map-int-add`). Every engine died identically on `unbound symbol` at line 1, so all four configs *agreed*, every seed printed `ok`, and the run ended "all configs agree". The generator is Python, so `nest check` and the `.blsp` suite could never see it | ✅ **fixed 2026-08-27** — names updated (60 seeds, 0 unbound, all configs agree with real digests) **and the shape gated**: an `unbound symbol` on stderr from a GENERATED program is now a hard failure naming the dead names, and a run where not one seed reached a clean exit fails as "the corpus is dead, not the engines agreeing". Sabotage-verified in the exact original shape — reverting `(table/new)` to `(table)` prints `DEAD PROGRAM seed=1 … : table` instead of `ok` |
@@ -4370,3 +4371,33 @@ beside `project/source-files`, the same remedy KI-67 applied to its four.
 for; a lint that is never *reached* leaves nothing at all. When a checker has a
 "return early if this is not the shape I expect" line, that line is a silent coverage
 boundary — and the shapes on the far side of it are exactly where nobody is looking.
+
+---
+
+## KI-70 — `seq/remove-nth`'s argument swap was invisible to every gate ☑️ NOT A BUG 2026-08-27
+
+Not a defect in brood — a note about the *class*, because this one cost the most time to
+find of anything in the downstream migration.
+
+`seq/remove-nth` moved to index-first, correctly: it was the one function in `seq` that
+broke the collection-last convention, and its docstring says so. But a **reversed-args
+change is invisible to every gate we have**:
+
+- the arity is unchanged, so no arity error;
+- no symbol is unbound, so `nest check` is clean;
+- the type mismatch is advisory, and the call sites are polymorphic enough not to warn.
+
+In bedit it surfaced as **seven** failures in `buffers_eval`, `hosted` and `tutor` that
+looked like unrelated buffer-lifecycle bugs — "killing the last editable buffer leaves a
+fresh `*scratch*`" returning the *old* buffer's text. The actual raise
+(`<=: expected number, got vector` in `%take-acc`) happened inside `ed-kill-at`, where the
+caller's error handling absorbed it.
+
+**What made it findable** was reading the failing function's source and testing the
+primitive directly, not any tool. **What fixed it** was `nest rename --swap`, which already
+exists for this and rewrites `(f a b)` to `(f b a)`.
+
+**The lesson for the next wave:** a reversed-args rename needs to be announced differently
+from a moved name. A moved name produces an unbound symbol the checker will point at; a
+swapped one produces a plausible wrong answer somewhere else entirely. Worth listing them
+explicitly in the release notes under their own heading, since no gate will.
