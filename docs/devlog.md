@@ -4362,3 +4362,87 @@ directory; the age floor still fires under the cap) and one Brood case. Revertin
 leaves all 40 seeded files and fails; reversing the sort so it keeps the *oldest* 16 also fails,
 which is the assertion that matters — a prune that keeps the wrong 16 costs a source boot on
 every binary in use, the exact cost it exists to avoid.
+
+## 2026-08-27 (fifth session) — the image becomes standard, and the trap in a shared key
+
+Asked to clean the disk and make the stdlib image standard for nest projects and for the
+benchmarks.
+
+**Disk first: 91 GB.** `target/` held 100 GB, 85 GB of it `target/debug` — 73 GB of accumulated
+test binaries in `deps/` (cargo never GCs those) and 12 GB of `incremental/` — plus 6.7 GB of
+`target/ab` worktrees. Dropped both; the machine went from 87% full to 46%. Nothing precious:
+all of it regenerates.
+
+**The image was made the default and reverted the same day — KI-72.** `make test` caught it on
+the first run, as a **120 s timeout** rather than a failure, which is the shape a stall takes.
+Reduced to a clean repro: 12 parallel copies of `autoload_race --test-threads=4` against a 90 s
+cap give **12 of 12 over with the image, 0 of 12 without**, while the same test passes 12/12 in
+0.5 s alone. Not a deadlock and not a fault in the image — the amplifier of one. ADR-256's edge
+replay must precede `provide` (or a racing process sees a module whose deps are missing, the
+112-failure bug), so a module stays unprovided while it requires its whole edge set, and every
+process that wants it meanwhile enters `%require-await`'s 5 ms x 1000 poll. The image puts many
+more modules through that window at once, so the stalls compound. Fixing the poll — wait on the
+loader finishing, not sleep-and-recheck — is the work; the flip waits on it.
+
+Worth stating because it nearly went the other way: **six green suite runs with
+`BROOD_STDIMAGE=1` and a clean `make green-all` did not catch this.** They were effectively
+sequential; the stall only compounds under the full parallel suite. And a second measurement kept
+the conclusion honest — at 12x4 parallelism the default arm *also* shows 4 of 12 over the cap, so
+the image amplifies something pre-existing rather than creating it, and a fix has to move both
+arms.
+
+**Everything else ships**, with the duties split:
+
+- the **runtime installs** an image when a current one exists (~0.9 ms, ~30 µs to find none) and
+  **never builds** one — a build is ~1 s and `brood app.blsp` is exactly the short-lived run
+  that cost would land on;
+- **`nest` writes** it when missing (under `BROOD_STDIMAGE=1`), because a project tool can afford
+  a second once per stdlib change. Measured end to end on a fresh `XDG_CACHE_HOME`: `brood` alone
+  finds nothing and builds nothing, the first `nest` command takes 3.2 s and leaves an image, the
+  next `nest test` runs in 78 ms, and `brood` then installs 101 sections from the file `nest`
+  wrote.
+
+Two more faults the flip exposed, both fixed and both worth having found:
+
+- **`%image-write` was not atomic.** A plain `fs::write` truncates in place, and images are now
+  written by `nest`, which a test suite or build script can easily run several of at once — a
+  reader indexing the file mid-rebuild sees a torn image. Now a sibling temp file plus `rename`.
+- **Line coverage saw nothing of the standard library.** Coverage instruments the COMPILER
+  (ADR-148); a materialised module is never compiled, so with an image installed no std module
+  can appear in a readout and `nest test --cover-lines` silently reports nothing for `std/`. The
+  image now stands aside under `BROOD_COVERAGE`, the same way `--cover-lines` already sets
+  `BROOD_NO_JIT=1`, and for the same reason: you cannot measure what ran from code that was
+  restored rather than run.
+
+**The shared key hides a production-only failure, and it nearly shipped.** `stdlib-id` hashes
+every `std/**/*.blsp` **on disk** regardless of features — deliberately, so `brood`, `nest` and
+`brood-lsp` share one ~2 MB file instead of writing three. But they do not bake the same
+*modules*: `nest` has the dev-tools, and a lean runtime — what actually ships — does not. So
+`nest` writing the image let a lean `brood` beside it **materialise `test`**, a module that
+binary was built to exclude. That is the worst shape available: works on the dev box, fails in
+production where no image exists.
+
+`%std-image-serves?` closes it — a stdlib-image section is usable only for a module this binary
+bakes; a project image stays unrestricted. The first attempt filtered the index at install and
+cost **+1.4 ms of a 20 ms boot**, so the check moved to materialise, where it is one comparison
+paid only by a module that actually loads.
+
+**And the sabotage check lied the first time.** Forcing the guard true left the lean build still
+refusing `test` — apparently proving the guard did nothing. It proved the opposite: editing
+`tools.blsp` changes `stdlib-id`, so the on-disk image had gone stale and *no image was installed
+at all*. Rebuilding the image at the new id after each rebuild, the sabotage reproduces exactly —
+"YES — LEAKED". A sabotage that fails to break something is not evidence until you have checked
+that the mechanism was live.
+
+**Also fixed: `nest stdimage` was doing double work on a stale premise.** It built the image and
+then shelled out to the `brood` on PATH to "build its own", commented as necessary because the key
+was `system/build-id` (per-executable). That key moved to `stdlib-id` precisely so they would
+share — so the second build wrote the same bytes to the same path, and reported
+"brood: skipped (no `brood` on PATH)" whenever it was absent, which reads as a missing image and
+was nothing of the kind.
+
+**Benchmarks: `build_brood()`**, beside `build_beam()` and for the same reason. The runtime
+installs an image but never builds one, so a benchmark host that had never run `nest` would
+measure the source path while a developer's machine measured the image — a split across hosts, not
+a fair-comparison question. The harness now writes it in the build phase. This is not a thumb on
+the scale: default-on means the image is what every user's `require` already does.

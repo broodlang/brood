@@ -608,6 +608,22 @@ enum KeyCmd {
     },
 }
 
+/// Write this binary's stdlib image if there is no current one, so the NEXT process boots with
+/// it. Best-effort and silent on success: a `:present` answer is the common case and costs one
+/// index read, and a failure to build is not a reason to fail the user's command — `require`
+/// simply keeps reading source, exactly as it did before images existed.
+fn ensure_stdimage(interp: &mut Interp, cmd: &Cmd) {
+    // `Stdimage` builds explicitly and reports; the rest are the commands that must stay
+    // instant, where a first-run build would BE the command's whole runtime.
+    if matches!(
+        cmd,
+        Cmd::Stdimage | Cmd::Completions { .. } | Cmd::Complete { .. }
+    ) {
+        return;
+    }
+    let _ = interp.eval_str("(require-one 'stdimage) (stdimage/ensure-built)");
+}
+
 fn main() {
     // Default to a backtrace on panic (see the matching note in
     // `crates/cli/src/main.rs`) — set before any thread spawns; RUST_BACKTRACE=0
@@ -693,6 +709,24 @@ fn run_main(cli: Cli) {
     }
 
     let mut interp = Interp::new();
+
+    // Make the stdlib startup image standard for a project, without asking. The image is what
+    // makes `require` cheap (`json` 6.5 -> 1.7 ms, `http` 12.0 -> 3.6 ms; ADR-256), the prelude
+    // installs one at boot whenever a current one exists, and the only thing missing on a fresh
+    // machine — or the first run after a `brood` upgrade — is that nobody has WRITTEN it.
+    //
+    // `nest` is the right place to pay for that and `brood` is not: a project tool can afford
+    // ~1 s once per stdlib change, while `brood app.blsp` is exactly the short-lived run the
+    // cost would land on. The image is keyed on `system/stdlib-id` — the same for every binary
+    // built from one tree — so `nest` building it also speeds up `brood`, `brood-lsp` and every
+    // later `nest`. Skipped for the commands where a second of silence would be the whole
+    // command (`--version`, `complete`), and never for `stdimage` itself, which does its own.
+    // Only when the image is switched on (`BROOD_STDIMAGE=1`) — see KI-72. There is no point
+    // spending ~1 s writing a file nothing will read, and doing it unconditionally made every
+    // `nest` command in a parallel test run pay for it.
+    if std::env::var_os("BROOD_STDIMAGE").is_some() {
+        ensure_stdimage(&mut interp, &cli.cmd);
+    }
 
     match cli.cmd {
         Cmd::Test {
@@ -837,10 +871,20 @@ fn run_main(cli: Cli) {
                 "(project/load-config) (scaffold/update-tooling)",
             );
         }
-        // Build THIS binary's image, then ask the `brood` on PATH to build its own.
-        // `system/build-id` embeds each executable's mtime — the same reason the expanded-prelude
-        // cache is named per binary — so `nest` and `brood` never share one, and a user
-        // running `brood app.blsp` would otherwise see no benefit from `nest stdimage`.
+        // Build the image, once. It is keyed on `system/stdlib-id` — a content hash of every
+        // baked-in `.blsp` — so `brood`, `nest` and `brood-lsp` from one tree all read the
+        // SAME file and one build serves all three.
+        //
+        // This used to build here and then shell out to the `brood` on PATH to "build its
+        // own", on the premise that the key was `system/build-id` (which embeds each
+        // executable's mtime, so they could not share). That premise is stale: the key moved
+        // to `stdlib-id` precisely so they would share, and the second build was writing the
+        // same bytes to the same path — while silently reporting "skipped" whenever `brood`
+        // was not on PATH, which read as a missing image and was nothing of the kind.
+        //
+        // Rarely needed now: every ordinary `nest` command already writes the image when one
+        // is missing (`ensure_stdimage`). Kept as the explicit form, for a machine where the
+        // first run should not be the one that pays.
         Cmd::Stdimage => run(
             &mut interp,
             concat!(
@@ -848,14 +892,8 @@ fn run_main(cli: Cli) {
                 "(let (r (stdimage/build)) ",
                 "  (if (nil? r) ",
                 "    (io/puts \"no cache directory (set XDG_CACHE_HOME or HOME)\") ",
-                "    (io/puts \"nest:  \" (second r) \" bindings -> \" (first r)))) ",
-                // `brood` runs a FILE, it has no -e; write one and hand it over.
-                "(let (f (path/temp \"brood-stdimage-\") ",
-                "      _ (file/spit f \"(require-one (quote stdimage)) (stdimage/build)\") ",
-                "      code (try (os/run-process \"brood\" [f]) (catch _ nil)) ",
-                "      _ (try (file/rm f) (catch _ nil))) ",
-                "  (io/puts (if (= code 0) \"brood: image built\" ",
-                "             \"brood: skipped (no `brood` on PATH — run it there yourself)\")))",
+                "    (io/puts (second r) \" bindings -> \" (first r) ",
+                "      \" (shared by brood, nest and brood-lsp from this tree)\")))",
             ),
         ),
         Cmd::Tree => {
