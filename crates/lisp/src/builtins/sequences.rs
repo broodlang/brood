@@ -1089,7 +1089,12 @@ pub(super) fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
         Value::Str(id) => Ok(Value::int(
             crate::text_width::display_width(&heap.string(id)) as i64,
         )),
-        _ => Err(LispError::wrong_type(heap, "string/display-width", "string", v)),
+        _ => Err(LispError::wrong_type(
+            heap,
+            "string/display-width",
+            "string",
+            v,
+        )),
     }
 }
 
@@ -1810,7 +1815,10 @@ pub(super) fn int_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         .ok()
         .and_then(char::from_u32)
         .ok_or_else(|| {
-            LispError::runtime(format!("string/int->char: {} is not a valid Unicode codepoint", n))
+            LispError::runtime(format!(
+                "string/int->char: {} is not a valid Unicode codepoint",
+                n
+            ))
         })?;
     let mut buf = [0u8; 4];
     Ok(heap.alloc_string(c.encode_utf8(&mut buf)))

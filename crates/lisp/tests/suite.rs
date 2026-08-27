@@ -64,6 +64,18 @@ fn run_suite() {
     // file's own default won and the sweep stayed full (which is how this was missed).
     // SAFETY: single-threaded, before the interpreter loads any test file.
     unsafe { std::env::set_var("BROOD_UCD_PART1_OF", "16") };
+    // Same treatment, same reason, for the heavier `nboyer` size in
+    // tests/conformance_gabriel_test.blsp. That one test measured **256 s here — a third
+    // of the entire `make test` wall** (715 s of in-language suite inside a 790 s run)
+    // against 19.6 s on the release path: upstream's scaling parameter roughly triples the
+    // rewrite count per step, so n=2's 1.8M rewrites dominate everything else in the suite
+    // put together. Capping at n=1 keeps 0.6M rewrites — still 6x the 95k baseline, so the
+    // sustained-allocation pressure the case exists for is still applied, and applied under
+    // debug-assertions, which is the only thing this wrapper offers that the release path
+    // does not. `nest test` / `make suite` keep running both sizes, and the *answer* is
+    // pinned independently by the small-size case against upstream's published table.
+    // SAFETY: as above.
+    unsafe { std::env::set_var("BROOD_GABRIEL_NBOYER_MAX_N", "1") };
     // Same treatment, same reason, for tests/jit_deep_recursion_test.blsp (the KI-14
     // guard-page regression). Those three cases are ~2.7 s release but ~210 s here — 38%
     // of this wrapper — because the property under test is deep recursion and a debug

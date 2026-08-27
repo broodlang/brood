@@ -163,24 +163,24 @@
 
   (test "multiply adds the operand exponents"
     (assert= (decimal/->string (* 1.50M
-                                2.25M))
+                                 2.25M))
       "3.3750")
     (assert= (decimal/->string (* 1.20M
-                                2M))
+                                 2M))
       "2.40")
     (assert= (decimal/->string (* 0.10M
-                                0.10M))
+                                 0.10M))
       "0.0100"))
 
   (test "add and subtract take the smaller operand exponent"
     (assert= (decimal/->string (+ 1.25M
-                                1.25M))
+                                 1.25M))
       "2.50")
     (assert= (decimal/->string (+ 0.7M
-                                0.3M))
+                                 0.3M))
       "1.0")
     (assert= (decimal/->string (+ 1.00M
-                                2M))
+                                 2M))
       "3.00"))
 
   ;; Regression cases for the two `bigdecimal` short-circuits the corpus caught
@@ -191,30 +191,30 @@
   ;; of a decimal: money scaled by `1.00M` has to stay in cents.
   (test "a zero operand still aligns exponents (subtract)"
     (assert= (decimal/->string (- 1M
-                                (decimal/of "0.0")))
+                                 (decimal/of "0.0")))
       "1.0")
     (assert= (decimal/->string (- 1M
-                                (decimal/of "0.00")))
+                                 (decimal/of "0.00")))
       "1.00")
     (assert= (decimal/->string (- (decimal/of "0.0")
-                                1M))
+                                 1M))
       "-1.0")
     (assert= (decimal/->string (+ 1M
-                                (decimal/of "0.0")))
+                                 (decimal/of "0.0")))
       "1.0"))
 
   (test "a one-valued operand still contributes its scale (multiply)"
     (assert= (decimal/->string (* (decimal/of "-1")
-                                1.00M))
+                                 1.00M))
       "-1.00")
     (assert= (decimal/->string (* 1.00M
-                                (decimal/of "-1")))
+                                 (decimal/of "-1")))
       "-1.00")
     (assert= (decimal/->string (* (decimal/of "-2")
-                                1.00M))
+                                 1.00M))
       "-2.00")
     (assert= (decimal/->string (* 1M
-                                1.00M))
+                                 1.00M))
       "1.00"))
 
   ;; The remaining departure from dectest, on the record rather than left as a
@@ -226,15 +226,15 @@
   ;; decimals ever grow scale-significant equality.
   (test "a zero result prints scale-less (deviation from dectest)"
     (assert= (decimal/->string (- 1.50M
-                                1.50M))
+                                 1.50M))
       "0")
     (assert= (decimal/->string (* 0M
-                                1.50M))
+                                 1.50M))
       "0")
     (assert= (decimal/->string (decimal/of "0.00")) "0")
     ;; non-zero results keep their scale, which is the property that matters
     (assert= (decimal/->string (- 1.50M
-                                1.25M))
+                                 1.25M))
       "0.25"))
 
   (test "exponent alignment across a wide gap is exact"

@@ -285,9 +285,11 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     (seq/drop-last 1 [1 2 3])  → (1 2)"
   (take (- (count coll) n) coll))
 
-(defn third (coll) "The third item of `coll`.
+(defn third (coll)
+  "The third item of `coll`.
 
-    (seq/third [1 2 3])        → 3" (first (rest (rest coll))))
+    (seq/third [1 2 3])        → 3"
+  (first (rest (rest coll))))
 
 (defn times (n f x)
   "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`."

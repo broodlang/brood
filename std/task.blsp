@@ -113,7 +113,9 @@ to keep an interactive loop live."
   (if (pid? thunk-or-handle)
     (await-handle thunk-or-handle timeout-ms)
     (let (me (self)
-          w (spawn (send me [:await--reply (try [:ok (thunk-or-handle)] (catch e [:err (error-message e)]))])))
+          w (spawn (send me
+                     [:await--reply
+                       (try [:ok (thunk-or-handle)] (catch e [:err (error-message e)]))])))
       (receive
         ([:await--reply [:ok v]] v)
         ([:await--reply [:err m]] (error m))

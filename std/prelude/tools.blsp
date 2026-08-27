@@ -1047,6 +1047,7 @@ and that every declared arity still matches its module's actual definition."
 ;; (`string/length`, `string/split`, `string/substring`, `string/lower`, …) are registered
 ;; by the Rust kernel and need nothing.
 (%autoload string
+  (starts-with? 2)
   (char-at 2)
   (blank? 1)
   (ends-with? 2)
@@ -1364,8 +1365,7 @@ resolution; `%impl-for` is what picks the winner."
   (let (methods (get *impls* op-key))
     (or (get methods key) (get methods :default))))
 
-(defn %impl-exact?
-  (op-key key)
+(defn %impl-exact? (op-key key)
   "Is there an impl of op `op-key` registered for id `key` SPECIFICALLY — ignoring the
 `:default` that `%impl-for` falls back to? The question the collection seams ask before
 handing a built-in kind to an ability: `Seqable`'s `:default` is `(map-pairs (fields x))`,
@@ -2006,8 +2006,16 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
   (let (t (type-of x))
     (cond
       (%eq t :map) (if (record? x) (->string x) x)
-      (or (%eq t :int) (%eq t :float) (%eq t :string) (%eq t :nil) (%eq t :bool)
-        (%eq t :keyword) (%eq t :symbol) (%eq t :vector) (%eq t :pair)) x
+      (or (%eq t :int)
+        (%eq t :float)
+        (%eq t :string)
+        (%eq t :nil)
+        (%eq t :bool)
+        (%eq t :keyword)
+        (%eq t :symbol)
+        (%eq t :vector)
+        (%eq t :pair))
+        x
       else (->string x))))
 
 ;; Wire the screen printers to honor `Display` for records, by default (ADR-172 §8).

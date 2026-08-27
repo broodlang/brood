@@ -139,7 +139,8 @@ the order is unspecified and not stable across processes (see `keys`).
 ;; nil for a key that holds values — the worst shape a wrong answer can take. There is no
 ;; ability seam for `get`, so the only honest fix available is to say so: reach for
 ;; `multimap/get` and `multimap/keys`, never the bare ones.
-(impl Conjable multimap/multimap
+(impl Conjable
+  multimap/multimap
   (-conj [mm x]
     (cond
       (and (vector? x) (= (count x) 2)) (assoc mm (nth x 0) (nth x 1))
