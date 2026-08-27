@@ -177,7 +177,10 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   wasm.rs      embedded `wasmtime` host — `%wasm-*` load/call/exports, WIT-typed
                lower/lift + fuel metering (ADR-071/145; Brood policy `std/wasm.blsp`)
   treesit.rs   tree-sitter integration for the editor highlighter (std/editor/treesit.blsp)
-  bundle.rs    single-binary app bundling (ADR-038); gui.rs the GUI frontend (ADR-046);
+  bundle.rs    single-binary app bundling (ADR-038) + the RESERVED `--brood-` argv
+               namespace a bundle honours in first position (ADR-257): `--brood-build-info`
+               and `--brood-boot-check`. Everything else in argv is the app's;
+               gui.rs the GUI frontend (ADR-046);
                gui_gpu.rs the experimental OpenGL backend; audio.rs `audio-beep`
   jit/         the JIT's ABI + backend registry (feature = "jit", ADR-101/220):
                backend.rs (the `JitBackend` contract — six obligations a backend must
@@ -232,7 +235,10 @@ docs/                    architecture, language, roadmap, decisions, devlog,
 The CLI is split (ADR-028, the `rustc`/`cargo` model): **`brood` runs the
 language**, **`nest` runs the project**. Both embed the `brood` lib (no
 subprocess); `nest` is a thin shell over `std/tool/project.blsp`. `nest` subcommands
-today: `new`, `test`, `check`, `run` (with `--watch`), `doc`, `format`, `repl`,
+today: `new`, `test`, `check` (with `--fix-renames`, which applies the *unambiguous* half of
+a rename wave's recovery — ADR-257), `run` (with `--watch`, and `--check-boot`: load every
+module, resolve `:main`, run **nothing**, exit nonzero — the question `check` and `test`
+both leave unasked, KI-66), `doc`, `format`, `repl`,
 `mcp` (an MCP server over the project), `observe` (the M3 process viewer),
 `attach` (the `emacsclient`-style thin frontend for a daemon serving a `ui-run`
 app — ADR-090), `completions` (emit a shell TAB-completion script; `complete` is the hidden
@@ -241,7 +247,9 @@ Emacs — generated from `(special-forms)`, ADR-092), the package-manager comman
 `fetch`/`update`/`tree`/`add`/`remove` (ADR-037) plus `publish`/`search` against a
 **hosted** registry (the `hive` tarball service, ADR-147/211 — *not* a git-backed
 index) and `key` (generate/manage the ed25519 signing keypair `nest publish` uses,
-ADR-212), `release` (single-binary bundling, ADR-038), and `update-tooling` (re-drop
+ADR-212), `release` (single-binary bundling, ADR-038; `--smoke` boot-checks each binary it
+just wrote — the *artifact*, which carries a dependency snapshot no source-tree check can
+see), and `update-tooling` (re-drop
 the AI-assistant files `nest new` scaffolds — the `docs/brood-for-claude.md`
 reference and the `writing-brood` skill — from the current binary, so they don't
 drift as the language evolves).
@@ -259,7 +267,7 @@ cargo run -p nest -- test         # discover + run the project's test suite
 cargo run -p nest -- new foo      # scaffold a new project
 make ab BASE=<ref>                # A/B the working tree vs a git ref on the benchmark rows
 make green                        # IS THE TREE GREEN? completed CI runs + the gates `make check` skips
-make green-all                    # …plus the examples and stress corpus gates
+make green-all                    # …plus clippy on CI's flags, and the examples/stress gates
 ```
 
 **`make green` is the answer to "is the tree green?" — do not hand-read the run list.** It
@@ -273,6 +281,14 @@ and the stress gate; v0.14.0 was tagged and pushed with `nest format --check` re
 that reason. `make green` reports the completed runs of the **CI workflow specifically** (the
 `Release` workflow goes green on commits whose CI failed) and runs the local gates `make check`
 omits; it prints **"no verdict"** rather than "green" when CI has concluded nothing recent.
+
+> **Clippy: `--all-features` is load-bearing, not thoroughness.** CI runs
+> `cargo clippy --all-targets --all-features -- -D warnings`; **a plain
+> `cargo clippy --all-targets` passes on code CI rejects**, because the smaller feature set
+> arms fewer lints. That cost two commits on 2026-08-27, and the second was expensive out of
+> proportion: the `Clippy` step failing **skips every step behind it**, so the tests, the
+> doctests and the checker gate never ran on that commit at all. `make green` says clippy was
+> not run and prints the exact invocation; `make green-all` runs it.
 
 **Reading where the time goes: `make perf-brood`, then `(perf/summary)`.** The counters are a
 cargo feature, so an ordinary (or installed) binary cannot attribute at all — `make perf-brood`

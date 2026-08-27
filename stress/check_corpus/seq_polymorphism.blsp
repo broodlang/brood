@@ -2,4 +2,4 @@
 (io/puts (map inc (list 1 2)) (map inc [1 2]) (map inc (range 3)))
 (io/puts (fold + 0 [1 2 3]) (count {:a 1}) (first (keys {:a 1})))
 (io/puts (filter int? [1 "a" 2 nil 3.5]))
-(io/puts (seq/sort-by count ["ccc" "a" "bb"]))
+(io/puts (sort-by count ["ccc" "a" "bb"]))

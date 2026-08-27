@@ -25,6 +25,7 @@
 //! shape for hot reload (docs/shared-code.md), and `nest` is where the
 //! daily-driver workflow lives.
 
+use brood::bundle::{BUNDLE_BOOT_CHECK_ARG, BUNDLE_BUILD_INFO_ARG};
 use brood::cli_support::{report_error, run_on_main_stack, RawTermGuard};
 use brood::Interp;
 use clap::Parser;
@@ -108,6 +109,31 @@ fn main() {
             .skip(1)
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
+        // The two runtime-reserved arguments, honoured only as the FIRST one. They are
+        // the single exception to "argv goes straight to the app", and they carry the
+        // `--brood-` prefix precisely so the exception costs the app nothing: the prefix
+        // is reserved by the runtime, so no app has to know it exists in order to keep
+        // its own `--build-info` or `--boot-check`.
+        //
+        // Both answer questions about the ARTIFACT, which is why they live here rather
+        // than in a library the app calls: the moment they are the app's responsibility,
+        // a broken app can no longer tell you what it is — and "what is this?" is asked
+        // exactly when something is broken.
+        match brood::bundle::reserved_command(&args) {
+            Some(BUNDLE_BUILD_INFO_ARG) => {
+                run_on_main_stack("brood-main", || {
+                    run_bundle_meta("(project/build-info-report)")
+                });
+                return;
+            }
+            Some(BUNDLE_BOOT_CHECK_ARG) => {
+                run_on_main_stack("brood-main", || {
+                    run_bundle_meta("(project/check-bundle-boot)")
+                });
+                return;
+            }
+            _ => {}
+        }
         run_on_main_stack("brood-main", move || run_bundle(args));
         return;
     }
@@ -177,6 +203,19 @@ fn run(cli: Cli) {
         interp.eval_str("(repl/run)")
     };
     if let Err(e) = result {
+        report_error(&e);
+        std::process::exit(1);
+    }
+}
+
+/// Run one of the reserved bundle meta-commands: evaluate `code` in a fresh interp
+/// and exit non-zero if it raises. Deliberately does **not** go through
+/// `run_bundle` — neither command may invoke the app's `:main`, and the build-info
+/// one must answer even when the app's modules cannot load at all.
+fn run_bundle_meta(code: &str) {
+    brood::core::alloc::init_limits_from_env();
+    let mut interp = Interp::new();
+    if let Err(e) = interp.eval_str(code) {
         report_error(&e);
         std::process::exit(1);
     }

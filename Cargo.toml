@@ -8,6 +8,58 @@ edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["Wilhelm Kirschbaum"]
 
+# `cargo test` / `cargo nextest` build this profile. It is OPTIMIZED, deliberately.
+#
+# Brood's test suite is an interpreter exercising itself, so it is exactly the workload an
+# unoptimized build punishes most. Measured 2026-08-27 on the same commit and the same ~1200
+# in-language cases: **933 s** for `brood_suite_passes` under the stock (opt-level 0) test
+# profile, against **58 s** for the identical suite on the release binary — a **16x** tax that
+# is entirely the profile and has nothing to do with the tests.
+#
+# That tax is what `.config/nextest.toml`'s budget history is a record of: the cap on this one
+# wrapper went 300s -> 600s -> 1200s -> 2700s, and its own comments note the release path doing
+# the same work in 88 s. Every raise treated the symptom. This treats the cause.
+#
+# `debug-assertions` stays ON (inherited from `dev`, and stated here so a future edit cannot
+# drop it silently). That combination — optimized + assertions armed — is the one CLAUDE.md
+# already recommends for manual runs, because it keeps the per-deref GC tripwire and the heap
+# verifier live at release speed. The tests must run WITH those armed; they are how a
+# use-after-GC is caught at the bad deref instead of as a distant SIGSEGV.
+#
+# `opt-level = 2`, not 3: on this workload 3 buys little over 2 and costs noticeably more
+# compile time, and compile time is the whole price being paid here.
+[profile.test]
+opt-level = 2
+debug-assertions = true
+# `line-tables-only`, not full debuginfo. Full DWARF made each test binary ~500 MB and
+# `target/debug` 30 GB, and generating and linking that dominated the build. Measured
+# 2026-08-27, `cargo test --workspace --no-run` from clean:
+#
+#     full DWARF          3m44s wall,  30 GB
+#     line-tables-only    2m28s wall,  20 GB
+#
+# and the comparison UNDERSTATES the gain: changing this key invalidates every dependency,
+# so the second run also rebuilt the whole third-party graph that the first one reused, and
+# still finished a third faster. (Its higher CPU total is that extra work, not a regression
+# — read the wall clock here, not `user`.)
+#
+# Line tables keep exactly what this repo actually reads: `file:line` in a backtrace, which
+# `RUST_BACKTRACE=1` is defaulted to in both binaries' `main` and which
+# `cli_support::install_crash_dump` writes to `.brood_crash_dump`. What goes is the variable
+# and type DWARF only an interactive debugger uses; `gdb --batch -ex run -ex bt` on a
+# use-after-GC SIGSEGV — the documented recipe — still gets its function names and lines.
+debug = "line-tables-only"
+
+# The lib and its dependencies as built FOR the tests. `cargo test` compiles the crate under
+# test with `profile.test`, but its path dependencies come from `profile.dev` — and for this
+# workspace the code under test (`crates/lisp`) is a dependency of every other crate's test
+# binaries, so leaving `dev` at opt-level 0 would leave most of the tax in place.
+[profile.dev]
+opt-level = 2
+debug-assertions = true
+# Same reasoning as `profile.test` above — this is what the lib is built as FOR the tests.
+debug = "line-tables-only"
+
 # The runtime `nest release` appends an app to (ADR-038). Inherits `release` and
 # squeezes the shipped binary: `strip` drops symbols + debug info; fat `lto` +
 # a single codegen unit cross-module-inline and dead-code-eliminate the whole

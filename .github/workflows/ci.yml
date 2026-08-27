@@ -61,10 +61,51 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
-  # Lint + test together: both need the full --all-features build (gui/audio/jit/
-  # treesit), so they share the one toolchain, system-dep install, and cache.
+  # Clippy runs ALONE, in parallel with the test job, and that is the point.
+  #
+  # It lints `--all-features` (gui/gui-gpu/audio/system-alloc/loom-model); the tests build
+  # `brood/treesit-grammars`. Cargo compiles the entire dependency graph once PER FEATURE
+  # SET, so while these shared a job, clippy's build was thrown away before nextest started
+  # its own — the job paid for two full compilations back to back, and every step behind
+  # clippy waited for it. Measured 2026-08-27 at `opt-level = 2`: 118 s of clippy build,
+  # then ~390 s rebuilding the same crates under different flags.
+  #
+  # Splitting costs one more runner and a second cache restore; it buys `max(lint, test)`
+  # instead of `lint + test`, and full `--all-features` lint coverage is kept exactly as it
+  # was — narrowing clippy to the test features would have been the cheaper fix and would
+  # have stopped linting every gui/audio/sanitizer path.
+  lint:
+    name: clippy (all features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Same invocation as `make clippy`: all targets, all features, warnings fatal.
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Lives HERE, not in the test job, purely for artifact reuse: `--all-features` above
+      # already compiled `gui,gui-gpu`, so this costs the run of the test. In the test job
+      # it was a fourth distinct feature set — a full rebuild of the graph to exercise one
+      # `--lib gui` target.
+      - name: Test (gui renderer — feature-gated, not covered by the nextest run)
+        run: cargo test -p brood --features gui,gui-gpu --lib gui
+
   build-test:
-    name: clippy + test
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,10 +131,6 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-
-      # Same invocation as `make clippy`: all targets, all features, warnings fatal.
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
 
       # The no-JIT configuration (`BROOD_NO_JIT` has a build-level counterpart —
       # CLAUDE.md documents `--no-default-features` as supported). It broke silently
@@ -133,12 +170,12 @@ jobs:
       # clippy step and executed by nothing. A guard that never runs is not a guard —
       # and these are exactly the cases that pin a GUI-thread panic, which no Brood
       # `try` can catch. The system deps this needs are already installed above.
-      - name: Test (gui renderer — feature-gated, not covered by the run above)
-        run: cargo test -p brood --features gui,gui-gpu --lib gui
-
       # nextest doesn't run doctests; run them separately so future ones are covered.
+      # Aligned with the nextest step's features on purpose: `cargo test --doc` on the
+      # DEFAULT set was a third distinct feature configuration in this job, so it rebuilt
+      # the whole graph a third time to run a handful of doctests.
       - name: Doctests
-        run: cargo test --doc
+        run: cargo test --doc --features brood/treesit-grammars
 
       # The advisory type checker's ONE hard reject, which is batch/CI-only by
       # design (ADR-123/124/125/126): the checker never gates the live image, so
@@ -310,6 +347,17 @@ jobs:
       # This job already builds `nest`, so the gate costs one command.
       - name: Check .blsp formatting (nest format)
         run: ./target/release/nest format --check
+
+      # STATIC pass over the same trees, and it is not redundant with the two RUN-based gates
+      # below. Those execute the programs, so they only ever see a dead name on a path a run
+      # actually takes; this resolves every name in the file. With both of them green on
+      # 2026-08-27 this found 74 unresolvable names — 31 `rem`, 11 `quot`, the whole `table-*`
+      # family in `stress/check_corpus/` — all of them rename rot on branches nothing had run.
+      # Cheap (a few seconds) and it runs FIRST, so the fast, precise failure comes before the
+      # slow one.
+      - name: Check the corpora resolve (static)
+        shell: bash
+        run: make check-corpora
 
       - name: Check the examples
         shell: bash

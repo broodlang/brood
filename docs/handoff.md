@@ -5,10 +5,13 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-27 (the dead-gates session, concluded).** Released **v0.14.0** and
-**v0.14.1**, both tagged and pushed. `known-issues.md` shows **no open bug and no watch
-item**. Three separate gates turned out to be passing without testing anything, and the
-theme of the day is that *all three failed the same way* — see the box at the end.
+**As of 2026-08-27 (the dead-gates session, then the toolchain-gaps session — both
+concluded).** Released **v0.14.0** and **v0.14.1**, both tagged and pushed.
+`known-issues.md` shows **no open bug and no watch item**, and the open lists of both
+sessions are now empty (see "the toolchain gaps … are CLOSED too", below).
+
+Three separate gates turned out to be passing without testing anything, and the theme of
+that day is that *all three failed the same way* — see the box after the next section.
 
 **Read this first if you are about to judge whether the tree is green.** It was not, and the
 run list said it was. Every CI run after a failure is `cancelled` by the next push (the
@@ -54,18 +57,66 @@ concluded nothing recent. `make green-all` adds the examples and stress corpus g
 > gate goes red. Both KI-69 guards survived only because someone had already done this
 > (`only {checked} lowerable chunks inspected … a green result would mean nothing`).
 
-**Open, and worth doing next:**
+**All three ungated classes that session listed as open are now CLOSED** — by `5aa49463`,
+which landed after the paragraphs above were written:
 
-- **`nest check` has no gate over `examples/`, `stress/`, `scripts/fuzz/stress/` or
-  `breakage/`.** `make check-examples` / `make check-stress` run those programs and grep for
-  `unbound symbol`, which is weaker: it only catches a name on an executed path. This is why
-  the rot reached 22 harnesses.
-- **Brood embedded in non-`.blsp` files is ungated** — `stress/fuzz_programs.py` (KI-68) and
-  Brood inside `crates/lisp/tests/*.rs`. `scripts/stale-names.sh` and every `.blsp` gate walk
-  `.blsp` only.
-- **The reversed-args rename class has no gate at all** (KI-71): arity unchanged, nothing
-  unbound, the type warning advisory. `nest rename --swap` exists to *perform* one; nothing
-  detects a missed one.
+- The corpora are checked **statically**: `make check-corpora` / `scripts/check-corpora.sh`
+  runs `nest check` over `examples/`, `stress/`, `scripts/fuzz/stress/` and `breakage/` and
+  fails on any `unbound symbol`, per tree. The three runtime gates beside it
+  (`check-examples`, `check-stress`, `breakagetests`) only ever saw a name on an **executed**
+  path; with all three green, the static pass found **74** unresolvable names. Wired into CI
+  (`ci.yml`), ahead of the slow run-based gates.
+- Brood **embedded in non-`.blsp` files** is gated where it mattered — the docs' 123 code
+  blocks, via `tests/doc_snippets_test.blsp` (qualified call heads inside code blocks: 24,
+  all real). The other two surfaces were already covered (`scaffold_quality.rs` checks every
+  `nest new` template; the Python fuzz generator got its liveness assertion with KI-68).
+- The **reversed-args class** has its gate (KI-71).
+
+**The toolchain gaps a downstream migration exposed are CLOSED too (2026-08-27, ADR-257).**
+Migrating hive and its dependency closure across the namespacing waves took the registry down
+twice; neither outage was a language bug, both were gaps in what the toolchain could tell you
+before you shipped. Three of the five were a question nothing had a command for:
+
+1. **Does it boot?** `nest run --check-boot` loads every source module and resolves `:main`,
+   running nothing; `nest release --smoke` then does it to the **binary just written**. That
+   second half is the one that matters — a bundle carries a *snapshot* of every dependency,
+   so a dep updated on disk since the last `nest fetch` is invisible to any source-tree check
+   and fatal in the artifact. All four entry paths share one entry resolver, so the check
+   cannot drift from the boot it checks. (KI-66) **Know its edge:** it catches a module that
+   raises at *load*, not a name reached only once `main` executes — that one is
+   `nest run --for`, already wired in hive's CI. ADR-257 has the three-way table; don't
+   trust `--check-boot` past it.
+2. **What is this binary?** `myapp --brood-build-info` — version, build-id, features, app +
+   module count. The **`--brood-` argv prefix is reserved** (two names, first position only)
+   so the bundle's "argv belongs to the app" contract is intact; it loads no module, so it
+   answers on a broken bundle.
+3. **What moved?** `nest check --fix-renames` (+ `--dry-run`). Applies only unambiguous public
+   moves, through the CST and `:refs-only`; declines with a printed reason for ambiguity, a
+   `%`-withdrawn target, and a name the project itself defines — the last being the hazard
+   that cost a revert, since `nest rename` is not scope-aware.
+4. `nest check` now sees inside a `try` body (KI-67), and `docsite/render-css` emits CSS
+   variables so an embedding host rethemes by redefinition rather than by overriding ~30
+   selectors.
+
+**So: no open bug, no watch item, and no open item on the last two sessions' lists.** The
+tree is clear to start new work — verify with `make green` first (it is the answer to "is
+this tree green?"; do not hand-read the run list).
+
+**Where to look next**, in rough value order — see `ROADMAP.md` and `docs/roadmap-for-v1.md`:
+
+- **The 1.0 language surface is freeze-ready** (all four pre-freeze items shipped, ADR-170
+  ratified). The one remaining non-language release blocker is **`nest format --check`'s
+  comment *hoisting*** — a style verdict nobody has made, not a defect hunt. ~40% of the red
+  is the formatter moving a same-line trailing comment onto its own line, which is intended,
+  documented behaviour that this tree's authors do not write for. Decide hoisting first;
+  `roadmap-for-v1.md` has the measurement, and says not to run the formatter tree-wide before
+  that call. (Re-measure: a format sweep landed 2026-08-19 and the figure predates it.)
+- **The stdlib surface audit's residue** (ADR-250–253): example coverage ~16% of ~1,150
+  functions (each example written is a test gained — `tests/doc_examples_test.blsp` executes
+  them), ability seams that cannot reach `rope`/`table`, and the naming seams.
+- **VM/JIT**: the cheap end of the compute frontier is mined out; what is left (X-register
+  call convention, computed-goto dispatch, the `bintree`/`nqueens` allocation frontier) is a
+  multi-session redesign each.
 
 **Previous session's entry follows.**
 

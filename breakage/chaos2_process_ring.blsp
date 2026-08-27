@@ -43,7 +43,7 @@
 
   ;; Wire each node to the next (ring topology)
   (doseq (i (range n))
-    (let (next-i (rem (+ i 1) n))
+    (let (next-i (math/rem (+ i 1) n))
       (send (get ring-pids i)
         {:next (get ring-pids next-i)
          :done me
@@ -82,8 +82,8 @@
   ;; Expected: 0+1+2+...+(n-1) = n*(n-1)/2
   (def p24-expected (* n (- n 1) (/ 1 2)))
   (io/puts "P24: sum:" p24-sum)
-  (io/puts "P24: expected:" (quot (* n (- n 1)) 2))
-  (io/puts "P24-correct:" (= p24-sum (quot (* n (- n 1)) 2))))
+  (io/puts "P24: expected:" (math/quot (* n (- n 1)) 2))
+  (io/puts "P24-correct:" (= p24-sum (math/quot (* n (- n 1)) 2))))
 
 ;;; ---- P25: selective receive queues non-matching messages ----
 (io/puts "=== P25: selective receive ordering ===")

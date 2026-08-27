@@ -195,7 +195,7 @@ fn boot_cache_prune(dir: &std::path::Path, keep: &std::path::Path) {
         found.push((modified, p));
     }
     // Newest first, then everything past the cap goes, plus anything stale.
-    found.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    found.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
     for (i, (modified, p)) in found.iter().enumerate() {
         let stale = modified.elapsed().ok().is_some_and(|age| age > MAX_AGE);
         if i >= MAX_KEEP || stale {

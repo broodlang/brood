@@ -42,7 +42,7 @@
 (defn bench-compiled-match (n)
   (if (= n 0)
     :done (do
-      (compiled-100-match (rem n 101))
+      (compiled-100-match (math/rem n 101))
       (bench-compiled-match (- n 1)))))
 (io/puts "bench 100k calls to compiled 100-clause match..." (bench-compiled-match 100000))
 
@@ -99,10 +99,10 @@
 
 (defn classify-num (n)
   (match n
-    (x :when (and (int? x) (< x 0) (= (rem x 2) 0)) "negative even int")
+    (x :when (and (int? x) (< x 0) (= (math/rem x 2) 0)) "negative even int")
     (x :when (and (int? x) (< x 0)) "negative odd int")
     (x :when (and (int? x) (= x 0)) "zero")
-    (x :when (and (int? x) (= (rem x 2) 0)) "positive even int")
+    (x :when (and (int? x) (= (math/rem x 2) 0)) "positive even int")
     (x :when (int? x) "positive odd int")
     (x :when (float? x) (str "float: " x))
     (_ "other")))
@@ -132,7 +132,7 @@
 (defn classify-loop (n acc-pos acc-neg acc-zero)
   (if (= n 0)
     {:pos acc-pos :neg acc-neg :zero acc-zero}
-    (match (rem n 13)
+    (match (math/rem n 13)
       (0 (classify-loop (- n 1) acc-pos acc-neg (+ acc-zero 1)))
       (x :when (< x 7) (classify-loop (- n 1) (+ acc-pos 1) acc-neg acc-zero))
       (_ (classify-loop (- n 1) acc-pos (+ acc-neg 1) acc-zero)))))

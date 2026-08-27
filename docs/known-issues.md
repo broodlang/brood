@@ -82,7 +82,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | # | What | Status |
 |---|---|---|
 | KI-72 | **the stdlib image cannot be default-ON yet: it turns a latent require-stall into a reliable one.** Measured with 12 parallel copies of `autoload_race --test-threads=4` against a 90 s timeout: **12 of 12 exceed it with the image installed, 0 of 12 without**, and the same test passes 12/12 alone in 0.5 s. Not a deadlock — nothing hangs permanently. The edge replay must run BEFORE `provide` (or a racing process sees a module whose dependencies are missing — the 112-failure bug ADR-256 fixed), so a module stays unprovided while it recursively requires its whole edge set, and every process that wants it meanwhile enters `%require-await`'s **5 ms x 1000** poll before force-loading. The image makes many more modules take that path in a burst, so the stalls compound | ⚠️ **OPEN 2026-08-27** — image reverted to opt-in (`BROOD_STDIMAGE=1`) the day it was flipped; everything else from ADR-256 ships. The fix is the POLL, not the ordering: `%require-await` should wait on the loader finishing rather than sleep-and-recheck. Note the synthetic load stresses something pre-existing — at 12x4 parallelism the default (no image) still shows 4 of 12 — so a fix should be measured on both arms |
-| KI-71 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right. Fixed downstream with `nest rename --swap`, which exists for exactly this. Recorded because the CLASS has no gate: a moved name gives the checker something to point at, a swapped one gives a plausible wrong answer somewhere else. Worth its own heading in release notes |
+| KI-71 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right; fixed downstream with `nest rename --swap`. ✅ **The class now HAS a gate (same day):** the checker already catches a reversed call precisely, per argument — it was silent here only because `seq/remove-nth` had **no declared `sig`**. The index/collection functions (`remove-nth`, `take-last`, `drop-last`, `chunk-every`, `split-at`, `sample`, `shuffle`, `vector-ref`) now carry one, so the reversal is a warning and CI's zero-warning gate makes it a hard failure. Argument types precise, return `any` — the reversal is an argument mistake, and a narrow return would false-positive at every call site. Zero new warnings across std/ + tests/. Guards `a_reversed_index_and_collection_call_is_flagged` + `the_correct_index_first_order_stays_silent`, sabotage-verified by deleting one `sig` |
 | KI-70 | **the checker never looked inside a vector or map literal**, so every expression in Hiccup-shaped code was unchecked. `check_into_inner` opened with `let Value::Pair(_) = form else { return }` — a `[…]` or `{…}` in value position ended the walk, though its contents are ordinary evaluated code. hive's `/docs` renderer carried `(str (max 2 …))` for weeks after `max` moved to `math`: `nest check` green, `nest test` green, and only rendering the page raised it. One level out from KI-67 — not a form that suppressed the lint, a form the walk never reached | ✅ **fixed 2026-08-27** — `Value::Vector` and `Value::Map` descend into their elements (map **keys** as well as values). No false positives: the checker runs on macroexpanded forms, so a `match` pattern vector is already lowered to `let`/`if` binders, and `quote`/`quasiquote` return at `SpecialHead::SkipBody` before their data is ever handed down. std/ + tests/ stayed at **zero warnings** apart from one real find — `std/tool/mcp.blsp`'s `callers` tool called the module-private `project-all-files` from inside a map literal, the **fifth** dead `project-*` call site and the one KI-67's sweep could not see. Guards `unbound_inside_a_vector_or_map_literal_is_flagged` + `descending_into_a_literal_does_not_read_data_as_code`, sabotage-verified |
 | KI-69 | **two `jit_plan` guards failed on every `main` push**, so the `differential (tree-walker)` job had been red since KI-64's fix landed. `block_argument_spills_never_reach_the_deopt_journal` and `the_block_argument_want_is_clamped_to_the_reserve` assert on VM-compiled arms, and the job runs `BROOD_VM=0` — nothing compiles, so the first inspected 0 chunks and the second saw no arm to clamp. Both fail loudly by design (a vacuous green would mean nothing), which is why they failed rather than passing hollowly | ✅ **fixed 2026-08-27** — both pin `set_forced_ceiling(Some(Tier::Native))`, the fix `compile/tests.rs` already documents for its two native tests since ADR-222 made the ceiling coherent. The guards are new (2026-08-26) and simply missed the pin |
 | KI-68 | **the fuzz-differential gate was HOLLOW — it had been comparing dead programs.** `stress/fuzz_programs.py` writes Brood source itself, and the rename waves retired every name it emitted (`table`, `rem`, `bit-and`, `bit-xor`, `table-get`/`put`/`incr`/`count`, `quot`, `min`/`max`, `println`, `map-get`/`map-count`/`map-dissoc`/`map-int-add`). Every engine died identically on `unbound symbol` at line 1, so all four configs *agreed*, every seed printed `ok`, and the run ended "all configs agree". The generator is Python, so `nest check` and the `.blsp` suite could never see it | ✅ **fixed 2026-08-27** — names updated (60 seeds, 0 unbound, all configs agree with real digests) **and the shape gated**: an `unbound symbol` on stderr from a GENERATED program is now a hard failure naming the dead names, and a run where not one seed reached a clean exit fails as "the corpus is dead, not the engines agreeing". Sabotage-verified in the exact original shape — reverting `(table/new)` to `(table)` prints `DEAD PROGRAM seed=1 … : table` instead of `ok` |
@@ -366,6 +366,25 @@ brood built this, with which features" required `grep -ac cranelift` on the bina
 and the first attempt used `strings`, which is absent from `debian:bookworm-slim` and so
 reported 0 for *command not found* — indistinguishable from "no JIT". A `--build-info` on
 the bundle (brood commit, features, module count) removes that guesswork entirely.
+
+**Both follow-throughs landed 2026-08-27 ([ADR-257](decisions.md)).**
+
+- **`--build-info` shipped** as `myapp --brood-build-info` — brood version, build-id,
+  features, app name/version, module count. The `--brood-` argv prefix is **reserved by
+  the runtime** (two names, first position only) so the bundle's "argv belongs to the app"
+  contract survives intact, and it reads only the manifest and module directory — loading
+  no module, so it still answers on a bundle whose modules are broken, which is when it
+  is asked.
+- **A first-class boot check shipped too**, `nest run --check-boot` and `nest release
+  --smoke`, alongside the `nest run --for` wiring recorded above. The distinction between
+  them is the useful part of this entry and is now written down as a table in ADR-257:
+  `--check-boot` loads every module and resolves `:main` **without invoking it**, so it
+  catches the v130 class (raised during `require`) and *not* the v134 class (reached from
+  `main`'s body) — exactly the point this entry made. In exchange it is always safe to
+  run: no window, no port, no side effects, and valid for a library with no runnable
+  `:main`, which is precisely why `package-ci.yml`'s `boot-check` had to default to false.
+  `--smoke` additionally runs the **artifact**, which carries a dependency snapshot no
+  source-tree check can see.
 
 ---
 
@@ -4540,3 +4559,9 @@ exists for this and rewrites `(f a b)` to `(f b a)`.
 from a moved name. A moved name produces an unbound symbol the checker will point at; a
 swapped one produces a plausible wrong answer somewhere else entirely. Worth listing them
 explicitly in the release notes under their own heading, since no gate will.
+
+<!-- KI-70 addendum, 2026-08-27: a second call site of the same reversed-args change was
+     found in brood-terminal (`seq/remove-nth tabs i`), presenting as one unrelated-looking
+     test failure — "ctrl-d with two tabs closes one". Two repos, two different symptoms,
+     one rename. `grep -rn 'remove-nth'` across the ecosystem is what found it; nothing in
+     the toolchain would have. -->

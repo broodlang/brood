@@ -53,6 +53,20 @@ fn checker_survives_pathologically_deep_forms() {
 /// `check-file` actually do. Required to exercise post-expansion shapes
 /// like `match` (a `defmacro` whose pattern compiler lowers to
 /// `let`+`if`+`%eq`), threading macros, and the test-framework wrappers.
+/// Like [`warnings`], but with `mods` loaded first. A bare `Interp` carries the prelude
+/// only, so a module's declared `sig`s are unknown and every cross-module check passes
+/// vacuously — `brood --check` on a real file auto-requires, this harness does not.
+fn warnings_with(mods: &[&str], src: &str) -> Vec<String> {
+    let mut interp = crate::Interp::new();
+    for m in mods {
+        interp
+            .eval_str(&format!("(require-one '{m})"))
+            .unwrap_or_else(|e| panic!("require {m}: {e:?}"));
+    }
+    let form = reader::read_one(&mut interp.heap, src).expect("parse");
+    check_form(&interp.heap, form)
+}
+
 fn warnings_expanded(src: &str) -> Vec<String> {
     let mut interp = crate::Interp::new();
     let form = reader::read_one(&mut interp.heap, src).expect("parse");
@@ -1361,6 +1375,51 @@ fn unbound_inside_an_error_testing_form_is_still_flagged() {
             w.iter()
                 .any(|m| m.contains("unbound symbol: definitely-not-bound")),
             "{src} should flag the unbound name, got {w:?}"
+        );
+    }
+}
+
+/// KI-71 — a **reversed-args rename** is the one rename mistake with no natural gate: the
+/// arity is unchanged and no name is unbound, so `nest check` is silent and the wrong answer
+/// surfaces somewhere else entirely (`seq/remove-nth` moving to index-first read as seven
+/// unrelated buffer-lifecycle failures downstream). A declared `sig` is what makes it
+/// visible, and the index/collection functions in `std/seq.blsp` now carry one.
+///
+/// Argument types are precise on purpose and the return is `any`: the reversal is an
+/// ARGUMENT mistake, and a too-narrow return would false-positive at every call site.
+#[test]
+fn a_reversed_index_and_collection_call_is_flagged() {
+    for (src, fname) in [
+        ("(seq/remove-nth [1 2 3] 1)", "remove-nth"),
+        ("(seq/take-last (list 1 2 3) 2)", "take-last"),
+        ("(seq/chunk-every [1 2 3 4] 2)", "chunk-every"),
+        ("(seq/split-at [1 2 3] 1)", "split-at"),
+    ] {
+        let w = warnings_with(&["seq"], src);
+        assert!(
+            w.iter()
+                .any(|m| m.contains(fname) && m.contains("argument 1 expects int")),
+            "{src} reverses index and collection and should be flagged, got {w:?}"
+        );
+    }
+}
+
+/// The false-positive half: the CORRECT order must stay silent, and so must a call whose
+/// arguments are untyped locals — the checker only knows a param's type when something
+/// says so, and guessing would make these sigs unusable.
+#[test]
+fn the_correct_index_first_order_stays_silent() {
+    for src in [
+        "(seq/remove-nth 1 [1 2 3])",
+        "(seq/take-last 2 (list 1 2 3))",
+        "(seq/chunk-every 2 [1 2 3 4])",
+        "(seq/split-at 1 [1 2 3])",
+        "(fn (i coll) (seq/remove-nth i coll))",
+    ] {
+        assert!(
+            warnings_with(&["seq"], src).is_empty(),
+            "{src} is correct and should be silent, got {:?}",
+            warnings_with(&["seq"], src)
         );
     }
 }
