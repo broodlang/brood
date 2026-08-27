@@ -44,6 +44,20 @@ pub const BUNDLE_BUILD_INFO_ARG: &str = "--brood-build-info";
 /// boot check `nest release --smoke` runs against each binary it writes (KI-66).
 pub const BUNDLE_BOOT_CHECK_ARG: &str = "--brood-boot-check";
 
+/// Which reserved command, if any, `args` (a bundle's argv minus argv[0]) asks for.
+///
+/// The whole contract in one testable place: recognized **only as the first argument**,
+/// and **only** these two spellings. Anywhere else — second position, or any other
+/// `--brood-…` name — the argument belongs to the app and is passed through untouched,
+/// so a bundle can neither swallow an app's argument nor grow a second meaning for one.
+pub fn reserved_command(args: &[String]) -> Option<&'static str> {
+    match args.first().map(String::as_str) {
+        Some(BUNDLE_BUILD_INFO_ARG) => Some(BUNDLE_BUILD_INFO_ARG),
+        Some(BUNDLE_BOOT_CHECK_ARG) => Some(BUNDLE_BOOT_CHECK_ARG),
+        _ => None,
+    }
+}
+
 /// Footer magic — 8 bytes, the trailing digit doubling as the format version so
 /// a stale `nest` writing v1 against a `brood` expecting v2 is detectable.
 const MAGIC: &[u8; 8] = b"BRDBNDL1";
@@ -279,6 +293,39 @@ mod tests {
         assert_eq!(bundle.modules, modules);
         assert_eq!(bundle.module_src("util"), Some("(defn helper () 2)"));
         assert_eq!(bundle.module_src("absent"), None);
+    }
+
+    /// The reserved-argument contract: first position only, exact spelling only.
+    /// Everything else is the app's — that is the property the bundle's whole argv
+    /// design rests on, so it is asserted rather than assumed.
+    #[test]
+    fn reserved_commands_are_first_position_and_exact() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            reserved_command(&argv(&[BUNDLE_BUILD_INFO_ARG])),
+            Some(BUNDLE_BUILD_INFO_ARG)
+        );
+        assert_eq!(
+            reserved_command(&argv(&[BUNDLE_BOOT_CHECK_ARG, "ignored"])),
+            Some(BUNDLE_BOOT_CHECK_ARG)
+        );
+
+        // Not first → the app's.
+        assert_eq!(
+            reserved_command(&argv(&["serve", BUNDLE_BUILD_INFO_ARG])),
+            None
+        );
+        // No args at all → run the app.
+        assert_eq!(reserved_command(&[]), None);
+        // The app's own similarly-named flags are untouched: reserving the
+        // `--brood-` prefix is exactly what buys this.
+        assert_eq!(reserved_command(&argv(&["--build-info"])), None);
+        assert_eq!(reserved_command(&argv(&["--boot-check"])), None);
+        // An unrecognized `--brood-…` is passed through, not swallowed as a typo'd
+        // reserved word — the app may legitimately define it, and guessing would be
+        // the silent-wrong-behaviour failure mode.
+        assert_eq!(reserved_command(&argv(&["--brood-nonesuch"])), None);
     }
 
     #[test]

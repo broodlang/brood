@@ -853,3 +853,34 @@
           (range n))
         (coloc-await-n n))
       (assert= pkge/twomod-internal/*loads* 1))))
+
+;; `--brood-build-info` — the answer to "which brood built this, with which features".
+;; It existed nowhere: answering it meant grepping the binary over SSH, and the first
+;; attempt used `strings`, which `debian:bookworm-slim` does not ship — so it reported
+;; nothing and read exactly like "no JIT". Every fact was already in the runtime.
+;;
+;; The bundled half (`:app`/`:module-count`) can only be exercised by a real `nest
+;; release` artifact; `crates/nest/tests/` owns that. What is checked here is the half
+;; that must hold for EVERY binary, bundle or not.
+(describe "project: build-info"
+  (test "reports this runtime's identity, unbundled"
+    (let (info (project/build-info))
+      (assert= (get info :bundled?) false)
+      (assert= (get info :brood-version) (system/brood-version))
+      (assert= (get info :build-id) (system/build-id))
+      ;; A *bound* builtin does not imply a working one, which is why the feature set
+      ;; is reported rather than inferred from what happens to be bound.
+      (is (vector? (get info :features)))))
+  ;; It has to answer on a binary whose app is broken — that is when it is asked — so it
+  ;; must not be able to reach a module load. Nothing here is app state.
+  (test "an unbundled binary carries no app fields"
+    (let (info (project/build-info))
+      (is (nil? (get info :app)))
+      (is (nil? (get info :module-count)))))
+  (test "the printed report names every field and returns 0"
+    (let (out (with-out-str (assert= (project/build-info-report) 0)))
+      (is (includes? out "brood:"))
+      (is (includes? out "build-id:"))
+      (is (includes? out "features:"))
+      ;; No app line without an app — the report describes what is there, not a template.
+      (refute (includes? out "app:")))))
