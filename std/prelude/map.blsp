@@ -215,7 +215,10 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
         default)
     else default))
 (defn get-in (m path & default)
-  "The value in nested maps `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. `(get-in m ())` is `m`."
+  "The value in nested maps `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. `(get-in m ())` is `m`.
+
+    (get-in {:a {:b 1}} [:a :b])   → 1
+    (get-in {:a 1} [:z :y])        → nil"
   (%get-in-walk m path (first default)))
 
 ;; check-allow: deliberately non-tail — depth = (count path) — a few keys, never data scale.
@@ -228,7 +231,9 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
         (assoc m k (assoc-in (get m k) ks v))))))
 
 (defn update-in (m path f & args)
-  "A nested copy of `m` with the value at the key sequence `path` replaced by `(apply f current args)` (creating intermediate maps as needed)."
+  "A nested copy of `m` with the value at the key sequence `path` replaced by `(apply f current args)` (creating intermediate maps as needed).
+
+    (update-in {:a {:b 1}} [:a :b] inc)   → {:a {:b 2}}"
   (assoc-in m path (apply f (get-in m path) args)))
 
 ;; The nested-access family was `get-in`/`assoc-in`/`update-in` with no removal —
@@ -247,8 +252,13 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
         (contains? m k) (assoc m k (dissoc-in (get m k) ks))
         else m))))
 
-(defn identity (x) "Return `x` unchanged." x)
-(defn zero? (n) "True if `n` is zero." (= n 0))
+(defn identity (x) "Return `x` unchanged.
+
+    (identity 5)   → 5" x)
+(defn zero? (n) "True if `n` is zero.
+
+    (zero? 0)     → true
+    (zero? 0.0)   → false   ; `=` is type-strict, so a FLOAT zero is not `0`" (= n 0))
 ;; `nan` is a reader-level float literal, so the language could *produce* a NaN
 ;; long before it could TEST for one: `=` reports NaN as equal to nothing (the
 ;; IEEE rule), which is simultaneously the only way to detect it. Naming that
@@ -264,7 +274,9 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
 ;; `rem`. (a - (rem a b)) is exactly divisible by b, so `/` returns an exact int
 ;; (no float round-trip — correct even for large i64, unlike (floor (/ a b))).
 (defn quot (a b)
-  "Truncated integer division of `a` by `b` (toward zero); the quotient partner to `rem`."
+  "Truncated integer division of `a` by `b` (toward zero); the quotient partner to `rem`.
+
+    (quot 7 2)    → 3"
   (%quot a b))
 
 ;; Euclidean modulo: the result is always non-negative and lies in
@@ -272,7 +284,10 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
 ;; back into range when `rem` comes out negative. (÷0 raises via `rem`.)
 ;; Note this is *not* floored modulo: `(mod 7 -3)` is 1, not -2.
 (defn mod (a b)
-  "Euclidean modulo: the result is always non-negative and lies in [0, |b|)."
+  "Euclidean modulo: the result is always non-negative and lies in [0, |b|).
+
+    (mod 7 2)     → 1
+    (mod -1 3)    → 2   ; sign follows the DIVISOR"
   ;; `(abs b)` inlined so bare `mod` stays self-sufficient — `abs` now lives in the
   ;; `math` module (ADR-227) and the boot-time prelude cannot require a module.
   (let (r (rem a b)) (if (< r 0) (+ r (if (< b 0) (- b) b)) r)))
@@ -281,11 +296,15 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
 ;; call head for a `{…}` map literal inside a template, so every macro that builds a
 ;; map depends on the bare name existing.
 (defn hash-map (& more)
-  "A map from alternating key/value arguments (last wins on duplicate keys)."
+  "A map from alternating key/value arguments (last wins on duplicate keys).
+
+    (hash-map :a 1)   → {:a 1}"
   (apply %hash-map more))
 
 ;; `zipmap` stays core: a prelude sequence helper builds a map with it, and `map` is
 ;; not force-loaded at boot.
 (defn zipmap (ks vs)
-  "A map pairing each key in `ks` with the value at the same position in `vs`, stopping at the shorter."
+  "A map pairing each key in `ks` with the value at the same position in `vs`, stopping at the shorter.
+
+    (zipmap [:a] [1])   → {:a 1}"
   (into {} (zip ks vs)))

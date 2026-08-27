@@ -4,22 +4,46 @@
 ;; variadic comparison, and it can't be shadowed by a local `=`.)
 ;; `nil?` and `pair?` are native builtins (builtins.rs) — they compile to
 ;; PrimOp1::IsNil / IsPair inline instructions, eliminating call overhead.
-(defn int? (x) "True if `x` is an integer." (%eq (type-of x) :int))
-(defn float? (x) "True if `x` is a float." (%eq (type-of x) :float))
-(defn bool? (x) "True if `x` is a boolean." (%eq (type-of x) :bool))
-(defn string? (x) "True if `x` is a string." (%eq (type-of x) :string))
+(defn int? (x) "True if `x` is an integer.
+
+    (int? 1)     → true
+    (int? 1.0)   → false   ; a float is not an int" (%eq (type-of x) :int))
+(defn float? (x) "True if `x` is a float.
+
+    (float? 1.5) → true
+    (float? 1)   → false" (%eq (type-of x) :float))
+(defn bool? (x) "True if `x` is a boolean.
+
+    (bool? true)   → true" (%eq (type-of x) :bool))
+(defn string? (x) "True if `x` is a string.
+
+    (string? \"a\")   → true
+    (string? :a)    → false" (%eq (type-of x) :string))
 (defn bytes? (x) "True if `x` is a bytes value." (%eq (type-of x) :bytes))
 (defn decimal? (x)
   "True if `x` is an exact base-10 decimal (e.g. `1.50M`)."
   (%eq (type-of x) :decimal))
 (defn ratio? (x)
-  "True if `x` is an exact rational (e.g. `1/2`)."
+  "True if `x` is an exact rational (e.g. `1/2`).
+
+    (ratio? 1/2)   → true"
   (%eq (type-of x) :ratio))
-(defn symbol? (x) "True if `x` is a symbol." (%eq (type-of x) :symbol))
-(defn keyword? (x) "True if `x` is a keyword." (%eq (type-of x) :keyword))
-(defn vector? (x) "True if `x` is a vector." (%eq (type-of x) :vector))
-(defn map? (x) "True if `x` is a map." (%eq (type-of x) :map))
-(defn set? (x) "True if `x` is a set (a `#{…}` value)." (%eq (type-of x) :set))
+(defn symbol? (x) "True if `x` is a symbol.
+
+    (symbol? 'a)   → true" (%eq (type-of x) :symbol))
+(defn keyword? (x) "True if `x` is a keyword.
+
+    (keyword? :a)  → true" (%eq (type-of x) :keyword))
+(defn vector? (x) "True if `x` is a vector.
+
+    (vector? [1])   → true" (%eq (type-of x) :vector))
+(defn map? (x) "True if `x` is a map.
+
+    (map? {:a 1})   → true
+    (map? #{1})     → false   ; that is a SET" (%eq (type-of x) :map))
+(defn set? (x) "True if `x` is a set (a `#{…}` value).
+
+    (set? #{1})    → true" (%eq (type-of x) :set))
 (defn ref? (x) "True if `x` is a `(ref)` token (a unique reference)." (%eq (type-of x) :ref))
 (defn pid? (x) "True if `x` is a process id (from `self`/`spawn`)." (%eq (type-of x) :pid))
 (defn rope? (x)
@@ -38,12 +62,18 @@ private table, and never surfaced to user code — reach for `table/new` instead
   (reduce (fn (t kv) (%table-put t (first kv) (second kv))) (%table) (%map-pairs m)))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
-  "True if `x` is callable (a closure or a primitive)."
+  "True if `x` is callable (a closure or a primitive).
+
+    (fn? inc)   → true   ; true for a closure AND a primitive
+    (fn? 1)     → false"
   (or (%eq (type-of x) :fn) (%eq (type-of x) :native)))
 
 ;; ---- derived predicates ----
 (defn number? (x)
-  "True if `x` is an int, a float, a decimal, or a ratio."
+  "True if `x` is an int, a float, a decimal, or a ratio.
+
+    (number? 1/2)  → true   ; the whole tower: int, float, ratio, decimal, bignum
+    (number? \"1\")  → false"
   (or (int? x) (float? x) (decimal? x) (ratio? x)))
 (defn ->float (x)
   "The number `x` as an (inexact) float — the escape hatch from an exact ratio or
@@ -51,13 +81,22 @@ decimal to fast float math (`(->float 1/2)` → `0.5`)."
   (* 1.0 x))
 (defn rational (n d)
   "The exact rational `n`/`d` — reduced, with a positive denominator (a denominator
-of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0."
+of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
+
+    (rational 1 2)   → 1/2"
   (/ n d))
-(defn list? (x) "True if `x` is a proper list (`nil` or a pair)." (or (nil? x) (pair? x)))
+(defn list? (x) "True if `x` is a proper list (`nil` or a pair).
+
+    (list? (list 1))  → true
+    (list? [1])       → false   ; a vector is not a list
+    (list? nil)       → true    ; the empty list IS nil" (or (nil? x) (pair? x)))
 
 ;; ---- list accessors ----
 (defn list (& xs) "A list of the given arguments." xs)
-(defn second (coll) "The second item of `coll`." (first (rest coll)))
+(defn second (coll) "The second item of `coll`.
+
+    (second [1 2 3])     → 2
+    (second (list 1))    → nil" (first (rest coll)))
 
 ;; ---- sequence operations ----
 ;; Many eager seq ops share one structure: reverse-accumulate over `(seq coll)`,
