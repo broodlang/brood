@@ -79,12 +79,6 @@ private table, and never surfaced to user code — reach for `table/new` instead
   "The number `x` as an (inexact) float — the escape hatch from an exact ratio or
 decimal to fast float math (`(->float 1/2)` → `0.5`)."
   (* 1.0 x))
-(defn rational (n d)
-  "The exact rational `n`/`d` — reduced, with a positive math/denominator (a math/denominator
-of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
-
-    (rational 1 2)   → 1/2"
-  (/ n d))
 (defn list? (x) "True if `x` is a proper list (`nil` or a pair).
 
     (list? (list 1))  → true

@@ -11,59 +11,59 @@
 
 (defn hint-of (src)
   "The :hint of the error raised reading+evaluating `src`, or nil."
-  (try (eval (read-string src)) (catch e (get e :hint))))
+  (try (eval (reflect/read-string src)) (catch e (get e :hint))))
 
 ; a bare #-atom is a symbol
 (describe "reader: Clojure/Scheme syntax gets a teaching hint"
   (test "#{…} now reads as a first-class set literal (no longer an error)"
-    (let (s (eval (read-string "#{1 2 3}")))
+    (let (s (eval (reflect/read-string "#{1 2 3}")))
       (is (set? s))
       (assert= s #{1 2 3})))
   (test "#(…) anonymous-fn reader macro → parse error naming (fn …)"
-    (let (e (try (read-string "#(+ 1 %)") (catch e e)))
+    (let (e (try (reflect/read-string "#(+ 1 %)") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) "(fn (x)"))))
   (test "#' var-quote → parse error naming plain quote"
-    (let (e (try (read-string "#'foo") (catch e e)))
+    (let (e (try (reflect/read-string "#'foo") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) "'foo"))))
   (test "#_ discard reader macro → parse error naming the ; comment idiom"
-    (let (e (try (read-string "#_(skip me)") (catch e e)))
+    (let (e (try (reflect/read-string "#_(skip me)") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) ";"))))
   (test "#\"…\" regex literal → parse error naming the regex module"
-    (let (e (try (read-string "#\"[0-9]+\"") (catch e e)))
+    (let (e (try (reflect/read-string "#\"[0-9]+\"") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) "regex"))))
   (test "\\c character literal → parse error naming the 1-char string idiom"
-    (let (e (try (read-string "\\c") (catch e e)))
+    (let (e (try (reflect/read-string "\\c") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) "1-char string")))
     ;; a named char (\newline) hints the same way
-    (let (e (try (read-string "\\newline") (catch e e)))
+    (let (e (try (reflect/read-string "\\newline") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) "string/int->char"))))
   (test "the legitimate # forms still read (no false positive)"
     ; the only two: bytes and set
-    (is (bytes? (read-string "#b\"hi\"")))
-    (is (set? (read-string "#{1 2}"))))
+    (is (bytes? (reflect/read-string "#b\"hi\"")))
+    (is (set? (reflect/read-string "#{1 2}"))))
   ;; `#` is a DISPATCH character, not an atom character. `#foo` used to read as a
   ;; symbol (this test asserted that), which quietly spent the `#` space: any `#`
   ;; form added after 1.0 would have been taking a token that was a legal name —
   ;; a breaking change. Rejecting the whole space costs nothing and keeps every
   ;; future `#` literal additive.
   (test "any other #… is reserved, not a symbol"
-    (let (e (try (read-string "#foo") (catch e e)))
+    (let (e (try (reflect/read-string "#foo") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) "#{…}")))
     ;; …including the Scheme/CL block comment, which used to read as the
     ;; bar-quoted symbol `|#\|c\|#|` rather than being rejected.
-    (let (e (try (read-string "#|a comment|#") (catch e e)))
+    (let (e (try (reflect/read-string "#|a comment|#") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) "(comment"))))
   ;; A trailing `#` is untouched — that is auto-gensym, and it is load-bearing.
   (test "a trailing # is still auto-gensym, not affected"
-    (is (= (type-of (read-string "x#")) :symbol))))
+    (is (= (type-of (reflect/read-string "x#")) :symbol))))
 
 ;; The digit-led rule: a token that leads with a digit MUST be a number. These all
 ;; read as symbols before, which meant `0x1F` surfaced as a far-away "unbound
@@ -79,35 +79,35 @@
                   ["1N" "bigint"]
                   ["3px" "must be a number"]])
       (map (fn (c)
-             (let (e (try (read-string (first c)) (catch e e)))
+             (let (e (try (reflect/read-string (first c)) (catch e e)))
                (assert= (get e :kind) :parse)
                (is (includes? (get e :hint) (second c)))))
         cases)))
   (test "every real numeric literal still reads"
-    (assert= (read-string "42") 42)
-    (assert= (read-string "1.5") 1.5)
-    (assert= (read-string "1e10") 1e10)
-    (assert= (read-string ".5") 0.5)
-    (assert= (read-string "5.") 5.0)
-    (assert= (type-of (read-string "1.50M")) :decimal)
-    (assert= (type-of (read-string "1M")) :decimal)
+    (assert= (reflect/read-string "42") 42)
+    (assert= (reflect/read-string "1.5") 1.5)
+    (assert= (reflect/read-string "1e10") 1e10)
+    (assert= (reflect/read-string ".5") 0.5)
+    (assert= (reflect/read-string "5.") 5.0)
+    (assert= (type-of (reflect/read-string "1.50M")) :decimal)
+    (assert= (type-of (reflect/read-string "1M")) :decimal)
     ;; the reservation that paid out: `1/2` reads as an exact ratio (ADR-196), and is
-    ;; reduced with a positive math/denominator, with a math/denominator of 1 demoting to an int
-    (assert= (read-string "1/2") 1/2)
-    (assert= (type-of (read-string "1/2")) :ratio)
-    (assert= (read-string "2/4") 1/2)
-    (assert= (read-string "-3/4") -3/4)
-    (assert= (read-string "4/2") 2)
-    (assert= (type-of (read-string "4/2")) :int))
+    ;; reduced with a positive denominator, with a denominator of 1 demoting to an int
+    (assert= (reflect/read-string "1/2") 1/2)
+    (assert= (type-of (reflect/read-string "1/2")) :ratio)
+    (assert= (reflect/read-string "2/4") 1/2)
+    (assert= (reflect/read-string "-3/4") -3/4)
+    (assert= (reflect/read-string "4/2") 2)
+    (assert= (type-of (reflect/read-string "4/2")) :int))
   (test "names that merely contain a sign or dot are untouched"
     ;; The rule keys on a digit AFTER the sign/dot, which is what keeps these legal.
-    (map (fn (t) (assert= (type-of (read-string t)) :symbol))
+    (map (fn (t) (assert= (type-of (reflect/read-string t)) :symbol))
       ["+" "-" "..." "..foo" "foo." ".foo" "foo/bar" "a1" "x2y"])
-    (assert= (type-of (read-string ":a/b")) :keyword))
+    (assert= (type-of (reflect/read-string ":a/b")) :keyword))
   (test "inf/nan still read as floats, not reserved tokens"
-    (is (math/infinite? (read-string "inf")))
-    (is (math/infinite? (read-string "-inf")))
-    (is (math/nan? (read-string "nan")))))
+    (is (math/infinite? (reflect/read-string "inf")))
+    (is (math/infinite? (reflect/read-string "-inf")))
+    (is (math/nan? (reflect/read-string "nan")))))
 (describe "let/letrec: Scheme/Clojure nested bindings get a hint"
   (test "(let ((a 1)) …) → hint to flatten the bindings"
     (let (h (hint-of "(let ((a 1)) a)"))
@@ -133,16 +133,16 @@
   (test "bare-list / vector destructuring is NOT mistaken for a nested let"
     ;; The literal-value guard: these have symbols or compounds in the value
     ;; slot, so the even-length nested-hint must NOT fire — they are valid binds.
-    (is (= (eval (read-string "(let ((a b) '(1 2)) (list a b))")) '(1 2)))
-    (is (= (eval (read-string "(let ((h & t) '(1 2 3)) (list h t))")) '(1 (2 3))))
-    (is (= (eval (read-string "(let ((a 1) '(9 1)) a)")) 9)))
+    (is (= (eval (reflect/read-string "(let ((a b) '(1 2)) (list a b))")) '(1 2)))
+    (is (= (eval (reflect/read-string "(let ((h & t) '(1 2 3)) (list h t))")) '(1 (2 3))))
+    (is (= (eval (reflect/read-string "(let ((a 1) '(9 1)) a)")) 9)))
   (test "flat list bindings work; a vector container is rejected with a hint"
-    (is (= (eval (read-string "(let (a 1 b 2) (+ a b))")) 3))
+    (is (= (eval (reflect/read-string "(let (a 1 b 2) (+ a b))")) 3))
     ;; ADR-010: the container is a list. Accepting a vector too is what made the
     ;; Clojure spellings *reinterpret* rather than fail — `(let [[a 1] [b 2]] …)`
     ;; destructured `[a 1]` against `[b 2]` and reported `unbound symbol: b`.
-    (assert-error (eval (read-string "(let [a 1 b 2] (+ a b))")))
+    (assert-error (eval (reflect/read-string "(let [a 1 b 2] (+ a b))")))
     (is (includes? (hint-of "(let [a 1 b 2] (+ a b))") "lists-for-code"))
     (is (includes? (hint-of "(let [[a 1] [b 2]] (+ a b))") "lists-for-code"))
     ;; a vector *inside* a binding position is still destructuring
-    (is (= (eval (read-string "(let ([a b] [1 2]) (+ a b))")) 3))))
+    (is (= (eval (reflect/read-string "(let ([a b] [1 2]) (+ a b))")) 3))))

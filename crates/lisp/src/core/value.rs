@@ -593,10 +593,10 @@ pub enum Value {
     /// An exact **rational** number (`1/2`) — a heap leaf handle into the per-process
     /// `ratios` slab, mirroring [`Value::Decimal`] (an immutable leaf holding no
     /// `Value` children, backed by `num_rational::BigRational` = `Ratio<BigInt>`,
-    /// always kept reduced with a positive math/denominator). Its OWN type: `type-of` is
+    /// always kept reduced with a positive denominator). Its OWN type: `type-of` is
     /// `:ratio`, distinct from `int`/`float`/`decimal`. `/` on two integers that do
     /// not divide evenly yields a ratio (exact), not a float — reach for `->float`
-    /// for an inexact value. A ratio whose math/denominator is 1 is demoted to an `Int`
+    /// for an inexact value. A ratio whose denominator is 1 is demoted to an `Int`
     /// on construction, so a `Ratio` never numerically equals an integer. Added at
     /// the END to preserve the JIT's pinned discriminant order.
     Ratio(RatioId),

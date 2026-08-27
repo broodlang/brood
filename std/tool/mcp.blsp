@@ -57,7 +57,7 @@ process's OS user can; that process is the trust boundary."
     (try
       ;; Evaluate *every* form and return the last value — so pasting a multi-form
       ;; block (a batch of `defn`s, say) runs all of them instead of silently
-      ;; dropping every form after the first (the old `read-first` behaviour).
+      ;; dropping every form after the first (the old `reflect/read-first` behaviour).
       (let (value (eval-string src))
         {:value (pr-str value)})
       (catch e
@@ -266,7 +266,7 @@ the agent can branch on `(get r :error)` cleanly."
   (let (name (get args :name))
     (when (not (string? name))
       (throw "lookup: :name must be a string"))
-    (let (sym (read-string name))
+    (let (sym (reflect/read-string name))
       (try
         ;; `arglist` and `doc` want the *function value*; `(eval sym)`
         ;; resolves the name. `source-location` wants the symbol itself.
@@ -289,7 +289,7 @@ text — unbalanced parens in `:form` can't break the host expression."
     (when (not (string? src))
       (throw "macroexpand: :form must be a string"))
     (try
-      (let (form (read-first src)
+      (let (form (reflect/read-first src)
             out (if (= mode "all")
                   (macroexpand form)
                   (macroexpand-1 form)))
@@ -523,7 +523,7 @@ like `eval`. Returns `{:error msg}` on failure."
     (when (not (and (int? iters) (> iters 0)))
       (throw "bench: :iterations must be a positive integer"))
     (try
-      (let (form (read-first src)
+      (let (form (reflect/read-first src)
             t0 (os/now)
             value (eval form)
             _done (bench-loop form (- iters 1))
@@ -572,7 +572,7 @@ its owner namespace, whether it's derivable, and which types implement it. Retur
   (let (name-str (get args :name))
     (when (not (string? name-str))
       (throw "ability: :name must be a string"))
-    (let (aname (read-string name-str))
+    (let (aname (reflect/read-string name-str))
       (if (not (contains? *abilities* aname))
         {:name name-str :error (str "not an ability: " name-str)}
         (let (ops (%ability-ops aname)

@@ -2336,7 +2336,7 @@ fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<ArmHa
 /// Compile `f`'s body NOW, without calling it, and cache the result. Returns whether
 /// anything was compiled.
 ///
-/// Exists for line coverage's math/denominator (ADR-148 tier 2). Arms compile LAZILY — on
+/// Exists for line coverage's denominator (ADR-148 tier 2). Arms compile LAZILY — on
 /// first call, via [`compiled_arm_for`] — so the set of instrumented lines otherwise
 /// contains only lines that already ran, making the ratio a tautology: a fixture whose
 /// every function had run reported 100% while a deliberately-uncalled function's lines

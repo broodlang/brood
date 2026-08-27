@@ -254,13 +254,13 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
 (defn- interp-hole
   (chars expr depth parts)
   ;; inside a {…} hole: accumulate the expression text until the matching `}`, then
-  ;; `read-string` it into a form. Braces nest by `depth` (a map/set literal inside).
+  ;; `reflect/read-string` it into a form. Braces nest by `depth` (a map/set literal inside).
   (cond
     (empty? chars) (error "string/interp: unterminated '{' in template")
     (and (= (first chars) "}") (= depth 0))
       (interp-lit (rest chars)
         nil
-        (cons (read-string expr) parts))
+        (cons (reflect/read-string expr) parts))
     (= (first chars) "{") (interp-hole (rest chars) (str expr "{") (inc depth) parts)
     (= (first chars) "}") (interp-hole (rest chars) (str expr "}") (dec depth) parts)
     else (interp-hole (rest chars) (str expr (first chars)) depth parts)))

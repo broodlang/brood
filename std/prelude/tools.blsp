@@ -598,7 +598,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
             (= (first form) 'defmodule)
             (not (empty? (rest form)))
             (= (name (first (rest form))) key-name)))
-    (try (read-all (file/slurp path)) (catch _ nil))))
+    (try (%read-all (file/slurp path)) (catch _ nil))))
 (defn- %require-colocated-files
   (key-name dirs)
   ;; Every `.blsp` on `dirs` (searched top-level, not recursively) that declares `key-name`.

@@ -250,7 +250,7 @@
     (let (m (scaffold/project-manifest-template "demo"))
       (is (includes? m ":dependencies"))
       ;; still a valid manifest: the first form is the (project …) call
-      (let (form (read-string m))
+      (let (form (reflect/read-string m))
         (assert= (first form) 'project)
         (assert= (plist-get (rest form) :name) "demo")))))
 

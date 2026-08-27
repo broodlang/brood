@@ -1123,7 +1123,7 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; and appended the missing paren at the end. Being mid-edit with an unclosed paren
 ;; is completely routine (and format-on-save makes it automatic), so that turned a
 ;; half-typed file into silently different code.
-(defn- format-parses? (src) (try (do (read-all src) true) (catch _ false)))
+(defn- format-parses? (src) (try (do (reflect/read-all src) true) (catch _ false)))
 
 (defn file (path)
   "Format the file at `path` in place. Returns `:unchanged`, `:rewrote`, or `:unparseable` — a file that does not parse is left untouched, since there is no program to re-lay-out and the tolerant CST would restructure it."

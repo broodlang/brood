@@ -596,7 +596,7 @@ completes it: mid-typing, `(defn f (x` came back as `(defn f (x ) )`, silently c
 brackets the user had not closed yet. Comparing the parsed forms rejects that (and any
 future rewrite that changes structure) while correctly ignoring comment and whitespace
 changes, which is exactly the difference a formatter is allowed to make."
-  (try (= (read-all a) (read-all b)) (catch _ false)))
+  (try (= (reflect/read-all a) (reflect/read-all b)) (catch _ false)))
 
 (defn lineedit-reformat (state _)
   "M-q: reformat the whole form in place with `std/format.blsp`, leaving point at the
@@ -718,7 +718,7 @@ a rebound key or a user's own command can't leave a stale listing on screen."
   "The arglist of the function/macro named by string `callee` (resolved in the live
 image), or nil if it isn't a bound symbol. A bare-symbol `eval` is just a lookup."
   (try
-    (let (sym (read-string callee))
+    (let (sym (reflect/read-string callee))
       (if (and (symbol? sym) (bound? sym)) (arglist (eval sym)) nil))
     (catch e nil)))
 

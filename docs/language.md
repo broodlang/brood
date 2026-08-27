@@ -63,7 +63,7 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 | Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. A result out of `i64` range promotes to an arbitrary-precision **bignum** rather than wrapping, and demotes back when it fits again — so the integer type is unbounded in practice. |
 | Float | `3.14`, `-0.5`, `1e3`, `inf`, `nan` | 64-bit. **`inf`, `-inf` and `nan` are reader literals** — those three bare tokens are floats, not symbols, so they can't be used as names (the digit-required rule below has these three exceptions). Test them with `infinite?` / `nan?`; `=` reports NaN as equal to nothing, per IEEE. |
 | Decimal | `1.50M`, `0M`, `-3.14M` | Exact arbitrary-precision base-10, for money and Postgres `numeric` — values a float can't hold (`(+ 0.1M 0.2M)` *is* `0.3M`). The literal is a trailing `M`; `(decimal/of x)` builds one from a string, int, bignum or float. Scale is significant in arithmetic (see [Arithmetic](#arithmetic)) but **not** in `=`, which compares values (`1.5M` = `1.50M`). |
-| Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive math/denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a math/denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`decimal/number->` convert out; `math/numerator`/`math/denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
+| Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`decimal/number->` convert out; `math/numerator`/`math/denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
 | String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control), `\xHH` (two-hex-digit byte), `\u{H..H}` (1–6-hex-digit Unicode codepoint). A malformed `\x`/`\u{}` is a read error, and so is an unknown **alphabetic** escape (`\d`, `\w`, `\s`, …) — that's almost always a regex class written in a plain string, where dropping the backslash would silently break the pattern, so write `\\d`. A `\X` escape of punctuation or a digit (`\.`, `\/`, `\1`) is literal `X` (how you write a literal metacharacter in a regex string). Readable printing is the inverse: it re-escapes `\n \t \r \e \0 \\ \"` by name and any other control char as `\u{H..H}`, so a printed string always re-reads to the same value. |
 | Symbol | `foo`, `+`, `my-fn`, `empty?`, `++`, `...` | Names; interned. **A token that leads with a digit — or a sign/dot immediately followed by a digit — must be a number** (ADR-169): if it isn't one Brood has (`0x1F`, `1_000`, `1N`, `1+`, `12-34`; but `1/2` *is* a ratio now — ADR-196) it's a *reader error*, never a symbol, so those tokens stay reserved for future numeric syntax. A sign or dot with **no** digit behind it is not digit-led and stays a symbol — `+`, `-`, `...`, `.foo`, `foo.`, `--5`, `++`. A symbol whose name isn't a clean token — one built via `(symbol "a b")` with whitespace, delimiters, an empty name, or a spelling that would read as a number/keyword (including a reserved one, `(symbol "1+")`) — prints (readably) and reads back as a `\|…\|` **bar-quoted** symbol (`\|a b\|`, `\|1+\|`, `\|\|` for empty; `\|`/`\\` escape a literal bar/backslash), so every symbol round-trips through `pr-str`/`read`. |
 | Keyword | `:ok`, `:else`, `:\|a b\|` | Self-evaluating named constants. Like symbols, a keyword whose name isn't a clean token (e.g. `(keyword "a b")`, `(keyword "")`) prints and reads as `:\|…\|`. |
@@ -2781,7 +2781,7 @@ iolist in memory.
   suffixes accepted).
 
 ### Metaprogramming / self-hosting
-`eval`  `read-string`  `read-all`  `eval-string`  `load`  `macroexpand`  `macroexpand-1`  `gensym`
+`eval`  `reflect/read-string`  `reflect/read-all`  `eval-string`  `load`  `macroexpand`  `macroexpand-1`  `gensym`
 
 There is **no user-facing `require` form** — you load an embedded standard-library
 module by *referencing* it. A qualified reference `name/foo` auto-loads `name` on
@@ -2792,13 +2792,13 @@ used by the `:use` machinery, the runtime bootstrap, and a few dynamic/cycle
 cases — not something you call directly.)
 
 ```clojure
-(eval (read-string "(+ 40 2)"))  ;=> 42
-(read-all "(a) (b) (c)")         ;=> ((a) (b) (c))  — every form, vs read-string's first
+(eval (reflect/read-string "(+ 40 2)"))  ;=> 42
+(reflect/read-all "(a) (b) (c)")         ;=> ((a) (b) (c))  — every form, vs reflect/read-string's first
 (eval-string "(def x 1) (+ x 1)");=> 2  — read+eval all forms, last value wins
 (load "some-file.blsp")          ; evaluate a file into the global environment
 ```
 
-`read-string` returns the *first* form in a string; `read-all` returns *all* of
+`reflect/read-string` returns the *first* form in a string; `reflect/read-all` returns *all* of
 them as a list (the read-half of `eval-string` without the eval) — the basis for
 form-by-form tooling, e.g. an editor evaluating the last sexp before point. Both
 raise on a malformed/incomplete form; `parse-source` is the lossless,

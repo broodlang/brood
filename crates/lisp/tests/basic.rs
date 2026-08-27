@@ -174,7 +174,7 @@ fn maps_structural_keys_and_equality() {
 fn maps_round_trip_through_reader() {
     // pr-str's readable form reads + evals back to an equal map.
     let src = "(def m {:a 1 :b [2 3] :c \"x\" :d {:nested true}}) \
-               (= m (eval (read-string (pr-str m))))";
+               (= m (eval (reflect/read-string (pr-str m))))";
     assert_eq!(run(src), "true");
 }
 
@@ -225,7 +225,7 @@ fn string_kernel() {
     assert_eq!(run("(string/upper \"ß\")"), "\"SS\""); // Unicode case folding
     assert_eq!(run("(string/->number \"42\")"), "42");
     assert_eq!(run("(string/->number \"3.5\")"), "3.5");
-    assert_eq!(run("(string/->number \"3abc\")"), "nil"); // strict parse, not read-string
+    assert_eq!(run("(string/->number \"3abc\")"), "nil"); // strict parse, not reflect/read-string
     assert_eq!(run("(string/->number \"\")"), "nil");
 }
 
@@ -343,10 +343,10 @@ fn unchanged_redefinition_is_deduped() {
     assert_eq!(interp.print(v), "12");
 }
 
-/// `eval` + `read-string` let the language run code it builds at runtime.
+/// `eval` + `reflect/read-string` let the language run code it builds at runtime.
 #[test]
 fn eval_and_read_string() {
-    assert_eq!(run("(eval (read-string \"(+ 40 2)\"))"), "42");
+    assert_eq!(run("(eval (reflect/read-string \"(+ 40 2)\"))"), "42");
 }
 
 #[test]
@@ -961,7 +961,7 @@ fn hints_name_only_features_that_exist() {
     assert!(l.contains("lmap") && l.contains("lfilter"), "{l}");
     // The reader owns every `#X` spelling (so the `#` arm above is a backstop). Its
     // `#_` hint predated `comment` and offered only `;`.
-    let d = run("(try (read-string \"(x #_1)\") (catch e (get e :hint)))");
+    let d = run("(try (reflect/read-string \"(x #_1)\") (catch e (get e :hint)))");
     assert!(d.contains("comment"), "{d}");
     // ADR-154 removals carry their replacement.
     assert!(hint("(car (list 1))").contains("first"));
@@ -1322,15 +1322,15 @@ fn equal_on_long_lists_does_not_overflow() {
 fn dotted_pairs_round_trip() {
     assert_eq!(run(r#"(pr-str (cons 1 2))"#), r#""(1 . 2)""#);
     assert_eq!(run(r#"(pr-str (cons 1 (cons 2 3)))"#), r#""(1 2 . 3)""#);
-    assert_eq!(run(r#"(first (read-string "(1 2 . 3)"))"#), "1");
-    assert_eq!(run(r#"(rest (read-string "(1 . 2)"))"#), "2");
-    assert_eq!(run(r#"(read-string "(1 2 3)")"#), "(1 2 3)"); // proper list unaffected
+    assert_eq!(run(r#"(first (reflect/read-string "(1 2 . 3)"))"#), "1");
+    assert_eq!(run(r#"(rest (reflect/read-string "(1 . 2)"))"#), "2");
+    assert_eq!(run(r#"(reflect/read-string "(1 2 3)")"#), "(1 2 3)"); // proper list unaffected
     assert_eq!(run("(first (list .5 6))"), "0.5"); // `.5` is a float, not a separator
 
     let mut interp = Interp::new();
-    assert!(interp.eval_str(r#"(read-string "( . 3)")"#).is_err());
-    assert!(interp.eval_str(r#"(read-string "(1 . )")"#).is_err());
-    assert!(interp.eval_str(r#"(read-string "(1 . 2 3)")"#).is_err());
+    assert!(interp.eval_str(r#"(reflect/read-string "( . 3)")"#).is_err());
+    assert!(interp.eval_str(r#"(reflect/read-string "(1 . )")"#).is_err());
+    assert!(interp.eval_str(r#"(reflect/read-string "(1 . 2 3)")"#).is_err());
 }
 
 /// Dynamic variables (`defdyn`/`binding`): default, dynamic shadowing through a

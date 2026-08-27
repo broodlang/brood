@@ -135,26 +135,26 @@
     (assert= "\u{1F600}" "😀"))
   ;; A malformed `\x`/`\u{}` is a hard read error (kernel audit) — the old
   ;; pass-through silently produced wrong output ("\xZZ" became "xZZ").
-  ;; Driven through `read-string` so the error is raised at runtime where
+  ;; Driven through `reflect/read-string` so the error is raised at runtime where
   ;; `assert-error` can catch it (a literal in this file would fail the load).
   (test "malformed hex escapes are read errors"
-    (assert-error (read-string "\"\\xZZ\""))
-    (assert-error (read-string "\"\\u{}\""))
-    (assert-error (read-string "\"\\u{nothex}\""))
-    (assert-error (read-string "\"\\u{110000}\"")))
+    (assert-error (reflect/read-string "\"\\xZZ\""))
+    (assert-error (reflect/read-string "\"\\u{}\""))
+    (assert-error (reflect/read-string "\"\\u{nothex}\""))
+    (assert-error (reflect/read-string "\"\\u{110000}\"")))
   (test "unknown punctuation/digit escapes pass through as literal X"
     ;; `\X` for punctuation or a digit stays literal — how you write a literal
     ;; metacharacter in a regex string (`\.` etc.), and not a footgun.
-    (assert= (read-string "\"\\.\"") ".")
-    (assert= (read-string "\"\\/\"") "/")
-    (assert= (read-string "\"\\1\"") "1"))
+    (assert= (reflect/read-string "\"\\.\"") ".")
+    (assert= (reflect/read-string "\"\\/\"") "/")
+    (assert= (reflect/read-string "\"\\1\"") "1"))
   (test "unknown ALPHABETIC escapes are a hard error (regex-class footgun)"
     ;; `"\d+"` used to silently become `"d+"`, breaking regex patterns with no
     ;; error. An unknown letter escape now rejects — the user wants `\\d`.
-    (assert-error (read-string "\"\\q\""))
-    (assert-error (read-string "\"\\d+\""))
-    (assert-error (read-string "\"\\w\""))
-    (assert-error (read-string "\"\\s\""))))
+    (assert-error (reflect/read-string "\"\\q\""))
+    (assert-error (reflect/read-string "\"\\d+\""))
+    (assert-error (reflect/read-string "\"\\w\""))
+    (assert-error (reflect/read-string "\"\\s\""))))
 
 (describe "search"
   (test "index-of finds the first occurrence"

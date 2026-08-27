@@ -11,7 +11,7 @@
 ;;   degenerate forms — (do), (if), (quote), (->), empty let, fn with no body
 ;;   malformed forms  — let odd-binding, let non-symbol name, quote arity
 ;;   dup fn params   — last binding wins, no error
-;;   read-string     — 1.2.3 a malformed-float error, #q as symbol, unknown escape stripped
+;;   reflect/read-string     — 1.2.3 a malformed-float error, #q as symbol, unknown escape stripped
 ;;   apply / map     — zero-arg and non-fn errors
 
 (defmodule malformed-test
@@ -265,29 +265,29 @@
   (test "duplicate params: all references to the name see the last bound value"
     (assert= [2 2] ((fn (a a) [a a]) 1 2))))
 
-;; ── 10. read-string edge cases ────────────────────────────────────────────────
+;; ── 10. reflect/read-string edge cases ────────────────────────────────────────────────
 
-(describe "read-string edge cases"
+(describe "reflect/read-string edge cases"
   ; the valid form still parses
   (test "\"1.2.3\" is a malformed float literal (number-intent fails loudly), not a symbol"
     ;; a token that leads with a digit/sign/dot and holds only number chars is
     ;; number-intent: if it doesn't parse, it's a parse error, not a symbol.
-    (assert-error (read-string "1.2.3"))
-    (assert-error (read-string "1e"))
-    (assert= 10000000.0 (read-string "1e7")))
+    (assert-error (reflect/read-string "1.2.3"))
+    (assert-error (reflect/read-string "1e"))
+    (assert= 10000000.0 (reflect/read-string "1e7")))
   ;; `#q` used to read as a symbol. `#` is now a dispatch character — `#{…}` and
   ;; `#b\"…\"` are the only forms — so an unrecognised one is a parse error. Same
   ;; principle as the number-intent rule just above: a token whose shape says
   ;; \"literal\" must not silently degrade into a name.
   (test "\"#q\" is reserved, not a symbol"
-    (assert-error (read-string "#q")))
+    (assert-error (reflect/read-string "#q")))
 
   (test "unknown alphabetic backslash escape is a hard read error (regex footgun)"
     ;; `"\d"` used to silently become `"d"`, breaking regex patterns; a letter
     ;; escape now rejects (the user wants `\\d`). Punctuation/digit escapes still
     ;; pass through as literal X.
-    (assert-error (read-string "\"\\q\""))
-    (assert= "." (read-string "\"\\.\""))))
+    (assert-error (reflect/read-string "\"\\q\""))
+    (assert= "." (reflect/read-string "\"\\.\""))))
 
 ;; ── 11. apply and map/filter arity ───────────────────────────────────────────
 

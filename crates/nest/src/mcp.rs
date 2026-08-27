@@ -600,7 +600,7 @@ fn emit_progress(note: &Json) {
 }
 
 /// Build an MCP `notifications/progress` message for `token`: `progress` is the
-/// value so far, `total` the math/denominator (if known), `message` a human label.
+/// value so far, `total` the denominator (if known), `message` a human label.
 /// Per the MCP spec, `progress` MUST increase; the token echoes the request's
 /// `_meta.progressToken` (a string or a number — passed through as-is).
 fn progress_notification(

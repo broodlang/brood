@@ -96,7 +96,7 @@
   ;; ---- (b) an older upstream stanza -------------------------------------------
 
   (test "cpstak — continuation-passing TAK, upstream's smallest stanza"
-    ;; cpstak.input keeps three historical stanzas; `read-all` sees all of them because
+    ;; cpstak.input keeps three historical stanzas; `reflect/read-all` sees all of them because
     ;; only the prose between them is commented. The third — count 1700, then 18 12 6,
     ;; then 7 — is the classic Gabriel size and the only one that fits a test budget:
     ;; the current stanza (40 20 11) takes 3.5 s in Chez for ONE iteration.

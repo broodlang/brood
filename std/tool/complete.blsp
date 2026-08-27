@@ -103,7 +103,7 @@ suggestions\", never to an error on the user's command line."
 (defn- complete-manifest
   (root)
   (complete-safely (fn ()
-                     (let (form (read-first (file/slurp (path/join root "project.blsp"))))
+                     (let (form (reflect/read-first (file/slurp (path/join root "project.blsp"))))
                        (if (and (pair? form) (= (first form) 'project)) form nil)))))
 
 ;; The directories the manifest declares under `key`, as absolute paths, falling back

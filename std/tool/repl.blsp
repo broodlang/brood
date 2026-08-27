@@ -253,7 +253,7 @@ entries) plus the static Tab / `*1 *2 *3` footer."
 The argument must read as exactly one symbol — it is spliced into code text, so
 anything else (`,doc foo)`, `,doc (fn …)`, `,doc foo) (extra) (`) would splice extra
 forms into the eval rather than fail cleanly."
-  (let (forms (try (read-all name) (catch _ nil))
+  (let (forms (try (reflect/read-all name) (catch _ nil))
         sym (if (and (pair? forms) (empty? (rest forms))) (first forms) nil))
     (if (not (symbol? sym))
       (io/puts (str "\e[90m(usage: ,doc <name>)\e[0m"))
@@ -334,7 +334,7 @@ form that is unreadable on one line."
   (if (= expr "")
     (io/puts "\e[90m(usage: ,expand <form>)\e[0m")
     (try
-      (let (form (read-first expr)
+      (let (form (reflect/read-first expr)
             out (if all (macroexpand form) (macroexpand-1 form))
             ;; `format` is required lazily — pretty-printing an expansion is worth a
             ;; module load the first time you ask, but not on every REPL boot.
@@ -477,7 +477,7 @@ and `(binding (*print-length* nil) …)` lifts the bound for a form."
 against the live image), or nil. Nil on incomplete input — there is nothing to check yet."
   (if (os/env "BROOD_NO_CHECK")
     nil
-    (mapcat reflect/check (try (read-all src) (catch _ nil)))))
+    (mapcat reflect/check (try (reflect/read-all src) (catch _ nil)))))
 
 (defn- repl-warn
   (src)
@@ -717,7 +717,7 @@ form — or a genuine *syntax* error, which should submit so eval reports it —
 only when the reader wants more input (the E0002 incomplete signal: insert a newline
 and keep editing). So `(defn foo` opens a continuation line; a balanced form submits."
   (try
-    (do (read-all src) true)
+    (do (reflect/read-all src) true)
     (catch e (not (repl-incomplete? e)))))
 
 (defn- repl-submit

@@ -531,7 +531,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
           (and (pair? form)
             (let (head (first form))
               (or (= head 'describe) (= head 'deftest)))))
-    (try (read-all (file/slurp path)) (catch _ nil))))
+    (try (reflect/read-all (file/slurp path)) (catch _ nil))))
 
 ;; Project source files carrying co-located tests (ADR-225), added to the `nest
 ;; test` corpus so a `deftest`/`describe` written beside the code runs without a
@@ -565,7 +565,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
               (name (%root-module-name (second f)))
               acc))
       nil
-      (read-all (file/slurp path)))
+      (reflect/read-all (file/slurp path)))
     (catch e nil)))
 
 ;; Whether to (re-)load a source file that provides feature `feat`, given the
@@ -997,7 +997,7 @@ A `:path` dep loads in place, so its manifest sits at its `:path`; a `:git` /
   "Read the `:format-headers` map declared in the manifest at `manifest-path`; {} if
 the file is missing or declares none."
   (if (file/exists? manifest-path)
-    (let (form (read-first (file/slurp manifest-path)))
+    (let (form (reflect/read-first (file/slurp manifest-path)))
       (if (and (pair? form) (= (first form) 'project))
         (or (plist-get (rest form) :format-headers) {})
         {}))
@@ -1009,7 +1009,7 @@ the file is missing or declares none."
 constraint-string}`, or {} if the file is missing or declares none. The sibling of
 `project-manifest-format-headers`, feeding the plugin-discovery query below."
   (if (file/exists? manifest-path)
-    (let (form (read-first (file/slurp manifest-path)))
+    (let (form (reflect/read-first (file/slurp manifest-path)))
       (if (and (pair? form) (= (first form) 'project))
         (or (plist-get (rest form) :enhances) {})
         {}))
@@ -1087,7 +1087,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
 (defn- project-apply-manifest
   (manifest-path)
   (let (form (try
-               (read-first (file/slurp manifest-path))
+               (reflect/read-first (file/slurp manifest-path))
                ;; A parse error arrives as a structured map; unwrap it to a
                ;; readable `file: line L, column C: message` rather than printing
                ;; the raw `{:message … :code … :kind :parse}` at the user.
@@ -2065,7 +2065,7 @@ resolve in the advisory checker. Returns the project root."
     (let (f (project-cache-file root name))
       (if (and f (file/exists? f))
         (try
-          (let (data (read-string (file/slurp f)))
+          (let (data (reflect/read-string (file/slurp f)))
             (if (= (%map-get data :stamp nil) (project-cache-stamp))
               (%map-get data :entries {})
               {}))
@@ -2122,7 +2122,7 @@ resolve in the advisory checker. Returns the project root."
       nil)))
 
 ;; Above this many files the on-disk cache is SKIPPED and the fast from-scratch
-;; parallel path runs instead. The single manifest is a `pr-str`/`read-string`
+;; parallel path runs instead. The single manifest is a `pr-str`/`reflect/read-string`
 ;; s-expression whose read+write cost (and the per-entry dep-keys it holds) grows
 ;; with the file count; measured on 1000-line files a ~10K-entry manifest turned
 ;; the cache into a net loss (cold slower + multi-GB RSS + a pathologically slow
@@ -2364,7 +2364,7 @@ business."
   (let (f (project-failed-file root))
     (if (or (nil? f) (not (file/exists? f)))
       nil
-      (let (form (try (read-first (file/slurp f)) (catch _ nil)))
+      (let (form (try (reflect/read-first (file/slurp f)) (catch _ nil)))
         (if (map? form) form nil)))))
 
 (defn- project-write-failed!
@@ -2395,7 +2395,7 @@ business."
   (let (f (project-stale-file root))
     (if (or (nil? f) (not (file/exists? f)))
       {}
-      (let (form (try (read-first (file/slurp f)) (catch _ nil)))
+      (let (form (try (reflect/read-first (file/slurp f)) (catch _ nil)))
         (if (map? form) form {})))))
 
 (defn- project-module-file-index
@@ -2817,7 +2817,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
   (let (manifest (file/slurp (path/join root "project.blsp")))
     ;; Apply the manifest as DATA (not `load`) to learn its source paths + deps,
     ;; mirroring `setup`. We don't load any source here — just read it.
-    (let (form (read-first manifest))
+    (let (form (reflect/read-first manifest))
       (when (and (pair? form) (= (first form) 'project)) (apply-config (rest form))))
     ;; Project source dirs first, then resolved dependency dirs (so a project
     ;; module wins a stem clash with a dep — matches `*load-path*` ordering).
@@ -2885,10 +2885,10 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; Re-emit the bundle manifest with `:bundled-packages` (every rooted dependency package,
 ;; transitive included) added, so `run-bundle` roots all of them — not just the direct deps
 ;; `:dependencies` names. Serialised as DATA: the embedded manifest is only ever read back with
-;; `read-first` + `apply`, so dropping comments/formatting is fine.
+;; `reflect/read-first` + `apply`, so dropping comments/formatting is fine.
 (defn- bundle-augment-manifest
   (manifest dep-packages)
-  (let (form (read-first manifest))
+  (let (form (reflect/read-first manifest))
     (if (and (pair? form) (= (first form) 'project))
       (pr-str (cons 'project
                 (append (rest form)
@@ -2956,7 +2956,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 string arguments). The `brood` binary calls this when it detects it is a `nest
 release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (default module `main`, fn `main`). Errors if the entry fn is missing/uncallable."
-  (let (form (read-first (%bundle-manifest)))
+  (let (form (reflect/read-first (%bundle-manifest)))
     (when (and (pair? form) (= (first form) 'project)) (apply-config (rest form))))
   ;; Rebuild the package-rooting context for the embedded DEPENDENCY modules (ADR-070
   ;; dev/release parity): each is embedded under its rooted key `pkg/mod`, and must load
@@ -3034,7 +3034,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     ;; (the project manifest is read the same way, ADR-020) and decouples it from
     ;; namespace resolution — `config` here is `project/config` (this body is
     ;; compiled in the `project` namespace), so the apply resolves.
-    (let (form (read-first (file/slurp p)))
+    (let (form (reflect/read-first (file/slurp p)))
       (when (and (pair? form) (= (first form) 'config))
         (/apply config (rest form)))))
   nil)

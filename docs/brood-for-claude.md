@@ -1018,7 +1018,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   stream from any int (e.g. `(now)`) with `rand-seed`. Carry `next-seed` in your
   loop/process state like any other value.
 - **meta / eval**: `apply` (call a fn with a list of args — the only way to
-  splat) `eval` `read-string` `eval-string` `gensym` (fresh symbol, for macros)
+  splat) `eval` `reflect/read-string` `eval-string` `gensym` (fresh symbol, for macros)
 - **discovery / introspection**: `doc` `arglist` `bound?` `source-location`;
   and to *find* what exists rather than guess names — `global-names`,
   `apropos` (name substring, e.g. `(apropos "rand")`), `doc-search` (matches
@@ -1027,7 +1027,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   probing names one at a time.
 - **timing**: `now` (ms since epoch) `now-ns` (ns since epoch) `bench`
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
-- **I/O**: `print` `println` `file/slurp` `file/spit` `load` `eval-string` `read-string`.
+- **I/O**: `print` `println` `file/slurp` `file/spit` `load` `eval-string` `reflect/read-string`.
   `print`/`println` **space-join** their args (Python-style, via `%render`) —
   distinct from `str`, which concatenates. A **record** defines how it prints on screen
   (Elixir's `String.Chars`) via the core, always-on `Display` ability: just

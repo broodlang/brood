@@ -66,7 +66,7 @@ pub fn disarm_mcp_progress() {
 
 /// `(%mcp-progress progress total message)` — report progress from a `nest mcp`
 /// tool handler. `progress` is an int (units completed); `total` is an int or
-/// nil (the math/denominator, if known); `message` is a string or nil (a human
+/// nil (the denominator, if known); `message` is a string or nil (a human
 /// label). Returns `true` if a progress notification was actually sent (a token
 /// was in scope), `false` if it was a no-op (not under an MCP progress request).
 pub(super) fn mcp_progress(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -955,7 +955,7 @@ pub(super) fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 
 /// `(string/->number s)` — parse `s` as an integer if it is one, else as a float,
 /// else `nil`. The inverse of `str`. A robust parse-or-nil can't be
-/// expressed over `read-string` (which would read `"3abc"` as `3` and stop), so
+/// expressed over `reflect/read-string` (which would read `"3abc"` as `3` and stop), so
 /// the strict parse is a primitive. Surrounding whitespace is not accepted —
 /// `trim` first if the input may carry any.
 

@@ -100,7 +100,7 @@ A value is exactly one of:
 | **set** | immutable collection of distinct elements (`#{ }`); its own kind — never `=` to a map (ADR-060). |
 | **bytes** | immutable byte sequence (`#b"…"`), the binary counterpart of `string`; addressed by byte, and the subject of bit-syntax patterns (ADR-140). |
 | **decimal** | exact arbitrary-precision base-10 (`1.50M`), for money — values a float cannot hold. |
-| **ratio** | exact rational (`1/2`), always reduced with a positive math/denominator; `/` on integers is exact (`(/ 1 2)` → `1/2`), and a math/denominator of 1 demotes to an integer (ADR-196). |
+| **ratio** | exact rational (`1/2`), always reduced with a positive denominator; `/` on integers is exact (`(/ 1 2)` → `1/2`), and a denominator of 1 demotes to an integer (ADR-196). |
 | **rope** | immutable, char-indexed editor buffer text, backed by a rope structure (ADR-045). |
 | **pid** | a process identifier, carrying its node's identity. |
 | **ref** | a globally-unique reference token; tags a request to its reply. |
@@ -340,7 +340,7 @@ load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 - maps `hash-map %map-get %map-assoc %map-dissoc map-keys map-vals map-contains?`
 - strings `string-length substring upper lower string->number`
 - reflection/checking `type-of check`; value↔text & IO `str pr-str print stdout-tty?`
-- self-hosting `eval read-string eval-string load %builtin-module apply`; macros `macroexpand macroexpand-1 gensym`
+- self-hosting `eval reflect/read-string eval-string load %builtin-module apply`; macros `macroexpand macroexpand-1 gensym`
 - filesystem/system `cwd file-exists? dir? list-dir make-dir spit slurp getenv run-process`
 - symbols/tooling `name form-pos current-file doc arglist global-names bound?`
 - time/memory `now mem-bytes mem-peak`; errors/control `throw %try %isolate`

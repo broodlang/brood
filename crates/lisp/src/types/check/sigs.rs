@@ -159,6 +159,10 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     put("math/->fixed", Sig::new(vec![num, int], str_ty));
     put("math/numerator", Sig::new(vec![num], int));
     put("math/denominator", Sig::new(vec![num], int));
+    put("math/rational", Sig::new(vec![num, num], num));
+    put("reflect/read-string", Sig::new(vec![str_ty], any));
+    put("reflect/read-all", Sig::new(vec![str_ty], any));
+    put("reflect/read-first", Sig::new(vec![str_ty], any));
     put("count", Sig::new(vec![countable], int));
     // NO `length` entry: there is no `length` function, and there never was. It was added
     // 2026-05-31 alongside `count` as if it were an alias ("each vetted against

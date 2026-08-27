@@ -2,7 +2,7 @@
 
 ;; The `eval` MCP tool must evaluate *every* form in a multi-form `:source` and
 ;; return the last value — not silently drop everything after the first form (the
-;; old `read-first` behaviour, which made a pasted batch of `defn`s run only the
+;; old `reflect/read-first` behaviour, which made a pasted batch of `defn`s run only the
 ;; first). See docs/devlog.md and the brood-life feedback triage.
 (describe "mcp eval tool"
   (test "runs every form in a multi-form source, returns the last value"
