@@ -20,12 +20,12 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 (def e 2.718281828459045)
 
 ;; ---- sign & parity ----------------------------------------------------------
-;; `math/zero` — is this value the additive identity of ITS OWN type?
+;; `Zero` — is this value the additive identity of ITS OWN type?
 ;;
 ;; It lives HERE, as `math/zero?`, because its whole family does: `math/positive?`,
 ;; `math/negative?`, `math/even?`, `math/odd?`. It was bare, which made it the odd one out
 ;; and spent a bare name on a question only numbers can answer. An ability op declared
-;; inside a module is namespaced to it (`%ability-qualify-op`), the way `io/port`'s op is
+;; inside a module is namespaced to it (`%ability-qualify-op`), the way `Port`'s op is
 ;; `io/emit` and not bare `emit`.
 ;;
 ;; `zero?` was `(= n 0)`, bare, in prelude/map.blsp. `=` is type-strict, so it answered
@@ -41,7 +41,7 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 ;;
 ;; A zero ratio normalises to the int `0` (`(/ 0 5)` is `0`, `:int`), so the `:ratio` impl is
 ;; constant-false rather than a comparison.
-;; `math/numeric` — the two float-domain questions, asked of any numeric type.
+;; `Numeric` — the two float-domain questions, asked of any numeric type.
 ;;
 ;; `nan?`/`infinite?` were bare and written `(and (float? x) …)`, so a non-float answered
 ;; `false` — including `"a"`, `nil` and `[1]`, for which the question is a category error,
@@ -91,7 +91,7 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
   ;; `math` module (ADR-227) and the boot-time prelude cannot require a module.
   (let (r (math/rem a b)) (if (< r 0) (+ r (if (< b 0) (- b) b)) r)))
 
-(defability math/numeric
+(defability Numeric
   "Float-domain questions every numeric type can answer.
 
     (math/nan? nan)        → true
@@ -100,14 +100,14 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
     (math/infinite? 1.0)   → false"
   (nan? [self] :-> bool)
   (infinite? [self] :-> bool))
-(impl math/numeric :float
+(impl Numeric :float
   (nan? [x] (not (= x x)))
   (infinite? [x] (or (= x inf) (= x -inf))))
-(impl math/numeric :int     (nan? [x] false) (infinite? [x] false))
-(impl math/numeric :decimal (nan? [x] false) (infinite? [x] false))
-(impl math/numeric :ratio   (nan? [x] false) (infinite? [x] false))
+(impl Numeric :int     (nan? [x] false) (infinite? [x] false))
+(impl Numeric :decimal (nan? [x] false) (infinite? [x] false))
+(impl Numeric :ratio   (nan? [x] false) (infinite? [x] false))
 
-(defability math/zero
+(defability Zero
   "True when `self` is the additive identity of its own type — across the whole numeric
 tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
@@ -116,10 +116,10 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
     (zero? 0M)     → true
     (zero? 1/2)    → false"
   (zero? [self] :-> bool))
-(impl math/zero :int     (zero? [n] (%eq n 0)))
-(impl math/zero :float   (zero? [n] (%eq n 0.0)))
-(impl math/zero :decimal (zero? [n] (%eq n 0M)))
-(impl math/zero :ratio   (zero? [n] false))
+(impl Zero :int     (zero? [n] (%eq n 0)))
+(impl Zero :float   (zero? [n] (%eq n 0.0)))
+(impl Zero :decimal (zero? [n] (%eq n 0M)))
+(impl Zero :ratio   (zero? [n] false))
 
 
 (defn positive? (n) "True if `n` is greater than zero.

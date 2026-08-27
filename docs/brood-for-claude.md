@@ -366,7 +366,7 @@ Other things worth knowing:
   behave as on a map — `(get r :__id__)` even reaches the id. But a record is **NOT `=`**
   to a bare map with the same fields (nominal, Elixir-struct semantics), and its
   **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`/`map`/`fold`
-  over a record see its fields, never `:__id__` (via the `seqable` ability). Use
+  over a record see its fields, never `:__id__` (via the `Seqable` ability). Use
   `record?`/`record-id`/`fields` to test/read the identity explicitly.
 - **Match a record by id + fields** with `(record name {:k p …})` — the `name` fixes the
   nominal id (bare = current ns, or `mod/name`) and the optional `{…}` is a map pattern over
@@ -398,16 +398,16 @@ Other things worth knowing:
 ### The abilities `std/` already ships (ADR-177)
 
 `impl` one of these for your own record and that library accepts your type — you don't
-edit the library. Beyond the core `display` (`->string`, what `println` shows) and `inspectable`
+edit the library. Beyond the core `Display` (`->string`, what `println` shows) and `Inspect`
 (`inspect`, the debug form):
 
 | `impl` this | to get |
 |---|---|
-| `json/encodable` — `(->json x)`, from `json` | `json/encode` handles your type (a record's wire shape; a pid/fn/datetime at all). **No `:default`** — an unimpl'd kind still errors loudly. |
-| `io/port` — `(io-write p s)`, from `io` | your value is an output port (`with-out`, logger sinks). A bare 1-arg fn already is one. |
-| `log/backend` — `(backend-emit b rec)`, from `log` | a backend that batches / emits JSON lines / samples. `backend-passes?` is the stock level+filter gate. |
-| `http/response` — `(send-response r sock)`, from `http` | a response kind with its own wire behaviour, including who closes the socket. |
-| `package/dependency` (**sealed**), from `package` · `datetime/temporal` — `(->iso x)` (**sealed**), from `datetime` | a new manifest dep kind / calendar type. Sealed ⇒ `nest check` demands every op. |
+| `JsonEncode` — `(->json x)`, from `json` | `json/encode` handles your type (a record's wire shape; a pid/fn/datetime at all). **No `:default`** — an unimpl'd kind still errors loudly. |
+| `Port` — `(io-write p s)`, from `io` | your value is an output port (`with-out`, logger sinks). A bare 1-arg fn already is one. |
+| `LogBackend` — `(backend-emit b rec)`, from `log` | a backend that batches / emits JSON lines / samples. `backend-passes?` is the stock level+filter gate. |
+| `Response` — `(send-response r sock)`, from `http` | a response kind with its own wire behaviour, including who closes the socket. |
+| `Dependency` (**sealed**), from `package` · `Temporal` — `(->iso x)` (**sealed**), from `datetime` | a new manifest dep kind / calendar type. Sealed ⇒ `nest check` demands every op. |
 
 Also: `std/`'s value types are **records**, not plain maps — `buffer`, `queue`, `pq`,
 `multimap`, `datetime`/`date`/`time-of-day`, and the four dependency kinds. So
@@ -416,7 +416,7 @@ prints as itself (`#<buffer *scratch* 11 chars>`, `2026-07-29T…Z`) rather than
 internals, and **none of them is `=` to a map with the same fields** — build them with
 their constructors, and don't compare one against a map literal in a test. Where a library
 renders a *user* value to text (`template/render`, `csv-emit`, `url/query-encode`) it calls
-`->string`, so your `display` impl governs that output too.
+`->string`, so your `Display` impl governs that output too.
 
 ## Patterns (`let`, `fn`, `match`, `receive`)
 
@@ -957,7 +957,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `string/starts-with?` `string/ends-with?` `string/->list` `string/list->`
   `string/->bytes` `string/bytes->`.
   **Bare (core, not in the module):** `str` `pr-str` `index-of` `includes?`
-  `string/->number` `->string` (the polymorphic display op) `name`.
+  `string/->number` `->string` (the polymorphic Display op) `name`.
   There is no `symbol->string`/`number->string` — use `str`, `->string` or `name`
   (ADR-239 removed both as redundant).
 - **unicode**: `string/->graphemes` (extended grapheme clusters as a vector of
@@ -1030,8 +1030,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **I/O**: `print` `println` `file/slurp` `file/spit` `load` `eval-string` `reflect/read-string`.
   `print`/`println` **space-join** their args (Python-style, via `%render`) —
   distinct from `str`, which concatenates. A **record** defines how it prints on screen
-  (Elixir's `String.Chars`) via the core, always-on `display` ability: just
-  `(impl display my/rec (->string [r] …))` and the screen printers honor it — no import,
+  (Elixir's `String.Chars`) via the core, always-on `Display` ability: just
+  `(impl Display my/rec (->string [r] …))` and the screen printers honor it — no import,
   no activation step; built-ins unchanged (ADR-171/172).
   `print`/`println` **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the
