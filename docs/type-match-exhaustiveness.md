@@ -41,8 +41,8 @@ correctly — there's nothing else to wire it into.
 
 ## The insight that made this small
 
-`match` (`std/prelude.blsp`, `match*`/`match` macros, `match-build-from`/
-`match-no-match`) compiles
+`match` (`std/prelude.blsp`, `match*`/`match` macros, `%match-build-from`/
+`%match-no-match`) compiles
 
 ```lisp
 (match expr
@@ -63,14 +63,14 @@ Two facts about this shape make it a ready-made exhaustiveness signal with
 **zero new parsing**:
 
 1. **The throw only exists when there's no catch-all.** An irrefutable clause
-   (a wildcard `_` or a bare bind, no `:when` guard — `match-irrefutable?`)
+   (a wildcard `_` or a bare bind, no `:when` guard — `%match-irrefutable?`)
    compiles to its body directly, with no further `if` — so `(throw
    [:match-error …])` is syntactically *absent* from the compiled tree
    whenever the match is already covered by a catch-all. Finding this exact
    shape at all is already "this match lacks a catch-all" — no separate
    detection needed.
 2. **The full list of tried patterns is embedded in the throw as data.**
-   `match-no-match` is `(throw [:match-error (quote ~context) ~target (quote
+   `%match-no-match` is `(throw [:match-error (quote ~context) ~target (quote
    ~patterns)])` — `patterns` (every clause's raw pattern) is quoted literal
    data sitting in the 4th vector slot. No clause-boundary reconstruction
    needed — just read it off.

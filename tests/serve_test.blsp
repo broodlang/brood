@@ -98,7 +98,7 @@
 
 (describe "editor/serve — attach-display-local (the host's own window)"
   :isolated (test "the operator attaches a local display to the session it serves in the same runtime"
-    ;; No node link: attach-display-local handshakes with the local manager (whereis serve-name)
+    ;; No node link: attach-display-local handshakes with the local manager (proc/whereis serve-name)
     ;; and runs the unified loop, so a served daemon can also show the host a live window.
     (let (report (self))
       ; register a manager under serve-name in THIS (isolated) runtime
@@ -158,7 +158,7 @@
     ;; the only test that touches the global `:ui` name (avoids cross-test clashes)
     (do
       (serve mk vw up)
-      (is (not (nil? (whereis serve-name))))))
+      (is (not (nil? (proc/whereis serve-name))))))
 
   (test "attach-display (GUI client): frames paint to the display, input ships back, :close tears down"
     ;; The terminal client reads input from the TTY; a GUI client reads window input from

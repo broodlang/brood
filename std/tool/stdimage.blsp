@@ -13,8 +13,8 @@
 ;; project's sections first, then any additional source, so a project can still shadow a
 ;; stdlib module name.
 ;;
-;; **Staleness is `stdlib-id`** — version + git sha + a content hash of every baked-in
-;; `.blsp`, computed at build time. Deliberately NOT `build-id`, which embeds the running
+;; **Staleness is `system/stdlib-id`** — version + git sha + a content hash of every baked-in
+;; `.blsp`, computed at build time. Deliberately NOT `system/build-id`, which embeds the running
 ;; executable's mtime: that would give `brood`, `nest` and `brood-lsp` three different keys
 ;; for one identical stdlib, and three ~2 MB images. It still changes on any edit to any
 ;; `.blsp`, committed or not, so a stale image can never be read.
@@ -29,8 +29,8 @@
 (defn- cache-dir
   ()
   "`$XDG_CACHE_HOME/brood` (or `~/.cache/brood`), or nil when neither is set."
-  (let (xdg (os/getenv "XDG_CACHE_HOME")
-        home (os/getenv "HOME")
+  (let (xdg (os/env "XDG_CACHE_HOME")
+        home (os/env "HOME")
         base (cond
                (and xdg (not (= xdg ""))) xdg
                (and home (not (= home ""))) (path/join home ".cache")
@@ -39,11 +39,11 @@
 
 (defn image-path ()
   "Where this binary's stdlib image lives, or nil if there is no cache directory.
-Named by `stdlib-id` — a hash of what is BAKED IN, not of this executable. `build-id`
+Named by `system/stdlib-id` — a hash of what is BAKED IN, not of this executable. `system/build-id`
 embeds the binary's own mtime, so `brood`, `nest` and `brood-lsp` from one tree would each
 write their own ~2 MB copy of an identical image; keyed this way they share one."
   (let (dir (cache-dir))
-    (when dir (path/join dir (str "std-image-" (stdlib-id) ".bin")))))
+    (when dir (path/join dir (str "std-image-" (system/stdlib-id) ".bin")))))
 
 (defn- prefixed-by-any?
   (nm names)
@@ -119,7 +119,7 @@ since the prelude is always present."
                              ;; and a later require would restore no bindings rather than fall back.
                              (when (> (count syms) 0) [mn syms])))
                          names)))
-        [path (%image-write path sections (stdlib-id))]))))
+        [path (%image-write path sections (system/stdlib-id))]))))
 
 (defn install ()
   "Install this binary's stdlib image as an additional feature source, if one exists and is
@@ -127,7 +127,7 @@ current. Returns the section count, or nil on a miss (absent, stale, unreadable)
 case `require` keeps loading stdlib modules from source exactly as before."
   (let (path (image-path))
     (when (and path (file/exists? path))
-      (let (idx (try (%image-index path (stdlib-id)) (catch _ nil)))
+      (let (idx (try (%image-index path (system/stdlib-id)) (catch _ nil)))
         (when idx
           ;; Replay the recorded edges FIRST: a restored module defines its bindings but
           ;; evaluates nothing, so without them `url` comes back with no `path` and its

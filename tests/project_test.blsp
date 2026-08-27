@@ -649,15 +649,15 @@
 
 ;; ---- the :brood runtime-version gate (ADR-209) -------------------------------
 ;; A project may require a minimum/compatible runtime with `:brood "<constraint>"`,
-;; checked against `(brood-version)` at setup. Met = silent; unmet = a hard, clear
+;; checked against `(system/brood-version)` at setup. Met = silent; unmet = a hard, clear
 ;; error naming the constraint and the running version. We drive `project-check-brood-
 ;; version` directly by binding the dynvar it reads, so no fixture project or cwd
 ;; change is needed.
 
-(describe "project: (brood-version)"
+(describe "project: (system/brood-version)"
   (test "returns this runtime's semantic version as a valid MAJOR.MINOR.PATCH string"
-    (is (string? (brood-version)))
-    (is (version/valid? (brood-version)))))
+    (is (string? (system/brood-version)))
+    (is (version/valid? (system/brood-version)))))
 
 (describe "project: the :brood runtime gate"
   (test "no constraint is a no-op (nothing to satisfy)"
@@ -667,14 +667,14 @@
     ;; the running version always satisfies >= 0.0.0
     (binding (*project-brood* ">= 0.0.0")
       (assert= nil (project/project-check-brood-version)))
-    (binding (*project-brood* (str "<= " (brood-version)))
+    (binding (*project-brood* (str "<= " (system/brood-version)))
       (assert= nil (project/project-check-brood-version))))
   (test "an unmet constraint errors, naming the requirement and the running version"
     (binding (*project-brood* ">= 999.0")
       (let (message (try (project/project-check-brood-version) (catch e (error-message e))))
         (is (includes? message "requires Brood"))
         (is (includes? message ">= 999.0"))
-        (is (includes? message (brood-version))))))
+        (is (includes? message (system/brood-version))))))
   (test "a caret/tilde constraint is honoured like any other range"
     (binding (*project-brood* "^999.0")
       (is (includes? (try (project/project-check-brood-version) (catch e (error-message e)))

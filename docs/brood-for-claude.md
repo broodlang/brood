@@ -217,7 +217,7 @@ your code will read like the standard library.
 ```
 foo?         ; predicate — returns a boolean (int? empty? starts-with?)
 *foo*         ; dynamic var or module-level config/state (defdyn *log-level*)
-foo->bar      ; conversion (string/->number, int->char); a module-rooted
+foo->bar      ; conversion (string/->number, string/int->char); a module-rooted
               ; conversion drops the source: string/->bytes, string/bytes->
 ```
 
@@ -259,7 +259,7 @@ Symbols are kebab-case (`out-of-range?`, not `outOfRange`/`out_of_range`).
 recursion with an accumulator:
 
 ```lisp
-(defn reverse (coll) "The items of `coll` in reverse order." (fold flip-cons nil coll))
+(defn reverse (coll) "The items of `coll` in reverse order." (fold %flip-cons nil coll))
 
 ;; longer recursions split into a public shell + a private -at helper
 (defn- count-newlines-at (s i acc) …)              ; private worker
@@ -708,25 +708,25 @@ a node link (ADR-073). The whole model in one example:
 ```lisp
 ;; --- on node "alice" ---------------------------------------------------------
 (node/start "alice")                  ; this runtime is now :alice@host (a keyword)
-(register :inbox (self))              ; bind a LOCAL name -> this pid
+(proc/register :inbox (self))              ; bind a LOCAL name -> this pid
 (let (bob (connect "bob"))            ; dial peer "bob"; returns its :bob@host name
   (node/monitor bob)                  ; get [:nodedown :bob@host] when the link drops
   (send {:name :inbox :node bob} [:hi (node/name)]))   ; reach bob's :inbox
 
 ;; --- on node "bob" -----------------------------------------------------------
 (node/start "bob")
-(register :inbox (self))
+(proc/register :inbox (self))
 (receive ([:hi from] (println "hi from " from)))       ; => hi from :alice@host
 ```
 
 The three pieces and how they relate:
 
-- **`(register name pid)`** binds `name` → `pid` in *this node's* local registry;
-  **`(whereis name)`** resolves it — **locally only** (`(whereis :inbox)` on alice
-  never sees bob's `:inbox`). Both ends usually `register` the same local name.
+- **`(proc/register name pid)`** binds `name` → `pid` in *this node's* local registry;
+  **`(proc/whereis name)`** resolves it — **locally only** (`(proc/whereis :inbox)` on alice
+  never sees bob's `:inbox`). Both ends usually `proc/register` the same local name.
 - **`{:name :inbox :node :bob@host}`** is the cross-node address — a send-map naming
   a registered process *on a specific node*. `(send {:name … :node …} msg)` is the
-  remote analogue of `(send (whereis name) msg)`: it's how you reach a peer's
+  remote analogue of `(send (proc/whereis name) msg)`: it's how you reach a peer's
   registered process.
 - **`node/start` / `connect` / `node/name` return keywords** (`:bob@host`), not
   strings — use them directly as the `:node` value; `(str …)` only for display.
@@ -965,13 +965,13 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `"e\u{301}"` is 2 codepoints but 1 cluster) · `string/->codepoints` ·
   `string/normalize` (`(string/normalize s :nfc)`, also `:nfd` `:nfkc` `:nfkd` — `=` is
   byte-structural, so `"é"` written two ways compares unequal until you normalise) ·
-  `display-width` (terminal cells, bare)
+  `string/display-width` (terminal cells, bare)
 - **string formatting**: `string/repeat` `string/pad-left` `string/pad-right`
   `->fixed` (number → string with fixed decimals, e.g. `(->fixed 3.14159 2)`
   → `"3.14"` — `str` prints full f64 precision, so reach for this for output) ·
   `format` (small printf, e.g. `(format "x=%d y=%.2f" 42 3.14)` → `"x=42 y=3.14"`;
   specifiers `%s %d %f %.Nf %%`; width via `string/pad-left`/`string/pad-right`)
-- **map**: `assoc` `dissoc` `get` `keys` `vals` `contains?` `into` `map-pairs`
+- **map**: `assoc` `dissoc` `get` `keys` `vals` `contains?` `into` `%map-pairs`
   (a map's `[k v]` pairs) `seq` (universal list-view — coerces a map to its
   `[k v]` pairs; lists, vectors, strings, nil pass through). **Maps are seqable**:
   `(map f m)` / `(filter f m)` / `(fold f acc m)` / `(reduce f acc m)` /
@@ -1001,7 +1001,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   **`/` is exact** (ADR-196): `(/ 1 2)` → `1/2` (a **ratio**, not a float),
   `(/ 6 3)` → `2` (divides evenly → int). `1/2` is a literal; ratios do the full
   tower (ratio+decimal is exact, ratio+float contagion). Reach for `->float`
-  (or `->decimal`) for an inexact result; `numerator`/`denominator` read the parts.
+  (or `decimal/number->`) for an inexact result; `numerator`/`denominator` read the parts.
   Number types: `int` (bignum on overflow) · `float` · `decimal` (`1.50M`, exact
   base-10) · `ratio` (`1/2`, exact rational). `number?`/`ratio?`/`decimal?` test them.
 - **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-loads
@@ -1009,8 +1009,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `pow` `sqrt` `clamp` `sum` `product`, the sign/parity predicates `positive?`
   `negative?` `even?` `odd?`, and the constants `pi` `e`. **No bare-name magic** — a bare
   `sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound.
-- **bitwise**: `bit-and` `bit-or` `bit-xor` `bit-not` `bit-shift-left`
-  `bit-shift-right` (64-bit, arithmetic right shift; shift amount in `[0,64)`).
+- **bitwise**: `bit/and` `bit/or` `bit/xor` `bit/not` `bit/shift-left`
+  `bit/shift-right` (64-bit, arithmetic right shift; shift amount in `[0,64)`).
 - **randomness** (pure & seedable — there is *no* global RNG; thread the seed):
   every step takes a seed and returns `[value next-seed]`. `rng` (→ a 32-bit
   int), `rand-int` `(seed n)` → `[i next]` in `[0,n)`, `rand-float` `(seed)` →
@@ -1046,7 +1046,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **Filesystem (stat-class)**: `file/exists?` `file/dir?` `file/ls` `file/mtime` `file/stat`
 - **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`) `spawn-link`
   `send` `receive` `self` `ref` `monitor` `demonitor` `link` `unlink` `trap-exit`
-  `register` `whereis`
+  `proc/register` `proc/whereis`
   — plus the **`gen`** framework below
 - **lazy fusing views**: `lmap` `lfilter` `lkeep` `lremove` (thread with `->>`;
   realise with `seq`/`into`) plus `comp` for function composition

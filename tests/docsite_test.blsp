@@ -83,6 +83,19 @@
     (let (html (docsite/render sample-model {}))
       (is (includes? html "id=\"docsite-filter\""))
       (is (includes? html "<script"))))
+  ;; Searching a MODULE name used to show its heading with every definition hidden: each
+  ;; `.def` had already failed its own text test, so `agent` returned a bare header instead
+  ;; of agent's functions. A module-level match must make the whole module a result.
+  ;; Verified behaviourally by executing the emitted script against a stub DOM (3 of 3 defs
+  ;; shown, against 1 of 3 before); this pins the shape so it cannot silently revert.
+  (test "a module-name match shows the module's definitions, not just its heading"
+    (let (js (docsite/render-js))
+      ;; the module-level verdict, computed before the per-def loop
+      (is (includes? js "var whole="))
+      ;; …and consulted by it, so a module hit shows every def
+      (is (includes? js "whole||hits(d,t)"))
+      ;; the sidebar follows the same rule, so nav and content agree
+      (is (includes? js "whole||hits(li,t)"))))
   (test "an explicit :title overrides the model name"
     (is (includes? (docsite/render sample-model {:title "Custom"}) "<title>Custom</title>"))))
 

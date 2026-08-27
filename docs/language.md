@@ -41,7 +41,7 @@ these are the ones to unlearn:
 | `#'foo` var-quote | Symbols are values — plain `'foo`. | A parse error **with a hint** naming `'foo`. |
 | `#_form` discard reader macro | No form-level discard — wrap the form in `(comment …)`, whose body is read but never evaluated, or comment it out with `;`. | A parse error **with a hint** naming `(comment …)` and `;` (was a stray `#_` symbol). |
 | `#"[0-9]+"` regex literal | Regexes are library values: a `(regex/match? "pat" s)` reference auto-loads the `regex` module. | A parse error **with a hint** naming `(regex/match? …)` (was a stray `#`-symbol). |
-| `\c` / `\newline` character literal | No character type — a character is a 1-char string `"c"` (or `(int->char 99)`). | A parse error **with a hint** naming the 1-char string (was `unbound symbol: \c`). |
+| `\c` / `\newline` character literal | No character type — a character is a 1-char string `"c"` (or `(string/int->char 99)`). | A parse error **with a hint** naming the 1-char string (was `unbound symbol: \c`). |
 | `#\|…\|#` block comment (Scheme/CL) | No block comments — comment each line with `;`, or wrap forms in `(comment …)` (read but never evaluated). | A parse error **with a hint** (ADR-169; used to read as a bar-quoted symbol). Any other `#…` is likewise reserved — `#` is a dispatch character, and `#{…}` / `#b"…"` are its only forms. |
 | `0x1F`/`0b1010` radix, `1_000` separators, `1N` bigint | None of these — a digit-led token must be a number Brood has. `(string/->number "1F" 16)` parses hex, `1000` needs no separator, plain `1` already widens to bignum. | A parse error **with a targeted hint** (ADR-169; these read as symbols before, surfacing as a far-away "unbound symbol"). Reserving the tokens keeps each future numeric syntax additive. |
 | `(/ 7 2)` → ratio `7/2` | **Yes — this is what happens** (ADR-196). `/` on integers is exact: `(/ 7 2)` → `7/2`, `(/ 12 3)` → `4` (divides evenly → int). `1/2` is a reader literal. Reach for `->float` when you want an inexact result. | A ratio, exactly as in Clojure/Scheme. |
@@ -62,8 +62,8 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 | Boolean | `true`, `false` | |
 | Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. A result out of `i64` range promotes to an arbitrary-precision **bignum** rather than wrapping, and demotes back when it fits again — so the integer type is unbounded in practice. |
 | Float | `3.14`, `-0.5`, `1e3`, `inf`, `nan` | 64-bit. **`inf`, `-inf` and `nan` are reader literals** — those three bare tokens are floats, not symbols, so they can't be used as names (the digit-required rule below has these three exceptions). Test them with `infinite?` / `nan?`; `=` reports NaN as equal to nothing, per IEEE. |
-| Decimal | `1.50M`, `0M`, `-3.14M` | Exact arbitrary-precision base-10, for money and Postgres `numeric` — values a float can't hold (`(+ 0.1M 0.2M)` *is* `0.3M`). The literal is a trailing `M`; `(decimal x)` builds one from a string, int, bignum or float. Scale is significant in arithmetic (see [Arithmetic](#arithmetic)) but **not** in `=`, which compares values (`1.5M` = `1.50M`). |
-| Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`->decimal` convert out; `numerator`/`denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
+| Decimal | `1.50M`, `0M`, `-3.14M` | Exact arbitrary-precision base-10, for money and Postgres `numeric` — values a float can't hold (`(+ 0.1M 0.2M)` *is* `0.3M`). The literal is a trailing `M`; `(decimal/of x)` builds one from a string, int, bignum or float. Scale is significant in arithmetic (see [Arithmetic](#arithmetic)) but **not** in `=`, which compares values (`1.5M` = `1.50M`). |
+| Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`decimal/number->` convert out; `numerator`/`denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
 | String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control), `\xHH` (two-hex-digit byte), `\u{H..H}` (1–6-hex-digit Unicode codepoint). A malformed `\x`/`\u{}` is a read error, and so is an unknown **alphabetic** escape (`\d`, `\w`, `\s`, …) — that's almost always a regex class written in a plain string, where dropping the backslash would silently break the pattern, so write `\\d`. A `\X` escape of punctuation or a digit (`\.`, `\/`, `\1`) is literal `X` (how you write a literal metacharacter in a regex string). Readable printing is the inverse: it re-escapes `\n \t \r \e \0 \\ \"` by name and any other control char as `\u{H..H}`, so a printed string always re-reads to the same value. |
 | Symbol | `foo`, `+`, `my-fn`, `empty?`, `++`, `...` | Names; interned. **A token that leads with a digit — or a sign/dot immediately followed by a digit — must be a number** (ADR-169): if it isn't one Brood has (`0x1F`, `1_000`, `1N`, `1+`, `12-34`; but `1/2` *is* a ratio now — ADR-196) it's a *reader error*, never a symbol, so those tokens stay reserved for future numeric syntax. A sign or dot with **no** digit behind it is not digit-led and stays a symbol — `+`, `-`, `...`, `.foo`, `foo.`, `--5`, `++`. A symbol whose name isn't a clean token — one built via `(symbol "a b")` with whitespace, delimiters, an empty name, or a spelling that would read as a number/keyword (including a reserved one, `(symbol "1+")`) — prints (readably) and reads back as a `\|…\|` **bar-quoted** symbol (`\|a b\|`, `\|1+\|`, `\|\|` for empty; `\|`/`\\` escape a literal bar/backslash), so every symbol round-trips through `pr-str`/`read`. |
 | Keyword | `:ok`, `:else`, `:\|a b\|` | Self-evaluating named constants. Like symbols, a keyword whose name isn't a clean token (e.g. `(keyword "a b")`, `(keyword "")`) prints and reads as `:\|…\|`. |
@@ -1660,7 +1660,7 @@ The stock one is an `io` port + a minimum level + a filter + a formatter, so the
 `process-backend` is the **log-to-a-buffer** path: the formatted line is sent to
 `buffer-pid` as `[:io-write s]` — the same envelope `process-port` uses — so an
 editor process can fold it into its `*Messages*` buffer. The default logger is
-registered under the name `:logger` (found via `whereis`); `(log …)` falls back to
+registered under the name `:logger` (found via `proc/whereis`); `(log …)` falls back to
 stderr when none is running, so a log is never silently lost.
 
 For a backend that does something other than write one formatted line — batch records,
@@ -1992,7 +1992,7 @@ instead of hanging); `(gen/call-timeout pid payload ms)` sets a custom deadline;
 `(gen/stop pid)` ends the loop; `(gen/code-change pid)` asks a running server to
 migrate its state after a hot reload. Spawn with `gen/spawn-server`,
 `gen/spawn-server-link` (Erlang `start_link` — links the server to the caller), or
-`gen/spawn-server-named` (registers it for `whereis`). A `defprocess` server
+`gen/spawn-server-named` (registers it for `proc/whereis`). A `defprocess` server
 composes directly under `supervisor` (see `std/proc/supervisor.blsp`).
 
 **A call that times out leaves nothing behind.** `gen/call-timeout` mints a fresh
@@ -2056,7 +2056,7 @@ a net-split.
 `(spawn-link expr)` spawns `expr` in a new process **already linked** to the
 caller (Erlang `spawn_link`) and returns its pid. It takes one expression, like
 `spawn`, and a `(fn () …)` body is passed through rather than re-wrapped; there
-is no named form (`register` the child if it needs a name).
+is no named form (`proc/register` the child if it needs a name).
 
 The point is the **atomicity**, not the brevity. The link is registered while
 the child's mailbox is live but *before* the child is enqueued to run, so the
@@ -2123,7 +2123,7 @@ site, catchable as usual.
 
 Only long/blocking **data-in/data-out** natives are allowed (`%git-clone`,
 `%git-resolve-ref`, `%pbkdf2-sha256-bytes`, `%digest`, `%hmac`, `file/slurp`,
-`file/slurp-bytes`, `file/spit`, `file/spit-bytes`, `file/spit-append`, `append-bytes`,
+`file/slurp-bytes`, `file/spit`, `file/spit-bytes`, `file/spit-append`, `file/spit-bytes-append`,
 `tls-self-signed`); anything heap-sharing or env-reading is refused with a
 clear error. Args and the result are deep-copied across (like `send`), so
 they must be sendable values. The package manager's clones already ride it.
@@ -2188,7 +2188,7 @@ transparently.
 ```clojure
 ;; node A: name the runtime, listen, expose a process by name
 (node/start :a "127.0.0.1:9001" "secret")
-(register :echo (self))
+(proc/register :echo (self))
 
 ;; node B: connect, reach A's :echo by name, then talk to the pid it replies with
 (node/start :b "127.0.0.1:9002" "secret")
@@ -2202,7 +2202,7 @@ transparently.
 |---|---|
 | `(node/start name "host:port" cookie)` | Name this runtime and listen for peers. Returns the node name. |
 | `(node/connect "name@host:port")` | Dial + authenticate a peer (shared cookie). Returns the peer's node name. |
-| `(register name pid)` | Bind a local name so peers can reach this process via `{:name name :node this-node}`. |
+| `(proc/register name pid)` | Bind a local name so peers can reach this process via `{:name name :node this-node}`. |
 | `(node/name)` | This runtime's node name (`:nonode` until `node/start`). |
 | `(node/list)` | A list of currently connected peer node names. |
 | `(node/monitor name)` | Deliver `[:nodedown name]` when the link to `name` goes down (clean close or heartbeat timeout). |
@@ -2279,33 +2279,33 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   (`std/prelude.blsp`) — including `+`, `<`, and `=` themselves.
 
 ### Bitwise
-`bit-and`  `bit-or`  `bit-xor`  `bit-not`  `bit-shift-left`  `bit-shift-right`
+`bit/and`  `bit/or`  `bit/xor`  `bit/not`  `bit/shift-left`  `bit/shift-right`
 
 - Integer bit operations over the 64-bit two's-complement representation.
-  `bit-and`/`bit-or`/`bit-xor` are binary; `bit-not` is the unary complement
-  (`(bit-not n)` = `(- (- n) 1)`).
-- `bit-shift-left` discards bits shifted past bit 63; `bit-shift-right` is an
+  `bit/and`/`bit/or`/`bit/xor` are binary; `bit/not` is the unary complement
+  (`(bit/not n)` = `(- (- n) 1)`).
+- `bit/shift-left` discards bits shifted past bit 63; `bit/shift-right` is an
   **arithmetic** (sign-preserving) shift. The shift amount must be in `[0, 64)`
   — outside that range is a clean error, not a crash.
 - These are Rust primitives (they can't be bootstrapped from the numeric ops).
 
 ### Float bit patterns
-`float->bits`  `bits->float`
+`bit/float->`  `bit/->float`
 
-- `(float->bits x)` is the IEEE 754 binary64 bit pattern of `x` as a non-negative
+- `(bit/float-> x)` is the IEEE 754 binary64 bit pattern of `x` as a non-negative
   integer — a bignum whenever the sign bit is set, since the pattern is a *u64*.
-  `(bits->float n)` is the inverse, for `n` in `[0, 2^64)`.
+  `(bit/->float n)` is the inverse, for `n` in `[0, 2^64)`.
 - This is **reinterpretation, not conversion**, and it is the only *exact* float
   comparison the language has. `=` on floats is value equality, which deliberately
   collapses `-0.0` and `0.0` and reports every NaN as equal to nothing:
 
   ```lisp
   (= -0.0 0.0)                                  ; => true
-  (= (float->bits -0.0) (float->bits 0.0))      ; => false
+  (= (bit/float-> -0.0) (bit/float-> 0.0))      ; => false
   ```
 
-- An `int` argument is taken as its float value, so `(float->bits 1)` and
-  `(float->bits 1.0)` agree.
+- An `int` argument is taken as its float value, so `(bit/float-> 1)` and
+  `(bit/float-> 1.0)` agree.
 - Rust primitives: no bitcast or `frexp` exists to bootstrap them from. They are
   what the `parse-number-fxx` conformance corpus asserts against
   (`tests/conformance_parse_number_test.blsp`).
@@ -2336,7 +2336,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 ### Lists & sequences
 `cons`  `first`  `rest`  `second`  `third`  `last`  `but-last`
 `list`  `vector`  `vec`  `conj`  `disj`  `into`  `seq`
-`append`  `reverse`  `reverse-onto`  `nth`  `count`  `empty?`
+`append`  `reverse`  `%reverse-onto`  `nth`  `count`  `empty?`
 `range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
 `includes?`  `any?`  `every?`  `find`  `index-of`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
@@ -2369,7 +2369,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 - `append` concatenates any number of sequences — lists *and* vectors, read as
   sequences — left to right, returning a **list**; wrap in `(into [] …)` for a
   vector. (The `concat` alias was removed — one spelling each.)
-- `reverse-onto` is `(append (reverse xs) ys)` in **one** pass instead of four, and
+- `%reverse-onto` is `(append (reverse xs) ys)` in **one** pass instead of four, and
   is the spelling to reach for in a tail-recursive loop that has accumulated a
   reversed prefix and wants to splice it back in front of the remainder — the shape
   every non-tail-to-tail rewrite lands in. `ys` is shared, not copied, so only the
@@ -2474,7 +2474,7 @@ access, or call qualified (`map/update-vals`). The core protocol above stays bar
 
 See the [Maps](#maps) section above. `{ }` is the literal form; the rest are
 immutable operations that return fresh maps. `count`/`empty?` work on maps too,
-in **O(1)** — the CHAMP root node tracks its size (exposed by the `map-count`
+in **O(1)** — the CHAMP root node tracks its size (exposed by the `%map-count`
 kernel primitive), so neither walks nor materialises the entries.
 
 ### Higher-order
@@ -2545,7 +2545,7 @@ Every operation whose **subject is a string** lives in the `string` module
 Bare in the prelude — these operate on *any* collection or bridge a string to
 another type, so they are **not** string-library ops:
 `str`  `pr-str`  `index-of`  `includes?`  `string/->number`
-`string/->symbol`  `->fixed`  `format`  `fmt`  `display-width`
+`string/->symbol`  `->fixed`  `format`  `fmt`  `string/display-width`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
@@ -2568,7 +2568,7 @@ another type, so they are **not** string-library ops:
   strings: `"e"` + U+0301 is *two* code points but *one* cluster, and a flag emoji is
   four code points and one cluster. This is the unit to step a cursor by; stepping by
   code point splits a cluster and corrupts the text. `(apply str (string/->graphemes
-  s))` is `s`. `display-width` counts terminal cells over the same clusters (a CJK
+  s))` is `s`. `string/display-width` counts terminal cells over the same clusters (a CJK
   char or emoji is 2, a combining mark 0).
 - **The cluster-indexed accessors** are `string/grapheme-count`, `(string/grapheme-at s i
   [default])`, and `(string/substring-graphemes s start [end])` — the grapheme-indexed
@@ -2676,7 +2676,7 @@ linear on any text.
 ### Iolists (write-boundary trees)
 
 The byte-producing write boundaries — `tcp-send`, `proc-send`, `file/spit`,
-`file/spit-append`, `file/spit-bytes`, `append-bytes`, and the in-memory materialiser
+`file/spit-append`, `file/spit-bytes`, `file/spit-bytes-append`, and the in-memory materialiser
 `bytes-concat` — accept any **iolist** (ADR-139, the Erlang/Elixir model): a
 **string**, a **`bytes`** value, a **byte int 0–255**, or an arbitrarily nested
 **list/vector** of iolists (`nil` is empty; an improper tail is a final leaf).
@@ -2961,13 +2961,13 @@ two disagree. A builtin from a feature this binary lacks is still bound and stil
 raises when called, so ask the build instead (ADR-197):
 
 ```clojure
-(features)             ;=> [:gui :clipboard :jit :treesit :wasm :dev-tools]
-(feature? :gui)        ;=> true    ; can this binary open a window at all?
-(feature? :nonesuch)   ;=> false   ; unknown names are false, not an error
+(system/features)             ;=> [:gui :clipboard :jit :treesit :wasm :dev-tools]
+(system/feature? :gui)        ;=> true    ; can this binary open a window at all?
+(system/feature? :nonesuch)   ;=> false   ; unknown names are false, not an error
 (bound? 'gui-open)     ;=> true    ; …even on a build with no gui backend
 ```
 
-`features` reports what was **compiled in**, not what will work right now — a `gui`
+`system/features` reports what was **compiled in**, not what will work right now — a `gui`
 build still fails on a headless box. It buys you the distinction between "this binary
 lacks the feature" and "this feature failed", which is the one an app needs to decide
 whether to degrade or to report.

@@ -46,7 +46,7 @@ pub enum PrimOp {
     // per 2-arg call (one cons cell for `xs` + one closure for fold's lambda).
     Max,
     Min,
-    // `bit-and`/`bit-or`/`bit-xor` (perf): plain bitwise builtins; turning them
+    // `bit/and`/`bit/or`/`bit/xor` (perf): plain bitwise builtins; turning them
     // into PrimOps removes the non-tail Call they emit in self-tail loops (e.g.
     // sort's `gen`), which unblocks int register-carry for the loop variables.
     // Int-only fast path; non-Int (BigInt) defers to the native builtin.
@@ -142,9 +142,9 @@ impl PrimOp {
             "vector-ref" => PrimOp::VectorRef,
             "max" => PrimOp::Max,
             "min" => PrimOp::Min,
-            "bit-and" => PrimOp::BitAnd,
-            "bit-or" => PrimOp::BitOr,
-            "bit-xor" => PrimOp::BitXor,
+            "bit/and" => PrimOp::BitAnd,
+            "bit/or" => PrimOp::BitOr,
+            "bit/xor" => PrimOp::BitXor,
             _ if name == kw::TABLE_HAS => PrimOp::TableHas,
             _ if name == kw::TABLE_GET => PrimOp::TableGet,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,

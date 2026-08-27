@@ -43,7 +43,7 @@
           nonce (crypto/random-nonce)
           ct (into [] (crypto/encrypt key nonce (string/->bytes "data")))
           ;; flip a byte in the ciphertext
-          bad (assoc ct 0 (bit-xor (nth ct 0) 255)))
+          bad (assoc ct 0 (bit/xor (nth ct 0) 255)))
       (assert= :error (crypto/decrypt key nonce bad)))))
 
 (describe "crypto/encrypt-string + decrypt-string"

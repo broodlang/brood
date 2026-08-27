@@ -48,8 +48,8 @@
 
 (defn serve-spawns ()
   "Idempotently start + register the local `:remote-spawn` server so peers can `(node/spawn this-node …)` against this node. Safe to call multiple times — only the first call spawns a server. Typically called once at startup, after `(node/start …)`."
-  (when (nil? (whereis :remote-spawn))
-    (register :remote-spawn (/spawn (remote-spawn-server))))
+  (when (nil? (proc/whereis :remote-spawn))
+    (proc/register :remote-spawn (/spawn (remote-spawn-server))))
   nil)
 
 (defmacro spawn (node expr)
@@ -83,7 +83,7 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
 
 (defn- node-config-dir
   ()
-  (str (or (os/getenv "XDG_CONFIG_HOME") (str (os/getenv "HOME") "/.config")) "/brood"))
+  (str (or (os/env "XDG_CONFIG_HOME") (str (os/env "HOME") "/.config")) "/brood"))
 
 (defn- node-cookie-path () (str (node-config-dir) "/cookie"))
 
@@ -100,7 +100,7 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
   "The shared secret authenticating node links, resolved as: `$BROOD_COOKIE` →
 `~/.config/brood/cookie` → freshly generated and persisted (0600). All your nodes
 on this machine share one cookie; set `$BROOD_COOKIE` to override."
-  (or (os/getenv "BROOD_COOKIE")
+  (or (os/env "BROOD_COOKIE")
     (let (path (node-cookie-path))
       (if (file/exists? path)
         (node-chomp (file/slurp path))
@@ -113,8 +113,8 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
 ;; cron / ssh session leaves it unset.
 (defn- node-runtime-dir
   ()
-  (str (or (os/getenv "XDG_RUNTIME_DIR")
-         (str "/tmp/brood-" (or (os/getenv "USER") (os/getenv "LOGNAME") "shared")))
+  (str (or (os/env "XDG_RUNTIME_DIR")
+         (str "/tmp/brood-" (or (os/env "USER") (os/env "LOGNAME") "shared")))
     "/brood"))
 
 (defn- node-socket-path (s) (str (node-runtime-dir) "/" s ".sock"))

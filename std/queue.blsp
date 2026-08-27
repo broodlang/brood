@@ -26,12 +26,10 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
 ;; The bare `queue?` type predicate lives in the prelude alongside `set?`/`map?` (ADR-236).
 
 (defn empty ()
-  "An empty FIFO queue."
-  (queue nil nil 0))
+  "An empty FIFO queue.
 
-(defn empty? (q)
-  "True if the queue has no elements."
-  (= (get q :size) 0))
+    (count (queue/empty))          → 0"
+  (queue nil nil 0))
 
 (defn- balance
   (front back size)
@@ -41,17 +39,23 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
     (queue front back size)))
 
 (defn push (q v)
-  "Return a queue with `v` added at the back."
+  "Return a queue with `v` added at the back.
+
+    (seq (queue/push (queue/empty) 1))   → (1)"
   (balance (get q :front) (cons v (get q :back)) (+ (get q :size) 1)))
 
 (defn pop (q)
-  "Return `[front-value new-queue]`, or `:empty` if the queue is empty."
+  "Return `[front-value new-queue]`, or `:empty` if the queue is empty.
+
+    (first (queue/pop (queue/list-> [1 2])))   → 1"
   (if (empty? q)
     :empty (let (front (get q :front))
       [(first front) (balance (rest front) (get q :back) (- (get q :size) 1))])))
 
 (defn peek (q)
-  "Return the front value without removing it, or `:empty` if empty."
+  "Return the front value without removing it, or `:empty` if empty.
+
+    (queue/peek (queue/list-> [1 2]))   → 1"
   (if (empty? q)
     :empty (first (get q :front))))
 
@@ -65,13 +69,10 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
     (if (= (get q :size) 0) nil (append (get q :front) (reverse (get q :back))))))
 (impl Conjable queue/queue (-conj [q v] (push q v)))
 
-(defn ->list (q)
-  "All elements in FIFO order as a list — the queue's `Seqable` view. `(seq q)` /
-`(into [] q)` / `(map f q)` / `(fold f init q)` / `(for (x q) …)` all work directly."
-  (seq q))
-
 (defn list-> (xs)
-  "Build a queue from a list or vector, front → back — i.e. `(into (queue/empty) xs)`."
+  "Build a queue from a list or vector, front → back — i.e. `(into (queue/empty) xs)`.
+
+    (seq (queue/list-> [1 2 3]))   → (1 2 3)"
   (into (empty) xs))
 
 ;; A queue shows its shape, not its two-list representation: `Display` is the O(1) summary
@@ -85,4 +86,4 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
 
 (impl Inspect
   queue/queue
-  (inspect [q] (str "#<queue " (pr-str (->list q)) ">")))
+  (inspect [q] (str "#<queue " (pr-str (seq q)) ">")))

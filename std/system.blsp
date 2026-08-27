@@ -1,30 +1,18 @@
-;; std/system.blsp — OS/process interface.
+;; std/system.blsp — the Brood runtime's own surface (argv, exit, build identity).
 
 (defmodule system
-  "OS and process utilities: environment, argv, subprocess execution, OS type.
+  "The Brood RUNTIME itself: this process's arguments, how it exits, and which build it is.
+Distinct from `os`, which is the OPERATING SYSTEM around it (`os/env`, `os/cmd`, `os/spawn`).
 
-    (system/env \"HOME\")               ;; => \"/home/alice\"
-    (system/env-all)                    ;; => {:HOME \"/home/alice\" ...}
-    (system/argv)                       ;; => [\"brood\" \"script.blsp\"]
-    (system/os-type)                    ;; => :linux
-    (system/cwd)                        ;; => \"/home/alice/project\"
-    (system/os/hostname)                   ;; => \"mymachine\"
+    (system/argv)            ;; => [\"brood\" \"script.blsp\"]
+    (system/script-args)     ;; => [\"--verbose\"]   — everything after `--`
+    (system/brood-version)   ;; => \"0.13.0\"
+    (system/halt 0)          ;; exit with code 0
 
-    (def r (system/cmd \"git\" [\"log\" \"--oneline\" \"-3\"]))
-    (get r :stdout)                     ;; => \"abc1234 ...\n...\"
-    (get r :exit)                       ;; => 0
-
-    (system/halt 0)                     ;; exit with code 0")
+The environment/subprocess half moved to `os` on 2026-08-27: `system/env` was literally
+`(os/getenv name)`, so one function had two names in two modules.")
 
 ;; ---- environment ------------------------------------------------------------
-
-(defn env (name)
-  "The value of environment variable `name` as a string, or nil if unset."
-  (os/getenv name))
-
-(defn env-all ()
-  "All environment variables as a `{string → string}` map."
-  (%env-all))
 
 ;; ---- process identity -------------------------------------------------------
 
@@ -50,33 +38,25 @@
   shape."
   (%script-args))
 
-(defn os-type ()
-  "The current OS as a keyword: `:linux`, `:macos`, or `:windows`."
-  (%os-type))
-
 ;; ---- subprocess -------------------------------------------------------------
-
-(defn cmd (prog & rest)
-  "Run `prog` (a string) and return `{:stdout s :stderr s :exit n}`.
-An optional second argument is a list or vector of string arguments.
-
-    (system/cmd \"ls\" [\"-la\" \"/tmp\"])
-    (system/cmd \"date\")"
-  (let (args (if (nil? rest) nil (first rest)))
-    (if (nil? args)
-      (%os-cmd prog)
-      (%os-cmd prog args))))
-
-(defn cmd-ok? (result)
-  "True if the command result has exit code 0."
-  (= (get result :exit) 0))
-
-(defn cmd-out (result)
-  "The stdout string from a `cmd` result, trimmed."
-  (string/trim (get result :stdout "")))
 
 ;; ---- process control --------------------------------------------------------
 
 (defn halt (& args)
   "Exit the process. `(halt)` exits with code 0; `(halt n)` exits with code `n`."
   (%halt (if (nil? args) 0 (first args))))
+
+;; ---- build identity ----------------------------------------------------------
+;; `feature?` lived in `std/prelude/string.blsp` — a module-system predicate in the string
+;; file, which is simply where it landed rather than where it belongs. It asks what THIS
+;; RUNTIME was built with, so it belongs beside `system/brood-version` and `system/build-id`.
+
+(defn feature? (name)
+  "True if this runtime was built with the optional feature `name` (a keyword —
+`:gui`, `:jit`, `:audio`, `:treesit`, …). See `(system/features)` for the whole list.
+
+Reach for this instead of `bound?` when a capability is optional: a builtin from
+an absent feature is still **bound** and still raises when called, so `(bound?
+'gui/open)` answers yes on a runtime that cannot open a window. An app that wants
+to degrade rather than fail asks the build."
+  (includes? (system/features) name))

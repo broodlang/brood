@@ -50,12 +50,14 @@ encoding everything else as %XX. Accumulates pieces into the reversed list `acc`
     acc
     (let (b (first bytes))
       (url-encode-bytes (rest bytes)
-        (cons (if (url-unreserved? b) (int->char b) (url-byte->pct b)) acc)))))
+        (cons (if (url-unreserved? b) (string/int->char b) (url-byte->pct b)) acc)))))
 
 (defn percent-encode (s)
   "Percent-encode string `s` for use in a URL path or query component. Every byte
 that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
-%XX (uppercase hex). Multi-byte UTF-8 sequences are encoded byte-by-byte."
+%XX (uppercase hex). Multi-byte UTF-8 sequences are encoded byte-by-byte.
+
+    (url/percent-encode \"a b\")   → \"a%20b\""
   (apply str (reverse (url-encode-bytes (seq (string/->bytes s)) nil))))
 
 ;; ---- percent-decoding -------------------------------------------------------
@@ -95,13 +97,13 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
       (if (= c "%")
         (if (>= (+ i 2) n)
           ;; Incomplete %XX — emit the % literally as a byte
-          (url-pct-decode-loop s (+ i 1) n (cons (char->int c) acc))
+          (url-pct-decode-loop s (+ i 1) n (cons (string/char->int c) acc))
           (let (hi (get url-hex-val (nth s (+ i 1)))
                 lo (get url-hex-val (nth s (+ i 2))))
             (if (and hi lo)
               (url-pct-decode-loop s (+ i 3) n (cons (+ (* hi 16) lo) acc))
               ;; Not a valid %XX — emit the % literally and re-process
-              (url-pct-decode-loop s (+ i 1) n (cons (char->int c) acc)))))
+              (url-pct-decode-loop s (+ i 1) n (cons (string/char->int c) acc)))))
         ;; Normal char: encode its UTF-8 bytes into the accumulator
         (url-pct-decode-loop s
           (+ i 1)
@@ -110,7 +112,9 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 
 (defn percent-decode (s)
   "Decode percent-encoded sequences in `s`, returning the original string.
-Invalid or incomplete %XX sequences are passed through as-is."
+Invalid or incomplete %XX sequences are passed through as-is.
+
+    (url/percent-decode \"a%20b\") → \"a b\""
   (let (v (into [] (string/->list s)))
     (url-pct-decode-loop v 0 (count v) nil)))
 
@@ -127,7 +131,7 @@ Invalid or incomplete %XX sequences are passed through as-is."
     (let (b (first bytes))
       (url-qenc-bytes (rest bytes)
         (cons (cond
-                (url-unreserved? b) (int->char b)
+                (url-unreserved? b) (string/int->char b)
                 (= b 32) "+"
                 else (url-byte->pct b))
           acc)))))
@@ -154,7 +158,9 @@ pass through, space becomes +, all other bytes become %XX."
 `key=value&key=value` query string, percent-encoding keys and values and using
 `+` for spaces. Keys are sorted for deterministic output. A non-string value is rendered
 with `->string` (the `Display` protocol), so a record encodes as the string its type
-defines rather than as its field map."
+defines rather than as its field map.
+
+    (url/query-encode {:a 1})    → \"a=1\""
   (let (pairs (sort (map (fn (kv)
                            (list (if (keyword? (first kv))
                                    (name (first kv))
@@ -190,7 +196,9 @@ defines rather than as its field map."
 
 (defn query-decode (s)
   "Parse a query string `key=value&key=value` into a string→string map,
-decoding + as space and %XX sequences."
+decoding + as space and %XX sequences.
+
+    (url/query-decode \"a=1\")     → {\"a\" \"1\"}"
   (if (= s "")
     {}
     (url-parse-query-pairs (string/split s "&") {})))

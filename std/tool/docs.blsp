@@ -300,7 +300,7 @@ module's namespace-rooted globals (ADR-070) back to it."
         syms (filter language? (global-names))
         category-of (fn (s) (doc-catalog/category-of (docs-bare s))))
     {:name "Brood"
-     :version (try (brood-version) (catch _ nil))
+     :version (try (system/brood-version) (catch _ nil))
      :modules (apply vector
                 (filter (fn (group) (not (empty? (get group :defs))))
                   (map (fn (pair)

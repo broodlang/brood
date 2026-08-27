@@ -40,7 +40,7 @@ that are skew, not bugs. Check `Cargo.lock` before bumping `UCD_VERSION` in
 ## Findings
 
 Wiring this up (2026-07-25) required two new primitives — `string->graphemes` and
-`string-normalize` — since Brood previously exposed neither (only `display-width`,
+`string-normalize` — since Brood previously exposed neither (only `string/display-width`,
 which segments internally). Results:
 
 - **NormalizationTest: ~19,000 cases, all pass**, full conformance closure.

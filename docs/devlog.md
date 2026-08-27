@@ -3836,3 +3836,125 @@ plumbing profile could not be refreshed; and FRONTIER's own ruled-out list recor
 memoising the VM's half delivered -4.3%/-4.9% at ceiling 1 and **parity at the default
 ceiling**, i.e. interpreted-path call work is already covered by the JIT where the published
 numbers live. It needs a profiler and a session that can watch it.
+## 2026-08-26 — the rest of the audit: `bit/`, `decimal/`, `proc/`, and the deferred reply
+
+Follow-on to the namespace pass earlier today, working the audit's remaining list top to
+bottom. **Bare names 510 → 268.**
+
+**Three more namespaces, on the `string/length` pattern** — kernel primitives registered
+under a module name, with a `.blsp` file declaring the namespace:
+
+- **`bit/`** (10 names): `bit-and` → `bit/and`, `float->bits` → `bit/float->`, and the rest.
+  347 call sites. The hazard worth recording: `eval/compile/ir.rs` maps the bare strings
+  `"bit-and"`/`"bit-or"`/`"bit-xor"` to `PrimOp::BitAnd` for JIT inlining, so a rename that
+  misses that line does not fail a test — it silently stops inlining bit ops in the crypto
+  and hash hot loops. `eval::compile::tests`' `resolve_prim` assertion is the gate; it
+  passes. A check confirmed no OTHER PrimOp-keyed name was renamed in any wave.
+- **`decimal/`** (4 names), following the conversion idiom: `decimal/->string` is a decimal
+  to a string, `decimal/number->` a number to a decimal. `decimal?` stays bare — a type
+  predicate belongs beside `int?`/`float?`/`ratio?`, not behind a prefix.
+- **`proc/`** for process naming: `register`/`whereis` moved in beside `proc/info`, and the
+  two missing halves added — **`proc/unregister`** (a name could previously only be released
+  by its process dying, so a service could not hand its name over or step down) and
+  **`proc/alive?`** (liveness had to be asked for by allocating a whole `proc/info` map).
+
+Also `brood-version`/`build-id`/`stdlib-id` → `system/*`, and `char->int`/`int->char`/
+`display-width` → `string/*`.
+
+**Two renaming hazards this pass, both caught by the suite rather than by review.** A
+token-boundary matcher is safe for hyphenated names — they cannot be Rust identifiers — but
+`whereis` has no hyphen, so it renamed `pub(crate) fn whereis` in `dist.rs` to something
+unparseable. And `decimal` and `register` are ordinary English words: a blanket rename
+rewrote them inside prose and, for `register`, inside 12 Rust sites where `"decimal"` is the
+*type* name. Both were handled by matching CALL POSITION only (`(name `) and hand-editing the
+single registration line. Error messages that named the old function (`bits->float: …`,
+`int->char: …`) were updated too — an error naming a function that no longer exists is worse
+than the rename.
+
+**`gen` can defer a reply.** A `call` clause had to produce `[reply next-state]`
+synchronously, so a server could not hand work off without blocking its own loop — the one
+gap that limited what could be *built* rather than what was convenient. New `defer` clause:
+the body returns the next state (like a cast) and binds `reply`, an opaque token, so the
+answer can be sent from anywhere once it exists. `(gen/reply token value)` delivers it.
+Verified end to end: with a deferred call outstanding, the loop still served two casts and a
+query, and the answer arrived from a spawned worker.
+
+**`task` and `await` compose.** `(task/await (task/task f) ms)` was meaningless — `await`
+took a *thunk* and started a fresh process. It now takes either.
+
+**`pq` and `multimap` get `Conjable`.** Both had declined it on the reasoning that "conj's
+single element can't carry a key/priority" — but the default impl already answers that with
+the `[k v]` pair convention, and without an impl `(conj q 3)` failed with "adding to a RECORD
+takes a [k v] pair or a map": an error about records, raised for a priority queue.
+
+**A correction to the audit.** `supervisor/delete-child` is not missing — `terminate-child`
+already drops the child from supervision. Adding it would have been duplication.
+
+**Documented examples: 65 → ~170 executed cases**, across `path`, `queue`, `pq`, `set`,
+`math`, `encoding`, `url`, `uuid`, `version`, `text`, `multimap`, `seq`, `bytes`, `stats`,
+`rand`, `diff`, `fuzzy`. Four modules are now at 100%. Writing them found two documentation
+bugs the prose had asserted for a long time:
+
+- `multimap/keys` claimed "insertion order". It returns the CHAMP trie's order, which is not
+  insertion order and **not even stable across processes** — it follows keyword interning, so
+  the same two keys come back in either order depending on what else the process has loaded.
+  The example failed in the suite and passed standalone, which is how it surfaced. Now
+  documented as unspecified, with the example sorted.
+- An example inserter that did not escape quotes terminated a docstring early and leaked the
+  rest into the function BODY — `path/basename` compiled fine and raised `unbound symbol:
+  a/b/c.txt` when called. It went unnoticed because only `doc_examples_test` was re-run after
+  that batch, not the suite. The repair pass then over-corrected, escaping the docstrings'
+  own closing quotes and four real code lines whose *strings* contain a `→`. Both were caught
+  by the full suite, which is the argument for running it rather than the targeted subset.
+
+Still open: ~1,150 public functions carry no example. That is a campaign, not a pass — but
+each one written becomes an executed test, so it pays for itself.
+
+## 2026-08-27 — `os` is the operating system, `system` is the runtime
+
+`std/os.blsp` and `std/system.blsp` were not two modules for one concern, as the audit
+recorded — they were one boundary drawn in the wrong place, which is why `system/env` was
+literally `(os/getenv name)`: one function, two names, two modules. Redrawn:
+
+- **`os`** is the OPERATING SYSTEM: `os/env`, `os/env-all`, `os/type`, `os/cmd`,
+  `os/run-process`, `os/hostname`, `os/exe-path`, the tty predicates, the clock, the
+  clipboard — and now the CHILD-PROCESS family.
+- **`system`** is the Brood RUNTIME itself: `system/argv`, `system/script-args`,
+  `system/halt`, `system/brood-version`, `system/build-id`, `system/stdlib-id`, and
+  `system/features` / `system/feature?`.
+
+That boundary is what decided the two open questions. `proc` held green-process
+introspection AND OS children, so `proc/spawn` started an operating-system process while the
+bare `spawn` started a green one; the OS half is now `os/spawn` / `os/write` / `os/close` /
+`os/set-binary`, and `proc` is green processes only. **`proc/spawn` for the green one was
+never available** — `spawn` is a *special form*, not a function, so it cannot be namespaced;
+`os/spawn` against a bare `spawn` is the clearer pairing anyway. And `feature?`, which had
+been sitting in `std/prelude/string.blsp`, asks what this runtime was built with, so it went
+to `system` beside `brood-version`.
+
+`proc/send` became **`os/write`**: it writes to the child's STDIN, and in this language
+`send` means message-passing to a mailbox. The `[:proc handle data]` message tags are
+deliberately unchanged — a receive pattern that stops matching does not fail, it silently
+drops the message, which is not worth churning for symmetry.
+
+**Three traps, all mine, all worth recording.**
+
+*A dedupe turned an alias into a self-call.* `system/env`'s body was `(os/getenv name)`;
+renaming `os/getenv` → `os/env` made the body call itself. It did not overflow the stack —
+proper tail calls made it an infinite loop in O(1) memory, so the symptom was a HANG at the
+first `(os/env …)`, with boot itself fine and every module loading fine. Bisecting by line
+found it in a minute; guessing would not have.
+
+*A rename ran over a file after moving code into it*, producing `(defn system/feature? …)`
+inside module `system` — a self-qualified definition. Move first, then rename, or the rename
+sees the moved text.
+
+*`features` is an English word.* The token-boundary matcher rewrote prose ("build features")
+and Rust identifiers (`pub(super) fn system/features`) alike. Reversed and redone by call
+position plus the one registration line — the same treatment `register` and `decimal` needed.
+
+**And a stale binary cost twenty minutes.** After fixing the self-call I rebuilt only
+`--bin brood`; `target/release/nest` still carried the infinite recursion, so every
+`nest test` hung and the corpus suites looked like a 25× regression. CLAUDE.md warns that a
+stale binary "fails by agreeing with the baseline" — it also fails by disagreeing
+spectacularly. Rebuild both binaries, or check the mtime before believing a timing.

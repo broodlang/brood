@@ -16558,3 +16558,136 @@ the byte range proven before indexing the alphabet, and wrapping that check in a
 helper — a call per element — cost that direction **4×**. Measured and reverted. The general
 lesson is recorded in the source: in a per-element loop in this library, a function call is
 not a small thing, which is also why the decoder's bounds guards are inlined at each site.
+## ADR-250 — The bare namespace is the scarce resource: prelude internals take the `%` prefix
+
+**Context.** Root-level code — a script, a test file, the REPL — shares one flat global table
+with the prelude, and every shipped *function* is reserved there (ADR-166), so a top-level
+`(def merge-sort …)` fails with "it ships with Brood and cannot be redefined". An audit of the
+whole surface found that **203 of the 510 reserved words were private helpers**: `flip-cons`,
+`reverse-onto`, `with-build`, `for-fold`, `take-acc`, `pr-limit`, `path-last-slash`. A user
+cannot call them meaningfully (`defn-` privacy blocks a qualified cross-module reference),
+`doc` returns nil for them, and they are absent from every generated reference — yet each one
+took an ordinary English word out of the user's vocabulary, with an error message that
+explains nothing about why.
+
+Module code was never at risk: a `defn` inside a `defmodule` leaks no bare global and cannot
+shadow the prelude. Verified, not assumed — defining `merge-sort` and `count` inside a module
+leaves `sort` working. The cost is specific to module-less code.
+
+Reservation is not the bug. Root code and the prelude share one table, so an *unreserved*
+`(def merge-sort …)` in a script would genuinely break `sort` via late binding. The guard is
+correct and blunt: it defends 203 names by making 203 words unusable.
+
+**Decision.** Prelude-private helpers are spelled `%name`. This is not a new rule — it is the
+convention the library already teaches and already applies to 313 kernel names and to four
+prelude helpers (`%xmap`, `%impl-rank`, `%table-from-map`, `%seqview-realize`). The 203 were
+simply the ones that predated or missed it.
+
+The `%` prefix keeps the shadowing guard intact (nobody defines a `%` name by accident),
+costs module-scoped code nothing, needs no new mechanism, and returns 203 ordinary words to
+scripts. Bare names went 510 → 298 in that pass.
+
+**Rejected: giving the prelude a real module namespace.** Genuinely smaller — the names would
+leave `global-names` entirely rather than moving within it — but `defmodule` is itself defined
+in `std/prelude/tools.blsp`, so nothing loaded before it can use a module. Making the prelude
+modular is a bootstrap change, not a rename.
+
+**Rejected: exempting private names from reservation.** It is the shadowing hazard, restated:
+prelude call sites resolve late, so a script's `merge-sort` would win.
+
+**Consequence.** `%`-prefixed globals went 313 → 521, which makes filtering them out of
+`apropos`, `doc-search` and completion a requirement rather than a nicety — see ADR-253.
+
+## ADR-251 — A coherent family of primitives gets a module namespace, not ten bare names
+
+**Context.** ADR-250 cleared the private helpers; what remained bare were families of *public*
+primitives that share one idea and one prefix — `bit-and`/`bit-or`/`bit-shift-left`/… (10
+names), `decimal`/`->decimal`/`decimal->string`/`decimal->float` (4). A hyphen prefix is a
+namespace spelled by hand: it groups the names for a reader and not for the language, while
+still spending ten words of the bare vocabulary that ADR-250 established as scarce.
+
+**Decision.** A family like this is registered under a module name, exactly as `string/length`
+and `file/spit-private` already are: Rust supplies the mechanism, the namespace is Brood's,
+and a `.blsp` file declares the module and documents the surface. `bit/and`, `bit/shift-left`,
+`decimal/of`, `decimal/->string`. `(:use bit)` brings them back bare inside one module for
+code that wants them there.
+
+Names inside the module follow the conversion idiom the rest of the library uses — inside
+module `M`, `M/->x` reads "M to x" and `M/x->` reads "x to M" — so `float->bits` is
+`bit/float->` and `decimal->string` is `decimal/->string`.
+
+**A type predicate does not move.** `decimal?` stays bare with `int?`/`float?`/`ratio?`/`map?`.
+The predicates are one family, recognisable by their `?`, and splitting them by which module
+owns the type would make them harder to find, not easier.
+
+**The hazard this creates, recorded because it fails silently.** `eval/compile/ir.rs` maps
+primitive names *as strings* to `PrimOp`s for JIT inlining — `"bit-and"` → `PrimOp::BitAnd`.
+A rename that updates the registration but not that table does not fail a test: the primitive
+still works, it just stops being inlined, in the crypto and hash hot loops where bit ops
+actually live. The `resolve_prim` assertion in `eval::compile::tests` is the gate. Before any
+future rename, check the renamed set against the 20 names that table keys on.
+
+## ADR-252 — A `gen` server can defer its reply
+
+**Context.** A `defprocess` `call` clause had to return `[reply next-state]` synchronously, so
+the reply was produced inside the receive loop. A server that needed to consult something slow
+had three options, all bad: block its own loop (and every other client with it), answer with a
+placeholder, or abandon `call` and hand-roll the request/reply envelope it already had. This
+was the one gap in the process framework that limited what could be *built* rather than what
+was convenient.
+
+The envelope already carried everything needed — `[:$call from ref payload]` names the caller
+and the one-shot reply alias — so the missing piece was only a way to hold that pair and
+answer later.
+
+**Decision.** A `defer` clause: the body returns the next state (like a `cast`) and binds
+`reply`, an opaque `[pid ref]` token. `(gen/reply token value)` sends the answer from wherever
+it is eventually produced — a spawned worker, a later message, a timer tick. The caller is an
+ordinary `gen/call` throughout and cannot tell the difference.
+
+`reply` is injected as a literal symbol (`~'reply`, the escape hatch `%defseq` already uses)
+rather than taken as a clause parameter, so the common shape stays one line.
+
+**Why a token rather than replying to `from` directly.** The reply `ref` is a one-shot alias
+(ADR-244): a late answer is dropped at delivery rather than left unmatchable in the caller's
+mailbox. Carrying the pair keeps that property — deferring is safe against a caller that gave
+up, and replying twice is harmless.
+
+## ADR-253 — Prefer one bare ability op to a function per data type
+
+**Context.** The library has two ways to give a type the collection vocabulary: implement an
+ability (`Seqable`, `Conjable`, `Display`, `Ord`, `Num`) and inherit `seq`/`count`/`map`/
+`fold`/`conj`/`sort`/`+`, or define per-type functions in the type's own module. The first has
+by far the better ratio — nine bare op names (`->seq`, `-conj`, `->string`, `inspect`,
+`compare-to`, the four `num-*`) carry roughly twenty-five bare functions to any type that
+implements them — and, crucially, it adds *no* bare name, because the bare name already exists.
+`set` is the exemplar: its module defines `union`/`intersection`/`difference`/`subset?` and
+nothing else.
+
+**Decision.** Where a type can join the bare vocabulary, prefer that to a per-type function.
+The test is two questions: **does the bare name already exist, and does this type mean the
+same thing by it?** Two yeses and the per-type function is redundant — `queue/->list`,
+`queue/empty?`, `pq/->list`, `pq/empty?` and `bytes/->list` were deleted on that basis.
+
+**The second question is not a formality.** `multimap` implements `Seqable`, so every bare
+collection op *resolves* on it — and two disagree with the module's own answer without raising:
+`(get mm k)` returns nil where `(multimap/get mm k)` returns the values, because a multimap is
+a record and bare `get` takes the record-field path; `(keys mm)` answers one key per value
+where `multimap/keys` answers distinct keys. A type that iterates and counts through the bare
+vocabulary *looks* like it belongs to it, which is what makes the op that doesn't work a trap.
+There is no ability seam for `get`, so the only honest response available is to document the
+divergence at both definitions, which is what is done.
+
+**A no on the first question is a reason to stay per-type**, not a reason to add a bare name:
+`queue/pop` beside `pq/pop` serves two types with two different contracts, and a bare `pop`
+ability would spend a bare name to serve them. `stream/map` and friends must shadow, because a
+stream is a pull source with effects and forcing it is the whole difference. Three modules
+sharing the verb `insert` mean three unrelated things.
+
+**Not yet possible for a built-in kind.** Every seam tests `record?` before consulting the
+ability — deliberately, so built-ins keep their native path at zero cost — with the result that
+`rope` and `table` cannot join at all: `(count r)` raises, `(seq r)` silently returns the rope,
+and `(impl Display :rope …)` registers, resolves when called directly, and is never consulted
+by any seam. The `record?` test justifies skipping the ability on the *fast* path; it does not
+justify skipping it on the *failure* path, where the native dispatch has already given up.
+Falling through there is what would make `text` and `table` first-class, and it is free.

@@ -167,8 +167,8 @@ before working in any Rust component:
 
 ### `builtins/` — the primitive kernel (split by domain)
 - **Owns:** every Rust-implemented primitive, registered into the prelude builder
-  by `register`. One file per domain: `mod.rs` (the `Reg` struct, the single
-  `register` table, `PRIMITIVE_DOCS`, and the shared helpers), `numeric.rs`
+  by `proc/register`. One file per domain: `mod.rs` (the `Reg` struct, the single
+  `proc/register` table, `PRIMITIVE_DOCS`, and the shared helpers), `numeric.rs`
   (numeric/bitwise/bitset/math), `sequences.rs` (pair/list/range/vector/map/
   string/rope), `io.rs` (TCP/table/print/time/fs/hashing/git/crypto),
   `terminal.rs` (terminal + GUI, feature-gated), `system.rs` (eval/load/macros/
@@ -296,7 +296,7 @@ before working in any Rust component:
 2. **`builtins.rs` monolith — resolved.** *(Resolved.)* The old 10-domain
    single file is now the `builtins/` directory, one file per domain
    (`mod.rs`/`numeric.rs`/`sequences.rs`/`io.rs`/`terminal.rs`/`system.rs`/
-   `bytes.rs`) with the single `register` table in `mod.rs`, and the dead
+   `bytes.rs`) with the single `proc/register` table in `mod.rs`, and the dead
    never-registered functions were deleted along the way (backlog W1/W4).
 
 3. **`docs/architecture.md` — now current.** *(Resolved.)* Its layout/component
@@ -348,9 +348,9 @@ W2 and W3 both edit `core/heap.rs`. (W1 and W4 — the `builtins/` split — are
 
 ### W4 — Split `builtins.rs` into `builtins/` by domain · ✅ done
 - **Was:** convert the single `crates/lisp/src/builtins/mod.rs` into a directory,
-  one cohesive file per primitive domain, keeping the full `register` table in
+  one cohesive file per primitive domain, keeping the full `proc/register` table in
   `mod.rs` so every primitive + arity stays visible in one place.
 - **Done:** the split exists on disk as `crates/lisp/src/builtins/` — `mod.rs`
-  (the `register` table + `PRIMITIVE_DOCS` + shared helpers), `numeric.rs`,
+  (the `proc/register` table + `PRIMITIVE_DOCS` + shared helpers), `numeric.rs`,
   `sequences.rs`, `io.rs`, `terminal.rs`, `system.rs`, `bytes.rs`. Includes W1
   (the dead functions were not carried over).

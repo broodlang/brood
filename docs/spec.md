@@ -337,7 +337,7 @@ load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 - arithmetic substrate `%add %sub %mul %div %lt %eq` and integer `rem`
 - the one float→int crossing `floor` (`ceil`/`round`/`quot`/`pow`/`sqrt` are Brood over it)
 - pairs/vectors `cons first rest empty? vector vector-ref vector-length`
-- maps `hash-map map-get map-assoc map-dissoc map-keys map-vals map-contains?`
+- maps `hash-map %map-get %map-assoc %map-dissoc map-keys map-vals map-contains?`
 - strings `string-length substring upper lower string->number`
 - reflection/checking `type-of check`; value↔text & IO `str pr-str print stdout-tty?`
 - self-hosting `eval read-string eval-string load %builtin-module apply`; macros `macroexpand macroexpand-1 gensym`

@@ -19,7 +19,7 @@ inline the callee body — that is Phase 3, which this unblocks.
 
 Target callees: reserved **prelude defns** (`get`, `map`, `filter`, `reduce`,
 `assoc`, `count`, `str`, …). Reserved builtins that already map to `PrimOp`/`PrimOp1`
-(`+`, `-`, `<`, `first`, `rest`, `map-get`, …) are **already** compile-time inlined
+(`+`, `-`, `<`, `first`, `rest`, `%map-get`, …) are **already** compile-time inlined
 (`resolve_prim`/`resolve_prim1`), so they are out of scope.
 
 ## What already exists (do NOT rebuild)
@@ -154,6 +154,6 @@ behind a clean commit, and re-verify with the KI-20 discipline below.
 - **Phase 2 — multi-arity devirtualization:** pick the arm for a known argc at compile
   time (the ADR-165 `+24 ms` multi-arity-dispatch cost).
 - **Phase 3 — see-through inlining of a non-leaf reserved body:** inline `get`'s `cond`
-  (which calls builtins), so `(get m :k)` lowers toward `(map-get m :k nil)` at the 4,796
+  (which calls builtins), so `(get m :k)` lowers toward `(%map-get m :k nil)` at the 4,796
   keyword call sites. The big win, the highest risk; Phase 1 (compile-time identity +
   no staleness guard) is its prerequisite.

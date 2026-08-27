@@ -160,7 +160,7 @@ fn is_rationalizable(v: Value) -> bool {
 /// decimal arm of [`num_bin`] turn a scale into a `scale`-digit bignum — `10ˢᶜᵃˡᵉ`, or
 /// the zero padding `with_scale` applies — so an unbounded scale is an unbounded
 /// *native* allocation, which the ADR-043 `BROOD_MEM_LIMIT` cap never sees: measured,
-/// `(+ 1/2 (decimal "1e-1000000000"))` sailed past 400MB and kept climbing with no
+/// `(+ 1/2 (decimal/of "1e-1000000000"))` sailed past 400MB and kept climbing with no
 /// error and no end. A million digits is already far past any real decimal; beyond it
 /// the operation raises a clean, catchable error.
 const MAX_DEC_SCALE: i64 = 1_000_000;
@@ -181,7 +181,7 @@ fn dec_scale_err(who: &str, scale: i64) -> LispError {
 /// Errors when the decimal's scale exceeds [`MAX_DEC_SCALE`]. The conversion is
 /// `10^|scale|`, so the magnitude has to be checked *before* the `pow` — and the
 /// exponent must be converted with `try_into`, never `as u32`: an `as` cast silently
-/// truncated `4294967297` to `1`, so `(+ 1/2 (decimal "1e-4294967297"))` answered
+/// truncated `4294967297` to `1`, so `(+ 1/2 (decimal/of "1e-4294967297"))` answered
 /// `3/5` — a wrong answer with no diagnostic at all.
 fn to_bigrational(
     heap: &Heap,
@@ -255,7 +255,7 @@ pub(super) fn num_bin(
     big_op: fn(num_bigint::BigInt, num_bigint::BigInt) -> num_bigint::BigInt,
     dec_op: fn(bigdecimal::BigDecimal, bigdecimal::BigDecimal) -> bigdecimal::BigDecimal,
     // `None` when the ideal exponent leaves i64 — `*` adds the operand scales, and
-    // `(* (decimal "1e-5000000000000000000") …)` overflowed that add (a debug panic,
+    // `(* (decimal/of "1e-5000000000000000000") …)` overflowed that add (a debug panic,
     // a wrapped scale in release).
     dec_scale: fn(i64, i64) -> Option<i64>,
     ratio_op: fn(num_rational::BigRational, num_rational::BigRational) -> num_rational::BigRational,
@@ -517,7 +517,7 @@ pub(super) fn prim_denominator(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     }
 }
 
-/// `(->decimal x)` — a number as an exact base-10 `Decimal`. Exact for an integer or
+/// `(decimal/number-> x)` — a number as an exact base-10 `Decimal`. Exact for an integer or
 /// a terminating ratio (`1/2` → `0.5M`); a non-terminating ratio (`1/3`) rounds to
 /// `bigdecimal`'s default precision. A `Float` coerces through its decimal form.
 pub(super) fn prim_to_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -538,10 +538,10 @@ pub(super) fn prim_to_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
         Value::Float(f) => match BigDecimal::try_from(f) {
             Ok(d) => Ok(heap.alloc_decimal(d)),
             Err(_) => Err(LispError::runtime(
-                "->decimal: cannot convert a non-finite float",
+                "decimal/number->: cannot convert a non-finite float",
             )),
         },
-        _ => Err(LispError::wrong_type(heap, "->decimal", "number", x)),
+        _ => Err(LispError::wrong_type(heap, "decimal/number->", "number", x)),
     }
 }
 
@@ -785,7 +785,7 @@ pub(super) fn bit_and(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
     // num-bigint implements bitwise ops on its (infinite) two's-complement
     // model, so this matches the i64 result on small values and extends it.
-    let (a, b) = bigint_pair(heap, args, "bit-and")?;
+    let (a, b) = bigint_pair(heap, args, "bit/and")?;
     Ok(heap.int_from_bigint(a & b))
 }
 
@@ -793,7 +793,7 @@ pub(super) fn bit_or(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let (Value::Int(a), Value::Int(b)) = (arg(args, 0), arg(args, 1)) {
         return Ok(Value::int(a | b));
     }
-    let (a, b) = bigint_pair(heap, args, "bit-or")?;
+    let (a, b) = bigint_pair(heap, args, "bit/or")?;
     Ok(heap.int_from_bigint(a | b))
 }
 
@@ -801,7 +801,7 @@ pub(super) fn bit_xor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let (Value::Int(a), Value::Int(b)) = (arg(args, 0), arg(args, 1)) {
         return Ok(Value::int(a ^ b));
     }
-    let (a, b) = bigint_pair(heap, args, "bit-xor")?;
+    let (a, b) = bigint_pair(heap, args, "bit/xor")?;
     Ok(heap.int_from_bigint(a ^ b))
 }
 
@@ -812,7 +812,7 @@ pub(super) fn bit_not(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let n = !heap.bigint(id).clone();
             Ok(heap.int_from_bigint(n))
         }
-        v => Err(LispError::wrong_type(heap, "bit-not", "int", v)),
+        v => Err(LispError::wrong_type(heap, "bit/not", "int", v)),
     }
 }
 
@@ -826,7 +826,7 @@ pub(super) fn bit_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             let bits = heap.bigint(id).magnitude().count_ones();
             Ok(Value::int(bits as i64))
         }
-        v => Err(LispError::wrong_type(heap, "bit-count", "int", v)),
+        v => Err(LispError::wrong_type(heap, "bit/count", "int", v)),
     }
 }
 
@@ -850,42 +850,42 @@ pub(super) fn bit_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
                 mag.set_bit(i, false);
             }
         }
-        v => return Err(LispError::wrong_type(heap, "bit-positions", "int", v)),
+        v => return Err(LispError::wrong_type(heap, "bit/positions", "int", v)),
     }
     Ok(heap.alloc_vector(out))
 }
 
-/// `(float->bits x)` — the IEEE 754 binary64 bit pattern of `x` as a non-negative
+/// `(bit/float-> x)` — the IEEE 754 binary64 bit pattern of `x` as a non-negative
 /// integer (a bignum whenever the sign bit is set, since the pattern is a *u64*).
 /// Reinterpretation, not conversion: the only way to compare two floats *exactly*,
 /// including distinguishing `-0.0` from `0.0` and the individual NaN payloads that
-/// `=` collapses. Its inverse is `bits->float`.
+/// `=` collapses. Its inverse is `bit/->float`.
 pub(super) fn float_to_bits(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let f = num_to_f64(heap, "float->bits", arg(args, 0))?;
+    let f = num_to_f64(heap, "bit/float->", arg(args, 0))?;
     Ok(heap.int_from_bigint(num_bigint::BigInt::from(f.to_bits())))
 }
 
-/// `(bits->float n)` — the binary64 float with bit pattern `n`. The inverse of
-/// `float->bits`; `n` must be in `[0, 2^64)`.
+/// `(bit/->float n)` — the binary64 float with bit pattern `n`. The inverse of
+/// `bit/float->`; `n` must be in `[0, 2^64)`.
 pub(super) fn bits_to_float(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use num_traits::ToPrimitive;
     let bits = match arg(args, 0) {
         Value::Int(n) => n.to_u64(),
         Value::BigInt(id) => heap.bigint(id).to_u64(),
-        v => return Err(LispError::wrong_type(heap, "bits->float", "int", v)),
+        v => return Err(LispError::wrong_type(heap, "bit/->float", "int", v)),
     };
     match bits {
         Some(b) => Ok(Value::float(f64::from_bits(b))),
         // Out of u64 range in either direction — negative, or wider than 64 bits.
         None => Err(LispError::runtime(
-            "bits->float: bit pattern out of range (must be 0 <= n < 2^64)".to_string(),
+            "bit/->float: bit pattern out of range (must be 0 <= n < 2^64)".to_string(),
         )),
     }
 }
 
 /// Validate a shift amount: non-negative (a negative shift is an error) and not
 /// absurdly large (cap well above any realistic bit width so a typo'd
-/// `(bit-shift-left 1 1e9)` can't try to allocate gigabytes). Returns the amount
+/// `(bit/shift-left 1 1e9)` can't try to allocate gigabytes). Returns the amount
 /// as `usize`. No upper *bit-width* cap any more — large shifts promote to
 /// BigInt (the whole point of the bitboard use).
 pub(super) fn shift_amount(n: i64, who: &str) -> Result<usize, LispError> {
@@ -908,8 +908,8 @@ pub(super) fn shift_amount(n: i64, who: &str) -> Result<usize, LispError> {
 
 pub(super) fn bit_shift_left(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let a = arg(args, 0);
-    let n = expect_int(heap, "bit-shift-left", arg(args, 1))?;
-    let amount = shift_amount(n, "bit-shift-left")?;
+    let n = expect_int(heap, "bit/shift-left", arg(args, 1))?;
+    let amount = shift_amount(n, "bit/shift-left")?;
     // i64 fast path: stay an `Int` when the shift fits, else promote. (Unlike the
     // old wrapping shift, an i64 result that would lose bits past the top now
     // promotes to BigInt — the conventional arbitrary-width left shift.)
@@ -924,30 +924,30 @@ pub(super) fn bit_shift_left(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
             }
         }
     }
-    let x = expect_bigint(heap, "bit-shift-left", a)?;
+    let x = expect_bigint(heap, "bit/shift-left", a)?;
     Ok(heap.int_from_bigint(x << amount))
 }
 
 pub(super) fn bit_shift_right(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let a = arg(args, 0);
-    let n = expect_int(heap, "bit-shift-right", arg(args, 1))?;
-    let amount = shift_amount(n, "bit-shift-right")?;
+    let n = expect_int(heap, "bit/shift-right", arg(args, 1))?;
+    let amount = shift_amount(n, "bit/shift-right")?;
     // Arithmetic (sign-preserving) right shift, matching the signed model.
     if let Value::Int(x) = a {
         // A right shift ≥ 64 collapses to the sign bit (0 or -1).
         let r = if amount >= 64 { x >> 63 } else { x >> amount };
         return Ok(Value::int(r));
     }
-    let x = expect_bigint(heap, "bit-shift-right", a)?;
+    let x = expect_bigint(heap, "bit/shift-right", a)?;
     Ok(heap.int_from_bigint(x >> amount))
 }
 
 // ---------- decimal ----------
 
-/// `(decimal x)` — construct an exact base-10 `Decimal` from a string ("1.50"),
+/// `(decimal/of x)` — construct an exact base-10 `Decimal` from a string ("1.50"),
 /// an int (3), or a float. A string parses exactly; an int is exact; a float is
 /// converted from its *shortest round-trip* decimal text (an f64 is inexact, so
-/// `(decimal 0.1)` is the decimal `0.1`, the value the literal `0.1` denotes,
+/// `(decimal/of 0.1)` is the decimal `0.1`, the value the literal `0.1` denotes,
 /// not the full binary expansion). A `BigInt` is also accepted (exact).
 pub(super) fn prim_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use std::str::FromStr;
@@ -986,14 +986,14 @@ pub(super) fn prim_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 }
 
 /// Render an f64 as the shortest decimal text that round-trips back to it — the
-/// same form the value printer uses, so `(decimal 1.5)` is `1.5M`, not the long
+/// same form the value printer uses, so `(decimal/of 1.5)` is `1.5M`, not the long
 /// binary expansion of the nearest f64.
 fn format_decimal_from_float(f: f64) -> String {
     // `{}` on f64 already prints the shortest round-trip representation in Rust.
     format!("{f}")
 }
 
-/// `(decimal->string d)` — the canonical decimal string of `d` (no `M` suffix).
+/// `(decimal/->string d)` — the canonical decimal string of `d` (no `M` suffix).
 pub(super) fn prim_decimal_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     let s = match v {
@@ -1001,7 +1001,7 @@ pub(super) fn prim_decimal_to_string(args: &[Value], _: EnvId, heap: &mut Heap) 
         other => {
             return Err(LispError::wrong_type(
                 heap,
-                "decimal->string",
+                "decimal/->string",
                 "decimal",
                 other,
             ))
@@ -1010,7 +1010,7 @@ pub(super) fn prim_decimal_to_string(args: &[Value], _: EnvId, heap: &mut Heap) 
     Ok(heap.alloc_string(&s))
 }
 
-/// `(decimal->float d)` — `d` as an (inexact) `f64`.
+/// `(decimal/->float d)` — `d` as an (inexact) `f64`.
 pub(super) fn prim_decimal_to_float(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use bigdecimal::ToPrimitive;
     let v = arg(args, 0);
@@ -1020,7 +1020,7 @@ pub(super) fn prim_decimal_to_float(args: &[Value], _: EnvId, heap: &mut Heap) -
         )),
         other => Err(LispError::wrong_type(
             heap,
-            "decimal->float",
+            "decimal/->float",
             "decimal",
             other,
         )),

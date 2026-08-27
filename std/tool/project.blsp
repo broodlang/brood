@@ -64,7 +64,7 @@ the `nest new` scaffolder."
 (defdyn *project-description* nil)
 (defdyn *project-repository* nil)
 ;; `:brood` — the runtime-version constraint this project needs (a `std/version` string,
-;; e.g. `">= 0.2"`, `"^0.1"`). Checked at `setup` against `(brood-version)`; an
+;; e.g. `">= 0.2"`, `"^0.1"`). Checked at `setup` against `(system/brood-version)`; an
 ;; unmet constraint is a hard, clear error (ADR-209), the way `mix.exs`'s `elixir:`
 ;; requirement refuses an incompatible Elixir. Absent = runs on any runtime.
 (defdyn *project-brood* nil)
@@ -344,7 +344,7 @@ than being fetched into `_deps/<name>/`."
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(system/brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'apply …)`) so α qualifies `apply`
   ;; to `project/apply-config` at this macro's definition (ADR-065 §7).
   `(apply-config (quote ~opts)))
@@ -698,7 +698,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; so the source-tree walk alone cannot see one change, and an imaged start would go on
   ;; serving the old code. They come from `*module-files*`, which `setup`
   ;; populates before any fingerprint is taken, on the cold and warm paths alike.
-  (str (build-id)
+  (str (system/build-id)
     "\n"
     (string/join "\n"
       (map (fn (f) (str f ":" (file/size f) ":" (file/mtime f)))
@@ -863,7 +863,7 @@ NOT call this: it requires its entry point and lets the rest stay on disk."
 ;; is exactly the failure mode worth a special case.
 (defn image-usable? ()
   "Whether a cached startup image may be used — false under `BROOD_COVERAGE`, whose instrumentation an image cannot represent."
-  (nil? (os/getenv "BROOD_COVERAGE")))
+  (nil? (os/env "BROOD_COVERAGE")))
 
 ;; Milliseconds as "12.3s" / "845ms" — build output should read at a glance.
 (defn- project-ms-str
@@ -916,7 +916,7 @@ program's and the LSP's protocol channel stays clean."
                     else (do (materialize-all) n)))
               else nil)
         t-d (os/now-ns)
-        _ (when (os/getenv "BROOD_IMAGE_TRACE")
+        _ (when (os/env "BROOD_IMAGE_TRACE")
             (io/puts (str "[loader] collect "
                        (quot (- t-b t-a) 1000000)
                        " ms, fingerprint "
@@ -1115,18 +1115,18 @@ rules merged in declaration order, then this project's own `:format-headers` on 
 ;; The `:brood` runtime gate (ADR-209): if the manifest names a constraint and this
 ;; runtime doesn't satisfy it, stop with a clear error rather than failing obscurely
 ;; deeper in on whatever newer feature the project assumed. Policy in Brood; the only
-;; kernel input is the `(brood-version)` primitive.
+;; kernel input is the `(system/brood-version)` primitive.
 (defn- project-check-brood-version
   ()
   (when *project-brood*
     (when (not (string? *project-brood*))
       (error "project: :brood must be a version-constraint string (e.g. \">= 0.2\"), got "
         (pr-str *project-brood*)))
-    (when (not (version/satisfies? (brood-version) *project-brood*))
+    (when (not (version/satisfies? (system/brood-version) *project-brood*))
       (error "project: this project requires Brood "
         (pr-str *project-brood*)
         " but you are running "
-        (brood-version)
+        (system/brood-version)
         " — upgrade brood, or relax the :brood constraint in project.blsp"))))
 
 (defn setup (root)
@@ -1665,7 +1665,7 @@ resolve in the advisory checker. Returns the project root."
 
 (defn- project-check-files
   (files root)
-  (if (= (os/getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/env "BROOD_NO_CHECK") "1")
     0
     ;; Build the KI-17 reachability closures from the WHOLE project (every file's
     ;; header), not just `files` — a `nest check FILE` still needs the full graph to
@@ -1714,7 +1714,7 @@ resolve in the advisory checker. Returns the project root."
         (or from (file/cwd))
         ")"))
     (project-ensure-loaded root)
-    (if (= (os/getenv "BROOD_NO_CHECK") "1")
+    (if (= (os/env "BROOD_NO_CHECK") "1")
       nil
       ;; `%append-two` (copy the small per-file diagnostic list, share `acc`) not
       ;; `(append acc …)` (recopies the growing accumulator each file → O(files²)).
@@ -1857,7 +1857,7 @@ resolve in the advisory checker. Returns the project root."
 ;; type-check pre-flight. Shared by `check` / `check-sources`.
 (defn- project-check-duplicate-defs
   (extracts source-set)
-  (if (= (os/getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/env "BROOD_NO_CHECK") "1")
     0
     (fold (fn (n w) (io/puts w :to *err*) (+ n 1))
       0
@@ -1990,13 +1990,13 @@ resolve in the advisory checker. Returns the project root."
 ;; change in one file correctly shifts another's verdict via the always-recomputed
 ;; aggregate. Sound with mtime alone; the advisory contract (types.md #5, never
 ;; rejects a runnable program) makes mtime's rare imprecision harmless. The whole
-;; cache carries a `(build-id)`+version stamp and is dropped on mismatch (the
+;; cache carries a `(system/build-id)`+version stamp and is dropped on mismatch (the
 ;; extract depends on the Rust `parse-source`, so it isn't portable across binaries).
 ;; Opt out with `BROOD_NO_CHECK_CACHE=1`.
 ; v2: check-result entries gained a 5th field, the KI-17 require-closure (ADR-189).
 (def *check-cache-version* "v2")
-(defn- project-cache-stamp () (str (build-id) "|" *check-cache-version*))
-(defn- project-cache-off? () (= (os/getenv "BROOD_NO_CHECK_CACHE") "1"))
+(defn- project-cache-stamp () (str (system/build-id) "|" *check-cache-version*))
+(defn- project-cache-off? () (= (os/env "BROOD_NO_CHECK_CACHE") "1"))
 
 ;; The cache directory for `root` (created if absent), or nil if no cache base is
 ;; available: `$XDG_CACHE_HOME` (or `~/.cache`) `/brood/check/<sha256 of root>`.
@@ -2035,8 +2035,8 @@ resolve in the advisory checker. Returns the project root."
 
 (defn- project-cache-dir
   (root)
-  (let (xdg (os/getenv "XDG_CACHE_HOME")
-        home (os/getenv "HOME")
+  (let (xdg (os/env "XDG_CACHE_HOME")
+        home (os/env "HOME")
         base (cond
                (and xdg (not (= xdg ""))) xdg
                (and home (not (= home ""))) (path/join home ".cache")
@@ -2133,7 +2133,7 @@ resolve in the advisory checker. Returns the project root."
 ;; / per-file), noted as future work (ADR-119). Tunable via `BROOD_CHECK_CACHE_MAX`.
 (defn- project-cache-max-files
   ()
-  (let (e (os/getenv "BROOD_CHECK_CACHE_MAX"))
+  (let (e (os/env "BROOD_CHECK_CACHE_MAX"))
     (if (and e (not (= e ""))) (or (string/->number e) 50000) 50000)))
 
 ;; Return `{path -> [mtime counts privs def-names]}` for `files` by scanning them
@@ -2184,7 +2184,7 @@ resolve in the advisory checker. Returns the project root."
 ;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.
 (defn- project-check-unused-private
   (extracts)
-  (if (= (os/getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/env "BROOD_NO_CHECK") "1")
     0
     (fold (fn (n w) (io/puts w :to *err*) (+ n 1))
       0
@@ -2644,7 +2644,7 @@ as unchanged (only when some were)."
 ;; load-all-then-run-all path under `BROOD_TEST_NO_SCOPE`.
 (defn- project-run-suite
   (files opts)
-  (if (os/getenv "BROOD_TEST_NO_SCOPE")
+  (if (os/env "BROOD_TEST_NO_SCOPE")
     (do
       (fold (fn (_ f) (load f)) nil files)
       (/apply test/run-tests opts))
@@ -2672,7 +2672,7 @@ as unchanged (only when some were)."
       ;; Per-file scoped run (see `run-tests`) — matters most here: `nest mcp`
       ;; is a long-lived hot-reload image, so a load-all-then-run would accumulate every
       ;; file's promoted code on EVERY run-tests call. `BROOD_TEST_NO_SCOPE` reverts.
-      (if (os/getenv "BROOD_TEST_NO_SCOPE")
+      (if (os/env "BROOD_TEST_NO_SCOPE")
         (do
           (fold (fn (_ f) (load f)) nil files)
           (/apply test/run-tests-structured opts))
@@ -2984,7 +2984,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
 ;; It's auto-created with documented defaults on first tool use, then loaded by
-;; the `nest` subcommands. Rust mechanism: os/getenv (locate it) + os/run-process.
+;; the `nest` subcommands. Rust mechanism: os/env (locate it) + os/run-process.
 (defdyn *config-git-init* false)
 ; nest new: run `git init` in the new project?
 
@@ -3006,8 +3006,8 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (defn- config-base-dir
   ()
   ; $XDG_CONFIG_HOME, else ~/.config
-  (let (xdg (os/getenv "XDG_CONFIG_HOME"))
-    (if (nil? xdg) (path/join (os/getenv "HOME") ".config") xdg)))
+  (let (xdg (os/env "XDG_CONFIG_HOME"))
+    (if (nil? xdg) (path/join (os/env "HOME") ".config") xdg)))
 (defn- config-dir () (path/join (config-base-dir) "brood"))
 (defn- config-path () (path/join (config-dir) "config.blsp"))
 

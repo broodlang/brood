@@ -155,7 +155,7 @@ This is the largest *core* undertaking in the project. Two consequences:
    the child before it can run so its true exit reason (not a racy `:noproc`) always
    reaches the parent — userland supervision trees
    (`std/proc/supervisor.blsp` — `:one-for-one`/`:one-for-all`/`:rest-for-one`),
-   and registered names (`register`/`whereis`/`(spawn :name …)`) all shipped.
+   and registered names (`proc/register`/`proc/whereis`/`(spawn :name …)`) all shipped.
 
 ## Distribution across nodes (slice 1 implemented)
 

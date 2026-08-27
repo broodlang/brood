@@ -117,6 +117,19 @@ simply exit on timeout, which made a late reply moot.)"
         (receive ([:down ^m _ _] :ok) (after 0 :ok))
         (error "call: timed out after " ms " ms")))))
 
+(defn reply (token value)
+  "Answer a `defer`red call: send `value` to the caller still blocked in `gen/call`.
+`token` is the opaque `reply` the `defer` clause bound — pass it wherever the answer
+will be produced (a worker, a later message, a timer) and call this when it exists.
+
+    (defprocess fetcher (state)
+      (defer :get (do (spawn-link (fn () (gen/reply reply (slow-fetch)))) state)))
+
+Safe to call after the caller gave up: its reply `ref` is a one-shot alias, so a late
+answer is dropped at delivery rather than left unmatchable in the mailbox. Replying
+twice to one token is likewise harmless — the second is dropped."
+  (send (nth token 0) [:reply (nth token 1) value]))
+
 (defn stop (pid)
   "Tell a server process to exit its receive loop cleanly (running its
 `terminate` clause first, if it has one). Returns nil immediately — there is no
@@ -147,9 +160,9 @@ propagates either way (Erlang `start_link`). Returns the pid."
 
 (defn spawn-server-named (name f state)
   "Spawn a server and `register` it under `name` (a keyword), returning its pid.
-Address it later via `(whereis name)` or by sending to `{:name name}`. (Combine
+Address it later via `(proc/whereis name)` or by sending to `{:name name}`. (Combine
 with linking by registering the result of `spawn-server-link` yourself.)"
-  (let (pid (spawn-server f state)) (register name pid) pid))
+  (let (pid (spawn-server f state)) (proc/register name pid) pid))
 
 ;; (`sleep` lives in the prelude — it used to be redefined here with the
 ;; unforgeable-`(ref)` trick because the prelude's version was buggy, but that fix
@@ -177,11 +190,20 @@ and `info` can tail-recurse with it unchanged)."
       (= kind 'query)
         `([:$call ~from ~rf ~pat] (send ~from [:reply ~rf (do ~@body)])
            (~loop ~state-sym))
+      ; defer — a CALL the server will answer later. The body returns the next state
+      ; (like a cast) and binds `reply`, an opaque token, so the answer can be sent from
+      ; anywhere once it exists: a worker process, a later message, a timer. Without this
+      ; a `call` clause had to produce its reply synchronously, so a server could not hand
+      ; work off without blocking its own loop — the one gap that limited what could be
+      ; built rather than merely what was convenient. `~'reply` injects the literal symbol
+      ; (the `%defseq` escape hatch) so the body can name it.
+      (= kind 'defer)
+        `([:$call ~from ~rf ~pat] (let (~'reply [~from ~rf]) (~loop (do ~@body))))
       ; info — a raw message (no envelope): a monitor [:down …], a link [:EXIT …],
       ; a timer tick, a plain send. Body => next state, like a cast.
       (= kind 'info) `(~pat (~loop (do ~@body)))
       else
-        (error "defprocess: a message clause must start with `cast`, `call`, `query`, or `info`, got "
+        (error "defprocess: a message clause must start with `cast`, `call`, `query`, `defer`, or `info`, got "
           (pr-str kind)))))
 
 (defmacro defprocess (name params & clauses)
@@ -213,7 +235,7 @@ clause is dropped (so the mailbox can't leak)."
         ;; Envelope clauses (cast/call/query) are matched BEFORE info clauses,
         ;; regardless of declaration order, so a broad `info` pattern can never
         ;; swallow a `[:$call …]` / `[:$cast …]` envelope (receive is first-match).
-        env-clauses (filter (fn (c) (includes? (list 'cast 'call 'query) (first c))) msg-clauses)
+        env-clauses (filter (fn (c) (includes? (list 'cast 'call 'query 'defer) (first c))) msg-clauses)
         info-clauses (filter (fn (c) (= (first c) 'info)) msg-clauses)
         from (gensym "from")
         rf (gensym "ref")
@@ -250,5 +272,5 @@ clause is dropped (so the mailbox can't leak)."
         entry `(letrec (~loop (fn (~state-sym) ~loop-body)) (~loop ~init-expr)))
     ;; Guard typos: every message clause must be cast/call/query/info.
     (if (not (= (+ (count env-clauses) (count info-clauses)) (count msg-clauses)))
-      (error "defprocess: every clause must be cast/call/query/info/init/terminate/code-change"))
+      (error "defprocess: every clause must be cast/call/query/defer/info/init/terminate/code-change"))
     (if doc `(defn ~name ~params ~doc ~entry) `(defn ~name ~params ~entry))))

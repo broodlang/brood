@@ -337,7 +337,7 @@ enum Cmd {
     /// a program pulling http+json+format+datetime goes ~124 ms -> ~31 ms, and even a
     /// trivial script gains ~8 ms because boot's own `string`/`seq` come from it.
     ///
-    /// Costs ~2 s and ~2 MB, once per binary. The image is keyed on `build-id` (which
+    /// Costs ~2 s and ~2 MB, once per binary. The image is keyed on `system/build-id` (which
     /// includes the executable's mtime), so a rebuilt or reinstalled binary simply misses
     /// and falls back to source until this is run again — it can never go stale.
     Stdimage,
@@ -838,7 +838,7 @@ fn run_main(cli: Cli) {
             );
         }
         // Build THIS binary's image, then ask the `brood` on PATH to build its own.
-        // `build-id` embeds each executable's mtime — the same reason the expanded-prelude
+        // `system/build-id` embeds each executable's mtime — the same reason the expanded-prelude
         // cache is named per binary — so `nest` and `brood` never share one, and a user
         // running `brood app.blsp` would otherwise see no benefit from `nest stdimage`.
         Cmd::Stdimage => run(

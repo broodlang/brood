@@ -38,11 +38,15 @@ For pure ASCII input the string and byte forms agree.")
   (string/bytes-> (encoding-hex-encode-loop (seq bs) codes nil)))
 
 (defn hex-encode (s)
-  "Encode string `s` as lowercase hexadecimal (each UTF-8 byte → 2 hex chars)."
+  "Encode string `s` as lowercase hexadecimal (each UTF-8 byte → 2 hex chars).
+
+    (encoding/hex-encode \"hi\")         → \"6869\""
   (encoding-hex-encode-codes (string/->bytes s) encoding-hex-lower-codes))
 
 (defn hex-encode-upper (s)
-  "Encode string `s` as uppercase hexadecimal (each UTF-8 byte → 2 hex chars)."
+  "Encode string `s` as uppercase hexadecimal (each UTF-8 byte → 2 hex chars).
+
+    (encoding/hex-encode-upper \"~\")    → \"7E\""
   (encoding-hex-encode-codes (string/->bytes s) encoding-hex-upper-codes))
 
 (defn hex-encode-bytes (bytes)
@@ -92,7 +96,9 @@ UTF-8-encodes a string."
       :invalid)))
 
 (defn hex-decode (s)
-  "Decode a hexadecimal string → original string, or nil if the input is invalid."
+  "Decode a hexadecimal string → original string, or nil if the input is invalid.
+
+    (encoding/hex-decode \"6869\")       → \"hi\""
   (let (bs (encoding-hex-decode-bytelist s))
     (if (= bs :invalid) nil (string/bytes-> bs))))
 
@@ -151,11 +157,15 @@ binary payload (digests, salts, wire bytes)."
                       (cons (nth codes (quot b1 4)) acc))))))))))))
 
 (defn base64-encode (s)
-  "Encode string `s` as standard Base64 (RFC 4648, `+/` alphabet, `=` padding)."
+  "Encode string `s` as standard Base64 (RFC 4648, `+/` alphabet, `=` padding).
+
+    (encoding/base64-encode \"hi\")      → \"aGk=\""
   (encoding-b64-encode (string/->bytes s) encoding-b64-std-codes))
 
 (defn base64-url-encode (s)
-  "Encode string `s` as URL-safe Base64 (RFC 4648 §5, `-_` alphabet, `=` padding)."
+  "Encode string `s` as URL-safe Base64 (RFC 4648 §5, `-_` alphabet, `=` padding).
+
+    (encoding/base64-url-encode \"~~~\") → \"fn5-\""
   (encoding-b64-encode (string/->bytes s) encoding-b64-url-codes))
 
 (defn base64-encode-bytes (bytes)
@@ -267,7 +277,9 @@ UTF-8 form."
                           (encoding-b64-dec-loop s (+ i 4) n vals acc))))))))))))))
 
 (defn base64-decode (s)
-  "Decode a standard Base64 string → original string, or nil on invalid input."
+  "Decode a standard Base64 string → original string, or nil on invalid input.
+
+    (encoding/base64-decode \"aGk=\")    → \"hi\""
   (let (bs (encoding-b64-decode s encoding-b64-std-vals))
     (if (= bs :invalid) nil (string/bytes-> bs))))
 

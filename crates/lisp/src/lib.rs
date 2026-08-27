@@ -45,7 +45,7 @@
 // directory tree mirrors this — core/, syntax/, eval/, types/ — so the layout
 // reads as the architecture.
 
-/// This runtime's semantic version — the same string `(brood-version)` returns.
+/// This runtime's semantic version — the same string `(system/brood-version)` returns.
 ///
 /// Exported because `env!("CARGO_PKG_VERSION")` read from a DEPENDENT crate yields that
 /// crate's version, not brood's: the playground's `version()` advertised itself as the
@@ -80,7 +80,7 @@ pub mod perf; // VM work-attribution counters (feature "perf-stats") — docs/be
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 pub mod profile; // sampling CPU profiler over the VM's reified frames (observability timing tier)
 pub mod subprocess; // persistent child-process mechanism: spawn + stdio pipes over the mailbox seam (ADR-104)
-pub mod text_width; // grapheme-cluster display-cell width (the `display-width` builtin + the GUI grid)
+pub mod text_width; // grapheme-cluster display-cell width (the `string/display-width` builtin + the GUI grid)
 pub mod treesit; // optional tree-sitter parsing for foreign languages (feature "treesit") — ROADMAP §C
 #[cfg(feature = "wasm")]
 pub mod wasm; // WASM component interop host (ADR-071/145); policy lives in std/wasm.blsp
@@ -108,7 +108,7 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     // full source boot costs ~31 ms, ~27 ms of which is macro-EXPANSION of the
     // prelude (measured 2026-07-19; see the devlog) — parse, eval, and freeze
     // together are ~4 ms. So the cache stores the *post-compile* (expanded +
-    // resolved + static-quasiquote) forms as plain text, keyed by `build-id`
+    // resolved + static-quasiquote) forms as plain text, keyed by `system/build-id`
     // (the prelude is `include_str!`'d, so any binary change invalidates), and
     // a warm boot skips `eval::macros::compile` entirely. Any mismatch or
     // failure falls back to the source boot, which rewrites the cache.
@@ -122,7 +122,7 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
 
 /// The expanded-prelude cache file for THIS binary:
 /// `~/.cache/brood/prelude-expanded-<hash-of-build-id>.blsp`. Per-binary
-/// naming (not one shared file) because the staleness key — `build-id` —
+/// naming (not one shared file) because the staleness key — `system/build-id` —
 /// embeds each executable's own mtime: `brood`, `nest`, and every test binary
 /// carry different stamps, and a single shared file would be endlessly
 /// overwritten by whichever booted last, never hitting. Old builds' files are

@@ -520,7 +520,7 @@
     ;; observe-serve's agent, exercised same-runtime: request → snapshot reply.
     ;; Remote attach is the same protocol with the request routed over a node link.
     (let (a (spawn (observer/observe-agent-loop)))
-      (register :observe a)
+      (proc/register :observe a)
       (send {:name :observe :node (node/name)} [:snapshot (self) (ref)])
       (let (reply (receive ([:observe-reply snap] snap) (after *test-wait-ms* :timeout)))
         (is (map? reply))

@@ -475,7 +475,7 @@ and `(binding (*print-length* nil) …)` lifts the bound for a form."
   (src)
   "The advisory type-check warning strings for REPL input `src` (each complete form checked
 against the live image), or nil. Nil on incomplete input — there is nothing to check yet."
-  (if (os/getenv "BROOD_NO_CHECK")
+  (if (os/env "BROOD_NO_CHECK")
     nil
     (mapcat reflect/check (try (read-all src) (catch _ nil)))))
 
@@ -674,10 +674,10 @@ session is armed, else inline. The meta-command counterpart of `repl-eval`."
   ()
   "The history file path: `$BROOD_HISTORY`, else `$HOME/.brood_history` (or, with no
 `$HOME`, `.brood_history` in the current directory)."
-  (let (override (os/getenv "BROOD_HISTORY"))
+  (let (override (os/env "BROOD_HISTORY"))
     (if override
       override
-      (str (or (os/getenv "HOME") ".") "/.brood_history"))))
+      (str (or (os/env "HOME") ".") "/.brood_history"))))
 
 (defn- repl-history->text
   (history)
@@ -819,8 +819,8 @@ Returns (and the process exits) at end of input."
   "The startup files to load, in order: `$BROOD_RC` (else `$HOME/.broodrc.blsp`), then
 `./.broodrc.blsp` for a project-local one. Duplicates collapse, so running the REPL
 from your home directory doesn't load the same file twice."
-  (let (user (or (os/getenv "BROOD_RC")
-               (let (home (os/getenv "HOME")) (if home (path/join home ".broodrc.blsp") nil)))
+  (let (user (or (os/env "BROOD_RC")
+               (let (home (os/env "HOME")) (if home (path/join home ".broodrc.blsp") nil)))
         ;; Compared against the *absolute* local path, since `user` is absolute — a
         ;; bare "./.broodrc.blsp" would never match it and we'd load twice.
         local (try (path/join (file/cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
