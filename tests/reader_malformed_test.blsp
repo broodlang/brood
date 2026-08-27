@@ -1,51 +1,51 @@
 ;; Reader hardening — malformed / "silly syntax" must produce a clean parse error,
 ;; never a panic or segfault (added 2026-06-29, after a 500-input syntax fuzz run
-;; found 0 crashes). `read-string` surfaces the reader directly; `assert-error`
+;; found 0 crashes). `reflect/read-string` surfaces the reader directly; `assert-error`
 ;; confirms a clean error. Also pins a few valid-but-weird forms that MUST parse.
 (defmodule reader-malformed-test (:use test))
 
-;; one arg, fully balanced per line: (assert-error (read-string "S"))
+;; one arg, fully balanced per line: (assert-error (reflect/read-string "S"))
 (describe "malformed input errors cleanly (no crash)"
   (test "unbalanced / stray delimiters"
-    (assert-error (read-string "(((("))
-    (assert-error (read-string ")"))
-    (assert-error (read-string "[1 2"))
-    (assert-error (read-string "{:a"))
-    (assert-error (read-string "([)]")))
+    (assert-error (reflect/read-string "(((("))
+    (assert-error (reflect/read-string ")"))
+    (assert-error (reflect/read-string "[1 2"))
+    (assert-error (reflect/read-string "{:a"))
+    (assert-error (reflect/read-string "([)]")))
   (test "unterminated / bad-escape strings"
-    (assert-error (read-string "\"no end"))
-    (assert-error (read-string "\"\\x\""))
-    (assert-error (read-string "\"\\u{110000}\"")))
+    (assert-error (reflect/read-string "\"no end"))
+    (assert-error (reflect/read-string "\"\\x\""))
+    (assert-error (reflect/read-string "\"\\u{110000}\"")))
   ; float-shaped, malformed
   (test "number-shaped tokens that don't parse are a parse error, not a silent symbol"
     ;; a token with genuine numeric intent — a digit present, every sign in a valid
     ;; position — but that doesn't parse must fail loudly; it is NOT a symbol.
     ; valid float still parses
-    (assert= (read-string "1e7") 10000000.0)
+    (assert= (reflect/read-string "1e7") 10000000.0)
     ; float-shaped, malformed
-    (assert-error (read-string "1e"))
+    (assert-error (reflect/read-string "1e"))
     ; float-shaped, malformed
-    (assert-error (read-string "1.2.3"))
-    (assert-error (read-string "1e+")))
+    (assert-error (reflect/read-string "1.2.3"))
+    (assert-error (reflect/read-string "1e+")))
   (test "dangling reader sugar"
-    (assert-error (read-string "'"))
-    (assert-error (read-string "`"))
-    (assert-error (read-string "~"))
-    (assert-error (read-string "~@")))
+    (assert-error (reflect/read-string "'"))
+    (assert-error (reflect/read-string "`"))
+    (assert-error (reflect/read-string "~"))
+    (assert-error (reflect/read-string "~@")))
   (test "pathologically deep nesting errors (depth cap), does not overflow"
-    (assert-error (read-string (string/repeat "(" 100000)))
-    (assert-error (read-string (string/repeat "[" 100000)))))
+    (assert-error (reflect/read-string (string/repeat "(" 100000)))
+    (assert-error (reflect/read-string (string/repeat "[" 100000)))))
 
 (describe "valid but unusual forms still parse correctly"
   (test "non-finite float literals read as floats"
-    (assert= (type-of (read-string "inf")) :float)
-    (assert= (type-of (read-string "nan")) :float))
+    (assert= (type-of (reflect/read-string "inf")) :float)
+    (assert= (type-of (reflect/read-string "nan")) :float))
   (test "dotted pair and empty containers"
-    (assert= (read-string "(1 2 . 3)") (cons 1 (cons 2 3)))
-    (assert= (read-string "[]") [])
-    (assert= (read-string "()") '()))
+    (assert= (reflect/read-string "(1 2 . 3)") (cons 1 (cons 2 3)))
+    (assert= (reflect/read-string "[]") [])
+    (assert= (reflect/read-string "()") '()))
   (test "nested form parses to the right structure"
-    (assert= (read-string "(1 (2 (3)))") (list 1 (list 2 (list 3))))))
+    (assert= (reflect/read-string "(1 (2 (3)))") (list 1 (list 2 (list 3))))))
 
 (describe "conventional identifiers read as symbols, not malformed numbers"
   ;; A token is only number-shaped with genuine numeric intent: a digit present AND
@@ -53,9 +53,9 @@
   ;; sign/dot-only or misplaced-sign tokens are ordinary symbols — matching Lisp
   ;; convention and the `scan-tokens` tooling classifier.
   (test "sign/dot runs with no digit are symbols"
-    (is (symbol? (read-string "++")))
-    (is (symbol? (read-string "--")))
-    (is (symbol? (read-string "..."))))
+    (is (symbol? (reflect/read-string "++")))
+    (is (symbol? (reflect/read-string "--")))
+    (is (symbol? (reflect/read-string "..."))))
   ;; A misplaced sign USED to make these symbols — `1+`/`1-` were readable as the
   ;; Emacs-Lisp increment names. They are digit-led, so the reader now reserves them
   ;; (see reader_hints_test.blsp). The ergonomic cost is nil: `inc`/`dec` are the
@@ -64,26 +64,26 @@
   ;; far more likely a typo than a name — now fail at the token instead of becoming
   ;; a symbol that goes unbound somewhere else entirely.
   (test "a digit-led token with a misplaced sign is reserved, not a symbol"
-    (map (fn (t) (assert= (get (try (read-string t) (catch e e)) :kind) :parse))
+    (map (fn (t) (assert= (get (try (reflect/read-string t) (catch e e)) :kind) :parse))
       ["1+" "1-" "2+3" "12-34"]))
   (test "…but a sign run with no digit behind it is still a symbol"
     ;; `--5` leads with `-` followed by `-`, not a digit, so it is not digit-led.
-    (is (symbol? (read-string "--5"))))
+    (is (symbol? (reflect/read-string "--5"))))
   (test "the read symbol is the expected one (round-trips through equality)"
-    (assert= (read-string "++") '++)
-    (assert= (read-string "...") '...)
-    (assert= (read-string "--5") '--5))
+    (assert= (reflect/read-string "++") '++)
+    (assert= (reflect/read-string "...") '...)
+    (assert= (reflect/read-string "--5") '--5))
   (test "a valid number is still a number, not a symbol"
-    (is (number? (read-string "-5")))
+    (is (number? (reflect/read-string "-5")))
     ; sign after e is a real exponent
-    (is (number? (read-string "1e+5")))
-    (is (number? (read-string ".5")))
-    (is (number? (read-string "-.5")))))
+    (is (number? (reflect/read-string "1e+5")))
+    (is (number? (reflect/read-string ".5")))
+    (is (number? (reflect/read-string "-.5")))))
 
 (describe "symbols/keywords built from arbitrary strings round-trip via |…| bars"
   ;; `(symbol s)` / `(keyword s)` can intern any spelling; `pr-str` bar-quotes the
-  ;; ones that aren't a clean token so `(read-string (pr-str x))` recovers `x`.
-  (defn rt (v) (assert= v (read-string (pr-str v))))
+  ;; ones that aren't a clean token so `(reflect/read-string (pr-str x))` recovers `x`.
+  (defn rt (v) (assert= v (reflect/read-string (pr-str v))))
   ; contains a backslash
   (test "symbols with awkward spellings round-trip"
     ; whitespace
@@ -109,13 +109,13 @@
     (rt (keyword "a}b"))
     (rt (keyword "a|b")))
   (test "a bar-quoted symbol reads to exactly the constructed symbol"
-    (assert= (read-string "|a b|") (symbol "a b"))
-    (assert= (read-string ":|a b|") (keyword "a b"))
-    (assert= (read-string "||") (symbol ""))
-    (is (symbol? (read-string "|a b|")))
-    (is (keyword? (read-string ":|a b|"))))
+    (assert= (reflect/read-string "|a b|") (symbol "a b"))
+    (assert= (reflect/read-string ":|a b|") (keyword "a b"))
+    (assert= (reflect/read-string "||") (symbol ""))
+    (is (symbol? (reflect/read-string "|a b|")))
+    (is (keyword? (reflect/read-string ":|a b|"))))
   (test "an unterminated bar is a clean parse error, not a crash"
-    (assert-error (read-string "|no end")))
+    (assert-error (reflect/read-string "|no end")))
   ; a numeric keyword name is fine bare
   (test "clean names still print WITHOUT bars (no needless escaping)"
     (assert= (pr-str 'hello) "hello")
@@ -131,7 +131,7 @@
   (test "a programmatically-built reserved name round-trips through bars"
     (map (fn (n)
            (assert= (pr-str (symbol n)) (str "|" n "|"))
-           (assert= (read-string (pr-str (symbol n))) (symbol n)))
+           (assert= (reflect/read-string (pr-str (symbol n))) (symbol n)))
       ["1+" "1/2" "0x1F" "1_000"]))
   (test "display (non-readable) prints the raw name, no bars"
     (assert= (str (symbol "a b")) "a b")

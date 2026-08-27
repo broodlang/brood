@@ -71,6 +71,12 @@ partner of `quot`. `mod` is the one whose sign follows the divisor.
     (math/->fixed 1.5 2)   → \"1.50\""
   (%->fixed x n))
 
+(defn rational (n d)
+  "The exact rational `n`/`d` — reduced, with a positive denominator (a denominator
+of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
+
+    (math/rational 1 2)   → 1/2"
+  (/ n d))
 (defn quot (a b)
   "Truncated integer division of `a` by `b` (toward zero); the quotient partner to `rem`.
 
@@ -220,7 +226,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
   ;; exactness a float never had, so a float `x` converts back — which restores the
   ;; pre-ADR-196 contract exactly: that `/` was float division, giving a float in the
   ;; non-integral case and an int in the integral one (`(round-to 2.5 0)` → 3, because
-  ;; a math/denominator of 1 demotes). An exact `x` keeps the exact answer.
+  ;; a denominator of 1 demotes). An exact `x` keeps the exact answer.
   (let (scale (pow 10 places)
         r (/ (round (* x scale)) scale))
     (if (and (float? x) (ratio? r)) (->float r) r)))

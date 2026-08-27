@@ -25,7 +25,7 @@ were measurements."
 (def min-samples 1000)
 
 ;; ---- derived ratios ---------------------------------------------------------
-;; Each returns nil rather than a number when its math/denominator is zero, so "no data"
+;; Each returns nil rather than a number when its denominator is zero, so "no data"
 ;; is distinguishable from "measured zero" — the distinction the whole report rests on.
 
 (defn- pct
@@ -55,8 +55,8 @@ were measurements."
 (defn ratios (vm gc)
   "Derived figures, split by what the counters can actually support.
 
-**Meaningful ratios** — all three live inside the *interpreted* domain, so math/numerator and
-math/denominator are counted by the same machinery: `:defer-rate` (share of activations that fell
+**Meaningful ratios** — all three live inside the *interpreted* domain, so numerator and
+denominator are counted by the same machinery: `:defer-rate` (share of activations that fell
 back to the tree-walker — the deopt surface), `:call-ic-hit-rate`, `:env-hops-per-get` (chain
 depth; deep chains are a lexical-addressing target).
 
@@ -99,7 +99,7 @@ Verdicts: `:dispatch-bound` (a bytecode VM / JIT removes this), `:env-bound` (a
 lexical-addressing or capture-flattening target), `:balanced`, or `:no-data`.
 
 **`:alloc-bound` is deliberately absent**, though `docs/benchmarking.md` §2 names it as one of
-the three. These counters cannot establish it: the only available math/denominator stops counting
+the three. These counters cannot establish it: the only available denominator stops counting
 once the hot path goes native, while allocations do not (see `ratios`). Guessing anyway would
 label every JIT'd tail loop alloc-bound. To answer that question, read `:allocations` and
 `:gc-collections` against a *second run* of the same workload — or sweep `BROOD_GC_FLOOR`,
@@ -121,7 +121,7 @@ re-derive the inputs."
         [:no-data
           ;; Report the counts; do NOT assert *why* nothing is judgeable. A rate is nil either
           ;; because it rests on too few samples or because it has none at all (a zero
-          ;; math/denominator), and this branch cannot tell which. The earlier wording claimed
+          ;; denominator), and this branch cannot tell which. The earlier wording claimed
           ;; "fewer than N samples on every rate" — a guess, and a wrong one for
           ;; `{:samples {:activations 5000 …}}` with absent rates, where it reported a sample
           ;; shortage that had not happened. Guessing a cause is what this module exists not to do.

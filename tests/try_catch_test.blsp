@@ -99,8 +99,8 @@
   (test "unbound symbol error is catchable"
     (is (try (eval 'no-such-symbol-xyz) false (catch _ true))))
 
-  (test "parse error from read-string is catchable"
-    (is (try (read-string "(1 2") false (catch _ true))))
+  (test "parse error from reflect/read-string is catchable"
+    (is (try (reflect/read-string "(1 2") false (catch _ true))))
 
   (test "index out of bounds is catchable"
     (is (try (seq/vector-ref [1 2 3] 99) false (catch _ true)))))
@@ -323,7 +323,7 @@
   (test "multiple assert-error in one test"
     (assert-error (first 5))
     (assert-error (eval 'undefined-xyz-99))
-    (assert-error (read-string "(("))))
+    (assert-error (reflect/read-string "(("))))
 
 ;; ── 11. error stack traces (:trace) ──────────────────────────────────────────
 ;; A caught builtin error's map carries :trace — the call stack at the raise,

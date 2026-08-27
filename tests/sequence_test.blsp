@@ -28,7 +28,7 @@
   ;; doesn't read back as the value it came from.
   (test "a range spliced into a cons tail prints (and re-reads) as a proper list"
     (assert= (pr-str (cons 9 (range 2))) "(9 0 1)")
-    (assert= (read-string (pr-str (cons 9 (range 2)))) (list 9 0 1))
+    (assert= (reflect/read-string (pr-str (cons 9 (range 2)))) (list 9 0 1))
     (assert= (count (cons 9 (range 2))) 3)
     (assert= (pr-str (cons 9 (range 0))) "(9)")
     (assert= (pr-str (cons :a (cons :b (range 5 8)))) "(:a :b 5 6 7)")

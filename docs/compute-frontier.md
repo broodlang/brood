@@ -555,7 +555,7 @@ Priority if/when this is picked up:
    "parity-unsound" worry is solved by the guard). Isolated read ~7.8 → ~1.2 ns; `matmul`
    compute ~241 → ~171 ms, now beating both interpreters. The one residual read is the
    **per-`k` row** (varies — not hoistable), so the gap stays the suite's largest (~30×,
-   noise-sensitive math/denominator) — bounded ultimately by the boxed 24-byte `Value`.
+   noise-sensitive denominator) — bounded ultimately by the boxed 24-byte `Value`.
 2. **zero-copy message passing** (§3c, §6) — share immutable structures by handle instead of
    deep-copying across processes; attacks the `strings` ~180 MB outlier and `spawn`/`pfib`
    message cost. Also opens **lazy combinators** as the eager-list fix.

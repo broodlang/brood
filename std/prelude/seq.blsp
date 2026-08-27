@@ -89,18 +89,18 @@ the example above."
     (%zip-acc (rest a) (rest b) (cons [(first a) (first b)] acc))))
 
 ;; (partition n coll) -> consecutive n-sized chunks; a trailing partial chunk is
-;; dropped (Clojure `partition` semantics). `has-at-least?` avoids re-counting.
-(defn has-at-least? (n coll)
+;; dropped (Clojure `partition` semantics). `%has-at-least?` avoids re-counting.
+(defn %has-at-least? (n coll)
   "True when `coll` has at least `n` items, walking only that far — the O(n) test that lets
 `partition` and friends check a chunk without counting the whole (possibly long) sequence.
 Always true for `n` <= 0.
 
-    (has-at-least? 2 (list 1 2 3))   → true
-    (has-at-least? 4 (list 1 2 3))   → false"
-  (cond (<= n 0) true (empty? coll) false else (has-at-least? (- n 1) (rest coll))))
+    (%has-at-least? 2 (list 1 2 3))   → true
+    (%has-at-least? 4 (list 1 2 3))   → false"
+  (cond (<= n 0) true (empty? coll) false else (%has-at-least? (- n 1) (rest coll))))
 (defn- %partition-acc
   (n coll acc)
-  (if (has-at-least? n coll)
+  (if (%has-at-least? n coll)
     (%partition-acc n (drop n coll) (cons (take n coll) acc))
     (reverse acc)))
 

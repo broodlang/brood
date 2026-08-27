@@ -214,7 +214,6 @@
    "global-names" :meta
    "string/grapheme-at" :strings
    "string/grapheme-count" :strings
-   "has-at-least?" :predicates
    "identity" :functions
    "if-let" :control
    "impl" :meta
@@ -311,11 +310,11 @@
    "range" :collections
    "range?" :predicates
    "ratio?" :predicates
-   "rational" :convert
-   "read-all" :io
-   "read-first" :io
+   "math/rational" :convert
+   "reflect/read-all" :io
+   "reflect/read-first" :io
    "read-line" :io
-   "read-string" :io
+   "reflect/read-string" :io
    "receive" :processes
    "%receive-binds" :processes
    "%receive-body-code" :processes

@@ -77,7 +77,7 @@ land in a later slice."
   (manifest-path)
   (if (not (file/exists? manifest-path))
     nil
-    (let (form (read-first (file/slurp manifest-path)))
+    (let (form (reflect/read-first (file/slurp manifest-path)))
       (if (and (pair? form) (= (first form) 'project))
         (project/parse-deps (plist-get (rest form) :dependencies))
         nil))))
@@ -583,7 +583,7 @@ land in a later slice."
   (let (meta (package-pkg-meta-path target))
     (and (file/dir? target)
       (file/exists? meta)
-      (let (form (read-first (file/slurp meta)))
+      (let (form (reflect/read-first (file/slurp meta)))
         (and (pair? form)
           (= (first form) 'brood-pkg)
           (= commit (plist-get (rest form) :commit)))))))
@@ -744,7 +744,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
   (let (meta (package-pkg-meta-path target))
     (and (file/dir? target)
       (file/exists? meta)
-      (let (form (read-first (file/slurp meta)))
+      (let (form (reflect/read-first (file/slurp meta)))
         (and (pair? form)
           (= (first form) 'brood-pkg)
           (= sha (plist-get (rest form) :sha256)))))))
@@ -1167,7 +1167,7 @@ sha256 pin still holds."
     (map second
       (filter (fn (form)
                 (and (pair? form) (= (first form) 'defmodule) (symbol? (second form))))
-        (read-all (file/slurp file))))
+        (reflect/read-all (file/slurp file))))
     (catch _ nil)))
 
 ;; Every `.blsp` file at or under `dir`, recursively (full paths). A hierarchical
@@ -1316,7 +1316,7 @@ sha256 pin still holds."
   (let (path (package-lockfile-path root))
     (if (not (file/exists? path))
       nil
-      (let (form (read-first (file/slurp path)))
+      (let (form (reflect/read-first (file/slurp path)))
         (if (and (pair? form) (= (first form) 'lock))
           (plist-get (rest form) :dependencies)
           nil)))))
@@ -1395,7 +1395,7 @@ sha256 pin still holds."
 (defn- package-load-manifest
   (path)
   (when (file/exists? path)
-    (let (form (read-first (file/slurp path)))
+    (let (form (reflect/read-first (file/slurp path)))
       (when (and (pair? form) (= (first form) 'project))
         (project/apply-config (rest form))))))
 
@@ -1617,14 +1617,14 @@ sha256 pin still holds."
 ;; with an internal parse error until the file was repaired by hand. Any name
 ;; containing a space, quote, bracket or paren did the same.
 ;;
-;; The round-trip IS the property we need: whatever survives `read-first`
+;; The round-trip IS the property we need: whatever survives `reflect/read-first`
 ;; unchanged is safe to write back out. That also correctly rejects a numeric name
 ;; ("5" reads as an int, not a symbol) without a hand-maintained character list.
 (defn- package-valid-dep-name?
   (nm)
   (and (string? nm)
     (not (= nm ""))
-    (= (try (read-first nm) (catch _ nil)) (symbol nm))))
+    (= (try (reflect/read-first nm) (catch _ nil)) (symbol nm))))
 
 ;; --- editing project.blsp safely --------------------------------------------
 ;; The manifest edit is a read-modify-write: read the source, splice an entry in or
@@ -1859,7 +1859,7 @@ ordinary library, which the server stores as \"nothing\"."
   "The publisher's stored keypair as `{:public <hex> :private <hex>}`, or nil if none exists."
   (let (p (package-signing-key-path))
     (if (file/exists? p)
-      (let (form (read-first (file/slurp p)))
+      (let (form (reflect/read-first (file/slurp p)))
         (if (and (pair? form) (= (first form) 'signing-key))
           {:public (plist-get (rest form) :public) :private (plist-get (rest form) :private)}
           nil))

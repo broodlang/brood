@@ -55,7 +55,7 @@ Reading rather than evaluating is deliberate: a documented list result is writte
 which as a *form* would call `:a`. Read, it is the list value it depicts. Anything that does
 not read — `#<fn>`, a `RAISED …` line — falls back to comparing `pr-str`, so nothing is
 silently accepted."
-  (let (parsed (try [:ok (read-string expected)] (catch _ nil)))
+  (let (parsed (try [:ok (reflect/read-string expected)] (catch _ nil)))
     (if parsed
       (= value (second parsed))
       (= (pr-str value) expected))))
@@ -67,7 +67,7 @@ silently accepted."
     (when c
       (let ([src expected] c
             outcome (try
-                      [:ok (eval (read-string src))]
+                      [:ok (eval (reflect/read-string src))]
                       (catch e [:raised (str "RAISED " (error-message e))]))
             ok (if (= (first outcome) :raised)
                  (= (second outcome) expected)

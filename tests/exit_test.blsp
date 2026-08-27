@@ -97,7 +97,7 @@
 ; the source text: a string reaches `eval-string` after this module's compile-time
 ; namespace qualification, so a bare `ex-spin` would be unbound at runtime.
 (defn ex-spin-eval-string () (eval-string "(exit-test/ex-spin)"))
-(defn ex-spin-eval-form () (eval (read-first "(exit-test/ex-spin)")))
+(defn ex-spin-eval-form () (eval (reflect/read-first "(exit-test/ex-spin)")))
 ; `try` around the eval'd spin — the kill must NOT surface as a catchable error
 (defn ex-spin-eval-try () (try (eval-string "(exit-test/ex-spin)") (catch e :caught)))
 
@@ -107,7 +107,7 @@
       (sleep 30)
       (exit p :kill)
       (assert= (ex-down-reason p m) :kill)))
-  (test "hard :kill stops a tight loop inside (eval (read-first …))"
+  (test "hard :kill stops a tight loop inside (eval (reflect/read-first …))"
     (let (p (spawn (ex-spin-eval-form)) m (monitor p))
       (sleep 30)
       (exit p :kill)

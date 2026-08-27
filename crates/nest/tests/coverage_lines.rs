@@ -42,7 +42,7 @@ fn tempdir(tag: &str) -> TempDir {
 }
 
 /// A project with `live` (called by the tests) and `dead` (never called). `dead`'s body
-/// is two call-bearing lines, so it contributes to the math/denominator and to nothing else.
+/// is two call-bearing lines, so it contributes to the denominator and to nothing else.
 fn fixture(tag: &str) -> TempDir {
     let dir = tempdir(tag);
     let root = &dir.path;

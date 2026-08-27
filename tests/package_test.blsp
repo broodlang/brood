@@ -964,7 +964,7 @@
       ;; `rest`: the `project` MACRO passes only the opts plist to `apply`, so
       ;; handing it the whole `(project …)` form would shift every key by one and find
       ;; nothing — the same mistake as reading a manifest with `plist-get` on the form.
-      (project/apply-config (rest (read-string (file/slurp (path/join root "project.blsp")))))
+      (project/apply-config (rest (reflect/read-string (file/slurp (path/join root "project.blsp")))))
       (assert= ">= 0.1" (get *project-enhances* 'bedit))
       (def *project-enhances* saved)))
   (test "the publish envelope carries it with STRING keys (JSON has no symbols)"
@@ -1136,14 +1136,14 @@
           out (package/package-manifest-add src
                 (dep-entry-node (dep-path 'greeter "../greeter"))))
       (is (includes? out "a keeper comment"))
-      (let (form (read-string out))
+      (let (form (reflect/read-string out))
         (assert= (project/parse-deps (plist-get (rest form) :dependencies))
           (list (assoc (dep-path 'greeter "../greeter") :optional false))))))
   (test "add appends to an existing :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
           out (package/package-manifest-add src
                 (dep-entry-node (dep-path 'b "../b"))))
-      (let (form (read-string out))
+      (let (form (reflect/read-string out))
         (assert= (map (fn (d) (get d :name))
                    (project/parse-deps (plist-get (rest form) :dependencies)))
           (list 'a 'b)))))
@@ -1151,14 +1151,14 @@
     (let (src "(project :name \"app\"\n  :dependencies [[a :path \"../a\"] [b :path \"../b\"]])\n;; keep me\n"
           out (package/package-manifest-remove src 'a))
       (is (includes? out "keep me"))
-      (let (form (read-string out))
+      (let (form (reflect/read-string out))
         (assert= (map (fn (d) (get d :name))
                    (project/parse-deps (plist-get (rest form) :dependencies)))
           (list 'b)))))
   (test "remove of the only dep leaves an empty :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
           out (package/package-manifest-remove src 'a))
-      (assert= (project/parse-deps (plist-get (rest (read-string out)) :dependencies)) nil))))
+      (assert= (project/parse-deps (plist-get (rest (reflect/read-string out)) :dependencies)) nil))))
 
 ;; ---- the Dependency ability -------------------------------------------------
 ;; Every per-kind behaviour (resolve / lock row / manifest entry / compatibility) is an

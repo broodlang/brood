@@ -17,7 +17,7 @@
 ;;    Encoding accepts those plus string keys (emitted as-is) and lists (as arrays).
 ;;  - **`\uXXXX` with no codepoint primitive:** pure Brood can't build a character
 ;;    from an integer — but the *reader* decodes `\u{H..H}` escapes, so we synthesize
-;;    the one-char Brood source `"\u{H..H}"` and `read-string` it. That makes the
+;;    the one-char Brood source `"\u{H..H}"` and `reflect/read-string` it. That makes the
 ;;    whole library Rust-free (the reader is the codepoint→char mechanism), including
 ;;    `\b`/`\f` and astral surrogate pairs.
 ;;  - Pure, opt-in (`require`), never in the prelude.
@@ -38,7 +38,7 @@ parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
 ;; ---- codepoint → char, via the reader (the one tricky bit) ------------------
 ;;
 ;; Pure Brood has no integer→char primitive, but the scanner decodes `\u{H..H}`
-;; string escapes — so `(read-string "\"\\u{41}\"")` reads the Brood string "A".
+;; string escapes — so `(reflect/read-string "\"\\u{41}\"")` reads the Brood string "A".
 ;; We build that source and read it. Used for `\uXXXX`, `\b`, `\f`.
 
 (def- json-hex-digits "0123456789abcdef")
@@ -58,7 +58,7 @@ parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
   (cp)
   "The one-character string for Unicode code point `cp`, via a `\\u{…}` reader
 escape (the codepoint→char mechanism pure Brood otherwise lacks)."
-  (read-string (str "\"\\u{" (int->hex cp) "}\"")))
+  (reflect/read-string (str "\"\\u{" (int->hex cp) "}\"")))
 
 ;; ---- parse ------------------------------------------------------------------
 ;;

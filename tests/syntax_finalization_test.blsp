@@ -1,7 +1,7 @@
 ;; The syntax-finalisation rules (ADR-149/150/151/152): each of these spellings was
 ;; once accepted and *reinterpreted* into a different working program. They must now
 ;; be rejected, with a hint naming the fix — and the idiomatic spelling must still
-;; work. Every "must fail" case goes through `(eval (read-string …))` so the bad form
+;; work. Every "must fail" case goes through `(eval (reflect/read-string …))` so the bad form
 ;; doesn't fail this file's own compile pass.
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test, via
@@ -16,11 +16,11 @@
 
 (defn err-of (src)
   "The message of the error raised by reading+evaluating `src`, or nil if it ran."
-  (try (do (eval (read-string src)) nil) (catch e (error-message e))))
+  (try (do (eval (reflect/read-string src)) nil) (catch e (error-message e))))
 
 (defn hint-of (src)
   "The :hint of the error raised by reading+evaluating `src`, or nil."
-  (try (do (eval (read-string src)) nil) (catch e (get e :hint))))
+  (try (do (eval (reflect/read-string src)) nil) (catch e (get e :hint))))
 
 ;; ---- ADR-149: a binding container is a list ---------------------------------
 
@@ -123,7 +123,7 @@
     (defdyn *sf-declared* 0)
     (is (dynamic? '*sf-declared*))
     (refute (dynamic? '*sf-never-declared*))
-    (assert-error (eval (read-string "(binding (*sf-never-declared* 1) nil)")))))
+    (assert-error (eval (reflect/read-string "(binding (*sf-never-declared* 1) nil)")))))
 
 ;; ---- ADR-152: reject the shape, never reinterpret it ------------------------
 

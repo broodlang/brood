@@ -1,5 +1,5 @@
 ;; Regression: non-finite floats (inf / -inf / nan) must round-trip through
-;; pr-str → read-string (found 2026-06-29). The printer emits bare `inf`/`-inf`/
+;; pr-str → reflect/read-string (found 2026-06-29). The printer emits bare `inf`/`-inf`/
 ;; `nan`, but the reader's atom classifier had no case for them, so they read back
 ;; as *symbols* — `(read (pr-str x))` silently turned a float into a symbol. The
 ;; language produces these floats by design (`1e400`, overflow), so the lossy
@@ -9,10 +9,10 @@
   (:use test)
   (:use math))
 
-(defn roundtrip (x) (read-string (pr-str x)))
+(defn roundtrip (x) (reflect/read-string (pr-str x)))
 
 ;; The read/write-invariance property (a standard Scheme/float requirement): for
-;; every finite float, (= x (read-string (pr-str x))). Brood's printer uses
+;; every finite float, (= x (reflect/read-string (pr-str x))). Brood's printer uses
 ;; shortest-round-trip formatting, so this must hold exactly. Drive it over many
 ;; PRNG-generated floats spanning ~10^-20 .. 10^20, plus a curated set of hard
 ;; values. A 5000-float fuzz run found 0 failures (2026-06-29); this pins it.
@@ -63,7 +63,7 @@
     (assert= (type-of nan) :float)
     (is (not (= nan nan)))
     (assert= (pr-str nan) "nan")
-    (assert= (type-of (read-string "nan")) :float))
+    (assert= (type-of (reflect/read-string "nan")) :float))
   (test "overflow-produced infinity prints as inf and round-trips"
     (let (big (* 1e308 1e308))
       (assert= (pr-str big) "inf")

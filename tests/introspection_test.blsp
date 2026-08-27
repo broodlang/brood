@@ -173,7 +173,7 @@
                   (if (= n 0)
                     nil
                     (do
-                      (read-all "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))")
+                      (reflect/read-all "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))")
                       (churn (- n 1)))))
           _ (churn 4000)
           _ (dev/gc-collect)
@@ -187,7 +187,7 @@
     ;; DECREASE the recorded count. (Exact growth is not asserted: a collection may
     ;; drop dead entries between the two samples.)
     (let (before (get (dev/pos-stats) :local-forms)
-          _ (read-all "(defn probe-fn (a b) (if (> a b) a b))")
+          _ (reflect/read-all "(defn probe-fn (a b) (if (> a b) a b))")
           after (get (dev/pos-stats) :local-forms))
       (is (>= after before)))))
 

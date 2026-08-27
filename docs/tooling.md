@@ -365,7 +365,7 @@ Policy is Brood (`std/tool/docs.blsp`); Rust supplies only the mechanism. The to
 **loads the module and introspects it** rather than parsing source: it snapshots
 `(global-names)`, loads the module, and the new names are what it defined — read
 back via the existing `(doc f)` / `(arglist f)`. The module docstring is read
-from source with `file/slurp` + `read-string` (a leading string form is discarded on
+from source with `file/slurp` + `reflect/read-string` (a leading string form is discarded on
 load, so it can't be recovered by introspection). This reuses the canonical
 docstring machinery and is one-shot, unlike the continuously-running LSP, which
 must never evaluate user code (see `docs/lsp.md`).

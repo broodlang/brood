@@ -16,7 +16,7 @@
 (defmodule coverage-test (:use-internals coverage) (:use test) (:use coverage))
 
 (describe "coverage: percentage"
-  (test "an empty math/denominator is 100%, not 0%"
+  (test "an empty denominator is 100%, not 0%"
     ;; Nothing to cover isn't a failure — and 0% here would fail a --cover-min gate
     ;; on a project that legitimately has no functions yet.
     (assert= (coverage/coverage-percent 0 0) 100))
@@ -209,7 +209,7 @@
 
 (describe "coverage: forcing a compile"
   (test "precompiling a real function reports that a body compiled"
-    ;; The math/denominator depends on this: arms compile on first CALL, so without a
+    ;; The denominator depends on this: arms compile on first CALL, so without a
     ;; forced compile an uncalled function is missing from BOTH halves of the ratio
     ;; and a dead function reads as 100% covered.
     (is (%coverage-precompile coverage-test-dead-line-fn)))

@@ -13,6 +13,26 @@
 ;; the code rather than as a call into a tool.
 (defmodule reflect)
 
+(defn reflect/read-string (s)
+  "Parse the source string `s` into a single form (the first one). Errors on malformed
+input. Text in, data out — which is what this module is for.
+
+    (reflect/read-string \"(a b)\")   → (a b)"
+  (%read-string s))
+
+(defn reflect/read-all (s)
+  "Every top-level form in the source string `s`, as a list. What the module loader reads
+a file with.
+
+    (count (reflect/read-all \"(a) (b)\"))   → 2"
+  (%read-all s))
+
+(defn reflect/read-first (s)
+  "The first top-level form in `s`, or nil when it holds none.
+
+    (reflect/read-first \"(a) (b)\")   → (a)"
+  (%read-first s))
+
 (defn behaviour-ops (bname)
   "The op specs `defbehaviour` recorded for behaviour `bname`, or nil — which ops a module
 claiming `(:implements bname)` must define, and at what arities. The checker and the LSP
