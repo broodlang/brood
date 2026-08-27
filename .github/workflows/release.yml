@@ -24,7 +24,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A tag is a claim about what the binaries contain. Nothing checked it: pushing `v0.15.0`
+  # at a tree whose Cargo.toml says 0.14.1 would publish four tarballs named v0.15.0 whose
+  # `brood --version` reports 0.14.1, and the mismatch would surface only for whoever
+  # downloaded one. It runs before the build so a wrong tag costs seconds, not four
+  # cross-compiles.
+  verify:
+    name: tag matches the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag, Cargo.toml and CHANGELOG must agree
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "tag=$tag  Cargo.toml=$cargo_version"
+
+          if [ "$tag" != "v$cargo_version" ]; then
+            echo "::error::tag $tag does not match Cargo.toml ($cargo_version)." \
+                 "Bump the version and commit it before tagging, or tag v$cargo_version."
+            exit 1
+          fi
+
+          # A release with no changelog entry is a release nobody can read. The entry is
+          # cheap to write and impossible to add convincingly afterwards.
+          if ! grep -q "^## $tag " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## $tag' section."
+            exit 1
+          fi
+          echo "tag, Cargo.toml and CHANGELOG agree"
+
   build:
+    needs: verify
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
