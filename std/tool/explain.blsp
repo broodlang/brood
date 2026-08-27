@@ -73,7 +73,7 @@ the `nest mcp` tools of the same names.")
    "E0051" {:summary "Subprocess failed to start — the program couldn't be spawned."
             :causes "The program isn't on PATH; a wrong executable name."
             :fix "Confirm the binary is installed and on PATH; pass an absolute path if needed."
-            :example "(proc/spawn \"git\" [\"status\"])"}
+            :example "(os/spawn \"git\" [\"status\"])"}
    "E0060" {:summary "Distribution-layer failure — a node/connect/send operation failed."
             :causes "A wrong `name@host`; the peer not listening; a cookie mismatch; a dropped link (E0060 noconnection when `:send-errors` is on)."
             :fix "Confirm both nodes ran `node-start` with the SAME cookie and reachable addresses; `std/net/reconnect` auto-heals a dropped link."

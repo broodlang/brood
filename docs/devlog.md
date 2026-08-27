@@ -3909,3 +3909,52 @@ bugs the prose had asserted for a long time:
 
 Still open: ~1,150 public functions carry no example. That is a campaign, not a pass — but
 each one written becomes an executed test, so it pays for itself.
+
+## 2026-08-27 — `os` is the operating system, `system` is the runtime
+
+`std/os.blsp` and `std/system.blsp` were not two modules for one concern, as the audit
+recorded — they were one boundary drawn in the wrong place, which is why `system/env` was
+literally `(os/getenv name)`: one function, two names, two modules. Redrawn:
+
+- **`os`** is the OPERATING SYSTEM: `os/env`, `os/env-all`, `os/type`, `os/cmd`,
+  `os/run-process`, `os/hostname`, `os/exe-path`, the tty predicates, the clock, the
+  clipboard — and now the CHILD-PROCESS family.
+- **`system`** is the Brood RUNTIME itself: `system/argv`, `system/script-args`,
+  `system/halt`, `system/brood-version`, `system/build-id`, `system/stdlib-id`, and
+  `system/features` / `system/feature?`.
+
+That boundary is what decided the two open questions. `proc` held green-process
+introspection AND OS children, so `proc/spawn` started an operating-system process while the
+bare `spawn` started a green one; the OS half is now `os/spawn` / `os/write` / `os/close` /
+`os/set-binary`, and `proc` is green processes only. **`proc/spawn` for the green one was
+never available** — `spawn` is a *special form*, not a function, so it cannot be namespaced;
+`os/spawn` against a bare `spawn` is the clearer pairing anyway. And `feature?`, which had
+been sitting in `std/prelude/string.blsp`, asks what this runtime was built with, so it went
+to `system` beside `brood-version`.
+
+`proc/send` became **`os/write`**: it writes to the child's STDIN, and in this language
+`send` means message-passing to a mailbox. The `[:proc handle data]` message tags are
+deliberately unchanged — a receive pattern that stops matching does not fail, it silently
+drops the message, which is not worth churning for symmetry.
+
+**Three traps, all mine, all worth recording.**
+
+*A dedupe turned an alias into a self-call.* `system/env`'s body was `(os/getenv name)`;
+renaming `os/getenv` → `os/env` made the body call itself. It did not overflow the stack —
+proper tail calls made it an infinite loop in O(1) memory, so the symptom was a HANG at the
+first `(os/env …)`, with boot itself fine and every module loading fine. Bisecting by line
+found it in a minute; guessing would not have.
+
+*A rename ran over a file after moving code into it*, producing `(defn system/feature? …)`
+inside module `system` — a self-qualified definition. Move first, then rename, or the rename
+sees the moved text.
+
+*`features` is an English word.* The token-boundary matcher rewrote prose ("build features")
+and Rust identifiers (`pub(super) fn system/features`) alike. Reversed and redone by call
+position plus the one registration line — the same treatment `register` and `decimal` needed.
+
+**And a stale binary cost twenty minutes.** After fixing the self-call I rebuilt only
+`--bin brood`; `target/release/nest` still carried the infinite recursion, so every
+`nest test` hung and the corpus suites looked like a 25× regression. CLAUDE.md warns that a
+stale binary "fails by agreeing with the baseline" — it also fails by disagreeing
+spectacularly. Rebuild both binaries, or check the mtime before believing a timing.

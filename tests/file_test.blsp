@@ -192,8 +192,8 @@
     ; default base is (file/cwd)
     (assert= (path/absolute "rel") (path/join (file/cwd) "rel"))
     ; ~ expands against $HOME
-    (assert= (path/absolute "~/x") (str (os/getenv "HOME") "/x"))
-    (assert= (path/absolute "~") (os/getenv "HOME"))))
+    (assert= (path/absolute "~/x") (str (os/env "HOME") "/x"))
+    (assert= (path/absolute "~") (os/env "HOME"))))
 
 ;; `%file-swap` — atomic compare-and-swap of a file's whole contents, serialised
 ;; across processes by an exclusive lock. The mechanism behind a safe

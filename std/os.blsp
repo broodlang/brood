@@ -1,11 +1,19 @@
 ;; std/os.blsp — operating-system & environment surface. Policy over the %-prefixed
-;; primitives, so a program reaches the OS as os/getenv, os/run-process, os/now, … rather
+;; primitives, so a program reaches the OS as os/env, os/run-process, os/now, … rather
 ;; than the bare language core.
-(defmodule os)
+(defmodule os
+  "The OPERATING SYSTEM: environment, external commands, child processes, machine and
+terminal facts. Distinct from `system`, which is the Brood RUNTIME itself (`system/argv`,
+`system/halt`, `system/brood-version`).
 
-(defn getenv (name)
-  "The value of environment variable name, or nil if unset."
-  (%getenv name))
+    (os/env \"HOME\")                       ;; => \"/home/alice\"
+    (os/type)                              ;; => :linux
+    (os/cmd \"git\" [\"log\" \"--oneline\" \"-3\"])   ;; => {:stdout … :stderr … :exit 0}
+
+The two boundaries this module used to get wrong, both fixed 2026-08-27: `os/env` was
+literally `(os/env name)` — one function, two names, two modules — and the CHILD-PROCESS
+functions lived in `proc`, whose other half is green-process introspection, so `os/spawn`
+started an operating-system process while the bare `spawn` special form started a green one.")
 
 (defn hostname ()
   "This machine's short hostname (no domain). Used to qualify a node name as name@host."
@@ -46,3 +54,85 @@
 (defn clipboard-set! (s)
   "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."
   (%clipboard-set! s))
+
+;; ---- environment ------------------------------------------------------------
+
+(defn env (name)
+  "The value of environment variable `name` as a string, or nil if unset.
+
+    (os/env \"PATH\")        ;; => \"/usr/bin:/bin\"
+    (os/env \"NO_SUCH_VAR\")  ;; => nil"
+  (%getenv name))
+
+(defn env-all ()
+  "All environment variables as a `{string → string}` map."
+  (%env-all))
+
+(defn type ()
+  "The current OS as a keyword: `:linux`, `:macos`, or `:windows`."
+  (%os-type))
+
+(defn cmd (prog & rest)
+  "Run `prog` (a string) and return `{:stdout s :stderr s :exit n}`.
+An optional second argument is a list or vector of string arguments.
+
+    (os/cmd \"ls\" [\"-la\" \"/tmp\"])
+    (os/cmd \"date\")"
+  (let (args (if (nil? rest) nil (first rest)))
+    (if (nil? args)
+      (%os-cmd prog)
+      (%os-cmd prog args))))
+
+(defn cmd-ok? (result)
+  "True if the command result has exit code 0."
+  (= (get result :exit) 0))
+
+(defn cmd-out (result)
+  "The stdout string from a `cmd` result, trimmed."
+  (string/trim (get result :stdout "")))
+
+;; ---- child processes ---------------------------------------------------------
+;; A persistent OS child with piped stdio (ADR-104). These lived in `proc` until
+;; 2026-08-27, which put green-process introspection and OS children in one module and made
+;; `os/spawn` start an operating-system process while the bare `spawn` special form starts
+;; a green one. `spawn` cannot be namespaced — it is a special form, not a function — so the
+;; OS half moved here instead.
+;;
+;; `os/write`, not `send`: this writes to the child's STDIN. In this language `send` means
+;; message-passing to a process mailbox, which is a different thing entirely.
+;;
+;; The messages a child delivers keep their `[:proc handle data]` / `[:proc-err …]` /
+;; `[:proc-closed …]` tags: a receive pattern that stops matching does not fail, it silently
+;; drops the message, so those are not worth churning for symmetry.
+
+(defn spawn (prog args &optional opts)
+  "Spawn prog (a string) with args (a list/vector of strings) as a persistent child
+process with piped stdio. This spawns an OS-level child process — distinct from the
+kernel green-process `spawn` (the actor primitive); it returns a subprocess handle, not a
+pid. An optional opts map tunes the child: :cwd (a string) sets its working directory,
+:env (a map of string->string) adds environment variables on top of the inherited
+environment. Its stdout/stderr arrive at the calling process as [:proc handle data] /
+[:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the
+exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be
+spawned."
+  (%proc-spawn prog args opts))
+
+(defn write (p data)
+  "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a
+string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those,
+flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever
+the child's mode (ADR-141). Returns nil; throws if p is unknown/closed."
+  (%proc-send p data))
+
+(defn close (p)
+  "Terminate subprocess p: kill it if still running and close its stdin. Idempotent;
+returns nil. The final [:proc-closed handle code] still arrives at the owner."
+  (%proc-close p))
+
+(defn set-binary (p on)
+  "Switch subprocess p's INBOUND decode between text mode (default) and binary mode
+(mirrors tcp-set-binary; outbound os/write is unaffected, ADR-141). In binary mode
+inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` value (not a
+string) — for a child speaking a binary protocol over stdio. Returns nil; throws if p is
+unknown/closed."
+  (%proc-set-binary p on))

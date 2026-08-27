@@ -863,7 +863,7 @@ NOT call this: it requires its entry point and lets the rest stay on disk."
 ;; is exactly the failure mode worth a special case.
 (defn image-usable? ()
   "Whether a cached startup image may be used — false under `BROOD_COVERAGE`, whose instrumentation an image cannot represent."
-  (nil? (os/getenv "BROOD_COVERAGE")))
+  (nil? (os/env "BROOD_COVERAGE")))
 
 ;; Milliseconds as "12.3s" / "845ms" — build output should read at a glance.
 (defn- project-ms-str
@@ -916,7 +916,7 @@ program's and the LSP's protocol channel stays clean."
                     else (do (materialize-all) n)))
               else nil)
         t-d (os/now-ns)
-        _ (when (os/getenv "BROOD_IMAGE_TRACE")
+        _ (when (os/env "BROOD_IMAGE_TRACE")
             (io/puts (str "[loader] collect "
                        (quot (- t-b t-a) 1000000)
                        " ms, fingerprint "
@@ -1665,7 +1665,7 @@ resolve in the advisory checker. Returns the project root."
 
 (defn- project-check-files
   (files root)
-  (if (= (os/getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/env "BROOD_NO_CHECK") "1")
     0
     ;; Build the KI-17 reachability closures from the WHOLE project (every file's
     ;; header), not just `files` — a `nest check FILE` still needs the full graph to
@@ -1714,7 +1714,7 @@ resolve in the advisory checker. Returns the project root."
         (or from (file/cwd))
         ")"))
     (project-ensure-loaded root)
-    (if (= (os/getenv "BROOD_NO_CHECK") "1")
+    (if (= (os/env "BROOD_NO_CHECK") "1")
       nil
       ;; `%append-two` (copy the small per-file diagnostic list, share `acc`) not
       ;; `(append acc …)` (recopies the growing accumulator each file → O(files²)).
@@ -1857,7 +1857,7 @@ resolve in the advisory checker. Returns the project root."
 ;; type-check pre-flight. Shared by `check` / `check-sources`.
 (defn- project-check-duplicate-defs
   (extracts source-set)
-  (if (= (os/getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/env "BROOD_NO_CHECK") "1")
     0
     (fold (fn (n w) (io/puts w :to *err*) (+ n 1))
       0
@@ -1996,7 +1996,7 @@ resolve in the advisory checker. Returns the project root."
 ; v2: check-result entries gained a 5th field, the KI-17 require-closure (ADR-189).
 (def *check-cache-version* "v2")
 (defn- project-cache-stamp () (str (system/build-id) "|" *check-cache-version*))
-(defn- project-cache-off? () (= (os/getenv "BROOD_NO_CHECK_CACHE") "1"))
+(defn- project-cache-off? () (= (os/env "BROOD_NO_CHECK_CACHE") "1"))
 
 ;; The cache directory for `root` (created if absent), or nil if no cache base is
 ;; available: `$XDG_CACHE_HOME` (or `~/.cache`) `/brood/check/<sha256 of root>`.
@@ -2035,8 +2035,8 @@ resolve in the advisory checker. Returns the project root."
 
 (defn- project-cache-dir
   (root)
-  (let (xdg (os/getenv "XDG_CACHE_HOME")
-        home (os/getenv "HOME")
+  (let (xdg (os/env "XDG_CACHE_HOME")
+        home (os/env "HOME")
         base (cond
                (and xdg (not (= xdg ""))) xdg
                (and home (not (= home ""))) (path/join home ".cache")
@@ -2133,7 +2133,7 @@ resolve in the advisory checker. Returns the project root."
 ;; / per-file), noted as future work (ADR-119). Tunable via `BROOD_CHECK_CACHE_MAX`.
 (defn- project-cache-max-files
   ()
-  (let (e (os/getenv "BROOD_CHECK_CACHE_MAX"))
+  (let (e (os/env "BROOD_CHECK_CACHE_MAX"))
     (if (and e (not (= e ""))) (or (string/->number e) 50000) 50000)))
 
 ;; Return `{path -> [mtime counts privs def-names]}` for `files` by scanning them
@@ -2184,7 +2184,7 @@ resolve in the advisory checker. Returns the project root."
 ;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.
 (defn- project-check-unused-private
   (extracts)
-  (if (= (os/getenv "BROOD_NO_CHECK") "1")
+  (if (= (os/env "BROOD_NO_CHECK") "1")
     0
     (fold (fn (n w) (io/puts w :to *err*) (+ n 1))
       0
@@ -2644,7 +2644,7 @@ as unchanged (only when some were)."
 ;; load-all-then-run-all path under `BROOD_TEST_NO_SCOPE`.
 (defn- project-run-suite
   (files opts)
-  (if (os/getenv "BROOD_TEST_NO_SCOPE")
+  (if (os/env "BROOD_TEST_NO_SCOPE")
     (do
       (fold (fn (_ f) (load f)) nil files)
       (/apply test/run-tests opts))
@@ -2672,7 +2672,7 @@ as unchanged (only when some were)."
       ;; Per-file scoped run (see `run-tests`) — matters most here: `nest mcp`
       ;; is a long-lived hot-reload image, so a load-all-then-run would accumulate every
       ;; file's promoted code on EVERY run-tests call. `BROOD_TEST_NO_SCOPE` reverts.
-      (if (os/getenv "BROOD_TEST_NO_SCOPE")
+      (if (os/env "BROOD_TEST_NO_SCOPE")
         (do
           (fold (fn (_ f) (load f)) nil files)
           (/apply test/run-tests-structured opts))
@@ -2984,7 +2984,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
 ;; It's auto-created with documented defaults on first tool use, then loaded by
-;; the `nest` subcommands. Rust mechanism: os/getenv (locate it) + os/run-process.
+;; the `nest` subcommands. Rust mechanism: os/env (locate it) + os/run-process.
 (defdyn *config-git-init* false)
 ; nest new: run `git init` in the new project?
 
@@ -3006,8 +3006,8 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (defn- config-base-dir
   ()
   ; $XDG_CONFIG_HOME, else ~/.config
-  (let (xdg (os/getenv "XDG_CONFIG_HOME"))
-    (if (nil? xdg) (path/join (os/getenv "HOME") ".config") xdg)))
+  (let (xdg (os/env "XDG_CONFIG_HOME"))
+    (if (nil? xdg) (path/join (os/env "HOME") ".config") xdg)))
 (defn- config-dir () (path/join (config-base-dir) "brood"))
 (defn- config-path () (path/join (config-dir) "config.blsp"))
 

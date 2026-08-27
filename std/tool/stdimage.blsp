@@ -29,8 +29,8 @@
 (defn- cache-dir
   ()
   "`$XDG_CACHE_HOME/brood` (or `~/.cache/brood`), or nil when neither is set."
-  (let (xdg (os/getenv "XDG_CACHE_HOME")
-        home (os/getenv "HOME")
+  (let (xdg (os/env "XDG_CACHE_HOME")
+        home (os/env "HOME")
         base (cond
                (and xdg (not (= xdg ""))) xdg
                (and home (not (= home ""))) (path/join home ".cache")

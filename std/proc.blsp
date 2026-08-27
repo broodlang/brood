@@ -58,38 +58,6 @@ call and not automatic."
 ;; `offload` stays a BARE prelude wrapper (core dirty-native concurrency, used
 ;; during `nest fetch` before any module loads) — see std/prelude/process.blsp.
 
-(defn spawn (prog args &optional opts)
-  "Spawn prog (a string) with args (a list/vector of strings) as a persistent child
-process with piped stdio. This spawns an OS-level child process — distinct from the
-kernel green-process `spawn` (the actor primitive); it returns a subprocess handle, not a
-pid. An optional opts map tunes the child: :cwd (a string) sets its working directory,
-:env (a map of string->string) adds environment variables on top of the inherited
-environment. Its stdout/stderr arrive at the calling process as [:proc handle data] /
-[:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the
-exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be
-spawned."
-  (%proc-spawn prog args opts))
-
-(defn send (p data)
-  "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a
-string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those,
-flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever
-the child's mode (ADR-141). Returns nil; throws if p is unknown/closed."
-  (%proc-send p data))
-
-(defn close (p)
-  "Terminate subprocess p: kill it if still running and close its stdin. Idempotent;
-returns nil. The final [:proc-closed handle code] still arrives at the owner."
-  (%proc-close p))
-
-(defn set-binary (p on)
-  "Switch subprocess p's INBOUND decode between text mode (default) and binary mode
-(mirrors tcp-set-binary; outbound proc/send is unaffected, ADR-141). In binary mode
-inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` value (not a
-string) — for a child speaking a binary protocol over stdio. Returns nil; throws if p is
-unknown/closed."
-  (%proc-set-binary p on))
-
 ;; ---- timers ----------------------------------------------------------------
 ;; Cancellation moved to `timer/cancel`, beside the two functions that create a timer.
 

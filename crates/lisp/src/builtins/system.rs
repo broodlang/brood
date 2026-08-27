@@ -2060,7 +2060,7 @@ pub(super) fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::process::peak_threads() as i64))
 }
 
-/// `(features)` — the optional build features this runtime was compiled with, as a
+/// `(system/features)` — the optional build features this runtime was compiled with, as a
 /// vector of keywords (e.g. `[:jit :treesit :gui]`).
 ///
 /// The point is that a *bound* builtin does not imply a working one: with the `gui`

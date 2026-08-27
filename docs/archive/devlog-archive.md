@@ -11314,7 +11314,7 @@ processes logging through one logger with zero loss). Full `cargo nextest -p
 brood` green (316), including `suite` (discovers the new tests) and `differential`
 (tree-walker vs VM agree on the changed `print`).
 
-**Note.** `crates/nest/src/main.rs` was mid-refactor (a `features`/`resolve_runtime`
+**Note.** `crates/nest/src/main.rs` was mid-refactor (a `system/features`/`resolve_runtime`
 arity break — the user's concurrent WIP) and didn't build, so `nest check`/`nest
 test` ran a stale binary; verification was done with `cli` + `nextest` instead.
 `nest format`/`nest test` still want a green `nest` build.
@@ -23961,11 +23961,11 @@ have caught this except running the flag, and nothing did, because the wrapper i
 only emitted when `--for`/`--watch` is set. Any such snippet needs an *execution*
 test, not a reading — worth a grep for the others.
 
-**`features` + `feature?` (ADR-197).** A builtin from an absent optional feature is
+**`system/features` + `feature?` (ADR-197).** A builtin from an absent optional feature is
 still *bound* and still raises when called, so `(bound? 'gui-open)` answers yes on a
 runtime that cannot open a window. The app was reduced to calling it and matching on
 the error's prose (`index-of … "gui backend"`) — which silently turns a graceful
-terminal fallback into a crash the day someone rewords `NOT_COMPILED`. `(features)`
+terminal fallback into a crash the day someone rewords `NOT_COMPILED`. `(system/features)`
 is one Rust builtin over `cfg!`; `feature?` is a prelude one-liner over it.
 
 **`rect` takes a corner radius.** `frect` was rounded but GUI-only and `rect` was

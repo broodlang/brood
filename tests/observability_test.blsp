@@ -44,7 +44,7 @@
       ;; samples come from the VM driver's frame boundaries — the legacy
       ;; tree-walker (BROOD_VM=0) is by design not sampled, so the content
       ;; assertions only apply on the default engine
-      (when (not= (os/getenv "BROOD_VM") "0")
+      (when (not= (os/env "BROOD_VM") "0")
         (is (> (count prof) 0))
         ;; every entry is {:stack (...) :count n}
         (let (e (first prof))
