@@ -809,6 +809,36 @@ pub(super) fn check_into(
 }
 
 fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+    // A vector or map **literal in value position is evaluated code**: `[:tag (f x)]`
+    // calls `f`, and so does `{:k (f x)}`. This walk used to return here for anything
+    // that is not a `Pair`, so every form nested inside `[…]` / `{…}` was invisible to
+    // every lint — and Hiccup-shaped code (hive's entire web layer, `std/editor/*`) is
+    // written that way. `(str (max 2 …))` sat in hive's `/docs` renderer long after
+    // `max` moved to `math`, with `nest check` green the whole time; only rendering the
+    // page raised it. Same class as KI-67, one level out: not a form that suppressed the
+    // lint, a form the walk never reached.
+    //
+    // Descending is safe on both counts that would otherwise cost false positives:
+    // the checker runs on **macroexpanded** forms, so a `match` pattern vector has
+    // already been lowered to `let`/`if` binders and no binder vector survives in value
+    // position; and `quote`/`quasiquote`/`comment` return at `SpecialHead::SkipBody`
+    // above without ever handing their data down here.
+    match form {
+        Value::Vector(vid) => {
+            for item in heap.vector(vid).to_vec() {
+                check_into(heap, item, ctx, out);
+            }
+            return;
+        }
+        Value::Map(mid) => {
+            for (k, v) in heap.map_entries(mid) {
+                check_into(heap, k, ctx, out);
+                check_into(heap, v, ctx, out);
+            }
+            return;
+        }
+        _ => {}
+    }
     let Value::Pair(_) = form else { return };
     let Some(items) = list_items(heap, form) else {
         return;

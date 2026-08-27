@@ -1248,10 +1248,12 @@ resolve in the advisory checker. Returns the project root."
     (when deps
       (set-load-path! (append *load-path* (package/ensure-deps root deps))))))
 
-;; Every .blsp file the project owns — its source files plus its test files.
-;; The set the advisory type-checker walks for `(check)`.
-(defn- project-all-files
-  (root)
+(defn all-files (root)
+  "Every `.blsp` file the project at `root` owns — its source files plus its test files.
+The set the advisory type-checker walks for `(check)`; the sibling of [[source-files]],
+which gives the source half alone. Public because the MCP `callers` tool scans the whole
+project, and a `defn-` here is exactly the dead call site KI-67 found four of (this was
+the fifth, and it hid inside a map literal until the checker learned to walk one)."
   (let (src-dirs (abs-paths root *project-source-paths*)
         test-dirs (abs-paths root *project-test-paths*))
     (append (fold (fn (a d) (append a (collect-sources d))) nil src-dirs)
@@ -1672,7 +1674,7 @@ resolve in the advisory checker. Returns the project root."
     ;; resolve `FILE`'s transitive requires, else a transitively-reached module would
     ;; false-positive. Outside a project (no root) the checked files are the universe;
     ;; there the lint is inert anyway (only the file's own requires are loaded).
-    (let (closures (project-require-closures (if root (project-all-files root) files)))
+    (let (closures (project-require-closures (if root (all-files root) files)))
       (cond
         ;; No cache when it's disabled, there's no project root, or the project is over
         ;; the file cap (the manifest read would rival re-checking) — parallel fresh path.
@@ -1721,7 +1723,7 @@ resolve in the advisory checker. Returns the project root."
       ;; `%mcp-progress` streams per-file progress under `nest mcp` (a no-op — a
       ;; cheap thread-local check — otherwise), so a large project's `check`
       ;; reports live instead of one silent wait.
-      (let (files (project-all-files root)
+      (let (files (all-files root)
             closures (project-require-closures files)
             total (count files))
         (project-check-fold files closures total 0 nil)))))
@@ -2209,7 +2211,7 @@ Returns nil when there is nothing to report."
     (when (nil? root)
       (error "check: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project-ensure-loaded root)
-    (let (files (project-all-files root)
+    (let (files (all-files root)
           ;; Phase 1 (unused-private + duplicate-defs): native parallel scan every
           ;; run — cheaper than any disk cache (see `project-gather-extracts`).
           extracts (project-gather-extracts files)
@@ -2436,7 +2438,7 @@ names back to files), including itself. Modules with no project file (std/prelud
   (root files)
   "`test-file -> current max-dep-mtime` for each test file in `files`, over the whole
 project's require-closure."
-  (let (all (project-all-files root)
+  (let (all (all-files root)
         infos (project-module-infos all)
         closures (project-require-closures all)
         module->file (project-module-file-index infos))

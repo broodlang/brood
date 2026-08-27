@@ -314,7 +314,7 @@ null}` — agents shouldn't have to disambiguate \"no warnings\" from
     ;; `*project-root*` explicitly, not the implicit `(file/cwd)` this used to rely on. The
     ;; server serves ONE project — that root is what the write sandbox is pinned to
     ;; (`project-path`) and what every other project-scoped tool here already reads
-    ;; (`project-all-files *project-root*`) — so taking the checked project from cwd
+    ;; (`project/all-files *project-root*`) — so taking the checked project from cwd
     ;; made `check` the one tool that could disagree with the rest if the host process
     ;; ever moved. It also made the tool untestable without process-global state, which
     ;; is how its test came to type-check the whole brood repo (KI-46). Nil root keeps
@@ -439,7 +439,7 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
                              (map (fn (lc) {:file f :line (first lc) :col (second lc)})
                                (reflect/references-in-source name (file/slurp f)))
                              (catch _ nil)))
-                   (project-all-files *project-root*))}))
+                   (project/all-files *project-root*))}))
 
 (defn apropos-tool (args)
   "`apropos` — discover globals whose name contains a pattern. Returns
