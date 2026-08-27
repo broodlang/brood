@@ -79,7 +79,9 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
   (and (record? x) (= (record-id x) :datetime/datetime)))
 
 (defn date? (x)
-  "True if `x` is a date (no time component)."
+  "True if `x` is a date (no time component).
+
+    (datetime/date? (datetime/today))   → true"
   (and (record? x) (= (record-id x) :datetime/date)))
 
 (defn time-of-day? (x)
@@ -89,7 +91,9 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 ;; ---- epoch conversion -------------------------------------------------------
 
 (defn epoch-ms-> (ms)
-  "Convert Unix epoch milliseconds to a UTC datetime."
+  "Convert Unix epoch milliseconds to a UTC datetime.
+
+    (datetime/format (datetime/epoch-ms-> 0) \"%Y-%m-%d\")   → \"1970-01-01\""
   (let (total-s (dt-fdiv ms 1000)
         ms-part (- ms (* total-s 1000))
         days (dt-fdiv total-s 86400)
@@ -223,7 +227,9 @@ milliseconds."
 
 (defn format (dt fmt)
   "Format `dt` with %-codes: %Y year, %m month (01-12), %d day (01-31),
-%H hour (00-23), %M minute (00-59), %S second (00-59), %f ms (000-999), %% literal %."
+%H hour (00-23), %M minute (00-59), %S second (00-59), %f ms (000-999), %% literal %.
+
+    (datetime/format (datetime/parse-date \"2026-08-27\") \"%Y/%m/%d\")   → \"2026/08/27\""
   (dt-fmt-loop dt fmt 0 (string/length fmt) ""))
 
 ;; ---- parsing ----------------------------------------------------------------
@@ -277,7 +283,9 @@ milliseconds."
   "Parse an ISO 8601 date string \"YYYY-MM-DD\" → a `date`, or nil on failure.
 The date must be a **real** one: the month is 1–12 and the day is within that
 month for that year (so \"2026-02-31\" and \"2026-13-05\" are nil, not a silently
-normalised March date)."
+normalised March date).
+
+    (datetime/format (datetime/parse-date \"2026-08-27\") \"%Y-%m-%d\")   → \"2026-08-27\""
   (let (parts (string/split s "-"))
     (when (= (count parts) 3)
       (let (y (dt-parse-int (nth parts 0))
@@ -307,19 +315,31 @@ nil. Hour 0–23, minute and second 0–59; anything else is nil."
 
 ;; ---- duration helpers -------------------------------------------------------
 
-(defn seconds (n) "Milliseconds in `n` seconds." (* n 1000))
-(defn minutes (n) "Milliseconds in `n` minutes." (* n 60000))
-(defn hours (n) "Milliseconds in `n` hours." (* n 3600000))
-(defn days (n) "Milliseconds in `n` days." (* n 86400000))
+(defn seconds (n) "Milliseconds in `n` seconds.
+
+    (datetime/seconds 2)   → 2000" (* n 1000))
+(defn minutes (n) "Milliseconds in `n` minutes.
+
+    (datetime/minutes 1)   → 60000" (* n 60000))
+(defn hours (n) "Milliseconds in `n` hours.
+
+    (datetime/hours 1)     → 3600000" (* n 3600000))
+(defn days (n) "Milliseconds in `n` days.
+
+    (datetime/days 1)      → 86400000" (* n 86400000))
 
 ;; ---- arithmetic -------------------------------------------------------------
 
 (defn add (dt ms)
-  "Add `ms` milliseconds to `dt`, returning a new datetime."
+  "Add `ms` milliseconds to `dt`, returning a new datetime.
+
+    (datetime/format (datetime/add (datetime/parse-iso8601 \"2026-08-27T00:00:00Z\") (datetime/days 1)) \"%Y-%m-%d\")   → \"2026-08-28\""
   (epoch-ms-> (+ (->epoch-ms dt) ms)))
 
 (defn diff (dt1 dt2)
-  "Milliseconds from `dt2` to `dt1` (positive when `dt1` is later)."
+  "Milliseconds from `dt2` to `dt1` (positive when `dt1` is later).
+
+    (datetime/diff (datetime/parse-iso8601 \"2026-08-28T00:00:00Z\") (datetime/parse-iso8601 \"2026-08-27T00:00:00Z\"))   → 86400000"
   (- (->epoch-ms dt1) (->epoch-ms dt2)))
 
 ;; ---- comparison -------------------------------------------------------------

@@ -43,7 +43,9 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
 ;; ---- case -------------------------------------------------------------------
 
 (defn capitalize (s)
-  "Return `s` with the first character upper-cased and the rest lower-cased."
+  "Return `s` with the first character upper-cased and the rest lower-cased.
+
+    (string/capitalize \"hi there\")   → \"Hi there\""
   (if (= (string/length s) 0)
     s
     (str (string/upper (string/substring s 0 1)) (string/lower (string/substring s 1)))))
@@ -51,7 +53,9 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
 ;; ---- char access & content conversions --------------------------------------
 
 (defn char-at (s i)
-  "The character (a 1-char string) at char index `i` of `s`."
+  "The character (a 1-char string) at char index `i` of `s`.
+
+    (string/char-at \"abc\" 1)   → \"b\""
   (string/substring s i (inc i)))
 
 (defn ->list (s)
@@ -146,7 +150,10 @@ leaves `s` unchanged.
 (defn- whitespace? (c) (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
 
 (defn blank? (s)
-  "Is `s` empty or made up only of whitespace?"
+  "Is `s` empty or made up only of whitespace?
+
+    (string/blank? \"  \")   → true
+    (string/blank? \" a \")  → false"
   (let (n (string/length s))
     (cond (= n 0) true (whitespace? (char-at s 0)) (blank? (string/substring s 1 n)) else false)))
 
@@ -162,18 +169,24 @@ leaves `s` unchanged.
     (string/substring s 0 n)))
 (defn trimr (s) "Remove trailing whitespace from `s`." (trimr-to s (string/length s)))
 
-(defn trim (s) "Remove leading and trailing whitespace from `s`." (triml (trimr s)))
+(defn trim (s) "Remove leading and trailing whitespace from `s`.
+
+    (string/trim \"  a \")   → \"a\"" (triml (trimr s)))
 
 ;; ---- padding & repetition ---------------------------------------------------
 ;; Column formatting for tabular/console output. `pad-*` left unchanged when the
 ;; string already meets the width (they never truncate).
 
 (defn pad-left (s w &optional (pad " "))
-  "Right-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the left; `s` is returned unchanged if it is already at least `w` wide."
+  "Right-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the left; `s` is returned unchanged if it is already at least `w` wide.
+
+    (string/pad-left \"7\" 3)    → \"  7\""
   (let (n (string/length s)) (if (>= n w) s (str (repeat pad (- w n)) s))))
 
 (defn pad-right (s w &optional (pad " "))
-  "Left-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the right; `s` is returned unchanged if it is already at least `w` wide."
+  "Left-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the right; `s` is returned unchanged if it is already at least `w` wide.
+
+    (string/pad-right \"7\" 3)   → \"7  \""
   (let (n (string/length s)) (if (>= n w) s (str s (repeat pad (- w n))))))
 
 ;; ---- fill: greedy word-wrap (was std/text.blsp) -----------------------------
@@ -195,7 +208,9 @@ Prepending to `done` is O(1) (the caller reverses once), so a whole fill is O(wo
 spaces) to a single space, then re-break on word boundaries so each line is as full as it
 can be without exceeding `width`. A single word longer than `width` keeps its own
 (over-long) line rather than being split. Returns the rewrapped text, lines joined by
-`\\n`; the empty string for blank input."
+`\\n`; the empty string for blank input.
+
+    (string/fill \"abc\" 10)   → \"abc\"   ; already fits, so unchanged"
   (let (flat (replace (replace s "\n" " ") "\t" " ")
         words (filter (fn (w) (not (= w ""))) (string/split flat " "))
         [cur done] (fold (fn (acc w) (fill-pack acc w width)) ["" ()] words))
@@ -203,7 +218,9 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
 
 ;; (restored: this is string's repeat, not the sequence one)
 (defn repeat (s n)
-  "The string `s` concatenated `n` times (the empty string if `n` <= 0)."
+  "The string `s` concatenated `n` times (the empty string if `n` <= 0).
+
+    (string/repeat \"ab\" 3)   → \"ababab\""
   ;; Build the list of copies with the generic `range`/`map` (NOT the generic
   ;; `repeat`, which this name would shadow inside the `string` namespace), then
   ;; concatenate in one `apply str` pass.

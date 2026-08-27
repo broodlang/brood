@@ -357,7 +357,9 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
 (defn parse (s)
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →
 a vector, string → string, number → int/float, true/false → bool, null → nil. Errors
-on malformed input or trailing content. Pure."
+on malformed input or trailing content. Pure.
+
+    (json/parse \"[1,2]\")   → [1 2]"
   (let (
         ; int code points: O(1) nth, one native pass
         s (string/->codepoints s)
@@ -530,6 +532,8 @@ number, a string → a quoted string, a keyword/symbol → a string of its name,
 an object (keyword keys become string keys), a vector or list → an array. A `defrecord`
 value encodes as its **fields** (its internal id never reaches the wire) unless its type
 has a `JsonEncode` impl, which then decides the wire shape. Any other kind (a pid, a fn)
-errors unless it has a `JsonEncode` impl. Pure."
+errors unless it has a `JsonEncode` impl. Pure.
+
+    (json/encode [1 2])   → \"[1,2]\""
   (apply str (reverse (emit v nil))))
 (sig encode (any -> string))
