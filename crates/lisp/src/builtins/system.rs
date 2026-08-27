@@ -1093,9 +1093,15 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // is unaffected. `(:use map)` for bare access, or call qualified.
     embedded_module!("map", "std/map.blsp"),
     // The math library (ADR-227): sqrt / pow / ceil / round / round-to / clamp / abs /
-    // sum / product / positive? / negative? / even? / odd? + the constants pi/e —
-    // derived math over the bare arithmetic core (operators, quot/mod/rem stay in the
-    // prelude). `(:use math)` for bare access, or call qualified.
+    // sum / product / positive? / negative? / even? / odd? + the constants pi/e, and since
+    // 2026-08-27 the rest of the derived arithmetic too — min / max / rem / quot / mod /
+    // floor / ->fixed / numerator / denominator, plus the `Zero` and `Numeric` abilities
+    // (zero? / nan? / infinite?). Only the OPERATORS `+ - * / < =` stay bare.
+    //
+    // Their kernel halves keep the `%` prefix every primitive has (`%max`, `%rem`, beside
+    // `%add`/`%quot`), so the PRELUDE does arithmetic without loading a module — prelude
+    // code cannot reference one. `resolve_prim` keys on the call-site NAME, so the `math/*`
+    // wrappers still lower to their `PrimOp`. `(:use math)` for bare access.
     embedded_module!("math", "std/math.blsp"),
     // Bitwise ops on integers + the IEEE-754 float/bit reinterpretations. The operations
     // are kernel primitives registered as `bit/*` (the `string/length` pattern); this
