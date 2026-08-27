@@ -147,7 +147,7 @@ behind an Emacs-style `display-buffer`)."
   "Move selection to the next pane in traversal order, wrapping (Emacs `C-x o`)."
   (let (paths (pane-leaf-paths tree)
         i (index-of paths (pane-selected-path tree)))
-    (pane-select-path tree (nth paths (mod (inc i) (count paths))))))
+    (pane-select-path tree (nth paths (math/mod (inc i) (count paths))))))
 
 ;; ---- structure (split / delete) ---------------------------------------------
 
@@ -188,7 +188,7 @@ returned unchanged — you can't delete the only one."
 (defn- pane-clampi
   (v lo hi)
   "Clamp integer `v` into `[lo hi]`."
-  (max lo (min hi v)))
+  (math/max lo (math/min hi v)))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
@@ -206,7 +206,7 @@ returned unchanged — you can't delete the only one."
             ;; the extent split between the two children (less the 1-cell divider),
             ;; and child a's share of it, clamped so neither pane vanishes
             ext (- (if col? w h) 1)
-            a-ext (pane-clampi (round (* ext (get node :ratio))) 1 (max 1 (- ext 1)))
+            a-ext (pane-clampi (round (* ext (get node :ratio))) 1 (math/max 1 (- ext 1)))
             arect (if col? [x y a-ext h] [x y w a-ext])
             drect (if col? [(+ x a-ext) y 1 h] [x (+ y a-ext) w 1])
             brect (if col?
@@ -262,12 +262,12 @@ point is off every pane."
 i.e. dragging the divider to the pointer. Feed the result to `pane-set-ratio`."
   (let ([x y w h] (get divider :split-rect) [row col] point)
     (if (= (get divider :dir) :col)
-      (/ (- col x) (max 1 (- w 1)))
-      (/ (- row y) (max 1 (- h 1))))))
+      (/ (- col x) (math/max 1 (- w 1)))
+      (/ (- row y) (math/max 1 (- h 1))))))
 
 (defn pane-set-ratio (tree path ratio)
   "Set the `:ratio` of the split at `path` (clamped to `[0.1 0.9]` so neither pane
 vanishes), returning the re-proportioned tree — one step of a divider drag."
   (pane-update tree
     path
-    (fn (split) (assoc split :ratio (max 0.1 (min 0.9 ratio))))))
+    (fn (split) (assoc split :ratio (math/max 0.1 (math/min 0.9 ratio))))))

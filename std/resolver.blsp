@@ -64,7 +64,7 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
   (let (steps (get ctx :steps)
         n (+ 1 (table/get steps :n 0)))
     (table/put steps :n n)
-    (when (and (= 0 (rem n 256))
+    (when (and (= 0 (math/rem n 256))
             (> (- (os/now) (table/get steps :start 0)) *resolver-time-budget-ms*))
       (resolver-budget-exceeded (str "did not finish within " *resolver-time-budget-ms* " ms")))
     (when (> n *resolver-max-steps*)
@@ -383,7 +383,7 @@ all). NONE never matches — a version constraint is about a selected version."
     (let (acc2 (pg-apply ctx acc (nth chrono j))
           with-satisfier (pg-apply ctx acc2 satisfier))
       (if (= :satisfied (pg-ic-rel with-satisfier ctx ic))
-        (max 0 (get (nth chrono j) :level))
+        (math/max 0 (get (nth chrono j) :level))
         (pg-prev-level-go ctx ic chrono satisfier-idx satisfier (+ j 1) acc2)))))
 
 ;; Replay one assignment onto a scratch state (for the satisfier search) — like pg-derive/

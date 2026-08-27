@@ -100,15 +100,15 @@ attach). Drive the standalone app from the shell with `nest observe`."
 (defn- observe-fit
   (s w)
   "Truncate `s` to at most `w` characters so a rendered row never wraps."
-  (if (> (string/length s) w) (string/substring s 0 (max 0 w)) s))
+  (if (> (string/length s) w) (string/substring s 0 (math/max 0 w)) s))
 
 (defn- observe-bytes->human
   (n)
   "A compact human-readable byte count: `B` / `KB` / `MB` (integer-rounded)."
   (cond
     (< n 1024) (str n " B")
-    (< n 1048576) (str (quot n 1024) " KB")
-    else (str (quot n 1048576) " MB")))
+    (< n 1048576) (str (math/quot n 1024) " KB")
+    else (str (math/quot n 1048576) " MB")))
 
 (defn- observe-opt
   (v f)
@@ -229,8 +229,8 @@ the colours live in one place (`:observer/*`)."
   (sel cap n)
   "First visible index of a `cap`-row window over `n` items that keeps row `sel`
 on screen (roughly centred), clamped so the window never runs past the end."
-  (let (maxstart (max 0 (- n cap)))
-    (max 0 (min maxstart (- sel (quot cap 2))))))
+  (let (maxstart (math/max 0 (- n cap)))
+    (math/max 0 (math/min maxstart (- sel (math/quot cap 2))))))
 
 ;; ---- the eval minibuffer's rendering (colour shared with the REPL) -----------
 ;;
@@ -268,13 +268,13 @@ completion already works via `lineedit/lineedit-handle`'s keymap in `observe-com
         promptw (string/length prompt)
         input (get edit :text)
         hs (or (get edit :hscroll) 0)
-        avail (max 0 (- cols promptw))
+        avail (math/max 0 (- cols promptw))
         len (string/length input)
-        vis (string/substring input hs (min len (+ hs avail)))
+        vis (string/substring input hs (math/min len (+ hs avail)))
         point (get edit :point)
         overrides (editor/lineedit/lineedit-overrides input point)
         chunks (highlight-chunks input hs vis overrides)
-        cursor-col (min (max 0 (dec cols)) (+ promptw (- point hs))))
+        cursor-col (math/min (math/max 0 (dec cols)) (+ promptw (- point hs))))
     (append [(text row 0 prompt (face :observer/minibuffer-prompt))]
       (observe-chunk-ops chunks row promptw)
       [(cursor row cursor-col)])))
@@ -301,7 +301,7 @@ and `(:msg ui)` — the last command's result — replaces the detail line. No I
 the observer's testable core; `observe-loop` feeds it live data."
   (let (nprocs (count procs)
         lines (observe-node-lines node nprocs link)
-        cap (max 1 (- rows 5))
+        cap (math/max 1 (- rows 5))
         start (observe-window-start sel cap nprocs)
         visible (take cap (drop start procs))
         body (map (fn ([i p])
@@ -318,7 +318,7 @@ the observer's testable core; `observe-loop` feeds it live data."
         detail (cond
                  (get ui :msg) (str "  " (get ui :msg))
                  (empty? procs) "  (no live processes)"
-                 else (observe-detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
+                 else (observe-detail (nth procs (math/min (math/max 0 (dec nprocs)) sel)) nprocs cap sel))
         footer (str (if paused "  PAUSED · space resume" "  space pause")
                  " · ↑/↓ select · t tree · s sort("
                  (name sort)
@@ -421,7 +421,7 @@ Clamps a negative delta (a recycled id) to 0. Pure."
     (let (dt (- at prev-at))
       (if (<= dt 0)
         nil
-        (quot (* 1000 (max 0 (- reds prev-reds))) dt)))))
+        (math/quot (* 1000 (math/max 0 (- reds prev-reds))) dt)))))
 
 (defn- observe-rate-procs
   (prev-procs prev-at procs at)
@@ -490,7 +490,7 @@ last snapshot) until the user quits. Pure."
 selection follows the same process across re-sorts, and recovers if it dies).
 Clamped to a valid row."
   (let (idx (index-of (map :id procs) sel-id))
-    (max 0 (min (max 0 (dec (count procs))) (if (< idx 0) 0 idx)))))
+    (math/max 0 (math/min (math/max 0 (dec (count procs))) (if (< idx 0) 0 idx)))))
 
 (defn- observe-select
   (state procs idx)
@@ -506,12 +506,12 @@ Clamped to a valid row."
 
 (defn observe-cmd-up (state _)
   "Select the previous row."
-  (observe-select state (get state :procs) (max 0 (dec (get state :sel)))))
+  (observe-select state (get state :procs) (math/max 0 (dec (get state :sel)))))
 (defn observe-cmd-down (state _)
   "Select the next row."
   (observe-select state
     (get state :procs)
-    (min (max 0 (dec (get state :n))) (inc (get state :sel)))))
+    (math/min (math/max 0 (dec (get state :n))) (inc (get state :sel)))))
 (defn observe-cmd-sort (state _)
   "Cycle the view (id/mailbox/memory/tree)."
   (assoc state :sort (observe-next-sort (get state :sort))))
@@ -599,7 +599,7 @@ process line. The body occupies frame rows 3..(3+`cap`) over a window starting a
 the wheel scrolls the selection one row. Any other event (a right/middle click, a
 click off the list, or an action a future frontend adds) leaves `state` untouched.
 An acting event also clears the stale command-result message. `cap` is the visible
-body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
+body height (`(math/max 1 (- rows 5))`, as in `observe-frame`)."
   ;; Read fields positionally (nth), not via a fixed-length `[_ a b r c]` vector
   ;; pattern: the event grew a trailing `mods` element ([:mouse … mods], ADR-077),
   ;; and a vector pattern is exact-length, so destructuring would silently stop
@@ -612,8 +612,8 @@ body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
         sel (get state :sel)
         st (assoc state :msg nil))
     (cond
-      (= action :scroll-up) (observe-select st procs (max 0 (dec sel)))
-      (= action :scroll-down) (observe-select st procs (min (max 0 (dec n)) (inc sel)))
+      (= action :scroll-up) (observe-select st procs (math/max 0 (dec sel)))
+      (= action :scroll-down) (observe-select st procs (math/min (math/max 0 (dec n)) (inc sel)))
       (and (= action :press) (= button :left))
         (let (idx (observe-mouse-row->sel row sel cap n))
           (if (nil? idx)
@@ -748,7 +748,7 @@ routes keys to y/n; otherwise keys flow through `overlay-route` — the eval min
 (`:command` mode) if open, else `*observe-keymap*` (quit sets `:done`, which `ui-run`
 honours). The backend rides in the model under `:backend`."
   (let (backend (get model :backend)
-        cap (max 1 (- rows 5)))
+        cap (math/max 1 (- rows 5)))
     ; visible body height (see observe-frame)
     (cond
       (= input :tick)

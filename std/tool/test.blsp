@@ -67,7 +67,7 @@
 ;; :parallel | :serial | :isolated and tests is a list of (name thunk meta) —
 ;; `meta` being `{:tags :file :line}`, which the selection layer below filters on.
 ;; A thunk runs one test body and returns its list of failure-message strings
-;; (empty = passed). A default `describe` emits one :parallel unit PER test (max
+;; (empty = passed). A default `describe` emits one :parallel unit PER test (math/max
 ;; parallelism); a :serial/:isolated `describe` emits ONE unit holding all its
 ;; tests (so they run in sequence, in a single process).
 (defmodule test
@@ -495,10 +495,10 @@ the test rather than hanging the run."
 ;; A "N.N MB" formatter for the memory line (`quot` is the prelude's).
 (defn- mb-str
   (bytes)
-  (let (tenths (quot (+ (* bytes 10) 524288) 1048576)
+  (let (tenths (math/quot (+ (* bytes 10) 524288) 1048576)
         ; round to nearest 0.1 MB
-        whole (quot tenths 10)
-        frac (rem tenths 10))
+        whole (math/quot tenths 10)
+        frac (math/rem tenths 10))
     (str whole "." frac " MB")))
 
 ;; --- results -----------------------------------------------------------------
@@ -714,7 +714,7 @@ the test rather than hanging the run."
 ;;
 ;; The finalizer is load-bearing, not decoration. A plain polynomial hash
 ;; (`h*31 + c`) leaves the LOW bits barely mixed — its parity is just the parity
-;; of the character sum — so `(rem h 2)` sent every test in a small suite to the
+;; of the character sum — so `(math/rem h 2)` sent every test in a small suite to the
 ;; same shard, leaving the other empty. Shifting the high bits down before the
 ;; `rem` spreads that structure across the low bits, so small shard counts split
 ;; evenly.
@@ -738,7 +738,7 @@ the test rather than hanging the run."
              (list (first unit)
                (second unit)
                (filter (fn (t)
-                         (= index (rem (test-label-hash (label (second unit) (first t))) total)))
+                         (= index (math/rem (test-label-hash (label (second unit) (first t))) total)))
                  (seq/third unit))))
         units))))
 
@@ -1115,7 +1115,7 @@ the test rather than hanging the run."
            (first t)
            (list (list nil
                    (list (str "test timed out after "
-                           (quot *test-timeout-ms* 1000)
+                           (math/quot *test-timeout-ms* 1000)
                            "s — hard-killed (raise *test-timeout-ms* if legitimately slow)"))))
            *test-timeout-ms*))
     (seq/third unit)))
@@ -1143,7 +1143,7 @@ the test rather than hanging the run."
   ;; budget for its batch (see `*test-slow-timeout-ms*`); rebinding the var rather
   ;; than threading a number keeps the timeout *message* accurate too.
   (if (collect-slow-batch? workers)
-    (binding (*test-timeout-ms* (max *test-timeout-ms* *test-slow-timeout-ms*))
+    (binding (*test-timeout-ms* (math/max *test-timeout-ms* *test-slow-timeout-ms*))
       (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*)))
     (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*))))
 
@@ -1152,7 +1152,7 @@ the test rather than hanging the run."
   (if (= pending 0)
     acc
     ;; `(m m)` takes the next message; `(after …)` fires when the budget is spent.
-    (let (msg (receive (m m) (after (max 0 (- deadline (os/now))) :%test-timeout)))
+    (let (msg (receive (m m) (after (math/max 0 (- deadline (os/now))) :%test-timeout)))
       (cond
         ;; budget spent — kill + fail the stragglers
         (= msg :%test-timeout) (collect-timeout workers reported acc)
@@ -1506,7 +1506,7 @@ the test rather than hanging the run."
 ;; "1.3s" from milliseconds — one decimal, rounded to nearest 0.1s.
 (defn- secs-str
   (ms)
-  (let (tenths (quot (+ ms 50) 100)) (str (quot tenths 10) "." (rem tenths 10) "s")))
+  (let (tenths (math/quot (+ ms 50) 100)) (str (math/quot tenths 10) "." (math/rem tenths 10) "s")))
 
 ;; Always-on slow-test surfacing: list every test slower than `over` ms (slowest
 ;; first), so a slow test is never hidden behind the one-line summary. Unlike

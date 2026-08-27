@@ -870,7 +870,7 @@ NOT call this: it requires its entry point and lets the rest stay on disk."
   (ms)
   (if (< ms 1000)
     (str ms "ms")
-    (str (quot ms 1000) "." (quot (mod ms 1000) 100) "s")))
+    (str (math/quot ms 1000) "." (math/quot (math/mod ms 1000) 100) "s")))
 
 (defn setup-lazy-image (root)
   "Install `root`'s startup image WITHOUT materialising its modules, so `require` pulls each
@@ -918,11 +918,11 @@ program's and the LSP's protocol channel stays clean."
         t-d (os/now-ns)
         _ (when (os/env "BROOD_IMAGE_TRACE")
             (io/puts (str "[loader] collect "
-                       (quot (- t-b t-a) 1000000)
+                       (math/quot (- t-b t-a) 1000000)
                        " ms, fingerprint "
-                       (quot (- t-c t-b) 1000000)
+                       (math/quot (- t-c t-b) 1000000)
                        " ms, image-read "
-                       (quot (- t-d t-c) 1000000)
+                       (math/quot (- t-d t-c) 1000000)
                        " ms")
               :to *err*)))
     (cond
@@ -935,7 +935,7 @@ program's and the LSP's protocol channel stays clean."
               t0 (os/now-ns)
               before (global-names)
               _ (/apply load-sources (cons root opts))
-              t-load (quot (- (os/now-ns) t0) 1000000)
+              t-load (math/quot (- (os/now-ns) t0) 1000000)
               ;; A project whose globals are not all portable — a `table` global is the
               ;; documented mutable-state idiom, and a table is deliberately local to its
               ;; runtime — simply cannot be imaged. That is correct (loading from source is
@@ -957,7 +957,7 @@ program's and the LSP's protocol channel stays clean."
                                 :to *err*)
                               nil)))
                       else nil)
-              t-all (quot (- (os/now-ns) t0) 1000000))
+              t-all (math/quot (- (os/now-ns) t0) 1000000))
           (io/puts (str "Built "
                      name
                      " in "
@@ -1384,7 +1384,7 @@ resolve in the advisory checker. Returns the project root."
   (tries)
   (let (n (dev/worker-threads))
     (if (or (> n 0) (<= tries 0))
-      (max 1 n)
+      (math/max 1 n)
       (do (sleep 1) (project-await-pool (dec tries))))))
 (defn- project-pool-size
   ()
@@ -1493,8 +1493,8 @@ resolve in the advisory checker. Returns the project root."
     (if (< n *check-min-parallel*)
       (combine init (project-pfold-run op (cons shared files)))
       (let (cores (project-pool-size)
-            nchunks (min n (* cores *check-oversample*))
-            csize (quot (+ n nchunks -1) nchunks)
+            nchunks (math/min n (* cores *check-oversample*))
+            csize (math/quot (+ n nchunks -1) nchunks)
             chunks (map (fn (c) (cons shared c)) (project-chunk-list csize files nil)))
         (project-pfold-groups (project-chunk-list cores chunks nil)
           op
@@ -1509,9 +1509,9 @@ resolve in the advisory checker. Returns the project root."
     (if (< n *check-min-parallel*)
       (combine init (project-pfold-run op files))
       (let (cores (project-pool-size)
-            nchunks (min n (* cores *check-oversample*))
+            nchunks (math/min n (* cores *check-oversample*))
             ; ceil(n / nchunks)
-            csize (quot (+ n nchunks -1) nchunks)
+            csize (math/quot (+ n nchunks -1) nchunks)
             chunks (project-chunk-list csize files nil))
         ;; Group size = `cores`: at most `cores` worker heaps live at once (bounds
         ;; peak memory), and with `*check-oversample*` chunks per core the groups

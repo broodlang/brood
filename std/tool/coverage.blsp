@@ -141,7 +141,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; reporting 0% and failing a `--cover-min` gate.
 (defn- coverage-percent
   (covered total)
-  (if (= total 0) 100 (quot (+ (* covered 200) total) (* total 2))))
+  (if (= total 0) 100 (math/quot (+ (* covered 200) total) (* total 2))))
 
 ;; Group results by file, as a list of `[file file-results]`, in stable
 ;; (alphabetical) file order so the report is diffable between runs.

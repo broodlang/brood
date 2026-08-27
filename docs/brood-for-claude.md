@@ -967,7 +967,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   byte-structural, so `"é"` written two ways compares unequal until you normalise) ·
   `string/display-width` (terminal cells, bare)
 - **string formatting**: `string/repeat` `string/pad-left` `string/pad-right`
-  `->fixed` (number → string with fixed decimals, e.g. `(->fixed 3.14159 2)`
+  `->fixed` (number → string with fixed decimals, e.g. `(math/->fixed 3.14159 2)`
   → `"3.14"` — `str` prints full f64 precision, so reach for this for output) ·
   `format` (small printf, e.g. `(format "x=%d y=%.2f" 42 3.14)` → `"x=42 y=3.14"`;
   specifiers `%s %d %f %.Nf %%`; width via `string/pad-left`/`string/pad-right`)

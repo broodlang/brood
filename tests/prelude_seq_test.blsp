@@ -119,7 +119,7 @@
   (test "empty input"
     (assert= nil (distinct-by (fn (x) x) [])))
   (test "reachable qualified as seq/distinct-by"
-    (assert= (list 1 2) (seq/distinct-by (fn (x) (mod x 2)) [1 3 2 4])))
+    (assert= (list 1 2) (seq/distinct-by (fn (x) (math/mod x 2)) [1 3 2 4])))
   (test "across processes: the deduped value round-trips through send"
     :isolated (let (me (self)
           n 6

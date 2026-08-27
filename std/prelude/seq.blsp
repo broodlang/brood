@@ -152,7 +152,7 @@ Always true for `n` <= 0.
     (less? coll n)
     (if (<= n 1)
       coll
-      (let (h (quot n 2)
+      (let (h (%quot n 2)
             parts (seq/split-at h coll))
         (%merge-runs less?
           (%merge-sort-n less? (nth parts 0) h)

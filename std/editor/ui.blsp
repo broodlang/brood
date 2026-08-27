@@ -111,7 +111,7 @@ screen (a larger frontend just shows it in its top-left)."
           (let ([c r] ((get d :size)))
             (if (nil? acc)
               [c r]
-              (let ([ac ar] acc) [(min ac c) (min ar r)]))))
+              (let ([ac ar] acc) [(math/min ac c) (math/min ar r)]))))
     nil displays))
 
 (defn- display-poll-loop
@@ -125,7 +125,7 @@ screen (a larger frontend just shows it in its top-left)."
   (displays ms)
   "Poll each frontend for a slice of `ms` in turn, returning the first key seen
 (or nil) — so a keystroke from *any* attached frontend reaches the loop."
-  (display-poll-loop displays (max 1 (quot ms (max 1 (count displays))))))
+  (display-poll-loop displays (math/max 1 (math/quot ms (math/max 1 (count displays))))))
 
 (defn display-broadcast (displays)
   "Compose several displays into one that fans a single frame out to all of them
@@ -211,7 +211,7 @@ from `armed`, so its deadline is fixed and it fires exactly once per arming. An
 pushes it out — it fires only after input settles."
   (let (ms (ui-timer-ms spec)
         base0 (if (contains? spec :every) (or fired armed) armed)
-        base (if (get spec :idle?) (max base0 last-input) base0))
+        base (if (get spec :idle?) (math/max base0 last-input) base0))
     (+ base ms)))
 
 (defn- ui-timer-live?
@@ -256,7 +256,7 @@ a far-future timer can't oversleep a responsive app."
                nil timers))
     (if (nil? best)
       *ui-idle-cap*
-      (max 1 (min *ui-idle-cap* (- best now))))))
+      (math/max 1 (math/min *ui-idle-cap* (- best now))))))
 
 (defn- ui-fire
   (timers clock now)

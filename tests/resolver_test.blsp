@@ -259,7 +259,7 @@
                                   (seq/distinct (seq/keep (fn (j)
                                                             (when (and (>= j 0) (< j i))
                                                               [(nm j) ">= 1.0"]))
-                                                  (list (- i 1) (quot i 2) (- i 3))))))
+                                                  (list (- i 1) (math/quot i 2) (- i 3))))))
                          (assoc m (nm i) {"1.0.0" ds "1.1.0" ds "2.0.0" ds})))
                  {}
                  (range 0 n))

@@ -1752,11 +1752,11 @@ pub(super) fn string_normalize(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     Ok(heap.alloc_string(&out))
 }
 
-/// `(->fixed x n)` — x rendered with exactly `n` digits after the decimal point
+/// `(math/->fixed x n)` — x rendered with exactly `n` digits after the decimal point
 /// (rounded). The one float→text op the language can't bootstrap: `str`/`pr-str`
 /// print the shortest round-tripping form (full f64 precision, e.g.
 /// `0.015873015873015872`), which is wrong for tabular/console output. An int `x`
-/// is promoted, so `(->fixed 3 2)` is `"3.00"`. `n` must be non-negative.
+/// is promoted, so `(math/->fixed 3 2)` is `"3.00"`. `n` must be non-negative.
 pub(super) fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let x = num_to_f64(heap, "->fixed", arg(args, 0))?;
     let n = expect_int(heap, "->fixed", arg(args, 1))?;
@@ -1768,14 +1768,14 @@ pub(super) fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
     }
     // Bound the width: `format!("{:.*}", n, x)` materialises an `n`-digit string,
-    // so an unbounded `n` (e.g. `(->fixed 1.0 1000000000)`) allocates ~1 GB on the
+    // so an unbounded `n` (e.g. `(math/->fixed 1.0 1000000000)`) allocates ~1 GB on the
     // Rust side, bypassing the GC/soft-memory cap. An f64 carries ~17 significant
     // digits; past that the tail is just zeros, so 1000 is far beyond any real use
     // while keeping the worst-case alloc to ~1 KB.
     const MAX_DECIMALS: i64 = 1000;
     if n > MAX_DECIMALS {
         return Err(LispError::runtime(format!(
-            "->fixed: decimal places {n} too large (max {MAX_DECIMALS}); an f64 has \
+            "->fixed: decimal places {n} too large (math/max {MAX_DECIMALS}); an f64 has \
              ~17 significant digits, so a larger count only pads zeros"
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));

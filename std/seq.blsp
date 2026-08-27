@@ -308,7 +308,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     (if (= n 0)
       (error "sample: cannot sample from an empty collection")
       (let (s (%rand-step (%rand-seed seed)))
-        [(nth items (rem s n)) s]))))
+        [(nth items (math/rem s n)) s]))))
 
 ;; Fisher–Yates, which is what the docstring always claimed — the implementation was
 ;; not it. The old `shuffle-acc` rebuilt the remaining collection on every step: two
@@ -334,7 +334,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     ; always advance, so a chained next-seed never stalls on a 0/1-element input
     [m (%rand-step state)]
     (let (s (%rand-step state)
-          j (rem s (+ i 1)))
+          j (math/rem s (+ i 1)))
       (shuffle-at (shuffle-swap m i j) (- i 1) s))))
 
 (defn- shuffle-drain

@@ -101,10 +101,10 @@
           2M))
     (is (> 3M
           2.5M))
-    (is (= (max 1M
+    (is (= (math/max 1M
              2.5M 2M)
           2.5M))
-    (is (= (min 1.5M
+    (is (= (math/min 1.5M
              1M 2M)
           1M))))
 

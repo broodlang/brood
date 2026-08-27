@@ -1141,22 +1141,22 @@ fn curated_output_and_numeric_sigs() {
         );
     }
     // min/max require at least one number.
-    assert!(warnings("(min \"a\" 2)")
+    assert!(warnings("(math/min \"a\" 2)")
         .iter()
         .any(|w| w.contains("min") && w.contains("number")));
-    assert!(warnings("(max 1 :k)")
+    assert!(warnings("(math/max 1 :k)")
         .iter()
         .any(|w| w.contains("max") && w.contains("number")));
     // min/max return a number — feeding to a string sink is caught.
-    assert!(warnings("(string/length (min 1 2))")
+    assert!(warnings("(string/length (math/min 1 2))")
         .iter()
         .any(|w| w.contains("string/length")));
     // Correct uses stay silent.
     for ok in [
         "(io/puts \"hi\")",
-        "(min 1 2 3)",
-        "(max 0.5 1.5)",
-        "(+ 1 (min 2 3))",
+        "(math/min 1 2 3)",
+        "(math/max 0.5 1.5)",
+        "(+ 1 (math/min 2 3))",
     ] {
         assert!(
             warnings(ok).iter().all(|w| !w.contains("expects")),
@@ -1932,9 +1932,9 @@ fn match_redundancy_fires_on_a_hand_written_eq_chain_too() {
 
 #[test]
 fn covers_the_other_signed_primitives() {
-    assert!(warnings("(mod 7 3)").is_empty());
-    assert!(warnings("(mod 7 \"x\")").iter().any(|w| w.contains("mod")));
-    assert!(warnings("(rem :a 3)").iter().any(|w| w.contains("rem")));
+    assert!(warnings("(math/mod 7 3)").is_empty());
+    assert!(warnings("(math/mod 7 \"x\")").iter().any(|w| w.contains("mod")));
+    assert!(warnings("(math/rem :a 3)").iter().any(|w| w.contains("rem")));
     assert!(warnings("(%vector-length 5)")
         .iter()
         .any(|w| w.contains("vector-length")));
@@ -1947,7 +1947,7 @@ fn covers_the_other_signed_primitives() {
 #[test]
 fn reports_each_bad_argument() {
     // Both args provably wrong → two distinct warnings (one per position).
-    let w = warnings("(mod \"a\" :b)");
+    let w = warnings("(math/mod \"a\" :b)");
     assert_eq!(w.len(), 2, "{:?}", w);
     assert!(w.iter().any(|s| s.contains("argument 1")));
     assert!(w.iter().any(|s| s.contains("argument 2")));
@@ -2719,10 +2719,14 @@ fn flags_too_few_arguments() {
 
 #[test]
 fn flags_too_many_arguments() {
-    // `rem` is `exact(2)`; calling with 3 is wrong.
-    assert!(warnings("(rem 1 2 3)")
+    // `inc` is `exact(1)`; calling with 2 is wrong. This used to use `rem`, which moved to
+    // `math` on 2026-08-27 — and `warnings()` builds a bare `Interp::new()` with no module
+    // loaded, so a `math/…` name has no bound function for the ARITY check to read (the
+    // curated sig supplies types only). A still-bare function keeps the test about what it
+    // is about.
+    assert!(warnings("(inc 1 2)")
         .iter()
-        .any(|w| w.contains("rem") && w.contains("expected 2") && w.contains("got 3")));
+        .any(|w| w.contains("inc") && w.contains("expected 1") && w.contains("got 2")));
 }
 
 #[test]
@@ -2742,7 +2746,7 @@ fn arity_pass_is_silent_for_correct_calls() {
     assert!(warnings("(first [1 2])")
         .iter()
         .all(|w| !w.contains("number of arguments")));
-    assert!(warnings("(rem 7 3)")
+    assert!(warnings("(math/rem 7 3)")
         .iter()
         .all(|w| !w.contains("number of arguments")));
     // Variadic: any count is fine.

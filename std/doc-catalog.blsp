@@ -263,13 +263,13 @@
    "map?" :predicates
    "match" :patterns
    "match*" :patterns
-   "max" :math
+   "math/max" :math
    "merge" :maps
    "%merge-acc" :collections
    "%merge-runs" :collections
    "%merge-sort-n" :collections
-   "min" :math
-   "mod" :math
+   "math/min" :math
+   "math/mod" :math
    "system/module-doc" :meta
    "monitor" :processes
    "name" :strings
@@ -307,7 +307,7 @@
    "pr-str-bounded" :io
    "private?" :meta
    "provide" :meta
-   "quot" :math
+   "math/quot" :math
    "range" :collections
    "range?" :predicates
    "ratio?" :predicates
@@ -342,7 +342,7 @@
    "%register-method-derive" :meta
    "%register-method-store" :meta
    "system/reload-defs" :meta
-   "rem" :math
+   "math/rem" :math
    "file/rename" :filesystem
    "%repeat-acc" :collections
    "%repeatedly-acc" :collections
@@ -421,7 +421,7 @@
    "%take-acc" :collections
    "%take-while-acc" :collections
    "throw" :errors
-   "->fixed" :strings
+   "math/->fixed" :strings
    "->seq" :meta
    "->string" :meta
    "trap-exit" :processes

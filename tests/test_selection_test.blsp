@@ -176,11 +176,11 @@
   (test "different labels hash differently"
     (refute (= (test/test-label-hash "math › adds") (test/test-label-hash "math › multiplies"))))
   ;; Regression: a plain polynomial hash left the LOW bits unmixed (its parity was
-  ;; just the character-sum parity), so `(rem h 2)` sent a whole small suite to one
+  ;; just the character-sum parity), so `(math/rem h 2)` sent a whole small suite to one
   ;; shard and left the other empty. The finalizer fixes that; assert the spread.
   (test "the hash spreads across 2 shards rather than collapsing into one"
     (let (counts (fold (fn (acc i)
-                         (let (k (rem (test/test-label-hash (str "group " i " › case " i)) 2))
+                         (let (k (math/rem (test/test-label-hash (str "group " i " › case " i)) 2))
                            (assoc acc k (+ 1 (or (get acc k) 0)))))
                    {}
                    (range 0 200)))

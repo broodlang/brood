@@ -48,6 +48,43 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 ;; not a fact. An INT answering false is right (an int is a number and is not NaN); a string
 ;; answering false is the `zero?` bug again. One impl per numeric type, no `:default`
 ;; (ADR-254), so an unanswered type raises instead of being told it is not NaN.
+;; ---- the arithmetic that is not an operator ------------------------------------
+;; `min`/`max`/`rem`/`quot`/`mod`/`->fixed` were BARE. They are derived arithmetic, which is
+;; what this module is, and bare is the scarce namespace — `(:use math)` brings them back
+;; bare inside one module. The kernel halves keep the `%` prefix every other primitive has
+;; (`%add`, `%quot`), so the PRELUDE can use `%max`/`%rem`/`%quot` directly and never has to
+;; load a module to do arithmetic. `eval/compile/ir.rs` keys `PrimOp::Max`/`Min`/`Rem` on the
+;; call-site NAME, so these wrappers are still inlined — `table/get` is the same shape.
+
+(defn max (& xs) "The largest of the arguments.\n\n    (math/max 1 2)   → 2" (apply %max xs))
+(defn min (& xs) "The smallest of the arguments.\n\n    (math/min 1 2)   → 1" (apply %min xs))
+(defn rem (a b)
+  "The remainder of `a / b`, taking the sign of the DIVIDEND (truncated division), the
+partner of `quot`. `mod` is the one whose sign follows the divisor.
+
+    (math/rem 7 2)    → 1
+    (math/rem -7 2)   → -1"
+  (%rem a b))
+(defn ->fixed (x n)
+  "Render number `x` as a string with exactly `n` digits after the decimal point (rounded).
+
+    (math/->fixed 1.5 2)   → \"1.50\""
+  (%->fixed x n))
+
+(defn quot (a b)
+  "Truncated integer division of `a` by `b` (toward zero); the quotient partner to `rem`.
+
+    (math/quot 7 2)    → 3"
+  (%quot a b))
+(defn mod (a b)
+  "Euclidean modulo: the result is always non-negative and lies in [0, |b|).
+
+    (math/mod 7 2)     → 1
+    (math/mod -1 3)    → 2   ; sign follows the DIVISOR"
+  ;; `(abs b)` inlined so bare `mod` stays self-sufficient — `abs` now lives in the
+  ;; `math` module (ADR-227) and the boot-time prelude cannot require a module.
+  (let (r (math/rem a b)) (if (< r 0) (+ r (if (< b 0) (- b) b)) r)))
+
 (defability Numeric
   "Float-domain questions every numeric type can answer.
 
@@ -98,7 +135,7 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
     (math/even? 0)   → true
 
     (math/even? 4)         → true"
-  (= (rem n 2) 0))
+  (= (math/rem n 2) 0))
 (defn odd? (n) "True if integer `n` is odd." (not (even? n)))
 
 ;; ---- aggregation ------------------------------------------------------------
@@ -153,7 +190,7 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 ;; underflows. So the test is on the reciprocal, not on the power: a 0.0 result may have
 ;; lost a representable answer either way. Recompute by splitting the exponent in half,
 ;; which keeps every intermediate in range and is exact for a radix-2 base. Terminates
-;; because `(quot exp 2)` is strictly closer to zero than `exp` once `exp <= -2`, and the
+;; because `(math/quot exp 2)` is strictly closer to zero than `exp` once `exp <= -2`, and the
 ;; halves only recurse while they too come back 0.0. A genuinely-zero answer (10.0^-400,
 ;; below the subnormal floor) costs one extra recompute and still yields 0.0.
 ;; (Found by the Paranoia port, 2026-07-26.)
@@ -162,7 +199,7 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
   (let (p (pow-acc base (- exp) 1)
         r (if (pow-inf? p) 0.0 (/ 1 p)))
     (if (and (= r 0.0) (<= exp -2))
-      (let (h (quot exp 2))
+      (let (h (math/quot exp 2))
         (* (pow base h) (pow base (- exp h))))
       r)))
 
@@ -205,7 +242,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 
     (math/clamp 12 0 10)   → 10
     (math/clamp -1 0 10)   → 0"
-  (max lo (min hi x)))
+  (math/max lo (math/min hi x)))
 
 ;; ---- transcendental functions -----------------------------------------------
 ;; Thin policy over the `%`-prefixed f64 primitives (mechanism), so they live in the

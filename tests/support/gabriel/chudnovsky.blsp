@@ -42,14 +42,14 @@ conformance port. The oracle is upstream's own expected output in
 (defn- chudnovsky-isqrt-descend
   (n x y)
   (if (< y x)
-    (chudnovsky-isqrt-descend n y (quot (+ y (quot n y)) 2))
+    (chudnovsky-isqrt-descend n y (math/quot (+ y (math/quot n y)) 2))
     x))
 
 (defn- chudnovsky-isqrt
   (n)
   (if (< n 2)
     n
-    (chudnovsky-isqrt-descend n n (quot (+ n 1) 2))))
+    (chudnovsky-isqrt-descend n n (math/quot (+ n 1) 2))))
 
 ;; Binary splitting over the series terms [a, b): returns `[g p q]`. Doubly recursive and
 ;; non-tail — the divide-and-conquer shape is the point.
@@ -59,9 +59,9 @@ conformance port. The oracle is upstream's own expected output in
     (if (= 1 (- b a))
       (let (g (* (- (* 6 b) 5) (- (* 2 b) 1) (- (* 6 b) 1)))
         [g
-          (quot (* chudnovsky-c^3 (pow b 3)) 24)
+          (math/quot (* chudnovsky-c^3 (pow b 3)) 24)
           (* (pow -1 b) g (+ (* b chudnovsky-b) chudnovsky-a))])
-      (let (mid (quot (+ a b) 2)
+      (let (mid (math/quot (+ a b) 2)
             [g1 p1 q1] (chudnovsky-split a mid)
             [g2 p2 q2] (chudnovsky-split mid b))
         [(* g1 g2)
@@ -73,7 +73,7 @@ conformance port. The oracle is upstream's own expected output in
   (let (num-terms (math/floor (+ 2 (/ digits 14.181647462)))
         sqrt-c (chudnovsky-isqrt (* chudnovsky-c (pow 100 digits)))
         [_ p q] (chudnovsky-split 0 num-terms))
-    (quot (* p chudnovsky-c sqrt-c)
+    (math/quot (* p chudnovsky-c sqrt-c)
       (* chudnovsky-d (+ q (* p chudnovsky-a))))))
 
 (check-allow :non-tail-recursion

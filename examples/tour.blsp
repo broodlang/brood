@@ -6,7 +6,7 @@
 ;; Arithmetic — +, -, *, /, etc. are defined in Brood on a tiny Rust kernel.
 (io/puts "1 + 2 * 3   =" (+ 1 (* 2 3)))
 (io/puts "7 / 2       =" (/ 7 2))
-(io/puts "10 mod 3    =" (mod 10 3))
+(io/puts "10 mod 3    =" (math/mod 10 3))
 
 ;; defn, with optional args (default values)
 (defn greet (name &optional (greeting "hello")) (str greeting ", " name))
@@ -19,7 +19,7 @@
 
 ;; Higher-order functions over lists.
 (io/puts "squares:" (map (fn (x) (* x x)) (list 1 2 3 4 5)))
-(io/puts "evens:  " (filter (fn (x) (= 0 (mod x 2))) (list 1 2 3 4 5 6)))
+(io/puts "evens:  " (filter (fn (x) (= 0 (math/mod x 2))) (list 1 2 3 4 5 6)))
 (io/puts "total:  " (reduce + 0 (list 1 2 3 4 5)))
 
 ;; Vectors are a data type with O(1) indexing (code is lists, data can be vectors).

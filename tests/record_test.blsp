@@ -127,7 +127,7 @@
 (defmethod num-add [usd usd] (a b) (usd (+ (get a :cents) (get b :cents))))
 (defmethod num-sub [usd usd] (a b) (usd (- (get a :cents) (get b :cents))))
 (defmethod num-mul [usd :int] (m n) (usd (* (get m :cents) n))) ; scale by a scalar
-(defmethod num-div [usd :int] (m n) (usd (quot (get m :cents) n)))
+(defmethod num-div [usd :int] (m n) (usd (math/quot (get m :cents) n)))
 
 (describe "defrecord: custom Num"
   (test "a Num record uses +/-/*// (dispatched from the kernel %add fallback)"

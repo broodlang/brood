@@ -31,8 +31,8 @@ always — useful for content-based IDs and idempotent generation.")
   (n acc)
   (if (= n 0)
     acc
-    (int->hex-loop (quot n 16)
-      (str (string/char-at hex-digits (rem n 16)) acc))))
+    (int->hex-loop (math/quot n 16)
+      (str (string/char-at hex-digits (math/rem n 16)) acc))))
 
 (defn- pad-hex
   (s n)
@@ -60,7 +60,7 @@ always — useful for content-based IDs and idempotent generation.")
 (defn- variant-char
   (raw-hex-char)
   "Map any hex char to one of 8/9/a/b for the RFC 4122 variant nibble."
-  (string/char-at variant-chars (rem (hex-nibble raw-hex-char) 4)))
+  (string/char-at variant-chars (math/rem (hex-nibble raw-hex-char) 4)))
 
 (defn v4 ()
   "Generate a random RFC 4122 version 4 UUID string.
@@ -195,8 +195,8 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
         hex (fold (fn (acc i)
                     (let (b (if (= i 6) b6 (if (= i 8) b8 (nth bv i))))
                       (str acc
-                        (string/char-at hex-digits (quot b 16))
-                        (string/char-at hex-digits (rem b 16)))))
+                        (string/char-at hex-digits (math/quot b 16))
+                        (string/char-at hex-digits (math/rem b 16)))))
               ""
               (range 16)))
     (str (string/substring hex 0 8)

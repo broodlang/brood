@@ -103,7 +103,7 @@ fn declined_values_fall_back_without_disturbing_the_receiver() {
         (defn blast2 (dst i n)
           (if (>= i n)
               (send dst [:done])
-              (do (if (= (mod i 2) 0)
+              (do (if (= (math/mod i 2) 0)
                       (send dst [:v i])
                       (send dst [:f (fn () i)]))
                   (blast2 dst (+ i 1) n))))

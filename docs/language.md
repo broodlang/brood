@@ -672,7 +672,7 @@ import, no activation step. Built-ins are unchanged and pay no dispatch cost.
 (defmodule money)             ; no (:use ability), no (:use show) — both are core
 (defrecord usd (cents))
 (impl Display usd
-  (->string [m] (str "$" (->fixed (/ (get m :cents) 100.0) 2))))
+  (->string [m] (str "$" (math/->fixed (/ (get m :cents) 100.0) 2))))
 
 (println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
 (->string (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
@@ -2254,11 +2254,11 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   nature, so neither carries an ideal exponent. Pinned by the dectest conformance
   corpus (`tests/conformance_dectest_test.blsp`).
 - Integer arithmetic is overflow-checked: an operation that would overflow
-  (including `i64::MIN` cases like `(mod min -1)`) raises an error rather than
+  (including `i64::MIN` cases like `(math/mod min -1)`) raises an error rather than
   wrapping or panicking. `(/ min -1)` falls through to a float.
 - `rem` is the truncated remainder (sign of the dividend); `quot` is truncated
   integer division; `mod` is the euclidean remainder (always non-negative, in
-  `[0, |b|)` — so `(mod 7 -3)` is `1`, not the floored `-2`).
+  `[0, |b|)` — so `(math/mod 7 -3)` is `1`, not the floored `-2`).
 - `floor`/`ceil`/`round` return an **int** (an int passes through unchanged);
   `round` rounds half away from zero. `round-to` keeps a fixed number of
   decimal *places* but stays a **number** (`(round-to 3.14159 2)` → `3.14`); for
@@ -2600,7 +2600,7 @@ another type, so they are **not** string-library ops:
   `string/blank?` is true for an empty or all-whitespace string.
 - `string/repeat` concatenates n copies; `string/pad-left` / `string/pad-right` justify a
   string into a fixed-width field with spaces (never truncating). `->fixed`
-  renders a number with a fixed decimal count (`(->fixed 3.14159 2)` → `"3.14"`)
+  renders a number with a fixed decimal count (`(math/->fixed 3.14159 2)` → `"3.14"`)
   — the float→text op `str`/`pr-str` can't do, since they print the shortest
   round-tripping form. Together they handle tabular/console output. `->fixed` is
   a Rust primitive (Rust's float formatter); the rest are Brood.
@@ -2608,7 +2608,7 @@ another type, so they are **not** string-library ops:
   → `"x = 42, y = 3.14"`. Specifiers: `%s` (any, via `str`), `%d` (number),
   `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `->fixed`), `%%` (literal
   `%`). Width/justification isn't built in (compose with `string/pad-left`/`string/pad-right`).
-- `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(->fixed y 2)}")`
+- `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(math/->fixed y 2)}")`
   splices each `{expr}` hole's value between the literal text, lowering to a plain
   `(str …)` — zero runtime cost, so it is just a terser `str`. `{{`/`}}` are literal
   braces; braces nest inside a hole (`(fmt "m={ {:a 1} }")`). Prefer it over

@@ -21,7 +21,7 @@
   (if (<= n 0)
     (error "rand/int: bound must be positive: " n)
     (let (s (%rand-step (%rand-seed seed)))
-      [(rem s n) s])))
+      [(math/rem s n) s])))
 
 (defn float (seed)
   "Returns `[f next-seed]` with `f` a pseudo-random float in `[0.0, 1.0)`."

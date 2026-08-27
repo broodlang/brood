@@ -27,8 +27,8 @@ For pure ASCII input the string and byte forms agree.")
   (if (empty? bs)
     (reverse acc)
     (let (b (first bs)
-          hi (quot b 16)
-          lo (rem b 16))
+          hi (math/quot b 16)
+          lo (math/rem b 16))
       (encoding-hex-encode-loop (rest bs)
         codes
         (cons (nth codes lo) (cons (nth codes hi) acc))))))
@@ -91,7 +91,7 @@ UTF-8-encodes a string."
         ; codepoint vector: O(1) nth, int lookups
         s (string/->codepoints s)
         n (count s))
-    (if (= (rem n 2) 0)
+    (if (= (math/rem n 2) 0)
       (encoding-hex-decode-loop s 0 n nil)
       :invalid)))
 
@@ -137,24 +137,24 @@ binary payload (digests, salts, wire bytes)."
         ;; 1-byte tail: 2 chars + "=="
         (reverse (cons encoding-b64-pad
                    (cons encoding-b64-pad
-                     (cons (nth codes (* (rem b1 4) 16))
-                       (cons (nth codes (quot b1 4)) acc)))))
+                     (cons (nth codes (* (math/rem b1 4) 16))
+                       (cons (nth codes (math/quot b1 4)) acc)))))
         (let (b2 (first rest1)
               rest2 (rest rest1))
           (if (empty? rest2)
             ;; 2-byte tail: 3 chars + "="
             (reverse (cons encoding-b64-pad
-                       (cons (nth codes (* (rem b2 16) 4))
-                         (cons (nth codes (+ (* (rem b1 4) 16) (quot b2 16)))
-                           (cons (nth codes (quot b1 4)) acc)))))
+                       (cons (nth codes (* (math/rem b2 16) 4))
+                         (cons (nth codes (+ (* (math/rem b1 4) 16) (math/quot b2 16)))
+                           (cons (nth codes (math/quot b1 4)) acc)))))
             ;; full 3-byte group → 4 chars
             (let (b3 (first rest2))
               (encoding-b64-enc-loop (rest rest2)
                 codes
-                (cons (nth codes (rem b3 64))
-                  (cons (nth codes (+ (* (rem b2 16) 4) (quot b3 64)))
-                    (cons (nth codes (+ (* (rem b1 4) 16) (quot b2 16)))
-                      (cons (nth codes (quot b1 4)) acc))))))))))))
+                (cons (nth codes (math/rem b3 64))
+                  (cons (nth codes (+ (* (math/rem b2 16) 4) (math/quot b3 64)))
+                    (cons (nth codes (+ (* (math/rem b1 4) 16) (math/quot b2 16)))
+                      (cons (nth codes (math/quot b1 4)) acc))))))))))))
 
 (defn base64-encode (s)
   "Encode string `s` as standard Base64 (RFC 4648, `+/` alphabet, `=` padding).
@@ -238,7 +238,7 @@ UTF-8 form."
             ; codepoint vector: O(1) nth, int lookups
             s (string/->codepoints body)
             n (count s)
-            tail (rem n 4))
+            tail (math/rem n 4))
         (if (= tail 1)
           ; 1 leftover char is always invalid
           :invalid (encoding-b64-dec-loop s 0 n vals nil))))))
@@ -261,19 +261,19 @@ UTF-8 form."
           c2 (if (>= remaining 2) (%vector-ref s (+ i 1)) 128)
           v2 (if (< c2 128) (%vector-ref vals c2) nil))
       (if (not (and v1 v2))
-        :invalid (let (acc (cons (+ (* v1 4) (quot v2 16)) acc))
+        :invalid (let (acc (cons (+ (* v1 4) (math/quot v2 16)) acc))
           (if (= remaining 2)
             (reverse acc)
             (let (c3 (%vector-ref s (+ i 2))
                   v3 (if (< c3 128) (%vector-ref vals c3) nil))
               (if (not v3)
-                :invalid (let (acc (cons (+ (* (rem v2 16) 16) (quot v3 4)) acc))
+                :invalid (let (acc (cons (+ (* (math/rem v2 16) 16) (math/quot v3 4)) acc))
                   (if (= remaining 3)
                     (reverse acc)
                     (let (c4 (%vector-ref s (+ i 3))
                           v4 (if (< c4 128) (%vector-ref vals c4) nil))
                       (if (not v4)
-                        :invalid (let (acc (cons (+ (* (rem v3 4) 64) v4) acc))
+                        :invalid (let (acc (cons (+ (* (math/rem v3 4) 64) v4) acc))
                           (encoding-b64-dec-loop s (+ i 4) n vals acc))))))))))))))
 
 (defn base64-decode (s)

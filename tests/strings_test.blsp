@@ -378,23 +378,23 @@
 
 (describe "->fixed (fixed-decimal rendering)"
   (test "renders exactly n decimal places"
-    (assert= (->fixed 3.14159 2) "3.14")
-    (assert= (->fixed 0.015873015873 4) "0.0159"))
+    (assert= (math/->fixed 3.14159 2) "3.14")
+    (assert= (math/->fixed 0.015873015873 4) "0.0159"))
   (test "pads short fractions with trailing zeros"
-    (assert= (->fixed 1.5 3) "1.500")
-    (assert= (->fixed 2 2) "2.00"))
+    (assert= (math/->fixed 1.5 3) "1.500")
+    (assert= (math/->fixed 2 2) "2.00"))
   (test "n = 0 gives an integer-looking string (no point)"
-    (assert= (->fixed 3.7 0) "4")
-    (assert= (->fixed 3.2 0) "3"))
-  (test "rejects a negative decimal count" (assert-error (->fixed 1.0 -1)))
+    (assert= (math/->fixed 3.7 0) "4")
+    (assert= (math/->fixed 3.2 0) "3"))
+  (test "rejects a negative decimal count" (assert-error (math/->fixed 1.0 -1)))
   ;; A huge count would materialise a ~1 GB string (kernel audit #6); bounded.
   (test "rejects an absurd decimal count instead of allocating gigabytes"
-    (assert-error (->fixed 1.0 1000000000)))
+    (assert-error (math/->fixed 1.0 1000000000)))
   ;; "1." + 1000 zeros
   (test "a generous-but-bounded count is still allowed"
-    (assert= (count (->fixed 1.0 1000)) 1002))
+    (assert= (count (math/->fixed 1.0 1000)) 1002))
   (test "lines up in a fixed-width column via pad-left"
-    (assert= (string/pad-left (->fixed 1.5 2) 7) "   1.50")))
+    (assert= (string/pad-left (math/->fixed 1.5 2) 7) "   1.50")))
 
 (describe "format (printf-style)"
   (test "a format string with no specifiers is returned unchanged"

@@ -105,11 +105,11 @@ from `point` stays inside this window, so running the CST queries on `sub` (with
 shifted by `base`, the result shifted back) matches running them on all of `text` — at a
 cost of ~three forms, not the whole buffer."
   (let (n (string/length text)
-        p (max 0 (min point n))
+        p (math/max 0 (math/min point n))
         ;; ONE lexical pass for both offsets. The pair used to be two `scan-form-start`
         ;; calls, and the second re-walked the prefix the first had already covered — the
         ;; dominant cost of every structural motion, paid twice (2026-08-04).
-        [base start] (reflect/scan-form-start-2 text (min p (max 0 (dec n))))
+        [base start] (reflect/scan-form-start-2 text (math/min p (math/max 0 (dec n))))
         ;; The window END was an interpreted `sexp-scan` char-at loop over the ~3-form
         ;; window — ~85% of every structural motion. `scan-form-end` is the same lexical
         ;; scan (strings/comments skipped, bracket depth tracked) in one native byte pass.
@@ -284,7 +284,7 @@ form before it (paredit `forward-barf-sexp`); point stays inside the list.
                (string/char-at text (dec ee))
                (string/substring text new-close (dec ee))
                (string/substring text ee))
-              (min point
+              (math/min point
                 new-close)]))))))
 
 (defn point-slurp-backward (text point)
@@ -368,7 +368,7 @@ form's siblings (paredit `raise-sexp`).
         [(str (string/substring text 0 es)
            (string/substring text (inc es) (dec ee))
            (string/substring text ee))
-          (max es
+          (math/max es
             (dec point))]))))
 
 (defn point-wrap-round (text point)
@@ -436,12 +436,12 @@ parens. At end of line, kills the newline. At least `point` (a no-op at the clos
         le (sexp-line-end text point n)
         enc (enclosing (tree text) point))
     (if (= (get enc :kind) :root)
-      (if (= point le) (min n (inc point)) le)
+      (if (= point le) (math/min n (inc point)) le)
       (let (cp (dec (get enc :end)))
         (cond
-          (<= cp le) (max point cp)
+          (<= cp le) (math/max point cp)
           ; close on this line → kill up to (not incl) it
-          (= point le) (min n (inc point))
+          (= point le) (math/min n (inc point))
           ; empty rest of line → kill the newline
           else le)))))
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------

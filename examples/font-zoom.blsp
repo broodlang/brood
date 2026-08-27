@@ -32,8 +32,8 @@ grows/shrinks within [*min-px* *max-px*]; anything else leaves `px` unchanged."
         mods (nth ev 5 []))
     (cond
       (not (includes? mods :ctrl)) px
-      (= action :scroll-up) (min *max-px* (+ px *step*))
-      (= action :scroll-down) (max *min-px* (- px *step*))
+      (= action :scroll-up) (math/min *max-px* (+ px *step*))
+      (= action :scroll-down) (math/max *min-px* (- px *step*))
       else px)))
 
 ; keys, resizes, etc. — just re-render

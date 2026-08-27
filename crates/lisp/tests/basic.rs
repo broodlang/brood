@@ -61,7 +61,7 @@ fn arithmetic() {
     // `/` on integers is exact (ADR-196): a ratio unless it divides evenly.
     assert_eq!(run("(/ 7 2)"), "7/2");
     assert_eq!(run("(->float (/ 7 2))"), "3.5");
-    assert_eq!(run("(mod 7 3)"), "1");
+    assert_eq!(run("(math/mod 7 3)"), "1");
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn higher_order() {
 fn prelude_helpers() {
     assert_eq!(run("(inc 41)"), "42");
     assert_eq!(run("(math/sum (list 1 2 3 4))"), "10");
-    assert_eq!(run("(max 3 7)"), "7");
+    assert_eq!(run("(math/max 3 7)"), "7");
     assert_eq!(run("(math/abs -9)"), "9");
 }
 
@@ -1238,9 +1238,9 @@ fn integer_overflow_does_not_panic() {
     // The `i64::MIN op -1` edge cases no longer overflow-error: rem/mod are
     // mathematically 0, and quot promotes to the bignum `9223372036854775808`
     // (ADR bignums — integer arithmetic auto-promotes rather than trapping).
-    assert_eq!(run("(mod -9223372036854775808 -1)"), "0");
-    assert_eq!(run("(rem -9223372036854775808 -1)"), "0");
-    assert_eq!(run("(quot -9223372036854775808 -1)"), "9223372036854775808");
+    assert_eq!(run("(math/mod -9223372036854775808 -1)"), "0");
+    assert_eq!(run("(math/rem -9223372036854775808 -1)"), "0");
+    assert_eq!(run("(math/quot -9223372036854775808 -1)"), "9223372036854775808");
     // `i64::MIN / -1` used to overflow the i64 fast path and fall through to the float
     // path, giving an imprecise `Float`. Exact division (ADR-196) makes it the exact
     // bignum 2^63 instead — the quotient divides evenly, so it is an integer, not a
@@ -1249,8 +1249,8 @@ fn integer_overflow_does_not_panic() {
     // Ordinary integer division/modulo unaffected.
     assert_eq!(run("(/ 12 3)"), "4");
     assert_eq!(run("(/ 7 2)"), "7/2");
-    assert_eq!(run("(mod -7 3)"), "2");
-    assert_eq!(run("(rem -7 3)"), "-1");
+    assert_eq!(run("(math/mod -7 3)"), "2");
+    assert_eq!(run("(math/rem -7 3)"), "-1");
 }
 
 /// `bit/count` (population count) over the two's-complement bit pattern.
@@ -1637,7 +1637,7 @@ fn bignum_demotes_when_result_fits() {
     );
     // 2^100 / 2^100 demotes to 1.
     assert_eq!(
-        run("(quot (bit/shift-left 1 100) (bit/shift-left 1 100))"),
+        run("(math/quot (bit/shift-left 1 100) (bit/shift-left 1 100))"),
         "1"
     );
 }
@@ -1695,19 +1695,19 @@ fn bignum_bitwise() {
 
 #[test]
 fn bignum_quot_rem_mod() {
-    // (quot 2^200 2^100) == 2^100.
+    // (math/quot 2^200 2^100) == 2^100.
     assert_eq!(
-        run("(quot (bit/shift-left 1 200) (bit/shift-left 1 100))"),
+        run("(math/quot (bit/shift-left 1 200) (bit/shift-left 1 100))"),
         run("(bit/shift-left 1 100)")
     );
     // rem divides evenly here.
     assert_eq!(
-        run("(rem (bit/shift-left 1 200) (bit/shift-left 1 100))"),
+        run("(math/rem (bit/shift-left 1 200) (bit/shift-left 1 100))"),
         "0"
     );
     // mod composes (prelude) over rem/+/-.
     assert_eq!(
-        run("(mod (+ (bit/shift-left 1 200) 7) (bit/shift-left 1 100))"),
+        run("(math/mod (+ (bit/shift-left 1 200) 7) (bit/shift-left 1 100))"),
         "7"
     );
 }

@@ -223,7 +223,7 @@ suggestions\", never to an error on the user's command line."
         ;; An escaped \" neither opens nor closes, so drop those pairs first.
         cleaned (string/replace prefix "\\\"" ""))
     ;; Odd number of quotes before the position ⇒ still inside one.
-    (= 1 (rem (- (count (string/split cleaned "\"")) 1) 2))))
+    (= 1 (math/rem (- (count (string/split cleaned "\"")) 1) 2))))
 
 ;; The bare names of the `:keyword`s in a whitespace-separated fragment.
 (defn- complete-keywords

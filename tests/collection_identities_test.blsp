@@ -9,16 +9,16 @@
 
 (defmodule collection-identities-test (:use test))
 
-(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+(defn lcg (s) (math/rem (+ (* s 1103515245) 12345) 2147483648))
 
 (defn build-vec (s n acc)
-  (if (= n 0) acc (build-vec (lcg s) (- n 1) (conj acc (- (rem s 200) 100)))))
+  (if (= n 0) acc (build-vec (lcg s) (- n 1) (conj acc (- (math/rem s 200) 100)))))
 (defn rand-vec (s n) (build-vec s n []))
 
 (defn build-map (s n acc)
   (if (= n 0)
     acc
-    (build-map (lcg s) (- n 1) (assoc acc (rem s 20) (- (rem (lcg s) 2000) 1000)))))
+    (build-map (lcg s) (- n 1) (assoc acc (math/rem s 20) (- (math/rem (lcg s) 2000) 1000)))))
 (defn rand-map (s n) (build-map s n {}))
 
 ; merge overrides
@@ -65,17 +65,17 @@
 (defn check-maps (s n)
   (if (= n 0)
     true
-    (let (m (rand-map (lcg s) (+ 1 (rem s 8)))
-          k (rem (lcg (lcg s)) 20)
-          v (- (rem (lcg (lcg (lcg s))) 2000) 1000))
+    (let (m (rand-map (lcg s) (+ 1 (math/rem s 8)))
+          k (math/rem (lcg (lcg s)) 20)
+          v (- (math/rem (lcg (lcg (lcg s))) 2000) 1000))
       (if (map-laws m k v) (check-maps (lcg (lcg (lcg (lcg s)))) (- n 1)) false))))
 
 (defn check-vecs (s n)
   (if (= n 0)
     true
-    (let (v (rand-vec (lcg s) (+ 1 (rem s 9)))
-          w (rand-vec (lcg (lcg s)) (rem s 6))
-          x (- (rem s 200) 100))
+    (let (v (rand-vec (lcg s) (+ 1 (math/rem s 9)))
+          w (rand-vec (lcg (lcg s)) (math/rem s 6))
+          x (- (math/rem s 200) 100))
       (if (and (vec-laws v w x) (hof-laws v))
         (check-vecs (lcg (lcg (lcg s))) (- n 1))
         false))))
@@ -83,8 +83,8 @@
 (defn check-strs (s n)
   (if (= n 0)
     true
-    (let (a (str (rem s 100000) "x")
-          b (str "y" (rem (lcg s) 100000)))
+    (let (a (str (math/rem s 100000) "x")
+          b (str "y" (math/rem (lcg s) 100000)))
       (if (str-laws a b) (check-strs (lcg (lcg s)) (- n 1)) false))))
 
 ;; A char index is a byte offset only for pure-ASCII text, so every char-indexed string
@@ -99,7 +99,7 @@
   (s n acc)
   (if (= n 0)
     (apply str acc)
-    (mb-build (lcg s) (- n 1) (cons (nth mb-alphabet (rem s 7)) acc))))
+    (mb-build (lcg s) (- n 1) (cons (nth mb-alphabet (math/rem s 7)) acc))))
 (def- mb-text (mb-build 8675309 600 nil))
 (def- mb-cps (into [] (string/->list mb-text)))
 (def- mb-len (string/length mb-text))
@@ -119,8 +119,8 @@
 (defn check-mb (s n)
   (if (= n 0)
     true
-    (let (i (rem s mb-len)
-          j (+ i (rem (lcg s) (- mb-len i))))
+    (let (i (math/rem s mb-len)
+          j (+ i (math/rem (lcg s) (- mb-len i))))
       (if (mb-laws i j) (check-mb (lcg (lcg s)) (- n 1)) false))))
 
 (describe "collection identities hold over random values"
