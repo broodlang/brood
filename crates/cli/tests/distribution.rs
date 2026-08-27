@@ -2215,7 +2215,7 @@ fn allocated_ports_are_outside_the_kernel_ephemeral_range() {
         let port = free_port();
         assert!(
             port < floor,
-            "free_port() returned {port}, inside the ephemeral range (floor {floor}) — an \
+            "free_port() returned {port}, inside the ephemeral range (math/floor {floor}) — an \
              unrelated process's client socket can take it before the node binds (KI-27)"
         );
         assert!(

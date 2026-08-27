@@ -472,7 +472,7 @@ exist?\" without guessing names one at a time."
 
 (defn progress (progress &optional (total nil) (message nil))
   "Report incremental progress from a `nest mcp` tool handler (the streaming
-tier): `progress` units done, optional `total` (denominator) and `message`
+tier): `progress` units done, optional `total` (math/denominator) and `message`
 (label). Streams a `notifications/progress` to the client when the current
 `tools/call` carried a `_meta.progressToken`; a no-op otherwise, so it is safe
 to call from any handler. Returns true if a notification was sent. Call it from

@@ -618,7 +618,7 @@ impl<'a> Parser<'a> {
             )),
             // A ratio literal `num/den` (`1/2`, `-3/4`). `classify` validated the
             // shape; `BigRational`'s parse reduces it, and `alloc_ratio` demotes a
-            // denominator of 1 to an `Int` (so `4/2` reads as `2`).
+            // math/denominator of 1 to an `Int` (so `4/2` reads as `2`).
             AtomKind::Ratio => match token.parse::<num_rational::BigRational>() {
                 Ok(n) => Ok(self.heap.alloc_ratio(n)),
                 Err(_) => Err(self.err_at(
@@ -632,8 +632,8 @@ impl<'a> Parser<'a> {
                     format!("malformed ratio literal: {}", token),
                 )
                 .with_hint(
-                    "a ratio is `num/den` with an integer numerator over a positive, \
-                     nonzero integer denominator — write `-1/2` (sign on the numerator), \
+                    "a ratio is `num/den` with an integer math/numerator over a positive, \
+                     nonzero integer math/denominator — write `-1/2` (sign on the math/numerator), \
                      not `1/-2`, and not `1/0`",
                 )),
             // Digit-led but not a number Brood has (`1/2`, `0x1F`, `1_000`, `1N`).

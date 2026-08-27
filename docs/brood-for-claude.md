@@ -1001,7 +1001,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   **`/` is exact** (ADR-196): `(/ 1 2)` → `1/2` (a **ratio**, not a float),
   `(/ 6 3)` → `2` (divides evenly → int). `1/2` is a literal; ratios do the full
   tower (ratio+decimal is exact, ratio+float contagion). Reach for `->float`
-  (or `decimal/number->`) for an inexact result; `numerator`/`denominator` read the parts.
+  (or `decimal/number->`) for an inexact result; `math/numerator`/`math/denominator` read the parts.
   Number types: `int` (bignum on overflow) · `float` · `decimal` (`1.50M`, exact
   base-10) · `ratio` (`1/2`, exact rational). `number?`/`ratio?`/`decimal?` test them.
 - **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-loads

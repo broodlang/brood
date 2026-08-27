@@ -33,19 +33,19 @@
 //!
 //! # Why there are two sets
 //!
-//! A percentage needs a denominator drawn from the SAME population as the numerator.
+//! A percentage needs a math/denominator drawn from the SAME population as the numerator.
 //! Counting "every line holding a form" against "lines that recorded a hit" compares
 //! different things and systematically under-reports: a `defmodule` header, a docstring
 //! and a `defn`'s own line are all forms, none is an instrumented node, so a fully
 //! exercised file reports a fraction of itself. (Measured on a fixture whose every
 //! function ran: 14%.)
 //!
-//! So the denominator is not inferred from source text at all — [`note_instrumented`]
+//! So the math/denominator is not inferred from source text at all — [`note_instrumented`]
 //! records what the compiler actually instrumented, at compile time. Arms compile on
 //! first CALL, so that alone is not enough either: the reporting side forces every
 //! project function to compile before the suite runs
 //! (`eval::compile::precompile` / `%coverage-precompile`), which is what puts a
-//! never-called function into the denominator and nowhere else.
+//! never-called function into the math/denominator and nowhere else.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
@@ -149,7 +149,7 @@ pub fn branch_instrumented() -> Vec<(String, Vec<(u32, u32)>)> {
     }
 }
 
-/// Every instrumented `(file, lines)` pair — the denominator, mirroring [`snapshot`].
+/// Every instrumented `(file, lines)` pair — the math/denominator, mirroring [`snapshot`].
 pub fn instrumented() -> Vec<(String, Vec<u32>)> {
     match instrumented_lines().lock() {
         Ok(map) => map

@@ -144,7 +144,7 @@ pub(super) fn is_decimal(v: Value) -> bool {
 }
 
 /// True iff `v` is an exact `Ratio` (its own type — not an integer, since a
-/// denominator of 1 is demoted to `Int` on construction).
+/// math/denominator of 1 is demoted to `Int` on construction).
 pub(super) fn is_ratio(v: Value) -> bool {
     matches!(v, Value::Ratio(_))
 }
@@ -209,8 +209,8 @@ fn to_bigrational(
     unreachable!("to_bigrational on a non-rationalizable value")
 }
 
-/// Is this `BigRational` zero? (Its numerator is zero.) The exact-division
-/// denominator check.
+/// Is this `BigRational` zero? (Its math/numerator is zero.) The exact-division
+/// math/denominator check.
 fn ratio_is_zero(r: &num_rational::BigRational) -> bool {
     use num_traits::Zero;
     r.is_zero()
@@ -281,7 +281,7 @@ pub(super) fn num_bin(
         }
         // A ratio operand, and the other is rationalizable-exact (Int/BigInt/Ratio/
         // Decimal): compute exactly in `BigRational` and return a reduced `Ratio`
-        // (demoted to `Int` when the denominator reduces to 1). A `Decimal` operand
+        // (demoted to `Int` when the math/denominator reduces to 1). A `Decimal` operand
         // promotes losslessly (so `(+ 1/2 0.5M)` is `1/1`). Checked before the decimal
         // arm so a ratio wins over a decimal; a `Float` operand falls to contagion.
         _ if (is_ratio(a) || is_ratio(b)) && is_rationalizable(a) && is_rationalizable(b) => {
@@ -454,7 +454,7 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     // `(/ 1 2)` → `1/2` (a reduced Ratio) rather than a float. Likewise any division
     // involving a `Ratio` (with the other operand rationalizable — Int/BigInt/Ratio/
     // Decimal, a Decimal promoting losslessly) is exact. `alloc_ratio` demotes a
-    // denominator of 1 back to an integer. Reach for `->float` for an inexact result.
+    // math/denominator of 1 back to an integer. Reach for `->float` for an inexact result.
     if (is_integer(a) && is_integer(b))
         || ((is_ratio(a) || is_ratio(b)) && is_rationalizable(a) && is_rationalizable(b))
     {
@@ -485,8 +485,8 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(Value::Float(num_to_f64(heap, "/", a)? / bf))
 }
 
-/// `(numerator x)` — the numerator of a ratio, or an integer itself (its
-/// numerator over 1). Errors on a non-rational number.
+/// `(math/numerator x)` — the math/numerator of a ratio, or an integer itself (its
+/// math/numerator over 1). Errors on a non-rational number.
 pub(super) fn prim_numerator(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let x = arg(args, 0);
     match x {
@@ -495,11 +495,11 @@ pub(super) fn prim_numerator(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
             Ok(heap.int_from_bigint(n))
         }
         Value::Int(_) | Value::BigInt(_) => Ok(x),
-        _ => Err(LispError::wrong_type(heap, "numerator", "int or ratio", x)),
+        _ => Err(LispError::wrong_type(heap, "math/numerator", "int or ratio", x)),
     }
 }
 
-/// `(denominator x)` — the (positive) denominator of a ratio, or `1` for an integer.
+/// `(math/denominator x)` — the (positive) math/denominator of a ratio, or `1` for an integer.
 pub(super) fn prim_denominator(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let x = arg(args, 0);
     match x {
@@ -510,7 +510,7 @@ pub(super) fn prim_denominator(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         Value::Int(_) | Value::BigInt(_) => Ok(Value::int(1)),
         _ => Err(LispError::wrong_type(
             heap,
-            "denominator",
+            "math/denominator",
             "int or ratio",
             x,
         )),
@@ -738,8 +738,8 @@ pub(super) fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// crossing the language can't bootstrap (no other primitive produces an `Int`
 /// from a `Float`). An `Int` passes through; a `Float` is floored. `NaN` and
 /// values whose floor doesn't fit in `i64` are runtime errors — pre-fix the
-/// `as i64` cast silently saturated, so `(floor (* 1e308 1e308))` returned
-/// `i64::MAX` and `(floor (/ 0.0 0.0))` returned `0`. `ceil`/`round`/`quot`/
+/// `as i64` cast silently saturated, so `(math/floor (* 1e308 1e308))` returned
+/// `i64::MAX` and `(math/floor (/ 0.0 0.0))` returned `0`. `ceil`/`round`/`quot`/
 /// `pow`/`sqrt` are all Brood over this + `rem`/`/`/`*`/`<` (std/prelude.blsp).
 pub(super) fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
@@ -747,7 +747,7 @@ pub(super) fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         // A bignum is already an integer — it is its own floor.
         v @ Value::BigInt(_) => Ok(v),
         // A ratio floors **exactly**, not through f64. Since ADR-196 made `/` on
-        // integers exact, `(floor (/ a b))` is an ordinary idiom, and routing it
+        // integers exact, `(math/floor (/ a b))` is an ordinary idiom, and routing it
         // through f64 would round the answer for ratios beyond 2^53 — a wrong
         // integer, not merely an imprecise one.
         Value::Ratio(id) => {

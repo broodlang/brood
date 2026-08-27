@@ -53,7 +53,7 @@ Codes are grouped by [`ErrorKind`]:
 | `E0020` | `:arity` | `bind_params`, `LispError::arity(...)` | `((fn (x) x))` |
 | `E0030` | `:type` | `LispError::wrong_type(...)` / `type_err(...)` | `(first 5)` |
 | `E0040` | `:runtime` | `%div` / `rem` (with a `:hint`) | `(/ 1 0)`, `(rem 1 0)` |
-| `E0041` | `:runtime` | checked arithmetic overflow; `floor` of non-finite or out-of-i64 float | `(* 9223372036854775807 2)`, `(floor 1e20)` |
+| `E0041` | `:runtime` | checked arithmetic overflow; `floor` of non-finite or out-of-i64 float | `(* 9223372036854775807 2)`, `(math/floor 1e20)` |
 | `E0042` | `:runtime` | index out of range (`vector-ref`, `substring`) | `(vector-ref [1 2 3] 7)`, `(substring "hi" 0 99)` |
 | `E0043` | `:runtime` | allocation crossed the soft memory limit; the eval safepoint raises (catchable) instead of OOMing the host. Off by default; set via `BROOD_MEM_LIMIT` | a runaway `(cons …)`/`(string-repeat …)` loop under a limit |
 | `E0044` | `:runtime` | evaluation used more stack than the byte budget (runaway *non-tail* recursion); raised before the coroutine stack overflows into an uncatchable SIGSEGV. Tune via `BROOD_STACK_BUDGET` | `(defn boom (n) (+ 1 (boom (+ n 1)))) (boom 0)` |

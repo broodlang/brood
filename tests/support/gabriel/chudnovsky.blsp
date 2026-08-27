@@ -70,7 +70,7 @@ conformance port. The oracle is upstream's own expected output in
 
 (defn pi-digits (digits)
   "The first `digits` digits of π, as an exact integer (upstream's `pi`)."
-  (let (num-terms (floor (+ 2 (/ digits 14.181647462)))
+  (let (num-terms (math/floor (+ 2 (/ digits 14.181647462)))
         sqrt-c (chudnovsky-isqrt (* chudnovsky-c (pow 100 digits)))
         [_ p q] (chudnovsky-split 0 num-terms))
     (quot (* p chudnovsky-c sqrt-c)

@@ -338,7 +338,7 @@ them is a timing run.
 An "executable line" is one carrying an instrumented node (a call or an inlined prim),
 so a literal-bodied function has no measurable lines and is left out of the report
 rather than counted as 0%. See [`coverage.md`](coverage.md) for what each tier
-measures, why the line denominator comes from the compiler rather than from reading the
+measures, why the line math/denominator comes from the compiler rather than from reading the
 source (two earlier versions produced confidently wrong percentages), and why the
 function shim is variadic.
 

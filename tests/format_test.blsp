@@ -28,7 +28,7 @@
     (assert= (source "(assert= (sqrt 9/4) 1.5)") "(assert= (sqrt 9/4) 1.5)\n")
     (assert= (source "(list 1/2 -3/4 22/7)") "(list 1/2 -3/4 22/7)\n"))
   (test "a decimal literal does not force a break"
-    (assert= (source "(floor 1.5M)") "(floor 1.5M)\n")
+    (assert= (source "(math/floor 1.5M)") "(math/floor 1.5M)\n")
     (assert= (source "(list 1.50M 0M -3.14M)") "(list 1.50M 0M -3.14M)\n"))
   (test "every leaf kind inlines: symbol keyword int float ratio decimal bool nil string"
     (assert= (source "(f a :k 1 1.5 1/2 1.5M true nil \"s\")")
@@ -36,7 +36,7 @@
   ;; The contract that actually protects the tree: formatting must not GROW a file that
   ;; is already canonical. A forced break is visible as extra lines.
   (test "a canonical one-line form is unchanged, so re-formatting cannot grow it"
-    (dolist (src (list "(sqrt 9/4)" "(floor 1.5M)" "(list 1/2)" "(f 22/7 1.5M)"))
+    (dolist (src (list "(sqrt 9/4)" "(math/floor 1.5M)" "(list 1/2)" "(f 22/7 1.5M)"))
       (let (out (source src))
         (assert= out (str src "\n"))
         (assert= (count-newlines out) 1)

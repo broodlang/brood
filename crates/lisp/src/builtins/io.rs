@@ -66,7 +66,7 @@ pub fn disarm_mcp_progress() {
 
 /// `(%mcp-progress progress total message)` — report progress from a `nest mcp`
 /// tool handler. `progress` is an int (units completed); `total` is an int or
-/// nil (the denominator, if known); `message` is a string or nil (a human
+/// nil (the math/denominator, if known); `message` is a string or nil (a human
 /// label). Returns `true` if a progress notification was actually sent (a token
 /// was in scope), `false` if it was a no-op (not under an MCP progress request).
 pub(super) fn mcp_progress(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

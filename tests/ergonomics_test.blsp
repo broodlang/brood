@@ -187,19 +187,26 @@
     (assert= [1 2 3] (vec (list 1 2 3)))
     (assert= [1 2 3] (vec [1 2 3]))
     (assert= [] (vec nil)))
-  (test "nan? identifies the float that isn't equal to itself"
-    (is (nan? nan))
-    (is (nan? (- nan)))
-    (refute (nan? 1.0))
-    (refute (nan? 0))
-    (refute (nan? inf))
-    (refute (nan? "nan")))
-  (test "infinite? covers both infinities only"
-    (is (infinite? inf))
-    (is (infinite? -inf))
-    (refute (infinite? 1.0))
-    (refute (infinite? 1))
-    (refute (infinite? nan))))
+  ;; `math/nan?` / `math/infinite?` (they were bare, and `(and (float? x) …)`, so a STRING
+  ;; answered `false` — a category error reported as a fact). One impl per numeric type,
+  ;; no `:default`, so a non-number raises (ADR-254).
+  (test "math/nan? identifies the float that isn't equal to itself"
+    (is (math/nan? nan))
+    (is (math/nan? (- nan)))
+    (refute (math/nan? 1.0))
+    (refute (math/nan? 0))
+    (refute (math/nan? inf)))
+  (test "math/infinite? covers both infinities only"
+    (is (math/infinite? inf))
+    (is (math/infinite? -inf))
+    (refute (math/infinite? 1.0))
+    (refute (math/infinite? 1))
+    (refute (math/infinite? nan)))
+  (test "both REFUSE a non-number rather than answering false"
+    ;; `(nan? "nan")` used to be `false`. A string is not "not NaN" — the question does
+    ;; not apply, and saying `false` makes that indistinguishable from a computed answer.
+    (is (includes? (error-message (try (math/nan? "nan") (catch e e))) "no impl"))
+    (is (includes? (error-message (try (math/infinite? nil) (catch e e))) "no impl"))))
 
 (describe "transduce — transducers as public surface (ADR-161)"
   (test "a composed stage stack reduces in one pass"

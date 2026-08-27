@@ -41,6 +41,29 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 ;;
 ;; A zero ratio normalises to the int `0` (`(/ 0 5)` is `0`, `:int`), so the `:ratio` impl is
 ;; constant-false rather than a comparison.
+;; `Numeric` — the two float-domain questions, asked of any numeric type.
+;;
+;; `nan?`/`infinite?` were bare and written `(and (float? x) …)`, so a non-float answered
+;; `false` — including `"a"`, `nil` and `[1]`, for which the question is a category error,
+;; not a fact. An INT answering false is right (an int is a number and is not NaN); a string
+;; answering false is the `zero?` bug again. One impl per numeric type, no `:default`
+;; (ADR-254), so an unanswered type raises instead of being told it is not NaN.
+(defability Numeric
+  "Float-domain questions every numeric type can answer.
+
+    (math/nan? nan)        → true
+    (math/nan? 1)          → false   ; an int is a number, and is not NaN
+    (math/infinite? inf)   → true
+    (math/infinite? 1.0)   → false"
+  (nan? [self] :-> bool)
+  (infinite? [self] :-> bool))
+(impl Numeric :float
+  (nan? [x] (not (= x x)))
+  (infinite? [x] (or (= x inf) (= x -inf))))
+(impl Numeric :int     (nan? [x] false) (infinite? [x] false))
+(impl Numeric :decimal (nan? [x] false) (infinite? [x] false))
+(impl Numeric :ratio   (nan? [x] false) (infinite? [x] false))
+
 (defability Zero
   "True when `self` is the additive identity of its own type — across the whole numeric
 tower, not just the int `0`. A type with no impl RAISES rather than answering.
@@ -92,13 +115,13 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 ;; Rounding & roots, all Brood over the one Float->Int primitive `floor` (toward
 ;; -inf) plus `rem`/`/`/`*`. `floor` of an int is itself, so these pass ints
 ;; through unchanged.
-(defn ceil (x) "Round `x` toward positive infinity to an integer." (- (floor (- x))))
+(defn ceil (x) "Round `x` toward positive infinity to an integer." (- (math/floor (- x))))
 ;; round half away from zero: floor(x+0.5) for x>=0, mirrored for x<0.
 (defn round (x)
   "Round `x` to the nearest integer (halves away from zero).
 
     (math/round 2.5)       → 3"
-  (if (< x 0) (- (floor (+ (- x) 0.5))) (floor (+ x 0.5))))
+  (if (< x 0) (- (math/floor (+ (- x) 0.5))) (math/floor (+ x 0.5))))
 
 ;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
 ;; non-negative exp stays an int (overflow raises, like `*`); a negative exp gives
@@ -160,7 +183,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
   ;; exactness a float never had, so a float `x` converts back — which restores the
   ;; pre-ADR-196 contract exactly: that `/` was float division, giving a float in the
   ;; non-integral case and an int in the integral one (`(round-to 2.5 0)` → 3, because
-  ;; a denominator of 1 demotes). An exact `x` keeps the exact answer.
+  ;; a math/denominator of 1 demotes). An exact `x` keeps the exact answer.
   (let (scale (pow 10 places)
         r (/ (round (* x scale)) scale))
     (if (and (float? x) (ratio? r)) (->float r) r)))

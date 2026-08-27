@@ -136,7 +136,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (results)
   (sort-by :line (filter (fn (r) (= (get r :hits) 0)) results)))
 
-;; Percentage as a whole number, rounded to nearest. An empty denominator is 100%
+;; Percentage as a whole number, rounded to nearest. An empty math/denominator is 100%
 ;; (nothing to cover is not a failure), which keeps a source-less project from
 ;; reporting 0% and failing a `--cover-min` gate.
 (defn- coverage-percent
@@ -223,8 +223,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;;     `RecordLine` the compiler emits is registered as it is emitted, and
 ;;     `%coverage-instrumented` reads that back. Arms compile on first CALL, though, so
 ;;     `line-begin!` must force every project function to compile before the
-;;     suite runs — otherwise a function nothing calls is missing from the denominator
-;;     as well as the numerator, and the ratio flatters itself.
+;;     suite runs — otherwise a function nothing calls is missing from the math/denominator
+;;     as well as the math/numerator, and the ratio flatters itself.
 ;;
 ;; Counting "lines that hold a form" instead — the obvious static approach — was tried
 ;; and is wrong: a `defmodule` header, a docstring and a `defn`'s own line all hold
@@ -264,7 +264,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 (defn line-begin! (source-dirs)
   "Force every project function under `source-dirs` to compile, so the lines of a function the suite never calls still count as measurable. Call once, after the sources are loaded and BEFORE the suite runs. Returns how many bodies compiled."
   ;; Arms compile on first CALL, so without this pass an uncalled function is missing
-  ;; from the denominator as well as the numerator and the ratio flatters itself: the
+  ;; from the math/denominator as well as the math/numerator and the ratio flatters itself: the
   ;; fixture with one deliberately-dead function reported 100%.
   (fold (fn (compiled target)
           (if (coverage-safely (fn () (%coverage-precompile (eval (get target :name)))))
@@ -377,7 +377,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 
 (defn- coverage-branch-sites-index
   ()
-  "`file -> ([line col] …)` — every instrumented branch point (the denominator)."
+  "`file -> ([line col] …)` — every instrumented branch point (the math/denominator)."
   (fold (fn (index entry) (assoc index (seq/vector-ref entry 0) (seq/vector-ref entry 1)))
     {}
     (or (coverage-safely (fn () (%coverage-branch-instrumented))) nil)))
