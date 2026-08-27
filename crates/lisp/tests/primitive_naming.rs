@@ -21,7 +21,12 @@ fn primitives_do_not_borrow_a_non_module_slash_namespace() {
     // so `(:use <name>)` and `require`-ing `<name>` both succeed and the primitives ride its
     // namespace safely. Extend this ONLY when a new primitive family's prefix is likewise a
     // genuine module — otherwise give the primitive a flat dash name.
-    let allowed: &[&str] = &["string", "file"];
+    // Every prefix here must be a REAL module — one with a `std/<name>.blsp` (or
+    // `std/<name>/`) that owns the namespace — so a primitive sitting under it is a
+    // primitive of that module, not a kernel name squatting on a slash. `bit`, `decimal`,
+    // `proc` and `system` joined when the 510->298 bare-name refactors gave each family
+    // its own module (ADR-251).
+    let allowed: &[&str] = &["string", "file", "bit", "decimal", "proc", "system"];
 
     let interp = Interp::new();
     let mut violations: Vec<String> = Vec::new();
