@@ -128,17 +128,22 @@ the order is unspecified and not stable across processes (see `keys`).
 ;; element carries two things, so the earlier "an association needs a key, which conj's
 ;; single element can't carry" reasoning does not actually rule it out.
 ;;
-;; CAUTION — the bare vocabulary is not all safe here. Joining `Seqable` makes every bare
-;; collection op *resolve* on a multimap, including the two whose meaning does not survive
-;; the trip:
+;; Joining `Seqable` makes every bare collection op resolve on a multimap. One of them used
+;; to answer WRONGLY and is now fixed; the other differs legitimately.
 ;;
-;;   (get mm k)   -> nil        while (multimap/get mm k)   -> the values
-;;   (keys mm)    -> per-entry  while (multimap/keys mm)    -> distinct
+;; `get` is FIXED (2026-08-27). It answered `nil` for a key holding values, because a
+;; multimap is a record and bare `get` took the record-FIELD path — reporting "no such
+;; field" as "no such key", a wrong value rather than an error (ADR-254). Bare `get` now
+;; consults the `Lookup` ability when a map lookup comes back empty, and this type
+;; implements it, so `(get mm k)` and `(multimap/get-all mm k)` agree.
 ;;
-;; A multimap is a record, so bare `get` takes the record-FIELD path and silently answers
-;; nil for a key that holds values — the worst shape a wrong answer can take. There is no
-;; ability seam for `get`, so the only honest fix available is to say so: reach for
-;; `multimap/get` and `multimap/keys`, never the bare ones.
+;; `keys` still differs, legitimately: bare `keys` reads the `Seqable` view — the flattened
+;; associations — so it answers one key per VALUE, while `multimap/keys` answers the
+;; DISTINCT keys. Both are right for the question asked; reach for the qualified one when
+;; you mean distinct.
+(impl Lookup
+  multimap/multimap
+  (-get [mm k] (get-all mm k)))
 (impl Conjable
   multimap/multimap
   (-conj [mm x]

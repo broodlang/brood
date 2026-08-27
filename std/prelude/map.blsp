@@ -35,6 +35,30 @@
              (pr-str coll)
              ")"))))
 
+(defn- %lookup-miss
+  (coll k fallback)
+  ;; Reached ONLY when a map lookup came back empty: consult `Lookup` for a record whose
+  ;; contents are not its fields, else keep `fallback` — which is what `%map-get` ALREADY
+  ;; answered, so a map storing `nil` under a key keeps that nil and does not fall to the
+  ;; caller's default. (`(get {:a nil} :a 99)` is `nil`; `maps_test` guards it.) Split out of `get` deliberately —
+  ;; `get`'s map branch is the hottest path in the language (4796 call sites) and a previous
+  ;; refactor that moved its kind test behind a CALL cost 1.8x. So the call happens only on
+  ;; a miss; a present key pays one `nil?` test.
+  ;;
+  ;; Raw prims and a `bound?` guard, as in `seq`: this file loads six before `*impls*`.
+  ;; `%identity-of` is the obvious way to get the dispatch id and it uses bare `get`, so it
+  ;; re-enters here and recurses forever. `coll` is already known to be a map, so its id is
+  ;; just `:__id__` — read it with the prim.
+  (if (bound? (quote *impls*))
+    (let (id (%map-get coll (quote :__id__) nil))
+      (if id
+        (let (methods (%map-get *impls* (quote [Lookup -get]) nil))
+          (if methods
+            (if (%map-get methods id nil) (-get coll k) fallback)
+            fallback))
+        fallback))
+    fallback))
+
 (defn get "The value at key/index `k` in `coll`, or `default` (else `nil`) if absent.
 Maps look up by key; **a set looks up by membership** — it yields the element
 itself when present (so `(get s x)` agrees with `(contains? s x)`), never a
@@ -63,7 +87,8 @@ a wrong-typed one.
   ;; entry check showing up through this call (an inlining-boundary effect, not
   ;; instruction cost — `nth` measured standalone is identical either way).
   ((coll k) (cond
-              (map? coll) (%map-get coll k nil)
+              (map? coll) (let (v (%map-get coll k nil))
+                            (if (nil? v) (%lookup-miss coll k v) v))
               (set? coll) (if (%set-has? coll k) k nil)
               (nil? coll) nil
               (string? coll)
@@ -73,7 +98,9 @@ a wrong-typed one.
               (int? k) (nth coll k nil)
               else (%get-unanswerable coll k)))
   ((coll k default) (cond
-                      (map? coll) (%map-get coll k default)
+                      (map? coll)
+                        (let (v (%map-get coll k default))
+                          (if (nil? v) (%lookup-miss coll k v) v))
                       (set? coll) (if (%set-has? coll k) k default)
                       (nil? coll) default
                       (string? coll)
@@ -252,9 +279,11 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
         (contains? m k) (assoc m k (dissoc-in (get m k) ks))
         else m))))
 
-(defn identity (x) "Return `x` unchanged.
+(defn identity (x)
+  "Return `x` unchanged.
 
-    (identity 5)   → 5" x)
+    (identity 5)   → 5"
+  x)
 ;; `zero?` lives in tools.blsp now, beside `defability` — it dispatches on TYPE, and the
 ;; ability machinery does not exist this early in the prelude. See the `Zero` ability.
 ;; `nan` is a reader-level float literal, so the language could *produce* a NaN
