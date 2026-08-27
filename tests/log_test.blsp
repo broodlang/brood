@@ -119,22 +119,22 @@
     ;; fallback path writes to stderr; the call must still return nil cleanly
     (assert= (info "nowhere") nil)))
 
-;; ---- the LogBackend ability -------------------------------------------------
-;; A backend is any value with a `LogBackend` impl, so a backend that does something
+;; ---- the log/backend ability -------------------------------------------------
+;; A backend is any value with a `log/backend` impl, so a backend that does something
 ;; other than "format one line and write it" needs no change to std/log.blsp. This one
 ;; sends the record itself (not a formatted line) and reuses the standard level/filter
 ;; gate via `backend-passes?`.
 
 (defrecord raw-backend (target min-level filter))
 
-(impl LogBackend
+(impl log/backend
   log-test/raw-backend
   (backend-emit [b record]
     (when (backend-passes? b record)
       (send (get b :target) [:rec record]))
     nil))
 
-(describe "log: a third-party LogBackend"
+(describe "log: a third-party log/backend"
   :isolated (test "a custom backend record receives records instead of formatted lines"
     (let (me (self))
       (start-logger {:level :debug :backends [(raw-backend me :debug nil)]})
@@ -183,9 +183,9 @@
   (test "file-backend writes through a file-port"
     (assert= (record-id (get (file-backend "/tmp/brood-log-test.log") :sink)) :io/file-port))
   (test "satisfies? reports whether a value can serve as a backend"
-    (is (satisfies? 'LogBackend (stdout-backend)))
-    (is (satisfies? 'LogBackend (raw-backend (self) :debug nil)))
-    (is (not (satisfies? 'LogBackend {:sink (fn (s) s)})))))
+    (is (satisfies? 'log/backend (stdout-backend)))
+    (is (satisfies? 'log/backend (raw-backend (self) :debug nil)))
+    (is (not (satisfies? 'log/backend {:sink (fn (s) s)})))))
 
 ;; ---- concurrency ------------------------------------------------------------
 (describe "log: safe under concurrency"

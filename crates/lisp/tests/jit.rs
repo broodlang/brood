@@ -260,8 +260,8 @@ fn inlined_recursive_collatz_under_jit() {
     is(
         "(defn cc (n)
            (if (= n 1) 0
-             (if (= (rem n 2) 0)
-               (+ 1 (cc (quot n 2)))
+             (if (= (math/rem n 2) 0)
+               (+ 1 (cc (math/quot n 2)))
                (+ 1 (cc (+ (* 3 n) 1))))))
          (defn run (k last) (if (< k 1) last (run (- k 1) (cc 27))))
          (run 50000 0)",
@@ -330,8 +330,8 @@ fn integer_division_family_under_jit() {
     is(
         "(defn cstep (n steps)
            (if (= n 1) steps
-             (if (= (rem n 2) 0)
-               (cstep (quot n 2) (+ steps 1))
+             (if (= (math/rem n 2) 0)
+               (cstep (math/quot n 2) (+ steps 1))
                (cstep (+ (* 3 n) 1) (+ steps 1)))))
          (defn run (k last) (if (< k 1) last (run (- k 1) (cstep 27 0))))
          (run 20000 0)",
@@ -339,7 +339,7 @@ fn integer_division_family_under_jit() {
     );
     // rem/quot on positive and negative operands.
     is(
-        "(defn r (a) (rem a 5))
+        "(defn r (a) (math/rem a 5))
          (defn run (k last) (if (< k 1) last (run (- k 1) (r 17))))
          (list (do (run 20000 0) (r 17)) (r -17))",
         "(2 -2)",
@@ -364,7 +364,7 @@ fn exact_division_inlines_inexact_deopts_to_ratio() {
 fn division_by_zero_deopts_to_the_same_error() {
     // A warmed division arm hitting a zero divisor must deopt and raise the VM's exact
     // error (Cranelift's srem would *trap*/abort if we hadn't guarded it).
-    let err = run("(defn r (a b) (rem a b))
+    let err = run("(defn r (a b) (math/rem a b))
          (defn run (k last) (if (< k 1) last (run (- k 1) (r 10 2))))
          (run 20000 0)
          (r 10 0)")
@@ -380,7 +380,7 @@ fn quot_min_over_neg1_deopts_to_bignum() {
     // `quot i64::MIN -1` overflows i64 (Cranelift sdiv would trap); the guard deopts and
     // the VM promotes to a BigInt. Warm `quot`, then hit the overflow edge.
     is(
-        "(defn q (a b) (quot a b))
+        "(defn q (a b) (math/quot a b))
          (defn run (k last) (if (< k 1) last (run (- k 1) (q 100 5))))
          (do (run 20000 0) (q -9223372036854775808 -1))",
         "9223372036854775808", // 2^63, a BigInt
@@ -673,10 +673,10 @@ fn type_of_prim_covers_every_shape_hot() {
          (defn work (i acc)
            (if (>= i 60000) acc
              (work (+ i 1)
-               (+ acc (code (if (%eq (rem i 5) 0) 7
-                             (if (%eq (rem i 5) 1) [1]
-                              (if (%eq (rem i 5) 2) (range 3)
-                               (if (%eq (rem i 5) 3) \"s\"
+               (+ acc (code (if (%eq (math/rem i 5) 0) 7
+                             (if (%eq (math/rem i 5) 1) [1]
+                              (if (%eq (math/rem i 5) 2) (range 3)
+                               (if (%eq (math/rem i 5) 3) \"s\"
                                 (< 1 2))))))))))
          (work 0 0)",
         "180000", // 12000 × (1+2+3+4+5)
@@ -711,7 +711,7 @@ fn type_mixed_join_edges_stay_exact() {
         "(defn code (x) (if (%eq x 7) 1 (if (%eq x true) 5 0)))
          (defn work (i acc)
            (if (>= i 60000) acc
-             (work (+ i 1) (+ acc (code (if (%eq (rem i 2) 0) 7 (< 1 2)))))))
+             (work (+ i 1) (+ acc (code (if (%eq (math/rem i 2) 0) 7 (< 1 2)))))))
          (work 0 0)",
         "180000", // 30000×1 + 30000×5 — verified against BROOD_VM=0
     );

@@ -38,7 +38,9 @@
 (defn- url-byte->pct
   (b)
   "Encode a single byte `b` as a %XX string (uppercase hex)."
-  (str "%" (string/char-at url-hex-upper (quot b 16)) (string/char-at url-hex-upper (rem b 16))))
+  (str "%"
+    (string/char-at url-hex-upper (math/quot b 16))
+    (string/char-at url-hex-upper (math/rem b 16))))
 
 ;; `acc` is the emitted pieces in reverse; `percent-encode` joins once. `(str acc …)`
 ;; per byte rebuilt the whole accumulator each step — O(n^2) over a long input.
@@ -157,7 +159,7 @@ pass through, space becomes +, all other bytes become %XX."
   "Encode a map of string→string (or keyword→string) params as a
 `key=value&key=value` query string, percent-encoding keys and values and using
 `+` for spaces. Keys are sorted for deterministic output. A non-string value is rendered
-with `->string` (the `Display` protocol), so a record encodes as the string its type
+with `->string` (the `display` protocol), so a record encodes as the string its type
 defines rather than as its field map.
 
     (url/query-encode {:a 1})    → \"a=1\""

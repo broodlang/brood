@@ -51,7 +51,9 @@ escape sequences and carriage returns."
 (defn strip (s)
   "`s` with all ANSI escape sequences and bare carriage returns removed.
 Fast path: a chunk with no ESC byte only needs its CRs dropped (a single
-`replace` pass, no char-by-char scan)."
+`replace` pass, no char-by-char scan).
+
+    (ansi/strip (str (string/int->char 27) \"[1mx\" (string/int->char 27) \"[0m\"))   → \"x\""
   (if (includes? s "\e")
     (let (v (into [] (string/->list s)))
       (ansi-strip v 0 (count v) ()))

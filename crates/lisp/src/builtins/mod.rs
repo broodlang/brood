@@ -206,7 +206,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     let num_or_record = num.union(map_ty);
     def(
         heap,
-        "max",
+        "%max",
         Arity::at_least(1),
         Sig::variadic(num_or_record.clone(), num_or_record.clone()),
         &["x", "&", "more"],
@@ -214,7 +214,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         prim_max);
     def(
         heap,
-        "min",
+        "%min",
         Arity::at_least(1),
         Sig::variadic(num_or_record.clone(), num_or_record),
         &["x", "&", "more"],
@@ -232,7 +232,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // `mod` is Brood over `rem` (std/prelude.blsp); only `rem` is primitive.
     def(
         heap,
-        "rem",
+        "%rem",
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "b"],
@@ -241,7 +241,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     // `%quot` — truncating integer division (toward zero), the kernel `quot`
     // passes through to so the VM inlines it as one op. (It used to be Brood over
-    // `(/ (- a (rem a b)) b)` — three dispatched calls per use, which made tight
+    // `(/ (- a (math/rem a b)) b)` — three dispatched calls per use, which made tight
     // integer loops like `collatz` pay rem+sub+div every step.)
     def(
         heap,
@@ -253,7 +253,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         prim_quot,
     );
     // Ratio parts + conversions (exact rationals, ADR-196). `math/numerator`/`math/denominator`
-    // accept an int (math/numerator = itself, math/denominator = 1) or a ratio.
+    // accept an int (math/numerator = itself, denominator = 1) or a ratio.
     let int_or_ratio = int.union(ratio_ty);
     def(
         heap,
@@ -261,7 +261,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![int_or_ratio.clone()], int),
         &["x"],
-        "The math/numerator of a ratio (`(math/numerator 3/4)` → 3), or an integer itself.",
+        "The numerator of a ratio (`(math/numerator 3/4)` → 3), or an integer itself.",
         prim_numerator,
     );
     def(
@@ -270,7 +270,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![int_or_ratio], int),
         &["x"],
-        "The positive math/denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer.",
+        "The positive denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer.",
         prim_denominator,
     );
     def(
@@ -1102,7 +1102,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], num.union(nil_ty)),
         &["s"],
-        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike read-string). The inverse of str.",
+        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike reflect/read-string). The inverse of str.",
         string_to_number);
     // `decimal` constructs an exact base-10 decimal from a string ("1.50"), an
     // int (3), or a float (inexact source — uses its shortest round-trip form).
@@ -1137,7 +1137,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // form, i.e. full f64 precision). `round-to` (a *number*) is Brood over floor.
     def(
         heap,
-        "->fixed",
+        "%->fixed",
         Arity::exact(2),
         Sig::new(vec![num, int], string),
         &["x", "n"],
@@ -2100,27 +2100,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "read-string",
+        "%read-string",
         Arity::exact(1),
         Sig::new(vec![string], any),
         &["s"],
-        "Parse and return the single form in string s. Errors on trailing content after the form (rather than silently dropping it) — use read-all for input with more than one form.",
+        "Parse and return the single form in string s. Errors on trailing content after the form (rather than silently dropping it) — use reflect/read-all for input with more than one form.",
         read_string);
     def(
         heap,
-        "read-all",
+        "%read-all",
         Arity::exact(1),
         Sig::new(vec![string], any),
         &["s"],
-        "Parse every form in string s and return them as a list (the all-forms sibling of read-string).",
+        "Parse every form in string s and return them as a list (the all-forms sibling of reflect/read-string).",
         read_all);
     def(
         heap,
-        "read-first",
+        "%read-first",
         Arity::exact(1),
         Sig::new(vec![string], any),
         &["s"],
-        "Parse and return the first form in string s, ignoring any trailing forms (the lenient sibling of read-string — for peeking a multi-form source's leading form, e.g. a file's (defmodule …) header).",
+        "Parse and return the first form in string s, ignoring any trailing forms (the lenient sibling of reflect/read-string — for peeking a multi-form source's leading form, e.g. a file's (defmodule …) header).",
         read_first);
     def(
         heap,
@@ -2331,7 +2331,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(0),
         Sig::new(vec![], list_ty),
         &[],
-        "Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the math/denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there.",
+        "Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there.",
         coverage_instrumented);
     def(
         heap,
@@ -2347,7 +2347,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(0),
         Sig::new(vec![], list_ty),
         &[],
-        "Every [line col] branch point the compiler INSTRUMENTED, as [file ([line col] …)] — the branch math/denominator (each needs both edges taken for full coverage).",
+        "Every [line col] branch point the compiler INSTRUMENTED, as [file ([line col] …)] — the branch denominator (each needs both edges taken for full coverage).",
         coverage_branch_instrumented);
     def(
         heap,

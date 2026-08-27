@@ -719,6 +719,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-26** — KI-64 fixed: a JIT block-argument spill was landing on the deopt journal (ADR-248)
 - **2026-08-26** — the codecs: `json` parse 1.8x (row -20.8%) and `base64` decode 1.8x (row -9.5%) (ADR-249)
 - **2026-08-26** — every package's `:brood` floor was a lie; the ecosystem release train that fixed it
+- **2026-08-27** — migrating the ecosystem across the waves; two outages, both from verifying the wrong artifact (KI-66/67)
 
 ---
 
@@ -3959,6 +3960,50 @@ position plus the one registration line — the same treatment `register` and `d
 stale binary "fails by agreeing with the baseline" — it also fails by disagreeing
 spectacularly. Rebuild both binaries, or check the mtime before believing a timing.
 
+## 2026-08-27 — migrating the ecosystem across the waves, and two outages
+
+hive and its whole closure (hatch, store-postgres, store, s3) moved onto current brood. The
+migration itself was mechanical — `int->char`, `char->int`, `whereis`/`register`, the `bit/*`
+family, `decimal/of`, `os/env`, `os/spawn`, `map-pairs` → `%map-pairs`, `bytes/->list` → `seq`
+— and every one applied with `nest rename` so the rewrites stayed CST-scoped (`decimal` never
+touched `decimal?`).
+
+What is worth recording is the two outages, because neither was a language bug and both were
+the same mistake in different clothes: **verifying something other than what shipped**.
+
+**The first.** Bumping BROOD_REF past the renames while the pinned hatch still called
+`int->char`. The runtime built; the BUNDLE died at module load. `nest check` had passed —
+against my locally installed brood, which was not the pinned one. Fix: build a toolchain at
+the exact pin (a throwaway `git worktree`) and check every dependency against THAT.
+
+**The second, sharper.** I committed hatch, then found `os/getenv` while checking against a
+newer brood, fixed it in the working tree, and pinned hive at the commit from before the fix.
+Everything I then ran — check, 969/969, 103/103 — tested my working tree, which is not what
+`nest fetch` would clone. **A pin can only be verified against a pushed commit.** The recovery
+step that now matters: `rm -rf _deps && nest fetch`, so the verification reads exactly what the
+build will.
+
+**And the check that would have caught both:** booting it. `nest test` never runs `main`, and
+both failures were on the module-load path. Filed as KI-66 with `nest release --smoke` as the
+fix; KI-67 covers the other blind spot, `nest check`'s deliberate silence inside a `try` body,
+which let hatch ship a dead spool write (`bytes/append` → `file/spit-bytes-append`) with every
+gate green.
+
+**Three measurement lessons, all mine.** `strings` is absent from `debian:bookworm-slim`, so
+`strings … | grep -c cranelift` reported 0 for *command not found* — indistinguishable from
+"no JIT", and I built two deploys and a whole theory on it before checking whether the probe
+ran. `grep -ac` works. Second: a 200 is not a rendered page — `/reference` returned 200 while
+serving white panels on a dark ground. Third: cascade LAYERS outrank specificity, so every
+component override written in `@layer components` was silently discarded by daisyUI's own
+later layer; `.btn.btn-primary` was the wrong instrument because specificity never gets
+consulted across layers.
+
+Also this session: hive's `[:task-error ^h _msg]` discarded the handler's error message, which
+is why its 500s were undiagnosable for months; hatch's access log never subscribed to
+`[:hatch :request :exception]`; the playground's autocomplete offered a fraction of the library
+(a bare `Interp` holds only the prelude — 986 names against 3632) while suggesting 1615 private
+internals.
+
 ## 2026-08-27 (second session) — the stdlib image, and three measurements that were measuring nothing
 
 Picked up the compile-parity thread the previous session was killed mid-way through (OOM,
@@ -3981,7 +4026,7 @@ The install had to move into the **prelude** — the only place that precedes th
 `require`. `stdimage/image-path` and `stdimage/install` are now one-line calls into it, so
 there is one definition rather than a boot twin drifting from the shipped one. Measured that
 way: **157 failures of 4917**, in four independent faults, and the one on record was neither
-the largest nor correctly described (ADR-255).
+the largest nor correctly described (ADR-256).
 
 - **112 were a concurrency race**, not a registration gap. The image branch called `provide`
   before following the module's require-edges, justified by a comment reading the `defmodule`
@@ -4032,3 +4077,22 @@ a pass — the trace that counted materialised modules is what separated a real 
 green that ran none of the code under test. And do not rebuild the binary while a
 verification runs: I did, mid-suite, and had to discard the batch and re-run against a frozen
 copy rather than argue that the change was harmless.
+
+**Merge follow-up — one red that came in with the ability rename, not with the image.**
+`a_shipped_closure_requires_its_modules_on_the_receiver` failed on both nextest tries, and
+reproduced at loadavg 1 with the stall report saying *"the child is gone, so this was not a
+stall"* — deterministic, not the KI-38 load shape it resembles. Confirmed against a worktree
+at `origin/main` **without** this session's commit: red there too.
+
+The cause is a real module edge, not a bug. `std/string.blsp` reaches `math/max` and
+`math/->fixed`, and `std/rand.blsp` reaches `math/rem`, so since the morning's `math/` wave
+anything that formats a string pulls `math` onto the boot chain. The test asserts node A has
+"never heard of math" before a shipped closure arrives — a premise that quietly stopped being
+true. Its own guard is what caught it (`throw "node A already had math loaded — the test
+proves nothing"`), which is the argument for writing that kind of guard: without it the test
+would have gone on passing while proving nothing. Re-pointed at `encoding`, which is genuinely
+off the boot chain; every assertion it makes is unchanged.
+
+Worth knowing rather than fixing: loading `math` costs microseconds, so this is not a startup
+regression — but `string` is on everyone's path, and a future wave that moves something
+heavier under it would be.

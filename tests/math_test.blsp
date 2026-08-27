@@ -103,7 +103,7 @@
 (describe "float math accepts the whole numeric tower"
   (test "a ratio coerces into the float functions"
     (assert= (sqrt 9/4) 1.5)
-    (assert= (->fixed 7/2 2) "3.50")
+    (assert= (math/->fixed 7/2 2) "3.50")
     (assert= (ceil 7/2) 4)
     (assert= (round 7/2) 4))
   (test "a decimal and a bignum coerce too"
@@ -122,16 +122,16 @@
   (test "a non-number is still rejected"
     (assert-error (sqrt "x"))
     (assert-error (math/floor :a))
-    (assert-error (->fixed nil 2))))
+    (assert-error (math/->fixed nil 2))))
 
 (describe "quot, even? and odd?"
   (test "quot is truncated integer division"
-    (assert= (quot 17 5) 3)
-    (assert= (quot -17 5) -3)
+    (assert= (math/quot 17 5) 3)
+    (assert= (math/quot -17 5) -3)
     ; truncates toward zero (unlike floor)
-    (assert= (type-of (quot 17 5)) :int))
-  (test "quot by zero raises" (assert-error (quot 1 0)))
-  (test "quot/rem reconstruct the dividend" (assert= (+ (* (quot 17 5) 5) (rem 17 5)) 17))
+    (assert= (type-of (math/quot 17 5)) :int))
+  (test "quot by zero raises" (assert-error (math/quot 1 0)))
+  (test "quot/rem reconstruct the dividend" (assert= (+ (* (math/quot 17 5) 5) (math/rem 17 5)) 17))
   (test "even? / odd? classify integers"
     (is (even? 0))
     (is (even? 4))
@@ -143,12 +143,12 @@
 
 (describe "variadic min / max"
   (test "max / min over many args keep the extreme"
-    (assert= (max 3 1 4 1 5 9 2 6) 9)
-    (assert= (min 3 1 4 1 5 9 2 6) 1))
-  (test "max / min on a single arg return it" (assert= (max 7) 7) (assert= (min 7) 7))
+    (assert= (math/max 3 1 4 1 5 9 2 6) 9)
+    (assert= (math/min 3 1 4 1 5 9 2 6) 1))
+  (test "max / min on a single arg return it" (assert= (math/max 7) 7) (assert= (math/min 7) 7))
   (test "max / min work on floats and mixed numbers"
-    (assert= (max 1 2.5 2) 2.5)
-    (assert= (min 1 2.5 0.5) 0.5)))
+    (assert= (math/max 1 2.5 2) 2.5)
+    (assert= (math/min 1 2.5 0.5) 0.5)))
 
 (describe "arbitrary-precision integers (bignums)"
   (test "arithmetic past i64 promotes; in-range results demote"
@@ -166,9 +166,9 @@
     (is (number? (bit/shift-left 1 200)))
     (assert= (type-of (bit/shift-left 1 200)) :int))
   (test "quot / rem / mod on bignums"
-    (assert= (quot (bit/shift-left 1 200) (bit/shift-left 1 100)) (bit/shift-left 1 100))
-    (assert= (rem (bit/shift-left 1 200) (bit/shift-left 1 100)) 0)
-    (assert= (mod (+ (bit/shift-left 1 200) 7) (bit/shift-left 1 100)) 7))
+    (assert= (math/quot (bit/shift-left 1 200) (bit/shift-left 1 100)) (bit/shift-left 1 100))
+    (assert= (math/rem (bit/shift-left 1 200) (bit/shift-left 1 100)) 0)
+    (assert= (math/mod (+ (bit/shift-left 1 200) 7) (bit/shift-left 1 100)) 7))
   (test "comparisons span int and bignum"
     (is (> (bit/shift-left 1 200) 9223372036854775807))
     (is (< (bit/shift-left 1 100) (bit/shift-left 1 200)))

@@ -67,7 +67,7 @@ stray print). A request must carry an int `:id` and a string `:src`; a present
 `:timeout-ms` must be an int (a malformed field is a nil, never a raise later —
 one bad line must not kill the server) and a present `:trace` a vector."
   (try
-    (let (v (read-string line))
+    (let (v (reflect/read-string line))
       (if (and (map? v)
             (int? (get v :id))
             (string? (get v :src))
@@ -86,7 +86,7 @@ one bad line must not kill the server) and a present `:trace` a vector."
   "The reply map in `line`, or nil when the line isn't one — a client skips nil
 lines (see the module preamble on stray output)."
   (try
-    (let (v (read-string line))
+    (let (v (reflect/read-string line))
       (if (map? v) v nil))
     (catch _ nil)))
 
@@ -159,7 +159,7 @@ looking identical to a round-trip that cleaned up after itself."
   ;; silently discarded. In a tutorial that made a fixed exercise report the old
   ;; answer (and a broken one report the fixed answer), depending on history.
   ;; Why not up front: the function usually doesn't exist until its `defn` has run.
-  (let (forms (read-all src)
+  (let (forms (reflect/read-all src)
         result (fold (fn (acc form)
                        (let ([installed _] acc)
                          (if (or installed (eval-server-definition-form? form))

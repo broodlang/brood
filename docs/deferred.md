@@ -430,7 +430,7 @@ Reproduce:
 (let (t (now) _ (cd 1000000)) (println "compiled: " (- (now) t) "ms"))
 
 (def SRC "(defn cd2 ((0) :liftoff) ((n) (cd2 (- n 1))))\n(cd2 1000000)")
-(let (t (now) _ (fold (fn (_ f) (eval f)) nil (read-all SRC)))
+(let (t (now) _ (fold (fn (_ f) (eval f)) nil (reflect/read-all SRC)))
   (println "eval:     " (- (now) t) "ms"))
 ```
 

@@ -47,7 +47,7 @@ arg silently becoming `nil`.
 | | `%str-last-index-of` | 2-3 | char index of the **last** occurrence starting strictly before the optional `before` bound (default end; -1 if none). One forward pass with an advancing cursor. Backs `last-index-of`, which used to walk forward in Brood calling `index-of` per match — O(matches × length), and on an editor hot path both ways (reverse buffer search; finding the current line's start per keystroke) |
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
 | | `lower` | 1 | `s` lower-cased (Unicode-aware) |
-| | `string/->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
+| | `string/->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `reflect/read-string`) |
 | | `string->codepoints` | 1 | the characters of `s` as a vector of integer Unicode codepoints, one O(n) pass — the random-access form text parsers index with `nth` and compare as ints |
 | | `%codepoints->string` | 1 | its **inverse**: a string from a vector, list or `bytes` of codepoint ints, one O(n) pass. Backs `string/codepoints->`, which was `(apply str (map int->char cs))` — a seq view, a closure call and a one-character string per code point, then an N-way variadic concat. That shape was every text parser's way back from the code vector, and removing it took `json` parse 1.8× (row −20.8%). Errors on a non-int or a non-Unicode-scalar (negative, > U+10FFFF, or a surrogate) |
 | | `string-span` | 3 | `(string-span s start chars)` → the char index just past the maximal run of chars in the set `chars` (a string) starting at char `start` — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native |
@@ -106,14 +106,14 @@ arg silently becoming `nil`.
 | | `%write-out` | 1 | Write the ready string `s` to the current stdout sink — the active capture buffer (`with-out-str`) if set, else real stdout. The default `*out*` port. |
 | | `%write-err` | 1 | Write the ready string `s` to real stderr (never captured). The default `*err*` port. |
 | | `read-line` | 0 | Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input. |
-| | `read-all` | 1 | Parse every form in string s and return them as a list (the all-forms sibling of read-string). |
-| | `read-first` | 1 | Parse and return the first form in string s, ignoring any trailing forms (the lenient sibling of read-string — for peeking a multi-form source's leading form, e.g. a file's (defmodule …) header). |
+| | `reflect/read-all` | 1 | Parse every form in string s and return them as a list (the all-forms sibling of reflect/read-string). |
+| | `reflect/read-first` | 1 | Parse and return the first form in string s, ignoring any trailing forms (the lenient sibling of reflect/read-string — for peeking a multi-form source's leading form, e.g. a file's (defmodule …) header). |
 | **Time** | `now` | 0 | wall-clock milliseconds since the Unix epoch (integer); subtract two readings for elapsed time |
 | | `now-ns` | 0 | Wall-clock nanoseconds since the Unix epoch (finer-grained than now). |
 | **Memory** | `mem-bytes` | 0 | bytes currently allocated process-wide (from the counting global allocator) |
 | | `mem-peak` | 0 | high-water mark of allocated bytes since process start |
 | **Self-hosting hooks** | `eval` | 1 | evaluate a form in the global env |
-| | `read-string` | 1 | parse one form from text |
+| | `reflect/read-string` | 1 | parse one form from text |
 | | `eval-string` | 1 | read + evaluate every form in a string (string analogue of `load`) |
 | | `load` | 1 | read + evaluate a file |
 | | `%builtin-module` | 1 | source of a baked-in std module by name, or nil (used by Brood `require`) |
@@ -246,9 +246,9 @@ literal — no constructor call.
 |  | `decimal/->string` | 1 | The canonical decimal string of decimal d (no M suffix). |
 |  | `decimal/->float` | 1 | Decimal d as an (inexact) float. |
 |  | `->fixed` | 2 | Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0. |
-| **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `math/numerator` | 1 | The math/numerator of a ratio (`(math/numerator 3/4)` → 3), or an integer itself. |
-|  | `math/denominator` | 1 | The positive math/denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer. |
-|  | `decimal/number->` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `rational` are prelude functions.) |
+| **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `math/numerator` | 1 | The numerator of a ratio (`(math/numerator 3/4)` → 3), or an integer itself. |
+|  | `math/denominator` | 1 | The positive denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer. |
+|  | `decimal/number->` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `math/rational` are prelude functions.) |
 | **Set** (`#{…}`; CHAMP-backed. `%`-internal — `std/set.blsp` is the library) | `%set` | any | Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `set` library's constructor is Brood over this. |
 |  | `%set-add` | 2 | A fresh set like s with element x added (a set already holding x is returned unchanged). O(log n). |
 |  | `%set-remove` | 2 | A fresh set like s with element x removed (absent → unchanged). O(log n). |
@@ -291,7 +291,7 @@ literal — no constructor call.
 |  | `%untar-gz` | 3 | Extract a gzip'd tar `archive` into `dest`, stripping `strip` leading path components (package convention: 1). Shells to `tar`. Returns :ok or throws. The tarball-dep delivery mechanism (ADR-037). |
 |  | `%rm-rf` | 1 | Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037). |
 | **Coverage** (ADR-148; armed by `BROOD_COVERAGE=1`) | `%coverage-lines` | 0 | Every source line recorded as EXECUTED, as a list of [file (line …)]. Empty unless the run was started with BROOD_COVERAGE=1 (`nest test --cover-lines`). |
-|  | `%coverage-instrumented` | 0 | Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the math/denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there. |
+|  | `%coverage-instrumented` | 0 | Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there. |
 |  | `%coverage-precompile` | 1 | Compile f's body now, without calling it, so its lines count toward %coverage-instrumented. Returns true if a body was compiled. |
 |  | `%coverage-reset` | 0 | Forget every line recorded by %coverage-lines, so a long-lived image can measure more than once without runs bleeding together. |
 | **GUI** (optional native window backend, ADR-046; needs `--features gui`) | `gui-open` | 0–4 | Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. An optional `opts` map carries the attributes fixed at build time: `{:decorations false}` for a borderless window, `{:app-id "my-app"}` for the desktop application id (Wayland `app_id` / X11 `WM_CLASS`) the installed `my-app.desktop` entry is named after — what gives the window its own icon and name in the dash instead of the desktop's generic fallback. |

@@ -31,13 +31,13 @@
     (let (n 30000
           got (ev-step n 0))
       ;; n steps alternate ev->od->ev…; starting at ev, half add 1 and half add 2.
-      (is (= got (+ (* (quot n 2) 3) (if (= (rem n 2) 0) 0 1))))))
+      (is (= got (+ (* (math/quot n 2) 3) (if (= (math/rem n 2) 0) 0 1))))))
 
   (test "concurrent hot tail recursion agrees across processes"
     ;; Peers tier and swap while others are mid-tail-dispatch — the window the bug needed.
     (let (me (self)
           n 20000
-          expect (+ (* (quot n 2) 3) (if (= (rem n 2) 0) 0 1))
+          expect (+ (* (math/quot n 2) 3) (if (= (math/rem n 2) 0) 0 1))
           _ (map (fn (_) (spawn (fn () (send me [:r (ev-step n 0)])))) (range 8))
           got (map (fn (_) (receive ([:r v] v))) (range 8)))
       (is (= (count got) 8))

@@ -36,7 +36,7 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     // ---- base: disjoint argument, wrong arity ----
     ("(first 5)", "first"),                  // int isn't a sequence
     (r#"(+ 1 "x")"#, "+"),                    // string isn't a number
-    ("(rem 1 2 3)", "rem"),                  // arity: expects 2
+    ("(math/rem 1 2 3)", "rem"),                  // arity: expects 2
     // ---- function arrows: callback arity ----
     ("(map cons (list 1 2 3))", "callback"),         // cons is 2-ary; map calls with 1
     ("(map (fn (a b) a) (list 1 2 3))", "callback"), // 2-ary lambda under map
@@ -123,7 +123,7 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(map (fn (x) (+ x 1)) (list 1 2 3))",      // right-arity lambda
     "(reduce + 0 (list 1 2 3))",                // right-arity, numeric
     "(reduce (fn (acc x) (+ acc x)) 0 (list 1 2 3))", // 2-ary lambda for reduce
-    "(map (fn (& xs) (apply + xs)) (list 1 2 3))", // variadic lambda (min 0) accepts 1
+    "(map (fn (& xs) (apply + xs)) (list 1 2 3))", // variadic lambda (math/min 0) accepts 1
     "(map (fn (x &optional y) x) (list 1 2 3))", // 1 required + optional accepts 1
     "(reduce (fn (acc x & more) (+ acc x)) 0 (list 1 2 3))", // variadic min 2 == reduce's 2
     // ---- parametric results used correctly (number element is fine for +) ----

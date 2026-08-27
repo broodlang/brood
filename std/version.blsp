@@ -221,8 +221,8 @@ everything (the \"no release yet\" placeholder a registry starts from).
   ;;          if every written component is zero, the last one written.
   ;;   `~>` : one shallower than written — index (written-count - 2), floored at 0.
   (if (= op "^")
-    (or (first-nonzero-index parts) (max 0 (dec (count parts))))
-    (max 0 (- (count parts) 2))))
+    (or (first-nonzero-index parts) (math/max 0 (dec (count parts))))
+    (math/max 0 (- (count parts) 2))))
 
 (defn- upper-bound
   (parts bump-index)

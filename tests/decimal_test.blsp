@@ -101,10 +101,10 @@
           2M))
     (is (> 3M
           2.5M))
-    (is (= (max 1M
+    (is (= (math/max 1M
              2.5M 2M)
           2.5M))
-    (is (= (min 1.5M
+    (is (= (math/min 1.5M
              1M 2M)
           1M))))
 
@@ -143,13 +143,13 @@
 
 (describe "decimal: printer round-trip"
   (test "pr-str emits the M suffix and re-reads to the same value"
-    (is (= (read-string (pr-str 1.50M))
+    (is (= (reflect/read-string (pr-str 1.50M))
           1.50M))
-    (is (= (read-string (pr-str -3.14M))
+    (is (= (reflect/read-string (pr-str -3.14M))
           -3.14M))
-    (is (= (read-string (pr-str 0M))
+    (is (= (reflect/read-string (pr-str 0M))
           0M))
-    (is (= (read-string (pr-str 100M))
+    (is (= (reflect/read-string (pr-str 100M))
           100M))))
 
 (describe "decimal: GC survival"

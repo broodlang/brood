@@ -133,8 +133,8 @@ shape `std/observer` draws by hand. Returns one `text` op.
 
     (bar 0 cols \" file.blsp        UTF-8  L1\" {:face (face :ui/header)})
     (bar (dec rows) cols msg {:face {:bg :blue :fg :white} :align :center})"
-  (let (scale (max 1 (get opts :scale 1))
-        cells (max 1 (quot width scale)))
+  (let (scale (math/max 1 (get opts :scale 1))
+        cells (math/max 1 (math/quot width scale)))
     (text row
       0
       (bar-fit s cells (get opts :align :left))
@@ -154,7 +154,8 @@ shape `std/observer` draws by hand. Returns one `text` op.
     (cond
       (>= n cells) (string/substring s 0 cells)
       (= align :right) (string/pad-left s cells)
-      (= align :center) (string/pad-right (str (string/repeat " " (quot (- cells n) 2)) s) cells)
+      (= align :center)
+        (string/pad-right (str (string/repeat " " (math/quot (- cells n) 2)) s) cells)
       else (string/pad-right s cells))))
 
 (defn frame (& ops)
@@ -209,7 +210,7 @@ no `:cursor` contribute nothing."
   "The clamped top-left `[mr mc]` of a `w`×`h`-cell card anchored at `(row, col)`: shifted
 so the whole card stays on the `cols`×`rows` screen. Shared by a card's renderer and any
 click/hover hit-test, so a card near a screen edge stays interactive exactly where drawn."
-  [(max 0 (min (- rows h) row)) (max 0 (min (- cols w) col))])
+  [(math/max 0 (math/min (- rows h) row)) (math/max 0 (math/min (- cols w) col))])
 
 (defn card-surface (row col w h face &optional (gui? false) (opts {}))
   "Render ops for a floating card's **surface** — the raised panel other overlays sit on:
@@ -241,13 +242,13 @@ widest line plus one cell of padding each side; `face` fills the surface, `fg` s
 text, and `opts` forwards `:border`/`:radius` to `card-surface`. GUI rounds the card; the
 terminal draws a flat panel."
   (let (n (count lines)
-        w (+ 2 (fold (fn (m s) (max m (string/length s))) 0 lines))
+        w (+ 2 (fold (fn (m s) (math/max m (string/length s))) 0 lines))
         [mr mc] (card-rect (- anchor-row n) anchor-col w n cols rows))
     (append (card-surface mr mc w n face gui? opts)
       (map (fn (i)
              (let (s (nth lines i))
                (text (+ mr i)
                  mc
-                 (str " " s (string/repeat " " (max 0 (- w 1 (string/length s)))))
+                 (str " " s (string/repeat " " (math/max 0 (- w 1 (string/length s)))))
                  fg)))
         (range n)))))

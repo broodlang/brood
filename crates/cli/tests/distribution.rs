@@ -546,11 +546,18 @@ fn a_shipped_closure_requires_its_modules_on_the_receiver() {
     let port_b = free_port();
 
     // A: no `require`, no qualified reference of its own — a node that has never heard
-    // of `math` or `json`. It asserts that before the closure arrives.
+    // of `encoding` or `json`. It asserts that before the closure arrives.
+    //
+    // NOT `math`, which this test used until 2026-08-27: `string` reaches `math/max` and
+    // `math/->fixed`, so anything that formats a string pulls `math` onto the boot chain and
+    // the guard below fired on every run. That is a legitimate module edge, not a bug — but
+    // it makes `math` useless as a "node A has never heard of this" probe. The guards are
+    // what caught it, which is the reason to keep them: without them the test would still
+    // have passed while proving nothing.
     let server = format!(
         r#"
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(when (bound? 'math/sqrt) (throw "node A already had math loaded — the test proves nothing"))
+(when (bound? 'encoding/hex-encode) (throw "node A already had encoding loaded — the test proves nothing"))
 (when (bound? 'json/encode) (throw "node A already had json loaded — the test proves nothing"))
 (proc/register :calc (self))
 (defn serve ()
@@ -567,7 +574,7 @@ fn a_shipped_closure_requires_its_modules_on_the_receiver() {
 (node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (node/connect "a@127.0.0.1:{port_a}")
 (send {{:name :calc :node :a@127.0.0.1}}
-  [:run (fn (x) (str (math/sqrt x) " " (json/encode {{:q (quote math/not-a-real-name)}}))) 144 (self)])
+  [:run (fn (x) (str (encoding/hex-encode (str x)) " " (json/encode {{:q (quote math/not-a-real-name)}}))) 144 (self)])
 (receive
   ([:result r] (io/puts (str "GOT: " r)))
   (after 30000 (throw "no reply from calc")))
@@ -594,7 +601,7 @@ fn a_shipped_closure_requires_its_modules_on_the_receiver() {
         "client did not finish cleanly.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
     );
     assert!(
-        stdout.contains(r#"GOT: 12.0 {"q":"math/not-a-real-name"}"#),
+        stdout.contains(r#"GOT: 313434 {"q":"math/not-a-real-name"}"#),
         "expected the remote to run the closure against modules it loaded on demand, got:\n\
          --- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
     );

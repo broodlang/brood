@@ -60,8 +60,8 @@ pub fn read_one(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
 }
 
 /// Read exactly one form and require everything after it to be trivia (whitespace
-/// / commas / comments). Errors if a second form follows — so `read-string` is a
-/// *loud* error on trailing content, not a silent drop (use `read-all` to read
+/// / commas / comments). Errors if a second form follows — so `reflect/read-string` is a
+/// *loud* error on trailing content, not a silent drop (use `reflect/read-all` to read
 /// every form). Trailing whitespace and comments are fine.
 pub fn read_one_complete(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
     let mut parser = Parser::new(heap, src);
@@ -73,8 +73,8 @@ pub fn read_one_complete(heap: &mut Heap, src: &str) -> Result<Value, LispError>
     parser.s.skip_trivia();
     if !parser.s.at_end() {
         return Err(parser.err(
-            "unexpected trailing content after the form — read-string reads a single \
-             form; use read-all (or eval-string) for input with more than one",
+            "unexpected trailing content after the form — reflect/read-string reads a single \
+             form; use reflect/read-all (or eval-string) for input with more than one",
         ));
     }
     Ok(form)
@@ -110,7 +110,10 @@ impl<'a> Parser<'a> {
     /// into a stack-overflow abort. Pair every successful call with [`exit`].
     fn enter(&mut self) -> Result<(), LispError> {
         if self.depth >= MAX_DEPTH {
-            return Err(self.err(format!("form nested too deeply (max {} levels)", MAX_DEPTH)));
+            return Err(self.err(format!(
+                "form nested too deeply (math/max {} levels)",
+                MAX_DEPTH
+            )));
         }
         self.depth += 1;
         Ok(())
@@ -618,7 +621,7 @@ impl<'a> Parser<'a> {
             )),
             // A ratio literal `num/den` (`1/2`, `-3/4`). `classify` validated the
             // shape; `BigRational`'s parse reduces it, and `alloc_ratio` demotes a
-            // math/denominator of 1 to an `Int` (so `4/2` reads as `2`).
+            // denominator of 1 to an `Int` (so `4/2` reads as `2`).
             AtomKind::Ratio => match token.parse::<num_rational::BigRational>() {
                 Ok(n) => Ok(self.heap.alloc_ratio(n)),
                 Err(_) => Err(self.err_at(
@@ -632,8 +635,8 @@ impl<'a> Parser<'a> {
                     format!("malformed ratio literal: {}", token),
                 )
                 .with_hint(
-                    "a ratio is `num/den` with an integer math/numerator over a positive, \
-                     nonzero integer math/denominator — write `-1/2` (sign on the math/numerator), \
+                    "a ratio is `num/den` with an integer numerator over a positive, \
+                     nonzero integer denominator — write `-1/2` (sign on the numerator), \
                      not `1/-2`, and not `1/0`",
                 )),
             // Digit-led but not a number Brood has (`1/2`, `0x1F`, `1_000`, `1N`).

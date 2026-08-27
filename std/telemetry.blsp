@@ -244,13 +244,14 @@ runtime presence-check of a declared event.
         ;; the emitter's measurement/metadata map bodies — `{:field field}` with the field
         ;; symbols as values (spliced as a literal, exactly like defrecord's ctor body, so
         ;; the values evaluate as the params).
-        meas-map (zipmap m-kws m-names)
-        meta-map (zipmap md-kws md-names)
+        meas-map (map/zipmap m-kws m-names)
+        meta-map (map/zipmap md-kws md-names)
         ;; the schema stored for introspection / runtime checks (types kept unevaluated).
         schema {:name (list 'quote fname)
-                :measurements (zipmap m-kws
+                :measurements (map/zipmap m-kws
                                 (map (fn (s) (list 'quote (telemetry-spec-type s))) meas))
-                :metadata (zipmap md-kws (map (fn (s) (list 'quote (telemetry-spec-type s))) meta))
+                :metadata (map/zipmap md-kws
+                            (map (fn (s) (list 'quote (telemetry-spec-type s))) meta))
                 :doc doc})
     `(do
        (register-event ~event ~schema)
@@ -641,8 +642,8 @@ read). Returns `id`."
                 :count (+ (get cur :count) 1)
                 :sum (+ (get cur :sum) v)
                 :sumsq (+ (get cur :sumsq) (* v v))
-                :min (min (get cur :min) v)
-                :max (max (get cur :max) v)))))))))
+                :min (math/min (get cur :min) v)
+                :max (math/max (get cur :max) v)))))))))
 
 ;; ---- distribution / histogram (bucketed, bounded) ---------------------------
 ;; The percentile-capable aggregator ADR-106 anticipated. Like `summary` it keeps
@@ -692,8 +693,8 @@ no samples). `(metric id)` → `{:kind :distribution :count :sum :min :max :mean
               :counts (assoc counts idx (+ (get counts idx 0) 1))
               :count (+ (get cur :count) 1)
               :sum (+ (get cur :sum) v)
-              :min (min (get cur :min) v)
-              :max (max (get cur :max) v))))))))
+              :min (math/min (get cur :min) v)
+              :max (math/max (get cur :max) v))))))))
 
 (defn- telemetry-dist-buckets
   (bounds counts i acc)
@@ -795,4 +796,4 @@ folds only a fraction of a hot event. Deterministic (an atomic counter under `id
 not a PRNG), so it never loses count. Compose with an aggregator's handler, or any
 attach handler. Returns the wrapped handler."
   (let (t (telemetry-metrics) k [id :sample-seen])
-    (fn (e m md) (when (= 0 (rem (table/incr t k 1) n)) (handler e m md)))))
+    (fn (e m md) (when (= 0 (math/rem (table/incr t k 1) n)) (handler e m md)))))

@@ -24,8 +24,8 @@
     ;; the identity is still reachable by direct key access (get), even though the
     ;; collection view hides it (next test) — `get`/`assoc` treat the record as a map.
     (assert= (get (point 1 2) :__id__) :record-test/point))
-  (test "the collection view (Seqable) is the fields — :__id__ never leaks"
-    ;; count/keys/vals/seq/map/fold go through the record's `Seqable` view (its fields,
+  (test "the collection view (seqable) is the fields — :__id__ never leaks"
+    ;; count/keys/vals/seq/map/fold go through the record's `seqable` view (its fields,
     ;; id-free) — so `:__id__` doesn't leak into iteration (it did before ADR-172 §7's
     ;; collection protocol). `(count r)` is the field count, not the raw map size.
     (assert= (count (point 1 2)) 2)
@@ -73,26 +73,26 @@
   (test "an accessor on a bare map without that field returns nil (records are maps)"
     (assert= (point-y {:x 1}) nil)))
 
-;; ---- the collection protocol: a custom record joins iteration (Seqable) + build (Conjable) ----
+;; ---- the collection protocol: a custom record joins iteration (seqable) + build (conjable) ----
 (defrecord stack (items))
-(impl Seqable stack (->seq [s] (get s :items))) ; iterate the items, not the fields
-(impl Conjable stack (-conj [s x] (stack (cons x (get s :items))))) ; prepend on conj
-(describe "defrecord: custom collection (Seqable + Conjable)"
-  (test "Seqable — a custom record iterates its own way"
+(impl seqable stack (->seq [s] (get s :items))) ; iterate the items, not the fields
+(impl conjable stack (conj-onto [s x] (stack (cons x (get s :items))))) ; prepend on conj
+(describe "defrecord: custom collection (seqable + conjable)"
+  (test "seqable — a custom record iterates its own way"
     (let (s (stack (list 10 20 30)))
       (assert= (seq s) (list 10 20 30))
       (assert= (count s) 3) ; not 1 (the one `items` field)
       (assert= (fold + 0 s) 60)
       (assert= (map inc s) (list 11 21 31))
       (assert= (filter even? s) (list 10 20 30))))
-  (test "the accessors first/rest/empty?/nth route through Seqable too"
+  (test "the accessors first/rest/empty?/nth route through seqable too"
     (let (s (stack (list 10 20 30)))
       (assert= (first s) 10)
       (assert= (rest s) (list 20 30))
       (assert= (nth s 1) 20)
       (refute (empty? s))
       (is (empty? (stack (list))))))
-  (test "Conjable — conj/into build the custom collection its own way"
+  (test "conjable — conj/into build the custom collection its own way"
     (assert= (seq (conj (stack (list)) 1)) (list 1))
     (assert= (seq (fold conj (stack (list)) (list 1 2 3))) (list 3 2 1)) ; prepend
     (assert= (seq (into (stack (list)) (list :a :b :c))) (list :c :b :a)))
@@ -127,7 +127,7 @@
 (defmethod num-add [usd usd] (a b) (usd (+ (get a :cents) (get b :cents))))
 (defmethod num-sub [usd usd] (a b) (usd (- (get a :cents) (get b :cents))))
 (defmethod num-mul [usd :int] (m n) (usd (* (get m :cents) n))) ; scale by a scalar
-(defmethod num-div [usd :int] (m n) (usd (quot (get m :cents) n)))
+(defmethod num-div [usd :int] (m n) (usd (math/quot (get m :cents) n)))
 
 (describe "defrecord: custom Num"
   (test "a Num record uses +/-/*// (dispatched from the kernel %add fallback)"

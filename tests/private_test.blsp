@@ -65,7 +65,7 @@
              (catch e :refused))
           :refused)))
   (test "top-level (no module) code may reach privates — the live-hacking hatch"
-    (assert= (eval (read-string "(priv-vault/secret)")) 41))
+    (assert= (eval (reflect/read-string "(priv-vault/secret)")) 41))
   (test "an unquoted private ref inside a quasiquote is still an evaluated ref — blocked"
     ;; `(x ~(other/priv)) — the ~ brings the ref back to the evaluated context,
     ;; so wrapping it in a quasiquote is not a bypass (ADR-146 level-aware walk).

@@ -66,7 +66,7 @@ still answering control messages between attempts."
 
 (defn- reconnect-next-delay
   (delay opts)
-  (min (* delay 2) (get opts :max-ms 30000)))
+  (math/min (* delay 2) (get opts :max-ms 30000)))
 
 (defn- reconnect-wait
   (spec peer opts subs delay deadline)

@@ -45,27 +45,27 @@ pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
 }
 
 pub(super) fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "read-string", arg(args, 0))?;
+    let s = expect_string(heap, "reflect/read-string", arg(args, 0))?;
     reader::read_one_complete(heap, &s)
 }
 
-/// `(read-first s)` — parse and return the **first** form in `s`, ignoring any
-/// trailing forms. The lenient sibling of `read-string`: for peeking the leading
+/// `(reflect/read-first s)` — parse and return the **first** form in `s`, ignoring any
+/// trailing forms. The lenient sibling of `reflect/read-string`: for peeking the leading
 /// form of a multi-form source (e.g. a file's `(defmodule …)` header) without
 /// parsing — or erroring on — the rest.
 pub(super) fn read_first(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "read-first", arg(args, 0))?;
+    let s = expect_string(heap, "reflect/read-first", arg(args, 0))?;
     reader::read_one(heap, &s)
 }
 
-/// `(read-all s)` — parse *every* form in `s` and return them as a list (empty for
-/// blank/comment-only input). The all-forms sibling of `read-string` (which
+/// `(reflect/read-all s)` — parse *every* form in `s` and return them as a list (empty for
+/// blank/comment-only input). The all-forms sibling of `reflect/read-string` (which
 /// returns only the first), and the read-half of `eval-string` without the eval —
 /// so form-manipulating Brood (an editor evaluating the last sexp before point,
 /// say) can isolate individual forms. Raises on a malformed/incomplete form, like
-/// `read-string`; use `parse-source` for lossless, error-tolerant parsing.
+/// `reflect/read-string`; use `parse-source` for lossless, error-tolerant parsing.
 pub(super) fn read_all(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "read-all", arg(args, 0))?;
+    let s = expect_string(heap, "reflect/read-all", arg(args, 0))?;
     let forms = reader::read_all(heap, &s)?;
     Ok(heap.list(forms))
 }
@@ -1093,9 +1093,15 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // is unaffected. `(:use map)` for bare access, or call qualified.
     embedded_module!("map", "std/map.blsp"),
     // The math library (ADR-227): sqrt / pow / ceil / round / round-to / clamp / abs /
-    // sum / product / positive? / negative? / even? / odd? + the constants pi/e —
-    // derived math over the bare arithmetic core (operators, quot/mod/rem stay in the
-    // prelude). `(:use math)` for bare access, or call qualified.
+    // sum / product / positive? / negative? / even? / odd? + the constants pi/e, and since
+    // 2026-08-27 the rest of the derived arithmetic too — min / max / rem / quot / mod /
+    // floor / ->fixed / numerator / denominator, plus the `Zero` and `Numeric` abilities
+    // (zero? / nan? / infinite?). Only the OPERATORS `+ - * / < =` stay bare.
+    //
+    // Their kernel halves keep the `%` prefix every primitive has (`%max`, `%rem`, beside
+    // `%add`/`%quot`), so the PRELUDE does arithmetic without loading a module — prelude
+    // code cannot reference one. `resolve_prim` keys on the call-site NAME, so the `math/*`
+    // wrappers still lower to their `PrimOp`. `(:use math)` for bare access.
     embedded_module!("math", "std/math.blsp"),
     // Bitwise ops on integers + the IEEE-754 float/bit reinterpretations. The operations
     // are kernel primitives registered as `bit/*` (the `string/length` pattern); this
@@ -3233,7 +3239,7 @@ pub(super) fn coverage_lines(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 }
 
 /// `(%coverage-instrumented)` — every line the compiler INSTRUMENTED, same shape. The
-/// math/denominator for a percentage: without it the two halves of the ratio would come
+/// denominator for a percentage: without it the two halves of the ratio would come
 /// from different populations (see `coverage.rs`). A never-called function is present
 /// here and absent from `%coverage-lines` — provided it was forced through
 /// `%coverage-precompile` first, since arms otherwise compile on first call.
@@ -3274,7 +3280,7 @@ pub(super) fn coverage_branches(_: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 }
 
 /// `(%coverage-branch-instrumented)` — every `[line col]` decision point the compiler
-/// instrumented, as `[file ([line col] …)]` — the branch math/denominator (two edges each).
+/// instrumented, as `[file ([line col] …)]` — the branch denominator (two edges each).
 pub(super) fn coverage_branch_instrumented(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let entries = crate::coverage::branch_instrumented();
     let mut out = Vec::new();
@@ -3297,7 +3303,7 @@ pub(super) fn coverage_branch_instrumented(_: &[Value], _: EnvId, heap: &mut Hea
 
 /// `(%coverage-precompile f)` — compile `f`'s body now, without calling it, so its
 /// lines land in `%coverage-instrumented`. Returns true if a body was compiled.
-/// See `eval::compile::precompile` for why the math/denominator needs this.
+/// See `eval::compile::precompile` for why the denominator needs this.
 pub(super) fn coverage_precompile(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::boolean(crate::eval::compile::precompile(
         heap, args[0],

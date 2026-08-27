@@ -42,7 +42,7 @@ next person fastest.
    `quot`, `string-length`.
 5. Float formatting via `str` prints full f64 precision
    (`0.015873015873015872`). No `format`, no `to-fixed`, no `printf`.
-   Demo code ends up with hand-rolled `(quot (* 10 a) b)` tricks.
+   Demo code ends up with hand-rolled `(math/quot (* 10 a) b)` tricks.
 6. Pattern-destructure failures surface as **Rust panics**
    (`index out of bounds: the len is 0 but the index is 1`) rather
    than Brood-level errors. Catastrophic for debugging.
@@ -249,7 +249,7 @@ to reach into the prelude to find:
 
 - `(format "%.2f" x)` or `(to-fixed x 2)` — anything to render a float
   with a fixed precision. Currently I wrote
-  `(let (x10 (quot (* 10 a) b)) (str (quot x10 10) "." (mod x10 10) "x"))`
+  `(let (x10 (math/quot (* 10 a) b)) (str (math/quot x10 10) "." (math/mod x10 10) "x"))`
   to display a single decimal place. That's 60 characters of distraction
   in a demo.
 - `(bench label expr)` macro that prints `label: N ms` and returns

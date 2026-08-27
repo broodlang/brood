@@ -31,7 +31,7 @@
 ;; Read from the ENVIRONMENT at the point of use, not from a global the wrapper defines
 ;; first: the wrapper's `def` would run before this file loads (the mistake the UCD knob's
 ;; comment records).
-(def- jdr-of (max 1 (or (string/->number (or (os/env "BROOD_JDR_OF") "")) 1)))
+(def- jdr-of (math/max 1 (or (string/->number (or (os/env "BROOD_JDR_OF") "")) 1)))
 
 (defn- jdr-parse
   (path)
@@ -43,7 +43,7 @@
 (defn- jdr-warm
   (path k)
   (if (= k 0) :warmed (do (jdr-parse path) (jdr-warm path (- k 1)))))
-(defn- jdr-warm-count (k) (max 1 (/ k jdr-of)))
+(defn- jdr-warm-count (k) (math/max 1 (/ k jdr-of)))
 
 ;; Parse in a spawned green process — on a scheduler worker, which is where the
 ;; guard-page abort happened.
@@ -116,7 +116,7 @@
     (jdr-every-nth-go (rest xs)
       n
       (inc i)
-      (if (= (rem i n) 0) (cons (first xs) acc) acc))))
+      (if (= (math/rem i n) 0) (cons (first xs) acc) acc))))
 
 (defn- jdr-scan
   (fs n)

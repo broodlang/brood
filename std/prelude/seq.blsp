@@ -76,11 +76,12 @@ the example above."
     (every? math/even? [2 4])   → true"
   (cond (empty? coll) true (pred (first coll)) (every? pred (rest coll)) else false))
 
-;; (zip a b) -> a list of [x y] vectors, stopping at the shorter input.
-(defn zip (a b)
+;; (%zip a b) -> a list of [x y] vectors, stopping at the shorter input.
+;; Internal: `zipmap` below builds on it and the prelude cannot `require` a module.
+;; The published name is `seq/zip` (ADR-251) — see std/seq.blsp.
+(defn %zip (a b)
   "A list of `[x y]` pairs from `a` and `b`, stopping at the shorter input.
-
-    (zip [1 2] [:a :b])   → ([1 :a] [2 :b])"
+Internal — the published name is `seq/zip`."
   (%zip-acc a b nil))
 (defn- %zip-acc
   (a b acc)
@@ -89,18 +90,18 @@ the example above."
     (%zip-acc (rest a) (rest b) (cons [(first a) (first b)] acc))))
 
 ;; (partition n coll) -> consecutive n-sized chunks; a trailing partial chunk is
-;; dropped (Clojure `partition` semantics). `has-at-least?` avoids re-counting.
-(defn has-at-least? (n coll)
+;; dropped (Clojure `partition` semantics). `%has-at-least?` avoids re-counting.
+(defn %has-at-least? (n coll)
   "True when `coll` has at least `n` items, walking only that far — the O(n) test that lets
 `partition` and friends check a chunk without counting the whole (possibly long) sequence.
 Always true for `n` <= 0.
 
-    (has-at-least? 2 (list 1 2 3))   → true
-    (has-at-least? 4 (list 1 2 3))   → false"
-  (cond (<= n 0) true (empty? coll) false else (has-at-least? (- n 1) (rest coll))))
+    (%has-at-least? 2 (list 1 2 3))   → true
+    (%has-at-least? 4 (list 1 2 3))   → false"
+  (cond (<= n 0) true (empty? coll) false else (%has-at-least? (- n 1) (rest coll))))
 (defn- %partition-acc
   (n coll acc)
-  (if (has-at-least? n coll)
+  (if (%has-at-least? n coll)
     (%partition-acc n (drop n coll) (cons (take n coll) acc))
     (reverse acc)))
 
@@ -152,7 +153,7 @@ Always true for `n` <= 0.
     (less? coll n)
     (if (<= n 1)
       coll
-      (let (h (quot n 2)
+      (let (h (%quot n 2)
             parts (seq/split-at h coll))
         (%merge-runs less?
           (%merge-sort-n less? (nth parts 0) h)
@@ -190,7 +191,7 @@ Always true for `n` <= 0.
     ;; only build-local trie nodes inside one GC-quiet builtin; no `Value` is ever
     ;; mutable), so O(result-nodes) allocation, not O(n) fresh path-copies. A map
     ;; `from` is read as its entries first (`%map-into` takes a list/vector of `[k v]`).
-    ;; a record target conj's each item via `Conjable` (a custom collection defines how);
+    ;; a record target conj's each item via `conjable` (a custom collection defines how);
     ;; a plain map uses the GC-quiet CHAMP builder. `%map-get` tells them apart.
     (map? to)
       (if (%map-get to :__id__ nil)
@@ -212,18 +213,23 @@ Always true for `n` <= 0.
     (nil? coll) (list x)
     (vector? coll) (into coll [x])
     (set? coll) (%set-add coll x)
-    ;; a record dispatches to its `Conjable` impl (default: the map behaviour below); a
+    ;; a record dispatches to its `conjable` impl (default: the map behaviour below); a
     ;; custom-collection record defines its own insertion. `%map-get` distinguishes it from
-    ;; a plain map, and `-conj` is only reached for records, so its late definition is fine.
+    ;; a plain map, and `conj-onto` is only reached for records, so its late definition is fine.
     (map? coll)
       (if (%map-get coll :__id__ nil)
-        (-conj coll x)
+        (conj-onto coll x)
         (cond
           (map? x) (merge coll x)
           (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
           else (error "conj: adding to a map takes a [k v] pair or a map, got "
                  (pr-str x))))
     (pair? coll) (cons x coll)
+    ;; A built-in kind with a `conjable` impl of its own — the third of the collection
+    ;; seams, matching `seq` and `count` (ADR-253). Gated on `%impl-exact?` so a kind
+    ;; nobody has answered for keeps the clear error below rather than being handed
+    ;; `conjable`'s `:default`, which is the MAP behaviour and means nothing here.
+    (%impl-exact? '[conjable conj-onto] (%identity-of coll)) (conj-onto coll x)
     else (error "conj: not a collection: " (pr-str coll))))
 
 (defn conj (coll & xs)
@@ -360,7 +366,7 @@ and it must be loaded before this `defrecord`.
         ;; symbols, with the reserved `:__id__` carrying the id keyword. Emitting a real
         ;; map value (not a `(hash-map …)` call) is what makes the checker infer the result
         ;; as a record shape carrying the `:__id__` keyword literal.
-        body (zipmap (cons :__id__ fkws) (cons id fnames))
+        body (%zipmap (cons :__id__ fkws) (cons id fnames))
         ctor `(defn ~rec (~@fnames) ~body)
         accs (map (fn (f)
                     (let (fnm (%defrecord-fname f))
@@ -479,21 +485,20 @@ for a higher-order op that wants a fixed answer.
 ;; fuses a pipeline into one per-step reducing function. Named `%x*` because they
 ;; are plumbing: the public surface is `lmap`/`lfilter`/`lkeep`/`lremove`, not
 ;; raw transducers. Fixed-arity (no rest-list) so they keep the fast call path.
-(defn xmap (f)
-  "The `map` stage as a transducer: `(f x)` for each input. Compose with `comp`, run with
-`transduce`, or reach for `lmap` when you just want a fusing pipeline.
-
-    (seq/transduce (comp (xmap inc) (xfilter math/even?)) + 0 [1 2 3])   → 6"
+;; The four built-in stages. Internal: the `l*` combinators below build on them and
+;; the prelude cannot `require` a module. Published as `seq/xmap` … (ADR-251) — the
+;; stage constructors belong with `seq/transduce`, the only thing that runs them.
+(defn %xmap (f)
+  "The `map` stage as a transducer — internal; published as `seq/xmap`."
   (fn (rf) (fn (acc x) (rf acc (f x)))))
-(defn xfilter (pred)
-  "The `filter` stage as a transducer: keep inputs where `(pred x)` is truthy."
+(defn %xfilter (pred)
+  "The `filter` stage as a transducer — internal; published as `seq/xfilter`."
   (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
-(defn xremove (pred)
-  "The `remove` stage as a transducer: drop inputs where `(pred x)` is truthy — the
-complement of `xfilter`."
+(defn %xremove (pred)
+  "The `remove` stage as a transducer — internal; published as `seq/xremove`."
   (fn (rf) (fn (acc x) (if (pred x) acc (rf acc x)))))
-(defn xkeep (f)
-  "The `keep` stage as a transducer: `(f x)` for each input, dropping `nil` results."
+(defn %xkeep (f)
+  "The `keep` stage as a transducer — internal; published as `seq/xkeep`."
   (fn (rf) (fn (acc x) (let (y (f x)) (if (nil? y) acc (rf acc y))))))
 
 ;; ---- transducers, as public surface (ADR-161) -------------------------------
@@ -508,8 +513,8 @@ complement of `xfilter`."
 ;;   reverse of ordinary function composition, because each stage wraps the *next*
 ;;   one's reducer.
 ;;
-;; `xmap`/`xfilter`/`xremove`/`xkeep` are the built-in stages (the same functions
-;; the `l*` combinators use), and `transduce` runs a stack over any collection.
+;; `seq/xmap`/`xfilter`/`xremove`/`xkeep` are the built-in stages (the same functions
+;; the `l*` combinators use), and `seq/transduce` runs a stack over any collection.
 (defn- %seqview-wrap
   (coll xf)
   "Wrap `coll` in a lazy seq-view applying transducer `xf`. If `coll` is already a
@@ -527,19 +532,19 @@ no intermediate lists. Realise with `seq`/`into`, or just consume it
 iterating for side effects.
 
     (->> [1 2 3] (lmap inc) (into []))   → [2 3 4]"
-  (%seqview-wrap coll (xmap f)))
+  (%seqview-wrap coll (%xmap f)))
 
 (defn lfilter (pred coll)
   "Lazy, fusing `filter` — see `lmap`."
-  (%seqview-wrap coll (xfilter pred)))
+  (%seqview-wrap coll (%xfilter pred)))
 
 (defn lkeep (f coll)
   "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `lmap`."
-  (%seqview-wrap coll (xkeep f)))
+  (%seqview-wrap coll (%xkeep f)))
 
 (defn lremove (pred coll)
   "Lazy, fusing `remove` — see `lmap`."
-  (%seqview-wrap coll (xremove pred)))
+  (%seqview-wrap coll (%xremove pred)))
 
 ;; ---- iteration combinators --------------------------------------------------
 ;; Hide the hand-rolled counter/accumulator recursion behind names that read as
@@ -554,7 +559,7 @@ iterating for side effects.
   (reverse (%iterate-times-acc f x n nil)))
 
 ;; One tail pass pairing each item with a running index — the old
-;; `(zip (range (count coll)) coll)` made three passes (count, build the range
+;; `(seq/zip (range (count coll)) coll)` made three passes (count, build the range
 ;; list, then zip). `seq` coerces a map to its `[k v]` pairs, as `zip` did.
 ;; ---- comprehensions ---------------------------------------------------------
 ;; `for` builds a list by walking one or more bindings, with `:when` guards —

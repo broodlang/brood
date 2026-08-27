@@ -111,7 +111,7 @@ screen (a larger frontend just shows it in its top-left)."
           (let ([c r] ((get d :size)))
             (if (nil? acc)
               [c r]
-              (let ([ac ar] acc) [(min ac c) (min ar r)]))))
+              (let ([ac ar] acc) [(math/min ac c) (math/min ar r)]))))
     nil displays))
 
 (defn- display-poll-loop
@@ -125,7 +125,7 @@ screen (a larger frontend just shows it in its top-left)."
   (displays ms)
   "Poll each frontend for a slice of `ms` in turn, returning the first key seen
 (or nil) — so a keystroke from *any* attached frontend reaches the loop."
-  (display-poll-loop displays (max 1 (quot ms (max 1 (count displays))))))
+  (display-poll-loop displays (math/max 1 (math/quot ms (math/max 1 (count displays))))))
 
 (defn display-broadcast (displays)
   "Compose several displays into one that fans a single frame out to all of them
@@ -211,7 +211,7 @@ from `armed`, so its deadline is fixed and it fires exactly once per arming. An
 pushes it out — it fires only after input settles."
   (let (ms (ui-timer-ms spec)
         base0 (if (contains? spec :every) (or fired armed) armed)
-        base (if (get spec :idle?) (max base0 last-input) base0))
+        base (if (get spec :idle?) (math/max base0 last-input) base0))
     (+ base ms)))
 
 (defn- ui-timer-live?
@@ -256,7 +256,7 @@ a far-future timer can't oversleep a responsive app."
                nil timers))
     (if (nil? best)
       *ui-idle-cap*
-      (max 1 (min *ui-idle-cap* (- best now))))))
+      (math/max 1 (math/min *ui-idle-cap* (- best now))))))
 
 (defn- ui-fire
   (timers clock now)
@@ -511,10 +511,10 @@ non-blocking window. The shared loop behind the observer (and the editor)."
 ;; they share — route a key to whichever overlay is open, else dispatch normally — so an
 ;; app lists its overlays as data instead of growing a bespoke `cond`. The editor and the
 ;; observer both build on it (ADR-094). An overlay is a record implementing the
-;; `Overlay` ability (ADR-183); the pre-ability map vtable
+;; `ui/overlay` ability (ADR-183); the pre-ability map vtable
 ;; `{:active? :owns? :handle :exit}` is the `:default` impl, so it keeps working.
 
-(defability Overlay
+(defability ui/overlay
   "A transient input overlay: a modal feature that sits beside an app's keymap and,
 while open, captures input. Implement it for a record per overlay — only the ops the
 overlay needs: a record that skips `overlay-owns?` captures every key, and one that
@@ -524,7 +524,7 @@ also accepts the legacy map vtable `{:active? :owns? :handle :exit}` unchanged).
   (overlay-owns? [self model input] :-> any) ; truthy when `input` is the overlay's to handle
   (overlay-handle [self model input] :-> any) ; fold an owned key into the model
   (overlay-exit [self model] :-> any)) ; dismiss before a non-owned key falls through
-(impl Overlay
+(impl ui/overlay
   :default
   ;; The legacy map vtable — and the fallback for a record implementing a subset of
   ;; the ops: a record has no `:owns?`/`:exit` slot, so those fall back to the same
@@ -536,14 +536,14 @@ also accepts the legacy map vtable `{:active? :owns? :handle :exit}` unchanged).
 
 (defn overlay-active (overlays model)
   "The first overlay in `overlays` open for `model` (`overlay-active?`; list order =
-precedence), or nil. An overlay is an `Overlay` record or the legacy map vtable."
+precedence), or nil. An overlay is an `ui/overlay` record or the legacy map vtable."
   (seq/find (fn (o) (overlay-active? o model)) overlays))
 
 (defn overlay-route (overlays model input fallback)
   "Fold `input` into the first active overlay in `overlays`, or `(fallback model input)`
 when none is open. The owning overlay (`overlay-owns?`) handles the key; a key it does
 **not** own dismisses the overlay (`overlay-exit`) and is re-dispatched through
-`fallback` — Emacs' dismiss-and-process. Overlays are records implementing `Overlay`
+`fallback` — Emacs' dismiss-and-process. Overlays are records implementing `ui/overlay`
 (or legacy map vtables — see the `:default` impl). The shared seam behind the editor's
 transient overlays and the observer's minibuffer."
   (let (o (overlay-active overlays model))

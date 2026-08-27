@@ -43,7 +43,7 @@ the `nest mcp` tools of the same names.")
             :fix "Convert explicitly (`string/->number`, `str`); for numeric compares across int/float use `<`/`<=`, not `=`. The finding names the argument position and expected type."
             :example "(+ 1 (string/->number \"2\"))   ; not (+ 1 \"2\")"}
    "E0040" {:summary "Division (or remainder) by zero."
-            :causes "`(/ x 0)` or `(rem x 0)` where the divisor turned out to be 0 (often a nil defaulted to 0, or an empty-collection count)."
+            :causes "`(/ x 0)` or `(math/rem x 0)` where the divisor turned out to be 0 (often a nil defaulted to 0, or an empty-collection count)."
             :fix "Guard the divisor: `(if (math/zero? d) fallback (/ n d))`."
             :example "(if (math/zero? n) 0 (/ total n))"}
    "E0041" {:summary "Integer overflow (legacy) — arithmetic past the i64 range."

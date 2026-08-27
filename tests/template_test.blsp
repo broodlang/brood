@@ -62,12 +62,12 @@
   (test "empty list"
     (is (nil? (template/render-all "{{x}}" nil)))))
 
-;; ---- substituted values render through Display ------------------------------
+;; ---- substituted values render through display ------------------------------
 
 (defrecord usd (cents))
-(impl Display template-test/usd (->string [m] (str "$" (get m :cents))))
+(impl display template-test/usd (->string [m] (str "$" (get m :cents))))
 
-(describe "render uses Display for substituted values"
+(describe "render uses display for substituted values"
   (test "a record substitutes as its display string, not its field map"
     (assert= (template/render "Total: {{amount}}" {"amount" (usd 1050)}) "Total: $1050")
     (assert= (template/render "{{amount}}" {:amount (usd 25)}) "$25"))

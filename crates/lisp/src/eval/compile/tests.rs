@@ -1916,8 +1916,13 @@ fn every_inlinable_head_still_reaches_its_primitive() {
         ("-", PrimOp::Sub),
         ("*", PrimOp::Mul),
         ("cons", PrimOp::Cons),
-        ("max", PrimOp::Max),
-        ("min", PrimOp::Min),
+        // `%max`/`%min`, not `max`/`min`: those are `math/max`/`math/min` since 2026-08-27,
+        // and the KERNEL halves took the `%` prefix every other primitive has so the prelude
+        // can do arithmetic without loading a module. `resolve_prim` keys on the call-site
+        // name, so this is the name a hot loop actually writes.
+        ("%max", PrimOp::Max),
+        ("%min", PrimOp::Min),
+        ("%rem", PrimOp::Rem),
         ("bit/and", PrimOp::BitAnd),
         ("bit/or", PrimOp::BitOr),
         ("bit/xor", PrimOp::BitXor),

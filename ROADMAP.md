@@ -56,6 +56,54 @@ and **observability**. See "What's next — by area".
 
 ## Active work — dated findings & backlogs
 
+### Toolchain gaps a downstream migration exposed (2026-08-27)
+
+Migrating hive and its whole dependency closure (hatch, store-postgres, store, s3) across the
+namespacing waves took the registry down **twice**. Neither outage was a language bug — both
+were gaps in what the toolchain can tell you before you ship. Recorded as KI-66 and KI-67;
+the roadmap items are what would remove the class.
+
+**1. A boot check.** `nest check` resolves names, `nest test` runs the suite, and neither
+loads `main` — which is exactly where a stale dependency dies (`unbound symbol: int->char`
+during `require`; `unbound symbol: os/getenv` on `main`'s first line). A
+`nest release --smoke` / `nest run --check-boot` that loads the bundle's modules, runs
+nothing, and exits nonzero would have caught both on the machine that produced them. Small,
+and the highest-value item here. (KI-66)
+
+**2. `nest check` inside a `try`.** The checker deliberately skips unbound symbols in a `try`
+body, which is where I/O lives, which is where the renamed primitives live. hatch shipped a
+dead spool write for exactly this reason. Narrowing candidate: flag one whose `catch` does
+not itself mention the name. (KI-67)
+
+**3. A bundle should say what it is.** Answering "which brood built this, with which
+features" meant grepping the binary over SSH — and the first attempt used `strings`, absent
+from `debian:bookworm-slim`, which reported 0 and read exactly like "no JIT". A
+`--build-info` (brood commit, features, module count) on a `nest release` bundle removes the
+guesswork.
+
+**4. A migration aid for a rename wave.** Each wave breaks every downstream repo, and the
+recovery is a manual loop: `nest check`, read one hint, `nest rename`, repeat — a dozen
+rounds per repo. Two things would make it a command:
+
+- the checker already emits the answer (``\`int->char\` is defined as \`string/int->char\```),
+  so a `nest check --fix-renames` could apply the unambiguous ones and list the rest;
+- the hint only exists for PUBLIC moves. A name that went behind `%` (`map-pairs` →
+  `%map-pairs`) has no hint at all, so those were guesswork against `std/`.
+
+Note the hazard that cost a revert: **`nest rename` is not scope-aware**. Renaming `register`
+in hive also renamed hive's OWN sign-up handler, producing `(defn proc/register …)` — a
+reserved name, so the module stopped defining. Any `--fix-renames` must skip a name the
+project itself defines.
+
+**5. `docsite/render-css` has no theming counterpart.** A `:wrap? false` host embeds a
+fragment whose stylesheet hard-codes a light palette; `component-dark-css` exists but is
+emitted only by the wrapped path and is gated on `prefers-color-scheme`, i.e. the reader's
+OS rather than the host's theme. hive had to override ~30 selectors by hand to put the
+reference on a dark page. `render-css` should emit CSS variables the host can redefine —
+the same shape hive's own stylesheet uses. This is the second incomplete hand-off in that
+API; `render-js` was the first, fixed 2026-08-26.
+
+
 ### Standard-library surface audit — the bare namespace (2026-08-26)
 
 **Status: the reduction landed; examples and three structural items remain.** Every public
@@ -88,7 +136,7 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
 
 - [x] `gen` can defer a reply — `defer` clause + `gen/reply`, so a server can hand work off
       without blocking its loop. The one gap that limited what could be *built*
-- [x] `task`/`await` compose; `pq`/`multimap` get `Conjable`
+- [x] `task`/`await` compose; `pq`/`multimap` get `conjable`
 
 **Still open:**
 
@@ -97,7 +145,7 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
       ~1,150 functions remain — a campaign, not a pass
 - [ ] **Ability seams do not reach built-in kinds** (ADR-253). Every seam tests `record?`
       first, so `rope` and `table` cannot join the bare vocabulary: `(count r)` raises,
-      `(seq r)` silently returns the rope, and `(impl Display :rope …)` registers, resolves
+      `(seq r)` silently returns the rope, and `(impl display :rope …)` registers, resolves
       when called directly, and is never consulted. The `record?` test is right on the fast
       path and wrong on the failure path, where falling through is free
 - [ ] **Naming seams:** five verbs for "start a process"; `task/task` and `set/set` stutter;
@@ -222,16 +270,16 @@ Shipped as ADRs:
   the ability system (`defability`/`impl`/`defrecord`, nominal dispatch), now **core
   in the prelude**. `defbehaviour` stays in `std/protocol.blsp`.
   - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first ability for
-    open-extension rendering: `Display`/`->string` (Elixir's `String.Chars`), with a
+    open-extension rendering: `display`/`->string` (Elixir's `String.Chars`), with a
     zero-cost prelude `*show*` hook so the screen printers let a record define how it
     prints. **Now core and always on** (slice 6 below): a record customizes printing
-    with just `(impl Display …)` — no `(require 'show)`, no activation step.
+    with just `(impl display …)` — no `(require 'show)`, no activation step.
   - ✅ **`std/` adopts abilities** ([ADR-177](docs/decisions.md), 2026-07-29) — a second,
     wider audit than ADR-171's (which found only two candidates by asking solely about
-    third-party extension). Shipped six abilities — `JsonEncode` (the ADR-171 follow-up),
-    `Dependency` (`:sealed`, replacing five scattered `:kind` cond chains in the package
-    manager — `nest check` now reports a missing op), `Port` (`std/io`'s documented
-    "richer port value" seam), `LogBackend`, `Response` (`std/net/http`), `Temporal`
+    third-party extension). Shipped six abilities — `json/encodable` (the ADR-171 follow-up),
+    `package/dependency` (`:sealed`, replacing five scattered `:kind` cond chains in the package
+    manager — `nest check` now reports a missing op), `io/port` (`std/io`'s documented
+    "richer port value" seam), `log/backend`, `http/response` (`std/net/http`), `datetime/temporal`
     (`:sealed`) — plus `defrecord` identities for five value types that were previously
     identified by structural sniffing (`buffer`, `queue`, `pq`, `multimap`, the temporal
     types). ADR-177 also records the **rejection list** (the prelude's collection
@@ -335,9 +383,9 @@ Shipped as ADRs:
       machinery — and it's invisible to the language (a pure memo of `impl-for`). Dispatch
       overhead vs a direct call roughly halved. Still ⬜: compile-time *static* resolution
       where the receiver type is known, and `:sealed` → a closed exhaustive switch.
-    - ✅ **Slice 6 — `Display` core, always on** (2026-07-28): the ability system +
-      `Display`/`Inspect` folded into the prelude; the prelude wires `*show*` on by
-      default. A record customizes printing with just `(impl Display …)` — no
+    - ✅ **Slice 6 — `display` core, always on** (2026-07-28): the ability system +
+      `display`/`inspectable` folded into the prelude; the prelude wires `*show*` on by
+      default. A record customizes printing with just `(impl display …)` — no
       `(require 'show)`, no `display-on`. `std/ability.blsp` + `std/show.blsp` deleted
       (their content is now prelude); the `Interp` needs no per-runtime load. **Records
       unified**: `defrecord`/`defrecord*` collapsed into one identity-carrying `defrecord`
@@ -348,7 +396,7 @@ Shipped as ADRs:
   of every cluster in the string per keystroke.
 - ✅ **ADR-160** — `(or …)` / `(and …)` patterns and general `{key subpattern}` map
   patterns; `and` doubles as the `:as` capture. `(not …)` and map `:as` stay rejected.
-- ✅ **ADR-161** — transducers as public surface (`transduce` + `xmap`/`xfilter`/
+- ✅ **ADR-161** — transducers as public surface (`seq/transduce` + `seq/xmap`/`xfilter`/
   `xremove`/`xkeep`), so a user can write their own fusing stage.
 - ✅ **ADR-162** — the `lambda` alias retired; `fn` is the only spelling.
 - ✅ **ADR-163** — the convention questions settled *as decisions*: no `&key` (a
@@ -394,24 +442,24 @@ What that review consciously left OPEN, with the reasoning:
   checker's `sig_of`, `defrecord`'s emitted sigs, `sig!`'s wrapping, and every `sig`
   in `std/`. Deferred with the reasoning in ADR-163, not dismissed. **[Brood]**
 - 🟡 **Re-host the seq protocol on abilities** (2026-07-29). The **read/iteration half
-  shipped**: a `Seqable` ability (op `->seq`, default = a record's fields id-free) that
+  shipped**: a `seqable` ability (op `->seq`, default = a record's fields id-free) that
   `seq` — and so `map`/`filter`/`fold`/`for`/`into`, plus `count`/`keys`/`vals` — consults
   for a RECORD, so a custom-collection record defines its own iteration and joins the
-  protocol. Hybrid, à la `Display`: built-ins keep their native fast path (the `Seqable`
+  protocol. Hybrid, à la `display`: built-ins keep their native fast path (the `seqable`
   branch fires only for a record, detected by one `:__id__` check, once per collection op,
   not per element), so zero cost to lists/vectors/maps. This also **fixed the `:__id__`
   leak** unified `defrecord` introduced — `(count r)`/`(keys r)`/`(seq r)` are now the
   field view, not the raw map (which included `:__id__`). The **build half** also shipped:
-  a `Conjable` ability so `conj`/`into` (both prelude defns) dispatch for a record —
+  a `conjable` ability so `conj`/`into` (both prelude defns) dispatch for a record —
   default is the map behaviour, a custom collection defines its own insertion. **Dogfooded
   onto std**: `std/queue` and `std/multimap` now impl the protocol, so a queue/multimap is
   a first-class collection (`count`/`seq`/`map`/`fold`/`for`/`conj`/`into` all work) and
   their bespoke `queue-to-list`/`queue-from-list`/`multimap-size` collapsed into one-liners
   over it. Still ⬜: the Prim1 accessors (`first`/`rest`/`empty?`/`nth`) don't route
-  through `Seqable` — they're JIT-inlined ops the hot `fold--loop` uses, so routing them
+  through `seqable` — they're JIT-inlined ops the hot `fold--loop` uses, so routing them
   needs kernel work (or raw `%first`/`%rest`); use `(first (seq c))` meanwhile — plus an
   optional `Counted` for O(1) `count`. **[Brood]**
-- ✅ **Numeric protocol — arithmetic for records (`Num`)** (2026-07-29). A money value,
+- ✅ **math/numeric protocol — arithmetic for records (`Num`)** (2026-07-29). A money value,
   complex number, 2-D vector, or bignum uses `+`/`-`/`*`/`/` via a `Num` ability
   (`num-add`/`num-sub`/`num-mul`/`num-div`). A Brood-side attempt (a `(record? a)` branch in
   `+`'s binary arm) was ❌ first — it defeats the JIT's arithmetic specialization, a **~195×

@@ -223,7 +223,7 @@ fn bignum_step_churn_via_mcp_does_not_corrupt_heap() {
     let churn = r#"(let (w 200 h 120
                             mask (- (bit/shift-left 1 w) 1)
                             board (- (bit/shift-left 1 (* w h)) 1)
-                            col0 (quot board mask)
+                            col0 (math/quot board mask)
                             high (bit/shift-left col0 (- w 1))
                             st (bit/and board (bit/shift-left (- (bit/shift-left 1 100) 1) 5000)))
                         (ms (fn () (bit/count (reduce (fn (b _) (wstep b w h mask board col0 high)) st (range 30))))))"#;

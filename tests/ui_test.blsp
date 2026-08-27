@@ -10,7 +10,7 @@
   (:use test)
   (:use editor/ui)
   (:use editor/display)
-  ;; `:exclude [inspect]` — `io/inspect` WRITES, while the root `inspect` is the `Inspect`
+  ;; `:exclude [inspect]` — `io/inspect` WRITES, while the root `inspect` is the `inspectable`
   ;; ability op that RETURNS a string. Referring the writer bare here would shadow the op.
   (:use io :exclude [inspect]))
 
@@ -252,17 +252,17 @@
     (is (nil? (overlay-active overlays {})))
     (assert= (get (overlay-active overlays {:pop true}) :active?) (get (second overlays) :active?))))
 
-;; Overlay as an ability (ADR-183): an overlay is a record implementing `Overlay`;
+;; ui/overlay as an ability (ADR-183): an overlay is a record implementing `ui/overlay`;
 ;; a record that skips `overlay-owns?` is capture-all and one that skips
 ;; `overlay-exit` needs no dismiss step — the same nil policy the map vtable had.
-(describe "overlay-route — Overlay ability records"
+(describe "overlay-route — ui/overlay ability records"
   (defrecord ov-mini ()) ; capture-all: only active?/handle implemented
-  (impl Overlay
+  (impl ui/overlay
     ov-mini
     (overlay-active? [_ m] (get m :mini))
     (overlay-handle [_ m k] (assoc m :typed k)))
   (defrecord ov-pop ()) ; discriminating: all four ops
-  (impl Overlay
+  (impl ui/overlay
     ov-pop
     (overlay-active? [_ m] (get m :pop))
     (overlay-owns? [_ m k] (= k "x"))

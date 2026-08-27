@@ -111,7 +111,7 @@ Returns true if `a` and `b` are identical, false otherwise."
       (fold (fn (acc pair)
               (bit/or acc (bit/xor (first pair) (second pair))))
         0
-        (zip (seq a) (seq b))))))
+        (seq/zip (seq a) (seq b))))))
 
 ;; --- ed25519 signatures (ADR-212) ------------------------------------------
 ;; Public-key signatures: a private seed signs a message, the matching public key verifies

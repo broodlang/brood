@@ -16730,6 +16730,12 @@ indication of which function is responsible — the language cannot report a fau
 that makes reporting possible. The working version uses `if`, `%eq`, `bound?` and `%map-get`
 and nothing else. Anything hooked into `seq` faces the same constraint.
 
+**`conj` closed the set (2026-08-27).** `%conj-one`'s `else` was
+`(error "conj: not a collection")`, so a `rope` with a `Conjable` impl of its own was
+refused. Same gate as the other two: `%impl-exact?` before the error, so a kind nobody has
+answered for keeps the clear message rather than being handed `Conjable`'s `:default` — the
+MAP behaviour, which means nothing for a rope. All three seams now agree.
+
 ## ADR-254 — A type-dispatched predicate refuses an unanswered type; it does not default
 
 **Context.** `zero?` was `(defn zero? (n) (= n 0))`. `=` is type-strict, so it answered
@@ -16768,6 +16774,43 @@ op is `io/emit` and not bare `emit`; declaring `Zero` in `std/math.blsp` is all 
 dispatches on", whose `:default` impls everything relies on; a numeric predicate in a library
 module is not that, and claiming otherwise would make the list mean less.
 
+**`get` — the one seam where the cost had to be designed around (2026-08-27).** Bare `get`
+answered `nil` for a multimap key holding values: a multimap is a record, so `get` took the
+FIELD path and reported "no such field" as "no such key". A `Lookup` ability fixes it, but
+`get`'s map branch is the hottest path in the language — 4796 call sites, and its own
+comment records a 1.8x regression from an earlier refactor that moved its kind test behind a
+CALL.
+
+Measured, that warning was exact: consulting the ability through a helper on every map get
+cost **+27%**. Consulting it only after an EMPTY result costs **+3.9%** — a present key pays
+one `nil?` test, and a `Lookup` type is always in the empty case, so the check lands exactly
+where it is needed and nowhere else.
+
+Two traps in the implementation, both the shape this ADR keeps meeting:
+
+- `%identity-of` reads `:__id__` with bare `get`, so calling it from inside `get`'s own miss
+  path recurses forever. The value is already known to be a map, so read `:__id__` with the
+  prim.
+- the miss path must fall back to what `%map-get` ALREADY answered, not to the caller's
+  `default` — otherwise a map storing `nil` under a key gets the default instead of the nil.
+  `maps_test` guards exactly that, and caught it.
+
+**`keys` followed, and the duplicates went with it.** `keys` read the `Seqable` view, so a
+multimap answered one key per VALUE while `multimap/keys` answered the DISTINCT keys. That
+was documented as a legitimate difference; it is not one. Two names for the same question
+with two answers is the divergence this ADR is about, whichever answer you call correct.
+`Lookup` gained `-keys`, the type answers for itself, and **`multimap/keys` and
+`multimap/values` are deleted** — bare `keys` and `vals` now give exactly what they gave, so
+keeping them would be two names for one function.
+
+Unlike `get`, `keys` already walks the whole map and allocates, so its impl check sits up
+front rather than behind a miss — there is no hot path to protect.
+
+The bug in the first attempt is worth keeping: the impl read its own field with bare `get`,
+and inside module `multimap` bare `get` IS `multimap/get`, so it looked up a KEY named
+`:entries` in the contents and found nothing — silently returning nil, which the seam then
+read as "no impl". The rest of that module uses `/get` for exactly this reason.
+
 **Where this rule is not yet applied.** `Seqable` and `Conjable` keep `:default` impls (a
 record's fields; map-style conj). Those are real answers for a *record*, which is the only
 thing that reaches them — the collection seams gate on `%impl-exact?` before consulting the
@@ -16776,7 +16819,84 @@ handed the record default. `Display`/`Inspect` keep theirs because `(str x)` gen
 answers for every value. The rule bites wherever a default would be a *guess*.
 
 
-## ADR-255 — A startup image restores a module's REGISTRATIONS, not only its bindings
+## ADR-255 — An ability is named like a record: kebab-case, qualified by its owner
+
+**Context.** Abilities were the only CamelCase identifiers in Brood — `Display`, `Seqable`,
+`JsonEncode`, `LogBackend`. Everything else in the language is kebab-case, and the *other*
+operand of `impl` is a record id, which is kebab-case **and** namespaced. So a single form
+carried two conventions at once:
+
+```
+(impl Seqable pq/pq (->seq [q] …))   ; CamelCase bare | kebab-case qualified
+```
+
+The CamelCase was inherited from Rust traits / Clojure protocols, not derived from anything
+in Brood. It also hid the owner: `defability` already records the defining namespace in
+`*ability-owner*` (ADR-172) for impl precedence, but nothing in the source showed it.
+
+**Decision.** An ability is spelled like a record id — **kebab-case, qualified by the
+namespace that `defability`'d it**. This needs no new rule; it is the rule already in force
+one operand to the right.
+
+```
+Display Inspect Seqable Lookup Conjable  ->  display inspectable seqable lookup conjable
+Zero Numeric                             ->  math/zero math/numeric
+Port                                     ->  io/port
+Temporal                                 ->  datetime/temporal
+LogBackend                               ->  log/backend
+Response                                 ->  http/response
+Overlay                                  ->  ui/overlay
+Dependency                               ->  package/dependency
+JsonEncode                               ->  json/encodable
+```
+
+Three sub-rules fell out of doing it:
+
+- **The ability name never equals its op name.** `Inspect`'s op is `inspect`, so the ability
+  became `inspectable` rather than stuttering as `(impl inspect … (inspect [x] …))`. Where the
+  op is already distinct (`display`/`->string`, `lookup`/`lookup-get`), the plain noun stands.
+- **`-able` only where it is English.** `seqable`, `conjable`, `inspectable`, `encodable` read;
+  `portable`, `lookupable` do not. Name the capability otherwise.
+- **`json/encodable`, not `json/encode`** — `json/encode` is already a function.
+
+**The name is written qualified, not auto-qualified.** Unlike `defrecord` — which derives its
+`:module/name` id from `(current-ns)` — `defability` stores the name verbatim, so `math/zero`
+is spelled out at the `defability` and at every `impl`. Auto-qualifying would need a
+resolution rule (what a bare `zero` means inside `math` versus outside it), which is a
+mechanism change, not a rename. Deferred deliberately (ADR-011): explicit costs nothing and
+the registry key then matches what is written.
+
+**Ability names are not globals.** `(bound? 'display)` is false — they key `*abilities*` /
+`*impls*` / `*ability-owner*` / `*op-ability*`. So none of this spends the bare namespace
+ADR-250 established as scarce, and the qualification is for legibility and owner-visibility
+rather than collision avoidance.
+
+**The leading-dash ops go too.** `-get`, `-keys` and `-conj` were spelled with a leading dash
+purely to avoid clobbering the `get`/`keys`/`conj` generics that dispatch *to* them. That is a
+real constraint met with an ad-hoc marker; the rest of the library already meets it with a
+plain descriptive name (`->seq`, `->string`, `backend-emit`, `send-response`, `dep-kind`). So:
+
+```
+-get -keys  ->  lookup-get lookup-keys        ; ability-prefixed, as `dep-*`/`overlay-*` are
+-conj       ->  conj-onto                     ; verb + preposition, as `send-response` is
+```
+
+**Rule:** an ability op is a plain kebab-case name. Where the natural name is already a bare
+function, pick a distinct descriptive one — never decorate it with a sigil.
+
+**Consequence.** The dispatch-failure message changed separator, because `<ability>/<op>`
+doubles up once the ability is itself qualified:
+
+```
+ability Zero/zero?: no impl for :string          ; before
+ability math/zero, op zero?: no impl for :string ; after
+```
+
+**Not renamed:** the English words. `Zero the counters`, `Numeric-tower`, `Zero-copy`,
+`Dependency order`, and Rust's own `fmt::Display` are prose, and a blanket rename corrupts
+them — the trap this repo has hit on `register`, `features`, `floor` and `mod` before.
+
+## ADR-256 — A startup image restores a module's REGISTRATIONS, not only its bindings
 
 **Status:** accepted (2026-08-27). Supersedes the registration-replay design recorded
 against KI-61, whose central premise is measured false.

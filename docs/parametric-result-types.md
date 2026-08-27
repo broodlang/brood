@@ -37,7 +37,7 @@ write `map : (A->B, seq<A>) -> list<B>`; on a call, unify the actual arg types
 against the param pattern, bind `A`/`B`, substitute into the result. This is real
 (if lightweight) parametric polymorphism — general enough for *user-defined*
 generic functions later. **Cost:** a new `Ty` kind that ripples through
-`union`/`intersect`/`negate`/`is_subtype`/`is_disjoint`/`Display`, plus a unifier,
+`union`/`intersect`/`negate`/`is_subtype`/`is_disjoint`/`display`, plus a unifier,
 plus compatibility-contract scrutiny (a type var isn't a set of values). High
 surface, real FP-risk in the set ops.
 

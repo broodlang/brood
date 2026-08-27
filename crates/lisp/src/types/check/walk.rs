@@ -153,7 +153,7 @@ pub(super) fn is_fn_head(head: Symbol) -> bool {
 /// This mirrors what `arity_of` already computes for a *named* variadic global, so
 /// a variadic inline lambda whose *minimum* arity exceeds what a fixed-arity HOF
 /// supplies (e.g. `(map (fn (a b & c) …) xs)` — needs ≥2, gets 1) is now caught,
-/// while a permissive `(fn (& xs) …)` (min 0) still isn't flagged.
+/// while a permissive `(fn (& xs) …)` (math/min 0) still isn't flagged.
 ///
 /// `None` for anything we can't read off cleanly — a multi-arity `fn` (clause
 /// lists, not a bare param list), a destructuring parameter, an out-of-order
@@ -414,7 +414,7 @@ fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
 /// **KI-17** — a *user-written* qualified reference `mod/name` that resolves in the
 /// loaded image but whose module `mod` the file never `require`s/`:use`s. It works only
 /// by load-order luck (another file pulled `mod` in first); reorder or drop that file and
-/// it raises `unbound symbol: mod/name` at runtime. Returns `Some(mod)` to warn.
+/// it raises `unbound symbol: mod/name` at runtime. Returns `Some(math/mod)` to warn.
 ///
 /// Silent unless the file's reachability set is known ([`Ctx::required_mods`], whole-
 /// project mode), the symbol is genuinely *bound* (an unbound one is [`is_unbound`]'s

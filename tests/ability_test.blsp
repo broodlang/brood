@@ -657,18 +657,18 @@
       (%unimpl Retract ability-test/retractable)))
 
   (test "the language's OWN fallbacks cannot be retracted"
-    ;; `(%unimpl Display :default)` was one line that stopped the image printing anything —
+    ;; `(%unimpl display :default)` was one line that stopped the image printing anything —
     ;; every value falls through to that impl, and the only symptom was a `no impl for
     ;; :vector` out of an unrelated call. Same rule as reserved names (ADR-166): the
     ;; language's own definitions are not yours to remove.
     (do
-      (assert-error (%unimpl Display :default))
-      (assert-error (%unregister-impl 'Display '->string :default))
+      (assert-error (%unimpl display :default))
+      (assert-error (%unregister-impl 'display '->string :default))
       (assert= "[1 2 3]" (->string [1 2 3])) ; …and printing still works
       ;; an impl for YOUR OWN id is policy, and retracts normally
-      (impl Display ability-test/retractable (->string [r] (str "R" (get r :n))))
+      (impl display ability-test/retractable (->string [r] (str "R" (get r :n))))
       (assert= "R7" (->string (retractable 7)))
-      (assert= 1 (%unimpl Display ability-test/retractable))
+      (assert= 1 (%unimpl display ability-test/retractable))
       (assert= "[1 2 3]" (->string [1 2 3]))))
 
   (test "REGRESSION: retracting ONE id leaves every other impl of that op alone"

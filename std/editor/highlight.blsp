@@ -117,7 +117,7 @@ that can't begin a number — since this runs on every atom on the fontify hot p
 (defn- hl-to-eol
   (src i n)
   "Index of the newline ending the line containing `i` (or `n` at end of input)."
-  (min n (string/span-until src i "\n")))
+  (math/min n (string/span-until src i "\n")))
 
 ; backslash: skip it and the escaped char
 (defn- hl-string-end
@@ -133,7 +133,7 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
 (defn- hl-atom-end
   (src i n)
   "Index of the first delimiter at or after `i` — the end of an atom token."
-  (min n (string/span-until src i hl-delim-chars)))
+  (math/min n (string/span-until src i hl-delim-chars)))
 
 ;; ---- the lexer: source -> colour spans --------------------------------------
 
@@ -341,8 +341,8 @@ innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped a
     (if (empty? stack) -1 (first stack))
     (let (c (string/char-at full i))
       (cond
-        (= c "\"") (hl-enc-scan full (min pos (hl-string-end full (inc i) n)) pos n stack)
-        (= c ";") (hl-enc-scan full (min pos (hl-to-eol full (inc i) n)) pos n stack)
+        (= c "\"") (hl-enc-scan full (math/min pos (hl-string-end full (inc i) n)) pos n stack)
+        (= c ";") (hl-enc-scan full (math/min pos (hl-to-eol full (inc i) n)) pos n stack)
         (hl-open? c) (hl-enc-scan full (inc i) pos n (cons i stack))
         (hl-close? c) (hl-enc-scan full (inc i) pos n (rest stack))
         else (hl-enc-scan full (inc i) pos n stack)))))
@@ -379,7 +379,7 @@ cursor sits deep in a large file."
         op (hl-enc-scan full (safe-restart full pos) pos n '()))
     (if (or (< op 0) (not (= (string/char-at full op) "(")))
       nil
-      (let (end (min pos n)
+      (let (end (math/min pos n)
             starts (reverse (hl-datum-starts full (inc op) end n '())))
         (if (empty? starts)
           nil
@@ -392,7 +392,7 @@ cursor sits deep in a large file."
                   nil
                   (let (afterc (dec (count starts))
                         in-datum (and (> pos 0) (not (hl-delim? (string/char-at full (dec pos)))))
-                        argi (if in-datum (max 0 (dec afterc)) afterc))
+                        argi (if in-datum (math/max 0 (dec afterc)) afterc))
                     [callee argi]))))))))))
 
 ;; ---- completion helpers (pure; candidates supplied by the caller) -----------
@@ -411,7 +411,7 @@ symbol."
 (defn- hl-cp2
   (a b)
   "The longest common prefix of two strings."
-  (hl-cp2-at a b 0 (min (string/length a) (string/length b))))
+  (hl-cp2-at a b 0 (math/min (string/length a) (string/length b))))
 (defn- hl-cp2-at
   (a b i n)
   (if (or (>= i n) (not (= (string/char-at a i) (string/char-at b i))))

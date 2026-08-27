@@ -101,7 +101,7 @@ fn quote_form(heap: &mut Heap, v: Value) -> Value {
 fn qq_elem(heap: &mut Heap, v: Value, depth: u32, autogen: &mut AutoGen) -> LispResult {
     if depth >= MAX_DEPTH {
         return Err(LispError::runtime(format!(
-            "quasiquote template nested too deeply (max {} levels)",
+            "quasiquote template nested too deeply (math/max {} levels)",
             MAX_DEPTH
         )));
     }
@@ -1905,7 +1905,7 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
     // purely for the stack-depth accounting it feeds. See `docs/memory-model.md`.
     if depth >= MAX_DEPTH {
         return Err(LispError::runtime(format!(
-            "macro expansion nested too deeply (max {} levels)",
+            "macro expansion nested too deeply (math/max {} levels)",
             MAX_DEPTH
         )));
     }

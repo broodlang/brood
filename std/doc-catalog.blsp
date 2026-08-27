@@ -45,7 +45,9 @@
    "->>" :control
    "decimal/number->" :convert
    "->float" :convert
-   "-conj" :meta
+   "conj-onto" :meta
+   "lookup-get" :meta
+   "lookup-keys" :meta
    "/" :math
    "<" :math
    "<=" :math
@@ -214,7 +216,6 @@
    "global-names" :meta
    "string/grapheme-at" :strings
    "string/grapheme-count" :strings
-   "has-at-least?" :predicates
    "identity" :functions
    "if-let" :control
    "impl" :meta
@@ -263,13 +264,13 @@
    "map?" :predicates
    "match" :patterns
    "match*" :patterns
-   "max" :math
+   "math/max" :math
    "merge" :maps
    "%merge-acc" :collections
    "%merge-runs" :collections
    "%merge-sort-n" :collections
-   "min" :math
-   "mod" :math
+   "math/min" :math
+   "math/mod" :math
    "system/module-doc" :meta
    "monitor" :processes
    "name" :strings
@@ -307,15 +308,15 @@
    "pr-str-bounded" :io
    "private?" :meta
    "provide" :meta
-   "quot" :math
+   "math/quot" :math
    "range" :collections
    "range?" :predicates
    "ratio?" :predicates
-   "rational" :convert
-   "read-all" :io
-   "read-first" :io
+   "math/rational" :convert
+   "reflect/read-all" :io
+   "reflect/read-first" :io
    "read-line" :io
-   "read-string" :io
+   "reflect/read-string" :io
    "receive" :processes
    "%receive-binds" :processes
    "%receive-body-code" :processes
@@ -342,7 +343,7 @@
    "%register-method-derive" :meta
    "%register-method-store" :meta
    "system/reload-defs" :meta
-   "rem" :math
+   "math/rem" :math
    "file/rename" :filesystem
    "%repeat-acc" :collections
    "%repeatedly-acc" :collections
@@ -421,7 +422,7 @@
    "%take-acc" :collections
    "%take-while-acc" :collections
    "throw" :errors
-   "->fixed" :strings
+   "math/->fixed" :strings
    "->seq" :meta
    "->string" :meta
    "trap-exit" :processes
@@ -454,11 +455,11 @@
    "%zip-acc" :collections
    "hash-map" :maps
    "dissoc-in" :maps
-   "xfilter" :collections
-   "xkeep" :collections
-   "xmap" :collections
-   "xremove" :collections
-   "zipmap" :maps
+   "seq/xfilter" :collections
+   "seq/xkeep" :collections
+   "seq/xmap" :collections
+   "seq/xremove" :collections
+   "map/zipmap" :maps
    "system/stdlib-id" :meta
    ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
    "but-last" :collections
@@ -469,7 +470,7 @@
    "repeat" :collections
    "sort-by" :collections
    "take-while" :collections
-   "zip" :collections
+   "seq/zip" :collections
    ;; ---- added so nothing falls into :other (every core name has a home) ----
    ;; (`gen`'s client API — call / cast / stop / start / defprocess — is NOT
    ;; here: `gen` is an ordinary module, so those names are `gen/…` and catalogued
