@@ -16,7 +16,7 @@ Mirrors ADR-117's `lit_int` pattern twice more in `crates/lisp/src/types/mod.rs`
   [`type-match-exhaustiveness.md`](type-match-exhaustiveness.md)).
 - `bool` is natively `Ord`/`Eq`/`Hash`/`Copy` — a straight copy of the int
   pattern across all ~6 call sites (`union`/`merge_union_lit_bool`,
-  `intersect`, `negate`, `is_subtype`, `is_disjoint`, `display`).
+  `intersect`, `negate`, `is_subtype`, `is_disjoint`, `Display`).
 - `string` has one real wrinkle: `Value::Str` is a heap handle (`StrId`), not
   inline data — two textually identical string literals can have different
   underlying ids, so storing `StrId` in the set would break equality.

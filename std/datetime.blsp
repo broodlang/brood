@@ -67,7 +67,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 ;; maps told apart by which keys they carry. That buys real predicates (`datetime?` /
 ;; `date?` / `time-of-day?` — a date is not "a datetime missing its time"), a per-type
 ;; display form (an ISO string, not `{:year 2026, :month 7, …}`), and dispatch: the
-;; `datetime/temporal` ability below renders any of them, and a fourth temporal type from
+;; `Temporal` ability below renders any of them, and a fourth temporal type from
 ;; elsewhere (a zoned datetime, a fiscal quarter) can join by impl'ing it.
 
 (defrecord datetime (year month day hour minute second ms))
@@ -154,7 +154,7 @@ milliseconds."
     (get t :second 0)
     (get t :ms 0)))
 
-;; ---- formatting: the datetime/temporal ability ----------------------------------------
+;; ---- formatting: the Temporal ability ----------------------------------------
 ;;
 ;; ISO 8601 rendering is per-type — a date has no time part, a time-of-day no date — so
 ;; it was three functions (`date->iso8601` / `time->iso8601` / `dt->iso8601`) that callers
@@ -162,7 +162,7 @@ milliseconds."
 ;; dispatching on the value: `(->iso x)` renders whichever of the three `x` is, and the
 ;; ability is `:sealed` so `nest check` flags a temporal type that forgets it.
 
-(defability datetime/temporal
+(defability Temporal
   "A calendar value that renders as ISO 8601."
   :sealed [datetime date time-of-day]
   (->iso [self] :-> string))
@@ -186,18 +186,18 @@ milliseconds."
     "."
     (dt-zero-pad (get t :ms 0) 3)))
 
-(impl datetime/temporal datetime/date (->iso [d] (dt-iso-date d)))
-(impl datetime/temporal datetime/time-of-day (->iso [t] (dt-iso-time t)))
-(impl datetime/temporal
+(impl Temporal datetime/date (->iso [d] (dt-iso-date d)))
+(impl Temporal datetime/time-of-day (->iso [t] (dt-iso-time t)))
+(impl Temporal
   datetime/datetime
   (->iso [dt] (str (dt-iso-date dt) "T" (dt-iso-time dt) "Z")))
 
 ;; A temporal value's display form is its ISO string — so `(io/puts (utc-now))` shows
 ;; `2026-07-28T14:03:11.000Z`, not the field map. `str`/`pr-str` stay native (ADR-171),
 ;; so the data form is still available for debugging via `pr-str`.
-(impl display datetime/datetime (->string [dt] (->iso dt)))
-(impl display datetime/date (->string [d] (->iso d)))
-(impl display datetime/time-of-day (->string [t] (->iso t)))
+(impl Display datetime/datetime (->string [dt] (->iso dt)))
+(impl Display datetime/date (->string [d] (->iso d)))
+(impl Display datetime/time-of-day (->string [t] (->iso t)))
 
 (defn- dt-fmt-code
   (dt code)

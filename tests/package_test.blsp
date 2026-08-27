@@ -1160,25 +1160,25 @@
           out (package/package-manifest-remove src 'a))
       (assert= (project/parse-deps (plist-get (rest (reflect/read-string out)) :dependencies)) nil))))
 
-;; ---- the package/dependency ability -------------------------------------------------
+;; ---- the Dependency ability -------------------------------------------------
 ;; Every per-kind behaviour (resolve / lock row / manifest entry / compatibility) is an
 ;; op of one `:sealed` ability dispatching on the dep record's identity, replacing five
 ;; separate `(get dep :kind)` cond chains. Sealing is what makes a forgotten op a `nest
 ;; check` error instead of a runtime surprise in one code path.
 
-(describe "package: the package/dependency ability"
+(describe "package: the Dependency ability"
   (test "the ability is sealed over exactly the four manifest kinds"
-    (assert= (sort (%sealed-members 'package/dependency))
+    (assert= (sort (%sealed-members 'Dependency))
       (sort (list :project/dep-path
               :project/dep-git :project/dep-tarball :project/dep-registry))))
   (test "every declared op resolves for every sealed member"
-    (is (every? (fn (d) (satisfies? 'package/dependency d))
+    (is (every? (fn (d) (satisfies? 'Dependency d))
           (list (dep-path 'a "p")
             (dep-git 'b "u" "r" nil)
             (dep-tarball 'c "u" "s")
             (dep-registry 'd "1.0.0")))))
   (test "the ability declares the five ops the package manager dispatches"
-    (assert= (sort (map first (%ability-ops 'package/dependency)))
+    (assert= (sort (map first (%ability-ops 'Dependency)))
       (sort (list 'dep-kind
               'dep-resolve 'dep-check-compatible 'dep-lock-vec 'dep-entry-node))))
   (test "dep-kind is the manifest keyword for each identity"
@@ -1187,7 +1187,7 @@
     (assert= (dep-kind (dep-tarball 'c "u" "s")) :tarball)
     (assert= (dep-kind (dep-registry 'd "1.0.0")) :registry))
   (test "a plain map is not a dependency — it dispatches as :map and raises"
-    (is (not (satisfies? 'package/dependency {:name 'x :path "p"})))
+    (is (not (satisfies? 'Dependency {:name 'x :path "p"})))
     (assert-error (dep-kind {:name 'x :path "p"})))
   (test "dep-entry-node round-trips each kind back to a manifest entry"
     (assert= (dep-entry-node (dep-path 'a "../a"))
