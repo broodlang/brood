@@ -108,6 +108,23 @@
 ;; thing anyone reaches for, hides it completely.
 
 (describe "stdlib image: a materialised module is complete, not merely bound"
+  (test "the image cache is bounded by COUNT, so stdlib edits cannot fill the disk"
+    ;; The name carries `system/stdlib-id` — a content hash of every baked-in `.blsp` — so
+    ;; every edit to the standard library mints a NEW ~2 MB image, and the machines that
+    ;; build these are exactly the machines editing it. An age-based rule catches none of
+    ;; them: measured 2026-08-27, 35 images / 74 MB, all from that day, and the prelude boot
+    ;; cache beside it had reached 4192 files / 732 MB the same way. `build` prunes to the
+    ;; newest few before writing.
+    (let (dir (path/dirname (image-path)))
+      (when (file/dir? dir)
+        (let (n (count (filter (fn (e)
+                                 (and (string/starts-with? e "std-image-")
+                                   (string/ends-with? e ".bin")))
+                         (file/ls dir))))
+          ;; A bound, not an exact count: another binary in this tree (`nest`, `brood-lsp`)
+          ;; legitimately writes its own, and the suite itself may have just built one.
+          (is (<= n 12))))))
+
   (test "the image carries the registration tables, not just bindings"
     ;; `%std-impls` holds ability impls (an `impl` form is a top-level CALL, so
     ;; materialising skips it); `%std-regs` holds the rest — ability declarations,

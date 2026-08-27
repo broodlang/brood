@@ -4323,3 +4323,42 @@ measures the cold-tier path repeatedly and never reaches the warm steady state. 
 *inside* one process shows both — round 1 at ~300 ms, warm at ~224 — and it is the warm
 number that moved here. The two-steady-state rule in CLAUDE.md is about call count within a
 run; a `for i in $(seq 9)` loop over the binary does not satisfy it.
+
+## 2026-08-27 (fourth session) — the caches were 806 MB, and tidying them cost a whole warm boot
+
+Went looking for the easiest real perf item and found it in `~/.cache/brood`: **4192
+expanded-prelude files, 732 MB**, plus **35 stdlib images, 74 MB**. 806 MB of cache on a
+machine whose whole working set is a few hundred MB.
+
+**Both leak for the same reason, and it is not "nobody wrote a prune".** Both were bounded by
+**age** — and age bounds nothing here, because both names are content/build keyed:
+`prelude-expanded-<hash of build-id>.blsp` hashes the binary's mtime, so **every rebuild mints
+a new ~190 KB file**, and `std-image-<stdlib-id>.bin` hashes every baked-in `.blsp`, so **every
+edit to the standard library mints a new ~2 MB one**. The machines that produce these files are
+exactly the machines rebuilding and editing all day, so nothing is ever seven days old. Not one
+of the 4192 files was stale by the rule meant to remove it.
+
+**The measurable cost is the prune itself.** `boot_cache_prune` walks the directory and stats
+every entry on each cache-*writing* boot — i.e. the first run after every rebuild, which on a
+dev machine is constant. Over 4192 entries that is **7.6 ms**, against a warm boot of **7.6 ms**:
+the tidying cost as much as the thing it was tidying for. Now **0.14 ms** (54×), and the
+directory is **52 MB**, 37 MB of which is `check/`'s incremental results — a separate cache,
+left alone deliberately.
+
+**Fix: bound by COUNT, keeping the newest.** 16 prelude caches (~3 MB), 4 stdlib images
+(~8 MB); the age rule stays as a floor for a directory under the cap but full of dead builds.
+Deleting a *recent* file another live binary is still hitting is safe by construction — that
+binary pays one source boot and rewrites its own — so the failure mode is a slower boot once,
+never a wrong one. The image prune is Brood (`stdimage/prune!`), the boot-cache prune is Rust,
+each beside the code that writes the file.
+
+Warm boot is unchanged at 7.6 ms and is not claimed otherwise: the prune does not run on a
+cache hit, and a 4192-entry directory did not measurably slow the single `open`. The win is the
+source-boot path and 754 MB of disk.
+
+**Gated, and sabotage-verified in both directions** — the day's standing lesson is that a prune
+with no test is how this rotted in the first place. Two Rust cases (count cap bounds the
+directory; the age floor still fires under the cap) and one Brood case. Reverting to age-only
+leaves all 40 seeded files and fails; reversing the sort so it keeps the *oldest* 16 also fails,
+which is the assertion that matters — a prune that keeps the wrong 16 costs a source boot on
+every binary in use, the exact cost it exists to avoid.
