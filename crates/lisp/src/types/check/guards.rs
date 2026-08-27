@@ -68,12 +68,17 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
 // `skips_body` used to live here; it's now folded into the
 // `SpecialHead::SkipBody` arm of `walk::SPECIAL_HEAD` (one `SymbolMap` probe
 // shared with the special-form dispatch, no per-call string allocation).
-// Names that route through that arm: `quote`, `quasiquote`, `try`,
-// `error-of`, `assert-error`, `%try`. `%try` matters post-expansion: the
-// macroexpand pass rewrites `(try …)` to `(%try (fn () body) (fn (e) handler))`
-// before `check_file` walks the tree, and without `%try` in that arm the walk
-// would descend into the "I expect this to fail" body and flag every
-// `(error-of (cons 1))` in the test suite.
+// Names that route through `SkipBody`: `quote`, `quasiquote`, `comment` —
+// syntax, never evaluated, so nothing in them is a reference.
+//
+// `try`, `%try`, `error-of` and `assert-error` route through `ErrorTesting`
+// instead (KI-67): the walk DOES descend, with every lint but `unbound`
+// suppressed. They deliberately exercise failures, so `(error-of (cons 1))`
+// must stay silent about the misuse — but an unbound symbol in there is a dead
+// call site, not the failure under test, and skipping the body outright let a
+// rename wave ship a broken `try` with every gate green. `%try` matters
+// post-expansion: macroexpand rewrites `(try …)` to
+// `(%try (fn () body) (fn (e) handler))` before `check_file` walks the tree.
 
 /// A recognised type guard over a single variable: when `test` is truthy, `sym`
 /// provably has type `ty`. `then_only` marks a guard whose *negation is unsound*
