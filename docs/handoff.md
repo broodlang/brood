@@ -15,10 +15,10 @@ run list said it was. Every CI run after a failure is `cancelled` by the next pu
 workflow's `concurrency` group cancels in-progress runs per ref), so `gh run list` showed a
 wall of cancellations with an `in_progress` at the top and no red anywhere — while the last
 three *completed* runs had all failed, for two days. **Filter to completed runs.** A
-cancelled run is not evidence of anything:
-
-    gh run list --limit 40 --json conclusion,headSha,displayTitle \
-      -q '.[] | select(.conclusion=="success" or .conclusion=="failure")'
+cancelled run is not evidence of anything. **`make green` now answers this** — completed runs
+of the CI workflow specifically (`Release` goes green on commits whose CI failed) plus the
+local gates `make check` skips, and it prints "no verdict" rather than "green" when CI has
+concluded nothing recent. `make green-all` adds the examples and stress corpus gates.
 
 **What was wrong, and what now guards it:**
 

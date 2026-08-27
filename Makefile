@@ -290,6 +290,17 @@ quickbench: ## Fast (~10s) benchmark for iteration — no archive, few samples
 ab: ## A/B the working tree against a git ref on the cross-language rows: make ab BASE=<ref> ROWS="fib pfib" N=7
 	./scripts/ab-bench.sh $(if $(BASE),-b $(BASE),) $(if $(N),-n $(N),) $(ROWS) $(ARGS)
 
+green: ## Answer one question honestly: is this tree green? (completed CI runs + the gates `make check` skips)
+	# The two ways that question got answered WRONGLY for two days (KI-68/KI-69): every CI run
+	# after a failure is CANCELLED by the next push, so the run list showed no red while the last
+	# three completed runs had all failed; and `make check` is clippy+test, which skips the four
+	# .blsp gates CI also runs (v0.14.0 was tagged with `nest format --check` red for that reason).
+	# `--local` skips the CI half, `--remote` skips the local half.
+	@./scripts/green.sh $(ARGS)
+
+green-all: green check-examples check-stress ## `make green` plus the two slow .blsp corpus gates
+	@echo "green-all: the .blsp gates passed too. Still not run: make test, breakage, tree-walker differential."
+
 doctor: ## Report the things that make a measurement or a gate lie (build drift, strays, boot cache, litter)
 	# Read this BEFORE trusting a benchmark delta or a green gate. Every check maps to a
 	# class that has cost a real session — chiefly build drift, because a stale binary fails

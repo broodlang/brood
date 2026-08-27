@@ -59,15 +59,20 @@ feature.
 
 ## Before you call the tree green
 
-A **cancelled** CI run is not evidence of anything. Every run is cancelled by the next push
-to the same ref (the workflow's `concurrency` group), so a busy day shows a wall of
-cancellations with no red in it while the last several *completed* runs were all failures —
-which is exactly how KI-68/KI-69 stayed hidden for two days. Filter to completed:
-
 ```bash
-gh run list --limit 40 --json conclusion,headSha,displayTitle \
-  -q '.[] | select(.conclusion=="success" or .conclusion=="failure")'
+make green        # completed CI runs + the local gates `make check` skips
+make green-all    # …plus the examples and stress corpus gates
 ```
+
+Do not hand-read the run list. A **cancelled** CI run is not evidence of anything: every run
+is cancelled by the next push to the same ref (the workflow's `concurrency` group), so a busy
+day shows a wall of cancellations with no red in it while the last several *completed* runs
+were all failures — which is exactly how KI-68/KI-69 stayed hidden for two days. And
+`make check` is clippy + tests; CI additionally runs `nest format --check`, the zero-warning
+checker gate, and the examples and stress gates, so it is possible to be entirely green
+locally and red in CI (v0.14.0 was tagged that way). `make green` covers both halves, scopes
+the CI half to the **CI workflow** (`Release` succeeds on commits whose CI failed), and says
+**"no verdict"** rather than "green" when CI has concluded nothing recent.
 
 And per `CLAUDE.md`, "passed once" is not green for anything touching concurrency, the
 scheduler, dist, GC or the JIT — run it repeatedly.
