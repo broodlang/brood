@@ -28,7 +28,9 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 ;; default. So `nest format` / the LSP / `nest mcp` all honour a project that pins,
 ;; say, `:width 80`, and a bare `brood`-run format uses the default.
 (defn width ()
-  "The effective column budget: the project's `:width` when set, else the built-in default."
+  "The effective column budget: the project's `:width` when set, else the built-in default.
+
+    (format/width)   → 100   ; the column the formatter wraps at"
   (or *project-width* *width*))
 
 ;; ---- CST node accessors -----------------------------------------------------
@@ -76,7 +78,9 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
   (if (< i 0) acc (vec->list-acc v (dec i) (cons (seq/vector-ref v i) acc))))
 
 (defn count-newlines (s)
-  "How many `\\n` characters appear in string `s`."
+  "How many `\\n` characters appear in string `s`.
+
+    (format/count-newlines \"a\nb\")   → 1"
   ;; Native O(n) split. A per-char `(string/substring s i (inc i))` loop is O(n^2) —
   ;; `substring` walks to char boundary `i` each call.
   (dec (count (string/split s "\n"))))
@@ -937,7 +941,9 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; trailing newline. Top-level forms are joined by a single `\n`, with a blank
 ;; line preserved between any pair the author separated with one.
 (defn source (src)
-  "Format `src` as a Brood source string. Idempotent."
+  "Format `src` as a Brood source string. Idempotent.
+
+    (string/trim (format/source \"(a  b)\"))   → \"(a b)\""
   (let (root (reflect/parse-source src)) (cst-root (node-children root))))
 
 (defn cst-root (kids)
