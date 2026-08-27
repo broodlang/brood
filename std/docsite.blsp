@@ -284,60 +284,104 @@
     "body{margin:0;font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;color:#1f2933;background:#fff}"
     "@media (prefers-color-scheme:dark){body{color:#cbd2d9;background:#1a1f26}}"))
 
+;; ── The palette, as CSS custom properties ───────────────────────────────────
+;; Every colour the component uses, declared once on `.docsite` so a host can retheme the
+;; fragment by redefining variables instead of overriding rules.
+;;
+;; This is the fix for the second incomplete hand-off in this API (`render-js` was the
+;; first). `render-css` emitted a hard-coded LIGHT palette and `component-dark-css` was
+;; reachable only from the wrapped page, so a `:wrap? false` host had exactly two options:
+;; take the light palette, or override ~30 selectors by hand — which is what hive did to
+;; put the reference on a dark page. Neither is a hand-off. A host now writes:
+;;
+;;     .docsite { --docsite-surface: #12161c; --docsite-fg: #e4e7eb; … }
+;;
+;; and every rule follows, because there is no colour literal left in `component-css` to
+;; fight with. The defaults below are the previous light palette exactly, so a host that
+;; sets nothing renders byte-identically to before.
+;;
+;; `prefers-color-scheme` is the OS's opinion, not the host's, which is why the dark block
+;; stays out of `render-css`: an embedded fragment must follow the page it is embedded in.
+;; A standalone page owns its whole background and so may follow the OS — it now does that
+;; by redefining these same variables, rather than by carrying a second copy of the rules
+;; that could drift from the first.
+(defn- component-vars-css
+  ()
+  (str ".docsite{"
+    "--docsite-fg:#1f2933;" ; headings, signatures — the strongest text
+    "--docsite-text:#3e4c59;" ; body prose
+    "--docsite-muted:#52606d;" ; secondary text (nav entries, section labels, tags)
+    "--docsite-faint:#9aa5b1;" ; tertiary (undocumented markers, empty states)
+    "--docsite-dim:#7b8794;" ; dimmest (version suffix, type lines)
+    "--docsite-accent:#2563eb;" ; links, module headings, the badge fill
+    "--docsite-accent-fg:#fff;" ; text ON the accent
+    "--docsite-border:#e4e7eb;" ; panel/box borders, and the tag fill
+    "--docsite-border-strong:#cbd2d9;" ; the heavier rules (section underline, input)
+    "--docsite-rule:#eef1f4;" ; the lightest rule (module heading underline)
+    "--docsite-surface:#f8fafc;" ; the sidebar
+    "--docsite-code-bg:#f0f4f8;" ; inline code, examples, guide `pre`
+    "--docsite-input-bg:#fff}")) ; the filter box
 ;; The component styles — every selector scoped under `.docsite`, so the fragment can be
 ;; embedded in any host page (hive's daisyUI theme) without a class collision (`.badge`,
 ;; `.sidebar`, … are all namespaced). Two columns: a sticky sidebar + scrolling content,
-;; monospace signatures. LIGHT palette only: an embedding host controls the theme (hive
-;; forces `data-theme="light"`), so the fragment must NOT flip to dark on the viewer's OS
-;; — doing so painted dark-mode light-gray text onto the host's white page. The standalone
-;; page opts into OS dark separately via `component-dark-css`.
+;; monospace signatures. No colour literals: every one is a `--docsite-*` variable from
+;; `component-vars-css`, so the host owns the theme (see the note there).
 (defn- component-css
   ()
   (str ".docsite code,.docsite .sig,.docsite .type{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}"
-    ".docsite a{color:#2563eb;text-decoration:none}.docsite a:hover{text-decoration:underline}"
+    ".docsite a{color:var(--docsite-accent);text-decoration:none}.docsite a:hover{text-decoration:underline}"
     ".docsite .layout{display:flex;align-items:flex-start}"
     ".docsite .sidebar{width:16rem;flex:0 0 16rem;position:sticky;top:0;height:100vh;overflow-y:auto;"
-    "padding:1rem;border-right:1px solid #e4e7eb;background:#f8fafc}"
-    ".docsite .brand{font-weight:700;margin-bottom:.5rem}.docsite .ver{color:#7b8794;font-weight:400}"
-    ".docsite #docsite-filter{width:100%;padding:.35rem .5rem;margin-bottom:.75rem;border:1px solid #cbd2d9;border-radius:.375rem;background:#fff;color:inherit}"
+    "padding:1rem;border-right:1px solid var(--docsite-border);background:var(--docsite-surface)}"
+    ".docsite .brand{font-weight:700;margin-bottom:.5rem}.docsite .ver{color:var(--docsite-dim);font-weight:400}"
+    ".docsite #docsite-filter{width:100%;padding:.35rem .5rem;margin-bottom:.75rem;border:1px solid var(--docsite-border-strong);border-radius:.375rem;background:var(--docsite-input-bg);color:inherit}"
     ".docsite .nav-module{margin-bottom:.4rem}.docsite .nav-module-link{font-weight:600}"
     ".docsite .nav-defs{list-style:none;margin:.15rem 0 .5rem;padding-left:.75rem}"
-    ".docsite .nav-defs li{margin:.05rem 0}.docsite .nav-defs a{color:#52606d;font-size:.86rem}"
+    ".docsite .nav-defs li{margin:.05rem 0}.docsite .nav-defs a{color:var(--docsite-muted);font-size:.86rem}"
     ".docsite .content{flex:1 1 auto;min-width:0;max-width:52rem;padding:1.5rem 2rem}"
-    ".docsite .page-head{display:flex;align-items:baseline;gap:.75rem;border-bottom:1px solid #e4e7eb;padding-bottom:.75rem;margin-bottom:1.5rem}"
+    ".docsite .page-head{display:flex;align-items:baseline;gap:.75rem;border-bottom:1px solid var(--docsite-border);padding-bottom:.75rem;margin-bottom:1.5rem}"
     ".docsite .page-head h1{margin:0;font-size:1.6rem}"
-    ".docsite .badge{background:#2563eb;color:#fff;border-radius:.375rem;padding:.1rem .5rem;font-size:.8rem}"
-    ".docsite .module{margin-bottom:2.5rem}.docsite .module h2{font-size:1.3rem;color:#2563eb;border-bottom:1px solid #eef1f4;padding-bottom:.3rem}"
-    ".docsite .doc-section{font-size:1.05rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#52606d;margin:3rem 0 1.4rem;padding-bottom:.45rem;border-bottom:2px solid #cbd2d9}.docsite .doc-section:first-child{margin-top:.5rem}"
-    ".docsite .nav-section{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#9aa5b1;margin:1.1rem 0 .45rem}"
-    ".docsite .moduledoc{color:#3e4c59;margin-bottom:1rem}"
-    ".docsite .def{border:1px solid #e4e7eb;border-radius:.5rem;padding:.75rem 1rem;margin:.6rem 0;scroll-margin-top:1rem}"
-    ".docsite .sig{font-weight:600;color:#1f2933}.docsite .tag{background:#e4e7eb;color:#52606d;border-radius:.25rem;padding:0 .35rem;font-size:.72rem;vertical-align:middle}"
-    ".docsite .type{color:#7b8794;font-size:.85rem;margin-top:.15rem}"
-    ".docsite .doc{margin-top:.4rem;color:#3e4c59}.docsite .doc p{margin:.4rem 0}.docsite .undoc{color:#9aa5b1;font-style:italic;margin:.4rem 0 0}"
-    ".docsite .doc code,.docsite .moduledoc code{background:#f0f4f8;border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
-    ".docsite .doc-example{background:#f0f4f8;border-radius:.375rem;padding:.6rem .8rem;margin:.5rem 0;overflow-x:auto;font-size:.85rem;line-height:1.45}"
+    ".docsite .badge{background:var(--docsite-accent);color:var(--docsite-accent-fg);border-radius:.375rem;padding:.1rem .5rem;font-size:.8rem}"
+    ".docsite .module{margin-bottom:2.5rem}.docsite .module h2{font-size:1.3rem;color:var(--docsite-accent);border-bottom:1px solid var(--docsite-rule);padding-bottom:.3rem}"
+    ".docsite .doc-section{font-size:1.05rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--docsite-muted);margin:3rem 0 1.4rem;padding-bottom:.45rem;border-bottom:2px solid var(--docsite-border-strong)}.docsite .doc-section:first-child{margin-top:.5rem}"
+    ".docsite .nav-section{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--docsite-faint);margin:1.1rem 0 .45rem}"
+    ".docsite .moduledoc{color:var(--docsite-text);margin-bottom:1rem}"
+    ".docsite .def{border:1px solid var(--docsite-border);border-radius:.5rem;padding:.75rem 1rem;margin:.6rem 0;scroll-margin-top:1rem}"
+    ".docsite .sig{font-weight:600;color:var(--docsite-fg)}.docsite .tag{background:var(--docsite-border);color:var(--docsite-muted);border-radius:.25rem;padding:0 .35rem;font-size:.72rem;vertical-align:middle}"
+    ".docsite .type{color:var(--docsite-dim);font-size:.85rem;margin-top:.15rem}"
+    ".docsite .doc{margin-top:.4rem;color:var(--docsite-text)}.docsite .doc p{margin:.4rem 0}.docsite .undoc{color:var(--docsite-faint);font-style:italic;margin:.4rem 0 0}"
+    ".docsite .doc code,.docsite .moduledoc code{background:var(--docsite-code-bg);border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
+    ".docsite .doc-example{background:var(--docsite-code-bg);border-radius:.375rem;padding:.6rem .8rem;margin:.5rem 0;overflow-x:auto;font-size:.85rem;line-height:1.45}"
     ".docsite .doc-example code{background:none;padding:0;white-space:pre}"
-    ".docsite .empty{color:#9aa5b1}" ".docsite .guide-body{color:#3e4c59}"
-    ".docsite .guide-body h1{font-size:1.5rem;margin:1rem 0 .5rem;color:#1f2933}"
-    ".docsite .guide-body h2{font-size:1.2rem;border:0;margin:1rem 0 .4rem;color:#1f2933}"
-    ".docsite .guide-body h3{font-size:1.05rem;margin:.8rem 0 .3rem;color:#1f2933}"
+    ".docsite .empty{color:var(--docsite-faint)}" ".docsite .guide-body{color:var(--docsite-text)}"
+    ;; The guide headings follow `--docsite-fg` rather than a literal. They used to be a
+    ;; hard `#1f2933` that the dark block never overrode, so a dark standalone page drew
+    ;; near-black headings on a near-black background; routing them through the variable
+    ;; fixes that as a consequence of having one palette instead of two.
+    ".docsite .guide-body h1{font-size:1.5rem;margin:1rem 0 .5rem;color:var(--docsite-fg)}"
+    ".docsite .guide-body h2{font-size:1.2rem;border:0;margin:1rem 0 .4rem;color:var(--docsite-fg)}"
+    ".docsite .guide-body h3{font-size:1.05rem;margin:.8rem 0 .3rem;color:var(--docsite-fg)}"
     ".docsite .guide-body p{margin:.5rem 0}.docsite .guide-body ul{margin:.5rem 0;padding-left:1.4rem}"
-    ".docsite .guide-body pre{background:#f0f4f8;border-radius:.4rem;padding:.6rem .8rem;overflow-x:auto}"
-    ".docsite .guide-body code{background:#f0f4f8;border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
+    ".docsite .guide-body pre{background:var(--docsite-code-bg);border-radius:.4rem;padding:.6rem .8rem;overflow-x:auto}"
+    ".docsite .guide-body code{background:var(--docsite-code-bg);border-radius:.25rem;padding:.05rem .3rem;font-size:.9em}"
     ".docsite .guide-body pre code{background:none;padding:0}"))
 
-;; The OS-dark palette for a STANDALONE page only (`:wrap? true`) — that page owns its
-;; whole background, so it may follow `prefers-color-scheme`. It is NOT part of
-;; `render-css` (a host embeds the fragment and dictates the theme itself).
+;; The dark palette, as a variables-only override — the same twelve names, different
+;; values. Emitted for a STANDALONE page only (`:wrap? true`), which owns its whole
+;; background and so may follow the viewer's OS; an embedding host is handed
+;; [[render-css-dark]] and decides for itself when (or whether) to apply it, because
+;; `prefers-color-scheme` answers a question about the OS and the host's theme is not
+;; the OS's business. That distinction is why hive's reference rendered light-on-light.
+(defn- component-dark-vars
+  ()
+  (str "--docsite-fg:#e4e7eb;"
+    "--docsite-text:#b0b8c1;" "--docsite-muted:#9aa5b1;" "--docsite-accent:#63b3ed;"
+    "--docsite-border:#2b3138;" "--docsite-border-strong:#3e4c59;" "--docsite-rule:#2b3138;"
+    "--docsite-surface:#12161c;" "--docsite-code-bg:#2b3138;" "--docsite-input-bg:#1a1f26;"))
+
 (defn- component-dark-css
   ()
-  (str "@media (prefers-color-scheme:dark){"
-    ".docsite .sidebar{background:#12161c;border-color:#2b3138}.docsite #docsite-filter{background:#1a1f26;border-color:#3e4c59}"
-    ".docsite .content .sig{color:#e4e7eb}.docsite .def{border-color:#2b3138}.docsite .tag{background:#2b3138;color:#9aa5b1}"
-    ".docsite .page-head,.docsite .module h2{border-color:#2b3138}.docsite .doc code,.docsite .moduledoc code{background:#2b3138}"
-    ".docsite .doc-section{color:#9aa5b1;border-color:#3e4c59}"
-    ".docsite a{color:#63b3ed}.docsite .nav-defs a{color:#9aa5b1}.docsite .moduledoc,.docsite .doc{color:#b0b8c1}}"))
+  (str "@media (prefers-color-scheme:dark){.docsite{" (component-dark-vars) "}}"))
 
 ;; A dependency-free filter: hide any definition, module, and sidebar entry whose text
 ;; doesn't contain the query. Empty query restores everything.
@@ -383,6 +427,7 @@
         "</title>"
         "<style>"
         (page-reset-css)
+        (component-vars-css)
         (component-css)
         (component-dark-css)
         "</style></head><body>"
@@ -394,8 +439,44 @@
 (defn render-css ()
   "The `.docsite`-scoped component stylesheet a `:wrap? false` fragment needs, for a host
   that inlines it once. Every rule is namespaced under `.docsite`, so it never touches the
-  host's own styles; the host supplies its page chrome, this styles the doc content."
-  (component-css))
+  host's own styles; the host supplies its page chrome, this styles the doc content.
+
+  **Themeable.** The sheet opens by declaring its whole palette as custom properties on
+  `.docsite` and every rule after that reads one — there is no colour literal left to
+  fight. To retheme, redefine the ones you care about *after* this sheet:
+
+      .docsite { --docsite-surface: #12161c; --docsite-fg: #e4e7eb }
+
+  The twelve names, with their light defaults: `--docsite-fg` (#1f2933, headings and
+  signatures), `--docsite-text` (#3e4c59, prose), `--docsite-muted` (#52606d, nav and
+  section labels), `--docsite-faint` (#9aa5b1), `--docsite-dim` (#7b8794),
+  `--docsite-accent` (#2563eb, links and module headings), `--docsite-accent-fg` (#fff),
+  `--docsite-border` (#e4e7eb, boxes and tag fill), `--docsite-border-strong` (#cbd2d9),
+  `--docsite-rule` (#eef1f4), `--docsite-surface` (#f8fafc, sidebar),
+  `--docsite-code-bg` (#f0f4f8) and `--docsite-input-bg` (#fff).
+
+  For a ready-made dark set see [[render-css-dark]]. This sheet deliberately carries **no**
+  `prefers-color-scheme` rule: that is the viewer's OS talking, and an embedded fragment
+  must follow the page it sits in, not the desktop it is viewed on.
+
+      (includes? (docsite/render-css) \"--docsite-accent\") → true"
+  (str (component-vars-css) (component-css)))
+
+(defn render-css-dark ()
+  "The dark palette for an embedded fragment: the same custom-property names as
+  [[render-css]] with dark values, scoped to `.docsite` and wrapped in **no** media query —
+  so the host applies it on its own terms. Inline it after `render-css`, under whatever
+  selector expresses the host's theme:
+
+      <style>.docsite { … }</style>                    <!-- always dark -->
+      <style>[data-theme=dark] .docsite { … }</style>  <!-- host-driven -->
+
+  It exists because the alternative was hive's: override ~30 selectors by hand, because
+  the dark styles were reachable only from the standalone page. Only the names that
+  actually differ are redefined; the rest inherit from `render-css`.
+
+      (includes? (docsite/render-css-dark) \"--docsite-surface\") → true"
+  (str ".docsite{" (component-dark-vars) "}"))
 
 (defn render-js ()
   "The `<script>` the `Filter…` box needs, for a host embedding a `:wrap? false` fragment —
