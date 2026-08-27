@@ -329,10 +329,10 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
     (hash-map :a 1)   → {:a 1}"
   (apply %hash-map more))
 
-;; `zipmap` stays core: a prelude sequence helper builds a map with it, and `map` is
-;; not force-loaded at boot.
-(defn zipmap (ks vs)
-  "A map pairing each key in `ks` with the value at the same position in `vs`, stopping at the shorter.
-
-    (zipmap [:a] [1])   → {:a 1}"
-  (into {} (zip ks vs)))
+;; `%zipmap` stays core: `defrecord`'s expansion builds its ctor body with it, and
+;; `map` is not force-loaded at boot. Published as `map/zipmap` (ADR-251) — it
+;; returns a MAP, so it belongs with the map helpers.
+(defn %zipmap (ks vs)
+  "A map pairing each key in `ks` with the value at the same position in `vs`,
+stopping at the shorter. Internal — the published name is `map/zipmap`."
+  (into {} (%zip ks vs)))

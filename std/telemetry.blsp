@@ -244,13 +244,13 @@ runtime presence-check of a declared event.
         ;; the emitter's measurement/metadata map bodies — `{:field field}` with the field
         ;; symbols as values (spliced as a literal, exactly like defrecord's ctor body, so
         ;; the values evaluate as the params).
-        meas-map (zipmap m-kws m-names)
-        meta-map (zipmap md-kws md-names)
+        meas-map (map/zipmap m-kws m-names)
+        meta-map (map/zipmap md-kws md-names)
         ;; the schema stored for introspection / runtime checks (types kept unevaluated).
         schema {:name (list 'quote fname)
-                :measurements (zipmap m-kws
+                :measurements (map/zipmap m-kws
                                 (map (fn (s) (list 'quote (telemetry-spec-type s))) meas))
-                :metadata (zipmap md-kws (map (fn (s) (list 'quote (telemetry-spec-type s))) meta))
+                :metadata (map/zipmap md-kws (map (fn (s) (list 'quote (telemetry-spec-type s))) meta))
                 :doc doc})
     `(do
        (register-event ~event ~schema)

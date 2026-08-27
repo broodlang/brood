@@ -23,7 +23,7 @@
 sorted list of symbols. `%`-prefixed plumbing and module-private names are excluded — they
 are not callable vocabulary, and they used to bury the answer.
 
-    (apropos \"zipm\")   → (zipmap)"
+    (apropos \"gensy\")   → (gensym)"
   ;; `name` (not `str`) so a keyword pattern drops its leading colon, matching
   ;; the bare global names; a string passes through unchanged.
   (let (needle (if (string? pattern) pattern (name pattern)))

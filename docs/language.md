@@ -233,7 +233,7 @@ Maps are immutable — every operation returns a **fresh** map:
 | `(update m k f args…)` | a new map with `k`'s value replaced by `(f current args…)` (`current` is `nil` if absent; also works on a **vector** by integer index, which must be in range) |
 | `(map/update-vals m f)` / `(map/update-keys m f)` | a new map with `f` applied to every value / key — the `map` module |
 | `(map/select-keys m ks)` | a new map of just the entries whose key is in `ks` — the `map` module |
-| `(zipmap ks vs)` | a map pairing `ks` with `vs` positionally (stops at the shorter) |
+| `(map/zipmap ks vs)` | a map pairing `ks` with `vs` positionally (stops at the shorter) |
 | `(get-in m path)` / `(get-in m path default)` | the value at a nested key `path`, or `default`/`nil` |
 | `(assoc-in m path v)` | a nested copy with `v` stored at `path` (intermediate maps created) |
 | `(dissoc-in m path)` | a nested copy with `path` removed (a missing path is a no-op; empty branches are left in place) |
@@ -2466,7 +2466,7 @@ ordinary function composition — because each stage wraps the *next* one's redu
 
 ### Maps
 `hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`
-`merge`  `update`  `zipmap`  `get-in`  `assoc-in`  `dissoc-in`  `update-in`  `map?`
+`merge`  `update`  `get-in`  `assoc-in`  `dissoc-in`  `update-in`  `map?`
 
 The transformation helpers `merge-with`, `update-vals`, `update-keys`, and
 `select-keys` live in the **`map` module** (ADR-227) — `(:use map)` for bare
@@ -3015,7 +3015,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
 | `std/enum.blsp` | `'enum` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. The core ops (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stay bare in the prelude; `(:use seq)` for bare access or call qualified |
-| `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `merge-with`, `update-vals`, `update-keys`, `select-keys`. The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`/`zipmap`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
+| `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `merge-with`, `update-vals`, `update-keys`, `select-keys`. The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
 | `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Core arithmetic (operators, `quot`/`mod`/`rem`/`floor`/`min`/`max`) stays bare in the prelude; `(:use math)` for bare access or call qualified |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
