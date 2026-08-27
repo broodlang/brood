@@ -162,7 +162,18 @@ static GLOBALS: OnceLock<Vec<String>> = OnceLock::new();
 fn globals() -> &'static Vec<String> {
     GLOBALS.get_or_init(|| {
         let mut interp = Interp::new();
-        let mut names: Vec<String> = match interp.eval_str("(global-names)") {
+        // Load every bundled module first. A bare `Interp` holds only the prelude, so
+        // `(global-names)` returned no `math/…`, `string/…` or `json/…` at all — typing
+        // `math/ze` matched nothing, and the completion list could only ever offer core
+        // names. The reference documents the whole library, so the playground offering a
+        // fraction of it is the site disagreeing with itself.
+        let _ =
+            interp.eval_str("(doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))");
+        // Public names only. Raw `(global-names)` includes private helpers, so the menu
+        // offered `map-get`, `macroexpand-loop`, `%map-pairs` and friends — internals that
+        // appear in no documentation and that a user has no business calling.
+        let query = "(filter (fn (s) (not (private? s))) (global-names))";
+        let mut names: Vec<String> = match interp.eval_str(query) {
             Ok(value) => {
                 // `(global-names)` prints as a bare list `(a b c …)`; symbols never contain
                 // whitespace or parens, so splitting the trimmed body recovers the names.
