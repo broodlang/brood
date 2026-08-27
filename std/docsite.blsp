@@ -345,16 +345,25 @@
   ()
   (str "<script>(function(){"
     "var q=document.getElementById('docsite-filter');if(!q)return;"
-    "function norm(s){return s.toLowerCase()}" "q.addEventListener('input',function(){"
-    "var t=norm(q.value.trim());" "document.querySelectorAll('.module').forEach(function(m){"
-    "var any=false;" "m.querySelectorAll('.def').forEach(function(d){"
-    "var hit=!t||norm(d.textContent).indexOf(t)>=0;d.style.display=hit?'':'none';if(hit)any=true;});"
-    "m.style.display=(!t||any||norm(m.querySelector('h2').textContent).indexOf(t)>=0)?'':'none';});"
-    "document.querySelectorAll('.nav-module').forEach(function(n){" "var any=false;"
+    "function norm(s){return s.toLowerCase()}"
+    "function hits(el,t){return !!el&&norm(el.textContent).indexOf(t)>=0}"
+    "q.addEventListener('input',function(){" "var t=norm(q.value.trim());"
+    ;; `whole`: the MODULE itself matched, so everything in it is a result. Without this a
+    ;; module-name search showed the heading with all its definitions hidden — each `.def`
+    ;; had already failed its own text test — so searching `agent` gave you a bare header
+    ;; instead of agent's functions, which is the opposite of what you asked it for.
+    "document.querySelectorAll('.module').forEach(function(m){"
+    "var whole=!t||hits(m.querySelector('h2'),t);var any=false;"
+    "m.querySelectorAll('.def').forEach(function(d){"
+    "var hit=whole||hits(d,t);d.style.display=hit?'':'none';if(hit)any=true;});"
+    "m.style.display=(whole||any)?'':'none';});"
+    ;; The sidebar follows the same rule, so the nav and the content never disagree about
+    ;; what the query matched.
+    "document.querySelectorAll('.nav-module').forEach(function(n){"
+    "var whole=!t||hits(n.querySelector('.nav-module-link'),t);var any=false;"
     "n.querySelectorAll('.nav-defs li').forEach(function(li){"
-    "var hit=!t||norm(li.textContent).indexOf(t)>=0;li.style.display=hit?'':'none';if(hit)any=true;});"
-    "n.style.display=(!t||any||norm(n.querySelector('.nav-module-link').textContent).indexOf(t)>=0)?'':'none';});"
-    "});})();</script>"))
+    "var hit=whole||hits(li,t);li.style.display=hit?'':'none';if(hit)any=true;});"
+    "n.style.display=(whole||any)?'':'none';});" "});})();</script>"))
 
 (defn render (model opts)
   "Render `model` to an HTML string. `opts` is a map:
