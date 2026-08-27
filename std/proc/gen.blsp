@@ -197,8 +197,7 @@ and `info` can tail-recurse with it unchanged)."
       ; work off without blocking its own loop — the one gap that limited what could be
       ; built rather than merely what was convenient. `~'reply` injects the literal symbol
       ; (the `%defseq` escape hatch) so the body can name it.
-      (= kind 'defer)
-        `([:$call ~from ~rf ~pat] (let (~'reply [~from ~rf]) (~loop (do ~@body))))
+      (= kind 'defer) `([:$call ~from ~rf ~pat] (let (~'reply [~from ~rf]) (~loop (do ~@body))))
       ; info — a raw message (no envelope): a monitor [:down …], a link [:EXIT …],
       ; a timer tick, a plain send. Body => next state, like a cast.
       (= kind 'info) `(~pat (~loop (do ~@body)))
@@ -235,7 +234,8 @@ clause is dropped (so the mailbox can't leak)."
         ;; Envelope clauses (cast/call/query) are matched BEFORE info clauses,
         ;; regardless of declaration order, so a broad `info` pattern can never
         ;; swallow a `[:$call …]` / `[:$cast …]` envelope (receive is first-match).
-        env-clauses (filter (fn (c) (includes? (list 'cast 'call 'query 'defer) (first c))) msg-clauses)
+        env-clauses (filter (fn (c) (includes? (list 'cast 'call 'query 'defer) (first c)))
+                      msg-clauses)
         info-clauses (filter (fn (c) (= (first c) 'info)) msg-clauses)
         from (gensym "from")
         rf (gensym "ref")

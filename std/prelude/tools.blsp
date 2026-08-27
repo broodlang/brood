@@ -1045,6 +1045,7 @@ and that every declared arity still matches its module's actual definition."
 ;; (`string/length`, `string/split`, `string/substring`, `string/lower`, …) are registered
 ;; by the Rust kernel and need nothing.
 (%autoload string
+  (starts-with? 2)
   (char-at 2)
   (blank? 1)
   (ends-with? 2)
