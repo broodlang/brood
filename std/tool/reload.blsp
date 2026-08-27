@@ -58,14 +58,14 @@ behind a long-lived loop has changed since it started."
 ;;   - if it vanished, complain once and keep polling (the editor may be
 ;;     mid-rename);
 ;;   - if mtime unchanged, sleep and recur;
-;;   - else `reload-defs` it — re-evaluate only the top-level *definitions*
+;;   - else `system/reload-defs` it — re-evaluate only the top-level *definitions*
 ;;     (def, defn, defmacro, defmodule, …), not side-effecting calls. This
 ;;     is the difference between hot-reload and re-launch: a watched file
 ;;     containing both `(defn main-loop …)` and `(main-loop 0)` would, with
 ;;     plain `load`, re-execute the loop on every save (spawning a
 ;;     duplicate that runs alongside the original, *and* blocking the
 ;;     watcher itself inside the call — observable as "stops updating
-;;     after the first reload"). `reload-defs` refreshes the bindings only;
+;;     after the first reload"). `system/reload-defs` refreshes the bindings only;
 ;;     the still-running loop picks up the new code via late binding on
 ;;     its next call site (ADR-013).
 ;;
@@ -74,7 +74,7 @@ behind a long-lived loop has changed since it started."
 ;;     still advance `last` to `now` so we don't busy-retry the same
 ;;     broken state every poll.
 ;;
-;;     `on-reload`, when given, runs after a *successful* `reload-defs` (not
+;;     `on-reload`, when given, runs after a *successful* `system/reload-defs` (not
 ;;     after a failed one — the failure is already reported, and its own
 ;;     globals didn't change). Its errors are caught separately so a broken
 ;;     callback (e.g. a checker hiccup) can't take the watcher down either.
@@ -123,7 +123,7 @@ behind a long-lived loop has changed since it started."
         (do
           (try
             (do
-              (reload-in-package-context path (fn () (reload-defs path)))
+              (reload-in-package-context path (fn () (system/reload-defs path)))
               ;; Bump the code generation BEFORE the on-reload hook, so a hook (or a
               ;; loop the hook wakes) that reads `(code-version)` already sees the new
               ;; value. The push hand-off — `(gen/code-change pid)` per affected server —

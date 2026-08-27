@@ -321,7 +321,7 @@ fewer than two items.
   `(if ~test nil (do ~@body)))
 
 ;; `defonce` — define only if the name is not already bound. The point is
-;; hot-reload: re-evaluating a file (via `reload-defs` or `load`) re-runs every
+;; hot-reload: re-evaluating a file (via `system/reload-defs` or `load`) re-runs every
 ;; `def…` form, which would reset top-level state and re-create singletons (a
 ;; fresh `(spawn …)`, a reopened connection) on every save. `defonce` makes the
 ;; init run *once* — the value survives reload, exactly like Emacs `defvar`.

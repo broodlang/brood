@@ -164,7 +164,7 @@ Without a clear opt-out the warning becomes noise, not signal.
   src/mandel.blsp:42:1)`. Suppression: `(def ^:override foo …)`
   metadata, or `(defn ^:override foo …)` — silenced explicitly per
   binding so the warning stays useful where it isn't.
-- Hot-reload (`reload-defs`) is not a redefinition — the origin matches
+- Hot-reload (`system/reload-defs`) is not a redefinition — the origin matches
   the existing binding, so no warning fires.
 - Same-file redefinitions are silent (already handled cleanly by the
   load process).
