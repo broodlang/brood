@@ -651,6 +651,33 @@ module, so restoring it cannot half-load one."
   (def *std-require-edges* edges)
   *std-require-edges*)
 
+(def- *std-image-file* nil)
+
+(defn- %std-image-serves?
+  (img-path src)
+  "May the section found at `img-path` be used for a module whose embedded source is `src`?
+
+Yes for a PROJECT image, which snapshots that project's own modules and is the only thing
+that has them. For the STDLIB image, only when this binary actually bakes the module in
+(`src` non-nil).
+
+The stdlib image is keyed on `system/stdlib-id`, which hashes every `std/**/*.blsp` **on
+disk** regardless of features — deliberately, so `brood`, `nest` and `brood-lsp` from one tree
+share one ~2 MB copy instead of writing three. But they do not bake the same MODULES: `nest`
+carries the dev-tools (`test`, `project`, `mcp`); a lean runtime — what `nest release` and
+`make install INSTALL_FEATURES=RUN_FEATURES` produce, i.e. what SHIPS — does not. Without this
+check, `nest` writing the image would let a lean `brood` beside it materialise `test` and
+friends: modules that binary was built to exclude, present only because a developer tool once
+ran on that machine. That is the worst shape a bug can take — it works on the dev box and
+fails in production, where no image exists.
+
+So the image may only ever make a module this binary already has FASTER to load; it can never
+add one. The same rule `%merge-require-edges!` applies to a replayed edge, for the same reason.
+Checked HERE rather than by filtering the index at install: the filter is O(sections) of
+`%builtin-module` on the boot path and measured **+1.4 ms of a 20 ms boot**, while this is one
+comparison, paid only by a module that actually materialises."
+  (or (not (= img-path *std-image-file*)) (not (nil? src))))
+
 (def- *std-image-sections* nil)
 
 (defn- %std-image-tables!
@@ -837,6 +864,9 @@ case `require` keeps loading stdlib modules from source exactly as before."
              "%std-edges" (get idx "%std-edges")
              "%std-impls" (get idx "%std-impls")
              "%std-regs" (get idx "%std-regs")})
+          ;; Remember WHICH file is the stdlib image, so a section read back can be told
+          ;; from a project's own (see `%std-image-serves?`).
+          (def *std-image-file* path)
           (%add-image-source! path
             (dissoc (dissoc (dissoc idx "%std-edges") "%std-impls") "%std-regs"))
           (count (keys idx)))))))
@@ -939,7 +969,8 @@ case `require` keeps loading stdlib modules from source exactly as before."
       ;; after its fingerprint matched (the stdlib image keys on `system/build-id`, so it cannot
       ;; outlive the binary whose source it snapshotted), and a module with no section
       ;; still falls through to the source branch unchanged.
-      (not (nil? (%image-section-for key)))
+      (let (hit (%image-section-for key))
+        (and hit (%std-image-serves? (first hit) src)))
         (let ([img-path sec] (%image-section-for key))
           ;; `src` non-nil means this key is an EMBEDDED module — the same condition under
           ;; which the source branch below reaches `%load-module-source`, which is what makes
@@ -2228,15 +2259,38 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; compile time, so anything the program mentions has already loaded from source — and three
 ;; separate published failure counts were measured that way before anyone checked (ADR-256).
 ;;
-;; Opt-in (`BROOD_STDIMAGE=1`). The suite passes 4917/4917 either way; the default stays off
-;; because turning it on changes every program's load path, which is its own decision on its
-;; own evidence. With no image built, or one built from different stdlib content, `install`
-;; returns nil and `require` reads source exactly as before.
+;; **Opt-IN: `BROOD_STDIMAGE=1`.** It was briefly made the default on 2026-08-27 and reverted
+;; the same day — see KI-72. Under concurrency the image turns a latent stall into a reliable
+;; one: 12 of 12 parallel copies of `autoload_race` exceed a 90 s timeout with it installed and
+;; 0 of 12 without. Cause is understood and is NOT the image itself — the edge replay below
+;; must run before `provide` (or a racing process sees a module whose deps are missing, the
+;; 112-failure bug ADR-256 fixed), which keeps a module unprovided while it recursively
+;; requires its whole edge set, and every other process that wants it meanwhile falls into
+;; `%require-await`'s 5 ms x 1000 poll. Nothing hangs permanently — it force-loads after 5 s —
+;; but the stalls compound. Fixing the poll is the work; until then this stays opt-in. This is safe by construction rather
+;; than by policy: the image is keyed on `system/stdlib-id`, a content hash of every baked-in
+;; `.blsp`, so a stale one cannot be read — and with no image built at all, `install` returns
+;; nil in ~40 µs and `require` reads source exactly as before. A run therefore either gets a
+;; snapshot of the library this very binary bakes in, or the source. There is no third state.
+;;
+;; The opt-out exists to A/B it, to bisect a suspected materialise fault, and as the stopgap
+;; if one is ever found — the same reason `BROOD_NO_RECV_MARK` and `BROOD_NO_SHARE_FN` have
+;; switches. `nest` builds the image when it is missing (`ensure_stdimage`), so a project gets
+;; this without being asked; `brood` alone installs one if present and never pays to build.
 ;;
 ;; The traced arm times the install. It is here because an earlier version of it cost 6.8 ms
 ;; of a 20 ms boot and made `startup` 20% WORSE while making module loads faster — a
 ;; regression that only a measurement at this exact point can see.
-(when (%getenv "BROOD_STDIMAGE")
+(when (and (%getenv "BROOD_STDIMAGE")
+        ;; Line coverage instruments the COMPILER (ADR-148): it prefixes each positioned
+        ;; node with a `RecordLine` as the module is evaluated. A materialised module is
+        ;; never evaluated — that is the entire point — so with an image installed no std
+        ;; module can ever appear in a coverage readout, and `nest test --cover-lines`
+        ;; silently reports nothing for the standard library. Stand aside, the same way
+        ;; `--cover-lines` already sets `BROOD_NO_JIT=1`, and for the same reason: a
+        ;; measurement of what ran cannot be taken from code that was restored rather
+        ;; than run.
+        (nil? (%getenv "BROOD_COVERAGE")))
   (if (%getenv "BROOD_IMAGE_TRACE")
     (let (t0 (%now-ns) n (%std-image-install) t1 (%now-ns))
       ;; nanoseconds, not microseconds: this runs during PRELUDE evaluation, where a
