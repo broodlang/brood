@@ -46,7 +46,9 @@
 (defmacro with-out-str (& body)
   "Evaluate `body` with stdout captured, and return everything it printed as a
 string (`\"\"` if it printed nothing), discarding `body`'s own value. Output from
-processes `body` spawns is captured too; nested `with-out-str`s compose."
+processes `body` spawns is captured too; nested `with-out-str`s compose.
+
+    (with-out-str (io/write \"a\"))   → \"a\""
   `(do
      (%capture-begin)
      (try
@@ -81,19 +83,25 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   (acc form)
   (if (pair? form) (cons (first form) (cons acc (rest form))) (list form acc)))
 (defmacro -> (x & forms)
-  "Thread `x` through the forms as each one's *first* argument: `(-> x (f a) (g b))` is `(g (f x a) b)`."
+  "Thread `x` through the forms as each one's *first* argument: `(-> x (f a) (g b))` is `(g (f x a) b)`.
+
+    (-> 1 inc inc)   → 3"
   (reduce %thread-first-step x forms))
 
 (defn- %thread-last-step (acc form) (if (pair? form) (append form (list acc)) (list form acc)))
 (defmacro ->> (x & forms)
-  "Thread `x` through the forms as each one's *last* argument: `(->> x (f a) (g b))` is `(g b (f a x))`."
+  "Thread `x` through the forms as each one's *last* argument: `(->> x (f a) (g b))` is `(g b (f a x))`.
+
+    (->> [1 2] (map inc))   → (2 3)"
   (reduce %thread-last-step x forms))
 
 ;; (as-> x name (f a name) (g name b)) — thread `x` as `name`, in ANY position.
 ;; Brood's `let` is sequential and re-binds a repeated name, so this is one `let`:
 ;;   (as-> 5 $ (+ $ 1) (* $ 2))  =>  (let ($ 5  $ (+ $ 1)  $ (* $ 2)) $)  =>  12
 (defmacro as-> (expr name & forms)
-  "Thread `expr` through `forms`, re-binding it to `name` at each step so it can sit in *any* argument position: `(as-> 5 $ (+ $ 1) (* $ 2))` is `12`."
+  "Thread `expr` through `forms`, re-binding it to `name` at each step so it can sit in *any* argument position: `(as-> 5 $ (+ $ 1) (* $ 2))` is `12`.
+
+    (as-> 1 x (+ x 2))   → 3"
   (let (steps (reduce (fn (acc form) (append acc (list name form))) (list name expr) forms))
     `(let ~steps ~name)))
 
@@ -113,7 +121,10 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
          (let (~place ~(step place (first forms)))
            ~(%some-thread-build place (rest forms) step))))))
 (defmacro some-> (x & forms)
-  "Thread `x` through `forms` as each one's *first* argument (like `->`), but short-circuit to `nil` as soon as any step yields `nil`."
+  "Thread `x` through `forms` as each one's *first* argument (like `->`), but short-circuit to `nil` as soon as any step yields `nil`.
+
+    (some-> 1 inc)     → 2
+    (some-> nil inc)   → nil   ; short-circuits on nil"
   (let (v (gensym "v")) `(let (~v ~x) ~(%some-thread-build v forms %thread-first-step))))
 (defmacro some->> (x & forms)
   "Thread `x` through `forms` as each one's *last* argument (like `->>`), but short-circuit to `nil` as soon as any step yields `nil`."
@@ -128,7 +139,10 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
       `(let (~place (if ~(first clauses) ~(step place (second clauses)) ~place))
          ~(%cond-thread-build place (rest (rest clauses)) step)))))
 (defmacro cond-> (x & clauses)
-  "Thread `x` through the `test form` clause pairs, applying each `form` (as its *first* argument, like `->`) only when its `test` is truthy: `(cond-> {} add-a? (assoc :a 1))`."
+  "Thread `x` through the `test form` clause pairs, applying each `form` (as its *first* argument, like `->`) only when its `test` is truthy: `(cond-> {} add-a? (assoc :a 1))`.
+
+    (cond-> 1 true inc)    → 2
+    (cond-> 1 false inc)   → 1"
   (let (v (gensym "v")) `(let (~v ~x) ~(%cond-thread-build v clauses %thread-first-step))))
 (defmacro cond->> (x & clauses)
   "Thread `x` through the `test form` clause pairs, applying each `form` (as its *last* argument, like `->>`) only when its `test` is truthy."
@@ -157,11 +171,16 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; the truthy branch. Testing a fresh temp (not the pattern) is what makes
 ;; destructuring targets — `(when-let ([k v] (first-entry m)) …)` — behave.
 (defmacro if-let (binding then & else)
-  "Bind `(name expr)`; if `expr` is truthy, evaluate `then` with `name` bound to it, else evaluate `else` (or `nil`). `name` may be a destructuring pattern."
+  "Bind `(name expr)`; if `expr` is truthy, evaluate `then` with `name` bound to it, else evaluate `else` (or `nil`). `name` may be a destructuring pattern.
+
+    (if-let (x 1) x :none)     → 1
+    (if-let (x nil) x :none)   → :none"
   (let (name (first binding) expr (second binding) v (gensym "v"))
     `(let (~v ~expr) (if ~v (let (~name ~v) ~then) ~@else))))
 (defmacro when-let (binding & body)
-  "Bind `(name expr)`; when `expr` is truthy, evaluate `body` (returning the last) with `name` bound to it, else `nil`. `name` may be a destructuring pattern."
+  "Bind `(name expr)`; when `expr` is truthy, evaluate `body` (returning the last) with `name` bound to it, else `nil`. `name` may be a destructuring pattern.
+
+    (when-let (x 1) x)   → 1"
   (let (name (first binding) expr (second binding) v (gensym "v"))
     `(let (~v ~expr) (when ~v (let (~name ~v) ~@body)))))
 
@@ -290,7 +309,9 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 (defn error-message (e)
   "A human-readable message string for a caught value `e`: a raised string
 as-is, the `:message` of a structured error map (what the kernel throws), else
-its printed form."
+its printed form.
+
+    (error-message (try (error \"b\") (catch e e)))   → \"b\""
   (cond
     (string? e) e
     (and (map? e) (get e :message)) (get e :message)
