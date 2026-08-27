@@ -4206,6 +4206,58 @@ and "a print depth" were left alone here.
 
 **Cut as v0.14.0.** No language change — the release is the tree going green.
 
+## 2026-08-27 (fifth session) — KI-70: the checker's silent coverage boundary
+
+**Found by accident, chasing something else.** While updating `../hive`'s dropped
+`brood-for-claude.md`, `bin/deploy.blsp` and `src/web/views/docs.blsp` turned out to call
+bare `min`/`max` — retired to `math` in the ADR-227 wave. Except `nest check` in hive said
+nothing, and a probe file with the same call in the same shape said `unbound symbol: max`.
+
+The difference was not the name, the module, the deps or the check cache — all four were
+ruled out one at a time (a fresh broken file at `src/` **and** at `src/web/views/` was
+caught; appending a broken `defn` to `docs.blsp` itself was caught; `BROOD_NO_CHECK_CACHE=1`
+changed nothing). What was left was the *shape*: the live call sits inside
+`[:textarea {:rows (str (max 2 …))} code]`.
+
+**One line.** `check_into_inner` opened with `let Value::Pair(_) = form else { return }`, so
+a vector or map literal ended the walk. Everything inside `[…]`/`{…}`, arbitrarily deep, was
+unchecked by every lint. That is the entire Hiccup style — hive's web layer, `std/editor/*`,
+every UI spec in the language.
+
+Minimal repro, five shapes, one warning where there should be five:
+
+```lisp
+(defn a (x) (zzz x))                       ;; flagged
+(defn b (x) [:tag (zzz x)])                ;; silent
+(defn c (x) {:k (zzz x)})                  ;; silent
+(defn d (x) [:tag {:k (zzz x)}])           ;; silent
+(defn e (x) [:tag {:k (str (zzz x))}])     ;; silent — the hive shape
+```
+
+**The fix descends into vectors and maps (keys as well as values), and it is safe for three
+reasons that all had to hold** before turning it on under a CI gate that rejects any
+warning: the checker runs on **macroexpanded** forms, so a `match` pattern vector is already
+`let`/`if` binders; `quote`/`quasiquote`/`comment` return at `SpecialHead::SkipBody`, reached
+at the enclosing pair's head, so quoted data never arrives; and the generic operand recursion
+is already gated on `head_is_macro`. Argued, then *confirmed* — the gate
+`nest check std/**/*.blsp tests/**/*.blsp`, at zero since 2026-07-31, returned exactly one
+warning, and it was real.
+
+**That one warning was the fifth dead `project-*` call site.** KI-67's sweep found four in
+`std/tool/mcp.blsp` two commits ago; the fifth, `project-all-files` in the `callers` tool,
+sat inside `{:references …}` where the walk never went. So the MCP `callers` tool has been
+raising `unbound symbol` on every invocation. Now `project/all-files`, public and
+de-stuttered beside `project/source-files` — the remedy KI-67 already established.
+
+> **The reusable lesson.** A lint that is *suppressed* somewhere leaves a trace you can grep
+> for. A lint that is never *reached* leaves nothing. Every "return early if this is not the
+> shape I expect" line in a checker is a silent coverage boundary, and the far side of it is
+> exactly where nobody has been looking. KI-67 and KI-70 are the same bug at two depths;
+> the second was invisible to the sweep that fixed the first.
+
+**Also caught:** v0.14.0 was pushed with three `.blsp` files failing `nest format --check` —
+the one gate in `bin/ci`'s sequence I had not run locally before pushing. Cut as v0.14.1.
+
 ## 2026-08-27 (third session) — a 79% deopt rate that is not a cost, and the build that faked it
 
 Went looking for the next perf lever with the attribution build. `perf/measure` on a
