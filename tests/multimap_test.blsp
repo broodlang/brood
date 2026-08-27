@@ -50,7 +50,7 @@
     (let (mm (-> (multimap/empty)
                (multimap/assoc :a 1)
                (multimap/assoc :b 2)))
-      (assert= 2 (count (multimap/keys mm)))))
+      (assert= 2 (count (keys mm)))))
   (test "multimap-size counts all pairs"
     (let (mm (-> (multimap/empty)
                (multimap/assoc :x 1)
@@ -61,7 +61,7 @@
     (let (mm (-> (multimap/empty)
                (multimap/assoc :a "x")
                (multimap/assoc :b "y")))
-      (assert= 2 (count (multimap/values mm)))))
+      (assert= 2 (count (vals mm)))))
   (test "multimap->map returns map of lists"
     (let (mm (-> (multimap/empty)
                (multimap/assoc :k "a")
@@ -86,9 +86,9 @@
     (is (not (= (multimap/empty) {}))))
   (test "the identity never leaks into keys, size, or the map view"
     (let (mm (multimap/assoc (multimap/empty) :k 1))
-      (assert= (into [] (multimap/keys mm)) [:k])
+      (assert= (into [] (keys mm)) [:k])
       (assert= (count mm) 1)
-      (is (not (includes? (into [] (multimap/keys mm)) :__id__)))
+      (is (not (includes? (into [] (keys mm)) :__id__)))
       (is (not (contains? (multimap/->map mm) :__id__)))))
   (test "an empty multimap is empty by its own count, not the wrapper's"
     (is (multimap/empty? (multimap/empty)))
@@ -123,6 +123,17 @@
     (let (mm (multimap/assoc (multimap/empty) :k 1))
       (assert= (get mm :nope) nil)
       (assert= (get mm :nope :none) :none)))
+  (test "bare `keys` gives the DISTINCT keys, and `vals` every value"
+    ;; `keys` read the `Seqable` view and answered one key per VALUE; it consults
+    ;; `Lookup`'s `-keys` now. `multimap/keys` and `multimap/values` are GONE — bare `keys`
+    ;; and `vals` give exactly what they gave, so keeping them would be two names for one
+    ;; function.
+    (let (mm (multimap/assoc (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2) :j 9))
+      (assert= (sort (keys mm)) (list :j :k))
+      (assert= (sort (vals mm)) (list 1 2 9))))
+  (test "a plain map and a plain record are untouched by the keys seam"
+    (assert= (keys {:a 1}) (list :a))
+    (assert= (vals {:a 1}) (list 1)))
   ;; The seam fires only when a map lookup comes back EMPTY, so a plain map storing a falsy
   ;; value must keep it rather than fall through to the caller's default.
   (test "a plain map storing nil or false is untouched by the seam"

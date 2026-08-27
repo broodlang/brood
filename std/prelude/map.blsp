@@ -168,13 +168,33 @@ A multi-key result prints in the map's internal order, not the order given."
 ;; primitive + get-per-key `vals`).
 ;; `seq` (not `%map-pairs`) so a record's keys/vals are its fields — no internal `:__id__`.
 (defn keys (m)
-  "The keys of map `m` (a record's are its fields, id-free).
+  "The keys of map `m` (a record's are its fields, id-free). A record that stores its
+contents elsewhere answers for itself through the `Lookup` ability — a multimap gives its
+DISTINCT keys, not one per value.
 
     (keys {:a 1})  → (:a)
 
 Order is the map's internal (hash) order, NOT insertion order — sort if you need a
 stable one."
-  (map first (seq m)))
+  ;; Unlike `get`'s, this branch is not hot: it already walks the whole map and allocates,
+  ;; so the impl check sits up front rather than behind a miss.
+  (let (ks (%keys-via-lookup m))
+    (if (nil? ks) (map first (seq m)) ks)))
+
+(defn- %keys-via-lookup
+  (m)
+  "This map's own `-keys`, or nil when it has no `Lookup` impl. Raw prims and a `bound?`
+guard, as in `seq`: this file loads six before `*impls*`, and `%identity-of` reads `:__id__`
+with bare `get`."
+  (if (map? m)
+    (if (bound? (quote *impls*))
+      (let (id (%map-get m (quote :__id__) nil))
+        (if id
+          (let (methods (%map-get *impls* (quote [Lookup -keys]) nil))
+            (if methods (if (%map-get methods id nil) (-keys m) nil) nil))
+          nil))
+      nil)
+    nil))
 (defn vals (m)
   "The values of map `m` (a record's are its fields, id-free).
 

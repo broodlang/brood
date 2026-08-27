@@ -1937,9 +1937,10 @@ which is meaningless for a rope, so falling through unconditionally would swap a
 ;; No `:default` — a record with no impl keeps the field lookup, which is the right answer
 ;; for an ordinary record and the reason `get` works on one at all.
 (defability Lookup
-  "A record's own keyed access — what `get` should answer for it, when its contents are
-not simply its fields."
-  (-get [self k] :-> any))
+  "A record's own keyed access — what `get` and `keys` should answer for it, when its
+contents are not simply its fields."
+  (-get [self k] :-> any)
+  (-keys [self] :-> any))
 
 ;; Conjable — adding an element: the seam `conj`/`into` consult for a RECORD. The default
 ;; is the map behaviour (a record is a map: assoc a `[k v]` pair, or merge a map), so a
