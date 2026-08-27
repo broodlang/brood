@@ -4,22 +4,22 @@
 
 (defmodule match-props-stress-test (:use test))
 
-(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+(defn lcg (s) (math/rem (+ (* s 1103515245) 12345) 2147483648))
 
 ;; random shallow value across the shapes the matcher dispatches on
 (defn gen (s)
-  (let (c (rem s 11))
+  (let (c (math/rem s 11))
     (cond
-      (= c 0) [:a (rem s 100)]
-      (= c 1) [:a (rem s 100) (rem s 7)]
-      (= c 2) [:b (rem s 100) (rem s 9)]
-      (= c 3) (list :c (rem s 5) (rem s 5) (rem s 5))
-      (= c 4) {:p (rem s 50)}
-      (= c 5) {:p (rem s 50) :q (rem s 50)}
+      (= c 0) [:a (math/rem s 100)]
+      (= c 1) [:a (math/rem s 100) (math/rem s 7)]
+      (= c 2) [:b (math/rem s 100) (math/rem s 9)]
+      (= c 3) (list :c (math/rem s 5) (math/rem s 5) (math/rem s 5))
+      (= c 4) {:p (math/rem s 50)}
+      (= c 5) {:p (math/rem s 50) :q (math/rem s 50)}
       (= c 6) "lit"
       (= c 7) 7
       (= c 8) nil
-      (= c 9) (rem s 1000)
+      (= c 9) (math/rem s 1000)
       else [:z])))
 
 (defn via-match (v)

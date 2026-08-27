@@ -23,9 +23,9 @@
 ;;   * a burst of spawns                                               (placement spill)
 (defmodule soak (:use supervisor))
 
-(def secs (let (e (os/getenv "SOAK_SECS")) (if e (string/->number e) 3600)))
-(def backlog (let (e (os/getenv "SOAK_BACKLOG")) (if e (string/->number e) 64)))
-(def report-every (let (e (os/getenv "SOAK_REPORT")) (if e (string/->number e) 30000)))
+(def secs (let (e (os/env "SOAK_SECS")) (if e (string/->number e) 3600)))
+(def backlog (let (e (os/env "SOAK_BACKLOG")) (if e (string/->number e) 64)))
+(def report-every (let (e (os/env "SOAK_REPORT")) (if e (string/->number e) 30000)))
 
 (def reload-target 2)
 (defn shared-thunk () (* reload-target 21)) ; no captures -> shared handle
@@ -83,22 +83,22 @@
     (let (seen (drain-junk backlog 0))
       (when (not (= seen backlog)) (fail (str "backlog lost: saw " seen " of " backlog) n)))
     ;; 2. supervised crash + restart
-    (let (pid (start-child sup {:id (mod n 8) :start start-crashy :restart :permanent}))
+    (let (pid (start-child sup {:id (math/mod n 8) :start start-crashy :restart :permanent}))
       (do
         (send pid :die)
-        (terminate-child sup (mod n 8))))
+        (terminate-child sup (math/mod n 8))))
     ;; 3. closures across a send, shared and captured, against a hot-reloaded global
     (let (got (round-trip))
       ; keeps the server warm
       (when (not (= got :pong)) (fail "server stopped replying" n)))
-    (when (= 0 (mod n 97))
-      (eval (list 'def 'reload-target (+ 2 (mod n 5)))))
+    (when (= 0 (math/mod n 97))
+      (eval (list 'def 'reload-target (+ 2 (math/mod n 5)))))
     ;; 4. spawn burst (placement)
     (burst 32)
     ;; heartbeat
-    (when (= 0 (mod n report-every))
+    (when (= 0 (math/mod n report-every))
       (io/puts (str "t="
-                 (quot (- (os/now) t-start) 1000)
+                 (math/quot (- (os/now) t-start) 1000)
                  "s iter="
                  n
                  " reloads="
@@ -123,6 +123,6 @@
                      " rt-threshold="
                      (get (dev/gc-stats) :runtime-threshold))
                    " (rt-closures unavailable: lean build, no gc-stats)")))
-      (loop-once (+ n 1) (if (= 0 (mod n 97)) (+ reloads 1) reloads)))))
+      (loop-once (+ n 1) (if (= 0 (math/mod n 97)) (+ reloads 1) reloads)))))
 
 (loop-once 0 0)

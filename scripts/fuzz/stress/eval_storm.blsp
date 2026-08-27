@@ -1,3 +1,3 @@
-(defn bf (i) (list 'let (list 'a i 'b (* i 2)) (list '+ 'a 'b (rem i 7))))
-(defn storm (i acc) (if (= i 0) acc (storm (- i 1) (+ acc (rem (eval (bf i)) 13)))))
+(defn bf (i) (list 'let (list 'a i 'b (* i 2)) (list '+ 'a 'b (math/rem i 7))))
+(defn storm (i acc) (if (= i 0) acc (storm (- i 1) (+ acc (math/rem (eval (bf i)) 13)))))
 (io/puts "eval-storm:" (storm 15000 0))

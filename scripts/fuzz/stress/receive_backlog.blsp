@@ -7,8 +7,8 @@
 ;; walks past the whole backlog, so this measures the per-candidate cost of that walk — the
 ;; part the single-lock skip changes. (The O(backlog) walk itself is the receive-mark item;
 ;; this only makes each step cheaper.)
-(def backlog (let (e (os/getenv "BACKLOG")) (if e (string/->number e) 2000)))
-(def n (let (e (os/getenv "N")) (if e (string/->number e) 2000)))
+(def backlog (let (e (os/env "BACKLOG")) (if e (string/->number e) 2000)))
+(def n (let (e (os/env "N")) (if e (string/->number e) 2000)))
 (defn server () (receive ([:ping from r] (do (send from [:reply r :pong]) (server)))))
 (def s (spawn (server)))
 (defn stuff (k) (if (= k 0) :ok (do (send (self) [:junk k]) (stuff (- k 1)))))
@@ -17,4 +17,4 @@
 (defn go (i) (if (>= i n) i (do (call1) (go (+ i 1)))))
 (def t0 (os/now-ns))
 (go 0)
-(io/puts (str "backlog=" backlog " us/round-trip=" (quot (- (os/now-ns) t0) (* n 1000))))
+(io/puts (str "backlog=" backlog " us/round-trip=" (math/quot (- (os/now-ns) t0) (* n 1000))))

@@ -45,10 +45,10 @@ class Gen:
             return str(r.choice(EDGE_INTS) if r.random() < 0.4 else r.randint(-999, 999))
         c = r.random()
         if c < 0.45:
-            op = r.choice(["+", "-", "*", "max", "min", "bit-and", "bit-or", "bit-xor"])
+            op = r.choice(["+", "-", "*", "math/max", "math/min", "bit/and", "bit/or", "bit/xor"])
             return f"({op} {self.expr(params, depth-1)} {self.expr(params, depth-1)})"
         if c < 0.60:  # guarded integer division (nonzero literal divisor)
-            op = r.choice(["quot", "rem"])
+            op = r.choice(["math/quot", "math/rem"])
             d = r.choice([2, 3, 7, 97, -3, -8])
             return f"({op} {self.expr(params, depth-1)} {d})"
         if c < 0.75:
@@ -77,10 +77,10 @@ class Gen:
             return str(r.randint(-50, 50))
         c = r.random()
         if c < 0.5:
-            op = r.choice(["+", "-", "*", "bit-and", "bit-or", "bit-xor", "max", "min"])
+            op = r.choice(["+", "-", "*", "bit/and", "bit/or", "bit/xor", "math/max", "math/min"])
             return f"({op} {self.i64_expr(params, depth-1)} {self.i64_expr(params, depth-1)})"
         if c < 0.65:
-            op = r.choice(["quot", "rem"])
+            op = r.choice(["math/quot", "math/rem"])
             d = r.choice([2, 3, 7, -3, 8])
             return f"({op} {self.i64_expr(params, depth-1)} {d})"
         if c < 0.82:
@@ -92,7 +92,7 @@ class Gen:
 
     def program(self):
         r = self.r
-        lines = ["(def t (table))"]
+        lines = ["(def t (table/new))"]
         helpers = []
         for _ in range(r.randint(1, 3)):
             f = self.name("f")
@@ -114,9 +114,9 @@ class Gen:
         if r.random() < 0.4:
             h = self.name("h")
             k = r.randint(1, 9)
-            op = r.choice(["+", "*", "bit-xor"])
+            op = r.choice(["+", "*", "bit/xor"])
             lines.append("(defn " + h + " (x) (fold + 0 (map (fn (y) (" + op
-                         + " y (rem x " + str(k + 1) + "))) (range " + str(k) + "))))")
+                         + " y (math/rem x " + str(k + 1) + "))) (range " + str(k) + "))))")
             helpers.append((h, 1))
         # a match-dispatch helper: builds a shape from its arg and matches it —
         # exercises the fail-thunk match lowering + destructures under every tier
@@ -124,7 +124,7 @@ class Gen:
             m = self.name("m")
             lines.append(
                 "(defn " + m + " (x) "
-                "(match (if (= (rem x 3) 0) [:a x] (if (= (rem x 3) 1) [:b x (+ x 1)] (list :c x))) "
+                "(match (if (= (math/rem x 3) 0) [:a x] (if (= (math/rem x 3) 1) [:b x (+ x 1)] (list :c x))) "
                 "([:a v] :when (> v 100) (+ v 1)) "
                 "([:a v] (- v 1)) "
                 "([:b v w] (+ v w)) "
@@ -138,7 +138,7 @@ class Gen:
             lines.append(
                 "(defn " + sname + " (x) "
                 '(let (t (str x "-" (* x 3))) '
-                "(+ (string/length t) (bit-and x 7))))")
+                "(+ (string/length t) (bit/and x 7))))")
             helpers.append((sname, 1))
         # a MAP helper: build a CHAMP map by folding assoc, then dissoc/get/merge/
         # count/keys — exercises persistent-map construction + traversal through
@@ -149,10 +149,10 @@ class Gen:
             mname = self.name("mp")
             lines.append(
                 "(defn " + mname + " (x)\n"
-                "  (let (m (fold (fn (mm i) (assoc mm (rem (+ x i) 16) (bit-and (* i x) 255)))\n"
+                "  (let (m (fold (fn (mm i) (assoc mm (math/rem (+ x i) 16) (bit/and (* i x) 255)))\n"
                 "                {} (range 8)))\n"
-                "    (let (m2 (merge (dissoc m (rem x 16)) {99 (bit-and x 255)}))\n"
-                "      (bit-and (+ (count m2) (get m2 (rem (+ x 3) 16) 0)\n"
+                "    (let (m2 (merge (dissoc m (math/rem x 16)) {99 (bit/and x 255)}))\n"
+                "      (bit/and (+ (count m2) (get m2 (math/rem (+ x 3) 16) 0)\n"
                 "                  (fold + 0 (map (fn (k) (get m2 k 0)) (keys m2))))\n"
                 "               268435455))))")
             helpers.append((mname, 1))
@@ -164,12 +164,12 @@ class Gen:
             cname = self.name("cl")
             lines.append(
                 "(defn " + cname + " (x)\n"
-                "  (let (a (rem x 7) b (rem x 5) c (rem x 3))\n"
+                "  (let (a (math/rem x 7) b (math/rem x 5) c (math/rem x 3))\n"
                 "    (let (f (fn (y)\n"
                 "              (let (d (+ y a))\n"
                 "                (fn (z)\n"
                 "                  (let (e (+ (* z b) d))\n"
-                "                    (fn (w) (bit-and (+ a b c d e w (* x 2)) 268435455)))))))\n"
+                "                    (fn (w) (bit/and (+ a b c d e w (* x 2)) 268435455)))))))\n"
                 "      (((f 1) 2) 3))))")
             helpers.append((cname, 1))
         # a TRY/CATCH helper: deterministically throws on some inputs and catches,
@@ -181,9 +181,9 @@ class Gen:
             lines.append(
                 "(defn " + tname + " (x)\n"
                 "  (try\n"
-                "    (let (d (rem x 3))\n"
-                "      (if (= d 0) (throw [:zero x]) (quot 100 d)))\n"
-                "    (catch e (bit-and (+ 7 (rem x 5)) 255))))")
+                "    (let (d (math/rem x 3))\n"
+                "      (if (= d 0) (throw [:zero x]) (math/quot 100 d)))\n"
+                "    (catch e (bit/and (+ 7 (math/rem x 5)) 255))))")
             helpers.append((tname, 1))
         # a SLOT-TORTURE helper: sibling `let`s in operand positions, shadowing
         # (slot reuse across scopes), `let`-in-`if`, and a bool-slot `let` used as
@@ -193,10 +193,10 @@ class Gen:
             qn = self.name("sq")
             lines.append(
                 "(defn " + qn + " (x)\n"
-                "  (let (a (rem x 7))\n"
+                "  (let (a (math/rem x 7))\n"
                 "    (- (let (a (+ a 1))\n"
                 "         (+ (let (b (* a 2)) b)\n"
-                "            (let (a (bit-xor a x)) a)))\n"
+                "            (let (a (bit/xor a x)) a)))\n"
                 "       (let (c (if (< a 3) (let (d 10) d) (let (d 20) d)))\n"
                 "         (* c (if (let (e (> x 0)) e) 2 3))))))")
             helpers.append((qn, 1))
@@ -207,7 +207,7 @@ class Gen:
             fn = self.name("sf")
             lines.append(
                 "(defn " + fn + " (x)\n"
-                "  (+ (if (< (let (a (* (rem x 5) 1.5)) a) (let (b (/ (+ x 3) 2.0)) b)) 1 0)\n"
+                "  (+ (if (< (let (a (* (math/rem x 5) 1.5)) a) (let (b (/ (+ x 3) 2.0)) b)) 1 0)\n"
                 "     (if (< (let (a (+ x 0.5)) a) (let (a (* x 0.25)) a)) 10 0)))")
             helpers.append((fn, 1))
         # an EA-SCALAR-REPLACEMENT helper: a single-binder `let` of a small vector
@@ -223,7 +223,7 @@ class Gen:
             lines.append(
                 "(defn " + en + " (x)\n"
                 "  (let (v [" + elems + "])\n"
-                "    (bit-and (+ " + reads + ") 268435455)))")
+                "    (bit/and (+ " + reads + ") 268435455)))")
             helpers.append((en, 1))
         # a RANGE-REDUCE helper: a NON-prim closure folded over a range, which
         # dispatches through the native `%range-reduce` HOF driver + its JIT
@@ -232,11 +232,11 @@ class Gen:
         if r.random() < 0.5:
             rrn = self.name("rr")
             k = r.randint(6, 15)
-            op = r.choice(["+", "-", "bit-xor"])
+            op = r.choice(["+", "-", "bit/xor"])
             m = r.randint(2, 9)
             lines.append(
                 "(defn " + rrn + " (x)\n"
-                "  (reduce (fn (acc i) (bit-and (" + op + " acc (* i (rem x " + str(m) + "))) 268435455)) 0 (range " + str(k) + ")))")
+                "  (reduce (fn (acc i) (bit/and (" + op + " acc (* i (math/rem x " + str(m) + "))) 268435455)) 0 (range " + str(k) + ")))")
             helpers.append((rrn, 1))
         # the driver bit-ands the helper result, so it must be int-returning; the
         # float helper `g` is exercised on its own (and by the pure `flt`/`accf`
@@ -244,8 +244,8 @@ class Gen:
         f, arity = r.choice([(n, a) for (n, a) in helpers if not n.startswith("g")])
         args = " ".join(["i"] * arity)
         key_mod = r.choice([8, 64, 512, 4095])
-        body_bits = [f"(table-put t (rem i {key_mod}) ({f} {args}))",
-                     f"(table-incr t {r.randint(0, 7)} 1)"]
+        body_bits = [f"(table/put t (math/rem i {key_mod}) ({f} {args}))",
+                     f"(table/incr t {r.randint(0, 7)} 1)"]
         r.shuffle(body_bits)
         n_iters = r.choice([3000, 5000, 9000])
         lines.append(
@@ -253,7 +253,7 @@ class Gen:
             f"  (if (>= i n) acc\n"
             f"    (do {body_bits[0]}\n"
             f"      {body_bits[1]}\n"
-            f"      (drive (+ i 1) n ({r.choice(["bit-xor", "+"])} acc (bit-and ({f} {args}) 268435455))))))")
+            f"      (drive (+ i 1) n ({r.choice(["bit/xor", "+"])} acc (bit/and ({f} {args}) 268435455))))))")
         lines.append(f"(def acc (drive 0 {n_iters} 0))")
         # optional CONCURRENT phase: fan out workers running a pure helper +
         # commutative shared-table ops (incr / disjoint puts), fan in results.
@@ -276,21 +276,21 @@ class Gen:
                 lines.append(
                     "(defn worker (w j n s)\n"
                     "  (if (>= j n) (send me [:done s])\n"
-                    "    (do (table-incr t 999983 1)\n"
-                    "      (table-put t (+ 100000 (* w " + str(span) + ") (rem j " + str(span) + ")) (bit-and (" + pf + " " + pargs + ") 268435455))\n"
-                    "      (worker w (+ j 1) n (bit-and (+ s (" + pf + " " + pargs + ")) 268435455)))))")
+                    "    (do (table/incr t 999983 1)\n"
+                    "      (table/put t (+ 100000 (* w " + str(span) + ") (math/rem j " + str(span) + ")) (bit/and (" + pf + " " + pargs + ") 268435455))\n"
+                    "      (worker w (+ j 1) n (bit/and (+ s (" + pf + " " + pargs + ")) 268435455)))))")
                 lines.append(
                     "(defn fan (w) (if (= w " + str(nworkers) + ") nil (do (spawn (worker w 0 " + str(per) + " 0)) (fan (+ w 1)))))")
                 lines.append(
-                    "(defn fan-in (k s) (if (= k " + str(nworkers) + ") s (fan-in (+ k 1) (receive ([:done v] (bit-and (+ s v) 268435455)) (after 10000 -1)))))")
+                    "(defn fan-in (k s) (if (= k " + str(nworkers) + ") s (fan-in (+ k 1) (receive ([:done v] (bit/and (+ s v) 268435455)) (after 10000 -1)))))")
                 lines.append(
                     "(defn dig2 (k n s)\n"
                     "  (if (>= k n) s\n"
-                    "    (dig2 (+ k 1) n (bit-xor s (* (- k 99999) (table-get t k 0))))))")
+                    "    (dig2 (+ k 1) n (bit/xor s (* (- k 99999) (table/get t k 0))))))")
                 lines.append("(fan 0)")
                 lines.append("(def conc (fan-in 0 0))")
                 lines.append(
-                    f'(println "conc" conc (table-get t 999983 0) '
+                    f'(io/puts "conc" conc (table/get t 999983 0) '
                     f"(dig2 100000 {100000 + nworkers * span} 0))")
             else:
                 # PROCESS TREE: a parent spawns `nodes` node-workers; each node
@@ -309,12 +309,12 @@ class Gen:
                 lines.append(
                     "(defn leaf (node w j n s)\n"
                     "  (if (>= j n) (send node [:leaf s])\n"
-                    "    (leaf node w (+ j 1) n (bit-and (+ s (" + pf + " " + pa + ")) 268435455))))")
+                    "    (leaf node w (+ j 1) n (bit/and (+ s (" + pf + " " + pa + ")) 268435455))))")
                 lines.append(
                     "(defn node-loop (w downs sum)\n"
-                    "  (if (= downs " + str(leaves) + ") (send me [:node (bit-and sum 268435455)])\n"
+                    "  (if (= downs " + str(leaves) + ") (send me [:node (bit/and sum 268435455)])\n"
                     "    (receive\n"
-                    "      ([:leaf v] (node-loop w downs (bit-and (+ sum v) 268435455)))\n"
+                    "      ([:leaf v] (node-loop w downs (bit/and (+ sum v) 268435455)))\n"
                     "      ([:down _ _ _] (node-loop w (+ downs 1) sum))\n"
                     "      (after 15000 (send me [:node -1])))))")
                 # NB `spawn` evaluates its whole form in the CHILD, so `(self)`
@@ -331,9 +331,9 @@ class Gen:
                 lines.append(
                     "(defn spawn-nodes (w) (if (= w " + str(nodes) + ") nil (do (spawn (node-worker w)) (spawn-nodes (+ w 1)))))")
                 lines.append(
-                    "(defn tree-in (k s) (if (= k " + str(nodes) + ") s (tree-in (+ k 1) (receive ([:node v] (bit-and (+ s v) 268435455)) (after 20000 -1)))))")
+                    "(defn tree-in (k s) (if (= k " + str(nodes) + ") s (tree-in (+ k 1) (receive ([:node v] (bit/and (+ s v) 268435455)) (after 20000 -1)))))")
                 lines.append("(spawn-nodes 0)")
-                lines.append('(println "tree" (tree-in 0 0))')
+                lines.append('(io/puts "tree" (tree-in 0 0))')
         # PURE self-recursive numeric fns — standalone (no tables, no cross-helper
         # calls), so they stay in the pure-i64/float subset the SPECIALISED
         # fast-path lowerer (`jit_lower_arm_inner`) compiles. This is the lowering
@@ -345,15 +345,15 @@ class Gen:
             lines.append(
                 f"(defn {pn} (n a)\n"
                 f"  (if (<= n 0) a\n"
-                f"    ({pn} (- n 1) (bit-and {body} 268435455))))")
-            lines.append(f'(println "{pn}" ({pn} {r.choice([2000, 4000, 8000])} {r.randint(1, 99)}))')
+                f"    ({pn} (- n 1) (bit/and {body} 268435455))))")
+            lines.append(f'(io/puts "{pn}" ({pn} {r.choice([2000, 4000, 8000])} {r.randint(1, 99)}))')
         # fib-like NON-TAIL double self-recursion (the `i64_too_deep` guard path).
         if r.random() < 0.45:
             fbn = self.name("fib")
             lines.append(
                 f"(defn {fbn} (n)\n"
-                f"  (if (< n 2) n (bit-and (+ ({fbn} (- n 1)) ({fbn} (- n 2))) 268435455)))")
-            lines.append(f'(println "{fbn}" ({fbn} {r.choice([25, 28, 30])}))')
+                f"  (if (< n 2) n (bit/and (+ ({fbn} (- n 1)) ({fbn} (- n 2))) 268435455)))")
+            lines.append(f'(io/puts "{fbn}" ({fbn} {r.choice([25, 28, 30])}))')
         # pure FLOAT self-recursion — the float variant of the fast path
         # (`has_float_slot`). A bounded predicate keeps the print IEEE-stable while
         # still catching a float-path divergence (jit inf vs tree finite → differs).
@@ -363,7 +363,7 @@ class Gen:
                 f"(defn {fln} (n a)\n"
                 f"  (if (<= n 0) a\n"
                 f"    ({fln} (- n 1) (+ (* a 1.0000001) (- (* n 0.5) a)))))")
-            lines.append(f'(println "{fln}" (< ({fln} {r.choice([1500, 3000])} 1.0) 1.0e18))')
+            lines.append(f'(io/puts "{fln}" (< ({fln} {r.choice([1500, 3000])} 1.0) 1.0e18))')
         # UNMASKED-overflow recursion — the i64 arm's overflow guard
         # (`i64_guard_overflow`) must deopt to the VM, which promotes to a bignum
         # (never silently wrap). The bignum result is engine-independent.
@@ -372,7 +372,7 @@ class Gen:
             base = r.choice([2, 3, 5])
             lines.append(
                 f"(defn {ovn} (n a) (if (<= n 0) a ({ovn} (- n 1) (* a {base}))))")
-            lines.append(f'(println "{ovn}" ({ovn} {r.choice([40, 50, 80])} {r.randint(2, 9)}))')
+            lines.append(f'(io/puts "{ovn}" ({ovn} {r.choice([40, 50, 80])} {r.randint(2, 9)}))')
         # THROW inside an i64 arm (`i64_throw_call`) — the throw fires from the
         # recursion and is caught deterministically.
         if r.random() < 0.4:
@@ -380,8 +380,8 @@ class Gen:
             lines.append(
                 f"(defn {trn} (n a)\n"
                 f"  (if (<= n 0) (throw [:done a])\n"
-                f"    ({trn} (- n 1) (bit-and (+ (* a 2) n) 268435455))))")
-            lines.append(f'(println "{trn}" (try ({trn} {r.choice([2000, 5000])} 1) (catch e (nth e 1))))')
+                f"    ({trn} (- n 1) (bit/and (+ (* a 2) n) 268435455))))")
+            lines.append(f'(io/puts "{trn}" (try ({trn} {r.choice([2000, 5000])} 1) (catch e (nth e 1))))')
         # a LINMAP (linear map-accumulator) loop: an immutable map threaded through
         # a self-recursive fold, updated ONLY via map-int-add / map-dissoc and read
         # via map-get / map-count — the whitelist that lets the compiler rewrite it
@@ -392,9 +392,9 @@ class Gen:
             hn = self.name("hist")
             keys = r.choice([5, 7, 10, 16])
             upd = r.choice([1, 2, 3])
-            body = f"(map-int-add m (rem i {keys}) {upd})"
+            body = f"(%map-int-add m (math/rem i {keys}) {upd})"
             if r.random() < 0.45:  # mix in the other update op (dissoc)
-                body = f"(if (= (rem i 13) 0) (map-dissoc m (rem i {keys})) {body})"
+                body = f"(if (= (math/rem i 13) 0) (%map-dissoc m (math/rem i {keys})) {body})"
             lines.append(
                 f"(defn {hn} (m i n)\n"
                 f"  (if (>= i n) m\n"
@@ -403,10 +403,10 @@ class Gen:
             lines.append(
                 f"(defn {dn} (m k acc)\n"
                 f"  (if (>= k {keys}) acc\n"
-                f"    ({dn} m (+ k 1) (bit-xor acc (* (+ k 1) (map-get m k 0))))))")
+                f"    ({dn} m (+ k 1) (bit/xor acc (* (+ k 1) (%map-get m k 0))))))")
             hv = hn + "-r"
             lines.append(f"(def {hv} ({hn} {{}} 0 {r.choice([2000, 5000, 9000])}))")
-            lines.append(f'(println "{hn}" ({dn} {hv} 0 0) (map-count {hv}))')
+            lines.append(f'(io/puts "{hn}" ({dn} {hv} 0 0) (%map-count {hv}))')
         # a SIDE-EFFECT + call-result-DESTRUCTURE loop — the deopt-rerun bug's
         # shape: a `table-incr` effect before a non-tail call whose vector result
         # is destructured (which deopts). Exercises the JIT deopt/effect-ordering
@@ -416,22 +416,22 @@ class Gen:
             sp = self.name("spin")
             mk = self.name("mk")
             key = r.choice([777, 888, 999])
-            lines.append(f"(defn {mk} (s) [(rem (+ (* s 1103515245) 12345) 2147483648) :tag])")
+            lines.append(f"(defn {mk} (s) [(math/rem (+ (* s 1103515245) 12345) 2147483648) :tag])")
             lines.append(
                 f"(defn {sp} (s i n acc)\n"
                 f"  (if (>= i n) acc\n"
-                f"    (do (table-incr t {key} 1)\n"
+                f"    (do (table/incr t {key} 1)\n"
                 f"      (let ([s2 tag] ({mk} s))\n"
-                f"        ({sp} s2 (+ i 1) n (bit-xor acc (bit-and s2 268435455)))))))")
+                f"        ({sp} s2 (+ i 1) n (bit/xor acc (bit/and s2 268435455)))))))")
             sv = sp + "-r"
             lines.append(f'(def {sv} ({sp} 1337 0 {r.choice([5000, 15000])} 0))')
-            lines.append(f'(println "{sp}" {sv} (table-get t {key} 0))')
+            lines.append(f'(io/puts "{sp}" {sv} (table/get t {key} 0))')
         # digest: accumulator + table contents
         lines.append(
             "(defn dig (k n s)\n"
             "  (if (>= k n) s\n"
-            "    (dig (+ k 1) n (bit-xor s (* (+ k 1) (table-get t k 0))))))")
-        lines.append(f'(println "digest" acc (dig 0 {key_mod} 0) (table-count t))')
+            "    (dig (+ k 1) n (bit/xor s (* (+ k 1) (table/get t k 0))))))")
+        lines.append(f'(io/puts "digest" acc (dig 0 {key_mod} 0) (table/count t))')
         return "\n".join(lines) + "\n"
 
 def check_soundness(path):
@@ -457,15 +457,20 @@ def check_soundness(path):
     return None
 
 def run_one(path, env_extra):
+    return run_one_full(path, env_extra)[0]
+
+def run_one_full(path, env_extra):
+    """(comparison string, stderr). Only the first is compared across configs —
+    stderr carries the diagnostics the LIVENESS check below reads."""
     env = dict(os.environ)
     env.update(env_extra)
     env["BROOD_NO_CHECK"] = "1"
     try:
         out = subprocess.run([BROOD, path], capture_output=True, text=True,
                              timeout=120, env=env)
-        return f"exit={out.returncode}\n{out.stdout}"
+        return f"exit={out.returncode}\n{out.stdout}", out.stderr
     except subprocess.TimeoutExpired:
-        return "TIMEOUT"
+        return "TIMEOUT", ""
 
 # ---- auto-shrink (delta debugging over s-expressions) ------------------------
 
@@ -616,15 +621,34 @@ def main():
     outdir = os.environ.get("FUZZ_OUTDIR", "stress/fuzz_out")
     os.makedirs(outdir, exist_ok=True)
     bad = 0
+    live = 0          # seeds every config ran to a clean exit — see LIVENESS below
     for seed in range(args.start, args.start + args.seeds):
         src = Gen(seed).program()
         path = os.path.join(outdir, f"fuzz_{seed}.blsp")
         with open(path, "w") as fh:
             fh.write(src)
-        results = {name: run_one(path, env) for name, env in CONFIGS}
+        ran = {name: run_one_full(path, env) for name, env in CONFIGS}
+        results = {name: out for name, (out, _) in ran.items()}
+        # LIVENESS. Every config agreeing is only meaningful if the program RAN.
+        # A rename wave left this generator emitting `rem`/`bit-and`/`table-get`
+        # long after those names went away: every engine died identically on
+        # `unbound symbol`, every seed reported "ok", and the differential gate
+        # was hollow for weeks. An unbound name in a GENERATED program is never
+        # legitimate — the generator writes the calls itself.
+        unbound = sorted({ln.split("unbound symbol:")[1].strip()
+                          for _, err in ran.values() for ln in err.splitlines()
+                          if "unbound symbol:" in ln})
+        if unbound:
+            bad += 1
+            print(f"DEAD PROGRAM seed={seed} ({path} kept): the generator emits "
+                  f"names this build does not bind: {', '.join(unbound)}")
+            print("  Every engine fails identically on these, so the run would "
+                  "otherwise report agreement. Update Gen to the current names.")
+            continue
         # checker soundness: a program every engine runs CLEANLY must produce
         # zero advisory warnings (sound-but-incomplete contract)
         if all(r.startswith("exit=0") for r in results.values()):
+            live += 1
             if (w := check_soundness(path)) is not None:
                 bad += 1
                 print(f"CHECKER FALSE POSITIVE seed={seed} ({path} kept):")
@@ -654,7 +678,13 @@ def main():
     if bad:
         print(f"---- fuzz: {bad}/{args.seeds} seeds DIVERGED")
         return 1
-    print(f"---- fuzz: {args.seeds} seeds, all configs agree")
+    # The backstop under the per-seed check above: agreement across configs on a
+    # corpus that never ran is not evidence of anything.
+    if live == 0:
+        print(f"---- fuzz: {args.seeds} seeds agreed but NOT ONE ran to a clean "
+              f"exit — the corpus is dead, not the engines agreeing")
+        return 1
+    print(f"---- fuzz: {args.seeds} seeds, all configs agree ({live} ran clean)")
     if not args.keep and os.path.isdir(outdir) and not os.listdir(outdir):
         shutil.rmtree(outdir)
     return 0
