@@ -19,8 +19,8 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-67 | **`nest check` is silent about unbound symbols inside a `try` body**, so a rename can leave a call site dead and every gate stays green. `hatch`'s spool write was `(try (bytes/append path piece) (catch e …))`; brood renamed that to `file/spit-bytes-append`, `nest check` reported nothing, and the repo shipped with every spooled upload broken — visible only as four tests timing out with no error to read. The skip is deliberate (`skips_error_testing_forms`, so a test that deliberately calls an unbound name is not flagged), but it costs exactly the case a rename wave produces | ⚠️ **open (2026-08-27)** — narrowing candidates: flag an unbound symbol in a `try` whose `catch` does not itself reference it, or a `--strict` that reports them separately. Found the hard way twice this session |
-| KI-66 | **nothing in the default gate verifies that a project still BOOTS.** `nest check` resolves names and `nest test` runs the suite, but neither evaluates `main` — and that is exactly where a stale dependency dies. hive went down twice on the same shape: `unbound symbol: int->char` and then `unbound symbol: os/getenv`, both raised on the first line of `main`, both after a clean check and a green suite | ☑️ **not a missing capability (2026-08-27)** — `nest run --for 6s` ALREADY does it: exit 1 with the error if the entry point raises, exit 0 if it survives the window. Verified on a fixture both ways. So the gap is wiring, not tooling: nothing tells you to run it and no gate does. Wired into hive's `bin/ci`; the open part is whether the shared package-ci workflow should too (it must not: `bedit`/`pong` need a GUI, so it has to be opt-in per repo) |
+| KI-67 | **`nest check` was silent about unbound symbols inside a `try` body**, so a rename could leave a call site dead and every gate stayed green. `hatch`'s spool write was `(try (bytes/append path piece) (catch e …))`; brood renamed that to `file/spit-bytes-append`, `nest check` reported nothing, and the repo shipped with every spooled upload broken — visible only as four tests timing out with no error to read | ✅ **fixed 2026-08-27** — `try`/`%try`/`error-of`/`assert-error` now DESCEND, keeping only the unbound-symbol diagnostic and dropping every other lint. Filtering happens at the collection point, not lint-by-lint, so a lint added later is suppressed here by default. Opt out with `(check-allow :unbound …)`. Found two real dead call sites on the first run: `bytes-concat` in `http_test` and four module-private `project-*` names in `std/tool/mcp.blsp` |
+| KI-66 | **nothing in the default gate verified that a project still BOOTS.** `nest check` resolves names and `nest test` runs the suite, but neither evaluates `main` — and that is exactly where a stale dependency dies. hive went down twice on the same shape: `unbound symbol: int->char` and then `unbound symbol: os/getenv`, both raised on the first line of `main`, both after a clean check and a green suite | ✅ **closed 2026-08-27** — never a missing capability: `nest run --for 6s` already does it (exit 1 with the error if the entry point raises, exit 0 if it survives). The gap was wiring, now wired: hive's `bin/ci` runs it, and the shared `package-ci` workflow takes an opt-in `boot-check` input with `boot-seconds` (2b51de93). Off by default on purpose — a library has no `:main`, and `bedit`/`pong` need a GUI a runner has not got |
 | KI-64 | **the JIT miscompiles `json/encode` under sustained load** — hive's `/api/v1/packages*` returns 500 after ~60 requests and then fails until the machine restarts, while `/health` and every web page keep serving. The error is `empty?: expected collection, got int (1114114)` inside `emit-pairs`/`emit-list`, i.e. an int where the recursion expects a list; 1114114 is NOT a codepoint (that reading was a coincidence) — it is a packed deopt-journal word, `17 << 16 \| 2`. `BROOD_NO_JIT=1` makes it 120/120 clean | ✅ **fixed 2026-08-26** — a block-argument spill slot was landing on the deopt checkpoint, because `jit_spill_reserve` gated the WHOLE reserve on having ≥2 non-tail calls while block-argument slots depend only on the operand depth at a block leader. Not shared code, not concurrency, not load: it reproduces in one process on the fourth call. Fixed by clamping the spill window to its reserve (ADR-248); `BROOD_NO_JIT=1` is no longer needed in hive |
 | KI-63 | ~~loading std modules taxes JIT'd hot loops~~ — **RETRACTED 2026-08-25, the effect does not exist.** After a discarded warm-up run in-process, a 20M loop is 23-24 ms whether or not `format` is loaded. Every earlier figure measured the FIRST run, i.e. JIT warm-up, which is variable and shape-sensitive — the same loop read 25 ms in one file and 40-51 ms in another differing only by having three call sites | ☑️ **retracted** — no bug. What is real, and is the reusable part: a whole-process benchmark of a short row measures tiering, not steady state |
 | KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
@@ -186,7 +186,7 @@ repetition, the usual flake defence, does not help. The missing dimension is a *
 
 ---
 
-## KI-67 — `nest check` cannot see inside a `try` body ⚠️ OPEN 2026-08-27
+## KI-67 — `nest check` could not see inside a `try` body ✅ FIXED 2026-08-27
 
 `nest check` does not report an unbound symbol used inside a `try`. The skip is deliberate
 and has a test guarding it — `skips_error_testing_forms` — because a test that deliberately
@@ -225,7 +225,35 @@ Found twice in one session: this, and brood-terminal's `run-process` earlier.
 
 ---
 
-## KI-66 — nothing verifies that a project still boots ⚠️ OPEN 2026-08-27
+
+**Fixed.** `try` / `%try` / `error-of` / `assert-error` moved off `SpecialHead::SkipBody`
+onto a new `ErrorTesting` arm that **descends** into the body and keeps **only** the
+unbound-symbol diagnostic. Everything else — arity, type misuse, exhaustiveness, no-method
+— is dropped, because deliberately exercising a failure is what these forms are *for*.
+
+The filtering happens **at the collection point**, not lint-by-lint: the arm walks into a
+scratch `Vec` and retains messages starting with `UNBOUND_PREFIX`. That was the second
+attempt. The first gated each lint on a `SUPPRESS_*` bit and immediately proved too coarse —
+exhaustiveness and `no num-mul method` have no bit, so `nest check` went from 0 to 6
+warnings, four of them false. Filtering at the collection point means a lint added later is
+suppressed here **by default**, which is the correct default for these forms.
+
+A test that really does assert on an unbound name opts out with `(check-allow :unbound …)`.
+
+**It found two real dead call sites on its first run:**
+
+| where | stale name | swallowed by |
+|---|---|---|
+| `tests/http_test.blsp:63-64` | `bytes-concat` (it is `bytes/concat`) | `assert-error` — the test passed on the *unbound* error, never exercising the CRLF-injection refusal it claimed to test |
+| `std/tool/mcp.blsp:78-83` | four `project-*` names that are `defn-` (module-private) | `(catch _ nil)` — so `mcp`'s per-file shadow report always returned nil |
+
+The second is the more instructive one: it is shipped `std/`, not a test, and the fix was to
+add a public `project/file-shadow-warnings` rather than let `mcp` reach for four private
+names. Guarded by `unbound_inside_an_error_testing_form_is_still_flagged` and
+`only_unbound_survives_an_error_testing_form` in `types/check/tests.rs` — sabotage-verified
+(restore `SkipBody` for `try` and the first fails).
+
+## KI-66 — nothing verified that a project still boots ✅ CLOSED 2026-08-27
 
 `nest check` resolves names; `nest test` runs the suite. Neither loads `main`. Module-load
 is precisely where a project with a stale dependency dies, so both gates can be green while
@@ -259,6 +287,12 @@ going to be enough. You have to actually run the thing.
 **Wired into hive's `bin/ci`.** The open question is the shared package-ci workflow. It
 cannot simply be enabled everywhere: `bedit` and `pong` need a GUI, and a library has no
 `:main` at all. It wants an opt-in input, the way `postgres: true` is.
+
+**Closed.** That opt-in landed in `2b51de93`: `package-ci.yml` takes a `boot-check` boolean
+(default **false**) plus a `boot-seconds` string (default `6s`), and runs `nest run --for`
+before the suite when set. Default-off is deliberate and not laziness — a library has no
+`:main` to run, and `bedit`/`pong` open a window a runner has not got. hive's `bin/ci` runs
+it unconditionally, which is where the two outages happened.
 
 **Related, and cheap alongside it:** a bundled app cannot say what it is. Answering "which
 brood built this, with which features" required `grep -ac cranelift` on the binary over SSH,

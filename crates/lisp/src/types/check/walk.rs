@@ -245,12 +245,17 @@ fn is_output_sink(s: Symbol) -> bool {
         || value::symbol_is(s, "format")
 }
 
+/// The prefix every unbound-symbol diagnostic starts with. `SpecialHead::ErrorTesting`
+/// matches on it to keep unbound warnings while dropping every other lint inside a
+/// `try` / `error-of` / `assert-error` body (KI-67).
+pub(super) const UNBOUND_PREFIX: &str = "unbound symbol: ";
+
 /// The `unbound symbol: …` diagnostic text for `nm`, with the foreign-construct
 /// hint appended when `nm` names a construct from another Lisp that Brood lacks
 /// (so the Brood way is visible at write-time). Shared by the call-head and the
 /// value-leaf unbound checks so the two messages can't drift apart.
 fn unbound_msg(nm: &str) -> String {
-    let mut msg = format!("unbound symbol: {}", nm);
+    let mut msg = format!("{}{}", UNBOUND_PREFIX, nm);
     if let Some(hint) = crate::eval::foreign_construct_hint(nm) {
         msg.push_str(" — ");
         msg.push_str(hint);
@@ -592,9 +597,19 @@ pub(super) fn collect_all_syms(heap: &Heap, forms: &[Value]) -> HashSet<Symbol> 
 /// `SymbolMap` pattern on its own loop.)
 #[derive(Clone, Copy)]
 enum SpecialHead {
-    /// `quote` / `quasiquote` / `try` / `error-of` / `assert-error` / `%try`
-    /// — return without descending. Mirrors `guards::skips_body`.
+    /// `quote` / `quasiquote` / `comment` — return without descending. These
+    /// hold *syntax*, not evaluated code, so nothing inside them is a reference.
     SkipBody,
+    /// `try` / `%try` / `error-of` / `assert-error` — descend, but with every
+    /// lint except `unbound` suppressed (KI-67). These forms deliberately
+    /// exercise failures, so `(error-of (first 5))` must stay silent about the
+    /// type misuse — that is the whole point of the form. An **unbound symbol**
+    /// is a different class: it is never the failure under test unless the
+    /// author says so, and skipping the body entirely meant a rename could
+    /// leave a call site dead inside a `try` with every gate green. A test that
+    /// really does assert on an unbound name opts out with
+    /// `(check-allow :unbound …)`.
+    ErrorTesting,
     If,
     /// `let` / `let*` — sequential bind, no pre-binding.
     Let,
@@ -613,10 +628,10 @@ static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
     [
         (kw::QUOTE, SkipBody),
         (kw::QUASIQUOTE, SkipBody),
-        (kw::TRY, SkipBody),
-        (kw::ERROR_OF, SkipBody),
-        (kw::ASSERT_ERROR, SkipBody),
-        (kw::TRY_PRIM, SkipBody),
+        (kw::TRY, ErrorTesting),
+        (kw::ERROR_OF, ErrorTesting),
+        (kw::ASSERT_ERROR, ErrorTesting),
+        (kw::TRY_PRIM, ErrorTesting),
         // `(comment …)` expands to `nil` — its body is never evaluated, so
         // checking it would flag names that intentionally don't resolve (a
         // sketched call, a snippet from another project). The whole point of the
@@ -987,6 +1002,25 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         if let Some(&kind) = SPECIAL_HEAD.get(&s) {
             match kind {
                 SpecialHead::SkipBody => return,
+                SpecialHead::ErrorTesting => {
+                    // Walk the body into a scratch buffer and keep ONLY the
+                    // unbound-symbol diagnostics. Filtering at the collection
+                    // point rather than gating lint-by-lint is deliberate: a
+                    // lint added later is suppressed here by default, which is
+                    // the right default for a form whose whole purpose is to
+                    // exercise a failure. The prefix is the one `unbound_msg`
+                    // builds, the single constructor for both unbound sites.
+                    let mut inner_out = Vec::new();
+                    for it in items.iter().skip(1) {
+                        check_into(heap, *it, ctx, &mut inner_out);
+                    }
+                    out.extend(
+                        inner_out
+                            .into_iter()
+                            .filter(|(_, m)| m.starts_with(UNBOUND_PREFIX)),
+                    );
+                    return;
+                }
                 SpecialHead::If => {
                     check_if(heap, form, &items, ctx, out);
                     return;

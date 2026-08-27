@@ -1855,6 +1855,19 @@ resolve in the advisory checker. Returns the project root."
 ;; Print the duplicate-def warnings to stderr and return the count. Advisory
 ;; (never raises, never stops a run) and honors `BROOD_NO_CHECK=1` like the
 ;; type-check pre-flight. Shared by `check` / `check-sources`.
+(defn file-shadow-warnings (file root)
+  "The duplicate-def warnings (ADR-065 flat-namespace shadowing) that mention a global
+`file` itself defines, for the project at `root`. Public because the MCP server reports
+them per open file, while every helper it needs is module-private — the alternative was
+`mcp` reaching for four `defn-` names, which is exactly the dead call site KI-67 found.
+Returns nil when there is nothing to report."
+  (let (defined (project-file-def-names file)
+        srcs (source-files root)
+        extracts (project-gather-extracts srcs)
+        source-set (fold (fn (m p) (%map-assoc m p true)) {} srcs))
+    (filter (fn (w) (any? (fn (nm) (includes? w (str "'" nm "'"))) defined))
+      (project-duplicate-def-warnings extracts source-set))))
+
 (defn- project-check-duplicate-defs
   (extracts source-set)
   (if (= (os/env "BROOD_NO_CHECK") "1")
