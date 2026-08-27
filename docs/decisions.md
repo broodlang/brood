@@ -16730,6 +16730,12 @@ indication of which function is responsible — the language cannot report a fau
 that makes reporting possible. The working version uses `if`, `%eq`, `bound?` and `%map-get`
 and nothing else. Anything hooked into `seq` faces the same constraint.
 
+**`conj` closed the set (2026-08-27).** `%conj-one`'s `else` was
+`(error "conj: not a collection")`, so a `rope` with a `Conjable` impl of its own was
+refused. Same gate as the other two: `%impl-exact?` before the error, so a kind nobody has
+answered for keeps the clear message rather than being handed `Conjable`'s `:default` — the
+MAP behaviour, which means nothing for a rope. All three seams now agree.
+
 ## ADR-254 — A type-dispatched predicate refuses an unanswered type; it does not default
 
 **Context.** `zero?` was `(defn zero? (n) (= n 0))`. `=` is type-strict, so it answered

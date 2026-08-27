@@ -224,6 +224,11 @@ Always true for `n` <= 0.
           else (error "conj: adding to a map takes a [k v] pair or a map, got "
                  (pr-str x))))
     (pair? coll) (cons x coll)
+    ;; A built-in kind with a `Conjable` impl of its own — the third of the collection
+    ;; seams, matching `seq` and `count` (ADR-253). Gated on `%impl-exact?` so a kind
+    ;; nobody has answered for keeps the clear error below rather than being handed
+    ;; `Conjable`'s `:default`, which is the MAP behaviour and means nothing here.
+    (%impl-exact? '[Conjable -conj] (%identity-of coll)) (-conj coll x)
     else (error "conj: not a collection: " (pr-str coll))))
 
 (defn conj (coll & xs)
