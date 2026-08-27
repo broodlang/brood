@@ -4,7 +4,7 @@
 ;; to reach for when exploring rather than guessing names one at a time.
 
 ;; The candidate set for name-based discovery: every global MINUS the plumbing. A `%`
-;; name is a kernel primitive or a prelude internal (ADR-249 moved 203 of the latter
+;; name is a kernel primitive or a prelude internal (ADR-250 moved 203 of the latter
 ;; behind the prefix, taking `%` globals from 313 to 521) and a `defn-` name is
 ;; module-private. Neither is something a user should be offered, and before this
 ;; `(apropos "sort")` answered `(%sort-asc %sort-cmp %merge-sort %merge-sort-n sort

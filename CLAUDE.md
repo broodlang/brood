@@ -196,7 +196,7 @@ crates/playground/src/   the `brood-playground` cdylib — a wasm-bindgen shim e
                          a Brood `eval()` to the browser (the in-browser playground)
 std/                     standard library written in Brood, grouped (ADR-085):
                          NOTE: `bit`, `decimal` and `proc` also namespace KERNEL
-                         primitives (ADR-250) — the `.blsp` file declares the module
+                         primitives (ADR-251) — the `.blsp` file declares the module
                          and documents the surface; the ops are Rust, registered as
                          `bit/and`, `decimal/of`, `proc/register`, the way
                          `string/length` always has been.

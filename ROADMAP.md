@@ -62,13 +62,13 @@ and **observability**. See "What's next — by area".
 function in `std/` + the prelude (1,374 across 106 files) read against seven criteria: module
 placement, duplication, documentation-with-an-example, naming consistency, fit with the
 language, parity with the process model, and whether one bare ability op could replace a
-family of per-type functions. ADR-249 through ADR-252 carry the decisions.
+family of per-type functions. ADR-250 through ADR-253 carry the decisions.
 
 **Bare names 510 → 268** (names a top-level `def` in a script cannot use, 470 → 239):
 
-- [x] 203 prelude-private helpers moved behind `%` (ADR-249) — they held ordinary words
+- [x] 203 prelude-private helpers moved behind `%` (ADR-250) — they held ordinary words
       (`merge-sort`, `flip-cons`, `for-fold`, `take-acc`) that no user could call anyway
-- [x] `bit/` (10) and `decimal/` (4) namespaces for kernel-primitive families (ADR-250);
+- [x] `bit/` (10) and `decimal/` (4) namespaces for kernel-primitive families (ADR-251);
       `system/*` and `string/*` for the metadata and char/width functions
 - [x] `proc/register` / `proc/whereis` moved beside `proc/info`, plus the two missing halves:
       `proc/unregister` (`register` had no inverse) and `proc/alive?`
@@ -79,7 +79,7 @@ family of per-type functions. ADR-249 through ADR-252 carry the decisions.
 - [ ] ~15 more bare names: the module-tooling group (`set-load-path!`, `reload-defs`,
       `builtin-modules`, `module-doc`, `reserved-package-name?`) belongs in `reflect`
 
-**Process framework** (ADR-251):
+**Process framework** (ADR-252):
 
 - [x] `gen` can defer a reply — `defer` clause + `gen/reply`, so a server can hand work off
       without blocking its loop. The one gap that limited what could be *built*
@@ -90,7 +90,7 @@ family of per-type functions. ADR-249 through ADR-252 carry the decisions.
 - [ ] **Examples.** 100% docstring coverage; example coverage 4.7% → ~16%, and
       `tests/doc_examples_test.blsp` *executes* every one, so each written is a test gained.
       ~1,150 functions remain — a campaign, not a pass
-- [ ] **Ability seams do not reach built-in kinds** (ADR-252). Every seam tests `record?`
+- [ ] **Ability seams do not reach built-in kinds** (ADR-253). Every seam tests `record?`
       first, so `rope` and `table` cannot join the bare vocabulary: `(count r)` raises,
       `(seq r)` silently returns the rope, and `(impl Display :rope …)` registers, resolves
       when called directly, and is never consulted. The `record?` test is right on the fast

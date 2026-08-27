@@ -16507,7 +16507,58 @@ real `ckpt_slot` over every chunk a boot compiles, because the behavioural test
 (`tests/jit_blockarg_spill_test.blsp`) can only fail when the clamp *and* the backstop are both
 gone — the backstop alone converts the corruption into silently lost JIT coverage.
 
-## ADR-249 — The bare namespace is the scarce resource: prelude internals take the `%` prefix
+## ADR-249 — `string/->codepoints` gets a native inverse
+
+**Context.** ADR-006 says Rust provides mechanism and Brood provides policy, and the bar for
+a new primitive is deliberately high: it must improve *overall* language performance and
+build up a capability, not move one slow function into Rust. `string/->codepoints` is a
+native — an O(n) pass to the indexable code vector every text parser in `std/` wants — and
+it had **no native inverse**. `string/codepoints->` was:
+
+```lisp
+(apply str (map int->char cs))
+```
+
+a seq view, a closure call per code point to allocate a **one-character string**, and then
+an N-way variadic concat. Every parser that used the native to take a string apart paid that
+to put one back together: `std/json`'s per-string, per-key and per-number-slice assembly,
+`std/string`'s own `codepoints->`, and the same shape open-coded in more than one place.
+
+**Decision.** Add `%codepoints->string` — one pass into a `String`, accepting a vector, list
+or `bytes` value — and point `string/codepoints->` at it.
+
+This clears the ADR-006 bar on both counts rather than one. It is *mechanism*: UTF-8-encoding
+a sequence of code points is not a rule Brood can express cheaply, any more than the forward
+direction was, and the asymmetry of having one half native was the accident. And it pays off
+broadly rather than at a call site: it is the inverse of a primitive whose whole purpose is
+that parsers use it, so every parser gets it. The dogfooding rule's worked example — variadic
+`+` as a Rust builtin — is the opposite shape: a fast path for one call site that teaches the
+language nothing. This is the shape the rule *asks* for, a missing primitive that dogfooding
+surfaced.
+
+**Consequences.** `json` parse ~85 ms → ~45 ms, row **−20.8%** against a 0.7% floor — the
+worst row in the suite against a native library. `base64` −4.9% (inside its floor, but the
+right sign for a shared helper); `regex` unchanged, because its hot path is a memoised DFA
+whose steady state is one `table/get`, not string assembly.
+
+A non-int or non-scalar code point is a clean error naming the offender. That matters more
+than it looks: a surrogate (D800–DFFF) is not a `char`, so accepting one would either panic
+or silently substitute U+FFFD, and `json` relies on the error to reject `"\ud800"`.
+
+**It also moved a map's print order**, which is worth recording because the mechanism is
+non-obvious. Adding a primitive adds a name to the symbol interner, which shifts symbol ids,
+which shifts keyword hashing, which shifts CHAMP trie order — so a *printed* map changes.
+`tests/doc_examples_test.blsp` compared documented results as text and duly failed on
+`(seq/frequencies [:a :b :a])`, whose docstring recorded the equally-correct `{:b 1, :a 2}`.
+The harness now compares as a **value** when the documented side reads as one. Any docstring
+example whose result is a map or set was fragile the same way; this retires the class.
+
+**Not done: the encoders.** The symmetric change on the *encode* side of `std/encoding` needs
+the byte range proven before indexing the alphabet, and wrapping that check in a one-line
+helper — a call per element — cost that direction **4×**. Measured and reverted. The general
+lesson is recorded in the source: in a per-element loop in this library, a function call is
+not a small thing, which is also why the decoder's bounds guards are inlined at each site.
+## ADR-250 — The bare namespace is the scarce resource: prelude internals take the `%` prefix
 
 **Context.** Root-level code — a script, a test file, the REPL — shares one flat global table
 with the prelude, and every shipped *function* is reserved there (ADR-166), so a top-level
@@ -16545,15 +16596,15 @@ modular is a bootstrap change, not a rename.
 prelude call sites resolve late, so a script's `merge-sort` would win.
 
 **Consequence.** `%`-prefixed globals went 313 → 521, which makes filtering them out of
-`apropos`, `doc-search` and completion a requirement rather than a nicety — see ADR-252.
+`apropos`, `doc-search` and completion a requirement rather than a nicety — see ADR-253.
 
-## ADR-250 — A coherent family of primitives gets a module namespace, not ten bare names
+## ADR-251 — A coherent family of primitives gets a module namespace, not ten bare names
 
-**Context.** ADR-249 cleared the private helpers; what remained bare were families of *public*
+**Context.** ADR-250 cleared the private helpers; what remained bare were families of *public*
 primitives that share one idea and one prefix — `bit-and`/`bit-or`/`bit-shift-left`/… (10
 names), `decimal`/`->decimal`/`decimal->string`/`decimal->float` (4). A hyphen prefix is a
 namespace spelled by hand: it groups the names for a reader and not for the language, while
-still spending ten words of the bare vocabulary that ADR-249 established as scarce.
+still spending ten words of the bare vocabulary that ADR-250 established as scarce.
 
 **Decision.** A family like this is registered under a module name, exactly as `string/length`
 and `file/spit-private` already are: Rust supplies the mechanism, the namespace is Brood's,
@@ -16576,7 +16627,7 @@ still works, it just stops being inlined, in the crypto and hash hot loops where
 actually live. The `resolve_prim` assertion in `eval::compile::tests` is the gate. Before any
 future rename, check the renamed set against the 20 names that table keys on.
 
-## ADR-251 — A `gen` server can defer its reply
+## ADR-252 — A `gen` server can defer its reply
 
 **Context.** A `defprocess` `call` clause had to return `[reply next-state]` synchronously, so
 the reply was produced inside the receive loop. A server that needed to consult something slow
@@ -16602,7 +16653,7 @@ rather than taken as a clause parameter, so the common shape stays one line.
 mailbox. Carrying the pair keeps that property — deferring is safe against a caller that gave
 up, and replying twice is harmless.
 
-## ADR-252 — Prefer one bare ability op to a function per data type
+## ADR-253 — Prefer one bare ability op to a function per data type
 
 **Context.** The library has two ways to give a type the collection vocabulary: implement an
 ability (`Seqable`, `Conjable`, `Display`, `Ord`, `Num`) and inherit `seq`/`count`/`map`/
