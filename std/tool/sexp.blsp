@@ -77,7 +77,9 @@ recovers), so it answers over source someone is mid-typing — which form contai
 point, where each form ends — without a completeness gate; whether the text
 *evaluates* is a separate `read-all` question. Note recovery means a node may be
 `:kind :error` (e.g. an unterminated string swallowing the rest of the text) —
-fine for position queries, but don't feed the returned spans to `eval` unchecked."
+fine for position queries, but don't feed the returned spans to `eval` unchecked.
+
+    (count (sexp/top-level-forms \"(a)\n(b)\n\"))   → 2"
   (forms-of (tree text)))
 
 ;; ---- narrowing: bound structural queries to the forms around point ----------
@@ -147,40 +149,54 @@ the enclosing list; `point` when there is none. The shared body of the backward 
 
 (defn point-forward (text point)
   "End of the next sexp at or after `point` within the enclosing list; unchanged if
-there is none (the Emacs `forward-sexp`)."
+there is none (the Emacs `forward-sexp`).
+
+    (sexp/point-forward \"(a b)\" 0)    → 5"
   (sexp-sibling-forward text point sexp-anything?))
 
 (defn point-backward (text point)
-  "Start of the previous sexp ending at or before `point` (Emacs `backward-sexp`)."
+  "Start of the previous sexp ending at or before `point` (Emacs `backward-sexp`).
+
+    (sexp/point-backward \"(a b)\" 5)   → 0"
   (sexp-sibling-backward text point sexp-anything?))
 
 (defn point-list-forward (text point)
   "End of the next LIST at or after `point` within the enclosing list — atoms are stepped
-over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none."
+over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
+
+    (sexp/point-list-forward \"(a) (b)\" 0)   → 3"
   (sexp-sibling-forward text point sexp-list?))
 
 (defn point-list-backward (text point)
   "Start of the previous LIST ending at or before `point` — atoms stepped over (Emacs
-`backward-list`, C-M-p); unchanged if there is none."
+`backward-list`, C-M-p); unchanged if there is none.
+
+    (sexp/point-list-backward \"(a) (b)\" 7)  → 4"
   (sexp-sibling-backward text point sexp-list?))
 
 (defn point-up (text point)
   "Start of the enclosing list — before its opening delimiter (Emacs
-`backward-up-list`); unchanged at top level."
+`backward-up-list`); unchanged at top level.
+
+    (sexp/point-up \"(a (b))\" 4)       → 3"
   (let ([base sub] (narrow text point)
         enc (enclosing (tree sub) (- point base)))
     (if (= (get enc :kind) :root) point (+ base (get enc :start)))))
 
 (defn point-up-forward (text point)
   "Just past the enclosing list's closing delimiter — the forward counterpart of
-`point-up` (Emacs `up-list`); unchanged at top level."
+`point-up` (Emacs `up-list`); unchanged at top level.
+
+    (sexp/point-up-forward \"(a (b))\" 4)   → 6"
   (let ([base sub] (narrow text point)
         enc (enclosing (tree sub) (- point base)))
     (if (= (get enc :kind) :root) point (+ base (get enc :end)))))
 
 (defn point-down (text point)
   "Just inside the next list at or after `point` (Emacs `down-list`); unchanged if
-none."
+none.
+
+    (sexp/point-down \"(a b)\" 0)       → 1"
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
@@ -204,7 +220,9 @@ unchanged if `point` isn't within one."
 
 (defn point-defun-end (text point)
   "End of the top-level form containing `point` (Emacs `end-of-defun`, C-M-e);
-unchanged if `point` isn't within one."
+unchanged if `point` isn't within one.
+
+    (sexp/point-defun-end \"(defn f (x)\n  (+ x 1))\n\" 0)   → 22"
   (sexp-defun-edge text point :end))
 
 ;; ---- pure structural edits: (text point) -> [new-text new-point] ------------
@@ -227,7 +245,9 @@ edit). Wrapped in `[tr enc]` so callers reuse the one tree for parent/child look
 
 (defn point-slurp-forward (text point)
   "Pull the sibling form *after* the enclosing list inside it — move the close
-delimiter past that form (Emacs/paredit `forward-slurp-sexp`)."
+delimiter past that form (Emacs/paredit `forward-slurp-sexp`).
+
+    (sexp/point-slurp-forward \"(a) b\" 1)   → [\"(a b)\" 1]"
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
@@ -246,7 +266,9 @@ delimiter past that form (Emacs/paredit `forward-slurp-sexp`)."
 
 (defn point-barf-forward (text point)
   "Expel the last form of the enclosing list — move the close delimiter in past the
-form before it (paredit `forward-barf-sexp`); point stays inside the list."
+form before it (paredit `forward-barf-sexp`); point stays inside the list.
+
+    (sexp/point-barf-forward \"(a b)\" 1)    → [\"(a) b\" 1]"
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
@@ -267,7 +289,9 @@ form before it (paredit `forward-barf-sexp`); point stays inside the list."
 
 (defn point-slurp-backward (text point)
   "Pull the sibling form *before* the enclosing list inside it — move the open
-delimiter back over that form (paredit `backward-slurp-sexp`)."
+delimiter back over that form (paredit `backward-slurp-sexp`).
+
+    (sexp/point-slurp-backward \"a (b)\" 3)  → [\"(a b)\" 3]"
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
@@ -286,7 +310,9 @@ delimiter back over that form (paredit `backward-slurp-sexp`)."
 
 (defn point-barf-backward (text point)
   "Expel the first form of the enclosing list — move the open delimiter in past the
-form after it (paredit `backward-barf-sexp`); point stays inside the list."
+form after it (paredit `backward-barf-sexp`); point stays inside the list.
+
+    (sexp/point-barf-backward \"(a b)\" 1)   → [\"a (b)\" 3]"
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
@@ -308,7 +334,9 @@ form after it (paredit `backward-barf-sexp`); point stays inside the list."
 
 (defn point-raise (text point)
   "Replace the enclosing list with the child form point is in/on, deleting that
-form's siblings (paredit `raise-sexp`)."
+form's siblings (paredit `raise-sexp`).
+
+    (sexp/point-raise \"(a (b))\" 3)      → [\"(b)\" 0]"
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
@@ -328,7 +356,9 @@ form's siblings (paredit `raise-sexp`)."
 
 (defn point-splice (text point)
   "Remove the enclosing list's delimiters, keeping its contents (paredit
-`splice-sexp`)."
+`splice-sexp`).
+
+    (sexp/point-splice \"(a (b c))\" 4)   → [\"(a b c)\" 3]"
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
@@ -343,7 +373,9 @@ form's siblings (paredit `raise-sexp`)."
 
 (defn point-wrap-round (text point)
   "Wrap the form at or after `point` in a fresh `( … )`, point landing just inside the
-new open (paredit `wrap-round`)."
+new open (paredit `wrap-round`).
+
+    (sexp/point-wrap-round \"a b\" 0)     → [\"(a) b\" 1]"
   (let (tr (tree text)
         enc (enclosing tr point)
         nxt (seq/find (fn (f) (>= (get f :end) point)) (forms-of enc)))
@@ -363,7 +395,9 @@ new open (paredit `wrap-round`)."
 enclosing list. When `point` sits *inside* a form, that form is the one \"after\" — so the
 chord mid-symbol swaps it with its predecessor, as it does in Emacs. Only the span
 `[prev.start, next.end)` is rearranged and its length is unchanged, so point lands exactly
-at `next.end` (the whitespace between the two forms is preserved in place)."
+at `next.end` (the whitespace between the two forms is preserved in place).
+
+    (sexp/point-transpose \"(a b)\" 2)   → [\"(b a)\" 4]"
   (let (enc (enclosing (tree text) point)
         sibs (forms-of enc)
         inside (seq/find (fn (f) (and (< (get f :start) point) (< point (get f :end)))) sibs)
@@ -395,7 +429,9 @@ at `next.end` (the whitespace between the two forms is preserved in place)."
 (defn point-kill-end (text point)
   "End offset for a structure-aware kill from `point` (paredit `kill`): the line end,
 but never past the enclosing list's closing delimiter — so a kill never breaks the
-parens. At end of line, kills the newline. At least `point` (a no-op at the close)."
+parens. At end of line, kills the newline. At least `point` (a no-op at the close).
+
+    (sexp/point-kill-end \"(a b c)\" 3)  → 6"
   (let (n (string/length text)
         le (sexp-line-end text point n)
         enc (enclosing (tree text) point))

@@ -13,7 +13,9 @@
 (defmodule dev)
 
 (defn mem-bytes ()
-  "Bytes currently allocated process-wide."
+  "Bytes currently allocated process-wide.
+
+    (int? (dev/mem-bytes))     → true"
   (%mem-bytes))
 
 (defn mem-limit ()
@@ -33,7 +35,9 @@
   (%gc-collect))
 
 (defn gc-stats ()
-  "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the timing tier) for the caller's own LOCAL heap; :runtime-closures and :runtime-threshold for the *shared* RUNTIME code region (its promoted-closure count + next auto-compact trigger — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (runtime-collect) for the RUNTIME live/reclaimable split."
+  "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the timing tier) for the caller's own LOCAL heap; :runtime-closures and :runtime-threshold for the *shared* RUNTIME code region (its promoted-closure count + next auto-compact trigger — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (runtime-collect) for the RUNTIME live/reclaimable split.
+
+    (map? (dev/gc-stats))      → true"
   (%gc-stats))
 
 (defn gc-trace (& more)
@@ -53,11 +57,15 @@
   (%profile-stop))
 
 (defn sched-stats ()
-  "A snapshot map of the scheduler's cumulative counters: {:spawned :exited :preempts :steals :migrations :workers :peak-threads}. :spawned - :exited is the live-process figure; :preempts counts reduction-budget quantum exhaustions; :steals/:migrations count work-stealing activity. The scheduler half of the observability timing tier (pairs with gc-stats' :pause-* keys)."
+  "A snapshot map of the scheduler's cumulative counters: {:spawned :exited :preempts :steals :migrations :workers :peak-threads}. :spawned - :exited is the live-process figure; :preempts counts reduction-budget quantum exhaustions; :steals/:migrations count work-stealing activity. The scheduler half of the observability timing tier (pairs with gc-stats' :pause-* keys).
+
+    (map? (dev/sched-stats))   → true"
   (%sched-stats))
 
 (defn spawn-count ()
-  "How many green processes have been spawned since program start."
+  "How many green processes have been spawned since program start.
+
+    (int? (dev/spawn-count))   → true"
   (%spawn-count))
 
 (defn steal-count ()

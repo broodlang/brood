@@ -467,7 +467,9 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn markdown->html (md)
   "Render a Markdown string to HTML — a small subset (ATX headings, fenced ``` code, `- `
   lists, blank-line paragraphs, inline `code`/links). Everything is HTML-escaped; not a
-  full CommonMark parser. Used for doc guides."
+  full CommonMark parser. Used for doc guides.
+
+    (docs/markdown->html \"# hi\")   → \"<h1>hi</h1>\""
   (get (md-flush (fold md-line {:out "" :mode :none :buf nil} (string/split md "\n"))) :out))
 
 ;; A guide's display title from its filename: `getting-started.md` -> `Getting started`.

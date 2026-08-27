@@ -44,12 +44,16 @@ that frame. Ops: `(clear)`, `(text row col s)` / `(text row col s face)`,
 columns are 0-based character cells.")
 
 (defn clear ()
-  "A render op that clears the whole screen."
+  "A render op that clears the whole screen.
+
+    (editor/display/clear)   → [:clear]"
   [:clear])
 
 (defn text (row col s &optional (face nil))
   "A render op drawing string `s` at (`row`, `col`) (0-based cells), optionally
-styled by `face` (a map like `{:fg :red :bold true}`)."
+styled by `face` (a map like `{:fg :red :bold true}`).
+
+    (editor/display/text 0 0 \"hi\")   → [:text 0 0 \"hi\"]"
   (if (nil? face)
     [:text row col s]
     [:text row col s face]))
@@ -59,7 +63,9 @@ styled by `face` (a map like `{:fg :red :bold true}`)."
 (a thin insertion caret on the cell's left edge), `:underline` (a rule along the
 cell bottom), or `:block` (the default full-cell caret) — the GUI frontend shapes
 the caret accordingly and the terminal maps it to its matching steady cursor. With
-no `style` it's `[:cursor row col]`, unchanged (a block caret)."
+no `style` it's `[:cursor row col]`, unchanged (a block caret).
+
+    (editor/display/cursor 1 2)   → [:cursor 1 2]"
   (if (nil? style)
     [:cursor row col]
     [:cursor row col style]))
@@ -153,7 +159,9 @@ shape `std/observer` draws by hand. Returns one `text` op.
 
 (defn frame (& ops)
   "Collect render ops into a frame (a vector), dropping any `nil` ops so callers
-can splice in conditional ops inline. Pass the result to a frontend (`term/draw`)."
+can splice in conditional ops inline. Pass the result to a frontend (`term/draw`).
+
+    (count (editor/display/frame (editor/display/clear)))   → 1"
   (into [] (filter (fn (o) (not (nil? o))) ops)))
 
 ;; ---- interaction zones (hover / click hit-testing) --------------------------
