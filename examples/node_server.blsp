@@ -9,7 +9,7 @@
 ;; automatically. It runs forever — stop it with Ctrl-C when you're done.
 
 (node/start :server)
-(register :echo (self))
+(proc/register :echo (self))
 (io/puts "[server] node " (node/name) " up (local socket), :echo registered")
 (io/puts "[server] waiting for messages — start the client now, Ctrl-C to quit")
 

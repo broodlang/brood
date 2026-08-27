@@ -139,11 +139,11 @@
   ;; exactly the `:use-internals` case, as `tests/sse_test.blsp` does.
   (:use-internals sse)
   (:use agent :only [start update stop])
-  (:use gen :only [defprocess spawn-server call])
+  (:use gen :only [defprocess call])
   (:use editor/buffer)
   (:use sexp :only [point-forward]))
 
-(def n (let (e (os/getenv "N")) (if e (string/->number e) 2000)))
+(def n (let (e (os/env "N")) (if e (string/->number e) 2000)))
 
 ;; UTF8=1 re-runs every string row with a NON-ASCII lead, which is a different complexity
 ;; regime, not a cosmetic variation: a char index is a byte offset only for pure-ASCII text,
@@ -152,7 +152,7 @@
 ;; (2026-08-04). Every row here was originally cleared on ASCII fixtures, so a row cleared
 ;; without this knob is only half-cleared. One lead char is enough — it is the string's
 ;; ASCII-ness that is lost, not the position of the character.
-(def utf8? (not (nil? (os/getenv "UTF8"))))
+(def utf8? (not (nil? (os/env "UTF8"))))
 (def utf8-lead (if utf8? "café — " ""))
 ;; Source-shaped fixtures must stay parseable, so lead them with a comment instead.
 (def utf8-src-lead (if utf8? ";; café — em dash\n" ""))
@@ -160,17 +160,17 @@
 (defn ms (f)
   (let (t0 (os/now-ns)
         _ (f))
-    (quot (- (os/now-ns) t0) 1000000)))
+    (math/quot (- (os/now-ns) t0) 1000000)))
 
 (defn us (f k)
   (let (t0 (os/now-ns)
         _ (f))
-    (quot (- (os/now-ns) t0) (* k 1000))))
+    (math/quot (- (os/now-ns) t0) (* k 1000))))
 
 (defn row (label base f)
   (let (t1 (ms (fn () (f base)))
         t4 (ms (fn () (f (* 4 base))))
-        ratio (if (= t1 0) 0 (quot (* 100 t4) t1)))
+        ratio (if (= t1 0) 0 (math/quot (* 100 t4) t1)))
     (io/puts (str label
                " N="
                base
@@ -179,9 +179,9 @@
                " ms   4N: "
                t4
                " ms   ratio "
-               (quot ratio 100)
+               (math/quot ratio 100)
                "."
-               (rem ratio 100)
+               (math/rem ratio 100)
                (if (> ratio 800) "   <-- SUPERLINEAR" "")))))
 
 ;; ---- agent: N sequential updates against one agent ---------------------
@@ -212,7 +212,7 @@
       (loop-calls pid (- k 1)))))
 
 (defn gen-calls (k)
-  (let (pid (spawn-server counter-server 0)
+  (let (pid (gen/start counter-server 0)
         _ (loop-calls pid k))
     (gen/stop pid)))
 

@@ -1,5 +1,5 @@
 ;; overflow promotes to bigint — arithmetic on the result stays valid int math.
 (def big (* 9223372036854775807 3))
-(io/puts (quot big 3) (rem big 7) (- big big))
+(io/puts (math/quot big 3) (math/rem big 7) (- big big))
 (defn grow (x n) (if (= n 0) x (grow (* x 2) (- n 1))))
 (io/puts (grow 1 80))

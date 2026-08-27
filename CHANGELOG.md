@@ -4,6 +4,42 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.14.0 — 2026-08-27
+
+**The gates that had stopped gating.** No language change — this release is the CI tree
+going green again, and three separate harnesses that were passing without testing anything.
+
+**Fixed**
+
+- **The fuzz-differential gate was hollow (KI-68).** `stress/fuzz_programs.py` writes Brood
+  source from Python, and the namespacing waves retired every name it emitted — `(table)`,
+  `rem`, `quot`, `min`/`max`, `bit-and`/`bit-or`/`bit-xor`, the `table-*` family, `println`,
+  and the linear-map whitelist. Every generated program died on line 1 **identically in all
+  four configs**, so the differential reported agreement and every seed printed `ok`. Names
+  updated, and **liveness is now asserted**: an `unbound symbol` from a generated program is
+  a hard failure naming the dead names, and a run where not one seed exits cleanly fails as
+  "the corpus is dead, not the engines agreeing". Sabotage-verified in the original shape.
+- **The `differential (tree-walker)` CI job had been red since KI-64's fix (KI-69).** The two
+  new `jit_plan` guards assert on VM-compiled arms and the job runs `BROOD_VM=0`; both now
+  pin `set_forced_ceiling(Some(Tier::Native))`, as `compile/tests.rs` has since ADR-222.
+- **`examples/` and the stress corpus were 22 harnesses deep in rename rot.** `examples/life`
+  called `map-pairs` and `examples/node_server` called a bare `register`; `stress/` and
+  `scripts/fuzz/stress/` between them named `os/getenv`, `rem`, `quot`, `mod`, `min`, `max`,
+  `string-length`, `read-all`, `read-string` and `gen/spawn-server`. `make check-examples`
+  and `make check-stress` are both clean again.
+- **`docs/language.md` and `docs/brood-for-claude.md` taught retired names.** The whole
+  `print`/`println`/`eprint`/`eprintln` family (gone since the `io/` trio landed in 0.13.0),
+  `spawn-server` (now `gen/start`), and an arithmetic reference still claiming
+  `quot`/`mod`/`rem`/`floor`/`min`/`max` are bare when they live in `math`. This matters
+  twice over: `brood-for-claude.md` is baked into the binary and dropped into every project
+  `nest new` scaffolds, so a wrong name there propagates to every assistant reading it.
+
+**Known**
+
+- `eval_forward_ref.blsp` opts out of the unbound lint with `(check-allow :unbound …)`: its
+  two names are defined by `eval`, and that invisibility is the thing the harness exists to
+  exercise (KI-24).
+
 ## v0.13.0 — 2026-08-26
 
 **BREAKING — the output trio settles, and the two string builders stop sharing a name.**

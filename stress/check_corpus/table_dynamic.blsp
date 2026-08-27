@@ -2,6 +2,6 @@
 (def t (table))
 (table-put t 1 "str")
 (table-put t 2 [1 2])
-(io/puts (string-length (table-get t 1)) (count (table-get t 2)))
+(io/puts (string/length (table-get t 1)) (count (table-get t 2)))
 (table-incr t 9 5)
 (io/puts (+ (table-get t 9) 1))
