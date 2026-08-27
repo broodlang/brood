@@ -83,6 +83,34 @@
       ;; and requiring still works afterwards
       (is (= :ok (try (do (require-one 'json) :ok) (catch e (get e :message)))))))
 
+  (test "the image may accelerate a module this binary bakes, never ADD one"
+    ;; The other half of the shared-key trade-off above, and the dangerous half. One image
+    ;; serves `brood`, `nest` and `brood-lsp` because the key hashes every `std/**/*.blsp` on
+    ;; DISK regardless of features — but a lean runtime bakes no dev-tools. Without a check,
+    ;; `nest` writing the image lets a lean `brood` beside it MATERIALISE `test`: a module
+    ;; that binary was built to exclude, present only because a dev tool ran on that machine.
+    ;; It then works on the dev box and fails in production, where there is no image.
+    ;;
+    ;; `%std-image-serves?` is the rule. Verified by sabotage on a real lean build
+    ;; (`make release-brood`, no dev-tools) against an image written by the dev-tools binary:
+    ;; forced true, `(require-one 'test)` succeeds — "YES — LEAKED"; as written it is refused
+    ;; while `json` still materialises from the same file.
+    ;; `*std-image-file*` rather than `(%std-image-path)`: the predicate compares against the
+    ;; image this process actually INSTALLED, and there may be none (no image built yet,
+    ;; `BROOD_NO_STDIMAGE=1`, or a coverage run). With none installed there is no stdlib
+    ;; image to restrict, so every section is by definition a project's — which is the
+    ;; correct answer, and asserting the refusal there would be asserting against a
+    ;; configuration that does not exist.
+    (let (img *std-image-file*)
+      ;; a project image (any other path) is unrestricted — it is the only thing that HAS
+      ;; the project's own modules
+      (is (%std-image-serves? "/some/project/image.bin" nil))
+      (when img
+        ;; the stdlib image serves a module this binary bakes…
+        (is (%std-image-serves? img "(some embedded source)"))
+        ;; …and refuses one it does not
+        (is (not (%std-image-serves? img nil))))))
+
   (test "install is a no-op when no image exists for this binary"
     ;; Returns nil rather than raising, so `require` keeps loading from source unchanged.
     ;; (If one does exist, it returns a positive section count — both are valid here.)
