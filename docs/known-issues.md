@@ -19,6 +19,8 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-67 | **`nest check` is silent about unbound symbols inside a `try` body**, so a rename can leave a call site dead and every gate stays green. `hatch`'s spool write was `(try (bytes/append path piece) (catch e …))`; brood renamed that to `file/spit-bytes-append`, `nest check` reported nothing, and the repo shipped with every spooled upload broken — visible only as four tests timing out with no error to read. The skip is deliberate (`skips_error_testing_forms`, so a test that deliberately calls an unbound name is not flagged), but it costs exactly the case a rename wave produces | ⚠️ **open (2026-08-27)** — narrowing candidates: flag an unbound symbol in a `try` whose `catch` does not itself reference it, or a `--strict` that reports them separately. Found the hard way twice this session |
+| KI-66 | **nothing verifies that a project still BOOTS.** `nest check` resolves names and `nest test` runs the suite, but neither loads `main` — and module-load is exactly where a stale dependency dies. hive went down twice on the same shape: `unbound symbol: int->char` and then `unbound symbol: os/getenv`, both raised on the first line of `main`, both after a clean check and a green suite. The runtime built fine; the BUNDLE could not start | ⚠️ **open (2026-08-27)** — the fix is small: a `nest release --smoke` (or `nest run --check-boot`) that loads the bundle's modules and exits nonzero on failure. Today the only way to learn this is to deploy |
 | KI-64 | **the JIT miscompiles `json/encode` under sustained load** — hive's `/api/v1/packages*` returns 500 after ~60 requests and then fails until the machine restarts, while `/health` and every web page keep serving. The error is `empty?: expected collection, got int (1114114)` inside `emit-pairs`/`emit-list`, i.e. an int where the recursion expects a list; 1114114 is NOT a codepoint (that reading was a coincidence) — it is a packed deopt-journal word, `17 << 16 \| 2`. `BROOD_NO_JIT=1` makes it 120/120 clean | ✅ **fixed 2026-08-26** — a block-argument spill slot was landing on the deopt checkpoint, because `jit_spill_reserve` gated the WHOLE reserve on having ≥2 non-tail calls while block-argument slots depend only on the operand depth at a block leader. Not shared code, not concurrency, not load: it reproduces in one process on the fourth call. Fixed by clamping the spill window to its reserve (ADR-248); `BROOD_NO_JIT=1` is no longer needed in hive |
 | KI-63 | ~~loading std modules taxes JIT'd hot loops~~ — **RETRACTED 2026-08-25, the effect does not exist.** After a discarded warm-up run in-process, a 20M loop is 23-24 ms whether or not `format` is loaded. Every earlier figure measured the FIRST run, i.e. JIT warm-up, which is variable and shape-sensitive — the same loop read 25 ms in one file and 40-51 ms in another differing only by having three call sites | ☑️ **retracted** — no bug. What is real, and is the reusable part: a whole-process benchmark of a short row measures tiering, not steady state |
 | KI-62 | **the stdlib startup image was unusable on the build that ships.** It is keyed on `stdlib-id` — the stdlib's CONTENT — deliberately identical for `brood`/`nest`/`brood-lsp` so one copy is shared; but those binaries do not bake in the same MODULES. A lean runtime (`nest release`, `make install INSTALL_FEATURES=RUN_FEATURES`) has no dev-tools, and `std/tool/project.blsp`'s recorded require-edges name `test`. Replaying that edge made the very next `require` die with `cannot find module 'test'` — so installing the image BROKE `require`, and its advertised 4-33x was never reachable where it matters | ✅ **fixed 2026-08-25** — `merge-require-edges!` drops a dep this binary cannot load. Filtered at INSTALL, not at build: the image may have been written by a different binary from the one reading it, which is the whole point of sharing the key. Measured on release: `require format` **62.0 -> 12.8 ms (4.8x)**, `require datetime` **3.3 -> 0.39 ms (~9x)**. Guard in `tests/stdimage_test.blsp`, sabotage-verified |
@@ -181,6 +183,75 @@ activation, and no `std` suite tests a large input. It is invisible below ~10⁵
 loop that calls the same function eleven times at increasing sizes stays correct throughout — so
 repetition, the usual flake defence, does not help. The missing dimension is a **size sweep**
 (same closed-form answer at 10³/10⁵/10⁶, across `BROOD_TIER` 0/1/2), which the new guard does.
+
+---
+
+## KI-67 — `nest check` cannot see inside a `try` body ⚠️ OPEN 2026-08-27
+
+`nest check` does not report an unbound symbol used inside a `try`. The skip is deliberate
+and has a test guarding it — `skips_error_testing_forms` — because a test that deliberately
+calls a missing name should not be flagged. The cost is that it blinds the checker to
+exactly the shape a rename wave produces.
+
+**How it presented.** hatch's spooled-upload write is:
+
+```lisp
+(try
+  (bytes/append path piece)
+  (catch e (do (spool-cleanup path) (error (str "spool write failed: " (error-message e))))))
+```
+
+brood renamed `bytes/append` to `file/spit-bytes-append` (it writes a FILE). `nest check`
+reported nothing. The repo was green, and every spooled upload was broken. It surfaced as
+four tests timing out — `:timeout`, `file/slurp-bytes: … No such file` — with no error
+naming the cause, because the `catch` swallowed the unbound-symbol error and re-raised it
+as a generic "spool write failed".
+
+**Why it is worth fixing rather than documenting.** A `try` is where I/O lives, and I/O is
+where the renamed primitives live (`file/*`, `os/*`, `bytes/*`). So the blind spot lines up
+precisely with the code most likely to be moved by a wave.
+
+**Candidates**, cheapest first:
+
+- Flag an unbound symbol in a `try` **whose `catch` does not itself mention it** — that
+  preserves `skips_error_testing_forms` (those tests catch the very name they call) while
+  covering the rename case, which never does.
+- A `nest check --strict` that reports them in a separate section, so the default stays
+  quiet and a rename wave has one command to run.
+- Have the checker treat an unbound symbol as an error but a *deliberate* one as suppressed
+  by the existing `(check-allow :unbound …)` directive, which already exists for this shape.
+
+Found twice in one session: this, and brood-terminal's `run-process` earlier.
+
+---
+
+## KI-66 — nothing verifies that a project still boots ⚠️ OPEN 2026-08-27
+
+`nest check` resolves names; `nest test` runs the suite. Neither loads `main`. Module-load
+is precisely where a project with a stale dependency dies, so both gates can be green while
+the app cannot start.
+
+hive went down twice on the same shape:
+
+| | error | raised at |
+|---|---|---|
+| v130 | `unbound symbol: int->char` | `hatch/web/live.blsp` during `require`, before `main` |
+| v134 | `unbound symbol: os/getenv` | `web/application/default-logger-opts`, first line of `main` |
+
+Both times `nest check` was clean and the suite was green, because the failing module was a
+pinned dependency that the local working tree did not match, and because a suite never
+executes the entry point. The Rust runtime built fine — it is the BUNDLE that could not
+start, which is a different artifact from anything the gates look at.
+
+**The fix is small.** A `nest release --smoke`, or `nest run --check-boot`: load the
+bundle's modules, run nothing, exit nonzero on failure. Seconds to run, and it converts
+both of those outages into a failed command on the machine that produced them.
+
+**Related, and cheap alongside it:** a bundled app cannot say what it is. Answering "which
+brood built this, with which features" required `grep -ac cranelift` on the binary over SSH,
+and the first attempt used `strings`, which is absent from `debian:bookworm-slim` and so
+reported 0 for *command not found* — indistinguishable from "no JIT". A `--build-info` on
+the bundle (brood commit, features, module count) removes that guesswork entirely.
 
 ---
 
