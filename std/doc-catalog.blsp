@@ -450,7 +450,7 @@
    "with-err-str" :io
    "with-out-str" :io
    "%with-split-else" :control
-   "zero?" :predicates
+   "math/zero?" :predicates
    "%zip-acc" :collections
    "hash-map" :maps
    "dissoc-in" :maps

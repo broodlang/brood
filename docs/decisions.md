@@ -16758,6 +16758,16 @@ legitimate where it is a genuine answer for every type it can receive, as `Displ
 "zero? is structural", which is what a deliberate-looking test for a defaulted answer looks
 like from the inside.
 
+**It is `math/zero?`, not bare `zero?`.** Its whole family is already there —
+`math/positive?`, `math/negative?`, `math/even?`, `math/odd?` — so bare made it the odd one
+out and spent a bare name on a question only numbers can answer. An ability op declared
+inside a module is namespaced to that module (`%ability-qualify-op`), which is why `Port`'s
+op is `io/emit` and not bare `emit`; declaring `Zero` in `std/math.blsp` is all it takes.
+
+`Zero` is NOT in `*substrate-abilities*`. That list means "abilities the language itself
+dispatches on", whose `:default` impls everything relies on; a numeric predicate in a library
+module is not that, and claiming otherwise would make the list mean less.
+
 **Where this rule is not yet applied.** `Seqable` and `Conjable` keep `:default` impls (a
 record's fields; map-style conj). Those are real answers for a *record*, which is the only
 thing that reaches them — the collection seams gate on `%impl-exact?` before consulting the

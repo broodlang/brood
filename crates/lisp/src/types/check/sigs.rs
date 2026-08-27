@@ -120,7 +120,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // tighter type never false-positives:
     //   even?/odd? — body reduces via `rem`/`=`; require a number → bool.
     //   abs        — `(if (< n 0) (- n) n)`: numeric in and out.
-    //   not/zero?  — accept any value (truthiness / `=`), but pin the `bool`
+    //   not/math/zero?  — accept any value (truthiness / dispatch), but pin the `bool`
     //                result, so a non-bool sink like `(+ 1 (not x))` is catchable.
     //   count      — a string, map, or sequence → int.
     //
@@ -143,7 +143,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     put("math/odd?", Sig::new(vec![num], bool_ty));
     put("math/abs", Sig::new(vec![num], num));
     put("not", Sig::new(vec![any], bool_ty));
-    put("zero?", Sig::new(vec![any], bool_ty));
+    put("math/zero?", Sig::new(vec![any], bool_ty));
     put("count", Sig::new(vec![countable], int));
     // NO `length` entry: there is no `length` function, and there never was. It was added
     // 2026-05-31 alongside `count` as if it were an alias ("each vetted against

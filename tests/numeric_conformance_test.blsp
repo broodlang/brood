@@ -65,16 +65,16 @@
   ;; whole tower. It is the `Zero` ability now: one impl per numeric type, and NO `:default`,
   ;; so a type nobody has answered for raises instead of picking a value (2026-08-27).
   (test "zero? spans the numeric tower"
-    (is (zero? 0))
-    (is (zero? 0.0))
-    (is (zero? 0M))
-    (is (not (zero? 1)))
-    (is (not (zero? 1.5)))
-    (is (not (zero? 1/2))))
+    (is (math/zero? 0))
+    (is (math/zero? 0.0))
+    (is (math/zero? 0M))
+    (is (not (math/zero? 1)))
+    (is (not (math/zero? 1.5)))
+    (is (not (math/zero? 1/2))))
   (test "zero? REFUSES a type with no impl, rather than answering false"
-    (is (not (nil? (try (zero? "a") (catch e e)))))
-    (is (not (nil? (try (zero? nil) (catch e e)))))
-    (is (includes? (error-message (try (zero? [1]) (catch e e))) "no impl")))
+    (is (not (nil? (try (math/zero? "a") (catch e e)))))
+    (is (not (nil? (try (math/zero? nil) (catch e e)))))
+    (is (includes? (error-message (try (math/zero? [1]) (catch e e))) "no impl")))
   (test "sign via comparison (no pos?/neg? builtins)"
     (is (> 5 0))
     (is (< -5 0))

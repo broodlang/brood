@@ -20,6 +20,42 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 (def e 2.718281828459045)
 
 ;; ---- sign & parity ----------------------------------------------------------
+;; `Zero` — is this value the additive identity of ITS OWN type?
+;;
+;; It lives HERE, as `math/zero?`, because its whole family does: `math/positive?`,
+;; `math/negative?`, `math/even?`, `math/odd?`. It was bare, which made it the odd one out
+;; and spent a bare name on a question only numbers can answer. An ability op declared
+;; inside a module is namespaced to it (`%ability-qualify-op`), the way `Port`'s op is
+;; `io/emit` and not bare `emit`.
+;;
+;; `zero?` was `(= n 0)`, bare, in prelude/map.blsp. `=` is type-strict, so it answered
+;; **false for `0.0` and for `0M`** — a zero-predicate that says a zero is not zero — while
+;; `(< 0.0 1)` and `math/positive?` beside it handled the whole numeric tower. It also
+;; answered `false` for `"a"` and for `nil`: a WRONG VALUE for a question that has no
+;; meaning, rather than a refusal.
+;;
+;; There is deliberately **NO `:default`**. A type with no impl gets the loud `%no-method`
+;; error naming the ability, exactly as `Num` and `Ord` do — a question about a type nobody
+;; has answered must SAY nobody has answered it, not pick a value. That is the whole
+;; distinction between "false" and "not applicable", and defaulting erases it.
+;;
+;; A zero ratio normalises to the int `0` (`(/ 0 5)` is `0`, `:int`), so the `:ratio` impl is
+;; constant-false rather than a comparison.
+(defability Zero
+  "True when `self` is the additive identity of its own type — across the whole numeric
+tower, not just the int `0`. A type with no impl RAISES rather than answering.
+
+    (zero? 0)      → true
+    (zero? 0.0)    → true
+    (zero? 0M)     → true
+    (zero? 1/2)    → false"
+  (zero? [self] :-> bool))
+(impl Zero :int     (zero? [n] (%eq n 0)))
+(impl Zero :float   (zero? [n] (%eq n 0.0)))
+(impl Zero :decimal (zero? [n] (%eq n 0M)))
+(impl Zero :ratio   (zero? [n] false))
+
+
 (defn positive? (n) "True if `n` is greater than zero." (> n 0))
 (defn negative? (n) "True if `n` is less than zero." (< n 0))
 (defn abs (n)
