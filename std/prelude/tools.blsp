@@ -1979,7 +1979,27 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; with `(binding (*show* nil) …)`.
 (defn- %show-print-hook
   (x)
-  (if (record? x) (->string x) x))
+  ;; Which values the screen printers route through `Display`.
+  ;;
+  ;; The guard used to be `(if (record? x) …)`, which meant an `(impl Display :rope …)`
+  ;; REGISTERED, RESOLVED when called directly, and was then never consulted by any printer
+  ;; — a silently inert impl, worse than a refusal (ADR-253). Consulting `Display` for
+  ;; EVERYTHING fixes that and is behaviour-preserving (its `:default` is `(str x)`, and
+  ;; `%render` and `->string` agree on every built-in kind) but costs **+17%** on a
+  ;; print-heavy loop: 319 -> 374 ms over 40k `io/write` batches, best-of-7, pinned and
+  ;; interleaved. That is a real bill for printing, which the tests and the REPL pay
+  ;; constantly.
+  ;;
+  ;; So: the kinds `%render` already renders natively keep the old zero-cost path, and
+  ;; everything else consults the ability. A map is tested with `record?` exactly as before
+  ;; (a record IS a map, so the two cannot be told apart by `type-of`); rope, table, bytes,
+  ;; set, pid, ref and functions now reach `Display`, which is the point.
+  (let (t (type-of x))
+    (cond
+      (%eq t :map) (if (record? x) (->string x) x)
+      (or (%eq t :int) (%eq t :float) (%eq t :string) (%eq t :nil) (%eq t :bool)
+        (%eq t :keyword) (%eq t :symbol) (%eq t :vector) (%eq t :pair)) x
+      else (->string x))))
 
 ;; Wire the screen printers to honor `Display` for records, by default (ADR-172 §8).
 ;; `(binding (*show* nil) …)` disables it for a scope.

@@ -348,9 +348,16 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
         [out state] (shuffle-at slots (- n 1) (%rand-seed seed)))
     [(shuffle-drain out (- n 1) nil) state]))
 
-(defn remove-nth (coll i)
+(defn remove-nth (i coll)
   "A fresh collection like `coll` with the element at index `i` removed. Returns
-a vector for a vector and a list for a list. `i` must be in `[0, count)`."
+a vector for a vector and a list for a list. `i` must be in `[0, count)`.
+
+The index comes FIRST, like every other index/count-taking function in this module
+(`take-last`, `drop-last`, `split-at`, `chunk-every`): collection-last is the convention,
+and this was the one function that broke it.
+
+    (seq/remove-nth 1 [10 20 30])        → [10 30]
+    (seq/remove-nth 0 (list 1 2 3))      → (2 3)"
   (if (vector? coll)
     (into (seq/subvec coll 0 i) (seq/subvec coll (inc i) (count coll)))
     (append (take i coll) (drop (inc i) coll))))
