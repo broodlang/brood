@@ -16991,3 +16991,138 @@ absent or stale, `require` loads from source exactly as before, since the image 
 `system/stdlib-id` — a content hash — and cannot outlive what it snapshotted. Flipping the
 default is a separate decision on a separate day's evidence: it changes every program's load
 path, and one green suite run is not the bar this repo sets for that.
+
+## ADR-257 — Three questions a toolchain must answer about an artifact: does it boot, what is it, and what moved
+
+**Status:** accepted (2026-08-27).
+
+**Context.** Migrating hive and its whole dependency closure (hatch, store-postgres,
+store, s3) across the namespacing waves took the registry down **twice**. Neither
+outage was a language bug. Both were gaps in what the toolchain could tell you
+*before* you shipped — recorded as KI-66 and KI-67, and as four items in
+`ROADMAP.md`'s Active section.
+
+The failures rhyme with the dead-gates session that preceded them: in each case a
+green signal was believed, and the thing that went red in production had never been
+looked at by anything. The difference is that these were not gates that silently
+stopped working; they were questions **nobody had a command for**.
+
+**Decision.** Four additions, three of them a new question the toolchain can answer.
+
+### 1. `nest run --check-boot` and `nest release --smoke` — *does it boot?*
+
+`nest check` resolves names against the image. `nest test` runs the suite. **Neither
+loads `:main`**, which is exactly where a stale dependency dies: one outage was
+`unbound symbol: int->char` raised *during* `require` (a top-level form in a
+dependency, on no test's path); the other was `unbound symbol: os/getenv` on `main`'s
+own first line.
+
+So the boot check is a genuinely third question, not a cheaper spelling of the other
+two: **load every module the way the shipped artifact does, resolve the entry point,
+and then deliberately run nothing.** Loading is the entire point — a module's
+top-level forms *evaluate* at load time, so this executes the code a static pass
+cannot see, without executing the program.
+
+Three choices inside it are load-bearing:
+
+- **Every module, not the entry's require-closure.** `nest run` is lazy (ADR-218)
+  because it is optimising a hot dev loop; a *gate* that optimises for latency checks
+  less than it claims to. `run-bundle` requires every embedded module, so a check
+  walking only the closure would go green on a dead module the bundle will still load.
+- **`--smoke` runs the ARTIFACT, not the tree that produced it.** A bundle carries a
+  *snapshot* of every dependency, so a dependency updated on disk since the last `nest
+  fetch`, a module outside `:source-paths`, and a `:main` naming a module that was
+  never collected are all invisible upstream and fatal in the binary. A cross-target
+  binary cannot run on this host, so that case is **reported as skipped**, never
+  silently passed.
+- **One entry resolver, shared by all four paths** (`run`, `run-bundle`, and the two
+  checks). The check's whole value is failing exactly where the real boot would, so
+  "is the entry there, and is it callable?" must have one implementation rather than a
+  copy per caller that can answer differently.
+
+**What it does NOT catch, stated plainly, because a gate believed past its reach is
+this repo's cardinal sin.** Of the two outages it is motivated by, `--check-boot`
+catches the **first** (raised during `require`, so loading is enough) and **not the
+second**: `os/getenv` was reached from inside `default-logger-opts`, called from
+`main`'s body, and a check that resolves the entry without invoking it will never
+execute that line. That is deliberate — invoking `:main` is running the program, and a
+gate that starts your server is not a gate — but it means the boot check is one of
+three complementary answers, not a replacement for either:
+
+| failure | caught by |
+|---|---|
+| a top-level form in a module raises at load | **`--check-boot`** / `--smoke` |
+| an unbound name in a function body | `nest check` (and, inside a `try`, only since KI-67) |
+| a name reached only when `main` actually executes | `nest run --for <DURATION>` (KI-66; wired into hive's `bin/ci` and `package-ci.yml`'s opt-in `boot-check`) |
+
+`--check-boot` is the cheap, always-safe member of that set — no window, no port, no
+side effects, valid for a library with no runnable `:main` — which is why it can run
+unconditionally where `--for` cannot.
+
+### 2. The `--brood-` argument namespace is reserved — *what is this binary?*
+
+Answering "which brood built this, with which features" meant grepping the binary over
+SSH; the first attempt used `strings`, which `debian:bookworm-slim` does not ship, so
+it reported nothing and read exactly like "no JIT". Every fact needed already existed
+in the runtime (`system/brood-version`, `system/build-id`, `system/features`) — nothing
+could ask the *artifact* for them.
+
+A bundle's standing contract is that **argv belongs to the app**: it is handed to
+`:main` before clap ever runs. Rather than break that for `--build-info`, the
+`--brood-` prefix is reserved by the runtime, and exactly two names are honoured, only
+in **first position**: `--brood-build-info` and `--brood-boot-check`. An exception that
+costs the app a name it might plausibly want is an exception the app has to know
+about; this one costs it nothing, and an unrecognised `--brood-…` is passed through
+rather than guessed at as a typo.
+
+`build-info` deliberately reads only the manifest and the module *directory*, never
+loading a module: it has to answer on a bundle that is broken, because that is when it
+is asked.
+
+### 3. `nest check --fix-renames` — *what moved, and where to?*
+
+Each rename wave breaks every downstream repo, and the recovery was a manual loop —
+`nest check`, read one hint, `nest rename`, repeat — a dozen rounds per repo, five
+repos deep. The loop is mechanical and the checker already knows the answer, so
+running it is the tool's job.
+
+What makes it safe rather than merely fast is what it **refuses**:
+
+- **Only an unambiguous fix is applied** — exactly one public `mod/name`, or nothing
+  happens. Two candidates is a decision, not a rename.
+- **A name the project itself defines is never touched.** `nest rename` is *not*
+  scope-aware: renaming `register` in hive also renamed hive's own sign-up handler,
+  producing `(defn proc/register …)` — a reserved name, so the module stopped defining
+  anything at all. That cost a revert. Rewriting only *references* (`:refs-only`, via
+  the CST, so a docstring or comment is byte-identical) removes half the hazard;
+  declining a name the project owns removes the other half.
+- **A `%`-private target is named, never applied.** `map-pairs` → `%map-pairs` has no
+  hint precisely because the name was withdrawn on purpose. Printing the target ends
+  the guesswork against `std/` — which was the actual complaint — without quietly
+  rewriting a caller onto something the stdlib took away.
+
+Every decline prints its reason, because a bare "skipped" would leave exactly the
+guesswork the tool exists to end.
+
+### 4. `docsite/render-css` emits CSS variables
+
+A `:wrap? false` host embedded a fragment whose stylesheet hard-coded a light palette;
+`component-dark-css` existed but was emitted only by the wrapped path and was gated on
+`prefers-color-scheme`, i.e. the reader's **OS** rather than the host's theme. hive
+overrode ~30 selectors by hand to put the reference on a dark page.
+
+The sheet now declares its whole palette as custom properties on `.docsite` and every
+rule reads one, so a host rethemes by redefining variables. The fix is not that dark
+values exist somewhere — it is that **no rule names a colour**, so a host's redefinition
+cannot be out-voted by a rule. `render-css-dark` hands over the dark set with no media
+query attached, because `prefers-color-scheme` answers a question about the OS and an
+embedded fragment must follow the page it sits in. This was the second incomplete
+hand-off in that API; `render-js` was the first (fixed 2026-08-26), and both had the
+same shape: a surface that produced correct-looking output with a silently missing half.
+
+**Consequences.** The two gates are testable and are tested in both directions — each
+positive case is paired with a sabotage that must turn it red, per the dead-gates
+lesson that a gate whose pass condition can be satisfied by doing nothing is worse
+than no gate. `docsite`'s guide headings, previously a hard `#1f2933` that the dark
+block never overrode (near-black on near-black), are fixed as a consequence of there
+being one palette instead of two.

@@ -4488,3 +4488,53 @@ and repeated assertion lines are shared idioms within a single file.
 > validated against four known-answer cases *before* its output was trusted. A gate that
 > cannot fail is the theme of this whole day, and writing one by accident while auditing for
 > them is the obvious way to get caught by it.
+
+## 2026-08-27 (eighth session) — the three questions the toolchain had no command for
+
+Closed all five toolchain gaps the hive migration exposed ([ADR-257](decisions.md);
+item 2 had already shipped with KI-67). The framing that made this cheap: three of them
+are not "a check that should be stricter" but **a question nothing could ask**.
+
+- **Does it boot?** `nest check` resolves names, `nest test` runs the suite, and neither
+  loads `:main` — where both registry outages actually died (`int->char` raised *during*
+  `require`, on no test's path; `os/getenv` on `main`'s first line). `nest run
+  --check-boot` loads every source module and resolves the entry, running nothing; `nest
+  release --smoke` then does it to the **binary just written**. That distinction is the
+  point: a bundle carries a *snapshot* of every dependency, so a dep updated on disk since
+  the last `nest fetch` is invisible to any source-tree check and fatal in the artifact.
+  All four entry paths (`run`, `run-bundle`, both checks) now share one entry resolver —
+  a check whose value is failing where the real boot fails must not have its own copy.
+- **What is this binary?** `myapp --brood-build-info`. Every fact was already in the
+  runtime (`system/brood-version` / `build-id` / `features`); nothing could ask the
+  *artifact*. Rather than break the bundle's "argv belongs to the app" contract, the
+  **`--brood-` prefix is reserved** — two names, first position only, everything else
+  passed through. It reads the manifest and module directory and loads no module, so it
+  answers on a broken bundle, which is when it is asked.
+- **What moved, and where to?** `nest check --fix-renames` (+ `--dry-run`) runs the manual
+  recovery loop. What makes it safe is what it refuses, each with its reason printed:
+  ambiguity, a `%`-withdrawn target (named, never applied), and — the revert-causing one —
+  **a name the project itself defines**, since `nest rename` is not scope-aware and
+  renaming `register` in hive also renamed hive's own handler into the reserved
+  `proc/register`. Rewrites go through the CST and `:refs-only`, so no `defn` head moves
+  and a docstring or comment naming the identifier comes back byte-identical.
+
+Plus `docsite/render-css`, the second incomplete hand-off in that API after `render-js`:
+the palette is now custom properties on `.docsite` and **no rule names a colour** — which
+is the actual fix, since dark values existing somewhere is worth nothing if a rule can
+out-vote the host's redefinition. `render-css-dark` carries no media query, because
+`prefers-color-scheme` is the viewer's OS and an embedded fragment must follow the page it
+sits in — conflating those is what painted dark grey onto hive's white page. The guide
+headings' hard `#1f2933`, which the old dark block never overrode (near-black on
+near-black), fell out as a fix.
+
+Every gate is sabotage-verified in both directions — a load-time unbound name, a missing
+entry fn, an entry that raises if called, a healthy-project negative control — per the
+previous session's lesson. Two bugs found while writing them, both worth naming because
+both are the class the tooling now guards: `string/join` takes its separator **first**
+(I wrote it reversed — exactly KI-71's shape), and `index-of`/`last-index-of` answer
+**-1**, not nil, so a `(nil? …)` guard sails through into an out-of-bounds substring.
+
+> Also corrected `handoff.md`, which still listed the previous session's three ungated
+> classes as open: `5aa49463` closed all three (`make check-corpora` is in CI), but the
+> handoff was written before that commit landed and nothing re-read it. A stale "open"
+> list is the mirror image of a stale green — same cost, opposite sign.
