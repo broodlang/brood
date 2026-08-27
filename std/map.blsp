@@ -3,7 +3,7 @@
 ;; consumers `(:use map)` to refer them bare, or call them qualified.
 ;;
 ;; The *core* map protocol stays bare in the prelude — `assoc`/`dissoc`/`get`/`keys`/
-;; `vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge` (and `zipmap`,
+;; `vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge` (and `hash-map`,
 ;; which the record/ability machinery uses during bootstrap) are the universal map
 ;; surface. This module is the derived transformation helpers layered on top.
 ;;
@@ -56,3 +56,15 @@ access, or call qualified (`map/update-vals`).")
 (defn reduce-kv (f init m)
   "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
   (fold (fn (acc p) (f acc (first p) (second p))) init (%map-pairs m)))
+
+;; ---- zipmap (ADR-251) -------------------------------------------------------
+;; Published here rather than bare: it RETURNS a map, so it belongs with the map
+;; helpers. The implementation is the prelude `%zipmap` internal, because
+;; `defrecord`'s expansion builds its constructor body with it at boot.
+
+(defn zipmap (ks vs)
+  "A map pairing each key in `ks` with the value at the same position in `vs`,
+stopping at the shorter.
+
+    (map/zipmap [:a :b] [1 2])   → {:a 1 :b 2}"
+  (%zipmap ks vs))

@@ -402,7 +402,7 @@ module's namespace-rooted globals (ADR-070) back to it."
       (map (fn (pair)
              (let ([i seg] pair)
                (if (odd? i) (str "<code>" (md-escape seg) "</code>") (md-links seg))))
-        (zip (range (count parts)) parts)))))
+        (seq/zip (range (count parts)) parts)))))
 
 ;; Emit a buffered paragraph or list when a block ends; a no-op for other modes.
 (defn- md-flush

@@ -396,7 +396,7 @@ Shipped as ADRs:
   of every cluster in the string per keystroke.
 - ✅ **ADR-160** — `(or …)` / `(and …)` patterns and general `{key subpattern}` map
   patterns; `and` doubles as the `:as` capture. `(not …)` and map `:as` stay rejected.
-- ✅ **ADR-161** — transducers as public surface (`transduce` + `xmap`/`xfilter`/
+- ✅ **ADR-161** — transducers as public surface (`seq/transduce` + `seq/xmap`/`xfilter`/
   `xremove`/`xkeep`), so a user can write their own fusing stage.
 - ✅ **ADR-162** — the `lambda` alias retired; `fn` is the only spelling.
 - ✅ **ADR-163** — the convention questions settled *as decisions*: no `&key` (a

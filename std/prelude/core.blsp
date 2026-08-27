@@ -101,7 +101,7 @@
 
 ;; ---- universal list view ----
 ;; `seq` is what lets every list-shaped op (map/filter/fold/reduce/…) walk a
-;; *map* without callers reaching for `(zip (keys m) (vals m))`: a map becomes
+;; *map* without callers reaching for `(seq/zip (keys m) (vals m))`: a map becomes
 ;; its `[k v]` pairs in one O(n) `%map-pairs` pass; lists, vectors, strings, and
 ;; `nil` pass through unchanged. Defined here with raw kernel ops (`%eq`,
 ;; `type-of`, `%map-pairs`) because `fold` calls it before the `map?` predicate /

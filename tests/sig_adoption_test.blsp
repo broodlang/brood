@@ -92,7 +92,7 @@
 (defn- sig-misplaced
   (lines)
   (seq/keep (fn (pair) (let ([a b] pair) (when (sig-above-def? a b) a)))
-    (zip lines (rest lines))))
+    (seq/zip lines (rest lines))))
 
 ;; ---- occurrence typing: inferred params check callers, zero annotations (ADR-190) ----
 ;; Pass 2.8 now carries each same-file function's inferred PARAMETER demands (not just its
