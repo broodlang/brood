@@ -1076,7 +1076,7 @@ fn curated_helper_sigs_catch_misuse() {
     assert!(warnings("(+ 1 (not x))")
         .iter()
         .any(|w| w.contains('+') && w.contains("bool")));
-    assert!(warnings("(+ 1 (zero? x))")
+    assert!(warnings("(+ 1 (math/zero? x))")
         .iter()
         .any(|w| w.contains('+') && w.contains("bool")));
     // Correct uses stay silent (no false positives).
@@ -1091,7 +1091,7 @@ fn curated_helper_sigs_catch_misuse() {
         "(rest (bytes 1 2 3))",
         "(every? math/odd? (bytes 1 3 5))",
         "(not x)",
-        "(zero? n)",
+        "(math/zero? n)",
     ] {
         assert!(
             warnings(ok).iter().all(|w| !w.contains("expects")),
@@ -2597,7 +2597,7 @@ fn or_over_different_vars_does_not_narrow() {
 fn non_guard_tests_dont_narrow() {
     // The test isn't a recognised type predicate, so x stays unknown in
     // both branches — `(first x)` must not warn.
-    let w = warnings("(if (zero? x) (first x) (first x))");
+    let w = warnings("(if (math/zero? x) (first x) (first x))");
     assert!(w.is_empty(), "non-tag-guard test must not narrow: {:?}", w);
 }
 
@@ -2911,7 +2911,7 @@ fn unbound_is_silent_for_prelude_names() {
         "(inc 1)",
         "(list 1 2 3)",
         "(int? 5)",
-        "(zero? 0)",
+        "(math/zero? 0)",
         "(map (fn (x) x) [1 2 3])",
     ] {
         assert!(
