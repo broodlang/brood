@@ -13,7 +13,7 @@
 ;;
 ;;   N=200 brood ki22.blsp
 
-(def n (let (e (os/getenv "N")) (if e (string/->number e) 200)))
+(def n (let (e (os/env "N")) (if e (string/->number e) 200)))
 
 ;; one ability per index, declared UP FRONT and single-threaded, so the only concurrent
 ;; operation under test is %register-impl itself

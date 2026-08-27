@@ -20,8 +20,8 @@
 
 (defmodule net-framed-scale (:use tcp))
 
-(def chunks (let (e (os/getenv "CHUNKS")) (if e (string/->number e) 2000)))
-(def size (let (e (os/getenv "SIZE")) (if e (string/->number e) 64)))
+(def chunks (let (e (os/env "CHUNKS")) (if e (string/->number e) 2000)))
+(def size (let (e (os/env "SIZE")) (if e (string/->number e) 64)))
 
 (def sep "\r\n\r\n")
 (def filler (bytes/concat (string/repeat "x" size)))
@@ -39,7 +39,7 @@
     (drip sock chunks)
     (let (t0 (os/now-ns)
           r (read-until sock sep)
-          us (quot (- (os/now-ns) t0) 1000))
+          us (math/quot (- (os/now-ns) t0) 1000))
       (do
         (if (not (= (string/bytes-> (nth r 1)) "TRAILER"))
           (do (io/puts "ERROR: wrong remainder") (%halt 1))
@@ -57,7 +57,7 @@
     (drip sock chunks)
     (let (t0 (os/now-ns)
           r (read-n sock (* size (+ chunks 1)))
-          us (quot (- (os/now-ns) t0) 1000))
+          us (math/quot (- (os/now-ns) t0) 1000))
       us)))
 
 ;; Control 2: the harness floor — receive the same messages and do nothing with them.
@@ -71,7 +71,7 @@
     (drip sock chunks)
     (let (t0 (os/now-ns)
           r (sink sock (+ chunks 1))
-          us (quot (- (os/now-ns) t0) 1000))
+          us (math/quot (- (os/now-ns) t0) 1000))
       us)))
 
 (defn report (what us)
@@ -85,7 +85,7 @@
              " us="
              us
              " ns/chunk="
-             (quot (* us 1000) chunks))))
+             (math/quot (* us 1000) chunks))))
 
 (report "floor" (bench-floor :sock-floor))
 (report "tcp/read-n" (bench-tcp-read-n :sock-n))

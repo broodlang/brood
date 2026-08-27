@@ -31,10 +31,10 @@
 
 (defmodule decay (:use supervisor))
 
-(def mode (let (e (os/getenv "MODE")) (if e e "alloc")))
-(def secs (let (e (os/getenv "SECS")) (if e (string/->number e) 180)))
-(def window (let (e (os/getenv "WINDOW")) (if e (string/->number e) 20000)))
-(def maxsecs (let (e (os/getenv "MAXSECS")) (if e (string/->number e) 60)))
+(def mode (let (e (os/env "MODE")) (if e e "alloc")))
+(def secs (let (e (os/env "SECS")) (if e (string/->number e) 180)))
+(def window (let (e (os/env "WINDOW")) (if e (string/->number e) 20000)))
+(def maxsecs (let (e (os/env "MAXSECS")) (if e (string/->number e) 60)))
 
 (defn rss-kb ()
   (let (txt (file/slurp "/proc/self/status") i (index-of txt "VmRSS:"))
@@ -74,8 +74,8 @@
         (do (send srv [:ping (self) r]) (receive ([:reply ^r v] v))))
     (= mode "sup")
       (let (pid (start-child sup
-                  {:id (mod n 8) :start start-crashy :restart :permanent}))
-        (do (send pid :die) (terminate-child sup (mod n 8))))
+                  {:id (math/mod n 8) :start start-crashy :restart :permanent}))
+        (do (send pid :die) (terminate-child sup (math/mod n 8))))
     (= mode "reload") (eval (list 'def 'decay-target n))
     ;; supervisor-free: separate spawn-link from the CRASH and from the error VALUE
     ;; supervisor cycle WITHOUT a crash: start-child + terminate-child only. Separates
@@ -89,10 +89,10 @@
     (= mode "supnocrash")
       (do
         (start-child sup
-          {:id (mod n 8)
+          {:id (math/mod n 8)
            :start (fn () (spawn-link (idle-child)))
            :restart :temporary})
-        (terminate-child sup (mod n 8)))
+        (terminate-child sup (math/mod n 8)))
     (= mode "linkok") (do (spawn-link (ok-child)) (receive ([:EXIT _ _] :ok) (after 2000 :ok)))
     (= mode "linkcrash")
       (do
@@ -109,14 +109,14 @@
 (def deadline (+ t-start (* secs 1000)))
 
 (defn report (w n t0)
-  (let (dt (max 1 (- (os/now) t0))
+  (let (dt (math/max 1 (- (os/now) t0))
         g (dev/gc-stats))
     (io/puts (str "w="
                w
                " ops="
                n
                " ops_per_s="
-               (quot (* n 1000) dt)
+               (math/quot (* n 1000) dt)
                " rss_kb="
                (rss-kb)
                " sup_heap="
@@ -131,7 +131,7 @@
 (defn run (n w wstart)
   (do
     (unit n)
-    (if (= 0 (mod (+ n 1) window))
+    (if (= 0 (math/mod (+ n 1) window))
       (do
         (report w window wstart)
         (if (> (os/now) deadline)

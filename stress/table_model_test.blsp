@@ -15,32 +15,32 @@
 (defmodule table-model-stress-test (:use test))
 
 ;; Deterministic 31-bit LCG (identical constants in stress/table_model_oracle.py).
-(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+(defn lcg (s) (math/rem (+ (* s 1103515245) 12345) 2147483648))
 
 ;; ---- generators (each consumes one PRNG step) --------------------------------
 ; compound key -> migration
 (defn gen-key (s)
-  (let (c (rem s 12))
+  (let (c (math/rem s 12))
     (cond
-      (< c 5) (rem s 512)
+      (< c 5) (math/rem s 512)
       ; hot dense key (collisions likely)
-      (= c 5) (rem s 100000)
+      (= c 5) (math/rem s 100000)
       ; cold dense key
       (= c 6) 8388607
       ; DENSE_KEY_MAX - 1 (last dense slot)
       (= c 7) 8388608
       ; DENSE_KEY_MAX (first hashed key)
-      (= c 8) (- 0 (rem s 100))
+      (= c 8) (- 0 (math/rem s 100))
       ; negative (hashed)
-      (= c 9) (str "k" (rem s 64))
+      (= c 9) (str "k" (math/rem s 64))
       ; string key -> migration
       (= c 10) 1152921504606846976
       ; 2^60 as a KEY (hashed, in range)
-      else [:vec (rem s 16)])))
+      else [:vec (math/rem s 16)])))
 (defn gen-val (s)
-  (let (c (rem s 13))
+  (let (c (math/rem s 13))
     (cond
-      (< c 4) (rem s 1000)
+      (< c 4) (math/rem s 1000)
       (= c 4) nil
       ; stored nil (distinct from absent)
       (= c 5) true
@@ -53,12 +53,12 @@
       ; -2^60     (smallest tagged int)
       (= c 10) (- 0 1152921504606846977)
       ; -2^60 - 1 (unencodable -> migration)
-      (= c 11) (str "v" (rem s 32))
-      else [:nested (rem s 8) [true nil]])))
+      (= c 11) (str "v" (math/rem s 32))
+      else [:nested (math/rem s 8) [true nil]])))
 
 ;; ---- one op applied to (table, model) — returns [seed model] -----------------
 (defn apply-op (t s m)
-  (let (s1 (lcg s) c (rem s1 10))
+  (let (s1 (lcg s) c (math/rem s1 10))
     (cond
       ;; put
       (< c 5)
@@ -71,7 +71,7 @@
       ;; deopt-resume checkpoints (tests/jit_deopt_effects_test.blsp is the
       ;; focused regression for the duplication bug this once caught)
       (< c 9)
-        (let (s2 (lcg s1) k (rem s2 32) cur (get m k :zero))
+        (let (s2 (lcg s1) k (math/rem s2 32) cur (get m k :zero))
           (if (int? cur)
             (do (table/incr t k 1) [s2 (assoc m k (+ cur 1))])
             (if (= cur :zero)
@@ -117,7 +117,7 @@
     (let (t (table/new))
       (do
         ;; puts across the whole dense shape incl. nil/false values
-        (fold (fn (_ i) (table/put t i (if (= (rem i 3) 0) nil (if (= (rem i 3) 1) false (* i 7)))))
+        (fold (fn (_ i) (table/put t i (if (= (math/rem i 3) 0) nil (if (= (math/rem i 3) 1) false (* i 7)))))
           nil
           (range 5000))
         (assert= (table/count t) 5000)

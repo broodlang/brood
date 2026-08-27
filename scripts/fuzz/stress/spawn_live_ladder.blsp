@@ -40,8 +40,8 @@
 ;; `spawn-live` with a 20.6% noise floor (handoff.md §6). Use:
 ;;   /usr/bin/time -f '%U user %S sys %e wall' brood … ladder.blsp
 
-(def n (let (e (os/getenv "N")) (if e (string/->number e) 100000)))
-(def mode (let (e (os/getenv "MODE")) (if e e "all")))
+(def n (let (e (os/env "N")) (if e (string/->number e) 100000)))
+(def mode (let (e (os/env "MODE")) (if e e "all")))
 (def payload (into [] (range 16)))
 (def me (self))
 
@@ -81,7 +81,7 @@
 ;;
 ;;   park − park-batched  = what coexistence costs
 ;;   park-batched − nopark = what suspend/resume costs
-(def batch (let (e (os/getenv "BATCH")) (if e (string/->number e) 100)))
+(def batch (let (e (os/env "BATCH")) (if e (string/->number e) 100)))
 
 (defn spawn-k (f i k acc) (if (%eq i k) acc (spawn-k f (%add i 1) k (cons (spawn (f)) acc))))
 (defn collect-k (got k acc)
@@ -97,13 +97,13 @@
       (park-batched (%sub remaining k)))))
 
 (defn ms (f)
-  (let (t0 (os/now-ns) _ (f)) (quot (- (os/now-ns) t0) 1000000)))
+  (let (t0 (os/now-ns) _ (f)) (math/quot (- (os/now-ns) t0) 1000000)))
 
 ;; ns/unit as a plain integer — a hand-rolled fixed-point µs print silently dropped the
 ;; leading zero of its fraction (5.050 rendered as "5.50", i.e. 10x wrong).
 (defn rung (label f)
   (let (t (ms f))
-    (io/puts (str label "  " t " ms   " (quot (* t 1000000) n) " ns/unit"))))
+    (io/puts (str label "  " t " ms   " (math/quot (* t 1000000) n) " ns/unit"))))
 
 (defn run-spawn () (drain (spawn-n unit-spawn 0 nil)))
 (defn run-send () (release (spawn-n unit-send 0 nil) [:go]))

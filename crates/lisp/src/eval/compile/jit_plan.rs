@@ -901,6 +901,10 @@ mod tests {
     /// arguments straight onto their journal slot.
     #[test]
     fn block_argument_spills_never_reach_the_deopt_journal() {
+        // Ceiling 2 explicitly: this asserts on VM-compiled arms and JIT lowering arithmetic,
+        // so under `BROOD_VM=0` (the differential job) nothing compiles and the probe inspects
+        // zero chunks — the same pin `compile/tests.rs` documents for its two native tests.
+        set_forced_ceiling(Some(Tier::Native));
         let mut interp = Interp::new();
         // Exercise the shapes: a walker with an `if` inside a call's argument list is the
         // one that regressed, and `json/encode` is the same shape in the standard library.
@@ -965,6 +969,10 @@ mod tests {
     /// block-argument slots than the frame reserved. This is the line that broke.
     #[test]
     fn the_block_argument_want_is_clamped_to_the_reserve() {
+        // Ceiling 2 explicitly: this asserts on VM-compiled arms and JIT lowering arithmetic,
+        // so under `BROOD_VM=0` (the differential job) nothing compiles and the probe inspects
+        // zero chunks — the same pin `compile/tests.rs` documents for its two native tests.
+        set_forced_ceiling(Some(Tier::Native));
         let mut interp = Interp::new();
         interp
             .eval_str(
