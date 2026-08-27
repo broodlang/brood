@@ -212,7 +212,7 @@
       (is (= (file/slurp path) "abcde:xy"))
       (file/spit-bytes path ["A" [66] (bytes 67)])
       (is (= (file/slurp-bytes path) #b"ABC"))
-      (bytes/append path [[68] "E"])
+      (file/spit-bytes-append path [[68] "E"])
       (is (= (file/slurp-bytes path) #b"ABCDE"))
       (file/rm path)))
   (test "deep nesting flattens (and survives the heap walkers)"

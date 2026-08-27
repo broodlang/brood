@@ -33,9 +33,9 @@
     (%bytes-index-of haystack needle)
     (%bytes-index-of haystack needle (first more))))
 
-(defn append (path bytes)
-  "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. The incremental counterpart to spit-bytes (which truncates) — lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory."
-  (%append-bytes path bytes))
+; `bytes/append` lived here and took a PATH: it appended an iolist to a FILE, which is not a
+; bytes operation at all — it is `file/spit-bytes`'s append counterpart, and the name also
+; read as the bytes analogue of the bare `append`. It is `file/spit-bytes-append`.
 
 (defn int (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a big-endian signed (two's-complement) integer.

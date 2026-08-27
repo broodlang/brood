@@ -2123,7 +2123,7 @@ site, catchable as usual.
 
 Only long/blocking **data-in/data-out** natives are allowed (`%git-clone`,
 `%git-resolve-ref`, `%pbkdf2-sha256-bytes`, `%digest`, `%hmac`, `file/slurp`,
-`file/slurp-bytes`, `file/spit`, `file/spit-bytes`, `file/spit-append`, `append-bytes`,
+`file/slurp-bytes`, `file/spit`, `file/spit-bytes`, `file/spit-append`, `file/spit-bytes-append`,
 `tls-self-signed`); anything heap-sharing or env-reading is refused with a
 clear error. Args and the result are deep-copied across (like `send`), so
 they must be sendable values. The package manager's clones already ride it.
@@ -2676,7 +2676,7 @@ linear on any text.
 ### Iolists (write-boundary trees)
 
 The byte-producing write boundaries — `tcp-send`, `proc-send`, `file/spit`,
-`file/spit-append`, `file/spit-bytes`, `append-bytes`, and the in-memory materialiser
+`file/spit-append`, `file/spit-bytes`, `file/spit-bytes-append`, and the in-memory materialiser
 `bytes-concat` — accept any **iolist** (ADR-139, the Erlang/Elixir model): a
 **string**, a **`bytes`** value, a **byte int 0–255**, or an arbitrarily nested
 **list/vector** of iolists (`nil` is empty; an improper tail is a final leaf).

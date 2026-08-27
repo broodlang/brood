@@ -2568,11 +2568,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         spit_bytes);
     def(
         heap,
-        "%append-bytes",
+        "file/spit-bytes-append",
         Arity::exact(2),
         Sig::new(vec![string, any], nil_ty),
         &["path", "bytes"],
-        "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. The incremental counterpart to spit-bytes (which truncates) — lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory.",
+        "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) — to the file at path, byte-faithfully, creating it if absent. Returns nil. The append counterpart of file/spit-bytes (which truncates), as file/spit-append is to file/spit: lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory.",
         append_bytes);
     def(
         heap,
