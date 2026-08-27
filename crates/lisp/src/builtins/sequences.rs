@@ -1549,6 +1549,86 @@ pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) ->
     Ok(heap.alloc_vector(codes))
 }
 
+/// `(%codepoints->string codes)` — a string from a sequence of integer Unicode code
+/// points: the **inverse of `string/->codepoints`**, which until now had none.
+///
+/// Its absence was a real gap, not a convenience. `string/->codepoints` is a native that
+/// every text parser in `std/` uses to get an indexable code vector — and every one of them
+/// then rebuilt its result with `(apply str (map int->char cs))`, which allocates a seq
+/// view, calls a closure per code point to make a **one-character string**, and then
+/// concatenates N of those variadically. That is what `std/string.blsp`'s
+/// `codepoints->` was, so `json`'s per-string assembly, the regex matcher's and the hex
+/// encoder's all paid it. One O(n) pass into a `String` replaces the whole shape.
+///
+/// Accepts a vector or list (and a `bytes` value, where a byte *is* its code point), so it
+/// mirrors what the parsers actually hold. A value that is not an integer, or is not a
+/// Unicode scalar (negative, above U+10FFFF, or a surrogate in D800–DFFF), is a clean
+/// error naming the offender — a surrogate cannot be a `char`, and letting one through
+/// would either panic or silently produce U+FFFD.
+pub(super) fn codepoints_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let arg0 = arg(args, 0);
+    // Collect the ints first, so the string is built without a live heap borrow.
+    let codes: Vec<i64> = match arg0 {
+        Value::Bytes(id) => heap
+            .bytes(id)
+            .as_bytes()
+            .iter()
+            .map(|b| *b as i64)
+            .collect(),
+        Value::Vector(id) => heap
+            .vector(id)
+            .to_vec()
+            .iter()
+            .map(int_code)
+            .collect::<Result<_, _>>()
+            .map_err(|v| bad_codepoint(heap, v))?,
+        Value::Pair(_) | Value::Nil => {
+            let mut out = Vec::new();
+            let mut cur = arg0;
+            while let Value::Pair(id) = cur {
+                let (h, t) = heap.pair(id);
+                out.push(int_code(&h).map_err(|v| bad_codepoint(heap, v))?);
+                cur = t;
+            }
+            out
+        }
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%codepoints->string",
+                "vector, list or bytes of codepoint ints",
+                other,
+            ))
+        }
+    };
+    let mut out = String::with_capacity(codes.len());
+    for c in codes {
+        match u32::try_from(c).ok().and_then(char::from_u32) {
+            Some(ch) => out.push(ch),
+            None => {
+                return Err(LispError::runtime(format!(
+                    "%codepoints->string: {c} is not a Unicode scalar value (0..=0x10FFFF, \
+                     excluding the surrogates 0xD800..=0xDFFF)"
+                )))
+            }
+        }
+    }
+    Ok(heap.alloc_string(&out))
+}
+
+/// The int in `v`, or `v` itself when it is not one — the error carries the offender so
+/// [`codepoints_to_string`] can name it.
+fn int_code(v: &Value) -> Result<i64, Value> {
+    match v {
+        Value::Int(n) => Ok(*n),
+        other => Err(*other),
+    }
+}
+
+fn bad_codepoint(heap: &Heap, v: Value) -> LispError {
+    LispError::wrong_type(heap, "%codepoints->string", "codepoint int", v)
+}
+
 /// `(string/->graphemes s)` — the **extended grapheme clusters** of `s` as a vector
 /// of strings, one O(n) pass. The sibling of `string/->codepoints`, and the unit a
 /// human means by "character": `"é"` written as `e` + U+0301 is two code points but

@@ -39,17 +39,47 @@
     (when (= 2 (count parts))
       [(string/trim (first parts)) (string/trim (second parts))])))
 
+(defn- holds?
+  (value expected)
+  "Does `value` satisfy the documented result text `expected`?
+
+Compared as a VALUE when `expected` reads as one, and only then as text. A printed map or
+set is in the trie's order, and that order depends on the ids the symbol interner handed
+out — so it moves when anything else in the image changes, *including adding an unrelated
+kernel primitive*. That is how this fired: `%codepoints->string` shifted the interning and
+`(seq/frequencies [:a :b :a])` began printing `{:a 2, :b 1}` where the docstring recorded
+the equally-correct `{:b 1, :a 2}`. The same example passed when evaluated on its own,
+which is the tell that the comparison and not the example was wrong.
+
+Reading rather than evaluating is deliberate: a documented list result is written `(:a :b)`,
+which as a *form* would call `:a`. Read, it is the list value it depicts. Anything that does
+not read — `#<fn>`, a `RAISED …` line — falls back to comparing `pr-str`, so nothing is
+silently accepted."
+  (let (parsed (try [:ok (read-string expected)] (catch _ nil)))
+    (if parsed
+      (= value (second parsed))
+      (= (pr-str value) expected))))
+
 (defn- check
   (name-str line)
   "nil when the example holds, else a description of how it failed."
   (let (c (case-of line))
     (when c
       (let ([src expected] c
-            got (try
-                  (pr-str (eval (read-string src)))
-                  (catch e (str "RAISED " (error-message e)))))
-        (when (not (= got expected))
-          (str name-str ": " src "  → got " got ", documented " expected))))))
+            outcome (try
+                      [:ok (eval (read-string src))]
+                      (catch e [:raised (str "RAISED " (error-message e))]))
+            ok (if (= (first outcome) :raised)
+                 (= (second outcome) expected)
+                 (holds? (second outcome) expected)))
+        (when (not ok)
+          (str name-str
+            ": "
+            src
+            "  → got "
+            (if (= (first outcome) :raised) (second outcome) (pr-str (second outcome)))
+            ", documented "
+            expected))))))
 
 (defn- documented-names
   ()
