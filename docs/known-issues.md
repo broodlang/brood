@@ -4087,3 +4087,27 @@ enters the append-only shared RUNTIME region, which the local collector cannot r
 2. `nest test` (release) and `brood_suite_passes` (debug, via the Rust suite binary) are **different
    harnesses with different allocation profiles**. The former passed 4652/4652 while the latter
    failed. Reproduce CI with CI's harness, not the convenient one.
+
+## KI-65 — `take-while` / `drop-while` silently ignored a vector ✅ FIXED 2026-08-27
+
+**Symptom.** `(take-while pred [1 2 3 1])` answered `nil` and `(drop-while pred [1 2 3 1])`
+answered `[1 2 3 1]` — for every vector and every string, whatever the predicate said. A
+wrong VALUE, not an error, so nothing downstream could notice.
+
+**Cause.** Both loops guarded on `(pair? coll)`, which is false for a vector and a string, so
+they walked zero items and returned the accumulator (`nil`) or the input unchanged. Every
+neighbouring function — `take`, `drop`, `%take-acc` — guards on `empty?`, which is
+collection-generic, so the inconsistency sat inside one file between adjacent definitions.
+
+**Why it survived.** `tests/prelude_seq_test.blsp` and `tests/sequence_test.blsp` both cover
+these, on LISTS. The prelude's own two callers (`prelude/tools.blsp`, splitting a parameter
+list on `&`) also pass lists, so nothing in the tree exercised the broken path.
+
+**Found by writing a documented example.** The probe that produced the value for the
+docstring returned `nil` where `(1 2)` was obvious, which is the whole argument for
+`tests/doc_examples_test.blsp`: an example is evaluated, so a wrong one cannot be committed,
+and writing one puts a second pair of eyes on behaviour nothing else was checking.
+
+**Fix.** `pair?` → `empty?` in both guards. A string now raises a clear `first: expected
+list, vector, set, map or bytes` rather than answering wrongly. `drop-while` returns `coll`
+itself when nothing is dropped, matching `(drop 0 [1 2 3])` → `[1 2 3]`.
