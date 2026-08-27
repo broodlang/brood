@@ -52,7 +52,9 @@ For pure ASCII input the string and byte forms agree.")
 (defn hex-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
 lowercase hexadecimal. The byte-faithful counterpart of `hex-encode`, which first
-UTF-8-encodes a string."
+UTF-8-encodes a string.
+
+    (encoding/hex-encode-bytes #b\"hi\")   → \"6869\""
   (encoding-hex-encode-codes bytes encoding-hex-lower-codes))
 
 (defn hex-encode-bytes-upper (bytes)

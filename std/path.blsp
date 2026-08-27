@@ -233,7 +233,9 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
   "Resolve `path` to an absolute path: a `/`-rooted path is returned unchanged, a
 `~`/`~/…` path is expanded against `$HOME`, and any other (relative) path is joined
 onto `base` (default the current directory, `(file/cwd)`). The empty string is returned as
-is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segments."
+is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segments.
+
+    (path/absolute? (path/absolute \"a\"))   → true"
   (cond
     (or (= path "") (string/starts-with? path "/")) path
     (= path "~") (or (%getenv "HOME") path)

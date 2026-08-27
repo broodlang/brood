@@ -67,7 +67,9 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 ;; first item for each distinct `(f item)`. A map carried alongside the result is
 ;; the "seen" set of keys (stores only `true`, so one `%map-get` distinguishes it).
 (defn distinct-by (f coll)
-  "The items of `coll` with duplicates removed by key: keeps the first item for each distinct `(f item)`, order-preserving. `(distinct-by :id users)` keeps one user per id (≈ `Enum.uniq_by`)."
+  "The items of `coll` with duplicates removed by key: keeps the first item for each distinct `(f item)`, order-preserving. `(distinct-by :id users)` keeps one user per id (≈ `Enum.uniq_by`).
+
+    (seq/distinct-by count [\"a\" \"b\" \"cc\"])   → (\"a\" \"cc\")"
   (reverse (nth (fold (fn (state x)
                         (let (k (f x))
                           (if (%map-get (nth state 0) k false)
@@ -135,7 +137,9 @@ trailing partial chunk is kept. `n` must be positive.
         (chunk-by-acc f (rest coll) k (list x) (cons (into [] (reverse curr)) acc))))))
 (defn chunk-by (f coll)
   "Split `coll` into consecutive vectors where `(f x)` returns the same value.
-A new chunk starts each time the return value of `f` changes."
+A new chunk starts each time the return value of `f` changes.
+
+    (seq/chunk-by math/even? [2 4 1])   → ([2 4] [1])"
   (let (s (seq coll))
     (if (empty? s)
       nil
@@ -207,7 +211,9 @@ equality); recover the item itself with `find`.
   (index-where-from pred coll 0))
 
 (defn subvec (v start & more)
-  "A fresh vector of v's elements in [start, end); end defaults to the length."
+  "A fresh vector of v's elements in [start, end); end defaults to the length.
+
+    (seq/subvec [1 2 3 4] 1 3)   → [2 3]"
   (if (empty? more) (%subvec v start) (%subvec v start (first more))))
 
 (defn vector-ref (v i)
@@ -292,7 +298,9 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
   (first (rest (rest coll))))
 
 (defn times (n f x)
-  "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`."
+  "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`.
+
+    (seq/times 3 inc 0)   → 3"
   (if (<= n 0) x (seq/times (dec n) f (f x))))
 
 (defn repeatedly (n f)

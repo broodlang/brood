@@ -21,7 +21,9 @@
 (defn render (tmpl data)
   "Substitute all `{{key}}` markers in `tmpl` with values from map `data`.
 Keys in the template are trimmed of whitespace; both string and keyword keys are
-tried. Unknown keys render as empty string. Nested `{{` are not supported."
+tried. Unknown keys render as empty string. Nested `{{` are not supported.
+
+    (template/render \"{{a}}!\" {:a 1})   → \"1!\""
   ;; One native split, then one join. This used to be a recursive scan that, per marker,
   ;; sliced the REST of the template (`(string/substring s (+ open 2) …)`) and re-`str`'d the
   ;; whole output so far — both O(remaining), so the whole render was O(n²): measured

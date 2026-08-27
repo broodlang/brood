@@ -122,8 +122,12 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 (impl Zero :ratio   (zero? [n] false))
 
 
-(defn positive? (n) "True if `n` is greater than zero." (> n 0))
-(defn negative? (n) "True if `n` is less than zero." (< n 0))
+(defn positive? (n) "True if `n` is greater than zero.
+
+    (math/positive? 1)    → true" (> n 0))
+(defn negative? (n) "True if `n` is less than zero.
+
+    (math/negative? -1)   → true" (< n 0))
 (defn abs (n)
   "The absolute value of `n`.
 
@@ -142,7 +146,9 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
     (math/even? 4)         → true"
   (= (math/rem n 2) 0))
-(defn odd? (n) "True if integer `n` is odd." (not (even? n)))
+(defn odd? (n) "True if integer `n` is odd.
+
+    (math/odd? 3)         → true" (not (even? n)))
 
 ;; ---- aggregation ------------------------------------------------------------
 (defn sum (xs)
@@ -153,12 +159,16 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
     (math/sum [1 2 3])     → 6"
   (fold %add 0 xs))
-(defn product (xs) "The product of the numbers in `xs`." (fold %mul 1 xs))
+(defn product (xs) "The product of the numbers in `xs`.
+
+    (math/product [2 3 4])   → 24" (fold %mul 1 xs))
 
 ;; Rounding & roots, all Brood over the one Float->Int primitive `floor` (toward
 ;; -inf) plus `rem`/`/`/`*`. `floor` of an int is itself, so these pass ints
 ;; through unchanged.
-(defn ceil (x) "Round `x` toward positive infinity to an integer." (- (math/floor (- x))))
+(defn ceil (x) "Round `x` toward positive infinity to an integer.
+
+    (math/ceil 1.2)       → 2" (- (math/floor (- x))))
 ;; round half away from zero: floor(x+0.5) for x>=0, mirrored for x<0.
 (defn round (x)
   "Round `x` to the nearest integer (halves away from zero).
@@ -253,8 +263,12 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 ;; ---- transcendental functions -----------------------------------------------
 ;; Thin policy over the `%`-prefixed f64 primitives (mechanism), so they live in the
 ;; `math` namespace (`math/sin`) rather than cluttering the bare language core.
-(defn sin (x) "The sine of `x` (radians). Returns a float." (%sin x))
-(defn cos (x) "The cosine of `x` (radians). Returns a float." (%cos x))
+(defn sin (x) "The sine of `x` (radians). Returns a float.
+
+    (math/sin 0)          → 0.0" (%sin x))
+(defn cos (x) "The cosine of `x` (radians). Returns a float.
+
+    (math/cos 0)          → 1.0" (%cos x))
 (defn tan (x) "The tangent of `x` (radians). Returns a float." (%tan x))
 (defn asin (x) "The arcsine of `x` in radians. `x` must be in [-1, 1]; raises otherwise." (%asin x))
 (defn acos (x)
@@ -262,9 +276,15 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
   (%acos x))
 (defn atan (x) "The arctangent of `x` in radians (result in [-π/2, π/2])." (%atan x))
 (defn atan2 (y x)
-  "The angle in radians of the vector (`x`, `y`) from the positive x-axis, in (-π, π]. Handles x=0."
+  "The angle in radians of the vector (`x`, `y`) from the positive x-axis, in (-π, π]. Handles x=0.
+
+    (math/atan2 0 1)      → 0.0"
   (%atan2 y x))
-(defn exp (x) "e raised to the power `x`. Returns a float." (%exp x))
-(defn ln (x) "The natural logarithm of `x`. `x` must be positive; raises otherwise." (%ln x))
+(defn exp (x) "e raised to the power `x`. Returns a float.
+
+    (math/exp 0)          → 1.0" (%exp x))
+(defn ln (x) "The natural logarithm of `x`. `x` must be positive; raises otherwise.
+
+    (math/ln 1)           → 0.0" (%ln x))
 (defn log2 (x) "The base-2 logarithm of `x`. `x` must be positive; raises otherwise." (%log2 x))
 (defn log10 (x) "The base-10 logarithm of `x`. `x` must be positive; raises otherwise." (%log10 x))

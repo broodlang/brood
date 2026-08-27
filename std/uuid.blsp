@@ -96,7 +96,9 @@ always — useful for content-based IDs and idempotent generation.")
 (defn v7 ()
   "Generate an RFC 9562 version 7 UUID. The first 48 bits encode the current
 Unix timestamp in milliseconds, giving chronological sort order. The rest is
-random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
+random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
+
+    (count (uuid/v7))   → 36"
   (let (ms (os/now)
         rand (rand/token 10)
         ts (pad-hex (int->hex ms) 12)

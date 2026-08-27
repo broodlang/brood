@@ -59,7 +59,9 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
   (string/substring s i (inc i)))
 
 (defn ->list (s)
-  "The characters of `s` as a list of 1-char strings."
+  "The characters of `s` as a list of 1-char strings.
+
+    (string/->list \"ab\")   → (\"a\" \"b\")"
   ;; One native O(n) `chars()` pass (via `string/split` on the empty separator). A
   ;; pure-Brood `(string/substring s i (inc i))` loop is O(n^2) — `substring` walks to char
   ;; boundary `i` each call — which silently makes every `(into [] (string/->list s))`
@@ -68,7 +70,9 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
   (string/split s ""))
 
 (defn list-> (cs)
-  "Concatenate a list of strings (e.g. from `string/->list`) into one string."
+  "Concatenate a list of strings (e.g. from `string/->list`) into one string.
+
+    (string/list-> [\"a\" \"b\"])   → \"ab\""
   (apply str cs))
 
 (defn codepoints-> (cs)
@@ -81,11 +85,15 @@ inverse of the `string/->codepoints` primitive."
   (%codepoints->string cs))
 
 (defn ->bytes (s)
-  "Encode string `s` as a bytes value — its UTF-8 bytes. Inverse of `string/bytes->`."
+  "Encode string `s` as a bytes value — its UTF-8 bytes. Inverse of `string/bytes->`.
+
+    (string/->bytes \"hi\")  → #b\"hi\""
   (%string->utf8-bytes s))
 
 (defn bytes-> (b)
-  "Decode a bytes value of UTF-8 bytes back to a string. Inverse of `string/->bytes`."
+  "Decode a bytes value of UTF-8 bytes back to a string. Inverse of `string/->bytes`.
+
+    (string/bytes-> #b\"hi\")   → \"hi\""
   (%utf8-bytes->string b))
 
 ;; ---- join -------------------------------------------------------------------
@@ -160,14 +168,18 @@ leaves `s` unchanged.
 (defn- triml-from
   (s i n)
   (if (and (< i n) (whitespace? (char-at s i))) (triml-from s (inc i) n) (string/substring s i n)))
-(defn triml (s) "Remove leading whitespace from `s`." (triml-from s 0 (string/length s)))
+(defn triml (s) "Remove leading whitespace from `s`.
+
+    (string/triml \"  a\")   → \"a\"" (triml-from s 0 (string/length s)))
 
 (defn- trimr-to
   (s n)
   (if (and (> n 0) (whitespace? (char-at s (dec n))))
     (trimr-to s (dec n))
     (string/substring s 0 n)))
-(defn trimr (s) "Remove trailing whitespace from `s`." (trimr-to s (string/length s)))
+(defn trimr (s) "Remove trailing whitespace from `s`.
+
+    (string/trimr \"a  \")   → \"a\"" (trimr-to s (string/length s)))
 
 (defn trim (s)
   "Remove leading and trailing whitespace from `s`.
