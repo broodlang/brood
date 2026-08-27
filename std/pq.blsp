@@ -71,17 +71,17 @@ Stable: among equal priorities, earlier inserts pop first (FIFO).
   (if (empty? q)
     :empty (first (first (get q :entries)))))
 
-;; The pq joins the collection protocol too: `seqable` yields its values in priority order,
+;; The pq joins the collection protocol too: `Seqable` yields its values in priority order,
 ;; so `seq`/`count`/`map`/`fold`/`for`/`into`-from work on a pq.
 ;;
-;; `conjable` takes a `[priority value]` PAIR. It was left unimplemented on the reasoning
+;; `Conjable` takes a `[priority value]` PAIR. It was left unimplemented on the reasoning
 ;; that "inserting needs a priority, which `conj`'s single element can't carry" — but the
 ;; default impl already answers that: `conj` on a map takes a `[k v]` pair, so a pair is
 ;; the established way to carry two things through one element. Without this, `(conj q 3)`
 ;; fell through to that default and failed with "adding to a RECORD takes a [k v] pair or
 ;; a map" — an error about records, raised for a priority queue.
-(impl seqable pq/pq (->seq [q] (map second (get q :entries))))
-(impl conjable
+(impl Seqable pq/pq (->seq [q] (map second (get q :entries))))
+(impl Conjable
   pq/pq
   (conj-onto [q x]
     (if (and (vector? x) (= (count x) 2))
@@ -89,13 +89,13 @@ Stable: among equal priorities, earlier inserts pop first (FIFO).
       (error "conj: adding to a priority queue takes a [priority value] pair, got "
         (pr-str x)))))
 
-(impl display
+(impl Display
   pq/pq
   (->string [q]
     (if (empty? q)
       "#<pq empty>"
       (str "#<pq " (count q) " min=" (->string (peek-priority q)) ">"))))
 
-(impl inspectable
+(impl Inspect
   pq/pq
   (inspect [q] (str "#<pq " (pr-str (get q :entries)) ">")))

@@ -108,7 +108,7 @@ pub(super) fn realize_seqviews(
     })
 }
 
-/// If `v` is a RECORD (a `Value::Map` carrying `:__id__`), return its `seqable` view — the
+/// If `v` is a RECORD (a `Value::Map` carrying `:__id__`), return its `Seqable` view — the
 /// list its `->seq` ability op yields (its fields id-free by default, or a custom
 /// collection's own sequence). Lets `first`/`rest`/`empty?` treat a record AS its sequence
 /// (ADR-172 §7). Only reached on the builtin fallback: `first`/`rest` are `PrimOp1`s the JIT
@@ -128,7 +128,7 @@ pub(super) fn record_seq(heap: &mut Heap, v: Value) -> Result<Option<Value>, Lis
     let genv = heap.global();
     let callee = heap
         .env_get(genv, crate::core::value::intern("->seq"))
-        .ok_or_else(|| LispError::runtime("->seq: the seqable protocol is unavailable"))?;
+        .ok_or_else(|| LispError::runtime("->seq: the Seqable protocol is unavailable"))?;
     Ok(Some(crate::eval::compile::apply_value(
         heap,
         callee,
@@ -139,7 +139,7 @@ pub(super) fn record_seq(heap: &mut Heap, v: Value) -> Result<Option<Value>, Lis
 
 pub(super) fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let v0 = arg(args, 0);
-    // a record dispatches to its `seqable` view first (custom collection or fields).
+    // a record dispatches to its `Seqable` view first (custom collection or fields).
     let v = match record_seq(heap, v0)? {
         Some(s) => s,
         None => v0,
@@ -260,7 +260,7 @@ pub(super) fn is_pair(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 
 pub(super) fn is_empty(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let x0 = arg(args, 0);
-    // a record is empty iff its `seqable` view is (a custom empty queue, a field-less
+    // a record is empty iff its `Seqable` view is (a custom empty queue, a field-less
     // record) — not iff the raw map is (which always carries `:__id__`).
     let x = match record_seq(heap, x0)? {
         Some(s) => s,

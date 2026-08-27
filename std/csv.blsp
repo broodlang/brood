@@ -250,7 +250,7 @@ maps from header→value strings. An empty or header-only CSV returns nil/empty.
 (defn- csv-emit-field
   (v)
   "Emit a single CSV field, quoting it if necessary. Interior quotes are doubled.
-A non-string cell is rendered with `->string` (the `display` protocol) first — so a number
+A non-string cell is rendered with `->string` (the `Display` protocol) first — so a number
 emits as its digits, and a record emits as the string its type defines rather than as its
 field map (or, as before `->string`, a type error out of the quoting scan)."
   (let (s (if (string? v) v (->string v)))

@@ -395,7 +395,7 @@ retracting what was never there is a quiet zero. `unregister-impl` is the functi
 underneath, for a caller holding names as values.
 
 Two things `unimpl` will not do: retract the language's own `:default` for an ability the
-runtime dispatches on itself (`display`, `inspectable`, `seqable`, `conjable` — that one line
+runtime dispatches on itself (`Display`, `Inspect`, `Seqable`, `Conjable` — that one line
 would leave every value unprintable, so it errors and points at `impl` for your own id), and
 touch any impl but the one named (retracting one id leaves its siblings, including `:default`,
 in place).
@@ -563,7 +563,7 @@ checker and LSP read.
 The id is held in a reserved `:__id__` field, reachable by direct `(get r :__id__)`,
 but the record's **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`
 — and `map`/`filter`/`fold`/`for`/`into`, which coerce through `seq` — see only the
-fields, so `(count (circle 2))` is `1`. This is the `seqable` ability (op `->seq`,
+fields, so `(count (circle 2))` is `1`. This is the `Seqable` ability (op `->seq`,
 default = the fields); a custom-collection record overrides it to define its own
 iteration. `(fields r)` gives the id-free map explicitly; nothing else should read
 `:__id__` directly (the stable seam a future hidden slot would swap behind).
@@ -614,7 +614,7 @@ provable mismatch; anything whose type isn't pinned down defers — sound, no fa
 
 **Any ability name is a type (ADR-186).** An *open* ability (no `:sealed`) has no finite
 member set, so it resolves to the permissive **`any`** — a `sig` mentioning it (`(sig render
-(display -> string))`) still *checks* (the return and other params flow), the open-ability
+(Display -> string))`) still *checks* (the return and other params flow), the open-ability
 parameter just accepts anything. That's the sound choice: an open ability's impls are late
 and may cover any value, so no argument can be rejected on the type — the "does this value
 implement it" safety is enforced at the op *call sites* instead. Sealed abilities keep their
@@ -646,7 +646,7 @@ type itself.
 > same registration as `impl` (no runtime substance), and the orphan rule guarded a
 > multi-third-party-library collision greenfield Brood doesn't have. Dispatch now runs
 > through a **polymorphic per-op inline cache** (`%dispatch`, 4-way) that deopts on
-> reload (a `def *impls*`/compaction bumps the epoch), and `display` is always-on core.
+> reload (a `def *impls*`/compaction bumps the epoch), and `Display` is always-on core.
 > Still ahead: `:sealed` abilities fully static, and JIT specialization of the dispatch
 > site. This section documents what is implemented today.
 
@@ -662,16 +662,16 @@ ability when third-party or later code must be able to add a case.
 
 #### The display protocol: customizing how a record prints
 
-The `display` ability — Elixir's `String.Chars` for Brood (ADR-171/172) — is **core
+The `Display` ability — Elixir's `String.Chars` for Brood (ADR-171/172) — is **core
 and always on**. Its op **`(->string x)`** turns a value into its display string; the
 `:default` impl is the native `str`. The **screen printers** (`print` / `println` /
-`eprint` / `eprintln`) route a *record* through its `display` impl out of the box — no
+`eprint` / `eprintln`) route a *record* through its `Display` impl out of the box — no
 import, no activation step. Built-ins are unchanged and pay no dispatch cost.
 
 ```clojure
 (defmodule money)             ; no (:use ability), no (:use show) — both are core
 (defrecord usd (cents))
-(impl display usd
+(impl Display usd
   (->string [m] (str "$" (math/->fixed (/ (get m :cents) 100.0) 2))))
 
 (println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
@@ -720,30 +720,30 @@ the specs as data.
 
 #### The abilities the standard library ships
 
-Beyond the core `display`/`inspectable`, `std/` declares these (ADR-177). Each is the
+Beyond the core `Display`/`Inspect`, `std/` declares these (ADR-177). Each is the
 extension point for its module: `impl` it for your own type and that module accepts the
 type with no change to it.
 
 | Ability | Op | Module | Sealed? | What impl'ing it buys |
 |---|---|---|---|---|
-| `json/encodable` | `(->json x)` | `json` | open | `json-encode` accepts your type — a record picks its wire shape, and a kind JSON has no rule for (a pid, a datetime) stops erroring. No `:default`. |
-| `io/port` | `(io-write port s)` | `io` | open | Your value is an output port: `io-write`, `with-out`/`with-err`, and every logger backend take it. A bare 1-arg fn is a port via the `:fn` impl. |
-| `log/backend` | `(backend-emit b record)` | `log` | open | A backend that does something other than "format one line and write it" — batching, JSON lines, sampling. Reuse `backend-passes?` for the standard level/filter gate. |
-| `http/response` | `(send-response r sock)` | `http` | open | A response kind with its own wire behaviour (sendfile, chunked, a 101 upgrade), including whether it closes the socket. |
-| `package/dependency` | `dep-kind`, `dep-resolve`, `dep-check-compatible`, `dep-lock-vec`, `dep-entry-node` | `package` | **sealed** | A new manifest dependency kind. Sealed, so `nest check` reports any op you forget. |
-| `datetime/temporal` | `(->iso x)` | `datetime` | **sealed** | ISO 8601 rendering for a calendar value. |
+| `JsonEncode` | `(->json x)` | `json` | open | `json-encode` accepts your type — a record picks its wire shape, and a kind JSON has no rule for (a pid, a datetime) stops erroring. No `:default`. |
+| `Port` | `(io-write port s)` | `io` | open | Your value is an output port: `io-write`, `with-out`/`with-err`, and every logger backend take it. A bare 1-arg fn is a port via the `:fn` impl. |
+| `LogBackend` | `(backend-emit b record)` | `log` | open | A backend that does something other than "format one line and write it" — batching, JSON lines, sampling. Reuse `backend-passes?` for the standard level/filter gate. |
+| `Response` | `(send-response r sock)` | `http` | open | A response kind with its own wire behaviour (sendfile, chunked, a 101 upgrade), including whether it closes the socket. |
+| `Dependency` | `dep-kind`, `dep-resolve`, `dep-check-compatible`, `dep-lock-vec`, `dep-entry-node` | `package` | **sealed** | A new manifest dependency kind. Sealed, so `nest check` reports any op you forget. |
+| `Temporal` | `(->iso x)` | `datetime` | **sealed** | ISO 8601 rendering for a calendar value. |
 
-Sealed vs open is a per-ability judgement: `package/dependency` and `datetime/temporal` cover genuinely
+Sealed vs open is a per-ability judgement: `Dependency` and `Temporal` cover genuinely
 closed sets and want exhaustiveness checking; the rest exist so a type the module has
 never heard of can join.
 
 `std/` also uses `defrecord` for the value types that were once plain maps told apart by
 their shape — `buffer`, `queue`, `pq`, `multimap`, `datetime`/`date`/`time-of-day`, and the
 four dependency kinds. Each has an identity-based predicate (`buffer?`, `queue?`, …) that a
-look-alike map can't satisfy, and a `display` impl, so it prints as itself rather than as
+look-alike map can't satisfy, and a `Display` impl, so it prints as itself rather than as
 its internals. Where a library renders a *user-supplied* value into text —
 `template/render`, `csv-emit`, `url/query-encode` — it goes through `->string`, so your
-record's `display` impl decides how it appears there too.
+record's `Display` impl decides how it appears there too.
 
 #### Polymorphism: multiple dispatch (`defmulti`)
 
@@ -1620,10 +1620,10 @@ value — which is exactly why it's safe. (Dynamic bindings don't
 reach a `spawn`ed child, so a child starts with the default `*out*`; hand it a
 port explicitly if it should redirect too.)
 
-A port is any value implementing the **`io/port`** ability, whose one op is `io-write` — so
+A port is any value implementing the **`Port`** ability, whose one op is `io-write` — so
 a bare 1-arg fn is a port (that is the `:fn` impl), and so is a port *record* that
 carries its target and prints as itself (`#<port stdout>`, `#<port file /tmp/app.log>`).
-`port?` tests it, and your own type joins with `defrecord` + `impl io/port`. `*out*`/`*err*`
+`port?` tests it, and your own type joins with `defrecord` + `impl Port`. `*out*`/`*err*`
 still hold a plain fn, which the prelude's `print` calls directly — so printing pays no
 dispatch cost, `print` gains no special cases, and `with-out-str` is unaffected;
 `with-out`/`with-err` adapt a record port at that boundary for you (`port-fn`).
@@ -1647,7 +1647,7 @@ takes down only that line, not the caller.
 ```
 
 Levels are `:debug` < `:info` < `:warn` < `:error`. A **backend** is any value
-implementing the **`log/backend`** ability (one op, `backend-emit`, handed each record).
+implementing the **`LogBackend`** ability (one op, `backend-emit`, handed each record).
 The stock one is an `io` port + a minimum level + a filter + a formatter, so the logger
 *reuses* ports rather than inventing its own sink; build it with `stdout-backend` /
 `stderr-backend` / `file-backend` / `fn-backend` / `process-backend`, and add it live:
@@ -1664,7 +1664,7 @@ registered under the name `:logger` (found via `proc/whereis`); `(log …)` fall
 stderr when none is running, so a log is never silently lost.
 
 For a backend that does something other than write one formatted line — batch records,
-emit JSON lines, sample — `defrecord` your own and `impl log/backend` for it; the logger
+emit JSON lines, sample — `defrecord` your own and `impl LogBackend` for it; the logger
 takes it unchanged, and `backend-passes?` gives you the same `:min-level`/`:filter` gate
 every stock backend honours.
 
@@ -3012,7 +3012,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | Module | name | What it provides |
 |--------|---------------|-----------------|
 | `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `regular?`, `list-files`, `list-dirs`, `walk-files`. Pure path-string ops (`extension`, `stem`, …) live in `path` (ADR-234). All Brood (ADR-006), no new Rust |
-| `std/io.blsp` | `'io` | Output **ports** — the `io/port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
+| `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
 | `std/enum.blsp` | `'enum` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. The core ops (`map`/`filter`/`reduce`/`fold`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`) stay bare in the prelude; `(:use seq)` for bare access or call qualified |
 | `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `merge-with`, `update-vals`, `update-keys`, `select-keys`. The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`reduce-kv`/`update`/`get-in`/`update-in`/`merge`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |

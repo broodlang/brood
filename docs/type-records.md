@@ -161,7 +161,7 @@ behave.
 `fields` mismatch is never inspected by disjointness — it can only *miss* a
 warning, never manufacture a false one.
 
-**`display`** — a record renders as `{name: string, age?: int}` (`?` marks an
+**`Display`** — a record renders as `{name: string, age?: int}` (`?` marks an
 optional field, sorted by field name since `Symbol` is an interned `u32` and
 sorts by intern order, not spelling — same trap `lit`'s rendering already
 avoids).

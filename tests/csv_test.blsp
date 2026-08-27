@@ -115,19 +115,19 @@
         (assert= original
           (csv/emit-maps maps ["name" "age"]))))))
 
-;; ---- non-string cells render through display --------------------------------
+;; ---- non-string cells render through Display --------------------------------
 ;; A cell is rendered with `->string` before quoting, so a record emits the string its type
 ;; defines instead of its field map (and a number no longer trips the quoting scan).
 
 (defrecord usd (cents))
-(impl display csv-test/usd (->string [m] (str "$" (get m :cents))))
+(impl Display csv-test/usd (->string [m] (str "$" (get m :cents))))
 
 (describe "emit renders non-string cells"
   ;; `->string` on a keyword is its printed form, colon included (`name` would strip it) —
   ;; the display form, not the bare word.
   (test "numbers and keywords emit as their display form"
     (assert= (csv/emit [["a" 1 :b]]) "a,1,:b"))
-  (test "a record emits via its display impl, not as a field map"
+  (test "a record emits via its Display impl, not as a field map"
     (assert= (csv/emit [[(usd 1050) "x"]]) "$1050,x")
     (is (not (includes? (csv/emit [[(usd 1050)]]) "__id__"))))
   (test "a rendered cell is still quoted when it needs to be"

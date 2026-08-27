@@ -159,7 +159,7 @@ pass through, space becomes +, all other bytes become %XX."
   "Encode a map of string→string (or keyword→string) params as a
 `key=value&key=value` query string, percent-encoding keys and values and using
 `+` for spaces. Keys are sorted for deterministic output. A non-string value is rendered
-with `->string` (the `display` protocol), so a record encodes as the string its type
+with `->string` (the `Display` protocol), so a record encodes as the string its type
 defines rather than as its field map.
 
     (url/query-encode {:a 1})    → \"a=1\""

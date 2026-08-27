@@ -1248,10 +1248,10 @@ and that every declared arity still matches its module's actual definition."
   (split-at 2)
   (vector-ref 2))
 
-;; ═══ Abilities + the display protocol (core) ════════════════════════════════
+;; ═══ Abilities + the Display protocol (core) ════════════════════════════════
 ;; Open generic functions with nominal dispatch — Brood's unified polymorphism seam
 ;; (ADR-168/172). Folded into the prelude (was std/ability.blsp + std/show.blsp) so
-;; `defability`/`impl`/`defrecord` and the always-on `display`/`inspectable` protocol are
+;; `defability`/`impl`/`defrecord` and the always-on `Display`/`Inspect` protocol are
 ;; core — no `(:use ability)`, no load step at all, no activation. Dispatch is on
 ;; the FIRST arg's identity (a built-in's `type-of` kind, or a `defrecord` value's
 ;; nominal `module/name` id); resolution is by PRECEDENCE tier, not load order:
@@ -1402,7 +1402,7 @@ and that every declared arity still matches its module's actual definition."
 
 (defn fields (x)
   "The FIELDS of record `x` as a plain map — its identity omitted. The explicit id-free
-  view; the default `seqable` view a record's `seq`/`count`/`keys`/`map`/`fold` already
+  view; the default `Seqable` view a record's `seq`/`count`/`keys`/`map`/`fold` already
   give (so those don't leak `:__id__`). A plain map is returned unchanged."
   (if (record? x) (dissoc x :__id__) x))
 
@@ -1434,7 +1434,7 @@ and that every declared arity still matches its module's actual definition."
 ; tier ladder: an impl whose registering ns equals this owns the type.
 ;
 ; Written on the two NATIVE string ops rather than `string/split` + `string/join`: this
-; runs on every `impl` registration, the prelude's own `display`/`inspectable` impls included,
+; runs on every `impl` registration, the prelude's own `Display`/`Inspect` impls included,
 ; so it is the one boot-time caller of the `string` module — and the module now loads
 ; LAZILY (see `%autoload` below). Cutting at the last `/` is also what the docstring above
 ; describes, without building the intermediate list to rejoin all but its last element.
@@ -1553,19 +1553,19 @@ resolution; `%impl-for` is what picks the winner."
 (defn %impl-exact? (op-key key)
   "Is there an impl of op `op-key` registered for id `key` SPECIFICALLY — ignoring the
 `:default` that `%impl-for` falls back to? The question the collection seams ask before
-handing a built-in kind to an ability: `seqable`'s `:default` is `(map-pairs (fields x))`,
+handing a built-in kind to an ability: `Seqable`'s `:default` is `(map-pairs (fields x))`,
 which is meaningless for a rope, so falling through unconditionally would swap a clear
 `expected collection` error for a confusing one (ADR-253)."
   (not (nil? (get (get *impls* op-key) key))))
 
-(def- *substrate-abilities* ['display 'inspectable 'seqable 'conjable])
+(def- *substrate-abilities* ['Display 'Inspect 'Seqable 'Conjable])
 ;; The abilities the LANGUAGE ITSELF dispatches on. Their `:default` impls are the fallback
-;; every value relies on — `display`'s is what `io/write`/`io/puts`/`str` reach for — so they are
-;; substrate, not policy, and `%unregister-impl` refuses to retract them: `(%unimpl display
+;; every value relies on — `Display`'s is what `io/write`/`io/puts`/`str` reach for — so they are
+;; substrate, not policy, and `%unregister-impl` refuses to retract them: `(%unimpl Display
 ;; :default)` is one line that stops the image printing anything, and the only clue is a
 ;; `no impl for :vector` from deep inside an unrelated call. Same reasoning as reserved names
 ;; (ADR-166): the language's own definitions are not yours to remove. An `impl` you wrote for
-;; YOUR OWN id (`(impl display my/rec …)`) is policy, and retracts normally.
+;; YOUR OWN id (`(impl Display my/rec …)`) is policy, and retracts normally.
 
 (defn- %impl-substrate?
   (aname key)
@@ -1631,8 +1631,8 @@ which is meaningless for a rope, so falling through unconditionally would swap a
         op (second op-key)
         known (keys (or (get *impls* op-key) {}))
         message (if (empty? known)
-                  (str "ability " aname ", op " op ": no impl for " key)
-                  (str "ability " aname ", op " op ": no impl for " key " — have " known)))
+                  (str "ability " aname "/" op ": no impl for " key)
+                  (str "ability " aname "/" op ": no impl for " key " — have " known)))
     (throw {:kind :%no-impl :message message :ability aname :op op :id key :have known})))
 
 (defn satisfies? (aname x)
@@ -2075,67 +2075,67 @@ which is meaningless for a rope, so falling through unconditionally would swap a
       (error "defmethod "
         mname ": the dispatch pattern must be a vector of ids or " "`:default`, got " pattern)))
 
-;; ── display / inspectable: the print protocol (always on) ──────────────────────────
-(defability display
+;; ── Display / Inspect: the print protocol (always on) ──────────────────────────
+(defability Display
   "A value's human display string — what `io/write`/`io/puts` show for it."
   (->string [self] :-> string))
 
 ;; Every built-in kind, and every record without a custom impl, lands here: the
 ;; native `str` — i.e. exactly what printing produced before this module loaded.
-(impl display :default (->string [x] (str x)))
+(impl Display :default (->string [x] (str x)))
 
-;; `inspectable` — the DEBUG form (Elixir's `inspectable`, Haskell's `Show`), the companion
-;; to `display`. `(inspect x)` is what you want in a log line or a REPL: unambiguous,
+;; `Inspect` — the DEBUG form (Elixir's `Inspect`, Haskell's `Show`), the companion
+;; to `Display`. `(inspect x)` is what you want in a log line or a REPL: unambiguous,
 ;; type-revealing, and free to include a wrapper a human reads (`#money<$10.50>`).
 ;; It is DISTINCT from `pr-str` on purpose — `pr-str` must *round-trip* (its output
 ;; re-reads to the same value), so it is a kernel guarantee this protocol must not
 ;; override. `inspect` carries no round-trip contract, so a record may shape it
 ;; freely. `:default` is `pr-str` (the readable form) for everything uncustomised.
-(defability inspectable
+(defability Inspect
   "A value's debug string — for logs / the REPL. Unlike `pr-str`, need not re-read."
   (inspect [self] :-> string))
 
-(impl inspectable :default (inspect [x] (pr-str x)))
+(impl Inspect :default (inspect [x] (pr-str x)))
 
 ;; `inspectln` (print the debug form, return the value) is gone: it had no call site in
 ;; the tree, and the pipeline it existed for is `(-> v f (io/puts (inspect …)) g)` or just
-;; `inspect` plus `io/puts`. `inspect` itself stays — it is the `inspectable` ability op and
+;; `inspect` plus `io/puts`. `inspect` itself stays — it is the `Inspect` ability op and
 ;; returns a STRING, so it belongs with `pr-str`, not with the printers.
 
-;; seqable — a value's list/seq view: the seam `seq` (and thus `map`/`filter`/`fold`/
+;; Seqable — a value's list/seq view: the seam `seq` (and thus `map`/`filter`/`fold`/
 ;; `for`/`into`, plus `count`/`keys`/`vals`) consults for a RECORD. The default is the
 ;; record's fields (id-free) as `[k v]` pairs, so a record iterates, counts, and keys as
 ;; its fields and never leaks the internal `:__id__`; a custom-collection record overrides
 ;; `->seq` to define its own iteration. Built-ins never reach here — `seq` takes their
-;; native path — so this is purely the record extension point (à la `display`), at zero
+;; native path — so this is purely the record extension point (à la `Display`), at zero
 ;; cost to built-ins.
-(defability seqable
+(defability Seqable
   "A value's sequence view — the list that `seq`/`map`/`fold`/`for`/`into` iterate."
   (->seq [self] :-> any))
-(impl seqable :default (->seq [x] (%map-pairs (fields x))))
+(impl Seqable :default (->seq [x] (%map-pairs (fields x))))
 
-;; lookup — keyed access: the seam `get` consults for a RECORD that stores its contents
+;; Lookup — keyed access: the seam `get` consults for a RECORD that stores its contents
 ;; somewhere other than its own fields. Without it a record answers `get` from its FIELDS,
 ;; which for such a type is a wrong VALUE and not an error: `(get multimap k)` answered nil
 ;; for a key holding values, indistinguishable from a real absence (ADR-254).
 ;;
 ;; No `:default` — a record with no impl keeps the field lookup, which is the right answer
 ;; for an ordinary record and the reason `get` works on one at all.
-(defability lookup
+(defability Lookup
   "A record's own keyed access — what `get` and `keys` should answer for it, when its
 contents are not simply its fields."
   (lookup-get [self k] :-> any)
   (lookup-keys [self] :-> any))
 
-;; conjable — adding an element: the seam `conj`/`into` consult for a RECORD. The default
+;; Conjable — adding an element: the seam `conj`/`into` consult for a RECORD. The default
 ;; is the map behaviour (a record is a map: assoc a `[k v]` pair, or merge a map), so a
 ;; plain record conj's like a map; a custom-collection record overrides `conj-onto` to define
 ;; its own insertion (a queue pushes, a stack prepends, …). Built-ins keep their native
 ;; `%conj-one` path — this fires only for a record.
-(defability conjable
+(defability Conjable
   "Add element `x` to collection `self`, returning a fresh collection."
   (conj-onto [self x] :-> any))
-(impl conjable
+(impl Conjable
   :default (conj-onto [coll x]
     (cond
       (map? x) (merge coll x)
@@ -2179,18 +2179,18 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 (defmulti num-div)
 
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
-;; (display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through
+;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through
 ;; `->string` (a `defrecord` value is the sole thing that can carry a custom impl); every
 ;; other value passes through untouched so the built-in renderer stays on the fast path
 ;; — no `%identity-of`/`%impl-for` lookup per printed int or string. Disable for a scope
 ;; with `(binding (*show* nil) …)`.
 (defn- %show-print-hook
   (x)
-  ;; Which values the screen printers route through `display`.
+  ;; Which values the screen printers route through `Display`.
   ;;
-  ;; The guard used to be `(if (record? x) …)`, which meant an `(impl display :rope …)`
+  ;; The guard used to be `(if (record? x) …)`, which meant an `(impl Display :rope …)`
   ;; REGISTERED, RESOLVED when called directly, and was then never consulted by any printer
-  ;; — a silently inert impl, worse than a refusal (ADR-253). Consulting `display` for
+  ;; — a silently inert impl, worse than a refusal (ADR-253). Consulting `Display` for
   ;; EVERYTHING fixes that and is behaviour-preserving (its `:default` is `(str x)`, and
   ;; `%render` and `->string` agree on every built-in kind) but costs **+17%** on a
   ;; print-heavy loop: 319 -> 374 ms over 40k `io/write` batches, best-of-7, pinned and
@@ -2200,7 +2200,7 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
   ;; So: the kinds `%render` already renders natively keep the old zero-cost path, and
   ;; everything else consults the ability. A map is tested with `record?` exactly as before
   ;; (a record IS a map, so the two cannot be told apart by `type-of`); rope, table, bytes,
-  ;; set, pid, ref and functions now reach `display`, which is the point.
+  ;; set, pid, ref and functions now reach `Display`, which is the point.
   (let (t (type-of x))
     (cond
       (%eq t :map) (if (record? x) (->string x) x)
@@ -2216,7 +2216,7 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
         x
       else (->string x))))
 
-;; Wire the screen printers to honor `display` for records, by default (ADR-172 §8).
+;; Wire the screen printers to honor `Display` for records, by default (ADR-172 §8).
 ;; `(binding (*show* nil) …)` disables it for a scope.
 (def *show* %show-print-hook)
 

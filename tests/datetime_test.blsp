@@ -136,13 +136,13 @@
     (assert= (->string (datetime/date 2026 6 7)) "2026-06-07")
     (assert= (->string (datetime/time-of-day 10 30 5 750)) "10:30:05.750")
     (assert= (->string (datetime/datetime 2026 6 7 15 4 30 0)) "2026-06-07T15:04:30.000Z"))
-  (test "datetime/temporal is sealed over exactly the three types"
-    (assert= (sort (%sealed-members 'datetime/temporal))
+  (test "Temporal is sealed over exactly the three types"
+    (assert= (sort (%sealed-members 'Temporal))
       (sort (list :datetime/datetime :datetime/date :datetime/time-of-day))))
   (test "every sealed member satisfies the ability"
-    (is (satisfies? 'datetime/temporal (datetime/date 2026 6 7)))
-    (is (satisfies? 'datetime/temporal (datetime/time-of-day 0 0 0 0)))
-    (is (satisfies? 'datetime/temporal (datetime/epoch-ms-> 0))))
+    (is (satisfies? 'Temporal (datetime/date 2026 6 7)))
+    (is (satisfies? 'Temporal (datetime/time-of-day 0 0 0 0)))
+    (is (satisfies? 'Temporal (datetime/epoch-ms-> 0))))
   (test "a value that is not temporal raises rather than rendering nonsense"
     (assert-error (datetime/->iso {:year 2026 :month 6 :day 7}))))
 

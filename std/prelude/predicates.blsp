@@ -197,16 +197,16 @@ and a set its elements, as everywhere else `seq` applies.
     (string? coll) (string/length coll)
     (vector? coll) (%vector-length coll)
     (bytes? coll) (%byte-length coll)
-    ;; a record counts as its `seqable` view (its fields, id-free, by default) — not the
+    ;; a record counts as its `Seqable` view (its fields, id-free, by default) — not the
     ;; raw map, which would include the internal `:__id__`. `%map-get` distinguishes it.
     (map? coll) (if (%map-get coll :__id__ nil) (count (->seq coll)) (%map-count coll))
     (set? coll) (%set-count coll)
     ;; Lists and nil are what `%count-acc` is for. Anything else reaching here has no
     ;; native count — a rope, a table — and used to die inside `%count-acc` with
-    ;; `empty?: expected collection`. Consult `seqable` where an impl exists for that
+    ;; `empty?: expected collection`. Consult `Seqable` where an impl exists for that
     ;; identity; otherwise keep the old error, which is the honest one (ADR-253).
     (or (pair? coll) (nil? coll)) (%count-acc coll 0)
-    (%impl-exact? '[seqable ->seq] (%identity-of coll)) (count (->seq coll))
+    (%impl-exact? '[Seqable ->seq] (%identity-of coll)) (count (->seq coll))
     else (%count-acc coll 0)))
 
 (defn- %nth-list
@@ -235,7 +235,7 @@ and a set its elements, as everywhere else `seq` applies.
   (coll i d)
   (cond
     (or (pair? coll) (nil? coll)) (%nth-list coll i d)
-    ;; a record indexes through its `seqable` view (a custom collection or its fields)
+    ;; a record indexes through its `Seqable` view (a custom collection or its fields)
     (record? coll) (%nth-list (seq coll) i d)
     else
       (error (str "nth: expected a collection to index, got "
