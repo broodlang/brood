@@ -113,8 +113,8 @@ pub(crate) fn prim_apply_float(op: PrimOp, x: Value, y: Value) -> Option<Value> 
         PrimOp::Mul => Value::float(a * b),
         PrimOp::Lt => Value::boolean(a < b),
         PrimOp::Le => Value::boolean(a <= b),
-        // `%div`: the native errors on a zero denominator — defer that edge
-        // (a NaN/inf denominator is not zero, so it stays inline, matching the
+        // `%div`: the native errors on a zero math/denominator — defer that edge
+        // (a NaN/inf math/denominator is not zero, so it stays inline, matching the
         // native's plain `a / b`).
         PrimOp::Div if b != 0.0 => Value::float(a / b),
         // `max`/`min` are NOT inlined for floats: the native `prim_max`/`prim_min`

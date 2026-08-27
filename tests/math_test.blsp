@@ -12,12 +12,12 @@
 ;; method it once was; the epsilon compare is kept where the algebra is what matters.
 (defn mth-approx? (a b) (< (abs (- a b)) 1e-9))
 
-(describe "rounding (floor / ceil / round)"
+(describe "rounding (math/floor / ceil / round)"
   (test "floor rounds toward negative infinity, returning an Int"
-    (assert= (floor 3.7) 3)
-    (assert= (floor 3.2) 3)
-    (assert= (floor -3.2) -4)
-    (assert= (type-of (floor 3.7)) :int))
+    (assert= (math/floor 3.7) 3)
+    (assert= (math/floor 3.2) 3)
+    (assert= (math/floor -3.2) -4)
+    (assert= (type-of (math/floor 3.7)) :int))
   (test "ceil rounds toward positive infinity"
     (assert= (ceil 3.2) 4)
     (assert= (ceil 3.7) 4)
@@ -27,11 +27,11 @@
     (assert= (round 3.4) 3)
     (assert= (round -3.5) -4))
   (test "an Int passes through the rounders unchanged"
-    (assert= (floor 5) 5)
+    (assert= (math/floor 5) 5)
     (assert= (ceil 5) 5)
     (assert= (round 5) 5))
   (test "rounders reject a non-number"
-    (assert-error (floor "x"))
+    (assert-error (math/floor "x"))
     (assert-error (ceil :k))
     (assert-error (round nil)))
   (test "round-to keeps a fixed number of decimal places"
@@ -107,21 +107,21 @@
     (assert= (ceil 7/2) 4)
     (assert= (round 7/2) 4))
   (test "a decimal and a bignum coerce too"
-    (assert= (floor 1.5M) 1)
+    (assert= (math/floor 1.5M) 1)
     (assert= (sqrt 4.0M) 2.0)
-    (assert= (floor (pow 10 30)) (pow 10 30))
+    (assert= (math/floor (pow 10 30)) (pow 10 30))
     (is (> (sqrt (pow 10 30)) 0.0)))
   ;; `floor` on a ratio is computed EXACTLY, not via f64: the quotient below is far
   ;; past 2^53, so an f64 round-trip would return a different integer.
   (test "floor on a ratio is exact past f64 precision"
-    (assert= (floor (/ (+ (pow 10 30) 1) 3)) 333333333333333333333333333333)
-    (assert= (floor 7/2) 3)
+    (assert= (math/floor (/ (+ (pow 10 30) 1) 3)) 333333333333333333333333333333)
+    (assert= (math/floor 7/2) 3)
     ;; toward negative infinity, not toward zero
-    (assert= (floor -7/2) -4)
+    (assert= (math/floor -7/2) -4)
     (assert= (ceil -7/2) -3))
   (test "a non-number is still rejected"
     (assert-error (sqrt "x"))
-    (assert-error (floor :a))
+    (assert-error (math/floor :a))
     (assert-error (->fixed nil 2))))
 
 (describe "quot, even? and odd?"

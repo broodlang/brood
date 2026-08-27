@@ -92,7 +92,7 @@
     (assert= (type-of (read-string "1.50M")) :decimal)
     (assert= (type-of (read-string "1M")) :decimal)
     ;; the reservation that paid out: `1/2` reads as an exact ratio (ADR-196), and is
-    ;; reduced with a positive denominator, with a denominator of 1 demoting to an int
+    ;; reduced with a positive math/denominator, with a math/denominator of 1 demoting to an int
     (assert= (read-string "1/2") 1/2)
     (assert= (type-of (read-string "1/2")) :ratio)
     (assert= (read-string "2/4") 1/2)
@@ -105,9 +105,9 @@
       ["+" "-" "..." "..foo" "foo." ".foo" "foo/bar" "a1" "x2y"])
     (assert= (type-of (read-string ":a/b")) :keyword))
   (test "inf/nan still read as floats, not reserved tokens"
-    (is (infinite? (read-string "inf")))
-    (is (infinite? (read-string "-inf")))
-    (is (nan? (read-string "nan")))))
+    (is (math/infinite? (read-string "inf")))
+    (is (math/infinite? (read-string "-inf")))
+    (is (math/nan? (read-string "nan")))))
 (describe "let/letrec: Scheme/Clojure nested bindings get a hint"
   (test "(let ((a 1)) …) → hint to flatten the bindings"
     (let (h (hint-of "(let ((a 1)) a)"))

@@ -80,7 +80,7 @@ private table, and never surfaced to user code — reach for `table/new` instead
 decimal to fast float math (`(->float 1/2)` → `0.5`)."
   (* 1.0 x))
 (defn rational (n d)
-  "The exact rational `n`/`d` — reduced, with a positive denominator (a denominator
+  "The exact rational `n`/`d` — reduced, with a positive math/denominator (a math/denominator
 of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
 
     (rational 1 2)   → 1/2"

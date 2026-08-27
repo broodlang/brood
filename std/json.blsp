@@ -504,7 +504,7 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
     ;; which is the documented escape hatch (encode a decimal as a string, say).
     (int? v) (cons (str v) acc)
     (float? v)
-      (if (or (nan? v) (infinite? v))
+      (if (or (math/nan? v) (math/infinite? v))
         (error "json: cannot encode "
           (str v)
           " — JSON has no infinity or NaN; encode it as a string or null instead")

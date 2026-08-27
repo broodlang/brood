@@ -161,7 +161,7 @@
    "file/rmdir" :filesystem
    "file/rm" :filesystem
    "demonitor" :processes
-   "denominator" :math
+   "math/denominator" :math
    "%deprecation-warning" :meta
    "file/dir?" :filesystem
    "disj" :collections
@@ -199,7 +199,7 @@
    "%flatten-acc" :collections
    "bit/float->" :convert
    "float?" :predicates
-   "floor" :math
+   "math/floor" :math
    "fn?" :predicates
    "fold" :collections
    "%fold-loop" :collections
@@ -226,7 +226,7 @@
    "includes?" :predicates
    "index-of" :strings
    "%index-of-seq-from" :strings
-   "infinite?" :predicates
+   "math/infinite?" :predicates
    "inspect" :io
    "string/int->char" :strings
    "int?" :predicates
@@ -273,7 +273,7 @@
    "system/module-doc" :meta
    "monitor" :processes
    "name" :strings
-   "nan?" :predicates
+   "math/nan?" :predicates
    "nil?" :predicates
    "not" :predicates
    "not=" :math
@@ -285,7 +285,7 @@
    "num-mul" :meta
    "num-sub" :meta
    "number?" :predicates
-   "numerator" :math
+   "math/numerator" :math
    "or" :control
    "%ord-compare" :meta
    "string/pad-left" :strings

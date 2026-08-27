@@ -3647,8 +3647,8 @@ All "Critical" + "Important" items addressed; the larger cleanup items
   (`1e1000` → `inf`) still parse. New
   `reader_rejects_out_of_range_integer_literal` test.
 - **`floor` errors on non-finite / out-of-range floats** rather than
-  the silent saturating `f as i64`. `(floor (* 1e308 1e308))` and
-  `(floor (/ 0.0 0.0))` now return a runtime error; finite in-range
+  the silent saturating `f as i64`. `(math/floor (* 1e308 1e308))` and
+  `(math/floor (/ 0.0 0.0))` now return a runtime error; finite in-range
   values still work. New `floor_rejects_non_finite_and_out_of_range`
   test. `crates/lisp/src/builtins.rs:454`.
 - **`apply` is TCO through the eval loop.** Eval's main dispatch
@@ -22576,9 +22576,9 @@ itself noise.
 
 The method that actually answers it: a fixed baseline binary plus a **base-vs-base
 control** — `taskset`-pinned best-of-15 for base, base again, then new, reading the
-base-vs-base spread as the row's noise floor. Controlled: fib 0.0% (floor 0.0%), spawn
-−0.9% (floor −0.9%), bintree +0.8% (floor +1.6%), pingpong +0.9% (floor +0.5%), spawn-live
-−1.2% (floor +0.4%). Neutral on time, real on memory. Note added to CLAUDE.md.
+base-vs-base spread as the row's noise floor. Controlled: fib 0.0% (math/floor 0.0%), spawn
+−0.9% (math/floor −0.9%), bintree +0.8% (math/floor +1.6%), pingpong +0.9% (math/floor +0.5%), spawn-live
+−1.2% (math/floor +0.4%). Neutral on time, real on memory. Note added to CLAUDE.md.
 
 ## 2026-07-29 (cont.) — BROOD_MONO Tier 1: the direct-constructor shape (ADR-182)
 
@@ -24072,7 +24072,7 @@ nothing routinely produced those in the middle of float math; making `/` exact d
 computes stddev — raised `%f64-sqrt: expected number, got ratio (200/3)`. They now go through
 `num_to_f64`, the tower-aware coercion that already existed one screen away in the same file
 for the arithmetic path. `floor` on a **ratio** is done *exactly* instead (`.floor()` on the
-`BigRational`): since `/` is exact, `(floor (/ a b))` is an ordinary idiom, and via f64 it
+`BigRational`): since `/` is exact, `(math/floor (/ a b))` is an ordinary idiom, and via f64 it
 would return the **wrong integer** past 2^53, not merely an imprecise one.
 
 **Real bug 2: `round-to` returned a ratio for a float input.** It is
@@ -24364,7 +24364,7 @@ style verdict, so it did not get pushed — the formatter had a real bug, and `n
 **Every form containing a ratio or decimal literal was force-broken.**
 `(assert= (sqrt 9/4) 1.5)` came out as four lines; `(f 9/4)` became two. `(f 1.5)` was fine,
 so it was not width and not hoisting — the tell was that every mangled line held a `1/2`,
-`9/4`, `7/2`, `1.5M` or `4.0M`, while `(floor (pow 10 30))` beside it was untouched.
+`9/4`, `7/2`, `1.5M` or `4.0M`, while `(math/floor (pow 10 30))` beside it was untouched.
 
 **Cause: two hand-maintained copies of the leaf-kind list, and only one learned ADR-196.**
 `single-line` enumerated the CST leaf kinds and fell through to `else nil`, which means

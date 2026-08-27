@@ -141,7 +141,7 @@ anyway (`Inst::RecordLine` is not lowerable), but turning the JIT off outright k
 the measurement from depending on which arms happened to tier up. **A `--cover-lines`
 run is a diagnostic run, never a timing one.**
 
-### What "executable line" means, and why the denominator is not counted from source
+### What "executable line" means, and why the math/denominator is not counted from source
 
 Only **positioned nodes** are instrumented — calls and inlined prims, the same set
 that tags a runtime error with a line. So "line 12 never ran" means "no call on line
@@ -149,7 +149,7 @@ that tags a runtime error with a line. So "line 12 never ran" means "no call on 
 contributes no measurable lines at all. A file of nothing but literal-bodied functions
 is omitted from the report rather than shown as 0%.
 
-The denominator therefore comes from the compiler, via `%coverage-instrumented`, not
+The math/denominator therefore comes from the compiler, via `%coverage-instrumented`, not
 from reading the source. Two earlier attempts got this wrong in opposite directions,
 and both looked plausible:
 
@@ -158,13 +158,13 @@ and both looked plausible:
    an instrumented node, so the two halves of the ratio described different
    populations.
 2. **Counting what had been instrumented, without forcing compilation.** Arms compile
-   on first **call**, so a function nothing calls was missing from the denominator as
-   well as the numerator, and the same fixture reported **100%** with a dead function
+   on first **call**, so a function nothing calls was missing from the math/denominator as
+   well as the math/numerator, and the same fixture reported **100%** with a dead function
    in it.
 
 Hence `coverage-line-begin!`, which runs before the suite and forces every project
 function to compile (`%coverage-precompile`) without calling it. A never-called
-function then has its lines in the denominator and in nothing else — which is the
+function then has its lines in the math/denominator and in nothing else — which is the
 whole point of the measurement.
 
 **Known under-count:** a nested `(fn …)` inside a body compiles when the enclosing

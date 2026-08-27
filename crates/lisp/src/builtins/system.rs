@@ -3233,7 +3233,7 @@ pub(super) fn coverage_lines(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 }
 
 /// `(%coverage-instrumented)` — every line the compiler INSTRUMENTED, same shape. The
-/// denominator for a percentage: without it the two halves of the ratio would come
+/// math/denominator for a percentage: without it the two halves of the ratio would come
 /// from different populations (see `coverage.rs`). A never-called function is present
 /// here and absent from `%coverage-lines` — provided it was forced through
 /// `%coverage-precompile` first, since arms otherwise compile on first call.
@@ -3274,7 +3274,7 @@ pub(super) fn coverage_branches(_: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 }
 
 /// `(%coverage-branch-instrumented)` — every `[line col]` decision point the compiler
-/// instrumented, as `[file ([line col] …)]` — the branch denominator (two edges each).
+/// instrumented, as `[file ([line col] …)]` — the branch math/denominator (two edges each).
 pub(super) fn coverage_branch_instrumented(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let entries = crate::coverage::branch_instrumented();
     let mut out = Vec::new();
@@ -3297,7 +3297,7 @@ pub(super) fn coverage_branch_instrumented(_: &[Value], _: EnvId, heap: &mut Hea
 
 /// `(%coverage-precompile f)` — compile `f`'s body now, without calling it, so its
 /// lines land in `%coverage-instrumented`. Returns true if a body was compiled.
-/// See `eval::compile::precompile` for why the denominator needs this.
+/// See `eval::compile::precompile` for why the math/denominator needs this.
 pub(super) fn coverage_precompile(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::boolean(crate::eval::compile::precompile(
         heap, args[0],

@@ -1408,17 +1408,17 @@ fn parser_rejects_deeply_nested_input_instead_of_overflowing() {
 }
 
 /// `floor` on `NaN`/`±inf`/out-of-`i64`-range values is a runtime error,
-/// not a silent saturating cast. Pre-fix, `(floor (* 1e308 1e308))` returned
-/// `i64::MAX` and `(floor (/ 0.0 0.0))` returned `0`.
+/// not a silent saturating cast. Pre-fix, `(math/floor (* 1e308 1e308))` returned
+/// `i64::MAX` and `(math/floor (/ 0.0 0.0))` returned `0`.
 #[test]
 fn floor_rejects_non_finite_and_out_of_range() {
     let mut interp = brood::Interp::new();
-    assert!(interp.eval_str("(floor (* 1e308 1e308))").is_err());
-    assert!(interp.eval_str("(floor (/ 0.0 0.0))").is_err());
+    assert!(interp.eval_str("(math/floor (* 1e308 1e308))").is_err());
+    assert!(interp.eval_str("(math/floor (/ 0.0 0.0))").is_err());
     // In-range floats still work.
-    let v = interp.eval_str("(floor 3.7)").unwrap();
+    let v = interp.eval_str("(math/floor 3.7)").unwrap();
     assert_eq!(interp.print(v), "3");
-    let v = interp.eval_str("(floor -3.2)").unwrap();
+    let v = interp.eval_str("(math/floor -3.2)").unwrap();
     assert_eq!(interp.print(v), "-4");
 }
 

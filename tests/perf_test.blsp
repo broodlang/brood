@@ -109,7 +109,7 @@
       (assert= :balanced (first (perf/verdict rs)))))
 
   (test "never claims :alloc-bound — these counters cannot establish it"
-    ;; Deliberately absent (see perf/verdict's docstring): the only denominator available
+    ;; Deliberately absent (see perf/verdict's docstring): the only math/denominator available
     ;; stops counting once the hot path goes native, while allocations do not.
     (let (rs (perf/ratios {:vm-apply 10000
                            :alloc 99999999

@@ -252,25 +252,25 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "",
         prim_quot,
     );
-    // Ratio parts + conversions (exact rationals, ADR-196). `numerator`/`denominator`
-    // accept an int (numerator = itself, denominator = 1) or a ratio.
+    // Ratio parts + conversions (exact rationals, ADR-196). `math/numerator`/`math/denominator`
+    // accept an int (math/numerator = itself, math/denominator = 1) or a ratio.
     let int_or_ratio = int.union(ratio_ty);
     def(
         heap,
-        "numerator",
+        "math/numerator",
         Arity::exact(1),
         Sig::new(vec![int_or_ratio.clone()], int),
         &["x"],
-        "The numerator of a ratio (`(numerator 3/4)` → 3), or an integer itself.",
+        "The math/numerator of a ratio (`(math/numerator 3/4)` → 3), or an integer itself.",
         prim_numerator,
     );
     def(
         heap,
-        "denominator",
+        "math/denominator",
         Arity::exact(1),
         Sig::new(vec![int_or_ratio], int),
         &["x"],
-        "The positive denominator of a ratio (`(denominator 3/4)` → 4), or 1 for an integer.",
+        "The positive math/denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer.",
         prim_denominator,
     );
     def(
@@ -285,7 +285,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // sqrt are all Brood over it + rem/`/`/`*`/`<` (std/prelude.blsp).
     def(
         heap,
-        "floor",
+        "math/floor",
         Arity::exact(1),
         Sig::new(vec![num], int),
         &["x"],
@@ -2331,7 +2331,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(0),
         Sig::new(vec![], list_ty),
         &[],
-        "Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there.",
+        "Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the math/denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there.",
         coverage_instrumented);
     def(
         heap,
@@ -2347,7 +2347,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(0),
         Sig::new(vec![], list_ty),
         &[],
-        "Every [line col] branch point the compiler INSTRUMENTED, as [file ([line col] …)] — the branch denominator (each needs both edges taken for full coverage).",
+        "Every [line col] branch point the compiler INSTRUMENTED, as [file ([line col] …)] — the branch math/denominator (each needs both edges taken for full coverage).",
         coverage_branch_instrumented);
     def(
         heap,

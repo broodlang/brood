@@ -945,7 +945,7 @@ impl Heap {
 
     /// Materialise an exact `Value::Ratio` from an owned `num_rational::BigRational`
     /// (mirrors [`alloc_decimal`](Self::alloc_decimal)). Enforces the normalize
-    /// invariant: a `BigRational` is always reduced with a positive denominator, and
+    /// invariant: a `BigRational` is always reduced with a positive math/denominator, and
     /// a **denominator of 1 is an integer** — so it is demoted to `Int`/`BigInt`
     /// (via [`int_from_bigint`](Self::int_from_bigint)), and a `Value::Ratio` is
     /// therefore never integer-valued (so it never numerically equals an integer).

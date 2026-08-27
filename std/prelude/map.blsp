@@ -261,16 +261,12 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
 ;; long before it could TEST for one: `=` reports NaN as equal to nothing (the
 ;; IEEE rule), which is simultaneously the only way to detect it. Naming that
 ;; removes the puzzle.
-(defn nan? (x)
-  "True if `x` is the float NaN — the value that is not equal to itself."
-  (and (float? x) (not (= x x))))
-(defn infinite? (x)
-  "True if `x` is float `inf` or `-inf` (a finite float, and any int, is false)."
-  (and (float? x) (or (= x inf) (= x -inf))))
-
+;; `nan?` / `infinite?` are `math/nan?` / `math/infinite?` now — float-domain questions
+;; belong with `math/even?` and `math/positive?`, and each was `(and (float? x) …)`, which
+;; ANSWERED `false` for a string, a nil, a vector. See the `Numeric` ability (ADR-254).
 ;; (quot a b) — truncated integer division (toward zero), the quotient partner to
 ;; `rem`. (a - (rem a b)) is exactly divisible by b, so `/` returns an exact int
-;; (no float round-trip — correct even for large i64, unlike (floor (/ a b))).
+;; (no float round-trip — correct even for large i64, unlike (math/floor (/ a b))).
 (defn quot (a b)
   "Truncated integer division of `a` by `b` (toward zero); the quotient partner to `rem`.
 

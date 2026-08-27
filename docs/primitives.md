@@ -246,8 +246,8 @@ literal — no constructor call.
 |  | `decimal/->string` | 1 | The canonical decimal string of decimal d (no M suffix). |
 |  | `decimal/->float` | 1 | Decimal d as an (inexact) float. |
 |  | `->fixed` | 2 | Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0. |
-| **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `numerator` | 1 | The numerator of a ratio (`(numerator 3/4)` → 3), or an integer itself. |
-|  | `denominator` | 1 | The positive denominator of a ratio (`(denominator 3/4)` → 4), or 1 for an integer. |
+| **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `math/numerator` | 1 | The math/numerator of a ratio (`(math/numerator 3/4)` → 3), or an integer itself. |
+|  | `math/denominator` | 1 | The positive math/denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer. |
 |  | `decimal/number->` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `rational` are prelude functions.) |
 | **Set** (`#{…}`; CHAMP-backed. `%`-internal — `std/set.blsp` is the library) | `%set` | any | Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `set` library's constructor is Brood over this. |
 |  | `%set-add` | 2 | A fresh set like s with element x added (a set already holding x is returned unchanged). O(log n). |
@@ -291,7 +291,7 @@ literal — no constructor call.
 |  | `%untar-gz` | 3 | Extract a gzip'd tar `archive` into `dest`, stripping `strip` leading path components (package convention: 1). Shells to `tar`. Returns :ok or throws. The tarball-dep delivery mechanism (ADR-037). |
 |  | `%rm-rf` | 1 | Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037). |
 | **Coverage** (ADR-148; armed by `BROOD_COVERAGE=1`) | `%coverage-lines` | 0 | Every source line recorded as EXECUTED, as a list of [file (line …)]. Empty unless the run was started with BROOD_COVERAGE=1 (`nest test --cover-lines`). |
-|  | `%coverage-instrumented` | 0 | Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there. |
+|  | `%coverage-instrumented` | 0 | Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the math/denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there. |
 |  | `%coverage-precompile` | 1 | Compile f's body now, without calling it, so its lines count toward %coverage-instrumented. Returns true if a body was compiled. |
 |  | `%coverage-reset` | 0 | Forget every line recorded by %coverage-lines, so a long-lived image can measure more than once without runs bleeding together. |
 | **GUI** (optional native window backend, ADR-046; needs `--features gui`) | `gui-open` | 0–4 | Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. An optional `opts` map carries the attributes fixed at build time: `{:decorations false}` for a borderless window, `{:app-id "my-app"}` for the desktop application id (Wayland `app_id` / X11 `WM_CLASS`) the installed `my-app.desktop` entry is named after — what gives the window its own icon and name in the dash instead of the desktop's generic fallback. |
