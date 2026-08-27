@@ -26,6 +26,24 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+/// The `--brood-` argument namespace is **reserved by the runtime**: a bundle honours
+/// the two names below as its first argument and hands every other argument, including
+/// any other `--brood-…`, straight to the app's `:main`.
+///
+/// Reserving a prefix rather than the bare `--build-info` / `--boot-check` is the whole
+/// design: the bundle's contract is that argv belongs to the app, and an exception that
+/// costs the app a name it might want is an exception the app has to know about. This one
+/// costs it nothing.
+///
+/// Print the bundle's build identity — which brood, which features, which app — and exit
+/// 0. Answering that meant grepping the binary over SSH, and the first attempt used
+/// `strings`, absent from `debian:bookworm-slim`, which reported nothing and read exactly
+/// like "no JIT".
+pub const BUNDLE_BUILD_INFO_ARG: &str = "--brood-build-info";
+/// Load the bundle's embedded modules, resolve `:main`, run **nothing**, exit 0/1 — the
+/// boot check `nest release --smoke` runs against each binary it writes (KI-66).
+pub const BUNDLE_BOOT_CHECK_ARG: &str = "--brood-boot-check";
+
 /// Footer magic — 8 bytes, the trailing digit doubling as the format version so
 /// a stale `nest` writing v1 against a `brood` expecting v2 is detectable.
 const MAGIC: &[u8; 8] = b"BRDBNDL1";

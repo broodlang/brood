@@ -16,6 +16,12 @@ const EMBEDDED_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embedd
 /// equal to it is served by the embedded runtime, no cache entry needed.
 const HOST_TRIPLE: &str = env!("NEST_HOST_TRIPLE");
 
+/// The triple this `nest` runs on — the one `--target` whose artifact can actually
+/// be executed here, so the only one `nest release --smoke` can boot-check.
+pub(crate) fn host_triple() -> &'static str {
+    HOST_TRIPLE
+}
+
 /// The base runtime bytes to append the app to — the single **lean + gui**
 /// runtime (no test/observer/MCP/doc/hot-reload/REPL/GC-debug surface, but the
 /// windowed backend kept so any app runs). Priority:

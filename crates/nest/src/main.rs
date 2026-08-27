@@ -172,6 +172,17 @@ enum Cmd {
         #[arg(long = "name", value_name = "NAME")]
         name: Option<String>,
 
+        /// Load every source module and resolve `:main`, then run NOTHING —
+        /// exiting non-zero if a module fails to load or the entry point is
+        /// missing. The gate between `nest check` (names resolve) and `nest
+        /// test` (the suite passes): neither of those loads the entry point,
+        /// which is where a stale dependency actually dies.
+        #[arg(
+            long = "check-boot",
+            conflicts_with_all = ["watch", "for_duration", "file", "args"]
+        )]
+        check_boot: bool,
+
         /// Trailing arguments passed to the entry function as strings.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -296,6 +307,18 @@ enum Cmd {
         /// Specific files to check. Omit for project-wide checking.
         #[arg(value_name = "FILE")]
         files: Vec<String>,
+
+        /// Recover from a stdlib rename wave: for each bare name reported
+        /// unbound, rewrite this project's *references* to the single public
+        /// `mod/name` that now defines it. Declines — and says why — a name
+        /// this project itself defines, a name defined in several namespaces,
+        /// and a name that moved behind `%`. Exits non-zero if any are left.
+        #[arg(long = "fix-renames", conflicts_with = "files")]
+        fix_renames: bool,
+
+        /// With `--fix-renames`, print the plan and change nothing.
+        #[arg(long = "dry-run", requires = "fix_renames")]
+        dry_run: bool,
     },
 
     /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
@@ -582,6 +605,13 @@ enum Cmd {
         /// cache (or pass `--runtime`).
         #[arg(long = "target", value_name = "TRIPLE")]
         targets: Vec<String>,
+
+        /// After writing each binary, run it to prove it boots: load every
+        /// embedded module, resolve `:main`, run nothing. Fails the release if
+        /// it doesn't. Skipped for a non-host `--target` (that binary cannot run
+        /// here); the skip is reported, never silent.
+        #[arg(long = "smoke")]
+        smoke: bool,
     },
 
     /// Manage the package signing key (ADR-212).
@@ -760,12 +790,29 @@ fn run_main(cli: Cli) {
             };
             cmd_test(&mut interp, &paths, &opts);
         }
-        Cmd::Check { files } => {
+        Cmd::Check {
+            files,
+            fix_renames,
+            dry_run,
+        } => {
             if files.is_empty() {
                 require_project(
                     "check",
                     Some("To check one file outside a project: nest check <file>.blsp"),
                 );
+            }
+            if fix_renames {
+                // Whole-project by construction — the rewrite is project-wide, so
+                // scoping it to a file list would fix one caller and leave the rest.
+                let code = format!(
+                    "(project/load-config) (require-one 'test) (project/fix-renames {})",
+                    if dry_run { "false" } else { "true" }
+                );
+                match run_for_value(&mut interp, &code) {
+                    brood::core::value::Value::Int(0) => {}
+                    _ => std::process::exit(1),
+                }
+                return;
             }
             cmd_check(&mut interp, &files)
         }
@@ -782,6 +829,7 @@ fn run_main(cli: Cli) {
             for_duration,
             main,
             name,
+            check_boot,
             args,
         } => {
             // A FILE runs standalone outside a project (documented); the bare
@@ -791,6 +839,24 @@ fn run_main(cli: Cli) {
                     "run",
                     Some("To run one file outside a project: nest run <file>.blsp"),
                 );
+            }
+            if check_boot {
+                // `--main` still applies: checking that a *specific* entry boots is
+                // the point when a project ships several.
+                let override_form = main
+                    .as_deref()
+                    .map(|spec| {
+                        format!(
+                            "{} ",
+                            brood::introspect::call_form("project/set-project-main", &[spec])
+                        )
+                    })
+                    .unwrap_or_default();
+                run(
+                    &mut interp,
+                    &format!("(project/load-config) {override_form}(project/check-boot)"),
+                );
+                return;
             }
             cmd_run(
                 &mut interp,
@@ -966,7 +1032,14 @@ fn run_main(cli: Cli) {
             output,
             runtime,
             targets,
-        } => cmd_release(&mut interp, output.as_deref(), runtime.as_deref(), &targets),
+            smoke,
+        } => cmd_release(
+            &mut interp,
+            output.as_deref(),
+            runtime.as_deref(),
+            &targets,
+            smoke,
+        ),
     }
 }
 
@@ -1861,6 +1934,7 @@ fn cmd_release(
     output: Option<&str>,
     runtime: Option<&str>,
     targets: &[String],
+    smoke: bool,
 ) {
     use brood::core::value::Value;
 
@@ -1987,6 +2061,59 @@ fn cmd_release(
             release::human_size(size),
             triple.map(|t| format!(", {t}")).unwrap_or_default(),
         );
+        if smoke {
+            smoke_test(&out, triple);
+        }
+    }
+}
+
+/// `nest release --smoke` — run the binary just written with the reserved
+/// `--brood-boot-check` argument, so the ARTIFACT is proven to load its modules and
+/// resolve `:main` before the release is called a success (KI-66).
+///
+/// Checking the source tree is not the same act: the bundle carries a *snapshot* of
+/// every dependency, so a dependency updated on disk since the last `nest fetch`, a
+/// module outside `:source-paths`, or a `:main` naming a module that was never
+/// collected are invisible upstream and fatal here. This is the only gate that runs
+/// the thing that ships.
+fn smoke_test(out: &std::path::Path, triple: Option<&str>) {
+    // A cross-target binary cannot execute here. Say so — a smoke test that
+    // quietly does nothing is the gate-that-cannot-fail shape (KI-68/70).
+    if let Some(t) = triple {
+        if t != release::host_triple() {
+            println!("  smoke: skipped for {t} (not this host — run it on the target)");
+            return;
+        }
+    }
+    // `./out`, not `out`: a bare relative name is not a command on any shell's PATH,
+    // and `Command` inherits that rule.
+    let path = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        std::path::Path::new(".").join(out)
+    };
+    match std::process::Command::new(&path)
+        .arg(brood::bundle::BUNDLE_BOOT_CHECK_ARG)
+        .status()
+    {
+        Ok(s) if s.success() => println!("  smoke: boots"),
+        Ok(s) => {
+            eprintln!(
+                "nest release: {} was written but does NOT boot (exit {})",
+                out.display(),
+                s.code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string())
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!(
+                "nest release: cannot run {} for the smoke test: {e}",
+                out.display()
+            );
+            std::process::exit(1);
+        }
     }
 }
 
