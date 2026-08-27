@@ -56,7 +56,7 @@
           (file/spit f "(def rwt-val2 1)\n")
           (load f)
           ;; A callback that always throws — the def must still take effect
-          ;; (on-reload runs *after* reload-defs already succeeded) and the
+          ;; (on-reload runs *after* system/reload-defs already succeeded) and the
           ;; watcher must survive to reload again on a later edit.
           (on-change f (fn (_p) (throw "boom")))
           (sleep 100)

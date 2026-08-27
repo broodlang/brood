@@ -70,7 +70,7 @@ running `nest mcp` image:
   below is real but *narrower* than "Emacs loses nothing": it's specifically
   about state and resources bound at **global** scope.
 - **A reload trigger exists** — `std/tool/reload.blsp` polls file mtimes and calls
-  `reload-defs`, which re-evals only `def…` top-level forms (skipping
+  `system/reload-defs`, which re-evals only `def…` top-level forms (skipping
   side-effecting calls like `(main-loop 0)`).
 
 ## The gap (why it isn't Emacs yet)
@@ -78,7 +78,7 @@ running `nest mcp` image:
 Five things, roughly in order of how soon they bite:
 
 1. **Reload clobbers global state and re-creates singletons.** `def` always
-   re-evaluates its RHS, and `reload-defs` re-runs every `def…` form. Two sharp
+   re-evaluates its RHS, and `system/reload-defs` re-runs every `def…` form. Two sharp
    consequences at *global* scope (process-threaded state is fine — see above):
    - **Global cells reset:** `(def *registry* {})` is set back to empty on every
      save.
@@ -138,7 +138,7 @@ no-op once bound; restart or re-`def` to force re-init."
   `(unless (bound? '~name) (def ~name ~val)))
 ```
 
-**Why it composes with reload for free.** `reload-defs` re-evals forms whose
+**Why it composes with reload for free.** `system/reload-defs` re-evals forms whose
 head starts with `def` — `defonce` qualifies, gets re-evaluated on every save,
 and no-ops itself when already bound. Nothing in the watcher changes.
 
@@ -164,9 +164,9 @@ green. → **ADR-042 (shipped 2026-05-29).**
 
 ---
 
-## Stage 2 — `reload-defs` hardening: atomic, honest detection
+## Stage 2 — `system/reload-defs` hardening: atomic, honest detection
 
-**Problem.** Two sub-issues with `reload-defs` (`crates/lisp/src/builtins/system.rs`):
+**Problem.** Two sub-issues with `system/reload-defs` (`crates/lisp/src/builtins/system.rs`):
 - **Atomicity.** It evals forms one at a time and `break`s on the first error,
   which *can* leave a file half-reloaded. (Note: a **syntax error is already
   atomic** — `read_all_positioned` parses the whole file before any eval, so a
@@ -217,7 +217,7 @@ syntactically broken save changes nothing. Suite green. → **ADR-042 (shipped
 request) in `crates/lsp`, reusing the same image the MCP talks to:
 - `eval-defun` — eval the top-level form under the cursor.
 - `eval-region` — eval the selection.
-- `eval-buffer` — `reload-defs` the current buffer (def-only, so an entry call
+- `eval-buffer` — `system/reload-defs` the current buffer (def-only, so an entry call
   isn't re-run).
 
 These are thin: locate the enclosing top-level form (the LSP already parses
@@ -332,7 +332,7 @@ body…)` lifecycle clause (sibling of `init`/`terminate`) that runs on a
 one; `(gen/code-change pid)` is the push trigger (a supervisor or `on-reload` hook
 calls it once per affected child), and a server with no clause drops the message
 as a safe no-op. The pull counterpart shipped too: `reload/*code-version*` (a plain
-global, bumped on each successful `reload-defs`) with a `(reload/code-version)`
+global, bumped on each successful `system/reload-defs`) with a `(reload/code-version)`
 reader, so a loop can stash its start version and self-migrate when it differs.
 Covered by `tests/gen_test.blsp` "gen: code-change state migration" (inline +
 cross-process). Full `release_handler`/appup orchestration remains deferred (see the
@@ -370,7 +370,7 @@ design. What genuinely *can't* be hot-patched:
   scheduler). These are native; you can shadow the *symbol* with a Brood
   redefinition but not edit the native body.
 - **Editing the prelude *source file*** and having new bodies go live — actually
-  works via `reload-defs` on the prelude path (each `defn` re-defs into RUNTIME,
+  works via `system/reload-defs` on the prelude path (each `defn` re-defs into RUNTIME,
   shadowing the frozen original); the frozen PRELUDE copy just becomes dead
   weight.
 
@@ -390,7 +390,7 @@ the editor is Brood, not Rust).
 - **Macro dependency graph** (Stage 7) — warn instead.
 - **Kernel-level upgrade/`code_change`** (Stage 6) — userland pattern instead,
   consistent with let-it-crash supervision (ADR-039).
-- **Snapshot/rollback in `reload-defs`** (Stage 2) — read+expand-first covers the
+- **Snapshot/rollback in `system/reload-defs`** (Stage 2) — read+expand-first covers the
   common breakage; full transactional rebind deferred.
 - **Schema/record-redefinition migration** — *not applicable today and a
   data-model win worth naming.* The classic hard reload case (Erlang records,
@@ -410,8 +410,8 @@ real usage. Stage 8 is a doc note.
 
 ## Open questions
 
-1. Should `eval-buffer` (Stage 3) use `reload-defs` (skip the entry call) or full
-   `load` (run everything)? Likely `reload-defs`, matching the watcher — confirm
+1. Should `eval-buffer` (Stage 3) use `system/reload-defs` (skip the entry call) or full
+   `load` (run everything)? Likely `system/reload-defs`, matching the watcher — confirm
    against how the editor's entry point is structured.
 2. `*code-version*` (Stage 6): a single per-runtime counter, or per-file
    generations? Single counter is simpler and probably enough.

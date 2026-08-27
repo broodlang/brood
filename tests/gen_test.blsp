@@ -17,20 +17,20 @@
   ; reply old, set new
 
   (test "a cast threads new state; call reads it synchronously"
-    (let (c (spawn-server counter 0)) (cast c :inc) (cast c [:add 10]) (assert= (call c :value) 11)))
+    (let (c (start counter 0)) (cast c :inc) (cast c [:add 10]) (assert= (call c :value) 11)))
 
   (test "a no-op cast leaves state unchanged"
-    (let (c (spawn-server counter 5)) (cast c :ping) (assert= (call c :value) 5)))
+    (let (c (start counter 5)) (cast c :ping) (assert= (call c :value) 5)))
 
   (test "a call can both reply and update state"
-    (let (c (spawn-server counter 7))
+    (let (c (start counter 7))
       (assert= (call c [:set 100]) 7)
       ; replies the OLD value
       (assert= (call c :value) 100)))
   ; and the new state took effect
 
   (test "casts are ordered, and a later call observes all of them"
-    (let (c (spawn-server counter 0))
+    (let (c (start counter 0))
       (cast c :inc)
       (cast c :inc)
       (cast c :inc)
@@ -49,7 +49,7 @@
   :isolated (defprocess echo (state) (call [:double x] [(* x 2) state]))
 
   (test "two gen-calls to two servers get their own replies"
-    (let (a (spawn-server echo nil) b (spawn-server echo nil))
+    (let (a (start echo nil) b (start echo nil))
       ;; refs tag each call, so interleaved replies can't be confused
       (assert= (call a [:double 3]) 6)
       (assert= (call b [:double 21]) 42))))
@@ -66,7 +66,7 @@
     (query :size (count m)))
 
   (test "query replies the body and leaves state unchanged"
-    (let (s (spawn-server kv {}))
+    (let (s (start kv {}))
       (cast s [:put :a 1])
       (cast s [:put :b 2])
       (assert= (call s [:get :a]) 1)
@@ -81,7 +81,7 @@
     ;; an exited process are no-ops in this kernel). We can't observe the exit
     ;; from outside without `monitor`, so we just confirm stop returns nil and
     ;; the surrounding test completes (i.e. the process doesn't deadlock).
-    (let (s (spawn-server kv {}))
+    (let (s (start kv {}))
       (cast s [:put :a 1])
       (assert= (call s :size) 1)
       (assert= (stop s) nil))))
@@ -101,13 +101,13 @@
   ; a monitor down: record its reason
 
   (test "a raw (non-envelope) send reaches an info clause"
-    (let (s (spawn-server inbox nil))
+    (let (s (start inbox nil))
       (send s [:note 42])
       ; not a cast/call — goes to `info`
       (assert= (call s :last) 42)))
 
   (test "a message matched by no clause is dropped, not leaked"
-    (let (s (spawn-server inbox nil))
+    (let (s (start inbox nil))
       (send s [:junk :unhandled])
       ; matches nothing → default catch-all drops it
       (send s [:note 7])
@@ -115,7 +115,7 @@
   ; server still responsive
 
   (test "an info clause receives the [:down …] of a monitored process"
-    (let (s (spawn-server inbox nil) w (spawn-server inbox nil))
+    (let (s (start inbox nil) w (start inbox nil))
       (cast s [:watch w])
       ; s monitors w
       (sleep 20)
@@ -134,7 +134,7 @@
     (query :value n))
 
   (test "init transforms the seed exactly once (not per message)"
-    (let (s (spawn-server doubler 10))
+    (let (s (start doubler 10))
       ; init: 10*2 = 20
       (assert= (call s :value) 20)
       (cast s :inc)
@@ -149,7 +149,7 @@
     (terminate reason (send owner [:closed reason])))
 
   (test "terminate fires on (stop) with reason :normal"
-    (let (s (spawn-server closer (self)))
+    (let (s (start closer (self)))
       (assert= (call s :ping) :pong)
       (stop s)
       (assert= (receive ([:closed r] r) (after *test-wait-ms* :no-terminate)) :normal))))
@@ -162,11 +162,11 @@
   (defprocess echoing (s) (query :ping :pong))
 
   (test "call-timeout raises when the server never replies"
-    (let (s (spawn-server silent nil))
+    (let (s (start silent nil))
       (assert= (try (call-timeout s :anything 30) (catch e :timed-out)) :timed-out)))
 
   (test "call raises promptly when the server is already dead"
-    (let (s (spawn-server silent nil))
+    (let (s (start silent nil))
       (stop s)
       (sleep 20)
       ;; the monitor on a dead pid fires [:down … :noproc] at once — no 2 s wait
@@ -177,7 +177,7 @@
     ;; behind carries an unforgeable ref that no later receive can match, so it is
     ;; unreachable garbage: it grows the mailbox without bound over a retry loop and
     ;; is re-scanned by every later selective receive.
-    (let (s (spawn-server silent nil)
+    (let (s (start silent nil)
           before (proc/mailbox-size (self)))
       (assert= (try (call-timeout s :anything 20) (catch e :timed-out)) :timed-out)
       ;; the server dies AFTER we gave up: a still-armed monitor would deliver a
@@ -187,7 +187,7 @@
       (assert= before (proc/mailbox-size (self)))))
 
   (test "a timed-out call does not poison the NEXT call on the same server"
-    (let (s (spawn-server echoing nil))
+    (let (s (start echoing nil))
       ;; 0 ms — give up before the server can possibly answer
       (assert= (try (call-timeout s :ping 0) (catch e :timed-out)) :timed-out)
       (sleep 60)
@@ -197,14 +197,14 @@
 (describe "gen: named and linked spawn"
   :isolated (defprocess echo2 (s) (query [:echo x] x))
 
-  (test "spawn-server-named registers the server for proc/whereis"
-    (let (p (spawn-server-named :echo-srv echo2 nil))
+  (test "start-named registers the server for proc/whereis"
+    (let (p (start-named :echo-srv echo2 nil))
       (assert= (proc/whereis :echo-srv) p)
       (assert= (call (proc/whereis :echo-srv) [:echo 99]) 99)
       (stop p)))
 
-  (test "spawn-server-link links the server but a normal stop won't take us down"
-    (let (p (spawn-server-link echo2 nil))
+  (test "start-link links the server but a normal stop won't take us down"
+    (let (p (start-link echo2 nil))
       (assert= (call p [:echo 5]) 5)
       (stop p)
       (is true))))
@@ -225,7 +225,7 @@
   (defprocess plain (n) (query :value n))
 
   (test "code-change runs the migration clause, reshaping the loop state"
-    (let (c (spawn-server migrating 5))
+    (let (c (start migrating 5))
       (assert= (call c :shape) :int)
       (assert= (call c :value) 5)
       (code-change c)
@@ -235,7 +235,7 @@
       (stop c)))
 
   (test "code-change on a server without the clause is a safe no-op"
-    (let (p (spawn-server plain 7))
+    (let (p (start plain 7))
       (code-change p)
       (assert= (call p :value) 7) ; dropped by the catch-all; state unchanged
       (stop p)))
@@ -245,7 +245,7 @@
   ;; across the per-process heap boundary, not just inline.
   (test "a migration triggered from another process is observed here"
     (let (me (self))
-      (spawn (send me (spawn-server migrating 3)))
+      (spawn (send me (start migrating 3)))
       (let (c (receive (p p)))
         (code-change c)
         (assert= (call c :value) {:count 3 :ver 2})

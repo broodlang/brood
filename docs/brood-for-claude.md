@@ -696,7 +696,7 @@ named form.
 ```
 
 Use it for anything supervised — `std/proc/supervisor.blsp`'s `:start` thunks are
-`(fn () (spawn-link (worker …)))`, and `gen/spawn-server-link` is the
+`(fn () (spawn-link (worker …)))`, and `gen/start-link` is the
 same idea for a `defprocess` server.
 
 ## Distributed nodes — named processes & cross-node addressing
@@ -756,7 +756,7 @@ kinds:
 
 ```lisp
 ;; `gen` is an ordinary module: `(:use gen)` refers defprocess / spawn-server /
-;; cast / call / stop bare. Without it, qualify: `gen/spawn-server`, `gen/call`, …
+;; cast / call / stop bare. Without it, qualify: `gen/start`, `gen/call`, …
 ;; (`call`/`cast`/`stop` are NOT global names — `(def call …)` is yours.)
 (defmodule my-counter "…" (:use gen))
 
@@ -868,7 +868,7 @@ Writing a live script: just write a normal Brood file. The
 What happens when you save:
 
 - `(defn my-loop …)` re-evaluates — the global rebinds.
-- `(my-loop 0)` is **not** re-run — `reload-defs` skips non-`def*` top-level
+- `(my-loop 0)` is **not** re-run — `system/reload-defs` skips non-`def*` top-level
   forms, so each save doesn't fork a duplicate loop.
 - The running process's next call to `my-loop` late-binds to the new
   closure, picks up your edit on the next iteration (ADR-013).

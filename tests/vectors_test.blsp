@@ -66,16 +66,16 @@
 
 (describe "remove-nth"
   (test "drops the element at an index, preserving type"
-    (assert= (seq/remove-nth [10 20 30] 1) [10 30])
-    (is (vector? (seq/remove-nth [10 20 30] 1))))
+    (assert= (seq/remove-nth 1 [10 20 30]) [10 30])
+    (is (vector? (seq/remove-nth 1 [10 20 30]))))
   (test "first and last"
-    (assert= (seq/remove-nth [10 20 30] 0) [20 30])
-    (assert= (seq/remove-nth [10 20 30] 2) [10 20]))
+    (assert= (seq/remove-nth 0 [10 20 30]) [20 30])
+    (assert= (seq/remove-nth 2 [10 20 30]) [10 20]))
   (test "on a list returns a list"
-    (assert= (seq/remove-nth (list 1 2 3 4) 0) (list 2 3 4))
-    (assert= (seq/remove-nth (list 1 2 3 4) 2) (list 1 2 4)))
+    (assert= (seq/remove-nth 0 (list 1 2 3 4)) (list 2 3 4))
+    (assert= (seq/remove-nth 2 (list 1 2 3 4)) (list 1 2 4)))
   (test "the original vector is untouched"
-    (let (v [1 2 3] w (seq/remove-nth v 1))
+    (let (v [1 2 3] w (seq/remove-nth 1 v))
       (assert= v [1 2 3])
       (assert= w [1 3]))))
 

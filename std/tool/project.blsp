@@ -590,7 +590,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; one walk each module loads once even when an earlier file `require`d it (its
 ;; `defmodule` `provide` is the load-once key — see `project-should-load?`); across
 ;; separate walks a file is re-loaded, so a re-run in a long-lived image picks up
-;; edits (the hot-reload contract; the file watcher in std/reload uses `reload-defs`).
+;; edits (the hot-reload contract; the file watcher in std/reload uses `system/reload-defs`).
 ;; With `:skip-loaded`, any module already on `*features*` is skipped (the check
 ;; pre-flight, which runs *after* the image is loaded and must not re-evaluate it).
 (defn load-sources (root & opts)
