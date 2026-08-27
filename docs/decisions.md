@@ -16729,3 +16729,39 @@ Both failures land as `prelude expand: recursion too deep` during `Interp::new`,
 indication of which function is responsible — the language cannot report a fault in the code
 that makes reporting possible. The working version uses `if`, `%eq`, `bound?` and `%map-get`
 and nothing else. Anything hooked into `seq` faces the same constraint.
+
+## ADR-254 — A type-dispatched predicate refuses an unanswered type; it does not default
+
+**Context.** `zero?` was `(defn zero? (n) (= n 0))`. `=` is type-strict, so it answered
+**false for `0.0` and for `0M`** — a zero-predicate saying a zero is not zero — while
+`(< 0.0 1)` and `math/positive?` beside it handled the whole numeric tower. It also answered
+**false for `"a"` and for `nil`**: a wrong value for a question that has no meaning there.
+
+Both failures are the same failure. A function that branches on type has three possible
+answers — yes, no, and *nobody has said* — and `(= n 0)` collapsed the third into the second.
+That collapse is invisible by construction: `false` is a perfectly ordinary answer, so no
+caller can tell it apart from one that was actually computed.
+
+**Decision.** A predicate that dispatches on type is an ability, and it has **no `:default`**.
+`Zero` declares `(zero? [self] :-> bool)` with one impl per numeric type; a type nobody has
+answered for raises `ability Zero/zero?: no impl for :string — have (:ratio :float :decimal
+:int)`, which names the ability, the type, and who *did* answer.
+
+This is the rule `Num` and `Ord` already follow — "there is NO `:default`: a record type must
+define `compare-to` to be ordered, else the pair is a loud `%no-method`" — stated generally:
+**where a function dispatches on type, an unanswered type must say so.** A `:default` is only
+legitimate where it is a genuine answer for every type it can receive, as `Display`'s
+`(str x)` is. It is not a way to avoid writing the error path.
+
+**Consequence.** `(zero? 0.0)` is now `true`, and `(zero? "a")` raises where it used to answer
+`false`. `tests/numeric_conformance_test.blsp` pinned the old behaviour under the heading
+"zero? is structural", which is what a deliberate-looking test for a defaulted answer looks
+like from the inside.
+
+**Where this rule is not yet applied.** `Seqable` and `Conjable` keep `:default` impls (a
+record's fields; map-style conj). Those are real answers for a *record*, which is the only
+thing that reaches them — the collection seams gate on `%impl-exact?` before consulting the
+ability (ADR-253), so a built-in kind with no impl keeps its native error rather than being
+handed the record default. `Display`/`Inspect` keep theirs because `(str x)` genuinely
+answers for every value. The rule bites wherever a default would be a *guess*.
+
