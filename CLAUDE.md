@@ -258,7 +258,21 @@ cargo run -p cli -- --test f.blsp # run one self-contained test file
 cargo run -p nest -- test         # discover + run the project's test suite
 cargo run -p nest -- new foo      # scaffold a new project
 make ab BASE=<ref>                # A/B the working tree vs a git ref on the benchmark rows
+make green                        # IS THE TREE GREEN? completed CI runs + the gates `make check` skips
+make green-all                    # …plus the examples and stress corpus gates
 ```
+
+**`make green` is the answer to "is the tree green?" — do not hand-read the run list.** It
+exists because that question was answered wrongly for two days (KI-68/KI-69), twice, and
+neither reading was careless. First, **a cancelled CI run is not evidence**: every run is
+cancelled by the next push to the ref, so a busy day shows a wall of `cancelled` with an
+`in_progress` on top and *no red anywhere*, while the last several **completed** runs were all
+failures. Second, **`make check` is not what CI runs** — it is clippy + tests, and CI also runs
+`nest format --check`, the zero-warning checker gate over `std/` + `tests/`, the examples gate
+and the stress gate; v0.14.0 was tagged and pushed with `nest format --check` red for exactly
+that reason. `make green` reports the completed runs of the **CI workflow specifically** (the
+`Release` workflow goes green on commits whose CI failed) and runs the local gates `make check`
+omits; it prints **"no verdict"** rather than "green" when CI has concluded nothing recent.
 
 **Reading where the time goes: `make perf-brood`, then `(perf/summary)`.** The counters are a
 cargo feature, so an ordinary (or installed) binary cannot attribute at all — `make perf-brood`

@@ -24,6 +24,31 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Is the version in Cargo.toml actually released? Not a gate — a NOTICE, because the
+  # commit that bumps the version legitimately precedes the tag. It exists because the
+  # drift is otherwise silent and lasted days: 0.12.0 and 0.13.0 were bumped, changelogged
+  # and committed as `release: …`, and never tagged, so the newest downloadable brood
+  # stayed 0.11.0 while every package in the ecosystem advertised a floor above it —
+  # a version nobody could install.
+  release-status:
+    name: is this version released?
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Compare Cargo.toml against the tags
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "v$version is tagged"
+          else
+            echo "::notice title=Unreleased version::Cargo.toml is $version and there is no \
+          v$version tag. Packages resolving a ':brood' floor of >= $version would name a \
+          version nobody can download. Tag it when the release is ready: git tag v$version \
+          && git push origin v$version"
+          fi
+
   # Formatting is a cheap, dependency-free gate — it needs neither the system
   # libraries nor a compiled build, so it runs on its own and fails fast.
   fmt:
