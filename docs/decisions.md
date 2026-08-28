@@ -18501,7 +18501,7 @@ a time of day, and a coercion the caller did not ask for is a wrong answer weari
 of a right one — the rule the cross-type arithmetic review already settled on. A mixed pair
 raises, and the error names the methods that do exist.
 
-## ADR-285 — A binary that is older than its own standard library says so
+## ADR-287 — A binary that is older than its own standard library says so
 
 **Status:** accepted (2026-08-28)
 
