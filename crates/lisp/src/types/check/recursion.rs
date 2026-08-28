@@ -146,7 +146,26 @@ fn analyze_body(
 
 /// Walk `form`, knowing whether it is in tail position, flagging any non-tail
 /// call to `name`.
+///
+/// Grows the stack in heap-backed segments, like every other walker here. The
+/// entry point [`check_recursion`] was hardened in 2026-07-23's host-panic pass and
+/// *this* recursion — the one that descends a function's body — was not, so a
+/// deeply-nested body inside a `(def n (fn …))` still aborted the process. Found by
+/// the domain walk's own deep-body test, which exercised the same shape.
 fn walk(
+    heap: &Heap,
+    form: Value,
+    tail: bool,
+    name: Symbol,
+    enclosing: Option<Pos>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        walk_inner(heap, form, tail, name, enclosing, out)
+    })
+}
+
+fn walk_inner(
     heap: &Heap,
     form: Value,
     tail: bool,

@@ -54,7 +54,23 @@ seq    ::= (list type) | (vector type)         ; element type checked at runtime
 map-kv ::= (map key-type val-type)             ; key/val checked at runtime
 union  ::= (or type type+)
 inter  ::= (and type+)                         ; intersection; (and) = any
+compl  ::= (not type)                          ; complement — every value that is NOT a type
 ```
+
+**The complement `(not T)` (ADR-263).** Every value that is *not* a `T`. The
+lattice has computed complements since ADR-023 — the else-branch of a `(string?
+x)` guard is one — but there was no way to write one, so "anything but nil", the
+most-wanted annotation in a nil-carrying language, could not be said:
+
+```lisp
+(sig head-of ((and any (not nil)) -> any))
+```
+
+Exact on the flat tag lattice; the complement of a *refined* type (`(not (tuple
+int))`) widens to that tag, which over-approximates — sound, and it can only ever
+suppress a warning. Exactly one argument: `(not A B)` is reported as malformed
+rather than guessed. The runtime `type-matches?` implements the same clause, so a
+`sig!` contract agrees with the checker.
 
 **Keyword-literal (singleton) types (ADR-105).** A *bare* keyword in type position
 is a literal type — the value must be exactly that keyword. Enumerate a closed set
@@ -129,6 +145,29 @@ Base names map to the same lattice points the predicates imply (`number` =
 `int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, `seqable` =
 `nil∪pair∪vector∪set∪map∪bytes` — every collection the sequence combinators walk, `string`
 excluded — for a polymorphic-sequence parameter without falling back to `any`, …).
+
+### A declaration that cannot be read is reported, not dropped (ADR-259)
+
+A `sig` is read *first* — ahead of the primitive table, the curated table and
+inference — so a declaration the parser cannot read used to be worse than none:
+the annotated position silently widened to `any`. Four shapes are now reported:
+
+```lisp
+(sig q1 (strng -> int))          ; unknown type `strng`
+(sig q2 ((tupel int) -> int))    ; unknown type constructor `tupel`
+(sig q3 (int -> int))            ; …beside (defn q3 (a b) …): arities disagree
+(sig q4 (int -> int))            ; nothing named `q4` is defined here
+```
+
+The third used to *suppress* a correct check: within a file the declared sig was
+the only arity source, so a wrong one made a wrong call type-check clean and die
+at run time. The **definition** now owns the arity, and only a provably-disjoint
+declaration is reported (a multi-arm `defn` annotated with one arm's arrow
+overlaps, and stays silent).
+
+One deliberate silence: an unknown **capitalised** name is assumed to be an
+ability used as a type (ADR-181/186), whose module a single-file check may not
+have loaded.
 
 A `(sig name (… -> …))` whose type-expr is an **arrow** declares a function
 signature. Non-arrow `(sig x int)` (a value's type) declares a **value type**:

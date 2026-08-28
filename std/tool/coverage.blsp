@@ -96,7 +96,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
             sym
             (list 'quote
               (fn (& args)
-                (table/incr hits (name sym) 1)
+                (table/incr hits (->string sym) 1)
                 (apply original args)))))))
 
 (defn begin! (source-dirs)
@@ -124,7 +124,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
     nil
     (let (snapshot (table/snapshot *coverage-hits*))
       (map (fn (target)
-             (assoc target :hits (or (get snapshot (name (get target :name))) 0)))
+             (assoc target :hits (or (get snapshot (->string (get target :name))) 0)))
         *coverage-targets*))))
 
 (defn- coverage-covered (results) (filter (fn (r) (> (get r :hits) 0)) results))
@@ -197,7 +197,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
                                ":"
                                (get r :line)
                                ": "
-                               (name (get r :name)))))
+                               (->string (get r :name)))))
               nil
               ;; Report in source order within a file, files alphabetical — the
               ;; same order as the table above, so the two read together.

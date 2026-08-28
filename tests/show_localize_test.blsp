@@ -44,7 +44,7 @@
 ;; `Inspect` — the debug form is locale-independent and self-describing.
 (impl Inspect
   show-localize-test/money
-  (inspect [m] (str "#money<" (get m :amount) " " (name (get m :currency)) ">")))
+  (inspect [m] (str "#money<" (get m :amount) " " (->string (get m :currency)) ">")))
 
 ;; Display is core and always on (ADR-172 §8) — no activation step.
 

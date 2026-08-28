@@ -226,7 +226,7 @@
     (%register-ability 'Owned '((op [self])) 'mymod)
     (assert= (%ability-owner-ns 'Owned) 'mymod))
   ;; regression: a top-level/REPL `impl` registers with `from` = nil (the root ns has no
-  ;; name). Before the guard this crashed `%impl-rank`'s `(name from)`. Exercise the real
+  ;; name). Before the guard this crashed `%impl-rank`'s `(->string from)`. Exercise the real
   ;; path — `%register-impl` with a nil `from`, then dispatch — which reproduces the crash.
   (test "a nil `from` (root/REPL impl) doesn't crash — dispatch round-trips"
     (%register-ability 'RootAb '((op [self])) 'somens)
@@ -437,7 +437,7 @@
     ;; `(str …)` yields a string → :string impl (count), NOT any record path.
     (assert= (size (str "ab" "cd")) 4)))
 
-(describe "typed ability op parameters: (name T) in an op spec (ADR-180)"
+(describe "typed ability op parameters: (->string T) in an op spec (ADR-180)"
   (test "a bad argument to a typed op param is flagged"
     (is (abt-warns-about? "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn bad () (sc 5 \"x\"))"
           "argument 2 expects float")))
@@ -529,7 +529,7 @@
   (ncols [self] :-> int (count (columns self))) ; provided
   :derive-record (fn (flds)
     ;; a list of `impl` method forms: derive `columns` as the field values, in field order
-    (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (name f)))) flds)]))))
+    (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (->string f)))) flds)]))))
 (defrecord cpoint (x y) :derives [Columns])
 (defrecord crgb (r g b) :derives [Columns])
 

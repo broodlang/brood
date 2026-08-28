@@ -70,7 +70,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; `sym` is already the qualified name, which is what `private?` keys on.
 (defn- docs-private? (sym) (private? sym))
 
-;; One definition's Markdown: a `### (name args…)` heading (with a *(macro)* tag
+;; One definition's Markdown: a `### (->string args…)` heading (with a *(macro)* tag
 ;; for macros) followed by its docstring, or a placeholder when undocumented.
 (defn- docs-entry
   (sym v)
@@ -103,7 +103,7 @@ module's namespace-rooted globals (ADR-070) back to it."
                syms))
     (if (empty? vars)
       ""
-      (str "## Variables\n\n" (apply str (map (fn (s) (str "- `" (name s) "`\n")) vars))))))
+      (str "## Variables\n\n" (apply str (map (fn (s) (str "- `" (->string s) "`\n")) vars))))))
 
 ;; Assemble one module's Markdown from its title, module doc, and added names.
 (defn- docs-render
@@ -142,7 +142,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; the names it added.
 (defn document-module (modname)
   "The Markdown documentation for the module named `modname` (a symbol or string), resolved baked-in or on `*load-path*`. Errors if it can't be found."
-  (let (key (name modname) src (docs-source key))
+  (let (key (->string modname) src (docs-source key))
     (when (nil? src) (error "doc: cannot find module '" key "'"))
     (let (before (global-names))
       (require-one modname)
@@ -171,7 +171,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; what a user/agent actually calls.
 (defn- docs-public?
   (sym)
-  (let (nm (name sym))
+  (let (nm (->string sym))
     (and (not (includes? nm "--")) (not (string/starts-with? nm "%")))))
 
 (defn document-all ()
@@ -193,7 +193,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; so those keep their whole name.
 (defn- docs-bare
   (sym)
-  (let (nm (name sym) segments (string/split nm "/"))
+  (let (nm (->string sym) segments (string/split nm "/"))
     (if (= (last segments) "") nm (last segments))))
 
 ;; One definition as a data record for the model: bare name (for anchors/headings),
@@ -231,7 +231,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- docs-module-name
   (src)
   (let (form (try (reflect/read-first src) (catch _ nil)))
-    (when (and (pair? form) (= (first form) 'defmodule)) (name (nth form 1)))))
+    (when (and (pair? form) (= (first form) 'defmodule)) (->string (nth form 1)))))
 
 ;; Every global bound in module `modname`'s namespace (`modname/…`). Order-independent,
 ;; so a module's own definitions are attributed to it no matter what loaded first — the
@@ -240,7 +240,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- docs-namespace-syms
   (modname)
   (let (prefix (str modname "/"))
-    (filter (fn (s) (string/starts-with? (name s) prefix)) (global-names))))
+    (filter (fn (s) (string/starts-with? (->string s) prefix)) (global-names))))
 
 (defn model-file (path)
   "The doc-model module entry for the file at `path`: load it, then collect its module's
@@ -264,7 +264,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn model-module (modname)
   "The doc-model module entry for the module named `modname` (a symbol or string),
   resolved baked-in or on `*load-path*`. Errors if it can't be found."
-  (let (key (name modname) src (docs-source key))
+  (let (key (->string modname) src (docs-source key))
     (when (nil? src) (error "docs: cannot find module '" key "'"))
     (let (before (global-names))
       (require-one modname)
@@ -296,7 +296,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   ;; is at position 0) stays in. (Source-location can't tell them apart: an image-restored
   ;; module binding has no def-site, ADR-218.)
   (let (namespaced? (fn (nm) (let (i (index-of nm "/")) (and i (> i 0))))
-        language? (fn (s) (and (docs-public? s) (not (namespaced? (name s)))))
+        language? (fn (s) (and (docs-public? s) (not (namespaced? (->string s)))))
         syms (filter language? (global-names))
         category-of (fn (s) (doc-catalog/category-of (docs-bare s))))
     {:name "Brood"
@@ -529,7 +529,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- collect-doctests
   (prefix)
   (fold (fn (acc sym)
-          (if (not (string/starts-with? (name sym) prefix))
+          (if (not (string/starts-with? (->string sym) prefix))
             acc
             (let (v (try (eval sym) (catch _ nil))
                   d (when v (try (doc v) (catch _ nil))))
@@ -547,16 +547,16 @@ module's namespace-rooted globals (ADR-070) back to it."
     (doseq (r results)
       (let ([sym expr expected outcome] r)
         (match outcome
-          ([:ok] (io/puts (str "  ok   " (name sym) ": " expr " ;=> " expected)))
+          ([:ok] (io/puts (str "  ok   " (->string sym) ": " expr " ;=> " expected)))
           ([:fail actual _] (io/puts (str "  FAIL "
-                                       (name sym)
+                                       (->string sym)
                                        ": "
                                        expr
                                        " ;=> "
                                        expected
                                        " — got "
                                        (pr-str actual))))
-          ([:error msg] (io/puts (str "  ERR  " (name sym) ": " expr " — " msg))))))
+          ([:error msg] (io/puts (str "  ERR  " (->string sym) ": " expr " — " msg))))))
     (io/puts (str (count results)
                " doctests, "
                (- (count results) (count fails))

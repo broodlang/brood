@@ -165,7 +165,7 @@ defines rather than as its field map.
     (url/query-encode {:a 1})    → \"a=1\""
   (let (pairs (sort (map (fn (kv)
                            (list (if (keyword? (first kv))
-                                   (name (first kv))
+                                   (->string (first kv))
                                    (str (first kv)))
                              (->string (second kv))))
                       (%map-pairs params))))
@@ -271,7 +271,7 @@ a bracketed IPv6 literal. `port-str` is nil when no `:port` is present."
 `:host` keeps the brackets of an IPv6 literal (`\"[::1]\"`, which is what a Host
 header and a `build` round-trip both need); `:userinfo` is nil when absent and
 `:port` is an int or nil. An unparseable port raises."
-  (let (at (last-index-of auth "@")
+  (let (at (string/last-index-of auth "@")
         ;; the LAST `@` — userinfo may itself contain an encoded one
         userinfo (if (< at 0) nil (string/substring auth 0 at))
         hostport (if (< at 0) auth (string/substring auth (+ at 1) (string/length auth)))

@@ -16,7 +16,7 @@ use crate::core::heap::{Heap, SymbolMap};
 use crate::core::keywords as kw;
 use crate::core::value::{self, Arity, Symbol, Value};
 use crate::error::Pos;
-use crate::types::{GradualTy, Ty};
+use crate::types::{GradualTy, Sig, Ty};
 
 use super::ctx::{Ctx, PathKey};
 use super::guards::{
@@ -27,7 +27,7 @@ use super::guards::{
 use super::infer::{expr_ty, global_value_ty};
 use super::sigs::{
     arity_of, arity_str, curated_sig, declared_heap_overload, declared_heap_sig,
-    declared_heap_value_ty, is_globally_bound, sig_of,
+    declared_heap_value_ty, infer_overload_of, is_globally_bound, sig_of,
 };
 
 thread_local! {
@@ -135,6 +135,21 @@ fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity> {
         Value::Sym(s) if ctx.is_local(s) => None,
         Value::Sym(s) => arity_of(heap, s),
         Value::Pair(_) => lambda_literal_arity(heap, arg),
+        _ => None,
+    }
+}
+
+/// The signature of a callback **argument**, when one is knowable: a named global's
+/// (declared, primitive, curated, or inferred — see [`sigs::sig_of`]), or a file-local
+/// one this check has inferred. `None` for a lexical local (the global table doesn't
+/// describe it) or a lambda literal (the arity check covers those).
+fn callback_sig(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Sig> {
+    match arg {
+        Value::Sym(s) if ctx.is_lexical_local(s) => None,
+        Value::Sym(s) => ctx
+            .declared_sig(s)
+            .or_else(|| ctx.inferred_fn_sig(s))
+            .or_else(|| sig_of(heap, s)),
         _ => None,
     }
 }
@@ -352,6 +367,21 @@ fn overload_arg_mismatch(sigs: &[crate::types::Sig], arg_tys: &[Option<Ty>]) -> 
     any_arity_ok // ≥1 arm had a fitting arity, and every such arm was ruled out
 }
 
+/// The parameter lists of the clauses a call's *arity* selects, rendered for the
+/// mismatch diagnostic — `(string), (int)`. Without it the warning says only that
+/// nothing matched, leaving the reader to work out what would have.
+fn clause_domains_desc(sigs: &[crate::types::Sig], argc: usize) -> String {
+    let rendered: Vec<String> = sigs
+        .iter()
+        .filter(|sig| sig_accepts_argc(sig, argc))
+        .map(|sig| {
+            let params: Vec<String> = sig.params.iter().map(Ty::to_string).collect();
+            format!("({})", params.join(", "))
+        })
+        .collect();
+    rendered.join(", ")
+}
+
 /// The suppression bitmask a `(check-allow :category …)` marker's category
 /// keyword names. Unknown / missing → `0` (suppress nothing — a typo'd category
 /// is thus a no-op that still lints, never a silent blanket suppression). Keep
@@ -380,7 +410,7 @@ fn lint_allow_mask(category: Option<Value>) -> u8 {
 /// heap's globals (which includes macros and, once the project is loaded,
 /// file-local defs). The single predicate behind **both** the call-head and the
 /// operand unbound diagnostics, so the two never drift apart.
-fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
+pub(super) fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
     if ctx.is_local(s) || is_globally_bound(heap, s) || curated_sig(s).is_some() {
         return false;
     }
@@ -480,7 +510,7 @@ fn evaluates_args(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
 /// code. So the walk must not descend into them (it would false-flag a template
 /// like `(let ((a b) v) (+ a b))`'s spliced `(+ a b)`). Only a macro the compile
 /// pass *couldn't* expand reaches the walk, so the lost coverage is inherent.
-fn resolves_to_macro(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
+pub(super) fn resolves_to_macro(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
     if ctx.is_lexical_local(s) {
         return false;
     }
@@ -596,10 +626,17 @@ pub(super) fn collect_all_syms(heap: &Heap, forms: &[Value]) -> HashSet<Symbol> 
 /// the hot allocation the review flagged. (`eval/mod.rs` uses the same
 /// `SymbolMap` pattern on its own loop.)
 #[derive(Clone, Copy)]
-enum SpecialHead {
-    /// `quote` / `quasiquote` / `comment` — return without descending. These
-    /// hold *syntax*, not evaluated code, so nothing inside them is a reference.
+pub(super) enum SpecialHead {
+    /// `quote` / `comment` — return without descending. These hold *syntax*, not
+    /// evaluated code, so nothing inside them is a reference.
     SkipBody,
+    /// `quasiquote` (ADR-260) — a template is data, *except* for its `~` / `~@` escapes, which
+    /// are ordinary code evaluated at expansion time in the macro's own scope. Descend
+    /// to those and check them; everything else in the template is quoted. Skipping
+    /// the whole form (as this did until the reach gate went in) is the same silent
+    /// coverage boundary as KI-67 (`try`) and KI-70 (container literals): a rename
+    /// that kills a name used inside `~(…)` left every gate green.
+    Quasiquote,
     /// `try` / `%try` / `error-of` / `assert-error` — descend, but with every
     /// lint except `unbound` suppressed (KI-67). These forms deliberately
     /// exercise failures, so `(error-of (first 5))` must stay silent about the
@@ -623,11 +660,11 @@ enum SpecialHead {
     Defn,
 }
 
-static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
+pub(super) static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
     use SpecialHead::*;
     [
         (kw::QUOTE, SkipBody),
-        (kw::QUASIQUOTE, SkipBody),
+        (kw::QUASIQUOTE, Quasiquote),
         (kw::TRY, ErrorTesting),
         (kw::ERROR_OF, ErrorTesting),
         (kw::ASSERT_ERROR, ErrorTesting),
@@ -708,6 +745,13 @@ fn collect_def_names_inner(heap: &Heap, form: Value, ctx: &mut Ctx) {
             {
                 ctx.mark_variadic_global(name);
             }
+            // Record the arity the *definition* admits, so a call to a same-file
+            // function is arity-checked at all (the file isn't loaded, so
+            // `sigs::arity_of` sees nothing) and so a `(sig …)` that disagrees with
+            // the definition can't silently supply a wrong one.
+            if let Some(arity) = items.get(2).and_then(|&v| fn_form_arity(heap, v)) {
+                ctx.add_file_arity(name, arity);
+            }
         }
     } else if ctx.is_file_macro(head) {
         // A call to a file-local macro the checker can't expand (single-file mode,
@@ -772,6 +816,85 @@ fn part_has_rest(heap: &Heap, part: Value) -> bool {
     }
 }
 
+/// The arity a `fn`/`lambda` **definition** admits, read off its own parameter
+/// list(s) — the same fact [`sigs::arity_of`](super::sigs::arity_of) reads from a
+/// *loaded* closure, recovered from the form for a function defined in the file
+/// being checked (which is never loaded — see [`Ctx::file_arity`](super::ctx::Ctx)).
+///
+/// Multi-arm closures collapse to the interval **hull** (smallest min, largest max),
+/// exactly as `arity_of` does: sound (it over-accepts a gap between two arms) and
+/// never a false positive. `None` when the form isn't a `fn`, or when a parameter
+/// list isn't a readable list/vector — the caller then leaves the call unchecked,
+/// which is the pre-existing behaviour.
+fn fn_form_arity(heap: &Heap, value_form: Value) -> Option<Arity> {
+    let items = fn_form_items(heap, value_form)?;
+    let forms = &items[1..];
+    // A leading docstring is not a parameter list.
+    let forms = match forms.first() {
+        Some(Value::Str(_)) if forms.len() > 1 => &forms[1..],
+        _ => forms,
+    };
+    if crate::eval::macros::fn_is_arity_multi_clause(heap, &items) {
+        let mut hull: Option<Arity> = None;
+        for &clause in forms {
+            let plist = *list_items(heap, clause)?.first()?;
+            let a = params_arity(heap, plist)?;
+            hull = Some(match hull {
+                None => a,
+                Some(h) => Arity {
+                    min: h.min.min(a.min),
+                    max: match (h.max, a.max) {
+                        (Some(x), Some(y)) => Some(x.max(y)),
+                        _ => None,
+                    },
+                },
+            });
+        }
+        return hull;
+    }
+    params_arity(heap, *forms.first()?)
+}
+
+/// The arity one parameter list admits: the required binders before any marker,
+/// widened by `&optional` (a range) and by `&`/`&rest` (unbounded). Mirrors the
+/// closure `Arm::min_arity`/`max_arity` the runtime computes from the same list.
+/// `None` for a form that isn't a parameter list at all (so the caller stays silent
+/// rather than guessing).
+fn params_arity(heap: &Heap, params: Value) -> Option<Arity> {
+    let items = match params {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        // `()` reads as `nil` — a real, empty parameter list.
+        Value::Nil => Vec::new(),
+        Value::Pair(_) => list_items(heap, params)?,
+        _ => return None,
+    };
+    let mut required = 0usize;
+    let mut optional = 0usize;
+    let mut seen_optional = false;
+    for item in items {
+        if let Value::Sym(s) = item {
+            if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST) {
+                // Everything from here on is collected into one rest binder.
+                return Some(Arity::at_least(required));
+            }
+            if value::symbol_is(s, kw::AMP_OPTIONAL) {
+                seen_optional = true;
+                continue;
+            }
+        }
+        if seen_optional {
+            optional += 1;
+        } else {
+            required += 1;
+        }
+    }
+    Some(if seen_optional {
+        Arity::range(required, required + optional)
+    } else {
+        Arity::exact(required)
+    })
+}
+
 /// True if the parameter-list form `params` contains a `&` (or `&rest`) marker —
 /// i.e. the function it belongs to is variadic. A vector or list param list is
 /// accepted; a non-list form (e.g. a docstring) yields `false`.
@@ -787,6 +910,67 @@ fn params_have_rest(heap: &Heap, params: Value) -> bool {
     items.iter().any(|p| {
         matches!(p, &Value::Sym(s)
             if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST))
+    })
+}
+
+/// Walk a quasiquote template looking for **escapes** — `~x` / `~@x` at the current
+/// nesting level — and check each escaped form as ordinary code. Everything else in a
+/// template is data: a bare `foo` inside `` `(foo ~x) `` is the *symbol* `foo`, not a
+/// reference to it, so it must never be flagged.
+///
+/// `level` is the quasiquote depth: a nested `` ` `` raises it, an `~` lowers it, and
+/// only an escape that brings the depth back to 0 is code *here* (an inner template's
+/// `~` belongs to that template). Containers are walked too — `` `[~a {:k ~b}] `` — for
+/// the same reason KI-70 gave.
+fn check_unquoted(
+    heap: &Heap,
+    form: Value,
+    level: u32,
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        match form {
+            Value::Vector(id) => {
+                for item in heap.vector(id).to_vec() {
+                    check_unquoted(heap, item, level, ctx, out);
+                }
+            }
+            Value::Map(mid) => {
+                for (k, v) in heap.map_entries(mid) {
+                    check_unquoted(heap, k, level, ctx, out);
+                    check_unquoted(heap, v, level, ctx, out);
+                }
+            }
+            Value::Pair(_) => {
+                let Some(items) = list_items(heap, form) else {
+                    return;
+                };
+                if let Some(&Value::Sym(h)) = items.first() {
+                    if value::symbol_is(h, kw::QUASIQUOTE) {
+                        for &it in &items[1..] {
+                            check_unquoted(heap, it, level + 1, ctx, out);
+                        }
+                        return;
+                    }
+                    if value::symbol_is(h, kw::UNQUOTE) || value::symbol_is(h, kw::UNQUOTE_SPLICING)
+                    {
+                        for &it in &items[1..] {
+                            if level <= 1 {
+                                check_into(heap, it, ctx, out); // code, at this level
+                            } else {
+                                check_unquoted(heap, it, level - 1, ctx, out);
+                            }
+                        }
+                        return;
+                    }
+                }
+                for &it in &items {
+                    check_unquoted(heap, it, level, ctx, out);
+                }
+            }
+            _ => {}
+        }
     })
 }
 
@@ -1032,6 +1216,12 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         if let Some(&kind) = SPECIAL_HEAD.get(&s) {
             match kind {
                 SpecialHead::SkipBody => return,
+                SpecialHead::Quasiquote => {
+                    for it in items.iter().skip(1) {
+                        check_unquoted(heap, *it, 1, ctx, out);
+                    }
+                    return;
+                }
                 SpecialHead::ErrorTesting => {
                     // Walk the body into a scratch buffer and keep ONLY the
                     // unbound-symbol diagnostics. Filtering at the collection
@@ -1136,6 +1326,11 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
             (!ctx.is_file_global(s))
                 .then(|| arity_of(heap, s))
                 .flatten()
+                // The def site of a same-file function — the file isn't loaded, so
+                // `arity_of` above can't see it. Read *before* the declared sig, so a
+                // `(sig …)` that disagrees with the definition can't supply a wrong
+                // arity: the definition is what the call actually meets at run time.
+                .or_else(|| ctx.file_arity(s))
                 .or_else(|| {
                     declared
                         .filter(|sg| sg.rest.is_some() || !ctx.is_variadic_global(s))
@@ -1310,6 +1505,42 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                                 out.push((arg_pos(heap, arg, form), msg));
                             }
                         }
+                        // Callback **parameter-type** check. The arity check above asks
+                        // whether the callback can be called at all; this asks whether it
+                        // can accept what it will be handed. A `sig`-declared higher-order
+                        // parameter (`(sig g (((int -> int)) -> int))`) was annotated and
+                        // then not enforced — passing `string/length` to it was silent.
+                        //
+                        // Disjointness only, per position, and never on the *result*: an
+                        // inferred return over-approximates, so comparing results would
+                        // false-positive at every call site (a `(any) -> any` callback is
+                        // not a subtype of `(int) -> int`, but it is perfectly valid).
+                        // Sound with an inferred callback sig too: an inferred parameter
+                        // demand is a *superset* of what the function really accepts, so
+                        // disjoint-from-the-superset is disjoint from the truth.
+                        if let Some(cb) = callback_sig(heap, arg, ctx) {
+                            for (k, wanted) in expected.params.iter().enumerate() {
+                                let Some(accepts) = cb.param(k) else { continue };
+                                if wanted.is_never()
+                                    || accepts.is_never()
+                                    || !wanted.is_disjoint(&accepts)
+                                    || ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+                                {
+                                    continue;
+                                }
+                                let msg = format!(
+                                    "{}: argument {} is a callback handed {} at position {}, \
+                                     but {} takes {} there",
+                                    name_of(s),
+                                    i + 1,
+                                    wanted,
+                                    k + 1,
+                                    callback_desc(arg),
+                                    accepts,
+                                );
+                                out.push((arg_pos(heap, arg, form), msg));
+                            }
+                        }
                     }
                 }
             }
@@ -1326,13 +1557,29 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                 .declared_overload(s)
                 .cloned()
                 .or_else(|| declared_heap_overload(heap, s))
+                // …and, failing a declaration, the arms *inferred* from a multi-arm
+                // definition: same-file first (the file isn't loaded), else the loaded
+                // closure's. A multi-arm callee used to escape argument checking
+                // entirely, since it has no single `Sig` for the per-argument loop.
+                .or_else(|| ctx.inferred_overload(s))
+                .or_else(|| {
+                    (!ctx.is_file_global(s))
+                        .then(|| infer_overload_of(heap, s))
+                        .flatten()
+                })
             {
                 let arg_tys: Vec<Option<Ty>> =
                     items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
-                if overload_arg_mismatch(&arms, &arg_tys) {
+                if overload_arg_mismatch(&arms, &arg_tys)
+                    && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+                {
                     out.push((
                         heap.form_pos_only(form),
-                        format!("{}: no overload clause accepts these arguments", name_of(s)),
+                        format!(
+                            "{}: no clause accepts these arguments — the clauses take {}",
+                            name_of(s),
+                            clause_domains_desc(&arms, items.len() - 1),
+                        ),
                     ));
                 }
             }

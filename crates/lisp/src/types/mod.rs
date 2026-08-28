@@ -129,6 +129,12 @@ const STR_BIT: u32 = 1u32 << bit(Tag::Str);
 /// plus a handful of fields is well under it — so only pathological structure hits it.
 const MAX_TY_NODES: usize = 64;
 
+/// Max **terms** an inferred union keeps before collapsing to one widened term (see
+/// [`Ty::alts`]). Four covers the shapes that occur — a tagged union of two or three
+/// record/tuple alternatives, optionally with `nil` — while keeping every set
+/// operation's pairwise work trivially bounded.
+const MAX_TY_TERMS: usize = 4;
+
 /// A set-theoretic type — a **set of runtime [`Tag`]s** with optional
 /// *structured refinements* on its function and sequence members (Step 5+,
 /// ADR-078).
@@ -151,7 +157,7 @@ const MAX_TY_NODES: usize = 64;
 ///
 /// No longer `Copy` (the `Arc` refinements) but cheap to `Clone` — a `u32` plus
 /// refcount bumps. The flat case is two null pointers.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Debug)]
 pub struct Ty {
     /// The set of possible runtime tags — always present; the coarse set.
     tags: u32,
@@ -213,6 +219,125 @@ pub struct Ty {
     /// set operations correct. Independent tag/field, same semantics as
     /// `lit`/`lit_int` throughout.
     lit_str: Option<Arc<BTreeSet<String>>>,
+    /// **Alternative terms** — the disjunctive tail of a union this one term cannot
+    /// hold exactly (ADR-262). `None` for the overwhelmingly common single-term type,
+    /// which behaves exactly as it always did.
+    ///
+    /// A `Ty` is a *set of values*, and a set of values is a union of terms. One term
+    /// carries one refinement per slot, so `(or (tuple int) (tuple string))` had no
+    /// representation at all: `union` widened both away and the type became bare
+    /// `vector`. That is sound, and it made the tagged-union idiom — `{:ok v}` or
+    /// `{:error e}`, the shape most Brood code returns — invisible to every check.
+    ///
+    /// So a union that cannot merge exactly keeps both terms. The invariants, all
+    /// maintained by [`Ty::from_terms`]:
+    /// - every alternative is itself alts-free (the representation is two levels, not
+    ///   a tree), and non-`never`;
+    /// - no term is a subtype of another (absorbed on construction);
+    /// - at most [`MAX_TY_TERMS`] terms — beyond that they collapse by the old
+    ///   widening merge, so the size of a `Ty` stays bounded (the KI-13 property).
+    ///
+    /// Every *refinement accessor* (`as_arrow`, `elem_ty`, `record_fields`, …) reports
+    /// only for a single-term type and `None` for a multi-term one — exactly what a
+    /// widened type reported before — so no consumer reads a refinement that holds for
+    /// only part of the union. The set relations (`is_subtype`, `is_disjoint`,
+    /// `intersect`, `negate`) are the ones that got sharper.
+    alts: Option<Arc<Vec<Ty>>>,
+}
+
+/// Equality is **set** equality, not field equality: a union's terms have no
+/// meaningful order (`A ∪ B` and `B ∪ A` are the same set), so a derived `PartialEq`
+/// would call them different and break every memo and cache keyed on a type.
+impl PartialEq for Ty {
+    fn eq(&self, other: &Ty) -> bool {
+        if self.alts.is_none() && other.alts.is_none() {
+            return self.term_eq(other);
+        }
+        let (a, b) = (self.terms_vec(), other.terms_vec());
+        a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| x.term_eq(y)))
+    }
+}
+impl Eq for Ty {}
+
+/// Hashing must agree with that equality, so it combines the terms' hashes with an
+/// order-independent XOR (the terms are distinct by construction).
+impl std::hash::Hash for Ty {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let mut combined: u64 = 0;
+        for term in self.terms_vec() {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            term.hash_term(&mut h);
+            combined ^= std::hash::Hasher::finish(&h);
+        }
+        state.write_u64(combined);
+    }
+}
+
+impl Ty {
+    /// Field-by-field equality of one term, ignoring `alts`.
+    ///
+    /// Destructured rather than field-accessed **on purpose**: a new refinement slot
+    /// then fails to compile here until it is listed, instead of silently making two
+    /// different types compare equal. (`#[derive(PartialEq)]` can't be used — a union's
+    /// terms have no meaningful order — so this is the enforcement that replaces it.)
+    fn term_eq(&self, other: &Ty) -> bool {
+        let Ty {
+            tags,
+            arrow,
+            overload,
+            elem,
+            map_kv,
+            fields,
+            tuple,
+            lit,
+            lit_int,
+            lit_bool,
+            lit_str,
+            alts: _,
+        } = self;
+        *tags == other.tags
+            && *arrow == other.arrow
+            && *overload == other.overload
+            && *elem == other.elem
+            && *map_kv == other.map_kv
+            && *fields == other.fields
+            && *tuple == other.tuple
+            && *lit == other.lit
+            && *lit_int == other.lit_int
+            && *lit_bool == other.lit_bool
+            && *lit_str == other.lit_str
+    }
+
+    /// Hash one term's fields, ignoring `alts` — the counterpart of [`Ty::term_eq`],
+    /// destructured for the same compile-time reason.
+    fn hash_term<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+        let Ty {
+            tags,
+            arrow,
+            overload,
+            elem,
+            map_kv,
+            fields,
+            tuple,
+            lit,
+            lit_int,
+            lit_bool,
+            lit_str,
+            alts: _,
+        } = self;
+        tags.hash(state);
+        arrow.hash(state);
+        overload.hash(state);
+        elem.hash(state);
+        map_kv.hash(state);
+        fields.hash(state);
+        tuple.hash(state);
+        lit.hash(state);
+        lit_int.hash(state);
+        lit_bool.hash(state);
+        lit_str.hash(state);
+    }
 }
 
 impl Ty {
@@ -259,7 +384,24 @@ impl Ty {
             lit_int: None,
             lit_bool: None,
             lit_str: None,
+            alts: None,
         }
+    }
+
+    /// Does this type carry **no** refinements — is it exactly its tag set? The
+    /// question the complement rendering and the DNF-free fast paths ask: a flat type
+    /// is fully described by `tags`, so set reasoning on it is exact.
+    pub fn is_flat(&self) -> bool {
+        self.arrow.is_none()
+            && self.overload.is_none()
+            && self.elem.is_none()
+            && self.map_kv.is_none()
+            && self.fields.is_none()
+            && self.tuple.is_none()
+            && self.lit.is_none()
+            && self.lit_int.is_none()
+            && self.lit_bool.is_none()
+            && self.lit_str.is_none()
     }
 
     /// The singleton type containing exactly the values with this tag.
@@ -294,7 +436,7 @@ impl Ty {
     /// advisory checker reads to compare a callback against what a higher-order
     /// function expects.
     pub fn as_arrow(&self) -> Option<&Sig> {
-        self.arrow.as_deref()
+        self.single()?.arrow.as_deref()
     }
 
     /// An overloaded function type — `sigs[0] and sigs[1] and …` (an
@@ -314,7 +456,7 @@ impl Ty {
     /// checker reads to resolve a call's return type per matching arm. `None`
     /// when this type carries at most a single [`Ty::arrow`].
     pub fn overload_sigs(&self) -> Option<&Vec<Sig>> {
-        self.overload.as_deref()
+        self.single()?.overload.as_deref()
     }
 
     /// A sequence type over `tags` (some subset of `pair`/`vector`) whose elements
@@ -351,7 +493,7 @@ impl Ty {
     /// The record-shape refinement, if this map type carries one. The bridge
     /// the checker reads to flow `(get r :name)` to the field's exact type.
     pub fn record_fields(&self) -> Option<&BTreeMap<Symbol, (Ty, bool)>> {
-        self.fields.as_deref()
+        self.single()?.fields.as_deref()
     }
 
     /// A positional tuple shape — one type per index, fixed arity. Tagged
@@ -370,7 +512,7 @@ impl Ty {
     /// bridge the checker reads to flow `(nth t i)`/`(first t)` to the exact
     /// per-position type.
     pub fn tuple_elems(&self) -> Option<&Vec<Ty>> {
-        self.tuple.as_deref()
+        self.single()?.tuple.as_deref()
     }
 
     /// A keyword-literal (singleton) type — exactly the keyword `sym`. Unions of
@@ -387,7 +529,7 @@ impl Ty {
     /// The keyword-literal refinement, if this type carries one (the exact keyword
     /// symbols admitted). `None` means "any keyword" (or no keyword member).
     pub fn as_lit(&self) -> Option<&BTreeSet<Symbol>> {
-        self.lit.as_deref()
+        self.single()?.lit.as_deref()
     }
 
     /// An int-literal (singleton) type — exactly the integer `n` (ADR-117).
@@ -406,7 +548,7 @@ impl Ty {
     /// The int-literal refinement, if this type carries one (the exact
     /// integers admitted). `None` means "any int" (or no int member).
     pub fn as_lit_int(&self) -> Option<&BTreeSet<i64>> {
-        self.lit_int.as_deref()
+        self.single()?.lit_int.as_deref()
     }
 
     /// A bool-literal (singleton) type — exactly `true` or `false` (ADR-120).
@@ -426,7 +568,7 @@ impl Ty {
     /// The bool-literal refinement, if this type carries one. `None` means
     /// "any bool" (or no bool member).
     pub fn as_lit_bool(&self) -> Option<&BTreeSet<bool>> {
-        self.lit_bool.as_deref()
+        self.single()?.lit_bool.as_deref()
     }
 
     /// A string-literal (singleton) type — exactly the string `s` (ADR-120).
@@ -445,13 +587,13 @@ impl Ty {
     /// The string-literal refinement, if this type carries one. `None` means
     /// "any string" (or no string member).
     pub fn as_lit_str(&self) -> Option<&BTreeSet<String>> {
-        self.lit_str.as_deref()
+        self.single()?.lit_str.as_deref()
     }
 
     /// The key/value refinement, if this map type carries one. The bridge the
     /// checker reads to flow `(get m k)` → `V | nil`, `(keys m)` → `list<K>`, etc.
     pub fn map_kv(&self) -> Option<(&Ty, &Ty)> {
-        self.map_kv.as_deref().map(|(k, v)| (k, v))
+        self.single()?.map_kv.as_deref().map(|(k, v)| (k, v))
     }
 
     /// `vector<elem>` — a vector whose elements have type `elem`.
@@ -478,8 +620,9 @@ impl Ty {
     /// every existing caller already immediately `.cloned()`s the borrowed
     /// case anyway.
     pub fn elem_ty(&self) -> Option<Ty> {
-        self.elem.as_deref().cloned().or_else(|| {
-            self.tuple
+        let this = self.single()?;
+        this.elem.as_deref().cloned().or_else(|| {
+            this.tuple
                 .as_ref()
                 .map(|elems| elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t)))
         })
@@ -625,7 +768,7 @@ impl Ty {
         }
     }
 
-    pub fn union(self, other: Ty) -> Ty {
+    fn union_term(self, other: Ty) -> Ty {
         let tags = self.tags | other.tags;
         let arrow = merge_union(
             self.tags & FN_BITS != 0,
@@ -705,6 +848,7 @@ impl Ty {
             lit_int,
             lit_bool,
             lit_str,
+            alts: None,
         }
         // Bound the result's size so a fixpoint that unions nested branch results (a
         // recursive value-builder) can't grow the type without limit — every subsequent
@@ -717,7 +861,7 @@ impl Ty {
     /// keep it; two distinct known refinements can't be one → widen. (Used by
     /// guard narrowing `T ∩ tested_by(pred)`, where `tested_by` is flat, so a
     /// refined `T` keeps its refinement through the narrow.)
-    pub fn intersect(self, other: Ty) -> Ty {
+    fn intersect_term(self, other: Ty) -> Ty {
         let mut tags = self.tags & other.tags;
         let (arrow, overload) = if tags & FN_BITS != 0 {
             intersect_arrows(&self, &other)
@@ -795,6 +939,7 @@ impl Ty {
             lit_int,
             lit_bool,
             lit_str,
+            alts: None,
         }
         .bounded()
     }
@@ -813,7 +958,7 @@ impl Ty {
     /// (advisory-soundness). Consequence: `a ∩ ¬a = ⊥` and double-negation are
     /// exact only for **flat** `a` (which is all the laws tests sample, and all
     /// the checker ever negates — `tested_by`/`%eq` results are flat).
-    pub fn negate(self) -> Ty {
+    fn negate_term(self) -> Ty {
         let mut tags = !self.tags & UNIVERSE;
         // A refinement means `self` omits some values of its refined tag(s);
         // those omitted values are in the complement, so the tag must survive.
@@ -845,6 +990,145 @@ impl Ty {
         Ty::flat(tags)
     }
 
+    // ---- the union of terms (ADR-262) ----
+    //
+    // Everything above operates on ONE term. These five are the public set
+    // operations, and they quantify over a type's terms — which is what makes a
+    // union of two structured types (`(or (tuple int) (tuple string))`) survive
+    // being written down instead of widening to bare `vector`.
+
+    /// This type's terms: itself when single (the common case), else the head term
+    /// followed by its alternatives. Every term is alts-free.
+    fn terms_vec(&self) -> Vec<Ty> {
+        match &self.alts {
+            None => vec![self.clone()],
+            Some(rest) => {
+                let mut out = Vec::with_capacity(rest.len() + 1);
+                out.push(self.head_term());
+                out.extend(rest.iter().cloned());
+                out
+            }
+        }
+    }
+
+    /// This type without its alternatives — the head term alone.
+    fn head_term(&self) -> Ty {
+        Ty {
+            alts: None,
+            ..self.clone()
+        }
+    }
+
+    /// Build a type from a list of terms, restoring every invariant: `never` terms
+    /// dropped, subsumed terms absorbed, exactly-mergeable terms merged, and the
+    /// count capped at [`MAX_TY_TERMS`] by collapsing the remainder with the widening
+    /// merge (which is what a union always did, so the cap can only lose precision,
+    /// never soundness).
+    fn from_terms(mut terms: Vec<Ty>) -> Ty {
+        terms.retain(|t| !t.is_never());
+        if terms.is_empty() {
+            return Ty::NEVER;
+        }
+        // Merge and absorb until neither applies. Quadratic in the term count, which
+        // is bounded by the cap below — a handful at most.
+        let mut merged: Vec<Ty> = Vec::with_capacity(terms.len());
+        'next: for t in terms {
+            for existing in merged.iter_mut() {
+                if t.is_subtype_term(existing) {
+                    continue 'next; // absorbed
+                }
+                if existing.is_subtype_term(&t) {
+                    *existing = t;
+                    continue 'next;
+                }
+                if merge_is_exact(existing, &t) {
+                    *existing = existing.clone().union_term(t);
+                    continue 'next;
+                }
+            }
+            merged.push(t);
+        }
+        while merged.len() > MAX_TY_TERMS {
+            let last = merged.pop().expect("len > cap");
+            let prev = merged.pop().expect("len > cap");
+            merged.push(prev.union_term(last)); // the widening merge — sound, less precise
+        }
+        let mut head = merged.remove(0);
+        if !merged.is_empty() {
+            head.alts = Some(Arc::new(merged));
+        }
+        head
+    }
+
+    /// `self ∪ other` — every value in either.
+    pub fn union(self, other: Ty) -> Ty {
+        // The single-term fast path is the old behaviour verbatim, including its
+        // widening merge, so nothing that already had one representable term pays for
+        // this or renders differently.
+        if self.alts.is_none() && other.alts.is_none() && merge_is_exact(&self, &other) {
+            return self.union_term(other);
+        }
+        let mut terms = self.terms_vec();
+        terms.extend(other.terms_vec());
+        Ty::from_terms(terms)
+    }
+
+    /// `self ∩ other` — the values in both. Distributes over the terms:
+    /// `(A ∪ B) ∩ (C ∪ D)` = `(A∩C) ∪ (A∩D) ∪ (B∩C) ∪ (B∩D)`.
+    pub fn intersect(self, other: Ty) -> Ty {
+        if self.alts.is_none() && other.alts.is_none() {
+            return self.intersect_term(other);
+        }
+        let (a, b) = (self.terms_vec(), other.terms_vec());
+        let mut out = Vec::with_capacity(a.len() * b.len());
+        for x in &a {
+            for y in &b {
+                out.push(x.clone().intersect_term(y.clone()));
+            }
+        }
+        Ty::from_terms(out)
+    }
+
+    /// `¬self` — every value this type excludes. De Morgan over the terms:
+    /// `¬(A ∪ B)` = `¬A ∩ ¬B`. Exact for flat terms; a *refined* term's complement
+    /// widens to its tag (see [`Ty::negate_term`]), which over-approximates and so can
+    /// only ever suppress a warning.
+    pub fn negate(self) -> Ty {
+        if self.alts.is_none() {
+            return self.negate_term();
+        }
+        self.terms_vec()
+            .into_iter()
+            .map(Ty::negate_term)
+            .fold(Ty::ANY, |acc, n| acc.intersect(n))
+    }
+
+    /// `self ⊆ other` — semantic subtyping: is every value of `self` a value of
+    /// `other`? Each of `self`'s terms must fit *some* term of `other`. Sound and
+    /// deliberately not complete: a term covered jointly by two of `other`'s terms but
+    /// by neither alone reads as "not a subtype", which defers rather than warns.
+    pub fn is_subtype(&self, other: &Ty) -> bool {
+        if self.alts.is_none() && other.alts.is_none() {
+            return self.is_subtype_term(other);
+        }
+        let other_terms = other.terms_vec();
+        self.terms_vec()
+            .iter()
+            .all(|a| other_terms.iter().any(|b| a.is_subtype_term(b)))
+    }
+
+    /// Do `self` and `other` share no values? Every pair of terms must be disjoint —
+    /// one overlapping pair is one shared value.
+    pub fn is_disjoint(&self, other: &Ty) -> bool {
+        if self.alts.is_none() && other.alts.is_none() {
+            return self.is_disjoint_term(other);
+        }
+        let other_terms = other.terms_vec();
+        self.terms_vec()
+            .iter()
+            .all(|a| other_terms.iter().all(|b| a.is_disjoint_term(b)))
+    }
+
     /// `self \ other` — values in `self` but not `other`.
     pub fn difference(self, other: Ty) -> Ty {
         self.intersect(other.negate())
@@ -857,7 +1141,7 @@ impl Ty {
     /// result), **sequences** covariantly on the element type (sound because
     /// Brood sequences are immutable). An unrefined `self` ("any") is *not* a
     /// subtype of a specifically-refined `other`.
-    pub fn is_subtype(&self, other: &Ty) -> bool {
+    fn is_subtype_term(&self, other: &Ty) -> bool {
         if self.tags & other.tags != self.tags {
             return false;
         }
@@ -978,7 +1262,7 @@ impl Ty {
     /// genuinely-disjoint cases (a literal set is an exact enumeration, not an
     /// approximation), so it can't raise a false warning — advisory-soundness
     /// holds.
-    pub fn is_disjoint(&self, other: &Ty) -> bool {
+    fn is_disjoint_term(&self, other: &Ty) -> bool {
         let shared = self.tags & other.tags;
         if shared == 0 {
             return true;
@@ -1032,9 +1316,31 @@ impl Ty {
         false
     }
 
+    /// The terms of a *multi*-term type, or `None` for a single term — the display
+    /// hook, kept beside [`Ty::single`] so the two read as one decision.
+    pub(crate) fn alt_terms(&self) -> Option<Vec<Ty>> {
+        self.alts.is_some().then(|| self.terms_vec())
+    }
+
+    /// This type as a lone term, or `None` when it is a union of several. Every
+    /// *refinement* accessor goes through here: a refinement that holds for one term
+    /// of a union does not hold for the union, and reporting it would be exactly the
+    /// unsound reading the old widening avoided by throwing the refinement away.
+    fn single(&self) -> Option<&Ty> {
+        self.alts.is_none().then_some(self)
+    }
+
+    /// Every tag any term of this type admits.
+    fn all_tags(&self) -> u32 {
+        match &self.alts {
+            None => self.tags,
+            Some(rest) => rest.iter().fold(self.tags, |acc, t| acc | t.tags),
+        }
+    }
+
     /// Does this type admit a value with `tag`?
-    pub const fn contains_tag(&self, tag: Tag) -> bool {
-        self.tags & (1u32 << bit(tag)) != 0
+    pub fn contains_tag(&self, tag: Tag) -> bool {
+        self.all_tags() & (1u32 << bit(tag)) != 0
     }
 
     /// Is this the empty type `⊥` (no value inhabits it)?
@@ -1140,6 +1446,37 @@ fn intersect_arrows(a: &Ty, b: &Ty) -> (Option<Arc<Sig>>, Option<Arc<Vec<Sig>>>)
     } else {
         (None, Some(Arc::new(combined)))
     }
+}
+
+/// Would the widening union of these two terms lose nothing — is their union
+/// representable as one term?
+///
+/// It is, unless some refinement slot is *contested*: both sides contribute the tags
+/// that slot refines, and they carry different refinements there. That is exactly the
+/// case [`merge_union`] answers with `None` (widen to "any of that tag"), and exactly
+/// the case a second term now exists to hold instead. One rule per slot, matching the
+/// slots and tag masks `union_term` uses.
+fn merge_is_exact(a: &Ty, b: &Ty) -> bool {
+    fn contested<T: PartialEq>(
+        a_present: bool,
+        a: &Option<Arc<T>>,
+        b_present: bool,
+        b: &Option<Arc<T>>,
+    ) -> bool {
+        a_present && b_present && a != b
+    }
+    let (fa, fb) = (a.tags & FN_BITS != 0, b.tags & FN_BITS != 0);
+    let (sa, sb) = (a.tags & SEQ_BITS != 0, b.tags & SEQ_BITS != 0);
+    let (ma, mb) = (a.tags & MAP_BIT != 0, b.tags & MAP_BIT != 0);
+    let (va, vb) = (a.tags & VECTOR_BIT != 0, b.tags & VECTOR_BIT != 0);
+    !contested(fa, &a.arrow, fb, &b.arrow)
+        && !contested(fa, &a.overload, fb, &b.overload)
+        && !contested(sa, &a.elem, sb, &b.elem)
+        && !contested(ma, &a.map_kv, mb, &b.map_kv)
+        && !contested(ma, &a.fields, mb, &b.fields)
+        && !contested(va, &a.tuple, vb, &b.tuple)
+    // The four literal slots are *never* contested: their union is the union of the
+    // two literal sets, which `merge_union_lit_set` computes exactly.
 }
 
 /// The surviving refinement for a **union**: present on just one side → carry it;

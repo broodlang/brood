@@ -100,6 +100,10 @@ inverse of the `string/->codepoints` primitive."
 
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
 ;; recursively, reversed), then build the string in one `apply str` pass.
+;; Byte-identical to `seq/interpose-acc`, deliberately. `string/join` is one of the ops the
+;; PRELUDE reaches for (it is in the `%autoload string` list), and routing it through
+;; `seq/interpose` would make every `join` drag in a second module. Three lines of
+;; duplication buys that; noted here and there so neither looks like an oversight.
 (defn- join-parts
   (sep coll acc)
   (if (empty? coll) acc (join-parts sep (rest coll) (cons (first coll) (cons sep acc)))))
@@ -135,6 +139,26 @@ leaves `s` unchanged.
     (string/replace \"aaa\" \"aa\" \"b\")    → \"ba\"    ; left to right, no rescan
     (string/replace \"abc\" \"zz\" \"!\")    → \"abc\""
   (if (= old "") s (join new (string/split s old))))
+
+;; `last-index-of` moved here from the prelude on 2026-08-27. It is STRING-ONLY — it calls
+;; `%str-last-index-of` and defaults `before` to `(string/length s)` — so by this module's
+;; own boundary rule (ADR-230: `string/*` is "the first argument is a string") it never
+;; belonged bare. Its forward partner `index-of` DOES stay bare, because that one is
+;; polymorphic over strings, lists and vectors; the pair looked symmetric and was not.
+(defn last-index-of (s needle &optional before)
+  "The 0-based char index of the **last** occurrence of `needle` in string `s` whose
+start is strictly **before** `before` (default `(string/length s)`), or -1 if there is
+none. The backward counterpart of `(index-of s needle from)` — what reverse
+incremental search rides on."
+  ;; One native pass. This used to walk forward in Brood calling `(index-of s needle i)`
+  ;; per match; every one of those re-derives a char offset (and, before `index-of` took a
+  ;; `from`, allocated a copy of the suffix), so a reverse search was O(matches × length) —
+  ;; measured 16.5× then 16.4× per 4× of input, where linear is 4×. It is on an editor hot
+  ;; path in both directions: `buffer`'s reverse search runs over whole buffer text, and
+  ;; `lineedit` finds the current line's start on every keystroke. The empty-needle rule
+  ;; (matches at every position, so the answer is `before - 1` clamped) lives in the
+  ;; primitive now, unchanged.
+  (%str-last-index-of s needle (or before (string/length s))))
 
 (defn starts-with? (s prefix)
   "Does string `s` begin with `prefix`?

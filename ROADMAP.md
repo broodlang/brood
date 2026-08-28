@@ -117,6 +117,38 @@ command for — *does it boot?*, *what is this binary?*, *what moved, and where 
       guide headings' undarkened `#1f2933` fell out as a fix.
 
 
+### Type system — the audit, and the five items it ranked (2026-08-27)
+
+**Status: done (ADR-259..263).** A probe corpus through `brood --check` separated three layers
+in very different states — the lattice, the inference in front of it, and the annotation
+surface feeding it — and each turned out to need a different kind of fix. Details in
+[docs/type-system-status.md](docs/type-system-status.md); what is *left* is that document's
+"What's left" table, which is now shorter and more specific than the backlog it replaced.
+
+- [x] **1. `sig` fails closed, and the definition owns the arity** (ADR-259). Four shapes
+      exited 0 with no diagnostic — a misspelled type, a misspelled constructor, a sig whose
+      arity contradicts its `defn`, and a sig for a name never defined. The third *suppressed*
+      a correct check: inside a file the declared sig was the only arity source, so a wrong one
+      made a wrong call type-check clean and die at run time. A same-file call now has an arity
+      check at all, read from the def site's own parameter list.
+- [x] **2. The walk's totality is gated** (ADR-260). `REACH_CASES` plants an unresolvable name
+      in every code position of every special form and container literal, in both walks; a
+      companion test makes a *new* special form declare its own case. It found the next
+      instance of the KI-67/KI-70 class immediately: a `quasiquote` template was skipped whole,
+      though its `~`/`~@` escapes are code.
+- [x] **3. A parameter's type is its domain** (ADR-261). A guarded use is credited *within its
+      guard* and the alternatives union, so branch shapes, `match` patterns, head
+      destructuring, multi-arm functions and `:when` clause guards all constrain callers with
+      no annotation. Supersedes ADR-190's "a guarded use never constrains a param".
+- [x] **4. A union keeps its terms** (ADR-262). `(or (tuple int) (tuple string))` used to widen
+      to bare `vector`, which made the tagged-union idiom invisible to every check. Single-term
+      types are byte-identical; unions that cannot merge keep up to four terms, and the five
+      set operations quantify over them.
+- [x] **5. `(not T)`, and complements that read as complements** (ADR-263). The lattice has
+      computed complements since ADR-023 and the grammar could not say one; `expects string,
+      got nil | bool | number | …` (twenty-two tags) now reads `(not string)`.
+
+
 ### Standard-library surface audit — the bare namespace (2026-08-26)
 
 **Status: the reduction landed; examples and three structural items remain.** Every public

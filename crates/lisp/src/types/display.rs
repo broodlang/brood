@@ -7,6 +7,13 @@ impl fmt::Display for Ty {
     /// name, otherwise the members joined with ` | ` (e.g. `int | string`). A
     /// purely-function type with a known arrow renders as `(p1, p2) -> ret`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A union of terms renders as its terms, joined — `(tuple int) | (tuple
+        // string)`, the shape that used to print as bare `vector` because the union
+        // had nowhere to keep both (ADR-262). Each term renders by the rules below.
+        if let Some(terms) = self.alt_terms() {
+            let rendered: Vec<String> = terms.iter().map(Ty::to_string).collect();
+            return f.write_str(&rendered.join(" | "));
+        }
         // Named points (compared by value — `Arc` isn't structural, so these
         // can't be `match` patterns).
         if *self == Ty::NEVER {
@@ -152,6 +159,33 @@ impl fmt::Display for Ty {
                 }
             }
             return f.write_str(&parts.join(" | "));
+        }
+        // A **complement**: a pure tag union that omits only a handful of tags is what
+        // negation produces (`¬string`, the else-branch of a `(string? x)` guard), and
+        // spelling out the twenty-two tags it *does* admit tells the reader nothing —
+        // `expects string, got nil | bool | number | symbol | keyword | pair | vector |
+        // fn | macro | native | map | ref | pid | rope | socket | subprocess | table |
+        // bytes | set` was a real diagnostic. Say what it is instead: `not string`.
+        // Only for a genuinely small complement (at most three omitted tags, and far
+        // past half the universe), so an ordinary wide union still renders as a union.
+        let missing = UNIVERSE & !self.tags;
+        if self.is_flat()
+            && (1..=3).contains(&missing.count_ones())
+            && self.tags.count_ones() >= TAG_COUNT - 4
+        {
+            let omitted: Vec<&str> = ALL_TAGS
+                .iter()
+                .filter(|&&tag| missing & (1u32 << bit(tag)) != 0)
+                .map(|tag| tag.name())
+                .collect();
+            // Parenthesised, matching the `(not T)` annotation grammar exactly — and
+            // reading as a *name* inside a message ("got (not string)") rather than as
+            // a negated sentence ("got not string").
+            return if omitted.len() == 1 {
+                write!(f, "(not {})", omitted[0])
+            } else {
+                write!(f, "(not ({}))", omitted.join(" | "))
+            };
         }
         // Factor the `number` alias out of a *larger* pure-tag union: a type that admits
         // every `number` member (int, float, decimal) plus something else — e.g. the
