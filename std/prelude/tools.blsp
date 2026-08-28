@@ -1131,7 +1131,12 @@ load-time (`require`) guards."
 (defn- %require-await
   (key n)
   (cond
-    (contains? *features* key) key
+    ;; `%registry-member?`, NOT `contains?`: the latter reads the per-process global inline
+    ;; cache, which can miss a racing loader's `provide` — `require-one` says exactly that
+    ;; twenty lines below and bypasses it for the same reason, while this loop polled the
+    ;; cached read. A waiter whose cache stays stale sleeps its whole budget and then
+    ;; force-loads a module that was ready all along, which is both a stall and a double load.
+    (%registry-member? '*features* key) key
     (> n 0) (do (sleep 5) (%require-await key (dec n)))
     else (%require-force key)))
 
