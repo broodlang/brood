@@ -5973,3 +5973,76 @@ something that isn't there; it now distinguishes them.
 against the pre-change baseline), 628 Rust lib tests, the zero-warning checker gate, `nest
 format --check`, `cargo fmt --all --check`, and clippy `--all-targets --all-features` all
 green.
+
+
+### `math/max`/`math/min` get a two-argument arm — `collatz` −38.2%, and nothing in the kernel changed
+
+The lever the isolation pointed at, taken. `max` and `min` were single-clause `(& xs)` over
+`(apply %max xs)`; they now carry a two-argument arm as well:
+
+```lisp
+(defn max "…"
+  ((a b) (%max a b))
+  ((& xs) (apply %max xs)))
+```
+
+**The capability was already there, which is the pleasant part.** `docs/language.md` guarantees an
+arity arm "binds its params *directly* (no rest-list), so it's as cheap as a single-clause fn —
+this is how the prelude's variadic `+`/`-`/`<`/`=` stay fast and stay Brood", and `<=`'s own
+comment records the mechanism: its 2-arg body is spelled `(%le a b)` rather than
+`(not (%lt b a))` "so the ADR-069 thin-wrapper elision reaches it". `math/max`/`math/min` had
+simply never been given the treatment their prelude neighbours got. So no multi-arity dispatch had
+to be built — CLAUDE.md's prescribed lever turned out to be *already implemented and unused here*.
+
+`make ab` against the parent, best-of-11, `--floor`:
+
+| row | base | new | delta | floor | verdict |
+|---|---|---|---|---|---|
+| `collatz` | 228 ms | 141 ms | **−38.2%** | 0.4% | improved |
+| `latency` | 4743 ms | 4589 ms | −3.2% | 2.4% | noise, same direction (the other `math/min` row) |
+| `loop`, `fib`, `primes`, `sort`, `json` | — | — | within ±1.4% | — | flat |
+
+The qualified call is now indistinguishable from the primitive — 139 ms against a `%max`-direct
+control of 141 and an all-primitives bound of 140, from 223 — and `math/max` no longer appears as a
+lowered arm at all, because it is elided into its caller exactly as `math/rem` is.
+
+**Guarded and sabotage-verified.** `tests/math_test.blsp` pins the 2-arg arm separately from the
+variadic path: equal args, negatives, mixed int/float, and explicit 2-arg-vs-variadic agreement.
+Breaking one assertion reddens the suite and names it (5151 in-language tests, 1 failed). Pinning
+the 2-arg case on its own matters because a wrong arm leaves every pre-existing many-arg test green
+while changing the answer at the arity everyone actually calls.
+
+**Left alone on purpose:** `bytes/concat` and `hash-map` are the only other single-clause
+`(& rest)` wrappers over an `apply` in `std/`. Neither is shown to be hot, and adding arms on
+speculation is how a tree fills up with changes nobody can attach a measurement to.
+
+### Re-profiled the call path before starting the call-convention work — one claim confirmed, one withdrawn
+
+`perf` is unusable on this box (`perf_event_paranoid: 4`), so this used brood's own counters. The
+method that made them trustworthy is worth stating, because the first pass was wrong: **scope with
+`perf/measure`, then size-sweep and keep only the counters whose ratio tracks the work.**
+
+At whole-process scope, `pipeline` reported `alloc` and both call-IC counters *identical* between a
+1× and a 10× run while `env-get` scaled 8× — every interesting counter was boot's, not the row's.
+And `hof-decline-queued` at process scope reads like "the HOF fast path is declined on 96% of
+activations", which is a striking and completely wrong conclusion: scoped and swept, it is a fixed
+~33k warm-up cost that does not grow with the work at all. I nearly wrote it up as the finding.
+
+**`pipeline` — the "allocation churn dominates" claim is withdrawn.** `alloc` is **15 and flat**
+across a 10× sweep. `alloc_slot!` is the single macro behind `alloc_pair`/`alloc_vector`/
+`alloc_map`/`alloc_closure` and the rest, so that is all LOCAL heap allocation: the lazy
+`lfilter`/`lmap` form really does stream without allocating per element, which is what it exists
+for. What scales is **1.48 `jit-link-done` and 1.40 `env-get` per element** — the call path. The
+entry's other half ("~50% call plumbing") stands.
+
+**`bintree` — confirmed, not corrected.** 4,095 allocations per iteration is exactly 2¹²−1, one per
+node; 15,772 links per iteration is **3.85 per node**. That is an independent confirmation of the
+entry's "~77 ns per node over four non-tail calls" from a counter rather than a stopwatch, so the
+call-convention work is aimed at the right row. Note `vm-apply`/`env-get`/`prim2-inline` read
+*fixed* here — the arm is native, so its iterations stop being counted while its allocations do
+not, which is the documented `:alloc-bound` caveat and the reason not to read those columns.
+
+Full tables in [compute-frontier.md](compute-frontier.md) §2c. Also: `make perf-brood` overwrites
+the same binary path as `make release-brood`, so it was rebuilt afterwards and the "compiled out"
+hint checked — timing anything against the counter build charges the change for atomics it never
+introduced.
