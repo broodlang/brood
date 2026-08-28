@@ -5626,3 +5626,47 @@ survives both the unpinned and the interleaved check, so it is not the pinning a
 drift. Not bisected: that row's absolute numbers move ~3% between measurement *sessions* (the same
 binary read 90 ms in one interleaved pair and 93 ms in the next), which is enough to swamp a 3%
 per-step bisect. The entry says to use same-session interleaved pairs or not to bother.
+
+## 2026-08-28 — reviewing the day's 45 commits: a guard wrong in both directions, and two messages that showed the plumbing
+
+Reviewed today's 45 commits (208 files, ~15.6k insertions) by risk and by probing rather than
+by reading diffs. Three things.
+
+**1. ADR-278's `defmulti` guard was wrong in both directions at once.** `(defmulti f :-> nil)`
+was rejected though `nil` is a legal return type, and `(defmulti f :commutative :->)` — a
+dangling arrow — was accepted silently. One root cause: the guard tested `(nil? ret)` to mean
+"no return type given", but **absent is not nil**; and because it also demanded
+`(<= (count opts) 0)` it only fired when the arrow was the *first* option, so an algebra in
+front of a typo let it through, discarding the declaration the author was reaching for.
+
+The sharp part is that `%register-multi` was already written correctly — it takes the return
+as `& more` with a docstring saying "absent must be distinguishable from an explicitly
+declared nil" — and the macro defeated it by always passing a third argument, after which both
+checker-side readers had to treat a nil as "undeclared" to compensate. Three layers, and the
+careful one lost. Fixed all three; `:-> nil` is now genuinely enforced. (Landed concurrently
+as `0ac9ff37`; the merge came out coherent, re-verified against the merged binary.)
+
+**2. A record name could not be written as a type.** `(sig area (circle -> float))` warned
+"unknown type `circle`" about a type the checker held in `*record-ids*` all along — and
+`defrecord` already emits one in its own constructor sig. Sealed ability names have resolved
+since ADR-181; a record is the more obvious case, and ADR-259 turning unknown names into
+*reported* warnings made the gap something every user meets writing the obvious thing. I first
+declined this as a "power feature" under ADR-011, which was wrong: it is not a knob, it is an
+existing type that could not be named. See the ADR-181 amendments.
+
+**3. And then the message showed the plumbing.** `expects {__id__: :t/circle, ...}, got
+{__id__: :t/square, ...}` renders the representation twice over. It now reads `expects
+t/circle, got t/square` — the spelling a `sig` takes — with refinements kept
+(`t/pt{x: 7}`) and non-nominal maps untouched. Two of my own tests and one pre-existing one
+asserted on the `__id__` marker as a proxy for "the identity is named"; all three now pin the
+user-visible rendering instead, which is the better assertion.
+
+**Also re-verified, because a default flipped underneath the day's testing:** ADR-281 turned
+the stdlib image ON by default, so every green run before it described a configuration that is
+no longer shipped. Re-swept: 207/207 `.blsp` files under the new default, and KI-72's own
+repro — 12 parallel `autoload_race` copies — finishes in **2 s** against the 90 s cap it used
+to hang past. `BROOD_IMAGE_TRACE=1` confirms the image path is genuinely exercised rather than
+merely configured.
+
+218/218 `.blsp` test files, 626 Rust lib tests, the zero-warning checker gate, `nest format
+--check`, and clippy `--all-targets --all-features` all green.

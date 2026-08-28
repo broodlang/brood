@@ -16,6 +16,29 @@ fn excluded_of<T: Ord, F: Fn(&T) -> String>(
     out
 }
 
+/// The record identities a shape names — `:ns/circle` → `ns/circle`, a union of them joined
+/// by the caller — or `None` when the shape is not nominal: no `__id__` at all (an ordinary
+/// map type), or an `__id__` that is not a positively-enumerated set of keyword literals (a
+/// bare `keyword`, or a negatively-stated set, which cannot be listed).
+///
+/// The leading colon is dropped because the result is meant to be the spelling you would
+/// write in a `sig` — `(sig area (shapes/circle -> float))` — not the keyword the runtime
+/// stores. The FULL path is kept rather than the last segment: two modules may each define
+/// `pt`, and "expects pt, got pt" would be worse than no message at all.
+fn nominal_ids(fields: &std::collections::BTreeMap<Symbol, (Ty, bool)>) -> Option<Vec<String>> {
+    let (id_ty, _) = fields.get(&value::intern("__id__"))?;
+    let members = id_ty.lit.as_ref()?.members()?;
+    if members.is_empty() {
+        return None;
+    }
+    Some(
+        members
+            .iter()
+            .map(|s| value::symbol_name_ref(*s).to_string())
+            .collect(),
+    )
+}
+
 impl fmt::Display for Ty {
     /// A readable rendering for diagnostics: the named lattice points where they
     /// apply (`never`, `any`, `number`, `list`), a single tag by its `type-of`
@@ -78,6 +101,32 @@ impl fmt::Display for Ty {
         // by spelling for a stable rendering.
         if let Some(fields) = self.record_fields() {
             if self.tags == MAP_BIT {
+                // A record's NAME is its type. `{__id__: :shapes/circle, ...}` renders the
+                // REPRESENTATION: `:__id__` is how nominal identity is *carried*, not
+                // something anyone writes, so a mismatch read
+                //   expects {__id__: :t/circle, ...}, got {__id__: :t/square, ...}
+                // — which buries the one word that matters, twice, behind punctuation. Lead
+                // with the identity in the spelling a `sig` takes (`expects t/circle, got
+                // t/square`), and keep only the fields that say something the declaration
+                // does not, so a refined shape still shows its refinement.
+                if let Some(names) = nominal_ids(fields) {
+                    let mut refined: Vec<String> = fields
+                        .iter()
+                        .filter(|(name, (ty, _))| {
+                            value::symbol_name_ref(**name) != "__id__" && *ty != Ty::ANY
+                        })
+                        .map(|(name, (ty, required))| {
+                            let mark = if *required { "" } else { "?" };
+                            format!("{}{mark}: {ty}", value::symbol_name_ref(*name))
+                        })
+                        .collect();
+                    refined.sort();
+                    let joined = names.join(" | ");
+                    if refined.is_empty() {
+                        return write!(f, "{joined}");
+                    }
+                    return write!(f, "{joined}{{{}}}", refined.join(", "));
+                }
                 let mut parts: Vec<String> = fields
                     .iter()
                     .map(|(name, (ty, required))| {

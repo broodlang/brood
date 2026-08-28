@@ -165,3 +165,30 @@
              (assert= (point-y p) 22)
              (is (record? p))
              (assert= (record-id p) :record-test/point)))))))
+
+;; ---- a record name is a type (in a `sig`) -----------------------------------
+;;
+;; A record is the language's nominal type and `defrecord` already emits one in its own
+;; constructor sig, but the NAME could not be written in type position — the natural
+;; `(sig area (circle -> float))` warned "unknown type `circle`" about a type the checker
+;; held in `*record-ids*` all along. Sealed ability names have resolved since ADR-181.
+
+(defn- rt-warnings
+  (src)
+  (map (fn (d) (get d :message)) (reflect/check-string-structured src)))
+
+(describe "a record name in type position"
+  (test "resolves, bare and qualified, and admits a record carrying extra fields"
+    (assert= (rt-warnings "(defmodule u) (defrecord circle (r)) (sig area (circle -> float)) (defn area (c) (get c :r)) (defn ok () (area (circle 2))) (defn q () (area (assoc (circle 2) :z 3)))")
+      (list)))
+  (test "rejects a different record and a non-record"
+    (let (w (rt-warnings "(defmodule u) (defrecord circle (r)) (defrecord square (s)) (sig area (circle -> float)) (defn area (c) (get c :r)) (defn bad () (area (square 2)))"))
+      (is (not (empty? w)))
+      (is (any? (fn (m) (includes? m "argument 1")) w))))
+  (test "a base type name still outranks a record that claimed it"
+    ;; In a type EXPRESSION `int` is the int kind, even with a root record named `int`.
+    (assert= (rt-warnings "(defrecord int (n)) (sig f (int -> int)) (defn f (n) (+ n 1)) (defn ok () (f 42))")
+      (list)))
+  (test "an ambiguous bare name declines rather than guessing"
+    (let (w (rt-warnings "(defmodule a) (defrecord pt (x y)) (defmodule b) (defrecord pt (m n)) (sig amb (pt -> int)) (defn amb (p) 1)"))
+      (is (any? (fn (m) (includes? m "unknown type")) w)))))

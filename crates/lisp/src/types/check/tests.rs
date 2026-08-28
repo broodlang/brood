@@ -257,6 +257,83 @@ fn sealed_ability_complete_is_silent() {
 }
 
 #[test]
+fn a_record_name_is_a_type_in_a_sig() {
+    // A record is the language's nominal type and `defrecord` already emits one in its own
+    // constructor sig — but the NAME could not be written in type position, so the natural
+    // spelling warned "unknown type `circle`" about a type the checker held in
+    // `*record-ids*` all along. Sealed ability names have resolved since ADR-181; a record
+    // is the more obvious case. Bare and qualified spellings both resolve.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord circle (r))\n\
+         (sig area (circle -> float))\n\
+         (defn area (c) (get c :r))\n\
+         (sig qual (t/circle -> float))\n\
+         (defn qual (c) (get c :r))\n\
+         (defn ok () (area (circle 2)))\n\
+         (defn okq () (qual (circle 2)))\n\
+         (defn wider () (area (assoc (circle 2) :z 3)))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("unknown type")), "{ws:?}");
+    // The shape is `:__id__`-only and OPEN, so a record carrying extra fields is still one.
+    assert!(!ws.iter().any(|w| w.contains("argument 1")), "{ws:?}");
+}
+
+#[test]
+fn a_record_type_rejects_a_different_record_and_a_non_record() {
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord circle (r))\n\
+         (defrecord square (s))\n\
+         (sig area (circle -> float))\n\
+         (defn area (c) (get c :r))\n\
+         (defn bad1 () (area (square 2)))\n\
+         (defn bad2 () (area 42))",
+    );
+    assert_eq!(
+        ws.iter().filter(|w| w.contains("argument 1")).count(),
+        2,
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_base_type_name_outranks_a_record_that_claimed_it() {
+    // In a TYPE EXPRESSION `int` means the int kind, even where a root-namespace record has
+    // taken the id `:int`. That is the opposite precedence to `sealed_members_ty` — there
+    // the members are `impl` dispatch keys, here they are type syntax.
+    let ws = file_warnings(
+        "\
+         (defrecord int (n))\n\
+         (sig f (int -> int))\n\
+         (defn f (n) (+ n 1))\n\
+         (defn ok () (f 42))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("argument 1")), "{ws:?}");
+}
+
+#[test]
+fn an_ambiguous_bare_record_name_declines_rather_than_guessing() {
+    // Two modules may each define `pt`. Choosing between them would produce a WRONG type
+    // where declining produces a missing one — the ADR-181 "sound, not complete" rule.
+    let ws = file_warnings(
+        "\
+         (defmodule a)\n\
+         (defrecord pt (x y))\n\
+         (defmodule b)\n\
+         (defrecord pt (m n))\n\
+         (sig amb (pt -> int))\n\
+         (defn amb (p) 1)",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("unknown type `pt`")),
+        "{ws:?}"
+    );
+}
+
+#[test]
 fn sealed_over_builtin_kinds_accepts_its_own_members() {
     // `impl` dispatches on built-in kinds as well as records, so `:sealed [:int :float]` is
     // legal — but every member used to be turned into a record shape `%{__id__: :int}`, which
@@ -318,9 +395,11 @@ fn sealed_over_records_keeps_its_id_precision() {
          (defn good () (total (circle 2)))\n\
          (defn bad () (total 42))",
     );
+    // Pin the RENDERING, not the internal `:__id__` marker: a record type now prints as the
+    // name you would write in a `sig`, never as the shape that carries its identity.
     assert!(
         ws.iter()
-            .any(|w| w.contains("argument 1") && w.contains("__id__")),
+            .any(|w| w.contains("argument 1") && w.contains("t/circle | t/rect")),
         "{ws:?}"
     );
     assert_eq!(
@@ -364,7 +443,7 @@ fn sealed_member_colliding_with_a_kind_name_still_rejects_a_non_member() {
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("argument 1") && w.contains("__id__")),
+            .any(|w| w.contains("argument 1") && w.contains("ratio")),
         "{ws:?}"
     );
 }

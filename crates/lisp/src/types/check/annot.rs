@@ -186,6 +186,47 @@ pub(super) fn sealed_members_ty(members: &[String]) -> Option<Ty> {
     }
 }
 
+/// A **record** name as a type: `(sig area (circle -> float))`, `:-> circle`.
+///
+/// A record is the language's nominal type, and `defrecord` already emits one in its own
+/// constructor sig (`(any any -> (record :__id__ :ns/pt …))`) — but the *name* could not be
+/// written in a type position, so the natural spelling warned "unknown type `pt`" about a
+/// type the checker held in `*record-ids*` all along. Sealed abilities have resolved this way
+/// since ADR-181; a record is the more obvious case.
+///
+/// The shape is the nominal `:__id__` singleton and nothing else, **open** — the same
+/// denotation `ability_type` gives a sealed member, and for the same reason: a real
+/// `(pt 1 2)` carries `:x`/`:y` beside `:__id__`, and `(assoc (pt 1 2) :z 3)` is still a
+/// `pt`, so pinning the fields would describe no value anyone passes.
+///
+/// A **qualified** spelling (`shapes/circle`) hits the registry directly. A **bare** one is
+/// how you name a record inside its own module, and is accepted only when exactly one
+/// registered record ends in that segment: two modules may each define `pt`, and choosing
+/// between them would produce a *wrong* type where declining produces a missing one. Sound,
+/// not complete — the ADR-181 discipline.
+fn record_ty(name: &str) -> Option<Ty> {
+    RECORD_IDS.with(|m| {
+        let ids = m.borrow();
+        let id = if ids.contains(name) {
+            name.to_string()
+        } else {
+            let suffix = format!("/{name}");
+            let mut hits = ids.iter().filter(|id| id.ends_with(&suffix));
+            let first = hits.next()?.clone();
+            if hits.next().is_some() {
+                return None; // ambiguous across modules — decline rather than guess
+            }
+            first
+        };
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            value::intern("__id__"),
+            (Ty::keyword_lit(value::intern(&id)), true),
+        );
+        Some(Ty::record_of_open(fields))
+    })
+}
+
 /// The lattice point a base type *name* denotes — the spellings `type-of`
 /// returns, plus the named unions (`number` = int∪float, `list` = nil∪pair,
 /// `fn` = fn∪native). `None` for an unknown name, so an unrecognised annotation
@@ -253,10 +294,18 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             if name.starts_with('?') {
                 return Some(Ty::ANY);
             }
-            // A base type name wins; otherwise a bare **sealed ability** name resolves to
-            // the union of its members' record shapes (ADR-181) — `(sig f (Shape -> …))`,
-            // `:-> Shape`. An unknown symbol still yields `None` (dropped, never guessed).
-            base_ty(&name).or_else(|| ability_type(&name))
+            // A base type name wins; then a bare **sealed ability** name (ADR-181) — the
+            // union of its members' record shapes — then a **record** name. An unknown
+            // symbol still yields `None` (dropped, never guessed).
+            //
+            // Base types win the tie deliberately: in a *type expression* `int` means the
+            // int kind, even where a root-namespace record has claimed the id `:int`. That
+            // is the opposite precedence to `sealed_members_ty`, and for the opposite
+            // reason — there the members are `impl` dispatch keys, here they are type
+            // syntax.
+            base_ty(&name)
+                .or_else(|| ability_type(&name))
+                .or_else(|| record_ty(&name))
         }
         // `nil` reads as the literal `Value::Nil`, not a symbol — so a type-expr
         // like `(or int nil)` lands here, not in `base_ty`.
