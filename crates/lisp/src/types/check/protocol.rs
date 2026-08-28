@@ -1660,13 +1660,13 @@ fn read_record_ids_registry(heap: &Heap, out: &mut HashSet<String>) {
 /// makes the direction irrelevant). `None` for a non-operator head.
 fn operator_multimethod(head: value::Symbol) -> Option<&'static str> {
     Some(if value::symbol_is(head, "+") {
-        "num-add"
+        "num/add"
     } else if value::symbol_is(head, "-") {
-        "num-sub"
+        "num/sub"
     } else if value::symbol_is(head, "*") {
-        "num-mul"
+        "num/mul"
     } else if value::symbol_is(head, "/") {
-        "num-div"
+        "num/div"
     } else if value::symbol_is(head, "<")
         || value::symbol_is(head, "<=")
         || value::symbol_is(head, ">")

@@ -118,7 +118,7 @@
 //! All of it reuses the one `is_unbound` predicate, so head and operand checks
 //! can't drift.
 
-pub(crate) mod annot;
+pub mod annot;
 mod ctx;
 pub(super) mod deps;
 mod exhaustive;
@@ -873,6 +873,15 @@ pub fn arg_ty_at(
     walk::arm_arg_ty_query(line, col, arg_index);
     let _ = check_file(heap, forms);
     walk::take_arg_ty_query()
+}
+
+/// The checker's static type for a **closed expression** — the entry point a test or
+/// tool needs to ask "what does the checker think this value is?" without running a
+/// whole file check. For a literal the answer is exact, which is what makes it usable
+/// as one side of an agreement check against the runtime contract
+/// (`tests/type_grammar_agreement.rs`).
+pub fn expr_ty_of(heap: &Heap, form: Value) -> Option<Ty> {
+    infer::expr_ty(heap, form, &Ctx::default())
 }
 
 /// What a file's functions are, as the checker sees them — the data behind the LSP's

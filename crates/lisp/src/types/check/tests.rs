@@ -5143,13 +5143,41 @@ fn a_callback_whose_parameter_merely_widens_is_silent() {
 }
 
 #[test]
-fn a_callback_result_mismatch_is_never_flagged() {
-    // Results are over-approximated by inference, so comparing them would
-    // false-positive at every call site — the check is arguments-only.
+fn a_callback_whose_result_cannot_be_used_is_flagged() {
+    // Comparing results by *subtyping* would false-positive at every call site (an
+    // over-approximated return is not a subtype of a specific one). Disjointness is
+    // sound in the same way the parameter direction is: the inferred return is a
+    // superset of the truth, so if the superset shares nothing with what the caller
+    // does with it, neither does the truth.
     let ws = file_warnings(
         "(sig g ((int -> string) -> int))\n(defn g (f) 0)\n(defn h (n) (+ n 1))\n(defn c () (g h))",
     );
-    assert!(!ws.iter().any(|w| w.contains("callback handed")), "{ws:?}");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("callback whose result is used as string")
+                && w.contains("h returns")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_callback_whose_result_merely_widens_is_silent() {
+    // The over-approximation must not warn: `number` overlaps `int`, and an unknown
+    // return (`any`) overlaps everything.
+    let ws = file_warnings(
+        "(sig g ((int -> int) -> int))\n(defn g (f) 0)\n(defn h (n) (+ n 1))\n(defn c () (g h))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("callback whose result")),
+        "{ws:?}"
+    );
+    let ws = file_warnings(
+        "(sig g ((int -> string) -> int))\n(defn g (f) 0)\n(defn h (n) n)\n(defn c () (g h))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("callback whose result")),
+        "{ws:?}"
+    );
 }
 
 #[test]

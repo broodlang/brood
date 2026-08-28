@@ -352,7 +352,7 @@ fn is_record(heap: &Heap, v: Value) -> bool {
 }
 
 /// Dispatch an arithmetic operator to the `Num` MULTIMETHOD (ADR-179) when a record is an
-/// operand: `+`/`-`/`*`/`/` → `num-add`/`num-sub`/`num-mul`/`num-div`, each dispatching on
+/// operand: `+`/`-`/`*`/`/` → `num/add`/`num/sub`/`num/mul`/`num/div`, each dispatching on
 /// BOTH operand identities. Reached ONLY on the cold fallback — the JIT/VM inlines int+int
 /// and float+float and never calls `%add` for them, so the numeric hot path is byte-for-byte
 /// untouched (a Brood `(record? a)` branch in `+` measured ~195×). A pair with no method
@@ -360,10 +360,10 @@ fn is_record(heap: &Heap, v: Value) -> bool {
 /// silently coerced.
 fn num_multi_dispatch(heap: &mut Heap, who: &str, a: Value, b: Value) -> LispResult {
     let op = match who {
-        "+" => "num-add",
-        "-" => "num-sub",
-        "*" => "num-mul",
-        "/" => "num-div",
+        "+" => "num/add",
+        "-" => "num/sub",
+        "*" => "num/mul",
+        "/" => "num/div",
         _ => unreachable!("num_multi_dispatch: {who} is not a Num operator"),
     };
     let genv = heap.global();
@@ -443,7 +443,7 @@ pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 
 pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "/")?;
-    // A record operand (either position) dispatches the `Num` multimethod (`num-div`, on both
+    // A record operand (either position) dispatches the `Num` multimethod (`num/div`, on both
     // operands); the `is_record` check is cheap, and int/float division is JIT-inlined and
     // never reaches here.
     if is_record(heap, a) || is_record(heap, b) {

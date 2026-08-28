@@ -1537,6 +1537,34 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                                 );
                                 out.push((arg_pos(heap, arg, form), msg));
                             }
+                            // …and the **result**. This was left out on the grounds that
+                            // an inferred return over-approximates, so comparing it by
+                            // *subtyping* would false-positive at every call site — a
+                            // `(any) -> any` callback is not a subtype of `(int) -> int`
+                            // and is perfectly valid. Disjointness has no such problem
+                            // and is sound in the same way the parameter direction is:
+                            // the inferred return is a superset of the truth, so if the
+                            // superset shares nothing with what the caller will do with
+                            // it, neither does the truth.
+                            let (wants, gives) = (&expected.ret, &cb.ret);
+                            if !wants.is_any()
+                                && !gives.is_any()
+                                && !wants.is_never()
+                                && !gives.is_never()
+                                && wants.is_disjoint(gives)
+                                && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+                            {
+                                let msg = format!(
+                                    "{}: argument {} is a callback whose result is used as \
+                                     {}, but {} returns {}",
+                                    name_of(s),
+                                    i + 1,
+                                    wants,
+                                    callback_desc(arg),
+                                    gives,
+                                );
+                                out.push((arg_pos(heap, arg, form), msg));
+                            }
                         }
                     }
                 }
