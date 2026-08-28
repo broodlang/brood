@@ -5369,3 +5369,26 @@ source-order parity is unavailable because privates have no def-site. The comple
 atomic section install, and the KI entry now carries the GC trap waiting in the obvious version of
 it: buffering the built values in a Rust `Vec` leaves them unrooted while `from_message` keeps
 allocating.
+
+**The win now unblocked, measured on this machine** (best-of-7 whole invocations, `%now-ns`
+around a single `require-one`, which is the right shape here because module load is exactly what
+a short-lived run pays):
+
+| module | image OFF | image ON | speedup |
+|---|---|---|---|
+| `http` | 12.93 ms | 5.98 ms | **2.2×** |
+| `json` | 8.29 ms | 3.97 ms | **2.1×** |
+| `regex` | 4.90 ms | 1.87 ms | **2.6×** |
+| `datetime` | 4.02 ms | 2.75 ms | 1.5× |
+| `seq` | 3.66 ms | 2.27 ms | 1.6× |
+| `string` | 2 µs | 2 µs | — (already loaded: `io/puts` pulls `string` in before the timer starts, so this row measures nothing — kept as the reminder to check what your probe has already loaded) |
+
+Absolutes run higher than the published FRONTIER figures on this box and the ratios are smaller
+(FRONTIER has `json` 6.5 → 1.7 ms); read the ratios, not the absolutes. Either way this is 1.5–2.6×
+on the cost every short-lived invocation pays — a `nest check`, a one-shot script, a handler on a
+freshly spawned process — which is why the image is the widest lever left on startup and why the
+public→public residual is worth closing rather than working around.
+
+**Deliberately not attempted in this session:** the atomic section install. It is the complete fix
+and it is kernel work with a live use-after-GC hazard in its obvious form (see the KI entry), so
+it wants review rather than an unsupervised landing.
