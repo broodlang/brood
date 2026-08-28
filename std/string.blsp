@@ -49,6 +49,7 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
   (if (= (string/length s) 0)
     s
     (str (string/upper (string/substring s 0 1)) (string/lower (string/substring s 1)))))
+(sig capitalize (string -> any))
 
 ;; ---- char access & content conversions --------------------------------------
 
@@ -57,6 +58,7 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
 
     (string/char-at \"abc\" 1)   → \"b\""
   (string/substring s i (inc i)))
+(sig char-at (string int -> string))
 
 (defn ->list (s)
   "The characters of `s` as a list of 1-char strings.
@@ -68,6 +70,7 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
   ;; code-point vector O(n^2) to build (it defeated the json/base64 char-indexing
   ;; rewrites; see docs/devlog.md).
   (string/split s ""))
+(sig ->list (string -> list))
 
 (defn list-> (cs)
   "Concatenate a list of strings (e.g. from `string/->list`) into one string.
@@ -83,18 +86,21 @@ inverse of the `string/->codepoints` primitive."
   ;; concatenated N of those variadically — for a shape every text parser in std/ uses to
   ;; get back from the code vector `string/->codepoints` handed it.
   (%codepoints->string cs))
+(sig codepoints-> (seqable -> string))
 
 (defn ->bytes (s)
   "Encode string `s` as a bytes value — its UTF-8 bytes. Inverse of `string/bytes->`.
 
     (string/->bytes \"hi\")  → #b\"hi\""
   (%string->utf8-bytes s))
+(sig ->bytes (string -> bytes))
 
 (defn bytes-> (b)
   "Decode a bytes value of UTF-8 bytes back to a string. Inverse of `string/->bytes`.
 
     (string/bytes-> #b\"hi\")   → \"hi\""
   (%utf8-bytes->string b))
+(sig bytes-> (bytes -> string))
 
 ;; ---- join -------------------------------------------------------------------
 
@@ -168,6 +174,7 @@ incremental search rides on."
     (string/starts-with? \"hello\" \"\")     → true"
   (let (n (string/length prefix))
     (and (>= (string/length s) n) (= (string/substring s 0 n) prefix))))
+(sig starts-with? (string string -> bool))
 
 (defn ends-with? (s suffix)
   "Does string `s` end with `suffix`?
@@ -176,6 +183,7 @@ incremental search rides on."
     (string/ends-with? \"hello\" \"he\")   → false"
   (let (sl (string/length s) ql (string/length suffix))
     (and (>= sl ql) (= (string/substring s (- sl ql) sl) suffix))))
+(sig ends-with? (string string -> bool))
 
 ;; ---- whitespace: trimming & blank test --------------------------------------
 
@@ -188,6 +196,7 @@ incremental search rides on."
     (string/blank? \" a \")  → false"
   (let (n (string/length s))
     (cond (= n 0) true (whitespace? (char-at s 0)) (blank? (string/substring s 1 n)) else false)))
+(sig blank? (string -> bool))
 
 (defn- triml-from
   (s i n)
@@ -197,6 +206,7 @@ incremental search rides on."
 
     (string/triml \"  a\")   → \"a\""
   (triml-from s 0 (string/length s)))
+(sig triml (string -> string))
 
 (defn- trimr-to
   (s n)
@@ -208,12 +218,14 @@ incremental search rides on."
 
     (string/trimr \"a  \")   → \"a\""
   (trimr-to s (string/length s)))
+(sig trimr (string -> string))
 
 (defn trim (s)
   "Remove leading and trailing whitespace from `s`.
 
     (string/trim \"  a \")   → \"a\""
   (triml (trimr s)))
+(sig trim (string -> string))
 
 ;; ---- padding & repetition ---------------------------------------------------
 ;; Column formatting for tabular/console output. `pad-*` left unchanged when the
@@ -257,6 +269,7 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
         words (filter (fn (w) (not (= w ""))) (string/split flat " "))
         [cur done] (fold (fn (acc w) (fill-pack acc w width)) ["" ()] words))
     (join "\n" (reverse (if (= cur "") done (cons cur done))))))
+(sig fill (string any -> any))
 
 ;; (restored: this is string's repeat, not the sequence one)
 (defn repeat (s n)

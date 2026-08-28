@@ -222,6 +222,7 @@ milliseconds."
 
     (datetime/format (datetime/parse-date \"2026-08-27\") \"%Y/%m/%d\")   → \"2026/08/27\""
   (dt-fmt-loop dt fmt 0 (string/length fmt) ""))
+(sig format (any string -> any))
 
 ;; ---- parsing ----------------------------------------------------------------
 
@@ -356,6 +357,7 @@ nil. Hour 0–23, minute and second 0–59; anything else is nil."
   (and (= (math/rem y 4) 0)
     (or (not= (math/rem y 100) 0)
       (= (math/rem y 400) 0))))
+(sig leap-year? (int -> bool))
 
 (defn days-in-month (y m)
   "Number of days in month `m` (1–12) of year `y`."

@@ -35,7 +35,7 @@
 (defn- selection-labels
   (units)
   (fold (fn (acc unit)
-          (append acc (map (fn (t) (label (second unit) (first t))) (seq/third unit))))
+          (append acc (map (fn (t) (label (second unit) (first t))) (third unit))))
     nil units))
 
 (defn- selection-select (spec) (selection-labels (test/test-select-units selection-units spec)))

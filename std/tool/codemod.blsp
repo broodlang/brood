@@ -39,10 +39,12 @@
           olen
           (inc i)
           (cons (string/substring text from (inc i)) parts))))))
+(sig tr-loop (string any any any int any -> any))
 
 (defn token-replace (text old new)
   "`text` with every whole-token `old` replaced by `new` (substrings left alone)."
   (apply str (reverse (tr-loop text old new (string/length old) 0 nil))))
+(sig token-replace (any string any -> any))
 
 (defn- apply-pairs
   (text pairs)
@@ -80,6 +82,7 @@
   (rename (filter (fn (p) (= (count p) 2))
             (map (fn (l) (string/split (string/trim l) " "))
               (filter (fn (l) (not (string/blank? l))) (string/split (file/slurp path) "\n"))))))
+(sig rename-from-file (string -> int))
 
 ;; ---- CST-backed rename (context-aware) ---------------------------------------
 ;; `token-replace` above is boundary-aware but CONTEXT-blind: it rewrites a name
@@ -103,7 +106,7 @@
 
 (def- *def-heads*
   ["defn"
-    "defn-" "def" "def-" "defmacro" "defdyn" "defrecord" "defability" "defmodule" "defprocess"
+    "defn-" "def" "def-" "defmacro" "defdyn" "defrecord" "defability" "defmodule" "defserver"
     "defbehaviour" "defalias"])
 
 ;; Node shapes `parse-source` produces (all vectors):
@@ -295,6 +298,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
       (opener? c) (scan-close text (inc i) 1)
       (= c "\"") (skip-str text (inc i))
       else (atom-end text i))))
+(sig read-one (string int -> any))
 
 (defn- swap-loop
   (text old new from parts)
@@ -326,6 +330,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
                         (string/substring text a1s a1e)
                         ")")
                   (cons (string/substring text from i) parts))))))))))
+(sig swap-loop (string any any int any -> any))
 
 (defn swap2 (old new)
   "Rewrite every 2-arg call `(old A B)` to `(new B A)` across the project's own .blsp

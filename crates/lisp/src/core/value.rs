@@ -1180,6 +1180,23 @@ pub fn gensym(prefix: &str) -> Value {
     sym(&format!("{}__{}", prefix, n))
 }
 
+/// Was this symbol minted by [`gensym`] — i.e. is it `<prefix>__<digits>`?
+///
+/// A gensym is invisible to the author by construction: nothing anyone wrote refers to
+/// it, so a diagnostic naming one is never actionable. The type checker uses this to
+/// decline inferring anything about a macro's generated temporaries — the linear-map
+/// rewrite defines one to hold a fold's result, and typing it made the checker flag a
+/// branch of the rewrite's own wrapper that cannot run with that value.
+pub fn is_gensym(sym: Symbol) -> bool {
+    let name = symbol_name(sym);
+    match name.rsplit_once("__") {
+        Some((prefix, digits)) => {
+            !prefix.is_empty() && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
 /// The gensym counter's current value — recorded into the boot cache so a
 /// cache-booted process can [`gensym_floor`] past every name the cached
 /// expansion minted.

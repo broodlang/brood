@@ -118,7 +118,7 @@
 //! All of it reuses the one `is_unbound` predicate, so head and operand checks
 //! can't drift.
 
-pub(crate) mod annot;
+pub mod annot;
 mod ctx;
 pub(super) mod deps;
 mod exhaustive;
@@ -142,7 +142,7 @@ use ctx::Ctx;
 use walk::{check_into, collect_all_syms, collect_def_names, list_items};
 
 /// True when `form` is a top-level `(require …)` call — the one form the
-/// checker pre-evaluates so a module's macros (e.g. `defprocess` from
+/// checker pre-evaluates so a module's macros (e.g. `defserver` from
 /// `std/proc/gen.blsp`) are resolvable for the rest of the file.
 fn is_require_form(heap: &Heap, form: Value) -> bool {
     if let Value::Pair(p) = form {
@@ -875,6 +875,15 @@ pub fn arg_ty_at(
     walk::take_arg_ty_query()
 }
 
+/// The checker's static type for a **closed expression** — the entry point a test or
+/// tool needs to ask "what does the checker think this value is?" without running a
+/// whole file check. For a literal the answer is exact, which is what makes it usable
+/// as one side of an agreement check against the runtime contract
+/// (`tests/type_grammar_agreement.rs`).
+pub fn expr_ty_of(heap: &Heap, form: Value) -> Option<Ty> {
+    infer::expr_ty(heap, form, &Ctx::default())
+}
+
 /// What a file's functions are, as the checker sees them — the data behind the LSP's
 /// **effective-type inlay hints** (`docs/lsp.md`).
 #[derive(Clone, Debug)]
@@ -930,18 +939,29 @@ fn capture_file_signatures(heap: &Heap, expanded: &[Value], ctx: &Ctx) {
         let Some(out) = slot.as_mut() else {
             return; // not armed — the ordinary checking path pays nothing
         };
-        for &form in expanded {
+        for form in top_level_defs(heap, expanded) {
             let Some((name, rhs)) = def_name_and_value(heap, form) else {
                 continue;
             };
-            // Only functions: a `(def x 5)` has a value type, not a signature.
-            if !walk::is_fn_value_form(heap, rhs) || ctx.is_file_macro(name) {
+            // Only functions: a `(def x 5)` has a value type, not a signature. And
+            // never a macro's generated temporary — nobody can write a `(sig …)` for a
+            // name they cannot refer to.
+            if !walk::is_fn_value_form(heap, rhs)
+                || ctx.is_file_macro(name)
+                || value::is_gensym(name)
+            {
                 continue;
             }
             let (sig, declared) = match ctx.declared_sig(name) {
                 Some(sig) => (sig, true),
                 None => match inferred_signature(ctx, name) {
-                    Some(sig) => (sig, false),
+                    // An inferred signature is a *fact about types*; it carries no
+                    // obligation to describe the definition's shape, and for a function
+                    // whose params the checker could not type at all it is bare
+                    // `(-> ret)`. Written into a file that way it declares a NULLARY
+                    // function, which ADR-259's Pass 2.85 then rejects as contradicting
+                    // its `defn` — so a suggestion must never be offered in that state.
+                    Some(sig) => (reconcile_arity(heap, rhs, sig), false),
                     None => continue,
                 },
             };
@@ -1011,7 +1031,7 @@ pub fn check_file_ext(
     // When a top-level form is `(require 'mod …)`, also *evaluate* it so the
     // module's macros and globals become resolvable for the rest of the file.
     // Otherwise the next form using a macro the module brought in
-    // (`defprocess`, `cast`, `!`, etc. from `std/proc/gen.blsp`) would expand as
+    // (`defserver`, `cast`, `!`, etc. from `std/proc/gen.blsp`) would expand as
     // an un-known head and trip the unbound-symbol diagnostic. `require` is
     // idempotent (it checks `*features*`), so a later real run re-evaluating
     // the same form is a no-op. Failures are swallowed: the checker is
@@ -1279,13 +1299,14 @@ pub fn check_file_ext(
             for &form in &expanded {
                 count_defs(heap, form, &mut def_count);
             }
-            let candidates: Vec<(Symbol, Value)> = expanded
-                .iter()
-                .filter_map(|&form| {
+            let candidates: Vec<(Symbol, Value)> = top_level_defs(heap, &expanded)
+                .into_iter()
+                .filter_map(|form| {
                     let (name, rhs) = def_name_and_value(heap, form)?;
                     (def_count.get(&name) == Some(&1)
                         && !ctx.is_file_macro(name)
                         && !value::is_dynamic(name)
+                        && !value::is_gensym(name)
                         && ctx.declared_sig(name).is_none())
                     .then_some((name, rhs))
                 })
@@ -1512,6 +1533,98 @@ pub fn check_file_ext(
 /// A `(def NAME RHS)` form → `(NAME, RHS)`. `None` for anything else — a
 /// non-`def` head, a `(defmacro …)` (which stays a special form, never expands to
 /// `def`), or a malformed def. Used by Gap A's undeclared-global type inference.
+/// A signature reshaped to the definition's actual parameter list, filling anything the
+/// inference did not type with `any`.
+///
+/// This is what makes a suggestion *writable*: the LSP's declare-sig action and
+/// `nest check --suggest-sigs` both hand a `(sig …)` to a human to paste, and one whose
+/// arity contradicts its `defn` is not a weaker suggestion — it is a broken one that the
+/// declaration checker rejects. `string/last-index-of (s needle &optional before)`
+/// inferred `(-> int)`; it now reads `(any any &optional any -> int)`, which says less
+/// about the parameters and the truth about the shape.
+fn reconcile_arity(heap: &Heap, value_form: Value, sig: Sig) -> Sig {
+    let Some(arity) = walk::fn_form_arity(heap, value_form) else {
+        return sig;
+    };
+    let required = arity.min;
+    // **Fill in, never overrule.** A multi-clause `defn` lowers to a single variadic
+    // `fn` over `match*` (ADR-226), so the *form's* arity says "any number of arguments"
+    // while the clause inference knows the real one — reshaping to the form would throw
+    // that away and offer `(...any) -> …`. So this only acts on the case it exists for:
+    // an inference that produced no parameters at all for a definition that has some.
+    if sig.params.len() >= required {
+        return sig;
+    }
+    let mut params: Vec<Ty> = (0..required)
+        .map(|i| sig.params.get(i).cloned().unwrap_or(Ty::ANY))
+        .collect();
+    let mut optional = sig.optional.clone();
+    let mut rest = sig.rest.clone();
+    match arity.max {
+        // Unbounded: the tail is a rest binder.
+        None => rest = rest.or(Some(Ty::ANY)),
+        Some(max) => {
+            let extra = max.saturating_sub(required);
+            while optional.len() < extra {
+                optional.push(Ty::ANY);
+            }
+        }
+    }
+    params.truncate(required);
+    Sig {
+        params,
+        optional,
+        rest,
+        ret: sig.ret,
+    }
+}
+
+/// The top-level definition forms of a file — each form as written, with the `(do …)`
+/// that `defn-`/`def-` expand to opened up one level.
+///
+/// `defn-`/`def-` (ADR-146) expand to `(do (def name …) (%mark-private 'name))`, so a
+/// pass reading `expanded` directly finds no definition at all for a **module-private**
+/// function — and most definitions in a real module are private (40 of
+/// `std/json.blsp`'s 42). A pass keyed on [`def_name_and_value`] therefore has to look
+/// inside, or it silently declines to infer anything about them and their call sites go
+/// unchecked.
+///
+/// **Only** that shape, identified by the `%mark-private` call it carries. Other macros
+/// emit a top-level `do` too, and opening those was tried and reverted — twice over:
+///
+/// - the linear-map rewrite wraps a fold's result in `(do (def linmap-out__N …) …)`, and
+///   typing that temporary made the checker flag a branch of the rewrite's own wrapper
+///   that cannot run with that value — a warning naming a symbol the author never wrote
+///   (caught live by `tests/linmap_soundness_test.blsp`); and
+/// - `defability`/`defimpl` define their ops inside one, and an *inferred* signature for
+///   an op displaces the `:-> T` return the ability declares, so the return stopped
+///   flowing to call sites (`ability_op_return_type_flows_to_call_site`).
+///
+/// Both consumers additionally skip [`value::is_gensym`] names on their own account: a
+/// gensym is invisible to the author, so a diagnostic naming one is never actionable.
+fn top_level_defs(heap: &Heap, expanded: &[Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(expanded.len());
+    for &form in expanded {
+        match walk::do_body(heap, form).filter(|body| marks_private(heap, body)) {
+            Some(body) => out.extend(body),
+            None => out.push(form),
+        }
+    }
+    out
+}
+
+/// Does this `do` body carry a `(%mark-private …)` call — the fingerprint of a
+/// `defn-`/`def-` expansion?
+fn marks_private(heap: &Heap, body: &[Value]) -> bool {
+    body.iter().any(|&form| {
+        list_items(heap, form)
+            .and_then(|items| items.first().copied())
+            .is_some_and(
+                |head| matches!(head, Value::Sym(s) if value::symbol_is(s, "%mark-private")),
+            )
+    })
+}
+
 fn def_name_and_value(heap: &Heap, form: Value) -> Option<(Symbol, Value)> {
     let items = list_items(heap, form)?;
     if items.len() != 3 {

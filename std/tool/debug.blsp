@@ -316,22 +316,28 @@ was attempted."
 (defn dbg-state (dbg)
   "The debugger's full state snapshot: `{:events :paused :seq}`."
   (let (me (self)) (send dbg [:query me]) (receive ([:state s] s))))
+(sig dbg-state ((or map pid) -> any))
 (defn paused (dbg)
   "The map of currently parked processes: `pid -> snapshot`."
   (get (dbg-state dbg) :paused))
+(sig paused ((or map pid) -> any))
 (defn dbg-events (dbg)
   "The ordered event log the debugger has collected."
   (get (dbg-state dbg) :events))
+(sig dbg-events ((or map pid) -> any))
 (defn resume (dbg pid)
   "Release one parked process."
   (send dbg [:resume pid])
   nil)
+(sig resume ((or map pid) any -> nil))
 (defn resume-all (dbg)
   "Release every parked process; returns how many were waiting."
   (let (me (self)) (send dbg [:resume-all me]) (receive ([:resumed n] n))))
+(sig resume-all ((or map pid) -> any))
 (defn dbg-stop (dbg)
   "Stop the debugger process."
   (let (me (self)) (send dbg [:stop me]) (receive ([:stopped] :ok))))
+(sig dbg-stop ((or map pid) -> :ok))
 
 ;; ---- aggregate / statistical querying (debug the population, not one hit) ----
 ;; When thousands of processes hit the same trace point you don't want thousands of
@@ -340,6 +346,7 @@ was attempted."
 (defn trace-entries (dbg)
   "The raw `:trace` events the debugger collected (each `{:pid :entry :seq …}`)."
   (filter (fn (e) (= (get e :kind) :trace)) (dbg-events dbg)))
+(sig trace-entries ((or map pid) -> seqable))
 
 (defn observations (dbg)
   "Every `spy` node observation, flattened to `{:pid :form :value}`."
@@ -396,6 +403,7 @@ running shows `:value :running`."
                       :value (value-of (get e :span))
                       :children (map build (children-of (get e :span)))}))
       (map build (filter (fn (e) (nil? (get e :parent))) enters)))))
+(sig causal-tree ((or map pid) -> seqable))
 
 (defn- causal-lines
   (nodes depth)
@@ -636,3 +644,4 @@ no raw-terminal setup and works when piped."
                   (io/puts (str "=> " (pr-str-bounded (eval-string line))))
                   (catch e (io/puts (str "! " (pr-str-bounded e)))))
                 (repl-session dbg))))))))
+(sig repl-session ((or map pid) -> any))

@@ -31,6 +31,7 @@ held, reported once per cell crossed; button: :left :right :middle or nil for sc
 row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order,
 [] when none), or nil on timeout. Always pass a finite `ms`."
   (%term-poll ms))
+(sig poll (int -> (or keyword nil string)))
 
 (defn draw (frame)
   "Paint a `frame` — a vector of render ops: [:clear], [:text row col str], [:text row col
@@ -40,6 +41,7 @@ explicit [r g b] vector / \"#rrggbb\" hex string. [:rect …] fills a w×h cell 
 face's background. The optional cursor `style` is :block (default), :bar, or :underline. The
 in-process frontend for the display protocol; returns nil."
   (%term-draw frame))
+(sig draw (vector -> nil))
 
 (defn raw-enter ()
   "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved.
@@ -57,3 +59,4 @@ over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down
 [:col n], [:clear-eol], [:clear-below], [:clear-screen]. A face is a map like
 {:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."
   (%term-emit ops))
+(sig emit (vector -> nil))

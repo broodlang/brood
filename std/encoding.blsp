@@ -42,12 +42,14 @@ For pure ASCII input the string and byte forms agree.")
 
     (encoding/hex-encode \"hi\")         → \"6869\""
   (encoding-hex-encode-codes (string/->bytes s) encoding-hex-lower-codes))
+(sig hex-encode (string -> string))
 
 (defn hex-encode-upper (s)
   "Encode string `s` as uppercase hexadecimal (each UTF-8 byte → 2 hex chars).
 
     (encoding/hex-encode-upper \"~\")    → \"7E\""
   (encoding-hex-encode-codes (string/->bytes s) encoding-hex-upper-codes))
+(sig hex-encode-upper (string -> string))
 
 (defn hex-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
@@ -163,12 +165,14 @@ binary payload (digests, salts, wire bytes)."
 
     (encoding/base64-encode \"hi\")      → \"aGk=\""
   (encoding-b64-encode (string/->bytes s) encoding-b64-std-codes))
+(sig base64-encode (string -> string))
 
 (defn base64-url-encode (s)
   "Encode string `s` as URL-safe Base64 (RFC 4648 §5, `-_` alphabet, `=` padding).
 
     (encoding/base64-url-encode \"~~~\") → \"fn5-\""
   (encoding-b64-encode (string/->bytes s) encoding-b64-url-codes))
+(sig base64-url-encode (string -> string))
 
 (defn base64-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as

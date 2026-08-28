@@ -211,6 +211,155 @@ impl RecordShape {
 ///
 /// No longer `Copy` (the `Arc` refinements) but cheap to `Clone` — a `u32` plus
 /// refcount bumps. The flat case is two null pointers.
+/// A refinement of one tag's values to a set — stated positively (**exactly these**) or
+/// negatively (**anything but these**).
+///
+/// The negative case is what makes a literal complement representable, and therefore what
+/// makes an equality test narrow its *else* branch: `(or :ok :err) ∩ ¬:ok` is `:err`, not
+/// the unnarrowed union it used to be. Before this, negating a literal set widened to the
+/// whole tag — `¬:ok` was `any` — so `(if (= tag :ok) …)` could only refine on the true
+/// side (`then_only`, ADR-263's remaining gap).
+///
+/// The domain of `Out` is infinite for keywords, ints and strings, which is exactly why it
+/// has to be held negatively rather than enumerated. **Bool is the exception**: its domain
+/// is `{true, false}`, so a complement there is finite and is normalised back to `In`
+/// where it is produced ([`Ty::negate_term`]) — no `Out(bool)` is ever constructed, and
+/// the rules below may assume an `Out` set has an infinite complement.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum LitSet<T: Ord> {
+    /// Exactly these values.
+    In(BTreeSet<T>),
+    /// Every value of the tag except these. Never empty — an empty exclusion is
+    /// "every value", which is the unrefined `None` slot.
+    Out(BTreeSet<T>),
+}
+
+impl<T: Ord> LitSet<T> {
+    /// The positively-listed members, or `None` when the set is stated negatively and
+    /// cannot be enumerated. Every consumer outside this module reads literals through
+    /// this, so a negative set reads exactly like an unrefined one — the conservative
+    /// widening those consumers already handle.
+    fn members(&self) -> Option<&BTreeSet<T>> {
+        match self {
+            LitSet::In(set) => Some(set),
+            LitSet::Out(_) => None,
+        }
+    }
+
+    /// The excluded values, or `None` for a positive set. For rendering.
+    fn excluded(&self) -> Option<&BTreeSet<T>> {
+        match self {
+            LitSet::Out(set) => Some(set),
+            LitSet::In(_) => None,
+        }
+    }
+
+    /// Is this set empty — i.e. does the tag admit no value at all? Only a positive
+    /// empty set is; a negative one excludes finitely many from an infinite domain.
+    fn is_empty(&self) -> bool {
+        matches!(self, LitSet::In(set) if set.is_empty())
+    }
+}
+
+impl<T: Ord + Clone> LitSet<T> {
+    /// This set's complement *within its tag*. `In ↔ Out`, exactly.
+    fn complement(&self) -> LitSet<T> {
+        match self {
+            LitSet::In(set) => LitSet::Out(set.clone()),
+            LitSet::Out(set) => LitSet::In(set.clone()),
+        }
+    }
+}
+
+/// A literal slot in canonical form. Two spellings of the same set must not survive as
+/// different `Ty`s: `Ty` derives its equality and hash from the slots, so `false | true`
+/// comparing unequal to `bool` is not cosmetic — it makes `bool <: (or false true)` come
+/// out **false** for two identical sets, which is a spurious warning waiting to happen,
+/// and it breaks the fixpoint loops that iterate until a type stops changing.
+///
+/// Two ways a slot can say "every value of the tag", which is what `None` means:
+/// excluding nothing, and — for **bool** alone, the one finite domain — listing both.
+fn canon_lit<T: Ord>(slot: Option<Arc<LitSet<T>>>) -> Option<Arc<LitSet<T>>> {
+    match slot.as_deref() {
+        Some(LitSet::Out(excluded)) if excluded.is_empty() => None,
+        _ => slot,
+    }
+}
+
+/// [`canon_lit`] plus bool's finite-domain rule: `{true, false}` is every bool.
+fn canon_lit_bool(slot: Option<Arc<LitSet<bool>>>) -> Option<Arc<LitSet<bool>>> {
+    let slot = canon_lit(slot);
+    match slot.as_deref() {
+        Some(LitSet::In(set)) if set.len() == 2 => None,
+        _ => slot,
+    }
+}
+
+/// Union of two sets over the same tag. `None` on either side means "every value of the
+/// tag", which absorbs.
+fn lit_union<T: Ord + Clone>(a: Option<&LitSet<T>>, b: Option<&LitSet<T>>) -> Option<LitSet<T>> {
+    match (a?, b?) {
+        (LitSet::In(x), LitSet::In(y)) => Some(LitSet::In(x.union(y).cloned().collect())),
+        (LitSet::Out(x), LitSet::Out(y)) => Some(LitSet::Out(x.intersection(y).cloned().collect())),
+        // `In(A) ∪ Out(B)` = everything but `B∖A`: the excluded values `A` puts back are
+        // no longer excluded.
+        (LitSet::In(x), LitSet::Out(y)) | (LitSet::Out(y), LitSet::In(x)) => {
+            Some(LitSet::Out(y.difference(x).cloned().collect()))
+        }
+    }
+    .filter(|set| !matches!(set, LitSet::Out(e) if e.is_empty()))
+}
+
+/// Intersection of two sets over the same tag. `None` means "every value", the identity.
+fn lit_intersect<T: Ord + Clone>(
+    a: Option<&LitSet<T>>,
+    b: Option<&LitSet<T>>,
+) -> Option<LitSet<T>> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(only), None) | (None, Some(only)) => Some(only.clone()),
+        (Some(LitSet::In(x)), Some(LitSet::In(y))) => {
+            Some(LitSet::In(x.intersection(y).cloned().collect()))
+        }
+        (Some(LitSet::Out(x)), Some(LitSet::Out(y))) => {
+            Some(LitSet::Out(x.union(y).cloned().collect()))
+        }
+        (Some(LitSet::In(x)), Some(LitSet::Out(y)))
+        | (Some(LitSet::Out(y)), Some(LitSet::In(x))) => {
+            Some(LitSet::In(x.difference(y).cloned().collect()))
+        }
+    }
+}
+
+/// Is every value `a` admits for the tag one that `b` admits?
+fn lit_subset<T: Ord>(a: Option<&LitSet<T>>, b: Option<&LitSet<T>>) -> bool {
+    let Some(b) = b else {
+        return true; // `b` admits every value of the tag
+    };
+    match (a, b) {
+        // `a` is every value of the tag; `b` is not (it is `Some`), so no.
+        (None, _) => false,
+        (Some(LitSet::In(x)), LitSet::In(y)) => x.is_subset(y),
+        (Some(LitSet::In(x)), LitSet::Out(y)) => x.is_disjoint(y),
+        // An infinite domain minus finitely many is never inside a finite listing.
+        (Some(LitSet::Out(_)), LitSet::In(_)) => false,
+        (Some(LitSet::Out(x)), LitSet::Out(y)) => y.is_subset(x),
+    }
+}
+
+/// Do `a` and `b` share no value of the tag? `None` = every value, which shares with
+/// anything non-empty.
+fn lit_sets_disjoint<T: Ord>(a: Option<&LitSet<T>>, b: Option<&LitSet<T>>) -> bool {
+    match (a, b) {
+        (None, _) | (_, None) => false,
+        (Some(LitSet::In(x)), Some(LitSet::In(y))) => x.is_disjoint(y),
+        (Some(LitSet::In(x)), Some(LitSet::Out(y)))
+        | (Some(LitSet::Out(y)), Some(LitSet::In(x))) => x.is_subset(y),
+        // Two infinite complements always overlap.
+        (Some(LitSet::Out(_)), Some(LitSet::Out(_))) => false,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Ty {
     /// The set of possible runtime tags — always present; the coarse set.
@@ -254,25 +403,25 @@ pub struct Ty {
     /// tag in `tags` stays open (so `(or :a :b nil)` admits the two keywords *and*
     /// `nil`). Unlike the other refinements, union of two literal sets is *exact*
     /// (the set-union), not a widening — so `(or :a :b)` keeps both.
-    lit: Option<Arc<BTreeSet<Symbol>>>,
+    lit: Option<Arc<LitSet<Symbol>>>,
     /// Refinement of the int member (`int`) to a literal set — the exact
     /// integers admitted, e.g. `{5, 6}` (ADR-117). Independent of `lit`
     /// (a different tag, `INT_BIT` not `KEYWORD_BIT`), so both can be `Some`
     /// at once (`(or :ok 5)`). Same semantics as `lit` throughout: union is
     /// exact, not a widening; every other tag stays open. `BigInt`-range
     /// literals aren't representable here — see `docs/type-int-literals.md`.
-    lit_int: Option<Arc<BTreeSet<i64>>>,
+    lit_int: Option<Arc<LitSet<i64>>>,
     /// Refinement of the bool member (`bool`) to a literal set (ADR-120) —
     /// `{true}`, `{false}`, or (equivalent to unrefined) `{true, false}`.
     /// Independent tag/field, same semantics as `lit`/`lit_int` throughout.
-    lit_bool: Option<Arc<BTreeSet<bool>>>,
+    lit_bool: Option<Arc<LitSet<bool>>>,
     /// Refinement of the string member (`string`) to a literal set (ADR-120).
     /// Stores owned `String` content, not a heap `StrId` — two textually
     /// identical string literals can have different underlying heap handles,
     /// so comparing/ordering by content (not handle identity) is what makes
     /// set operations correct. Independent tag/field, same semantics as
     /// `lit`/`lit_int` throughout.
-    lit_str: Option<Arc<BTreeSet<String>>>,
+    lit_str: Option<Arc<LitSet<String>>>,
     /// **Alternative terms** — the disjunctive tail of a union this one term cannot
     /// hold exactly (ADR-262). `None` for the overwhelmingly common single-term type,
     /// which behaves exactly as it always did.
@@ -644,7 +793,7 @@ impl Ty {
         let mut set = BTreeSet::new();
         set.insert(sym);
         Ty {
-            lit: Some(Arc::new(set)),
+            lit: Some(Arc::new(LitSet::In(set))),
             ..Ty::flat(KEYWORD_BIT)
         }
     }
@@ -652,7 +801,7 @@ impl Ty {
     /// The keyword-literal refinement, if this type carries one (the exact keyword
     /// symbols admitted). `None` means "any keyword" (or no keyword member).
     pub fn as_lit(&self) -> Option<&BTreeSet<Symbol>> {
-        self.single()?.lit.as_deref()
+        self.single()?.lit.as_deref()?.members()
     }
 
     /// An int-literal (singleton) type — exactly the integer `n` (ADR-117).
@@ -663,7 +812,7 @@ impl Ty {
         let mut set = BTreeSet::new();
         set.insert(n);
         Ty {
-            lit_int: Some(Arc::new(set)),
+            lit_int: Some(Arc::new(LitSet::In(set))),
             ..Ty::flat(INT_BIT)
         }
     }
@@ -671,7 +820,7 @@ impl Ty {
     /// The int-literal refinement, if this type carries one (the exact
     /// integers admitted). `None` means "any int" (or no int member).
     pub fn as_lit_int(&self) -> Option<&BTreeSet<i64>> {
-        self.single()?.lit_int.as_deref()
+        self.single()?.lit_int.as_deref()?.members()
     }
 
     /// A bool-literal (singleton) type — exactly `true` or `false` (ADR-120).
@@ -683,7 +832,7 @@ impl Ty {
         let mut set = BTreeSet::new();
         set.insert(b);
         Ty {
-            lit_bool: Some(Arc::new(set)),
+            lit_bool: Some(Arc::new(LitSet::In(set))),
             ..Ty::flat(BOOL_BIT)
         }
     }
@@ -691,7 +840,7 @@ impl Ty {
     /// The bool-literal refinement, if this type carries one. `None` means
     /// "any bool" (or no bool member).
     pub fn as_lit_bool(&self) -> Option<&BTreeSet<bool>> {
-        self.single()?.lit_bool.as_deref()
+        self.single()?.lit_bool.as_deref()?.members()
     }
 
     /// A string-literal (singleton) type — exactly the string `s` (ADR-120).
@@ -702,7 +851,7 @@ impl Ty {
         let mut set = BTreeSet::new();
         set.insert(s.to_string());
         Ty {
-            lit_str: Some(Arc::new(set)),
+            lit_str: Some(Arc::new(LitSet::In(set))),
             ..Ty::flat(STR_BIT)
         }
     }
@@ -710,7 +859,7 @@ impl Ty {
     /// The string-literal refinement, if this type carries one. `None` means
     /// "any string" (or no string member).
     pub fn as_lit_str(&self) -> Option<&BTreeSet<String>> {
-        self.single()?.lit_str.as_deref()
+        self.single()?.lit_str.as_deref()?.members()
     }
 
     /// The key/value refinement, if this map type carries one. The bridge the
@@ -949,13 +1098,13 @@ impl Ty {
             other.tags,
             &other.lit_int,
         );
-        let lit_bool = merge_union_lit_set(
+        let lit_bool = canon_lit_bool(merge_union_lit_set(
             BOOL_BIT,
             self.tags,
             &self.lit_bool,
             other.tags,
             &other.lit_bool,
-        );
+        ));
         let lit_str = merge_union_lit_set(
             STR_BIT,
             self.tags,
@@ -1078,7 +1227,7 @@ impl Ty {
             if !keep {
                 tags &= !BOOL_BIT;
             }
-            s
+            canon_lit_bool(s)
         } else {
             None
         };
@@ -1151,7 +1300,48 @@ impl Ty {
                 tags |= bit;
             }
         }
-        Ty::flat(tags)
+        // …except **bool**, whose domain is finite. `¬{false}` within the bool members
+        // is exactly `{true}`, so this one complement is representable rather than
+        // widened — and it is the one that matters: *truthy* is `¬(nil ∪ false)`, the
+        // type every `(if x …)` narrows to. Widened, that lands on `not nil`, which is
+        // a sound necessary condition but not invertible (a false test does not imply
+        // `nil`), and the truthiness guard has to be one-sided as a result. Exact, it
+        // is biconditional.
+        //
+        // The other three literal kinds have infinite domains — `¬5` within the ints is
+        // not a set this lattice can hold — so they keep widening. That asymmetry is
+        // the whole of the "negative atoms" gap, narrowed to where it is unavoidable.
+        // Each literal kind's complement *within its tag* — `In(A) ↔ Out(A)`, exactly.
+        // This is the piece that makes an equality test narrow its else branch:
+        // `(or :ok :err) ∩ ¬:ok` is `:err`, where before `¬:ok` was `any` and the
+        // narrowing was lost. The tag bits are already set above (a literal set omits
+        // only *some* of its tag's values, so the tag survives the complement).
+        let mut out = Ty::flat(tags);
+        out.lit = self.lit.as_deref().map(|set| Arc::new(set.complement()));
+        out.lit_int = self
+            .lit_int
+            .as_deref()
+            .map(|set| Arc::new(set.complement()));
+        out.lit_str = self
+            .lit_str
+            .as_deref()
+            .map(|set| Arc::new(set.complement()));
+        // …except **bool**, whose domain is finite: its complement is normalised back to
+        // a positive set, and if that leaves nothing the tag itself drops. Holding bool
+        // positively is what keeps `LitSet::Out`'s "infinite complement" assumption true
+        // for every set that actually exists (see [`LitSet`]).
+        if let Some(LitSet::In(set)) = self.lit_bool.as_deref() {
+            let complement: BTreeSet<bool> = [true, false]
+                .into_iter()
+                .filter(|b| !set.contains(b))
+                .collect();
+            if complement.is_empty() {
+                out.tags &= !BOOL_BIT; // `¬{true, false}` admits no bool at all
+            } else {
+                out.lit_bool = canon_lit_bool(Some(Arc::new(LitSet::In(complement))));
+            }
+        }
+        out
     }
 
     // ---- the union of terms (ADR-262) ----
@@ -1295,7 +1485,40 @@ impl Ty {
         let other_terms = other.terms_vec();
         self.terms_vec()
             .iter()
-            .all(|a| other_terms.iter().any(|b| a.is_subtype_term(b)))
+            .all(|a| term_is_subtype_of_union(a, &other_terms))
+    }
+
+    /// This term restricted to a single tag — the piece of `self` whose runtime tag is
+    /// exactly `tag_bit`, carrying only the refinements that constrain that tag. A term
+    /// is the disjoint union of these projections, which is what makes
+    /// [`term_is_subtype_of_union`] sound.
+    ///
+    /// The struct literal is deliberate: a new refinement slot fails to compile here
+    /// rather than being silently dropped from the projection (which would be unsound
+    /// in the accepting direction), the same protection the manual `PartialEq`/`Hash`
+    /// impls get from destructuring.
+    fn project_tag(&self, tag_bit: u32) -> Ty {
+        fn keep<T>(applies: bool, slot: &Option<Arc<T>>) -> Option<Arc<T>> {
+            if applies {
+                slot.clone()
+            } else {
+                None
+            }
+        }
+        Ty {
+            tags: tag_bit,
+            arrow: keep(tag_bit & FN_BITS != 0, &self.arrow),
+            overload: keep(tag_bit & FN_BITS != 0, &self.overload),
+            elem: keep(tag_bit & SEQ_BITS != 0, &self.elem),
+            map_kv: keep(tag_bit & MAP_BIT != 0, &self.map_kv),
+            fields: keep(tag_bit & MAP_BIT != 0, &self.fields),
+            tuple: keep(tag_bit & VECTOR_BIT != 0, &self.tuple),
+            lit: keep(tag_bit & KEYWORD_BIT != 0, &self.lit),
+            lit_int: keep(tag_bit & INT_BIT != 0, &self.lit_int),
+            lit_bool: keep(tag_bit & BOOL_BIT != 0, &self.lit_bool),
+            lit_str: keep(tag_bit & STR_BIT != 0, &self.lit_str),
+            alts: None,
+        }
     }
 
     /// Do `self` and `other` share no values? Every pair of terms must be disjoint —
@@ -1632,6 +1855,42 @@ fn intersect_tuples(a: &[Ty], b: &[Ty]) -> Option<Vec<Ty>> {
 /// subtype of a 3-tuple, and vice versa), then covariant per position — sound
 /// because Brood vectors are immutable, same reasoning as element-covariant
 /// sequences.
+/// Is one term contained in the *union* of `others`?
+///
+/// The direct question — does some single `other` contain `a`? — is sound but
+/// incomplete, and the incompleteness costs a **false positive**: the checker warns
+/// about a call that is in fact fine. `int | vector<int>` is a single term (the union
+/// merged exactly), and it sits inside `(int | vector<string>) | vector<int>` only once
+/// you notice that its two halves land in *different* alternatives.
+///
+/// A term is the disjoint union of its per-tag projections, so it suffices to place
+/// each projection in some alternative: `a = ⋃ₜ a|ₜ ⊆ ⋃ others`. That is sound, and
+/// strictly sharper than the single-alternative test (which it keeps as a fast path,
+/// since a term contained in one alternative has every projection contained there too).
+///
+/// Still incomplete where one *tag's* refinement is split across alternatives —
+/// `vector<int|string>` against `vector<int> | vector<string>`. Deciding that needs the
+/// emptiness procedure a full negation type would bring; until then this direction only
+/// under-reports precision, never over-accepts.
+fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
+    if a.tags == 0 {
+        return true; // `never` is below everything
+    }
+    if others.iter().any(|b| a.is_subtype_term(b)) {
+        return true;
+    }
+    let mut remaining = a.tags;
+    while remaining != 0 {
+        let tag_bit = remaining & remaining.wrapping_neg();
+        remaining &= !tag_bit;
+        let part = a.project_tag(tag_bit);
+        if !others.iter().any(|b| part.is_subtype_term(b)) {
+            return false;
+        }
+    }
+    true
+}
+
 fn tuple_is_subtype(self_elems: &[Ty], other_elems: &[Ty]) -> bool {
     self_elems.len() == other_elems.len()
         && self_elems
@@ -1763,28 +2022,18 @@ fn merge_intersect<T: PartialEq>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> Opti
 fn merge_union_lit_set<T: Ord + Clone>(
     tag: u32,
     a_tags: u32,
-    a: &Option<Arc<BTreeSet<T>>>,
+    a: &Option<Arc<LitSet<T>>>,
     b_tags: u32,
-    b: &Option<Arc<BTreeSet<T>>>,
-) -> Option<Arc<BTreeSet<T>>> {
-    let open = |tags: u32, set: &Option<Arc<BTreeSet<T>>>| tags & tag != 0 && set.is_none();
-    if open(a_tags, a) || open(b_tags, b) {
-        return None;
-    }
-    if a.is_none() && b.is_none() {
-        return None;
-    }
-    let mut set = BTreeSet::new();
-    if let Some(a) = a {
-        set.extend(a.iter().cloned());
-    }
-    if let Some(b) = b {
-        set.extend(b.iter().cloned());
-    }
-    if set.is_empty() {
-        None
-    } else {
-        Some(Arc::new(set))
+    b: &Option<Arc<LitSet<T>>>,
+) -> Option<Arc<LitSet<T>>> {
+    // A side that carries the tag with no set admits *every* value of it, which absorbs
+    // whatever the other side lists. A side that lacks the tag contributes nothing.
+    let has = |tags: u32| tags & tag != 0;
+    match (has(a_tags), has(b_tags)) {
+        (false, false) => None,
+        (true, false) => a.clone(),
+        (false, true) => b.clone(),
+        (true, true) => canon_lit(lit_union(a.as_deref(), b.as_deref()).map(Arc::new)),
     }
 }
 
@@ -1794,44 +2043,26 @@ fn merge_union_lit_set<T: Ord + Clone>(
 /// The returned `bool` is `false` when the intersection is empty, so no value of
 /// the tag qualifies and the caller clears the tag bit.
 fn intersect_lit_set<T: Ord + Clone>(
-    a: &Option<Arc<BTreeSet<T>>>,
-    b: &Option<Arc<BTreeSet<T>>>,
-) -> (Option<Arc<BTreeSet<T>>>, bool) {
-    match (a, b) {
-        (Some(a), Some(b)) => {
-            let s: BTreeSet<T> = a.intersection(b).cloned().collect();
-            if s.is_empty() {
-                (None, false)
-            } else {
-                (Some(Arc::new(s)), true)
-            }
-        }
-        (Some(a), None) => (Some(a.clone()), true),
-        (None, Some(b)) => (Some(b.clone()), true),
-        (None, None) => (None, true),
+    a: &Option<Arc<LitSet<T>>>,
+    b: &Option<Arc<LitSet<T>>>,
+) -> (Option<Arc<LitSet<T>>>, bool) {
+    match lit_intersect(a.as_deref(), b.as_deref()) {
+        // An empty positive set admits no value of the tag, so the tag itself drops.
+        Some(set) if set.is_empty() => (None, false),
+        Some(set) => (canon_lit(Some(Arc::new(set))), true),
+        None => (None, true),
     }
 }
 
-/// Is `self`'s literal member for one tag a subtype of `other`'s? `self_has_tag`
-/// is whether `self` carries the tag at all (only then is there anything to
-/// check). An unrefined `other` admits everything; a refined `other` requires a
-/// refined `self` subset — an open `self` ("any") is *not* a subset of a literal
-/// set.
 fn lit_is_subtype<T: Ord>(
     self_has_tag: bool,
-    a: &Option<Arc<BTreeSet<T>>>,
-    b: &Option<Arc<BTreeSet<T>>>,
+    a: &Option<Arc<LitSet<T>>>,
+    b: &Option<Arc<LitSet<T>>>,
 ) -> bool {
     if !self_has_tag {
         return true;
     }
-    match b {
-        None => true,
-        Some(b) => match a {
-            Some(a) => a.is_subset(b),
-            None => false,
-        },
-    }
+    lit_subset(a.as_deref(), b.as_deref())
 }
 
 /// Whether two literal sets decide **disjointness** for a tag that is the sole
@@ -1840,13 +2071,11 @@ fn lit_is_subtype<T: Ord>(
 /// genuinely-disjoint verdict — advisory-soundness holds.
 fn lit_disjoint<T: Ord>(
     shared_is_tag: bool,
-    a: &Option<Arc<BTreeSet<T>>>,
-    b: &Option<Arc<BTreeSet<T>>>,
+    a: &Option<Arc<LitSet<T>>>,
+    b: &Option<Arc<LitSet<T>>>,
 ) -> Option<bool> {
-    if shared_is_tag {
-        if let (Some(a), Some(b)) = (a, b) {
-            return Some(a.is_disjoint(b));
-        }
+    if shared_is_tag && (a.is_some() || b.is_some()) {
+        return Some(lit_sets_disjoint(a.as_deref(), b.as_deref()));
     }
     None
 }

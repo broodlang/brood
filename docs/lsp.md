@@ -131,7 +131,12 @@ one server that owns the language knowledge.
 > has no faithful spelling, since a quick-fix that writes a different type than the
 > hint showed would be worse than none. Once written the sig is authoritative:
 > read ahead of inference, validated against the definition (ADR-259), and read by
-> the reversed-args gate.
+> the reversed-args gate. For a whole library rather than one cursor position,
+> `nest check --suggest-sigs` prints the same signatures file by file over the
+> `reflect/file-signatures` primitive both surfaces sit on. Since 2026-08-28 all
+> three see **module-private** functions, which the underlying inference had never
+> covered — `defn-` expands to a `do`, and most definitions in a real module are
+> private (ADR-266).
 > • **`textDocument/selectionRange`** (`selection_range.rs`) — smart expand/shrink
 > selection along the CST: symbol → enclosing form → outer form → … → file, read
 > off the node chain at each cursor (trivia and same-extent wrappers skipped so

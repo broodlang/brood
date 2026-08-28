@@ -124,7 +124,7 @@
   ;; The end-to-end shape the mechanism exists for: a slow-but-LIVE server that answers
   ;; strictly after the caller gave up. Flushing at the deadline cannot help here —
   ;; the reply has not been sent yet — so without the alias it queues forever.
-  (gen/defprocess laggard
+  (gen/defserver laggard
     (s)
     (call [:slow ms] (do (sleep ms) [:late s])))
 

@@ -151,6 +151,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
     (valid-segment? (string/substring s 14 18) 4)
     (valid-segment? (string/substring s 19 23) 4)
     (valid-segment? (string/substring s 24 36) 12)))
+(sig valid? (string -> bool))
 
 ;; ---- name-based UUIDs (v3 and v5) -------------------------------------------
 ;;

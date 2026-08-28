@@ -823,7 +823,7 @@ fn part_has_rest(heap: &Heap, part: Value) -> bool {
 /// never a false positive. `None` when the form isn't a `fn`, or when a parameter
 /// list isn't a readable list/vector — the caller then leaves the call unchecked,
 /// which is the pre-existing behaviour.
-fn fn_form_arity(heap: &Heap, value_form: Value) -> Option<Arity> {
+pub(super) fn fn_form_arity(heap: &Heap, value_form: Value) -> Option<Arity> {
     let items = fn_form_items(heap, value_form)?;
     let forms = &items[1..];
     // A leading docstring is not a parameter list.
@@ -1289,8 +1289,17 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // may describe it; never the stale heap signature.
         // `is_lexical_local` guards the heap fallback too: a shadowing local is not
         // the global, so its arg/return types are unknown — never the primitive's.
-        let sig = declared
-            .clone()
+        // **A variable whose own type is an arrow describes the call it heads.** A
+        // parameter declared `(sig apply-it ((int -> string) -> any))` carries a full
+        // signature, and `(f "x")` inside the body is the only site that can use it —
+        // without this the arrow was inert in both directions: the result had no type
+        // (`infer.rs`) and the arguments went unchecked here, so declaring one bought
+        // nothing at all. Checked FIRST because a local shadows any global of the same
+        // name, and `ctx.get` only answers for a variable actually in scope.
+        let local_ty = ctx.get(s);
+        let local_arrow = local_ty.as_ref().and_then(Ty::as_arrow).cloned();
+        let sig = local_arrow
+            .or_else(|| declared.clone())
             .or_else(|| {
                 (!ctx.is_lexical_local(s) && !ctx.is_file_global(s))
                     .then(|| sig_of(heap, s))
@@ -1537,6 +1546,34 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                                 );
                                 out.push((arg_pos(heap, arg, form), msg));
                             }
+                            // …and the **result**. This was left out on the grounds that
+                            // an inferred return over-approximates, so comparing it by
+                            // *subtyping* would false-positive at every call site — a
+                            // `(any) -> any` callback is not a subtype of `(int) -> int`
+                            // and is perfectly valid. Disjointness has no such problem
+                            // and is sound in the same way the parameter direction is:
+                            // the inferred return is a superset of the truth, so if the
+                            // superset shares nothing with what the caller will do with
+                            // it, neither does the truth.
+                            let (wants, gives) = (&expected.ret, &cb.ret);
+                            if !wants.is_any()
+                                && !gives.is_any()
+                                && !wants.is_never()
+                                && !gives.is_never()
+                                && wants.is_disjoint(gives)
+                                && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+                            {
+                                let msg = format!(
+                                    "{}: argument {} is a callback whose result is used as \
+                                     {}, but {} returns {}",
+                                    name_of(s),
+                                    i + 1,
+                                    wants,
+                                    callback_desc(arg),
+                                    gives,
+                                );
+                                out.push((arg_pos(heap, arg, form), msg));
+                            }
                         }
                     }
                 }
@@ -1711,7 +1748,19 @@ fn check_fn_seeded(
     if let Some(s) = sig {
         if let Some(&ret_form) = items[body_start..].last() {
             let g = gradual_of(heap, ret_form, &scope);
-            if !g.consistent_with(s.ret.clone())
+            // A body that yields `never` **never returns** — it always throws — so it is
+            // consistent with every declared return, including `never` itself. Without
+            // this skip the dynamic half of `consistent_with` (`∩ ≠ ⊥`) reads `never` as
+            // disjoint from everything, since it is: an empty set shares no value with
+            // any set, itself included. The result was a false positive on every
+            // always-throwing function that carried a `(sig …)` — `declared return type
+            // string but the body yields never` — and, at its silliest, on a function
+            // declared `never` whose body yields `never`. It stayed hidden only because
+            // so few signatures were declared; adopting them across `std/` surfaced it.
+            // The argument check has carried the same skip, for the same reason, all
+            // along.
+            if !g.bound.is_never()
+                && !g.consistent_with(s.ret.clone())
                 && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
             {
                 let who = name
@@ -2660,6 +2709,18 @@ fn bindings(heap: &Heap, form: Value) -> Option<Vec<Value>> {
 /// The elements of a proper list, or `None` for an improper list / non-list.
 /// `pub(super)` because `sigs` (`infer_sig`) and `guards` (`guard_assertion`,
 /// `expr_ty`) all need to peel a list head off a call form.
+/// The body forms of a `(do …)`, or `None` for anything else. `defn-`/`def-` expand to
+/// one, so a walk over top-level forms that does not look inside a `do` cannot see a
+/// module-private definition at all.
+pub(super) fn do_body(heap: &Heap, form: Value) -> Option<Vec<Value>> {
+    let items = list_items(heap, form)?;
+    let head = items.first()?;
+    if !matches!(head, Value::Sym(s) if value::symbol_is(*s, "do")) {
+        return None;
+    }
+    Some(items[1..].to_vec())
+}
+
 pub(super) fn list_items(heap: &Heap, mut v: Value) -> Option<Vec<Value>> {
     let mut out = Vec::new();
     loop {

@@ -1486,7 +1486,7 @@ links yet, by decision).
 `docs/primitives.md` lists `ref`/`monitor`/`demonitor`.
 
 **Next (see `todo.md`).** M1: the Brood process-framework library (gen_server-
-style `defprocess`, `gen-call`/`gen-cast`, `!`) in a `require`-able module — needs
+style `defserver`, `gen-call`/`gen-cast`, `!`) in a `require`-able module — needs
 a name (not "OTP"). M2: a Brood `supervisor` (one-for-one / rest-for-one /
 all-for-one, checkpoint/resume) built on monitors.
 
@@ -1545,7 +1545,7 @@ hit the `match`/`receive` prelude-freeze landmine). Named `hatch` (fits the
 spawn/offspring metaphor; deliberately NOT "OTP").
 
 **Built — `std/hatch.blsp`** (embedded module; `(require 'hatch)`):
-- `(defprocess name (state) (cast PAT body…) (call PAT body…) …)` — a macro that
+- `(defserver name (state) (cast PAT body…) (call PAT body…) …)` — a macro that
   compiles cast/call clauses into a tail-recursive `receive` loop. A **cast**
   body evaluates to the next state; a **call** body to `[reply next-state]`.
   State is immutable and explicit: to keep it, a clause returns the state var.
@@ -1556,7 +1556,7 @@ spawn/offspring metaphor; deliberately NOT "OTP").
 
 **Tests / example.** `tests/hatch_test.blsp` (state threading, no-op cast, call-
 updates-state, ordering, two servers not crossing wires). `examples/life.blsp`'s
-process section rewritten from a hand-rolled receive loop to `defprocess`
+process section rewritten from a hand-rolled receive loop to `defserver`
 life-server + `hatch`/`!`/`gen-call`. `cargo test` green (Rust + 34 in the
 process bucket; full suite passes).
 
@@ -5330,7 +5330,7 @@ Rust-boundary cases the language can't bootstrap:
 **Docs.** Expanded [`brood-for-claude.md`](../brood-for-claude.md): filled the
 missing builtins (`apply`/`now`/`gensym`/`quot`/`mod`/`rem`/`char-at`/`for`/
 `doseq`/`dotimes`/`dolist`/`enumerate` + the new helpers) and added a **`hatch`
-framework** section (`defprocess`/`cast`/`call`/`!`/`gen-call`/`sleep`) with a
+framework** section (`defserver`/`cast`/`call`/`!`/`gen-call`/`sleep`) with a
 verified counter-server and worker-pool example — the idiomatic concurrency
 story that was entirely absent. Kept [`language.md`](../language.md) in sync
 (Strings / Arithmetic / Time & memory sections).
@@ -5568,7 +5568,7 @@ quasiquote template:
 advisory and forbids flagging runnable code. The tight two-condition gate is
 what keeps it sound: audited across the entire `std/` tree (`brood --check` on
 every file), it produces **zero** hygiene warnings — every existing macro
-(`and`/`or`/`bench`/`is`/`assert=`/`match*`/`receive`/`defprocess`/…) already
+(`and`/`or`/`bench`/`is`/`assert=`/`match*`/`receive`/`defserver`/…) already
 gensyms or unquotes its binders. The only shape it would flag that could be
 intentional is an anaphoric macro (deliberate capture); none exist in-tree.
 
@@ -5948,7 +5948,7 @@ their own ADRs and were deferred.
    is like `call` but the body is *just the reply* — state passes
    through unchanged. Removes the `[x s]` boilerplate from "just read a
    field" cases. Every hatch process also now handles an implicit
-   `[:$stop]` envelope (the `defprocess` macro appends a stop clause
+   `[:$stop]` envelope (the `defserver` macro appends a stop clause
    that exits the loop), so `(stop pid)` ends the receive loop cleanly
    without each user having to declare it.
 7. **Docs updated.** `docs/brood-for-claude.md` and the `writing-brood`
@@ -8956,7 +8956,7 @@ bare fn name, the six `nest new` scaffold templates emitted pre-migration source
 the macroexpand pass didn't resolve `(:use …)`-imported macro heads. Net effect:
 `nest mcp` failed its bootstrap (and, mid-migration, grabbed the observer's
 alt-screen), every subcommand broke in turn, fresh scaffolds couldn't `test`/`run`,
-and a `hatch` project's `(defprocess …)` tripped spurious "unbound" advisories.
+and a `hatch` project's `(defserver …)` tripped spurious "unbound" advisories.
 
 **Fixed.**
 - **Bootstrap strings** (`crates/{nest,cli}/src/main.rs`, `lsp`, `introspect`):
@@ -8980,7 +8980,7 @@ and a `hatch` project's `(defprocess …)` tripped spurious "unbound" advisories
   the `(:use)` import table — as the `resolve` pass and eval-time dispatch already do
   — and expand if it names a macro. Strictly additive: a directly-bound non-macro
   still shadows (never reinterpreted). Closes the gap where an imported macro head
-  (hatch's `defprocess`) was left unexpanded and the advisory checker walked its raw
+  (hatch's `defserver`) was left unexpanded and the advisory checker walked its raw
   body; `macroexpand`/`macroexpand-1` now match eval and qualified-head behaviour.
 - **New MCP tool** `bench` (`std/mcp.blsp`) — times `:source` over `:iterations` in
   the live image; thirteenth tool.
@@ -9029,8 +9029,8 @@ that kept the count at 0; `run_one` adds the partial final quantum), exposed as
 `process-info :reductions`, and shown as a **REDS column** in `std/observer.blsp`.
 Exact for spawned processes, coarse (whole-budget) for the root.
 
-**Hatch / `defprocess` fix (`eval/macros.rs::resolve_def`).** A macro that expands to
-a `(defn name … (name …))` (the `defprocess` receive loop) recursed by name, but the
+**Hatch / `defserver` fix (`eval/macros.rs::resolve_def`).** A macro that expands to
+a `(defn name … (name …))` (the `defserver` receive loop) recursed by name, but the
 namespace resolver's forward-ref scan only sees *raw* `def`/`defn` heads — so the
 macro-defined name wasn't in `ns_known_names`, the def head qualified to `ns/name`
 while the recursion stayed bare → unbound in the spawned process. `resolve_def` now
@@ -9152,7 +9152,7 @@ remote-attach gains Unix + the cookie-file fallback.
 
 **Note.** Branched from a base predating the namespace-resolver fix (`59ae226`,
 "qualify macro-defined self-recursion"); merged `main` in before landing — that
-fix is what makes `defprocess`/`hatch` resolve under namespaces in spawned
+fix is what makes `defserver`/`hatch` resolve under namespaces in spawned
 processes, unrelated to this work.
 
 ## 2026-05-30 — Evaluator dispatch: cache the passthrough analysis + global inline cache (ADR-069)
@@ -16433,7 +16433,7 @@ Working the BEAM/.NET feature list top-down (perf deferred to a second pass):
 - **Stale roadmap discoveries:** the other two "OTP near-term" items already
   existed — `remote-spawn-sync` (returns the remote child's pid) and the
   `[:$stop]` graceful-teardown convention (supervisor `:shutdown`
-  `:brutal-kill`/`:infinity`/ms policies + `defprocess` `terminate`). Roadmap
+  `:brutal-kill`/`:infinity`/ms policies + `defserver` `terminate`). Roadmap
   ticked accordingly.
 
 Remaining feature-parity gaps after this: the observability timing tier
@@ -22065,7 +22065,7 @@ records) — the highest-risk one, since it touches the hottest paths.
 ## 2026-07-29 (finding) — numeric protocol for records: Brood-side is a ~195× fib regression
 
 Tried a `Num` ability so records (money, complex, vectors) could use `+`/`-`/`*`/`/`, wired
-by a `(record? a)` branch in each operator's binary arm (`(if (record? a) (num-add a b)
+by a `(record? a)` branch in each operator's binary arm (`(if (record? a) (num/add a b)
 (%add a b))`), int/float falling straight to `%add`. It works — money arithmetic dispatches,
 ints/floats give the right answers — but the one mandatory `make ab`-style check killed it:
 **fib 35 went 60 ms → 11.7 s, ~195×.** A `(record? a)` branch, however cheap in isolation,
@@ -22094,7 +22094,7 @@ is untouched — the JIT inlines int+int / float+float and never calls the `%add
 it never reaches the fallback. Measured: **fib 35 = 61 ms**, identical to baseline (60 ms).
 The operators stay `(%add a b)` — no Brood branch, so nothing to defeat the JIT.
 
-The `Num` ability (`num-add`/`num-sub`/`num-mul`/`num-div`, no `:default`) lives in the
+The `Num` ability (`num/add`/`num/sub`/`num/mul`/`num/div`, no `:default`) lives in the
 prelude; a record with no impl raises the ability's loud missing-impl error. A money value
 does `(+ (usd 500) (usd 250))` → `750`, variadic `+` folds through the same dispatch.
 
@@ -22465,7 +22465,7 @@ dispatch on `money`; `(+ 5 money)` cannot dispatch on the second arg). Built the
   is authored as the upper triangle of its type matrix; an authored method always wins over a
   derived one. STRICT: arg-count≠pattern-length, a closure on a non-binary pattern, an unknown
   algebra, a method for an undeclared multi, and `:default` as a tuple position all fail at load.
-- **`Num`/`Ord` migrated.** They were `defability`s; now `(defmulti num-add :commutative)` etc.
+- **`Num`/`Ord` migrated.** They were `defability`s; now `(defmulti num/add :commutative)` etc.
   and `(defmulti compare-to :antisymmetric)`. No implicit coercion — `(+ money 5)` needs an
   authored `[money :int]` method; commutativity then makes `(+ 5 money)` agree.
 - **Kernel (`builtins/numeric.rs`, `mod.rs`).** `+`/`-`/`*`/`/` and `<`/`<=`/`>`/`>=`/`min`/`max`
@@ -22702,8 +22702,8 @@ so an unclear dispatch fails at type-check, not only at runtime.
   `[money :int]` method does NOT false-warn. This was a real false positive caught in testing.
 - Only judges a call all of whose args have a certain identity — one unknown arg (a variable)
   defers. No inference hook yet (record-typed *variables* aren't judged); syntactic-only, sound.
-- Scope: fires on a **direct** generic call (`(num-add …)`, a user `(defmulti mine)` call), not
-  on the `+`/`<` operator sugar (which the checker doesn't see through to `num-add`).
+- Scope: fires on a **direct** generic call (`(num/add …)`, a user `(defmulti mine)` call), not
+  on the `+`/`<` operator sugar (which the checker doesn't see through to `num/add`).
 
 Zero false positives across `std/` + `tests/` (full suite 894 green); clippy + fmt clean.
 Tests: `type_check_catalog.rs` (a miss warns; covered/mirror/`:default`/unknown-arg stay silent).
@@ -27473,7 +27473,7 @@ A/B on `nest check` over all of std/ (warm, interleaved, 3×): 8.33s active vs 8
 within noise (`is_private` is O(1) regardless of how many privates are recorded, and the intra-module
 + grant pre-filters run before any lookup). The planned per-compile snapshot was unnecessary.
 
-`defmacro-`/`defprocess-` were judged unnecessary — only 2 private macros and 2 private processes
+`defmacro-`/`defserver-` were judged unnecessary — only 2 private macros and 2 private processes
 existed tree-wide; they collapse to public. A ~2,500-name sweep across the brood repo + 15 sibling
 projects migrated the tree, driven by a temporary `nest format --migrate-privacy` CST pass (removed
 after). Follow-up tracked: the unused-private lint still keys on `--` and needs reworking to detect
@@ -28079,7 +28079,7 @@ binary-*producing* form is already `(bytes-concat (for …))`, and there is no f
 `code_change` gap surfaced that the **"hot reload does not reach a self-recursive loop"**
 claim is stale — a top-level `defn` self-loop *does* now adopt its own redefinition mid-flight
 (the 2026-07-30 `SelfCall` epoch-watch fix, `4bbef7d9`), verified empirically (`:A…:B…`); only
-an inner `letrec` loop — the shape `defprocess` expands to — still runs old code (verified:
+an inner `letrec` loop — the shape `defserver` expands to — still runs old code (verified:
 stays `:A`). Corrected `docs/live-editing.md` §gradations and `docs/handoff.md` §7. The real
 gap (a `gen` `code_change` state-migration hook — a running server keeps threading old-shaped
 state after a reload) is Stage 6 in `live-editing.md`, already designed and userland; added to
@@ -28094,7 +28094,7 @@ long-lived `gen` server threads one immutable state value through its receive lo
 a hot reload the new code met **old-shaped state** with no way to migrate — OTP's `code_change/3`
 gap. Fixed in Brood (no kernel surface, matching the ADR-039 supervision call):
 
-- **`defprocess` gained a `(code-change old-state body…)` lifecycle clause** (sibling of
+- **`defserver` gained a `(code-change old-state body…)` lifecycle clause** (sibling of
   `init`/`terminate`, `std/proc/gen.blsp`). It compiles to a `[:$code-change]` receive clause
   that binds the current state and tail-recurses with the body's result — the migrated state.
   Placed among the envelope clauses (before the catch-all), so a server without the clause

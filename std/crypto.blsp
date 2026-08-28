@@ -32,6 +32,7 @@ cryptographically secure random bytes.
 
     (count (crypto/random-bytes 8))   → 8"
   (%random-bytes n))
+(sig random-bytes (int -> bytes))
 
 (defn random-key ()
   "Generate a random 32-byte key suitable for ChaCha20-Poly1305."
@@ -72,6 +73,7 @@ or tampered ciphertext). Inputs may be bytes values or vectors/lists of ints."
 (defn encrypt-string (key nonce s)
   "Encrypt the UTF-8 bytes of string `s`. Returns a ciphertext bytes value."
   (encrypt key nonce (string/->bytes s)))
+(sig encrypt-string (any any string -> bytes))
 
 (defn decrypt-string (key nonce ciphertext-bytes)
   "Decrypt to a string. Returns the decoded string, or `:error` on failure."
@@ -100,6 +102,7 @@ slower brute force; use ≥ 600,000 for password storage."
     (crypto-as-bytes salt)
     iterations
     key-len))
+(sig pbkdf2 (any any int int -> bytes))
 
 ;; ---- utilities --------------------------------------------------------------
 

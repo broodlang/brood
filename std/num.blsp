@@ -1,0 +1,32 @@
+;; std/num.blsp — arithmetic for a RECORD, as multimethods (ADR-179).
+;;
+;; A namespace in the ADR-251 shape: the module declares and documents the surface, while
+;; the ops themselves are defined in the PRELUDE (`std/prelude/tools.blsp`) — the same
+;; split `bit`, `decimal` and `proc` use, for the same reason. Here the reason is that the
+;; kernel's `%add`/`%sub`/`%mul`/`%div` call these on their cold fallback, so they have to
+;; be bound before any module can load; a `require` would be too late.
+;;
+;; They were `num-add`/`num-sub`/`num-mul`/`num-div` until 2026-08-28 — a hyphen prefix,
+;; which ADR-251 calls "a namespace spelled by hand: it groups the names for a reader and
+;; not for the language, while still spending four words of the bare vocabulary".
+(defmodule num
+  "Arithmetic for record types — the `+`/`-`/`*`/`/` extension point (ADR-179).
+
+A record operand to an arithmetic operator dispatches to one of these multimethods on
+**both** operand identities, so a money type, a complex number, a 2-D vector or a bignum
+can answer arithmetic without the kernel knowing about it:
+
+    (defrecord usd (cents))
+    (defmethod num/add [usd usd] (a b) (usd (+ (get a :cents) (get b :cents))))
+    (+ (usd 300) (usd 400))          ; => a usd of 700
+
+`num/add` and `num/mul` are `:commutative`, so authoring `[usd :int]` derives `[:int usd]`;
+`num/sub` and `num/div` are not. There is deliberately **no** `:default` — an operand pair
+with no method raises the loud `%no-method` error rather than being silently coerced.
+
+The operators do NOT branch on record-ness themselves: a Brood `(record? a)` test inside
+`+` defeated the JIT's arithmetic specialization by ~195x. The kernel builtins call these
+only on their cold fallback, when an operand is already known to be a record, so int and
+float arithmetic is byte-for-byte untouched.
+
+Defined in the prelude, documented here — see the note above.")

@@ -319,6 +319,14 @@ enum Cmd {
         /// With `--fix-renames`, print the plan and change nothing.
         #[arg(long = "dry-run", requires = "fix_renames")]
         dry_run: bool,
+
+        /// Print the `(sig …)` declaration the checker would write for every
+        /// function that lacks one, grouped by file, and change nothing. The
+        /// bulk counterpart of the editor's declare-sig action: an inferred
+        /// domain over-approximates the real one, so adopting one is sound —
+        /// but it is documentation, so it is advice rather than a patch.
+        #[arg(long = "suggest-sigs", conflicts_with = "fix_renames")]
+        suggest_sigs: bool,
     },
 
     /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
@@ -828,12 +836,28 @@ fn run_main(cli: Cli) {
             files,
             fix_renames,
             dry_run,
+            suggest_sigs,
         } => {
-            if files.is_empty() {
+            if files.is_empty() && !suggest_sigs {
                 require_project(
                     "check",
                     Some("To check one file outside a project: nest check <file>.blsp"),
                 );
+            }
+            if suggest_sigs {
+                let list = files
+                    .iter()
+                    .map(|f| format!("{f:?}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let code = format!(
+                    "(project/load-config) (require-one 'test) (project/suggest-sigs (list {list}))"
+                );
+                match run_for_value(&mut interp, &code) {
+                    brood::core::value::Value::Int(0) => {}
+                    _ => std::process::exit(1),
+                }
+                return;
             }
             if fix_renames {
                 // Whole-project by construction — the rewrite is project-wide, so

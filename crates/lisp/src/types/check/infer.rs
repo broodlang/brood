@@ -226,6 +226,18 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                             return Some(t);
                         }
                     }
+                    // **Calling a variable whose type is an arrow.** A parameter
+                    // declared `(sig apply-it ((int -> string) -> any))` carries a
+                    // full signature, and the call `(f 1)` inside the body is where
+                    // it should pay: without this the arrow was inert — the result
+                    // had no type and the arguments went unchecked, so declaring one
+                    // bought nothing at the only site that can use it.
+                    //
+                    // Checked FIRST, because a local shadows any global of the same
+                    // name; `ctx.get` only answers for a variable actually in scope.
+                    if let Some(sig) = ctx.get(s).as_ref().and_then(Ty::as_arrow) {
+                        return Some(sig.ret.clone());
+                    }
                     // A user `(sig …)` declaration is authoritative for the
                     // result type — consult it unless a *lexical* local (fn/let)
                     // shadows the name. (A file-global with a declared sig is the
@@ -595,6 +607,57 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     None
 }
 
+/// A record shape and whether it is open — for the sinks that carry a shape forward.
+struct ShapeOf {
+    fields: std::collections::BTreeMap<value::Symbol, (Ty, bool)>,
+    open: bool,
+}
+
+/// The record shape of a type, open or closed.
+fn record_shape_of(ty: Option<&Ty>) -> Option<ShapeOf> {
+    let ty = ty?;
+    Some(ShapeOf {
+        fields: ty.record_fields()?.clone(),
+        open: ty.record_is_open() == Some(true),
+    })
+}
+
+/// The fields of a **closed** record only. An open record may carry keys nothing
+/// declares, so a rule reading "these are all the keys" does not hold for one.
+fn closed_record_fields(
+    ty: Option<&Ty>,
+) -> Option<&std::collections::BTreeMap<value::Symbol, (Ty, bool)>> {
+    let ty = ty?;
+    if ty.record_is_open() != Some(false) {
+        return None;
+    }
+    ty.record_fields()
+}
+
+/// Every argument as a literal keyword, or `None` if any is dynamic — in which case the
+/// caller cannot say *which* fields an operation touches and must widen.
+fn literal_keyword_args(args: &[Value]) -> Option<Vec<value::Symbol>> {
+    args.iter()
+        .map(|arg| match arg {
+            Value::Keyword(name) => Some(*name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `k1 v1 k2 v2 …` as `(literal keyword, value form)` pairs, or `None` if any key is
+/// dynamic or the list is odd.
+fn literal_keyword_pairs(args: &[Value]) -> Option<Vec<(value::Symbol, Value)>> {
+    if !args.len().is_multiple_of(2) {
+        return None;
+    }
+    args.chunks_exact(2)
+        .map(|pair| match pair[0] {
+            Value::Keyword(name) => Some((name, pair[1])),
+            _ => None,
+        })
+        .collect()
+}
 /// Element-aware result type for the sequence builtins — `None` falls through to
 /// the callee's flat signature. `(list …)`/`(vector …)` build a refined
 /// sequence; `(first xs)`/`(last xs)`/`(nth xs i)` extract the element type
@@ -750,27 +813,95 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             return Some(v.clone().union(Ty::of(Tag::Nil)));
         }
     }
-    // `(keys m)` → `nil | list<K>`.
+    // `(keys m)` → `nil | list<K>`. On a **closed** record shape the keys are exactly
+    // the declared field names, so the element type is that literal set — which is what
+    // makes `(keys r)` usable as a value rather than an opaque `list<any>`. An OPEN
+    // record may carry keys nothing declares, so it falls through to the `map_kv` rule.
     if value::symbol_is(head, "keys") && items.len() == 2 {
         let map_arg = *items.get(1)?;
-        if let Some((k, _)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
+        let map_ty = expr_ty(heap, map_arg, ctx);
+        if let Some(shape) = closed_record_fields(map_ty.as_ref()) {
+            let names = shape
+                .keys()
+                .fold(Ty::NEVER, |acc, name| acc.union(Ty::keyword_lit(*name)));
+            // An optional field may be absent, so the union over ALL declared names is
+            // an over-approximation of the keys actually present — sound, and the only
+            // answer available without knowing the value.
+            return list_result(Some(names));
+        }
+        if let Some((k, _)) = map_ty.as_ref().and_then(Ty::map_kv) {
             return list_result(Some(k.clone()));
         }
     }
-    // `(vals m)` → `nil | list<V>`.
+    // `(vals m)` → `nil | list<V>`. On a closed record, every value present is one of
+    // the declared field types.
     if value::symbol_is(head, "vals") && items.len() == 2 {
         let map_arg = *items.get(1)?;
-        if let Some((_, v)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
+        let map_ty = expr_ty(heap, map_arg, ctx);
+        if let Some(shape) = closed_record_fields(map_ty.as_ref()) {
+            let types = shape
+                .values()
+                .fold(Ty::NEVER, |acc, (ty, _required)| acc.union(ty.clone()));
+            return list_result(Some(types));
+        }
+        if let Some((_, v)) = map_ty.as_ref().and_then(Ty::map_kv) {
             return list_result(Some(v.clone()));
         }
     }
-    // `(assoc m k1 v1 …)` → `map<K, V>`, preserving the input's refinement.
-    // We only carry the refinement forward; we don't try to refine based on the
-    // new k/v arguments (too expensive, no false-positive risk either way).
+    // `(dissoc m k …)` → the same record shape without those fields. Exact on a closed
+    // record with literal-keyword keys: the result definitely lacks them.
+    if value::symbol_is(head, "dissoc") && items.len() >= 3 {
+        let map_arg = *items.get(1)?;
+        let map_ty = expr_ty(heap, map_arg, ctx);
+        if let Some(shape) = closed_record_fields(map_ty.as_ref()) {
+            if let Some(removed) = literal_keyword_args(&items[2..]) {
+                let mut fields = shape.clone();
+                for name in removed {
+                    fields.remove(&name);
+                }
+                return Some(Ty::record_of(fields));
+            }
+        }
+    }
+    // `(assoc m k1 v1 …)` → `map<K, V>` with the assoc'd keys and values UNIONED into
+    // the refinement. Carrying `K`/`V` forward unchanged — which this did, on the stated
+    // grounds of "no false-positive risk either way" — is not sound in the direction
+    // that matters: `(assoc m :extra "text")` on a `(map keyword int)` genuinely holds a
+    // string at `:extra`, so claiming the result is still `(map keyword int)` made
+    // `(get … :extra)` read `nil | int` and flagged correct code. A key or value whose
+    // own type is unknown widens that side to `any` rather than keeping a refinement
+    // the value may contradict.
     if value::symbol_is(head, "assoc") && items.len() >= 4 && (items.len() - 2).is_multiple_of(2) {
         let map_arg = *items.get(1)?;
-        if let Some((k, v)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
-            return Some(Ty::map_of(k.clone(), v.clone()));
+        let map_ty = expr_ty(heap, map_arg, ctx);
+        // On a record shape with literal-keyword keys, carry the SHAPE forward with the
+        // assoc'd fields added or replaced — required, since `assoc` definitely puts them
+        // there. Without this a closed record degrades to a flat `map` on the first
+        // update, which would make closed records (ADR-264) unusable in the idiom that
+        // builds one field at a time. An unknown value type contributes `any` rather
+        // than dropping the whole shape.
+        if let Some(shape) = record_shape_of(map_ty.as_ref()) {
+            if let Some(updates) = literal_keyword_pairs(&items[2..]) {
+                let mut fields = shape.fields;
+                for (name, value_form) in updates {
+                    let vty = expr_ty(heap, value_form, ctx).unwrap_or(Ty::ANY);
+                    fields.insert(name, (vty, true));
+                }
+                return Some(if shape.open {
+                    Ty::record_of_open(fields)
+                } else {
+                    Ty::record_of(fields)
+                });
+            }
+        }
+        if let Some((k, v)) = map_ty.as_ref().and_then(Ty::map_kv) {
+            let mut key_ty = k.clone();
+            let mut val_ty = v.clone();
+            for pair in items[2..].chunks_exact(2) {
+                key_ty = key_ty.union(expr_ty(heap, pair[0], ctx).unwrap_or(Ty::ANY));
+                val_ty = val_ty.union(expr_ty(heap, pair[1], ctx).unwrap_or(Ty::ANY));
+            }
+            return Some(Ty::map_of(key_ty, val_ty));
         }
     }
     // `(map f coll)` → `nil | list<B>`, `B` = the callback's return type applied

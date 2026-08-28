@@ -84,6 +84,7 @@ tree-sitter language keyword `lang` (`:ruby`/`:elixir`), with `face-of` a node�
 function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 `(text)` service closing over its `lang` and table."
   (ts-spans (%tree-sitter-parse text lang) face-of))
+(sig fontify (string keyword any -> any))
 
 ;; ---- structural navigation --------------------------------------------------
 ;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp
@@ -120,6 +121,7 @@ unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
         enc (ts-enclosing root point)
         nxt (seq/find (fn (f) (>= (get f :start) point)) (ts-named-kids enc)))
     (if (nil? nxt) point (get nxt :end))))
+(sig point-forward (string keyword any -> any))
 
 (defn point-backward (text lang point)
   "Start of the previous named node ending at or before `point` (`backward-sexp`)."
@@ -127,6 +129,7 @@ unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
         enc (ts-enclosing root point)
         prev (last (filter (fn (f) (<= (get f :end) point)) (ts-named-kids enc))))
     (if (nil? prev) point (get prev :start))))
+(sig point-backward (string keyword any -> any))
 
 (defn point-list-forward (text lang point)
   "End of the next child CONTAINER at or after `point` — leaf nodes are stepped over, not
@@ -136,6 +139,7 @@ stopped at (Emacs `forward-list`); unchanged if none."
         nxt (seq/find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
               (ts-named-kids enc)))
     (if (nil? nxt) point (get nxt :end))))
+(sig point-list-forward (string keyword any -> any))
 
 (defn point-list-backward (text lang point)
   "Start of the previous child CONTAINER ending at or before `point` — leaves stepped over
@@ -145,12 +149,14 @@ stopped at (Emacs `forward-list`); unchanged if none."
         prev (last (filter (fn (f) (and (ts-container? f) (<= (get f :end) point)))
                      (ts-named-kids enc))))
     (if (nil? prev) point (get prev :start))))
+(sig point-list-backward (string keyword any -> any))
 
 (defn point-up (text lang point)
   "Start of the enclosing node (`backward-up-list`); unchanged at top level."
   (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point))
     (if (ts-root? enc root) point (get enc :start))))
+(sig point-up (string keyword any -> any))
 
 (defn point-up-forward (text lang point)
   "End of the enclosing node — the forward counterpart of `point-up` (Emacs `up-list`);
@@ -158,6 +164,7 @@ unchanged at top level."
   (let (root (%tree-sitter-parse text lang)
         enc (ts-enclosing root point))
     (if (ts-root? enc root) point (get enc :end))))
+(sig point-up-forward (string keyword any -> any))
 
 (defn point-down (text lang point)
   "Start of the next child container at or after `point` (`down-list`); unchanged
@@ -167,6 +174,7 @@ if none."
         lst (seq/find (fn (f) (and (ts-container? f) (>= (get f :start) point)))
               (ts-named-kids enc)))
     (if (nil? lst) point (get lst :start))))
+(sig point-down (string keyword any -> any))
 
 ;; check-allow: deliberately non-tail — depth = syntax-tree nesting at point.
 (check-allow :non-tail-recursion
@@ -215,14 +223,17 @@ The shared body of `point-defun-start` / `point-defun-end`."
       (not (empty? defuns)) (get (last defuns) edge)
       (not (empty? chain)) (get (first chain) edge)
       else point)))
+(sig ts-defun-edge (string keyword any any -> any))
 
 (defn point-defun-start (text lang point)
   "Start of the enclosing **definition** (`beginning-of-defun`): the deepest `def` / `class`
 / `module` / … containing `point` — so a `def` inside an Elixir `defmodule` or a Ruby `class`,
 not the whole enclosing module. Falls back to the top-level form, then `point`."
   (ts-defun-edge text lang point :start))
+(sig point-defun-start (string keyword any -> any))
 
 (defn point-defun-end (text lang point)
   "End of the enclosing **definition** (`end-of-defun`, C-M-e) — the close of the same node
 `point-defun-start` finds, so the pair brackets one `def` / `class` / `module`."
   (ts-defun-edge text lang point :end))
+(sig point-defun-end (string keyword any -> any))

@@ -65,23 +65,28 @@ if its owner crashes and vice versa."
 agent replies (up to 5 s; a dead agent raises rather than hanging). Use
 `identity` to return the state as-is."
   (gen/call pid [:get f]))
+(sig get ((or map pid) any -> any))
 
 (defn update (pid f)
   "Replace the agent's state with `(f state)`. Blocks until acknowledged (up to
 5 s; a dead agent raises rather than hanging)."
   (gen/call pid [:update f]))
+(sig update ((or map pid) any -> any))
 
 (defn get-and-update (pid f)
   "Atomically read and update: `f` must return a 2-vector `[result new-state]`.
 Returns `result` and leaves the agent with `new-state`. Blocks until the agent
 replies (up to 5 s; a dead agent raises rather than hanging)."
   (gen/call pid [:get-and-update f]))
+(sig get-and-update ((or map pid) any -> any))
 
 (defn cast (pid f)
   "Fire-and-forget update: apply `(f state)` asynchronously, no reply waited."
   (send pid [:$cast f]))
+(sig cast ((or map pid) any -> nil))
 
 (defn stop (pid)
   "Ask the agent to exit its loop cleanly. Blocks until it acknowledges (up to
 5 s; a dead agent raises rather than hanging)."
   (gen/call pid :stop))
+(sig stop ((or map pid) -> any))

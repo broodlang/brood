@@ -992,7 +992,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // (single-segment) namespaces, so a qualified call is `gen/call`, `supervisor/start`,
     // `agent/get`.
     //
-    // `gen` — the gen_server-style actor framework (ADR-243: `defprocess` / `spawn-server` /
+    // `gen` — the gen_server-style actor framework (ADR-243: `defserver` / `spawn-server` /
     // `call` / `cast` / `stop`). It was briefly prelude-bundled and *bare* (`7cb796f0`),
     // which seized ten very generic global names — `call`, `cast`, `stop`, … — into the
     // un-redefinable reserved set (ADR-166), so `(def call …)` was refused outright. A
@@ -1030,6 +1030,11 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Date and time utilities (UTC): epoch↔datetime conversion, ISO 8601
     // format/parse, arithmetic, calendar predicates. Pure Brood over `now`.
     embedded_module!("datetime", "std/datetime.blsp"),
+    // Time as an interval, not an instant (adapted from Tempo, Apache-2.0): one
+    // resolution-carrying value type whose span is half-open, Allen's thirteen
+    // relations, and an interval-set algebra (union/intersection/difference/gaps).
+    // Layered on `datetime` for the calendar arithmetic. Opt-in, never in the prelude.
+    embedded_module!("tempo", "std/tempo.blsp"),
     // Hex and Base64 encoding/decoding. Pure Brood over `string/char->int` /
     // `string->utf8-bytes` / `utf8-bytes->string`. Opt-in, never in the prelude.
     embedded_module!("encoding", "std/encoding.blsp"),
@@ -1112,6 +1117,12 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // `decimal/*`, this module declares the namespace. `decimal?` stays bare with the
     // other type predicates. Bare until 2026-08-26.
     embedded_module!("decimal", "std/decimal.blsp"),
+    // Arithmetic for RECORD types — the `+`/`-`/`*`/`/` extension point (ADR-179). The
+    // `bit`/`decimal` story with one twist: the ops are neither Rust nor loadable, they are
+    // prelude MULTIMETHODS, because `%add`'s cold fallback calls them before any module can
+    // load. This module declares the namespace and documents them. `num-add`… until
+    // 2026-08-28 — a four-name hyphen prefix is a namespace spelled by hand (ADR-251).
+    embedded_module!("num", "std/num.blsp"),
     // OS/process interface: env vars, argv, subprocess execution, OS type, halt.
     // Wraps the %env-all/%argv/%os-cmd/%os-type/%halt primitives with a clean API.
     embedded_module!("system", "std/system.blsp"),

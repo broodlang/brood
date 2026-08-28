@@ -228,7 +228,7 @@ private is a compile error without `(:use-internals mod)`; call it bare (same mo
 or `mod/name` (granted). There is no marker to spell and none to read, so ask the
 image: `(private? 'mod/name)`. The old `--`-in-name convention (`append--onto`) was
 **deleted** in favour of this — if you meet it in older code or a stale doc, it no
-longer means anything. There is no `defmacro-`/`defprocess-`: private macros and
+longer means anything. There is no `defmacro-`/`defserver-`: private macros and
 processes were rare enough that they simply stay public.
 
 A trailing `!` is **rare and not a mutation warning** — nothing mutates, so the
@@ -697,7 +697,7 @@ named form.
 
 Use it for anything supervised — `std/proc/supervisor.blsp`'s `:start` thunks are
 `(fn () (spawn-link (worker …)))`, and `gen/start-link` is the
-same idea for a `defprocess` server.
+same idea for a `defserver` server.
 
 ## Distributed nodes — named processes & cross-node addressing
 
@@ -755,12 +755,12 @@ kinds:
   Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
-;; `gen` is an ordinary module: `(:use gen)` refers defprocess / start /
+;; `gen` is an ordinary module: `(:use gen)` refers defserver / start /
 ;; cast / call / stop bare. Without it, qualify: `gen/start`, `gen/call`, …
 ;; (`call`/`cast`/`stop` are NOT global names — `(def call …)` is yours.)
 (defmodule my-counter "…" (:use gen))
 
-(defprocess counter (n)                 ; n is the state
+(defserver counter (n)                 ; n is the state
   (cast  :inc       (+ n 1))            ; new state = n+1
   (cast  [:add k]   (+ n k))            ; payloads can carry data (pattern binds k)
   (cast  :ping      (do (io/puts "pong") n))  ; side effect, state unchanged

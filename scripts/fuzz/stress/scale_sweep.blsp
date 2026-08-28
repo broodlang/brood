@@ -139,7 +139,7 @@
   ;; exactly the `:use-internals` case, as `tests/sse_test.blsp` does.
   (:use-internals sse)
   (:use agent :only [start update stop])
-  (:use gen :only [defprocess call])
+  (:use gen :only [defserver call])
   (:use editor/buffer)
   (:use sexp :only [point-forward]))
 
@@ -200,7 +200,7 @@
 
 ;; ---- gen: N synchronous calls against one server -----------------------
 
-(defprocess counter-server
+(defserver counter-server
   (state)
   (call :bump [(+ state 1) (+ state 1)]))
 

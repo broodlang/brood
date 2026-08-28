@@ -28,7 +28,7 @@ running in an agent harness:
 | Tool | Returns | Replaces |
 |---|---|---|
 | `brood.lookup(name)` | signature, docstring, file:line, source body | "grep the prelude" |
-| `brood.expand(form)` | macroexpanded form | reading `hatch.blsp` to know what `defprocess` does |
+| `brood.expand(form)` | macroexpanded form | reading `hatch.blsp` to know what `defserver` does |
 | `brood.eval(form, opts)` | `{value, type, stderr, time-ms}` JSON | `brood file.blsp` + parsing stdout |
 | `brood.where-is(symbol)` | `"std/prelude.blsp:803"` | full-text search |
 | `brood.find-pattern(intent)` | a runnable worked example | reading the entire `examples/` dir |
@@ -55,7 +55,7 @@ MCP server is mostly a thin JSON-RPC wrapper around APIs that exist.
 - A system-prompt fragment with the do's and don'ts:
   > When writing Brood, prefer `match` over nested `if`; use `_` for
   > wildcard and `_x` for "I'm binding but won't use it"; reach for
-  > `defprocess` over raw `receive` loops; use fused `->>`/`lmap` pipelines instead of
+  > `defserver` over raw `receive` loops; use fused `->>`/`lmap` pipelines instead of
   > chained `map`/`filter`; remember bare symbols in patterns *bind*…
 
 `nest new` could optionally drop this skill into the new project so any
@@ -82,7 +82,7 @@ Format suggestion:
 ## 2026-05-28 — Claude Opus 4.7 — concurrent Mandelbrot
 **Goal:** demo program exercising processes + fused pipelines + macros.
 **Blockers:** scheduler race; type-checker noise; formatter aggression.
-**Surprises:** `defprocess` is in hatch (reference `proc/hatch/…`, which loads it); apply exists.
+**Surprises:** `defserver` is in hatch (reference `proc/hatch/…`, which loads it); apply exists.
 **What I'd tell next-me:** read std/prelude.blsp once; use -j 1 for
 fan-out demos; the type-checker warnings about hatch macros are noise.
 ```
@@ -152,14 +152,14 @@ Two lessons worth keeping for future surface decisions:
 ## 5. Macroexpand visible everywhere
 
 Most Lisps have `(macroexpand 'form)` and most LLM Lisp code is wrong
-because the LLM hasn't seen the expansion. Today `defprocess` is a black
+because the LLM hasn't seen the expansion. Today `defserver` is a black
 box to anyone who hasn't read `hatch.blsp`.
 
 Make it visible:
 
 - **In the LSP hover** over a macro form, show the first-step expansion.
 - **In CLI errors** that originated inside an expansion: "error inside
-  expansion of `defprocess collector`; expanded form was: (receive
+  expansion of `defserver collector`; expanded form was: (receive
   ([:$cast …]) …)". This single change would have answered three of my
   debugging questions instantly.
 - **Via the MCP tool** (#1 `brood.expand`).
@@ -354,7 +354,7 @@ served over MCP via `prompts/get` and reusable as a plain file by other harnesse
 When writing Brood code:
 - Prefer match over nested if for tagged-data dispatch
 - Use _x (not _) when you're binding but won't use the value
-- Reach for defprocess + hatch over raw receive loops
+- Reach for defserver + hatch over raw receive loops
 - Use fused `->>`/`lmap`/`lfilter` instead of chained eager map/filter over large data
 - Remember: bare symbols in patterns BIND; use 'sym to match literal
 - Closures don't cross process boundaries via send; data does
@@ -486,10 +486,10 @@ These confirm or refine the table above based on hands-on re-testing.
   to stdout) doesn't yet route through this wrapper — separate
   follow-up.
 - **§5 — Macroexpand** partial as marked: the MCP `macroexpand` tool
-  works on `defprocess` and other hatch macros. The "in CLI errors
+  works on `defserver` and other hatch macros. The "in CLI errors
   show the expansion" piece and the "LSP hover shows expansion" piece
   aren't there yet. The single highest-leverage remaining piece is the
-  CLI-error one — when a worker dies inside a `defprocess`-expanded
+  CLI-error one — when a worker dies inside a `defserver`-expanded
   receive, surfacing the expansion would have answered three of my
   debugging questions instantly.
 - **§14 — Prompt fragment** verified at `docs/prompts/brood-task.md`.

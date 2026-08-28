@@ -279,6 +279,7 @@ Whitespace and plain variable references carry no span (the default colour). The
 per-character scan is the native `scan-tokens`; this only assigns faces over the token
 stream (O(tokens)), so it stays fast enough for per-frame fontification."
   (hl-spans (reflect/scan-tokens src) '() '()))
+(sig highlight-spans (string -> any))
 
 ;; ---- windowed highlighting (fontify just a viewport) ------------------------
 ;; A large buffer is too costly to lex whole every frame. The editor instead lexes
@@ -310,6 +311,7 @@ the top (a backward scan can't know string state), which is O(pos) — run nativ
 (`scan-form-start`, the ADR-093 scanner family), because interpreted it stalled eldoc /
 fontify-restart multi-second on every idle beat in a large file."
   (reflect/scan-form-start src pos))
+(sig safe-restart (string int -> int))
 
 ;; ---- the shared span -> runs tiler ------------------------------------------
 ;; `face-at` / `ranges-face` / `fontify-runs` are the renderer-agnostic core: a
@@ -335,6 +337,7 @@ highlight, isearch overlays, and bracket-match are all such ranges."
             (nil? acc) f
             else (into acc f)))
     nil ranges))
+(sig ranges-face (seqable any -> any))
 
 (defn fontify-runs (text base spans ranges)
   "Coalesce `text` (its first char at buffer offset `base`) into a list of
@@ -346,6 +349,7 @@ or HTML; `()` for empty `text`. `spans` must be ascending + non-overlapping (the
 The whole tile + overlay-merge is the native `%span-runs` (it runs per visible line every
 frame, including a region/isearch overlay during a drag-select), so this is a thin call."
   (%span-runs text base spans ranges))
+(sig fontify-runs (string int any any -> list))
 
 (defn highlight-chunks (full base line overrides)
   "Return `[substring face]` chunks that tile `line` — the visible region starting
@@ -358,6 +362,7 @@ one-char range `[pos (inc pos) face]`."
     base
     (highlight-spans full)
     (map (fn ([p f]) [p (inc p) f]) overrides)))
+(sig highlight-chunks (any any any seqable -> list))
 
 ;; ---- bracket matching -------------------------------------------------------
 
@@ -421,6 +426,7 @@ Public because it is the one fact an auto-indenter needs — which form am I ins
 and where does it start — and `enclosing-call` (right below) already computes it for
 signature hints; exposing it beats a second, subtly-different scan in the editor."
   (hl-enc-scan full 0 pos (string/length full) '()))
+(sig enclosing-open (string any -> any))
 
 ;; ---- enclosing call (for signature hints) -----------------------------------
 
@@ -486,6 +492,7 @@ cursor sits deep in a large file."
                         in-datum (and (> pos 0) (not (hl-delim? (string/char-at full (dec pos)))))
                         argi (if in-datum (math/max 0 (dec afterc)) afterc))
                     [callee argi]))))))))))
+(sig enclosing-call (string any -> (or nil (vector (or map number string)))))
 
 ;; ---- completion helpers (pure; candidates supplied by the caller) -----------
 

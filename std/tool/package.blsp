@@ -122,6 +122,7 @@ land in a later slice."
         registry-reqs (second walked)
         registry-entries (package-resolve-registry-closure root registry-reqs lock-index lock))
     (append non-registry registry-entries)))
+(sig resolve-deps (any seqable any -> any))
 
 ;; Returns `[non-registry-entries registry-reqs]`: the resolved path/git/tarball entries
 ;; in resolution order, and the (unresolved) registry dep records to hand to the solver.
@@ -1082,6 +1083,7 @@ registry, or nil if it is unpublished. Backs an app's 'is there an update?' chec
       nil
       (fold (fn (best v) (if (or (nil? best) (version/newer? v best)) v best))
         nil versions))))
+(sig registry-latest-version ((or keyword string symbol) -> any))
 
 (defn registry-enhancers (app)
   "The packages published to the configured registry that ENHANCE application `app` — a list of
@@ -1128,6 +1130,7 @@ sha256 pin still holds."
                       (offload %untar-gz archive target (if external 1 0))
                       (file/rm archive)
                       {:name name-str :version version :path target :checksum checksum}))))))
+(sig registry-install ((or keyword string symbol) any -> any))
 
 ;; Two resolutions of the same name must agree on their source. Different kinds can
 ;; never agree (checked here, since it is the one rule that is *about* the pair rather
@@ -1218,6 +1221,7 @@ sha256 pin still holds."
       (map (fn (file)
              (map (fn (m) (list m file)) (package-module-names-of file)))
         (package-blsp-files src-dir)))))
+(sig module-files (string -> any))
 
 ;; The [label src-dir] providers to check for a *module-name* collision. Since deps
 ;; are package-rooted (ADR-070) — a dep `foo`'s `b` is the global `foo/b` — a dep can

@@ -4028,7 +4028,7 @@ impl Heap {
     /// Record one more bare name as defined in the current namespace's file. Used
     /// by the resolver when it qualifies a `def` head whose name the up-front
     /// forward-ref scan missed — a name produced by a *macro* expansion (e.g.
-    /// `defprocess` → `(def counter …)`), which `scan_def_names` can't see in the
+    /// `defserver` → `(def counter …)`), which `scan_def_names` can't see in the
     /// raw form. Registering it before the def's body is resolved lets self-
     /// references (the recursion in `counter`'s loop) qualify to the same name.
     pub fn add_ns_known_name(&mut self, sym: Symbol) {

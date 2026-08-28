@@ -211,19 +211,21 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
         // {:x 10} :y)) (inc v) …)` read as handing `nil` to `inc` — a false positive
         // on a branch that cannot run.
         //
-        // **One-sided, and it has to be.** The exact truthy type is "anything but
-        // `nil` and the *literal* `false`", which this lattice cannot state: negating
-        // a literal set widens to its whole tag, so the closest sayable type is `not
-        // nil`. That is a sound *necessary* condition for a true test — right for the
-        // then-branch — but its complement (`nil`) is **not** implied by a false test,
-        // because `false` is falsy too. Marked biconditional it read `(not v)` as "v
-        // is nil" and reported live code as dead. One-sided is the honest reading
-        // until a negative literal atom exists to say the other half.
+        // **Biconditional, because the type is now exact.** Truthy is `¬(nil ∪ false)`.
+        // That was unsayable while negating a literal set widened to its whole tag —
+        // the closest was `not nil`, a sound *necessary* condition for a true test but
+        // not invertible (a false test does not imply `nil`, since `false` is falsy
+        // too), so this guard had to be one-sided, and marking it biconditional read
+        // `(not v)` as "v is nil" and reported live code as dead.
+        //
+        // `Ty::negate` now complements a **bool** literal set exactly — the one literal
+        // kind with a finite domain, where `¬{false}` really is `{true}` — so the type
+        // below *is* truthy, and its complement really is falsy. Both branches narrow.
         if ctx.is_lexical_local(s) {
             return Some(Guard {
                 sym: s,
-                ty: Ty::of(Tag::Nil).negate(),
-                then_only: true,
+                ty: Ty::of(Tag::Nil).union(Ty::bool_lit(false)).negate(),
+                then_only: false,
             });
         }
         return None;
@@ -258,17 +260,26 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
         if let Some((sym, ty)) =
             literal_eq_guard(items[1], items[2]).or_else(|| literal_eq_guard(items[2], items[1]))
         {
-            // **`then_only`:** `(%eq m lit)` being true proves `m` has `lit`'s
-            // tag, but being *false* proves nothing about the tag — `m ≠ "x"`
-            // can still be another string. So the else-branch must NOT narrow to
-            // `¬ty` (that flagged a valid `(string/length m)` after `(= m "x")`).
-            // (`nil` is the one tag where `≠ nil` *would* imply `¬nil`, but we
-            // don't special-case it — dropping that narrowing only loses
-            // precision, never soundness.)
+            // **The else-branch narrows exactly when the guard's type is exactly the
+            // values `=` compares against** — a literal set, whose complement became
+            // representable, or `nil`, whose tag holds a single value. That is what
+            // makes a tagged-union dispatch refine: after `(= tag :ok)` fails, a
+            // `(or :ok :err)` tag is `:err` rather than unnarrowed.
+            //
+            // Anything else stays one-sided, and a string literal is the case that
+            // matters: `of_value` has no heap to read the bytes, so `(= m "x")` yields
+            // the bare `string` tag. Negating *that* claims `m` is not a string at all
+            // — which is how this guard came to be one-sided in the first place (it
+            // flagged a valid `(string/length m)` in the else branch).
+            let exact = ty.as_lit().is_some()
+                || ty.as_lit_int().is_some()
+                || ty.as_lit_bool().is_some()
+                || ty.as_lit_str().is_some()
+                || ty == Ty::of(Tag::Nil);
             return Some(Guard {
                 sym,
                 ty,
-                then_only: true,
+                then_only: !exact,
             });
         }
         return None;

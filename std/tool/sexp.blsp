@@ -52,6 +52,7 @@ the structure queries below navigate the result directly. (This replaced an
 in-Brood `annotate` walk that re-derived positions by summing leaf lengths: O(n)
 interpreted and the bottleneck in structural navigation.)"
   (reflect/parse-source-positioned text))
+(sig tree (string -> map))
 
 ;; ---- structure queries ------------------------------------------------------
 
@@ -81,6 +82,7 @@ fine for position queries, but don't feed the returned spans to `eval` unchecked
 
     (count (sexp/top-level-forms \"(a)\n(b)\n\"))   → 2"
   (forms-of (tree text)))
+(sig top-level-forms (string -> seqable))
 
 ;; ---- narrowing: bound structural queries to the forms around point ----------
 ;; `parse-source-positioned` plus the CST walk below are O(buffer): at the bottom of a
@@ -388,6 +390,7 @@ new open (paredit `wrap-round`).
            ")"
            (string/substring text ne))
           (inc ns)]))))
+(sig point-wrap-round (string any -> (or nil (vector (or number string)))))
 
 (defn point-transpose (text point)
   "Interchange the sexp before `point` with the one after it, point landing just past both
@@ -417,6 +420,7 @@ at `next.end` (the whitespace between the two forms is preserved in place).
            (string/substring text ps pe) ; … then the earlier form
            (string/substring text ne))
           ne]))))
+(sig point-transpose (string any -> (or nil (vector any))))
 
 ;; ---- structure-aware kill bound ---------------------------------------------
 
@@ -444,6 +448,7 @@ parens. At end of line, kills the newline. At least `point` (a no-op at the clos
           (= point le) (math/min n (inc point))
           ; empty rest of line → kill the newline
           else le)))))
+(sig point-kill-end (string any -> any))
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
 
 (defn- sexp-apply-edit
