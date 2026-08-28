@@ -5583,3 +5583,46 @@ oldest version actually exercised, never a guess.
 Worth stating plainly because the instinct is to wave it away as environmental: a build that
 fails on a supported toolchain with an error that misdirects the reader **is** a bug, and the
 absence of an MSRV is what made it one.
+
+**Second correction, after pulling: the whole writer account above is SUPERSEDED, and the merge
+that brought the better one dropped it.** The same bug was root-caused twice in parallel that day.
+The other account (ADR-279, `startup_image.rs`) found the piece this one missed: the reason a
+racing process can enter a half-installed module at all is that installing the real `blank?`
+**removes its ADR-246 autoload stub** — the one door that routes a caller into `require-one` and
+makes it *wait*. So what must be deferred is not "privates" but **every name that already has a
+binding**, i.e. the stubs. That is strictly more general, and it dissolves the ≈257 public→public
+residual measured above: those windows are unreachable, because there is no stub to come through.
+**Deferring is enough; atomicity is not needed** — so the "atomic section install is the
+prerequisite for default-ON" conclusion above is withdrawn, as is "privates-first is necessary and
+not sufficient".
+
+The `std/tool/stdimage.blsp` privates-first change was accordingly **reverted**: with it removed
+the repro is 0 of 24 with the image verified live 24/24, so it was redundant, and two
+half-mechanisms for one bug is worse than one whole one.
+
+Three things worth keeping from how this went wrong:
+
+1. **The merge (`cba50894`) hit a conflict in `known-issues.md` and kept only the weaker account**,
+   silently dropping 83 lines of the better one — including its methodology (relaxed per-process
+   counters read out from a SIGTERM handler, because `ptrace_scope` forbids attaching gdb and every
+   in-language observer moved the race) and a third measurement trap. The code from both sides
+   merged cleanly and every gate stayed green, so **nothing failed**. A doc conflict resolved by
+   "keep one side" loses findings no test can miss. Restored by hand; both accounts and the
+   withdrawn claims are now in the KI entry.
+2. **The amplifier switches itself off.** `BROOD_STDLIB_HASH` covers every `std/**/*.blsp`, so any
+   edit — including one made by somebody else while a measurement loop is running — changes the id
+   and the image arm silently becomes the no-image arm. The figures in this entry were taken with
+   the image verified *once before the loop*, not per run, so they should not be leaned on. Verify
+   inside the measuring command and report `image live N/N`.
+3. **`make ab`'s json row was measuring a dead program.** `f3819889` renamed `json/parse` to
+   `json/decode` at 07:26 and the benchmark corpus still called the old name, so the row died on an
+   unbound symbol; the sweep surfaced it only as a 120 s timeout. `bench/smoke.py` in
+   brood-benchmarks catches exactly this and names the symbol — it simply never runs when the
+   rename lands in *brood*. Fixed; all 31 rows live. Worth a thought about wiring that gate to
+   brood's rename waves, since the two repos cannot depend on each other in CI.
+
+Also this session: **KI-77** filed (⚠️ watching) — the `loop` row is ~2-3% slower than v0.14.1 and
+survives both the unpinned and the interleaved check, so it is not the pinning artifact and not
+drift. Not bisected: that row's absolute numbers move ~3% between measurement *sessions* (the same
+binary read 90 ms in one interleaved pair and 93 ms in the next), which is enough to swamp a 3%
+per-step bisect. The entry says to use same-session interleaved pairs or not to bother.
