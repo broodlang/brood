@@ -67,6 +67,17 @@ const KIND_SIG: u8 = 2;
 /// A global bound to a `Value::Table` — stored as the table's *contents* (its snapshot
 /// map) and rebuilt into a fresh table on restore. See `encode_section`.
 const KIND_TABLE: u8 = 3;
+/// A **module-private** name (ADR-146). Privacy is recorded by *evaluating*
+/// `(%mark-private 'name)`, and materialising a section evaluates nothing — so without
+/// this every `defn-` in an imaged module came back PUBLIC. Silently: `(:use mod)` then
+/// refers the module's internals, `nest doc` publishes them as API, and `nest check`'s
+/// cross-module private-reference error stops firing — a gate that stops gating, the same
+/// shape as the declared sigs that a named section once dropped entirely.
+///
+/// Carried as its own entry rather than a flag on the value entry so it round-trips for a
+/// name whose value is not encodable (a `Table`, a closure `to_message` refuses): the
+/// privacy fact survives even when the binding itself is skipped.
+const KIND_PRIVATE: u8 = 4;
 
 /// `BROOD_IMAGE_TRACE=1` — report where image time goes, split by phase. Both sides run
 /// through an intermediate `process::Message` tree before or after the byte codec, and the
@@ -259,6 +270,18 @@ fn encode_section(
         encode_msg(&mut entries, &msg)
             .map_err(|e| LispError::runtime(format!("%image-write: sig encode: {e}")))?;
         count += 1;
+    }
+    // Privacy, for every name in this section the image records as private. Written after
+    // the values so a reader that stops early still has consistent bindings.
+    for nv in syms {
+        let value::ValueRef::Sym(sym) = nv.unpack() else {
+            continue;
+        };
+        if heap.is_private(sym) {
+            entries.push(KIND_PRIVATE);
+            put_str(&mut entries, &value::symbol_name(sym));
+            count += 1;
+        }
     }
     put_u32(&mut out, count);
     out.extend_from_slice(&entries);
@@ -467,6 +490,58 @@ pub(super) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// `set/union`) while its data globals — its own registries — stay rebindable. Materialising
 /// evaluates no `def`, so without this a module restored from an image came back unreserved
 /// and `(def path/join …)` was accepted. The caller passes it, because only the caller knows
+/// Bind one imaged entry to its global. **The single definition site**, called from both
+/// passes of `image_load_section` — the in-order pass and the deferred-entry-point pass
+/// (KI-72). It was inlined in both, and the deferred copy carried only the `KIND_MACRO` arm:
+/// a deferred TABLE global therefore landed as the decoded map rather than a rebuilt table
+/// (`(type-of …)` answered `:map`, and `table-get` on it raised), which
+/// `tests/startup_image_test.blsp` catches. Two copies of a `match` over a kind tag is the
+/// shape that silently loses an arm, so there is one.
+fn define_image_entry(
+    heap: &mut Heap,
+    global: EnvId,
+    kind: u8,
+    sym: value::Symbol,
+    v: Value,
+    reserve: bool,
+) -> Result<(), LispError> {
+    match kind {
+        KIND_SIG => heap.set_declared_sig(sym, v),
+        KIND_MACRO => {
+            let m = match v {
+                Value::Fn(id) => Value::Macro(id),
+                other => other,
+            };
+            heap.env_define(global, sym, m);
+        }
+        // Rebuild the table the write side snapshotted: a fresh store in THIS runtime's
+        // registry, refilled from the imaged pairs, so the global is bound to a live table
+        // with the contents loading produced. `table::put` deep-clones in, exactly as a
+        // `table-put` from Brood would.
+        KIND_TABLE => {
+            let tid = crate::core::table::create();
+            if let value::ValueRef::Map(mid) = v.unpack() {
+                for (k, val) in heap.map_entries(mid) {
+                    crate::core::table::put(heap, tid, k, val)?;
+                }
+            }
+            heap.env_define(global, sym, Value::Table(tid));
+        }
+        _ => heap.env_define(global, sym, v),
+    }
+    // Same predicate the `def` path uses under `in_module_load`: functions, macros and
+    // natives become reserved; data globals stay rebindable.
+    if reserve
+        && matches!(
+            v.unpack(),
+            value::ValueRef::Fn(_) | value::ValueRef::Macro(_) | value::ValueRef::Native(_)
+        )
+    {
+        heap.reserve_global(sym);
+    }
+    Ok(())
+}
+
 /// whether this section is an embedded module (reserved) or a project's own (not).
 pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = need_str(heap, arg(args, 0), "%image-load-section")?;
@@ -489,6 +564,24 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     let global = heap.global();
     let mut done: i64 = 0;
     let (mut ns_decode, mut ns_from_msg, mut ns_define) = (0u64, 0u64, 0u64);
+    // **Names that already have a binding are defined LAST** (KI-72). For a module that is
+    // not yet loaded, the only pre-existing binding one of its names can have is an
+    // ADR-246 **autoload stub** — and a stub is the door every other process comes
+    // through: it routes a caller into `require-one`, which sees the in-flight claim and
+    // waits for `provide`. Overwriting it mid-section opens that door early, onto a module
+    // whose remaining entries are not bound yet.
+    //
+    // That is the whole of KI-72's hang. `string/blank?` (public, stubbed) was installed
+    // before `string/whitespace?` (private, called from `blank?`'s body), so a racing
+    // process took the real `blank?` and died on `unbound symbol: string/whitespace?`. It
+    // never sent its reply, and the test's root waited forever for a 24th message — a
+    // *wrong answer* presenting as a hang. The source path cannot produce this: it
+    // evaluates in file order, where a helper is written before its caller.
+    //
+    // Deferring is enough; atomicity is not needed. While any stub is still in place the
+    // module remains unreachable except through `require-one`, and by the time the stubs
+    // are replaced every other entry is bound.
+    let mut deferred: Vec<(u8, value::Symbol, Value)> = Vec::new();
     for _ in 0..count {
         let p = r.position() as usize;
         if p >= r.get_ref().len() {
@@ -499,6 +592,12 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
         let Some(name) = get_str(&mut r) else {
             return Ok(Value::Nil);
         };
+        // A privacy entry carries a name and no value — branch before decoding one.
+        if kind == KIND_PRIVATE {
+            heap.mark_private(value::intern(&name));
+            done += 1;
+            continue;
+        }
         let t0 = std::time::Instant::now();
         let Ok(msg) = decode_msg(&mut r) else {
             return Ok(Value::Nil);
@@ -509,42 +608,20 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
         ns_from_msg += t1.elapsed().as_nanos() as u64;
         let sym = value::intern(&name);
         let t2 = std::time::Instant::now();
-        match kind {
-            KIND_SIG => heap.set_declared_sig(sym, v),
-            KIND_MACRO => {
-                let m = match v {
-                    Value::Fn(id) => Value::Macro(id),
-                    other => other,
-                };
-                heap.env_define(global, sym, m);
-            }
-            // Rebuild the table the write side snapshotted: a fresh store in THIS
-            // runtime's registry, refilled from the imaged pairs, so the global is bound
-            // to a live table with the contents loading produced. `table::put` deep-clones
-            // in, exactly as a `table-put` from Brood would.
-            KIND_TABLE => {
-                let tid = crate::core::table::create();
-                if let value::ValueRef::Map(mid) = v.unpack() {
-                    for (k, val) in heap.map_entries(mid) {
-                        crate::core::table::put(heap, tid, k, val)?;
-                    }
-                }
-                heap.env_define(global, sym, Value::Table(tid));
-            }
-            _ => heap.env_define(global, sym, v),
+        // A sig is not callable and cannot open the door, so it is never deferred.
+        if kind != KIND_SIG && heap.env_get(global, sym).is_some() {
+            deferred.push((kind, sym, v));
+            ns_define += t2.elapsed().as_nanos() as u64;
+            done += 1;
+            continue;
         }
-        // Same predicate the `def` path uses under `in_module_load`: functions, macros and
-        // natives become reserved; data globals stay rebindable.
-        if reserve
-            && matches!(
-                v.unpack(),
-                value::ValueRef::Fn(_) | value::ValueRef::Macro(_) | value::ValueRef::Native(_)
-            )
-        {
-            heap.reserve_global(sym);
-        }
+        define_image_entry(heap, global, kind, sym, v, reserve)?;
         ns_define += t2.elapsed().as_nanos() as u64;
         done += 1;
+    }
+    // …and now the deferred entry points, every other binding in the section being live.
+    for (kind, sym, v) in deferred {
+        define_image_entry(heap, global, kind, sym, v, reserve)?;
     }
     // Everything just promoted is bound to a global, so it is all live. Tell the RUNTIME
     // collector that rather than let it find out by compacting the whole region at the next
