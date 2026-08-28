@@ -307,6 +307,49 @@ single-word/NaN-boxed `Value` buys ~zero at tier-1; its only upside is tier-2
 register-passing, deferred. **Nothing this round changes that** — do not reach for
 NaN-boxing to close the rows below. (Tracked there; not re-opened here.)
 
+## 2b. A variadic call in a loop costs ~36%; fixed-arity wrappers cost nothing (measured 2026-08-28)
+
+Found by publishing a benchmark run. `collatz` read 95 → 185 ms against the previous published
+run with no runtime regression: the port had to migrate off the bare `rem`/`quot`/`max` the
+namespacing waves retired, and one of the three names it moved to is **variadic**.
+
+Isolated on one binary, same program shape:
+
+| variant | time |
+|---|---|
+| `math/rem`, `math/quot`, `math/max` all qualified | 223 ms |
+| the same, but `%max` called directly | **142 ms** |
+| all three primitives directly | **142 ms** |
+
+The middle row equals the bottom row, so `math/rem` and `math/quot` are **free** and the whole
+delta is `math/max`, called once per `sweep` iteration.
+
+**Why, from the JIT dump.** `steps` lowers to native with **no `Call` instruction at all**:
+
+```
+arm: 17 (steps)  insts: Prim2SlotInt JumpIfFalse Local Jump Prim2SlotInt Const Prim2
+                        JumpIfFalse Prim2SlotInt Prim2SlotInt SelfCall Jump …
+```
+
+A fixed-arity body that is one primitive call is **inlined into its caller and disappears** — so
+`math/rem`/`math/quot` never appear as lowered arms *and* never appear in `BROOD_JIT_BAIL_TRACE`.
+That absence is easy to misread as "they never lower, so the loop pays a VM round-trip per op";
+it means the opposite, and the isolation table is what settles which. `math/max` by contrast
+lowers to `GlobalIc Local Call` — it is `(apply %max xs)` over `& xs`, so it allocates an argument
+list per call and cannot be inlined.
+
+**So the lever is variadic dispatch, not wrappers.** This is the case CLAUDE.md's dogfooding
+section already uses as its worked example ("variadic `+`/`-`/`=` … ~40× a direct call") with the
+prescribed fix: efficient **multi-arity dispatch in the evaluator**, which keeps the functions in
+Brood and makes *every* multi-arity call faster rather than two. `math/max` and `math/min` are the
+`math` entries in that shape; `collatz` and `latency` are the rows that call them in a loop.
+
+**Two side results worth keeping.** Qualification is free — `math/rem` referred bare via
+`(:use math)` measured 204 ms against 205 ms qualified — so the module system costs nothing at a
+call site. And the leaf/one-prim inlining is already doing its job, which is a better starting
+position than the earlier framing implied: there is no missing inliner to build here, only the
+variadic shape it cannot reach.
+
 ## 3. The remaining gaps are data-structure-specific (measured 2026-06-14)
 
 Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_IR`.
