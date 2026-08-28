@@ -259,6 +259,18 @@ jobs:
         id: tw
         env:
           BROOD_VM: 0
+          # KI-78: keep ONE job deliberately on the stdlib image's SOURCE path.
+          #
+          # The image is default-ON (v0.15.0), and nextest's `build-std-image` setup script now
+          # builds one before the suite so the other jobs exercise that default. Without this
+          # line every job would run imaged and source-path coverage would silently vanish —
+          # trading one gap for its mirror image. This variable is the setup script's own off
+          # switch, so setting it here gives a source-path setup and a source-path run together.
+          #
+          # This job is the right one to carry it: it already exists to run the suite in a
+          # non-default configuration (the tree-walker, BROOD_VM=0), so "the other configuration"
+          # is its whole purpose. The pairing is engine x load-path, not either alone.
+          BROOD_NO_STDIMAGE: 1
         shell: bash
         run: |
           set -o pipefail
