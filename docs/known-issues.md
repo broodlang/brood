@@ -4753,3 +4753,32 @@ escape total there is nothing left to warn about; the gate asserts **zero** offe
 template plus three behavioural probes that define `get`/`reverse`/`bound?` and assert the real
 value comes back. It pins `receive` as the known exception, so a *new* offender fails the build.
 Sabotage-verified: removing `defrecord`'s escape fails both the scan and the probe.
+
+## KI-74 — one `cargo test -p brood --lib` run reported a failure it would not name ⚠️ WATCHING 2026-08-28
+
+**What was seen.** A single run of the lib suite ended `test result: FAILED. 607 passed; 1
+failed; 1 ignored` — and the run's output carried **no `---- <name> stdout ----` block and no
+`failures:` list**, so the failing case named itself nowhere. Every subsequent run has been
+green: **20 consecutive** clean runs (8 + 12) of the identical binary, `608 passed; 0 failed`.
+
+**Why it is a watch and not an open bug.** Per the rule above, `⚠️ watching` requires that it
+genuinely cannot be reproduced on demand, with the diagnostic armed and named. It cannot: 20
+runs, no recurrence, and the one sighting is uninformative by itself. It is *recorded* rather
+than dismissed because this repo's own history says a flake seen once is real until proven
+otherwise (KI-36 took three sightings and twelve days; KI-39 took four).
+
+**The one lead.** The suite has a test that deliberately touches the filesystem outside any
+project — `introspect::tests::load_tooling_image_is_best_effort_outside_a_project` — and its
+normal output in every run is a `Permission denied (os error 13)` note for
+`/nonexistent/path/xyzzy/.brood`. Tests run on many threads and several build an `Interp`
+that consults `~/.cache/brood`, so a shared-cache race is the most plausible shape. This is a
+**hypothesis, not a diagnosis**: nothing has tied the sighting to that test, and the run did
+not name a case.
+
+**Diagnostic armed.** `make test` runs the suite through cargo-nextest, which runs each test
+in its own process and **names the failing case** — the exact gap this sighting had. Re-run
+under nextest (`cargo nextest run -p brood --lib`) if it recurs, and capture the full output
+rather than the summary line; libtest's summary alone cannot answer it.
+
+**Next step if it recurs:** get the case name, then decide. Until then this entry exists so a
+second sighting is recognised as a second sighting rather than a first.
