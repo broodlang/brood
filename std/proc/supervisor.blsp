@@ -595,11 +595,13 @@ another, the parent links it, so the parent's death tears this sub-tree down too
 summaries. Synchronous — blocks for the reply, up to `gen/call`'s 5 s deadline;
 a dead supervisor raises instead of hanging."
   (gen/call sup :which-children))
+(sig which-children ((or map pid) -> any))
 
 (defn count-children (sup)
   "How many children supervisor `sup` currently has. Synchronous (see
 `which-children` for the deadline / dead-server behaviour)."
   (gen/call sup :count-children))
+(sig count-children ((or map pid) -> any))
 
 (defn start-child (sup spec)
   "Start a new child under a running supervisor `sup` from child `spec` (the same
@@ -608,12 +610,14 @@ child is linked and supervised like any static child. Returns its pid, or
 `[:error msg]` if the spec's `:start` thunk raised. Synchronous (see
 `which-children` for the deadline / dead-server behaviour)."
   (gen/call sup [:start-child spec]))
+(sig start-child ((or map pid) any -> any))
 
 (defn terminate-child (sup key)
   "Terminate a child of `sup` identified by `key` (its `:id` or pid) and drop it
 from supervision — it is *not* restarted. Returns `:ok`, or `:not-found`.
 Synchronous (see `which-children` for the deadline / dead-server behaviour)."
   (gen/call sup [:terminate-child key]))
+(sig terminate-child ((or map pid) any -> any))
 
 (defn restart-child (sup key)
   "Terminate the child of `sup` identified by `key` (`:id` or pid) and start a fresh
@@ -621,6 +625,7 @@ incarnation from the same spec (not counted against the restart-intensity window
 Returns the new pid, `:not-found`, or `[:error msg]` if the `:start` thunk raised.
 Synchronous (see `which-children` for the deadline / dead-server behaviour)."
   (gen/call sup [:restart-child key]))
+(sig restart-child ((or map pid) any -> any))
 
 ;; No `stop` here: a supervisor is an ordinary server process and answers the SAME
 ;; `[:$stop]` message `gen/stop` sends, so `(gen/stop sup)` already tears it down

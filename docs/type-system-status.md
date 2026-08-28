@@ -383,6 +383,32 @@ ADR-272 infers for every callback with no faithful annotation, so the declare-si
 could not offer the newest and most useful inference. It writes as `(or fn keyword)` now,
 and round-trips.
 
+## Adoption, and why it compounds (2026-08-28)
+
+`std/` carries **358** `(sig …)` declarations, up from ~34. That took three rounds, and
+the rounds are the interesting part: ADR-277 made a file-local declaration constrain its
+callers *in the same file*, so each round sharpened the domains the next one read.
+`bytes/int` was `(any (or map number) (or map number) -> any)` — noise ADR-276 rejects —
+before its neighbour `bytes/at` was declared; afterwards it was `(bytes int … -> any)`.
+Round 2 found 45 newly-adoptable signatures, round 3 found 20, and the remaining ~1550 are
+the tiers ADR-276 rejects on purpose (return-only, module-private, and the arithmetic-domain
+noise).
+
+Adoption paid for itself in defects, not just documentation. It surfaced ADR-275 (**every**
+unconditionally-raising function with a signature was told its body contradicted its
+declared return, because `never` is disjoint from itself), an inconsistency where `odd?`
+demanded `number` while `even?` demanded `int` for the same argument, and ADR-277 itself.
+
+One rule turned out not to be decidable in advance: a function whose job is to *validate*
+its own argument must not declare that argument's type, or its own guard becomes provably
+dead code. Guessing that from the source is guesswork the checker has already done, so it
+is a feedback step — declare, run `nest check`, drop any declaration that now reports an
+`unreachable clause`. Rounds 1 and 2 both re-added the same two functions because the rule
+lived only in a human's memory; round 3 dropped them automatically.
+
+The declarations are visible where they are read: `nest doc` renders the type under each
+heading now, for a declared signature and a curated primitive alike.
+
 ### What's left
 
 - **`sig` adoption itself** — now mechanical rather than archaeological, but still a
