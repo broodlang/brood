@@ -5757,3 +5757,33 @@ only sabotage said so. It asserted three preconditions (install returned non-nil
 `*std-image-file*` set, module not yet loaded) and every one of them held — the test was correct
 about its own setup and still measured nothing, because it was run the wrong way. A precondition
 assertion proves the setup, not the sensitivity.
+
+### Three items documented before fixing them (KI-78, the unattributed boot win, the drifting install)
+
+Recorded first and deliberately, because all three are things a green tree does not show you.
+
+**KI-78 — CI tests the load path users do not get.** The stdlib image is default-ON since
+v0.15.0, and default-ON is safe by construction: no image on disk means `install` returns nil in
+~30 µs and `require` reads source. Nothing in `ci.yml` builds one, so that is what every job
+does. The suite is green *imaged* (1222/1222 locally with one verified live), so this is a gap in
+what CI proves rather than a bug behind it — but it is nondeterministic rather than absent, because
+`image_matches_source.rs` builds an image and writes it to `~/.cache/brood`, and nextest schedules
+cases in no guaranteed order. Same shape as the KI-72 guard hole one level down, found the same way.
+
+The fix has a constraint that is easy to miss: building the image makes `autoload_race`'s
+default-path arms imaged too, so source-path race coverage would silently vanish. One job has to
+stay on source deliberately.
+
+**The boot win nobody recorded.** v0.15.0 carries a ~5-6 ms *fixed per-run* saving that lands on
+every benchmark row — `startup` 36 → 30 ms, `loop`/`sieve` −6 ms, `fib`/`collatz` −5 ms — and it
+closed KI-77 as a side effect. Nothing in the log claims it. Before bisecting, the rule from
+brood-benchmarks' CLAUDE.md applies: **sample three or four points across the range and look at
+the curve.** A ramp means there is nothing to find and `git bisect` will still return a commit —
+that is how a `primes` regression once got attributed to a `.blsp` *test file*.
+
+**The installed binary drifts, and it is load-bearing for benchmarks.** `~/.local/bin/brood` sat
+15+ commits behind most of the day. `make doctor` reports it; nothing enforces it. The harness runs
+whatever is on `PATH`, so a published run against a stale or dev-tools build silently measures
+something other than what `make ab` and `nest release` do. The lean install
+(`INSTALL_FEATURES='$(RUN_FEATURES)'`) is the one that keeps those three on one build — and
+contrary to an older note, `nest test` works fine on it.
