@@ -78,6 +78,7 @@
 compiler's linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed its
 private table, and never surfaced to user code — reach for `table/new` instead."
   (reduce (fn (t kv) (%table-put t (first kv) (second kv))) (%table) (%map-pairs m)))
+(sig %table-from-map (map -> table))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
   "True if `x` is callable (a closure or a primitive).
@@ -113,6 +114,17 @@ decimal to fast float math (`(->float 1/2)` → `0.5`)."
     (second [1 2 3])     → 2
     (second (list 1))    → nil"
   (first (rest coll)))
+(sig second (seqable -> any))
+(defn third (coll)
+  "The third item of `coll`.
+
+    (third [1 2 3])      → 3
+    (third (list 1 2))   → nil"
+  ;; Here, not in `std/seq.blsp`, because `first`/`second`/`third` is one trio and it
+  ;; had three homes: `first` a kernel builtin, `second` here, `third` a module function
+  ;; you had to know to qualify. Any of the three should read the same way.
+  (first (rest (rest coll))))
+(sig third (seqable -> any))
 
 ;; ---- sequence operations ----
 ;; Many eager seq ops share one structure: reverse-accumulate over `(seq coll)`,

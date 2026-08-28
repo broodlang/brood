@@ -535,7 +535,7 @@ iterating for side effects.
 
 ;; ---- iteration combinators --------------------------------------------------
 ;; Hide the hand-rolled counter/accumulator recursion behind names that read as
-;; intent (the way `defprocess` hides a receive loop). All ordinary Brood.
+;; intent (the way `defserver` hides a receive loop). All ordinary Brood.
 
 ;; One tail pass pairing each item with a running index — the old
 ;; `(seq/zip (range (count coll)) coll)` made three passes (count, build the range
@@ -668,6 +668,7 @@ indexed access or a vector literal shape (`(into [] (map f coll))`, named).
     (mapv inc [1 2 3])   → [2 3 4]
     (map inc [1 2 3])    → (2 3 4)   ; the list-returning sibling"
   (into [] (map f coll)))
+(sig mapv ((any -> any) seqable -> any))
 
 (defn partition (n coll)
   "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped.

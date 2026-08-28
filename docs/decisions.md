@@ -18038,3 +18038,29 @@ that line, and every later prelude file, is fine.
 zero warnings, and the four warnings it *did* raise on the way were all real — one
 inconsistency (`odd?` declared `number` while `even?` demanded `int`, where both take an
 int and `(math/odd? 2.5)` raises), two dead guards, and ADR-275.
+
+## ADR-277 — A file-local declaration constrains its callers in that file
+
+**Status:** accepted (2026-08-28)
+
+The domain walk (ADR-261) credits a parameter passed *directly* to a callee whose signature
+is known with the type that position demands. It looked the callee up in three places —
+primitive, curated, and the **loaded image**. A `(sig …)` written in the file being checked
+is in none of them: the file is checked *before* it loads, so its declarations live on
+`ctx`, which the walk never consulted.
+
+The consequence is precisely backwards. A declaration constrained callers in every *other*
+module and not in its own — which is where most calls to it are. `std/bytes.blsp` declares
+`(sig at (bytes int -> int))` and calls `(bytes/at bs off)` three lines later; `off` still
+inferred as the arithmetic domain rather than `int`, and `bs` as `any`.
+
+**Decision:** consult `ctx.declared_sig` first, ahead of the three global sources. A
+lexical local shadowing the name is excluded — its type is not the declared global's — and
+this stays a *table lookup*, never `infer_sig`, so it cannot recurse into the inference
+that called it (the property the other three lookups were chosen for).
+
+**It compounds with adoption, which is the point.** Each declaration sharpens the inferred
+domains of everything that calls it in the same module, which makes *those* signatures
+worth declaring in turn. `bytes/int` went from `(any (or map number) (or map number) ->
+any)` — which ADR-276 would reject as noise — to `(bytes int (or map number) -> any)`, two
+of three parameters now saying what they mean.

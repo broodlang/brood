@@ -1111,7 +1111,20 @@ fn domain_of_inner(
     // to a callee whose signature is known takes the type that position demands.
     // Table lookups only (primitive / curated / declared) — never `infer_sig`, so
     // this can't recurse into the inference that called it.
-    let callee_sig = primitive_sig(heap, h)
+    // A **file-local** `(sig …)` first: the file is checked before it loads, so its
+    // declarations are on `ctx` and NOT in the heap — `declared_heap_sig` cannot see
+    // them. Without this a signature constrained its callers in every OTHER module and
+    // not in its own, which is where most calls to it are. `std/bytes.blsp` declares
+    // `(sig at (bytes int -> int))` and then calls `(bytes/at bs off)` three lines
+    // later; `off` still inferred as the arithmetic domain rather than `int`.
+    //
+    // A lexical local shadows the global, so its type is not the declared one; and this
+    // stays a table lookup like the three below, never `infer_sig`, so it cannot recurse
+    // into the inference that called it.
+    let callee_sig = (!scope.shadowed.contains(&h))
+        .then(|| ctx.declared_sig(h))
+        .flatten()
+        .or_else(|| primitive_sig(heap, h))
         .or_else(|| curated_sig(h))
         .or_else(|| declared_heap_sig(heap, h));
     // Ability-op occurrence typing (ADR-190): a call to a *sealed* ability op demands
