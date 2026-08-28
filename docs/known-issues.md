@@ -81,7 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-72 | **the stdlib image cannot be default-ON yet: it turns a latent require-stall into a reliable one.** Measured with 12 parallel copies of `autoload_race --test-threads=4` against a 90 s timeout: **12 of 12 exceed it with the image installed, 0 of 12 without**, and the same test passes 12/12 alone in 0.5 s. Not a deadlock — nothing hangs permanently. The edge replay must run BEFORE `provide` (or a racing process sees a module whose dependencies are missing — the 112-failure bug ADR-256 fixed), so a module stays unprovided while it recursively requires its whole edge set, and every process that wants it meanwhile enters `%require-await`'s **5 ms x 1000** poll before force-loading. The image makes many more modules take that path in a burst, so the stalls compound | ⚠️ **OPEN 2026-08-27** — image reverted to opt-in (`BROOD_STDIMAGE=1`) the day it was flipped; everything else from ADR-256 ships. The fix is the POLL, not the ordering: `%require-await` should wait on the loader finishing rather than sleep-and-recheck. Note the synthetic load stresses something pre-existing — at 12x4 parallelism the default (no image) still shows 4 of 12 — so a fix should be measured on both arms |
+| KI-72 | **the stdlib image cannot be default-ON yet: it turns a latent require-stall into a reliable one.** Measured with 12 parallel copies of `autoload_race --test-threads=4` against a 90 s timeout: **12 of 12 exceed it with the image installed, 0 of 12 without**, and the same test passes 12/12 alone in 0.5 s. Not a deadlock — nothing hangs permanently. The edge replay must run BEFORE `provide` (or a racing process sees a module whose dependencies are missing — the 112-failure bug ADR-256 fixed), so a module stays unprovided while it recursively requires its whole edge set, and every process that wants it meanwhile enters `%require-await`'s **5 ms x 1000** poll before force-loading. **The "not a deadlock" half of this was WRONG (2026-08-28): the wait is unbounded** — a root blocked in `receive` sat >30 s with an EMPTY mailbox and every scheduler worker idle, so a reply is genuinely never delivered, not merely delayed | ⚠️ **OPEN 2026-08-27, re-characterised 2026-08-28** — image reverted to opt-in (`BROOD_STDIMAGE=1`) the day it was flipped; everything else from ADR-256 ships. The fix is the POLL, not the ordering: `%require-await` should wait on the loader finishing rather than sleep-and-recheck — the OTP `code_server` model, see below. Note the synthetic load stresses something pre-existing — at 12x4 parallelism the default (no image) still shows 4 of 12 — so a fix should be measured on both arms |
 | KI-71 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right; fixed downstream with `nest rename --swap`. ✅ **The class now HAS a gate (same day):** the checker already catches a reversed call precisely, per argument — it was silent here only because `seq/remove-nth` had **no declared `sig`**. The index/collection functions (`remove-nth`, `take-last`, `drop-last`, `chunk-every`, `split-at`, `sample`, `shuffle`, `vector-ref`) now carry one, so the reversal is a warning and CI's zero-warning gate makes it a hard failure. Argument types precise, return `any` — the reversal is an argument mistake, and a narrow return would false-positive at every call site. Zero new warnings across std/ + tests/. Guards `a_reversed_index_and_collection_call_is_flagged` + `the_correct_index_first_order_stays_silent`, sabotage-verified by deleting one `sig` |
 | KI-70 | **the checker never looked inside a vector or map literal**, so every expression in Hiccup-shaped code was unchecked. `check_into_inner` opened with `let Value::Pair(_) = form else { return }` — a `[…]` or `{…}` in value position ended the walk, though its contents are ordinary evaluated code. hive's `/docs` renderer carried `(str (max 2 …))` for weeks after `max` moved to `math`: `nest check` green, `nest test` green, and only rendering the page raised it. One level out from KI-67 — not a form that suppressed the lint, a form the walk never reached | ✅ **fixed 2026-08-27** — `Value::Vector` and `Value::Map` descend into their elements (map **keys** as well as values). No false positives: the checker runs on macroexpanded forms, so a `match` pattern vector is already lowered to `let`/`if` binders, and `quote`/`quasiquote` return at `SpecialHead::SkipBody` before their data is ever handed down. std/ + tests/ stayed at **zero warnings** apart from one real find — `std/tool/mcp.blsp`'s `callers` tool called the module-private `project-all-files` from inside a map literal, the **fifth** dead `project-*` call site and the one KI-67's sweep could not see. Guards `unbound_inside_a_vector_or_map_literal_is_flagged` + `descending_into_a_literal_does_not_read_data_as_code`, sabotage-verified |
 | KI-69 | **two `jit_plan` guards failed on every `main` push**, so the `differential (tree-walker)` job had been red since KI-64's fix landed. `block_argument_spills_never_reach_the_deopt_journal` and `the_block_argument_want_is_clamped_to_the_reserve` assert on VM-compiled arms, and the job runs `BROOD_VM=0` — nothing compiles, so the first inspected 0 chunks and the second saw no arm to clamp. Both fail loudly by design (a vacuous green would mean nothing), which is why they failed rather than passing hollowly | ✅ **fixed 2026-08-27** — both pin `set_forced_ceiling(Some(Tier::Native))`, the fix `compile/tests.rs` already documents for its two native tests since ADR-222 made the ceiling coherent. The guards are new (2026-08-26) and simply missed the pin |
@@ -4526,6 +4526,118 @@ duration instead of a 5 ms quantum.
 that parallelism the default (image off) still showed **4 of 12** over 90 s in one run. A fix
 should move both numbers, and a claim that the image is safe to default-on needs the image arm at
 parity with the no-image arm, not merely under the cap.
+
+### Re-characterised 2026-08-28: the wait is UNBOUNDED, and the repro is far cheaper
+
+Two corrections to the account above, both measured.
+
+**1. "Nothing hangs permanently" is wrong.** The 5 ms x 1000 poll bounds `%require-await` at
+~5 s, so the entry above reasoned that the suite could only be *slow*. It is not. With the
+image installed, a root blocked in `reduce`+`receive` over 24 spawned children:
+
+- outlasted a **30 s** `after` clause and still lost a reply (the whole 30 s elapsed — it did
+  not recover at 5 s);
+- was caught by a watchdog green process reporting **`backlog=0` continuously from t=20 s to
+  t=30 s** — the root's mailbox is EMPTY, so the reply was never delivered. This is not a
+  message delivered-and-unmatched, and not a slow poll;
+- under gdb, sat in `receive_match` -> `wait_for_message` with **all 12 scheduler workers idle**
+  in `wait_timeout` on the run queue. Nothing was runnable — so no child was merely slow.
+
+The watchdog kept ticking throughout, so the scheduler itself is alive. A `send` (or a child)
+is genuinely lost.
+
+**2. The repro no longer needs 12 parallel copies over 90 s.** One process is enough:
+
+```
+BROOD_STDIMAGE=1 ./target/debug/deps/autoload_race-* --test-threads=4     # 5-6 of 9 hang
+```
+
+against a 25 s timeout, where each test alone passes in ~105 ms. Rates measured over 8 runs
+each: `--test-threads=1` 3/8, `=2` 4/8, `=4` 5/8. **Concurrency between runtimes is not
+required** — sequential tests in one process hang too — but more than one `Interp` in the
+process is: a single test, run alone, has never hung.
+
+**Ruled out** (each with a measurement, none of them the cause):
+
+- the mailbox park/notify in general — a `pure` variant (children send a constant, no
+  `require`, no image) never lost a reply;
+- `%registry-member?` vs `contains?` staleness in the poll — fixed separately (that WAS a real
+  defect: a waiter polling the cached global read could miss a racing `provide`, sleep its
+  whole budget and then force-load a module that was ready), but it does not fix this;
+- pid collision across runtimes — concurrent `Interp`s get distinct pids;
+- `ensure_ctx` thread-local reuse — six sequential `Interp`s on one thread all report
+  `#<pid nonode/1>`, because the root `Ctx` is cached per THREAD rather than per runtime, and
+  the second runtime's root is therefore the first's mailbox. **This is a real design smell
+  worth fixing on its own**, but it is not this bug: four sequential same-thread `Interp`s
+  each running the full fan completed 6/6.
+- `BROOD_NO_RECV_MARK` / `BROOD_NO_HANDOFF` / `BROOD_NO_MSGTAG` — no arm separated from
+  baseline at n=12 (5, 4, 2, 6 losses respectively; the spread is noise at that sample size).
+
+**A warning for whoever picks this up.** The bug is timing-fragile and *every* in-language
+observer moved it. Collecting the child pids (`spawn-many`) instead of discarding them
+(`dotimes`) suppressed it twice; adding a `%list-processes` watchdog suppressed it (0/48);
+an `after` body larger than `(cons :LOST acc)` suppressed it. An earlier A/B here concluded
+that a `receive` nested inside the native `reduce` builtin was the trigger (3/10 vs 0/10
+for a Brood-level loop) — **that conclusion did not hold**: under parallel load the plain
+loop lost a reply and the nested one did not. Do not trust a shape comparison at n=10 on
+this bug. Use the unmodified `autoload_race` binary as the repro and observe from gdb.
+
+### How Erlang does it — the `code_server` model
+
+Brood's `%require-await` polls; OTP does not, and the difference is the fix. From
+`lib/kernel/src/code_server.erl`, in its own words:
+
+> we queue loaders for a given module and either reply to them or run them if a previous
+> loader succeeded.
+
+`schedule_or_run_loader/4` is the whole mechanism: if the module is already in `loading`, the
+requester is appended to that module's waiting list and the server answers `{noreply, ...}` —
+the caller simply stays blocked in its `gen_server:call` receive. When the in-flight load
+finishes, `run_loader_next/2` pops the next waiter and replies to it. Three consequences
+Brood does not currently get:
+
+1. **A waiter's cost is the load's real duration**, not a 5 ms quantum times however many
+   rounds — it wakes on a message, O(1).
+2. **There is no force-load fallback.** The claim is authoritative and only the claim holder
+   can release a waiter. Brood's `%require-force` after 1000 rounds is a *second* loader for
+   the same module — precisely what turns a slow load into a duplicate one.
+3. **Deadlock is detected, not timed out.** If the module's `on_load` is being run by the
+   requesting process itself, the server replies `{error, deadlock}` immediately.
+
+The claim itself is not the gap: Brood's `:assoc-new` test-and-set inside the registry lock is
+equivalent to the code server's serialisation. It is the *wait* that differs.
+
+**The deeper divergence, and it is the one this bug lives in.** In BEAM everything is a
+process and there is exactly ONE park/wake path — `erts_queue_message` enqueues under the
+message lock, then:
+
+```c
+erts_proc_notify_new_message(Process *p, ErtsProcLocks locks)
+{
+    erts_aint32_t state = erts_atomic32_read_nob(&p->state);
+    if (!(state & ERTS_PSFLG_ACTIVE))
+        erts_schedule_process(p, state, locks);
+}
+```
+
+The wakeup is recorded as a **persistent bit in the process state** (`ERTS_PSFLG_ACTIVE`). A
+state flag latches; whatever the interleaving, a process made ACTIVE will be run.
+
+Brood has two paths, chosen by whether a green process is parked:
+
+```rust
+st.push(env);
+if let Some(proc) = wake_parked(&mut st) { drop(st); wake_enqueue(proc); }
+else { mb.cv.notify_one(); }   // wake the root thread, if it's blocked in receive
+```
+
+A condvar notify **does not latch** — delivered with no waiter, it is silently discarded. The
+root/file-runner thread is a hybrid BEAM has no equivalent of: a mailbox owner that blocks an
+OS thread on a condvar instead of being a schedulable green process. `wait_for_message` does
+hold the state lock across its check-then-wait, which closes the obvious window, so this is
+not yet a proven mechanism for the loss — but it is the structural difference, and unifying
+the two wake paths (or latching the wakeup in the mailbox state the way `ERTS_PSFLG_ACTIVE`
+does) would remove the whole class.
 
 **Status:** the image ships **opt-in** (`BROOD_STDIMAGE=1`), which is where it was before the flip.
 Everything else from ADR-256 is unaffected and shipped: the registration replay, the
