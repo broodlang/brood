@@ -1561,7 +1561,12 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
 ;; warning severities (a fuller fix — see the roadmap).
 (defn- project-advisory-warning?
   (w)
-  (includes? w "recursive call in non-tail position"))
+  (or (includes? w "recursive call in non-tail position")
+    ;; Stability diagnostics (ADR-283). A deprecation that FAILS the build is a removal
+    ;; with extra steps — the point is to say "this is going away" while the code still
+    ;; works, so it prints and does not gate. Same for a beta notice.
+    (includes? w "is deprecated since")
+    (includes? w "is beta —")))
 
 ;; Print warning `w` and return the running gate count `n`, incremented only when
 ;; `w` gates the build. An advisory warning prints with an `(advisory)` marker and

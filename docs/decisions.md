@@ -18351,3 +18351,52 @@ one variable must not itself require a rebuild.
 So the rule this ADR sets: **a shipping choice may be a configure option; a measurement
 lever may not.** The image is the former and also has a use as the latter, which is why it
 gets both layers — like the JIT, and for the same reason.
+
+## ADR-283 — Stability metadata: `:since`, `:deprecated`, `:beta`
+
+**Status:** accepted (2026-08-28)
+
+Three facts a library must be able to state and Brood had no way to say: *when did this
+appear*, *is it going away*, *is it settled enough to build on*.
+
+```lisp
+(defn parse (text) …)
+(meta parse :since "0.9.0")
+(meta old-parse :deprecated "0.14.0" :use 'parse)
+(meta try-this :beta "the shape of the options map may change")
+```
+
+**One mechanism, not three features.** All three are a fact recorded against a name at
+definition time and read back by tooling — which is exactly what `%mark-private` (ADR-146)
+and `%register-sig` already are. `(meta …)` is the same shape with a data payload, and one
+form with keyword clauses rather than three macros, so a name can carry all three at once.
+
+**Where each one is spent — the part that decided the design.**
+
+- **`:since` is documentation only.** `nest doc` renders it; nothing warns. It is also the
+  one fact that could later be *derived* rather than declared (the version a name first
+  appeared in is recoverable from git history), so a future `--stamp-since` is left open
+  and hand-declaration is the fallback.
+- **`:deprecated` is a *checker* diagnostic, and an advisory one.** Warning at run time
+  would fire in a hot loop, on a machine that cannot act on it, long after the edit that
+  caused it. And it must not gate: **a deprecation that fails the build is a removal with
+  extra steps**, so `project-advisory-warning?` classifies it as printed-but-not-counted —
+  the mechanism that already existed for the non-tail-recursion lint. `:use` names the
+  replacement, which is what makes the message actionable rather than merely discouraging,
+  and `(check-allow :deprecated …)` silences a deliberate use (a library calling its own
+  deprecated name from the shim that replaces it).
+- **`:beta` warns with its reason**, through the same advisory path. The runtime notice
+  sketched in the roadmap is deferred: the static path is where it is actionable, and a
+  per-call hook would need the once-per-name deduplication ADR-232's drop warning uses —
+  additive, and gated on a real consumer (ADR-011).
+
+**Metadata is cleared by any redefinition**, in `env_define`, exactly as privacy is. A `def`
+that rebinds a name mid-run must not leave the *old* name's `:deprecated` attached to the
+new one — ADR-013's late binding applies to the facts about code, not only to the code.
+
+**It is an annotation on a definition, so it belongs beside one at top level**, like
+`(sig …)`. `meta` resolves its name to the current namespace the way a `def` head is
+resolved; written inside a function body the two can disagree about which namespace is
+current, and the annotation would key off a different symbol than the definition it
+annotates. Found by the test that asserts the redefinition rule, which is the right place
+for it to be found.
