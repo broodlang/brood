@@ -261,8 +261,21 @@ impl fmt::Display for Ty {
         // (An exact `number` is already named above; this only fires for a strict superset.)
         let number_tags = Ty::NUMBER.tags;
         let factor_number = (self.tags & number_tags) == number_tags && self.tags != number_tags;
+        // …and the same for `fn`. The `Fn`/`Native` split is an implementation detail the
+        // LANGUAGE does not have: `(type-of inc)` is `:fn`, `(fn? inc)` is true for a
+        // builtin and a closure alike, and the type grammar's `fn` already parses to both
+        // members. Only the renderers still spelled them apart, which is how a warning
+        // came to read `expects keyword | fn | native` — naming a kind no Brood program
+        // can observe or write down.
+        // Unlike `number`, this fires for the EXACT pair too — there is no earlier
+        // exact-match arm naming it, and reaching here with exactly `FN_BITS` means the
+        // type carries no arrow refinement (that case returned above), so it is plainly
+        // `fn`.
+        let fn_tags = FN_BITS;
+        let factor_fn = (self.tags & fn_tags) == fn_tags;
         let mut first = true;
         let mut number_emitted = false;
+        let mut fn_emitted = false;
         for tag in ALL_TAGS {
             if self.contains_tag(tag) {
                 // Collapse the number members into a single `number` token at the first one.
@@ -276,6 +289,18 @@ impl fmt::Display for Ty {
                     }
                     first = false;
                     f.write_str("number")?;
+                    continue;
+                }
+                if factor_fn && (1u32 << bit(tag)) & fn_tags != 0 {
+                    if fn_emitted {
+                        continue;
+                    }
+                    fn_emitted = true;
+                    if !first {
+                        f.write_str(" | ")?;
+                    }
+                    first = false;
+                    f.write_str("fn")?;
                     continue;
                 }
                 if !first {
@@ -476,6 +501,12 @@ impl Ty {
             (Ty::SEQABLE, "seqable"),
             (Ty::NUMBER, "number"),
             (Ty::LIST, "list"),
+            // `fn` covers both function members, which is what the grammar parses it to
+            // and what the language means by a function. Without it `to_source` hit
+            // `Tag::Native` and DECLINED, so the callable type ADR-272 infers for every
+            // callback parameter had no faithful spelling and the declare-sig surfaces
+            // could not offer it.
+            (Ty::of(Tag::Fn).union(Ty::of(Tag::Native)), "fn"),
         ] {
             // Only when the whole named union is present and nothing has pinned one of
             // its members to a literal set (which would make the alias a lie).

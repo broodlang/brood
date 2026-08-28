@@ -17887,3 +17887,80 @@ Note the consequence for suggestions: `Ty::to_source` cannot spell `native`, so 
 callable-typed parameter has no faithful annotation and the declare-sig surfaces decline
 it (ADR-271) rather than approximate. The *checking* is unaffected — this is about what
 can be written down, not what is known.
+
+## ADR-273 — An arrow parameter describes the call it heads
+
+**Status:** accepted (2026-08-28)
+
+A `(sig …)` can declare a parameter's *full signature* — `(sig apply-it ((int -> string)
+-> any))` — and ADR-078 has carried arrow refinements since Step 5. But the one site that
+could use one, the call inside the body, consulted only *global* signature sources. So an
+arrow parameter was **inert in both directions**:
+
+```lisp
+(sig apply-it ((int -> string) -> any))
+(defn apply-it (f) (f "not-an-int"))      ; not flagged: arguments unchecked
+(defn apply-it (f) (+ 1 (f 1)))           ; no result type at all
+```
+
+Declaring an arrow bought nothing. That is worse than it sounds now that ADR-272 types
+every callback parameter as callable: the shape is common, and a declaration that changes
+no outcome teaches an author that annotating higher-order code is pointless.
+
+**Decision:** a variable whose own type carries an arrow describes the call it heads. The
+call's result is the arrow's return (`infer.rs`), and its arguments are checked against the
+arrow's parameters by the ordinary argument check (`walk.rs`), which brings arity and the
+gradual relation with it for free.
+
+**Consulted first, before every global source.** A local shadows a global of the same
+name, and `ctx.get` answers only for a variable actually in scope — so putting it ahead is
+both correct and the cheaper test.
+
+**Verification is the part that was missing.** The oracle's expression facet types *closed*
+expressions, and a closed expression can never carry an arrow or a `map<K, V>` — those
+arrive only from an annotation. A new facet types a body under a parameter given a type
+through the annotation parser itself, then evaluates that body with a value of that type
+bound to the name, and requires the result to belong to the type the checker claimed. For
+an arrow that is the first end-to-end check of a *call's result type*: `value_member_of`
+cannot inspect a closure, but it does not need to — it reads what the closure returned.
+
+Sabotage-verified in both halves:
+
+```
+Ty::of(Tag::Int) in place of the arrow's return
+UNSOUND: with `f : (int -> string)`, `(f 1)` is typed `int`,
+         but it evaluates to "1" (tag string), which is not a member of it
+
+ADR-269's assoc widening reverted
+UNSOUND: with `m : (map keyword int)`, `(assoc m :b "s")` is typed `map<keyword, int>`,
+         but it evaluates to {:b "s", :a 1} (tag map), which is not a member of it
+```
+
+The second is the point: that facet catches, automatically, the defect that previously
+needed a hand-written test and had survived in the oracle's blind spot for as long as map
+refinements had existed.
+
+## ADR-274 — `fn` is one word, because that is all the language has
+
+**Status:** accepted (2026-08-28)
+
+`Tag::Fn` and `Tag::Native` distinguish a closure from a builtin. **The language does
+not**: `(type-of inc)` is `:fn`, `(fn? inc)` is true for both, and the type grammar's `fn`
+has always parsed to *both* members. Only the renderers still spelled them apart, with two
+consequences:
+
+- a warning read `expects keyword | fn | native`, naming a kind no Brood program can
+  observe or write down; and
+- `Ty::to_source` hit `Tag::Native` and **declined**, so the callable type ADR-272 infers
+  for every callback parameter had no faithful annotation — the declare-sig action and
+  `nest check --suggest-sigs` could not offer the inference that had just become the most
+  valuable one.
+
+**Decision:** both members present render as `fn`, in `Display` and in `to_source` alike —
+the same alias treatment `number`, `seqable` and `list` already get. A callback parameter
+now writes as `(or fn keyword)`, and it round-trips.
+
+**A lone `Native` still declines.** The alias covers the two members *together*, which is
+the only form the grammar can express and the only form the language can produce; writing
+half of it as `fn` would be a widening, and ADR-271 is the rule that a suggestion must not
+claim a different type than the checker meant.

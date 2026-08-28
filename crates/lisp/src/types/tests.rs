@@ -286,11 +286,11 @@ fn arrow_renders_as_an_arrow() {
         arr(vec![Ty::of(Tag::Int), Ty::of(Tag::Str)], Ty::NUMBER).to_string(),
         "(int, string) -> number"
     );
-    // A bare "any function" (no refinement) still prints as its tags.
-    assert_eq!(
-        Ty::of_tags(&[Tag::Fn, Tag::Native]).to_string(),
-        "fn | native"
-    );
+    // A bare "any function" (no refinement) prints as the one word the language has.
+    // It used to print `fn | native`, naming a kind no Brood program can observe:
+    // `(type-of inc)` is `:fn` and `(fn? inc)` is true for a builtin and a closure
+    // alike. See `the_two_function_members_render_as_the_one_word_the_language_has`.
+    assert_eq!(Ty::of_tags(&[Tag::Fn, Tag::Native]).to_string(), "fn");
 }
 
 #[test]
@@ -1237,6 +1237,10 @@ fn property_corpus() -> Vec<Ty> {
             .negate()
             .intersect(Ty::of(Tag::Keyword)),
         arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int)),
+        // the callable type every callback parameter infers (ADR-272)
+        Ty::of(Tag::Fn)
+            .union(Ty::of(Tag::Native))
+            .union(Ty::of(Tag::Keyword)),
     ]
 }
 
@@ -1520,7 +1524,10 @@ fn to_source_round_trips_through_the_annotation_parser() {
 
 #[test]
 fn to_source_declines_what_it_cannot_write() {
-    // `macro` and `native` are runtime kinds with no spelling in the grammar.
+    // `macro` has no spelling in the grammar, and neither does a LONE `native` — the
+    // `fn` alias covers the two function members TOGETHER, which is the only form the
+    // grammar can express and the only form the language can produce (`type-of` reports
+    // `:fn` for both). Half of it would be a widening if written as `fn`, so it declines.
     assert_eq!(Ty::of(Tag::Macro).to_source(), None);
     assert_eq!(Ty::of(Tag::Native).to_source(), None);
     // …and a type carrying one declines as a whole rather than dropping it.
@@ -1633,4 +1640,36 @@ fn two_spellings_of_the_same_set_are_one_type() {
         .union(Ty::keyword_lit(value::intern("a")))
         .intersect(Ty::of(Tag::Keyword));
     assert_eq!(all_keywords, Ty::of(Tag::Keyword));
+}
+
+#[test]
+fn the_two_function_members_render_as_the_one_word_the_language_has() {
+    // `Fn`/`Native` is an implementation detail the LANGUAGE does not have: `(type-of
+    // inc)` is `:fn`, `(fn? inc)` is true for a builtin and a closure alike, and the
+    // grammar's `fn` already parses to both members. Only the renderers spelled them
+    // apart, so a warning read `expects keyword | fn | native` — naming a kind no Brood
+    // program can observe or write down — and `to_source` DECLINED on `Tag::Native`, so
+    // the callable type inferred for every callback parameter (ADR-272) had no faithful
+    // annotation and the declare-sig surfaces could not offer it.
+    let callable = Ty::of(Tag::Fn).union(Ty::of(Tag::Native));
+    assert_eq!(callable.to_string(), "fn");
+    assert_eq!(callable.to_source().as_deref(), Some("fn"));
+
+    // …including inside a wider union, which is the shape a callback parameter has
+    // (a keyword is a function of a map, ADR-272).
+    let with_keyword = callable.clone().union(Ty::of(Tag::Keyword));
+    assert_eq!(with_keyword.to_string(), "keyword | fn");
+    let source = with_keyword
+        .to_source()
+        .expect("a callable param must be writable");
+    assert_eq!(source, "(or fn keyword)");
+
+    // …and it round-trips: what the tool offers is what the checker meant.
+    let mut interp = crate::Interp::new();
+    let form = crate::syntax::reader::read_one(&mut interp.heap, &source).expect("parses");
+    let back = super::check::annot::parse_type(&interp.heap, form).expect("is a type");
+    assert_eq!(
+        back, with_keyword,
+        "`{source}` must read back as what it rendered"
+    );
 }

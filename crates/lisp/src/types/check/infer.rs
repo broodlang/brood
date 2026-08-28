@@ -226,6 +226,18 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                             return Some(t);
                         }
                     }
+                    // **Calling a variable whose type is an arrow.** A parameter
+                    // declared `(sig apply-it ((int -> string) -> any))` carries a
+                    // full signature, and the call `(f 1)` inside the body is where
+                    // it should pay: without this the arrow was inert — the result
+                    // had no type and the arguments went unchecked, so declaring one
+                    // bought nothing at the only site that can use it.
+                    //
+                    // Checked FIRST, because a local shadows any global of the same
+                    // name; `ctx.get` only answers for a variable actually in scope.
+                    if let Some(sig) = ctx.get(s).as_ref().and_then(Ty::as_arrow) {
+                        return Some(sig.ret.clone());
+                    }
                     // A user `(sig …)` declaration is authoritative for the
                     // result type — consult it unless a *lexical* local (fn/let)
                     // shadows the name. (A file-global with a declared sig is the

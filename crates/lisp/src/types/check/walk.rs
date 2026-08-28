@@ -1289,8 +1289,17 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // may describe it; never the stale heap signature.
         // `is_lexical_local` guards the heap fallback too: a shadowing local is not
         // the global, so its arg/return types are unknown — never the primitive's.
-        let sig = declared
-            .clone()
+        // **A variable whose own type is an arrow describes the call it heads.** A
+        // parameter declared `(sig apply-it ((int -> string) -> any))` carries a full
+        // signature, and `(f "x")` inside the body is the only site that can use it —
+        // without this the arrow was inert in both directions: the result had no type
+        // (`infer.rs`) and the arguments went unchecked here, so declaring one bought
+        // nothing at all. Checked FIRST because a local shadows any global of the same
+        // name, and `ctx.get` only answers for a variable actually in scope.
+        let local_ty = ctx.get(s);
+        let local_arrow = local_ty.as_ref().and_then(Ty::as_arrow).cloned();
+        let sig = local_arrow
+            .or_else(|| declared.clone())
             .or_else(|| {
                 (!ctx.is_lexical_local(s) && !ctx.is_file_global(s))
                     .then(|| sig_of(heap, s))
