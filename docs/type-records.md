@@ -32,19 +32,23 @@ exact per-field `get` result type instead of a flat `V | nil`.
 
 ```
 type ::= …
-       | (record key-type-pair…)
+       | (record [&open] key-type-pair…)
 key-type-pair ::= keyword field-type
 field-type ::= type | (optional type)
 ```
 
 `(record :name string :age (optional int))` = "a map with a required `:name`
-key of type `string`, and an optional `:age` key that, if present, is an
-`int`". Fields not listed are unconstrained and **allowed** — records are
-**open** (structural width subtyping in the permissive direction), not closed:
-any map with the declared fields present and correctly typed satisfies the
-record, regardless of what else it carries. A closed-record variant (reject
-unknown keys) is a pure addition later if a real need appears — see
-[Deferred](#deferred).
+key of type `string`, an optional `:age` key that, if present, is an `int`,
+**and no other key**". A record is **closed** (ADR-264): a key it does not
+declare is absent, which a `get` reads as `nil`. `(record &open :name string)`
+is the open form — the declared fields, and a value may carry any others.
+
+Openness is *the type of the undeclared keys*, not a flag: `nil` closed, `any`
+open. That is what makes closedness compose — one field reading drives
+subtyping, disjointness and intersection alike, with no rule written for
+either kind. It is also what makes a **tagged union** work: `{ok: int}` says
+`:error` is absent, so `(get r :ok)` over `{ok: int} | {error: string}`
+resolves to `int | nil`, and the two alternatives are provably disjoint.
 
 Why list-headed rather than reusing the `{…}` map-literal reader syntax: every
 other compound type — `(map K V)`, `(vector E)`, `(list E)`, `(and A B)`,
@@ -188,9 +192,9 @@ annotation at all**.
 
 Smaller items, each additive, gated on a real consumer (ADR-011):
 
-- **Closed records** (reject unknown keys) — a separate opt-in marker (e.g.
-  `(record! …)` or a trailing marker in the field list) if open-by-default
-  ever proves too permissive for a real use case.
+- ✅ **Closed records** — shipped as the *default* (ADR-264), with `&open` as the
+  marked case, once ADR-262's union-of-terms made an open record's silence about
+  undeclared keys the thing standing between a tagged union and a usable field read.
 - **`assoc`/`keys`/`vals` field-precise sinks** — `(assoc r :k v)` returning an
   updated record shape, and `(keys r)`/`(vals r)` unioning across declared
   field types, weren't built (only `get` was, as the highest-value case). Both

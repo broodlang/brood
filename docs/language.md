@@ -1706,7 +1706,11 @@ sequences `(list E)` / `(vector E)`, unions `(or A B …)`, intersections
 variables (`?A`), key/value-typed maps `(map K V)` (see
 [type-map-kv.md](type-map-kv.md)), and heterogeneous record shapes `(record
 :k1 T1 :k2 T2 …)` with required-by-default fields and an `(optional T)` wrapper
-for optional ones (see [type-records.md](type-records.md)).
+for optional ones (see [type-records.md](type-records.md)). A record is **closed** —
+it names every key the value has, and a key it doesn't declare reads as `nil`; write
+`(record &open :k T)` for the permissive form. That is what makes a tagged union
+usable: `(get r :ok)` over `(or (record :ok int) (record :error string))` is
+`int | nil`, because the second alternative says `:ok` is absent.
 
 A type-expression the checker cannot read is **reported**, not guessed: a
 misspelled name (`strng`) or constructor (`(tupel int)`), a declaration whose

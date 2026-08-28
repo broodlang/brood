@@ -11,7 +11,7 @@
     (uuid/v5 uuid/ns-dns \"example.com\") ;; deterministic from a name
     (uuid/v3 uuid/ns-url \"https://x\")  ;; same, using MD5
     (uuid/valid? s)                          ;; => true/false
-    (uuid/nil-uuid)                         ;; => \"00000000-0000-0000-0000-000000000000\"
+    (uuid/zero)                         ;; => \"00000000-0000-0000-0000-000000000000\"
 
 v4 and v7 are random; v7 also embeds a ms timestamp prefix for chronological
 sort order. v3 and v5 are deterministic: same namespace + name → same UUID,
@@ -75,10 +75,10 @@ always — useful for content-based IDs and idempotent generation.")
         p4 (string/substring raw 20 32))
     (str p0 "-" p1 "-" p2 "-" p3 "-" p4)))
 
-(defn nil-uuid ()
+(defn zero ()
   "The nil UUID: all zeros.
 
-    (uuid/nil-uuid)   → \"00000000-0000-0000-0000-000000000000\""
+    (uuid/zero)   → \"00000000-0000-0000-0000-000000000000\""
   "00000000-0000-0000-0000-000000000000")
 
 ;; ---- UUID v7 ----------------------------------------------------------------

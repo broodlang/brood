@@ -821,7 +821,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 (defn- registry-error-text
   (resp)
   "The server's `:error` message from a JSON error body, or a generic HTTP line."
-  (let (parsed (try (json/parse (http/body-text resp)) (catch _ nil)))
+  (let (parsed (try (json/decode (http/body-text resp)) (catch _ nil)))
     (if (and (map? parsed) (get parsed :error))
       (get parsed :error)
       (str "HTTP " (get resp :status)))))
@@ -835,7 +835,7 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
         status (get resp :status))
     (cond
       (= status 0) [:error 0 (str "cannot reach the registry at " url ": " (get resp :error))]
-      (and (>= status 200) (< status 300)) [:ok (json/parse (http/body-text resp))]
+      (and (>= status 200) (< status 300)) [:ok (json/decode (http/body-text resp))]
       else [:error status (registry-error-text resp)])))
 
 ;; --- the resolver's registry provider (ADR-209) ---------------------------------

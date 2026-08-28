@@ -135,6 +135,60 @@ const MAX_TY_NODES: usize = 64;
 /// operation's pairwise work trivially bounded.
 const MAX_TY_TERMS: usize = 4;
 
+/// A record shape — the `fields` refinement's payload (ADR-264).
+///
+/// A shape is **not** just a field map: it also says what every key it does *not*
+/// declare holds. That single addition is what makes a record type say what a value
+/// *is not*, which is what a tagged union needs:
+///
+/// - **closed** (`rest` = `nil`) — the plain `(record :a int)`. Any other key is
+///   absent, and Brood reads an absent key as `nil`, so `(get r :b)` is exactly `nil`.
+/// - **open** (`rest` = `any`) — `(record &open :a int)`. Other keys may be present
+///   with any value, so nothing can be concluded about them.
+///
+/// Modelling openness as *the type of the undeclared keys* rather than as a boolean
+/// is what keeps every set operation uniform: subtyping, disjointness and
+/// intersection all quantify over `keys(a) ∪ keys(b)` and then compare the two
+/// `rest`s, with no special case for either kind.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct RecordShape {
+    /// Declared fields: name → (type, required?). An *optional* field may be absent,
+    /// which reads as `nil` — see [`RecordShape::field_ty`].
+    fields: BTreeMap<Symbol, (Ty, bool)>,
+    /// The type of every key not declared in `fields`.
+    rest: Ty,
+}
+
+impl RecordShape {
+    /// The type a `(get r k)` yields for `k` on a value of this shape: the declared
+    /// type for a required field, that type *or `nil`* for an optional one (it may be
+    /// absent), and `rest` for a key the shape does not declare.
+    ///
+    /// This is the single reading every relation uses, which is why a closed record's
+    /// undeclared key (`nil`) and an open record's (`any`) need no special-casing.
+    fn field_ty(&self, key: Symbol) -> Ty {
+        match self.fields.get(&key) {
+            Some((ty, true)) => ty.clone(),
+            Some((ty, false)) => ty.clone().union(Ty::of(Tag::Nil)),
+            None => self.rest.clone(),
+        }
+    }
+
+    /// Is this shape open — may a value carry keys it does not declare?
+    fn is_open(&self) -> bool {
+        !self.rest.is_never() && !self.rest.is_subtype(&Ty::of(Tag::Nil))
+    }
+
+    /// Every key either shape declares — the domain both must be compared over.
+    fn keys_with(&self, other: &RecordShape) -> BTreeSet<Symbol> {
+        self.fields
+            .keys()
+            .chain(other.fields.keys())
+            .copied()
+            .collect()
+    }
+}
+
 /// A set-theoretic type — a **set of runtime [`Tag`]s** with optional
 /// *structured refinements* on its function and sequence members (Step 5+,
 /// ADR-078).
@@ -185,7 +239,7 @@ pub struct Ty {
     /// `map_of` or `record_of`), but the two refinements are independent
     /// fields so the generic union/intersect machinery treats them exactly
     /// like every other refinement pair — see `docs/type-records.md`.
-    fields: Option<Arc<BTreeMap<Symbol, (Ty, bool)>>>,
+    fields: Option<Arc<RecordShape>>,
     /// Refinement of the vector member (`vector`) to a **positional** shape —
     /// one type per index, when statically known from a `(tuple …)`
     /// annotation (ADR-128). `None` means "no declared positional shape".
@@ -392,7 +446,11 @@ impl Ty {
     /// question the complement rendering and the DNF-free fast paths ask: a flat type
     /// is fully described by `tags`, so set reasoning on it is exact.
     pub fn is_flat(&self) -> bool {
-        self.arrow.is_none()
+        // A union of terms is not flat even when its *head* carries no refinement —
+        // the alternatives do the describing. Without this the predicate answers about
+        // one term while reading as if it answered about the type.
+        self.alts.is_none()
+            && self.arrow.is_none()
             && self.overload.is_none()
             && self.elem.is_none()
             && self.map_kv.is_none()
@@ -482,18 +540,83 @@ impl Ty {
     /// required?)`. Tagged `map` (a record is still a runtime `map` value;
     /// this only refines it, the same trick [`Ty::keyword_lit`] uses layering
     /// onto the `Keyword` tag). See `docs/type-records.md`.
+    /// A **closed** record shape — `(record :a int)`. Exactly the declared fields;
+    /// every other key is absent, which reads as `nil` (ADR-264).
     pub fn record_of(fields: BTreeMap<Symbol, (Ty, bool)>) -> Ty {
+        Ty::record_shape(fields, Ty::of(Tag::Nil))
+    }
+
+    /// An **open** record shape — `(record &open :a int)`. The declared fields, and a
+    /// value may carry any others. This is what a shape used as a *parameter domain*
+    /// wants (a `defrecord` accessor takes any record carrying its field), and what an
+    /// ability-as-a-type resolves to.
+    pub fn record_of_open(fields: BTreeMap<Symbol, (Ty, bool)>) -> Ty {
+        Ty::record_shape(fields, Ty::ANY)
+    }
+
+    /// The general constructor: declared fields plus the type of every undeclared key.
+    pub fn record_shape(fields: BTreeMap<Symbol, (Ty, bool)>, rest: Ty) -> Ty {
         Ty {
-            fields: Some(Arc::new(fields)),
+            fields: Some(Arc::new(RecordShape { fields, rest })),
             ..Ty::flat(MAP_BIT)
         }
         .bounded()
     }
 
-    /// The record-shape refinement, if this map type carries one. The bridge
-    /// the checker reads to flow `(get r :name)` to the field's exact type.
+    /// The record-shape refinement's declared fields, if this map type carries one.
     pub fn record_fields(&self) -> Option<&BTreeMap<Symbol, (Ty, bool)>> {
-        self.single()?.fields.as_deref()
+        Some(&self.single()?.fields.as_deref()?.fields)
+    }
+
+    /// The type a `(get r k)` yields on this record type, or `None` when there is no
+    /// answer to give. Unlike [`Ty::record_fields`] this answers for **every** key: an
+    /// undeclared key on a closed record is `nil` (it is absent), which is what lets a
+    /// field read through a tagged union resolve at all.
+    ///
+    /// Over a *union* of shapes it is the union of what each term yields — the whole
+    /// point of the closed shape: `{ok: int} | {error: string}` answers `int | nil` for
+    /// `:ok`, because the second term says the key is absent rather than shrugging.
+    pub fn record_field_ty(&self, key: Symbol) -> Option<Ty> {
+        // The single-term case is the common one and must not pay for the union: it
+        // reads the shape in place rather than materialising a term vector (this is a
+        // per-field-read hot path in the checker).
+        if self.alts.is_none() {
+            return (self.tags == MAP_BIT)
+                .then(|| self.term_field_ty(key))
+                .flatten();
+        }
+        let mut acc: Option<Ty> = None;
+        for term in self.terms_vec() {
+            if term.tags != MAP_BIT {
+                return None;
+            }
+            let t = term.term_field_ty(key)?;
+            acc = Some(match acc {
+                Some(a) => a.union(t),
+                None => t,
+            });
+        }
+        acc
+    }
+
+    /// One term's answer for `key`. Almost always the shape's own reading — except for
+    /// an **undeclared** key on an **open** shape, where the shape says only `any` and a
+    /// `map<K,V>` refinement on the same term (an intersection can carry both) says
+    /// something sharper. Taking the shape's `any` there would be a precision
+    /// regression against the pre-shape behaviour, which consulted `map_kv`.
+    fn term_field_ty(&self, key: Symbol) -> Option<Ty> {
+        let shape = self.fields.as_deref()?;
+        if !shape.fields.contains_key(&key) && shape.is_open() {
+            if let Some((_, v)) = self.map_kv.as_deref() {
+                return Some(v.clone().union(Ty::of(Tag::Nil)));
+            }
+        }
+        Some(shape.field_ty(key))
+    }
+
+    /// Is this a record shape that admits keys it does not declare?
+    pub fn record_is_open(&self) -> Option<bool> {
+        Some(self.single()?.fields.as_deref()?.is_open())
     }
 
     /// A positional tuple shape — one type per index, fixed arity. Tagged
@@ -722,7 +845,11 @@ impl Ty {
             }
         }
         if let Some(f) = &self.fields {
-            for (t, _) in f.values() {
+            n += f.rest.node_count(lim - n);
+            if n >= lim {
+                return n;
+            }
+            for (t, _) in f.fields.values() {
                 n += t.node_count(lim - n);
                 if n >= lim {
                     return n;
@@ -868,8 +995,18 @@ impl Ty {
         } else {
             (None, None)
         };
+        // Element types intersect **exactly**: `vector<int> ∩ vector<string>` is
+        // `vector<never>` — the empty vector, which really does inhabit both — not
+        // `vector`, which the generic widening merge produced and which is not even a
+        // subtype of either operand. (An intersection must be a lower bound; that
+        // property is now asserted over the whole corpus.)
         let elem = if tags & SEQ_BITS != 0 {
-            merge_intersect(&self.elem, &other.elem)
+            match (&self.elem, &other.elem) {
+                (Some(a), Some(b)) => {
+                    Some(Arc::new(a.as_ref().clone().intersect(b.as_ref().clone())))
+                }
+                (a, b) => merge_intersect(a, b),
+            }
         } else {
             None
         };
@@ -878,13 +1015,40 @@ impl Ty {
         } else {
             None
         };
+        // Record shapes intersect **exactly** (see `intersect_records`) rather than
+        // widening to `None` the way the generic refinement merge does — this is the
+        // narrowing a type guard performs, and dropping it would lose the fact the
+        // guard just established. A shape pair no value satisfies clears the `map` bit.
         let fields = if tags & MAP_BIT != 0 {
-            merge_intersect(&self.fields, &other.fields)
+            match (&self.fields, &other.fields) {
+                (Some(a), Some(b)) => match intersect_records(a, b) {
+                    Some(shape) => Some(Arc::new(shape)),
+                    None => {
+                        tags &= !MAP_BIT;
+                        None
+                    }
+                },
+                (a, b) => merge_intersect(a, b),
+            }
         } else {
             None
         };
+        // Positional shapes intersect **exactly**, and unlike an element type a tuple's
+        // arity *is* its shape: two different arities, or one position no value
+        // satisfies, means no vector is both — so the `vector` bit goes, rather than
+        // widening to plain `vector` (which `is_disjoint` correctly calls disjoint,
+        // leaving the two answers contradicting each other).
         let tuple = if tags & VECTOR_BIT != 0 {
-            merge_intersect(&self.tuple, &other.tuple)
+            match (&self.tuple, &other.tuple) {
+                (Some(a), Some(b)) => match intersect_tuples(a, b) {
+                    Some(elems) => Some(Arc::new(elems)),
+                    None => {
+                        tags &= !VECTOR_BIT;
+                        None
+                    }
+                },
+                (a, b) => merge_intersect(a, b),
+            }
         } else {
             None
         };
@@ -1047,6 +1211,23 @@ impl Ty {
                 }
             }
             merged.push(t);
+        }
+        // Absorption is not one-pass: a term that *replaces* an earlier one (or a merge
+        // that widens one) can subsume terms already accepted, and those were compared
+        // against the old value. Without this sweep `any ∪ (A | B)` kept `B` as a
+        // redundant alternative while `(A | B) ∪ any` did not — the same set, unequal,
+        // which breaks every memo keyed on a `Ty`.
+        let mut i = 0;
+        while i < merged.len() {
+            let absorbed = merged
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && merged[i].is_subtype_term(other));
+            if absorbed {
+                merged.remove(i);
+            } else {
+                i += 1;
+            }
         }
         while merged.len() > MAX_TY_TERMS {
             let last = merged.pop().expect("len > cap");
@@ -1217,14 +1398,21 @@ impl Ty {
                         // fits V. (Uses the conservative "any keyword" for the key rather
                         // than the exact literal set — enough for the common `map<keyword,
                         // any>`, and never a false accept.)
-                        Some(fields) => {
+                        Some(shape) => {
                             if !Ty::of(Tag::Keyword).is_subtype(&b.0) {
                                 return false;
                             }
-                            for (vty, _opt) in fields.values() {
+                            for (vty, _opt) in shape.fields.values() {
                                 if !vty.is_subtype(&b.1) {
                                     return false;
                                 }
+                            }
+                            // An OPEN record may carry keys nothing declares, so it is a
+                            // `map<K,V>` only if whatever those hold fits `V` too. A
+                            // closed record's undeclared keys are absent (`nil`), which
+                            // is vacuous — `nil` is not a value the map contains.
+                            if shape.is_open() && !shape.rest.is_subtype(&b.1) {
+                                return false;
                             }
                         }
                         None => return false, // self = "any map" ⊄ a specific map<K,V>
@@ -1234,7 +1422,7 @@ impl Ty {
             if let Some(b) = &other.fields {
                 match &self.fields {
                     Some(a) => {
-                        if !record_fields_is_subtype(a, b) {
+                        if !record_is_subtype(a, b) {
                             return false;
                         }
                     }
@@ -1307,10 +1495,7 @@ impl Ty {
         // `(if (int? (get r :age)) …)` — flag a call wanting `(record :age string)`.
         if shared == MAP_BIT {
             if let (Some(a), Some(b)) = (&self.fields, &other.fields) {
-                return a.iter().any(|(name, (aty, areq))| {
-                    b.get(name)
-                        .is_some_and(|(bty, breq)| (*areq || *breq) && aty.is_disjoint(bty))
-                });
+                return records_are_disjoint(a, b);
             }
         }
         false
@@ -1365,24 +1550,81 @@ impl Ty {
 /// `false` rather than trying to prove the relationship holds anyway — a
 /// missed subtype relation is fine (incomplete), but never claiming one that
 /// doesn't hold (unsound) is not negotiable.
-fn record_fields_is_subtype(
-    self_fields: &BTreeMap<Symbol, (Ty, bool)>,
-    other_fields: &BTreeMap<Symbol, (Ty, bool)>,
-) -> bool {
-    for (name, (other_ty, other_required)) in other_fields {
-        match self_fields.get(name) {
-            None => return false,
-            Some((self_ty, self_required)) => {
-                if *other_required && !*self_required {
-                    return false;
-                }
-                if !self_ty.is_subtype(other_ty) {
-                    return false;
-                }
-            }
+fn record_is_subtype(a: &RecordShape, b: &RecordShape) -> bool {
+    // Quantify over every key EITHER declares, comparing what a read yields, then the
+    // undeclared remainder. One rule covers what used to need three: an optional field
+    // reads as `T | nil` (so a shape omitting it is still a subtype of one that marks it
+    // optional), a required field `b` declares and `a` does not fails because `a`'s
+    // reading is `a.rest` (`nil` closed, `any` open) which is not the required type, and
+    // width subtyping falls out of `a.rest ⊆ b.rest` — `nil ⊆ any` (closed is a subtype
+    // of open) but not the reverse.
+    for key in a.keys_with(b) {
+        if !a.field_ty(key).is_subtype(&b.field_ty(key)) {
+            return false;
         }
     }
-    true
+    a.rest.is_subtype(&b.rest)
+}
+
+/// Do two record shapes share no value? When some key's readings are disjoint, no map
+/// can satisfy both — which is exactly how a **closed** shape discriminates a tagged
+/// union: `{ok: int}` says `:error` is absent (`nil`), `{error: string}` says it is a
+/// string, and `nil ∩ string = ⊥`.
+///
+/// Sound in the usual direction: this only ever *adds* a genuine disjointness verdict
+/// (a field's reading is an over-approximation, so disjoint readings mean disjoint
+/// values), and two open shapes disagreeing on nothing they both declare stay
+/// overlapping, as before.
+fn records_are_disjoint(a: &RecordShape, b: &RecordShape) -> bool {
+    a.keys_with(b)
+        .into_iter()
+        .any(|key| a.field_ty(key).is_disjoint(&b.field_ty(key)))
+}
+
+/// The **exact** intersection of two record shapes: per key, what both readings admit;
+/// for the remainder, what both rests admit. `None` when no value can satisfy both (some
+/// key's readings are disjoint), which the caller turns into "not a map at all".
+///
+/// Exact rather than widened because this is the narrowing a guard performs — `(if
+/// (int? (get r :age)) …)` intersects the incoming shape with `(record &open :age int)`,
+/// and dropping the refinement there would lose the very fact the guard established.
+fn intersect_records(a: &RecordShape, b: &RecordShape) -> Option<RecordShape> {
+    let mut fields = BTreeMap::new();
+    for key in a.keys_with(b) {
+        let ty = a.field_ty(key).intersect(b.field_ty(key));
+        if ty.is_never() {
+            return None;
+        }
+        // Required on either side means required in the intersection: a value must carry
+        // it. `field_ty` already folded `nil` into an optional reading, so a field that
+        // stays optional keeps that `nil` and reads the same.
+        let required = a.fields.get(&key).is_some_and(|(_, r)| *r)
+            || b.fields.get(&key).is_some_and(|(_, r)| *r);
+        fields.insert(key, (ty, required));
+    }
+    Some(RecordShape {
+        fields,
+        rest: a.rest.clone().intersect(b.rest.clone()),
+    })
+}
+
+/// The exact intersection of two positional shapes: same arity, then per position.
+/// `None` when no vector can be both — a differing arity, or a position whose types
+/// share nothing (unlike a uniform element type, where `never` still admits the empty
+/// vector, a tuple position must actually hold a value).
+fn intersect_tuples(a: &[Ty], b: &[Ty]) -> Option<Vec<Ty>> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(a.len());
+    for (x, y) in a.iter().zip(b) {
+        let t = x.clone().intersect(y.clone());
+        if t.is_never() {
+            return None;
+        }
+        out.push(t);
+    }
+    Some(out)
 }
 
 /// `self <: other` for two tuple shapes: exact arity match (unlike a record's

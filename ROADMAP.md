@@ -43,6 +43,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
   [Server / daemon](#server--daemon-m4) · [Packaging & ecosystem](#packaging--ecosystem)
 - [**Design notes**](#design-notes-context-for-the-above) ·
   [**Cross-cutting open questions**](#cross-cutting-open-questions-revisit-dont-build-yet) ·
+  [**Language features (held at arm's length)**](#language-features--candidates-held-at-arms-length) ·
   [**Killed directions**](#killed-directions-dont-retry) ·
   [**Out of scope**](#out-of-scope-deferred-additive-later) ·
   [**Guiding principles**](#guiding-principles)
@@ -2358,6 +2359,84 @@ today's ad-hoc `gc-stats`/`vm-stats`/`process-info` instrumentation behind one s
   real consumer needs it.
 - **Publishing the grammar** — the `github/linguist` PR isn't filable day-one; it's
   gated on `.blsp` adoption across hundreds of repos.
+
+---
+
+## Language features — candidates, held at arm's length
+
+**The default answer here is no.** This section exists so a recurring idea gets recorded
+once with its counter-argument, instead of being re-litigated every few months and
+occasionally winning on enthusiasm. Nothing below is scheduled.
+
+The bar a candidate has to clear, in order:
+
+1. **It buys a capability, not a spelling.** An alias for something we already have is
+   not a feature — ADR-227 already forbids bare re-export aliases, and greenfield means
+   we delete the old spelling rather than keep both.
+2. **It pays for the bare vocabulary it spends.** ADR-250 established the root namespace
+   as the scarce resource and clawed back 203 words; anything taking more owes an
+   argument. A module namespace (ADR-251) is the cheap way to add without spending.
+3. **It does not grow the evaluator.** Measured 2026-08-28: Brood has **nine** true
+   evaluator forms — `catch def do fn if let letrec quasiquote quote` — against Elixir's
+   ~25 `Kernel.SpecialForms`. The other 31 entries `(special-forms)` reports are prelude
+   macros. That ratio is an asset and the thing to protect: prefer a primitive plus a
+   macro over a special form, every time.
+
+### Held candidates
+
+- **`car`/`cdr`/`cadr`/`caddr`…** — asked for on grounds of Lisp familiarity. Fails bar 1
+  outright: it is an alias set over `first`/`rest`/`second`/`third`/`nth`, and an
+  open-ended one. `c[ad]+r` also encodes a path inside a name, which stops being readable
+  at two levels (`(cadddr x)` against `(nth x 3)`); Clojure dropped them for that reason.
+  *If the pull is real*, the shape that clears the bars is an opt-in **`lisp` compatibility
+  module** — `(:use lisp)` makes them bare inside one file and costs root nothing.
+- **A declared shadow in `defmodule`** (`(:exclude-core [get])`, the Clojure
+  `:refer-clojure :exclude` / Common Lisp `(:shadow …)` shape). Brood currently sits at
+  the permissive end for module code: a `(defn get …)` silently shadows, with no signal to
+  a reader. Deferred, not rejected — KI-73 removed the *breakage* that made it urgent, so
+  what remains is a legibility argument, and ADR-011 says wait for a concrete need.
+- **Full free-reference macro hygiene.** Would subsume the `/name` root-escape discipline
+  that `tests/prelude_capture_test.blsp` now enforces by hand. ADR-066 rejected
+  Scheme-style per-symbol lexical context on ship-by-name/homoiconicity/GC grounds, and
+  that reasoning still holds; the gate is the cheap 90%.
+
+### Warning suppression — configurable, and currently only at one granularity
+
+Today there is exactly one lever: **`(check-allow :category form…)`**, a source pragma
+wrapping the forms it covers (`docs/type-annotations.md` §"Suppressing an advisory lint on
+purpose"). It is the right *innermost* granularity — the suppression sits on the code it
+excuses, and a reader sees it — but it is the only one, so there is no way to say:
+
+- **per function** — "this whole `defn` is a deliberate non-tail loop", without wrapping
+  the body and re-indenting it;
+- **per file** — "this file is generated / is a test fixture / deliberately shadows core";
+- **globally, per project** — a `project.blsp` key, e.g. an advisory the team has decided
+  it does not want, or one a dependency's generated code trips.
+
+The last is the one with teeth, because `nest check` exits nonzero on **any** warning in
+batch/CI (ADR-023/024) — so a single lint the project disagrees with currently blocks CI
+with no supported answer but editing every site.
+
+Design notes for whoever picks it up:
+
+- **Keep `check-allow` the innermost and most specific**; broader scopes should widen, never
+  replace it. A file-level or project-level blanket is exactly how a real warning gets lost,
+  so the broader the scope, the louder it should be in the output — `nest check` should
+  *report* what a project globally suppresses rather than silently honouring it.
+- **The category vocabulary already exists** (`:non-tail-recursion`, `:unreachable-clause`,
+  `:unbound`, `:type-mismatch`, `:unrequired`, …) — see `types/check/ctx.rs`. Whatever the
+  new scopes are, they should take the same keywords, not a second vocabulary.
+- **Suppression is not the same as opting out of the gate.** ADR-124/125 are firm that the
+  checker never gates the live image; this is only about the batch/CI exit code.
+
+### Reduce before adding
+
+The more valuable direction, and it needs no evaluator change — both families are
+prelude macros:
+
+- **Four iteration forms** — `for` / `doseq` / `dolist` / `dotimes`.
+- **Three matching forms** — `match` / `match*` / `case`.
+- `unless` is `when` + `not`; `with-out-str` / `with-err-str` are one idea twice.
 
 ---
 

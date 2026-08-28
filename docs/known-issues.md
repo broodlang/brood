@@ -82,6 +82,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | # | What | Status |
 |---|---|---|
 | KI-72 | **the stdlib image cannot be default-ON yet: it turns a latent require-stall into a reliable one.** Measured with 12 parallel copies of `autoload_race --test-threads=4` against a 90 s timeout: **12 of 12 exceed it with the image installed, 0 of 12 without**, and the same test passes 12/12 alone in 0.5 s. Not a deadlock — nothing hangs permanently. The edge replay must run BEFORE `provide` (or a racing process sees a module whose dependencies are missing — the 112-failure bug ADR-256 fixed), so a module stays unprovided while it recursively requires its whole edge set, and every process that wants it meanwhile enters `%require-await`'s **5 ms x 1000** poll before force-loading. **The "not a deadlock" half of this was WRONG (2026-08-28): the wait is unbounded** — a root blocked in `receive` sat >30 s with an EMPTY mailbox and every scheduler worker idle, so a reply is genuinely never delivered, not merely delayed | ⚠️ **OPEN 2026-08-27, re-characterised 2026-08-28** — image reverted to opt-in (`BROOD_STDIMAGE=1`) the day it was flipped; everything else from ADR-256 ships. The fix is the POLL, not the ordering: `%require-await` should wait on the loader finishing rather than sleep-and-recheck — the OTP `code_server` model, see below. Note the synthetic load stresses something pre-existing — at 12x4 parallelism the default (no image) still shows 4 of 12 — so a fix should be measured on both arms |
+| KI-73 | **a prelude macro's template can be captured by a user module that defines the same name.** A template is spliced into the user's file, where a bare reference resolves against *their* namespace first — so `(defmodule m) (defn get (b k) :CAPTURED) (defrecord pt (x y))` made every accessor return `:CAPTURED`. Silent wrong value: right arity, nothing unbound, `nest check` quiet. Fixed for `defrecord`/`for`/`defonce`/`with-err-str` with the `/name` root escape (ADR-236), which this pass also had to *finish implementing* — it was a resolve-time rewrite only, so `/get` was unbound at root. `receive` included | ✅ **FIXED 2026-08-28** — the escape is now total: resolved in a module (`resolve_sym`), at root (`macros::strip_root_escapes`), and at **runtime macro expansion** (`eval/mod.rs`, for a macro defined after its use site or at the REPL). `but-last` moved to `core.blsp` and `sleep` below `receive` so `receive` expands at prelude compile time. Gated by `tests/prelude_capture_test.blsp` — a static scan asserting ZERO offenders plus four behavioural probes |
 | KI-71 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right; fixed downstream with `nest rename --swap`. ✅ **The class now HAS a gate (same day):** the checker already catches a reversed call precisely, per argument — it was silent here only because `seq/remove-nth` had **no declared `sig`**. The index/collection functions (`remove-nth`, `take-last`, `drop-last`, `chunk-every`, `split-at`, `sample`, `shuffle`, `vector-ref`) now carry one, so the reversal is a warning and CI's zero-warning gate makes it a hard failure. Argument types precise, return `any` — the reversal is an argument mistake, and a narrow return would false-positive at every call site. Zero new warnings across std/ + tests/. Guards `a_reversed_index_and_collection_call_is_flagged` + `the_correct_index_first_order_stays_silent`, sabotage-verified by deleting one `sig` |
 | KI-70 | **the checker never looked inside a vector or map literal**, so every expression in Hiccup-shaped code was unchecked. `check_into_inner` opened with `let Value::Pair(_) = form else { return }` — a `[…]` or `{…}` in value position ended the walk, though its contents are ordinary evaluated code. hive's `/docs` renderer carried `(str (max 2 …))` for weeks after `max` moved to `math`: `nest check` green, `nest test` green, and only rendering the page raised it. One level out from KI-67 — not a form that suppressed the lint, a form the walk never reached | ✅ **fixed 2026-08-27** — `Value::Vector` and `Value::Map` descend into their elements (map **keys** as well as values). No false positives: the checker runs on macroexpanded forms, so a `match` pattern vector is already lowered to `let`/`if` binders, and `quote`/`quasiquote` return at `SpecialHead::SkipBody` before their data is ever handed down. std/ + tests/ stayed at **zero warnings** apart from one real find — `std/tool/mcp.blsp`'s `callers` tool called the module-private `project-all-files` from inside a map literal, the **fifth** dead `project-*` call site and the one KI-67's sweep could not see. Guards `unbound_inside_a_vector_or_map_literal_is_flagged` + `descending_into_a_literal_does_not_read_data_as_code`, sabotage-verified |
 | KI-69 | **two `jit_plan` guards failed on every `main` push**, so the `differential (tree-walker)` job had been red since KI-64's fix landed. `block_argument_spills_never_reach_the_deopt_journal` and `the_block_argument_want_is_clamped_to_the_reserve` assert on VM-compiled arms, and the job runs `BROOD_VM=0` — nothing compiles, so the first inspected 0 chunks and the second saw no arm to clamp. Both fail loudly by design (a vacuous green would mean nothing), which is why they failed rather than passing hollowly | ✅ **fixed 2026-08-27** — both pin `set_forced_ceiling(Some(Tier::Native))`, the fix `compile/tests.rs` already documents for its two native tests since ADR-222 made the ceiling coherent. The guards are new (2026-08-26) and simply missed the pin |
@@ -4677,3 +4678,78 @@ explicitly in the release notes under their own heading, since no gate will.
      test failure — "ctrl-d with two tabs closes one". Two repos, two different symptoms,
      one rename. `grep -rn 'remove-nth'` across the ecosystem is what found it; nothing in
      the toolchain would have. -->
+
+## KI-73 — a prelude macro template is captured by a user module defining the same name ✅ FIXED 2026-08-28
+
+**Symptom.** A module that defines an ordinary domain function silently gets wrong values out of
+an unrelated language feature:
+
+```lisp
+(defmodule inventory)
+(defn get (bag k) :CAPTURED)     ; a perfectly reasonable function to write
+(defrecord point (x y))
+(point-x (point 1 2))            ; => :CAPTURED, not 1
+```
+
+No error, correct arity, nothing unbound, and `nest check` says nothing.
+
+**Cause.** A macro's quasiquote template is spliced into the *caller's* file, and a bare symbol
+in it resolves against the caller's namespace before root. ADR-065's α clause auto-qualifies a
+template's free references to the *defining* namespace, which fixes this for module macros — but
+the prelude's defining namespace is root, which has no prefix, so prelude templates emit bare
+names and are capturable. It is the general form of the `name` collision ADR-258 fixed for one
+symbol: renaming the operation moved the hazard, it did not remove it.
+
+**Fix (partial).** The `/name` root escape (ADR-236) pins a reference to root, and `defrecord`,
+`for`, `defonce` and `with-err-str` now use it. That escape had to be *completed* first: it was a
+resolve-time rewrite and `resolve` returns early at root, so an emitted `/get` reached the
+evaluator literally and was unbound in any root script. `macros::strip_root_escapes` now handles
+the root case, skipping `quote`/`quasiquote` subtrees — without that skip the prelude's own
+templates get stripped at definition time and the capture returns (it did, for one build).
+
+**`receive` needed two more moves, and both were structural rather than workarounds.** Its
+expansion calls `but-last`, which lived in `std/prelude/seq.blsp` — concatenated *after*
+`process.blsp` — so `receive` could not expand at prelude compile time; and `sleep`, whose body
+*is* a `receive`, was defined 200 lines *before* `receive` existed, so its expansion was deferred
+to first call. `but-last` moved to `core.blsp` (it needs only `reverse` and the kernel `rest`)
+and `sleep` moved below `receive`. Neither is a shim; both put a definition where its dependency
+order already required it to be.
+
+**And the escape had to work at runtime too.** A macro defined *at the REPL or after its use
+site* — `(defmacro await (t) \`(receive ([:reply ^~t v] v) (after 1000 :timeout)))` — expands in
+the evaluator, which no resolve pass ever touches. `eval/mod.rs`'s macro-application site now
+strips escapes on the way out, which is the runtime half of `macros::resolve`'s root case. Found
+by `tests/syntax_finalization_test.blsp`, not by reasoning.
+
+**A second emission shape, found a day later and live the whole time.** A macro need not
+use a quasiquote at all — it can build its output with `(list 'head …)`, and the template
+walker skips `quote` subtrees by design, so those heads were never scanned. Five prelude
+macros did it, emitting `map`, `apply`, `mapv`, `current-ns` and `sig`. `defmulti`'s
+`(list 'mapv '%identity-of 'args)` was the live bug: a module defining `mapv` broke every
+multimethod it declared, dispatching on `:CAPTURED` instead of the record id. All escaped
+except `sig` — see below. The gate now walks both shapes.
+
+**`sig` looked unescapable, and the reason was the ordering, not the name.** `compile`
+**expands before it resolves**, and `macro_head_id`'s root fallback did not understand the
+escape — so `(/sig …)` was not recognised as a macro head, stayed unexpanded, and never
+produced the `%register-sig` the checker collects. Every record's constructor and accessor
+signature silently stopped being checked. Four checker tests caught it; without them it
+would have shipped as a quiet loss of type checking, which is the worst shape a bug can take
+in a checker.
+
+The fix is at the lookup site: `macro_head_id` strips a leading `/` in its root fallback, so
+a macro head is recognised at *expansion* time rather than merely rewritten afterwards. It is
+general — every macro a template emits, not just `sig`. (The escape appeared to work on
+macros already; that was the *evaluator* expanding them at runtime. The checker never
+evaluates, so it never got that second chance — which is why only a checker test could find
+this.)
+
+**No name is reserved and no warning is added.** Reserving `sig`/`get`/`map`/`mapv` inside
+modules would break ADR-166's one-sentence rule — reserved ⇔ it shipped with Brood, and in a
+module it is yours — which is the escape hatch that makes namespacing worth having. With the
+escape total there is nothing left to warn about; the gate asserts **zero** offenders.
+
+**Guarded by** `tests/prelude_capture_test.blsp` — a static scan of every prelude `defmacro`
+template plus three behavioural probes that define `get`/`reverse`/`bound?` and assert the real
+value comes back. It pins `receive` as the known exception, so a *new* offender fails the build.
+Sabotage-verified: removing `defrecord`'s escape fails both the scan and the probe.

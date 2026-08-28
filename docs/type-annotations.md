@@ -55,6 +55,7 @@ map-kv ::= (map key-type val-type)             ; key/val checked at runtime
 union  ::= (or type type+)
 inter  ::= (and type+)                         ; intersection; (and) = any
 compl  ::= (not type)                          ; complement — every value that is NOT a type
+record ::= (record [&open] key-type-pair…)     ; a map shape; CLOSED unless `&open`
 ```
 
 **The complement `(not T)` (ADR-263).** Every value that is *not* a `T`. The

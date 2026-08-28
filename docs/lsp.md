@@ -111,12 +111,27 @@ one server that owns the language knowledge.
 > • **`textDocument/foldingRange`** (`folding.rs`) — collapsible regions off the
 > CST: every multi-line container (`()`/`[]`/`{}`) and every run of consecutive
 > comment lines. Pure structural walk, no eval.
-> • **`textDocument/inlayHint`** (`inlay_hints.rs`) — parameter-name hints at
-> call sites from `arglist` (the signature-help source). Conservative: only the
+> • **`textDocument/inlayHint`** (`inlay_hints.rs`) — two kinds. **Parameter names**
+> at call sites from `arglist` (the signature-help source), conservative: only the
 > **leading required** params (stops at the first `&optional`/`&` marker, since
 > `arglist` drops `(opt default)` groups); a head resolving to a **local** is
 > skipped; per-name `arglist` memoized per request; range-scoped to the visible
-> region.
+> region. And the **effective type** of each `defn`, rendered after its parameter
+> list — the question hover cannot answer, because hover reads the *loaded* image
+> and a buffer being edited is not loaded. The answer comes from
+> `types::check::file_signatures`, which runs the checker's own form-based
+> inference (ADR-188/190/261) and so can never describe a different type than the
+> warnings do. Deliberately quiet: nothing for a function that already carries a
+> `(sig …)` (it is on screen one line up), nothing for an uninformative
+> `(any …) -> any`, and nothing the checker declined to infer.
+> • **`textDocument/codeAction`** also offers **"Declare signature"** on the `defn`
+> under the cursor: the same inferred signature, written into the file as a real
+> `(sig …)` line. `Ty::to_source` renders it — the inverse of the annotation
+> parser, round-trip tested — and *declines* rather than approximating when a type
+> has no faithful spelling, since a quick-fix that writes a different type than the
+> hint showed would be worse than none. Once written the sig is authoritative:
+> read ahead of inference, validated against the definition (ADR-259), and read by
+> the reversed-args gate.
 > • **`textDocument/selectionRange`** (`selection_range.rs`) — smart expand/shrink
 > selection along the CST: symbol → enclosing form → outer form → … → file, read
 > off the node chain at each cursor (trivia and same-extent wrappers skipped so

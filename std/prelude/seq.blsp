@@ -351,7 +351,7 @@ and it must be loaded before this `defrecord`.
         ctor `(defn ~rec (~@fnames) ~body)
         accs (map (fn (f)
                     (let (fnm (%defrecord-fname f))
-                      `(defn ~(%defrecord-acc-sym rec fnm) (r) (get r ~(keyword (->string fnm))))))
+                      `(defn ~(%defrecord-acc-sym rec fnm) (r) (/get r ~(keyword (->string fnm))))))
                fields)
         ;; the record-shaped constructor sig (always — this is the dispatch-inference
         ;; seam): each field keeps its declared type, else `any`.
@@ -363,17 +363,27 @@ and it must be loaded before this `defrecord`.
                                (list (keyword (->string (%defrecord-fname f)))
                                  (or (%defrecord-ftype f) 'any)))
                        fields))))
-        ctor-sig (list 'sig rec (append arg-tys (list '-> rec-ty)))
+        ctor-sig (list '/sig rec (append arg-tys (list '-> rec-ty)))
         ;; per-accessor sigs only when every field is typed (else an accessor call on a
         ;; bare map would false-warn), mirroring the pre-unification behaviour.
         acc-sigs (if (every? pair? fields)
-                   (map (fn (f)
-                          (let (fnm (%defrecord-fname f))
-                            (list 'sig
-                              (%defrecord-acc-sym rec fnm)
-                              (list (list 'record (keyword (->string fnm)) (%defrecord-ftype f))
-                                '->
-                                (%defrecord-ftype f)))))
+                   (map
+                     (fn (f)
+                       (let (fnm (%defrecord-fname f))
+                         (list '/sig
+                           (%defrecord-acc-sym rec fnm)
+                           ;; `&open` (ADR-264): an accessor takes any record CARRYING
+                           ;; this field — a real value also has `:__id__` and every
+                           ;; sibling field, so a closed one-field shape would describe
+                           ;; no record at all. The constructor's RESULT stays closed:
+                           ;; the ctor builds exactly those keys, which is what lets a
+                           ;; field read through a union of records resolve.
+                           (list (list 'record
+                                   '&open
+                                   (keyword (->string fnm))
+                                   (%defrecord-ftype f))
+                             '->
+                             (%defrecord-ftype f)))))
                      fields)
                    nil)
         ;; `:derives [A …]` → one `(%derive-into 'A id 'fields (current-ns))` per ability. The
@@ -388,7 +398,7 @@ and it must be loaded before this `defrecord`.
                                 (list 'quote a)
                                 id
                                 (list 'quote fnames)
-                                (list 'current-ns)))
+                                (list '/current-ns)))
                          derives)
                        nil))
     `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs ~@derive-calls (%record-register ~id '~rec) nil)))
@@ -586,10 +596,10 @@ iterating for side effects.
         " *inside* a binding position is still destructuring: (for ([k v] pairs) k)."))
     (%for-check-binds binds)
     (let (acc (gensym "acc"))
-      `(reverse (let (~acc nil)
-                  ~(%for-fold acc
-                     (map identity binds)
-                     (if (empty? (rest body)) (first body) (cons 'do body))))))))
+      `(/reverse (let (~acc nil)
+                   ~(%for-fold acc
+                      (map identity binds)
+                      (if (empty? (rest body)) (first body) (cons 'do body))))))))
 
 ;; (doseq (pat coll) body...) — run `body` for its side effects over each item,
 ;; returning nil. Just `for` run for effect (the result list is discarded). The
@@ -627,15 +637,10 @@ iterating for side effects.
 
 ;; ---- kept in the prelude: used at MACRO-EXPANSION time -----------------------
 ;; A prelude macro that calls these runs during boot, before `(require-one 'seq)`,
-;; so they cannot live in the module however late-bound the reference is. `try` uses
-;; `but-last`, `defrecord` uses `mapcat`, `defmethod` uses `mapv`, and those pull in
-;; the rest transitively. Everything else in the sequence library moved to `seq/`.
-
-(defn but-last (xs)
-  "All but the last item of `xs`, as a list.
-
-    (but-last [1 2 3])   → (1 2)"
-  (reverse (rest (reverse xs))))
+;; so they cannot live in the module however late-bound the reference is. `defrecord` uses
+;; `mapcat`, `defmethod` uses `mapv`, and those pull in the rest transitively.
+;; (`but-last` moved to core.blsp — `receive` expands during the prelude's own boot,
+;; which is earlier than this file. See the note at its definition.) Everything else in the sequence library moved to `seq/`.
 
 (defn drop-while (pred coll)
   "`coll` with its leading items for which `(pred x)` holds removed. Returns `coll` itself

@@ -197,14 +197,19 @@
 ;; Heterogeneous, keyword-keyed map shapes — per-key types with required/optional
 ;; presence, distinct from the uniform-K/V `(map K V)` above. The runtime `sig!`
 ;; contract enforces every field (docs/type-records.md). The static checker now
-;; arg-checks a `(record …)` param too, but only on its *required* fields (an
-;; omitted optional field is relaxed away — see `relax_param_for_arg`); the calls
-;; below live inside `test`/`assert-error` thunks the checker walks opaquely, so
-;; the deliberately-wrong ones don't draw a static warning regardless. Records are
-;; OPEN — unknown extra keys pass.
+;; arg-checks a `(record …)` param too; the calls below live inside
+;; `test`/`assert-error` thunks the checker walks opaquely, so the deliberately-wrong
+;; ones don't draw a static warning regardless.
+;;
+;; A record is **CLOSED** unless it says `&open` (ADR-264): an undeclared key must be
+;; absent. Both shapes are exercised here, because the runtime contract and the checker
+;; have to agree about which one a declaration means.
 
 (defn c-user (m) m)
 (sig! c-user ((record :name string :age (optional int)) -> any))
+
+(defn c-user-open (m) m)
+(sig! c-user-open ((record &open :name string :age (optional int)) -> any))
 
 (describe "record type checks (record …)"
   (test "a required field present and correctly typed passes"
@@ -219,8 +224,14 @@
     (assert= (c-user {:name "Ada" :age nil}) {:name "Ada" :age nil}))
   (test "an optional field present with the wrong (non-nil) type throws"
     (assert-error (c-user {:name "Ada" :age "old"})))
-  (test "extra, undeclared keys are allowed (open records)"
-    (assert= (c-user {:name "Ada" :age 30 :extra :k}) {:name "Ada" :age 30 :extra :k}))
+  (test "an extra, undeclared key throws — a record is closed"
+    (assert-error (c-user {:name "Ada" :age 30 :extra :k})))
+  (test "…and passes under `&open`, which is what open means"
+    (assert= (c-user-open {:name "Ada" :age 30 :extra :k})
+      {:name "Ada" :age 30 :extra :k}))
+  (test "`&open` still enforces the fields it declares"
+    (assert-error (c-user-open {:age 30}))
+    (assert-error (c-user-open {:name 42})))
   (test "a non-map argument throws"
     (assert-error (c-user (list 1 2)))))
 

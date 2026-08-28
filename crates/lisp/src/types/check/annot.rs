@@ -101,7 +101,10 @@ fn ability_type(name: &str) -> Option<Ty> {
                     Some(id) => {
                         let mut fields = BTreeMap::new();
                         fields.insert(value::intern("__id__"), (id, true));
-                        Some(Ty::record_of(fields))
+                        // **Open** (ADR-264): a real `(circle 2)` carries `:radius` as
+                        // well as `:__id__`, so a shape that pinned the id and nothing
+                        // else would, closed, describe no record at all.
+                        Some(Ty::record_of_open(fields))
                     }
                     // A sealed ability with no members is degenerate → permissive, not NEVER.
                     None => Some(Ty::ANY),
@@ -167,7 +170,7 @@ fn base_ty(name: &str) -> Option<Ty> {
 /// `Ty::Map` in slice 1), `(record …)`, and `(tuple T1 T2 …)` (ADR-128,
 /// a fixed-arity positional vector shape). `None` for anything unrecognised
 /// — the annotation is then dropped, never guessed.
-pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
+pub(crate) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
     match form {
         Value::Sym(s) => {
             let name = value::symbol_name(s);
@@ -283,7 +286,15 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             // derive `get`'s exact per-field result type (see
             // docs/type-records.md).
             if value::symbol_is(head, "record") {
-                let rest = &items[1..];
+                let mut rest = &items[1..];
+                // `(record &open :a int)` — the leading marker makes the shape OPEN: a
+                // value may carry keys it does not declare. Without it a record is
+                // **closed** (ADR-264), which is what makes it say what a value is *not*.
+                let open = matches!(rest.first(), Some(&Value::Sym(m))
+                    if value::symbol_is(m, "&open"));
+                if open {
+                    rest = &rest[1..];
+                }
                 if rest.len() % 2 != 0 {
                     return None; // malformed — odd field-list length
                 }
@@ -299,7 +310,11 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                     let field_ty = parse_type(heap, field_form)?;
                     fields.insert(name, (field_ty, required));
                 }
-                return Some(Ty::record_of(fields));
+                return Some(if open {
+                    Ty::record_of_open(fields)
+                } else {
+                    Ty::record_of(fields)
+                });
             }
             None
         }
@@ -380,14 +395,19 @@ pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
             // A known constructor: report a bad argument before the arity, so the
             // innermost real problem wins.
             let args = if head_name == "record" {
-                // `(record :k T …)` — the keys are keywords, only the values are types.
-                if items[1..].len() % 2 != 0 {
+                // `(record [&open] :k T …)` — the keys are keywords, only the values
+                // are types.
+                let body = match items.get(1) {
+                    Some(&Value::Sym(m)) if value::symbol_is(m, "&open") => &items[2..],
+                    _ => &items[1..],
+                };
+                if body.len() % 2 != 0 {
                     return Some(
                         "malformed `record` type: each field needs a keyword and a type"
                             .to_string(),
                     );
                 }
-                for pair in items[1..].as_chunks::<2>().0 {
+                for pair in body.as_chunks::<2>().0 {
                     if !matches!(pair[0], Value::Keyword(_)) {
                         return Some(
                             "malformed `record` type: field names must be keywords".to_string(),

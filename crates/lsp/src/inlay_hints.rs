@@ -1,4 +1,5 @@
-//! `textDocument/inlayHint` — parameter-name hints at call sites.
+//! `textDocument/inlayHint` — parameter-name hints at call sites, and the
+//! **effective type** of each function this buffer defines.
 //!
 //! For a call `(f a b)` where `f` is a known function, render its parameter
 //! names inline before each argument: `(f` `from:`​`a` `to:`​`b`​`)`. The names
@@ -18,7 +19,9 @@ use std::collections::HashMap;
 
 use brood::introspect;
 use brood::syntax::cst::{Node, NodeKind};
+use brood::syntax::reader;
 use brood::syntax::scope::{BindingKind, Resolution, ScopeTree};
+use brood::types::check::{file_signatures, FnSignature};
 use brood::Interp;
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel};
 
@@ -37,9 +40,29 @@ pub fn inlay_hints(
     let mut out = Vec::new();
     // Memoize `arglist` per name within one request — a hot file repeats heads.
     let mut cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let sigs = buffer_signatures(interp, text);
     walk(
-        interp, root, root, text, scope, index, range, &mut cache, &mut out,
+        interp, root, root, text, scope, index, range, &mut cache, &sigs, &mut out,
     );
+    out
+}
+
+/// The effective signature of every function this buffer defines, by name.
+///
+/// The buffer is not loaded — that is the whole reason hover cannot answer this — so
+/// the answer comes from the checker's form-based inference, which is what
+/// `file_signatures` exposes. Wrapped in an arena checkpoint like the diagnostics
+/// path: the forms are LOCAL and reclaimed, so the server's heap doesn't grow per
+/// keystroke.
+fn buffer_signatures(interp: &mut Interp, text: &str) -> HashMap<String, FnSignature> {
+    let cp = interp.heap.checkpoint();
+    let mut out = HashMap::new();
+    if let Ok(forms) = reader::read_all(&mut interp.heap, text) {
+        for sig in file_signatures(&mut interp.heap, &forms) {
+            out.insert(sig.name.clone(), sig);
+        }
+    }
+    interp.heap.reset_local_to(cp);
     out
 }
 
@@ -53,6 +76,7 @@ fn walk(
     index: &LineIndex,
     range: (u32, u32),
     cache: &mut HashMap<String, Option<Vec<String>>>,
+    sigs: &HashMap<String, FnSignature>,
     out: &mut Vec<InlayHint>,
 ) {
     // Prune whole subtrees outside the requested (visible) range: their hints
@@ -64,14 +88,21 @@ fn walk(
     if node.kind == NodeKind::List {
         if let Some(head) = node.forms().next() {
             if head.kind == NodeKind::Symbol {
-                hints_for_call(
-                    interp, root, node, head, text, scope, index, range, cache, out,
-                );
+                let name = head.text(text);
+                if name == "defn" || name == "defn-" {
+                    hint_for_defn(node, text, index, range, sigs, out);
+                } else {
+                    hints_for_call(
+                        interp, root, node, head, text, scope, index, range, cache, out,
+                    );
+                }
             }
         }
     }
     for child in &node.children {
-        walk(interp, root, child, text, scope, index, range, cache, out);
+        walk(
+            interp, root, child, text, scope, index, range, cache, sigs, out,
+        );
     }
 }
 
@@ -150,6 +181,79 @@ fn hints_for_call(
     }
 }
 
+/// The **effective type** of a `defn`, rendered after its parameter list.
+///
+/// Subtle by omission — three things are deliberately not hinted, because a hint on
+/// every function is wallpaper and a wrong one is worse than none:
+///
+/// - a function carrying a hand-written `(sig …)`: the signature is already on screen
+///   one line up, and this hint's job is to answer "what does the checker *infer*?";
+/// - an uninformative signature (`(any …) -> any`), which is most functions in a file
+///   that hasn't been annotated and says nothing a reader doesn't see;
+/// - anything the checker declined to infer at all.
+///
+/// When only the return is known the label is just `→ T`; when the parameters are
+/// known it reads as the arrow you would write in a `sig`.
+fn hint_for_defn(
+    call: &Node,
+    text: &str,
+    index: &LineIndex,
+    range: (u32, u32),
+    sigs: &HashMap<String, FnSignature>,
+    out: &mut Vec<InlayHint>,
+) {
+    let mut forms = call.forms().skip(1); // past `defn`
+    let Some(name_node) = forms.next() else {
+        return;
+    };
+    let Some(sig) = sigs.get(name_node.text(text)) else {
+        return;
+    };
+    if sig.declared {
+        return;
+    }
+    let Some(label) = render_effective(&sig.sig) else {
+        return;
+    };
+    // The parameter list is the next form — or, for a multi-clause definition, the
+    // first *clause*, whose own first form is the list. Anchoring to it puts the hint
+    // where a reader's eye already is, and where a `sig` would describe.
+    let Some(params) = forms.next() else {
+        return;
+    };
+    let params = match params.forms().next() {
+        Some(inner) if inner.kind == NodeKind::List => inner,
+        _ => params,
+    };
+    let at = params.span.end;
+    if at < range.0 || at >= range.1 {
+        return;
+    }
+    out.push(InlayHint {
+        position: index.position(text, at),
+        label: InlayHintLabel::String(label),
+        kind: Some(InlayHintKind::TYPE),
+        text_edits: None,
+        tooltip: Some(lsp_types::InlayHintTooltip::String(
+            "inferred by the checker — no `sig` declared".to_string(),
+        )),
+        padding_left: Some(true),
+        padding_right: None,
+        data: None,
+    });
+}
+
+/// The label for an inferred signature, or `None` when it says nothing worth showing.
+fn render_effective(sig: &brood::types::Sig) -> Option<String> {
+    let params_known = sig.params.iter().any(|p| !p.is_any());
+    let ret_known = !sig.ret.is_any();
+    match (params_known, ret_known) {
+        (false, false) => None,
+        (false, true) => Some(format!("→ {}", sig.ret)),
+        _ => Some(format!("{sig}")),
+    }
+}
+
 /// The leading required parameter names, stopping at the first `&optional` / `&`
 /// marker. `None` (no hints) when there's no arglist or it has no plain params.
 fn leading_required(tokens: Option<Vec<String>>) -> Option<Vec<String>> {
@@ -225,5 +329,53 @@ mod tests {
     #[test]
     fn unknown_head_yields_nothing() {
         assert!(hints("(no-such-fn 1 2)").is_empty());
+    }
+
+    // ---- effective-type hints on `defn` ----
+
+    #[test]
+    fn a_defn_gets_the_type_the_checker_inferred() {
+        // The buffer is never loaded, so this can only come from form-based inference.
+        let ls = labels(&hints("(defn f (s) (string/length s))"));
+        assert!(
+            ls.iter().any(|l| l.contains("string") && l.contains("->")),
+            "got: {ls:?}"
+        );
+    }
+
+    #[test]
+    fn a_declared_signature_is_not_repeated() {
+        // It is already on screen one line up; the hint answers what the checker
+        // *inferred*, which is only interesting when nothing was said.
+        let ls = labels(&hints("(sig f (int -> string))\n(defn f (n) \"x\")"));
+        assert!(ls.iter().all(|l| !l.contains("->")), "got: {ls:?}");
+    }
+
+    #[test]
+    fn an_uninformative_signature_is_not_hinted() {
+        // `(any) -> any` on every function is wallpaper.
+        let ls = labels(&hints("(defn f (x) x)"));
+        assert!(ls.iter().all(|l| !l.contains("->")), "got: {ls:?}");
+    }
+
+    #[test]
+    fn a_known_return_alone_reads_as_an_arrow() {
+        let ls = labels(&hints("(defn f (x) (string/length \"lit\"))"));
+        assert!(ls.iter().any(|l| l.starts_with("→ ")), "got: {ls:?}");
+    }
+
+    #[test]
+    fn the_hint_sits_at_the_end_of_the_parameter_list() {
+        let src = "(defn f (s) (string/length s))";
+        let hs = hints(src);
+        let hint = hs
+            .iter()
+            .find(|h| matches!(&h.label, InlayHintLabel::String(l) if l.contains("->")))
+            .expect("a type hint");
+        // `(defn f (s)` — the character after the closing paren of the param list.
+        assert_eq!(
+            hint.position.character as usize,
+            src.find(") (").unwrap() + 1
+        );
     }
 }
