@@ -293,6 +293,42 @@ touched. The boot install (`BROOD_STDIMAGE=1`, the last line of the prelude) is 
 serves everything."
   (%std-image-install))
 
+(defn status ()
+  "Why this binary is, or is not, using a stdlib image — as
+`{:state :live|:absent|:stale|:no-cache :want <id> :path <path> :sections <n> :others [<id>…]}`.
+
+`%std-image-install` answers `nil` for **absent**, **stale** and **unreadable** alike, and
+that single silence is the most expensive thing about this feature. Every wrong measurement
+in KI-72's history came from it: the id carries the git sha and a hash of every baked-in
+`.blsp`, so a commit — or somebody else editing `std/` while your loop runs — makes the
+image stale, the install misses, and the arm you believe is measuring the image is quietly
+measuring source. That happened three times in one session, once inside the differential
+test written to catch exactly this.
+
+`:stale` is the answer worth having: it reports the id this binary WANTS beside the ids that
+are actually on disk, so `built for 7dc4da8e, running fb7f000f` reads off the two directly
+instead of being inferred from a run that looked wrong."
+  (let (want (system/stdlib-id)
+        path (image-path))
+    (if (nil? path)
+      {:state :no-cache :want want :path nil :sections 0 :others []}
+      (let (dir (path/dirname path)
+            present (if (file/dir? dir)
+                      (filter (fn (e) (string/starts-with? e "std-image-")) (file/list-files dir))
+                      [])
+            ;; The id sits between the `std-image-` prefix and the `.bin` suffix.
+            ids (apply vector
+                  (map (fn (e)
+                         (string/substring e 10 (- (string/length e) 4)))
+                    present))
+            idx (%image-index path want)
+            sections (if (nil? idx) nil (count idx)))
+        (cond
+          (not (nil? sections)) {:state :live :want want :path path :sections sections :others ids}
+          (file/exists? path) {:state :unreadable :want want :path path :sections 0 :others ids}
+          (empty? ids) {:state :absent :want want :path path :sections 0 :others ids}
+          else {:state :stale :want want :path path :sections 0 :others ids})))))
+
 (defn ensure-built ()
   "Build this binary's stdlib image if there is not already a CURRENT one on disk, and say
 which happened: `:built`, `:present`, or nil when there is no cache directory.

@@ -106,6 +106,43 @@ pub fn install_crash_dump() {
     }));
 }
 
+/// Append a **green process's death** to `.brood_crash_dump`, the same durable place a
+/// Rust panic goes.
+///
+/// The runtime already prints `process N died: …` to stderr, and for two sessions that was
+/// believed not to happen at all (KI-72): **libtest captures a test's stderr and discards
+/// it when the test never completes**, so the one line naming the cause was written and
+/// thrown away. The same loss happens under a TUI, under `nest run --watch`'s animation,
+/// and anywhere else stderr is a scrolling region — which is exactly the reasoning that
+/// produced `.brood_crash_dump` for panics in the first place.
+///
+/// A green process dying from a Brood error is not a Rust panic, so the panic hook never
+/// covered it — and it is the *more* likely of the two to be lost, because a crashing
+/// child in a fan-out is silent to its parent unless something links or monitors it.
+///
+/// Best-effort and never fatal: a process that cannot write its own death notice must
+/// still die quietly rather than take the runtime with it.
+pub fn dump_process_death(pid_descr: &str, reason: &str) {
+    use std::io::Write;
+    let when = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let body = format!(
+        "\n=== brood process death ===\nversion: {} ({})\nwhen:    {} ({when} ms since epoch)\nprocess: {pid_descr}\nreason:  {reason}\n",
+        env!("CARGO_PKG_VERSION"),
+        env!("BROOD_GIT_SHA"),
+        fmt_utc_ms(when),
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(".brood_crash_dump")
+    {
+        let _ = f.write_all(body.as_bytes());
+    }
+}
+
 /// Print a one-line stderr notice if any non-default GC env knob is active, so a
 /// performance benchmark can't silently measure a stressed or retuned heap. Prints
 /// nothing in the normal (all-default) case, so there's zero noise on a real run.

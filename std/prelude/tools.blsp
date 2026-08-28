@@ -2535,15 +2535,21 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; compile time, so anything the program mentions has already loaded from source — and three
 ;; separate published failure counts were measured that way before anyone checked (ADR-256).
 ;;
-;; **Opt-IN: `BROOD_STDIMAGE=1`.** It was briefly made the default on 2026-08-27 and reverted
-;; the same day — see KI-72. Under concurrency the image turns a latent stall into a reliable
-;; one: 12 of 12 parallel copies of `autoload_race` exceed a 90 s timeout with it installed and
-;; 0 of 12 without. Cause is understood and is NOT the image itself — the edge replay below
-;; must run before `provide` (or a racing process sees a module whose deps are missing, the
-;; 112-failure bug ADR-256 fixed), which keeps a module unprovided while it recursively
-;; requires its whole edge set, and every other process that wants it meanwhile falls into
-;; `%require-await`'s 5 ms x 1000 poll. Nothing hangs permanently — it force-loads after 5 s —
-;; but the stalls compound. Fixing the poll is the work; until then this stays opt-in. This is safe by construction rather
+;; **On by default; opt OUT with `BROOD_NO_STDIMAGE=1`.** It was made the default once
+;; before, on 2026-08-27, and reverted the same day: 12 of 12 parallel copies of
+;; `autoload_race` exceeded a 90 s timeout with it installed and 0 of 12 without (KI-72).
+;; That was never a stall. A section replaced a module's autoload STUB before the module's
+;; own private helpers were bound, so a racing process took the real function and died on an
+;; unbound symbol — a wrong answer wearing a hang's clothes. Sections install already-bound
+;; names last now (ADR-279), and the acceptance load reads 0 of 12 on both arms.
+;;
+;; What justifies the flip is not that one bug, though: every divergence between
+;; materialising and evaluating in this feature's history — dropped sigs, unreplayed edges,
+;; unreplayed impls, provide ordering, binding order, and privacy — was found by downstream
+;; symptom, one at a time. ADR-280 replaced that with a differential (`image_matches_source`)
+;; that loads every baked-in module from source and from the image and requires the
+;; resulting state to match. It found the sixth itself. The decision now rests on a gate
+;; rather than on five anecdotes. This is safe by construction rather
 ;; than by policy: the image is keyed on `system/stdlib-id`, a content hash of every baked-in
 ;; `.blsp`, so a stale one cannot be read — and with no image built at all, `install` returns
 ;; nil in ~40 µs and `require` reads source exactly as before. A run therefore either gets a
@@ -2557,7 +2563,7 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; The traced arm times the install. It is here because an earlier version of it cost 6.8 ms
 ;; of a 20 ms boot and made `startup` 20% WORSE while making module loads faster — a
 ;; regression that only a measurement at this exact point can see.
-(when (and (%getenv "BROOD_STDIMAGE")
+(when (and (nil? (%getenv "BROOD_NO_STDIMAGE"))
         ;; Line coverage instruments the COMPILER (ADR-148): it prefixes each positioned
         ;; node with a `RecordLine` as the module is evaluated. A materialised module is
         ;; never evaluated — that is the entire point — so with an image installed no std
@@ -2573,4 +2579,19 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
       ;; qualified `math/quot` is not resolvable yet — the autoload stubs are not usable
       ;; this early — and dividing is not worth requiring a module at boot to do.
       (%eprint (str "[image] install: " n " sections, " (- t1 t0) " ns\n")))
-    (%std-image-install)))
+    ;; **A miss must say so.** `%std-image-install` answers nil for absent, stale and
+    ;; unreadable alike, and asking for the image while silently not getting it is the
+    ;; single most expensive thing about this feature: the id carries the git sha and a
+    ;; hash of every baked-in `.blsp`, so a commit — or someone else editing `std/` while
+    ;; your measurement runs — turns the arm you believe is imaged into the source arm.
+    ;; That produced every wrong reading in KI-72's history, three of them in one session.
+    ;; The env var is an explicit request, so an unmet one is worth a line; `stdimage/status`
+    ;; says which of the three it was, and why.
+    ;; The warning fires only for an EXPLICIT `BROOD_STDIMAGE=1`. On the default path a
+    ;; miss is ordinary — no image has been built on this machine yet, or a commit has just
+    ;; moved the id — and falling back to source is exactly right, so saying so every time
+    ;; would be noise on a correct run. An explicit request that goes unmet is different:
+    ;; the caller is measuring something, and silence is what made three measurements wrong
+    ;; in one session.
+    (when (and (nil? (%std-image-install)) (%getenv "BROOD_STDIMAGE"))
+      (%eprint "brood: BROOD_STDIMAGE is set but no current stdlib image was installed — loading from source. `(stdimage/status)` says why.\n"))))
