@@ -57,6 +57,7 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
 
     (string/char-at \"abc\" 1)   → \"b\""
   (string/substring s i (inc i)))
+(sig char-at (string int -> string))
 
 (defn ->list (s)
   "The characters of `s` as a list of 1-char strings.

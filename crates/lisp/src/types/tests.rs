@@ -889,16 +889,25 @@ fn bool_union(bs: &[bool]) -> Ty {
 fn bool_literal_renders_as_its_value() {
     assert_eq!(Ty::bool_lit(true).to_string(), "true");
     assert_eq!(Ty::bool_lit(false).to_string(), "false");
-    assert_eq!(bool_union(&[true, false]).to_string(), "false | true");
+    // Both values IS `bool` — the domain is finite, so the two spellings are one type
+    // (canonicalised; see `two_spellings_of_the_same_set_are_one_type`).
+    assert_eq!(bool_union(&[true, false]).to_string(), "bool");
 }
 
 #[test]
 fn bool_literal_union_is_exact_but_open_bool_widens() {
-    let u = bool_union(&[true, false]);
+    // A union of literals keeps both, exactly — unlike every structural refinement,
+    // which widens on mismatch.
     let mut want = BTreeSet::new();
     want.insert(true);
-    want.insert(false);
+    let u = bool_union(&[true, true]);
     assert_eq!(u.as_lit_bool(), Some(&want));
+
+    // …and once the set covers bool's whole (finite) domain it IS `bool`: the refinement
+    // is dropped, so the two spellings do not survive as different types.
+    assert_eq!(bool_union(&[true, false]).as_lit_bool(), None);
+    assert_eq!(bool_union(&[true, false]), Ty::of(Tag::Bool));
+
     let widened = Ty::bool_lit(true).union(Ty::of(Tag::Bool));
     assert!(widened.contains_tag(Tag::Bool));
     assert_eq!(widened.as_lit_bool(), None);
@@ -1218,8 +1227,47 @@ fn property_corpus() -> Vec<Ty> {
         Ty::tuple_of(vec![Ty::of(Tag::Int)]).union(Ty::tuple_of(vec![Ty::of(Tag::Str)])),
         rec(&[("a", Ty::of(Tag::Int), true)]).union(rec(&[("b", Ty::of(Tag::Str), true)])),
         Ty::vector_of(Ty::of(Tag::Int)).union(Ty::of(Tag::Nil)),
+        Ty::vector_of(Ty::of(Tag::Int))
+            .union(Ty::vector_of(Ty::of(Tag::Str)))
+            .union(Ty::of(Tag::Int)),
+        // negative literal atoms — the complement half of the lattice
+        Ty::keyword_lit(value::intern("ok")).negate(),
+        Ty::int_lit(5).negate(),
+        Ty::keyword_lit(value::intern("ok"))
+            .negate()
+            .intersect(Ty::of(Tag::Keyword)),
         arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int)),
     ]
+}
+
+#[test]
+fn a_term_may_be_covered_by_several_alternatives_at_once() {
+    // The completeness direction cross-term subtyping used to miss. `int | vector<int>`
+    // merges into ONE term (the union is exact), and it fits inside the three-way union
+    // only because its `int` half and its `vector` half land in DIFFERENT alternatives.
+    // Requiring a single alternative to cover the whole term rejected it — a false
+    // positive on any call passing such a value.
+    let ints = Ty::of(Tag::Int);
+    let vec_int = Ty::vector_of(ints.clone());
+    let vec_str = Ty::vector_of(Ty::of(Tag::Str));
+
+    let left = ints.clone().union(vec_int.clone());
+    let right = vec_str.clone().union(vec_int.clone()).union(ints.clone());
+    assert!(
+        left.is_subtype(&right),
+        "`{left}` is contained in `{right}` — its int half and its vector half are in          different alternatives"
+    );
+
+    // …and the sound direction still holds: a half that nothing covers is rejected.
+    let unrelated = vec_str.union(Ty::of(Tag::Str));
+    assert!(
+        !left.is_subtype(&unrelated),
+        "`{left}` is NOT contained in `{unrelated}` — nothing there admits an int"
+    );
+
+    // The projection is per tag, not per term, so a refinement that only part of the
+    // union satisfies cannot leak: vector<int> is not covered by vector<string> alone.
+    assert!(!vec_int.is_subtype(&Ty::vector_of(Ty::of(Tag::Str))));
 }
 
 #[test]
@@ -1509,4 +1557,80 @@ fn a_bool_literal_complement_is_exact() {
     // Negating BOTH bool literals removes the tag: no bool is neither true nor false.
     let both = Ty::bool_lit(true).union(Ty::bool_lit(false));
     assert!(!both.negate().contains_tag(Tag::Bool));
+}
+
+#[test]
+fn a_literal_complement_is_exact_for_every_literal_kind() {
+    // The negative half of the lattice. `¬:ok` is "anything but the keyword :ok", held
+    // as an exclusion because the keyword domain is infinite — not the `any` it widened
+    // to before. That exactness is what lets an equality test narrow its else branch.
+    let ok = Ty::keyword_lit(value::intern("ok"));
+    let err = Ty::keyword_lit(value::intern("err"));
+    assert_eq!(
+        ok.clone().union(err.clone()).intersect(ok.clone().negate()),
+        err,
+        "(:ok | :err) minus :ok is :err"
+    );
+    assert_eq!(
+        Ty::int_lit(5)
+            .union(Ty::int_lit(6))
+            .intersect(Ty::int_lit(5).negate()),
+        Ty::int_lit(6)
+    );
+    assert_eq!(
+        Ty::str_lit("a")
+            .union(Ty::str_lit("b"))
+            .intersect(Ty::str_lit("a").negate()),
+        Ty::str_lit("b")
+    );
+
+    // A complement keeps its own tag — `¬:ok` still admits every OTHER keyword, which
+    // is the property that makes narrowing sound rather than merely narrow.
+    let other = Ty::keyword_lit(value::intern("other"));
+    assert!(other.is_subtype(&ok.clone().negate()));
+    assert!(!ok.is_subtype(&ok.clone().negate()));
+    assert!(Ty::of(Tag::Str).is_subtype(&ok.clone().negate()));
+
+    // Double negation returns the literal exactly.
+    assert_eq!(
+        ok.clone().negate().negate().intersect(Ty::of(Tag::Keyword)),
+        ok
+    );
+
+    // Bool stays positive: its domain is finite, so `¬false` is `{true}` rather than an
+    // exclusion (`LitSet::Out` may assume an infinite complement).
+    assert_eq!(
+        Ty::bool_lit(false).negate().intersect(Ty::of(Tag::Bool)),
+        Ty::bool_lit(true)
+    );
+}
+
+#[test]
+fn two_spellings_of_the_same_set_are_one_type() {
+    // `Ty` derives equality and hashing from its slots, so two representations of the
+    // same set are a real defect, not a cosmetic one: `bool <: (or false true)` came out
+    // FALSE for two identical sets — a spurious warning waiting to happen — and a
+    // fixpoint that iterates until a type stops changing would never settle between them.
+    //
+    // Bool is the only tag this can happen to: its domain is finite, so a positive set
+    // can cover it. The general case is an exclusion that excludes nothing.
+    let both = Ty::bool_lit(true).union(Ty::bool_lit(false));
+    assert_eq!(both, Ty::of(Tag::Bool), "`{both}` should BE `bool`");
+    assert!(Ty::of(Tag::Bool).is_subtype(&both));
+    assert!(both.is_subtype(&Ty::of(Tag::Bool)));
+    assert_eq!(both.to_source().as_deref(), Some("bool"));
+
+    // The same set reached by complement rather than union.
+    let neither = Ty::bool_lit(true)
+        .negate()
+        .union(Ty::bool_lit(false).negate())
+        .intersect(Ty::of(Tag::Bool));
+    assert_eq!(neither, Ty::of(Tag::Bool));
+
+    // …and an exclusion that excludes nothing is "every value of the tag".
+    let all_keywords = Ty::keyword_lit(value::intern("a"))
+        .negate()
+        .union(Ty::keyword_lit(value::intern("a")))
+        .intersect(Ty::of(Tag::Keyword));
+    assert_eq!(all_keywords, Ty::of(Tag::Keyword));
 }

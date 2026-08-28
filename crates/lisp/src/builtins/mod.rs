@@ -2984,6 +2984,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         check_file_builtin);
     def(
         heap,
+        "%file-signatures",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        &["path"],
+        "The signature the checker holds for every function the file at path defines: a list of `{:name :sig :declared? :informative?}` maps, `:sig` written in source syntax (`\"(int int -> int)\"`) and ready to paste into a `(sig …)`, or nil where the type names a runtime kind the grammar cannot write. `:declared?` marks the ones a `(sig …)` already states; `:informative?` marks the ones saying something an all-`any` arrow does not. Does not evaluate the file. The bulk counterpart of the editor's declare-sig action.",
+        file_signatures_builtin);
+    def(
+        heap,
         "%check-file-structured",
         Arity::range(1, 2),
         Sig::with_rest(vec![string], any, list_ty),

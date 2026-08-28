@@ -22065,7 +22065,7 @@ records) — the highest-risk one, since it touches the hottest paths.
 ## 2026-07-29 (finding) — numeric protocol for records: Brood-side is a ~195× fib regression
 
 Tried a `Num` ability so records (money, complex, vectors) could use `+`/`-`/`*`/`/`, wired
-by a `(record? a)` branch in each operator's binary arm (`(if (record? a) (num-add a b)
+by a `(record? a)` branch in each operator's binary arm (`(if (record? a) (num/add a b)
 (%add a b))`), int/float falling straight to `%add`. It works — money arithmetic dispatches,
 ints/floats give the right answers — but the one mandatory `make ab`-style check killed it:
 **fib 35 went 60 ms → 11.7 s, ~195×.** A `(record? a)` branch, however cheap in isolation,
@@ -22094,7 +22094,7 @@ is untouched — the JIT inlines int+int / float+float and never calls the `%add
 it never reaches the fallback. Measured: **fib 35 = 61 ms**, identical to baseline (60 ms).
 The operators stay `(%add a b)` — no Brood branch, so nothing to defeat the JIT.
 
-The `Num` ability (`num-add`/`num-sub`/`num-mul`/`num-div`, no `:default`) lives in the
+The `Num` ability (`num/add`/`num/sub`/`num/mul`/`num/div`, no `:default`) lives in the
 prelude; a record with no impl raises the ability's loud missing-impl error. A money value
 does `(+ (usd 500) (usd 250))` → `750`, variadic `+` folds through the same dispatch.
 
@@ -22465,7 +22465,7 @@ dispatch on `money`; `(+ 5 money)` cannot dispatch on the second arg). Built the
   is authored as the upper triangle of its type matrix; an authored method always wins over a
   derived one. STRICT: arg-count≠pattern-length, a closure on a non-binary pattern, an unknown
   algebra, a method for an undeclared multi, and `:default` as a tuple position all fail at load.
-- **`Num`/`Ord` migrated.** They were `defability`s; now `(defmulti num-add :commutative)` etc.
+- **`Num`/`Ord` migrated.** They were `defability`s; now `(defmulti num/add :commutative)` etc.
   and `(defmulti compare-to :antisymmetric)`. No implicit coercion — `(+ money 5)` needs an
   authored `[money :int]` method; commutativity then makes `(+ 5 money)` agree.
 - **Kernel (`builtins/numeric.rs`, `mod.rs`).** `+`/`-`/`*`/`/` and `<`/`<=`/`>`/`>=`/`min`/`max`
@@ -22702,8 +22702,8 @@ so an unclear dispatch fails at type-check, not only at runtime.
   `[money :int]` method does NOT false-warn. This was a real false positive caught in testing.
 - Only judges a call all of whose args have a certain identity — one unknown arg (a variable)
   defers. No inference hook yet (record-typed *variables* aren't judged); syntactic-only, sound.
-- Scope: fires on a **direct** generic call (`(num-add …)`, a user `(defmulti mine)` call), not
-  on the `+`/`<` operator sugar (which the checker doesn't see through to `num-add`).
+- Scope: fires on a **direct** generic call (`(num/add …)`, a user `(defmulti mine)` call), not
+  on the `+`/`<` operator sugar (which the checker doesn't see through to `num/add`).
 
 Zero false positives across `std/` + `tests/` (full suite 894 green); clippy + fmt clean.
 Tests: `type_check_catalog.rs` (a miss warns; covered/mirror/`:default`/unknown-arg stay silent).

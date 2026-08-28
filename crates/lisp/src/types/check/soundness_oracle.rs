@@ -34,6 +34,46 @@ fn value_member_of(heap: &Heap, v: Value, ty: &Ty) -> bool {
             _ => {}
         }
     }
+    // Map refinements. Without these the oracle passes on any map-typed expression
+    // whatever the refinement claims — which is how `(assoc m :extra "text")` on a
+    // `(map keyword int)` went on reporting `(map keyword int)`, flagging correct code
+    // downstream. A rule that carries a refinement through an operation that CHANGES it
+    // is invisible to a tags-only check.
+    if let Value::Map(id) = v {
+        let entries = heap.map_entries(id);
+        if let Some((key_ty, val_ty)) = ty.map_kv() {
+            for (k, val) in &entries {
+                if !value_member_of(heap, *k, key_ty) || !value_member_of(heap, *val, val_ty) {
+                    return false;
+                }
+            }
+        }
+        if let Some(fields) = ty.record_fields() {
+            for (name, (field_ty, required)) in fields {
+                match entries
+                    .iter()
+                    .find(|(k, _)| matches!(k, Value::Keyword(n) if n == name))
+                {
+                    Some((_, held)) => {
+                        if !value_member_of(heap, *held, field_ty) {
+                            return false;
+                        }
+                    }
+                    // A required field the value does not carry.
+                    None if *required => return false,
+                    None => {}
+                }
+            }
+            // A CLOSED record (ADR-264) declares that no other key is present.
+            if ty.record_is_open() == Some(false)
+                && entries
+                    .iter()
+                    .any(|(k, _)| !matches!(k, Value::Keyword(n) if fields.contains_key(n)))
+            {
+                return false;
+            }
+        }
+    }
     true
 }
 
@@ -86,7 +126,64 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         // nested
         "(first (map inc [1 2 3]))",
         "(reduce + 0 (map inc [1 2 3]))",
+        // maps and record shapes — the refinement-carrying rules. `assoc` is the one
+        // that was wrong: it kept `K`/`V` unchanged whatever it added.
+        "{:a 1 :b 2}",
+        "{:a 1 :b \"two\"}",
+        "{}",
+        "(assoc {:a 1} :b 2)",
+        "(assoc {:a 1} :b \"text\")",
+        "(assoc {:a 1} :a \"replaced\")",
+        "(dissoc {:a 1 :b 2} :b)",
+        "(keys {:a 1 :b 2})",
+        "(vals {:a 1 :b 2})",
+        "(get {:a 1} :a)",
+        "(get {:a 1} :missing)",
+        "(assoc (assoc {} :a 1) :b :k)",
+        // sequence rules that reshape rather than construct — each one carries an
+        // element refinement through an operation, the shape ADR-269 showed is where
+        // an under-approximation hides.
+        "(reverse [1 2 3])",
+        "(rest [1 2 3])",
+        "(rest [1])",
+        "(seq/but-last [1 2 3])",
+        "(seq/distinct [1 1 2])",
+        "(sort [3 1 2])",
+        "(seq/sort-by (fn (x) x) [3 1 2])",
+        "(take 2 [1 2 3])",
+        "(drop 2 [1 2 3])",
+        "(take 0 [1 2 3])",
+        "(drop 5 [1 2 3])",
+        "(seq/take-while math/even? [2 4 5])",
+        "(seq/drop-while math/even? [2 4 5])",
+        "(seq/remove math/even? [1 2 3])",
+        "(cons 1 [2 3])",
+        "(cons \"a\" [2 3])",
+        "(append [1 2] [\"a\"])",
+        "(append)",
+        "(range 3)",
+        "(range 1 5)",
+        "(seq/keep (fn (x) (if (math/even? x) x nil)) [1 2 3 4])",
+        "(seq/interpose 0 [1 2 3])",
+        // mixed-element and nested collections
+        "[[1 2] [3]]",
+        "[{:a 1} {:b 2}]",
+        "(map (fn (x) [x x]) [1 2])",
+        "(first [[1 2] [3]])",
+        // strings and numbers
+        "(str 1 \"a\" :k)",
+        "(string/upcase \"a\")",
+        "(string/split \"a,b\" \",\")",
+        "(math/abs -3)",
+        "(math/quot 7 2)",
+        "(/ 7 2)",
+        "(+ 1 2.5)",
+        // guards / branches — a union of both arms
+        "(if true 1 \"a\")",
+        "(if false 1 \"a\")",
+        "(let (x 5) (if (math/even? x) x nil))",
     ];
+    let mut claimed = 0usize;
     for src in cases {
         let mut interp = crate::Interp::new();
         // Static type of the form (read in this heap, typed in the empty ctx).
@@ -94,6 +191,7 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         let Some(t) = expr_ty(&interp.heap, form, &Ctx::default()) else {
             continue; // checker makes no claim → nothing to verify
         };
+        claimed += 1;
         // Runtime value of the same source (fresh parse + eval).
         let v = interp.eval_str(src).expect("eval");
         assert!(
@@ -104,6 +202,17 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
             value::tag(v).name(),
         );
     }
+    // A case the checker declines to type is skipped, so a corpus that mostly declines
+    // would pass while verifying nothing. Assert the coverage instead of assuming it:
+    // this is the difference between "the oracle found nothing" and "the oracle ran".
+    // It types 77 of 82 today; the bar is 90%, so a handful of deliberately untypeable
+    // cases is fine and a collapse is not.
+    assert!(
+        claimed * 10 >= cases.len() * 9,
+        "the oracle verified only {claimed} of {} cases — it is not covering what it \
+         looks like it covers",
+        cases.len()
+    );
 }
 
 #[test]
@@ -127,6 +236,27 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         "(first (map inc [1 2 3]))",
         "(match 5 (5 (+ 5 1)) (_ 0))",
         "(match [1 2] ([a b] (+ a b)) (_ 0))",
+        // Maps and records — the refinement-carrying rules (ADR-269). `assoc` adding a
+        // value outside the map's value type is the one that WAS a false positive.
+        "(get {:a 1} :a)",
+        "(+ 1 (get {:a 1} :a))",
+        "(string/length (get (assoc {:a 1} :b \"text\") :b))",
+        "(string/length (get (assoc {:a 1} :a \"replaced\") :a))",
+        "(+ 1 (get (dissoc {:a 1 :b 2} :b) :a))",
+        "(map (fn (k) k) (keys {:a 1 :b 2}))",
+        "(map (fn (v) v) (vals {:a 1 :b 2}))",
+        "(let (r {:name \"x\"}) (string/length (get r :name)))",
+        "(let (r (assoc {} :name \"x\")) (string/length (get r :name)))",
+        // Literal narrowing on BOTH branches (ADR-268) — the else branch now knows what
+        // the equality test ruled out, and must not over-claim on the way.
+        "(let (tag :ok) (if (%eq tag :ok) 1 (string/length tag)))",
+        "(let (tag :err) (if (%eq tag :ok) 1 :other))",
+        "(let (n 5) (if (%eq n 5) (+ n 1) (+ n 2)))",
+        "(let (s \"x\") (if (%eq s \"x\") 1 (string/length s)))",
+        "(let (b true) (if b 1 2))",
+        "(let (x nil) (if (%eq x nil) 0 (+ x 1)))",
+        // Multi-alternative unions reaching a call (ADR-267's per-tag decomposition).
+        "(let (v (if true 1 [2])) (if (vector? v) (first v) v))",
     ];
     for src in cases {
         let mut interp = crate::Interp::new();
@@ -148,7 +278,7 @@ fn correct_programs_draw_no_type_disjointness_warning() {
 
 /// The argument values every domain case is probed with — one per tag family the
 /// lattice distinguishes, so a domain that wrongly excludes any of them is caught.
-const PROBE_ARGS: [&str; 9] = [
+const PROBE_ARGS: [&str; 11] = [
     "5",
     "1.5",
     "\"s\"",
@@ -158,6 +288,11 @@ const PROBE_ARGS: [&str; 9] = [
     "[1 2]",
     "(list 1 2)",
     "{:a 1}",
+    // A callable, in both spellings the runtime accepts — without these, a domain that
+    // wrongly excludes functions is invisible here, since a probe that raises is skipped
+    // and every non-callable probe raises against a body that calls its parameter.
+    "inc",
+    "(fn (x) x)",
 ];
 
 #[test]
@@ -198,6 +333,28 @@ fn an_inferred_parameter_domain_over_approximates_the_real_one() {
         "(defn f (x) (if-let (v (get x :k)) (inc v) 0))",
         "(defn f (x) (when-let (v (get x :k)) (str v)))",
         "(defn f (x) (if (not x) 0 (inc x)))",
+        // Equality guards, whose ELSE branch narrows now that a literal complement is
+        // exact (ADR-268). The domain must still contain every value `f` accepts — an
+        // else-branch that over-narrows would exclude one and warn on a working call.
+        "(defn f (x) (if (%eq x :ok) 1 2))",
+        "(defn f (x) (if (%eq x :ok) 1 (str x)))",
+        "(defn f (x) (if (%eq x 5) (+ x 1) 0))",
+        "(defn f (x) (if (%eq x nil) 0 (str x)))",
+        "(defn f (x) (cond (%eq x :ok) 1 (%eq x :err) 2 else 3))",
+        "(defn f (x) (if (%eq x :ok) 1 (if (%eq x :err) 2 3)))",
+        // Record/map shapes reaching a parameter — the sinks carry a shape forward now.
+        "(defn f (x) (get (assoc x :k 1) :k))",
+        // A parameter in call-head position — the callback shape. Its domain must
+        // contain every callable, and nothing that isn't one is passed here.
+        "(defn f (g) (g 1))",
+        "(defn f (g) (+ 1 (g 1)))",
+        "(defn f (g x) (g x))",
+        "(defn f (g) (map g [1 2 3]))",
+        // A map argument, so the `:keyword` probe actually succeeds — a keyword is a
+        // function OF A MAP, and a domain that admits only `fn | native` is caught here
+        // and nowhere else (every other probe raises, and a raising probe is skipped).
+        "(defn f (g) (g {:a 1}))",
+        "(defn f (x) (count (keys x)))",
     ];
     for def in cases {
         for arg in PROBE_ARGS {

@@ -1,6 +1,21 @@
 //! Display rendering for [`Ty`] (extracted from mod.rs).
 use super::*;
 
+/// The excluded values of a negatively-stated literal set, rendered; empty for a
+/// positive one or an unrefined slot.
+fn excluded_of<T: Ord, F: Fn(&T) -> String>(
+    slot: &Option<Arc<LitSet<T>>>,
+    render: F,
+) -> Vec<String> {
+    let mut out: Vec<String> = slot
+        .as_deref()
+        .and_then(LitSet::excluded)
+        .map(|set| set.iter().map(&render).collect())
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
 impl fmt::Display for Ty {
     /// A readable rendering for diagnostics: the named lattice points where they
     /// apply (`never`, `any`, `number`, `list`), a single tag by its `type-of`
@@ -125,6 +140,7 @@ impl fmt::Display for Ty {
             let mut kw_parts: Vec<String> = self
                 .lit
                 .iter()
+                .flat_map(|set| set.members())
                 .flat_map(|set| set.iter())
                 .map(|s| format!(":{}", value::symbol_name_ref(*s)))
                 .collect();
@@ -132,6 +148,7 @@ impl fmt::Display for Ty {
             let mut int_parts: Vec<String> = self
                 .lit_int
                 .iter()
+                .flat_map(|set| set.members())
                 .flat_map(|set| set.iter())
                 .map(|n| n.to_string())
                 .collect();
@@ -139,6 +156,7 @@ impl fmt::Display for Ty {
             let mut bool_parts: Vec<String> = self
                 .lit_bool
                 .iter()
+                .flat_map(|set| set.members())
                 .flat_map(|set| set.iter())
                 .map(|b| b.to_string())
                 .collect();
@@ -146,14 +164,58 @@ impl fmt::Display for Ty {
             let mut str_parts: Vec<String> = self
                 .lit_str
                 .iter()
+                .flat_map(|set| set.members())
                 .flat_map(|set| set.iter())
                 .map(|s| format!("{s:?}"))
                 .collect();
             str_parts.sort();
+            // A **negatively** stated set — `¬:ok`, the else-branch of an equality
+            // test. It cannot be enumerated, so it renders as what it is. When the type
+            // is otherwise everything, that is exactly `(not :ok)`; when the tag has
+            // been narrowed alongside it, `(keyword and (not :ok))` says both halves.
+            // Rendering nothing here would be the dangerous option: the reader would see
+            // a union with the keyword member silently missing.
+            let excluded: Vec<(Tag, Vec<String>)> = vec![
+                (
+                    Tag::Keyword,
+                    excluded_of(&self.lit, |s| format!(":{}", value::symbol_name_ref(*s))),
+                ),
+                (Tag::Int, excluded_of(&self.lit_int, |n| n.to_string())),
+                (Tag::Bool, excluded_of(&self.lit_bool, |b| b.to_string())),
+                (Tag::Str, excluded_of(&self.lit_str, |s| format!("{s:?}"))),
+            ];
+            let negated_tags: u32 = excluded
+                .iter()
+                .filter(|(_, values)| !values.is_empty())
+                .fold(0, |acc, (tag, _)| acc | 1u32 << bit(*tag));
+
+            // The pure complement of one literal: every tag, nothing else refined.
+            if negated_tags != 0 && self.tags == UNIVERSE {
+                let all: Vec<String> = excluded
+                    .iter()
+                    .flat_map(|(_, values)| values.iter().cloned())
+                    .collect();
+                if all.len() == 1 {
+                    return write!(f, "(not {})", all[0]);
+                }
+                return write!(f, "(not ({}))", all.join(" | "));
+            }
+
             let mut parts = kw_parts;
             parts.extend(int_parts);
             parts.extend(bool_parts);
             parts.extend(str_parts);
+            for (tag, values) in &excluded {
+                if values.is_empty() {
+                    continue;
+                }
+                let inner = if values.len() == 1 {
+                    values[0].clone()
+                } else {
+                    format!("({})", values.join(" | "))
+                };
+                parts.push(format!("({} and (not {}))", tag.name(), inner));
+            }
             for tag in ALL_TAGS {
                 let is_literal_tag = (tag as u8 as u32 == bit(Tag::Keyword) && self.lit.is_some())
                     || (tag as u8 as u32 == bit(Tag::Int) && self.lit_int.is_some())
@@ -335,9 +397,97 @@ impl Ty {
                 };
             }
         }
+        // A structural refinement (element type, tuple shape, record shape, map
+        // key/value, arrow) constrains only its own tag family. When the term carries
+        // tags *outside* that family, none of the branches above fire and the
+        // fall-through renders bare tag names — silently dropping the refinement.
+        // `int | vector<int>` is exactly such a term: the union merged exactly, so it
+        // is a single term rather than an `alts` case, and it used to render as
+        // `(or int vector)`. Split it into per-tag projections and let each render
+        // itself; a projection has one tag, so this recursion terminates.
+        let mut structural_tags = 0u32;
+        if self.elem.is_some() {
+            structural_tags |= SEQ_BITS;
+        }
+        if self.tuple.is_some() {
+            structural_tags |= VECTOR_BIT;
+        }
+        if self.map_kv.is_some() || self.fields.is_some() {
+            structural_tags |= MAP_BIT;
+        }
+        if self.arrow.is_some() || self.overload.is_some() {
+            structural_tags |= FN_BITS;
+        }
+        if structural_tags != 0 && self.tags & !structural_tags != 0 {
+            let mut parts: Vec<String> = Vec::new();
+            let mut remaining = self.tags;
+            while remaining != 0 {
+                let tag_bit = remaining & remaining.wrapping_neg();
+                remaining &= !tag_bit;
+                parts.push(self.project_tag(tag_bit).to_source()?);
+            }
+            parts.sort();
+            return match parts.len() {
+                0 => None,
+                1 => Some(parts.remove(0)),
+                _ => Some(format!("(or {})", parts.join(" "))),
+            };
+        }
+
         // Otherwise: the members, as literals where a literal set pins them and as tag
-        // names elsewhere, joined with `or`.
+        // names elsewhere, joined with `or`. The named unions are factored out first —
+        // `Display` does this and source has to as well, or the arithmetic domain
+        // (`number | map`, which records join through the `Num` ability) renders as a
+        // five-way `or` of its members. A generated `(sig …)` is read by people.
+        // A negatively stated literal set — `¬:ok`, what an equality guard's else
+        // branch produces. `to_source` must render it or decline; falling through would
+        // emit the bare tag name and silently widen the type it claims to write.
+        let excluded: Vec<String> = [
+            excluded_of(&self.lit, |s| format!(":{}", value::symbol_name_ref(*s))),
+            excluded_of(&self.lit_int, |n| n.to_string()),
+            excluded_of(&self.lit_bool, |b| b.to_string()),
+            excluded_of(&self.lit_str, |s| format!("{s:?}")),
+        ]
+        .concat();
+        if !excluded.is_empty() {
+            let inner = if excluded.len() == 1 {
+                excluded[0].clone()
+            } else {
+                format!("(or {})", excluded.join(" "))
+            };
+            // The whole universe minus those values is exactly `(not …)`. A narrowed
+            // one — a single tag, minus values — is that intersected with the tag.
+            if self.tags == UNIVERSE {
+                return Some(format!("(not {inner})"));
+            }
+            let mut tags = ALL_TAGS
+                .iter()
+                .filter(|&&tag| self.contains_tag(tag))
+                .map(|tag| tag.name());
+            let (Some(only), None) = (tags.next(), tags.next()) else {
+                return None; // a partial universe minus literals: no faithful spelling
+            };
+            return Some(format!("(and {only} (not {inner}))"));
+        }
+
         let mut parts: Vec<String> = Vec::new();
+        let mut named_tags = 0u32;
+        for (named, source) in [
+            (Ty::SEQABLE, "seqable"),
+            (Ty::NUMBER, "number"),
+            (Ty::LIST, "list"),
+        ] {
+            // Only when the whole named union is present and nothing has pinned one of
+            // its members to a literal set (which would make the alias a lie).
+            let members = named.tags;
+            if self.tags & members == members
+                && named_tags & members == 0
+                && !(members & INT_BIT != 0 && self.lit_int.is_some())
+            {
+                named_tags |= members;
+                parts.push(source.to_string());
+            }
+        }
         for set in self.as_lit().iter() {
             for k in set.iter() {
                 parts.push(format!(":{}", value::symbol_name_ref(*k)));
@@ -359,7 +509,7 @@ impl Ty {
             }
         }
         for tag in ALL_TAGS {
-            if !self.contains_tag(tag) {
+            if !self.contains_tag(tag) || named_tags & (1u32 << bit(tag)) != 0 {
                 continue;
             }
             let pinned = (tag == Tag::Keyword && self.as_lit().is_some())

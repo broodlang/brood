@@ -1460,11 +1460,11 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
               (project-pfold-collect (- pending 1)
                 workers
                 (cons pid reported)
-                (combine acc (seq/third msg))
+                (combine acc (third msg))
                 combine
                 on-death)))
         (= (first msg) :down)
-          (let (pid (seq/third msg) entry (project-pfold-entry pid workers))
+          (let (pid (third msg) entry (project-pfold-entry pid workers))
             (if (or (includes? reported pid) (nil? entry))
               (project-pfold-collect pending
                 workers reported acc combine on-death)
@@ -2488,6 +2488,69 @@ more than one namespace, and a name that moved behind `%`. Backs `nest check --f
                      (count skips)
                      " left for you"))
           (count skips))))))
+
+;; --- `nest check --suggest-sigs` — the `sig` adoption aid ---------------------
+;;
+;; Adopting `(sig …)` across a large library is the type system's longest-standing
+;; backlog item, and the expensive part was never the typing — it was guessing what the
+;; checker already knows. It knows a lot: it infers a domain per parameter and a type
+;; per return, and `reflect/file-signatures` renders both back in source syntax. This
+;; prints the ones worth writing down, so adoption is review-and-paste rather than
+;; derive-from-scratch.
+;;
+;; Deliberately conservative about what it offers:
+;;   • a function whose `(sig …)` is already written is skipped — nothing to add;
+;;   • an all-`any` signature is skipped — true, and worth nothing to declare;
+;;   • a signature the grammar cannot write comes back nil and is skipped.
+;; Declaring an inferred signature is SOUND: the inferred parameter domain
+;; over-approximates the real one (ADR-261, and the soundness oracle asserts it), so a
+;; call this rejects would have failed anyway. It is still advice, not a patch — nothing
+;; is written to disk, because a signature is documentation and deserves a human's eye.
+
+(defn- suggestion-line
+  (entry)
+  "One `(sig name type)` line for a signature worth declaring, or nil."
+  (let (rendered (get entry :sig))
+    (when (and (not (get entry :declared?))
+            (not (nil? rendered))
+            ;; An all-`any` arrow says nothing a reader doesn't already have.
+            ;; Decided on the types, not on the rendered text — `(string any -> any)`
+            ;; contains the *text* of `(any -> any)` and is worth declaring.
+            (get entry :informative?))
+      (str "(sig " (get entry :name) " " rendered ")"))))
+
+(defn suggest-sigs (files)
+  "Print the `(sig …)` declarations the checker would write for every function that
+lacks one, grouped by file. With `files` empty, the whole project. Writes nothing.
+Backs `nest check --suggest-sigs`."
+  (let (targets (if (empty? files)
+                  (let (root (find-root (file/cwd)))
+                    (when (nil? root)
+                      (error "suggest-sigs: not in a Brood project (no project.blsp found from "
+                        (file/cwd)
+                        ")"))
+                    (source-files root))
+                  files)
+        total (fold (fn (acc path)
+                      (let (lines (filter (fn (x) (not (nil? x)))
+                                    (map suggestion-line
+                                      (reflect/file-signatures path))))
+                        (if (empty? lines)
+                          acc
+                          (do
+                            (io/puts (str "\n" path))
+                            (for (line lines) (io/puts (str "  " line)))
+                            (+ acc (count lines))))))
+                0 targets))
+    (io/puts (str "\nsuggest-sigs: "
+               total
+               " undeclared signature"
+               (if (= total 1) "" "s")
+               " the checker can already write, across "
+               (count targets)
+               " file"
+               (if (= (count targets) 1) "" "s")))
+    0))
 
 ;; (run-tests & opts) — find the project from the cwd, set it up, load
 ;; every <name>_test.blsp under its test paths (which only REGISTER tests via the

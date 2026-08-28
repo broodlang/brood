@@ -4953,3 +4953,113 @@ test and value position — so the clause walk pairs the way the formatter does 
 counting to parity. The per-form header table that used to drive it is gone: the formatter
 puts every body line +2 from its bracket, and only the two pair shapes (map / bindings list
 at +1, dropped pair value at +4) depart from that.
+
+**More of the review list.** `csv` follows `json` onto `decode`/`encode`. The three datetime
+TYPE predicates (`datetime?`, `date?`, `time-of-day?`) move bare into the prelude beside
+`queue?`/`pq?`/`multimap?` — ADR-236's carve-out 2 already stated the rule and the prelude
+comment already spelled out the reasoning; datetime's three had simply been missed.
+`before?`/`after?`/`same?` stay in the module: comparisons, not type predicates. `seq/third`
+moves bare beside `second` — `first` was a kernel builtin, `second` prelude, `third` a module
+function you had to know to qualify, which is one trio in three homes.
+
+**`num-add`/`sub`/`mul`/`div` → `num/*`,** with `std/num.blsp` declaring the namespace. A
+four-name hyphen prefix is exactly what ADR-251 calls a namespace spelled by hand. Two latent
+gaps fell out. `numeric.rs` maps operator → multimethod by **bare string** (`"+" => "num/add"`)
+and looks it up in the global table — ADR-251's recorded rename hazard in its purest form,
+since a miss fails at a user's first `(+ record record)` and nowhere earlier; now pinned by a
+test. And `prelude_hygiene`'s DEFINERS list did not include `defmulti`, so `num/add` read as a
+reference into an unloaded module — nothing had noticed because no prelude multimethod had ever
+carried a slash.
+
+**Two audited to "no change", which is also an answer.** `defprocess` is not an outlier —
+`test/deftest` and `telemetry/defevent` are the same shape, and its expansion calls
+`gen-clause`, so it is a gen form rather than a language construct. `stdimage` is already
+right: 8 of 13 definitions private, and every public one has an external caller.
+
+**Third time for the same mistake, so it is a rule now.** A bulk rename must exclude the
+files that *quote* the old name deliberately. `json/parse` swept ADR-220's text and two
+hypothetical package names (`fastjson/parse`, `json/parser`); `uuid/nil-uuid` and `num-div`
+swept `docs/wilhelm-review.md`, rewriting the very names the review questions were asking
+about. `decisions.md`, `known-issues.md`, `devlog.md` and `wilhelm-review.md` are records.
+
+## 2026-08-28 — the checker could not see most of the standard library
+
+Continuing the type-system backlog. Three findings, in the order they surfaced.
+
+**`to_source` renders for people, so it has to factor the aliases.** Surveying what the
+checker would declare across `std/` showed `(or decimal float int map ratio)` in every
+arithmetic signature — the true domain (a record joins it through the `Num` ability) spelled
+five ways. `Display` factors `number`/`seqable`/`list`; the source renderer didn't, and a
+generated `(sig …)` is read by a human. Fixed.
+
+**A module-private function had no inferred signature at all** (ADR-266). `defn-` expands to
+`(do (def name (fn …)) (%mark-private 'name))`, and every pass keyed on a top-level `(def …)`
+saw nothing there — so its call sites went unchecked. That is 40 of `std/json.blsp`'s 42
+definitions, and the internals are exactly where an argument-order slip lives. Opening the
+privacy expansion fixed it; opening *every* top-level `do` was the obvious generalisation and
+broke two unrelated things, which is why the descent is narrow and gensym'd names are now
+never typed. Arming it across `std/` + `tests/` produced **zero** new warnings.
+
+**Cross-term subtyping decomposes per tag** (ADR-267). Requiring each term of the left to fit
+inside a *single* term of the right rejected `int | vector<int>` ⊆
+`int | vector<string> | vector<int>` — a false positive, since the term's two halves land in
+different alternatives. A term is the disjoint union of its per-tag projections, so placing
+each projection is sound and sharper. The same projection fixed `to_source` dropping a
+refinement on a term that carried tags beside it — caught by the round-trip test within
+seconds of the type entering the property corpus, which is the second time that test has paid
+for itself.
+
+**And the bulk adoption path**: `nest check --suggest-sigs` prints the `(sig …)` the checker
+would write for every function lacking one, over `reflect/file-signatures`. Adopting one is
+sound — an inferred domain over-approximates the real one — but it stays advice, not a patch.
+Informativeness is decided on the types, not the rendered text: `(string any -> any)` contains
+the text of `(any -> any)` and is worth declaring.
+
+**Later the same day — the complement of a literal** (ADR-268). `¬:ok` widened to `any`,
+so a tagged-union dispatch refined only on its true side and the equality guard was marked
+`then_only` because of it. A literal refinement is now `In(A)` or `Out(A)`, which makes
+`(or :ok :err) ∩ ¬:ok` come out `:err` and the guard biconditional — where the guard type
+is exact, which a string literal's is not (`of_value` has no heap to read the bytes, so
+`(= m "x")` proves only `m : string`). Zero new warnings across the corpus; the property
+corpus carries negative atoms now, and the grammar-agreement gate pins that the runtime
+matcher reads `(not :ok)` and `(and keyword (not :ok))` the same way the checker does.
+
+**And a false positive on `assoc`** (ADR-269). Adding the record sinks closed records made
+load-bearing — `assoc`/`dissoc` carry the shape, `keys`/`vals` read the declared names and
+types — surfaced that the neighbouring `map<K,V>` rule carried `K`/`V` through `assoc`
+unchanged. `(assoc m :extra "text")` on a `(map keyword int)` was typed `(map keyword
+int)`, so reading the key back gave `nil | int` and the checker flagged correct code. The
+comment said "no false-positive risk either way"; claiming a *narrower* type than reality
+is exactly what manufactures one. The durable half of the fix is the gate: the soundness
+oracle checks map and record refinements now, not just tags and sequence elements — a
+tags-only membership check passes on any map-typed expression whatever its refinement
+claims, which is why this survived an oracle that had run since the refinements landed.
+
+**And the first curated batch of `sig` adoption.** `--suggest-sigs` reports 890 undeclared
+informative signatures across `std/`, which is not a number you adopt wholesale — a
+declaration is authoritative, freezes inference, and deserves a reader. The subset worth
+taking first is the **KI-71 class**: a function with two or more parameters of *different*
+concrete types, where a reversed call is accepted in silence. There are 22; 12 of them are
+in `.blsp` files (the rest are Rust builtins, which carry curated sigs already), and those
+are now declared — `string/char-at`, the six `text/*` rope operations, the three
+`reflect/scan-form-*` scanners, `math/->fixed`, `bytes/at`. `(string/char-at 3 "abc")` and
+`(text/insert r "text" 3)` are now warnings; the corpus stayed at zero.
+
+**The adoption turned up two defects in the tool that offers the sigs.** `(sig
+string/last-index-of (-> int))` for a three-parameter function (ADR-271): an inferred
+signature is a fact about types and says nothing about shape, so one whose parameters the
+checker could not type came out nullary — and pasted in, Pass 2.85 rejects it. It is
+reshaped to the definition's parameter list now, filling in rather than overruling, since a
+multi-clause `defn` lowers to a variadic `fn` whose form-level arity would discard what the
+clause inference knows. And `(or false true)` was not `bool` (ADR-270) — a different `Ty`,
+unequal and with `bool <: (or false true)` answered **false** for two identical sets.
+Literal slots canonicalise now, so the second spelling cannot be produced.
+
+**A parameter in call-head position is callable** (ADR-272). Every domain rule read a
+parameter's arguments; none read the position that says most about a *callback*, the head
+of a call. `(defn each-of (f xs) (f (first xs)))` typed `f` as `any`, so `(each-of [1 2 3]
+println)` — the argument-order slip in the shape it most often takes — was accepted in
+silence. Callable is `fn | native | keyword`, because a keyword is a function of a map here
+while maps, vectors and strings are not (verified, not assumed). The oracle gained a probe
+whose argument is a map, which is the only one under which a keyword succeeds and therefore
+the only one that catches a domain admitting merely `fn | native`.

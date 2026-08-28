@@ -5586,3 +5586,222 @@ fn file_signatures_costs_nothing_when_unarmed() {
     let ws = file_warnings("(defn f (s) (string/length s))\n(defn c () (f 5))");
     assert!(ws.iter().any(|w| w.contains("expects string")), "{ws:?}");
 }
+
+#[test]
+fn a_module_private_function_is_inferred_and_its_call_sites_are_checked() {
+    // `defn-` expands to `(do (def name (fn …)) (%mark-private 'name))`, so every pass
+    // keyed on a top-level `(def …)` used to see NO definition at all for a private
+    // function — and most definitions in a real module are private (40 of
+    // `std/json.blsp`'s 42). The consequence was silent: their call sites went
+    // unchecked, in exactly the internals where an argument-order slip lives.
+    let warnings = file_warnings(
+        r#"
+        (defmodule privacy-demo)
+        (defn- widen (s) (string/length s))
+        (defn use-it () (widen 42))
+        "#,
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("expects string")),
+        "a wrong-typed call to a private function must be flagged; got {warnings:?}"
+    );
+}
+
+#[test]
+fn a_macros_generated_temporary_is_never_typed() {
+    // Two guards, one property. The descent into a top-level `do` is limited to the
+    // `defn-`/`def-` expansion, and a gensym'd name is never typed regardless.
+    // Opening a top-level `do` reaches more than `defn-`: other macros emit one over
+    // GENERATED names. The linear-map rewrite wraps a fold's result in
+    // `(do (def linmap-out__N …) …)`, and typing that temporary made the checker flag a
+    // branch of the rewrite's own wrapper that cannot run with that value — a warning
+    // naming a symbol the author never wrote and cannot fix.
+    // `tests/linmap_soundness_test.blsp` caught it live; this pins the rule.
+    let generated = file_warnings(
+        r#"
+        (do (def helper__42 (fn (s) (string/length s))) (io/puts "generated"))
+        (defn consume () (helper__42 3))
+        "#,
+    );
+    assert!(
+        !generated.iter().any(|w| w.contains("expects string")),
+        "a gensym'd definition must not be typed — nobody can act on the warning; got \
+         {generated:?}"
+    );
+
+    // The descent that reaches it is narrow for a second reason: `defability`/`defimpl`
+    // define their ops inside a top-level `do` too, and an INFERRED signature for an op
+    // displaces the `:-> T` return the ability declares. Opening every `do` stopped that
+    // return flowing to call sites — which is what
+    // `ability_op_return_type_flows_to_call_site` pins.
+}
+
+#[test]
+fn a_failed_equality_test_narrows_the_else_branch_for_a_literal() {
+    // The tagged-union dispatch every Brood program writes: after `(= tag :ok)` fails,
+    // a `(or :ok :err)` tag is `:err`. This needed the literal complement to be exact —
+    // `¬:ok` used to widen to `any`, so the else branch learned nothing and the guard
+    // was one-sided (`then_only`).
+    let w = file_warnings(
+        r#"
+        (defn describe (tag)
+          (if (%eq tag :ok) "fine" (string/length tag)))
+        (sig describe ((or :ok :err) -> any))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("string/length") && s.contains(":err")),
+        "the else branch should know `tag` is `:err`, got {w:?}"
+    );
+
+    // …and the narrowing must not over-claim: a value the guard says nothing about
+    // stays unnarrowed. `of_value` leaves a string literal flat (no heap for the
+    // bytes), so `(= m "x")` proves only `m : string` and its negation proves nothing.
+    let w = warnings(r#"(if (%eq m "x") :yes (string/length m))"#);
+    assert!(
+        w.iter().all(|s| !s.contains("string/length")),
+        "a non-literal guard type must stay one-sided: {w:?}"
+    );
+}
+
+#[test]
+fn a_record_shape_survives_keys_vals_assoc_and_dissoc() {
+    // Closed records (ADR-264) made these sinks load-bearing rather than nice-to-have:
+    // without them a closed record degrades to a flat `map` on its first update, and the
+    // idiom that builds one field at a time loses its shape immediately.
+    //
+    // `assoc` adds the field it definitely puts there…
+    let w = file_warnings(
+        r#"
+        (defn widen (r) (string/length (get (assoc r :count 1) :count)))
+        (sig widen ((record :name string) -> any))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("string/length") && s.contains("1")),
+        "assoc should carry the shape forward with :count added, got {w:?}"
+    );
+
+    // …`dissoc` removes it, so reading it back is `nil`…
+    let w = file_warnings(
+        r#"
+        (defn drop-it (r) (string/length (get (dissoc r :count) :count)))
+        (sig drop-it ((record :name string :count int) -> any))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("string/length") && s.contains("nil")),
+        "dissoc should remove :count, so reading it yields nil, got {w:?}"
+    );
+
+    // …`keys` on a CLOSED record yields exactly the declared names…
+    let w = file_warnings(
+        r#"
+        (defn ks (r) (string/length (first (keys r))))
+        (sig ks ((record :name string :count int) -> any))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("string/length") && s.contains(":count")),
+        "keys should be the declared keyword literals, got {w:?}"
+    );
+
+    // …and `vals` the union of the declared field types. (A record with a `string`
+    // field would NOT be flagged: the argument check fires on provable disjointness,
+    // and a union containing `string` is not disjoint from it.)
+    let w = file_warnings(
+        r#"
+        (defn vs (r) (string/length (first (vals r))))
+        (sig vs ((record :count int :flag bool) -> any))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("string/length") && s.contains("int")),
+        "vals should union the declared field types, got {w:?}"
+    );
+}
+
+#[test]
+fn an_open_record_declines_the_exhaustive_sinks() {
+    // `keys`/`vals` read "these are ALL the keys", which is only true of a closed
+    // record. An open one may carry keys nothing declares, so it must fall through to
+    // the flat rule rather than claim a set it cannot know.
+    let w = file_warnings(
+        r#"
+        (defn ks (r) (string/length (first (keys r))))
+        (sig ks ((record &open :name string) -> any))
+        "#,
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("string/length")),
+        "an open record's keys are not exhaustively known: {w:?}"
+    );
+}
+
+#[test]
+fn assoc_widens_the_map_refinement_to_what_it_adds() {
+    // `(assoc m :extra "text")` on a `(map keyword int)` genuinely holds a string at
+    // `:extra`. Carrying `K`/`V` forward unchanged claimed otherwise, so reading the key
+    // back gave `nil | int` and flagged correct code — a false positive on the one
+    // operation everyone uses to build a map.
+    let w = file_warnings(
+        r#"
+        (defn widen (m) (string/length (get (assoc m :extra "text") :extra)))
+        (sig widen ((map keyword int) -> any))
+        "#,
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("string/length")),
+        "assoc must widen V to include the value it adds: {w:?}"
+    );
+
+    // The refinement still narrows what it can: adding an int keeps the value type
+    // `int`, so a string read out of it is still flagged.
+    let w = file_warnings(
+        r#"
+        (defn keep (m) (string/length (get (assoc m :extra 1) :extra)))
+        (sig keep ((map keyword int) -> any))
+        "#,
+    );
+    assert!(
+        w.iter().any(|s| s.contains("string/length")),
+        "adding an int must not widen V away: {w:?}"
+    );
+}
+
+#[test]
+fn a_parameter_in_call_head_position_is_callable() {
+    // The callback shape. Without this a higher-order function's function parameter
+    // types as `any`, so passing the sequence first — the classic argument-order slip —
+    // is accepted in silence.
+    let w = file_warnings(
+        r#"
+        (defn each-of (f xs) (f (first xs)))
+        (defn misuse () (each-of 5 [1 2 3]))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("each-of") && s.contains("argument 1")),
+        "a non-callable passed where the body calls it should be flagged: {w:?}"
+    );
+
+    // Callable is not just `fn`: a keyword is a function of a map, so passing one must
+    // stay silent. (Maps, vectors and strings are NOT callable — each raises — so they
+    // are correctly excluded.)
+    let w = file_warnings(
+        r#"
+        (defn lookup (f m) (f m))
+        (defn use-it () (lookup :a {:a 1}))
+        "#,
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("lookup")),
+        "a keyword IS callable on a map: {w:?}"
+    );
+}
