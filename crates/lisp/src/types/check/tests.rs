@@ -256,6 +256,142 @@ fn sealed_ability_complete_is_silent() {
     assert!(!ws.iter().any(|w| w.contains("sealed ability")), "{ws:?}");
 }
 
+#[test]
+fn sealed_over_builtin_kinds_accepts_its_own_members() {
+    // `impl` dispatches on built-in kinds as well as records, so `:sealed [:int :float]` is
+    // legal — but every member used to be turned into a record shape `%{__id__: :int}`, which
+    // no int satisfies. The domain rejected its own members: `(use-it 42)` warned on a program
+    // that runs correctly, and `nest check` exits nonzero on a warning, so this was a
+    // CI-breaking false positive. Both the exhaustiveness gate and the reject-a-non-member
+    // path only need the id set, so they were unaffected — passing a real member is the only
+    // thing that exposed it.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defability Sizey :sealed [:int :float] (sizey [self] :-> int))\n\
+         (impl Sizey :int (sizey [n] n))\n\
+         (impl Sizey :float (sizey [n] 0))\n\
+         (sig use-it (Sizey -> int))\n\
+         (defn use-it (x) (sizey x))\n\
+         (defn good-int () (use-it 42))\n\
+         (defn good-float () (use-it 1.5))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("argument 1")), "{ws:?}");
+}
+
+#[test]
+fn sealed_over_builtin_kinds_still_rejects_a_non_member() {
+    // The other half of the contract: widening to the kinds' own lattice points must not cost
+    // the rejection. A string is provably neither an int nor a float.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defability Sizey :sealed [:int :float] (sizey [self] :-> int))\n\
+         (impl Sizey :int (sizey [n] n))\n\
+         (impl Sizey :float (sizey [n] 0))\n\
+         (sig use-it (Sizey -> int))\n\
+         (defn use-it (x) (sizey x))\n\
+         (defn bad () (use-it \"not a number\"))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("argument 1") && w.contains("int") && w.contains("float")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn sealed_over_records_keeps_its_id_precision() {
+    // The control for the two above: a purely-record seal must still denote the precise
+    // `%{__id__: …}` shape, not widen to `map`. This is what drives a precise non-member
+    // rejection and sealed-`match` exhaustiveness (ADR-187 part 2).
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord circle (r))\n\
+         (defrecord rect (w h))\n\
+         (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
+         (impl Shape t/circle (area [c] (get c :r)))\n\
+         (impl Shape t/rect (area [r] (get r :w)))\n\
+         (sig total (Shape -> float))\n\
+         (defn total (s) (area s))\n\
+         (defn good () (total (circle 2)))\n\
+         (defn bad () (total 42))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("argument 1") && w.contains("__id__")),
+        "{ws:?}"
+    );
+    assert_eq!(
+        ws.iter().filter(|w| w.contains("argument 1")).count(),
+        1,
+        "only the int is a non-member; the circle must pass — {ws:?}"
+    );
+}
+
+#[test]
+fn sealed_member_id_that_collides_with_a_kind_name_is_the_record() {
+    // A record declared at ROOT namespace registers under its bare name, so
+    // `(defrecord ratio …)` owns the id `:ratio` — the identical dispatch key the built-in
+    // ratio kind uses (the language conflates them: a real `1/2` reaches that record's impl).
+    // Classifying members by spelling alone therefore read this member as the KIND and
+    // rejected the record — reintroducing, in a narrower case, the bug being fixed. The
+    // registry breaks the tie, and it must see THIS file's records: `nest check` expands but
+    // never evaluates, so `*record-ids*` alone does not know them.
+    let ws = file_warnings(
+        "\
+         (defrecord ratio (n d))\n\
+         (defability Sz :sealed [ratio] (sz [self] :-> int))\n\
+         (impl Sz ratio (sz [v] 1))\n\
+         (sig g (Sz -> int))\n\
+         (defn g (v) (sz v))\n\
+         (defn ok () (g (ratio 1 2)))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("argument 1")), "{ws:?}");
+}
+
+#[test]
+fn sealed_member_colliding_with_a_kind_name_still_rejects_a_non_member() {
+    let ws = file_warnings(
+        "\
+         (defrecord ratio (n d))\n\
+         (defability Sz :sealed [ratio] (sz [self] :-> int))\n\
+         (impl Sz ratio (sz [v] 1))\n\
+         (sig g (Sz -> int))\n\
+         (defn g (v) (sz v))\n\
+         (defn bad () (g \"x\"))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("argument 1") && w.contains("__id__")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn sealed_mixing_records_and_kinds_accepts_every_member() {
+    // A seal may name both. The record half degrades to `map` in the union (`Ty::union`
+    // widens a differing `fields` map away — sound, since it only ever accepts MORE), so a
+    // mixed seal trades id precision for coverage. What must not happen is a member being
+    // rejected.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord money (cents))\n\
+         (defability Amt :sealed [:int :float money] (amt [self] :-> float))\n\
+         (impl Amt :int (amt [n] (* 1.0 n)))\n\
+         (impl Amt :float (amt [n] n))\n\
+         (impl Amt t/money (amt [m] (* 0.01 (get m :cents))))\n\
+         (sig twice (Amt -> float))\n\
+         (defn twice (x) (* 2.0 (amt x)))\n\
+         (defn a () (twice 42))\n\
+         (defn b () (twice 1.5))\n\
+         (defn c () (twice (money 500)))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("argument 1")), "{ws:?}");
+}
+
 // ---- typed ability ops: `:-> RET` return types (return-type flow + impl check) ----
 
 #[test]

@@ -1214,6 +1214,9 @@ pub fn check_file_ext(
         // to a sealed ability (this file's or an imported one) resolves to the union of its
         // members' record shapes rather than being dropped as an unknown type name.
         annot::set_ability_types(protocol::ability_type_table(heap, &expanded));
+        // Which ids are records — the tiebreak for an unqualified sealed member that also
+        // spells a built-in kind (`ratio`, `map`, …). See `annot::sealed_members_ty`.
+        annot::set_record_ids(protocol::record_id_names(heap, &expanded));
         // ADR-190: build the ability facts + the sealed-op occurrence-typing domains HERE —
         // before any pass runs `sig_of` (Gap A, Pass 2.8, the body walk) — so an imported
         // function's inferred sig is never cached *without* the sealed-op demand. Keyed by op
