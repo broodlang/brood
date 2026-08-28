@@ -18543,3 +18543,105 @@ the test reads.
 **And `make doctor` now counts `.blsp` as source.** Its staleness check looked only at
 `crates/**/*.rs` — the one tool built to catch this class could not see the half of it that
 caused the sessions above.
+
+## ADR-289 — A product can be covered by several alternatives together
+
+**Status:** accepted (2026-08-28)
+
+ADR-267 decomposed cross-term subtyping per tag: a term is the disjoint union of its per-tag
+projections, so placing each projection in *some* alternative decides containment. That left
+one documented gap — a single tag's refinement split across several alternatives:
+
+```lisp
+(tuple (or int string))  ⊆  (tuple int) | (tuple string)     ; true, and answered false
+```
+
+A 1-tuple holds exactly one value, so it lands in one alternative or the other; between them
+they cover it though neither does alone. Missing it costs a **false positive**, the one class
+this checker does not accept.
+
+**Decision: decide products by the set-theoretic rule**, which splits the candidates every
+possible way:
+
+```text
+(A₁ … Aₙ) ⊆ ⋃_{j∈J} (B₁ⱼ … Bₙⱼ)   ⟺   ∀ J' ⊆ J:
+    A₁ ⊆ ⋃_{j∈J'} B₁ⱼ    or    (A₂ … Aₙ) ⊆ ⋃_{j∈J∖J'} (B₂ⱼ … Bₙⱼ)
+```
+
+Exponential in the candidate count, which is safe because a `Ty` holds at most
+`MAX_TY_TERMS` alternatives; past a cap it refuses rather than enumerates.
+
+**Componentwise coverage is not product coverage**, and assuming it is is the classic error:
+`(int|string, int|string)` covers each component against `{(int,int), (string,string)}` and
+yet `(int, string)` belongs to neither. The rule above answers that correctly.
+
+**Only products.** A `vector<A>` covered by `vector<B₁> | vector<B₂>` needs `A ⊆ Bⱼ` for a
+single j — an arbitrary-length vector can hold one element outside `B₁` and another outside
+`B₂` and escape both, so `[1 "a"]` is a `vector<int|string>` and is neither. The **fixed
+arity** is exactly what makes the product case different, and both neighbours are pinned as
+tests beside the rule.
+
+## ADR-288 — A term subtracts, so a structural complement is exact
+
+**Status:** accepted (2026-08-28)
+
+The lattice could complement a **tag** exactly (flip the bits) and, since ADR-268, a
+**literal set** exactly (flip `In`/`Out`). It could not complement a *structure*. "A vector
+whose element type is not `int`" is not a shape the positive slots can hold, so `negate`
+widened to the tag and kept every vector:
+
+```
+¬(vector int)                = any
+(vector int) ∩ ¬(vector int) = (vector int)     ← should be never
+¬¬(vector int)               = never            ← double negation destroying the type
+```
+
+Sound, and useless: a guard's else branch learned nothing, `(not (vector int))` parsed as an
+annotation and then checked nothing, and dead-code detection could not fire on a structural
+type.
+
+**Decision: a term carries a set of subtracted terms** — it denotes `P ∖ ⋃N` — and `negate`
+of a structurally-refined term returns `UNIVERSE ∖ {that term}`, which is exact by
+construction. Tag and literal complements stay in place, because those *are* expressible
+and the flat `(not string)` rendering is worth keeping.
+
+**Everything else follows from one identity.** `P ∖ N = ∅` exactly when `P ⊆ ⋃N`, which is
+`term_is_subtype_of_union` — the procedure cross-term subtyping already runs (ADR-267). So
+emptiness and subtyping cannot disagree: they are the same code.
+
+| | |
+|---|---|
+| intersection | `(Pa ∖ Na) ∩ (Pb ∖ Nb) = (Pa ∩ Pb) ∖ (Na ∪ Nb)` |
+| containment | `(P ∖ N) ⊆ ⋃B` is `P ⊆ ⋃B ∪ N` |
+| negation of a subtraction | `¬(P ∖ N) = ¬P ∪ (P ∩ ⋃N)` |
+| union | never merges across a subtraction — the alternatives are kept, which is exact |
+
+**Four things the property laws caught, each a real defect:**
+
+- **Absorption was subtraction-blind.** `from_terms` compared terms with `is_subtype_term`,
+  which reads positive slots only — so it saw `any` and `¬(vector int)` as the same shape and
+  absorbed the *wrong* one, making `A ∪ B` depend on the order of A and B.
+- **The structural disjointness rules short-circuited.** The tuple and record rules returned
+  their *negative* answer, skipping the subtraction check that knows
+  `(tuple int|string) ∖ (tuple int)` shares nothing with `(tuple int)`. Only a proven
+  disjointness returns early now.
+- **A candidate that subtracts cannot join a union of positives**, but it can still contain
+  a type on its own: `a ⊆ (P ∖ N)` iff `a ⊆ P` and `a` meets none of `N`. Dropping such
+  candidates failed `a ⊆ a ∪ b` the moment a union absorbed into one.
+- **The subtraction list is a set, not a sequence.** `¬A ∩ ¬B` and `¬B ∩ ¬A` were unequal
+  types denoting one set — the same defect ADR-270 fixed for literal spellings. It is sorted
+  now.
+
+**Bounded like everything else here**: at most `MAX_NEG_TERMS` subtractions, and past that
+the extra ones are dropped, which *widens* the type — the safe direction, since a wider type
+warns less rather than wrongly.
+
+**Rendering is not optional.** A subtraction that printed as its positive part would say
+`vector` for a type excluding every `vector<int>` — telling the reader the opposite of the
+truth, worse than the widening it replaced. `Display` and `to_source` both write
+`(not X)` / `(and P (not X))`, and it round-trips through the annotation parser.
+
+**Arrows are included in what can be subtracted but not decomposed**: `¬(int -> string)` is
+represented exactly, while deciding coverage *between* arrow types still falls back to the
+single-candidate rule. Contravariance needs its own decomposition, and nothing yet asks for
+it.

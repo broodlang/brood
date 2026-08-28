@@ -134,6 +134,10 @@ const MAX_TY_NODES: usize = 64;
 /// record/tuple alternatives, optionally with `nil` — while keeping every set
 /// operation's pairwise work trivially bounded.
 const MAX_TY_TERMS: usize = 4;
+/// How many terms one type may subtract (ADR-288). Same bounded-size discipline as
+/// [`MAX_TY_TERMS`]: beyond this the extra subtractions are dropped, which *widens* the
+/// type — the safe direction, since a wider type warns less rather than wrongly.
+const MAX_NEG_TERMS: usize = 4;
 
 /// A record shape — the `fields` refinement's payload (ADR-264).
 ///
@@ -446,6 +450,20 @@ pub struct Ty {
     /// only part of the union. The set relations (`is_subtype`, `is_disjoint`,
     /// `intersect`, `negate`) are the ones that got sharper.
     alts: Option<Arc<Vec<Ty>>>,
+    /// **Subtracted terms** — this term denotes its positive part *minus* the union of
+    /// these (ADR-288). `None` for the overwhelmingly common type that subtracts nothing.
+    ///
+    /// This is what makes a **structural** complement exact. Tags and literal sets can be
+    /// complemented in place (flip the bits, flip `In`/`Out`), but "a vector whose element
+    /// type is not `int`" is not a shape the positive slots can hold, so `¬(vector int)`
+    /// widened all the way to `any` — and `(vector int) ∩ ¬(vector int)` came out
+    /// `(vector int)` rather than `never`, which is a guard's else-branch learning nothing.
+    ///
+    /// Every subtracted term is itself positive (no `alts`, no `neg` of its own), so the
+    /// representation stays two levels rather than a tree. Everything else follows from
+    /// one identity — `P ∖ N` is empty exactly when `P ⊆ ⋃N`, which is
+    /// [`term_is_subtype_of_union`], the same procedure cross-term subtyping already uses.
+    neg: Option<Arc<Vec<Ty>>>,
 }
 
 /// Equality is **set** equality, not field equality: a union's terms have no
@@ -497,6 +515,7 @@ impl Ty {
             lit_bool,
             lit_str,
             alts: _,
+            neg,
         } = self;
         *tags == other.tags
             && *arrow == other.arrow
@@ -509,6 +528,7 @@ impl Ty {
             && *lit_int == other.lit_int
             && *lit_bool == other.lit_bool
             && *lit_str == other.lit_str
+            && *neg == other.neg
     }
 
     /// Hash one term's fields, ignoring `alts` — the counterpart of [`Ty::term_eq`],
@@ -528,6 +548,7 @@ impl Ty {
             lit_bool,
             lit_str,
             alts: _,
+            neg,
         } = self;
         tags.hash(state);
         arrow.hash(state);
@@ -540,6 +561,7 @@ impl Ty {
         lit_int.hash(state);
         lit_bool.hash(state);
         lit_str.hash(state);
+        neg.hash(state);
     }
 }
 
@@ -577,6 +599,7 @@ impl Ty {
     const fn flat(tags: u32) -> Ty {
         Ty {
             tags,
+            neg: None,
             arrow: None,
             elem: None,
             map_kv: None,
@@ -1114,6 +1137,10 @@ impl Ty {
         );
         Ty {
             tags,
+            // A merged union subtracts nothing: `merge_is_exact` refuses to merge two
+            // terms when either carries a subtraction, so this arm only ever runs on
+            // positives (ADR-288).
+            neg: None,
             arrow,
             overload,
             elem,
@@ -1240,8 +1267,12 @@ impl Ty {
         } else {
             None
         };
+        // `(Pa ∖ Na) ∩ (Pb ∖ Nb) = (Pa ∩ Pb) ∖ (Na ∪ Nb)` — the positives meet as they
+        // always did and the subtractions simply accumulate (ADR-288).
+        let neg = union_negs(&self.neg, &other.neg);
         Ty {
             tags,
+            neg,
             arrow,
             overload,
             elem,
@@ -1272,6 +1303,19 @@ impl Ty {
     /// exact only for **flat** `a` (which is all the laws tests sample, and all
     /// the checker ever negates — `tested_by`/`%eq` results are flat).
     fn negate_term(self) -> Ty {
+        // Negating a term that already SUBTRACTS something: `¬(P ∖ N) = ¬P ∪ (P ∩ ⋃N)`.
+        // Without this, `¬¬(vector int)` read the subtraction-free path, complemented
+        // `UNIVERSE` to nothing and answered `never` — double negation destroying the type
+        // rather than restoring it. The recursion terminates because `positive()` carries
+        // no subtraction of its own.
+        if let Some(negs) = &self.neg {
+            let positive = self.positive();
+            let mut out = positive.clone().negate_term();
+            for n in negs.iter() {
+                out = out.union(positive.clone().intersect(n.clone()));
+            }
+            return out;
+        }
         let mut tags = !self.tags & UNIVERSE;
         // A refinement means `self` omits some values of its refined tag(s);
         // those omitted values are in the complement, so the tag must survive.
@@ -1316,6 +1360,24 @@ impl Ty {
         // `(or :ok :err) ∩ ¬:ok` is `:err`, where before `¬:ok` was `any` and the
         // narrowing was lost. The tag bits are already set above (a literal set omits
         // only *some* of its tag's values, so the tag survives the complement).
+        // **A structural refinement cannot be complemented in place.** Flipping the tag
+        // keeps every vector, so `¬(vector int)` widened to `any` and
+        // `(vector int) ∩ ¬(vector int)` came out `(vector int)` instead of `never` — a
+        // guard's else branch learning nothing. Say it exactly instead: everything, minus
+        // this term (ADR-288). The tag and literal complements below stay in place, because
+        // those ARE expressible and the flat `(not string)` rendering is worth keeping.
+        if self.arrow.is_some()
+            || self.overload.is_some()
+            || self.elem.is_some()
+            || self.tuple.is_some()
+            || self.map_kv.is_some()
+            || self.fields.is_some()
+        {
+            return Ty {
+                neg: Some(Arc::new(vec![self.positive()])),
+                ..Ty::flat(UNIVERSE)
+            };
+        }
         let mut out = Ty::flat(tags);
         out.lit = self.lit.as_deref().map(|set| Arc::new(set.complement()));
         out.lit_int = self
@@ -1386,12 +1448,18 @@ impl Ty {
         // Merge and absorb until neither applies. Quadratic in the term count, which
         // is bounded by the cap below — a handful at most.
         let mut merged: Vec<Ty> = Vec::with_capacity(terms.len());
+        // Containment here must see SUBTRACTIONS (ADR-288). `is_subtype_term` compares
+        // positive slots only, so it reads `any` and `¬vector<int>` as the same shape —
+        // both `UNIVERSE` with no refinement — and absorbed `any` into the narrower one,
+        // making `A ∪ B` depend on the order of A and B. `term_covered` asks the question
+        // the subtraction actually poses.
+        let contains = |outer: &Ty, inner: &Ty| term_covered(inner, std::slice::from_ref(outer));
         'next: for t in terms {
             for existing in merged.iter_mut() {
-                if t.is_subtype_term(existing) {
+                if contains(existing, &t) {
                     continue 'next; // absorbed
                 }
-                if existing.is_subtype_term(&t) {
+                if contains(&t, existing) {
                     *existing = t;
                     continue 'next;
                 }
@@ -1412,7 +1480,7 @@ impl Ty {
             let absorbed = merged
                 .iter()
                 .enumerate()
-                .any(|(j, other)| j != i && merged[i].is_subtype_term(other));
+                .any(|(j, other)| j != i && contains(other, &merged[i]));
             if absorbed {
                 merged.remove(i);
             } else {
@@ -1479,13 +1547,14 @@ impl Ty {
     /// deliberately not complete: a term covered jointly by two of `other`'s terms but
     /// by neither alone reads as "not a subtype", which defers rather than warns.
     pub fn is_subtype(&self, other: &Ty) -> bool {
-        if self.alts.is_none() && other.alts.is_none() {
+        if self.alts.is_none() && other.alts.is_none() && self.neg.is_none() && other.neg.is_none()
+        {
             return self.is_subtype_term(other);
         }
         let other_terms = other.terms_vec();
         self.terms_vec()
             .iter()
-            .all(|a| term_is_subtype_of_union(a, &other_terms))
+            .all(|a| term_covered(a, &other_terms))
     }
 
     /// This term restricted to a single tag — the piece of `self` whose runtime tag is
@@ -1507,6 +1576,9 @@ impl Ty {
         }
         Ty {
             tags: tag_bit,
+            // A projection is of the POSITIVE part: the subtraction is a whole-term fact,
+            // applied by the callers that reason about `P ∖ N`, not per tag.
+            neg: None,
             arrow: keep(tag_bit & FN_BITS != 0, &self.arrow),
             overload: keep(tag_bit & FN_BITS != 0, &self.overload),
             elem: keep(tag_bit & SEQ_BITS != 0, &self.elem),
@@ -1704,7 +1776,12 @@ impl Ty {
                 if a.len() != b.len() {
                     return true;
                 }
-                return a.iter().zip(b.iter()).any(|(x, y)| x.is_disjoint(y));
+                // Only a PROVEN disjointness returns here. Returning the negative answer
+                // too would skip the subtraction check below, which is the one that knows
+                // `(tuple int|string) ∖ (tuple int)` shares nothing with `(tuple int)`.
+                if a.iter().zip(b.iter()).any(|(x, y)| x.is_disjoint(y)) {
+                    return true;
+                }
             }
         }
         // Two record shapes are provably disjoint if they both constrain some
@@ -1718,7 +1795,26 @@ impl Ty {
         // `(if (int? (get r :age)) …)` — flag a call wanting `(record :age string)`.
         if shared == MAP_BIT {
             if let (Some(a), Some(b)) = (&self.fields, &other.fields) {
-                return records_are_disjoint(a, b);
+                if records_are_disjoint(a, b) {
+                    return true;
+                }
+            }
+        }
+        // Subtractions (ADR-288): `(Pa ∖ Na) ∩ (Pb ∖ Nb)` is empty exactly when what the
+        // positives share is wholly subtracted — `vector<int> ∩ ¬vector<int>` is the
+        // simplest case, and without this `is_disjoint` and `intersect` disagreed about it.
+        if self.neg.is_some() || other.neg.is_some() {
+            let mut negs: Vec<Ty> = Vec::new();
+            for n in [&self.neg, &other.neg].into_iter().flatten() {
+                negs.extend(n.iter().cloned());
+            }
+            let shared_positive = self.positive().intersect(other.positive());
+            if shared_positive
+                .terms_vec()
+                .iter()
+                .all(|t| term_is_subtype_of_union(t, &negs))
+            {
+                return true;
             }
         }
         false
@@ -1752,8 +1848,47 @@ impl Ty {
     }
 
     /// Is this the empty type `⊥` (no value inhabits it)?
-    pub const fn is_never(&self) -> bool {
-        self.tags == 0
+    pub fn is_never(&self) -> bool {
+        self.terms_vec().iter().all(Ty::term_is_never)
+    }
+
+    /// Is this single term empty? No tags at all, or — the case subtractions introduce —
+    /// a positive part wholly covered by what it subtracts (ADR-288).
+    ///
+    /// `P ∖ N = ∅ ⟺ P ⊆ ⋃N` is the whole of it, and that question is
+    /// [`term_is_subtype_of_union`] — the same procedure cross-term subtyping runs, so the
+    /// emptiness decision and the subtyping decision cannot disagree by construction.
+    fn term_is_never(&self) -> bool {
+        if self.tags == 0 {
+            return true;
+        }
+        match &self.neg {
+            None => false,
+            Some(negs) => term_is_subtype_of_union(&self.positive(), negs),
+        }
+    }
+
+    /// This term's subtractions, for rendering. `None` when it subtracts nothing.
+    pub(super) fn subtracted(&self) -> Option<&[Ty]> {
+        self.neg.as_deref().map(|v| v.as_slice())
+    }
+
+    /// The positive part, for rendering — see [`Ty::positive`].
+    pub(super) fn positive_for_display(&self) -> Ty {
+        self.positive()
+    }
+
+    /// Whether this single term is empty, for rendering — see [`Ty::term_is_never`].
+    pub(super) fn term_is_empty_for_display(&self) -> bool {
+        self.term_is_never()
+    }
+
+    /// This term without its subtractions — the `P` of `P ∖ N`.
+    fn positive(&self) -> Ty {
+        Ty {
+            neg: None,
+            ..self.clone()
+        }
     }
 
     /// Is this the universe `⊤` (every value inhabits it)?
@@ -1855,6 +1990,117 @@ fn intersect_tuples(a: &[Ty], b: &[Ty]) -> Option<Vec<Ty>> {
 /// subtype of a 3-tuple, and vice versa), then covariant per position — sound
 /// because Brood vectors are immutable, same reasoning as element-covariant
 /// sequences.
+/// The subtractions of two terms, combined — for the intersection rule
+/// `(Pa ∖ Na) ∩ (Pb ∖ Nb) = (Pa ∩ Pb) ∖ (Na ∪ Nb)`. Deduplicated, since the same term is
+/// commonly subtracted twice (`¬T ∩ ¬T`), and capped so a chain of intersections cannot
+/// grow an unbounded list — past the cap the extra subtractions are DROPPED, which widens
+/// the type and is therefore the safe direction to lose precision in.
+fn union_negs(a: &Option<Arc<Vec<Ty>>>, b: &Option<Arc<Vec<Ty>>>) -> Option<Arc<Vec<Ty>>> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(only), None) | (None, Some(only)) => Some(only.clone()),
+        (Some(x), Some(y)) => {
+            let mut out: Vec<Ty> = x.as_ref().clone();
+            for t in y.iter() {
+                if out.len() >= MAX_NEG_TERMS {
+                    break;
+                }
+                if !out.contains(t) {
+                    out.push(t.clone());
+                }
+            }
+            // A SET, not a sequence: `Ty` derives its equality and hash from its slots, so
+            // `¬A ∩ ¬B` and `¬B ∩ ¬A` would otherwise be unequal types denoting one set —
+            // the same defect ADR-270 fixed for literal spellings. Sorted by rendering,
+            // which is deterministic and needs no `Ord` on `Ty`.
+            out.sort_by_key(Ty::to_string);
+            Some(Arc::new(out))
+        }
+    }
+}
+
+/// Is a **product** contained in a union of products? — the set-theoretic rule for tuples.
+///
+/// Componentwise containment is *not* the answer, and assuming it is the classic error:
+/// `(int|string, int|string)` covers each component against `{(int,int), (string,string)}`
+/// and yet `(int, string)` belongs to neither. The rule that is correct splits the
+/// candidates every possible way:
+///
+/// ```text
+/// (A₁ … Aₙ) ⊆ ⋃_{j∈J} (B₁ⱼ … Bₙⱼ)   ⟺   ∀ J' ⊆ J:
+///     A₁ ⊆ ⋃_{j∈J'} B₁ⱼ    or    (A₂ … Aₙ) ⊆ ⋃_{j∈J∖J'} (B₂ⱼ … Bₙⱼ)
+/// ```
+///
+/// — read as: for any way the candidates might divide, either they already cover the first
+/// component, or the ones they do not cover it with must cover everything after it. The
+/// base case is the empty tuple, which is covered exactly when some candidate remains.
+///
+/// Exponential in the candidate count, which is why it is safe here: a `Ty` holds at most
+/// [`MAX_TY_TERMS`] alternatives, so `J` is tiny, and the cap below refuses rather than
+/// blows up if that ever stops being true.
+fn tuple_covered_by(a: &[Ty], candidates: &[Vec<Ty>]) -> bool {
+    if a.is_empty() {
+        // `()` is covered iff some candidate is still in play — it is the only value of
+        // its type, so any surviving `()` candidate contains it.
+        return !candidates.is_empty();
+    }
+    if candidates.len() > 8 {
+        return false; // conservative: refuse a pathological fan-out rather than enumerate it
+    }
+    let n = candidates.len();
+    for mask in 0..(1u32 << n) {
+        let mut first = Ty::NEVER;
+        let mut rest: Vec<Vec<Ty>> = Vec::new();
+        for (j, cand) in candidates.iter().enumerate() {
+            if mask & (1 << j) != 0 {
+                first = first.union(cand[0].clone());
+            } else {
+                rest.push(cand[1..].to_vec());
+            }
+        }
+        if a[0].is_subtype(&first) {
+            continue;
+        }
+        if tuple_covered_by(&a[1..], &rest) {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+/// Is one term — subtractions and all — contained in the union of `others`?
+///
+/// `(P ∖ N) ⊆ ⋃B` is `P ⊆ ⋃B ∪ N`: whatever `P` holds that the candidates do not cover is
+/// acceptable exactly when this term already subtracts it. That one rearrangement is what
+/// lets subtractions ride the covering procedure instead of needing one of their own.
+///
+/// A candidate that *itself* subtracts something is dropped rather than folded in —
+/// `⋃(Pⱼ ∖ Nⱼ)` is not a union of positives, and treating it as one would over-accept.
+/// Dropping can only turn a true answer into `false`: incompleteness, never unsoundness.
+fn term_covered(a: &Ty, others: &[Ty]) -> bool {
+    if a.term_is_never() {
+        return true; // the empty set is below everything
+    }
+    let mut candidates: Vec<Ty> = others.iter().filter(|b| b.neg.is_none()).cloned().collect();
+    if let Some(negs) = &a.neg {
+        candidates.extend(negs.iter().cloned());
+    }
+    if term_is_subtype_of_union(&a.positive(), &candidates) {
+        return true;
+    }
+    // A candidate that itself subtracts is not a positive and cannot join the union above,
+    // but it can still contain `a` on its own: `a ⊆ (P ∖ N)` exactly when `a ⊆ P` and `a`
+    // meets none of `N`. Dropping these outright failed `a ⊆ a ∪ b` as soon as the union
+    // absorbed into a subtracting term — `int ⊆ int ∪ ¬vector<int>` came out false.
+    others.iter().filter(|b| b.neg.is_some()).any(|b| {
+        term_covered(a, std::slice::from_ref(&b.positive()))
+            && b.neg
+                .as_deref()
+                .is_some_and(|negs| negs.iter().all(|n| a.is_disjoint(n)))
+    })
+}
+
 /// Is one term contained in the *union* of `others`?
 ///
 /// The direct question — does some single `other` contain `a`? — is sound but
@@ -1890,9 +2136,34 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
             continue;
         }
         let part = a.project_tag(tag_bit);
-        if !others.iter().any(|b| part.is_subtype_term(b)) {
-            return false;
+        if others.iter().any(|b| part.is_subtype_term(b)) {
+            continue;
         }
+        // No single alternative covers this tag's projection. For a **tuple** that is not
+        // the end of the question: a product can be covered by several alternatives
+        // together, which is the one shape where splitting a refinement across a union is
+        // sound — `(int|string)` is covered by `(int)` and `(string)` between them, because
+        // a 1-tuple holds exactly one value and it lands in one or the other.
+        //
+        // Only tuples. A `vector<A>` covered by `vector<B₁> | vector<B₂>` needs `A ⊆ Bⱼ`
+        // for a single j, which the check above already asked: an arbitrary-length vector
+        // can hold one element outside B₁ and another outside B₂, so it escapes both.
+        // The fixed arity is exactly what makes the product case different.
+        if tag_bit == VECTOR_BIT {
+            if let Some(elems) = part.tuple_elems() {
+                let candidates: Vec<Vec<Ty>> = others
+                    .iter()
+                    .filter(|b| b.tags & VECTOR_BIT != 0)
+                    .filter_map(|b| b.tuple_elems().cloned())
+                    // A different arity shares no value with this one.
+                    .filter(|c| c.len() == elems.len())
+                    .collect();
+                if tuple_covered_by(elems, &candidates) {
+                    continue;
+                }
+            }
+        }
+        return false;
     }
     true
 }
@@ -1971,6 +2242,12 @@ fn merge_is_exact(a: &Ty, b: &Ty) -> bool {
         b: &Option<Arc<T>>,
     ) -> bool {
         a_present && b_present && a != b
+    }
+    // A subtraction on either side makes a merged union unsound to compute here: the
+    // merge combines POSITIVE slots, and `(P₁ ∖ N) ∪ P₂` is not `(P₁ ∪ P₂) ∖ N`. Refusing
+    // keeps both terms as alternatives, which is exact (ADR-288).
+    if a.neg.is_some() || b.neg.is_some() {
+        return false;
     }
     let (fa, fb) = (a.tags & FN_BITS != 0, b.tags & FN_BITS != 0);
     let (sa, sb) = (a.tags & SEQ_BITS != 0, b.tags & SEQ_BITS != 0);
