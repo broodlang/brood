@@ -182,7 +182,23 @@ else
   # shipped: identical flags on both sides is the whole point (footgun 1), and any
   # ref older than the `release-brood` target would otherwise fail outright — which
   # is exactly what happened the first time this script was run.
-  make -f "$root/Makefile" -C "$wt" release-brood >/dev/null || die "baseline build failed"
+  #
+  # ...but a cargo FEATURE this tree's Makefile forwards that the baseline's crate does not
+  # declare fails at dependency RESOLUTION, before any of that matters. `stdimage` (ADR-281,
+  # 2026-08-28) was the first: every ref older than it died with
+  #   package `cli` depends on `brood` with feature `stdimage` but `brood` does not have that
+  # which broke `make ab` for exactly the refs it exists to compare against. So drop a feature
+  # the baseline cannot know about — the alternative is a tool that only A/Bs against today.
+  # Add a line here when a new optional feature appears; the check is one grep against the
+  # baseline's own Cargo.toml, so it cannot go stale silently the way a hardcoded date would.
+  base_feature_overrides=""
+  grep -q '^stdimage *=' "$wt/crates/lisp/Cargo.toml" 2>/dev/null \
+    || base_feature_overrides="$base_feature_overrides WITH_STDIMAGE=0"
+  [ -n "$base_feature_overrides" ] &&
+    echo "ab-bench: baseline predates$(echo "$base_feature_overrides" | sed 's/ WITH_/ /g;s/=0//g') — building it without" >&2
+  # shellcheck disable=SC2086  # word splitting is intended for the VAR=VAL overrides
+  make -f "$root/Makefile" -C "$wt" $base_feature_overrides release-brood >/dev/null \
+    || die "baseline build failed"
   base_bin="$wt/target/release-fast/brood"
   base_desc="$base_sha"
 fi

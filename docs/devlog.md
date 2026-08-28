@@ -5787,3 +5787,48 @@ whatever is on `PATH`, so a published run against a stale or dev-tools build sil
 something other than what `make ab` and `nest release` do. The lean install
 (`INSTALL_FEATURES='$(RUN_FEATURES)'`) is the one that keeps those three on one build — and
 contrary to an older note, `nest test` works fine on it.
+
+### The benchmark publish, and two things it found that nobody was looking for
+
+Published a full seven-language run (brood-benchmarks `9fa69bc`) at the harness defaults on the
+lean installed build. 224/224 row-language combinations agreed on checksums; the only broken row
+in the corpus was `json`, fixed earlier the same day.
+
+**1. `collatz` read 95 → 185 ms and the runtime had not regressed.** The previous published run
+was Brood 0.13.0 and predated the port's migration from bare `rem`/`quot`/`max` to qualified
+`math/*` — a migration the namespacing waves forced, since the bare names no longer exist. So the
+row had to change to keep running, and the change cost ~40%. Measured on one binary: qualified
+205 ms, the same names bare via `(:use math)` 204 ms, the primitives directly 121 ms.
+
+**Qualification is free; the wrapper is not.** `math/rem`/`math/quot` are Brood functions over one
+primitive and `math/max`/`math/min` are variadic over `apply`. Fifteen of the 31 rows call
+`math/*`, so it is a floor under half the suite — written up in
+[compute-frontier.md](compute-frontier.md) §2b with the fix direction CLAUDE.md prescribes
+(multi-arity dispatch in the evaluator, *not* Rust builtins — this is the worked example there).
+
+**2. `make ab` could no longer build any baseline older than today.** `bfa98682` added the
+`stdimage` cargo feature, and `ab-bench.sh` deliberately builds the baseline with *this* tree's
+Makefile so both sides get identical flags — which forwarded `--features brood/stdimage` into a
+worktree whose crate does not declare it. Cargo fails at dependency *resolution*, so it is not a
+compile error you can read past:
+
+```
+package `cli` depends on `brood` with feature `stdimage` but `brood` does not have that feature
+```
+
+`make ab` exists to compare against older refs, so this broke the tool for precisely its purpose,
+and it broke silently in the sense that nothing exercises it — no gate A/Bs against an old ref.
+Fixed by dropping a feature the baseline's own `Cargo.toml` does not declare, checked with one
+grep against that file rather than a hardcoded cutoff, so it cannot go stale the way a date would.
+
+Two limits found while verifying the fix, both worth knowing before trusting a cross-version A/B:
+
+- **A row whose program changed across a rename wave cannot be A/B'd across it.** `collatz` now
+  calls `math/rem`, which does not exist on 0.13.0, so the baseline cannot run the program at all.
+  This is the same shape as the `json/parse` → `json/decode` breakage: the benchmark corpus tracks
+  the current API, so it is only valid on refs that share it.
+- Rows that *didn't* change measure fine. `fib` reads **+12.9%** and `startup` +3.4% across
+  0.13.0 → HEAD, and `fib` also moved +6.4% in the harness — two independent signals, not yet
+  investigated. Taken together with the unattributed ~5-6 ms boot win, what is wanted is a
+  per-commit sweep recording **absolutes for trend**, which is what brood-benchmarks' CLAUDE.md
+  prescribes when the shape might be a ramp rather than a step.
