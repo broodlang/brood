@@ -1196,7 +1196,8 @@ waiter joining concurrently either lands before the take (and is returned here) 
       (%registry-cas! '*features-waiting* old (dissoc old key)) ws
       else (%require-take-waiters! key))))
 
-(defn %require-release! (key)
+(defn- %require-release!
+  (key)
   "Wake every process waiting on `key`'s load. MUST be called after `provide` (or after the
 marker is cleared on failure), never before — see the ordering note above."
   (let (ws (%require-take-waiters! key))
