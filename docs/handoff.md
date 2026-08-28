@@ -5,10 +5,35 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-27 (the dead-gates session, then the toolchain-gaps session — both
-concluded).** Released **v0.14.0** and **v0.14.1**, both tagged and pushed.
-`known-issues.md` shows **no open bug and no watch item**, and the open lists of both
-sessions are now empty (see "the toolchain gaps … are CLOSED too", below).
+**As of 2026-08-28 (the green-again session).** The previous session's work — `092ba281`
+(three require/process defects) and its merge — had been **committed but never pushed**, and
+`origin/main` was red in three CI jobs. All of it is fixed and verified; see the devlog entry
+"a red tree, and a gate reading the wrong binary". What a cold reader most needs:
+
+- **`make green`'s `.blsp` half was reading the wrong binary (KI-76).** It gated on
+  `target/release/nest` while `make release` builds `target/release-fast` — 9 commits of drift,
+  and `std/` is `include_str!`'d, so it reported the `defprocess`→`defserver` rename *backwards*
+  as two `unbound symbol` failures. Now it resolves the binary by HEAD's sha and treats a stale
+  one as a **failure that skips the gates**, not a note beside a verdict. If you see
+  `the .blsp gates DID NOT RUN`, that is the new behaviour working — run `make release`.
+- **Local clippy is only as good as its version.** CI pins `dtolnay/rust-toolchain@stable` and
+  there is no `rust-toolchain.toml`. Four CI errors were lints new in **clippy 1.98** that a
+  full `--all-features -D warnings` run on 1.97 passes cleanly. `rustup update stable` before
+  believing a local clippy green. (The `--all-features` warning in CLAUDE.md has this companion:
+  the *version* arms lints too, not just the feature set.)
+- **An adopted `(sig …)` can be less precise than the curated sig it shadows, silently.**
+  `(sig capitalize (string -> any))` shadowed the curated `(string -> string)` and switched off
+  the `(+ 1 (string/capitalize "x"))` finding. Declared sigs are authoritative, so this loses
+  checking with no warning anywhere. Now gated structurally by
+  `no_declared_std_sig_widens_its_curated_signature` (returns only — see its doc comment for
+  why parameters are deliberately out of scope). **Read that before the next adoption round.**
+
+**Still open, and unchanged by this session: KI-72** (the stdlib image cannot be default-ON — a
+require-stall storm under parallel load; `BROOD_STDIMAGE=1` opt-in) and **KI-74** (⚠️ watching —
+one unnamed lib-suite failure, 20 clean runs since; re-run under nextest if it recurs). So
+`known-issues.md` no longer shows a clear board: **KI-72 is the work** before new features, per
+the green-tree rule below.
+
 
 Three separate gates turned out to be passing without testing anything, and the theme of
 that day is that *all three failed the same way* — see the box after the next section.
