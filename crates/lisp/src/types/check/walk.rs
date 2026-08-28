@@ -286,11 +286,26 @@ fn stability_msg(heap: &Heap, sym: Symbol) -> Option<String> {
             Some(u) => format!(" — use `{}` instead", name_of(u)),
             None => String::new(),
         };
-        return Some(format!("`{name}` is deprecated since {version}{replacement}"));
+        return Some(format!(
+            "`{name}` is deprecated since {version}{replacement}"
+        ));
     }
     meta.beta
         .as_ref()
         .map(|why| format!("`{name}` is beta — {why}"))
+}
+
+/// The arity a signature describes: `&` rest → unbounded, `&optional` → a range, else an
+/// exact count. Shared by the declared-sig path and the arrow-parameter path, which have to
+/// agree — they are the same question asked of the same shape.
+fn arity_of_sig(sg: &Sig) -> Arity {
+    if sg.rest.is_some() {
+        Arity::at_least(sg.params.len())
+    } else if sg.optional.is_empty() {
+        Arity::exact(sg.params.len())
+    } else {
+        Arity::range(sg.params.len(), sg.params.len() + sg.optional.len())
+    }
 }
 
 fn unbound_msg(nm: &str) -> String {
@@ -1330,6 +1345,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         let local_ty = ctx.get(s);
         let local_arrow = local_ty.as_ref().and_then(Ty::as_arrow).cloned();
         let sig = local_arrow
+            .clone()
             .or_else(|| declared.clone())
             .or_else(|| {
                 (!ctx.is_lexical_local(s) && !ctx.is_file_global(s))
@@ -1357,7 +1373,17 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // primitive, so its arity is unknown here. Skip the whole computation, exactly
         // as the declared-sig lookup above does (`is_lexical_local` → `None`);
         // otherwise `arity_of` reads the global's arity and false-flags the call.
-        let arity = if ctx.is_lexical_local(s) {
+        // **An arrow parameter's arity is exact.** `is_lexical_local` skips the whole
+        // computation below because a local's arity is normally unknown — but when the
+        // local's own TYPE is an arrow, the arrow says precisely how many arguments it
+        // takes. `(sig apply-it ((int -> string) -> any))` then catches `(f 1 2)` in the
+        // body, which is a certain error rather than a gradual one: the caller of
+        // `apply-it` had to supply a one-argument function to satisfy that parameter, so
+        // calling it with two always raises. Without this the arrow described the call's
+        // types (ADR-273) but not its shape, which is half a contract.
+        let arity = if let Some(sg) = &local_arrow {
+            Some(arity_of_sig(sg))
+        } else if ctx.is_lexical_local(s) {
             None
         } else {
             (!ctx.is_file_global(s))
@@ -1371,15 +1397,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                 .or_else(|| {
                     declared
                         .filter(|sg| sg.rest.is_some() || !ctx.is_variadic_global(s))
-                        .map(|sg| {
-                            if sg.rest.is_some() {
-                                Arity::at_least(sg.params.len())
-                            } else if sg.optional.is_empty() {
-                                Arity::exact(sg.params.len())
-                            } else {
-                                Arity::range(sg.params.len(), sg.params.len() + sg.optional.len())
-                            }
-                        })
+                        .map(|sg| arity_of_sig(&sg))
                 })
         };
         // Unbound-symbol diagnostic: warn only when the head is **truly not

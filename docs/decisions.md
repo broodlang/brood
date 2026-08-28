@@ -18418,3 +18418,37 @@ resolved; written inside a function body the two can disagree about which namesp
 current, and the annotation would key off a different symbol than the definition it
 annotates. Found by the test that asserts the redefinition rule, which is the right place
 for it to be found.
+
+## ADR-284 — An arrow parameter's arity is exact
+
+**Status:** accepted (2026-08-28)
+
+ADR-273 made a variable whose type is an arrow describe the call it heads — the result type
+and the argument types. It did not give that call an **arity**, because the arity lookup
+short-circuits on `is_lexical_local`: a local's arity is normally unknown, so the whole
+computation is skipped.
+
+For an arrow-typed local it is not unknown. `(int -> string)` says *one argument*, exactly,
+and the caller of
+
+```lisp
+(sig apply-it ((int -> string) -> any))
+(defn apply-it (f) (f 1 2))          ; not flagged, before this
+```
+
+had to supply a one-argument function to satisfy that parameter. So `(f 1 2)` always raises
+— it is a **certain** error, not a gradual one, which is the class this checker is most
+useful on and the one it was silently missing here. An arrow described the call's types but
+not its shape, which is half a contract.
+
+**Decision:** when a called name's own type carries an arrow, that arrow's shape *is* the
+arity — checked ahead of the `is_lexical_local` short-circuit. `&` rest maps to unbounded,
+`&optional` to a range, otherwise an exact count: the same mapping a declared sig already
+gets, now factored into one `arity_of_sig` so the two cannot drift, because they are the
+same question asked of the same shape.
+
+A bare `fn` parameter carries no arrow and therefore imposes nothing — `(sig f (fn -> any))`
+still says only "callable" (ADR-272).
+
+**No false positives across `std/` + `tests/`**, and sabotage-verified: remove the arrow
+branch and the too-many-arguments case goes unreported.
