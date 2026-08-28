@@ -341,6 +341,48 @@ higher-order call with its arguments the wrong way round once the callback is in
 The propagation compounds with adoption: with `string/char-at` declared, `(defn indirect
 (n s) (string/char-at s n))` infers `(int string -> string)` on its own.
 
+## The four worries, closed (2026-08-28)
+
+An audit of what was still weak found four things; three were real and one was a
+misjudgement worth pinning.
+
+**An arrow parameter was inert** (ADR-273). `(sig apply-it ((int -> string) -> any))`
+declares a parameter's full signature, and the call inside the body is the only site that
+can use it — but that path consulted only *global* signature sources, so `(f
+"not-an-int")` went unchecked and `(f 1)` produced no type. Declaring an arrow changed no
+outcome, which is a poor lesson to teach an author now that every callback parameter
+infers as callable (ADR-272). A variable whose own type carries an arrow now describes the
+call it heads, in both directions, consulted ahead of every global since a local shadows
+one.
+
+**The oracle could not reach `map<K, V>` or arrows.** Its expression facet types *closed*
+expressions, and neither shape can arise without an annotation — so every `map_kv` rule and
+every arrow rested on hand-written tests, and ADR-269 was a defect in exactly that gap. A
+new facet types a body under a parameter given a type *through the annotation parser
+itself*, then evaluates the same body with a value of that type bound and requires the
+result to be a member of what the checker claimed. It catches ADR-269's `assoc` defect
+automatically. Two further blind spots were closed alongside it: **literal sets**
+(`contains_tag` passes `6` against `{5}`) and **tuple shapes** (length and positions, which
+`elem_ty` does not describe). All sabotage-verified; none found a live defect, which is
+what was true of the map rules until the day one of them wasn't.
+
+**What a declaration catches was pinned, not changed.** A closed record catches a wrong
+field name, a wrong field type, a missing required field and an extra one — the last two
+only because ADR-264 made closedness provable. What it deliberately does *not* catch is an
+argument whose type is a union that **might** be right: `(or int string)` against `string`
+is silent, because argument checks fire on provable disjointness, and warning there would
+fire on correct code whenever the checker knows less than the programmer. A union with no
+`string` in it *is* flagged. I misjudged this line myself while writing a test, so it is a
+regression test now rather than a belief.
+
+**`fn` is one word** (ADR-274). `Fn`/`Native` is an implementation detail the language does
+not have — `(type-of inc)` is `:fn`, `(fn? inc)` is true for both, and the grammar's `fn`
+already parsed to both. Only the renderers disagreed, so a warning read `expects keyword |
+fn | native` and `to_source` **declined** on `Tag::Native` — leaving the callable type
+ADR-272 infers for every callback with no faithful annotation, so the declare-sig surfaces
+could not offer the newest and most useful inference. It writes as `(or fn keyword)` now,
+and round-trips.
+
 ### What's left
 
 - **`sig` adoption itself** — now mechanical rather than archaeological, but still a

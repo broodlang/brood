@@ -268,6 +268,117 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
     );
 }
 
+/// The parameter types this facet can hand a body, paired with a value of that type.
+/// Each is a shape a *closed expression cannot produce*, which is exactly why they were
+/// unverified: `map<K, V>` and an arrow only ever arrive from an annotation.
+const TYPED_PARAMS: [(&str, &str, &str); 8] = [
+    ("m", "(map keyword int)", "{:a 1 :b 2}"),
+    ("m", "(map keyword string)", "{:a \"x\"}"),
+    ("r", "(record :a int :b string)", "{:a 1 :b \"x\"}"),
+    ("r", "(record &open :a int)", "{:a 1 :extra :k}"),
+    ("f", "(int -> int)", "inc"),
+    ("f", "(int -> string)", "(fn (n) (str n))"),
+    ("xs", "(vector int)", "[1 2 3]"),
+    ("t", "(tuple int string)", "[1 \"x\"]"),
+];
+
+/// Bodies to type against each parameter above. A body that does not mention the
+/// parameter, or that the runtime rejects for this parameter's value, is skipped — the
+/// pairing is deliberately a cross-product so a new rule is covered by every shape it
+/// applies to without anyone maintaining a table.
+const TYPED_BODIES: [&str; 18] = [
+    "(get m :a)",
+    "(get m :missing)",
+    "(assoc m :b 2)",
+    "(assoc m :b \"s\")",
+    "(assoc m :b :k)",
+    "(dissoc m :a)",
+    "(keys m)",
+    "(vals m)",
+    "(first (vals m))",
+    "(get r :a)",
+    "(assoc r :c 1)",
+    "(dissoc r :a)",
+    "(keys r)",
+    "(vals r)",
+    "(f 1)",
+    "(str (f 1))",
+    "(first xs)",
+    "(first t)",
+];
+
+#[test]
+fn a_body_typed_under_a_declared_parameter_holds_at_run_time() {
+    // Facet (V). The expression facet types **closed** expressions, and a closed
+    // expression can never carry a `map<K, V>` refinement or an arrow — those arrive
+    // only from an annotation. So every `map_kv` rule (`get`/`assoc`/`dissoc`/`keys`/
+    // `vals`) and every arrow result was verified by hand-written checker tests alone,
+    // and ADR-269 was a defect in one of them that survived for as long as the
+    // refinements had existed.
+    //
+    // Here a parameter is given a type the way a `(sig …)` would — through the same
+    // annotation parser — the body is typed under it, and the same body is evaluated
+    // with a value of that type bound to the name. The runtime is the oracle: the value
+    // it produces must belong to the type the checker claimed for the expression.
+    //
+    // For an arrow parameter this is the first end-to-end check that a *call's result
+    // type* is right, which `value_member_of` cannot do by inspecting the closure: it
+    // does not read the function, it reads what the function returned.
+    let mut claimed_count = 0usize;
+    let mut checked = 0usize;
+    for (name, param_src, value_src) in TYPED_PARAMS {
+        for body_src in TYPED_BODIES {
+            if !body_mentions(body_src, name) {
+                continue;
+            }
+            checked += 1;
+            let mut interp = crate::Interp::new();
+
+            // The declared parameter type, read through the annotation parser itself —
+            // not hand-built — so this cannot drift from what a `(sig …)` would mean.
+            let ty_form = crate::syntax::reader::read_one(&mut interp.heap, param_src)
+                .expect("param type parses");
+            let param_ty = super::annot::parse_type(&interp.heap, ty_form)
+                .unwrap_or_else(|| panic!("`{param_src}` is not a type expression"));
+
+            let body =
+                crate::syntax::reader::read_one(&mut interp.heap, body_src).expect("body parses");
+            let ctx = Ctx::default().narrow(value::intern(name), param_ty.clone());
+            let Some(claimed) = expr_ty(&interp.heap, body, &ctx) else {
+                continue; // the checker makes no claim → nothing to verify
+            };
+            claimed_count += 1;
+
+            // The same body, evaluated with a value of that type bound to the name. A
+            // body the runtime rejects for this value proves nothing either way.
+            let program = format!("(let ({name} {value_src}) {body_src})");
+            let Ok(v) = interp.eval_str(&program) else {
+                continue;
+            };
+            assert!(
+                value_member_of(&interp.heap, v, &claimed),
+                "UNSOUND: with `{name} : {param_src}`, `{body_src}` is typed `{claimed}`, \
+                 but it evaluates to {} (tag {}), which is not a member of it",
+                crate::syntax::printer::print(&interp.heap, v),
+                value::tag(v).name(),
+            );
+        }
+    }
+    // Same discipline as the expression facet: a pairing that mostly declines would pass
+    // while verifying nothing, so the coverage is asserted rather than assumed.
+    assert!(
+        claimed_count * 10 >= checked * 9,
+        "the oracle typed only {claimed_count} of {checked} parameter/body pairings"
+    );
+}
+
+/// Does this body use the named parameter? A crude whole-token scan is enough — the
+/// names are single letters chosen not to occur inside any other token in the table.
+fn body_mentions(body: &str, name: &str) -> bool {
+    body.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '?')
+        .any(|token| token == name)
+}
+
 #[test]
 fn correct_programs_draw_no_type_disjointness_warning() {
     // Facet (II): every program here EVALUATES cleanly (no runtime type
@@ -308,6 +419,11 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         "(let (s \"x\") (if (%eq s \"x\") 1 (string/length s)))",
         "(let (b true) (if b 1 2))",
         "(let (x nil) (if (%eq x nil) 0 (+ x 1)))",
+        // An arrow parameter now describes the call it heads (ADR-273) — in both
+        // directions, so a CORRECT use of one must stay silent.
+        "(let (f inc) (+ 1 (f 1)))",
+        "(let (f str) (string/length (f 1)))",
+        "(map (fn (g) (g 1)) (list inc))",
         // Multi-alternative unions reaching a call (ADR-267's per-tag decomposition).
         "(let (v (if true 1 [2])) (if (vector? v) (first v) v))",
     ];

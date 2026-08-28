@@ -5805,3 +5805,126 @@ fn a_parameter_in_call_head_position_is_callable() {
         "a keyword IS callable on a map: {w:?}"
     );
 }
+
+#[test]
+fn an_arrow_parameter_describes_the_call_it_heads() {
+    // A `(sig …)` may declare a parameter's full signature, and the call inside the body
+    // is the only site that can use it. It was inert in BOTH directions: the result had
+    // no type and the arguments went unchecked, so declaring an arrow bought nothing.
+
+    // The result flows…
+    let w = file_warnings(
+        r#"
+        (sig apply-it ((int -> string) -> any))
+        (defn apply-it (f) (+ 1 (f 1)))
+        "#,
+    );
+    assert!(
+        w.iter().any(|s| s.contains("string")),
+        "the call's result should be the arrow's return type: {w:?}"
+    );
+
+    // …and the arguments are checked against the arrow's parameters.
+    let w = file_warnings(
+        r#"
+        (sig apply-it ((int -> string) -> any))
+        (defn apply-it (f) (f "not-an-int"))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("argument 1") && s.contains("expects int")),
+        "the argument should be checked against the arrow's parameter: {w:?}"
+    );
+
+    // A correct use stays silent — this is the false-positive direction, and the
+    // whole `std/` + `tests/` corpus is the wider version of this assertion.
+    let w = file_warnings(
+        r#"
+        (sig apply-it ((int -> string) -> any))
+        (defn apply-it (f) (string/length (f 1)))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .all(|s| !s.contains("apply-it") && !s.contains("string/length")),
+        "a correct use of an arrow parameter must be silent: {w:?}"
+    );
+
+    // A local shadowing a global with an arrow type wins — `ctx.get` answers only for a
+    // variable in scope, and it is consulted before the declared global.
+    let w = file_warnings(
+        r#"
+        (sig helper (string -> int))
+        (defn helper (s) (string/length s))
+        (sig shadow ((int -> string) -> any))
+        (defn shadow (helper) (helper 1))
+        "#,
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("shadow")),
+        "the shadowing local's arrow, not the global's sig, describes the call: {w:?}"
+    );
+}
+
+#[test]
+fn what_a_declared_parameter_catches_and_what_it_deliberately_does_not() {
+    // Argument checks fire on **provable disjointness**, not on subtyping (ADR-110's
+    // gradual relation: a precise argument is checked with `⊆`, a dynamic one with
+    // `∩ ≠ ⊥`). That is easy to over- or under-trust in both directions — this pins the
+    // line so neither happens by accident again.
+    let src = |body: &str| {
+        format!("(sig want ((record :a int) -> any))\n(defn want (r) r)\n(defn use-it () {body})")
+    };
+    let flags = |body: &str| {
+        file_warnings(&src(body))
+            .iter()
+            .any(|w| w.contains("want") && w.contains("argument 1"))
+    };
+
+    // A CLOSED record catches all four ways a map can be the wrong shape — including
+    // the two that only closedness (ADR-264) makes provable: a missing field, and an
+    // extra one.
+    assert!(flags("(want {:b 1})"), "wrong field name");
+    assert!(flags("(want {:a \"s\"})"), "wrong field type");
+    assert!(flags("(want {})"), "missing a required field");
+    assert!(
+        flags("(want {:a 1 :b 2})"),
+        "an extra field — closed means closed"
+    );
+    assert!(!flags("(want {:a 1})"), "the right shape must be silent");
+
+    // What it deliberately does NOT catch: an argument whose type is a UNION that
+    // *might* be right. `(or int string)` is not disjoint from `string`, so a
+    // `string` parameter accepts it. Widening rather than warning is the whole
+    // gradual bargain — a warning here would fire on correct code whenever the
+    // checker knows less than the programmer.
+    let w = file_warnings(
+        r#"
+        (sig want-s (string -> any))
+        (defn want-s (s) s)
+        (sig give ((record :a int :b string) -> any))
+        (defn give (r) (want-s (first (vals r))))
+        "#,
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("want-s")),
+        "a union that may be a string must not be flagged: {w:?}"
+    );
+
+    // …but a union with NO string in it is disjoint, and is flagged. The line is
+    // "could this value possibly be right", not "is this value provably right".
+    let w = file_warnings(
+        r#"
+        (sig want-s (string -> any))
+        (defn want-s (s) s)
+        (sig give ((record :a int :b bool) -> any))
+        (defn give (r) (want-s (first (vals r))))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("want-s") && s.contains("expects string")),
+        "a union that cannot be a string must be flagged: {w:?}"
+    );
+}
