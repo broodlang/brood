@@ -444,6 +444,7 @@ parens. At end of line, kills the newline. At least `point` (a no-op at the clos
           (= point le) (math/min n (inc point))
           ; empty rest of line → kill the newline
           else le)))))
+(sig point-kill-end (string any -> any))
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
 
 (defn- sexp-apply-edit

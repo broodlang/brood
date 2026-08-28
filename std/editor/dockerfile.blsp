@@ -102,3 +102,4 @@ editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Cover
 comments, leading instruction keywords (case-insensitive), and quoted strings. Spans
 are ascending and non-overlapping; everything else carries the default face."
   (dk-lex src 0 (string/length src) '()))
+(sig dockerfile-spans (string -> any))

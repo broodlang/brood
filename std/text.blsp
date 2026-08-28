@@ -29,6 +29,7 @@
 
     (text/length (text/from-string \"hi\"))   → 2"
   (%rope-length r))
+(sig length (rope -> int))
 
 (defn line (r n)
   "The text of line n (0-based) of rope r, including any trailing newline.
@@ -42,6 +43,7 @@
 
     (text/line-count (text/from-string \"a\nb\"))   → 2"
   (%rope-line-count r))
+(sig line-count (rope -> int))
 
 (defn char->line (r idx)
   "The 0-based line index containing character idx."
@@ -58,9 +60,11 @@
 
     (text/->string (text/from-string \"hi\"))   → \"hi\""
   (%rope->string r))
+(sig ->string (rope -> string))
 
 (defn from-string (s)
   "A rope (editor buffer text) holding the characters of string s.
 
     (text/->string (text/from-string \"hi\"))   → \"hi\""
   (%string->rope s))
+(sig from-string (string -> rope))

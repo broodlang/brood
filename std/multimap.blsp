@@ -50,6 +50,7 @@ look-alike map, and it prints as `#<multimap …>` (`->map` is the plain-map vie
 (defn assoc-all (mm k vs)
   "Return a multimap with all values in list `vs` added under key `k`."
   (fold (fn (m v) (assoc m k v)) mm vs))
+(sig assoc-all (any any seqable -> any))
 
 (defn get (mm k)
   "All values for key `k` in reverse insertion order, or nil if absent.

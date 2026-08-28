@@ -38,6 +38,7 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported.
     (apply str
       (cons (first parts)
         (map (fn (p) (template-marker p data)) (rest parts))))))
+(sig render (string any -> any))
 
 ;; One piece following a `{{`: `key}}rest` → the substituted value + `rest`. A piece with
 ;; no closing `}}` is an unterminated marker, emitted verbatim (`{{` included) — the same
@@ -68,3 +69,4 @@ its ISO form — rather than as its field map."
 (defn render-all (tmpl rows)
   "Apply `render` to `tmpl` for each map in list `rows`. Returns a list of strings."
   (map (fn (row) (render tmpl row)) rows))
+(sig render-all (any seqable -> (or nil (list any))))

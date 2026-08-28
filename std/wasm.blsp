@@ -31,6 +31,7 @@ resource** — its store, code, and linear memory live until you `close` it
 (there is no GC finalizer yet), so `load` in a loop without closing leaks.
 Load once and reuse for a long-lived codec; close a short-lived one."
   (%wasm-load (file/slurp-bytes path)))
+(sig load (string -> int))
 
 (defn instantiate (source)
   "Instantiate a WASM component from in-memory `source`: a `bytes` value (a
@@ -40,6 +41,7 @@ compiled component) or a string of WAT text — the REPL/testing path."
 (defn exports (inst)
   "The instance's exported functions, as a vector of `[name arity]` pairs."
   (%wasm-exports inst))
+(sig exports (int -> any))
 
 (defn call (inst name & args)
   "Call export `name` (a string) of `inst` with `args`, marshalled by the
@@ -55,6 +57,7 @@ process waits, never a scheduler worker. For long-running guest calls."
 (defn close (inst)
   "Drop `inst`: the sandbox and everything the guest owns is freed. Idempotent."
   (%wasm-close inst))
+(sig close (int -> nil))
 
 (defn use-native (inst)
   "Bind every export of `inst` as a global Brood function of the same name —

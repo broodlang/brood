@@ -43,15 +43,18 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 (defn node-kind (n)
   "The kind keyword of CST node `n` (`:list`, `:symbol`, `:whitespace`, …)."
   (seq/vector-ref n 0))
+(sig node-kind (vector -> any))
 (defn node-text (n)
   "The raw source text of leaf node `n` (so it re-emits byte-for-byte)."
   (seq/vector-ref n 1))
+(sig node-text (vector -> any))
 ; leaf
 (defn- node-form (n) (seq/vector-ref n 1))
 ; wrapper (quote/quasi/unquote/splice)
 (defn node-children (n)
   "The child-node vector of container node `n` (includes trivia)."
   (seq/vector-ref n 1))
+(sig node-children (vector -> any))
 ; container (a vector)
 
 (defn- whitespace? (n) (= (node-kind n) :whitespace))
@@ -73,6 +76,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 (defn vec->list (v)
   "The vector `v` as a list, preserving order."
   (vec->list-acc v (dec (seq/vector-length v)) nil))
+(sig vec->list (vector -> any))
 (defn- vec->list-acc
   (v i acc)
   (if (< i 0) acc (vec->list-acc v (dec i) (cons (seq/vector-ref v i) acc))))
@@ -84,6 +88,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
   ;; Native O(n) split. A per-char `(string/substring s i (inc i))` loop is O(n^2) —
   ;; `substring` walks to char boundary `i` each call.
   (dec (count (string/split s "\n"))))
+(sig count-newlines (string -> number))
 
 ;; (`string-repeat` is the prelude's — it used to be redefined here with an
 ;; accumulator that did `(str acc s)` each step (O(total length²)); the prelude's
@@ -452,6 +457,7 @@ same-line trailing comment is left in place rather than hoisted above its form, 
 comment that is last in the source is last in the output either way. That is what
 retired the `comment-on-own-line?` distinction this used to need."
   (last-nonws-comment?-at kids (dec (seq/vector-length kids))))
+(sig last-nonws-comment? (vector -> bool))
 (defn- last-nonws-comment?-at
   (kids i)
   (cond
@@ -811,6 +817,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   (when (= (node-kind (seq/vector-ref kids i)) :keyword)
     (let (j (kids-next-nonws kids (inc i) n))
       (when (and (< j n) (not (comment? (seq/vector-ref kids j)))) j))))
+(sig keyword-value-at (vector int any -> any))
 
 (defn- render-body
   (kids start-idx body-ind fill?)
@@ -957,6 +964,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   ;; that clears a row, and it was mistakenly cleared once on the small-N numbers alone.
   (let (out (apply str (reverse (format-cst-root-walk kids 0 (seq/vector-length kids) 0 ()))))
     (cond (= out "") "" (string/ends-with? out "\n") out else (str out "\n"))))
+(sig cst-root (vector -> any))
 
 ;; The walker threads `nl-since-last`: the newline count between the last
 ;; emitted block and the cursor. Whitespace adds its newline count; a comment
@@ -1131,6 +1139,7 @@ retired the `comment-on-own-line?` distinction this used to need."
     (if (not (format-parses? src))
       :unparseable (let (out (source src))
         (if (= src out) :unchanged (do (file/spit path out) :rewrote))))))
+(sig file (string -> (or :rewrote :unchanged :unparseable)))
 
 (defn project ()
   "Format every .blsp under the current project (sources + tests). Prints one line

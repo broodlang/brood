@@ -172,3 +172,4 @@ Suitable for hash tables and sharding; NOT cryptographically secure."
   (fold (fn (h c) (bit/xor (* h 31) (string/char->int c)))
     5381
     (string/->list s)))
+(sig string (string -> int))

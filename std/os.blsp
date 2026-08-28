@@ -22,6 +22,7 @@ started an operating-system process while the bare `spawn` special form started 
 (defn run-process (prog args)
   "Run external program prog with an args list, inheriting stdio; returns its exit code."
   (%run-process prog args))
+(sig run-process (string (or bytes list vector) -> int))
 
 (defn exe-path ()
   "The absolute path of the running executable, or nil when the platform won't say (a sandbox with no /proc/self/exe equivalent). For locating something installed ALONGSIDE this binary: a shipped app cannot assume PATH — a desktop launch inherits the session's, which routinely lacks ~/.local/bin — so \"the runtime that installed me is my sibling\" is the reliable lookup. Nil rather than an error, because asking where you live is opportunistic."
@@ -30,6 +31,7 @@ started an operating-system process while the bare `spawn` special form started 
 (defn canonicalize (path)
   "The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. Use it to make path sandboxing symlink-escape-proof."
   (%canonicalize path))
+(sig canonicalize (string -> (or nil string)))
 
 (defn stdin-tty? ()
   "True when stdin is an interactive terminal (false when redirected from a pipe or file). The REPL gates raw-mode line editing on this."
@@ -54,6 +56,7 @@ started an operating-system process while the bare `spawn` special form started 
 (defn clipboard-set! (s)
   "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."
   (%clipboard-set! s))
+(sig clipboard-set! (string -> string))
 
 ;; ---- environment ------------------------------------------------------------
 
@@ -63,6 +66,7 @@ started an operating-system process while the bare `spawn` special form started 
     (os/env \"PATH\")        ;; => \"/usr/bin:/bin\"
     (os/env \"NO_SUCH_VAR\")  ;; => nil"
   (%getenv name))
+(sig env (string -> (or nil string)))
 
 (defn env-all ()
   "All environment variables as a `{string → string}` map."
@@ -123,11 +127,13 @@ string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector 
 flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever
 the child's mode (ADR-141). Returns nil; throws if p is unknown/closed."
   (%proc-send p data))
+(sig write (subprocess (or bytes int list string vector) -> nil))
 
 (defn close (p)
   "Terminate subprocess p: kill it if still running and close its stdin. Idempotent;
 returns nil. The final [:proc-closed handle code] still arrives at the owner."
   (%proc-close p))
+(sig close (subprocess -> nil))
 
 (defn set-binary (p on)
   "Switch subprocess p's INBOUND decode between text mode (default) and binary mode
@@ -136,3 +142,4 @@ inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` val
 string) — for a child speaking a binary protocol over stdio. Returns nil; throws if p is
 unknown/closed."
   (%proc-set-binary p on))
+(sig set-binary (subprocess any -> nil))

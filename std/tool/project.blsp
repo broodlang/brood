@@ -58,6 +58,7 @@ the `nest new` scaffolder."
   package of its function (ADR-172). `trace` is the `:trace` on a caught kernel-error map.
   Frames whose function is root/std/unrecorded get `:package nil`."
   (map (fn (frame) (assoc frame :package (ns-package (get frame :fn)))) trace))
+(sig trace-with-packages (seqable -> (or nil (list any))))
 ;; Only ever set inside `setup` (from the manifest) and read by
 ;; `package` when it publishes — so they must be declared ambient here, like the
 ;; slots above: ambient is a `defdyn` declaration now, not an earmuff spelling.
@@ -480,10 +481,12 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (file/exists? (path/join dir "project.blsp")) dir
     (= dir (path/dirname dir)) nil
     else (find-root (path/dirname dir))))
+(sig find-root (string -> any))
 
 (defn abs-paths (root rels)
   "Resolve each relative path in `rels` against `root`, returning the list of absolute paths."
   (map (fn (r) (path/join root r)) rels))
+(sig abs-paths (any seqable -> (or nil (list string))))
 
 ;; Recursively collect every <name>_test.blsp path under `dir` (skipping nothing
 ;; else). Returns a list of full paths; nil if `dir` isn't a directory.
@@ -519,6 +522,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
       nil
       (file/ls dir))
     nil))
+(sig collect-sources (string -> any))
 
 ;; A source file that carries co-located tests (ADR-225): it has a top-level
 ;; `deftest` or `describe` form. Detection is by FORM — not filename, not module
@@ -668,6 +672,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 (defn image-path (root)
   "Where `root`'s startup image lives."
   (path/join root *project-image-file*))
+(sig image-path (string -> string))
 
 ;; The staleness key: every source file's path + size + mtime, plus the running
 ;; binary's build id. Any edit, add or delete changes it, as does a new `brood`.
@@ -1036,12 +1041,14 @@ empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not 
                        (and (get enhances app-symbol)
                          (version/satisfies-all? host enhances))))
              (file/ls dir))))))
+(sig enhancers-in (string (or keyword string symbol) any -> any))
 
 (defn installed-enhancers (root app app-version)
   "The names of packages installed under `root/_deps` that enhance `app` at a satisfied
 `app-version` — `enhancers-in` over a project's dependency dir. The runtime sibling of the
 registry's `?enhances=` query (`nest search --enhances`)."
   (enhancers-in (path/join root "_deps") app app-version))
+(sig installed-enhancers (string any any -> any))
 
 (defn- project-plugin-format-headers
   (root plugin-name)
@@ -1173,6 +1180,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; any stale value from a prior setup in a long-lived tooling image).
   (def *format-headers-extra* (project-effective-format-headers root))
   root)
+(sig setup (string -> any))
 
 ;; Register the project's OWN modules as package-rooted under its `:name`, and set the
 ;; ambient package context so every source loaded from here on roots (ADR-070). A no-op

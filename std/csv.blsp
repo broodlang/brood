@@ -308,3 +308,4 @@ column order. The header row is written first. Missing keys produce empty fields
   (let (header-row (into [] headers)
         data-rows (map (fn (m) (into [] (csv-map->row m headers))) maps))
     (encode (cons header-row (into [] data-rows)))))
+(sig encode-maps (seqable any -> string))

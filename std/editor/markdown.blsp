@@ -191,6 +191,7 @@ delimiter (or skip the char if unclosed), then continue the inline scan."
         (inc j)
         n
         (cons [(+ base i) (+ base (inc j)) md-face-italic] acc)))))
+(sig md-inline-emph (string any int any any -> any))
 
 (defn- md-inline
   (line base i n acc)
@@ -291,3 +292,4 @@ headings, fenced code blocks, list bullets and blockquotes (line shapes), and in
 code / bold / italic / links. Spans are ascending and non-overlapping; text carrying
 no markup carries no span (the default face)."
   (md-lex-lines (md-drop-trailing-empty (string/split src "\n")) 0 false '()))
+(sig markdown-spans (string -> any))

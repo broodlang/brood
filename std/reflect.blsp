@@ -67,22 +67,27 @@ answers `((render [x]))`."
 (defn file-signatures (path)
   "The signature the checker holds for every function the file at path defines: a list of `{:name :sig :declared? :informative?}` maps, `:sig` written in source syntax (`\"(int int -> int)\"`) and ready to paste into a `(sig …)`, or nil where the type names a runtime kind the grammar cannot write. `:declared?` marks the ones a `(sig …)` already states; `:informative?` marks the ones saying something an all-`any` arrow does not. Does not evaluate the file. The bulk counterpart of the editor's declare-sig action."
   (%file-signatures path))
+(sig file-signatures (string -> list))
 
 (defn check-string-structured (src)
   "Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics."
   (%check-string-structured src))
+(sig check-string-structured (string -> list))
 
 (defn references-in-source (name source)
   "Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded."
   (%references-in-source name source))
+(sig references-in-source ((or string symbol) string -> any))
 
 (defn parse-source (s)
   "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."
   (%parse-source s))
+(sig parse-source (string -> vector))
 
 (defn parse-source-positioned (s)
   "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."
   (%parse-source-positioned s))
+(sig parse-source-positioned (string -> map))
 
 (defn scan-form-start (s pos)
   "The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer."
@@ -102,18 +107,22 @@ answers `((render [x]))`."
 (defn scan-source-extract (src)
   "Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of every symbol's occurrence count, this file's `defn-`/`def-` privates as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk."
   (%scan-source-extract src))
+(sig scan-source-extract (string -> vector))
 
 (defn scan-tokens (s)
   "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens)."
   (%scan-tokens s))
+(sig scan-tokens (string -> vector))
 
 (defn source-location (name)
   "Where global name was defined, as [file line col], or nil. Quote it: (source-location 'foo)."
   (%source-location name))
+(sig source-location (symbol -> (or nil vector)))
 
 (defn type-signature (name)
   "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (type-signature 'map)."
   (%type-signature name))
+(sig type-signature ((or string symbol) -> (or nil string)))
 
 (defn form-pos (form)
   "A form's [line col] source position, or nil."

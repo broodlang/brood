@@ -40,3 +40,4 @@ fired or already-cancelled timer is a dead process; the exit is a no-op). Return
 Cancellation races an in-flight fire — a message already sent stays sent."
   (exit timer :kill)
   nil)
+(sig cancel (pid -> nil))

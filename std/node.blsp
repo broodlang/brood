@@ -21,14 +21,17 @@
 (defn disconnect (nm)
   "Tear down the link to peer node `nm` now, without exiting this process — fires [:nodedown nm] on both sides and prunes `nm` from (node/list). Returns true if a link existed, false otherwise. Use it to leave a node/cluster cleanly while staying alive."
   (%disconnect nm))
+(sig disconnect ((or keyword symbol) -> bool))
 
 (defn monitor (nm)
   "Get [:nodedown nm] when the link to node `nm` goes down (heartbeat timeout or close)."
   (%monitor-node nm))
+(sig monitor ((or keyword symbol) -> ref))
 
 (defn demonitor (nm)
   "Cancel this process's node monitor for node `nm` (undo node/monitor); a no-op if none is registered. Returns nil."
   (%demonitor-node nm))
+(sig demonitor ((or keyword symbol) -> nil))
 
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `node/spawn` macro. Receives `[:run thunk]` messages and applies the thunk
@@ -206,6 +209,7 @@ node — call `(node/start …)` first."
             spec))
         (%node-connect (keyword (string/substring spec 0 lc))
           (str "tcp:" (string/substring spec (inc at) n)))))))
+(sig connect (string -> keyword))
 
 (defn also-listen (&optional addr)
   "Add another listener to this (already-started) node so it serves several
