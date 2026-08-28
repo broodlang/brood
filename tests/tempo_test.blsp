@@ -177,10 +177,19 @@
   (test "intersects? is not Allen's :overlaps"
     (is (tempo/intersects? (tempo/parse! "2026-06") (tempo/parse! "2026")))
     (assert= :during (tempo/relation (tempo/parse! "2026-06") (tempo/parse! "2026"))))
+  ;; `compare-to` is a `defmethod` on the prelude multimethod, so it is reached BARE — it was
+  ;; a plain `tempo/compare-to` function until 2026-08-28, which left tempo values unorderable
+  ;; by `sort`/`<`/`compare` (all of which route a record through the multimethod).
   (test "compare-to sorts the shorter value first when two begin together"
-    (assert= -1 (tempo/compare-to (tempo/parse! "2026-01") (tempo/parse! "2026")))
-    (assert= 1 (tempo/compare-to (tempo/parse! "2026") (tempo/parse! "2026-01")))
-    (assert= 0 (tempo/compare-to (tempo/parse! "2026") (tempo/parse! "2026")))))
+    (assert= -1 (compare-to (tempo/parse! "2026-01") (tempo/parse! "2026")))
+    (assert= 1 (compare-to (tempo/parse! "2026") (tempo/parse! "2026-01")))
+    (assert= 0 (compare-to (tempo/parse! "2026") (tempo/parse! "2026"))))
+  (test "so the operators and sort work on tempo values"
+    (is (< (tempo/parse! "2026-01") (tempo/parse! "2026")))
+    (is (< (tempo/parse! "2026") (tempo/parse! "2027")))
+    (assert= (list "2026-01" "2026" "2027")
+      (map ->string
+        (sort (list (tempo/parse! "2027") (tempo/parse! "2026") (tempo/parse! "2026-01")))))))
 
 ;; ---- interop with the datetime module ---------------------------------------
 ;;

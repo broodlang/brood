@@ -129,7 +129,7 @@ Always true for `n` <= 0.
     (not (empty? more)) (%merge-sort a (first more))
     (empty? a) nil
     (number? (first a)) (%sort-asc a)
-    ;; a record element sorts by its `Ord` (`compare-to`, STRICT — no structural default,
+    ;; a record element sorts by its `compare-to` method (STRICT — no structural default,
     ;; ADR-179: sorting records without a method is a %no-method error), so a type can
     ;; define its own order; every built-in keeps the native `%sort-cmp` path.
     (record? (first a)) (%merge-sort (fn (x y) (< (%ord-compare x y) 0)) a)
@@ -337,7 +337,18 @@ and it must be loaded before this `defrecord`.
     (defmodule geometry)
     (defrecord circle (r))          ; (circle 2) → {:__id__ :geometry/circle, :r 2}
     (impl Shape circle (area [c] (* 3.14 (get c :r) (get c :r))))
-    (defrecord point (x y) :derives [Ord])   ; compare-to synthesized field-wise"
+
+    ;; deriving: the ability supplies the recipe, the record just names it
+    (defability Columns
+      (columns [self] :-> vector)
+      :derive-record (fn (flds)
+        (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (->string f)))) flds)]))))
+    (defrecord point (x y) :derives [Columns])   ; columns synthesised field-wise
+
+Note the example defines the ability *with* a `:derive-record` recipe: no ability in the
+prelude declares one, so `:derives` always names an ability from your own code. It read
+`:derives [Ord]` until 2026-08-28 — an ability that does not exist, so the one example of
+this clause was an expansion error."
   (let (fnames (map %defrecord-fname fields)
         fkws (map (fn (n) (keyword (->string n))) fnames)
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
@@ -680,7 +691,7 @@ indexed access or a vector literal shape (`(into [] (map f coll))`, named).
 
 (defn sort-by (key-fn coll)
   "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the
-structural order (`compare`) — or a key's own `Ord` if the key is a record. Numeric,
+structural order (`compare`) — or a key's own `compare-to` if the key is a record. Numeric,
 string, keyword, vector, and record keys all work.
 
     (sort-by count [\"aaa\" \"b\"])   → (\"b\" \"aaa\")"

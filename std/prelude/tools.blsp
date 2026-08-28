@@ -1846,8 +1846,16 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   record's construction — not its macro-expansion."
   (let (recipe (%ability-derive-recipe aname))
     (when (not recipe)
-      (error "defrecord :derives — ability "
-        aname " is not derivable " "(its defability declares no :derive-record recipe)"))
+      ;; Two different faults, and they want different fixes: an ability that is not LOADED
+      ;; (a typo, or a missing module — `:derives [Ord]` in the `defrecord` docstring named
+      ;; one that has never existed) versus a real ability that declares no recipe. Both
+      ;; read "is not derivable (declares no :derive-record recipe)" until 2026-08-28, which
+      ;; sends you to look for a recipe on an ability that isn't there.
+      (if (%ability-ops aname)
+        (error "defrecord :derives — ability "
+          aname " is not derivable " "(its defability declares no :derive-record recipe)")
+        (error "defrecord :derives — no ability named "
+          aname " is loaded " "(check the spelling, and that its defability runs first)")))
     (doseq (m (recipe fields))
       ;; a method form is `(op [args] body…)` (impl syntax — a `[args]` VECTOR); `fn` wants a
       ;; LIST param, so convert the vector to a list, exactly as the `impl` macro does.
@@ -1978,18 +1986,18 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   — which `defability` registers as the op's `:default` impl (ADR-185). An `impl` that
   omits a provided op inherits the default; one that supplies it overrides it (an id-keyed
   impl always beats `:default`). Write the required ops as bodyless specs and derive the
-  rest — implement `compare-to`, get `lt`/`gt`/`min`/`max` free:
+  rest — implement `rank`, get `outranks?`/`ranks-below?` free:
 
-    (defability Ord
-      (compare-to [self other] :-> int)                          ; required
-      (lt  [self other] :-> bool (< (compare-to self other) 0))   ; provided
-      (gt  [self other] :-> bool (> (compare-to self other) 0)))  ; provided
+    (defability Ranked
+      (rank [self] :-> int)                                        ; required
+      (outranks?    [a b] :-> bool (> (rank a) (rank b)))           ; provided
+      (ranks-below? [a b] :-> bool (< (rank a) (rank b))))          ; provided
 
   An optional `:sealed [id …]` clause names the CLOSED set of member ids the ability is
   meant to cover; the checker then flags any member missing an impl of any *required* op
   (a provided op is satisfied by its default). An optional `:requires [A B …]` clause names
   prerequisite (super-)abilities: any id implementing this ability must also implement each of
-  them, which the checker enforces (`(defability Ord :requires [Eq] (compare-to …))`). A bare
+  them, which the checker enforces (`(defability Ranked :requires [Eq] (rank …))`). A bare
   record symbol is qualified with the current ns. An optional `:derive-record <fn>` clause makes the ability derivable: `<fn>`
   maps a record's field names to a list of `impl` method forms, which `defrecord`'s
   `:derives` splices in (see `defrecord`).
@@ -2451,32 +2459,37 @@ contents are not simply its fields."
       (and (vector? x) (%eq (count x) 2)) (assoc coll (nth x 0) (nth x 1))
       else (error "conj: adding to a record takes a [k v] pair or a map, got " (pr-str x)))))
 
-;; Ord — total ordering: the seam `sort`/`sort-by` (and any `%ord-compare` caller) consult
-;; for a RECORD. `compare-to` returns -1 / 0 / 1. The default is the kernel's structural
-;; `compare` (a record orders as its underlying map — deterministic and total, but NOT by
-;; field value); a type that wants a meaningful order (a version, a money value, a hand of
-;; cards) overrides `compare-to`.
+;; Total ordering for a RECORD: the seam `sort`/`sort-by` (and any `%ord-compare` caller)
+;; consult. `compare-to` returns -1 / 0 / 1.
+;;
 ;; `compare-to` is a multimethod (ADR-179): `:antisymmetric`, so a `[ver :int]` method
 ;; derives `[:int ver]` as its negation. STRICT like `Num` — there is NO `:default`: a record
 ;; type must define `compare-to` to be ordered (`<`/`<=`/`>`/`>=`/`sort`), else the pair is a
 ;; loud `%no-method` (a record is not silently ordered by its map layout). `(compare-to a b)`
 ;; → -1 / 0 / 1.
 ;;
-;; The `:-> int` is that last sentence, machine-checked. The `Ord` ability has always
-;; declared `(compare-to [self other] :-> int)`, but the MULTIMETHOD declared nothing, so a
-;; method returning a string or nil was caught by neither — and `sort`, which is built on
-;; this, would then compare on garbage. Declaring it here types every `(compare-to a b)` call
-;; site and makes each method body checkable against the same contract the ability states.
+;; This comment claimed the opposite in its own first paragraph until 2026-08-28 — "the
+;; default is the kernel's structural `compare`" — three lines above the sentence saying
+;; there is no default. The code has always been strict; only the prose disagreed.
+;;
+;; It also spoke of an "`Ord` ability" that has never existed: `(%ability-ops 'Ord)` is nil,
+;; and `(defrecord p (x y) :derives [Ord])` — the one example the `defrecord` docstring gave
+;; for `:derives` — was therefore an expansion error. Ordering is this multimethod plus
+;; `%ord-compare`; there is no ability behind it, and the name is gone from the docs.
+;;
+;; The `:-> int` machine-checks the return: a method handing back a string or nil was caught
+;; by nothing, and `sort`, built on this, would then compare on garbage. Declaring it types
+;; every `(compare-to a b)` call site and makes each method body checkable.
 (defmulti compare-to :antisymmetric :-> int)
 
-;; Record-aware compare: a record uses its `compare-to` (a type with no `Ord` method is a loud
+;; Record-aware compare: a record uses its `compare-to` (a type with no such method is a loud
 ;; %no-method — strict), everything else the kernel `compare`. This is the comparator
-;; `sort`/`sort-by` use, so an `Ord` record type orders itself while built-ins keep the native
+;; `sort`/`sort-by` use, so a record type that defines one orders itself while built-ins keep the native
 ;; path.
 (defn %ord-compare (a b)
   "Record-aware three-way comparison returning -1 / 0 / 1: a record defers to its `compare-to`
-`Ord` method, everything else to the kernel `compare`. This is the comparator `sort`/`sort-by`
-use, so an `Ord` record type orders itself while built-ins keep the native path. A record type
+method, everything else to the kernel `compare`. This is the comparator `sort`/`sort-by`
+use, so a record type that defines one orders itself while built-ins keep the native path. A record type
 with no `compare-to` method is a loud `%no-method` error — never a silent order by map layout."
   (if (record? a) (compare-to a b) (compare a b)))
 

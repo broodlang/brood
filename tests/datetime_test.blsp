@@ -198,6 +198,34 @@
     (assert= nil (datetime/parse-iso8601 "not a date"))
     (assert= nil (datetime/parse-iso8601 "2026-06-07"))))
 
+;; A numeric zone designator is as much a part of ISO 8601 as `Z`, and every timestamp a real
+;; API hands you carries one. It used to return **nil** — indistinguishable from malformed
+;; input, so a caller saw "not a datetime" for a perfectly good timestamp. The module stays
+;; UTC-only: the offset is applied and the UTC instant is what you get back.
+(describe "parse-iso8601 — numeric UTC offsets"
+  (test "an offset is applied, not dropped"
+    (assert= (datetime/datetime 2026 1 2 1 4 5 0)
+      (datetime/parse-iso8601 "2026-01-02T03:04:05+02:00"))
+    (assert= (datetime/datetime 2026 1 2 8 34 5 0)
+      (datetime/parse-iso8601 "2026-01-02T03:04:05-05:30")))
+  (test "the compact and hour-only spellings work too"
+    (assert= (datetime/parse-iso8601 "2026-01-02T03:04:05+02:00")
+      (datetime/parse-iso8601 "2026-01-02T03:04:05+0200"))
+    (assert= (datetime/parse-iso8601 "2026-01-02T03:04:05+02:00")
+      (datetime/parse-iso8601 "2026-01-02T03:04:05+02")))
+  (test "+00:00 is Z, and Z and naive are unchanged"
+    (assert= (datetime/parse-iso8601 "2026-01-02T03:04:05Z")
+      (datetime/parse-iso8601 "2026-01-02T03:04:05+00:00"))
+    (assert= (datetime/datetime 2026 1 2 3 4 5 0)
+      (datetime/parse-iso8601 "2026-01-02T03:04:05")))
+  (test "an offset that crosses midnight moves the date, and the year with it"
+    (assert= (datetime/datetime 2025 12 31 22 30 0 0)
+      (datetime/parse-iso8601 "2026-01-01T00:30:00+02:00")))
+  (test "a malformed offset is still nil, not a silently wrong instant"
+    (assert= nil (datetime/parse-iso8601 "2026-01-02T03:04:05+99:00"))
+    (assert= nil (datetime/parse-iso8601 "2026-01-02T03:04:05+xx"))
+    (assert= nil (datetime/parse-iso8601 "2026-01-02T03:04:05+2:0"))))
+
 ;; ---- arithmetic -------------------------------------------------------------
 
 (describe "duration helpers"
@@ -235,15 +263,41 @@
       (assert= (- (datetime/days 1)) (datetime/diff d1 d2)))))
 
 ;; ---- comparison -------------------------------------------------------------
+;;
+;; The module used to carry `before?`/`after?`/`not-before?`/`not-after?`/`same?` — five
+;; functions that were `<`/`>`/`>=`/`<=`/`=` over `->epoch-ms`, and that none of the real
+;; operators could see: record ordering routes through the `compare-to` multimethod, so with
+;; no method registered `(sort dates)` raised while `datetime/before?` worked. Registering
+;; `compare-to` replaced all five and made the operators, `sort` and `compare` work.
 
 (describe "dt comparison"
   (let (a (datetime/datetime 2026 6 7 0 0 0 0)
         b (datetime/datetime 2026 6 8 0 0 0 0))
-    (test "before?" (is (datetime/before? a b)) (refute (datetime/before? b a)))
-    (test "after?" (is (datetime/after? b a)) (refute (datetime/after? a b)))
-    (test "same?" (is (datetime/same? a a)) (refute (datetime/same? a b)))
-    (test "not-after?" (is (datetime/not-after? a a)) (is (datetime/not-after? a b)))
-    (test "not-before?" (is (datetime/not-before? b b)) (is (datetime/not-before? b a)))))
+    (test "the ordering operators work on datetimes"
+      (is (< a b))
+      (refute (< b a))
+      (is (> b a))
+      (is (<= a a))
+      (is (>= b b))
+      (is (= a a))
+      (refute (= a b)))
+    (test "compare-to is the seam, and is antisymmetric"
+      (assert= -1 (compare-to a b))
+      (assert= 1 (compare-to b a))
+      (assert= 0 (compare-to a a)))
+    (test "sort orders datetimes — it raised %no-method before"
+      (assert= (list a b) (sort (list b a))))
+    (test "dates sort too"
+      (let (d1 (datetime/date 2026 6 7) d2 (datetime/date 2026 6 8))
+        (is (< d1 d2))
+        (assert= (list d1 d2) (sort (list d2 d1)))))
+    (test "a time-of-day orders by clock position, with no date to lean on"
+      (let (t1 (datetime/time-of-day 1 0 0 0) t2 (datetime/time-of-day 3 4 5 0))
+        (is (< t1 t2))
+        (assert= (list t1 t2) (sort (list t2 t1)))))
+    (test "a MIXED pair raises rather than assuming midnight"
+      ;; a date and a datetime are not two spellings of one instant
+      (assert-error (< (datetime/date 2026 6 7) a)))))
 
 ;; ---- day-of-week ------------------------------------------------------------
 

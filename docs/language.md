@@ -813,8 +813,11 @@ stays byte-for-byte on the kernel's fast path (records never touch it). Both are
 neither has a `:default`, so a record type must define the methods it means. `(+ (money 1)
 2.5)` with no matching method is a hard `no-method`, and likewise `(< (money 1) 2.5)` — and
 `(sort some-records)` — is a `no-method` until you give the record a `compare-to`. A record is
-never silently ordered by its underlying map layout; define `compare-to`/`num-*` for the pairs
-you actually mean.
+never silently ordered by its underlying map layout; define `compare-to`/`num/*` for the pairs
+you actually mean. The stdlib does this for its own temporal types: `std/datetime` and
+`std/tempo` register `compare-to`, so a datetime, date, time-of-day or tempo value works with
+`<`, `sort` and `compare` directly (same type only — a date and a datetime do not compare,
+since that would have to invent a time of day).
 
 **Strict declarations (fail at load, and `nest check`).** A `defmethod` whose arg count differs
 from its pattern length, a closure on a non-binary pattern, an unknown algebra keyword, a
@@ -2368,6 +2371,15 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   their type (`(= 1 1.0)` is `false`); use `<`/`>` for cross-type numeric order.
   Integers compare exactly (no precision loss past 2^53), and floats compare by
   IEEE value — so `(= 0.0 -0.0)` is `true` and `(= nan nan)` is `false`.
+- **`compare` is a total order over every value**, because `sort` needs one. It coerces
+  across the numeric tower where `=` refuses to (`(compare 1 1.0)` is `0` while `(= 1 1.0)`
+  is `false`), places NaN last, and orders collections by content: vectors and lists
+  lexicographically, maps and sets by size and then by entries in key order. That last part
+  is why `(sort maps)` sorts — until 2026-08-28 every map compared *equal* to every other,
+  so the sort silently returned its input (ADR-285).
+- A **record** is the exception, and deliberately so: it orders through its `compare-to`
+  method or not at all — never by its underlying map layout. See "Records and multimethods"
+  below.
 
 ### Lists & sequences
 `cons`  `first`  `rest`  `second`  `third`  `last`  `but-last`
