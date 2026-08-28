@@ -12084,6 +12084,31 @@ member shape carries only the nominal `:__id__` keyword singleton — records ar
 (width-subtyped), so a real `(circle 2)` with extra fields is still a subtype, and
 `:__id__` is exactly what nominal dispatch and `ty_record_id` key on.
 
+**Amendment (2026-08-28) — a record type PRINTS as its name.** Rendering the shape showed
+the representation: `:__id__` is how nominal identity is *carried*, not something anyone
+writes, so a mismatch read `expects {__id__: :t/circle, ...}, got {__id__: :t/square, ...}` —
+burying the one word that matters, twice, behind punctuation. `types::display` now leads with
+the identity in the spelling a `sig` accepts (`expects t/circle, got t/square`; a member union
+as `t/circle | t/rect`), keeping only fields the declaration does not already imply, so a
+refined shape still shows its refinement (`t/pt{x: 7}`). The FULL path is kept rather than the
+last segment: two modules may each define `pt`, and "expects pt, got pt" would be worse than
+no message. A non-nominal map type is untouched (`map<keyword, int>`), as is a kind union
+(`int | float`).
+
+**Amendment (2026-08-28) — a RECORD name is a type too.** ADR-181 made a *sealed ability*
+name resolve in type position; a record name did not, so the natural `(sig area (circle ->
+float))` warned "unknown type `circle`" about a type the checker held in `*record-ids*` all
+along — and `defrecord` already emits one in its own constructor sig
+(`(any -> (record :__id__ :ns/circle …))`). Since ADR-259 reports unknown type names rather
+than silently widening them, that gap became a warning every user meets writing the obvious
+thing. `annot::record_ty` now resolves it to the same `:__id__`-only OPEN shape a sealed
+member gets, for the same reason (a real value carries its fields beside `:__id__`, and an
+`assoc`'d one is still a member). Bare and qualified spellings both work; a bare name two
+modules claim **declines** — a wrong type is worse than a missing one. `base_ty` outranks it,
+so in a type expression `int` is the int kind even where a root-namespace record took that id
+— the opposite precedence to `sealed_members_ty`, because there the members are `impl`
+dispatch keys and here they are type syntax.
+
 **Amendment (2026-08-28) — a member need not be a record.** `impl` dispatches on built-in
 kinds as well as records (`(impl Numeric :int …)`), so a seal may name them: `:sealed [:int
 :float :decimal :ratio]`. Such a member denotes **its own lattice point** (`base_ty`), not a
@@ -18289,3 +18314,40 @@ measurement in KI-72's history, three of them in one session. An unmet explicit 
 prints a line, and `(stdimage/status)` reports `:live`/`:stale`/`:absent`/`:unreadable` with
 the wanted id beside what is on disk. On the default path a miss is ordinary — no image built
 yet, or the id just moved — and falling back to source is right, so it says nothing.
+
+## ADR-282 — Two layers for a shipped default: `./configure` chooses the build, an env var chooses the run
+
+**Status:** accepted (2026-08-28)
+
+`./configure` already records build-time choices into `config.mk` for the Makefile — GUI,
+GPU backend, audio, JIT, prefix — each mapping to a cargo feature. The startup image
+(ADR-281) had only a *runtime* switch, so the question was whether it belongs there too.
+
+**Decision: yes, and the JIT is the template.** The JIT is configurable at both levels for
+two genuinely different reasons, and the image has exactly the same pair:
+
+- **build time** (`./configure --without-stdimage`) — a deployment that must never consult
+  or write a cache directory: read-only, sandboxed, or simply a machine that should grow no
+  ~2 MB file. A distributor should be able to ship that without instructing users to set an
+  environment variable.
+- **run time** (`BROOD_NO_STDIMAGE=1`) — A/B and bisect on **one** binary.
+
+The single choke point is `%std-image-path`, which answers `nil` for a build configured
+without it: no path means nothing installs and nothing is written, so the whole feature
+stands aside at one line rather than at each of its call sites. `(stdimage/status)` reports
+`:disabled` distinctly from `:no-cache` — two different `nil`s, and reporting both the same
+way would send a reader looking for a directory that was never going to be consulted.
+
+**What must NOT move to configure, and this is the substantive half of the decision.** The
+`BROOD_NO_*` family — `NO_JIT`, `NO_INLINE`, `NO_LEAF_INLINE`, `NO_PARTIAL_LEAF`,
+`NO_FLOAT_GLOBAL`, `NO_SHARED_ARMS`, `NO_RECV_MARK`, `NO_SHARE_FN`, `NO_HANDOFF`,
+`NO_MSGTAG`, `LINMAP=0` — exists to **A/B and bisect one binary**, which is stated in each
+of their entries. Making any of them a build-time choice would defeat the purpose: you
+cannot compare two arms without also changing the build, and this repo's own measurement
+history is a list of results confounded by exactly that kind of difference (a stale binary,
+a counter-armed profile build, an invalidated image). A lever whose whole job is to isolate
+one variable must not itself require a rebuild.
+
+So the rule this ADR sets: **a shipping choice may be a configure option; a measurement
+lever may not.** The image is the former and also has a use as the latter, which is why it
+gets both layers — like the JIT, and for the same reason.

@@ -2325,6 +2325,18 @@ pub(super) fn build_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(system/stdlib-id)` — the embedded standard library's content identity. See
 /// [`stdlib_id_string`]: same for every binary built from one tree, which is what lets them
 /// share a stdlib startup image.
+/// `(%build-stdimage?)` — was this binary built with the stdlib startup image compiled in?
+///
+/// Two layers govern the image, the same way they govern the JIT: a **build-time** choice
+/// (`./configure --without-stdimage`, i.e. this cargo feature) for a deployment that must
+/// never touch a cache directory — read-only, sandboxed, or simply a machine that should
+/// grow no ~2 MB file — and a **runtime** one (`BROOD_NO_STDIMAGE=1`) for A/B and bisect
+/// on one binary. The runtime lever has to stay runtime: you cannot A/B two builds without
+/// confounding the build.
+pub(super) fn build_stdimage(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    Ok(Value::Bool(cfg!(feature = "stdimage")))
+}
+
 pub(super) fn stdlib_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&stdlib_id_string()))
 }

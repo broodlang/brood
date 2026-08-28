@@ -34,6 +34,13 @@ AUDIO_FEATURES := $(if $(filter-out 0,$(WITH_AUDIO)),--features brood/audio,)
 # unsupported host or a minimal build; otherwise the lean bundle re-adds it here.
 WITH_JIT ?= 1
 JIT_FEATURES := $(if $(filter-out 0,$(WITH_JIT)),--features brood/jit,)
+# The stdlib startup image (ADR-256/281), a default feature like the JIT and governed the
+# same way: this variable only affects the `--no-default-features` release/install path,
+# where `./configure --without-stdimage` (WITH_STDIMAGE=0) leaves it out so the shipped
+# binary never consults or writes a cache directory. `BROOD_NO_STDIMAGE=1` is the per-run
+# switch on a build that has it.
+WITH_STDIMAGE ?= 1
+STDIMAGE_FEATURES := $(if $(filter-out 0,$(WITH_STDIMAGE)),--features brood/stdimage,)
 # tree-sitter (foreign-language editor modes — ruby/elixir, ROADMAP §C). The
 # generic `treesit` mechanism is in `default`, but the language grammars are NOT
 # (the kernel ships no language-specific parser). A product install still wants
@@ -74,7 +81,7 @@ PERF_RUSTFLAGS := $(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off
 # RUN_FEATURES is the LEAN set: no `dev-tools`, so no `repl`/`test`/`observer`/`mcp`
 # DEV_MODULES. It builds the brood that gets EMBEDDED into nest for `nest release`
 # app bundling (small apps) and that `make ab` measures — both want it lean.
-RUN_FEATURES := --no-default-features $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
+RUN_FEATURES := --no-default-features $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES) $(STDIMAGE_FEATURES)
 # INSTALL_FEATURES is RUN_FEATURES + `dev-tools`: the set for the brood/nest
 # actually INSTALLED onto your PATH, where the REPL, `nest test`, `nest observe`,
 # and `nest mcp` must work. `make install` builds the lean brood (embed base) AND

@@ -858,9 +858,13 @@ Named by `system/stdlib-id` — a hash of what is BAKED IN, not of this executab
 Deliberately NOT `system/build-id`, which embeds the running binary's mtime: that would give
 `brood`, `nest` and `brood-lsp` three different keys for one identical stdlib, and three
 ~2 MB images."
+  ;; nil for a build configured WITHOUT the image (`./configure --without-stdimage`),
+  ;; which is the single choke point for that choice: no path means nothing installs and
+  ;; nothing is written, so such a build never touches a cache directory at all.
   (let (xdg (%getenv "XDG_CACHE_HOME")
         home (%getenv "HOME")
         base (cond
+               (not (%build-stdimage?)) nil
                (and xdg (not (= xdg ""))) xdg
                (and home (not (= home ""))) (str home "/.cache")
                else nil))
@@ -2605,4 +2609,6 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
     ;; the caller is measuring something, and silence is what made three measurements wrong
     ;; in one session.
     (when (and (nil? (%std-image-install)) (%getenv "BROOD_STDIMAGE"))
-      (%eprint "brood: BROOD_STDIMAGE is set but no current stdlib image was installed — loading from source. `(stdimage/status)` says why.\n"))))
+      (%eprint (if (%build-stdimage?)
+                 "brood: BROOD_STDIMAGE is set but no current stdlib image was installed — loading from source. `(stdimage/status)` says why.\n"
+                 "brood: BROOD_STDIMAGE is set but this build was configured --without-stdimage, so there is no image to install.\n")))))

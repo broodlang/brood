@@ -3702,6 +3702,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         build_id);
     def(
         heap,
+        "%build-stdimage?",
+        Arity::exact(0),
+        Sig::new(vec![], bool_ty),
+        &[],
+        "Was this binary built with the stdlib startup image compiled in (`./configure --with-stdimage`, the default)? False for a build that must never touch a cache directory. The per-run switch is `BROOD_NO_STDIMAGE=1`; this is the build-time one, the same two layers the JIT has.",
+        build_stdimage);
+    def(
+        heap,
         "system/stdlib-id",
         Arity::exact(0),
         Sig::nullary(string),

@@ -280,6 +280,7 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
   ;; `repeat`, which this name would shadow inside the `string` namespace), then
   ;; concatenate in one `apply str` pass.
   (apply str (map (fn (_) s) (range (math/max 0 n)))))
+(sig repeat (string int -> string))
 
 ;; ---- interpolation and printf ------------------------------------------------
 ;; Moved here from the prelude 2026-08-26. They were defined in `std/prelude/string.blsp`
