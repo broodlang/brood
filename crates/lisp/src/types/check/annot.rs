@@ -170,7 +170,7 @@ fn base_ty(name: &str) -> Option<Ty> {
 /// `Ty::Map` in slice 1), `(record …)`, and `(tuple T1 T2 …)` (ADR-128,
 /// a fixed-arity positional vector shape). `None` for anything unrecognised
 /// — the annotation is then dropped, never guessed.
-pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
+pub(crate) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
     match form {
         Value::Sym(s) => {
             let name = value::symbol_name(s);

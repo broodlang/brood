@@ -56,8 +56,14 @@ pub fn code_actions(
     line_index: &LineIndex,
     offset_of: impl Fn(Range) -> u32,
     context_diagnostics: &[Diagnostic],
+    at: u32,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
+    // Not diagnostic-driven: offered wherever the cursor is inside a `defn` the
+    // checker has inferred a signature for and the author hasn't declared one.
+    if let Some(action) = declare_sig_action(interp, uri, root, src, line_index, at) {
+        actions.push(action);
+    }
     for diag in context_diagnostics {
         let Some(rest) = diag.message.strip_prefix(UNBOUND_PREFIX) else {
             continue;
@@ -98,6 +104,106 @@ pub fn code_actions(
         }
     }
     actions
+}
+
+/// **"Declare this signature"** — write the checker's inferred signature for the
+/// `defn` under the cursor as a real `(sig …)` line above it.
+///
+/// The inlay hint (`inlay_hints.rs`) shows the same signature; this is the half that
+/// makes it durable. Once written the sig is *authoritative* — read ahead of inference
+/// at every call site, validated against the definition (ADR-259), and read by the
+/// reversed-args gate — so the action turns a passive display into the adoption path
+/// for a language whose std carries 34 declarations over 2828 definitions.
+///
+/// Declines rather than guesses, in three cases: a function that already has a `(sig
+/// …)` (nothing to add), one the checker inferred nothing useful about (`(any…) ->
+/// any` is not worth writing down), and one whose type cannot be written faithfully in
+/// the grammar (`Ty::to_source` returns `None` — a quick-fix that writes a *different*
+/// type than the one it showed would be worse than none).
+fn declare_sig_action(
+    interp: &mut Interp,
+    uri: &Uri,
+    root: &Node,
+    src: &str,
+    line_index: &LineIndex,
+    at: u32,
+) -> Option<CodeActionOrCommand> {
+    let defn = innermost_defn(root, src, at)?;
+    let name = defn.forms().nth(1)?.text(src).to_string();
+    let sig = buffer_signature(interp, src, &name)?;
+    if sig.declared {
+        return None;
+    }
+    let uninformative = sig.sig.params.iter().all(|p| p.is_any()) && sig.sig.ret.is_any();
+    if uninformative {
+        return None;
+    }
+    let rendered = sig.sig.to_source()?;
+    // Insert on its own line, indented like the `defn` it describes.
+    let line_start = line_index.position(src, defn.span.start);
+    let indent: String = src[line_index.offset(src, lsp_types::Position::new(line_start.line, 0))
+        as usize..defn.span.start as usize]
+        .chars()
+        .take_while(|c| c.is_whitespace() && *c != '\n')
+        .collect();
+    let insert = Range::new(
+        lsp_types::Position::new(line_start.line, 0),
+        lsp_types::Position::new(line_start.line, 0),
+    );
+    let edit = TextEdit {
+        range: insert,
+        new_text: format!("{indent}(sig {name} {rendered})\n"),
+    };
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Declare signature: (sig {name} {rendered})"),
+        kind: Some(CodeActionKind::REFACTOR),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
+}
+
+/// The innermost `(defn …)` / `(defn- …)` list containing byte offset `at`.
+fn innermost_defn<'a>(root: &'a Node, src: &str, at: u32) -> Option<&'a Node> {
+    let mut found: Option<&Node> = None;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if at < node.span.start || at > node.span.end {
+            continue;
+        }
+        if node.kind == NodeKind::List {
+            if let Some(head) = node.forms().next() {
+                let name = head.text(src);
+                if name == "defn" || name == "defn-" {
+                    found = Some(node);
+                }
+            }
+        }
+        stack.extend(node.children.iter());
+    }
+    found
+}
+
+/// The checker's effective signature for `name` in this buffer — the same call the
+/// inlay hints make, so the action and the hint can never disagree.
+fn buffer_signature(
+    interp: &mut Interp,
+    src: &str,
+    name: &str,
+) -> Option<brood::types::check::FnSignature> {
+    let cp = interp.heap.checkpoint();
+    let forms = brood::syntax::reader::read_all(&mut interp.heap, src).ok();
+    let found = forms.and_then(|forms| {
+        brood::types::check::file_signatures(&mut interp.heap, &forms)
+            .into_iter()
+            .find(|s| s.name == name)
+    });
+    interp.heap.reset_local_to(cp);
+    found
 }
 
 /// Modules that export a **public** `name` as `mod/name`, for the auto-import
@@ -434,6 +540,113 @@ fn levenshtein(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
 
+    /// The titles a code-action request at `at` (a byte offset) offers, with no
+    /// diagnostics in context — the cursor-driven path.
+    fn actions_at(src: &str, at: u32) -> Vec<String> {
+        let mut interp = Interp::new();
+        let root = brood::syntax::cst::parse(src);
+        let scope = brood::syntax::scope::analyze(&root, src);
+        let li = LineIndex::new(src);
+        let offset_of = |r: Range| li.offset(src, r.start);
+        code_actions(
+            &mut interp,
+            &uri(),
+            &root,
+            src,
+            &scope,
+            &li,
+            offset_of,
+            &[],
+            at,
+        )
+        .into_iter()
+        .map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title,
+            CodeActionOrCommand::Command(c) => c.title,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn declares_the_inferred_signature_under_the_cursor() {
+        let src = "(defn f (s) (string/length s))";
+        let titles = actions_at(src, 8);
+        assert!(
+            titles
+                .iter()
+                .any(|t| t.starts_with("Declare signature: (sig f (") && t.contains("string")),
+            "got: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn declines_when_a_signature_is_already_declared() {
+        let src = "(sig f (int -> string))\n(defn f (n) \"x\")";
+        let at = src.find("(defn").unwrap() as u32 + 2;
+        assert!(
+            actions_at(src, at)
+                .iter()
+                .all(|t| !t.starts_with("Declare signature")),
+            "a declared sig must not be offered again"
+        );
+    }
+
+    #[test]
+    fn declines_when_the_inference_says_nothing() {
+        let src = "(defn f (x) x)";
+        assert!(
+            actions_at(src, 8)
+                .iter()
+                .all(|t| !t.starts_with("Declare signature")),
+            "`(any) -> any` is not worth writing down"
+        );
+    }
+
+    #[test]
+    fn the_declared_edit_is_a_parseable_sig_line_above_the_defn() {
+        let src = "(defn f (s) (string/length s))";
+        let mut interp = Interp::new();
+        let root = brood::syntax::cst::parse(src);
+        let scope = brood::syntax::scope::analyze(&root, src);
+        let li = LineIndex::new(src);
+        let offset_of = |r: Range| li.offset(src, r.start);
+        let acts = code_actions(
+            &mut interp,
+            &uri(),
+            &root,
+            src,
+            &scope,
+            &li,
+            offset_of,
+            &[],
+            8,
+        );
+        let edit = acts
+            .iter()
+            .find_map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca)
+                    if ca.title.starts_with("Declare signature") =>
+                {
+                    Some(ca.edit.as_ref()?.changes.as_ref()?[&uri()][0].clone())
+                }
+                _ => None,
+            })
+            .expect("a declare-signature edit");
+        assert!(edit.new_text.starts_with("(sig f ("), "{edit:?}");
+        assert!(edit.new_text.ends_with(")\n"), "{edit:?}");
+        // Inserted at the start of the `defn`'s line, so the file still parses.
+        assert_eq!(edit.range.start.line, 0);
+        assert_eq!(edit.range.start.character, 0);
+        let applied = format!("{}{src}", edit.new_text);
+        assert!(
+            brood::syntax::cst::parse(&applied)
+                .children
+                .iter()
+                .all(|n| n.kind != NodeKind::Error),
+            "the applied edit must parse: {applied}"
+        );
+    }
+
     #[test]
     fn edit_distance_basics() {
         assert_eq!(levenshtein("", "abc"), 3);
@@ -511,13 +724,23 @@ mod tests {
             ..Default::default()
         };
         let offset_of = |r: Range| li.offset(src, r.start);
-        code_actions(interp, &uri(), &root, src, &scope, &li, offset_of, &[diag])
-            .into_iter()
-            .map(|a| match a {
-                CodeActionOrCommand::CodeAction(ca) => ca.title,
-                CodeActionOrCommand::Command(c) => c.title,
-            })
-            .collect()
+        code_actions(
+            interp,
+            &uri(),
+            &root,
+            src,
+            &scope,
+            &li,
+            offset_of,
+            &[diag],
+            0,
+        )
+        .into_iter()
+        .map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title,
+            CodeActionOrCommand::Command(c) => c.title,
+        })
+        .collect()
     }
 
     #[test]
@@ -561,6 +784,7 @@ mod tests {
             &li,
             offset_of,
             &[diag],
+            0,
         );
         let edit = acts
             .iter()
@@ -622,7 +846,17 @@ mod tests {
             ..Default::default()
         };
         let offset_of = |r: Range| li.offset(src, r.start);
-        let acts = code_actions(interp, &uri(), &root, src, &scope, &li, offset_of, &[diag]);
+        let acts = code_actions(
+            interp,
+            &uri(),
+            &root,
+            src,
+            &scope,
+            &li,
+            offset_of,
+            &[diag],
+            0,
+        );
         let edit = acts.iter().find_map(|a| match a {
             CodeActionOrCommand::CodeAction(ca) if ca.title.starts_with("Import ") => {
                 Some(ca.edit.as_ref()?.changes.as_ref()?[&uri()][0].clone())

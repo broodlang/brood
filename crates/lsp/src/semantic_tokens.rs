@@ -31,6 +31,9 @@ const T_STRUCT: u32 = 8;
 const T_INTERFACE: u32 = 9;
 // Token-modifier bits into [`legend`]'s `token_modifiers`.
 const M_DEFINITION: u32 = 1 << 0;
+/// A docstring — a `string` token the editor can tint apart from a string *value*
+/// (VS Code: the `string.documentation` selector). See [`doc_string_index`].
+const M_DOCUMENTATION: u32 = 1 << 1;
 
 /// The token legend the server advertises and every `data` triple indexes into.
 pub fn legend() -> SemanticTokensLegend {
@@ -49,7 +52,10 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenType::STRUCT,
             SemanticTokenType::INTERFACE,
         ],
-        token_modifiers: vec![SemanticTokenModifier::DEFINITION],
+        token_modifiers: vec![
+            SemanticTokenModifier::DEFINITION,
+            SemanticTokenModifier::DOCUMENTATION,
+        ],
     }
 }
 
@@ -59,6 +65,10 @@ pub fn legend() -> SemanticTokensLegend {
 /// tooling share one source and can't drift. Used here and by completion
 /// ([`crate::completion`]).
 pub(crate) use brood::builtins::SPECIAL_FORMS;
+
+/// The `def…` heads that carry a docstring, and where it sits — the same canonical
+/// list the highlighter and the generated editor grammars read via `(doc-forms)`.
+use brood::builtins::DOC_FORMS;
 
 /// All semantic tokens for the document, delta-encoded.
 pub fn semantic_tokens(
@@ -128,6 +138,8 @@ enum Role {
     RecordName,
     /// The name a `defability` binds — an interface.
     AbilityName,
+    /// The form's docstring — a string that documents rather than evaluates.
+    Doc,
     /// Anything else.
     Normal,
 }
@@ -143,6 +155,7 @@ fn walk(
     match node.kind {
         NodeKind::List => {
             let head = head_sym(node, src);
+            let doc_i = doc_string_index(node, head);
             let mut form_i = 0usize;
             for child in &node.children {
                 if child.kind.is_trivia() {
@@ -157,6 +170,7 @@ fn walk(
                         Some(h) if is_def_head(h) => Role::DefName,
                         _ => Role::Normal,
                     },
+                    i if Some(i) == doc_i => Role::Doc,
                     _ => Role::Normal,
                 };
                 walk(child, src, tree, r, index, out);
@@ -179,7 +193,14 @@ fn walk(
         }
         NodeKind::Symbol => push_symbol(node, src, tree, role, index, out),
         NodeKind::Keyword => emit(node, src, index, T_ENUM_MEMBER, 0, out),
-        NodeKind::Str => emit(node, src, index, T_STRING, 0, out),
+        NodeKind::Str => {
+            let mods = if role == Role::Doc {
+                M_DOCUMENTATION
+            } else {
+                0
+            };
+            emit(node, src, index, T_STRING, mods, out)
+        }
         NodeKind::Int | NodeKind::Float | NodeKind::Decimal | NodeKind::Ratio => {
             emit(node, src, index, T_NUMBER, 0, out)
         }
@@ -245,6 +266,35 @@ fn push_symbol(
 fn head_sym<'s>(node: &Node, src: &'s str) -> Option<&'s str> {
     let first = node.forms().next()?;
     (first.kind == NodeKind::Symbol).then(|| first.text(src))
+}
+
+/// The form index of the list's DOCSTRING, when the list is a doc-carrying `def…`
+/// form (`builtins::DOC_FORMS`) that actually has one: the third form — right after
+/// the name — or the fourth, when a parameter list comes between. The one thing that
+/// separates documentation from a string value, and it is positional, so only a
+/// parser can answer it (a regex grammar can only approximate — see
+/// `std/tool/grammar.blsp`).
+fn doc_string_index(node: &Node, head: Option<&str>) -> Option<usize> {
+    let head = head?;
+    let &(_, fn_like) = DOC_FORMS.iter().find(|(h, _)| *h == head)?;
+    let forms: Vec<&Node> = node.forms().collect();
+    // `(defmodule m "doc")` / `(defn f "doc" ((x) …))` put it third; a parameter list
+    // pushes it to fourth (`(defn f (x) "doc" …)`).
+    let i = match forms.get(2)?.kind {
+        NodeKind::Str => 2,
+        NodeKind::List | NodeKind::Vector => 3,
+        _ => return None,
+    };
+    if forms.get(i)?.kind != NodeKind::Str {
+        return None;
+    }
+    // A function whose body is a lone string RETURNS that string — it is a value, not
+    // documentation (the evaluator's own rule). `defmodule`/`defability` have no body,
+    // so their docstring may be the last form.
+    if fn_like && forms.len() <= i + 1 {
+        return None;
+    }
+    Some(i)
 }
 
 /// Whether `head` introduces a named definition (so its second form is a name).
