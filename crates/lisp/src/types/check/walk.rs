@@ -269,6 +269,45 @@ pub(super) const UNBOUND_PREFIX: &str = "unbound symbol: ";
 /// hint appended when `nm` names a construct from another Lisp that Brood lacks
 /// (so the Brood way is visible at write-time). Shared by the call-head and the
 /// value-leaf unbound checks so the two messages can't drift apart.
+/// The advisory diagnostic for referencing a name a `(meta …)` marks deprecated or beta
+/// (ADR-283), or `None` for an ordinary name.
+///
+/// **Advisory, not gating.** A deprecation that fails the build is a removal with extra
+/// steps: the whole point is to say "this is going away" while the code still works, so
+/// `project-advisory-warning?` classifies it as printed-but-not-counted. That is also why
+/// this reads the *loaded image* rather than the file — a deprecation is almost always
+/// cross-module, and the module that declares it has been loaded by the time its callers
+/// are checked.
+fn stability_msg(heap: &Heap, sym: Symbol) -> Option<String> {
+    let meta = heap.name_meta(sym)?;
+    let name = name_of(sym);
+    if let Some(version) = &meta.deprecated {
+        let replacement = match meta.use_instead {
+            Some(u) => format!(" — use `{}` instead", name_of(u)),
+            None => String::new(),
+        };
+        return Some(format!(
+            "`{name}` is deprecated since {version}{replacement}"
+        ));
+    }
+    meta.beta
+        .as_ref()
+        .map(|why| format!("`{name}` is beta — {why}"))
+}
+
+/// The arity a signature describes: `&` rest → unbounded, `&optional` → a range, else an
+/// exact count. Shared by the declared-sig path and the arrow-parameter path, which have to
+/// agree — they are the same question asked of the same shape.
+fn arity_of_sig(sg: &Sig) -> Arity {
+    if sg.rest.is_some() {
+        Arity::at_least(sg.params.len())
+    } else if sg.optional.is_empty() {
+        Arity::exact(sg.params.len())
+    } else {
+        Arity::range(sg.params.len(), sg.params.len() + sg.optional.len())
+    }
+}
+
 fn unbound_msg(nm: &str) -> String {
     let mut msg = format!("{}{}", UNBOUND_PREFIX, nm);
     if let Some(hint) = crate::eval::foreign_construct_hint(nm) {
@@ -397,6 +436,8 @@ fn lint_allow_mask(category: Option<Value>) -> u8 {
         super::ctx::SUPPRESS_UNBOUND
     } else if value::symbol_is(k, "unrequired") {
         super::ctx::SUPPRESS_UNREQUIRED
+    } else if value::symbol_is(k, "deprecated") {
+        super::ctx::SUPPRESS_DEPRECATED
     } else {
         0
     }
@@ -538,6 +579,11 @@ fn check_value_leaf(
         } else if !ctx.is_suppressed(super::ctx::SUPPRESS_UNREQUIRED) {
             if let Some(m) = unrequired_module(heap, ctx, s) {
                 out.push((heap.form_pos_only(parent), unrequired_msg(&m)));
+            }
+        }
+        if !ctx.is_suppressed(super::ctx::SUPPRESS_DEPRECATED) {
+            if let Some(msg) = stability_msg(heap, s) {
+                out.push((heap.form_pos_only(parent), msg));
             }
         }
     }
@@ -1299,6 +1345,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         let local_ty = ctx.get(s);
         let local_arrow = local_ty.as_ref().and_then(Ty::as_arrow).cloned();
         let sig = local_arrow
+            .clone()
             .or_else(|| declared.clone())
             .or_else(|| {
                 (!ctx.is_lexical_local(s) && !ctx.is_file_global(s))
@@ -1326,7 +1373,17 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // primitive, so its arity is unknown here. Skip the whole computation, exactly
         // as the declared-sig lookup above does (`is_lexical_local` → `None`);
         // otherwise `arity_of` reads the global's arity and false-flags the call.
-        let arity = if ctx.is_lexical_local(s) {
+        // **An arrow parameter's arity is exact.** `is_lexical_local` skips the whole
+        // computation below because a local's arity is normally unknown — but when the
+        // local's own TYPE is an arrow, the arrow says precisely how many arguments it
+        // takes. `(sig apply-it ((int -> string) -> any))` then catches `(f 1 2)` in the
+        // body, which is a certain error rather than a gradual one: the caller of
+        // `apply-it` had to supply a one-argument function to satisfy that parameter, so
+        // calling it with two always raises. Without this the arrow described the call's
+        // types (ADR-273) but not its shape, which is half a contract.
+        let arity = if let Some(sg) = &local_arrow {
+            Some(arity_of_sig(sg))
+        } else if ctx.is_lexical_local(s) {
             None
         } else {
             (!ctx.is_file_global(s))
@@ -1340,15 +1397,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                 .or_else(|| {
                     declared
                         .filter(|sg| sg.rest.is_some() || !ctx.is_variadic_global(s))
-                        .map(|sg| {
-                            if sg.rest.is_some() {
-                                Arity::at_least(sg.params.len())
-                            } else if sg.optional.is_empty() {
-                                Arity::exact(sg.params.len())
-                            } else {
-                                Arity::range(sg.params.len(), sg.params.len() + sg.optional.len())
-                            }
-                        })
+                        .map(|sg| arity_of_sig(&sg))
                 })
         };
         // Unbound-symbol diagnostic: warn only when the head is **truly not
@@ -1361,6 +1410,13 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // `is_syntactic_keyword` is the one piece that still wants the
         // spelling — but only when every other short-circuit has failed.
         // Compute it lazily.
+        // A CALLED name gets the same stability diagnostic a referenced one does — the
+        // call is the commoner shape by far, and the value-slot check above never sees it.
+        if !ctx.is_suppressed(super::ctx::SUPPRESS_DEPRECATED) {
+            if let Some(msg) = stability_msg(heap, s) {
+                out.push((heap.form_pos_only(form), msg));
+            }
+        }
         if is_unbound(heap, ctx, s) && !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
             out.push((heap.form_pos_only(form), unbound_msg(&name_of(s))));
             // Still recurse into args below — they may carry their own issues.

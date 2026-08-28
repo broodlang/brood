@@ -4,6 +4,42 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Fixed — `sort` was a silent no-op over maps and sets.** Both fell through to the cross-kind
+tag compare, where two maps rank identically, so `(compare {:a 1} {:a 2})` returned `0` and
+`(sort maps)` returned its input in input order with no error. They now order by content —
+size first, then entries in key order (the entries are sorted before comparison, so the
+result cannot depend on insertion history). Same failure shape as the NaN sort fixed in
+v0.15.0, on a different type (ADR-285).
+
+**A temporal value orders with the language's operators.** `std/datetime` and `std/tempo`
+register `compare-to`, so `<`, `<=`, `>`, `>=`, `sort`, `compare` and `math/min`/`math/max`
+work on a datetime, date, time-of-day or tempo value. Previously `(sort dates)` raised
+`%no-method` (ADR-286).
+
+**Removed** (greenfield, no aliases): `datetime/before?`, `datetime/after?`,
+`datetime/not-before?`, `datetime/not-after?` and `datetime/same?` — they were `<`, `>`, `>=`,
+`<=` and `=` over `->epoch-ms`, spelled a second way and invisible to every operator. Use the
+operators. `tempo/compare-to` is likewise gone as a *function*: it is a method on the
+`compare-to` multimethod now, so call it bare.
+
+Ordering is **same-type only**. A `date` and a `datetime` do not compare — that would have to
+invent a time of day — and a mixed pair raises, naming the methods that do exist.
+
+**`parse-iso8601` reads a numeric UTC offset.** `+02:00`, `-05:30`, `+0200` and `+02` are
+applied, yielding the UTC instant; the module remains UTC-only and `->iso` still emits `Z`. A
+valid offset previously returned **nil**, indistinguishable from malformed input. A malformed
+offset is still nil.
+
+**Fixed — three documentation claims that were false, not stale.** The `defrecord` docstring's
+only `:derives` example named an ability that does not exist (`Ord`), so it was an expansion
+error; the `defability` docstring illustrated provided ops with the same fictional ability and
+an op name that is a live multimethod; and the `%ord-compare` comment claimed a structural
+default three lines above the sentence saying there is none (the code is strict). The
+`:derives` error also now distinguishes "no such ability is loaded" from "this ability
+declares no recipe".
+
 ## v0.15.0 — 2026-08-28
 
 **BREAKING — the bare core gives back four ordinary English words, and one primitive becomes

@@ -191,6 +191,20 @@
 ;; never saw them. This asserts the drawer stays empty.
 (describe "doc catalogue: every public core name has a category"
   (test "nothing falls through to :other"
+    ;; The candidate set is asserted before the violation set. This gate walks
+    ;; `(global-names)` and asserts a FILTERED result is empty, which is the shape that
+    ;; passes vacuously when the filter stops matching — a bug that made every name look
+    ;; private, say, would empty the corpus and the drawer would look clean. ADR-280 is
+    ;; the same lesson from the startup image: assert the coverage, not only the verdict.
+    (let (candidates (filter (fn (s)
+                               (let (nm (->string s) i (index-of nm "/"))
+                                 (and (not (and i (> i 0)))
+                                   (not (includes? nm "--"))
+                                   (not (string/starts-with? nm "%"))
+                                   (not (private? s))
+                                   (or (fn? (eval s)) (= (type-of (eval s)) :macro)))))
+                       (global-names)))
+      (assert= true (> (count candidates) 200)))
     (let (uncatalogued (filter
                          (fn (s)
                            (let (nm (->string s) i (index-of nm "/"))
