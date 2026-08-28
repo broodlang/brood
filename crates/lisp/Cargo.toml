@@ -22,7 +22,15 @@ loom-model = []
 # `cargo build`/`cargo test`/rust-analyzer and the shipped `brood`/`nest` binaries.
 # The lean `nest release` bundle and unsupported hosts strip it via
 # `--no-default-features` (then re-add what they need), same as `dev-tools`/`treesit`.
-default = ["dev-tools", "treesit", "jit", "wasm"]
+default = ["dev-tools", "treesit", "jit", "wasm", "stdimage"]
+# The stdlib startup image (ADR-256/281), on by default: a `require`d std module
+# materialises its bindings from `~/.cache/brood` instead of re-reading and re-evaluating
+# its source. A feature as well as a runtime switch for the same reason the JIT is both —
+# `./configure --without-stdimage` ships a build that never touches a cache directory at
+# all (a read-only or sandboxed deployment, or simply a machine that should grow no ~2 MB
+# file), where `BROOD_NO_STDIMAGE=1` is the per-run lever. Costs nothing to leave on: with
+# no image present the install is one absent-file check.
+stdimage = []
 # Dev/tooling surface baked into the runtime: the test framework (`test`), the
 # process observer (`observer`), the agent/doc/hot-reload tooling (`mcp`/`docs`/
 # `reload`), the interactive REPL (`repl`/`lineedit`), and the GC debug builtins

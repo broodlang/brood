@@ -12,6 +12,7 @@ with_gui=0
 with_gui_gpu=0
 with_audio=0
 with_jit=1
+with_stdimage=1
 
 usage() {
 	cat <<'EOF'
@@ -35,6 +36,14 @@ Options:
                     host (x86_64 / aarch64).
   --without-jit     Disable the JIT (bytecode VM only) — for an unsupported host or a
                     minimal build.
+  --with-stdimage   Build the stdlib startup image in (ADR-256/281). On by default: a
+                    `require`d std module materialises its bindings from ~/.cache/brood
+                    instead of re-evaluating its source (a three-module script 46.5 ->
+                    36.2 ms). Costs nothing when no image is present.
+  --without-stdimage
+                    Never consult or write a cache directory — for a read-only or
+                    sandboxed deployment, or a machine that should grow no ~2 MB file.
+                    The per-run switch is BROOD_NO_STDIMAGE=1; this is the build-time one.
   --prefix=DIR      Install root for `make install` (default: $HOME/.local).
                     Binaries go in DIR/bin.
   -h, --help        Show this help and exit.
@@ -54,6 +63,8 @@ for arg in "$@"; do
 	--without-audio) with_audio=0 ;;
 	--with-jit) with_jit=1 ;;
 	--without-jit) with_jit=0 ;;
+	--with-stdimage) with_stdimage=1 ;;
+	--without-stdimage) with_stdimage=0 ;;
 	--prefix=*) prefix=${arg#--prefix=} ;;
 	-h | --help)
 		usage
@@ -74,6 +85,7 @@ WITH_GUI := $with_gui
 WITH_GUI_GPU := $with_gui_gpu
 WITH_AUDIO := $with_audio
 WITH_JIT := $with_jit
+WITH_STDIMAGE := $with_stdimage
 EOF
 
 echo "configure: wrote config.mk"
@@ -82,5 +94,6 @@ echo "  with-gui    = $with_gui"
 echo "  with-gui-gpu = $with_gui_gpu"
 echo "  with-audio  = $with_audio"
 echo "  with-jit    = $with_jit"
+echo "  with-stdimage = $with_stdimage"
 echo
 echo "Next: make install"

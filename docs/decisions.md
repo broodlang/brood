@@ -18289,3 +18289,40 @@ measurement in KI-72's history, three of them in one session. An unmet explicit 
 prints a line, and `(stdimage/status)` reports `:live`/`:stale`/`:absent`/`:unreadable` with
 the wanted id beside what is on disk. On the default path a miss is ordinary — no image built
 yet, or the id just moved — and falling back to source is right, so it says nothing.
+
+## ADR-282 — Two layers for a shipped default: `./configure` chooses the build, an env var chooses the run
+
+**Status:** accepted (2026-08-28)
+
+`./configure` already records build-time choices into `config.mk` for the Makefile — GUI,
+GPU backend, audio, JIT, prefix — each mapping to a cargo feature. The startup image
+(ADR-281) had only a *runtime* switch, so the question was whether it belongs there too.
+
+**Decision: yes, and the JIT is the template.** The JIT is configurable at both levels for
+two genuinely different reasons, and the image has exactly the same pair:
+
+- **build time** (`./configure --without-stdimage`) — a deployment that must never consult
+  or write a cache directory: read-only, sandboxed, or simply a machine that should grow no
+  ~2 MB file. A distributor should be able to ship that without instructing users to set an
+  environment variable.
+- **run time** (`BROOD_NO_STDIMAGE=1`) — A/B and bisect on **one** binary.
+
+The single choke point is `%std-image-path`, which answers `nil` for a build configured
+without it: no path means nothing installs and nothing is written, so the whole feature
+stands aside at one line rather than at each of its call sites. `(stdimage/status)` reports
+`:disabled` distinctly from `:no-cache` — two different `nil`s, and reporting both the same
+way would send a reader looking for a directory that was never going to be consulted.
+
+**What must NOT move to configure, and this is the substantive half of the decision.** The
+`BROOD_NO_*` family — `NO_JIT`, `NO_INLINE`, `NO_LEAF_INLINE`, `NO_PARTIAL_LEAF`,
+`NO_FLOAT_GLOBAL`, `NO_SHARED_ARMS`, `NO_RECV_MARK`, `NO_SHARE_FN`, `NO_HANDOFF`,
+`NO_MSGTAG`, `LINMAP=0` — exists to **A/B and bisect one binary**, which is stated in each
+of their entries. Making any of them a build-time choice would defeat the purpose: you
+cannot compare two arms without also changing the build, and this repo's own measurement
+history is a list of results confounded by exactly that kind of difference (a stale binary,
+a counter-armed profile build, an invalidated image). A lever whose whole job is to isolate
+one variable must not itself require a rebuild.
+
+So the rule this ADR sets: **a shipping choice may be a configure option; a measurement
+lever may not.** The image is the former and also has a use as the latter, which is why it
+gets both layers — like the JIT, and for the same reason.
