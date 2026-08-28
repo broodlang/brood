@@ -395,6 +395,28 @@ release-brood: ## Build ONLY the `brood` binary into $(RELEASE_DIR) — the perf
 	# relink $(RELEASE_DIR)/brood and silently benchmarks a stale binary.
 	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(RUN_FEATURES) $(CARGO_TARGET)
 
+perf-symbols: ## Build an UNSTRIPPED `brood` for `perf` (release-fast keeps strip=true, which hides every symbol)
+	# `perf` on a `release-fast` binary reports bare addresses, because that profile sets
+	# `strip = true` — a profile you cannot act on, and it looks like perf's fault rather
+	# than the build's. Same flags as `release-brood` otherwise: profiling a binary built
+	# differently from the one `make ab` measures answers a question nobody asked.
+	#
+	# Needs `perf` permitted too — Ubuntu's `perf_event_paranoid=4` refuses all
+	# unprivileged use. `scripts/enable-perf.sh --check` says whether it is, and
+	# `make enable-perf-check` is the same thing.
+	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast --bin brood \
+		$(RUN_FEATURES) $(CARGO_TARGET) \
+		--config 'profile.release-fast.strip=false' \
+		--config 'profile.release-fast.debug=1'
+	@echo
+	@echo "  unstripped brood in $(RELEASE_DIR) — and it OVERWRITES the timing binary, so:"
+	@echo "  re-run \`make release-brood\` before timing anything (same trap as perf-brood)."
+	@echo "  perf record --call-graph dwarf -- $(RELEASE_DIR)/brood bench.blsp"
+	@echo "  perf report --no-children      # self time, which the frontier tables quote"
+
+enable-perf-check: ## Report whether `perf` can profile here (no root, no changes)
+	@./scripts/enable-perf.sh --check
+
 perf-brood: ## Build a counter-armed `brood` into $(RELEASE_DIR) — the attribution build ((perf/report), BROOD_PERF_STATS, BROOD_DEOPT_TRACE)
 	# The VM work-attribution counters are a cargo feature (`perf.rs`), so a normal
 	# binary — including an installed one — cannot answer "where does the time go".

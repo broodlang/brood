@@ -174,3 +174,46 @@ tree-walker. Same `defseq`, opposite verdicts, decided by whether the closures
 involved are promoted (RUNTIME) or top-level (LOCAL) — exactly the distinction
 `(vm-stats)`'s `tw_defer`/`vm_apply`/`self_tail` make legible. Always confirm which
 you're measuring before quoting a ratio.)
+
+## Making `perf` usable (two blockers, and each looks like the other's fault)
+
+`perf` answers the one question brood's own counters cannot: **self time per symbol**. The
+counters say *how much* work of each kind happened; they have no per-function attribution, which
+is the wall the 2026-08-28 call-path profiling hit. Two things block a readable profile, and
+fixing one without the other fails in a way that looks like a different problem:
+
+1. **`kernel.perf_event_paranoid`.** Ubuntu ships **4**, which refuses all unprivileged perf use.
+   `perf record` then reports *"Failure to open any events for recording"*, which reads like a
+   broken perf install rather than a policy setting.
+
+   ```sh
+   make enable-perf-check          # report only: no root, no changes
+   sudo ./scripts/enable-perf.sh   # set it (default level 1) and persist it
+   ```
+
+   The script writes `/etc/sysctl.d/99-brood-perf.conf`, applies the value, and then **verifies by
+   actually running `perf record`** rather than trusting the number it just wrote — that failure
+   mode is the reason it exists. Undo with
+   `sudo rm /etc/sysctl.d/99-brood-perf.conf && sudo sysctl --system`.
+
+   Level **2** is enough for self-time inside brood; **1** also resolves kernel symbols, which is
+   what you want the first time a row turns out to be dominated by the allocator or a syscall
+   rather than by brood. Pass the level as the first argument.
+
+2. **`[profile.release-fast]` sets `strip = true`**, so a profile of the ordinary build shows bare
+   addresses instead of `dispatch::dispatch`. No sysctl fixes this:
+
+   ```sh
+   make perf-symbols               # same flags as release-brood, but unstripped + debug=1
+   perf record --call-graph dwarf -- target/release-fast/brood bench.blsp
+   perf report --no-children       # self time — what the frontier tables quote
+   ```
+
+**`make perf-symbols` overwrites the timing binary**, exactly as `make perf-brood` does — same
+path, same trap. Re-run `make release-brood` before timing anything, or you time a build with
+debug info and no strip and charge your change for it. `file target/release-fast/brood` says
+`stripped` / `not stripped` if you are unsure which one you have.
+
+Why the same flags matter: `perf-symbols` keeps `PERF_RUSTFLAGS` (`debug-assertions=off`,
+`overflow-checks=off`) and `RUN_FEATURES`, so it profiles the binary `make ab` measures. A profile
+of a differently-built binary answers a question nobody asked.
