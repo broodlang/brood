@@ -259,6 +259,10 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
         eprintln!("brood --test: expected a file, e.g. `brood --test foo_test.blsp`");
         std::process::exit(2);
     }
+    // A test result read from a binary older than the `std/` it is testing is worse than no
+    // result: it looks like an answer. This is the entry point where that has actually
+    // happened, so it is the entry point that checks.
+    brood::cli_support::warn_if_stdlib_is_stale();
     // Default a memory ceiling on for test runs so an adversarial / runaway test
     // can't OOM the host (ADR-043). An explicit BROOD_MEM_LIMIT still wins —
     // init_limits_from_env ran first in main(), so re-applying with defaults only

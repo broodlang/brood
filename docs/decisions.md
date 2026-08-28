@@ -18500,3 +18500,46 @@ Same-type only. A `date` and a `datetime` do not compare: ordering them would ha
 a time of day, and a coercion the caller did not ask for is a wrong answer wearing the shape
 of a right one — the rule the cross-type arithmetic review already settled on. A mixed pair
 raises, and the error names the methods that do exist.
+
+## ADR-285 — A binary that is older than its own standard library says so
+
+**Status:** accepted (2026-08-28)
+
+`std/**/*.blsp` is `include_str!`'d into the binary. So a module edited after the last build
+is invisible to the running program *while sitting plainly on disk*, and the failure never
+looks like staleness:
+
+- a function the file clearly defines reports as **unbound**;
+- a docstring fix "doesn't take";
+- a test suite reads as **failing when it passes**.
+
+Every one of those was diagnosed as a fact about the code before being diagnosed as a fact
+about the binary. It cost three separate sessions in three disguises, the last of which was
+reporting a colleague's passing suite as broken.
+
+**Decision: the binary answers the question itself.** `build.rs` already bakes
+`BROOD_STDLIB_HASH`, a content hash of every baked-in `.blsp`.
+`cli_support::warn_if_stdlib_is_stale` recomputes it from the tree and prints one line when
+they differ.
+
+**A content hash, not mtimes.** A `touch`, a rebase, or a checkout that restores identical
+bytes leaves the binary correct, and a staleness warning that fires on those is one people
+learn to ignore. Verified both ways: `touch std/json.blsp` is silent, appending one comment
+line warns, reverting it goes silent again.
+
+**Only at development entry points** — `brood --test` and `nest test`. That is where a wrong
+reading gets *believed*, the ~1 ms of hashing is nothing against a test run, and an installed
+binary run outside a checkout finds no tree and says nothing: it is not stale, it is
+installed.
+
+**The algorithm exists twice, so a gate keeps the copies honest.** A build script cannot
+share code with the crate it builds, so `stdlib_tree_hash` mirrors `build.rs` by hand — and
+two copies of a hash drift silently, which here would mean the warning simply stops firing,
+for the one trap where nothing looks wrong to begin with.
+`tests/stdlib_hash_agrees.rs` asserts they agree, and it is a real gate rather than a
+tautology because `cargo test` rebuilds first, so the baked hash always describes the tree
+the test reads.
+
+**And `make doctor` now counts `.blsp` as source.** Its staleness check looked only at
+`crates/**/*.rs` — the one tool built to catch this class could not see the half of it that
+caused the sessions above.
