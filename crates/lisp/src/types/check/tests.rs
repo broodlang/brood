@@ -5511,10 +5511,15 @@ fn a_bare_local_test_narrows_by_truthiness() {
     // without it a closed literal's `nil` read as a false positive there.
     let ws = warnings("(let (v (get {:x 10} :y)) (if v (inc v) :none))");
     assert!(!ws.iter().any(|w| w.contains("inc")), "{ws:?}");
-    // Deliberately ONE-SIDED: the exact truthy type is unsayable, so the else-branch
-    // is left unnarrowed rather than narrowed to a complement that is wrong for `false`.
+    // **Biconditional**, now that `¬{false}` is exactly `{true}`: the else-branch has
+    // `v` falsy, so a use that needs a number there is a real error and is caught.
+    // (While the truthy type was only approximable as `not nil`, this had to stay
+    // one-sided — its complement, `nil`, is not implied by a false test.)
     let ws = warnings("(fn (x) (let (v (if (int? x) 1 nil)) (if v :ok (inc v))))");
-    assert!(!ws.iter().any(|w| w.contains("inc")), "{ws:?}");
+    assert!(
+        ws.iter().any(|w| w.contains("inc") && w.contains("nil")),
+        "{ws:?}"
+    );
     // …and `(not v)` must NOT read as "v is nil": that inversion reported live code
     // as dead when the guard was two-sided.
     let ws = warnings_expanded("(let (s (if true true false)) (let (v (not s)) (if v 1 2)))");
