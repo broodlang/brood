@@ -434,6 +434,57 @@ size-swept it is a one-off warm-up cost.
 calls" from a counter rather than a stopwatch. So `bintree` really is one allocation and ~four
 calls per node, and the call-convention work is aimed at the right row.
 
+## 2d. `perf` profiles, 2026-08-28 — the call protocol confirmed, and the boot trap that nearly hid it
+
+First real per-symbol profiles (see [benchmarking.md](benchmarking.md) for the two blockers:
+`perf_event_paranoid` and `strip = true`). Frame-pointer call graphs — `--call-graph dwarf`
+produced no usable chains; `-C force-frame-pointers=yes` does.
+
+**Read the size caveat first.** Boot is **~47 ms** on this tree. `bintree` at its benchmark size
+(n=200) runs 160 ms, so **29% of that profile is boot** — and boot is macro-expansion-heavy, so it
+shows up as `Heap::env_get` (14.4%) and `eval_tail_loop` (4.25%), which reads exactly like "the row
+is partly interpreted". It is not: at n=2000 both symbols **vanish entirely**. The tree-walked form
+count is identical at n=3 and n=6 (13,253 both), i.e. fixed startup work, zero per-node. Profile
+below ~1 s and you are largely profiling boot.
+
+### `bintree`, n=2000 (boot ~4%)
+
+| % | symbol | group |
+|---|---|---|
+| **24.03** | `jit_runtime::jit_run_fast_link` | call |
+| 12.73 + 12.37 | `brood_jit_arm_53` / `_54` | **the real work — 25.1%** |
+| 11.38 | `__memmove_evex_unaligned_erms` | copying |
+| **10.67** | `brood_rt_fast_frame` | call |
+| 5.66 | `brood_rt_make_vector2` | alloc |
+| 3.95 / 2.78 / 2.15 | `brood_rt_push_n` / `fastlink_base` / `roots_base` | call |
+| 2.15 / 1.97 | `drop_glue::<Slabs>` / `__memset` | alloc |
+
+**Call protocol ≈ 44%, real work 25%, allocation ≈ 21%.** So the entry's "~77 ns per node over
+four non-tail calls" is right, and the counters agreed independently (3.85 links/node).
+
+### `pipeline`, N=10M (boot <2%)
+
+`dispatch` 13.48 · `jit_dispatch_call` 7.90 · `vm_cache_arm_handle` 5.74 · `passthrough_arm` 5.35 ·
+**SmallVec staging 5.22 + 2.80 + 1.92 = 9.94** · `Heap::closure` 4.89 · `push_frame` 4.29 ·
+`apply_value` 3.02 · `code_gen_pinned` 2.87 · `capture_value` 2.67 · `compiled_arm_for` 2.60 ·
+`hof_apply_step` 2.44 · `select_arm`'s `max_by_key` fold 2.01.
+
+**~50% call plumbing**, matching the older profile, with argument staging ~10%.
+
+### Ranked, and two of my own wrong answers on the way
+
+1. **`jit_run_fast_link` 24% + `brood_rt_fast_frame` 10.7% of `bintree`** — 35% between them, and
+   `jit_run_fast_link` alone costs as much as all the native compute. Plus 11% `memmove` that is
+   very likely the same frame/roots copying. **Start here.**
+2. `dispatch` 13.5% of `pipeline` — the interpreted-side call path.
+3. Argument staging ~10% of `pipeline`. Real, but a third the size of (1).
+
+**Withdrawn on the way here, both from reasoning instead of measuring:** that argument staging
+must be cheap because `SmallVec<[Value; 4]>` keeps ≤4 args inline (true, and irrelevant — the cost
+is the *copy*, 9.9%); and that `env_get` was the top cost and the row was partly interpreted (a
+boot artifact, gone at n=2000). Neither survived a profile. The rule that keeps surviving:
+**measure at two sizes and keep only what scales.**
+
 ## 3. The remaining gaps are data-structure-specific (measured 2026-06-14)
 
 Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_IR`.
