@@ -34,7 +34,7 @@
   (path)
   "`:ok` if `path` parses as JSON, `:rejected` if anything refuses it."
   (try
-    (do (json/parse (file/slurp path)) :ok)
+    (do (json/decode (file/slurp path)) :ok)
     (catch e :rejected)))
 
 (defn- js-kind (path) (string/substring (path/basename path) 0 1))
@@ -89,37 +89,37 @@
   :tags [:conformance]
 
   (test "a bare scalar is a valid JSON text (RFC 8259 §2, not the 2006 grammar)"
-    (assert= (json/parse "123") 123)
-    (assert= (json/parse "\"s\"") "s")
-    (assert= (json/parse "true") true)
-    (assert= (json/parse "null") nil))
+    (assert= (json/decode "123") 123)
+    (assert= (json/decode "\"s\"") "s")
+    (assert= (json/decode "true") true)
+    (assert= (json/decode "null") nil))
 
   (test "trailing commas, comments and single quotes are rejected"
-    (assert-error (json/parse "[1,]"))
-    (assert-error (json/parse "{\"a\":1,}"))
-    (assert-error (json/parse "[1] // comment"))
-    (assert-error (json/parse "['a']")))
+    (assert-error (json/decode "[1,]"))
+    (assert-error (json/decode "{\"a\":1,}"))
+    (assert-error (json/decode "[1] // comment"))
+    (assert-error (json/decode "['a']")))
 
   (test "the number grammar rejects what looks numeric but isn't"
     ; leading zero
-    (assert-error (json/parse "01"))
+    (assert-error (json/decode "01"))
     ; trailing point
-    (assert-error (json/parse "1."))
+    (assert-error (json/decode "1."))
     ; leading point
-    (assert-error (json/parse ".1"))
+    (assert-error (json/decode ".1"))
     ; leading plus
-    (assert-error (json/parse "+1"))
+    (assert-error (json/decode "+1"))
     ; empty exponent
-    (assert-error (json/parse "1e"))
-    (assert-error (json/parse "Infinity"))
-    (assert-error (json/parse "NaN")))
+    (assert-error (json/decode "1e"))
+    (assert-error (json/decode "Infinity"))
+    (assert-error (json/decode "NaN")))
 
   (test "unescaped control characters are rejected inside a string"
-    (assert-error (json/parse "[\"a\nb\"]"))
-    (assert-error (json/parse "[\"a\tb\"]")))
+    (assert-error (json/decode "[\"a\nb\"]"))
+    (assert-error (json/decode "[\"a\tb\"]")))
 
   (test "escapes and astral surrogate pairs decode"
-    (assert= (json/parse "\"\\u0041\"") "A")
-    (assert= (json/parse "\"\\/\"") "/")
+    (assert= (json/decode "\"\\u0041\"") "A")
+    (assert= (json/decode "\"\\/\"") "/")
     ;; U+1D11E MUSICAL SYMBOL G CLEF, as the surrogate pair JSON must spell it with
-    (assert= (json/parse "\"\\uD834\\uDD1E\"") "\u{1D11E}")))
+    (assert= (json/decode "\"\\uD834\\uDD1E\"") "\u{1D11E}")))

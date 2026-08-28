@@ -721,7 +721,9 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-26** — every package's `:brood` floor was a lie; the ecosystem release train that fixed it
 - **2026-08-27** — migrating the ecosystem across the waves; two outages, both from verifying the wrong artifact (KI-66/67)
 - **2026-08-27** — stdlib cleanup: `name` folds into `->string` (ADR-258); the seq orphans go home; `last-index-of` moves to `string/`
+- **2026-08-28** — the capture hazard behind that rename: prelude templates, and finishing the `/name` root escape (KI-73)
 - **2026-08-27** — the type system, audited then rebuilt: `sig` fails closed and the definition owns the arity (ADR-259), the walk's totality is gated and found the quasiquote gap (ADR-260), a parameter's type is its domain (ADR-261), a union keeps its terms (ADR-262), `(not T)` (ADR-263)
+- **2026-08-28** — a record is closed, and openness is the type of the keys it doesn't declare (ADR-264) — which is what makes ADR-262's tagged union usable rather than merely representable
 
 ---
 
@@ -1068,7 +1070,7 @@ for possible repurposing.
 
 **Stage 4 (`json`).** With the mechanism in place, `std/json.blsp`'s exports drop their
 now-redundant `json-` prefix — `json-parse`→`parse`, `json-encode`→`encode` (referenced
-qualified as `json/parse`, the prefix was doubled). Consumers updated with no new `require`
+qualified as `json/decode`, the prefix was doubled). Consumers updated with no new `require`
 lines needed anywhere: `std/net/sse.blsp`, `std/tool/{docs,explain,grammar,package,test}.blsp`,
 `tests/*_test.blsp`, and the JSON fuzz target. The stage-1/2/3 test consumers move to the
 qualified spellings too (`math/even?`, `enum/frequencies`, …) in `basic.rs` and the
@@ -1895,7 +1897,7 @@ another flag someone has to know to arm.
 
 Started dropping the redundant module-name prefix from std operation functions — `queue/queue-push`
 → `queue/push`, the smell being that the module qualifier already namespaces the name so repeating
-it (`queue/queue-push`, `stream/stream-map`) is noise. `set/union`/`json/parse` were already the
+it (`queue/queue-push`, `stream/stream-map`) is noise. `set/union`/`json/decode` were already the
 house style. Carve-outs: `defrecord`'s `-field` accessors stay (CL `defstruct` idiom); the type
 constructor/predicate keep the type name (`queue/queue`, `queue/queue?`, like `set/set`).
 
@@ -4772,3 +4774,182 @@ green, 572 lib unit tests green, whole-tree check still 1.7 s. Two rename leftov
 parallel session fell out of the new checks and were followed: the curated sig for
 `last-index-of` (now `string/last-index-of`) and a dead call site in
 `scripts/fuzz/stress/scale_sweep.blsp`.
+
+## 2026-08-28 — the capture hazard behind the `name` rename, and finishing the root escape
+
+Following the ADR-258 note that renaming `name` "moved the hazard rather than removing it".
+It is a real bug with a silent wrong value, not a theoretical one:
+
+```lisp
+(defmodule inventory)
+(defn get (bag k) :CAPTURED)     ; an ordinary function to want
+(defrecord point (x y))
+(point-x (point 1 2))            ; => :CAPTURED
+```
+
+**Measured the exposure rather than guessing at it.** A scanner written in Brood
+(`reflect/read-all` over the concatenated prelude, walking each `defmacro`'s quasiquote
+template) found 22 emitted bare names — but that over-reports, because a name is only
+capturable if it is a plain *function* (a special form resolves in the compiler) and if the
+macro is ever expanded in *user* code (`%defseq` is prelude-internal). The precise list was
+five macros. Two crude regex passes preceded this and both were wrong; the reader was the tool.
+
+**The `/name` root escape was half-implemented.** ADR-236 documents it, and it worked — in a
+module. `resolve()` returns early when `compile_ns()` is `None`, so at root the rewrite never
+ran and an emitted `/get` reached the evaluator literally, unbound. `macros::strip_root_escapes`
+now covers root: a read-only scan that allocates nothing and a rebuilding walk that runs only
+when it finds an escape. It **skips `quote`/`quasiquote` subtrees**, which is load-bearing and
+not merely consistent — the prelude is itself root code, so without the skip a template's `/get`
+is stripped at *definition* time and the capture returns. That happened, for one build.
+
+`defrecord`, `for`, `defonce` and `with-err-str` are fixed and proved by probe (a module
+defining `get`/`reverse`/`bound?` now gets the real value back).
+
+**Three things that did not work, each cheaper to record than to rediscover:**
+
+- **`defmodule` cannot use the escape at all.** It *establishes* the namespace, so its
+  expansion is evaluated before there is an ns to resolve against. It emits no conversion
+  instead — the callee converts.
+- **`receive` cannot use it either** (KI-73). Its expansion calls `but-last` from `seq.blsp`,
+  which concatenates *after* `process.blsp`, so `receive` cannot expand at prelude compile
+  time; `sleep`'s `(receive …)` expands lazily at first call, where no resolve pass runs, and
+  the escape arrives as the literal unbound `/nil?`. Applying it turned 35 test files red.
+- **Moving `sleep` below `receive` does not rescue it** — the expansion then happens during
+  boot, before `but-last` exists. Tried, reverted.
+
+**The rule is a gate now, not a convention** — `tests/prelude_capture_test.blsp`: a static scan
+of every prelude template plus three behavioural probes, pinning `receive` as the known
+exception so a *new* offender fails the build. Sabotage-verified both halves.
+
+## 2026-08-28 — a record says what a value is NOT
+
+ADR-262 made `{ok: int} | {error: string}` *representable*. It did not make it useful: a
+field read through it still answered nothing, and the reason was not the union but the
+records. An **open** record declared what a value must have and said nothing about
+anything else, so the `{error: string}` term could not rule out an `:ok` — the honest
+answer for the union was `any`, and `any` is what it gave.
+
+So a record is now **closed**: `(record :a int)` names every key, and one it doesn't
+declare is absent, which `get` reads as `nil`. `(record &open :a int)` is the marked
+permissive form, spelled like Brood's other in-list markers.
+
+**The part worth keeping is that openness is a *type*, not a flag** — `nil` for a closed
+shape's undeclared keys, `any` for an open one's. One reading (`field_ty`) then drives
+everything: subtyping quantifies over `keys(a) ∪ keys(b)` and compares readings, so width
+subtyping falls out of `nil ⊆ any` and the required/optional rule stops being a separate
+clause; disjointness is "some key's readings are disjoint", which makes the two arms of a
+tagged union provably distinct with no rule written for tagged unions; and intersection is
+exact per key, which matters because that is what a guard performs. Absence stopped being
+declined too — `{}` really is a subtype of `{a?: int}`.
+
+Three shapes had to stay open, and each is a *domain* rather than a value: a `defrecord`
+accessor's parameter (a real value carries `:__id__` and its siblings), an ability used as
+a type, and the base a path guard refines. The constructor's *result* stays closed, which
+is the shape a union's field read resolves against.
+
+**The interesting failure was downstream.** Once `(get {:x 10} :y)` typed as exactly
+`nil`, `(if-let (v …) (inc v) …)` read as handing `nil` to `inc` — nothing narrowed `v`
+by truthiness. Adding that guard is easy; getting it *right* was not. The exact truthy
+type is "not `nil` and not the literal `false`", which this lattice cannot state, so the
+sayable type is `not nil` — sound as a necessary condition for a true test, and **not**
+invertible, because a false test doesn't imply `nil`. Marked biconditional it read
+`(not v)` as "v is nil" and reported live code as dead, in a telemetry test. One-sided is
+the honest reading, and it is the same negative-atom gap that keeps `(not (tuple int))`
+from meaning what it says.
+
+Gates: `nest check std/**/*.blsp tests/**/*.blsp` back to zero, `nest format --check`
+clean, clippy clean, 583 lib unit tests. One test flipped by design — the runtime
+contract's "extra keys are allowed" is now "an extra key throws", with an `&open` case
+beside it, because the contract and the checker have to agree on what a declaration means.
+
+**Stdlib naming, from the review list.** `json/parse` → **`json/decode`** (46 call sites, its
+`sig`, the module docstring and the test prose): its partner is `json/encode`, and `parse`'s
+opposite is not `encode`. `std/csv.blsp` was left as `csv/parse` / `csv/emit` — that pair is
+coherent on its own terms (reader/writer), and churning it would trade one convention for
+another rather than fix an asymmetry.
+
+`uuid/nil-uuid` → **`uuid/zero`**. It returns the zero-UUID *string*, so the suggested `nil`
+would have been wrong; and the `-uuid` suffix was a plain ADR-236 violation — the redundant
+module-name prefix that ADR dropped everywhere else.
+
+Both renames tripped the same trap the `name` rename did, in the same order: the call-position
+pass missed the `sig`, the higher-order use (`(map parse results)`), the bare references in
+files that `(:use json)`, and finally the prose in test names. There is a lesson here that is
+now three-for-three — **a rename is not a call-site rewrite**; the classes are call, value,
+declaration (`sig`), re-export (`:use`), and prose, and each one failed a different gate.
+
+**`csv` follows `json`.** `csv/parse`/`parse-maps`/`emit`/`emit-maps` →
+`decode`/`decode-maps`/`encode`/`encode-maps`. The pair was already internally coherent
+(reader/writer); this is about one convention across both codec modules. Two *internal*
+calls inside `std/csv.blsp` were part of the rename and are the kind a call-site sweep
+misses because they are unqualified.
+
+**Seq consolidation: measured, and the first measurement was wrong.** Counting qualified
+`seq/x` references said seven functions were entirely unused. They are not — files that
+`(:use seq)` call them bare, and re-counting both shapes showed every one of the 37 in use.
+Nearly deleted live API on the strength of a grep. What the corrected numbers *do* show is
+that **18 of 37 have zero uses inside `std/` itself** — expected for a module ADR-227
+created as helpers for downstream code, so it is a product question about surface breadth,
+not a defect. The one genuine structural defect found: **`first` is a kernel builtin,
+`second` is in the prelude, and `third` is in `seq`** — one trio, three homes.
+
+**And a second capture shape (KI-73).** Chasing `mapv`'s placement turned up that
+`defmulti` emits `(list 'mapv '%identity-of 'args)` — quoted-head construction, which the
+quasiquote scanner skips. It was a live bug: a module defining `mapv` dispatched every
+multimethod on `:CAPTURED`. Five macros were affected (`map`, `apply`, `mapv`, `current-ns`,
+`sig`). `sig` could not be escaped — the checker matches it structurally by head name, so
+`/sig` silently disables record signature checking — which four checker tests caught before
+it shipped. Gate widened to both shapes and sabotage-verified.
+
+**And `sig` turned out to be escapable after all — the constraint was ordering.** Recorded
+an hour earlier as the one name that could not use the root escape. It could; `compile`
+expands before it resolves, and `macro_head_id`'s ROOT fallback (`import_of`) did not know
+about `/name`, so `/sig` was not seen as a macro head, never expanded, and never produced
+the `%register-sig` the checker collects. One branch in `macro_head_id` fixes it for every
+macro a template emits.
+
+The tell was that `/or` *appeared* to work while `/sig` did not. Both are macros; the
+difference is that the evaluator expands macros at runtime, so `/or` got a second chance —
+and the checker never evaluates, so `sig` did not. Two macros, same escape, opposite
+outcomes, for a reason that has nothing to do with either name.
+
+**On the question this raised — reserving names, or warning:** neither, now. Reserving
+`sig`/`get`/`map`/`mapv` inside modules would break ADR-166's rule that a name is yours
+inside a module, which is what makes namespacing worth having; and a warning is only worth
+adding for a hazard that still exists. The gate asserts zero offenders. The *inverse*
+problem — no way to turn a warning off per file/function/project when `nest check` exits
+nonzero on any of them — is the real gap, now on the roadmap.
+
+## 2026-08-28 — a docstring is not a string, in four editors at once
+
+Docstrings were coloured with the string face everywhere, so a `defn`'s prose and its
+return value were the same colour on adjacent lines. The rule that separates them is
+positional and has three edges nobody encodes twice by accident (`def` takes no
+docstring; a function's *lone* trailing string is its return value; a `defmodule`'s doc
+may be the form's last element), so it went in the kernel once — `builtins::DOC_FORMS` +
+the `(doc-forms)` primitive — and everything reads it: the LSP's semantic tokens (with
+the `documentation` modifier), `std/editor/highlight.blsp`'s new `:syntax/doc` face, and
+the VS Code / tree-sitter / Emacs artifacts `nest grammar` generates. ADR-265 has the why,
+including the one case TextMate cannot get right and the LSP corrects.
+
+**The highlighter needed a form stack, not a flag.** `hl-spans` carried a single `after`
+boolean — enough for "is this symbol a call head?", not for "is this string a doc?" It now
+carries a frame per open bracket (`[open n head params?]`), which is also what makes the
+lone-return-string case answerable: peek the token stream past the string for a following
+form.
+
+**`brood-mode`'s indentation was fixed the same day, and it was worth measuring rather
+than eyeballing.** `indent-region` over the 336 format-clean `.blsp` files in the repo
+rewrote **316** of them; it now rewrites **none**. Four causes, in order of damage: Emacs
+indents a `;` comment to `comment-column` and `;;;` to column 0 (Brood's formatter puts
+every comment at the code indent, whatever its semicolon count) — hence a `brood-indent-line`
+that indents comments as code, plus `indent-region-function nil` and `indent-tabs-mode nil`;
+`brood-indent-line` passed `syntax-ppss` where `calculate-lisp-indent` needs `lisp-ppss`
+(only the latter fills element 2, so the "line follows the open paren" branch answered
+without ever calling the Brood hook); the formatter renders `:keyword value` as one unit at
+the *body* indent, so `:isolated (test …)` lays its body out from the keyword's column, not
+the bracket's; and a comment *breaks a pair*, flipping every following `cond` clause between
+test and value position — so the clause walk pairs the way the formatter does instead of
+counting to parity. The per-form header table that used to drive it is gone: the formatter
+puts every body line +2 from its bracket, and only the two pair shapes (map / bindings list
+at +1, dropped pair value at +4) depart from that.

@@ -284,7 +284,7 @@ macro head, deferred qualified value ref, root-region scan for scripts/REPL); GC
 `macros.rs`/`check.rs` because `compile` can now collect. The checker's KI-17 unrequired-module
 lint is now obsolete — a qualified ref requires its own module — neutralized to a no-op in
 `walk.rs`. Plus **stage 4 (`json`)**: `std/json.blsp` drops its `json-` export prefix (now
-`json/parse`, `json/encode`), consumers + the JSON fuzz target updated. The ADR-227 namespacing
+`json/decode`, `json/encode`), consumers + the JSON fuzz target updated. The ADR-227 namespacing
 program is now **complete** (stages 1–4 + the follow-up); `docs/{decisions,language,devlog,
 auto-derived-imports}.md` and `ROADMAP.md` are reconciled to the shipped design.
 

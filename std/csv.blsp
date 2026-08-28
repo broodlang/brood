@@ -1,18 +1,18 @@
-;; std/csv.blsp — CSV parsing and emitting, written entirely in Brood.
+;; std/csv.blsp — CSV decoding and encoding, written entirely in Brood.
 ;;
 ;; Handles quoted fields (commas and newlines inside quotes), "" for escaped
 ;; quote, both \n and \r\n line endings.
 
 (defmodule csv
-  "CSV parsing and emitting, written entirely in Brood (pure; opt-in).
+  "CSV decoding and encoding, written entirely in Brood (pure; opt-in).
 
-    (csv/parse \"a,b\\n1,2\")
+    (csv/decode \"a,b\\n1,2\")
     ;; => ((\"a\" \"b\") (\"1\" \"2\"))
-    (csv/parse-maps \"name,age\\nAlice,30\")
+    (csv/decode-maps \"name,age\\nAlice,30\")
     ;; => ({\"name\" \"Alice\" \"age\" \"30\"})
-    (csv/emit '((\"a\" \"b\") (\"1\" \"2\")))
+    (csv/encode '((\"a\" \"b\") (\"1\" \"2\")))
     ;; => \"a,b\\n1,2\"
-    (csv/emit-maps '({\"name\" \"Alice\" \"age\" \"30\"}) [\"name\" \"age\"])
+    (csv/encode-maps '({\"name\" \"Alice\" \"age\" \"30\"}) [\"name\" \"age\"])
     ;; => \"name,age\\nAlice,30\"
 
 Quoted fields may contain commas, newlines, and escaped quotes (\"\").
@@ -27,7 +27,7 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
 ;;   :quote-seen    — just saw a quote inside a quoted field (may be "" or end)
 ;;
 ;; Result: a list of rows; each row is a vector of strings.
-;; `s` is a CODE-POINT VECTOR (built once in `parse` via `string->list`), so
+;; `s` is a CODE-POINT VECTOR (built once in `decode` via `string->list`), so
 ;; `csv-at` indexes with O(1) `nth` — `char-at` on a raw UTF-8 string is O(i), which
 ;; made the whole scan O(n^2). A field is a REVERSED LIST of chars, materialised once
 ;; via `csv-field` at each field boundary — `(str acc c)` per char was O(field^2).
@@ -194,13 +194,13 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
       ;; Should never happen — fall back to unquoted
       (csv-parse-loop s (+ i 1) n :unquoted (cons c field-acc) row-acc rows-acc))))
 
-(defn parse (s)
+(defn decode (s)
   "Parse a CSV string → a list of rows, where each row is a vector of strings.
 Handles quoted fields (which may contain commas and newlines), `\"\"` as an
 escaped quote inside a quoted field, and both `\\n` and `\\r\\n` line endings.
 An empty string returns an empty list.
 
-    (csv/parse \"a,b\n1,2\")   → ([\"a\" \"b\"] [\"1\" \"2\"])"
+    (csv/decode \"a,b\n1,2\")   → ([\"a\" \"b\"] [\"1\" \"2\"])"
   (if (= s "")
     nil
     (let (v (into [] (string/->list s)))
@@ -216,7 +216,7 @@ An empty string returns an empty list.
     (reverse acc)
     ;; `(into [] row)` was INSIDE the fold, so a row was rebuilt into a fresh vector
     ;; once per COLUMN — O(cols²) per row, quadratic in the header count (400 columns
-    ;; measured 517 ms). `parse` already hands back vectors, so hoisting it out of the
+    ;; measured 517 ms). `decode` already hands back vectors, so hoisting it out of the
     ;; fold is enough; the `into` stays only to tolerate a hand-built list row.
     (let (row (first rows)
           cells (if (vector? row) row (into [] row))
@@ -225,10 +225,10 @@ An empty string returns an empty list.
               (range (count headers))))
       (csv-rows->maps headers (rest rows) (cons m acc)))))
 
-(defn parse-maps (s)
+(defn decode-maps (s)
   "Parse a CSV string where the first row is a header row. Returns a list of
 maps from header→value strings. An empty or header-only CSV returns nil/empty."
-  (let (rows (parse s))
+  (let (rows (decode s))
     (if (or (nil? rows) (empty? rows))
       nil
       (let (headers (into [] (first rows))
@@ -237,7 +237,7 @@ maps from header→value strings. An empty or header-only CSV returns nil/empty.
           nil
           (csv-rows->maps headers data nil))))))
 
-;; ---- CSV emitting -----------------------------------------------------------
+;; ---- CSV encoding -----------------------------------------------------------
 
 (defn- csv-field-needs-quoting?
   (s)
@@ -270,14 +270,14 @@ field map (or, as before `->string`, a type error out of the quoting scan)."
     (string/join "\n" (reverse acc))
     (csv-emit-rows (rest rows) (cons (csv-emit-row (first rows)) acc))))
 
-(defn emit (rows)
+(defn encode (rows)
   "Serialize a list of rows (each a list or vector of cells) to a CSV string. A cell that
 is not a string is rendered with `->string` (so a number, keyword, or record emits its
 display form).
 Fields containing commas, quotes, or newlines are quoted; interior quotes are
 doubled. Rows are separated by `\\n`.
 
-    (csv/emit [[\"a\" \"b\"]])   → \"a,b\""
+    (csv/encode [[\"a\" \"b\"]])   → \"a,b\""
   (if (or (nil? rows) (empty? rows))
     ""
     (csv-emit-rows (seq rows) nil)))
@@ -302,9 +302,9 @@ doubled. Rows are separated by `\\n`.
   "Extract values from map `m` in the order given by `headers`."
   (map (fn (h) (csv-cell m h)) headers))
 
-(defn emit-maps (maps headers)
+(defn encode-maps (maps headers)
   "Serialize a list of maps to CSV, with the given `headers` list determining
 column order. The header row is written first. Missing keys produce empty fields."
   (let (header-row (into [] headers)
         data-rows (map (fn (m) (into [] (csv-map->row m headers))) maps))
-    (emit (cons header-row (into [] data-rows)))))
+    (encode (cons header-row (into [] data-rows)))))

@@ -195,12 +195,38 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
     if let Value::Sym(s) = test {
         // A let-stored guard alias — recorded only for biconditional guards
         // (see `check_let`), so it narrows the else-branch too.
-        let (sym, ty) = ctx.guard(s)?;
-        return Some(Guard {
-            sym,
-            ty,
-            then_only: false,
-        });
+        if let Some((sym, ty)) = ctx.guard(s) {
+            return Some(Guard {
+                sym,
+                ty,
+                then_only: false,
+            });
+        }
+        // **Truthiness.** A bare local as the test is itself a guard: only `nil` and
+        // `false` are falsy (`eval::truthy`), so a true test means the local is
+        // neither. This is what `if-let` / `when-let` expand to — `(let (v expr) (if v
+        // then else))` — and without it the *then* branch sees the binding's
+        // unnarrowed type. Invisible while a map lookup was untyped; once a closed
+        // literal made `(get {:x 10} :y)` exactly `nil` (ADR-264), `(if-let (v (get
+        // {:x 10} :y)) (inc v) …)` read as handing `nil` to `inc` — a false positive
+        // on a branch that cannot run.
+        //
+        // **One-sided, and it has to be.** The exact truthy type is "anything but
+        // `nil` and the *literal* `false`", which this lattice cannot state: negating
+        // a literal set widens to its whole tag, so the closest sayable type is `not
+        // nil`. That is a sound *necessary* condition for a true test — right for the
+        // then-branch — but its complement (`nil`) is **not** implied by a false test,
+        // because `false` is falsy too. Marked biconditional it read `(not v)` as "v
+        // is nil" and reported live code as dead. One-sided is the honest reading
+        // until a negative literal atom exists to say the other half.
+        if ctx.is_lexical_local(s) {
+            return Some(Guard {
+                sym: s,
+                ty: Ty::of(Tag::Nil).negate(),
+                then_only: true,
+            });
+        }
+        return None;
     }
     let items = list_items(heap, test)?;
     let Value::Sym(head) = *items.first()? else {

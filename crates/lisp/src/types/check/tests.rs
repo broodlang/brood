@@ -1588,14 +1588,21 @@ fn record_field_refinement_flows_through_checker() {
         "expected string-length warning for int|nil arg, got {w:?}"
     );
 
-    // Getting a field the record doesn't declare stays unknown — records
-    // are open, so this must NOT warn (no false positive on an
-    // undeclared/dynamic key).
+    // A key a *fully-read literal* doesn't carry is provably absent (ADR-264), so it
+    // reads as `nil` — and `(string/length nil)` is a real error, not a false positive.
     assert!(
         warnings("(let (m {:a 1}) (string/length (get m :other)))")
             .iter()
-            .all(|w| !w.contains("expects")),
-        "undeclared record field should stay unresolved, not warn"
+            .any(|w| w.contains("expects string")),
+        "an absent key on a closed literal is nil, and must be caught"
+    );
+    // But a literal the checker could not read completely stays OPEN — the dropped
+    // entry might be the key being asked for, so nothing may be concluded about it.
+    assert!(
+        warnings("(let (m {:a 1 :b (unknown-thing)}) (string/length (get m :other)))")
+            .iter()
+            .all(|w| !w.contains("expects string")),
+        "an incompletely-read literal must not claim a key is absent"
     );
 
     // Record-literal type inference: `{:a 1}` infers a record shape
@@ -5405,4 +5412,144 @@ fn a_union_of_record_shapes_rejects_a_map_matching_neither() {
          (defn c () (f {:a 1}))",
     );
     assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
+}
+
+// ---- closed records (ADR-264) ----
+
+#[test]
+fn a_closed_record_rejects_an_undeclared_key() {
+    let ws = file_warnings(
+        "(sig f ((record :name string) -> any))\n(defn f (m) m)\n\
+         (defn c () (f {:name \"Ada\" :extra :k}))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 1 expects")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn an_open_record_admits_undeclared_keys() {
+    let ws = file_warnings(
+        "(sig f ((record &open :name string) -> any))\n(defn f (m) m)\n\
+         (defn c () (f {:name \"Ada\" :extra :k}))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
+    // …and still enforces what it does declare.
+    let ws = file_warnings(
+        "(sig f ((record &open :name string) -> any))\n(defn f (m) m)\n\
+         (defn c () (f {:name 42}))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 1 expects")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_field_read_through_a_tagged_union_resolves() {
+    // The payoff. Each term answers for `:ok` — `int` in the first, `nil` in the
+    // second (closed: the key is absent) — so the union answers `int | nil`.
+    let ws = file_warnings(
+        "(sig f ((or (record :ok int) (record :error string)) -> any))\n\
+         (defn f (r) (string/length (get r :ok)))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("string/length") && w.contains("int")),
+        "{ws:?}"
+    );
+    // An open alternative says nothing about the key, so the union says nothing.
+    let ws = file_warnings(
+        "(sig f ((or (record :ok int) (record &open :error string)) -> any))\n\
+         (defn f (r) (string/length (get r :ok)))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("string/length")), "{ws:?}");
+}
+
+#[test]
+fn a_defrecord_accessor_takes_any_record_carrying_its_field() {
+    // The accessor sig is `&open` by construction: a real value carries `:__id__` and
+    // every sibling field, so a closed one-field shape would describe nothing.
+    let ws =
+        file_warnings("(defrecord point ((x int) (y int)))\n(defn c () (point-x (point 1 2)))");
+    assert!(!ws.iter().any(|w| w.contains("point-x")), "{ws:?}");
+}
+
+#[test]
+fn a_bare_local_test_narrows_by_truthiness() {
+    // `(if v …)` is itself a guard: only `nil` and `false` are falsy, so the
+    // then-branch has `v` as neither. This is what `if-let`/`when-let` expand to, and
+    // without it a closed literal's `nil` read as a false positive there.
+    let ws = warnings("(let (v (get {:x 10} :y)) (if v (inc v) :none))");
+    assert!(!ws.iter().any(|w| w.contains("inc")), "{ws:?}");
+    // Deliberately ONE-SIDED: the exact truthy type is unsayable, so the else-branch
+    // is left unnarrowed rather than narrowed to a complement that is wrong for `false`.
+    let ws = warnings("(fn (x) (let (v (if (int? x) 1 nil)) (if v :ok (inc v))))");
+    assert!(!ws.iter().any(|w| w.contains("inc")), "{ws:?}");
+    // …and `(not v)` must NOT read as "v is nil": that inversion reported live code
+    // as dead when the guard was two-sided.
+    let ws = warnings_expanded("(let (s (if true true false)) (let (v (not s)) (if v 1 2)))");
+    assert!(!ws.iter().any(|w| w.contains("unreachable")), "{ws:?}");
+}
+
+// ---- effective signatures for a buffer (the LSP inlay-hint source) ----
+
+/// `file_signatures` over a source string, as `name → rendered sig (declared?)`.
+fn signatures(src: &str) -> Vec<(String, String, bool)> {
+    let interp = crate::Interp::new();
+    let mut heap =
+        crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    heap.set_global(crate::core::value::EnvId::GLOBAL);
+    let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
+    super::file_signatures(&mut heap, &forms)
+        .into_iter()
+        .map(|s| (s.name, s.sig.to_string(), s.declared))
+        .collect()
+}
+
+#[test]
+fn file_signatures_reports_what_the_checker_inferred() {
+    // The buffer is never loaded, which is exactly why hover cannot answer this and
+    // the form-based inference can.
+    let sigs = signatures("(defn f (s) (string/length s))");
+    assert_eq!(sigs.len(), 1, "{sigs:?}");
+    assert_eq!(sigs[0].0, "f");
+    assert!(sigs[0].1.contains("string"), "{sigs:?}");
+    assert!(!sigs[0].2, "an inferred sig must not read as declared");
+}
+
+#[test]
+fn file_signatures_prefer_and_mark_a_declaration() {
+    let sigs = signatures("(sig f (int -> string))\n(defn f (n) \"x\")");
+    assert_eq!(sigs.len(), 1, "{sigs:?}");
+    assert!(sigs[0].2, "a declared sig must be marked: {sigs:?}");
+    assert!(sigs[0].1.contains("int"), "{sigs:?}");
+}
+
+#[test]
+fn file_signatures_covers_guarded_clauses_and_skips_non_functions() {
+    // A multi-clause definition has one signature per clause (ADR-261); the first is
+    // what a reader is looking at.
+    let sigs = signatures(
+        "(defn g ((x) :when (string? x) 1) ((x) :when (int? x) 2))\n\
+         (def not-a-fn 5)\n\
+         (defmacro m (x) x)",
+    );
+    let names: Vec<&str> = sigs.iter().map(|s| s.0.as_str()).collect();
+    assert_eq!(names, vec!["g"], "{sigs:?}");
+    assert!(sigs[0].1.contains("string"), "{sigs:?}");
+    // …and it carries the union of the clauses' returns rather than a bare `any`.
+    assert!(sigs[0].1.contains("1 | 2"), "{sigs:?}");
+}
+
+#[test]
+fn file_signatures_costs_nothing_when_unarmed() {
+    // The capture is a no-op on the ordinary checking path — pinned because it runs
+    // inside `check_file`, which every diagnostic request goes through.
+    assert!(file_warnings("(defn f (s) (string/length s))")
+        .iter()
+        .all(|w| !w.contains("panic")));
+    let ws = file_warnings("(defn f (s) (string/length s))\n(defn c () (f 5))");
+    assert!(ws.iter().any(|w| w.contains("expects string")), "{ws:?}");
 }

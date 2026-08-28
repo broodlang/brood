@@ -71,6 +71,11 @@ impl fmt::Display for Ty {
                     })
                     .collect();
                 parts.sort();
+                // An **open** shape says so (ADR-264) — without the marker `{a: int}`
+                // would read as "exactly this", which is what the *closed* shape means.
+                if self.record_is_open() == Some(true) {
+                    parts.push("...".to_string());
+                }
                 return write!(f, "{{{}}}", parts.join(", "));
             }
         }
@@ -219,5 +224,187 @@ impl fmt::Display for Ty {
             }
         }
         Ok(())
+    }
+}
+
+impl Ty {
+    /// This type as **source syntax** — the inverse of `annot::parse_type`, so the
+    /// result can be pasted into a `(sig …)` and read back as the same type.
+    ///
+    /// `None` when the type cannot be written faithfully: a `macro`/`native` member has
+    /// no spelling in the grammar, and an inferred arrow inside a parameter position is
+    /// not something the round-trip preserves. Returning `None` rather than an
+    /// approximation is the point — a quick-fix that writes a *different* type than the
+    /// one it showed would be worse than no quick-fix.
+    ///
+    /// [`Display`] is the diagnostic rendering and deliberately reads differently
+    /// (`vector<int>`, `{a: int}`); this is the one that has to parse.
+    pub fn to_source(&self) -> Option<String> {
+        // A union of terms: `(or …)` over each.
+        if let Some(terms) = self.alt_terms() {
+            let parts: Vec<String> = terms
+                .iter()
+                .map(Ty::to_source)
+                .collect::<Option<Vec<_>>>()?;
+            return Some(format!("({} {})", "or", parts.join(" ")));
+        }
+        if *self == Ty::NEVER {
+            return Some("never".to_string());
+        }
+        if *self == Ty::ANY {
+            return Some("any".to_string());
+        }
+        if *self == Ty::NUMBER {
+            return Some("number".to_string());
+        }
+        if *self == Ty::LIST {
+            return Some("list".to_string());
+        }
+        if *self == Ty::SEQABLE {
+            return Some("seqable".to_string());
+        }
+        // Structured refinements, each of which owns its whole tag set.
+        if self.tags & !FN_BITS == 0 {
+            if let Some(sig) = self.as_arrow() {
+                return sig.to_source();
+            }
+            if let Some(sigs) = self.overload_sigs() {
+                let parts: Vec<String> = sigs
+                    .iter()
+                    .map(Sig::to_source)
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(format!("(and {})", parts.join(" ")));
+            }
+        }
+        if self.tags == MAP_BIT {
+            if let Some((k, v)) = self.map_kv() {
+                return Some(format!("(map {} {})", k.to_source()?, v.to_source()?));
+            }
+            if let Some(fields) = self.record_fields() {
+                let open = if self.record_is_open() == Some(true) {
+                    " &open"
+                } else {
+                    ""
+                };
+                let mut parts: Vec<String> = Vec::with_capacity(fields.len());
+                for (name, (ty, required)) in fields {
+                    let inner = ty.to_source()?;
+                    let rendered = if *required {
+                        inner
+                    } else {
+                        format!("(optional {inner})")
+                    };
+                    parts.push(format!(":{} {rendered}", value::symbol_name_ref(*name)));
+                }
+                parts.sort();
+                return Some(format!("(record{open} {})", parts.join(" ")));
+            }
+        }
+        if self.tags == VECTOR_BIT {
+            if let Some(elems) = self.tuple_elems() {
+                let parts: Vec<String> = elems
+                    .iter()
+                    .map(Ty::to_source)
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(format!("(tuple {})", parts.join(" ")));
+            }
+        }
+        if let Some(elem) = self.elem_ty() {
+            // An element refinement describes the `pair`/`vector` members, and the type
+            // may carry `nil` beside them — `nil | list<int>` is what every sequence
+            // combinator returns. Render each member with its element type rather than
+            // falling through to the bare tag join, which silently dropped the
+            // refinement (caught by the round-trip test, which is why it exists).
+            let nil_bit = 1u32 << bit(Tag::Nil);
+            if self.tags & !(SEQ_BITS | nil_bit) == 0 {
+                let inner = elem.to_source()?;
+                let mut parts: Vec<String> = Vec::new();
+                if self.contains_tag(Tag::Nil) {
+                    parts.push("nil".to_string());
+                }
+                if self.contains_tag(Tag::Pair) {
+                    parts.push(format!("(list {inner})"));
+                }
+                if self.contains_tag(Tag::Vector) {
+                    parts.push(format!("(vector {inner})"));
+                }
+                return match parts.len() {
+                    0 => None,
+                    1 => Some(parts.remove(0)),
+                    _ => Some(format!("(or {})", parts.join(" "))),
+                };
+            }
+        }
+        // Otherwise: the members, as literals where a literal set pins them and as tag
+        // names elsewhere, joined with `or`.
+        let mut parts: Vec<String> = Vec::new();
+        for set in self.as_lit().iter() {
+            for k in set.iter() {
+                parts.push(format!(":{}", value::symbol_name_ref(*k)));
+            }
+        }
+        for set in self.as_lit_int().iter() {
+            for n in set.iter() {
+                parts.push(n.to_string());
+            }
+        }
+        for set in self.as_lit_bool().iter() {
+            for b in set.iter() {
+                parts.push(b.to_string());
+            }
+        }
+        for set in self.as_lit_str().iter() {
+            for t in set.iter() {
+                parts.push(format!("{t:?}"));
+            }
+        }
+        for tag in ALL_TAGS {
+            if !self.contains_tag(tag) {
+                continue;
+            }
+            let pinned = (tag == Tag::Keyword && self.as_lit().is_some())
+                || (tag == Tag::Int && self.as_lit_int().is_some())
+                || (tag == Tag::Bool && self.as_lit_bool().is_some())
+                || (tag == Tag::Str && self.as_lit_str().is_some());
+            if pinned {
+                continue;
+            }
+            // `macro` and `native` are runtime kinds the type grammar cannot name.
+            if matches!(tag, Tag::Macro | Tag::Native) {
+                return None;
+            }
+            parts.push(tag.name().to_string());
+        }
+        parts.sort();
+        match parts.len() {
+            0 => None,
+            1 => Some(parts.remove(0)),
+            _ => Some(format!("(or {})", parts.join(" "))),
+        }
+    }
+}
+
+impl Sig {
+    /// This signature as source — `(P… -> R)`, the shape a `(sig …)` takes. `None`
+    /// when any part cannot be written faithfully (see [`Ty::to_source`]).
+    pub fn to_source(&self) -> Option<String> {
+        let mut parts: Vec<String> = self
+            .params
+            .iter()
+            .map(Ty::to_source)
+            .collect::<Option<Vec<_>>>()?;
+        if !self.optional.is_empty() {
+            parts.push("&optional".to_string());
+            for o in &self.optional {
+                parts.push(o.to_source()?);
+            }
+        }
+        if let Some(rest) = &self.rest {
+            parts.push("&".to_string());
+            parts.push(rest.to_source()?);
+        }
+        parts.push("->".to_string());
+        parts.push(self.ret.to_source()?);
+        Some(format!("({})", parts.join(" ")))
     }
 }

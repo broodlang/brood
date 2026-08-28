@@ -288,6 +288,46 @@ pub(super) fn special_forms(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     Ok(heap.list(items))
 }
 
+/// The `def…` heads whose form carries a DOCSTRING, paired with whether the head
+/// builds a *function*. The single source of truth for "is this string documentation
+/// or a value?", the way [`SPECIAL_FORMS`] is for "does this read as a keyword": read
+/// from Brood via `(doc-forms)` (the REPL/editor highlighter `std/editor/highlight.blsp`
+/// and the generated editor grammars in `std/tool/grammar.blsp`) and from the LSP
+/// (`semantic_tokens`), so no editor keeps its own copy to drift.
+///
+/// In every one of these the docstring is the third form — right after the name —
+/// or the fourth, when a parameter list comes between (`(defn f (x) "doc" …)` vs the
+/// multi-arity `(defn f "doc" ((x) …) …)` and `(defmodule m "doc")`).
+///
+/// The flag is the one asymmetry: a *function*'s lone trailing string is its RETURN
+/// VALUE, not documentation — `(defn greeting () "hello")` returns `"hello"`, and only
+/// `(defn greeting () "doc" "hello")` documents it ([`crate::eval`]'s
+/// `parse_closure_template` rule). A `defmodule` / `defability` docstring has no body
+/// to follow it, so there the last form may well be the doc.
+pub const DOC_FORMS: &[(&str, bool)] = &[
+    (kw::DEFN, true),
+    (kw::DEFN_PRIVATE, true),
+    (kw::DEFMACRO, true),
+    // `std/proc/gen.blsp`'s server macro — not a kernel head, but the same shape
+    // (`(defprocess name (state) "doc" clauses…)`), and it peels the doc the same way.
+    ("defprocess", true),
+    (kw::DEFMODULE, false),
+    (kw::DEFABILITY, false),
+];
+
+/// `(doc-forms)` — a map from `def…` head (string) to `:fn` (the head builds a
+/// function, so a lone trailing string is the return value) or `:head` (the docstring
+/// may be the form's last element). The canonical [`DOC_FORMS`], so the highlighter,
+/// the generated grammars and the LSP share one list.
+pub(super) fn doc_forms(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut pairs = Vec::with_capacity(DOC_FORMS.len());
+    for &(name, fn_like) in DOC_FORMS {
+        let key = heap.alloc_string(name);
+        pairs.push((key, value::kw(if fn_like { "fn" } else { "head" })));
+    }
+    Ok(heap.map_from_pairs(pairs))
+}
+
 pub(super) fn global_names(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let mut syms = heap.global_symbols();
     // `symbol_name` locks the interner and allocates, so resolve each spelling

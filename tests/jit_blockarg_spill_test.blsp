@@ -82,9 +82,9 @@
     ;; own `emit-list` arm is the one that took the bad gate.
     (let (rows (map (fn (i) {:n i}) (range 500)))
       (is (= (list 500 500 500 500 500)
-            (map (fn (_) (count (json/parse (json/encode rows)))) (range 5))))))
+            (map (fn (_) (count (json/decode (json/encode rows)))) (range 5))))))
 
   (test "a walker whose elements are maps, so the pair emitter recurses too"
     (let (rows (map (fn (i) {:a i :b [i i]}) (range 400)))
       (is (= (list 400 400 400 400 400)
-            (map (fn (_) (count (json/parse (json/encode rows)))) (range 5)))))))
+            (map (fn (_) (count (json/decode (json/encode rows)))) (range 5)))))))

@@ -313,16 +313,13 @@ fn relax_param_for_arg(param: &Ty) -> Ty {
     if p.contains_tag(Tag::Fn) || p.contains_tag(Tag::Native) {
         p = p.union(Ty::of(Tag::Keyword));
     }
-    if let Some(fields) = p.record_fields() {
-        if fields.values().any(|(_, required)| !*required) {
-            let required_only: std::collections::BTreeMap<_, _> = fields
-                .iter()
-                .filter(|(_, (_, required))| *required)
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
-            p = Ty::record_of(required_only);
-        }
-    }
+    // (A record relaxation used to live here: an expected shape's *optional* fields
+    // were dropped before the membership test, because the old subtyping rule refused
+    // `{a: 1} <: {a: int, b?: string}` — it would not reason about a field the argument
+    // does not declare. Since ADR-264 a shape says what an undeclared key holds, so
+    // that comparison is answered directly and correctly; keeping the relaxation would
+    // now *cause* the false positive it was written to prevent, by rebuilding the
+    // expectation as a CLOSED shape with the optional fields removed.)
     if p.contains_tag(Tag::Pair) && p.elem_ty().is_some() {
         p = p.union(Ty::of(Tag::Nil));
     }
@@ -1875,6 +1872,12 @@ fn head_name(sym: Symbol) -> String {
 /// The items of `form` when it is an `(fn …)` form, else `None` —
 /// so `check_def` can recognise the `(def name (fn …))` shape that `defn`
 /// expands to.
+/// Is this `def`'s value a `fn` form — i.e. does the name denote a *function*, so that
+/// a signature is the right thing to say about it?
+pub(super) fn is_fn_value_form(heap: &Heap, form: Value) -> bool {
+    fn_form_items(heap, form).is_some()
+}
+
 fn fn_form_items(heap: &Heap, form: Value) -> Option<Vec<Value>> {
     let items = list_items(heap, form)?;
     match items.first()? {
@@ -2393,8 +2396,12 @@ fn check_if(
                 .collect();
             let t = match all_fields {
                 Some(fields) => {
+                    // **Open** (ADR-264): the guard proves this path is present and
+                    // typed, and says nothing about the base's other keys — a closed
+                    // shape here would claim they are absent, which the guard never
+                    // established.
                     let base_record = fields.iter().rev().fold(pg.ty.clone(), |acc, &k| {
-                        Ty::record_of(std::iter::once((k, (acc, true))).collect())
+                        Ty::record_of_open(std::iter::once((k, (acc, true))).collect())
                     });
                     t.narrow(pg.base, base_record)
                 }

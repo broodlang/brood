@@ -170,6 +170,7 @@
    "string/display-width" :strings
    "dissoc" :maps
    "doc" :meta
+   "doc-forms" :meta
    "doc-search" :meta
    "%doc-search-terms" :meta
    "dolist" :control

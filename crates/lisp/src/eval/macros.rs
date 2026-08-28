@@ -1149,7 +1149,16 @@ fn scan_def_form(
 pub fn resolve(heap: &mut Heap, form: Value) -> Value {
     let ns = match heap.compile_ns() {
         Some(ns) => ns,
-        None => return form,
+        // At ROOT there is no namespace to qualify against, but the `/name` root escape
+        // (ADR-236) still has to mean something: a prelude macro emits `/get` so a module
+        // defining `get` cannot capture it, and that same expansion must also work in a
+        // root script and during the prelude's own boot, where this pass used to return
+        // the form untouched and `/get` reached the evaluator literally — unbound.
+        //
+        // So root gets the escape rewrite and nothing else. It cannot use `resolve_sym`:
+        // with an empty `ns_name` that function's qualifier would turn every free symbol
+        // into `/name`, which is the bug inverted.
+        None => return strip_root_escapes(heap, form),
     };
     // Bounded compile walk — block the safepoint so the partially-built output tree
     // and the Rust-local Vecs aren't relocated/swept mid-walk (resolve allocates a
@@ -1310,6 +1319,88 @@ fn resolve_sym(
     } else {
         s
     }
+}
+
+/// `/name` → `name`, everywhere in `form`, and nothing else. The root-namespace half of
+/// the escape (see [`resolve`]).
+///
+/// Two passes on purpose: `has_root_escape` is a read-only walk that allocates nothing, and
+/// the rebuilding walk runs only when it finds one. Root is the *prelude's* namespace, so
+/// this is on the boot path — and a `/name` is rare, so the overwhelmingly common answer is
+/// "no rewrite needed, hand back the same tree".
+pub(crate) fn strip_root_escapes(heap: &mut Heap, form: Value) -> Value {
+    if !has_root_escape(heap, form) {
+        return form;
+    }
+    let _gc_block = crate::process::GcBlockGuard::enter();
+    let _macro_block = crate::process::MacroBlockGuard::enter();
+    rewrite_root_escapes(heap, form)
+}
+
+/// Is `s` spelled `/name` — a leading slash with something after it? A bare `/` is the
+/// division operator and is left alone.
+fn is_root_escape(s: value::Symbol) -> bool {
+    let name = value::symbol_name_ref(s);
+    name.len() > 1 && name.starts_with('/')
+}
+
+/// A `quote`/`quasiquote` subtree is DATA, not code to resolve — the same rule the main
+/// resolver follows. It is load-bearing here rather than merely consistent: the prelude is
+/// itself root code, so a `defrecord`/`for` template containing `/get` passes through this
+/// pass at *definition* time. Stripping the escape there would hand the expansion a bare
+/// `get` and reinstate exactly the capture the escape exists to prevent — which it did, for
+/// one build. The escape must survive in the template and be stripped when the EXPANSION is
+/// resolved, at the call site.
+fn skips_as_data(heap: &Heap, form: Value) -> bool {
+    matches!(form.unpack(), ValueRef::Pair(_))
+        && form_items(heap, form)
+            .and_then(|items| items.first().map(|h| h.unpack()))
+            .map(|h| match h {
+                ValueRef::Sym(s) => {
+                    value::symbol_is(s, kw::QUOTE) || value::symbol_is(s, kw::QUASIQUOTE)
+                }
+                _ => false,
+            })
+            .unwrap_or(false)
+}
+
+fn has_root_escape(heap: &Heap, form: Value) -> bool {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        if skips_as_data(heap, form) {
+            return false;
+        }
+        match form.unpack() {
+            ValueRef::Sym(s) => is_root_escape(s),
+            ValueRef::Pair(_) | ValueRef::Vector(_) => form_items(heap, form)
+                .map(|items| items.iter().any(|v| has_root_escape(heap, *v)))
+                .unwrap_or(false),
+            _ => false,
+        }
+    })
+}
+
+fn rewrite_root_escapes(heap: &mut Heap, form: Value) -> Value {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        if skips_as_data(heap, form) {
+            return form;
+        }
+        match form.unpack() {
+            ValueRef::Sym(s) if is_root_escape(s) => {
+                Value::symbol(value::intern(&value::symbol_name(s)[1..]))
+            }
+            ValueRef::Pair(_) | ValueRef::Vector(_) => match form_items(heap, form) {
+                Some(items) => {
+                    let out: Vec<Value> = items
+                        .into_iter()
+                        .map(|v| rewrite_root_escapes(heap, v))
+                        .collect();
+                    rebuild_seq_like(heap, form, out)
+                }
+                None => form,
+            },
+            _ => form,
+        }
+    })
 }
 
 fn resolve_walk(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Symbol]) -> Value {
@@ -1759,6 +1850,18 @@ pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Opti
         None => {
             let q = match heap.compile_ns() {
                 Some(ns) => resolve_sym(heap, sym, value::symbol_name_ref(ns), &[]),
+                // At ROOT there is no namespace to resolve against, but a `/name` root
+                // escape (ADR-236) still has to name the root binding — and a MACRO head
+                // has to be recognised here, at expansion time, not merely rewritten
+                // later by `resolve`. `compile` expands before it resolves, so an
+                // unrecognised `/sig` stays unexpanded and never produces the
+                // `%register-sig` the checker collects: every record's field types
+                // silently stop being checked. (`/or` and friends appear to work anyway
+                // only because the *evaluator* expands macros at runtime — the checker
+                // never evaluates, so it does not get that second chance.)
+                None if is_root_escape(sym) => {
+                    value::intern(&value::symbol_name(sym)[1..])
+                }
                 None => heap.import_of(sym).unwrap_or(sym),
             };
             match (

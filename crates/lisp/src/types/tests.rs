@@ -473,11 +473,20 @@ fn sequence_types_render_with_element() {
 // ---- record/shape types — Step 5+, ADR-115 ----
 
 fn rec(fields: &[(&str, Ty, bool)]) -> Ty {
+    Ty::record_of(field_map(fields))
+}
+
+/// The `(record &open …)` counterpart — a shape that admits keys it doesn't declare.
+fn rec_open(fields: &[(&str, Ty, bool)]) -> Ty {
+    Ty::record_of_open(field_map(fields))
+}
+
+fn field_map(fields: &[(&str, Ty, bool)]) -> BTreeMap<value::Symbol, (Ty, bool)> {
     let mut m = BTreeMap::new();
     for (name, ty, required) in fields {
         m.insert(value::intern(name), (ty.clone(), *required));
     }
-    Ty::record_of(m)
+    m
 }
 
 #[test]
@@ -501,14 +510,20 @@ fn record_subtyping_is_width_and_depth_but_conservative() {
     assert!(narrow.is_subtype(&wide));
     assert!(!wide.is_subtype(&narrow));
 
-    // Width: extra fields self declares beyond what `other` requires are
-    // fine (open records) — self may have MORE fields than other.
+    // Width: extra fields are fine when the supertype is **open** — that is what open
+    // means. Into a CLOSED supertype they are not (ADR-264): `{a: int}` closed says
+    // `:b` is absent, and a value carrying `:b` is not one of its values.
     let two_fields = rec(&[("a", Ty::of(Tag::Int), true), ("b", Ty::of(Tag::Str), true)]);
     let one_field = rec(&[("a", Ty::of(Tag::Int), true)]);
-    assert!(two_fields.is_subtype(&one_field));
-    // But not the reverse — `one_field` doesn't declare `b` at all, so it
-    // can't prove it satisfies a shape requiring `b`.
+    let one_field_open = rec_open(&[("a", Ty::of(Tag::Int), true)]);
+    assert!(two_fields.is_subtype(&one_field_open));
+    assert!(!two_fields.is_subtype(&one_field));
+    // Closed IS a subtype of open with the same fields — it promises more.
+    assert!(one_field.is_subtype(&one_field_open));
+    assert!(!one_field_open.is_subtype(&one_field));
+    // Not the reverse on width either — `one_field` doesn't declare `b` at all.
     assert!(!one_field.is_subtype(&two_fields));
+    assert!(!one_field_open.is_subtype(&two_fields));
 
     // A required field in `other` must also be required in `self` — an
     // optional field isn't guaranteed present, so it can't satisfy a
@@ -519,12 +534,13 @@ fn record_subtyping_is_width_and_depth_but_conservative() {
     // The reverse holds: a required field trivially satisfies "optional".
     assert!(a_required.is_subtype(&a_optional));
 
-    // Conservative-on-purpose: `self` not declaring a field `other` marks
-    // merely *optional* still isn't provably a subtype (no attempt to
-    // reason about absence) — sound (never claims a false subtype), just
-    // incomplete.
+    // Absence is now *reasoned about*, not declined (ADR-264): a CLOSED `{}` carries no
+    // `:a`, and `{a?: int}` reads `:a` as `int | nil`, so the subtype relation holds —
+    // where the old open-only rule had to refuse it as unprovable.
     let bare = rec(&[]);
-    assert!(!bare.is_subtype(&a_optional));
+    assert!(bare.is_subtype(&a_optional));
+    // An OPEN `{}` still isn't: it may carry an `:a` of any type at all.
+    assert!(!rec_open(&[]).is_subtype(&a_optional));
 }
 
 #[test]
@@ -568,14 +584,18 @@ fn record_disjointness_needs_a_required_conflicting_field() {
     let b = rec(&[("a", Ty::of(Tag::Str), true)]);
     assert!(a.is_disjoint(&b));
     // NOT disjoint when the conflicting field is optional on *both* sides —
-    // a value omitting `a` satisfies both open records.
-    let ao = rec(&[("a", Ty::of(Tag::Int), false)]);
-    let bo = rec(&[("a", Ty::of(Tag::Str), false)]);
+    // a value omitting `a` satisfies both.
+    let ao = rec_open(&[("a", Ty::of(Tag::Int), false)]);
+    let bo = rec_open(&[("a", Ty::of(Tag::Str), false)]);
     assert!(!ao.is_disjoint(&bo));
-    // NOT disjoint when only one side mentions the field (open records let
-    // the other carry the extra field freely).
+    // When only one side mentions the field, it depends on the OTHER side's kind
+    // (ADR-264). Open: the extra field is permitted, so they overlap.
+    let just_b_open = rec_open(&[("b", Ty::of(Tag::Str), true)]);
+    assert!(!rec_open(&[("a", Ty::of(Tag::Int), true)]).is_disjoint(&just_b_open));
+    // Closed: `{a: int}` says `:b` is absent and `{b: string}` requires it — no value
+    // is both. This is the discrimination a tagged union is made of.
     let just_b = rec(&[("b", Ty::of(Tag::Str), true)]);
-    assert!(!a.is_disjoint(&just_b));
+    assert!(a.is_disjoint(&just_b));
     // NOT disjoint when the shared field's types overlap (`int ⊆ number`).
     let anum = rec(&[("a", Ty::NUMBER, true)]);
     assert!(!a.is_disjoint(&anum));
@@ -1150,4 +1170,311 @@ fn term_equality_distinguishes_every_refinement_slot() {
             );
         }
     }
+}
+
+// ---- algebraic properties, over a cross-product of representative types ----
+//
+// The tests above check one relation at a time against a hand-picked expectation.
+// These check the relations *against each other*, over every pair (and triple) of a
+// deliberately awkward corpus — flat unions, refined terms of every kind, multi-term
+// unions, closed and open shapes. That is the shape of test that catches the bugs a
+// per-case test cannot: `is_disjoint` and `intersect` answer the same question through
+// completely separate code, and a review of this change found a defect (an open shape
+// hiding a `map<K,V>` refinement) that exactly this cross-check would have flagged.
+//
+// A fixed corpus rather than a generator: deterministic, no dependency, and every
+// failure names two concrete types you can paste into a REPL.
+fn property_corpus() -> Vec<Ty> {
+    vec![
+        Ty::NEVER,
+        Ty::ANY,
+        Ty::of(Tag::Int),
+        Ty::of(Tag::Str),
+        Ty::of(Tag::Nil),
+        Ty::NUMBER,
+        Ty::LIST,
+        Ty::of(Tag::Int).union(Ty::of(Tag::Str)),
+        Ty::of(Tag::Nil).negate(),
+        Ty::int_lit(5),
+        Ty::int_lit(5).union(Ty::int_lit(6)),
+        Ty::keyword_lit(value::intern("ok")),
+        Ty::bool_lit(true),
+        Ty::str_lit("x"),
+        Ty::vector_of(Ty::of(Tag::Int)),
+        Ty::vector_of(Ty::of(Tag::Str)),
+        Ty::list_of(Ty::NUMBER),
+        Ty::tuple_of(vec![Ty::of(Tag::Int)]),
+        Ty::tuple_of(vec![Ty::of(Tag::Str)]),
+        Ty::tuple_of(vec![Ty::of(Tag::Int), Ty::of(Tag::Str)]),
+        Ty::map_of(Ty::of(Tag::Keyword), Ty::of(Tag::Int)),
+        rec(&[("a", Ty::of(Tag::Int), true)]),
+        rec(&[("a", Ty::of(Tag::Str), true)]),
+        rec(&[("b", Ty::of(Tag::Int), true)]),
+        rec(&[("a", Ty::of(Tag::Int), false)]),
+        rec(&[]),
+        rec_open(&[("a", Ty::of(Tag::Int), true)]),
+        rec_open(&[]),
+        // multi-term unions — the representation ADR-262 added
+        Ty::tuple_of(vec![Ty::of(Tag::Int)]).union(Ty::tuple_of(vec![Ty::of(Tag::Str)])),
+        rec(&[("a", Ty::of(Tag::Int), true)]).union(rec(&[("b", Ty::of(Tag::Str), true)])),
+        Ty::vector_of(Ty::of(Tag::Int)).union(Ty::of(Tag::Nil)),
+        arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int)),
+    ]
+}
+
+#[test]
+fn disjointness_agrees_with_intersection() {
+    // The strongest cross-check available: two independent implementations of "do
+    // these share a value". `is_disjoint` walks tags, literal sets and field readings;
+    // `intersect` builds the actual intersection. They must not disagree.
+    //
+    // Only the *sound* direction is asserted as a law — claiming disjoint when the
+    // intersection is inhabited would be a false positive, the one unacceptable class.
+    // The converse (an empty intersection that `is_disjoint` won't confirm) is mere
+    // incompleteness, so it is reported rather than failed, and the corpus is kept at
+    // zero of them so a regression is visible.
+    let corpus = property_corpus();
+    let mut incomplete = Vec::new();
+    for a in &corpus {
+        for b in &corpus {
+            let inter = a.clone().intersect(b.clone());
+            if a.is_disjoint(b) {
+                assert!(
+                    inter.is_never(),
+                    "UNSOUND: `{a}` and `{b}` reported disjoint, but their intersection \
+                     is `{inter}`"
+                );
+            } else if inter.is_never() {
+                incomplete.push(format!("{a} ∩ {b}"));
+            }
+        }
+    }
+    assert!(
+        incomplete.is_empty(),
+        "intersection is empty but `is_disjoint` says otherwise (incomplete, not \
+         unsound) — new entries here mean the two answers drifted: {incomplete:#?}"
+    );
+}
+
+#[test]
+fn subtyping_agrees_with_the_other_relations() {
+    let corpus = property_corpus();
+    for a in &corpus {
+        // Reflexive.
+        assert!(a.is_subtype(a), "`{a}` is not a subtype of itself");
+        for b in &corpus {
+            let union = a.clone().union(b.clone());
+            let inter = a.clone().intersect(b.clone());
+            // A union is an upper bound; an intersection is a lower bound.
+            assert!(a.is_subtype(&union), "`{a}` ⊄ `{a}` ∪ `{b}` = `{union}`");
+            assert!(inter.is_subtype(a), "`{a}` ∩ `{b}` = `{inter}` ⊄ `{a}`");
+            // Sharing a subtype means not disjoint — a non-empty `a` inside `b`
+            // is a value they both contain.
+            if a.is_subtype(b) && !a.is_never() {
+                assert!(
+                    !a.is_disjoint(b),
+                    "`{a}` ⊆ `{b}` yet they are reported disjoint"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn union_and_intersection_are_commutative_as_sets() {
+    // `A ∪ B` and `B ∪ A` are one set, and every memo keyed on a `Ty` depends on them
+    // comparing *and hashing* equal — which the term representation makes a real
+    // question rather than a syntactic given.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let hash = |t: &Ty| {
+        let mut h = DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    };
+    let corpus = property_corpus();
+    for a in &corpus {
+        for b in &corpus {
+            let (ab, ba) = (a.clone().union(b.clone()), b.clone().union(a.clone()));
+            assert_eq!(ab, ba, "`{a}` ∪ `{b}` ≠ `{b}` ∪ `{a}`");
+            assert_eq!(hash(&ab), hash(&ba), "`{ab}` and `{ba}` hash differently");
+            let (ab, ba) = (
+                a.clone().intersect(b.clone()),
+                b.clone().intersect(a.clone()),
+            );
+            assert_eq!(ab, ba, "`{a}` ∩ `{b}` ≠ `{b}` ∩ `{a}`");
+        }
+    }
+}
+
+#[test]
+fn a_complement_shares_nothing_with_what_it_negates() {
+    // Exact for flat types; for a refined one the complement widens (it keeps the
+    // refined tag), so the law is asserted where it must hold and the widening is
+    // pinned separately by `negate_of_a_refined_type_is_a_sound_overapproximation`.
+    for a in property_corpus().iter().filter(|t| t.is_flat()) {
+        let n = a.clone().negate();
+        assert!(
+            a.clone().intersect(n.clone()).is_never(),
+            "`{a}` ∩ ¬`{a}` = `{}` is not empty",
+            a.clone().intersect(n)
+        );
+    }
+}
+
+#[test]
+fn a_record_shape_answers_for_every_key() {
+    // The reading that makes closedness composable: declared-required is the type,
+    // declared-optional adds `nil` (it may be absent), and undeclared is the shape's
+    // remainder — `nil` closed, `any` open.
+    let closed = rec(&[
+        ("a", Ty::of(Tag::Int), true),
+        ("b", Ty::of(Tag::Str), false),
+    ]);
+    let (a, b, z) = (value::intern("a"), value::intern("b"), value::intern("zzz"));
+    assert_eq!(closed.record_field_ty(a), Some(Ty::of(Tag::Int)));
+    assert_eq!(
+        closed.record_field_ty(b),
+        Some(Ty::of(Tag::Str).union(Ty::of(Tag::Nil)))
+    );
+    assert_eq!(closed.record_field_ty(z), Some(Ty::of(Tag::Nil)));
+    assert_eq!(
+        rec_open(&[("a", Ty::of(Tag::Int), true)]).record_field_ty(z),
+        Some(Ty::ANY)
+    );
+}
+
+#[test]
+fn a_field_read_over_a_union_of_shapes_is_the_union_of_the_readings() {
+    // `{ok: int} | {error: string}` — `:ok` is `int` in one term and `nil` in the
+    // other, so the union answers `int | nil`. This is what a closed shape buys.
+    let ok = rec(&[("ok", Ty::of(Tag::Int), true)]);
+    let err = rec(&[("error", Ty::of(Tag::Str), true)]);
+    assert_eq!(
+        ok.clone()
+            .union(err.clone())
+            .record_field_ty(value::intern("ok")),
+        Some(Ty::of(Tag::Int).union(Ty::of(Tag::Nil)))
+    );
+    // The two alternatives are provably disjoint — each says the other's key is absent.
+    assert!(ok.is_disjoint(&err));
+}
+
+#[test]
+fn intersecting_record_shapes_is_exact() {
+    // A guard narrows by intersection, so shapes must intersect precisely rather than
+    // widening away the fact the guard established.
+    let both = rec_open(&[("x", Ty::NUMBER, true)]).intersect(rec_open(&[
+        ("x", Ty::of(Tag::Int), true),
+        ("y", Ty::of(Tag::Str), true),
+    ]));
+    assert_eq!(
+        both.record_field_ty(value::intern("x")),
+        Some(Ty::of(Tag::Int))
+    );
+    // Contradictory shapes intersect to nothing at all — not to "some map".
+    assert!(rec(&[("x", Ty::of(Tag::Int), true)])
+        .intersect(rec(&[("y", Ty::of(Tag::Str), true)]))
+        .is_never());
+}
+
+#[test]
+fn an_open_shape_renders_its_openness() {
+    assert_eq!(
+        rec(&[("a", Ty::of(Tag::Int), true)]).to_string(),
+        "{a: int}"
+    );
+    assert_eq!(
+        rec_open(&[("a", Ty::of(Tag::Int), true)]).to_string(),
+        "{a: int, ...}"
+    );
+}
+
+#[test]
+fn a_union_is_never_flat() {
+    // `is_flat` asks whether a type is exactly its tag set. A union's *head* term can
+    // be refinement-free while the alternatives do the describing, so answering from
+    // the head alone would answer about one term while reading as if it answered about
+    // the type.
+    assert!(!Ty::of(Tag::Int)
+        .union(Ty::tuple_of(vec![Ty::of(Tag::Str)]))
+        .is_flat());
+    assert!(Ty::of(Tag::Int).union(Ty::of(Tag::Str)).is_flat());
+}
+
+#[test]
+fn an_open_shape_does_not_hide_a_map_kv_refinement() {
+    // An intersection can carry both refinements. For a key the shape doesn't declare,
+    // an OPEN shape says only `any`, while `map<K,V>` says `V | nil` — the sharper of
+    // the two must win, or intersecting with a shape would lose precision.
+    let both = Ty::map_of(Ty::of(Tag::Keyword), Ty::of(Tag::Int)).intersect(rec_open(&[(
+        "a",
+        Ty::of(Tag::Str),
+        true,
+    )]));
+    assert_eq!(
+        both.record_field_ty(value::intern("zzz")),
+        Some(Ty::of(Tag::Int).union(Ty::of(Tag::Nil)))
+    );
+    assert_eq!(
+        both.record_field_ty(value::intern("a")),
+        Some(Ty::of(Tag::Str))
+    );
+    // A CLOSED shape's undeclared key is `nil` — it is absent, whatever a uniform
+    // value type would say about the keys that ARE present.
+    assert_eq!(
+        Ty::map_of(Ty::of(Tag::Keyword), Ty::of(Tag::Int))
+            .intersect(rec(&[("a", Ty::of(Tag::Str), true)]))
+            .record_field_ty(value::intern("zzz")),
+        Some(Ty::of(Tag::Nil))
+    );
+}
+
+#[test]
+fn an_intersection_of_element_and_tuple_types_is_a_lower_bound() {
+    // Both were widening merges before the property tests went in: `vector<int> ∩
+    // vector<string>` came out as plain `vector` — not even a subtype of either side —
+    // and `(tuple int) ∩ (tuple string)` as `vector`, while `is_disjoint` (correctly)
+    // called the same pair disjoint. Two answers to one question, contradicting.
+    let vi = Ty::vector_of(Ty::of(Tag::Int));
+    let vs = Ty::vector_of(Ty::of(Tag::Str));
+    let both = vi.clone().intersect(vs);
+    assert!(both.is_subtype(&vi), "`{both}` is not a lower bound");
+    assert_eq!(both.elem_ty(), Some(Ty::NEVER)); // only the empty vector
+                                                 // A tuple's arity IS its shape, so no vector satisfies both.
+    assert!(Ty::tuple_of(vec![Ty::of(Tag::Int)])
+        .intersect(Ty::tuple_of(vec![Ty::of(Tag::Str)]))
+        .is_never());
+    assert!(Ty::tuple_of(vec![Ty::of(Tag::Int)])
+        .intersect(Ty::tuple_of(vec![Ty::of(Tag::Int), Ty::of(Tag::Int)]))
+        .is_never());
+}
+
+#[test]
+fn to_source_round_trips_through_the_annotation_parser() {
+    // The quick-fix that writes an inferred signature into a `(sig …)` must write the
+    // type it showed. Anything that renders must parse back to an equal type — and
+    // anything that cannot be written faithfully must decline (`None`) rather than
+    // approximate, which is the whole contract.
+    let mut interp = crate::Interp::new();
+    for ty in property_corpus() {
+        let Some(src) = ty.to_source() else { continue };
+        let form = crate::syntax::reader::read_one(&mut interp.heap, &src)
+            .unwrap_or_else(|e| panic!("`{src}` (from `{ty}`) does not parse: {e:?}"));
+        let back = super::check::annot::parse_type(&interp.heap, form)
+            .unwrap_or_else(|| panic!("`{src}` (from `{ty}`) is not a type expression"));
+        assert_eq!(
+            back, ty,
+            "`{ty}` rendered as `{src}`, which reads back as `{back}`"
+        );
+    }
+}
+
+#[test]
+fn to_source_declines_what_it_cannot_write() {
+    // `macro` and `native` are runtime kinds with no spelling in the grammar.
+    assert_eq!(Ty::of(Tag::Macro).to_source(), None);
+    assert_eq!(Ty::of(Tag::Native).to_source(), None);
+    // …and a type carrying one declines as a whole rather than dropping it.
+    assert_eq!(Ty::of(Tag::Int).union(Ty::of(Tag::Macro)).to_source(), None);
 }

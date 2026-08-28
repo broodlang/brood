@@ -7,31 +7,31 @@
 (defn- json-errs?
   (s)
   "True if parsing `s` raises (the malformed-input cases)."
-  (try (do (parse s) false) (catch e true)))
+  (try (do (decode s) false) (catch e true)))
 
-(describe "parse — scalars"
+(describe "decode — scalars"
   (test "integers and floats (incl. sign + exponent)"
-    (assert= (parse "42") 42)
-    (assert= (parse "-7") -7)
-    (assert= (parse "-2.5") -2.5)
-    (assert= (parse "1e3") 1000.0)
-    (assert= (parse "-2.5e3") -2500.0))
+    (assert= (decode "42") 42)
+    (assert= (decode "-7") -7)
+    (assert= (decode "-2.5") -2.5)
+    (assert= (decode "1e3") 1000.0)
+    (assert= (decode "-2.5e3") -2500.0))
   (test "the literals true / false / null"
-    (assert= (parse "true") true)
-    (assert= (parse "false") false)
-    (assert= (parse "null") nil))
+    (assert= (decode "true") true)
+    (assert= (decode "false") false)
+    (assert= (decode "null") nil))
   (test "leading + trailing whitespace is skipped"
-    (assert= (parse "   true  ") true)
-    (assert= (parse "\n\t [1] \n") [1])))
+    (assert= (decode "   true  ") true)
+    (assert= (decode "\n\t [1] \n") [1])))
 
-(describe "parse — strict number grammar (RFC 8259)"
+(describe "decode — strict number grammar (RFC 8259)"
   (test "valid numbers parse"
-    (assert= (parse "0") 0)
-    (assert= (parse "-0") 0)
-    (assert= (parse "0.5") 0.5)
-    (assert= (parse "123") 123)
-    (assert= (parse "1E+3") 1000.0)
-    (assert= (parse "1.5e-2") 0.015))
+    (assert= (decode "0") 0)
+    (assert= (decode "-0") 0)
+    (assert= (decode "0.5") 0.5)
+    (assert= (decode "123") 123)
+    (assert= (decode "1E+3") 1000.0)
+    (assert= (decode "1.5e-2") 0.015))
   (test "a leading + is rejected (string/->number would accept it)"
     (is (json-errs? "+5"))
     (is (json-errs? "+.5")))
@@ -46,51 +46,51 @@
     (is (json-errs? "1e"))
     (is (json-errs? "1e+")))
   (test "strict rules hold inside arrays and objects"
-    (assert= (parse "[0, -1.5, 1e2]") [0 -1.5 100.0])
+    (assert= (decode "[0, -1.5, 1e2]") [0 -1.5 100.0])
     (is (json-errs? "[01]"))
     (is (json-errs? "{\"a\": +1}"))))
 
-(describe "parse — strings + escapes"
+(describe "decode — strings + escapes"
   (test "a plain string"
-    (assert= (parse "\"hello\"") "hello")
-    (assert= (parse "\"\"") ""))
+    (assert= (decode "\"hello\"") "hello")
+    (assert= (decode "\"\"") ""))
   ; \t
   (test "the named escapes"
     ; \"  -> "
-    (assert= (parse "\"a\\\"b\"") "a\"b")
+    (assert= (decode "\"a\\\"b\"") "a\"b")
     ; \\  -> \
-    (assert= (parse "\"a\\\\b\"") "a\\b")
+    (assert= (decode "\"a\\\\b\"") "a\\b")
     ; \/  -> /
-    (assert= (parse "\"a\\/b\"") "a/b")
+    (assert= (decode "\"a\\/b\"") "a/b")
     ; \n
-    (assert= (parse "\"a\\nb\"") "a\nb")
-    (assert= (parse "\"a\\tb\"") "a\tb"))
+    (assert= (decode "\"a\\nb\"") "a\nb")
+    (assert= (decode "\"a\\tb\"") "a\tb"))
   (test "\\b and \\f decode to single control chars (no codepoint primitive needed)"
-    (assert= (string/length (parse "\"\\b\"")) 1)
-    (assert= (string/length (parse "\"\\f\"")) 1))
+    (assert= (string/length (decode "\"\\b\"")) 1)
+    (assert= (string/length (decode "\"\\f\"")) 1))
   (test "\\uXXXX BMP escapes (via the reader's \\u{} mechanism)"
-    (assert= (parse "\"\\u0041\"") "A")
-    (assert= (parse "\"caf\\u00e9\"") "café"))
+    (assert= (decode "\"\\u0041\"") "A")
+    (assert= (decode "\"caf\\u00e9\"") "café"))
   (test "a surrogate pair combines into one astral code point"
-    (assert= (parse "\"\\ud83d\\ude00\"") "😀")
-    (assert= (string/length (parse "\"\\ud83d\\ude00\"")) 1)))
+    (assert= (decode "\"\\ud83d\\ude00\"") "😀")
+    (assert= (string/length (decode "\"\\ud83d\\ude00\"")) 1)))
 
-(describe "parse — arrays + objects"
+(describe "decode — arrays + objects"
   (test "arrays: empty, flat, mixed, nested"
-    (assert= (parse "[]") [])
-    (assert= (parse "[1,2,3]") [1 2 3])
-    (assert= (parse "[1, \"a\", true, null]") [1 "a" true nil])
-    (assert= (parse "[[1],[2,3]]") [[1] [2 3]]))
+    (assert= (decode "[]") [])
+    (assert= (decode "[1,2,3]") [1 2 3])
+    (assert= (decode "[1, \"a\", true, null]") [1 "a" true nil])
+    (assert= (decode "[[1],[2,3]]") [[1] [2 3]]))
   (test "objects: empty, flat (KEYWORD keys), nested"
-    (assert= (parse "{}") {})
-    (assert= (parse "{\"a\":1,\"b\":2}") {:a 1 :b 2})
-    (assert= (get (parse "{\"repo\":\"brood\"}") :repo) "brood")
-    (assert= (parse "{\"o\":{\"x\":[true]}}") {:o {:x [true]}}))
+    (assert= (decode "{}") {})
+    (assert= (decode "{\"a\":1,\"b\":2}") {:a 1 :b 2})
+    (assert= (get (decode "{\"repo\":\"brood\"}") :repo) "brood")
+    (assert= (decode "{\"o\":{\"x\":[true]}}") {:o {:x [true]}}))
   (test "whitespace between tokens is ignored"
-    (assert= (parse "{ \"a\" : [ 1 , 2 ] }") {:a [1 2]})))
+    (assert= (decode "{ \"a\" : [ 1 , 2 ] }") {:a [1 2]})))
 
 ; not a value
-(describe "parse — malformed input errors"
+(describe "decode — malformed input errors"
   (test "structural errors"
     ; empty
     (is (json-errs? ""))
@@ -124,12 +124,12 @@
   (test "\\b and \\f control chars encode escaped (decode round-trip)"
     (assert= (encode "a\u{8}b") "\"a\\bb\"")
     (assert= (encode "a\u{c}b") "\"a\\fb\"")
-    (assert= (parse (encode "a\u{8}\u{c}b")) "a\u{8}\u{c}b"))
+    (assert= (decode (encode "a\u{8}\u{c}b")) "a\u{8}\u{c}b"))
   (test "other control chars (< U+0020) encode as \\u00XX"
     (assert= (encode "a\u{1}b") "\"a\\u0001b\"")
     (assert= (encode "\u{1f}") "\"\\u001f\"")
     (assert= (encode "\u{0}") "\"\\u0000\"")
-    (assert= (parse (encode "a\u{0}\u{1b}\u{1f}b")) "a\u{0}\u{1b}\u{1f}b"))
+    (assert= (decode (encode "a\u{0}\u{1b}\u{1f}b")) "a\u{0}\u{1b}\u{1f}b"))
   (test "keywords / symbols encode as their name string"
     (assert= (encode :foo) "\"foo\"")
     (assert= (encode 'bar) "\"bar\""))
@@ -146,13 +146,13 @@
   (test "cannot encode a non-JSON value"
     (is (try (do (encode (fn (x) x)) false) (catch e true)))))
 
-(describe "json round-trips (parse ∘ encode = identity)"
-  (test "values survive encode → parse (objects come back keyword-keyed)"
-    (assert= (parse (encode {:k [1 "two" true nil]})) {:k [1 "two" true nil]})
-    (assert= (parse (encode [1 [2 [3 []]]])) [1 [2 [3 []]]])
-    (assert= (parse (encode {:n -2.5 :s "a\"b\nc"})) {:n -2.5 :s "a\"b\nc"}))
-  (test "string keys encode fine and parse back as keywords (encode accepts either)"
-    (assert= (parse (encode {"repo" "brood" "stars" 3})) {:repo "brood" :stars 3})))
+(describe "json round-trips (decode ∘ encode = identity)"
+  (test "values survive encode → decode (objects come back keyword-keyed)"
+    (assert= (decode (encode {:k [1 "two" true nil]})) {:k [1 "two" true nil]})
+    (assert= (decode (encode [1 [2 [3 []]]])) [1 [2 [3 []]]])
+    (assert= (decode (encode {:n -2.5 :s "a\"b\nc"})) {:n -2.5 :s "a\"b\nc"}))
+  (test "string keys encode fine and decode back as keywords (encode accepts either)"
+    (assert= (decode (encode {"repo" "brood" "stars" 3})) {:repo "brood" :stars 3})))
 
 ;; ---- records + the JsonEncode ability ---------------------------------------
 ;; A record encodes as its FIELDS by default (its `:__id__` identity must never reach
@@ -168,41 +168,41 @@
 
 (describe "encoding records"
   (test "a record encodes as its fields, with the internal id omitted"
-    (assert= (parse (encode (point 1 2))) {:x 1 :y 2})
+    (assert= (decode (encode (point 1 2))) {:x 1 :y 2})
     (is (not (includes? (encode (point 1 2)) "__id__"))))
   (test "a nested record encodes as fields too"
-    (assert= (parse (encode (wrapped (point 3 4)))) {:inner {:x 3 :y 4}}))
+    (assert= (decode (encode (wrapped (point 3 4)))) {:inner {:x 3 :y 4}}))
   (test "a record in a map value or a vector element is encoded"
-    (assert= (parse (encode {:p (point 5 6)})) {:p {:x 5 :y 6}})
-    (assert= (parse (encode [(point 0 0)])) [{:x 0 :y 0}]))
+    (assert= (decode (encode {:p (point 5 6)})) {:p {:x 5 :y 6}})
+    (assert= (decode (encode [(point 0 0)])) [{:x 0 :y 0}]))
   (test "a plain map is unaffected — no id to strip"
     (assert= (encode {:x 1}) "{\"x\":1}")))
 
 (describe "the JsonEncode ability"
   (test "a JsonEncode impl decides the wire shape instead of the fields"
     (assert= (encode (usd 1050)) "\"$1050\"")
-    (assert= (parse (encode (usd 25))) "$25"))
+    (assert= (decode (encode (usd 25))) "$25"))
   (test "the impl applies wherever the record appears"
-    (assert= (parse (encode {:m (usd 7)})) {:m "$7"})
-    (assert= (parse (encode [(usd 1) (usd 2)])) ["$1" "$2"]))
+    (assert= (decode (encode {:m (usd 7)})) {:m "$7"})
+    (assert= (decode (encode [(usd 1) (usd 2)])) ["$1" "$2"]))
   (test "an impl opens a kind that has no built-in JSON rule"
     ;; :pid is impl'd above — without it this raises
-    (is (string? (parse (encode (self))))))
+    (is (string? (decode (encode (self))))))
   (test "a kind with no impl still errors loudly"
     (assert-error (encode (fn (x) x))))
   (test "no :default is registered — nil means 'no rule', not 'the fallback'"
     (is (nil? (%impl-for '[JsonEncode ->json] :fn)))
     (is (not (nil? (%impl-for '[JsonEncode ->json] :json-test/usd))))))
 
-;; Cross-process: parse in spawned workers and fan the results back in — the parsed
+;; Cross-process: decode in spawned workers and fan the results back in — the parsed
 ;; maps/vectors are deep-copied across per-process heaps on `send`, proving they
 ;; round-trip through to_message/from_message + promote under the scheduler.
 (describe "json across processes"
-  :isolated (test "workers parse the same payload; results agree after crossing heaps"
+  :isolated (test "workers decode the same payload; results agree after crossing heaps"
     (let (me (self)
           src "{\"id\":7,\"tags\":[\"a\",\"b\"],\"ok\":true}")
       (doseq (i (range 8))
-        (spawn (send me [:r (parse src)])))
+        (spawn (send me [:r (decode src)])))
       (let (results (map (fn (_) (receive ([:r m] m) (after *test-wait-ms* :timeout))) (range 8)))
         (is (every? (fn (m)
                       (and (= (get m :id) 7)
@@ -214,7 +214,7 @@
           v {:repo "brood" :runs [1 2 3]})
       (spawn (send me [:enc (encode v)]))
       (let (s (receive ([:enc s] s) (after *test-wait-ms* :timeout)))
-        (assert= (parse s) v))))
+        (assert= (decode s) v))))
   ;; `*impls*` is a global, so a spawned process sees the same registry; a record
   ;; deep-copies on `send` and keeps its `:__id__`, so it dispatches identically at
   ;; either end. Both directions are checked.
@@ -223,7 +223,7 @@
       (doseq (i (range 4)) (spawn (send me [:enc (encode (usd i))])))
       (let (results (map (fn (_) (receive ([:enc s] s) (after *test-wait-ms* :timeout)))
                       (range 4)))
-        (assert= (into [] (sort (map parse results))) ["$0" "$1" "$2" "$3"]))))
+        (assert= (into [] (sort (map decode results))) ["$0" "$1" "$2" "$3"]))))
   (test "a record built in a worker encodes via its impl after crossing heaps"
     (let (me (self))
       (spawn (send me [:rec (usd 99)]))
@@ -239,9 +239,9 @@
 ;; and a high surrogate followed by a non-low `\u` escape was silently MIS-DECODED
 ;; (`"\uD800\u0041"` returned "⑁") — a wrong value, which is worse than an error.
 
-(describe "parse — surrogate escapes"
+(describe "decode — surrogate escapes"
   (test "a valid surrogate pair decodes to one astral codepoint"
-    (assert= "\u{1D11E}" (parse "\"\\uD834\\uDD1E\"")))
+    (assert= "\u{1D11E}" (decode "\"\\uD834\\uDD1E\"")))
   (test "a lone high surrogate is a json error"
     (is (json-errs? "\"\\uD800\"")))
   (test "a lone LOW surrogate is a json error, not a kernel string/int->char error"
@@ -251,8 +251,8 @@
     (is (json-errs? "\"\\uD800\\u0041\""))
     (is (json-errs? "\"\\uD800\\uD800\"")))
   (test "the codepoints either side of the surrogate block still decode"
-    (assert= "\u{D7FF}" (parse "\"\\uD7FF\""))
-    (assert= "\u{E000}" (parse "\"\\uE000\""))))
+    (assert= "\u{D7FF}" (decode "\"\\uD7FF\""))
+    (assert= "\u{E000}" (decode "\"\\uE000\""))))
 
 ;; ---- encode emits only numbers JSON actually has -----------------------------
 ;; `(number? v)` also covers `:ratio` and `:decimal`, and a float may be inf/nan —
