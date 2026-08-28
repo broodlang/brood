@@ -1299,6 +1299,9 @@ fn validate_shard(opts: &TestOpts) {
 
 fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     validate_shard(opts);
+    // See `brood --test`: a green suite from a binary older than the `std/` under test is a
+    // gate that lies, and this is where the reading gets believed.
+    brood::cli_support::warn_if_stdlib_is_stale();
     // Default a memory ceiling on for test runs (ADR-043); an explicit
     // BROOD_MEM_LIMIT still wins (init ran first in main()).
     brood::core::alloc::init_limits_with_default(

@@ -18,76 +18,11 @@
 ;;
 ;; Only INDENTED lines count. Inline `e.g. …` prose is left alone deliberately: much of it
 ;; predates this convention and names values that do not exist outside the sentence.
+;;
+;; The ENGINE now lives in `std/tool/doctest.blsp`, so the same rules gate a user's project
+;; through `nest test`. This file is what points it at the standard library.
 
 (defmodule doc-examples-test (:use test))
-
-(defn- strip-comment
-  (line)
-  "`line` up to a trailing `;`, so `→ :x  ; note` compares against `:x`."
-  (let (i (index-of line ";")) (if (and i (>= i 0)) (string/substring line 0 i) line)))
-
-(defn- example-lines
-  (d)
-  "The indented ` → ` lines of docstring `d`."
-  (filter (fn (l) (and (string/starts-with? l "    ") (includes? l " → ")))
-    (string/split (str d) "\n")))
-
-(defn- case-of
-  (line)
-  "`[source expected]` for one example line, or nil when it does not split cleanly."
-  (let (parts (string/split (strip-comment line) " → "))
-    (when (= 2 (count parts))
-      [(string/trim (first parts)) (string/trim (second parts))])))
-
-(defn- holds?
-  (value expected)
-  "Does `value` satisfy the documented result text `expected`?
-
-Compared as a VALUE when `expected` reads as one, and only then as text. A printed map or
-set is in the trie's order, and that order depends on the ids the symbol interner handed
-out — so it moves when anything else in the image changes, *including adding an unrelated
-kernel primitive*. That is how this fired: `%codepoints->string` shifted the interning and
-`(seq/frequencies [:a :b :a])` began printing `{:a 2, :b 1}` where the docstring recorded
-the equally-correct `{:b 1, :a 2}`. The same example passed when evaluated on its own,
-which is the tell that the comparison and not the example was wrong.
-
-Reading rather than evaluating is deliberate: a documented list result is written `(:a :b)`,
-which as a *form* would call `:a`. Read, it is the list value it depicts. Anything that does
-not read — `#<fn>`, a `RAISED …` line — falls back to comparing `pr-str`, so nothing is
-silently accepted."
-  (let (parsed (try [:ok (reflect/read-string expected)] (catch _ nil)))
-    (if parsed
-      (= value (second parsed))
-      (= (pr-str value) expected))))
-
-(defn- check
-  (name-str line)
-  "nil when the example holds, else a description of how it failed."
-  (let (c (case-of line))
-    (when c
-      (let ([src expected] c
-            outcome (try
-                      [:ok (eval (reflect/read-string src))]
-                      (catch e [:raised (str "RAISED " (error-message e))]))
-            ok (if (= (first outcome) :raised)
-                 (= (second outcome) expected)
-                 (holds? (second outcome) expected)))
-        (when (not ok)
-          (str name-str
-            ": "
-            src
-            "  → got "
-            (if (= (first outcome) :raised) (second outcome) (pr-str (second outcome)))
-            ", documented "
-            expected))))))
-
-(defn- documented-names
-  ()
-  "Every public name whose docstring carries at least one indented example."
-  (filter (fn (s)
-            (let (d (try (doc (eval s)) (catch _ nil)))
-              (and d (not (empty? (example-lines d))))))
-    (filter (fn (s) (not (private? s))) (global-names))))
 
 (describe "documented examples evaluate as written"
 
@@ -95,25 +30,16 @@ silently accepted."
     ;; Load the whole library so the examples of every module are in scope, not just
     ;; whatever the test runner happened to pull in.
     (doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))
-    ;; The corpus, before the verdict. The sabotage test below proves the harness CAN
-    ;; fail; this proves it had something to run on. They are different guards, and a
-    ;; `documented-names` that quietly stopped matching — a change to `doc`, to
-    ;; `private?`, to how examples are indented — would leave the sabotage test passing
-    ;; while this one verified nothing (the ADR-280 lesson: assert coverage, not only the
-    ;; verdict).
-    (assert= true (> (count (documented-names)) 100))
-    (let (failures (fold (fn (acc s)
-                           (let (d (doc (eval s)))
-                             (append acc
-                               (filter (fn (x) (not (nil? x)))
-                                 (map (fn (l) (check (->string s) l)) (example-lines d))))))
-                     []
-                     (documented-names)))
-      ;; Name every offender — a count alone does not say which promise is broken.
-      (assert= [] (apply vector failures))))
+    ;; Name every offender — a count alone does not say which promise is broken.
+    (assert= [] (doctest/failures)))
 
   (test "the harness itself detects a wrong example"
     ;; Sabotage check: without this, a parser that silently matched nothing would make
     ;; the case above pass vacuously and the whole file would be decoration.
-    (is (not (nil? (check "probe" "    (+ 1 1)  → 3"))))
-    (is (nil? (check "probe" "    (+ 1 1)  → 2")))))
+    (is (not (nil? (doctest/check "probe" "    (+ 1 1)  → 3"))))
+    (is (nil? (doctest/check "probe" "    (+ 1 1)  → 2"))))
+
+  (test "an unindented line is prose, not a case"
+    ;; The indent is the whole discriminator between an example and a sentence.
+    (assert= [] (apply vector (doctest/example-lines "see (+ 1 1) → 2 for why")))
+    (assert= 1 (count (doctest/example-lines "x\n    (+ 1 1)   → 2")))))

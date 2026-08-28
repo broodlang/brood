@@ -228,3 +228,34 @@
   (test "a defrecord accessor takes any record carrying its field"
     (refute (warns-about? "(defrecord point ((x int) (y int))) (defn c () (point-x (point 1 2)))"
               "point-x"))))
+
+;; ---- exact division: `(/ int int)` is `int | ratio` --------------------------
+;;
+;; `/` is the one contagious operator that is not int-closed, so the arithmetic rule used to
+;; fall through and the checker made NO claim about `(/ x 2)` — the most ordinary arithmetic
+;; expression there is. Brood's division is exact: an `int` when it divides evenly, a `ratio`
+;; when it does not (`(/ 4 2)` → 2, `(/ 3 2)` → 3/2), and never a float at any arity.
+
+(describe "exact division has a type"
+  (test "declaring float over integer division is provably wrong"
+    (is (warns-about? "(defmodule dv1) (sig c (int -> float)) (defn c (x) (/ x 2))"
+          "int | ratio")))
+  (test "the runtime agrees with the claim, both arms"
+    (assert= :int (type-of (/ 4 2)))
+    (assert= :ratio (type-of (/ 3 2)))
+    (assert= :ratio (type-of (/ 2)))
+    (assert= :int (type-of (/ 12 2 3)))
+    (assert= :ratio (type-of (/ 12 5 3))))
+  ;; The residue that stays DEFERRED (ADR-011): `int | ratio` declared `int` is right for an
+  ;; even numerator, and proving that needs range analysis. Adding the rule must not smuggle
+  ;; in the false positive the deferral exists to avoid.
+  (test "the merely-wider case is still not flagged"
+    (refute (warns-about? "(defmodule dv2) (sig a (int -> int)) (defn a (x) (/ x 2))"
+              "declared return type"))
+    (refute (warns-about? "(defmodule dv3) (sig b (int -> number)) (defn b (x) (/ x 2))"
+              "declared return type")))
+  (test "a float operand is still contagious"
+    (is (warns-about? "(defmodule dv4) (sig g (int -> int)) (defn g (x) (/ x 2.0))"
+          "yields float"))
+    (refute (warns-about? "(defmodule dv5) (sig f (int -> float)) (defn f (x) (/ x 2.0))"
+              "declared return type"))))

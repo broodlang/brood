@@ -6047,6 +6047,80 @@ the same binary path as `make release-brood`, so it was rebuilt afterwards and t
 hint checked — timing anything against the counter build charges the change for atomics it never
 introduced.
 
+## 2026-08-28 — the checker had no opinion about `(/ x 2)`
+
+Picked up the **merely-wider** roadmap item, and the first finding was that the entry
+described its own example wrongly. It called `(/ x 2)` "a body typed exactly `number`
+(int ∪ float)". It is neither: Brood's division is **exact**, so integer division yields an
+`int` when it divides evenly and a **ratio** when it does not — never a float, at any arity
+(`(/ 2)` → 1/2, `(/ 12 5 3)` → 4/5) or width (a bigint numerator gives a bigint-backed ratio).
+
+And the checker was not typing it as `number` either. `/` sits in `is_contagious` but not in
+`is_int_closed`, so for all-int operands the arithmetic rule fell straight through to `None`:
+**no claim at all** about the most ordinary arithmetic expression in the language.
+
+So the sound half was sitting there unclaimed. `(/ int int)` now types as `int | ratio`, which
+catches a declared `float` return (`declared return type float but the body yields int |
+ratio`) and a result fed somewhere non-numeric — at **no cost in false positives**, because
+the case that got the item deferred is a *different* one: `int | ratio` DECLARED `int`, which
+is right whenever the numerator is even and needs range analysis to prove. That stays
+deferred, and it is now a narrower gap than the entry claimed — the residual ambiguity is
+int-vs-ratio, not int-vs-float.
+
+Worth recording as method, since the same shape recurs: the entry had been carrying a wrong
+premise long enough to look settled, and one `type-of` probe at the REPL overturned it. The
+deferral was still right; the reason given for it was not, and the useful 80% was on the other
+side of that reason.
+
+Rust tests in `check::tests` (positive, merely-wider negative, and contagion-still-wins), plus
+in-language coverage in `tests/sig_adoption_test.blsp` that asserts the runtime agrees with the
+claim on both arms. Sabotage-verified. Zero-warning gate over `std/` + `tests/` still clean,
+207/207 `.blsp` files, 630 Rust lib tests, clippy `--all-features` clean.
+
+## 2026-08-28 — doctests were mostly already written, and merely-wider got measured
+
+Two of the four open items; the other two were "prove green end-to-end" (1227/1227 via
+`make test-light`, the first full run over today's ~15.6k insertions plus the checker work)
+and pushing.
+
+**Doctests shipped, and were much cheaper than recorded.** The ROADMAP called this "bigger
+(docstring example parser + a discovery pass)". Both already existed — as six *private*
+functions inside `tests/doc_examples_test.blsp`, hard-wired to `builtin-modules` so they could
+gate `std/` and nothing else. The work was extraction, not construction: lift to
+`std/tool/doctest.blsp`, make the parts public, and take a prefix so a run can be scoped to
+one package's surface. `nest test` now runs a project's own examples after the suite passes
+and fails the run on a broken one, naming it:
+
+    1 documented example(s) do not hold:
+      proj/demo/triple: (demo/triple 4)  → got 12, documented 99
+
+Scoped to `*project-name*` so it gates what the project promises, not its dependencies or the
+stdlib; a **nameless** project is skipped rather than widened to the whole image (its modules
+are unrooted, so no prefix means "mine"). `tests/doc_examples_test.blsp` now *uses* the module
+instead of duplicating it — which is also the proof the extraction is faithful: sabotaging a
+`std/` docstring still fails it with the identical message.
+
+**The merely-wider residue: measured rather than argued a third time.** The deferral turns out
+to be *architectural*, not an omission. The body grades as **dynamic**, so `consistent_with`
+takes the `∩ ≠ ⊥` arm and `int|ratio ∩ int ≠ ⊥` passes; flagging it means switching that arm
+to `⊆`. I did exactly that, temporarily, and counted:
+
+- **zero** new warnings across all of `std/` + `tests/`;
+- **4 of 5** on a probe of ordinary *correct* code — `(/ x 1)`, `(/ 6 3)`, `(/ x x)` and
+  `(/ (* 2 x) 2)` are each provably int and each get flagged. Only `(/ x 2)` for an unknown
+  `x` is genuinely undecidable.
+
+So the in-repo cost is zero *only because nobody has written the code that breaks yet*, which
+is the trap rather than the reassurance: the gate looks free until someone divides by 1. Not
+shipped. What the measurement does give is the **order for a future attempt** — narrow first,
+flag second: make the decidable cases type as exactly `int` (literal folding, a literal ±1
+divisor, then parity), and only once the residual really is undecidable does flagging it
+become a strictness judgement instead of a false positive. Recorded on the ROADMAP entry so
+it is not re-litigated from scratch.
+
+Worth keeping as method: "would this false-positive?" is an empirical question, and a
+throwaway 10-line experiment answers it better than a third round of reasoning.
+
 ### `perf` works now, and the call protocol is confirmed — after boot faked two findings
 
 `scripts/enable-perf.sh` + `make perf-symbols` (both added today) made per-symbol profiling
